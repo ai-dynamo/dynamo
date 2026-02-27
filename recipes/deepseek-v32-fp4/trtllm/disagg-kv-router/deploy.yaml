@@ -1,0 +1,356 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: disagg-kv-dsv32-nvfp4
+spec:
+  services:
+    Frontend:
+      componentType: frontend
+      extraPodSpec:
+        containers: null
+        mainContainer:
+          command:
+            - python3
+          args:
+            - -m
+            - dynamo.frontend
+            - --router-mode
+            - kv
+            - --router-reset-states
+            - --request-plane
+            - nats
+          env:
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.0
+          name: ""
+          resources: {}
+        nodeSelector:
+          kubernetes.io/arch: arm64
+        tolerations:
+          - effect: NoSchedule
+            key: dedicated
+            operator: Equal
+            value: user-workload
+          - effect: NoExecute
+            key: dedicated
+            operator: Equal
+            value: user-workload
+          - effect: NoSchedule
+            key: dedicated
+            operator: Equal
+            value: system-workload
+          - effect: NoExecute
+            key: dedicated
+            operator: Equal
+            value: system-workload
+      replicas: 1
+    prefill:
+      componentType: worker
+      subComponentType: prefill
+      envFromSecret: hf-token-secret
+      extraPodSpec:
+        containers: null
+        mainContainer:
+          args:
+            - --model-path
+            - nvidia/DeepSeek-V3.2-NVFP4
+            - --served-model-name
+            - nvidia/DeepSeek-V3.2-NVFP4
+            - --extra-engine-args
+            - /config/prefill.yaml
+            - --disaggregation-mode
+            - prefill
+            - --publish-events-and-metrics
+            - --request-plane
+            - nats
+            - --kv-block-size
+            - "64"
+          command:
+            - python3
+            - -m
+            - dynamo.trtllm
+          env:
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            - name: HF_HOME
+              value: /model-cache
+            - name: TRITON_CACHE_DIR
+              value: /model-cache/.triton-cache
+            - name: NCCL_DEBUG
+              value: INFO
+            - name: NCCL_MNNVL_ENABLE
+              value: "1"
+            - name: NCCL_CUMEM_ENABLE
+              value: "1"
+            - name: NCCL_NVLS_ENABLE
+              value: "1"
+            - name: NVIDIA_GDRCOPY
+              value: "1"
+            - name: UCX_CUDA_IPC_ENABLE_MNNVL
+              value: "1"
+            - name: NCCL_SOCKET_IFNAME
+              value: eth0
+            - name: GLOO_SOCKET_IFNAME
+              value: eth0
+            - name: NCCL_STORE_TIMEOUT
+              value: "7200"
+            - name: TRTLLM_MOE_ENABLE_ALLTOALL_WITHOUT_ALLGATHER
+              value: "1"
+            - name: TRTLLM_ENABLE_PDL
+              value: "1"
+            - name: TRTLLM_SERVER_DISABLE_GC
+              value: "1"
+            - name: TRTLLM_WORKER_DISABLE_GC
+              value: "1"
+            - name: NCCL_GRAPH_MIXING_SUPPORT
+              value: "0"
+            - name: TLLM_OVERRIDE_LAYER_NUM
+              value: "61"
+            - name: TLLM_LOG_LEVEL
+              value: "INFO"
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.0
+          name: ""
+          resources: {}
+          securityContext:
+            runAsUser: 0
+          startupProbe:
+            failureThreshold: 60
+            httpGet:
+              path: /live
+              port: 9090
+            periodSeconds: 60
+            timeoutSeconds: 5
+          volumeMounts:
+            - mountPath: /model-cache
+              name: model-cache
+            - mountPath: /config
+              name: trtllm-config
+              readOnly: true
+          workingDir: /workspace/
+        nodeSelector:
+          kubernetes.io/arch: arm64
+        tolerations:
+          - effect: NoSchedule
+            key: dedicated
+            operator: Equal
+            value: user-workload
+          - effect: NoExecute
+            key: dedicated
+            operator: Equal
+            value: user-workload
+          - effect: NoSchedule
+            key: dedicated
+            operator: Equal
+            value: system-workload
+          - effect: NoExecute
+            key: dedicated
+            operator: Equal
+            value: system-workload
+        resourceClaims:
+          - name: compute-domain-channel
+            resourceClaimTemplateName: your-compute-domain-channel
+        volumes:
+          - name: model-cache
+            persistentVolumeClaim:
+              claimName: model-cache
+          - name: trtllm-config
+            configMap:
+              name: dsv32-trtllm-config
+      multinode:
+        nodeCount: 2
+      replicas: 2
+      resources:
+        limits:
+          gpu: "4"
+        claims:
+          - name: compute-domain-channel
+    dec:
+      componentType: worker
+      subComponentType: decode
+      envFromSecret: hf-token-secret
+      extraPodSpec:
+        containers: null
+        mainContainer:
+          args:
+            - --model-path
+            - nvidia/DeepSeek-V3.2-NVFP4
+            - --served-model-name
+            - nvidia/DeepSeek-V3.2-NVFP4
+            - --extra-engine-args
+            - /config/decode.yaml
+            - --disaggregation-mode
+            - decode
+            - --publish-events-and-metrics
+            - --request-plane
+            - nats
+            - --kv-block-size
+            - "64"
+          command:
+            - python3
+            - -m
+            - dynamo.trtllm
+          env:
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            - name: HF_HOME
+              value: /model-cache
+            - name: TRITON_CACHE_DIR
+              value: /model-cache/.triton-cache
+            - name: NCCL_DEBUG
+              value: INFO
+            - name: NCCL_MNNVL_ENABLE
+              value: "1"
+            - name: NCCL_CUMEM_ENABLE
+              value: "1"
+            - name: NCCL_NVLS_ENABLE
+              value: "1"
+            - name: NVIDIA_GDRCOPY
+              value: "1"
+            - name: UCX_CUDA_IPC_ENABLE_MNNVL
+              value: "1"
+            - name: NCCL_SOCKET_IFNAME
+              value: eth0
+            - name: GLOO_SOCKET_IFNAME
+              value: eth0
+            - name: NCCL_STORE_TIMEOUT
+              value: "7200"
+            - name: TRTLLM_MOE_ENABLE_ALLTOALL_WITHOUT_ALLGATHER
+              value: "1"
+            - name: TRTLLM_ENABLE_PDL
+              value: "1"
+            - name: TRTLLM_SERVER_DISABLE_GC
+              value: "1"
+            - name: TRTLLM_WORKER_DISABLE_GC
+              value: "1"
+            - name: ENROOT_ALLOW_DEV
+              value: "yes"
+            - name: NCCL_GRAPH_MIXING_SUPPORT
+              value: "0"
+            - name: TRTLLM_FORCE_COMM_METHOD
+              value: NVLINK_TWO_SIDED
+            - name: ENABLE_CONFIGURABLE_MOE
+              value: "1"
+            - name: TLLM_OVERRIDE_LAYER_NUM
+              value: "61"
+            - name: TLLM_LOG_LEVEL
+              value: "INFO"
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.0
+          name: ""
+          resources: {}
+          securityContext:
+            runAsUser: 0
+          startupProbe:
+            failureThreshold: 60
+            httpGet:
+              path: /live
+              port: 9090
+            periodSeconds: 60
+            timeoutSeconds: 5
+          volumeMounts:
+            - mountPath: /model-cache
+              name: model-cache
+            - mountPath: /config
+              name: trtllm-config
+              readOnly: true
+          workingDir: /workspace/
+        nodeSelector:
+          kubernetes.io/arch: arm64
+        tolerations:
+          - effect: NoSchedule
+            key: dedicated
+            operator: Equal
+            value: user-workload
+          - effect: NoExecute
+            key: dedicated
+            operator: Equal
+            value: user-workload
+          - effect: NoSchedule
+            key: dedicated
+            operator: Equal
+            value: system-workload
+          - effect: NoExecute
+            key: dedicated
+            operator: Equal
+            value: system-workload
+        resourceClaims:
+          - name: compute-domain-channel
+            resourceClaimTemplateName: your-compute-domain-channel
+        volumes:
+          - name: model-cache
+            persistentVolumeClaim:
+              claimName: model-cache
+          - name: trtllm-config
+            configMap:
+              name: dsv32-trtllm-config
+      multinode:
+        nodeCount: 2
+      replicas: 2
+      resources:
+        limits:
+          gpu: "4"
+        claims:
+          - name: compute-domain-channel
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dsv32-trtllm-config
+data:
+  prefill.yaml: |
+    cache_transceiver_config:
+      backend: UCX
+      max_tokens_in_buffer: 120000
+    max_num_tokens: 8192
+    enable_chunked_prefill: true
+    cuda_graph_config:
+      max_batch_size: 32
+      enable_padding: true
+    disable_overlap_scheduler: true
+    enable_attention_dp: true
+    kv_cache_config:
+      dtype: fp8
+      enable_block_reuse: true
+      free_gpu_memory_fraction: 0.9
+      tokens_per_block: 64
+    max_batch_size: 32
+    max_seq_len: 121000
+    moe_config:
+      backend: TRTLLM
+    moe_expert_parallel_size: 8
+    print_iter_log: true
+    tensor_parallel_size: 8
+  decode.yaml: |
+    allreduce_strategy: MNNVL
+    cache_transceiver_config:
+      backend: UCX
+      max_tokens_in_buffer: 120000
+    max_num_tokens: 8192
+    cuda_graph_config:
+      max_batch_size: 8
+      enable_padding: true
+    enable_attention_dp: true
+    kv_cache_config:
+      dtype: fp8
+      enable_block_reuse: false
+      free_gpu_memory_fraction: 0.9
+      tokens_per_block: 64
+    max_batch_size: 8
+    max_seq_len: 121000
+    moe_config:
+      backend: WIDEEP
+      use_low_precision_moe_combine: true
+    moe_expert_parallel_size: 8
+    num_postprocess_workers: 8
+    print_iter_log: true
+    stream_interval: 10
+    tensor_parallel_size: 8

@@ -1,0 +1,213 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# AIPerf trace-replay benchmark for DeepSeek-V3.2 NVFP4 (agg).
+#
+# Replays requests from a Mooncake-format trace file at their original timestamps
+# using aiperf --custom-dataset-type mooncake_trace --fixed-schedule.
+#
+# Prerequisites:
+#   - DGD deployed and in "normal" or "successful" state
+#   - model-cache PVC exists in your namespace
+#   - Trace file copied to PVC: /model-cache/traces/<trace>.jsonl
+#
+# Results: /model-cache/perf/<epoch>_<job-name>/
+#
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: agg-round-robin-dsv32-nvfp4-bench
+  namespace: your-namespace
+spec:
+  backoffLimit: 1
+  completions: 1
+  parallelism: 1
+  template:
+    metadata:
+      labels:
+        app: agg-round-robin-dsv32-nvfp4-bench
+    spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                  - key: nvidia.com/dynamo-graph-deployment-name
+                    operator: In
+                    values:
+                      - agg-round-robin-dsv32-nvfp4
+              topologyKey: kubernetes.io/hostname
+      tolerations:
+        - key: dedicated
+          operator: Equal
+          value: user-workload
+          effect: NoSchedule
+        - key: dedicated
+          operator: Equal
+          value: user-workload
+          effect: NoExecute
+        - key: dedicated
+          operator: Equal
+          value: system-workload
+          effect: NoSchedule
+        - key: dedicated
+          operator: Equal
+          value: system-workload
+          effect: NoExecute
+      containers:
+      - command:
+        - /bin/bash
+        - -c
+        - |
+          set -e
+          ulimit -n 600000
+          echo "File descriptor limit set to: $(ulimit -n)"
+          echo 2097152 > /proc/sys/fs/inotify/max_user_watches 2>/dev/null || true
+          echo 1024 > /proc/sys/fs/inotify/max_user_instances 2>/dev/null || true
+          apt-get update && apt-get install -y curl jq procps git && apt-get clean
+          # pip install git+https://github.com/ai-dynamo/aiperf.git
+          pip install aiperf==0.5.0
+          echo "aiperf installation completed"
+          sysctl -w net.ipv4.ip_local_port_range="1024 65000" 2>/dev/null || true
+          export COLUMNS=200
+          EPOCH=$(date +%s)
+
+          wait_for_model_ready() {
+            echo "Waiting for model '$TARGET_MODEL' at $ENDPOINT/v1/models (checking every 5s)..."
+            while ! curl -sf "http://$ENDPOINT/v1/models" | jq -e --arg model "$TARGET_MODEL" '.data[]? | select(.id == $model)' >/dev/null 2>&1; do
+              echo "[$(date '+%H:%M:%S')] Model not ready yet, sleeping 5s..."
+              sleep 5
+            done
+            echo "Model '$TARGET_MODEL' is now available!"
+            curl -s "http://$ENDPOINT/v1/models" | jq .
+          }
+
+          wait_for_model_ready
+          mkdir -p "${ROOT_ARTIFACT_DIR}/${EPOCH}_${JOB_NAME}"
+
+          # Validate trace file
+          if [ ! -f "${TRACE_FILE}" ]; then
+            echo "ERROR: Trace file not found: ${TRACE_FILE}"
+            echo "Copy trace to PVC first: kubectl cp <local_trace> your-namespace/<pod>:/model-cache/traces/"
+            exit 1
+          fi
+          TRACE_LINES=$(wc -l < "${TRACE_FILE}")
+          echo "Trace contains ${TRACE_LINES} requests"
+
+          printf '{"deployment":"agg-round-robin-dsv32-nvfp4","model":"%s","trace_file":"%s","trace_requests":%d,"ttft_threshold_ms":%s,"itl_threshold_ms":%s,"endpoint":"%s"}\n' \
+            "nvidia/DeepSeek-V3.2-NVFP4" "${TRACE_FILE}" "${TRACE_LINES}" "${TTFT_THRESHOLD_MS}" "${ITL_THRESHOLD_MS}" "${ENDPOINT}" \
+            > "${ROOT_ARTIFACT_DIR}/${EPOCH}_${JOB_NAME}/input_config.json"
+
+          TRACE_BASE_NAME="$(basename "${TRACE_FILE}" .jsonl)"
+          export ARTIFACT_DIR="${ROOT_ARTIFACT_DIR}/${EPOCH}_${JOB_NAME}/${TRACE_BASE_NAME}"
+          mkdir -p "$ARTIFACT_DIR"
+
+          # Server metrics args
+          SERVER_METRICS_ARGS=()
+          if [ -n "${AIPERF_SERVER_METRICS_URLS:-}" ]; then
+            IFS=',' read -r -a server_metrics_urls <<< "${AIPERF_SERVER_METRICS_URLS}"
+            if [ ${#server_metrics_urls[@]} -gt 0 ]; then
+              SERVER_METRICS_ARGS+=(--server-metrics "${server_metrics_urls[@]}")
+            fi
+          fi
+
+          echo "=============================================="
+          echo "Trace Replay Benchmark (aiperf)"
+          echo "=============================================="
+          echo "Endpoint: http://${ENDPOINT}"
+          echo "Model: nvidia/DeepSeek-V3.2-NVFP4"
+          echo "Trace file: Mooncake-based Synthetic Coding Trace"
+          echo "TTFT Threshold: ${TTFT_THRESHOLD_MS}ms"
+          echo "ITL Threshold: ${ITL_THRESHOLD_MS}ms"
+          echo "Artifact dir: ${ARTIFACT_DIR}"
+          echo "=============================================="
+
+          echo ""
+          echo "Running warmup benchmark..."
+          aiperf profile \
+            -m "nvidia/DeepSeek-V3.2-NVFP4" \
+            --tokenizer "nvidia/DeepSeek-V3.2-NVFP4" \
+            --url "http://${ENDPOINT}" \
+            --streaming \
+            --ui dashboard \
+            --synthetic-input-tokens-mean 10000 \
+            --synthetic-input-tokens-stddev 0 \
+            --output-tokens-mean 200 \
+            --output-tokens-stddev 0 \
+            --extra-inputs "max_tokens:200" \
+            --extra-inputs "min_tokens:200" \
+            --extra-inputs "ignore_eos:true" \
+            --concurrency 4 \
+            --request-count 10
+          echo "Warmup complete"
+
+          # Trace replay
+          echo ""
+          echo "$(date '+%Y-%m-%d %H:%M:%S') - Starting trace replay benchmark"
+          aiperf profile \
+            -m "nvidia/DeepSeek-V3.2-NVFP4" \
+            --tokenizer "nvidia/DeepSeek-V3.2-NVFP4" \
+            --input-file "${TRACE_FILE}" \
+            --custom-dataset-type mooncake_trace \
+            --fixed-schedule \
+            --url "http://${ENDPOINT}" \
+            --streaming \
+            --random-seed 42 \
+            --ui dashboard \
+            --artifact-dir "${ARTIFACT_DIR}" \
+            --workers-max 200 \
+            --request-timeout-seconds 1000 \
+            --profile-export-level records \
+            --record-processors 8 \
+            "${SERVER_METRICS_ARGS[@]}" \
+            --goodput "time_to_first_token:${TTFT_THRESHOLD_MS} inter_token_latency:${ITL_THRESHOLD_MS}"
+
+          BENCH_EXIT_CODE=$?
+          echo ""
+          echo "$(date '+%Y-%m-%d %H:%M:%S') - Benchmark complete (exit code: ${BENCH_EXIT_CODE})"
+          echo "Results: ${ARTIFACT_DIR}"
+          ls -la "${ARTIFACT_DIR}" 2>/dev/null || true
+          echo "Benchmark complete!"
+          exit $BENCH_EXIT_CODE
+        env:
+        - name: TARGET_MODEL
+          value: nvidia/DeepSeek-V3.2-NVFP4
+        - name: ENDPOINT
+          value: agg-round-robin-dsv32-nvfp4-frontend:8000
+        - name: TRACE_FILE
+          value: /model-cache/traces/conversation_trace_synth_16.00x1+10.00_speedup1_maxisl110000.jsonl
+        - name: TTFT_THRESHOLD_MS
+          value: "20000"
+        - name: ITL_THRESHOLD_MS
+          value: "50"
+        - name: AIPERF_HTTP_CONNECTION_LIMIT
+          value: "200"
+        - name: AIPERF_HTTP_SO_RCVTIMEO
+          value: "120"
+        - name: AIPERF_SERVER_METRICS_URLS
+          value: "http://agg-round-robin-dsv32-nvfp4-dec-0-dec-wkr:9090/metrics,http://agg-round-robin-dsv32-nvfp4-prefill-0:9090/metrics"
+        - name: JOB_NAME
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: metadata.labels['job-name']
+        - name: ROOT_ARTIFACT_DIR
+          value: /model-cache/perf
+        - name: HF_HOME
+          value: /model-cache
+        - name: PYTHONUNBUFFERED
+          value: "1"
+        image: python:3.12-slim
+        imagePullPolicy: IfNotPresent
+        name: perf
+        securityContext:
+          privileged: true
+        volumeMounts:
+        - name: model-cache
+          mountPath: /model-cache
+        workingDir: /workspace
+      restartPolicy: Never
+      volumes:
+      - name: model-cache
+        persistentVolumeClaim:
+          claimName: model-cache
