@@ -16,7 +16,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/epp-image:my-tag
+          image: docker.io/lambda108/epp-inference-extension-dynamo:discovery-logs
           env:
             - name: DYN_KV_CACHE_BLOCK_SIZE
               value: "128"
@@ -50,15 +50,19 @@ spec:
           - name: prefill
             plugins:
             - pluginRef: prefill-filter
+              weight: 0
             - pluginRef: dyn-prefill
               weight: 1
             - pluginRef: picker
+              weight: 0
           - name: decode
             plugins:
             - pluginRef: decode-filter
+              weight: 0
             - pluginRef: dyn-decode
               weight: 1
             - pluginRef: picker
+              weight: 0
     VllmPrefillWorker:
       componentType: worker
       subComponentType: prefill
@@ -94,13 +98,13 @@ spec:
           command:
           - /bin/sh
           - -c
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: docker.io/lambda108/dynamo:discovery-logs
           workingDir: /workspace/examples/backends/vllm
         # Frontend sidecar: receives requests from kGateway on port 8000
         # and routes them to the vLLM worker in the same pod
         containers:
           - name: frontend
-            image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+            image: docker.io/lambda108/dynamo:discovery-logs
             command:
               - python3
             args:
@@ -142,6 +146,8 @@ spec:
                 valueFrom:
                   fieldRef:
                     fieldPath: metadata.uid
+              - name: DYN_LOG
+                value: "info,dynamo_llm::protocols::openai::nvext=debug,dynamo_llm::kv_router::push_router=debug"
             livenessProbe:
               httpGet:
                 path: /live
@@ -195,13 +201,13 @@ spec:
           command:
           - /bin/sh
           - -c
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: docker.io/lambda108/dynamo:discovery-logs
           workingDir: /workspace/examples/backends/vllm
         # Frontend sidecar: receives requests from kGateway on port 8000
         # and routes them to the vLLM worker in the same pod
         containers:
           - name: frontend
-            image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+            image: docker.io/lambda108/dynamo:discovery-logs
             command:
               - python3
             args:
@@ -243,6 +249,8 @@ spec:
                 valueFrom:
                   fieldRef:
                     fieldPath: metadata.uid
+              - name: DYN_LOG
+                value: "info,dynamo_llm::protocols::openai::nvext=debug,dynamo_llm::kv_router::push_router=debug"
             livenessProbe:
               httpGet:
                 path: /live
