@@ -410,7 +410,7 @@ async def init_llm_worker(
                 register_engine_metrics_callback(
                     endpoint=endpoint,
                     registry=REGISTRY,
-                    metric_prefix_filters=["trtllm_"],
+                    exclude_prefixes=["python_", "process_", "gc_"],
                     namespace_name=config.namespace,
                     component_name=config.component,
                     endpoint_name="generate",
