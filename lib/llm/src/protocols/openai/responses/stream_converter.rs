@@ -13,14 +13,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::response::sse::Event;
 use dynamo_async_openai::types::responses::{
-    AssistantRole, FunctionToolCall, Instructions, OutputContent, OutputItem, OutputMessage,
-    OutputMessageContent, OutputStatus, OutputTextContent, Response, ResponseCompletedEvent,
-    ResponseContentPartAddedEvent, ResponseContentPartDoneEvent, ResponseCreatedEvent,
-    ResponseFailedEvent, ResponseFunctionCallArgumentsDeltaEvent,
+    AssistantRole, FunctionToolCall, InputTokenDetails, Instructions, OutputContent, OutputItem,
+    OutputMessage, OutputMessageContent, OutputStatus, OutputTextContent, OutputTokenDetails,
+    Response, ResponseCompletedEvent, ResponseContentPartAddedEvent, ResponseContentPartDoneEvent,
+    ResponseCreatedEvent, ResponseFailedEvent, ResponseFunctionCallArgumentsDeltaEvent,
     ResponseFunctionCallArgumentsDoneEvent, ResponseInProgressEvent, ResponseOutputItemAddedEvent,
     ResponseOutputItemDoneEvent, ResponseStreamEvent, ResponseTextDeltaEvent,
-    ResponseTextDoneEvent, ResponseTextParam, ServiceTier, Status, TextResponseFormatConfiguration,
-    ToolChoiceOptions, ToolChoiceParam, Truncation,
+    ResponseTextDoneEvent, ResponseTextParam, ResponseUsage, ServiceTier, Status,
+    TextResponseFormatConfiguration, ToolChoiceOptions, ToolChoiceParam, Truncation,
 };
 use uuid::Uuid;
 
@@ -45,6 +45,8 @@ pub struct ResponseStreamConverter {
     function_call_items: Vec<FunctionCallState>,
     // Output index counter
     next_output_index: u32,
+    // Usage stats from the backend's final chunk
+    usage: Option<ResponseUsage>,
 }
 
 struct FunctionCallState {
@@ -75,6 +77,7 @@ impl ResponseStreamConverter {
             accumulated_text: String::new(),
             function_call_items: Vec::new(),
             next_output_index: 0,
+            usage: None,
         }
     }
 
@@ -112,10 +115,10 @@ impl ResponseStreamConverter {
             // store: false because this branch does not persist responses.
             store: self.params.store.or(Some(false)),
             temperature: self.params.temperature.or(Some(1.0)),
-            text: Some(ResponseTextParam {
+            text: Some(self.params.text.clone().unwrap_or(ResponseTextParam {
                 format: TextResponseFormatConfiguration::Text,
                 verbosity: None,
-            }),
+            })),
             tool_choice: self
                 .params
                 .tool_choice
@@ -129,7 +132,7 @@ impl ResponseStreamConverter {
                     .unwrap_or_default(),
             ),
             top_p: self.params.top_p.or(Some(1.0)),
-            truncation: Some(Truncation::Disabled),
+            truncation: Some(self.params.truncation.unwrap_or(Truncation::Disabled)),
             // Nullable required fields
             billing: None,
             conversation: None,
@@ -142,11 +145,11 @@ impl ResponseStreamConverter {
             prompt: None,
             prompt_cache_key: None,
             prompt_cache_retention: None,
-            reasoning: None,
+            reasoning: self.params.reasoning.clone(),
             safety_identifier: None,
-            service_tier: Some(ServiceTier::Auto),
+            service_tier: Some(self.params.service_tier.unwrap_or(ServiceTier::Auto)),
             top_logprobs: Some(0),
-            usage: None,
+            usage: self.usage.clone(),
         }
     }
 
@@ -175,6 +178,29 @@ impl ResponseStreamConverter {
         chunk: &NvCreateChatCompletionStreamResponse,
     ) -> Vec<Result<Event, anyhow::Error>> {
         let mut events = Vec::new();
+
+        // Capture usage stats from the final chunk (sent when stream_options.include_usage=true)
+        if let Some(ref u) = chunk.usage {
+            self.usage = Some(ResponseUsage {
+                input_tokens: u.prompt_tokens,
+                input_tokens_details: InputTokenDetails {
+                    cached_tokens: u
+                        .prompt_tokens_details
+                        .as_ref()
+                        .and_then(|d| d.cached_tokens)
+                        .unwrap_or(0),
+                },
+                output_tokens: u.completion_tokens,
+                output_tokens_details: OutputTokenDetails {
+                    reasoning_tokens: u
+                        .completion_tokens_details
+                        .as_ref()
+                        .and_then(|d| d.reasoning_tokens)
+                        .unwrap_or(0),
+                },
+                total_tokens: u.total_tokens,
+            });
+        }
 
         for choice in &chunk.choices {
             let delta = &choice.delta;
