@@ -21,14 +21,15 @@ The TRT-LLM engine MetricsCollector already provides 5 core metrics:
   time_to_first_token_seconds, inter_token_latency_seconds,
   request_queue_time_seconds
 
-This module adds metrics that have no engine/runtime equivalent:
-  - Token counters (prompt_tokens_total, generation_tokens_total)
+The Rust frontend (metrics.rs) provides token counters:
+  input_tokens_total, output_tokens_total, cached_tokens
+
+This module adds metrics that have no engine/runtime/frontend equivalent:
   - Phase timing (prefill, decode, inference)
   - Request types (image, structured output)
-  - KV transfer metrics (speed, latency, bytes, success/failure, cache hits)
+  - KV transfer metrics (speed, latency, bytes, success/failure)
   - Config info (model, parallel, detailed, cache, engine startup)
-  - Throughput and abort tracking
-  - Optional handler-level timing (behind --enable-handler-timing flag)
+  - Abort tracking
 """
 
 import logging
@@ -43,10 +44,6 @@ TTFT_BUCKETS = (
     0.001, 0.005, 0.01, 0.02, 0.04, 0.06, 0.08, 0.1, 0.25, 0.5,
     0.75, 1.0, 2.5, 5.0, 7.5, 10.0, 20.0, 40.0, 80.0, 160.0, 640.0, 2560.0,
 )
-ITL_BUCKETS = (
-    0.01, 0.025, 0.05, 0.075, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5,
-    0.75, 1.0, 2.5, 5.0, 7.5, 10.0, 20.0, 40.0, 80.0,
-)
 E2E_BUCKETS = (
     0.3, 0.5, 0.8, 1.0, 1.5, 2.0, 2.5, 5.0, 10.0, 15.0, 20.0,
     30.0, 40.0, 50.0, 60.0, 120.0, 240.0, 480.0, 960.0, 1920.0, 7680.0,
@@ -60,43 +57,22 @@ class AdditionalMetricsCollector:
     """
     Additional Prometheus metrics for dynamo-trtllm.
 
-    Only creates metrics that have no engine/runtime equivalent.
+    Only creates metrics that have no engine/runtime/frontend equivalent.
     Metrics are registered in the default prometheus_client.REGISTRY.
 
     Args:
         labels: Dict with keys like model_name, disaggregation_mode, engine_type.
-        enable_handler_timing: If True, create handler-level TTFT/ITL/E2E histograms.
     """
 
-    def __init__(self, labels: dict, enable_handler_timing: bool = False):
+    def __init__(self, labels: dict):
         self._labelnames = list(labels.keys())
         self._labelvalues = list(labels.values())
-
-        # --- Token counters ---
-        self.prompt_tokens = Counter(
-            "prompt_tokens_total",
-            "Total number of prompt/input tokens processed",
-            labelnames=self._labelnames,
-        )
-        self.generation_tokens = Counter(
-            "generation_tokens_total",
-            "Total number of generation/output tokens produced",
-            labelnames=self._labelnames,
-        )
 
         # --- Abort tracking ---
         self.num_aborted_requests = Counter(
             "num_aborted_requests_total",
             "Total number of aborted/cancelled requests",
             labelnames=self._labelnames,
-        )
-
-        # --- Throughput ---
-        self.gen_throughput = Gauge(
-            "gen_throughput",
-            "Generation throughput in tokens per second",
-            labelnames=self._labelnames,
-            multiprocess_mode="mostrecent",
         )
 
         # --- Phase timing histograms ---
@@ -158,11 +134,6 @@ class AdditionalMetricsCollector:
             "Total number of failed KV cache transfers",
             labelnames=self._labelnames,
         )
-        self.kv_cache_hit_tokens = Counter(
-            "kv_cache_hit_tokens_total",
-            "Total number of prefix-cache hit tokens",
-            labelnames=self._labelnames,
-        )
 
         # --- Config info metrics (set once at startup) ---
         self.model_config_info = Gauge(
@@ -195,43 +166,9 @@ class AdditionalMetricsCollector:
             labelnames=["free_gpu_memory_fraction", "kv_block_size"],
         )
 
-        # --- Optional handler-level timing ---
-        self.enable_handler_timing = enable_handler_timing
-        self.handler_ttft = None
-        self.handler_itl = None
-        self.handler_e2e = None
+        logger.info("AdditionalMetricsCollector initialized")
 
-        if enable_handler_timing:
-            self.handler_ttft = Histogram(
-                "handler_time_to_first_token_seconds",
-                "Handler-level time to first token in seconds",
-                labelnames=self._labelnames,
-                buckets=TTFT_BUCKETS,
-            )
-            self.handler_itl = Histogram(
-                "handler_inter_token_latency_seconds",
-                "Handler-level inter-token latency in seconds",
-                labelnames=self._labelnames,
-                buckets=ITL_BUCKETS,
-            )
-            self.handler_e2e = Histogram(
-                "handler_e2e_request_latency_seconds",
-                "Handler-level end-to-end request latency in seconds",
-                labelnames=self._labelnames,
-                buckets=E2E_BUCKETS,
-            )
-
-        logger.info(
-            "AdditionalMetricsCollector initialized (handler_timing=%s)",
-            enable_handler_timing,
-        )
-
-    # --- Token / request helpers ---
-
-    def record_request_finish(self, prompt_tokens: int, gen_tokens: int):
-        """Record token counts at end of request."""
-        self.prompt_tokens.labels(*self._labelvalues).inc(prompt_tokens)
-        self.generation_tokens.labels(*self._labelvalues).inc(gen_tokens)
+    # --- Request helpers ---
 
     def record_request_abort(self):
         """Increment aborted requests counter."""
@@ -258,12 +195,6 @@ class AdditionalMetricsCollector:
                     inference_time
                 )
 
-    # --- Throughput ---
-
-    def set_gen_throughput(self, tokens_per_sec: float):
-        """Set the generation throughput gauge."""
-        self.gen_throughput.labels(*self._labelvalues).set(tokens_per_sec)
-
     # --- Request type tracking ---
 
     def record_request_type_image(self):
@@ -283,11 +214,6 @@ class AdditionalMetricsCollector:
     def record_kv_transfer_failure(self):
         """Increment the KV transfer failure counter."""
         self.kv_transfer_failure.labels(*self._labelvalues).inc()
-
-    def record_kv_cache_hits(self, cached_tokens: int):
-        """Record prefix-cache hit tokens."""
-        if cached_tokens > 0:
-            self.kv_cache_hit_tokens.labels(*self._labelvalues).inc(cached_tokens)
 
     # --- Config info ---
 
@@ -360,23 +286,6 @@ class AdditionalMetricsCollector:
             free_gpu_memory_fraction=str(free_gpu_memory_fraction),
             kv_block_size=str(kv_block_size),
         ).set(1.0)
-
-    # --- Optional handler timing ---
-
-    def record_handler_ttft(self, seconds: float):
-        """Record handler-level TTFT (only if handler timing enabled)."""
-        if self.handler_ttft is not None:
-            self.handler_ttft.labels(*self._labelvalues).observe(seconds)
-
-    def record_handler_itl(self, seconds: float):
-        """Record handler-level ITL (only if handler timing enabled)."""
-        if self.handler_itl is not None:
-            self.handler_itl.labels(*self._labelvalues).observe(seconds)
-
-    def record_handler_e2e(self, seconds: float):
-        """Record handler-level E2E latency (only if handler timing enabled)."""
-        if self.handler_e2e is not None:
-            self.handler_e2e.labels(*self._labelvalues).observe(seconds)
 
 
 # Backwards compatibility alias

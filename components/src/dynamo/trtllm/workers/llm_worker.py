@@ -440,7 +440,6 @@ async def init_llm_worker(
                         "disaggregation_mode": disagg_mode_str,
                         "engine_type": "trtllm",
                     },
-                    enable_handler_timing=config.enable_handler_timing,
                 )
 
                 # Tier 3: Config info gauges (set once)
@@ -470,9 +469,8 @@ async def init_llm_worker(
                 )
 
                 logging.info(
-                    "Unified metrics initialized (disagg_mode=%s, handler_timing=%s)",
+                    "Unified metrics initialized (disagg_mode=%s)",
                     disagg_mode_str,
-                    config.enable_handler_timing,
                 )
 
                 # Register unified metrics with Dynamo endpoint callback.
@@ -481,14 +479,13 @@ async def init_llm_worker(
                 # Register a second callback for the unprefixed additional metrics.
                 if config.publish_events_and_metrics:
                     _additional_prefixes = [
-                        "prompt_tokens_total", "generation_tokens_total",
-                        "num_aborted_requests_total", "gen_throughput",
+                        "num_aborted_requests_total",
                         "request_inference_time", "request_prefill_time",
                         "request_decode_time", "request_type_",
-                        "kv_transfer_", "kv_cache_hit_tokens",
+                        "kv_transfer_",
                         "model_config_info", "parallel_config_info",
                         "detailed_config_info", "cache_config_info",
-                        "engine_startup_time", "handler_",
+                        "engine_startup_time",
                     ]
                     register_engine_metrics_callback(
                         endpoint=endpoint,

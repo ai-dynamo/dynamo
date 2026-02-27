@@ -161,13 +161,6 @@ class DynamoTrtllmArgGroup(ArgGroup):
         )
         add_negatable_bool_argument(
             g,
-            flag_name="--enable-handler-timing",
-            env_var="DYN_TRTLLM_ENABLE_HANDLER_TIMING",
-            default=False,
-            help="Enable handler-level TTFT/ITL/E2E timing histograms. Requires --enable-unified-metrics.",
-        )
-        add_negatable_bool_argument(
-            g,
             flag_name="--disable-request-abort",
             env_var="DYN_TRTLLM_DISABLE_REQUEST_ABORT",
             default=True,
@@ -475,7 +468,6 @@ class DynamoTrtllmConfig(ConfigBase):
     override_engine_args: str
     publish_events_and_metrics: bool
     enable_unified_metrics: bool
-    enable_handler_timing: bool
     disable_request_abort: bool
     guided_decoding_backend: Optional[str] = None
 
@@ -515,10 +507,6 @@ class DynamoTrtllmConfig(ConfigBase):
     skip_components: str
 
     def validate(self) -> None:
-        if self.enable_handler_timing and not self.enable_unified_metrics:
-            raise ValueError(
-                "--enable-handler-timing requires --enable-unified-metrics"
-            )
         if isinstance(self.disaggregation_mode, str):
             self.disaggregation_mode = DisaggregationMode(self.disaggregation_mode)
         if isinstance(self.modality, str):
