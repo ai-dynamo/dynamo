@@ -143,12 +143,12 @@ func (c *GPUDiscoveryCache) Set(info *GPUInfo, ttl time.Duration) {
 // aggregate and return GPU information for all nodes instead of selecting
 // only one.
 func DiscoverGPUsFromDCGM(ctx context.Context, k8sClient client.Client, cache *GPUDiscoveryCache) (*GPUInfo, error) {
-
-	// Return cached result if still valid
-	if cached, ok := cache.Get(); ok {
-		return cached, nil
+	if cache != nil {
+		// Return cached result if still valid
+		if cached, ok := cache.Get(); ok {
+			return cached, nil
+		}
 	}
-
 	// List DCGM exporter pods
 	dcgmPods, err := listDCGMExporterPods(ctx, k8sClient)
 	if err != nil && !strings.Contains(err.Error(), "no DCGM exporter pods found") {
@@ -433,6 +433,9 @@ func parseMetrics(ctx context.Context, families map[string]*dto.MetricFamily) (*
 	if mf, ok := families["DCGM_FI_DEV_GPU_TEMP"]; ok {
 		for _, m := range mf.Metric {
 			gpuID := getLabel(m, "gpu")
+			if gpuID == "" {
++				continue
++			}
 			gpuSet[gpuID] = struct{}{}
 
 			// Extract model from label
@@ -451,6 +454,9 @@ func parseMetrics(ctx context.Context, families map[string]*dto.MetricFamily) (*
 	if mf, ok := families["DCGM_FI_DEV_FB_FREE"]; ok {
 		for _, m := range mf.Metric {
 			gpuID := getLabel(m, "gpu")
+			if gpuID == "" {
++				continue
++			}
 			fbFree[gpuID] = m.GetGauge().GetValue()
 
 			if hostName == "" {
@@ -462,6 +468,9 @@ func parseMetrics(ctx context.Context, families map[string]*dto.MetricFamily) (*
 	if mf, ok := families["DCGM_FI_DEV_FB_USED"]; ok {
 		for _, m := range mf.Metric {
 			gpuID := getLabel(m, "gpu")
+			if gpuID == "" {
++				continue
++			}
 			fbUsed[gpuID] = m.GetGauge().GetValue()
 
 			if hostName == "" {
@@ -473,6 +482,9 @@ func parseMetrics(ctx context.Context, families map[string]*dto.MetricFamily) (*
 	if mf, ok := families["DCGM_FI_DEV_FB_RESERVED"]; ok {
 		for _, m := range mf.Metric {
 			gpuID := getLabel(m, "gpu")
+			if gpuID == "" {
++				continue
++			}
 			fbReserved[gpuID] = m.GetGauge().GetValue()
 
 			if hostName == "" {
@@ -686,6 +698,7 @@ func GetCloudProviderInfo(ctx context.Context, k8sClient client.Client) (string,
 	node := nodeList.Items[0]
 	providerID := strings.ToLower(node.Spec.ProviderID)
 	labels := node.Labels
+	instanceType := strings.ToLower(labels["node.kubernetes.io/instance-type"])
 	// ---- Primary Detection: providerID ----
 	switch {
 	case strings.Contains(providerID, "azure"):
@@ -700,21 +713,21 @@ func GetCloudProviderInfo(ctx context.Context, k8sClient client.Client) (string,
 	if _, ok := labels["kubernetes.azure.com/cluster"]; ok {
 		return "aks", nil
 	}
-	if strings.Contains(labels["node.kubernetes.io/instance-type"], "standard_") {
+	if strings.Contains(instanceType, "standard_") {
 		return "aks", nil
 	}
 	// EKS labels
 	if _, ok := labels["eks.amazonaws.com/nodegroup"]; ok {
 		return "aws", nil
 	}
-	if strings.HasPrefix(labels["node.kubernetes.io/instance-type"], "p") {
+	if strings.HasPrefix(instanceType, "p") {
 		return "aws", nil
 	}
 	// GKE labels
 	if _, ok := labels["cloud.google.com/gke-nodepool"]; ok {
 		return "gcp", nil
 	}
-	if strings.HasPrefix(labels["node.kubernetes.io/instance-type"], "a2-") {
+	if strings.HasPrefix(instanceType, "a2-") {
 		return "gcp", nil
 	}
 	return "other", nil
