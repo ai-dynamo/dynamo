@@ -12,8 +12,8 @@ nvidia-ml-py<=13.580.65  # NVIDIA/CUDA related, may vary by driver version
 opentelemetry-api<=1.38.0  # Pinned for tracing support
 opentelemetry-exporter-otlp<=1.38.0
 opentelemetry-sdk<=1.38.0
-protobuf>=5.29.5,<7.0.0
 prometheus_client==0.23.1
+protobuf>=5.29.5,<7.0.0
 pydantic>=2.11.4,<2.13
 pydantic-settings<2.13.0
 PyYAML==6.0.3

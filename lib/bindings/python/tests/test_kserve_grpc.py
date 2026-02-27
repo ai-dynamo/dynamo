@@ -11,7 +11,11 @@ import pytest
 mc = pytest.importorskip("tritonclient.grpc.model_config_pb2")
 from tritonclient.utils import InferenceServerException  # noqa: E402
 
-from dynamo.llm import KserveGrpcService, ModelRuntimeConfig, PythonAsyncEngine  # noqa: E402
+from dynamo.llm import (  # noqa: E402
+    KserveGrpcService,
+    ModelRuntimeConfig,
+    PythonAsyncEngine,
+)
 
 pytestmark = pytest.mark.pre_merge
 
