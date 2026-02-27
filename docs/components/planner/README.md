@@ -68,7 +68,7 @@ args:
   - --loadbased-adjustment-interval=5
 ```
 
-The planner will auto-discover the frontend metrics endpoint from the DGD. See [disagg_planner_load.yaml](../../../../tests/planner/scaling/disagg_planner_load.yaml) for a complete example.
+The planner will auto-discover the frontend metrics endpoint from the DGD. See [disagg_planner_load.yaml](https://github.com/ai-dynamo/dynamo/blob/main/tests/planner/scaling/disagg_planner_load.yaml) for a complete example.
 
 ### Manual DGD Deployment
 
