@@ -207,14 +207,14 @@ trtllm_configs = {
     "epd_multimodal": TRTLLMConfig(
         name="epd_multimodal",
         directory=trtllm_dir,
-        script_name="epd_multimodal_image.sh",
+        script_name="epd_multimodal_image_and_embeddings.sh",
         marks=[
-            pytest.mark.gpu_2,
+            pytest.mark.gpu_1,
             pytest.mark.trtllm,
             pytest.mark.multimodal,
-            pytest.mark.nightly,
+            pytest.mark.pre_merge,
         ],
-        model="llava-hf/llava-v1.6-mistral-7b-hf",
+        model="Qwen/Qwen3-VL-2B-Instruct",
         frontend_port=DefaultPort.FRONTEND.value,
         timeout=900,
         delayed_start=120,
@@ -225,9 +225,8 @@ trtllm_configs = {
             )
         ],
         env={
-            # Override GPU assignments to fit on 2 GPUs (encode shares with prefill)
             "PREFILL_CUDA_VISIBLE_DEVICES": "0",
-            "DECODE_CUDA_VISIBLE_DEVICES": "1",
+            "DECODE_CUDA_VISIBLE_DEVICES": "0",
             "ENCODE_CUDA_VISIBLE_DEVICES": "0",
         },
     ),
