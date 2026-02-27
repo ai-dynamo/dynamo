@@ -19,7 +19,7 @@ import pytest
 
 grpcclient = pytest.importorskip("tritonclient.grpc")
 
-from tests.utils.managed_process import ManagedProcess
+from tests.utils.managed_process import ManagedProcess  # noqa: E402
 
 logger = logging.getLogger(__name__)
 

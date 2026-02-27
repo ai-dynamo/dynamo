@@ -22,10 +22,10 @@ import numpy as np
 import pytest
 
 grpcclient = pytest.importorskip("tritonclient.grpc")
-import triton_echo_client
+import triton_echo_client  # noqa: E402
 
-from tests.utils.constants import QWEN
-from tests.utils.managed_process import ManagedProcess
+from tests.utils.constants import QWEN  # noqa: E402
+from tests.utils.managed_process import ManagedProcess  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
