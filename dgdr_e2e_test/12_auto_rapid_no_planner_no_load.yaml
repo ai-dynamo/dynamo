@@ -1,0 +1,11 @@
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeploymentRequest
+metadata:
+  name: qwen3-32b-auto-rapid-no-planner-no-load
+spec:
+  model: "Qwen/Qwen3-32B"
+  image: "nvcr.io/nvidian/dynamo-dev/dynamo-frontend:hzhou-0225-02"
+  hardware:
+    gpuSku: b200_sxm
+    totalGpus: 8
+    numGpusPerNode: 8

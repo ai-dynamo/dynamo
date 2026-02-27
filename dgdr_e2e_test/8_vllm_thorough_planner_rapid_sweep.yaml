@@ -1,0 +1,22 @@
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeploymentRequest
+metadata:
+  name: qwen3-32b-thorough-planner-rapid-sweep
+spec:
+  model: "Qwen/Qwen3-32B"
+  backend: vllm
+  image: "nvcr.io/nvidian/dynamo-dev/dynamo-frontend:hzhou-0225-02"
+  hardware:
+    gpuSku: b200_sxm
+    totalGpus: 8
+    numGpusPerNode: 8
+  sla:
+    itl: 50.0
+  features:
+    planner:
+      pre_deployment_sweeping_mode: rapid
+      enable_throughput_scaling: true
+      enable_load_scaling: false
+      mode: disagg
+      backend: vllm
+  searchStrategy: thorough
