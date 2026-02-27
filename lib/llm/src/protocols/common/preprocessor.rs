@@ -56,6 +56,10 @@ pub struct RoutingHints {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<i32>,
 
+    /// TTL in seconds for cache control pinning. None = no pinning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_control_ttl: Option<u64>,
+
     /// Optional set of allowed worker IDs to restrict routing decisions (EPP).
     /// When set, only workers in this set are considered during scoring.
     #[serde(default, skip_serializing_if = "Option::is_none")]
