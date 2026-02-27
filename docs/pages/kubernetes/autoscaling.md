@@ -54,7 +54,7 @@ Dynamo provides flexible autoscaling through the `DynamoGraphDeploymentScalingAd
 
 ## Architecture
 
-```
+```text
 ┌──────────────────────────────────┐          ┌─────────────────────────────────────┐
 │   DynamoGraphDeployment          │          │   Scaling Adapters (auto-created)   │
 │   "sglang-agg"                   │          │   (one per service)                 │
@@ -510,7 +510,7 @@ spec:
 
 KEDA creates and manages an HPA under the hood:
 
-```
+```text
 ┌──────────────────────────────────────────────────────────────────────┐
 │  You create: ScaledObject                                            │
 │    - scaleTargetRef: sglang-agg-decode                               │

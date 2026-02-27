@@ -63,7 +63,7 @@ Dynamo exposes metrics in Prometheus Exposition Format text at the `/metrics` HT
 
 **Example Prometheus Exposition Format text:**
 
-```
+```text
 # HELP dynamo_component_requests_total Total requests processed
 # TYPE dynamo_component_requests_total counter
 dynamo_component_requests_total{dynamo_namespace="default",dynamo_component="worker",dynamo_endpoint="generate"} 42
@@ -177,7 +177,7 @@ This section explains the distinction between two key metrics used to track requ
 2. **HTTP Queue**: Tracks requests from HTTP handler start until first token generation begins (including prefill time)
 
 **Example Request Flow:**
-```
+```bash
 curl -s localhost:8000/v1/completions -H "Content-Type: application/json" -d '{
   "model": "Qwen/Qwen3-0.6B",
   "prompt": "Hello let's talk about LLMs",
@@ -187,18 +187,24 @@ curl -s localhost:8000/v1/completions -H "Content-Type: application/json" -d '{
 ```
 
 **Timeline:**
-```
-Timeline:    0, 1, ...
-Client ────> Frontend:8000 ────────────────────> Dynamo component/backend (SGLang, TRT, vLLM)
-             │request start                     │received                              │
-             |                                  |                                      |
-             │                                  ├──> start prefill ──> first token ──> |last token
-             │                                  │     (not impl)       |               |
-             ├─────actual HTTP queue¹ ──────────┘                      │               |
-             │                                                         │               │
-             ├─────implemented HTTP queue ─────────────────────────────┘               |
-             │                                                                         │
-             └─────────────────────────────────── Inflight ────────────────────────────┘
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Frontend as Frontend:8000
+    participant Backend as Backend (SGLang/TRT/vLLM)
+
+    Client->>Frontend: Request start
+    Note over Frontend: HTTP queue begins
+    Frontend->>Backend: Forward request
+    Note over Backend: Start prefill
+    Backend-->>Frontend: First token
+    Note over Frontend: HTTP queue ends
+    loop Token generation
+        Backend-->>Frontend: Tokens
+    end
+    Backend-->>Frontend: Last token
+    Frontend-->>Client: Complete response
+    Note over Frontend: Inflight ends
 ```
 
 **Concurrency Example:**

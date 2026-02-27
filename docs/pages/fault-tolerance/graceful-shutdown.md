@@ -223,7 +223,7 @@ This allows the frontend to automatically retry disconnected streams on healthy 
 
 Track shutdown behavior via logs:
 
-```
+```text
 INFO  Received shutdown signal, shutting down DistributedRuntime
 INFO  DistributedRuntime shutdown complete
 DEBUG Cleaning up worker

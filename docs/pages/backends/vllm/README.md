@@ -12,14 +12,6 @@ We recommend using the [latest stable release](https://github.com/ai-dynamo/dyna
 
 ---
 
-## Table of Contents
-- [Feature Support Matrix](#feature-support-matrix)
-- [Quick Start](#quick-start)
-- [Single Node Examples](#run-single-node-examples)
-- [Advanced Examples](#advanced-examples)
-- [Deploy on Kubernetes](#kubernetes-deployment)
-- [Configuration](#configuration)
-
 ## Feature Support Matrix
 
 ### Core Dynamo Features

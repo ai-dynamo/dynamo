@@ -6,22 +6,6 @@ title: Webhooks
 
 This document describes the webhook functionality in the Dynamo Operator, including validation webhooks, certificate management, and troubleshooting.
 
-## Table of Contents
-
-- [Overview](#overview)
-- [Architecture](#architecture)
-- [Configuration](#configuration)
-  - [Certificate Management Options](#certificate-management-options)
-  - [Advanced Configuration](#advanced-configuration)
-- [Certificate Management](#certificate-management)
-  - [Automatic Certificates (Default)](#automatic-certificates-default)
-  - [cert-manager Integration](#cert-manager-integration)
-  - [External Certificates](#external-certificates)
-- [Multi-Operator Deployments](#multi-operator-deployments)
-- [Troubleshooting](#troubleshooting)
-
----
-
 ## Overview
 
 The Dynamo Operator uses **Kubernetes admission webhooks** to provide real-time validation and mutation of custom resources. Currently, the operator implements **validation webhooks** that ensure invalid configurations are rejected immediately at the API server level, providing faster feedback to users compared to controller-based validation.
@@ -53,7 +37,7 @@ All webhook types (validating, mutating, conversion, etc.) share the same **webh
 
 ## Architecture
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────────┐
 │                         API Server                               │
 │  1. User submits CR (kubectl apply)                             │
@@ -370,7 +354,7 @@ The operator supports running both **cluster-wide** and **namespace-restricted**
 
 ### Scenario
 
-```
+```text
 Cluster:
 ├─ Operator A (cluster-wide, namespace: platform-system)
 │  └─ Validates all namespaces EXCEPT team-a
@@ -428,7 +412,7 @@ The webhook configuration name reflects the deployment mode:
 
 Example:
 
-```bash
+```text
 # Cluster-wide
 platform-operator-validating
 
@@ -487,7 +471,7 @@ kubectl logs -n <namespace> deployment/<release>-dynamo-operator | grep webhook
 ### Connection Refused Errors
 
 **Symptoms:**
-```
+```text
 Error from server (InternalError): Internal error occurred: failed calling webhook:
 Post "https://...webhook-service...:443/validate-...": dial tcp ...:443: connect: connection refused
 ```
@@ -524,7 +508,7 @@ kubectl logs -n <namespace> deployment/<release>-dynamo-operator | grep -i error
 ### Certificate Errors
 
 **Symptoms:**
-```
+```text
 Error from server (InternalError): Internal error occurred: failed calling webhook:
 x509: certificate signed by unknown authority
 ```

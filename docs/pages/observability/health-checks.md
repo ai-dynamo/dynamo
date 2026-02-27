@@ -56,13 +56,13 @@ Frontend liveness doesn't depend on worker health or liveness only on the Fronte
 
 ### Example Request
 
-```
+```bash
 curl -s localhost:8080/live -q | jq
 ```
 
 ### Example Response
 
-```
+```json
 {
   "message": "Service is live",
   "status": "live"
@@ -81,7 +81,7 @@ Frontend liveness doesn't depend on worker health or liveness only on the Fronte
 
 ### Example Request
 
-```
+```bash
 curl -v localhost:8080/health -q | jq
 ```
 
@@ -89,7 +89,7 @@ curl -v localhost:8080/health -q | jq
 
 Before workers are registered:
 
-```
+```text
 HTTP/1.1 200 OK
 content-type: application/json
 content-length: 72
@@ -104,7 +104,7 @@ date: Wed, 03 Sep 2025 13:31:44 GMT
 
 After workers are registered:
 
-```
+```text
 HTTP/1.1 200 OK
 content-type: application/json
 content-length: 609
@@ -166,7 +166,7 @@ Both /live and /ready return the same information
 
 ### Example Environment Setting
 
-```
+```bash
 export DYN_SYSTEM_PORT=9090
 export DYN_SYSTEM_STARTING_HEALTH_STATUS="notready"
 export DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS="[\"generate\"]"
@@ -174,14 +174,14 @@ export DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS="[\"generate\"]"
 
 #### Example Request
 
-```
+```bash
 curl -v localhost:9090/health | jq
 ```
 
 #### Example Response
 Before endpoints are being served:
 
-```
+```text
 HTTP/1.1 503 Service Unavailable
 content-type: text/plain; charset=utf-8
 content-length: 96
@@ -201,7 +201,7 @@ date: Wed, 03 Sep 2025 13:42:39 GMT
 
 After endpoints are being served:
 
-```
+```text
 HTTP/1.1 200 OK
 content-type: text/plain; charset=utf-8
 content-length: 139
@@ -300,7 +300,7 @@ These payloads are designed to:
 
 When health checks are enabled, you'll see logs like:
 
-```
+```text
 INFO Health check manager started (canary_wait_time: 10s, request_timeout: 3s)
 INFO Spawned health check task for endpoint: generate
 INFO Canary timer expired for generate, sending health check
@@ -309,7 +309,7 @@ INFO Health check successful for generate
 
 If an endpoint fails:
 
-```
+```text
 WARN Health check timeout for generate
 ERROR Health check request failed for generate: connection refused
 ```

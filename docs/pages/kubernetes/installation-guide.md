@@ -146,7 +146,7 @@ If your cluster has namespace-restricted Dynamo operators, you MUST add namespac
 Note: Use the full path `dynamo-operator.namespaceRestriction.enabled=true` (not just `namespaceRestriction.enabled=true`).
 
 If you see this validation error, you need namespace restriction:
-```
+```text
 VALIDATION ERROR: Cannot install cluster-wide Dynamo operator.
 Found existing namespace-restricted Dynamo operators in namespaces: ...
 ```
@@ -305,7 +305,7 @@ kubectl get pods -n ${NAMESPACE}
 
 **"VALIDATION ERROR: Cannot install cluster-wide Dynamo operator"**
 
-```
+```text
 VALIDATION ERROR: Cannot install cluster-wide Dynamo operator.
 Found existing namespace-restricted Dynamo operators in namespaces: ...
 ```
@@ -345,7 +345,7 @@ kubectl create secret generic hf-token-secret \
 
 **Bitnami etcd "unrecognized" image?**
 
-```bash
+```text
 ERROR: Original containers have been substituted for unrecognized ones. Deploying this chart with non-standard containers is likely to cause degraded security and performance, broken chart features, and missing environment variables.
 ```
 This error that you might encounter during helm install is due to bitnami changing their docker repository to a [secure one](https://github.com/bitnami/charts/tree/main/bitnami/etcd#%EF%B8%8F-important-notice-upcoming-changes-to-the-bitnami-catalog).
@@ -358,7 +358,7 @@ just add the following to the helm install command:
 **Clean uninstall?**
 
 To uninstall the platform, you can run the following command:
-```
+```bash
 helm uninstall dynamo-platform --namespace ${NAMESPACE}
 ```
 
@@ -370,7 +370,7 @@ kubectl get crd | grep "dynamo.*nvidia.com"
 ```
 
 You should see something like this:
-```
+```text
 dynamocomponentdeployments.nvidia.com               2025-10-21T14:49:52Z
 dynamocomponents.nvidia.com                         2025-10-25T05:16:10Z
 dynamographdeploymentrequests.nvidia.com            2025-11-24T05:26:04Z
