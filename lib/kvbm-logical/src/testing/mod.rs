@@ -55,10 +55,15 @@ pub const TEST_SALT: u64 = 42;
 // ============================================================================
 
 // pub items — usable by downstream crates via the testing feature
-pub use managers::{create_test_manager, create_test_manager_with_block_size};
+pub use managers::{
+    TestManagerBuilder, TestRegistryBuilder, create_and_populate_manager, create_test_manager,
+    create_test_manager_with_block_size, populate_manager_with_blocks,
+};
 pub use sequences::BlockSequenceBuilder;
 pub use token_blocks::{
-    create_iota_token_block, create_test_token_block, sequential_tokens, tokens_for_id,
+    create_disjoint_sequences, create_iota_token_block, create_sequential_block,
+    create_test_token_block, create_token_block, create_token_sequence,
+    default_request_salt_hash, generate_sequence_hashes, sequential_tokens, tokens_for_id,
 };
 
 // pub(crate) items — internal helpers using internal types

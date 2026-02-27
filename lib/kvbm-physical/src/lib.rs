@@ -9,6 +9,9 @@ pub use manager::TransferManager;
 pub use transfer::{TransferConfig, TransferOptions};
 
 pub use kvbm_common::BlockId;
+
+#[cfg(any(test, feature = "testing"))]
+pub mod testing;
 pub type SequenceHash = kvbm_common::SequenceHash;
 
 #[cfg(test)]
