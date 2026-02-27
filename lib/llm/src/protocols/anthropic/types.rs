@@ -885,8 +885,8 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
                                 }
                                 _ => None,
                             };
-                            if block_cc.is_some() {
-                                last_block_cc = block_cc.cloned();
+                            if let Some(cc) = block_cc {
+                                last_block_cc = Some(cc.clone());
                             }
                         }
                     }
@@ -2351,8 +2351,6 @@ mod tests {
 
     #[test]
     fn test_top_level_cache_control_overrides_per_block() {
-        use crate::protocols::openai::nvext::CacheControlType;
-
         let json = r#"{
             "model": "test",
             "max_tokens": 100,
