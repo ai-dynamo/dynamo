@@ -4,8 +4,6 @@
 title: Jail Stream
 ---
 
-# JailedStream Implementation
-
 ## Overview
 
 The `JailedStream` is a standalone implementation for handling "jail" detection in token streams. It provides a clean, builder-based API for accumulating tokens when certain sequences are detected, then releasing them as a single chunk when the jail ends.

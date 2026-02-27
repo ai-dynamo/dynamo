@@ -334,22 +334,7 @@ func generateSingleDCD(
 		labels[commonconsts.KubeLabelDynamoWorkerHash] = rollingUpdateCtx.NewWorkerHash
 	}
 
-	// Propagate metrics annotation from parent deployment if present
-	if parentDGD.Annotations != nil {
-		if deployment.Spec.Annotations == nil {
-			deployment.Spec.Annotations = make(map[string]string)
-		}
-		if val, exists := parentDGD.Annotations[commonconsts.KubeAnnotationEnableMetrics]; exists {
-			deployment.Spec.Annotations[commonconsts.KubeAnnotationEnableMetrics] = val
-		}
-		if val, exists := parentDGD.Annotations[commonconsts.KubeAnnotationDynamoDiscoveryBackend]; exists {
-			deployment.Spec.Annotations[commonconsts.KubeAnnotationDynamoDiscoveryBackend] = val
-		}
-		// Propagate operator origin version for version-gated behavior in backends
-		if val, exists := parentDGD.Annotations[commonconsts.KubeAnnotationDynamoOperatorOriginVersion]; exists {
-			deployment.Spec.Annotations[commonconsts.KubeAnnotationDynamoOperatorOriginVersion] = val
-		}
-	}
+	propagateDGDAnnotations(parentDGD.GetAnnotations(), &deployment.Spec.DynamoComponentDeploymentSharedSpec)
 
 	// Apply restart annotation if this service should be restarted.
 	if restartState.ShouldAnnotateService(componentName) {
@@ -1326,11 +1311,40 @@ func GeneratePodSpecForComponent(
 	if len(dynamoDeployment.Spec.Envs) > 0 {
 		component.Envs = MergeEnvs(dynamoDeployment.Spec.Envs, component.Envs)
 	}
+
+	propagateDGDAnnotations(dynamoDeployment.GetAnnotations(), component)
+
 	podSpec, err := GenerateBasePodSpec(component, backendFramework, secretsRetriever, dynamoDeployment.Name, dynamoDeployment.Namespace, role, numberOfNodes, operatorConfig, multinodeDeploymentType, serviceName, checkpointInfo)
 	if err != nil {
 		return nil, err
 	}
 	return podSpec, nil
+}
+
+// dgdPropagatedAnnotationKeys lists DGD metadata annotations that are propagated
+// to component-level annotations (for both the DCD/controller and Grove paths).
+// Service-level annotations take precedence (are never overwritten).
+var dgdPropagatedAnnotationKeys = []string{
+	commonconsts.KubeAnnotationEnableMetrics,
+	commonconsts.KubeAnnotationDynamoDiscoveryBackend,
+	commonconsts.KubeAnnotationDynamoOperatorOriginVersion,
+	commonconsts.KubeAnnotationVLLMDistributedExecutorBackend,
+}
+
+// propagateDGDAnnotations copies DGD-level annotations into the component
+// annotations so that downstream logic can read them uniformly.
+// Service-level annotations take precedence (are never overwritten).
+func propagateDGDAnnotations(dgdAnnotations map[string]string, component *v1alpha1.DynamoComponentDeploymentSharedSpec) {
+	for _, key := range dgdPropagatedAnnotationKeys {
+		if val, exists := dgdAnnotations[key]; exists {
+			if component.Annotations == nil {
+				component.Annotations = make(map[string]string)
+			}
+			if _, serviceHas := component.Annotations[key]; !serviceHas {
+				component.Annotations[key] = val
+			}
+		}
+	}
 }
 
 // GenerateGrovePodCliqueSet generates a Grove PodCliqueSet for the given deployment, supporting both single-node and multinode cases.
@@ -1383,14 +1397,6 @@ func GenerateGrovePodCliqueSet(
 				component.Annotations = make(map[string]string)
 			}
 			component.Annotations[commonconsts.KubeAnnotationDynamoDiscoveryBackend] = string(discoveryBackend)
-		}
-
-		// Propagate operator origin version for version-gated behavior in backends
-		if val, exists := dynamoDeployment.Annotations[commonconsts.KubeAnnotationDynamoOperatorOriginVersion]; exists {
-			if component.Annotations == nil {
-				component.Annotations = make(map[string]string)
-			}
-			component.Annotations[commonconsts.KubeAnnotationDynamoOperatorOriginVersion] = val
 		}
 
 		// Get checkpoint info for this service if available

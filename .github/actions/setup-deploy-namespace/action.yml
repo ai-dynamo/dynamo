@@ -1,0 +1,127 @@
+name: 'Setup Deploy Namespace'
+description: 'Create a Kubernetes namespace and install the Dynamo platform operator via Helm'
+
+inputs:
+  kubeconfig_base64:
+    description: 'Base64-encoded kubeconfig for cluster access'
+    required: true
+  namespace:
+    description: 'Target namespace name'
+    required: true
+  registry:
+    description: 'Container registry hostname (e.g. myregistry.azurecr.io)'
+    required: true
+  operator_tag:
+    description: 'Operator image tag (default: main-operator)'
+    required: false
+    default: 'main-operator'
+  hf_token:
+    description: 'HuggingFace token for model access'
+    required: false
+    default: ''
+
+runs:
+  using: "composite"
+  steps:
+    - name: Setup Kubeconfig
+      shell: bash
+      run: |
+        echo "${{ inputs.kubeconfig_base64 }}" | base64 -d > ${{ github.workspace }}/.kubeconfig
+        chmod 600 ${{ github.workspace }}/.kubeconfig
+        echo "KUBECONFIG=${{ github.workspace }}/.kubeconfig" >> $GITHUB_ENV
+
+    - name: Create namespace
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+      run: |
+        echo "::group::Create namespace $NAMESPACE"
+        set -x
+        kubectl create namespace $NAMESPACE
+        echo "Attaching the labels for secrets and cleanup"
+        kubectl label namespaces ${NAMESPACE} \
+          nscleanup/enabled=true \
+          nscleanup/ttl=7200 \
+          gitlab-imagepull=enabled \
+          ngc-api=enabled \
+          nvcr-imagepull=enabled \
+          --overwrite=true
+
+        # Set the context to the new namespace
+        kubectl config set-context --current --namespace=$NAMESPACE
+
+        # Check if Istio is installed
+        kubectl get pods -n istio-system
+        # Check if default storage class exists
+        kubectl get storageclass
+        echo "::endgroup::"
+
+    - name: Create HF token secret
+      if: inputs.hf_token != ''
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        HF_TOKEN: ${{ inputs.hf_token }}
+      run: |
+        echo "::group::Create HF token secret"
+        kubectl create secret generic hf-token-secret \
+          --from-literal=HF_TOKEN=${HF_TOKEN} \
+          -n $NAMESPACE || true
+        echo "::endgroup::"
+
+    - name: Install Dynamo platform via Helm
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        REGISTRY: ${{ inputs.registry }}
+        OPERATOR_TAG: ${{ inputs.operator_tag }}
+      run: |
+        echo "::group::Install Dynamo platform via Helm"
+        set -x
+        # Install Helm chart
+        export VIRTUAL_ENV=/opt/dynamo/venv
+        export KUBE_NS=$NAMESPACE
+        export ISTIO_ENABLED=true
+        export ISTIO_GATEWAY=istio-system/ingress-alb
+        export VIRTUAL_SERVICE_SUPPORTS_HTTPS=true
+        OPERATOR_REPO="${REGISTRY}/ai-dynamo/dynamo"
+        echo "Using operator image: ${OPERATOR_REPO}:${OPERATOR_TAG}"
+
+        # Install helm dependencies
+        helm repo add bitnami https://charts.bitnami.com/bitnami
+        cd deploy/helm/charts/platform/
+        helm dep build .
+        # Install platform with namespace restriction for single profile testing
+        # we manage crds via Velonix so we skip the crds installation
+        helm upgrade --install dynamo-platform . --namespace ${NAMESPACE} \
+          --skip-crds \
+          --set dynamo-operator.namespaceRestriction.enabled=true \
+          --set dynamo-operator.namespaceRestriction.allowedNamespaces[0]=${NAMESPACE} \
+          --set dynamo-operator.controllerManager.manager.image.repository=${OPERATOR_REPO} \
+          --set dynamo-operator.controllerManager.manager.image.tag=${OPERATOR_TAG} \
+          --set dynamo-operator.gpuDiscovery.enabled=false \
+          --set dynamo-operator.upgradeCRD=false \
+          --debug
+        echo "::endgroup::"
+
+    - name: Wait for operator rollout
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+      run: |
+        echo "::group::Wait for operator rollout"
+        kubectl rollout status deployment -n $NAMESPACE --watch --timeout=300s
+        echo "::endgroup::"
+
+    - name: Report Unhealthy Pods
+      if: failure()
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+      run: |
+        echo "### OPERATOR DEPLOYMENT FAILED: Unhealthy Pods Report" >> $GITHUB_STEP_SUMMARY
+        echo "Unhealthy pods:" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        kubectl get pods -n ${NAMESPACE} --no-headers \
+          | grep -v -E '(Running|Completed)' \
+          | awk '{print "- **" $1 "** | Status: `" $3 "`"}' >> $GITHUB_STEP_SUMMARY || true

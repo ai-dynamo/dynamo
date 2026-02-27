@@ -4,8 +4,6 @@
 title: Speculative Decoding
 ---
 
-# Speculative Decoding
-
 Speculative decoding is an optimization technique that uses a smaller "draft" model to predict multiple tokens, which are then verified by the main model in parallel. This can significantly reduce latency for autoregressive generation.
 
 ## Backend Support

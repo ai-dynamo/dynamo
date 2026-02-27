@@ -28,6 +28,7 @@ pub use dynamo_kv_router::approx;
 pub use dynamo_kv_router::indexer;
 pub use dynamo_kv_router::protocols;
 
+pub mod cache_control;
 pub mod config;
 pub mod indexer_standalone;
 mod jetstream;
@@ -42,6 +43,7 @@ pub mod sequence;
 pub mod subscriber;
 pub mod worker_query;
 
+pub use cache_control::{CacheControlClient, spawn_pin_prefix};
 pub use config::{KvRouterConfig, RouterConfigOverride};
 pub use indexer_standalone::start_kv_block_indexer;
 pub use prefill_router::PrefillRouter;
@@ -153,6 +155,26 @@ impl Indexer {
             return Indexer::None;
         }
 
+        // Approximate mode (--no-kv-events): always use single-threaded KvIndexer
+        // with TTL/pruning regardless of event_threads, since updates come from
+        // routing decisions only, not live KV events from workers.
+        if !kv_router_config.use_kv_events {
+            let kv_indexer_metrics = indexer::KvIndexerMetrics::from_component(component);
+            let cancellation_token = component.drt().primary_token();
+            let prune_config = Some(PruneConfig {
+                ttl: Duration::from_secs_f64(kv_router_config.router_ttl_secs),
+                max_tree_size: kv_router_config.router_max_tree_size,
+                prune_target_ratio: kv_router_config.router_prune_target_ratio,
+            });
+            return Indexer::KvIndexer(KvIndexer::new_with_frequency(
+                cancellation_token,
+                None,
+                block_size,
+                kv_indexer_metrics,
+                prune_config,
+            ));
+        }
+
         if kv_router_config.router_event_threads > 1 {
             return Indexer::Concurrent(Arc::new(ThreadPoolIndexer::new(
                 ConcurrentRadixTree::new(),
@@ -164,23 +186,12 @@ impl Indexer {
         let kv_indexer_metrics = indexer::KvIndexerMetrics::from_component(component);
         let cancellation_token = component.drt().primary_token();
 
-        // If use_kv_events is false, enable TTL and pruning for approximate behavior
-        let prune_config = if !kv_router_config.use_kv_events {
-            Some(PruneConfig {
-                ttl: Duration::from_secs_f64(kv_router_config.router_ttl_secs),
-                max_tree_size: kv_router_config.router_max_tree_size,
-                prune_target_ratio: kv_router_config.router_prune_target_ratio,
-            })
-        } else {
-            None
-        };
-
         Indexer::KvIndexer(KvIndexer::new_with_frequency(
             cancellation_token,
             None, // expiration_duration for frequency tracking
             block_size,
             kv_indexer_metrics,
-            prune_config,
+            None,
         ))
     }
 
@@ -386,18 +397,12 @@ impl KvRouter {
         });
         let hash_elapsed = start.elapsed();
 
-        let mut overlap_scores = self
+        let overlap_scores = self
             .indexer
             .find_matches(block_hashes)
             .instrument(tracing::info_span!("kv_router.find_matches"))
             .await?;
         let find_matches_elapsed = start.elapsed();
-
-        if let Some(ref allowed_ids) = allowed_worker_ids {
-            overlap_scores
-                .scores
-                .retain(|worker, _| allowed_ids.contains(&worker.worker_id));
-        }
 
         // Compute seq_hashes only if scheduler needs it for active blocks tracking
         let maybe_seq_hashes = tracing::info_span!("kv_router.compute_seq_hashes").in_scope(|| {

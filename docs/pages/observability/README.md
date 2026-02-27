@@ -5,8 +5,6 @@ title: Observability (Local)
 subtitle: Monitor Dynamo deployments with metrics, logging, and tracing
 ---
 
-# Dynamo Observability
-
 ## Getting Started Quickly
 
 This is an example to get started quickly on a single machine.

@@ -4,8 +4,6 @@
 title: KVBM Design
 ---
 
-# KVBM Design
-
 This document provides an in-depth look at the architecture, components, framework integrations via the connector API, and the detailed workings of the Dynamo KV Block Manager (KVBM). The design of KVBM takes inspiration from the KV block managers used in SGLang and vLLM, with added influence from historical memory tiering strategies common in general GPU programming. For more details, see [Further Reading](#further-reading).
 
 ## KVBM Components

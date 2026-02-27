@@ -7082,6 +7082,58 @@ func TestGenerateBasePodSpec_FrontendSidecar(t *testing.T) {
 			parentDGDName: "test-dgd",
 			namespace:     "test-ns",
 			wantErr:       true,
+func TestPropagateDGDAnnotations(t *testing.T) {
+	tests := []struct {
+		name               string
+		dgdAnnotations     map[string]string
+		serviceAnnotations map[string]string
+		expectedAnnotation map[string]string
+	}{
+		{
+			name: "DGD annotation propagates to empty service annotations",
+			dgdAnnotations: map[string]string{
+				commonconsts.KubeAnnotationVLLMDistributedExecutorBackend: "ray",
+			},
+			serviceAnnotations: nil,
+			expectedAnnotation: map[string]string{
+				commonconsts.KubeAnnotationVLLMDistributedExecutorBackend: "ray",
+			},
+		},
+		{
+			name: "service-level annotation takes precedence over DGD",
+			dgdAnnotations: map[string]string{
+				commonconsts.KubeAnnotationVLLMDistributedExecutorBackend: "ray",
+			},
+			serviceAnnotations: map[string]string{
+				commonconsts.KubeAnnotationVLLMDistributedExecutorBackend: "mp",
+			},
+			expectedAnnotation: map[string]string{
+				commonconsts.KubeAnnotationVLLMDistributedExecutorBackend: "mp",
+			},
+		},
+		{
+			name:               "no DGD annotation, no service annotation",
+			dgdAnnotations:     nil,
+			serviceAnnotations: nil,
+			expectedAnnotation: nil,
+		},
+		{
+			name: "origin version also propagates",
+			dgdAnnotations: map[string]string{
+				commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.0.0",
+			},
+			serviceAnnotations: nil,
+			expectedAnnotation: map[string]string{
+				commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.0.0",
+			},
+		},
+		{
+			name: "unrelated DGD annotations are not propagated",
+			dgdAnnotations: map[string]string{
+				"some-other-annotation": "value",
+			},
+			serviceAnnotations: nil,
+			expectedAnnotation: nil,
 		},
 	}
 
@@ -7169,35 +7221,19 @@ func TestGenerateBasePodSpec_FrontendSidecar(t *testing.T) {
 			}
 			for name, found := range hasDownwardAPI {
 				assert.True(t, found, "sidecar should have downward API env var %s", name)
+			component := &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				Annotations: tt.serviceAnnotations,
+			}
+			propagateDGDAnnotations(tt.dgdAnnotations, component)
+
+			if tt.expectedAnnotation == nil {
+				assert.True(t, len(component.Annotations) == 0 || component.Annotations == nil,
+					"expected no annotations, got %v", component.Annotations)
+			} else {
+				for k, v := range tt.expectedAnnotation {
+					assert.Equal(t, v, component.Annotations[k], "annotation %s mismatch", k)
+				}
 			}
 		})
 	}
-}
-
-func TestGenerateBasePodSpec_FrontendSidecarImagePullSecrets(t *testing.T) {
-	controllerConfig := &configv1alpha1.OperatorConfiguration{}
-
-	component := &v1alpha1.DynamoComponentDeploymentSharedSpec{
-		ComponentType: commonconsts.ComponentTypeWorker,
-		FrontendSidecar: &v1alpha1.FrontendSidecarSpec{
-			Image: "private-registry/frontend:latest",
-		},
-	}
-
-	podSpec, err := GenerateBasePodSpec(
-		component,
-		BackendFrameworkVLLM,
-		&mockSecretsRetrieverWithSecrets{},
-		"test-dgd",
-		"test-ns",
-		RoleMain,
-		1,
-		controllerConfig,
-		commonconsts.MultinodeDeploymentTypeGrove,
-		"test-service",
-		nil,
-	)
-
-	assert.NoError(t, err)
-	assert.Equal(t, []corev1.LocalObjectReference{{Name: "test-docker-secret"}}, podSpec.ImagePullSecrets)
 }

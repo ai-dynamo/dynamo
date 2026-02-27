@@ -4,8 +4,6 @@
 title: Distributed Runtime
 ---
 
-# Dynamo Distributed Runtime
-
 ## Overview
 
 Dynamo's `DistributedRuntime` is the core infrastructure in the framework that enables distributed communication and coordination between different Dynamo components. It is implemented in Rust (`/lib/runtime`) and exposed to other programming languages via bindings (i.e., Python bindings can be found in `/lib/bindings/python`). The runtime supports multiple discovery backends (Kubernetes-native or etcd) and request planes (TCP, HTTP, or NATS). `DistributedRuntime` follows a hierarchical structure:
@@ -28,7 +26,7 @@ Since these components are deployed in different processes, each has its own `Di
 - Worker components register with names like `backend`, `prefill`, `decode`, or `encoder` depending on their role
 - Workers register endpoints like `generate`, `clear_kv_blocks`, or `load_metrics`
 
-Their `DistributedRuntime`s are initialized in their respective main functions, their `Namespace`s are configured in the deployment YAML, their `Component`s are created programmatically (e.g., `runtime.namespace("dynamo").component("backend")`), and their `Endpoint`s are created using the `component.endpoint()` method.
+Their `DistributedRuntime`s are initialized in their respective main functions, their `Namespace`s are configured in the deployment YAML, and their `Endpoint`s are obtained by path. In Python, use `runtime.endpoint("namespace.component.endpoint")` (e.g., `runtime.endpoint("dynamo.backend.generate")`).
 
 ## Initialization
 

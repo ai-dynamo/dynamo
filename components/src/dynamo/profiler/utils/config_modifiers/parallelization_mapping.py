@@ -102,6 +102,51 @@ class ParallelizationMapping:
         )
 
 
+@dataclass(frozen=True)
+class PickedParallelConfig:
+    """Lightweight representation of a picked parallelization config.
+
+    Uses the same (tp, pp, dp, moe_tp, moe_ep) tuple that AIC's enumeration
+    and picking pipelines produce.  Unlike :class:`ParallelizationMapping`,
+    this stores all five dimensions explicitly rather than using mutually
+    exclusive optional fields.
+    """
+
+    tp: int = 1
+    pp: int = 1
+    dp: int = 1
+    moe_tp: int = 1
+    moe_ep: int = 1
+
+    @property
+    def num_gpus(self) -> int:
+        return self.tp * self.pp * self.dp
+
+    @property
+    def tp_size(self) -> int:
+        """Effective TP for KV-head splitting (TP or TEP; 1 for DEP)."""
+        if self.moe_ep > 1:
+            return 1
+        if self.moe_tp > 1:
+            return self.moe_tp
+        return self.tp
+
+    def label(self) -> str:
+        if self.moe_ep > 1:
+            return f"dep{self.moe_ep}"
+        elif self.moe_tp > 1:
+            return f"tep{self.moe_tp}"
+        return f"tp{self.tp}"
+
+    def to_parallelization_mapping(self) -> ParallelizationMapping:
+        """Convert to :class:`ParallelizationMapping`."""
+        if self.moe_ep > 1:
+            return ParallelizationMapping(dep=self.moe_ep)
+        elif self.moe_tp > 1:
+            return ParallelizationMapping(tep=self.moe_tp)
+        return ParallelizationMapping(tp=self.tp)
+
+
 def _check_divisibility(
     value: int | None,
     divisor: int,
