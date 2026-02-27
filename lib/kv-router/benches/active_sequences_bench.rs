@@ -6,7 +6,7 @@ mod common;
 use common::*;
 
 use clap::Parser;
-use dynamo_kv_router::bench_utils::NoopSequencePublisher;
+use common::NoopSequencePublisher;
 use dynamo_kv_router::protocols::WorkerWithDpRank;
 use dynamo_kv_router::{ActiveSequencesMultiWorker, OverlapScores, SequenceRequest};
 use dynamo_mocker::common::protocols::{DirectRequest, OutputSignal};

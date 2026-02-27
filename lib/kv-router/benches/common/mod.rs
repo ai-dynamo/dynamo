@@ -3,8 +3,16 @@
 
 #![allow(dead_code)]
 
+use std::future;
+use std::time::Duration;
+
 use dynamo_kv_router::LocalBlockHash;
-use dynamo_kv_router::protocols::{KvCacheEvent, KvCacheEventData, XXH3_SEED};
+use dynamo_kv_router::protocols::{
+    ActiveLoad, ActiveSequenceEvent, ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData,
+    KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData, RouterEvent, WorkerConfigLike,
+    WorkerId, WorkerWithDpRank, XXH3_SEED, compute_seq_hash_for_block,
+};
+use dynamo_kv_router::sequences::SequencePublisher;
 use dynamo_mocker::common::protocols::{DirectRequest, KvCacheEventSink, MockEngineArgs};
 use dynamo_mocker::scheduler::Scheduler;
 use dynamo_tokens::compute_hash_v2;
@@ -16,7 +24,7 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::sync::{Arc, Mutex};
 use tokio::task::JoinHandle;
-use tokio::time::{Duration, Instant};
+use tokio::time::Instant;
 use uuid::Uuid;
 
 /// Shared CLI arguments for trace-based benchmarks.
@@ -567,5 +575,211 @@ pub fn print_sweep_summary(name: &str, results: &[(u64, BenchmarkResults)]) {
             r.block_throughput,
             r.latency_p99_us,
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Sequence data generation (moved from src/bench_utils.rs)
+// ---------------------------------------------------------------------------
+
+/// Pre-generated sequence data for benchmarking.
+#[derive(Clone)]
+pub struct SequenceData {
+    pub worker_id: WorkerId,
+    pub local_hashes: Vec<LocalBlockHash>,
+    pub external_hashes: Vec<ExternalSequenceBlockHash>,
+}
+
+impl SequenceData {
+    /// Create a new sequence with synthetic hashes based on sequence ID.
+    pub fn new(seq_id: u64, worker_id: WorkerId, depth: usize) -> Self {
+        let local_hashes: Vec<LocalBlockHash> = (0..depth)
+            .map(|block_idx| LocalBlockHash((seq_id << 32) | (block_idx as u64)))
+            .collect();
+
+        let external_hashes: Vec<ExternalSequenceBlockHash> = (0..depth)
+            .map(|block_idx| ExternalSequenceBlockHash((seq_id << 32) | (block_idx as u64)))
+            .collect();
+
+        Self {
+            worker_id,
+            local_hashes,
+            external_hashes,
+        }
+    }
+
+    /// Create a sequence from local hashes, computing external hashes using cumulative hash.
+    pub fn from_local_hashes(worker_id: WorkerId, local_hashes: Vec<LocalBlockHash>) -> Self {
+        let seq_hashes = compute_seq_hash_for_block(&local_hashes);
+        let external_hashes = seq_hashes
+            .into_iter()
+            .map(ExternalSequenceBlockHash)
+            .collect();
+
+        Self {
+            worker_id,
+            local_hashes,
+            external_hashes,
+        }
+    }
+
+    /// Convert to a store event.
+    pub fn to_store_event(&self, event_id: u64) -> RouterEvent {
+        RouterEvent {
+            worker_id: self.worker_id,
+            event: KvCacheEvent {
+                event_id,
+                data: KvCacheEventData::Stored(KvCacheStoreData {
+                    parent_hash: None,
+                    blocks: self
+                        .local_hashes
+                        .iter()
+                        .zip(self.external_hashes.iter())
+                        .map(|(local, ext)| KvCacheStoredBlockData {
+                            tokens_hash: *local,
+                            block_hash: *ext,
+                            mm_extra_info: None,
+                        })
+                        .collect(),
+                }),
+                dp_rank: 0,
+            },
+        }
+    }
+
+    /// Convert to a remove event.
+    pub fn to_remove_event(&self, event_id: u64) -> RouterEvent {
+        RouterEvent {
+            worker_id: self.worker_id,
+            event: KvCacheEvent {
+                event_id,
+                data: KvCacheEventData::Removed(KvCacheRemoveData {
+                    block_hashes: self.external_hashes.clone(),
+                }),
+                dp_rank: 0,
+            },
+        }
+    }
+}
+
+/// Generate sequences with shared prefix prompts.
+pub fn generate_sequences(
+    num_sequences: usize,
+    depth: usize,
+    num_workers: usize,
+    prefix_ratio: f64,
+    num_prefix_groups: usize,
+    seed: u64,
+    use_cumulative_hash: bool,
+) -> Vec<SequenceData> {
+    let mut sequences = Vec::with_capacity(num_sequences);
+    let prefix_length = (depth as f64 * prefix_ratio).round() as usize;
+    let mut rng: StdRng = StdRng::seed_from_u64(seed);
+
+    for seq_id in 0..num_sequences {
+        let seq_id_u64 = seq_id as u64;
+        let worker_id = (seq_id % num_workers) as WorkerId;
+
+        let group_id = if num_prefix_groups > 0 && prefix_length > 0 {
+            Some(rng.random_range(0..num_prefix_groups) as u64)
+        } else {
+            None
+        };
+
+        let local_hashes: Vec<LocalBlockHash> = (0..depth)
+            .map(|block_idx| {
+                let block_idx_u64 = block_idx as u64;
+                if let Some(gid) = group_id
+                    && block_idx < prefix_length
+                {
+                    return LocalBlockHash(0xDEAD_BEEF_0000_0000 | (gid << 32) | block_idx_u64);
+                }
+                LocalBlockHash((seq_id_u64 << 32) | block_idx_u64)
+            })
+            .collect();
+
+        if use_cumulative_hash {
+            sequences.push(SequenceData::from_local_hashes(worker_id, local_hashes));
+        } else {
+            let external_hashes: Vec<ExternalSequenceBlockHash> = (0..depth)
+                .map(|block_idx| {
+                    let block_idx_u64 = block_idx as u64;
+                    if let Some(gid) = group_id
+                        && block_idx < prefix_length
+                    {
+                        return ExternalSequenceBlockHash(
+                            0xDEAD_BEEF_0000_0000 | (gid << 32) | block_idx_u64,
+                        );
+                    }
+                    ExternalSequenceBlockHash((seq_id_u64 << 32) | block_idx_u64)
+                })
+                .collect();
+
+            sequences.push(SequenceData {
+                worker_id,
+                local_hashes,
+                external_hashes,
+            });
+        }
+    }
+
+    sequences
+}
+
+/// Compute median of durations.
+pub fn median(durations: &[Duration]) -> Duration {
+    if durations.is_empty() {
+        return Duration::ZERO;
+    }
+    let mut sorted = durations.to_vec();
+    sorted.sort();
+    sorted[sorted.len() / 2]
+}
+
+/// No-op [`SequencePublisher`] for benchmarks that don't need event transport.
+pub struct NoopSequencePublisher;
+
+impl SequencePublisher for NoopSequencePublisher {
+    fn publish_event(
+        &self,
+        _event: &ActiveSequenceEvent,
+    ) -> impl future::Future<Output = anyhow::Result<()>> + Send {
+        future::ready(Ok(()))
+    }
+
+    fn publish_load(&self, _load: ActiveLoad) {}
+
+    fn observe_load(&self, _: &WorkerWithDpRank, _: &str, _: usize, _: usize) {}
+}
+
+/// Minimal [`WorkerConfigLike`] for scheduler/queue benchmarks.
+#[derive(Debug, Clone)]
+pub struct SimpleWorkerConfig {
+    pub data_parallel_size: u32,
+    pub max_num_batched_tokens: Option<u64>,
+    pub total_kv_blocks: Option<u64>,
+}
+
+impl Default for SimpleWorkerConfig {
+    fn default() -> Self {
+        Self {
+            data_parallel_size: 1,
+            max_num_batched_tokens: None,
+            total_kv_blocks: None,
+        }
+    }
+}
+
+impl WorkerConfigLike for SimpleWorkerConfig {
+    fn data_parallel_size(&self) -> u32 {
+        self.data_parallel_size
+    }
+
+    fn max_num_batched_tokens(&self) -> Option<u64> {
+        self.max_num_batched_tokens
+    }
+
+    fn total_kv_blocks(&self) -> Option<u64> {
+        self.total_kv_blocks
     }
 }

@@ -7,8 +7,6 @@
 //! efficient KV cache lookup and routing in distributed LLM inference systems.
 
 pub mod approx;
-#[cfg(feature = "bench")]
-pub mod bench_utils;
 pub mod concurrent_radix_tree;
 pub mod indexer;
 #[cfg(feature = "bench")]

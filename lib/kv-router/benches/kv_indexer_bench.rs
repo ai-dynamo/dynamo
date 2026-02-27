@@ -13,11 +13,14 @@
 //!   cargo bench --package dynamo-kv-router --bench kv_indexer_bench --features bench -- microbench --help
 //!   cargo bench --package dynamo-kv-router --bench kv_indexer_bench --features bench -- stress --help
 
+#[path = "common/mod.rs"]
+mod common;
+use common::{SequenceData, generate_sequences};
+
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use dynamo_bench::common::LatencyStats;
 use dynamo_kv_router::{
     ConcurrentRadixTree,
-    bench_utils::{SequenceData, generate_sequences},
     indexer::{
         KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvIndexerSharded, ThreadPoolIndexer,
     },
