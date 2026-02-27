@@ -110,7 +110,7 @@ runs:
         NAMESPACE: ${{ inputs.namespace }}
       run: |
         echo "::group::Wait for operator rollout"
-        timeout 300s kubectl rollout status deployment -n $NAMESPACE --watch
+        kubectl rollout status deployment -n $NAMESPACE --watch --timeout=300s
         echo "::endgroup::"
 
     - name: Report Unhealthy Pods
