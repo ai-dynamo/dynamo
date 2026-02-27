@@ -9,16 +9,25 @@ Usage — same syntax as the bare nvtx module:
 
     from dynamo.common.utils import nvtx_utils as _nvtx
 
+    # Manual range (needed when the range spans async yields or has conditional end)
     rng = _nvtx.start_range("my:range", color="blue")
     ...
     _nvtx.end_range(rng)
 
-    _nvtx.mark("my:event", color="navy")
+    # Decorator — annotates an entire function
+    @_nvtx.annotate("my:func", color="green")
+    def my_func(): ...
 
-When enabled, EventAttributes objects are cached internally by
-(message, color) on first call, so subsequent calls avoid re-allocation
-with no manual pre-allocation required by the caller.
+    # Context manager — annotates a block (works with await inside)
+    with _nvtx.annotate("my:block", color="cyan"):
+        result = await some_coroutine()
+
+When enabled, uses a named nvtx.Domain and pre-allocated EventAttributes
+objects (cached lazily by (message, color)) so that repeated calls to
+start_range incur only a single dict lookup — no object allocation
+or domain cache lookups on the hot path.
 """
+import functools as _functools
 import os as _os
 
 ENABLED: bool = bool(int(_os.getenv("DYN_NVTX", "0")))
@@ -26,30 +35,28 @@ ENABLED: bool = bool(int(_os.getenv("DYN_NVTX", "0")))
 if ENABLED:
     import nvtx as _nvtx_lib
 
-    # Shared cache: (message, color) -> EventAttributes.
-    # Populated lazily on first call; reused on every subsequent call.
+    # Named domain + pre-allocated EventAttributes: no per-call object
+    # allocation or domain cache lookups on the hot path.
+    _domain = _nvtx_lib.get_domain("dynamo")
     _attr_cache: dict = {}
 
-    def start_range(message: str, color: str = "white"):
-        """Start an NVTX range. EventAttributes are cached by (message, color)."""
+    def _get_attr(message: str, color: str):
         try:
-            attr = _attr_cache[message, color]
+            return _attr_cache[message, color]
         except KeyError:
-            attr = _nvtx_lib.EventAttributes(message=message, color=color)
+            attr = _domain.get_event_attributes(message=message, color=color)
             _attr_cache[message, color] = attr
-        return _nvtx_lib.start_range(attributes=attr)
+            return attr
+
+    def start_range(message: str, color: str = "white"):
+        return _domain.start_range(_get_attr(message, color))
 
     def end_range(rng) -> None:
-        _nvtx_lib.end_range(rng)
+        _domain.end_range(rng)
 
-    def mark(message: str, color: str = "white") -> None:
-        """Emit an NVTX mark. EventAttributes are cached by (message, color)."""
-        try:
-            attr = _attr_cache[message, color]
-        except KeyError:
-            attr = _nvtx_lib.EventAttributes(message=message, color=color)
-            _attr_cache[message, color] = attr
-        _nvtx_lib.mark(attributes=attr)
+    # functools.partial so decorator and context-manager usage both land
+    # in the "dynamo" domain, keeping all markers in one nsys row.
+    annotate = _functools.partial(_nvtx_lib.annotate, domain="dynamo")
 
 else:
     # Pure Python no-ops: no C extension calls, no string allocations.
@@ -61,5 +68,21 @@ else:
     def end_range(rng) -> None:  # type: ignore[misc]
         pass
 
-    def mark(message: str, color: str = "white") -> None:  # type: ignore[misc]
-        pass
+    class _NoOpAnnotate:
+        """No-op that works as both a decorator and a context manager."""
+
+        __slots__ = ()
+
+        def __call__(self, func):
+            return func
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+    _noop_annotate = _NoOpAnnotate()
+
+    def annotate(message: str = "", color: str = "white"):  # type: ignore[misc]
+        return _noop_annotate

@@ -20,8 +20,6 @@ from typing import Any, Dict, Optional
 
 import torch
 
-from dynamo.common.utils import nvtx_utils as _nvtx
-
 from .model import SupportedModels, is_model_supported, is_qwen_vl_model
 
 logger = logging.getLogger(__name__)
@@ -107,35 +105,29 @@ def encode_image_embeddings(
         ValueError: If projector is missing for LLaVA models
         NotImplementedError: If model is not supported
     """
-    rng_gpu = _nvtx.start_range("mm:enc:vit_gpu_forward", color="darkred")
-    try:
-        with torch.no_grad():
-            # Route through the correct encoder based on model
-            if is_model_supported(model_name, SupportedModels.LLAVA_1_5_7B):
-                pixel_values = image_embeds["pixel_values"].to(vision_encoder.device)
-                vision_outputs = vision_encoder(pixel_values)
+    with torch.no_grad():
+        # Route through the correct encoder based on model
+        if is_model_supported(model_name, SupportedModels.LLAVA_1_5_7B):
+            pixel_values = image_embeds["pixel_values"].to(vision_encoder.device)
+            vision_outputs = vision_encoder(pixel_values)
 
-                if projector is None:
-                    raise ValueError(
-                        f"Projector not found for LLaVA model: {model_name}"
-                    )
+            if projector is None:
+                raise ValueError(f"Projector not found for LLaVA model: {model_name}")
 
-                embeddings = projector(vision_outputs.last_hidden_state)
+            embeddings = projector(vision_outputs.last_hidden_state)
 
-            elif is_qwen_vl_model(model_name):
-                embeddings = get_qwen_image_features(vision_encoder, image_embeds)
+        elif is_qwen_vl_model(model_name):
+            embeddings = get_qwen_image_features(vision_encoder, image_embeds)
 
-            else:
-                raise NotImplementedError(f"Model not supported: {model_name}")
+        else:
+            raise NotImplementedError(f"Model not supported: {model_name}")
 
-            # Normalize output shape
-            if isinstance(embeddings, (tuple, list)):
-                embeddings = embeddings[0]
-            embeddings = embeddings.unsqueeze(0) if embeddings.ndim == 2 else embeddings
+        # Normalize output shape
+        if isinstance(embeddings, (tuple, list)):
+            embeddings = embeddings[0]
+        embeddings = embeddings.unsqueeze(0) if embeddings.ndim == 2 else embeddings
 
-        return embeddings
-    finally:
-        _nvtx.end_range(rng_gpu)
+    return embeddings
 
 
 def get_encoder_components(

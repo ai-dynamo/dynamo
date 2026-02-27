@@ -138,6 +138,7 @@ class LocalEmbeddingSender(AbstractEmbeddingSender):
         )
         return tensor_path
 
+    @_nvtx.annotate("mm:local:send_embeddings", color="magenta")
     async def send_embeddings(
         self, embeddings: torch.Tensor, stage_embeddings: bool = False
     ) -> tuple[TransferRequest, asyncio.Future]:
@@ -153,7 +154,6 @@ class LocalEmbeddingSender(AbstractEmbeddingSender):
         """
         # Implementation to send embeddings to the downstream worker
         # This could involve publishing to a message queue or making an API call
-        rng = _nvtx.start_range("mm:local:send_embeddings", color="magenta")
         embedding_key = f"{self.sender_id}_{self.embedding_counter}"
         self.embedding_counter += 1
         tensor_path = await asyncio.to_thread(
@@ -163,7 +163,6 @@ class LocalEmbeddingSender(AbstractEmbeddingSender):
         )
         fut = asyncio.get_event_loop().create_future()
         fut.set_result(None)
-        _nvtx.end_range(rng)
         return (
             TransferRequest(
                 embeddings_shape=list(embeddings.shape),
@@ -184,6 +183,7 @@ class LocalEmbeddingReceiver(AbstractEmbeddingReceiver):
         self.received_tensors = {}
         self.tensor_id_counter = 0
 
+    @_nvtx.annotate("mm:local:receive_embeddings", color="magenta")
     async def receive_embeddings(
         self, request: TransferRequest
     ) -> tuple[int, torch.Tensor]:
@@ -197,14 +197,12 @@ class LocalEmbeddingReceiver(AbstractEmbeddingReceiver):
             A tuple containing the tensor ID and the received embeddings as a torch.Tensor.
             Caller should invoke release_tensor(tensor_id) when the tensor is no longer needed to free up resources.
         """
-        rng = _nvtx.start_range("mm:local:receive_embeddings", color="magenta")
         tensor_path = request.serialized_request
         tensors = await asyncio.to_thread(safetensors_torch.load_file, tensor_path)
         embedding_tensor = tensors["ec_cache"]
         tensor_id = self.tensor_id_counter
         self.tensor_id_counter += 1
         self.received_tensors[tensor_id] = tensor_path
-        _nvtx.end_range(rng)
         return tensor_id, embedding_tensor
 
     def release_tensor(self, tensor_id: int):
@@ -352,6 +350,7 @@ class NixlPersistentEmbeddingSender(AbstractEmbeddingSender):
     def __init__(self):
         self.connector = PersistentConnector()
 
+    @_nvtx.annotate("mm:nixl:send_embeddings", color="magenta")
     async def send_embeddings(
         self, embeddings: torch.Tensor, stage_embeddings: bool = False
     ) -> tuple[TransferRequest, asyncio.Future]:
@@ -366,24 +365,19 @@ class NixlPersistentEmbeddingSender(AbstractEmbeddingSender):
         Returns:
             A tuple containing the TransferRequest object and a future that can be awaited to indicate the send is completed.
         """
-        rng = _nvtx.start_range("mm:nixl:send_embeddings", color="magenta")
         if stage_embeddings:
             transfer_buf = embeddings
         else:
             transfer_buf = embeddings.clone().detach()
-        rng_desc = _nvtx.start_range("mm:nixl:create_descriptor", color="pink")
-        descriptor = nixl_connect.Descriptor(transfer_buf)
-        _nvtx.end_range(rng_desc)
-        rng_readable = _nvtx.start_range("mm:nixl:create_readable", color="pink")
-        readable_op = await self.connector.create_readable(descriptor)
-        _nvtx.end_range(rng_readable)
-
+        with _nvtx.annotate("mm:nixl:create_descriptor", color="pink"):
+            descriptor = nixl_connect.Descriptor(transfer_buf)
+        with _nvtx.annotate("mm:nixl:create_readable", color="pink"):
+            readable_op = await self.connector.create_readable(descriptor)
         request = TransferRequest(
             embeddings_shape=list(embeddings.shape),
             embedding_dtype_str=torch_dtype_to_string(embeddings.dtype),
             serialized_request=readable_op.metadata().model_dump(),
         )
-        _nvtx.end_range(rng)
         return request, readable_op.wait_for_completion()
 
 
@@ -431,6 +425,7 @@ class NixlPersistentEmbeddingReceiver(AbstractEmbeddingReceiver):
             descriptor.register_with_connector(connection)
             self.warmedup_descriptors.put(descriptor)
 
+    @_nvtx.annotate("mm:nixl:receive_embeddings", color="magenta")
     async def receive_embeddings(
         self, request: TransferRequest
     ) -> tuple[int, torch.Tensor]:
@@ -451,7 +446,6 @@ class NixlPersistentEmbeddingReceiver(AbstractEmbeddingReceiver):
             request.serialized_request
         )
 
-        rng = _nvtx.start_range("mm:nixl:receive_embeddings", color="magenta")
         if self.warmedup_descriptors.empty():
             logger.debug(
                 "No warmed up descriptors available, creating a temporary one for transfer."
@@ -470,21 +464,18 @@ class NixlPersistentEmbeddingReceiver(AbstractEmbeddingReceiver):
             )
             dynamic_descriptor = False
 
-        rng_read = _nvtx.start_range("mm:nixl:begin_read", color="pink")
-        # Create read operation to read from EncodeHandler
-        read_op = await self.connector.begin_read(readable_metadata, descriptor)
-        _nvtx.end_range(rng_read)
-        # Wait for the read operation to complete
-        rng_wait = _nvtx.start_range("mm:nixl:wait_completion", color="pink")
-        await read_op.wait_for_completion()
-        _nvtx.end_range(rng_wait)
+        with _nvtx.annotate("mm:nixl:begin_read", color="pink"):
+            # Create read operation to read from EncodeHandler
+            read_op = await self.connector.begin_read(readable_metadata, descriptor)
+        with _nvtx.annotate("mm:nixl:wait_completion", color="pink"):
+            # Wait for the read operation to complete
+            await read_op.wait_for_completion()
         logging.debug(
             f"Successfully read embeddings via NIXL: {encodings_tensor.shape}"
         )
         tensor_id = self.tensor_id_counter
         self.tensor_id_counter += 1
         self.inuse_descriptors[tensor_id] = (descriptor, dynamic_descriptor)
-        _nvtx.end_range(rng)
         return tensor_id, encodings_tensor
 
     def release_tensor(self, tensor_id: int):

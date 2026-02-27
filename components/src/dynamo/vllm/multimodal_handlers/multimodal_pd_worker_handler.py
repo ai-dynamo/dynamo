@@ -257,13 +257,11 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
             lora_request=lora_request,
         )
 
-        rng_prefill = _nvtx.start_range("mm:pd:first_token_prefill", color="darkred")
         num_output_tokens_so_far = 0
         first_token = True
         try:
             async for response in gen:
                 if first_token:
-                    _nvtx.end_range(rng_prefill)
                     if rng_ttft is not None:
                         _nvtx.end_range(rng_ttft)
                     first_token = False
@@ -278,7 +276,6 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
                     num_output_tokens_so_far = len(response.outputs[0].token_ids)
         finally:
             if first_token:
-                _nvtx.end_range(rng_prefill)
                 if rng_ttft is not None:
                     _nvtx.end_range(rng_ttft)
 
@@ -373,7 +370,6 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
 
     async def generate(self, raw_request: dict, context):
         """Parse the request, load multimodal data, and run inference."""
-        _nvtx.mark("mm:pd:request_arrived", color="navy")
         rng_pd = _nvtx.start_range("mm:pd_worker_generate", color="green")
         rng_ttft = _nvtx.start_range("mm:pd:ttft", color="orange")
 
