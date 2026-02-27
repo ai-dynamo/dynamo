@@ -18,7 +18,7 @@ spec:
       resources:
         limits:
           gpu: "2"
-      failover:
+      failover: # Configures warm standby engines that can take over in case of the active engine failure
         enabled: true
       extraPodSpec:
         mainContainer:
