@@ -58,6 +58,19 @@ dev = [
     "patchelf",
 ]
 
+[tool.mypy]
+explicit_package_bases = true
+ignore_missing_imports = true
+check_untyped_defs = true
+
+[tool.pytest.ini_options]
+addopts = [
+    "-ra",
+    "--strict-markers",
+    "--strict-config",
+    "--mypy",
+]
+
 [tool.maturin]
 module-name = "kvbm._core"
 manifest-path = "Cargo.toml"

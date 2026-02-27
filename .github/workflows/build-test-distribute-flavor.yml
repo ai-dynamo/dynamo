@@ -294,6 +294,67 @@ jobs:
           else
             echo "✅ Sanity check passed"
           fi
+      - name: Run framework-scoped mypy checks
+        if: ${{ inputs.platform == 'amd64' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Shared targets checked in all backend pipelines.
+          MYPY_TARGETS=(
+            components/src/dynamo/common
+            components/src/dynamo/frontend
+            components/src/dynamo/global_planner
+            components/src/dynamo/global_router
+            components/src/dynamo/mocker
+            components/src/dynamo/planner
+            components/src/dynamo/profiler
+            components/src/dynamo/router
+            lib/bindings/python/src
+            lib/bindings/kvbm/python/kvbm/__init__.py
+            lib/bindings/kvbm/python/kvbm/utils.py
+            lib/gpu_memory_service/cli
+            lib/gpu_memory_service/common
+            lib/gpu_memory_service/client
+            lib/gpu_memory_service/server
+            lib/gpu_memory_service/integrations/common
+          )
+
+          case "${{ inputs.framework }}" in
+            vllm)
+              MYPY_TARGETS+=(
+                components/src/dynamo/vllm
+                lib/bindings/kvbm/python/kvbm/vllm_integration
+                lib/gpu_memory_service/integrations/vllm
+              )
+              ;;
+            sglang)
+              MYPY_TARGETS+=(
+                components/src/dynamo/sglang
+                lib/gpu_memory_service/integrations/sglang
+              )
+              ;;
+            trtllm)
+              MYPY_TARGETS+=(
+                components/src/dynamo/trtllm
+                lib/bindings/kvbm/python/kvbm/trtllm_integration
+              )
+              ;;
+            *)
+              echo "Unsupported framework for mypy scope: ${{ inputs.framework }}"
+              exit 1
+              ;;
+          esac
+
+          echo "Running framework-scoped mypy checks for '${{ inputs.framework }}'..."
+          printf ' - %s\n' "${MYPY_TARGETS[@]}"
+
+          docker run --rm -w /workspace \
+            --network host \
+            --name test_${{ github.run_id }}_${{ github.run_attempt }}_${{ github.job }}_mypy \
+            ${{ steps.calculate-target-tag.outputs.test_image }} \
+            python3 -m mypy "${MYPY_TARGETS[@]}"
+
       # Run CPU-only tests first (parallelized for speed)
       # These are unit tests marked with gpu_0 that don't require GPU hardware
       - name: Run CPU-only tests (parallelized)
@@ -305,7 +366,7 @@ jobs:
           framework: ${{ inputs.framework }}
           test_type: "pre_merge_cpu"
           platform_arch: ${{ inputs.platform }}
-          enable_mypy: 'true'
+          enable_mypy: 'false' # mypy is checked in dedicated step above
           hf_token: ${{ secrets.HF_TOKEN }}
           parallel_mode: 'auto'
           dind_as_sidecar: 'true'

@@ -151,27 +151,20 @@ known_third_party = ["vllm", "tensorrt_llm", "sglang"]
 minversion = "8.0"
 tmp_path_retention_policy = "failed"
 
-# NOTE
-# We ignore model.py explicitly here to avoid mypy errors with duplicate modules
-# pytest overrides the default mypy exclude configuration and so we exclude here as well
+# NOTE: --ignore-glob entries below are for pytest collection only (separate
+# sub-projects, generated files, docs). mypy coverage is handled separately via
+# per-commit unit-test jobs (framework-scoped mypy step) and the pre-commit hook.
 addopts = [
     "-ra",
     "--showlocals",
     "--strict-markers",
     "--strict-config",
-    "--mypy",
-    "--ignore-glob=*model.py",
     "--ignore-glob=*vllm_integration*",
     "--ignore-glob=*trtllm_integration*",
     "--ignore-glob=*kvbm/python/kvbm*",
     "--ignore-glob=*_inc.py",
     "--ignore-glob=*/llm/tensorrtllm*",
     "--ignore-glob=docs/*",
-    "--ignore-glob=components/src/dynamo/sglang/request_handlers/*",
-    "--ignore-glob=components/src/dynamo/sglang/multimodal_utils/*",
-    "--ignore-glob=components/src/dynamo/vllm/multimodal_utils/*",
-    "--ignore-glob=examples/backends/sglang/slurm_jobs/*",
-    # FIXME: Get relative/generic blob paths to work here
 ]
 xfail_strict = true
 log_cli_level = "INFO"
@@ -305,11 +298,6 @@ ignore_missing_imports = true
 
 check_untyped_defs = true
 
-[[tool.mypy.overrides]]
-# Skip mypy analysis on internal dependencies of vllm
-module = ["vllm.*"]
-follow_imports = "skip"
-ignore_missing_imports = true
 
 [tool.sphinx]
 
@@ -326,4 +314,3 @@ extra_content_footer = [
    <script type="text/javascript">if (typeof _satellite !== "undefined") {_satellite.pageBottom();}</script>
    ''',
 ]
-

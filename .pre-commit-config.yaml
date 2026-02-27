@@ -66,14 +66,20 @@ repos:
   - id: trailing-whitespace
     exclude: lib/llm/tests/data/deepseek-v3.2/.*\.txt$
 
-# NOTE: removing from pre commit
-# will move to gitlab ci to run in proper
-# container
-#- repo: https://github.com/pre-commit/mirrors-mypy
-#  rev: v1.13.0
-#  hooks:
-#  - id: mypy
-#    exclude: model.py # WAR errors about 'model.py' duplicate module name
+- repo: local
+  hooks:
+    - id: mypy
+      name: mypy
+      entry: mypy
+      language: system
+      files: ^(components/src/.*\.py|lib/bindings/.*\.py|lib/gpu_memory_service/.*\.py)$
+      types: [python]
+      pass_filenames: false
+      args:
+        - "components/src/"
+        - "lib/bindings/python/src/"
+        - "lib/bindings/kvbm/python/"
+        - "lib/gpu_memory_service/"
 
 # Fast linting
 - repo: https://github.com/astral-sh/ruff-pre-commit
