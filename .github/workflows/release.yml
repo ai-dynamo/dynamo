@@ -464,7 +464,7 @@ jobs:
     if: |
       always() && !cancelled() &&
       needs.prepare-release.result == 'success' &&
-      (needs.vllm-pipeline.result == 'success' || needs.sglang-pipeline.result == 'success' || needs.trtllm-pipeline.result == 'success' || needs.vllm-efa-pipeline.result == 'success' || needs.trtllm-efa-pipeline.result == 'success')
+      (needs.vllm-pipeline.result == 'success' || needs.sglang-pipeline.result == 'success' || needs.trtllm-pipeline.result == 'success')
     runs-on: cpu-amd-m5-4xlarge
     environment: automated-release
     env:
