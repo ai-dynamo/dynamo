@@ -8,6 +8,7 @@
 # - Use <= or < for packages that may have platform-specific versions
 
 aiconfigurator[webapp] @ git+https://github.com/ai-dynamo/aiconfigurator.git@7287307c4e3861b90927198da74e1adda53a4caf
+aiofiles<=25.1.0
 filterpy==1.4.5
 kubernetes==32.0.1
 kubernetes_asyncio==32.0.0
