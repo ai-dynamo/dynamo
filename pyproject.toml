@@ -15,6 +15,7 @@ requires-python = ">=3.10"
 dependencies = [
     "ai-dynamo-runtime==1.0.0",
     "transformers>=4.56.0",
+    "kubernetes>=32.0.1,<33.0.0",
     "fastapi>=0.115.0",
     "distro",
     # filelock: required by planner
@@ -23,7 +24,6 @@ dependencies = [
     "click<8.2.0",
     "setuptools",
     "prometheus_client>=0.23.1,<1.0",
-    "kubernetes>=32.0.1,<33.0.0",
 ]
 
 classifiers = [
