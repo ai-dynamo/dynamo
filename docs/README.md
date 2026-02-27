@@ -211,7 +211,7 @@ publishing. It runs three jobs depending on the trigger:
 **Steps:**
 1. Checks out both `main` and `docs-website` branches side-by-side
 2. Copies from `main` → `docs-website`:
-   - `docs/pages/` — all markdown content
+   - `docs/` — all markdown content
    - `docs/versions/dev.yml` — navigation structure
    - `docs/assets/` — images, fonts, SVGs
    - `docs/fern.config.json` — Fern config
@@ -236,7 +236,7 @@ manual `workflow_dispatch` with a tag specified.
 **Steps:**
 1. Validates tag format (must be exactly `vX.Y.Z`, no suffixes like `-rc1`)
 2. Checks that the version doesn't already exist (no duplicate snapshots)
-3. Creates `docs/pages-vX.Y.Z/` by copying `docs/pages/`
+3. Creates `docs/pages-vX.Y.Z/` by copying `docs/`
 4. Rewrites GitHub links in the snapshot:
    - `github.com/ai-dynamo/dynamo/tree/main` → `tree/vX.Y.Z`
    - `github.com/ai-dynamo/dynamo/blob/main` → `blob/vX.Y.Z`
@@ -273,7 +273,7 @@ Runs two independent link-checking jobs:
 
 ### Writing docs on `main`
 
-1. Edit or add markdown files in `docs/pages/`.
+1. Edit or add markdown files in `docs/`.
 2. If adding a new page, add an entry in `docs/versions/dev.yml` to make it
    appear in the sidebar navigation.
 3. Use standard GitHub-flavored markdown. Callouts (admonitions) should use
@@ -460,7 +460,7 @@ automatically.
 │       │                                                             │
 │       ▼                                                             │
 │  sync-dev job:                                                      │
-│    1. Copy docs/pages/, assets/, configs → docs-website branch      │
+│    1. Copy docs/, assets/, configs → docs-website branch      │
 │    2. Convert GitHub callouts → Fern admonitions                    │
 │    3. Preserve version list from docs-website's docs.yml            │
 │    4. Commit + push to docs-website                                 │
@@ -504,14 +504,14 @@ automatically.
 
 ### Update existing documentation
 
-1. Edit files in `docs/pages/` on a feature branch.
+1. Edit files in `docs/` on a feature branch.
 2. If adding a new page, add its entry in `docs/versions/dev.yml`.
 3. Open a PR — linting runs automatically.
 4. Merge — sync + publish happens automatically.
 
 ### Add a new top-level section
 
-1. Create a directory under `docs/pages/` (e.g., `docs/pages/new-section/`).
+1. Create a directory under `docs/` (e.g., `docs/new-section/`).
 2. Add markdown files for each page.
 3. Add a new `- section:` block in `docs/versions/dev.yml` with the desired
    hierarchy.

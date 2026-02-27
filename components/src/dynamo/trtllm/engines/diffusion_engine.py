@@ -12,7 +12,7 @@ HuggingFace Diffusers model), eliminating the need for a --model-type flag.
 Requirements:
     - tensorrt_llm with visual_gen support (tensorrt_llm._torch.visual_gen).
       See: https://github.com/NVIDIA/TensorRT-LLM
-    - See docs/pages/backends/trtllm/README.md for setup instructions.
+    - See docs/backends/trtllm/README.md for setup instructions.
 
 Note on imports:
     tensorrt_llm._torch.visual_gen is imported lazily in initialize() because:
