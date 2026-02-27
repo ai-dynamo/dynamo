@@ -235,7 +235,7 @@ navigation:
   # ==================== Developer Guide ====================
   - section: Developer Guide
     contents:
-      - page: Building and Publishing Docs
+      - page: Dynamo Docs Guide
         path: ../README.md
 
   # ==================== Hidden Pages ====================

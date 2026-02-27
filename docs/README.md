@@ -1,10 +1,11 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Building and Publishing Docs
+title: Dynamo Docs Guide
+sidebar-title: Dynamo Docs Guide
 ---
 
-# How the Fern Documentation Website Works
+# How to Build and Publish Dynamo Docs
 
 This document describes the architecture, workflows, and maintenance procedures for the
 NVIDIA Dynamo documentation website powered by [Fern](https://buildwithfern.com).
