@@ -2,15 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Core runtime dependencies shared by ALL Dynamo containers.
-#
-# Version Pinning Strategy:
-# - Use == for packages that are pure Python and well-tested
-# - Use <= or < for packages that may have platform-specific versions (CUDA, system packages)
-# - Never use >= as it allows untested future versions that may introduce breaking changes,
-#   create non-reproducible builds, and cause dependency conflicts. Every installed version
-#   should be explicitly tested, not an unknown future release.
-# - Platform differences: Some packages (especially CUDA-related) may have different
-#   maximum versions available on different platforms (x86_64 vs aarch64, different CUDA versions)
+# See README.md in this directory for version pinning strategy.
 
 fastapi==0.120.1
 grpcio-tools<=1.76.0  # May have platform-specific builds; pins grpcio ecosystem version

@@ -2,13 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Test-only dependencies — installed in test and dev containers, NOT in runtime.
-#
-# Version Pinning Strategy:
-# - Use == for packages that are pure Python and well-tested
-# - Use <= or < for packages that may have platform-specific versions
-# - Never use >= as it allows untested future versions that may introduce breaking changes,
-#   create non-reproducible builds, and cause dependency conflicts. Every installed version
-#   should be explicitly tested, not an unknown future release.
 
 # For MinIO/S3 operations in LoRA tests (replaces AWS CLI dependency)
 boto3==1.42.4

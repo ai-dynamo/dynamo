@@ -1,11 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Dependencies for planner, profiler, and global_planner components.
-#
-# Version Pinning Strategy:
-# - Use == for packages that are pure Python and well-tested
-# - Use <= or < for packages that may have platform-specific versions
+# Dependencies for planner, profiler, global_planner, and deploy utils.
 
 aiconfigurator[webapp] @ git+https://github.com/ai-dynamo/aiconfigurator.git@7287307c4e3861b90927198da74e1adda53a4caf
 aiofiles<=25.1.0
