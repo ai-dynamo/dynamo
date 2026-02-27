@@ -1,6 +1,6 @@
 ---
-title: "Skill: Add a Docs Page"
-hidden: true
+name: add-dynamo-docs
+description: Add a new page to the Dynamo Fern docs site. Use when creating new documentation pages.
 ---
 
 # Add a Dynamo Docs Page
@@ -11,17 +11,19 @@ Claude Code skill for adding a new page to the Dynamo Fern documentation site.
 
 | Skill | Use When |
 |-------|----------|
-| [rm-dynamo-docs](rm-dynamo-docs.md) | Removing an existing docs page |
-| [update-dynamo-docs](update-dynamo-docs.md) | Editing an existing docs page |
-| [fern-website](fern-website.md) | Understanding the docs architecture |
+| [rm-dynamo-docs](../rm-dynamo-docs/SKILL.md) | Removing an existing docs page |
+| [update-dynamo-docs](../update-dynamo-docs/SKILL.md) | Editing an existing docs page |
 
 ---
 
 ## Branch Rule
 
-> [!CAUTION]
-> ALL edits happen on `main` (or a feature branch based on `main`).
-> The `docs-website` branch is CI-managed and must **never** be edited by hand.
+**ALL edits happen on `main` (or a feature branch based on `main`).**
+The `docs-website` branch is CI-managed and must **never** be edited by hand.
+
+## Working Directory
+
+Must be in the `dynamo` repo (not `dynamo-tpm`). Architecture details: `docs/README.md`.
 
 ## When Invoked
 
@@ -122,4 +124,4 @@ git commit -s -m "docs: add <page-title> page"
 | `docs/pages/` | Content directory — create pages here |
 | `docs/assets/` | Images, SVGs, fonts |
 | `docs/convert_callouts.py` | Callout conversion rules (GitHub → Fern) |
-| `docs/pages/development/fern-website.md` | Full architecture guide |
+| `docs/README.md` | Full architecture guide |

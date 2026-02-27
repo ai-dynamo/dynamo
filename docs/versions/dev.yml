@@ -202,7 +202,7 @@ navigation:
   - section: Developer Guide
     contents:
       - page: Building and Publishing Docs
-        path: ../pages/development/fern-website.md
+        path: ../README.md
 
   # ==================== Design Docs ====================
   - section: Design Docs
@@ -249,13 +249,6 @@ navigation:
         path: ../pages/development/runtime-guide.md
       - page: Jail Stream
         path: ../pages/development/jail-stream.md
-      # -- Docs Skills (hidden reference pages) --
-      - page: "Skill: Add a Docs Page"
-        path: ../pages/development/add-dynamo-docs.md
-      - page: "Skill: Remove a Docs Page"
-        path: ../pages/development/rm-dynamo-docs.md
-      - page: "Skill: Update a Docs Page"
-        path: ../pages/development/update-dynamo-docs.md
       # -- API Reference --
       - section: NIXL Connect API
         path: ../pages/api/nixl-connect/README.md
@@ -335,9 +328,6 @@ navigation:
       # -- Mocker --
       - page: Mocker
         path: ../pages/mocker/mocker.md
-      # -- Docs README --
-      - page: Building Documentation
-        path: ../pages/README.md
       # -- Templates --
       - section: Templates
         path: ../pages/templates/README.md

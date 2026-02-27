@@ -1,6 +1,6 @@
 ---
-title: "Skill: Update a Docs Page"
-hidden: true
+name: update-dynamo-docs
+description: Update an existing page in the Dynamo Fern docs site. Use when editing content, titles, or moving pages between sections.
 ---
 
 # Update a Dynamo Docs Page
@@ -11,17 +11,19 @@ Claude Code skill for updating an existing page in the Dynamo Fern documentation
 
 | Skill | Use When |
 |-------|----------|
-| [add-dynamo-docs](add-dynamo-docs.md) | Adding a new docs page |
-| [rm-dynamo-docs](rm-dynamo-docs.md) | Removing an existing docs page |
-| [fern-website](fern-website.md) | Understanding the docs architecture |
+| [add-dynamo-docs](../add-dynamo-docs/SKILL.md) | Adding a new docs page |
+| [rm-dynamo-docs](../rm-dynamo-docs/SKILL.md) | Removing an existing docs page |
 
 ---
 
 ## Branch Rule
 
-> [!CAUTION]
-> ALL edits happen on `main` (or a feature branch based on `main`).
-> The `docs-website` branch is CI-managed and must **never** be edited by hand.
+**ALL edits happen on `main` (or a feature branch based on `main`).**
+The `docs-website` branch is CI-managed and must **never** be edited by hand.
+
+## Working Directory
+
+Must be in the `dynamo` repo (not `dynamo-tpm`). Architecture details: `docs/README.md`.
 
 ## When Invoked
 
@@ -133,4 +135,4 @@ git commit -s -m "docs: update <page-title>"
 | `docs/pages/` | Content directory — edit pages here |
 | `docs/assets/` | Images, SVGs, fonts |
 | `docs/convert_callouts.py` | Callout conversion rules (GitHub → Fern) |
-| `docs/pages/development/fern-website.md` | Full architecture guide |
+| `docs/README.md` | Full architecture guide |

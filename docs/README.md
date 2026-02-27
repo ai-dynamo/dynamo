@@ -25,8 +25,8 @@ NVIDIA Dynamo documentation website powered by [Fern](https://buildwithfern.com)
 
 | Environment | URL |
 |---|---|
-| Fern-hosted (primary) | <https://dynamo.docs.buildwithfern.com/dynamo> |
-| Custom domain (alias) | <https://docs.dynamo.nvidia.com/dynamo> |
+| Fern-hosted (primary) | [dynamo.docs.buildwithfern.com/dynamo](https://dynamo.docs.buildwithfern.com/dynamo) |
+| Custom domain (alias) | [docs.dynamo.nvidia.com/dynamo](https://docs.dynamo.nvidia.com/dynamo) |
 
 ---
 
@@ -72,7 +72,7 @@ bloating the `main` branch with frozen copies of old documentation.
 
 ### On `main`
 
-```
+```text
 docs/
 ├── fern.config.json          # Fern org + CLI version pin
 ├── docs.yml                  # Site configuration (instances, branding, layout)
@@ -96,7 +96,7 @@ docs/
 
 The `docs-website` branch mirrors the above structure, plus versioned snapshots:
 
-```
+```text
 docs/
 ├── docs.yml                  # Includes the full versions array
 ├── versions/
@@ -441,7 +441,7 @@ automatically.
 
 ## How Publishing Works
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────────────┐
 │                        CONTINUOUS (dev)                             │
 │                                                                     │

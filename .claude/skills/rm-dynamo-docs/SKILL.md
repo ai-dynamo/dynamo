@@ -1,6 +1,6 @@
 ---
-title: "Skill: Remove a Docs Page"
-hidden: true
+name: rm-dynamo-docs
+description: Remove a page from the Dynamo Fern docs site. Use when deleting documentation pages.
 ---
 
 # Remove a Dynamo Docs Page
@@ -11,17 +11,19 @@ Claude Code skill for removing a page from the Dynamo Fern documentation site.
 
 | Skill | Use When |
 |-------|----------|
-| [add-dynamo-docs](add-dynamo-docs.md) | Adding a new docs page |
-| [update-dynamo-docs](update-dynamo-docs.md) | Editing an existing docs page |
-| [fern-website](fern-website.md) | Understanding the docs architecture |
+| [add-dynamo-docs](../add-dynamo-docs/SKILL.md) | Adding a new docs page |
+| [update-dynamo-docs](../update-dynamo-docs/SKILL.md) | Editing an existing docs page |
 
 ---
 
 ## Branch Rule
 
-> [!CAUTION]
-> ALL edits happen on `main` (or a feature branch based on `main`).
-> The `docs-website` branch is CI-managed and must **never** be edited by hand.
+**ALL edits happen on `main` (or a feature branch based on `main`).**
+The `docs-website` branch is CI-managed and must **never** be edited by hand.
+
+## Working Directory
+
+Must be in the `dynamo` repo (not `dynamo-tpm`). Architecture details: `docs/README.md`.
 
 ## When Invoked
 
@@ -108,4 +110,4 @@ git commit -s -m "docs: remove <page-title> page"
 |------|---------|
 | `docs/versions/dev.yml` | Navigation tree — remove entries here |
 | `docs/pages/` | Content directory — delete pages here |
-| `docs/pages/development/fern-website.md` | Full architecture guide |
+| `docs/README.md` | Full architecture guide |
