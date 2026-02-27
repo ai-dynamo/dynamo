@@ -78,20 +78,20 @@ struct BatchingState {
 
 impl Default for BatchingState {
     fn default() -> Self {
-        Self {
-            pending_removed: None,
-            pending_stored: None,
-            last_event_id: 0,
-            last_dp_rank: 0,
-            last_flush_time: Instant::now() - Duration::from_secs(3600),
-        }
+        Self::new()
     }
 }
 
 impl BatchingState {
     /// Creates a new BatchingState with current timestamp
     fn new() -> Self {
-        Self::default()
+        Self {
+            pending_removed: None,
+            pending_stored: None,
+            last_event_id: 0,
+            last_dp_rank: 0,
+            last_flush_time: Instant::now(),
+        }
     }
 
     /// Returns true if there are pending batches
@@ -537,7 +537,7 @@ async fn run_event_processor_loop<P: EventSink + Send + Sync + 'static>(
                         }
                     }
                 }
-                
+
                 // After processing each event, check if timeout has elapsed and flush if so
                 // This handles both timeout=0 (immediate flush) and timeout>0 (elapsed check)
                 if batching_state.has_pending() {
@@ -2537,9 +2537,12 @@ mod batching_state_tests {
     #[test]
     fn test_batching_state_new() {
         let state = BatchingState::new();
+        // last_flush_time should be set to a time in the past (1 hour ago)
+        // so that the first event triggers a flush
+        let elapsed = state.last_flush_time.elapsed();
         assert!(
-            state.last_flush_time.is_some(),
-            "new() should create state with flush time"
+            elapsed >= Duration::from_secs(3600),
+            "new() should create state with flush time in the past (at least 1 hour ago)"
         );
     }
 
@@ -2574,7 +2577,10 @@ mod batching_state_tests {
 
     #[test]
     fn test_batching_state_timeout() {
-        let state = BatchingState::new();
+        let mut state = BatchingState::new();
+
+        // Reset flush time to now so we can test timeout behavior
+        state.reset_flush_time();
 
         // Test that remaining returns positive initially (using 10ms = 10_000us)
         let remaining_before = state.remaining_timeout(10_000);
@@ -2608,7 +2614,10 @@ mod batching_state_tests {
 
     #[test]
     fn test_batching_state_remaining_timeout() {
-        let state = BatchingState::new();
+        let mut state = BatchingState::new();
+
+        // Reset flush time to now so we can test timeout behavior
+        state.reset_flush_time();
 
         // Test that remaining returns positive initially
         let remaining = state.remaining_timeout(10_000); // 10ms
@@ -2768,11 +2777,12 @@ mod event_processor_tests {
             "Should have received at least one event"
         );
 
-        // With a long timeout, events should be batched (fewer output events than input)
-        assert!(
-            events.len() < event_count,
-            "Events should be batched: got {} events for {} input events",
+        // With a long timeout (100ms) and rapid event sending, all events should batch into exactly 1
+        assert_eq!(
             events.len(),
+            1,
+            "With long timeout ({}us), all {} events should batch into exactly 1 output event",
+            timeout_us,
             event_count
         );
 
@@ -2986,13 +2996,13 @@ mod event_processor_tests {
                 dp_rank: 0,
             };
             tx.send(event).unwrap();
-            // Wait 5ms between events (much longer than the timeout)
+            // Wait 2ms between events (much longer than the timeout)
             // This ensures each event times out before the next one arrives
-            tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
+            tokio::time::sleep(tokio::time::Duration::from_millis(2)).await;
         }
 
         // Give the processor time to process the last event
-        tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(2)).await;
 
         drop(tx);
         handle.await.unwrap();
