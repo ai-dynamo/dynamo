@@ -37,10 +37,11 @@ const (
 
 // GPUInfo contains discovered GPU configuration from cluster nodes
 type GPUInfo struct {
-	GPUsPerNode int    // Maximum GPUs per node found in the cluster
-	Model       string // GPU product name (e.g., "H100-SXM5-80GB")
-	VRAMPerGPU  int    // VRAM in MiB per GPU
-	System      string // AIC hardware system identifier (e.g., "h100_sxm", "h200_sxm"), empty if unknown
+	GPUsPerNode   int    // Maximum GPUs per node found in the cluster
+	NodesWithGPUs int    // Number of nodes that have GPUs
+	Model         string // GPU product name (e.g., "H100-SXM5-80GB")
+	VRAMPerGPU    int    // VRAM in MiB per GPU
+	System        string // AIC hardware system identifier (e.g., "h100_sxm", "h200_sxm"), empty if unknown
 }
 
 // DiscoverGPUs queries Kubernetes nodes to determine GPU configuration.
@@ -104,13 +105,15 @@ func DiscoverGPUs(ctx context.Context, k8sClient client.Reader) (*GPUInfo, error
 
 	// Infer hardware system from GPU model
 	bestGPUInfo.System = InferHardwareSystem(bestGPUInfo.Model)
+	bestGPUInfo.NodesWithGPUs = nodesWithGPUs
 
 	logger.Info("GPU discovery completed",
 		"gpusPerNode", bestGPUInfo.GPUsPerNode,
+		"nodesWithGPUs", bestGPUInfo.NodesWithGPUs,
+		"totalGpus", bestGPUInfo.GPUsPerNode*bestGPUInfo.NodesWithGPUs,
 		"model", bestGPUInfo.Model,
 		"vram", bestGPUInfo.VRAMPerGPU,
-		"system", bestGPUInfo.System,
-		"nodesWithGPUs", nodesWithGPUs)
+		"system", bestGPUInfo.System)
 
 	return bestGPUInfo, nil
 }
