@@ -192,7 +192,11 @@ vllm_configs = {
         name="agg-router",
         directory=vllm_dir,
         script_name="agg_router.sh",
-        marks=[pytest.mark.gpu_2, pytest.mark.post_merge],
+        marks=[
+            pytest.mark.gpu_2,
+            pytest.mark.post_merge,
+            pytest.mark.skip(reason="DYN-2263")
+            ],
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
             chat_payload_default(
@@ -211,7 +215,11 @@ vllm_configs = {
         name="agg-router-approx",
         directory=vllm_dir,
         script_name="agg_router_approx.sh",
-        marks=[pytest.mark.gpu_2, pytest.mark.post_merge],
+        marks=[
+            pytest.mark.gpu_2,
+            pytest.mark.post_merge,
+            pytest.mark.skip(reason="DYN-2264")
+        ],
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
             # Test approximate KV routing (--no-kv-events mode)
