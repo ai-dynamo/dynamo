@@ -9,12 +9,10 @@ use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tokio::sync::watch;
 
-use crate::multi_worker_sequence::{
-    ActiveSequencesMultiWorker, SequencePublisher, SequenceRequest,
-};
+use super::selector::WorkerSelector;
+use super::types::{SchedulingRequest, SchedulingResponse};
 use crate::protocols::{WorkerConfigLike, WorkerId, WorkerWithDpRank};
-use crate::scheduling::{SchedulingRequest, SchedulingResponse};
-use crate::selector::WorkerSelector;
+use crate::sequences::{ActiveSequencesMultiWorker, SequencePublisher, SequenceRequest};
 
 /// Large default for max_num_batched_tokens when not configured (effectively disables queueing for that worker)
 pub const DEFAULT_MAX_BATCHED_TOKENS: u64 = 10_000_000;

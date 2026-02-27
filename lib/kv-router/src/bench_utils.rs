@@ -11,12 +11,12 @@ use std::time::Duration;
 
 use rand::{Rng, SeedableRng, rngs::StdRng};
 
-use crate::multi_worker_sequence::SequencePublisher;
 use crate::protocols::{
     ActiveLoad, ActiveSequenceEvent, ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData,
     KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData, LocalBlockHash, RouterEvent,
     WorkerConfigLike, WorkerId, WorkerWithDpRank, compute_seq_hash_for_block,
 };
+use crate::sequences::SequencePublisher;
 
 /// Pre-generated sequence data for benchmarking.
 #[derive(Clone)]

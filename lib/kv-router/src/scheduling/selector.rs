@@ -5,9 +5,9 @@ use std::collections::HashMap;
 
 use rand::Rng;
 
-use crate::config::KvRouterConfig;
+use super::config::KvRouterConfig;
+use super::types::{KvSchedulerError, SchedulingRequest};
 use crate::protocols::{WorkerConfigLike, WorkerId, WorkerSelectionResult, WorkerWithDpRank};
-use crate::scheduling::{KvSchedulerError, SchedulingRequest};
 
 /// A trait that users can implement to define custom selection logic.
 ///

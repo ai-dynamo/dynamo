@@ -15,10 +15,10 @@ use std::future::Future;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
+use super::single::{ActiveSequences, RequestId};
 use crate::protocols::{
     ActiveLoad, ActiveSequenceEvent, ActiveSequenceEventData, OverlapScores, WorkerWithDpRank,
 };
-use crate::sequence::{ActiveSequences, RequestId};
 
 // ---------------------------------------------------------------------------
 // Traits
