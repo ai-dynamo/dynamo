@@ -49,19 +49,7 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			},
 			isClusterWide: true,
 		},
-		{
-			name: "missing image",
-			request: &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
-				ObjectMeta: metav1.ObjectMeta{Name: "test-dgdr", Namespace: "default"},
-				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
-					Model:   "llama-3-8b",
-					Backend: nvidiacomv1beta1.BackendTypeVllm,
-					Image:   "",
-				},
-			},
-			isClusterWide: true,
-			errMsg:        "spec.image is required",
-		},
+
 		{
 			name: "thorough + auto is invalid",
 			request: &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
@@ -174,7 +162,7 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			errMsg:              "GPU hardware configuration required: GPU discovery is disabled",
 		},
 		{
-			name: "multiple errors (missing image and thorough+auto)",
+			name: "thorough+auto is invalid regardless of image",
 			request: &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
 				ObjectMeta: metav1.ObjectMeta{Name: "test-dgdr", Namespace: "default"},
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
@@ -185,7 +173,7 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 				},
 			},
 			isClusterWide: true,
-			errMsg:        "spec.image is required\nspec.searchStrategy",
+			errMsg:        "spec.searchStrategy",
 		},
 	}
 

@@ -104,6 +104,11 @@ pub struct KvRouterConfig {
     /// `External`: workers are provided per-request (e.g. by the EPP); the router
     /// starts immediately without blocking on discovery.
     pub worker_discovery_mode: WorkerDiscoveryMode,
+    /// Enable cache control (PIN with TTL) via the worker's cache_control service mesh endpoint.
+    /// When true, the router creates a cache_control client and honors nvext.cache_control on
+    /// requests, firing a pin_prefix call (with TTL) to the worker after generation completes.
+    /// When false (default), cache_control is ignored and no cache_control client is created.
+    pub router_enable_cache_control: bool,
 }
 
 impl Default for KvRouterConfig {
@@ -125,6 +130,7 @@ impl Default for KvRouterConfig {
             router_queue_threshold: None,
             router_event_threads: 1,
             worker_discovery_mode: WorkerDiscoveryMode::default(),
+            router_enable_cache_control: false,
         }
     }
 }

@@ -5,8 +5,6 @@ title: Standalone KV Indexer
 subtitle: Run the KV cache indexer as an independent service for querying block state
 ---
 
-# Standalone KV Indexer
-
 ## Overview
 
 The standalone KV indexer runs the KV cache radix tree as an independent service, separate from the router. It subscribes to KV events from workers, maintains a radix tree of cached blocks, and exposes a query endpoint (`kv_indexer_query`) that external clients can use to inspect or query KV cache state.

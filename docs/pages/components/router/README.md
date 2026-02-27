@@ -4,8 +4,6 @@
 title: Router
 ---
 
-# Router
-
 The Dynamo KV Router intelligently routes requests by evaluating their computational costs across different workers. It considers both decoding costs (from active blocks) and prefill costs (from newly computed blocks), using KV cache overlap to minimize redundant computation. Optimizing the KV Router is critical for achieving maximum throughput and minimum latency in distributed inference setups.
 
 ## Quick Start
@@ -33,7 +31,7 @@ Backend workers register themselves using the `register_model` API, after which 
 | `--router-temperature <float>` | `0.0` | Controls routing randomness (0.0 = deterministic, higher = more random) |
 | `--kv-cache-block-size <size>` | Backend-specific | KV cache block size (should match backend config) |
 | `--router-kv-events` / `--no-router-kv-events` | `--router-kv-events` | Enable/disable real-time KV event tracking |
-| `--router-kv-overlap-score-weight <float>` | `1.0` | Balance prefill vs decode optimization (higher = better TTFT). |
+| `--router-kv-overlap-score-weight <float>` | `1.0` | Balance prefill vs decode optimization (higher = better TTFT) |
 
 For all available options: `python -m dynamo.frontend --help`
 

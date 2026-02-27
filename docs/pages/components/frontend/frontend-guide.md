@@ -4,8 +4,6 @@
 title: Frontend Guide
 ---
 
-# Frontend Guide
-
 This guide covers the KServe gRPC frontend configuration and integration for the Dynamo Frontend.
 
 ## KServe gRPC Frontend

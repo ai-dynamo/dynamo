@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import re as re_mod
 from dataclasses import dataclass
 from unittest import mock
 from unittest.mock import MagicMock
@@ -245,8 +246,6 @@ class TestGuidedDecodingFromToolChoice:
 
     def test_choice_with_special_chars_escaped(self):
         """Choice values with regex special characters must be escaped."""
-        import re as re_mod
-
         sampling_params = MockSamplingParams()
         request = {
             "sampling_options": {
@@ -289,6 +288,37 @@ class TestGuidedDecodingFromToolChoice:
             "sampling_options": {
                 "guided_decoding": {
                     "choice": [],
+                },
+            }
+        }
+
+        result = HandlerBase._override_sampling_params(sampling_params, request)
+
+        assert result.guided_decoding.regex is None
+
+    def test_choice_with_none_items_filtered(self):
+        """Choice list with None items should filter them out."""
+        sampling_params = MockSamplingParams()
+        request = {
+            "sampling_options": {
+                "guided_decoding": {
+                    "choice": [None, "yes", None, "no"],
+                },
+            }
+        }
+
+        result = HandlerBase._override_sampling_params(sampling_params, request)
+
+        assert not isinstance(result.guided_decoding, dict)
+        assert result.guided_decoding.regex == "(yes|no)"
+
+    def test_choice_all_none_items_no_regex(self):
+        """Choice list with all None items should not produce a regex."""
+        sampling_params = MockSamplingParams()
+        request = {
+            "sampling_options": {
+                "guided_decoding": {
+                    "choice": [None, None],
                 },
             }
         }

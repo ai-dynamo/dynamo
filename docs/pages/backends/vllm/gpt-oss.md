@@ -4,8 +4,6 @@
 title: GPT-OSS
 ---
 
-# Running gpt-oss-120b Disaggregated with vLLM
-
 Dynamo supports disaggregated serving of gpt-oss-120b with vLLM. This guide demonstrates how to deploy gpt-oss-120b using disaggregated prefill/decode serving on a single H100 node with 8 GPUs, running 1 prefill worker on 4 GPUs and 1 decode worker on 4 GPUs.
 
 ## Overview

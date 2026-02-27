@@ -4,8 +4,6 @@
 title: Feature Matrix
 ---
 
-# Dynamo Feature Compatibility Matrices
-
 This document provides a comprehensive compatibility matrix for key Dynamo features across the supported backends.
 
 *Updated for Dynamo v0.9.0*
@@ -109,26 +107,26 @@ TensorRT-LLM delivers maximum inference performance and optimization, with full 
 ---
 
 
-{/* Backend READMEs */}
-[vllm-readme]: ../backends/vllm
-[sglang-readme]: ../backends/sglang
-[trtllm-readme]: ../backends/trtllm
+{/* Backend READMEs — paths relative to rendered URL /getting-started/feature-matrix */}
+[vllm-readme]: ../backends/v-llm
+[sglang-readme]: ../backends/sg-lang
+[trtllm-readme]: ../backends/tensor-rt-llm
 
 {/* Design Docs */}
-[disagg]: ../design-docs/disagg-serving
+[disagg]: ../design-docs/disaggregated-serving
 [kv-routing]: ../components/router/router-guide
 [planner]: ../components/planner
 [kvbm]: ../components/kvbm
-[migration]: ../fault-tolerance/request-migration
-[tools]: ../agents/tool-calling
+[migration]: ../user-guides/fault-tolerance/request-migration
+[tools]: ../user-guides/tool-calling
 
 {/* Multimodal */}
-[mm]: ../features/multimodal
-[mm-vllm]: ../features/multimodal/multimodal-vllm
-[mm-trtllm]: ../features/multimodal/multimodal-trtllm
-[mm-sglang]: ../features/multimodal/multimodal-sglang
+[mm]: ../user-guides/multimodality-support
+[mm-vllm]: ../user-guides/multimodality-support/v-llm-multimodal
+[mm-trtllm]: ../user-guides/multimodality-support/tensor-rt-llm-multimodal
+[mm-sglang]: ../user-guides/multimodality-support/sg-lang-multimodal
 
 {/* Feature-specific */}
-[lora]: ../kubernetes/deployment/dynamomodel-guide
-[vllm-spec]: ../features/speculative-decoding/speculative-decoding-vllm
-[trtllm-eagle]: ../backends/trtllm/llama4-plus-eagle
+[lora]: ../kubernetes-deployment/deployment-guide/managing-models-with-dynamo-model
+[vllm-spec]: ../additional-resources/speculative-decoding/speculative-decoding-with-v-llm
+[trtllm-eagle]: ../additional-resources/tensor-rt-llm-details/llama-4-eagle

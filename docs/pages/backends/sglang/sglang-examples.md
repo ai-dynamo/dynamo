@@ -4,8 +4,6 @@
 title: Examples
 ---
 
-# SGLang Examples
-
 For quick start instructions, see the [SGLang README](README.md). This document provides all deployment patterns for running SGLang with Dynamo, including LLMs, multimodal, and diffusion models, and Kubernetes deployment.
 
 ## Table of Contents

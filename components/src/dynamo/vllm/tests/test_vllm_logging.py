@@ -49,9 +49,7 @@ def _clean_env(monkeypatch):
         "VLLM_CONFIGURE_LOGGING",
         "VLLM_LOGGING_CONFIG_PATH",
         "DYN_SKIP_SGLANG_LOG_FORMATTING",
-        "DYN_SKIP_TRTLLM_LOG_FORMATTING",
         "SGLANG_LOGGING_CONFIG_PATH",
-        "TLLM_LOG_LEVEL",
     ]:
         monkeypatch.delenv(var, raising=False)
 
