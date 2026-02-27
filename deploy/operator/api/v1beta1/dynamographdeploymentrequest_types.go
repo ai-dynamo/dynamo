@@ -458,7 +458,7 @@ type DynamoGraphDeploymentRequestStatus struct {
 	ProfilingJobName string `json:"profilingJobName,omitempty"`
 
 	// Conditions contains the latest observed conditions of the deployment request.
-	// Standard condition types include: Validated, ProfilingComplete, DeploymentReady.
+	// Standard condition types include: Succeeded, Validation, Profiling, SpecGenerated, DeploymentReady.
 	// +optional
 	// +listType=map
 	// +listMapKey=type

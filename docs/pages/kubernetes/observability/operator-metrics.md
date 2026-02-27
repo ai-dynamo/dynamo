@@ -91,7 +91,7 @@ All metrics use the `dynamo_operator` namespace prefix.
   - `"not_ready"` - Resource exists but is not operational (DCD, DM, DGDSA)
   - `"unknown"` - State cannot be determined (default for empty status)
   - DGD uses: `"pending"`, `"successful"`, `"failed"` from `.status.state`
-  - DGDR uses: `"Pending"`, `"Profiling"`, `"Deploying"`, `"Ready"`, `"DeploymentDeleted"`, `"Failed"` from `.status.state`
+  - DGDR uses: `"Pending"`, `"Profiling"`, `"Ready"`, `"Deploying"`, `"Deployed"`, `"Failed"` from `.status.phase`
 
 ## Example Queries
 
