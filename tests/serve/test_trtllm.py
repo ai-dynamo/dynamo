@@ -199,8 +199,8 @@ trtllm_configs = {
         delayed_start=60,
         request_payloads=[multimodal_payload_default()],
     ),
-    # TensorRT-LLM EPD (Encode-Prefill-Decode) multimodal test for nightly CI
-    # Uses llava model with 2 GPUs (encode shares GPU with prefill)
+    # TensorRT-LLM EPD (Encode-Prefill-Decode) multimodal test for pre-merge CI
+    # Uses Qwen3-VL-2B-Instruct model with 1 GPU (all workers share same GPU)
     #
     # TODO: Add Llama-4-Scout multimodal tests (agg_multimodal_llama, disagg_multimodal_llama)
     #       once CI supports gpu_8 runners and launch scripts are available
