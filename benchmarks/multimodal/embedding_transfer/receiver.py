@@ -23,7 +23,7 @@ class Receiver:
     def __init__(self, runtime: DistributedRuntime):
         self.runtime = runtime
         self.local_receiver = LocalEmbeddingReceiver()
-        self.write_receiver = NixlEmbeddingReceiver()
+        self.write_receiver = NixlEmbeddingReceiver(2 * 8 * 1024 * 256 * 1024 * 3)
         self.read_receiver = NixlPersistentEmbeddingReceiver(
             embedding_hidden_size=8 * 1024, max_item_mm_token=1024
         )

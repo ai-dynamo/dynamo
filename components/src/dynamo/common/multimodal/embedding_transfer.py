@@ -541,7 +541,7 @@ class NixlEmbeddingReceiver(AbstractEmbeddingReceiver):
     for reference and should not be used due to overhead discovered in practice.
     """
 
-    def __init__(self, buffer_size=2 * 8 * 1024 * 1024 * 256):
+    def __init__(self, buffer_size=2 * 8 * 1024 * 1024 * 256 * 2):
         # buffer_size is product of:
         # 2 (typical dtype size float16)
         # 8 * 1024 (typical embedding hidden size for Qwen-VL)
@@ -598,12 +598,26 @@ class NixlEmbeddingReceiver(AbstractEmbeddingReceiver):
         # Extract dynamic shape, metadata, and auxiliary data
         embeddings_shape = request.embeddings_shape
         embeddings_dtype = torch_dtype_from_string(request.embedding_dtype_str)
-        buffer_id, transfer_tensor = self.ring_buffer.get_buffer(
-            nixl_request.tensor_size
-        )
-        if transfer_tensor is None:
-            # [gluo TODO] not raise but retry or block on pending transfer
-            raise MemoryError("No available buffer for transfer, please retry later.")
+        while True:
+            buffer_id, transfer_tensor = self.ring_buffer.get_buffer(
+                nixl_request.tensor_size
+            )
+            if transfer_tensor is not None:
+                break
+
+            # [gluo FIXME] This approach will results in deadlock due to
+            # the current usage:
+            # concurrent requests may request 2 buffer in order,
+            # if all request get the first buffer and exhaust the ring buffer,
+            # then no request can get the second buffer and proceed.
+            # Must provide an API for batch allocation so some requests can
+            # proceed.
+            #
+            # No available buffer, wait for a short period and retry.
+            # The receiver side should have concurrent work on other
+            # allocated buffer and release them in a timely manner,
+            # so the wait time should not be long.
+            await asyncio.sleep(0.005)
         embedding_tensor = transfer_tensor.view(dtype=embeddings_dtype).view(
             embeddings_shape
         )
