@@ -1,0 +1,37 @@
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-agg-failover
+spec:
+  services:
+    Frontend:
+      envFromSecret: hf-token-secret
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo:failover-m6-88fb83c-vllm-runtime
+    VllmDecodeWorker:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      replicas: 1
+      resources:
+        limits:
+          gpu: "2"
+      failover:
+        enabled: true
+      extraPodSpec:
+        mainContainer:
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo:failover-m6-88fb83c-vllm-runtime
+          workingDir: /workspace/examples/backends/vllm
+          command:
+            - python3
+            - -m
+            - dynamo.vllm
+          args:
+            - --model
+            - Qwen/Qwen3-0.6B
+            - --tensor-parallel-size
+            - "2"
+            - --load-format
+            - gms
