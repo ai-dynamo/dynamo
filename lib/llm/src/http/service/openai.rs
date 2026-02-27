@@ -1326,6 +1326,7 @@ async fn responses(
     // Extract request parameters before into_parts() consumes the request.
     // These are echoed back in the Response object per the OpenAI spec.
     let response_params = ResponseParams {
+        model: request.inner.model.clone(),
         temperature: request.inner.temperature,
         top_p: request.inner.top_p,
         max_output_tokens: request.inner.max_output_tokens,

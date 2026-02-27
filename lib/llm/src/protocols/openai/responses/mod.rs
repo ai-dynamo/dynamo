@@ -5,9 +5,10 @@ pub mod stream_converter;
 
 use dynamo_async_openai::types::responses::{
     AssistantRole, FunctionCallOutput, FunctionToolCall, IncludeEnum, InputContent, InputItem,
-    InputParam, InputRole, Instructions, Item, MessageItem, OutputItem, OutputMessage,
-    OutputMessageContent, OutputStatus, OutputTextContent, Reasoning, Response, ResponseTextParam,
-    Role as ResponseRole, ServiceTier, Status, TextResponseFormatConfiguration, Tool,
+    InputParam, InputRole, InputTokenDetails, Instructions, Item, MessageItem, OutputItem,
+    OutputMessage, OutputMessageContent, OutputStatus, OutputTextContent, OutputTokenDetails,
+    Reasoning, ReasoningItem, Response, ResponseTextParam, ResponseUsage, Role as ResponseRole,
+    ServiceTier, Status, Summary, SummaryPart, TextResponseFormatConfiguration, Tool,
     ToolChoiceOptions, ToolChoiceParam, Truncation,
 };
 use dynamo_async_openai::types::{
@@ -629,6 +630,7 @@ fn strip_tool_call_text(text: &str) -> std::borrow::Cow<'_, str> {
 /// response objects reflect actual request values.
 #[derive(Clone, Debug, Default)]
 pub struct ResponseParams {
+    pub model: Option<String>,
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
     pub max_output_tokens: Option<u32>,
@@ -716,6 +718,21 @@ pub fn chat_completion_to_response(
             }
         }
 
+        // Map reasoning_content to a Reasoning output item
+        if let Some(reasoning_text) = choice.message.reasoning_content {
+            if !reasoning_text.is_empty() {
+                output.push(OutputItem::Reasoning(ReasoningItem {
+                    id: format!("rs_{}", Uuid::new_v4().simple()),
+                    summary: vec![SummaryPart::SummaryText(Summary {
+                        text: reasoning_text,
+                    })],
+                    content: None,
+                    encrypted_content: None,
+                    status: Some(OutputStatus::Completed),
+                }));
+            }
+        }
+
         // Handle text content -- also parse <tool_call> blocks from models
         // that emit tool calls as text (e.g. Qwen3)
         let content_text = match choice.message.content {
@@ -782,7 +799,11 @@ pub fn chat_completion_to_response(
         object: "response".to_string(),
         created_at,
         completed_at: Some(created_at),
-        model: chat_resp.model,
+        model: if chat_resp.model == "unknown" {
+            params.model.clone().unwrap_or(chat_resp.model)
+        } else {
+            chat_resp.model
+        },
         status: Status::Completed,
         output,
         // Spec-required defaults (OpenResponses requires these as non-null)
@@ -828,7 +849,23 @@ pub fn chat_completion_to_response(
         safety_identifier: None,
         service_tier: Some(params.service_tier.unwrap_or(ServiceTier::Auto)),
         top_logprobs: Some(0),
-        usage: None,
+        usage: chat_resp.usage.map(|u| ResponseUsage {
+            input_tokens: u.prompt_tokens,
+            input_tokens_details: InputTokenDetails {
+                cached_tokens: u
+                    .prompt_tokens_details
+                    .map(|d| d.cached_tokens.unwrap_or(0))
+                    .unwrap_or(0),
+            },
+            output_tokens: u.completion_tokens,
+            output_tokens_details: OutputTokenDetails {
+                reasoning_tokens: u
+                    .completion_tokens_details
+                    .map(|d| d.reasoning_tokens.unwrap_or(0))
+                    .unwrap_or(0),
+            },
+            total_tokens: u.total_tokens,
+        }),
     };
 
     Ok(NvResponse {
