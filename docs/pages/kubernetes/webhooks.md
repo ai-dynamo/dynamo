@@ -6,22 +6,6 @@ title: Webhooks
 
 This document describes the webhook functionality in the Dynamo Operator, including validation webhooks, certificate management, and troubleshooting.
 
-## Table of Contents
-
-- [Overview](#overview)
-- [Architecture](#architecture)
-- [Configuration](#configuration)
-  - [Certificate Management Options](#certificate-management-options)
-  - [Advanced Configuration](#advanced-configuration)
-- [Certificate Management](#certificate-management)
-  - [Automatic Certificates (Default)](#automatic-certificates-default)
-  - [cert-manager Integration](#cert-manager-integration)
-  - [External Certificates](#external-certificates)
-- [Multi-Operator Deployments](#multi-operator-deployments)
-- [Troubleshooting](#troubleshooting)
-
----
-
 ## Overview
 
 The Dynamo Operator uses **Kubernetes admission webhooks** to provide real-time validation and mutation of custom resources. Currently, the operator implements **validation webhooks** that ensure invalid configurations are rejected immediately at the API server level, providing faster feedback to users compared to controller-based validation.

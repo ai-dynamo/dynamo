@@ -6,15 +6,6 @@ title: Router Examples
 
 For quick start instructions, see the [Router README](README.md). This document provides further examples for using the Dynamo Router, including Python API usage, Kubernetes deployments, and custom routing patterns.
 
-## Table of Contents
-
-- [Using KvRouter Python API](#using-kvrouter-python-api)
-- [K8s Examples](#k8s-examples)
-- [Routing Patterns](#routing-patterns)
-- [Custom Routing Example: Minimizing TTFT](#custom-routing-example-minimizing-ttft)
-- [KV Event Publishing for Custom Engines](#kv-event-publishing-for-custom-engines)
-- [Global Router (Hierarchical Routing)](#global-router-hierarchical-routing)
-
 ## Using KvRouter Python API
 
 Instead of launching the KV Router via command line, you can create a `KvRouter` object directly in Python. This allows per-request routing configuration overrides.
