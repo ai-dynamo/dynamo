@@ -240,7 +240,7 @@ dynamo-frontend: http-request (root)
             dispatch
 ```
 
-![End-to-end trace in Grafana Tempo showing frontend, KV router, worker, and SGLang engine spans](../../../assets/img/sglang-trace.png)
+![End-to-end trace in Grafana Tempo showing frontend, KV router, worker, and SGLang engine spans](../../assets/img/sglang-trace.png)
 
 ### Viewing Traces
 

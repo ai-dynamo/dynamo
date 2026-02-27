@@ -7,7 +7,7 @@ title: Discovery Plane
 Dynamo's service discovery layer lets components find each other at runtime. Workers register their endpoints when they start, and frontends discover them automatically.
 The discovery backend adapts to the deployment environment.
 
-![Discovery plane architecture showing Kubernetes and etcd backends](../../assets/img/discovery-plane.svg)
+![Discovery plane architecture showing Kubernetes and etcd backends](../assets/img/discovery-plane.svg)
 
 ## Discovery Backends
 
@@ -85,7 +85,7 @@ Frontends and routers discover available workers by watching the relevant prefix
 
 Each runtime maintains a lease with etcd (default TTL: 10 seconds). If a worker crashes or loses connectivity:
 
-![Lease lifecycle showing DistributedRuntime keep-alive heartbeat to etcd](../../assets/img/discovery-plane-lease.svg)
+![Lease lifecycle showing DistributedRuntime keep-alive heartbeat to etcd](../assets/img/discovery-plane-lease.svg)
 
 1. Keep-alive heartbeats stop.
 2. The lease expires after the TTL.

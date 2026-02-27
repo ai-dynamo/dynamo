@@ -14,7 +14,7 @@ Key use cases:
 - **Worker load metrics** -- Workers report utilization so the router can balance load.
 - **Sequence tracking** -- Coordinates active sequences across router replicas for fault-tolerant routing.
 
-![Event plane architecture showing NATS and ZMQ transport options connecting Frontend, Planner, and Worker](../../assets/img/event-plane-transport.svg)
+![Event plane architecture showing NATS and ZMQ transport options connecting Frontend, Planner, and Worker](../assets/img/event-plane-transport.svg)
 
 ## Choosing a Transport
 
