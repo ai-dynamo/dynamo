@@ -1,6 +1,6 @@
 # Multimodal JSONL Request Generator
 
-Generates `.jsonl` benchmark files for [aiperf](https://github.com/NVIDIA/aiperf) with single-turn multimodal requests (text + images).
+Generates `.jsonl` benchmark files for [aiperf](https://github.com/ai-dynamo/aiperf) with single-turn multimodal requests (text + images).
 
 ## Key concept: image pool reuse
 
