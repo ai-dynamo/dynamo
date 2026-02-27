@@ -59,8 +59,11 @@ runs:
           # Replace underscores with hyphens for k8s naming compliance
           PROFILE_SANITIZED="${PROFILE//_/-}"
           SELF_NS="${NAMESPACE}-${FRAMEWORK}-${PROFILE_SANITIZED}"
-          # k8s namespace max length is 63 chars — truncate if needed
-          SELF_NS="${SELF_NS:0:63}"
+          #TODO: Improve this truncation logic. The operator creates k8s labels as "{namespace}-{deployment_name} which restricts max length to 44 chars 
+          # (largest deployment name is "vllm-disagg-router" (18 chars)).
+          SELF_NS="${SELF_NS:0:44}"
+          # Remove trailing dash from truncation
+          SELF_NS="${SELF_NS%-}"
           echo "ns=${SELF_NS}" >> $GITHUB_OUTPUT
           echo "Namespace $NAMESPACE not found, will self-bootstrap as ${SELF_NS}"
         fi
