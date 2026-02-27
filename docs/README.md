@@ -9,19 +9,34 @@ title: Building and Publishing Docs
 This document describes the architecture, workflows, and maintenance procedures for the
 NVIDIA Dynamo documentation website powered by [Fern](https://buildwithfern.com).
 
-> [!NOTE]
-> The documentation website is hosted entirely on
-> [Fern](https://buildwithfern.com). CI publishes to
-> `dynamo.docs.buildwithfern.com`; the production domain
-> `docs.dynamo.nvidia.com` is a custom domain alias that points to the
-> Fern-hosted site. There is no separate server — Fern handles hosting,
-> CDN, and versioned URL routing.
+<Note>
+The documentation website is hosted entirely on
+[Fern](https://buildwithfern.com). CI publishes to
+`dynamo.docs.buildwithfern.com`; the production domain
+`docs.dynamo.nvidia.com` is a custom domain alias that points to the
+Fern-hosted site. There is no separate server — Fern handles hosting,
+CDN, and versioned URL routing.
+</Note>
 
-> [!CAUTION]
-> The `docs-website` branch is **CI-managed and must never be edited by
-> hand**. All documentation authoring happens on `main` (or a feature
-> branch based on `main`). The sync workflow copies changes to
-> `docs-website` automatically.
+<Error>
+The `docs-website` branch is **CI-managed and must never be edited by
+hand**. All documentation authoring happens on `main` (or a feature
+branch based on `main`). The sync workflow copies changes to
+`docs-website` automatically.
+</Error>
+
+**Claude Code Skills:**
+
+Three Claude Code skills automate common docs tasks. Invoke them as slash
+commands in Claude Code (e.g., `/add-dynamo-docs`) — each skill walks through
+the full workflow: creating or editing the markdown file, updating the
+navigation in `docs/versions/dev.yml`, and running `fern check` to validate.
+
+| Skill | Description |
+|-------|-------------|
+| [add-dynamo-docs](/.claude/skills/add-dynamo-docs/SKILL.md) | Add a new page — creates the file with frontmatter, adds the nav entry |
+| [rm-dynamo-docs](/.claude/skills/rm-dynamo-docs/SKILL.md) | Remove a page — deletes the file, removes the nav entry, checks for broken links |
+| [update-dynamo-docs](/.claude/skills/update-dynamo-docs/SKILL.md) | Update a page — edit content, rename, or move between sections |
 
 **Live URLs:**
 
@@ -388,12 +403,13 @@ cd docs
 fern docs dev
 ```
 
-> [!NOTE]
-> `fern docs dev` requires a valid `FERN_TOKEN` environment variable. Ask a
-> maintainer for access, or set it in your shell profile:
-> ```bash
-> export FERN_TOKEN=<your-token>
-> ```
+<Note>
+`fern docs dev` requires a valid `FERN_TOKEN` environment variable. Ask a
+maintainer for access, or set it in your shell profile:
+```bash
+export FERN_TOKEN=<your-token>
+```
+</Note>
 
 The local server lets you see exactly how pages will look on the live site,
 including navigation, version dropdowns, and custom styling.
