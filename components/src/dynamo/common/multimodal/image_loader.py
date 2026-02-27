@@ -22,10 +22,10 @@ from typing import Any, Dict, Final, List, Optional
 from urllib.parse import urlparse
 
 import httpx
-import nvtx
 from PIL import Image
 
 import dynamo.nixl_connect as nixl_connect
+from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.media_nixl import read_decoded_media_via_nixl
 
 from .http_client import get_http_client
@@ -48,7 +48,7 @@ class ImageLoader:
         self._cache_queue: asyncio.Queue[str] = asyncio.Queue(maxsize=cache_size)
 
     async def load_image(self, image_url: str) -> Image.Image:
-        rng = nvtx.start_range("mm:img:load_image", color="lime")
+        rng = _nvtx.start_range("mm:img:load_image", color="lime")
         parsed_url = urlparse(image_url)
 
         # For HTTP(S) URLs, check cache first
@@ -56,12 +56,12 @@ class ImageLoader:
             image_url_lower = image_url.lower()
             if image_url_lower in self._image_cache:
                 logger.debug(f"Image found in cache for URL: {image_url}")
-                nvtx.end_range(rng)
+                _nvtx.end_range(rng)
                 return self._image_cache[image_url_lower]
 
         try:
             if parsed_url.scheme == "data":
-                rng_decode = nvtx.start_range("mm:img:base64_decode", color="lime")
+                rng_decode = _nvtx.start_range("mm:img:base64_decode", color="lime")
                 # Parse data URL format: data:[<media type>][;base64],<data>
                 if not parsed_url.path.startswith("image/"):
                     raise ValueError("Data URL must be an image type")
@@ -76,9 +76,9 @@ class ImageLoader:
                     image_data = BytesIO(image_bytes)
                 except binascii.Error as e:
                     raise ValueError(f"Invalid base64 encoding: {e}")
-                nvtx.end_range(rng_decode)
+                _nvtx.end_range(rng_decode)
             elif parsed_url.scheme in ("http", "https"):
-                rng_http = nvtx.start_range("mm:img:http_fetch", color="lime")
+                rng_http = _nvtx.start_range("mm:img:http_fetch", color="lime")
                 http_client = get_http_client(self._http_timeout)
 
                 response = await http_client.get(image_url)
@@ -88,11 +88,11 @@ class ImageLoader:
                     raise ValueError("Empty response content from image URL")
 
                 image_data = BytesIO(response.content)
-                nvtx.end_range(rng_http)
+                _nvtx.end_range(rng_http)
             else:
                 raise ValueError(f"Invalid image source scheme: {parsed_url.scheme}")
 
-            rng_pil = nvtx.start_range("mm:img:pil_open_convert", color="lime")
+            rng_pil = _nvtx.start_range("mm:img:pil_open_convert", color="lime")
             # PIL is sync, so offload to a thread to avoid blocking the event loop
             # Restrict to supported formats to prevent PSD parsing (GHSA-cfh3-3jmp-rvhc)
             image = await asyncio.to_thread(
@@ -104,7 +104,7 @@ class ImageLoader:
                 raise ValueError(f"Unsupported image format: {image.format}")
 
             image_converted = image.convert("RGB")
-            nvtx.end_range(rng_pil)
+            _nvtx.end_range(rng_pil)
 
             # Cache HTTP(S) URLs
             if parsed_url.scheme in ("http", "https"):
@@ -126,7 +126,7 @@ class ImageLoader:
             logger.error(f"Error loading image: {e}")
             raise ValueError(f"Failed to load image: {e}")
         finally:
-            nvtx.end_range(rng)
+            _nvtx.end_range(rng)
 
     async def load_image_batch(
         self,

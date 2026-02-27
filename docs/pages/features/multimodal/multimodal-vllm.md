@@ -583,6 +583,38 @@ curl -X POST http://<decode-worker>/load_lora \
 
 If a LoRA is loaded on the prefill worker but not on the decode worker, the decode worker will fall back to the base model for that request.
 
+## Profiling
+
+Dynamo's multimodal workers include NVTX markers for `nsys` profiling. They are disabled by default (zero overhead) and enabled by setting `DYN_NVTX=1`.
+
+```bash
+cd $DYNAMO_HOME/examples/backends/vllm
+DYN_NVTX=1 nsys profile --trace=cuda,nvtx -o profile.nsys-rep \
+    bash launch/agg_multimodal.sh ...
+```
+
+| ENV Variable | Default | Description |
+|---|---|---|
+| `DYN_NVTX` | `0` | Set to `1` to enable NVTX range/mark annotations in encode, prefill, and decode workers for `nsys` profiling |
+
+Key NVTX ranges emitted:
+
+| Range | Worker | Description |
+|-------|--------|-------------|
+| `mm:encode_worker_generate` | Encode | Full encode request lifetime |
+| `mm:enc:cache_check` | Encode | Embedding cache lookup |
+| `mm:enc:image_load` | Encode | Image download/load |
+| `mm:enc:image_preprocess` | Encode | Image processor (CPU) |
+| `mm:enc:vision_encode` | Encode | ViT + projector GPU forward |
+| `mm:enc:embedding_transfer` | Encode | RDMA embedding staging |
+| `mm:pd_worker_generate` | PD | Full PD request lifetime |
+| `mm:pd:ttft` | PD | Worker-side TTFT: from request arrival at the PD worker to first output token (excludes client→frontend→worker network transit) |
+| `mm:pd:load_multimodal` | PD | Fetch embeddings from encode worker |
+| `mm:pd:disagg_prefill` | PD (disagg) | Prefill-only engine call |
+| `mm:pd:disagg_remote_decode` | PD (disagg) | Remote decode round-trip |
+| `mm:decode_worker_generate` | Decode | Full decode request lifetime |
+| `mm:decode:first_token` | Decode | Time to first output token |
+
 ## Known Limitations
 
 - **Disaggregated flows require Python Processor** - All multimodal disaggregation requires the Python Processor component (`ModelInput.Text`).

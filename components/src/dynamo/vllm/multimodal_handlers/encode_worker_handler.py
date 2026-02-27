@@ -8,13 +8,13 @@ import time
 from dataclasses import dataclass
 from typing import AsyncIterator
 
-import nvtx
 import torch
 from transformers import AutoImageProcessor
 from vllm.engine.arg_utils import AsyncEngineArgs
 
 import dynamo.nixl_connect as connect
 from dynamo.common.multimodal import LocalEmbeddingSender, NixlPersistentEmbeddingSender
+from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.runtime import DistributedRuntime
 
 from ..multimodal_utils import (
@@ -106,7 +106,7 @@ class EncodeWorkerHandler:
     async def generate(
         self, request: vLLMMultimodalRequest, context
     ) -> AsyncIterator[str]:
-        nvtx.mark("mm:enc:request_arrived", color="navy")
+        _nvtx.mark("mm:enc:request_arrived", color="navy")
         logger.debug(f"Got raw request: {request}")
         if not isinstance(request, vLLMMultimodalRequest):
             if isinstance(request, str):
@@ -127,12 +127,12 @@ class EncodeWorkerHandler:
         # 7. Await for the write operation to complete.
         # 8. Yield the encode response.
 
-        rng_gen = nvtx.start_range("mm:encode_worker_generate", color="blue")
+        rng_gen = _nvtx.start_range("mm:encode_worker_generate", color="blue")
         active_inner_rng = None
         try:
             time_start = time.perf_counter()
 
-            active_inner_rng = nvtx.start_range("mm:enc:cache_check", color="cyan")
+            active_inner_rng = _nvtx.start_range("mm:enc:cache_check", color="cyan")
             # Before batch process images, check cache first
             need_encode_indexes = []
             embedding_lists = [None] * len(request.multimodal_inputs)
@@ -157,10 +157,10 @@ class EncodeWorkerHandler:
                     # keep track of key to avoid recompute of it
                     need_encode_indexes.append((idx, embedding_key))
 
-            nvtx.end_range(active_inner_rng)
+            _nvtx.end_range(active_inner_rng)
             active_inner_rng = None
 
-            active_inner_rng = nvtx.start_range("mm:enc:image_load", color="green")
+            active_inner_rng = _nvtx.start_range("mm:enc:image_load", color="green")
             # Load and generate image tensors
             image_tasks = []
             image_to_load = []
@@ -187,20 +187,22 @@ class EncodeWorkerHandler:
                     f"Errors occurred during image loading:\n{collective_exceptions}"
                 )
 
-            nvtx.end_range(active_inner_rng)
+            _nvtx.end_range(active_inner_rng)
             active_inner_rng = None
 
             if loaded_images:
-                active_inner_rng = nvtx.start_range(
+                active_inner_rng = _nvtx.start_range(
                     "mm:enc:image_preprocess", color="yellow"
                 )
                 image_embeds = await asyncio.to_thread(
                     self.image_processor, images=loaded_images, return_tensors="pt"
                 )
-                nvtx.end_range(active_inner_rng)
+                _nvtx.end_range(active_inner_rng)
                 active_inner_rng = None
 
-                active_inner_rng = nvtx.start_range("mm:enc:vision_encode", color="red")
+                active_inner_rng = _nvtx.start_range(
+                    "mm:enc:vision_encode", color="red"
+                )
                 # Encode the image embeddings using model-specific encoder
                 embeddings = await asyncio.to_thread(
                     encode_image_embeddings,
@@ -209,10 +211,10 @@ class EncodeWorkerHandler:
                     vision_encoder=self.vision_encoder,
                     projector=self.projector,
                 )
-                nvtx.end_range(active_inner_rng)
+                _nvtx.end_range(active_inner_rng)
                 active_inner_rng = None
 
-                active_inner_rng = nvtx.start_range(
+                active_inner_rng = _nvtx.start_range(
                     "mm:enc:split_embeddings", color="orange"
                 )
                 # [gluo FIXME] This is specific to qwen vision processing..
@@ -241,7 +243,7 @@ class EncodeWorkerHandler:
                     else None
                 )
 
-                nvtx.end_range(active_inner_rng)
+                _nvtx.end_range(active_inner_rng)
                 active_inner_rng = None
 
             # fill in the embedding_lists with new computed embeddings and cache them
@@ -263,7 +265,7 @@ class EncodeWorkerHandler:
 
             before_transfer_time = time.perf_counter()
 
-            active_inner_rng = nvtx.start_range(
+            active_inner_rng = _nvtx.start_range(
                 "mm:enc:embedding_transfer", color="purple"
             )
             # Prepare transfer
@@ -299,7 +301,7 @@ class EncodeWorkerHandler:
                     (transfer_request[1], embedding_item.embeddings)
                 )
 
-            nvtx.end_range(active_inner_rng)
+            _nvtx.end_range(active_inner_rng)
             active_inner_rng = None
 
             logger.debug(f"Request: {request.model_dump_json()}")
@@ -323,5 +325,5 @@ class EncodeWorkerHandler:
             raise
         finally:
             if active_inner_rng is not None:
-                nvtx.end_range(active_inner_rng)
-            nvtx.end_range(rng_gen)
+                _nvtx.end_range(active_inner_rng)
+            _nvtx.end_range(rng_gen)
