@@ -52,7 +52,7 @@ impl KvRouterConfig {
 #[pymethods]
 impl KvRouterConfig {
     #[new]
-    #[pyo3(signature = (overlap_score_weight=1.0, router_temperature=0.0, use_kv_events=true, durable_kv_events=false, router_replica_sync=false, router_track_active_blocks=true, router_track_output_blocks=false, router_assume_kv_reuse=true, router_snapshot_threshold=1000000, router_reset_states=false, router_ttl_secs=120.0, router_max_tree_size=1048576, router_prune_target_ratio=0.8, router_queue_threshold=None, router_event_threads=4))]
+    #[pyo3(signature = (overlap_score_weight=1.0, router_temperature=0.0, use_kv_events=true, durable_kv_events=false, router_replica_sync=false, router_track_active_blocks=true, router_track_output_blocks=false, router_assume_kv_reuse=true, router_snapshot_threshold=1000000, router_reset_states=false, router_ttl_secs=120.0, router_max_tree_size=1048576, router_prune_target_ratio=0.8, router_queue_threshold=None, router_event_threads=4, router_enable_cache_control=false))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         overlap_score_weight: f64,
@@ -70,6 +70,7 @@ impl KvRouterConfig {
         router_prune_target_ratio: f64,
         router_queue_threshold: Option<f64>,
         router_event_threads: u32,
+        router_enable_cache_control: bool,
     ) -> Self {
         KvRouterConfig {
             inner: RsKvRouterConfig {
@@ -88,6 +89,7 @@ impl KvRouterConfig {
                 router_prune_target_ratio,
                 router_queue_threshold,
                 router_event_threads,
+                router_enable_cache_control,
             },
         }
     }
