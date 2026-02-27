@@ -62,7 +62,7 @@ const BATCH_TIMEOUT_US: u64 = 10_000;
 
 /// Encapsulates the state for dynamic event batching.
 /// Tracks pending events and metadata for batch flushing.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct BatchingState {
     /// Pending Removed batch (block hashes to be removed)
     pending_removed: Option<KvCacheRemoveData>,
@@ -73,19 +73,25 @@ struct BatchingState {
     /// Last DP rank for batch
     last_dp_rank: u32,
     /// Time of last flush (for timeout tracking)
-    last_flush_time: Option<Instant>,
+    last_flush_time: Instant,
 }
 
-impl BatchingState {
-    /// Creates a new BatchingState with current timestamp
-    fn new() -> Self {
+impl Default for BatchingState {
+    fn default() -> Self {
         Self {
             pending_removed: None,
             pending_stored: None,
             last_event_id: 0,
             last_dp_rank: 0,
-            last_flush_time: Some(Instant::now()),
+            last_flush_time: Instant::now() - Duration::from_secs(3600),
         }
+    }
+}
+
+impl BatchingState {
+    /// Creates a new BatchingState with current timestamp
+    fn new() -> Self {
+        Self::default()
     }
 
     /// Returns true if there are pending batches
@@ -95,22 +101,18 @@ impl BatchingState {
 
     /// Resets flush time to now
     fn reset_flush_time(&mut self) {
-        self.last_flush_time = Some(Instant::now());
+        self.last_flush_time = Instant::now();
     }
 
     /// Gets remaining time until timeout
     fn remaining_timeout(&self, timeout_us: u64) -> Duration {
         let timeout = Duration::from_micros(timeout_us);
-        self.last_flush_time
-            .map(|t| {
-                let elapsed = t.elapsed();
-                if elapsed >= timeout {
-                    Duration::ZERO
-                } else {
-                    timeout - elapsed
-                }
-            })
-            .unwrap_or(Duration::ZERO)
+        let elapsed = self.last_flush_time.elapsed();
+        if elapsed >= timeout {
+            Duration::ZERO
+        } else {
+            timeout - elapsed
+        }
     }
 }
 
@@ -535,9 +537,19 @@ async fn run_event_processor_loop<P: EventSink + Send + Sync + 'static>(
                         }
                     }
                 }
+                
+                // After processing each event, check if timeout has elapsed and flush if so
+                // This handles both timeout=0 (immediate flush) and timeout>0 (elapsed check)
+                if batching_state.has_pending() {
+                    let elapsed = batching_state.last_flush_time.elapsed();
+                    if elapsed >= Duration::from_micros(timeout_us) {
+                        batching_state.flush(&publisher, &local_indexer, worker_id).await;
+                        batching_state.reset_flush_time();
+                    }
+                }
             }
-            _ = tokio::time::sleep(remaining) => {
-                // remaining == Duration::ZERO means timeout has elapsed
+            _ = tokio::time::sleep(remaining), if timeout_us > 0 => {
+                // Timeout elapsed - flush pending events
                 if batching_state.has_pending() {
                     batching_state.flush(&publisher, &local_indexer, worker_id).await;
                     batching_state.reset_flush_time();
@@ -2584,12 +2596,12 @@ mod batching_state_tests {
     fn test_batching_state_reset_flush_time() {
         let mut state = BatchingState::new();
 
-        let initial_time = state.last_flush_time.unwrap();
+        let initial_time = state.last_flush_time;
 
         state.reset_flush_time();
 
         assert!(
-            state.last_flush_time.unwrap() >= initial_time,
+            state.last_flush_time >= initial_time,
             "reset_flush_time should update the time"
         );
     }
@@ -2702,7 +2714,7 @@ mod event_processor_tests {
     }
 
     /// Test that pushing N removed events results in batched output
-    /// Uses a long timeout to ensure events are batched
+    /// Uses a 10ms timeout to ensure events are batched (events sent rapidly)
     #[tokio::test]
     async fn test_run_event_processor_loop_batches_removed_events_10() {
         test_removed_events_batching(10, 10_000).await; // 10ms timeout
@@ -2933,15 +2945,26 @@ mod event_processor_tests {
         assert_eq!(total_blocks, 3, "All 3 blocks should be accounted for");
     }
 
-    /// Test that with very short timeout, events are NOT batched (each sent immediately)
-    /// TODO: This test is currently ignored because the implementation batches events
-    /// even with timeout=0. The batching logic needs to be fixed to flush immediately
-    /// when timeout is 0.
+    /// Test that with short timeout and slow input, events are NOT batched
+    /// Parametrized over different timeout values: 0ms, 0.1ms, 0.2ms
+    /// All use 2ms delay between events, so each event times out before the next arrives
     #[tokio::test]
-    #[ignore]
-    async fn test_run_event_processor_loop_no_batching_with_zero_timeout() {
-        let timeout_us = 0; // Zero timeout means immediate flush
+    async fn test_run_event_processor_loop_no_batching_with_slow_input_0ms() {
+        test_no_batching_with_slow_input(0).await; // 0ms timeout
+    }
 
+    #[tokio::test]
+    async fn test_run_event_processor_loop_no_batching_with_slow_input_0_1ms() {
+        test_no_batching_with_slow_input(100).await; // 0.1ms timeout
+    }
+
+    #[tokio::test]
+    async fn test_run_event_processor_loop_no_batching_with_slow_input_0_2ms() {
+        test_no_batching_with_slow_input(200).await; // 0.2ms timeout
+    }
+
+    /// Helper function to test no batching with slow input
+    async fn test_no_batching_with_slow_input(timeout_us: u64) {
         let (tx, rx) = mpsc::unbounded_channel::<KvCacheEvent>();
         let publisher = MockPublisher::new();
         let publisher_clone = publisher.clone();
@@ -2952,7 +2975,8 @@ mod event_processor_tests {
                 .await
         });
 
-        // Send 5 removed events
+        // Send 5 removed events with 2ms delay between each
+        // Since timeout is <= 0.2ms, each event should timeout and be sent individually
         for i in 0..5 {
             let event = KvCacheEvent {
                 event_id: i as u64,
@@ -2962,7 +2986,13 @@ mod event_processor_tests {
                 dp_rank: 0,
             };
             tx.send(event).unwrap();
+            // Wait 5ms between events (much longer than the timeout)
+            // This ensures each event times out before the next one arrives
+            tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
         }
+
+        // Give the processor time to process the last event
+        tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
 
         drop(tx);
         handle.await.unwrap();
@@ -2971,11 +3001,12 @@ mod event_processor_tests {
 
         assert!(!events.is_empty(), "Should have received events");
 
-        // With zero timeout, each event should be sent immediately (no batching)
+        // With slow input (5ms delay) and short timeout, each event should be sent individually
         assert_eq!(
             events.len(),
             5,
-            "With zero timeout, should have 5 separate events (no batching)"
+            "With slow input (5ms delay) and timeout={}us, should have 5 separate events (no batching)",
+            timeout_us
         );
 
         let total_hashes: usize = events
