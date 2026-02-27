@@ -133,7 +133,7 @@ pub(crate) struct KvEventPublisher {
 #[pymethods]
 impl KvEventPublisher {
     #[new]
-    #[pyo3(signature = (endpoint, worker_id=0, kv_block_size=0, dp_rank=0, enable_local_indexer=false, zmq_endpoint=None, zmq_topic=None))]
+    #[pyo3(signature = (endpoint, worker_id=0, kv_block_size=0, dp_rank=0, enable_local_indexer=false, zmq_endpoint=None, zmq_topic=None, batching_timeout_ms=None))]
     fn new(
         endpoint: Endpoint,
         worker_id: WorkerId,
@@ -142,6 +142,7 @@ impl KvEventPublisher {
         enable_local_indexer: bool,
         zmq_endpoint: Option<String>,
         zmq_topic: Option<String>,
+        batching_timeout_ms: Option<u64>,
     ) -> PyResult<Self> {
         let _ = worker_id;
 
@@ -153,6 +154,10 @@ impl KvEventPublisher {
         if kv_block_size == 0 {
             return Err(to_pyerr(anyhow::anyhow!("kv_block_size cannot be 0")));
         }
+
+        // Build batching config from Python parameters (timeout only, no max batch size)
+        let batching_timeout_ms = batching_timeout_ms.unwrap_or(10);
+        // TODO use this timeout!
 
         // Extract component from endpoint
         let component = endpoint.inner.component().clone();

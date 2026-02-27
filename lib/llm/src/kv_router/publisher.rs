@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -52,6 +52,67 @@ const INITIAL_BACKOFF_MS: u64 = 10;
 const MAX_BACKOFF_MS: u64 = 5000;
 const MAX_CONSECUTIVE_ERRORS: u32 = 10;
 const MAX_BACKOFF_EXPONENT: u32 = 8; // Cap at 2^8 = 256x multiplier to prevent overflow
+
+// Batching configuration
+const BATCH_TIMEOUT_MS: u64 = 10;
+
+// -------------------------------------------------------------------------
+// Batching State -----------------------------------------------------------
+// -------------------------------------------------------------------------
+
+/// Encapsulates the state for dynamic event batching.
+/// Tracks pending events and metadata for batch flushing.
+#[derive(Debug, Default)]
+struct BatchingState {
+    /// Pending Removed batch (block hashes to be removed)
+    pending_removed: Option<KvCacheRemoveData>,
+    /// Pending Stored batch (blocks to be stored)
+    pending_stored: Option<KvCacheStoreData>,
+    /// Last event ID for batch
+    last_event_id: u64,
+    /// Last DP rank for batch
+    last_dp_rank: u32,
+    /// Time of last flush (for timeout tracking)
+    last_flush_time: Option<Instant>,
+}
+
+impl BatchingState {
+    /// Creates a new BatchingState with current timestamp
+    fn new() -> Self {
+        Self {
+            pending_removed: None,
+            pending_stored: None,
+            last_event_id: 0,
+            last_dp_rank: 0,
+            last_flush_time: Some(Instant::now()),
+        }
+    }
+
+    /// Returns true if there are pending batches
+    fn has_pending(&self) -> bool {
+        self.pending_removed.is_some() || self.pending_stored.is_some()
+    }
+
+    /// Resets flush time to now
+    fn reset_flush_time(&mut self) {
+        self.last_flush_time = Some(Instant::now());
+    }
+
+    /// Gets remaining time until timeout
+    fn remaining_timeout(&self, timeout_ms: u64) -> Duration {
+        let timeout = Duration::from_millis(timeout_ms);
+        self.last_flush_time
+            .map(|t| {
+                let elapsed = t.elapsed();
+                if elapsed >= timeout {
+                    Duration::from_millis(0)
+                } else {
+                    timeout - elapsed
+                }
+            })
+            .unwrap_or(Duration::from_millis(0))
+    }
+}
 
 // -------------------------------------------------------------------------
 // KV Event Publishers -----------------------------------------------------
@@ -319,97 +380,192 @@ impl EventSink for NatsQueue {
     }
 }
 
-/// Event processor for ephemeral transports (NATS Core / ZMQ).
-async fn start_event_processor<P: EventSink + Send + Sync + 'static>(
+impl BatchingState {
+    /// Flushes pending batches to the publisher and local indexer.
+    async fn flush<P: EventSink + Send + Sync + 'static>(
+        &mut self,
+        publisher: &P,
+        local_indexer: &Option<Arc<LocalKvIndexer>>,
+        worker_id: u64,
+    ) {
+        let last_event_id = self.last_event_id;
+        let last_dp_rank = self.last_dp_rank;
+
+        if let Some(removed_data) = self.pending_removed.take() {
+            let event = KvCacheEvent {
+                event_id: last_event_id,
+                data: KvCacheEventData::Removed(removed_data),
+                dp_rank: last_dp_rank,
+            };
+            let router_event = RouterEvent::new(worker_id, event);
+
+            if let Some(indexer) = local_indexer {
+                if let Err(e) = indexer.apply_event_with_buffer(router_event.clone()).await {
+                    tracing::warn!(
+                        "Failed to send removed event to local indexer for worker {}: {}",
+                        worker_id,
+                        e
+                    );
+                }
+            }
+
+            if let Err(e) = publisher.publish_event(&router_event).await {
+                tracing::error!("Failed to publish removed event: {}", e);
+            }
+        }
+
+        if let Some(stored_data) = self.pending_stored.take() {
+            let event = KvCacheEvent {
+                event_id: last_event_id,
+                data: KvCacheEventData::Stored(stored_data),
+                dp_rank: last_dp_rank,
+            };
+            let router_event = RouterEvent::new(worker_id, event);
+
+            if let Some(indexer) = local_indexer {
+                if let Err(e) = indexer.apply_event_with_buffer(router_event.clone()).await {
+                    tracing::warn!(
+                        "Failed to send stored event to local indexer for worker {}: {}",
+                        worker_id,
+                        e
+                    );
+                }
+            }
+
+            if let Err(e) = publisher.publish_event(&router_event).await {
+                tracing::error!("Failed to publish stored event: {}", e);
+            }
+        }
+
+        self.reset_flush_time();
+    }
+}
+
+/// Common event processor loop using BatchingState.
+/// Accumulates Removed events and sequential Stored events, flushing on:
+/// - Event type change
+/// - Timeout (10ms)
+/// - Shutdown
+async fn run_event_processor_loop<P: EventSink + Send + Sync + 'static>(
     publisher: P,
     worker_id: u64,
     cancellation_token: CancellationToken,
     mut rx: mpsc::UnboundedReceiver<KvCacheEvent>,
     local_indexer: Option<Arc<LocalKvIndexer>>,
 ) {
+    let mut batching_state = BatchingState::new();
+
     loop {
+        let remaining = batching_state.remaining_timeout(BATCH_TIMEOUT_MS);
+
         tokio::select! {
             _ = cancellation_token.cancelled() => {
                 tracing::info!("KV Event source received cancellation signal");
+                batching_state.flush(&publisher, &local_indexer, worker_id).await;
                 break;
             }
             event = rx.recv() => {
                 let Some(event) = event else {
                     tracing::debug!("Event processor channel closed.");
+                    batching_state.flush(&publisher, &local_indexer, worker_id).await;
                     break;
                 };
 
-                // Encapsulate in a router event.
                 tracing::trace!("Event processor for worker_id {} processing event: {:?}", worker_id, event.data);
-                let router_event = RouterEvent::new(worker_id, event);
 
-                // Apply to local indexer first (if present)
-                if let Some(indexer) = &local_indexer {
-                    // Adds event into local indexer, and logs it into internal buffer
-                    if let Err(e) = indexer.apply_event_with_buffer(router_event.clone()).await {
-                        tracing::warn!(
-                            "Failed to send event to local indexer for worker {}: {}",
-                            worker_id,
-                            e
-                        );
+                batching_state.last_event_id = event.event_id;
+                batching_state.last_dp_rank = event.dp_rank;
+
+                match event.data {
+                    KvCacheEventData::Removed(removed_data) => {
+                        if batching_state.pending_stored.is_some() {
+                            batching_state.flush(&publisher, &local_indexer, worker_id).await;
+                        }
+
+                        if let Some(ref mut pending) = batching_state.pending_removed {
+                            pending.block_hashes.extend(removed_data.block_hashes);
+                        } else {
+                            batching_state.pending_removed = Some(removed_data);
+                        }
+                    }
+                    KvCacheEventData::Stored(stored_data) => {
+                        let should_flush = if let Some(ref pending) = batching_state.pending_stored {
+                            let last_block_hash = pending.blocks.last().map(|b| b.block_hash);
+                            let is_sequential = stored_data.parent_hash == last_block_hash;
+                            !is_sequential
+                        } else {
+                            batching_state.pending_removed.is_some()
+                        };
+
+                        if should_flush {
+                            batching_state.flush(&publisher, &local_indexer, worker_id).await;
+                        }
+
+                        if let Some(ref mut pending) = batching_state.pending_stored {
+                            pending.blocks.extend(stored_data.blocks);
+                            if pending.parent_hash.is_none() {
+                                pending.parent_hash = stored_data.parent_hash;
+                            }
+                        } else {
+                            batching_state.pending_stored = Some(stored_data);
+                        }
+                    }
+                    KvCacheEventData::Cleared => {
+                        batching_state.flush(&publisher, &local_indexer, worker_id).await;
+
+                        let router_event = RouterEvent::new(worker_id, event);
+
+                        if let Some(indexer) = &local_indexer {
+                            if let Err(e) = indexer.apply_event_with_buffer(router_event.clone()).await {
+                                tracing::warn!(
+                                    "Failed to send cleared event to local indexer for worker {}: {}",
+                                    worker_id,
+                                    e
+                                );
+                            }
+                        }
+
+                        if let Err(e) = publisher.publish_event(&router_event).await {
+                            tracing::error!("Failed to publish cleared event: {}", e);
+                        }
                     }
                 }
-
-                // Then publish to event plane for global distribution.
-                if let Err(e) = publisher.publish_event(&router_event).await {
-                    tracing::error!("Failed to publish event: {}", e);
+            }
+            _ = tokio::time::sleep(remaining) => {
+                if batching_state.has_pending() {
+                    batching_state.flush(&publisher, &local_indexer, worker_id).await;
                 }
-
             }
         }
     }
 }
 
-/// Event processor using JetStream (durable).
+/// Batched event processor for ephemeral transports (NATS Core / ZMQ).
+/// This is a thin wrapper around run_event_processor_loop.
+async fn start_event_processor<P: EventSink + Send + Sync + 'static>(
+    publisher: P,
+    worker_id: u64,
+    cancellation_token: CancellationToken,
+    rx: mpsc::UnboundedReceiver<KvCacheEvent>,
+    local_indexer: Option<Arc<LocalKvIndexer>>,
+) {
+    run_event_processor_loop(publisher, worker_id, cancellation_token, rx, local_indexer).await
+}
+
+/// Batched event processor using JetStream (durable).
+/// This is a thin wrapper around run_event_processor_loop.
 async fn start_event_processor_jetstream(
     publisher: NatsQueue,
     worker_id: u64,
     cancellation_token: CancellationToken,
-    mut rx: mpsc::UnboundedReceiver<KvCacheEvent>,
+    rx: mpsc::UnboundedReceiver<KvCacheEvent>,
     local_indexer: Option<Arc<LocalKvIndexer>>,
 ) {
-    loop {
-        tokio::select! {
-            _ = cancellation_token.cancelled() => {
-                tracing::info!("KV Event source received cancellation signal");
-                break;
-            }
-            event = rx.recv() => {
-                let Some(event) = event else {
-                    tracing::debug!("Event processor channel closed.");
-                    break;
-                };
-
-                // Encapsulate in a router event.
-                tracing::trace!("Event processor for worker_id {} processing event: {:?}", worker_id, event.data);
-                let router_event = RouterEvent::new(worker_id, event);
-
-                // Apply to local indexer first (if present)
-                if let Some(indexer) = &local_indexer {
-                    // Adds event into local indexer, and logs it into internal buffer
-                    if let Err(e) = indexer.apply_event_with_buffer(router_event.clone()).await {
-                        tracing::warn!(
-                            "Failed to send event to local indexer for worker {}: {}",
-                            worker_id,
-                            e
-                        );
-                    }
-                }
-
-                // Then publish to NATS JetStream for global distribution
-                if let Err(e) = publisher.publish_event(KV_EVENT_SUBJECT, &router_event).await {
-                    tracing::error!("Failed to publish event to NATS JetStream: {}", e);
-                }
-
-            }
-        }
-    }
+    run_event_processor_loop(publisher, worker_id, cancellation_token, rx, local_indexer).await
 }
+
+
+
 
 /// Calculate exponential backoff duration based on consecutive error count
 fn calculate_backoff_ms(consecutive_errors: u32) -> u64 {
@@ -2311,5 +2467,138 @@ mod test_integration_publisher {
         drt.shutdown();
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod batching_state_tests {
+    use super::*;
+    use std::thread;
+    use std::time::Duration as StdDuration;
+
+    #[test]
+    fn test_batching_state_default() {
+        let state = BatchingState::default();
+        assert!(!state.has_pending(), "Default state should have no pending");
+        assert!(state.pending_removed.is_none(), "Default pending_removed should be None");
+        assert!(state.pending_stored.is_none(), "Default pending_stored should be None");
+    }
+
+    #[test]
+    fn test_batching_state_new() {
+        let state = BatchingState::new();
+        assert!(
+            state.last_flush_time.is_some(),
+            "new() should create state with flush time"
+        );
+    }
+
+    #[test]
+    fn test_batching_state_pending_removed() {
+        let mut state = BatchingState::default();
+        assert!(!state.has_pending(), "Should not have pending initially");
+
+        state.pending_removed = Some(KvCacheRemoveData {
+            block_hashes: vec![],
+        });
+        assert!(state.has_pending(), "Should have pending after setting pending_removed");
+    }
+
+    #[test]
+    fn test_batching_state_pending_stored() {
+        let mut state = BatchingState::default();
+        assert!(!state.has_pending(), "Should not have pending initially");
+
+        state.pending_stored = Some(KvCacheStoreData {
+            parent_hash: None,
+            blocks: vec![],
+        });
+        assert!(state.has_pending(), "Should have pending after setting pending_stored");
+    }
+
+    #[test]
+    fn test_batching_state_timeout() {
+        let state = BatchingState::new();
+        
+        let remaining_before = state.remaining_timeout(10);
+        assert!(remaining_before.as_millis() > 0, "Should have remaining time initially");
+
+        thread::sleep(StdDuration::from_millis(20));
+        
+        let remaining_after = state.remaining_timeout(10);
+        assert_eq!(remaining_after.as_millis(), 0, "Should have no remaining time after timeout");
+    }
+
+    #[test]
+    fn test_batching_state_reset_flush_time() {
+        let mut state = BatchingState::new();
+        
+        let initial_time = state.last_flush_time.unwrap();
+        
+        thread::sleep(StdDuration::from_millis(5));
+        
+        state.reset_flush_time();
+        
+        assert!(
+            state.last_flush_time.unwrap() > initial_time,
+            "reset_flush_time should update the time"
+        );
+    }
+
+    #[test]
+    fn test_batching_state_remaining_timeout() {
+        let state = BatchingState::new();
+        
+        let remaining = state.remaining_timeout(100);
+        assert!(remaining.as_millis() > 0 && remaining.as_millis() <= 100, 
+            "Remaining timeout should be between 0 and 100ms");
+    }
+
+    #[test]
+    fn test_batching_state_accumulate_removed() {
+        let mut state = BatchingState::default();
+        
+        let first = KvCacheRemoveData {
+            block_hashes: vec![ExternalSequenceBlockHash(1), ExternalSequenceBlockHash(2)],
+        };
+        
+        state.pending_removed = Some(first);
+        
+        if let Some(ref mut pending) = state.pending_removed {
+            pending.block_hashes.extend(vec![ExternalSequenceBlockHash(3)]);
+        }
+        
+        let pending = state.pending_removed.as_ref().unwrap();
+        assert_eq!(pending.block_hashes.len(), 3, "Should have accumulated 3 block hashes");
+    }
+
+    #[test]
+    fn test_batching_state_accumulate_stored() {
+        let mut state = BatchingState::default();
+        
+        let block1 = KvCacheStoredBlockData {
+            block_hash: ExternalSequenceBlockHash(1),
+            tokens_hash: LocalBlockHash(100),
+            mm_extra_info: None,
+        };
+        let first = KvCacheStoreData {
+            parent_hash: Some(ExternalSequenceBlockHash(0)),
+            blocks: vec![block1],
+        };
+        
+        state.pending_stored = Some(first);
+        
+        let block2 = KvCacheStoredBlockData {
+            block_hash: ExternalSequenceBlockHash(2),
+            tokens_hash: LocalBlockHash(200),
+            mm_extra_info: None,
+        };
+        
+        if let Some(ref mut pending) = state.pending_stored {
+            pending.blocks.extend(vec![block2]);
+        }
+        
+        let pending = state.pending_stored.as_ref().unwrap();
+        assert_eq!(pending.blocks.len(), 2, "Should have accumulated 2 blocks");
     }
 }
