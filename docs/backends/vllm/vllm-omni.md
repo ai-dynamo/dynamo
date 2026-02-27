@@ -8,7 +8,7 @@ Dynamo supports multimodal generation through the [vLLM-Omni](https://github.com
 
 ## Prerequisites
 
-This guide assumes familiarity with deploying Dynamo with vLLM as described in the [vLLM backend guide](/docs/pages/backends/vllm/README.md).
+This guide assumes familiarity with deploying Dynamo with vLLM as described in the [vLLM backend guide](/docs/backends/vllm/README.md).
 
 ### Installation
 
