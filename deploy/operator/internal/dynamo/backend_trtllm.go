@@ -17,6 +17,10 @@ type TRTLLMBackend struct {
 	MpiRunSecretName string
 }
 
+// UpdateContainer configures the container for TRT-LLM multinode deployments.
+// For single-node deployments it is a no-op. For multinode, it mounts the SSH
+// keypair secret and injects the appropriate SSH setup and launch commands for
+// leader (mpirun) and worker (sshd) roles.
 func (b *TRTLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
 	// Check for volumeMounts with useAsCompilationCache=true
 	for _, volumeMount := range component.VolumeMounts {
@@ -74,6 +78,8 @@ func (b *TRTLLMBackend) UpdateContainer(container *corev1.Container, numberOfNod
 	}
 }
 
+// UpdatePodSpec injects the SSH keypair volume into the pod spec for TRT-LLM
+// multinode deployments so that leader and worker containers can mount it.
 func (b *TRTLLMBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
 	// Add SSH keypair volume for TRTLLM multinode deployments
 	if numberOfNodes > 1 {
