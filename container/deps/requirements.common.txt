@@ -19,9 +19,6 @@ aiofiles
 fastapi==0.120.1
 # Pinned as a transitive dep of vLLM (text normalization)
 ftfy==6.3.1
-# tritonclient<=2.62.0 (in test deps) requires grpcio<1.68; cap grpcio here so the
-# runtime resolver already picks a compatible version and test deps don't downgrade it.
-grpcio<1.68,>=1.63.0
 grpcio-tools<=1.76.0  # May have platform-specific builds; pins grpcio ecosystem version
 httpx==0.28.1
 msgspec==0.19.0
