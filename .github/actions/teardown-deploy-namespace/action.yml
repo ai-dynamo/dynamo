@@ -24,26 +24,25 @@ runs:
       env:
         NAMESPACE: ${{ inputs.namespace }}
       run: |
+        echo "::group::List resources in namespace $NAMESPACE"
         kubectl get dynamographdeployments -n $NAMESPACE || true
         kubectl get all -n $NAMESPACE || true
-
-    - name: Delete DynamoGraphDeployments
-      shell: bash
-      env:
-        NAMESPACE: ${{ inputs.namespace }}
-      run: |
-        kubectl delete dynamographdeployments --all -n $NAMESPACE --timeout=60s || true
+        echo "::endgroup::"
 
     - name: Uninstall Helm chart
       shell: bash
       env:
         NAMESPACE: ${{ inputs.namespace }}
       run: |
-        helm uninstall dynamo-platform --namespace $NAMESPACE --timeout 10m || true
+        echo "::group::Uninstall Helm chart"
+        helm uninstall dynamo-platform --namespace $NAMESPACE --timeout 10m
+        echo "::endgroup::"
 
     - name: Delete namespace
       shell: bash
       env:
         NAMESPACE: ${{ inputs.namespace }}
       run: |
-        kubectl delete namespace $NAMESPACE --timeout=120s || true
+        echo "::group::Delete namespace $NAMESPACE"
+        kubectl delete namespace $NAMESPACE --timeout=120s
+        echo "::endgroup::"

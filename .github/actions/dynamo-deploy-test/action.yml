@@ -47,6 +47,7 @@ runs:
         FRAMEWORK: ${{ inputs.framework }}
         PROFILE: ${{ inputs.profile }}
       run: |
+        echo "::group::Check if namespace exists"
         echo "${KUBECONFIG_B64}" | base64 -d > ${{ github.workspace }}/.kubeconfig_check
         chmod 600 ${{ github.workspace }}/.kubeconfig_check
         if KUBECONFIG=${{ github.workspace }}/.kubeconfig_check kubectl get namespace $NAMESPACE --ignore-not-found | grep -q $NAMESPACE; then
@@ -68,6 +69,7 @@ runs:
           echo "Namespace $NAMESPACE not found, will self-bootstrap as ${SELF_NS}"
         fi
         rm -f ${{ github.workspace }}/.kubeconfig_check
+        echo "::endgroup::"
 
     - name: Setup namespace (self-bootstrap on rerun)
       if: steps.ns-check.outputs.exists != 'true'
@@ -133,6 +135,7 @@ runs:
         NAMESPACE: ${{ steps.ns-check.outputs.ns }}
         GRAPH_NAME: ${{ steps.deploy.outputs.graph_name }}
       run: |
+        echo "::group::Cleanup Deployment"
         set -x
         export KUBECONFIG=${{ github.workspace }}/.kubeconfig
 
@@ -147,8 +150,13 @@ runs:
               kubectl describe dynamographdeployments "$dep_name" -n $NAMESPACE
           done || true
 
-        echo "Deleting DynamoGraphDeployment: ${GRAPH_NAME}"
-        kubectl delete dynamographdeployments ${GRAPH_NAME} -n $NAMESPACE --timeout=60s || true
+        if kubectl get dynamographdeployments "${GRAPH_NAME}" -n $NAMESPACE &>/dev/null; then
+          echo "DGD ${GRAPH_NAME} still exists after test, deleting..."
+          kubectl delete dynamographdeployments ${GRAPH_NAME} -n $NAMESPACE --timeout=60s
+        else
+          echo "DGD ${GRAPH_NAME} already cleaned up by test"
+        fi
+        echo "::endgroup::"
 
     - name: Teardown namespace (self-cleanup on rerun)
       if: always() && steps.ns-check.outputs.exists != 'true'
