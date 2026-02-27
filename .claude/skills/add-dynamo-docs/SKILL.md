@@ -1,4 +1,6 @@
 ---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 name: add-dynamo-docs
 description: Add a new page to the Dynamo Fern docs site. Use when creating new documentation pages.
 ---
