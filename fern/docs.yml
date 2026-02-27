@@ -24,10 +24,10 @@ title: NVIDIA Dynamo Documentation
 products:
   - display-name: Dynamo
     slug: /
-    path: ./versions/dev.yml
+    path: ../docs/index.yml
     versions:
       - display-name: dev
-        path: ./versions/dev.yml
+        path: ../docs/index.yml
 
 redirects:
   - source: "/dynamo/index.html"
@@ -72,26 +72,26 @@ typography:
   bodyFont:
     name: NVIDIA
     paths:
-      - path: ./assets/fonts/NVIDIASans.woff2
+      - path: ../docs/assets/fonts/NVIDIASans.woff2
         style: normal
-      - path: ./assets/fonts/NVIDIASans_Italic.woff2
+      - path: ../docs/assets/fonts/NVIDIASans_Italic.woff2
         style: italic
   codeFont:
     name: RobotoMono
     paths:
-      - path: ./assets/fonts/RobotoMono.woff2
+      - path: ../docs/assets/fonts/RobotoMono.woff2
 theme:
   page-actions: toolbar
   footer-nav: minimal
 
 logo:
-  dark: ./assets/NVIDIA_dark.svg
-  light: ./assets/NVIDIA_light.svg
+  dark: ../docs/assets/NVIDIA_dark.svg
+  light: ../docs/assets/NVIDIA_light.svg
   height: 20
   href: /
   right-text: Documentation
 
-favicon: ./assets/NVIDIA_symbol.svg
+favicon: ../docs/assets/NVIDIA_symbol.svg
 
 js:
   - url: https://assets.adobedtm.com/5d4962a43b79/c1061d2c5e7b/launch-191c2462b890.min.js
