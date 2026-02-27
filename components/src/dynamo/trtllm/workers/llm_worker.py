@@ -274,7 +274,6 @@ async def init_llm_worker(
 
     logging.info(f"TensorRT-LLM engine args: {arg_map}")
     engine_args = arg_map
-    _engine_start_time = time.monotonic()
 
     # Populate default sampling params from the model
     tokenizer = tokenizer_factory(arg_map["model"])
@@ -442,32 +441,6 @@ async def init_llm_worker(
                     },
                 )
 
-                # Tier 3: Config info gauges (set once)
-                gpu_type = os.environ.get("GPU_TYPE", "unknown")
-                unified_metrics.set_model_config(
-                    model=str(config.model),
-                    served_model_name=model_name_for_metrics,
-                    gpu_type=gpu_type,
-                )
-                unified_metrics.set_parallel_config(
-                    tensor_parallel_size=config.tensor_parallel_size,
-                    pipeline_parallel_size=config.pipeline_parallel_size,
-                    gpu_count=config.tensor_parallel_size * config.pipeline_parallel_size,
-                )
-                unified_metrics.set_detailed_config(
-                    max_batch_size=config.max_batch_size,
-                    max_num_tokens=config.max_num_tokens,
-                    max_seq_len=config.max_seq_len,
-                    kv_block_size=config.kv_block_size,
-                    free_gpu_memory_fraction=config.free_gpu_memory_fraction,
-                    disaggregation_mode=disagg_mode_str,
-                    modality=config.modality.value if hasattr(config.modality, "value") else str(config.modality),
-                )
-                unified_metrics.set_cache_config(
-                    free_gpu_memory_fraction=config.free_gpu_memory_fraction,
-                    kv_block_size=config.kv_block_size,
-                )
-
                 logging.info(
                     "Unified metrics initialized (disagg_mode=%s)",
                     disagg_mode_str,
@@ -482,9 +455,6 @@ async def init_llm_worker(
                         "num_aborted_requests_total",
                         "request_type_",
                         "kv_transfer_",
-                        "model_config_info", "parallel_config_info",
-                        "detailed_config_info", "cache_config_info",
-                        "engine_startup_time",
                     ]
                     register_engine_metrics_callback(
                         endpoint=endpoint,
@@ -509,9 +479,6 @@ async def init_llm_worker(
                     logging.info("Unified-only metrics callback registered")
             except Exception as e:
                 logging.warning("Failed to initialize unified metrics: %s", e)
-
-        if unified_metrics:
-            unified_metrics.set_engine_startup_time(time.monotonic() - _engine_start_time)
 
         # Register callback for Dynamo component metrics using dedicated registry
         register_engine_metrics_callback(

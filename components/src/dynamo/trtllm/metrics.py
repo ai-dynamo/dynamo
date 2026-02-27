@@ -27,7 +27,6 @@ The Rust frontend (metrics.rs) provides token counters:
 This module adds metrics that have no engine/runtime/frontend equivalent:
   - Request types (image, structured output)
   - KV transfer metrics (speed, latency, bytes, success/failure)
-  - Config info (model, parallel, detailed, cache, engine startup)
   - Abort tracking
 """
 
@@ -104,37 +103,6 @@ class AdditionalMetricsCollector:
             labelnames=self._labelnames,
         )
 
-        # --- Config info metrics (set once at startup) ---
-        self.model_config_info = Gauge(
-            "model_config_info",
-            "Model configuration info (set to 1.0; labels carry config details)",
-            labelnames=["model", "served_model_name", "dtype", "gpu_type"],
-        )
-        self.parallel_config_info = Gauge(
-            "parallel_config_info",
-            "Parallelism configuration info (set to 1.0; labels carry config details)",
-            labelnames=["tensor_parallel_size", "pipeline_parallel_size", "gpu_count"],
-        )
-        self.engine_startup_time = Gauge(
-            "engine_startup_time",
-            "Engine initialization time in seconds",
-            labelnames=self._labelnames,
-        )
-        self.detailed_config_info = Gauge(
-            "detailed_config_info",
-            "Detailed engine configuration (set to 1.0; labels carry config details)",
-            labelnames=[
-                "max_batch_size", "max_num_tokens", "max_seq_len",
-                "kv_block_size", "free_gpu_memory_fraction",
-                "disaggregation_mode", "modality",
-            ],
-        )
-        self.cache_config_info = Gauge(
-            "cache_config_info",
-            "KV cache configuration (set to 1.0; labels carry config details)",
-            labelnames=["free_gpu_memory_fraction", "kv_block_size"],
-        )
-
         logger.info("AdditionalMetricsCollector initialized")
 
     # --- Request helpers ---
@@ -162,78 +130,6 @@ class AdditionalMetricsCollector:
     def record_kv_transfer_failure(self):
         """Increment the KV transfer failure counter."""
         self.kv_transfer_failure.labels(*self._labelvalues).inc()
-
-    # --- Config info ---
-
-    def set_model_config(
-        self,
-        model: str,
-        served_model_name: str,
-        dtype: str = "auto",
-        gpu_type: str = "unknown",
-    ):
-        """Set one-time model configuration info gauge."""
-        self.model_config_info.labels(
-            model=model,
-            served_model_name=served_model_name,
-            dtype=dtype,
-            gpu_type=gpu_type,
-        ).set(1.0)
-
-    def set_parallel_config(
-        self,
-        tensor_parallel_size: int,
-        pipeline_parallel_size: int,
-        gpu_count: int,
-    ):
-        """Set one-time parallelism configuration info gauge."""
-        self.parallel_config_info.labels(
-            tensor_parallel_size=str(tensor_parallel_size),
-            pipeline_parallel_size=str(pipeline_parallel_size),
-            gpu_count=str(gpu_count),
-        ).set(1.0)
-
-    def set_engine_startup_time(self, seconds: float):
-        """Record engine initialization time.
-
-        Note: Dynamo also tracks engine load time internally (engine.py).
-        This metric is part of the unified metrics spec for cross-backend
-        parity with vLLM/SGLang, measured from before get_llm_engine to
-        after the engine context is entered.
-        """
-        self.engine_startup_time.labels(*self._labelvalues).set(seconds)
-
-    def set_detailed_config(
-        self,
-        max_batch_size: int,
-        max_num_tokens: int,
-        max_seq_len: int,
-        kv_block_size: int,
-        free_gpu_memory_fraction: float,
-        disaggregation_mode: str,
-        modality: str,
-    ):
-        """Set one-time detailed engine configuration info gauge."""
-        self.detailed_config_info.labels(
-            max_batch_size=str(max_batch_size),
-            max_num_tokens=str(max_num_tokens),
-            max_seq_len=str(max_seq_len),
-            kv_block_size=str(kv_block_size),
-            free_gpu_memory_fraction=str(free_gpu_memory_fraction),
-            disaggregation_mode=str(disaggregation_mode),
-            modality=str(modality),
-        ).set(1.0)
-
-    def set_cache_config(
-        self,
-        free_gpu_memory_fraction: float,
-        kv_block_size: int,
-    ):
-        """Set one-time KV cache configuration info gauge."""
-        self.cache_config_info.labels(
-            free_gpu_memory_fraction=str(free_gpu_memory_fraction),
-            kv_block_size=str(kv_block_size),
-        ).set(1.0)
 
 
 # Backwards compatibility alias

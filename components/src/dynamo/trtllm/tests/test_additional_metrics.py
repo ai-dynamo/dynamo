@@ -72,26 +72,6 @@ class TestAdditionalMetricsCollector(unittest.TestCase):
         output = generate_latest(self.registry).decode()
         self.assertIn("num_aborted_requests_total", output)
 
-    def test_config_info_gauges(self):
-        """Test config info gauges are set correctly."""
-        self.collector.set_model_config(
-            model="/path/to/model",
-            served_model_name="my-model",
-            dtype="auto",
-            gpu_type="H100",
-        )
-        self.collector.set_parallel_config(
-            tensor_parallel_size=4,
-            pipeline_parallel_size=1,
-            gpu_count=4,
-        )
-        self.collector.set_engine_startup_time(45.5)
-
-        output = generate_latest(self.registry).decode()
-        self.assertIn("model_config_info", output)
-        self.assertIn("parallel_config_info", output)
-        self.assertIn("engine_startup_time", output)
-
     def test_request_type_counters(self):
         """Test request type counters."""
         self.collector.record_request_type_image()
@@ -123,6 +103,13 @@ class TestAdditionalMetricsCollector(unittest.TestCase):
         self.assertNotIn("request_prefill_time_seconds", output)
         self.assertNotIn("request_decode_time_seconds", output)
         self.assertNotIn("request_inference_time_seconds", output)
+        # Config info metrics removed (overlap dynamo_frontend_model_* and
+        # dynamo_component_model_load_time_seconds)
+        self.assertNotIn("model_config_info", output)
+        self.assertNotIn("parallel_config_info", output)
+        self.assertNotIn("detailed_config_info", output)
+        self.assertNotIn("cache_config_info", output)
+        self.assertNotIn("engine_startup_time", output)
 
 
 class TestBackwardsCompatAlias(unittest.TestCase):
