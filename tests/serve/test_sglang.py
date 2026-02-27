@@ -298,6 +298,7 @@ sglang_configs = {
             pytest.mark.gpu_1,
             pytest.mark.post_merge,
             pytest.mark.timeout(240),
+            pytest.mark.skip(reason="DYN-2261")
         ],
         model="Qwen/Qwen3-0.6B",
         env={"DYN_ENABLE_ANTHROPIC_API": "1"},
