@@ -198,12 +198,6 @@ navigation:
       - page: KV Events for Custom Engines
         path: ../pages/integrations/kv-events-custom-engines.md
 
-  # ==================== Developer Guide ====================
-  - section: Developer Guide
-    contents:
-      - page: Building and Publishing Docs
-        path: ../README.md
-
   # ==================== Design Docs ====================
   - section: Design Docs
     contents:
@@ -230,12 +224,19 @@ navigation:
 
   # ==================== Blog ====================
   - section: Blog
+    hidden: true
     path: ../blogs/index.mdx
     slug: blog
     contents:
       - page: "Flash Indexer: Inter-Galactic KV Routing"
         path: ../blogs/flash-indexer/flash-indexer.md
         slug: flash-indexer
+
+  # ==================== Developer Guide ====================
+  - section: Developer Guide
+    contents:
+      - page: Building and Publishing Docs
+        path: ../README.md
 
   # ==================== Hidden Pages ====================
   # Pages accessible via direct URL but not shown in main navigation.
