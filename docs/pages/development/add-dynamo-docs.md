@@ -1,0 +1,125 @@
+---
+title: "Skill: Add a Docs Page"
+hidden: true
+---
+
+# Add a Dynamo Docs Page
+
+Claude Code skill for adding a new page to the Dynamo Fern documentation site.
+
+## Related Skills
+
+| Skill | Use When |
+|-------|----------|
+| [rm-dynamo-docs](rm-dynamo-docs.md) | Removing an existing docs page |
+| [update-dynamo-docs](update-dynamo-docs.md) | Editing an existing docs page |
+| [fern-website](fern-website.md) | Understanding the docs architecture |
+
+---
+
+## Branch Rule
+
+> [!CAUTION]
+> ALL edits happen on `main` (or a feature branch based on `main`).
+> The `docs-website` branch is CI-managed and must **never** be edited by hand.
+
+## When Invoked
+
+### 1. Gather Information
+
+Ask for:
+- **Page title** — appears in the sidebar and as the H1
+- **Target section** — which sidebar section (e.g., `Getting Started`, `User Guides`, `Components`)
+- **Filename** — kebab-case `.md` file (e.g., `my-new-feature.md`)
+- **Subdirectory** — which `docs/pages/` subdirectory (e.g., `getting-started`, `features`, `components`)
+
+### 2. Create the Page
+
+Create `docs/pages/<subdirectory>/<filename>.md` with Fern frontmatter:
+
+```markdown
+---
+title: <Page Title>
+---
+
+# <Page Title>
+
+<!-- Content goes here -->
+```
+
+### 3. Add Navigation Entry
+
+Edit `docs/versions/dev.yml` and add the page under the correct section:
+
+```yaml
+- page: <Page Title>
+  path: ../pages/<subdirectory>/<filename>.md
+```
+
+**Section locations in `dev.yml`** (search for the comment banner):
+- `# ==================== Getting Started ====================`
+- `# ==================== Kubernetes Deployment ====================`
+- `# ==================== User Guides ====================`
+- `# ==================== Backends ====================`
+- `# ==================== Components ====================`
+- `# ==================== Integrations ====================`
+- `# ==================== Developer Guide ====================`
+- `# ==================== Design Docs ====================`
+- `# ==================== Blog ====================`
+- `# ==================== Hidden Pages ====================`
+
+### 4. Write Content
+
+Use standard **GitHub-flavored markdown**. For callouts, use GitHub's native syntax — CI auto-converts to Fern format:
+
+```markdown
+> [!NOTE]
+> Helpful context for the reader.
+
+> [!WARNING]
+> Something the reader should be careful about.
+
+> [!TIP]
+> A useful suggestion.
+```
+
+**Callout mapping** (GitHub → Fern):
+
+| GitHub Syntax | Fern Component |
+|---|---|
+| `> [!NOTE]` | `<Note>` |
+| `> [!TIP]` | `<Tip>` |
+| `> [!IMPORTANT]` | `<Info>` |
+| `> [!WARNING]` | `<Warning>` |
+| `> [!CAUTION]` | `<Error>` |
+
+Reference images from `docs/assets/`:
+```markdown
+![Diagram](../assets/my-diagram.png)
+```
+
+### 5. Validate
+
+```bash
+cd docs
+ln -sf . fern  # symlink required by Fern CLI
+fern check
+fern docs broken-links
+```
+
+### 6. Commit
+
+```bash
+git add docs/pages/<subdirectory>/<filename>.md docs/versions/dev.yml
+git commit -s -m "docs: add <page-title> page"
+```
+
+## Key References
+
+| File | Purpose |
+|------|---------|
+| `docs/versions/dev.yml` | Navigation tree — add entries here |
+| `docs/pages/` | Content directory — create pages here |
+| `docs/assets/` | Images, SVGs, fonts |
+| `docs/convert_callouts.py` | Callout conversion rules (GitHub → Fern) |
+| `docs/pages/development/fern-website.md` | Full architecture guide |
