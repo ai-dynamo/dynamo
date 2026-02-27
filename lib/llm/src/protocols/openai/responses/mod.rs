@@ -719,18 +719,18 @@ pub fn chat_completion_to_response(
         }
 
         // Map reasoning_content to a Reasoning output item
-        if let Some(reasoning_text) = choice.message.reasoning_content {
-            if !reasoning_text.is_empty() {
-                output.push(OutputItem::Reasoning(ReasoningItem {
-                    id: format!("rs_{}", Uuid::new_v4().simple()),
-                    summary: vec![SummaryPart::SummaryText(Summary {
-                        text: reasoning_text,
-                    })],
-                    content: None,
-                    encrypted_content: None,
-                    status: Some(OutputStatus::Completed),
-                }));
-            }
+        if let Some(reasoning_text) = choice.message.reasoning_content
+            && !reasoning_text.is_empty()
+        {
+            output.push(OutputItem::Reasoning(ReasoningItem {
+                id: format!("rs_{}", Uuid::new_v4().simple()),
+                summary: vec![SummaryPart::SummaryText(Summary {
+                    text: reasoning_text,
+                })],
+                content: None,
+                encrypted_content: None,
+                status: Some(OutputStatus::Completed),
+            }));
         }
 
         // Handle text content -- also parse <tool_call> blocks from models
