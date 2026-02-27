@@ -25,9 +25,9 @@ import semver "github.com/Masterminds/semver/v3"
 var (
 	// VLLMMultiprocessing gates the use of vLLM native multiprocessing (mp)
 	// instead of Ray for multi-node deployments. Enabled for DGDs originally
-	// created by operator >= 1.0.0-dev.
+	// created by operator >= 1.0.0.
 	VLLMMultiprocessing = OperatorOriginFeatureGate{
 		Name:             "VLLMMultiprocessing",
-		MinOriginVersion: *semver.MustParse("1.0.0-dev"),
+		MinOriginVersion: *semver.MustParse("1.0.0"),
 	}
 )

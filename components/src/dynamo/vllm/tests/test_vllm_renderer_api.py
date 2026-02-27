@@ -144,7 +144,6 @@ class TestVllmRendererApi:
             "role",
             "content",
             "reasoning",
-            "reasoning_content",
             "tool_calls",
         }
         actual_fields = set(DeltaMessage.model_fields)
@@ -358,7 +357,7 @@ class TestVllmRendererApi:
         position. vllm_processor.py constructs EngineCoreOutput by keyword
         and reads fields from EngineCoreRequest positionally.
         """
-        expected_request_fields = (
+        base_request_fields = (
             "request_id",
             "prompt_token_ids",
             "mm_features",
@@ -376,12 +375,17 @@ class TestVllmRendererApi:
             "trace_headers",
             "resumable",
             "external_req_id",
+            "reasoning_ended",
         )
+        # vllm-omni monkey-patches EngineCoreRequest with an extra field
+        # (only installed on amd64, not arm64)
+        omni_fields = base_request_fields + ("additional_information",)
         actual_request_fields = EngineCoreRequest.__struct_fields__
-        assert actual_request_fields == expected_request_fields, (
+        assert actual_request_fields in (base_request_fields, omni_fields), (
             "EngineCoreRequest fields changed!\n"
-            f"Expected: {expected_request_fields}\n"
-            f"Actual:   {actual_request_fields}\n"
+            f"Expected (base): {base_request_fields}\n"
+            f"Expected (omni): {omni_fields}\n"
+            f"Actual:          {actual_request_fields}\n"
             "Update request construction in components/src/dynamo/frontend/vllm_processor.py"
         )
 
@@ -397,6 +401,7 @@ class TestVllmRendererApi:
             "kv_transfer_params",
             "trace_headers",
             "num_cached_tokens",
+            "num_external_computed_tokens",
             "routed_experts",
             "num_nans_in_logits",
         )

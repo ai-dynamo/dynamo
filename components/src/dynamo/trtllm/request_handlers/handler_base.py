@@ -17,6 +17,7 @@ import asyncio
 import dataclasses
 import logging
 import os
+import re
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
 from typing import Any, AsyncGenerator, Optional, Union
@@ -802,13 +803,24 @@ class HandlerBase(BaseGenerativeHandler):
                         )
 
                     # Log metrics to TensorRT-LLM MetricsCollector when request finishes
+                    # NOTE: TRT-LLM 1.3.0rc5 (PR #11243) renamed log_metrics_dict → log_request_metrics_dict
                     if (
                         res.finished
                         and self.metrics_collector
                         and hasattr(res, "metrics_dict")
                     ):
                         try:
-                            self.metrics_collector.log_metrics_dict(res.metrics_dict)
+                            if hasattr(
+                                self.metrics_collector,
+                                "log_request_metrics_dict",
+                            ):
+                                self.metrics_collector.log_request_metrics_dict(
+                                    res.metrics_dict
+                                )
+                            else:
+                                self.metrics_collector.log_metrics_dict(
+                                    res.metrics_dict
+                                )
                         except Exception as e:
                             logging.warning(f"Failed to log TensorRT-LLM metrics: {e}")
 
@@ -865,9 +877,19 @@ class HandlerBase(BaseGenerativeHandler):
         # doesn't know about (e.g. Rust's "backend"/"choice" vs TRT-LLM's fields).
         guided_decoding = overrides.pop("guided_decoding", None)
         if guided_decoding is not None and isinstance(guided_decoding, dict):
+            # TRT-LLM's GuidedDecodingParams doesn't have a "choice" field.
+            # Convert choice list to a regex pattern: (choice1|choice2|...)
+            # This matches the approach used by vLLM's outlines backend.
+            regex = guided_decoding.get("regex")
+            choice = guided_decoding.get("choice")
+            if choice and not regex:
+                valid_choices = [c for c in choice if c is not None]
+                if valid_choices:
+                    regex = "(" + "|".join(re.escape(c) for c in valid_choices) + ")"
+
             overrides["guided_decoding"] = GuidedDecodingParams(
                 json=guided_decoding.get("json"),
-                regex=guided_decoding.get("regex"),
+                regex=regex,
                 grammar=guided_decoding.get("grammar"),
                 json_object=guided_decoding.get("json_object", False),
                 structural_tag=guided_decoding.get("structural_tag"),

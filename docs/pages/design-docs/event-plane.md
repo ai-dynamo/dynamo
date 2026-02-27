@@ -4,8 +4,6 @@
 title: Event Plane
 ---
 
-# Dynamo Event Plane
-
 The event plane provides Dynamo with a pub/sub layer for near real-time event exchange between components. It delivers KV cache updates, worker load metrics, and sequence tracking events, enabling features like KV-aware routing and disaggregated serving.
 
 ## When Is the Event Plane Used?
@@ -45,11 +43,11 @@ export DYN_EVENT_PLANE=zmq
 Python components also accept this as a CLI flag:
 
 ```bash
-# vLLM backend
-python3 -m dynamo.vllm --event-plane zmq --model Qwen/Qwen3-0.6B
-
 # SGLang backend
 python3 -m dynamo.sglang --event-plane zmq --model Qwen/Qwen3-0.6B
+
+# vLLM backend
+python3 -m dynamo.vllm --event-plane zmq --model Qwen/Qwen3-0.6B
 ```
 
 ### Environment Variables

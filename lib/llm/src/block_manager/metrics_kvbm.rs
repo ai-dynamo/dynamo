@@ -183,6 +183,7 @@ impl KvbmMetrics {
         let (_route_docs, app): (Vec<RouteDoc>, Router) = router(
             (*registry).clone(), // take owned Registry (Clone) for router to wrap in Arc
             None,                // or Some("/metrics".to_string()) to override the path
+            None,                // no DRT metrics for standalone KVBM server
         );
 
         let run_server = async move {

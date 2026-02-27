@@ -16,6 +16,10 @@
 # This is a YAML-formatted file.
 # Declare variables to be passed into your templates.
 
+# Whether to manage CRDs via a pre-install/pre-upgrade hook Job.
+# The Job runs the operator image with the crd-apply tool to apply CRDs via server-side apply.
+upgradeCRD: true
+
 # Namespace restriction configuration for the operator
 # If enabled: true and targetNamespace is empty, the operator will be restricted to the release namespace
 # If enabled: true and targetNamespace is set, the operator will be restricted to the specified namespace
@@ -77,11 +81,6 @@ controllerManager:
         cpu: 5m
         memory: 64Mi
   manager:
-    args:
-    - --health-probe-bind-address=:8081
-    - --metrics-bind-address=127.0.0.1:8080
-    - --leader-elect
-    - --leader-election-id=dynamo.nvidia.com
     containerSecurityContext:
       allowPrivilegeEscalation: false
       capabilities:

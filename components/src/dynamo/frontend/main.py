@@ -193,6 +193,7 @@ async def async_main():
             router_prune_target_ratio=config.router_prune_target_ratio,
             router_queue_threshold=config.router_queue_threshold,
             router_event_threads=config.router_event_threads,
+            router_enable_cache_control=config.router_enable_cache_control,
         )
     elif config.router_mode == "random":
         router_mode = RouterMode.Random
@@ -210,7 +211,7 @@ async def async_main():
         active_decode_blocks_threshold=config.active_decode_blocks_threshold,
         active_prefill_tokens_threshold=config.active_prefill_tokens_threshold,
         active_prefill_tokens_threshold_frac=config.active_prefill_tokens_threshold_frac,
-        enforce_disagg=config.enforce_disagg,
+        decode_fallback=config.decode_fallback,
     )
     kwargs = {
         "http_host": config.http_host,

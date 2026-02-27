@@ -4,8 +4,6 @@
 title: GPT-OSS
 ---
 
-# Running gpt-oss-120b Disaggregated with vLLM
-
 Dynamo supports disaggregated serving of gpt-oss-120b with vLLM. This guide demonstrates how to deploy gpt-oss-120b using disaggregated prefill/decode serving on a single H100 node with 8 GPUs, running 1 prefill worker on 4 GPUs and 1 decode worker on 4 GPUs.
 
 ## Overview
@@ -17,7 +15,7 @@ This deployment uses disaggregated serving in vLLM where:
 
 ## Prerequisites
 
-This guide assumes readers already knows how to deploy Dynamo disaggregated serving with vLLM as illustrated in [README.md](README.md)
+This guide assumes readers already knows how to deploy Dynamo disaggregated serving with vLLM as illustrated in [the vLLM Backend guide](README.md)
 
 ## Instructions
 
@@ -46,7 +44,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3  python -m dynamo.vllm \
 CUDA_VISIBLE_DEVICES=4,5,6,7  python -m dynamo.vllm \
   --model openai/gpt-oss-120b \
   --tensor-parallel-size 4 \
-  --is-prefill-worker \
+  --disaggregation-mode prefill \
   --dyn-reasoning-parser gpt_oss \
   --dyn-tool-call-parser harmony
 ```

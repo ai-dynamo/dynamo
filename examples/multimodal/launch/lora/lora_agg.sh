@@ -140,13 +140,11 @@ echo "Starting vLLM worker..."
 
 # --enable-lora: Enable LoRA adapter support in vLLM engine
 # --max-lora-rank: Maximum LoRA rank (increase if your adapters have higher rank)
-# --connector none: No KV transfer needed for aggregated serving
 CUDA_VISIBLE_DEVICES="$GPU_DEVICE" \
 DYN_SYSTEM_PORT="$SYSTEM_PORT" \
     python -m dynamo.vllm \
         --enable-multimodal \
         --model "$MODEL_NAME" \
-        --connector none \
         --enable-lora \
         --max-lora-rank "$MAX_LORA_RANK" \
         "${MODEL_SPECIFIC_ARGS[@]}" \

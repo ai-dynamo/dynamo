@@ -4,8 +4,6 @@
 title: Deployment Guide
 ---
 
-# Deploying Dynamo on Kubernetes
-
 High-level guide to Dynamo Kubernetes deployments. Start here, then dive into specific guides.
 
 ## Important Terminology
@@ -55,18 +53,17 @@ This validates kubectl connectivity, StorageClass configuration, and GPU availab
 export NAMESPACE=dynamo-system
 export RELEASE_VERSION=0.x.x # any version of Dynamo 0.3.2+ listed at https://github.com/ai-dynamo/dynamo/releases
 
-# 2. Install CRDs (skip if on shared cluster where CRDs already exist)
-helm fetch https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-crds-${RELEASE_VERSION}.tgz
-helm install dynamo-crds dynamo-crds-${RELEASE_VERSION}.tgz --namespace default
-
-# 3. Install Platform
+# 2. Install Platform (CRDs are automatically installed by the chart)
 helm fetch https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-${RELEASE_VERSION}.tgz
 helm install dynamo-platform dynamo-platform-${RELEASE_VERSION}.tgz --namespace ${NAMESPACE} --create-namespace
 ```
 
+> [!WARNING]
+> **v0.9.0 Helm Chart Issue:** The initial v0.9.0 `dynamo-platform` Helm chart sets the operator image to v0.7.1 instead of v0.9.0. Use `RELEASE_VERSION=0.9.0-post1` or add `--set dynamo-operator.controllerManager.manager.image.tag=0.9.0` to your helm install command.
+
 **For Shared/Multi-Tenant Clusters:**
 
-If your cluster has namespace-restricted Dynamo operators, add this flag to step 3:
+If your cluster has namespace-restricted Dynamo operators, add this flag to step 2:
 ```bash
 --set dynamo-operator.namespaceRestriction.enabled=true
 ```
@@ -223,7 +220,7 @@ Key customization points include:
 - **Resource Allocation**: Configure GPU requirements under `resources.limits`
 - **Scaling**: Set `replicas` for number of worker instances
 - **Routing Mode**: Enable KV-cache routing by setting `DYN_ROUTER_MODE=kv` in Frontend envs
-- **Worker Specialization**: Add `--is-prefill-worker` flag for disaggregated prefill workers
+- **Worker Specialization**: Add `--disaggregation-mode prefill` flag for disaggregated prefill workers
 
 ## Additional Resources
 

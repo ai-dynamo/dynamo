@@ -10,6 +10,13 @@ import pytest
 
 from dynamo.vllm.worker_factory import EngineSetupResult, WorkerFactory
 
+pytestmark = [
+    pytest.mark.unit,
+    pytest.mark.vllm,
+    pytest.mark.gpu_1,
+    pytest.mark.pre_merge,
+]
+
 
 def _make_config(**overrides) -> Mock:
     """Create a mock Config with all multimodal flags defaulting to False."""
@@ -71,7 +78,7 @@ class TestCreate:
         config = _make_config(multimodal_encode_worker=True)
         shutdown_event = asyncio.Event()
 
-        await factory.create(Mock(), config, shutdown_event)
+        await factory.create(Mock(), config, shutdown_event, [])
 
         factory._create_multimodal_encode_worker.assert_called_once()  # type: ignore[union-attr]
 
@@ -80,7 +87,7 @@ class TestCreate:
         config = _make_config(multimodal_worker=True)
         shutdown_event = asyncio.Event()
 
-        await factory.create(Mock(), config, shutdown_event)
+        await factory.create(Mock(), config, shutdown_event, [])
 
         factory._create_multimodal_worker.assert_called_once()  # type: ignore[union-attr]
 
@@ -91,16 +98,19 @@ class TestCreate:
         config = _make_config(multimodal_decode_worker=True)
         shutdown_event = asyncio.Event()
 
-        await factory.create(Mock(), config, shutdown_event)
+        await factory.create(Mock(), config, shutdown_event, [])
 
         factory._create_multimodal_worker.assert_called_once()  # type: ignore[union-attr]
 
     @pytest.mark.asyncio
-    async def test_passes_pre_created_engine(self, factory: WorkerFactory) -> None:
+    async def test_passes_checkpoint_restore_engine(
+        self, factory: WorkerFactory
+    ) -> None:
         config = _make_config(multimodal_worker=True)
         runtime = Mock()
         shutdown_event = asyncio.Event()
-        pre_created_engine: EngineSetupResult = (
+        shutdown_endpoints: list = []
+        checkpoint_restore_engine: EngineSetupResult = (
             Mock(),
             Mock(),
             Mock(),
@@ -109,15 +119,23 @@ class TestCreate:
         )
 
         await factory.create(
-            runtime, config, shutdown_event, pre_created_engine=pre_created_engine
+            runtime,
+            config,
+            shutdown_event,
+            shutdown_endpoints,
+            checkpoint_restore_engine=checkpoint_restore_engine,
         )
 
         factory._create_multimodal_worker.assert_called_once_with(  # type: ignore[union-attr]
-            runtime, config, shutdown_event, pre_created_engine=pre_created_engine
+            runtime,
+            config,
+            shutdown_event,
+            shutdown_endpoints,
+            checkpoint_restore_engine=checkpoint_restore_engine,
         )
 
     @pytest.mark.asyncio
     async def test_raises_when_no_multimodal_flag(self, factory: WorkerFactory) -> None:
         config = _make_config()
         with pytest.raises(ValueError, match="no multimodal worker type set"):
-            await factory.create(Mock(), config, asyncio.Event())
+            await factory.create(Mock(), config, asyncio.Event(), [])

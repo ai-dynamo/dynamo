@@ -4,8 +4,6 @@
 title: Router Examples
 ---
 
-# Router Examples
-
 For quick start instructions, see the [Router README](README.md). This document provides further examples for using the Dynamo Router, including Python API usage, Kubernetes deployments, and custom routing patterns.
 
 ## Table of Contents
@@ -53,14 +51,14 @@ python -m dynamo.vllm --model meta-llama/Llama-2-7b-hf
 
 ```python
 import asyncio
-from dynamollm import DistributedRuntime, KvRouter, KvRouterConfig
+from dynamo.runtime import DistributedRuntime
+from dynamo.llm import KvRouter, KvRouterConfig
 
 async def main():
     # Get runtime and create endpoint
-    runtime = DistributedRuntime.detached()
-    namespace = runtime.namespace("dynamo")
-    component = namespace.component("backend")
-    endpoint = component.endpoint("generate")
+    loop = asyncio.get_running_loop()
+    runtime = DistributedRuntime(loop, "etcd", "nats")
+    endpoint = runtime.endpoint("dynamo.backend.generate")
 
     # Create KV router
     kv_router_config = KvRouterConfig()
@@ -195,9 +193,12 @@ Query without state updates, then route through a chosen router:
 worker_id_1, dp_rank, overlap_1 = await router_1.best_worker(tokens)  # No request_id
 worker_id_2, dp_rank, overlap_2 = await router_2.best_worker(tokens)
 
-# Pick the best router based on results
-chosen_router = router_1 if overlap_1 > overlap_2 else router_2
-stream = await chosen_router.generate(tokens, model="model-name", worker_id=worker_id)
+# Pick the best router and corresponding worker based on results
+if overlap_1 > overlap_2:
+    chosen_router, chosen_worker = router_1, worker_id_1
+else:
+    chosen_router, chosen_worker = router_2, worker_id_2
+stream = await chosen_router.generate(tokens, model="model-name", worker_id=chosen_worker)
 ```
 - **Best for**: Multi-tier deployments (e.g., Envoy Gateway routing to multiple router groups)
 - **Advantage**: Query multiple routers before committing to one
@@ -222,14 +223,14 @@ Here's an example of using `get_potential_loads()` to implement custom routing t
 
 ```python
 import asyncio
-from dynamo.llm import DistributedRuntime, KvRouter, KvRouterConfig
+from dynamo.runtime import DistributedRuntime
+from dynamo.llm import KvRouter, KvRouterConfig
 
 async def minimize_ttft_routing():
     # Setup router
-    runtime = DistributedRuntime.detached()
-    namespace = runtime.namespace("dynamo")
-    component = namespace.component("backend")
-    endpoint = component.endpoint("generate")
+    loop = asyncio.get_running_loop()
+    runtime = DistributedRuntime(loop, "etcd", "nats")
+    endpoint = runtime.endpoint("dynamo.backend.generate")
 
     router = KvRouter(
         endpoint=endpoint,
@@ -279,7 +280,7 @@ See [Router Design](../../design-docs/router-design.md) for architecture details
 For full documentation on implementing KV event publishing for custom inference engines, see the dedicated [KV Event Publishing for Custom Engines](../../integrations/kv-events-custom-engines.md) guide. It covers:
 
 - **Direct publishing**: Call `publish_stored()` / `publish_removed()` to push events over the Dynamo event plane
-- **ZMQ relay**: For engines that emit raw KV events over ZMQ (like vLLM and SGLang), the same `KvEventPublisher` subscribes to the ZMQ socket and relays events automatically
+- **ZMQ relay**: For engines that emit raw KV events over ZMQ (like SGLang and vLLM), the same `KvEventPublisher` subscribes to the ZMQ socket and relays events automatically
 - API reference, event structure, ZMQ wire format, and best practices
 
 ## Global Router (Hierarchical Routing)

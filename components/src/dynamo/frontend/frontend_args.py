@@ -64,7 +64,8 @@ class FrontendConfig(ConfigBase):
     router_track_output_blocks: bool
     router_event_threads: int
     router_queue_threshold: Optional[float]
-    enforce_disagg: bool
+    router_enable_cache_control: bool
+    decode_fallback: bool
 
     migration_limit: int
     active_decode_blocks_threshold: Optional[float]
@@ -95,6 +96,8 @@ class FrontendConfig(ConfigBase):
             raise ValueError(
                 "--migration-limit must be between 0 and 4294967295 (0=disabled)"
             )
+        if self.router_enable_cache_control and self.router_mode != "kv":
+            raise ValueError("--enable-cache-control requires --router-mode=kv")
 
 
 @register_encoder(FrontendConfig)
@@ -306,10 +309,9 @@ class FrontendArgGroup(ArgGroup):
             env_var="DYN_ROUTER_DURABLE_KV_EVENTS",
             default=False,
             help=(
-                "KV Router: Enable durable KV events using NATS JetStream instead of NATS Core. "
-                "By default, the router uses the generic event plane (NATS Core or ZMQ) with "
-                "local_indexer mode. Use this flag when you need durability and multi-replica "
-                "consistency. Requires NATS with JetStream enabled."
+                "[Deprecated] KV Router: Enable durable KV events using NATS JetStream. "
+                "This option will be removed in a future release. The event-plane subscriber "
+                "(local_indexer mode) is now the recommended path."
             ),
             dest="durable_kv_events",
             obsolete_flag="--durable-kv-events",
@@ -376,12 +378,26 @@ class FrontendArgGroup(ArgGroup):
         )
         add_negatable_bool_argument(
             g,
-            flag_name="--enforce-disagg",
-            env_var="DYN_ENFORCE_DISAGG",
+            flag_name="--enable-cache-control",
+            env_var="DYN_ENABLE_CACHE_CONTROL",
             default=False,
+            dest="router_enable_cache_control",
             help=(
-                "Enforce disaggregated prefill-decode. When set, unactivated prefill router will "
-                "return an error instead of falling back to decode-only mode."
+                "KV Router: Enable cache control (PIN with TTL). When set, the router creates "
+                "a cache_control service mesh client and fires pin_prefix after generation for "
+                "requests with nvext.cache_control. Requires --router-mode=kv."
+            ),
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--decode-fallback",
+            env_var="DYN_DECODE_FALLBACK",
+            default=False,
+            dest="decode_fallback",
+            help=(
+                "Allow falling back to decode-only (aggregated) mode when prefill workers are "
+                "unavailable. By default, disaggregated prefill-decode is enforced and requests "
+                "fail if no prefill workers are found."
             ),
         )
 

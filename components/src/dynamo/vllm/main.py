@@ -52,8 +52,9 @@ from dynamo.runtime import DistributedRuntime, Endpoint
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.vllm.worker_factory import WorkerFactory
 
-from .args import Config, parse_args
+from .args import Config, _uses_dynamo_connector, parse_args
 from .checkpoint_restore import get_checkpoint_config
+from .constants import DisaggregationMode
 from .handlers import DecodeWorkerHandler, PrefillWorkerHandler
 from .health_check import (
     VllmHealthCheckPayload,
@@ -146,15 +147,15 @@ async def worker():
 
     # CHECKPOINT MODE: Load engine BEFORE runtime creation
     # This allows checkpointing GPU state before runtime connections are established
-    pre_created_engine = None
+    checkpoint_restore_engine = None
     if checkpoint_cfg is not None:
         logger.info("Checkpoint mode enabled (watcher-driven signals)")
 
         # Checkpoint mode requires sleep mode — enable before engine init
         config.engine_args.enable_sleep_mode = True
 
-        pre_created_engine = setup_vllm_engine(config)
-        engine_client = pre_created_engine[0]
+        checkpoint_restore_engine = setup_vllm_engine(config)
+        engine_client = checkpoint_restore_engine[0]
 
         if not await checkpoint_cfg.run_lifecycle(
             engine_client, CHECKPOINT_SLEEP_MODE_LEVEL
@@ -184,20 +185,26 @@ async def worker():
             config,
             shutdown_event,
             shutdown_endpoints,
-            pre_created_engine=pre_created_engine,
+            checkpoint_restore_engine=checkpoint_restore_engine,
         )
         logger.debug("multimodal worker completed")
     elif config.omni:
         await init_omni(runtime, config, shutdown_event)
         logger.debug("init_omni completed")
-    elif config.is_prefill_worker:
+    elif config.disaggregation_mode == DisaggregationMode.PREFILL:
         await init_prefill(
-            runtime, config, shutdown_event, pre_created_engine=pre_created_engine
+            runtime,
+            config,
+            shutdown_event,
+            checkpoint_restore_engine=checkpoint_restore_engine,
         )
         logger.debug("init_prefill completed")
     else:
         await init(
-            runtime, config, shutdown_event, pre_created_engine=pre_created_engine
+            runtime,
+            config,
+            shutdown_event,
+            checkpoint_restore_engine=checkpoint_restore_engine,
         )
         logger.debug("init completed")
 
@@ -318,7 +325,7 @@ def setup_kv_event_publisher(
         return None
 
     # Skip KV event publishing for decode workers
-    if config.is_decode_worker:
+    if config.disaggregation_mode == DisaggregationMode.DECODE:
         logger.info("Skipping KV event publisher setup for decode worker")
         return None
 
@@ -435,13 +442,39 @@ def setup_vllm_engine(config, stat_logger=None):
         engine_args.create_model_config().get_diff_sampling_param()
     )
 
+    # Configure ec_both mode with DynamoMultimodalEmbeddingCacheConnector.
+    # Must happen BEFORE engine setup so vLLM sees ec_transfer_config.
+    if (
+        not config.route_to_encoder
+        and config.multimodal_embedding_cache_capacity_gb > 0
+    ):
+        from vllm.config import ECTransferConfig
+
+        logger.info(
+            "Configuring ec_both mode with DynamoMultimodalEmbeddingCacheConnector "
+            "(capacity=%.2f GB)",
+            config.multimodal_embedding_cache_capacity_gb,
+        )
+        instance_id = 0
+        engine_id = f"{config.namespace}.{config.component}.backend.{instance_id}"
+        engine_args.ec_transfer_config = ECTransferConfig(
+            engine_id=engine_id,
+            ec_role="ec_both",
+            ec_connector="DynamoMultimodalEmbeddingCacheConnector",
+            ec_connector_module_path="dynamo.vllm.multimodal_utils.multimodal_embedding_cache_connector",
+            ec_connector_extra_config={
+                "multimodal_embedding_cache_capacity_gb": config.multimodal_embedding_cache_capacity_gb,
+            },
+        )
+        logger.info("Configured ec_both with engine_id=%s", engine_id)
+
     # Taken from build_async_engine_client_from_engine_args()
     usage_context = UsageContext.OPENAI_API_SERVER
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
 
-    # Set up consolidator endpoints if KVBM is enabled
+    # Set up consolidator endpoints if KVBM (DynamoConnector) is enabled
     consolidator_endpoints = None
-    if config.has_connector("kvbm"):
+    if _uses_dynamo_connector(config.engine_args):
         try:
             from kvbm.vllm_integration.consolidator_config import (
                 get_consolidator_endpoints,
@@ -454,7 +487,9 @@ def setup_vllm_engine(config, stat_logger=None):
                 "Continuing without KV event consolidation. "
                 "Ensure 'kvbm' package is installed if this feature is needed."
             )
-    vllm_config.consolidator_endpoints = consolidator_endpoints
+    # Store consolidator endpoints in additional_config (vLLM 0.16+ uses strict
+    # dataclass fields; monkey-patching attributes onto VllmConfig is no longer safe).
+    vllm_config.additional_config["consolidator_endpoints"] = consolidator_endpoints
 
     factory = []
     if stat_logger:
@@ -516,7 +551,8 @@ async def register_vllm_model(
     runtime_config.max_num_batched_tokens = runtime_values["max_num_batched_tokens"]
     # Decode workers don't create the WorkerKvQuery endpoint, so don't advertise local indexer
     runtime_config.enable_local_indexer = (
-        config.enable_local_indexer and not config.is_decode_worker
+        config.enable_local_indexer
+        and config.disaggregation_mode != DisaggregationMode.DECODE
     )
 
     # Add tool/reasoning parsers for decode models
@@ -564,7 +600,7 @@ async def init_prefill(
     runtime: DistributedRuntime,
     config: Config,
     shutdown_event: asyncio.Event,
-    pre_created_engine=None,
+    checkpoint_restore_engine=None,
 ):
     """
     Instantiate and serve
@@ -577,14 +613,14 @@ async def init_prefill(
     )
 
     # Use pre-created engine if provided (checkpoint mode), otherwise create new
-    if pre_created_engine is not None:
+    if checkpoint_restore_engine is not None:
         (
             engine_client,
             vllm_config,
             default_sampling_params,
             prometheus_temp_dir,
             _component_gauges,
-        ) = pre_created_engine
+        ) = checkpoint_restore_engine
     else:
         (
             engine_client,
@@ -612,13 +648,11 @@ async def init_prefill(
     consolidator_enabled = False
     consolidator_port = None
 
-    if (
-        hasattr(vllm_config, "consolidator_endpoints")
-        and vllm_config.consolidator_endpoints
-    ):
+    _consolidator_eps = vllm_config.additional_config.get("consolidator_endpoints")
+    if _consolidator_eps:
         # Extract connect endpoint (third element) for clients to subscribe
         # consolidator_endpoints = (vllm_endpoint, bind_endpoint, connect_endpoint)
-        consolidator_output_endpoint = vllm_config.consolidator_endpoints[2]
+        consolidator_output_endpoint = _consolidator_eps[2]
         consolidator_port = int(consolidator_output_endpoint.split(":")[-1])
         consolidator_enabled = True
 
@@ -706,7 +740,7 @@ async def init(
     runtime: DistributedRuntime,
     config: Config,
     shutdown_event: asyncio.Event,
-    pre_created_engine=None,
+    checkpoint_restore_engine=None,
 ):
     """
     Instantiate and serve
@@ -745,14 +779,14 @@ async def init(
         )
 
     # Use pre-created engine if provided (checkpoint mode), otherwise create new
-    if pre_created_engine is not None:
+    if checkpoint_restore_engine is not None:
         (
             engine_client,
             vllm_config,
             default_sampling_params,
             prometheus_temp_dir,
             component_gauges,
-        ) = pre_created_engine
+        ) = checkpoint_restore_engine
         # Factory is created after unpack so component_gauges is available
         factory = StatLoggerFactory(
             endpoint=generate_endpoint,
@@ -797,13 +831,11 @@ async def init(
     consolidator_enabled = False
     consolidator_port = None
 
-    if (
-        hasattr(vllm_config, "consolidator_endpoints")
-        and vllm_config.consolidator_endpoints
-    ):
+    _consolidator_eps = vllm_config.additional_config.get("consolidator_endpoints")
+    if _consolidator_eps:
         # Extract connect endpoint (third element) for clients to subscribe
         # consolidator_endpoints = (vllm_endpoint, bind_endpoint, connect_endpoint)
-        consolidator_output_endpoint = vllm_config.consolidator_endpoints[2]
+        consolidator_output_endpoint = _consolidator_eps[2]
         consolidator_port = int(consolidator_output_endpoint.split(":")[-1])
         consolidator_enabled = True
 
