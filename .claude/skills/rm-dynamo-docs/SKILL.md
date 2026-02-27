@@ -30,25 +30,25 @@ Must be in the `dynamo` repo (not `dynamo-tpm`). Architecture details: `docs/REA
 ### 1. Identify the Page
 
 Ask for the page to remove (accepts any of):
-- File path (e.g., `docs/pages/guides/old-page.md`)
+- File path (e.g., `docs/guides/old-page.md`)
 - Page title (e.g., "Old Page")
 - Topic keyword to search for
 
 If given a title or keyword, search for the page:
 ```bash
 # Search by title in navigation
-grep -n "<title>" docs/versions/dev.yml
+grep -n "<title>" docs/index.yml
 
 # Search by keyword in content
-grep -rl "<keyword>" docs/pages/
+grep -rl "<keyword>" docs/
 ```
 
 ### 2. Find the Navigation Entry
 
-Locate the page's entry in `docs/versions/dev.yml`:
+Locate the page's entry in `docs/index.yml`:
 
 ```bash
-grep -n "<filename>" docs/versions/dev.yml
+grep -n "<filename>" docs/index.yml
 ```
 
 Note the exact `- page:` block and its indentation level. If the page is the
@@ -60,10 +60,10 @@ Search for references to this page from other docs:
 
 ```bash
 # Search for the filename across all docs pages
-grep -r "<filename>" docs/pages/ --include="*.md"
+grep -r "<filename>" docs/ --include="*.md"
 
 # Also check the navigation file for any cross-references
-grep -r "<filename>" docs/versions/
+grep -r "<filename>" docs/
 ```
 
 Report any files that link to the page being removed — these links will break
@@ -72,12 +72,12 @@ and need updating.
 ### 4. Remove the Markdown File
 
 ```bash
-git rm docs/pages/<subdirectory>/<filename>.md
+git rm docs/<subdirectory>/<filename>.md
 ```
 
 ### 5. Remove the Navigation Entry
 
-Edit `docs/versions/dev.yml` and delete the `- page:` block (and its `path:`
+Edit `docs/index.yml` and delete the `- page:` block (and its `path:`
 line). If this was the last page in a section, remove the entire `- section:`
 block.
 
@@ -91,8 +91,6 @@ For each file that linked to the removed page:
 ### 7. Validate
 
 ```bash
-cd docs
-ln -sf . fern  # symlink required by Fern CLI
 fern check
 fern docs broken-links
 ```
@@ -100,7 +98,6 @@ fern docs broken-links
 ### 8. Preview Locally (Optional)
 
 ```bash
-cd docs
 fern docs dev
 ```
 
@@ -117,18 +114,18 @@ git commit -s -m "docs: remove <page-title> page"
 
 ### `fern check` fails
 
-- **Orphaned nav entry:** You deleted the file but left the `- page:` entry in `dev.yml`. Remove it.
-- **Empty section:** If the removed page was the only entry in a section, delete the entire `- section:` block from `dev.yml`.
+- **Orphaned nav entry:** You deleted the file but left the `- page:` entry in `index.yml`. Remove it.
+- **Empty section:** If the removed page was the only entry in a section, delete the entire `- section:` block from `index.yml`.
 
 ### `fern docs broken-links` reports errors
 
-- **Incoming links to removed page:** Other pages still link to the deleted file. Search with `grep -r "<filename>" docs/pages/` and update or remove those links.
+- **Incoming links to removed page:** Other pages still link to the deleted file. Search with `grep -r "<filename>" docs/` and update or remove those links.
 
 ### CI fails after merge
 
 - **MDX parse error:** Angle-bracket URLs like `<https://example.com>` break MDX parsing. Use `[text](https://example.com)` instead.
 - **Broken links check:** The `detect_broken_links.py` job found pages that still reference the removed file. Fix all incoming links before merging.
-- **Fern publish error:** Check the Actions tab for the `Fern Docs` workflow. Common causes: expired `FERN_TOKEN`, invalid `docs.yml` syntax.
+- **Fern publish error:** Check the Actions tab for the `Fern Docs` workflow. Common causes: expired `FERN_TOKEN`, invalid `fern/docs.yml` syntax.
 
 ### Page still appears on the live site
 
@@ -139,6 +136,7 @@ git commit -s -m "docs: remove <page-title> page"
 
 | File | Purpose |
 |------|---------|
-| `docs/versions/dev.yml` | Navigation tree — remove entries here |
-| `docs/pages/` | Content directory — delete pages here |
+| `docs/index.yml` | Navigation tree — remove entries here |
+| `docs/` | Content directory — delete pages here |
+| `fern/docs.yml` | Fern site configuration |
 | `docs/README.md` | Full architecture guide |
