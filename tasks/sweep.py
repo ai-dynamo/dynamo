@@ -435,10 +435,11 @@ def main():
         help="Worker counts to sweep (default depends on backend)",
     )
     parser.add_argument(
-        "--concurrency",
+        "--concurrencies",
+        nargs="+",
         type=int,
         default=None,
-        help="Fixed concurrency level (default depends on backend)",
+        help="Concurrency levels to sweep (default depends on backend)",
     )
     parser.add_argument(
         "--model",
@@ -455,8 +456,8 @@ def main():
 
     # Apply backend-specific defaults
     is_vllm = args.backend == "vllm"
-    if args.concurrency is None:
-        args.concurrency = VLLM_CONCURRENCY if is_vllm else MOCKER_CONCURRENCY
+    if args.concurrencies is None:
+        args.concurrencies = [VLLM_CONCURRENCY] if is_vllm else [MOCKER_CONCURRENCY]
     if args.num_requests_list is None:
         args.num_requests_list = VLLM_NUM_REQUESTS if is_vllm else MOCKER_NUM_REQUESTS
     if args.mocker_counts is None:
@@ -466,23 +467,25 @@ def main():
     selected_commits = {k: v for k, v in COMMITS.items() if k in args.commits}
     mocker_counts = sorted(args.mocker_counts)
     num_requests_list = sorted(args.num_requests_list)
+    concurrencies = sorted(args.concurrencies)
 
     total_runs = (
         len(selected_commits)
         * len(selected_profiles)
         * len(mocker_counts)
+        * len(concurrencies)
         * len(num_requests_list)
     )
     print(
         f"Sweep plan: {len(selected_commits)} commits x {len(selected_profiles)} profiles "
-        f"x {len(mocker_counts)} worker-counts x {len(num_requests_list)} num-requests "
-        f"= {total_runs} runs"
+        f"x {len(mocker_counts)} worker-counts x {len(concurrencies)} concurrencies "
+        f"x {len(num_requests_list)} num-requests = {total_runs} runs"
     )
     print(f"  Backend:        {args.backend}")
     print(f"  Model:          {args.model}")
     print(f"  Commits:        {list(selected_commits.keys())}")
     print(f"  Profiles:       {[p.name for p in selected_profiles]}")
-    print(f"  Concurrency:    {args.concurrency} (fixed)")
+    print(f"  Concurrencies:  {concurrencies}")
     print(f"  Worker counts:  {mocker_counts}")
     print(f"  Num requests:   {num_requests_list}")
     print(
@@ -500,13 +503,14 @@ def main():
         for commit_name in selected_commits:
             for nm in mocker_counts:
                 for profile in selected_profiles:
-                    for nr in num_requests_list:
-                        print(
-                            f"  [{commit_name} ({resolved_shas[commit_name]})] "
-                            f"mockers={nm} {profile.name} "
-                            f"isl={profile.isl} osl={profile.osl} "
-                            f"concurrency={args.concurrency} num_requests={nr}"
-                        )
+                    for conc in concurrencies:
+                        for nr in num_requests_list:
+                            print(
+                                f"  [{commit_name} ({resolved_shas[commit_name]})] "
+                                f"mockers={nm} {profile.name} "
+                                f"isl={profile.isl} osl={profile.osl} "
+                                f"concurrency={conc} num_requests={nr}"
+                            )
         return
 
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -565,52 +569,53 @@ def main():
                     start_mocker_services(nm)
 
                 for profile in selected_profiles:
-                    for nr in num_requests_list:
-                        run_idx += 1
-                        print(
-                            f"\n--- Run {run_idx}/{total_runs}: "
-                            f"[{commit_name}] {profile.name} "
-                            f"mockers={nm} num_requests={nr:,} "
-                            f"concurrency={args.concurrency} ---"
-                        )
-
-                        metrics = run_aiperf(profile, args.concurrency, nr)
-
-                        row = {
-                            "backend": args.backend,
-                            "commit_name": commit_name,
-                            "commit_sha": sha,
-                            "profile": profile.name,
-                            "isl": profile.isl,
-                            "osl": profile.osl,
-                            "concurrency": args.concurrency,
-                            "num_mockers": nm,
-                            "num_requests": nr,
-                        }
-                        if metrics:
-                            row.update(metrics)
+                    for conc in concurrencies:
+                        for nr in num_requests_list:
+                            run_idx += 1
                             print(
-                                f"    -> {metrics.get('req_per_sec', 'N/A')} req/s, "
-                                f"{metrics.get('output_tok_per_sec', 'N/A')} tok/s, "
-                                f"p99={metrics.get('req_latency_ms_p99', 'N/A')}ms, "
-                                f"ttft_p99={metrics.get('ttft_ms_p99', 'N/A')}ms, "
-                                f"itl_p99={metrics.get('itl_ms_p99', 'N/A')}ms, "
-                                f"{metrics.get('duration_sec', 'N/A')}s"
+                                f"\n--- Run {run_idx}/{total_runs}: "
+                                f"[{commit_name}] {profile.name} "
+                                f"mockers={nm} num_requests={nr:,} "
+                                f"concurrency={conc:,} ---"
                             )
-                        else:
-                            print("    -> NO RESULTS")
 
-                        results.append(row)
+                            metrics = run_aiperf(profile, conc, nr)
 
-                        # Write incrementally so partial results are saved
-                        with open(csv_path, "w", newline="") as f:
-                            writer = csv.DictWriter(
-                                f, fieldnames=fieldnames, extrasaction="ignore"
-                            )
-                            writer.writeheader()
-                            writer.writerows(results)
+                            row = {
+                                "backend": args.backend,
+                                "commit_name": commit_name,
+                                "commit_sha": sha,
+                                "profile": profile.name,
+                                "isl": profile.isl,
+                                "osl": profile.osl,
+                                "concurrency": conc,
+                                "num_mockers": nm,
+                                "num_requests": nr,
+                            }
+                            if metrics:
+                                row.update(metrics)
+                                print(
+                                    f"    -> {metrics.get('req_per_sec', 'N/A')} req/s, "
+                                    f"{metrics.get('output_tok_per_sec', 'N/A')} tok/s, "
+                                    f"p99={metrics.get('req_latency_ms_p99', 'N/A')}ms, "
+                                    f"ttft_p99={metrics.get('ttft_ms_p99', 'N/A')}ms, "
+                                    f"itl_p99={metrics.get('itl_ms_p99', 'N/A')}ms, "
+                                    f"{metrics.get('duration_sec', 'N/A')}s"
+                                )
+                            else:
+                                print("    -> NO RESULTS")
 
-                        time.sleep(COOLDOWN_SECS)
+                            results.append(row)
+
+                            # Write incrementally so partial results are saved
+                            with open(csv_path, "w", newline="") as f:
+                                writer = csv.DictWriter(
+                                    f, fieldnames=fieldnames, extrasaction="ignore"
+                                )
+                                writer.writeheader()
+                                writer.writerows(results)
+
+                            time.sleep(COOLDOWN_SECS)
 
                 kill_services()
 
@@ -630,8 +635,9 @@ def main():
 
 
 def print_summary_table(results: list[dict]):
-    """Print mockers x num_requests matrix with req/s, tok/s, p99 columns."""
+    """Print concurrency x num_requests matrix with req/s, tok/s, p99 columns."""
     mocker_counts = sorted(set(r["num_mockers"] for r in results))
+    concurrencies = sorted(set(r["concurrency"] for r in results))
     num_requests_list = sorted(set(r["num_requests"] for r in results))
 
     # Column widths
@@ -639,42 +645,48 @@ def print_summary_table(results: list[dict]):
 
     print()
     print("── Results Matrix ─────────────────────────────────────────────────────")
-    header = f"{'Mockers':>8}  {'NumReq':>8}  "
+    header = f"{'Mockers':>8}  {'Conc':>8}  {'NumReq':>8}  "
     header += f"{'req/s':>{W}}  {'comp_rps':>{W}}  {'tok/s':>{W}}  {'p99_ms':>{W}}  {'ttft_p99':>{W}}  {'itl_p99':>{W}}  {'dur_sec':>{W}}"
     print(header)
     print("-" * len(header))
 
     for nm in mocker_counts:
-        for nr in num_requests_list:
-            rows = [
-                r for r in results if r["num_mockers"] == nm and r["num_requests"] == nr
-            ]
-            if not rows:
-                continue
-            # Average across profiles (usually just one)
-            r = rows[0]
-            rps = r.get("req_per_sec", None)
-            comp_rps = r.get("computed_req_per_sec", None)
-            toks = r.get("output_tok_per_sec", None)
-            p99 = r.get("req_latency_ms_p99", None)
-            ttft_p99 = r.get("ttft_ms_p99", None)
-            itl_p99 = r.get("itl_ms_p99", None)
-            dur = r.get("duration_sec", None)
+        for conc in concurrencies:
+            for nr in num_requests_list:
+                rows = [
+                    r
+                    for r in results
+                    if r["num_mockers"] == nm
+                    and r["concurrency"] == conc
+                    and r["num_requests"] == nr
+                ]
+                if not rows:
+                    continue
+                r = rows[0]
+                rps = r.get("req_per_sec", None)
+                comp_rps = r.get("computed_req_per_sec", None)
+                toks = r.get("output_tok_per_sec", None)
+                p99 = r.get("req_latency_ms_p99", None)
+                ttft_p99 = r.get("ttft_ms_p99", None)
+                itl_p99 = r.get("itl_ms_p99", None)
+                dur = r.get("duration_sec", None)
 
-            rps_s = f"{rps:>{W}.1f}" if rps is not None else f"{'N/A':>{W}}"
-            comp_rps_s = (
-                f"{comp_rps:>{W}.1f}" if comp_rps is not None else f"{'N/A':>{W}}"
-            )
-            toks_s = f"{toks:>{W}.1f}" if toks is not None else f"{'N/A':>{W}}"
-            p99_s = f"{p99:>{W}.1f}" if p99 is not None else f"{'N/A':>{W}}"
-            ttft_s = f"{ttft_p99:>{W}.1f}" if ttft_p99 is not None else f"{'N/A':>{W}}"
-            itl_s = f"{itl_p99:>{W}.1f}" if itl_p99 is not None else f"{'N/A':>{W}}"
-            dur_s = f"{dur:>{W}.2f}" if dur is not None else f"{'N/A':>{W}}"
+                rps_s = f"{rps:>{W}.1f}" if rps is not None else f"{'N/A':>{W}}"
+                comp_rps_s = (
+                    f"{comp_rps:>{W}.1f}" if comp_rps is not None else f"{'N/A':>{W}}"
+                )
+                toks_s = f"{toks:>{W}.1f}" if toks is not None else f"{'N/A':>{W}}"
+                p99_s = f"{p99:>{W}.1f}" if p99 is not None else f"{'N/A':>{W}}"
+                ttft_s = (
+                    f"{ttft_p99:>{W}.1f}" if ttft_p99 is not None else f"{'N/A':>{W}}"
+                )
+                itl_s = f"{itl_p99:>{W}.1f}" if itl_p99 is not None else f"{'N/A':>{W}}"
+                dur_s = f"{dur:>{W}.2f}" if dur is not None else f"{'N/A':>{W}}"
 
-            print(
-                f"{nm:>8}  {nr:>8,}  {rps_s}  {comp_rps_s}  {toks_s}  {p99_s}  {ttft_s}  {itl_s}  {dur_s}"
-            )
-        print()  # blank line between mocker groups
+                print(
+                    f"{nm:>8}  {conc:>8,}  {nr:>8,}  {rps_s}  {comp_rps_s}  {toks_s}  {p99_s}  {ttft_s}  {itl_s}  {dur_s}"
+                )
+            print()  # blank line between concurrency groups
 
 
 def print_saturation_analysis(results: list[dict]):
