@@ -2342,6 +2342,17 @@ dependencies = [
 
 [[package]]
 name = "dynamo-config"
+<<<<<<< HEAD
+=======
+version = "0.9.0"
+source = "git+https://github.com/ai-dynamo/dynamo?branch=ryan%2Fkvbm-physical-testing#5eac239633e3f02b8bbff108ca4a41c6fc341c27"
+dependencies = [
+ "anyhow",
+]
+
+[[package]]
+name = "dynamo-config"
+>>>>>>> a13379e77c (kvbm: rename kvbm-distributed to kvbm-engine, add testing module)
 version = "1.0.0"
 dependencies = [
  "anyhow",
@@ -2376,9 +2387,13 @@ dependencies = [
  "tokio-util",
  "tracing",
  "uuid",
+<<<<<<< HEAD
  "validator",
  "xxhash-rust",
  "zmq",
+=======
+ "xxhash-rust",
+>>>>>>> a13379e77c (kvbm: rename kvbm-distributed to kvbm-engine, add testing module)
 ]
 
 [[package]]
@@ -2479,6 +2494,27 @@ dependencies = [
  "validator",
  "video-rs",
  "xxhash-rust",
+<<<<<<< HEAD
+=======
+ "zeromq",
+]
+
+[[package]]
+name = "dynamo-memory"
+version = "0.9.0"
+source = "git+https://github.com/ai-dynamo/dynamo?branch=ryan%2Fkvbm-physical-testing#5eac239633e3f02b8bbff108ca4a41c6fc341c27"
+dependencies = [
+ "anyhow",
+ "cudarc",
+ "dynamo-config 0.9.0",
+ "libc",
+ "nix 0.30.1",
+ "nixl-sys",
+ "offset-allocator",
+ "serde",
+ "thiserror 2.0.18",
+ "tracing",
+>>>>>>> a13379e77c (kvbm: rename kvbm-distributed to kvbm-engine, add testing module)
 ]
 
 [[package]]
@@ -2635,6 +2671,25 @@ dependencies = [
  "uuid",
  "validator",
  "xxhash-rust",
+<<<<<<< HEAD
+=======
+ "zmq",
+]
+
+[[package]]
+name = "dynamo-tokens"
+version = "0.9.0"
+source = "git+https://github.com/ai-dynamo/dynamo?branch=ryan%2Fkvbm-physical-testing#5eac239633e3f02b8bbff108ca4a41c6fc341c27"
+dependencies = [
+ "bs58",
+ "bytemuck",
+ "dashmap 6.1.0",
+ "derive-getters",
+ "serde",
+ "thiserror 2.0.18",
+ "uuid",
+ "xxhash-rust",
+>>>>>>> a13379e77c (kvbm: rename kvbm-distributed to kvbm-engine, add testing module)
 ]
 
 [[package]]
@@ -4454,7 +4509,12 @@ dependencies = [
 
 [[package]]
 name = "kvbm-common"
+<<<<<<< HEAD
 version = "1.0.0"
+=======
+version = "0.9.0"
+source = "git+https://github.com/ai-dynamo/dynamo?branch=ryan%2Fkvbm-physical-testing#5eac239633e3f02b8bbff108ca4a41c6fc341c27"
+>>>>>>> a13379e77c (kvbm: rename kvbm-distributed to kvbm-engine, add testing module)
 dependencies = [
  "dynamo-tokens",
  "serde",
@@ -4465,7 +4525,11 @@ name = "kvbm-config"
 version = "1.0.0"
 dependencies = [
  "anyhow",
+<<<<<<< HEAD
  "dynamo-memory",
+=======
+ "dynamo-memory 1.0.0",
+>>>>>>> a13379e77c (kvbm: rename kvbm-distributed to kvbm-engine, add testing module)
  "figment",
  "nix 0.30.1",
  "nvtx",
@@ -4478,11 +4542,20 @@ dependencies = [
  "tracing",
  "validator",
  "velo",
+<<<<<<< HEAD
+=======
+ "velo-backend",
+ "velo-discovery",
+>>>>>>> a13379e77c (kvbm: rename kvbm-distributed to kvbm-engine, add testing module)
 ]
 
 [[package]]
 name = "kvbm-engine"
+<<<<<<< HEAD
 version = "1.0.0"
+=======
+version = "0.9.0"
+>>>>>>> a13379e77c (kvbm: rename kvbm-distributed to kvbm-engine, add testing module)
 dependencies = [
  "anyhow",
  "async-nats",
@@ -4495,13 +4568,23 @@ dependencies = [
  "cudarc",
  "dashmap",
  "derive_builder",
+<<<<<<< HEAD
  "dynamo-memory",
  "figment",
+=======
+ "dynamo-memory 1.0.0",
+ "dynamo-tokens 1.0.0",
+>>>>>>> a13379e77c (kvbm: rename kvbm-distributed to kvbm-engine, add testing module)
  "flume 0.11.1",
  "futures",
  "kvbm-common",
  "kvbm-config",
+<<<<<<< HEAD
  "kvbm-logical",
+=======
+ "kvbm-kernels 0.9.0",
+ "kvbm-logical 0.9.0",
+>>>>>>> a13379e77c (kvbm: rename kvbm-distributed to kvbm-engine, add testing module)
  "kvbm-physical",
  "libc",
  "nvtx",
@@ -4518,10 +4601,22 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "velo",
+ "velo-backend",
 ]
 
 [[package]]
 name = "kvbm-kernels"
+<<<<<<< HEAD
+=======
+version = "0.9.0"
+source = "git+https://github.com/ai-dynamo/dynamo?branch=ryan%2Fkvbm-physical-testing#5eac239633e3f02b8bbff108ca4a41c6fc341c27"
+dependencies = [
+ "cudarc",
+]
+
+[[package]]
+name = "kvbm-kernels"
+>>>>>>> a13379e77c (kvbm: rename kvbm-distributed to kvbm-engine, add testing module)
 version = "1.0.0"
 dependencies = [
  "clap 4.6.0",
@@ -4533,6 +4628,33 @@ dependencies = [
 
 [[package]]
 name = "kvbm-logical"
+<<<<<<< HEAD
+=======
+version = "0.9.0"
+source = "git+https://github.com/ai-dynamo/dynamo?branch=ryan%2Fkvbm-physical-testing#5eac239633e3f02b8bbff108ca4a41c6fc341c27"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "bytes",
+ "derive_builder",
+ "dynamo-tokens 0.9.0",
+ "futures",
+ "lru 0.16.3",
+ "parking_lot",
+ "prometheus",
+ "rmp-serde",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+ "xxhash-rust",
+]
+
+[[package]]
+name = "kvbm-logical"
+>>>>>>> a13379e77c (kvbm: rename kvbm-distributed to kvbm-engine, add testing module)
 version = "1.0.0"
 dependencies = [
  "anyhow",
@@ -4563,7 +4685,12 @@ dependencies = [
 
 [[package]]
 name = "kvbm-physical"
+<<<<<<< HEAD
 version = "1.0.0"
+=======
+version = "0.9.0"
+source = "git+https://github.com/ai-dynamo/dynamo?branch=ryan%2Fkvbm-physical-testing#5eac239633e3f02b8bbff108ca4a41c6fc341c27"
+>>>>>>> a13379e77c (kvbm: rename kvbm-distributed to kvbm-engine, add testing module)
 dependencies = [
  "aligned-vec",
  "anyhow",
