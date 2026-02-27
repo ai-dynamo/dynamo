@@ -327,10 +327,10 @@ pub trait ObjectLockManager: Send + Sync {
 /// required feature is not enabled.
 #[cfg(feature = "s3")]
 pub async fn create_object_client(
-    config: &dynamo_kvbm_config::ObjectConfig,
+    config: &kvbm_config::ObjectConfig,
     rank: Option<usize>,
 ) -> Result<Arc<dyn ObjectBlockOps>> {
-    use dynamo_kvbm_config::ObjectClientConfig;
+    use kvbm_config::ObjectClientConfig;
     use s3::{S3Config, S3ObjectBlockClient};
 
     let key_formatter = create_key_formatter(rank);
@@ -350,7 +350,7 @@ pub async fn create_object_client(
 /// Fallback when S3 feature is disabled.
 #[cfg(not(feature = "s3"))]
 pub async fn create_object_client(
-    _config: &dynamo_kvbm_config::ObjectConfig,
+    _config: &kvbm_config::ObjectConfig,
     _rank: Option<usize>,
 ) -> Result<Arc<dyn ObjectBlockOps>> {
     anyhow::bail!("Object storage requires the 's3' feature to be enabled")
@@ -369,10 +369,10 @@ pub async fn create_object_client(
 /// required feature is not enabled.
 #[cfg(feature = "s3")]
 pub async fn create_lock_manager(
-    config: &dynamo_kvbm_config::ObjectConfig,
+    config: &kvbm_config::ObjectConfig,
     instance_id: String,
 ) -> Result<Arc<dyn ObjectLockManager>> {
-    use dynamo_kvbm_config::ObjectClientConfig;
+    use kvbm_config::ObjectClientConfig;
     use s3::{S3Config, S3LockManager, S3ObjectBlockClient};
 
     match &config.client {
@@ -392,7 +392,7 @@ pub async fn create_lock_manager(
 /// Fallback when S3 feature is disabled.
 #[cfg(not(feature = "s3"))]
 pub async fn create_lock_manager(
-    _config: &dynamo_kvbm_config::ObjectConfig,
+    _config: &kvbm_config::ObjectConfig,
     _instance_id: String,
 ) -> Result<Arc<dyn ObjectLockManager>> {
     anyhow::bail!("Object storage requires the 's3' feature to be enabled")

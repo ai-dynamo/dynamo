@@ -28,7 +28,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use anyhow::Result;
-use dynamo_kvbm_config::{PolicyType, TierOffloadConfig};
+use kvbm_config::{PolicyType, TierOffloadConfig};
 use futures::future::Either;
 
 use crate::{BlockId, SequenceHash};
@@ -974,7 +974,7 @@ impl<T: BlockMetadata> OffloadPolicy<T> for PassAllPolicy<T> {
 /// # Example
 ///
 /// ```ignore
-/// use dynamo_kvbm_config::offload::TierOffloadConfig;
+/// use kvbm_config::offload::TierOffloadConfig;
 ///
 /// let tracker = Arc::new(PendingTracker::new());
 /// let config = TierOffloadConfig {

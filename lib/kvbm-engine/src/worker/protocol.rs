@@ -175,14 +175,14 @@ pub struct LeaderLayoutConfig {
     /// When present, workers should instantiate object clients for storing
     /// blocks in external object storage (S3/MinIO).
     #[serde(default)]
-    pub object: Option<dynamo_kvbm_config::ObjectConfig>,
+    pub object: Option<kvbm_config::ObjectConfig>,
 
     /// Parallelism mode for this worker.
     ///
     /// When `ReplicatedData` and rank > 0, the worker skips G2/G3 creation
     /// since only rank 0 has host/disk storage in replicated mode.
     #[serde(default)]
-    pub parallelism: dynamo_kvbm_config::ParallelismMode,
+    pub parallelism: kvbm_config::ParallelismMode,
 }
 
 /// Worker's response after configuring additional layouts (G2, G3).

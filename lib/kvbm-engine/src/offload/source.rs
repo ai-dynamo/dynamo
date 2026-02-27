@@ -231,8 +231,8 @@ impl<T: BlockMetadata> From<SourceBlock<T>> for SourceBlocks<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::KvbmSequenceHashProvider;
-    use dynamo_tokens::TokenBlockSequence;
+    use kvbm_common::tokens::TokenBlockSequence;
+    use kvbm_logical::KvbmSequenceHashProvider;
 
     /// Create a test sequence hash at a given position.
     fn test_seq_hash(position: usize) -> SequenceHash {

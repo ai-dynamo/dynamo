@@ -38,8 +38,8 @@ pub use builder::{KvbmRuntimeBuilder, RuntimeHandle};
 
 use std::sync::Arc;
 
-use dynamo_kvbm_config::KvbmConfig;
 use dynamo_memory::nixl::NixlAgent;
+use kvbm_config::KvbmConfig;
 use tokio::runtime::Handle;
 use velo::Messenger;
 

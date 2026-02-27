@@ -29,4 +29,7 @@ pub mod runtime;
 pub mod worker;
 pub mod workers;
 
+#[cfg(any(test, feature = "testing"))]
+pub mod testing;
+
 pub use runtime::{KvbmRuntime, KvbmRuntimeBuilder, RuntimeHandle};

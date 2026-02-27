@@ -6,8 +6,8 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use dynamo_kvbm_config::KvbmConfig;
 use dynamo_memory::nixl::NixlAgent;
+use kvbm_config::KvbmConfig;
 use tokio::runtime::{Handle, Runtime};
 use velo::Messenger;
 
@@ -53,7 +53,7 @@ impl KvbmRuntimeBuilder {
     }
 
     /// Create builder from environment.
-    pub fn from_env() -> Result<Self, dynamo_kvbm_config::ConfigError> {
+    pub fn from_env() -> Result<Self, kvbm_config::ConfigError> {
         Ok(Self::new(KvbmConfig::from_env()?))
     }
 
@@ -61,7 +61,7 @@ impl KvbmRuntimeBuilder {
     ///
     /// JSON has highest priority - overrides env vars, TOML files, and defaults.
     /// This is the primary entrypoint for vLLM's `kv_connector_extra_config` dict.
-    pub fn from_json(json: &str) -> Result<Self, dynamo_kvbm_config::ConfigError> {
+    pub fn from_json(json: &str) -> Result<Self, kvbm_config::ConfigError> {
         Ok(Self::new(KvbmConfig::from_figment_with_json(json)?))
     }
 

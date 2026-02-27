@@ -2374,7 +2374,7 @@ dependencies = [
 [[package]]
 name = "dynamo-config"
 version = "0.9.0"
-source = "git+https://github.com/ai-dynamo/dynamo?branch=ryan%2Fkvbm-physical#0e1eaf9c4c8ab8542bb538e700de8d368dfc216e"
+source = "git+https://github.com/ai-dynamo/dynamo?branch=ryan%2Fkvbm-physical-testing#5eac239633e3f02b8bbff108ca4a41c6fc341c27"
 dependencies = [
  "anyhow",
 ]
@@ -2417,28 +2417,6 @@ dependencies = [
  "tracing",
  "uuid",
  "xxhash-rust",
-]
-
-[[package]]
-name = "dynamo-kvbm-config"
-version = "1.0.0"
-dependencies = [
- "anyhow",
- "dynamo-memory 1.0.0",
- "figment",
- "nix 0.30.1",
- "nvtx",
- "rayon",
- "serde",
- "serde_json",
- "temp-env",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "validator",
- "velo",
- "velo-backend",
- "velo-discovery",
 ]
 
 [[package]]
@@ -2544,7 +2522,7 @@ dependencies = [
 [[package]]
 name = "dynamo-memory"
 version = "0.9.0"
-source = "git+https://github.com/ai-dynamo/dynamo?branch=ryan%2Fkvbm-physical#0e1eaf9c4c8ab8542bb538e700de8d368dfc216e"
+source = "git+https://github.com/ai-dynamo/dynamo?branch=ryan%2Fkvbm-physical-testing#5eac239633e3f02b8bbff108ca4a41c6fc341c27"
 dependencies = [
  "anyhow",
  "cudarc",
@@ -2696,7 +2674,7 @@ dependencies = [
 [[package]]
 name = "dynamo-tokens"
 version = "0.9.0"
-source = "git+https://github.com/ai-dynamo/dynamo?branch=ryan%2Fkvbm-physical#0e1eaf9c4c8ab8542bb538e700de8d368dfc216e"
+source = "git+https://github.com/ai-dynamo/dynamo?branch=ryan%2Fkvbm-physical-testing#5eac239633e3f02b8bbff108ca4a41c6fc341c27"
 dependencies = [
  "bs58",
  "bytemuck",
@@ -4546,14 +4524,36 @@ dependencies = [
 [[package]]
 name = "kvbm-common"
 version = "0.9.0"
-source = "git+https://github.com/ai-dynamo/dynamo?branch=ryan%2Fkvbm-physical#0e1eaf9c4c8ab8542bb538e700de8d368dfc216e"
+source = "git+https://github.com/ai-dynamo/dynamo?branch=ryan%2Fkvbm-physical-testing#5eac239633e3f02b8bbff108ca4a41c6fc341c27"
 dependencies = [
  "dynamo-tokens 0.9.0",
  "serde",
 ]
 
 [[package]]
-name = "kvbm-distributed"
+name = "kvbm-config"
+version = "1.0.0"
+dependencies = [
+ "anyhow",
+ "dynamo-memory 1.0.0",
+ "figment",
+ "nix 0.30.1",
+ "nvtx",
+ "rayon",
+ "serde",
+ "serde_json",
+ "temp-env",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "validator",
+ "velo",
+ "velo-backend",
+ "velo-discovery",
+]
+
+[[package]]
+name = "kvbm-engine"
 version = "0.9.0"
 dependencies = [
  "anyhow",
@@ -4570,12 +4570,12 @@ dependencies = [
  "dashmap 6.1.0",
  "derive-getters",
  "derive_builder",
- "dynamo-kvbm-config",
  "dynamo-memory 1.0.0",
  "dynamo-tokens 1.0.0",
  "flume 0.11.1",
  "futures",
  "kvbm-common",
+ "kvbm-config",
  "kvbm-kernels 0.9.0",
  "kvbm-logical 0.9.0",
  "kvbm-physical",
@@ -4595,12 +4595,13 @@ dependencies = [
  "tracing",
  "uuid",
  "velo",
+ "velo-backend",
 ]
 
 [[package]]
 name = "kvbm-kernels"
 version = "0.9.0"
-source = "git+https://github.com/ai-dynamo/dynamo?branch=ryan%2Fkvbm-physical#0e1eaf9c4c8ab8542bb538e700de8d368dfc216e"
+source = "git+https://github.com/ai-dynamo/dynamo?branch=ryan%2Fkvbm-physical-testing#5eac239633e3f02b8bbff108ca4a41c6fc341c27"
 dependencies = [
  "cudarc",
 ]
@@ -4619,7 +4620,7 @@ dependencies = [
 [[package]]
 name = "kvbm-logical"
 version = "0.9.0"
-source = "git+https://github.com/ai-dynamo/dynamo?branch=ryan%2Fkvbm-physical#0e1eaf9c4c8ab8542bb538e700de8d368dfc216e"
+source = "git+https://github.com/ai-dynamo/dynamo?branch=ryan%2Fkvbm-physical-testing#5eac239633e3f02b8bbff108ca4a41c6fc341c27"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -4669,7 +4670,7 @@ dependencies = [
 [[package]]
 name = "kvbm-physical"
 version = "0.9.0"
-source = "git+https://github.com/ai-dynamo/dynamo?branch=ryan%2Fkvbm-physical#0e1eaf9c4c8ab8542bb538e700de8d368dfc216e"
+source = "git+https://github.com/ai-dynamo/dynamo?branch=ryan%2Fkvbm-physical-testing#5eac239633e3f02b8bbff108ca4a41c6fc341c27"
 dependencies = [
  "aligned-vec",
  "anyhow",

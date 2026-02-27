@@ -78,7 +78,7 @@ impl S3Config {
     }
 
     /// Create from kvbm-config's S3ObjectConfig.
-    pub fn from_object_config(config: &dynamo_kvbm_config::S3ObjectConfig) -> Self {
+    pub fn from_object_config(config: &kvbm_config::S3ObjectConfig) -> Self {
         Self {
             endpoint_url: config.endpoint_url.clone(),
             bucket: config.bucket.clone(),
