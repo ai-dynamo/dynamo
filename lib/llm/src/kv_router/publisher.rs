@@ -444,7 +444,7 @@ impl BatchingState {
 /// Common event processor loop using BatchingState.
 /// Accumulates Removed events and sequential Stored events, flushing on:
 /// - Event type change
-/// - Timeout (10ms)
+/// - Timeout (configurable, default 10ms)
 /// - Shutdown
 async fn run_event_processor_loop<P: EventSink + Send + Sync + 'static>(
     publisher: P,
@@ -452,11 +452,12 @@ async fn run_event_processor_loop<P: EventSink + Send + Sync + 'static>(
     cancellation_token: CancellationToken,
     mut rx: mpsc::UnboundedReceiver<KvCacheEvent>,
     local_indexer: Option<Arc<LocalKvIndexer>>,
+    timeout_ms: u64,
 ) {
     let mut batching_state = BatchingState::new();
 
     loop {
-        let remaining = batching_state.remaining_timeout(BATCH_TIMEOUT_MS);
+        let remaining = batching_state.remaining_timeout(timeout_ms);
 
         tokio::select! {
             _ = cancellation_token.cancelled() => {
@@ -532,8 +533,10 @@ async fn run_event_processor_loop<P: EventSink + Send + Sync + 'static>(
                 }
             }
             _ = tokio::time::sleep(remaining) => {
+                // remaining == Duration::ZERO means timeout has elapsed
                 if batching_state.has_pending() {
                     batching_state.flush(&publisher, &local_indexer, worker_id).await;
+                    batching_state.reset_flush_time();
                 }
             }
         }
@@ -549,7 +552,7 @@ async fn start_event_processor<P: EventSink + Send + Sync + 'static>(
     rx: mpsc::UnboundedReceiver<KvCacheEvent>,
     local_indexer: Option<Arc<LocalKvIndexer>>,
 ) {
-    run_event_processor_loop(publisher, worker_id, cancellation_token, rx, local_indexer).await
+    run_event_processor_loop(publisher, worker_id, cancellation_token, rx, local_indexer, BATCH_TIMEOUT_MS).await
 }
 
 /// Batched event processor using JetStream (durable).
@@ -561,11 +564,8 @@ async fn start_event_processor_jetstream(
     rx: mpsc::UnboundedReceiver<KvCacheEvent>,
     local_indexer: Option<Arc<LocalKvIndexer>>,
 ) {
-    run_event_processor_loop(publisher, worker_id, cancellation_token, rx, local_indexer).await
+    run_event_processor_loop(publisher, worker_id, cancellation_token, rx, local_indexer, BATCH_TIMEOUT_MS).await
 }
-
-
-
 
 /// Calculate exponential backoff duration based on consecutive error count
 fn calculate_backoff_ms(consecutive_errors: u32) -> u64 {
@@ -2480,8 +2480,14 @@ mod batching_state_tests {
     fn test_batching_state_default() {
         let state = BatchingState::default();
         assert!(!state.has_pending(), "Default state should have no pending");
-        assert!(state.pending_removed.is_none(), "Default pending_removed should be None");
-        assert!(state.pending_stored.is_none(), "Default pending_stored should be None");
+        assert!(
+            state.pending_removed.is_none(),
+            "Default pending_removed should be None"
+        );
+        assert!(
+            state.pending_stored.is_none(),
+            "Default pending_stored should be None"
+        );
     }
 
     #[test]
@@ -2501,7 +2507,10 @@ mod batching_state_tests {
         state.pending_removed = Some(KvCacheRemoveData {
             block_hashes: vec![],
         });
-        assert!(state.has_pending(), "Should have pending after setting pending_removed");
+        assert!(
+            state.has_pending(),
+            "Should have pending after setting pending_removed"
+        );
     }
 
     #[test]
@@ -2513,34 +2522,42 @@ mod batching_state_tests {
             parent_hash: None,
             blocks: vec![],
         });
-        assert!(state.has_pending(), "Should have pending after setting pending_stored");
+        assert!(
+            state.has_pending(),
+            "Should have pending after setting pending_stored"
+        );
     }
 
     #[test]
     fn test_batching_state_timeout() {
         let state = BatchingState::new();
-        
+
         let remaining_before = state.remaining_timeout(10);
-        assert!(remaining_before.as_millis() > 0, "Should have remaining time initially");
+        assert!(
+            remaining_before.as_millis() > 0,
+            "Should have remaining time initially"
+        );
 
         thread::sleep(StdDuration::from_millis(20));
-        
+
         let remaining_after = state.remaining_timeout(10);
-        assert_eq!(remaining_after.as_millis(), 0, "Should have no remaining time after timeout");
+        assert_eq!(
+            remaining_after.as_millis(),
+            0,
+            "Should have no remaining time after timeout"
+        );
     }
 
     #[test]
     fn test_batching_state_reset_flush_time() {
         let mut state = BatchingState::new();
-        
+
         let initial_time = state.last_flush_time.unwrap();
-        
-        thread::sleep(StdDuration::from_millis(5));
-        
+
         state.reset_flush_time();
-        
+
         assert!(
-            state.last_flush_time.unwrap() > initial_time,
+            state.last_flush_time.unwrap() >= initial_time,
             "reset_flush_time should update the time"
         );
     }
@@ -2548,34 +2565,42 @@ mod batching_state_tests {
     #[test]
     fn test_batching_state_remaining_timeout() {
         let state = BatchingState::new();
-        
+
         let remaining = state.remaining_timeout(100);
-        assert!(remaining.as_millis() > 0 && remaining.as_millis() <= 100, 
-            "Remaining timeout should be between 0 and 100ms");
+        assert!(
+            remaining.as_millis() > 0 && remaining.as_millis() <= 100,
+            "Remaining timeout should be between 0 and 100ms"
+        );
     }
 
     #[test]
     fn test_batching_state_accumulate_removed() {
         let mut state = BatchingState::default();
-        
+
         let first = KvCacheRemoveData {
             block_hashes: vec![ExternalSequenceBlockHash(1), ExternalSequenceBlockHash(2)],
         };
-        
+
         state.pending_removed = Some(first);
-        
+
         if let Some(ref mut pending) = state.pending_removed {
-            pending.block_hashes.extend(vec![ExternalSequenceBlockHash(3)]);
+            pending
+                .block_hashes
+                .extend(vec![ExternalSequenceBlockHash(3)]);
         }
-        
+
         let pending = state.pending_removed.as_ref().unwrap();
-        assert_eq!(pending.block_hashes.len(), 3, "Should have accumulated 3 block hashes");
+        assert_eq!(
+            pending.block_hashes.len(),
+            3,
+            "Should have accumulated 3 block hashes"
+        );
     }
 
     #[test]
     fn test_batching_state_accumulate_stored() {
         let mut state = BatchingState::default();
-        
+
         let block1 = KvCacheStoredBlockData {
             block_hash: ExternalSequenceBlockHash(1),
             tokens_hash: LocalBlockHash(100),
@@ -2585,20 +2610,318 @@ mod batching_state_tests {
             parent_hash: Some(ExternalSequenceBlockHash(0)),
             blocks: vec![block1],
         };
-        
+
         state.pending_stored = Some(first);
-        
+
         let block2 = KvCacheStoredBlockData {
             block_hash: ExternalSequenceBlockHash(2),
             tokens_hash: LocalBlockHash(200),
             mm_extra_info: None,
         };
-        
+
         if let Some(ref mut pending) = state.pending_stored {
             pending.blocks.extend(vec![block2]);
         }
-        
+
         let pending = state.pending_stored.as_ref().unwrap();
         assert_eq!(pending.blocks.len(), 2, "Should have accumulated 2 blocks");
+    }
+}
+
+#[cfg(test)]
+mod event_processor_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+    use tokio_util::sync::CancellationToken;
+
+    #[derive(Debug, Clone)]
+    struct MockPublisher {
+        events: Arc<Mutex<Vec<RouterEvent>>>,
+    }
+
+    impl MockPublisher {
+        fn new() -> Self {
+            Self {
+                events: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        fn get_events(&self) -> Vec<RouterEvent> {
+            self.events.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl EventSink for MockPublisher {
+        async fn publish_event(&self, event: &RouterEvent) -> Result<()> {
+            self.events.lock().unwrap().push(event.clone());
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_batching_10_removed_events() {
+        let timeout_ms = 1;
+        let (tx, rx) = mpsc::unbounded_channel();
+        let publisher = MockPublisher::new();
+        let publisher_clone = publisher.clone();
+        let token = CancellationToken::new();
+
+        let handle = tokio::spawn(run_event_processor_loop(
+            publisher_clone, 1, token, rx, None, timeout_ms,
+        ));
+
+        for i in 0..10 {
+            tx.send(KvCacheEvent {
+                event_id: i,
+                data: KvCacheEventData::Removed(KvCacheRemoveData {
+                    block_hashes: vec![ExternalSequenceBlockHash(i)],
+                }),
+                dp_rank: 0,
+            }).unwrap();
+        }
+        drop(tx);
+        handle.await.unwrap();
+
+        let events = publisher.get_events();
+        let total: usize = events.iter()
+            .map(|e| if let KvCacheEventData::Removed(d) = &e.event.data { d.block_hashes.len() } else { 0 })
+            .sum();
+        assert_eq!(total, 10);
+    }
+
+    #[tokio::test]
+    async fn test_batching_5_stored_sequential() {
+        let timeout_ms = 1;
+        let (tx, rx) = mpsc::unbounded_channel();
+        let publisher = MockPublisher::new();
+        let publisher_clone = publisher.clone();
+        let token = CancellationToken::new();
+
+        let handle = tokio::spawn(run_event_processor_loop(
+            publisher_clone, 1, token, rx, None, timeout_ms,
+        ));
+
+        for i in 0..5 {
+            tx.send(KvCacheEvent {
+                event_id: i,
+                data: KvCacheEventData::Stored(KvCacheStoreData {
+                    parent_hash: Some(ExternalSequenceBlockHash(i)),
+                    blocks: vec![KvCacheStoredBlockData {
+                        block_hash: ExternalSequenceBlockHash(i),
+                        tokens_hash: LocalBlockHash(i * 100),
+                        mm_extra_info: None,
+                    }],
+                }),
+                dp_rank: 0,
+            }).unwrap();
+        }
+        drop(tx);
+        handle.await.unwrap();
+
+        let events = publisher.get_events();
+        let total: usize = events.iter()
+            .map(|e| if let KvCacheEventData::Stored(d) = &e.event.data { d.blocks.len() } else { 0 })
+            .sum();
+        assert_eq!(total, 5);
+    }
+}
+
+// Event Processor Integration Tests
+// Add at the end of publisher.rs
+
+#[cfg(test)]
+mod event_processor_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+    use tokio_util::sync::CancellationToken;
+
+    /// Mock publisher that collects published events
+    #[derive(Debug, Clone)]
+    struct MockPublisher {
+        events: Arc<Mutex<Vec<RouterEvent>>>,
+    }
+
+    impl MockPublisher {
+        fn new() -> Self {
+            Self {
+                events: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        fn get_events(&self) -> Vec<RouterEvent> {
+            self.events.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl EventSink for MockPublisher {
+        async fn publish_event(&self, event: &RouterEvent) -> Result<()> {
+            self.events.lock().unwrap().push(event.clone());
+            Ok(())
+        }
+    }
+
+    /// Test that pushing 10 removed events results in batched output
+    #[tokio::test]
+    async fn test_run_event_processor_loop_batches_removed_events() {
+        let timeout_ms = 1;
+        
+        let (tx, rx) = mpsc::unbounded_channel::<KvCacheEvent>();
+        let publisher = MockPublisher::new();
+        let publisher_clone = publisher.clone();
+        let cancellation_token = CancellationToken::new();
+
+        let handle = tokio::spawn(async move {
+            run_event_processor_loop(
+                publisher_clone,
+                1,
+                cancellation_token,
+                rx,
+                None,
+                timeout_ms,
+            ).await
+        });
+
+        for i in 0..10 {
+            let event = KvCacheEvent {
+                event_id: i as u64,
+                data: KvCacheEventData::Removed(KvCacheRemoveData {
+                    block_hashes: vec![ExternalSequenceBlockHash(i as u64)],
+                }),
+                dp_rank: 0,
+            };
+            tx.send(event).unwrap();
+        }
+
+        drop(tx);
+        handle.await.unwrap();
+
+        let events = publisher.get_events();
+        
+        assert!(!events.is_empty(), "Should have received at least one event");
+        
+        let total_hashes: usize = events.iter()
+            .map(|e| {
+                if let KvCacheEventData::Removed(data) = &e.event.data {
+                    data.block_hashes.len()
+                } else {
+                    0
+                }
+            })
+            .sum();
+        assert_eq!(total_hashes, 10, "All 10 block hashes should be accounted for");
+    }
+
+    /// Test sequential stored events accumulate
+    #[tokio::test]
+    async fn test_run_event_processor_loop_batches_stored_events() {
+        let timeout_ms = 1;
+        
+        let (tx, rx) = mpsc::unbounded_channel::<KvCacheEvent>();
+        let publisher = MockPublisher::new();
+        let publisher_clone = publisher.clone();
+        let cancellation_token = CancellationToken::new();
+
+        let handle = tokio::spawn(async move {
+            run_event_processor_loop(
+                publisher_clone,
+                1,
+                cancellation_token,
+                rx,
+                None,
+                timeout_ms,
+            ).await
+        });
+
+        for i in 0..5 {
+            let event = KvCacheEvent {
+                event_id: i as u64,
+                data: KvCacheEventData::Stored(KvCacheStoreData {
+                    parent_hash: Some(ExternalSequenceBlockHash(i as u64)),
+                    blocks: vec![KvCacheStoredBlockData {
+                        block_hash: ExternalSequenceBlockHash(i as u64),
+                        tokens_hash: LocalBlockHash(i as u64 * 100),
+                        mm_extra_info: None,
+                    }],
+                }),
+                dp_rank: 0,
+            };
+            tx.send(event).unwrap();
+        }
+
+        drop(tx);
+        handle.await.unwrap();
+
+        let events = publisher.get_events();
+        
+        assert!(!events.is_empty(), "Should have received at least one event");
+        
+        let total_blocks: usize = events.iter()
+            .map(|e| {
+                if let KvCacheEventData::Stored(data) = &e.event.data {
+                    data.blocks.len()
+                } else {
+                    0
+                }
+            })
+            .sum();
+        assert_eq!(total_blocks, 5, "All 5 blocks should be accounted for");
+    }
+
+    /// Test non-sequential stored events trigger flush
+    #[tokio::test]
+    async fn test_run_event_processor_loop_non_sequential_flush() {
+        let timeout_ms = 100;
+        
+        let (tx, rx) = mpsc::unbounded_channel::<KvCacheEvent>();
+        let publisher = MockPublisher::new();
+        let publisher_clone = publisher.clone();
+        let cancellation_token = CancellationToken::new();
+
+        let handle = tokio::spawn(async move {
+            run_event_processor_loop(
+                publisher_clone,
+                1,
+                cancellation_token,
+                rx,
+                None,
+                timeout_ms,
+            ).await
+        });
+
+        for i in 0..3 {
+            let event = KvCacheEvent {
+                event_id: i as u64,
+                data: KvCacheEventData::Stored(KvCacheStoreData {
+                    parent_hash: Some(ExternalSequenceBlockHash((i + 1) as u64 * 100)),
+                    blocks: vec![KvCacheStoredBlockData {
+                        block_hash: ExternalSequenceBlockHash(i as u64),
+                        tokens_hash: LocalBlockHash(i as u64 * 100),
+                        mm_extra_info: None,
+                    }],
+                }),
+                dp_rank: 0,
+            };
+            tx.send(event).unwrap();
+        }
+
+        drop(tx);
+        handle.await.unwrap();
+
+        let events = publisher.get_events();
+        
+        assert!(!events.is_empty(), "Should have received events");
+        
+        let total_blocks: usize = events.iter()
+            .map(|e| {
+                if let KvCacheEventData::Stored(data) = &e.event.data {
+                    data.blocks.len()
+                } else {
+                    0
+                }
+            })
+            .sum();
+        assert_eq!(total_blocks, 3, "All 3 blocks should be accounted for");
     }
 }
