@@ -403,14 +403,6 @@ cd docs
 fern docs dev
 ```
 
-<Note>
-`fern docs dev` requires a valid `FERN_TOKEN` environment variable. Ask a
-maintainer for access, or set it in your shell profile:
-```bash
-export FERN_TOKEN=<your-token>
-```
-</Note>
-
 The local server lets you see exactly how pages will look on the live site,
 including navigation, version dropdowns, and custom styling.
 

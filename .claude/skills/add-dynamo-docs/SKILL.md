@@ -111,7 +111,16 @@ fern check
 fern docs broken-links
 ```
 
-### 6. Commit
+### 6. Preview Locally (Optional)
+
+```bash
+cd docs
+fern docs dev
+```
+
+Opens a local preview at `http://localhost:3000` with hot reload. No token required.
+
+### 7. Commit
 
 ```bash
 git add docs/pages/<subdirectory>/<filename>.md docs/versions/dev.yml
