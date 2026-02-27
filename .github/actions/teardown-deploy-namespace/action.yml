@@ -44,7 +44,11 @@ runs:
         NAMESPACE: ${{ inputs.namespace }}
       run: |
         echo "::group::Uninstall Helm chart"
-        helm uninstall dynamo-platform --namespace $NAMESPACE --timeout 10m
+        if helm status dynamo-platform --namespace $NAMESPACE &>/dev/null; then
+          helm uninstall dynamo-platform --namespace $NAMESPACE --timeout 10m
+        else
+          echo "Helm release dynamo-platform not found, skipping"
+        fi
         echo "::endgroup::"
 
     - name: Delete namespace
