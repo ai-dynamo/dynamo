@@ -24,8 +24,8 @@ pub use scheduling::selector;
 pub use sequences::multi_worker as multi_worker_sequence;
 pub use sequences::single as sequence;
 
-#[cfg(test)]
-pub(crate) mod test_utils;
+#[cfg(any(test, feature = "bench"))]
+pub mod test_utils;
 
 // Re-export key types for convenience
 pub use self::multi_worker_sequence::{

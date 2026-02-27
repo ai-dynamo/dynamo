@@ -212,3 +212,178 @@ impl<P: SequencePublisher + 'static, C: WorkerConfigLike> SchedulerQueue<P, C> {
         true
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use tokio::sync::watch;
+
+    use super::*;
+    use crate::protocols::OverlapScores;
+    use crate::selector::DefaultWorkerSelector;
+    use crate::sequences::ActiveSequencesMultiWorker;
+    use crate::test_utils::{NoopSequencePublisher, SimpleWorkerConfig};
+
+    fn make_queue(
+        num_workers: usize,
+        block_size: u32,
+        isl: usize,
+        threshold_frac: Option<f64>,
+    ) -> (
+        Arc<SchedulerQueue<NoopSequencePublisher, SimpleWorkerConfig>>,
+        Arc<ActiveSequencesMultiWorker<NoopSequencePublisher>>,
+    ) {
+        let dp_sizes: HashMap<u64, u32> = (0..num_workers as u64).map(|id| (id, 1)).collect();
+        let slots = Arc::new(ActiveSequencesMultiWorker::new(
+            NoopSequencePublisher,
+            block_size as usize,
+            dp_sizes,
+            false,
+            0,
+            "test",
+        ));
+
+        let mut configs: HashMap<u64, SimpleWorkerConfig> = HashMap::new();
+        for id in 0..num_workers as u64 {
+            configs.insert(
+                id,
+                SimpleWorkerConfig {
+                    max_num_batched_tokens: Some(isl as u64),
+                    ..Default::default()
+                },
+            );
+        }
+        let (cfg_tx, cfg_rx) = watch::channel(configs);
+        std::mem::forget(cfg_tx);
+
+        let selector = Box::new(DefaultWorkerSelector::default());
+        let queue = Arc::new(SchedulerQueue::new(
+            Arc::clone(&slots),
+            cfg_rx,
+            threshold_frac,
+            block_size,
+            selector,
+        ));
+
+        (queue, slots)
+    }
+
+    fn make_request(
+        request_id: &str,
+        isl_tokens: usize,
+    ) -> (
+        SchedulingRequest,
+        tokio::sync::oneshot::Receiver<Result<SchedulingResponse, crate::scheduling::types::KvSchedulerError>>,
+    ) {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let req = SchedulingRequest {
+            maybe_request_id: Some(request_id.to_string()),
+            token_seq: None,
+            isl_tokens,
+            overlaps: OverlapScores::default(),
+            decode_blocks: HashMap::new(),
+            prefill_tokens: HashMap::new(),
+            router_config_override: None,
+            update_states: true,
+            lora_name: None,
+            priority_jump: 0.0,
+            allowed_worker_ids: None,
+            resp_tx: Some(tx),
+        };
+        (req, rx)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_concurrent_flood() {
+        let block_size = 16;
+        let isl = 512;
+        let num_workers = 4;
+        let num_tasks = 25;
+
+        let (queue, slots) = make_queue(num_workers, block_size, isl, None);
+
+        let mut handles = Vec::new();
+        for i in 0..num_tasks {
+            let queue = Arc::clone(&queue);
+            let slots = Arc::clone(&slots);
+            handles.push(tokio::spawn(async move {
+                let req_id = format!("req-{i}");
+                let (req, rx) = make_request(&req_id, isl);
+                queue.enqueue(req).await;
+                let resp = rx.await.expect("oneshot dropped");
+                let resp = resp.expect("scheduling failed");
+                assert!(resp.best_worker.worker_id < num_workers as u64);
+
+                slots.mark_prefill_completed(&req_id).await.unwrap();
+                slots.free(&req_id).await.unwrap();
+                queue.update().await;
+            }));
+        }
+
+        for h in handles {
+            h.await.expect("task panicked");
+        }
+
+        let active = slots.active_tokens();
+        for (worker, tokens) in &active {
+            assert_eq!(*tokens, 0, "worker {worker:?} still has {tokens} active tokens");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_queueing_under_pressure() {
+        let block_size = 16;
+        let isl = 512;
+        let num_workers = 2;
+        let num_requests = 10;
+
+        let (queue, slots) = make_queue(num_workers, block_size, isl, Some(0.0));
+
+        let mut receivers = Vec::new();
+        let mut req_ids = Vec::new();
+
+        for i in 0..num_requests {
+            let req_id = format!("pressure-{i}");
+            let (req, rx) = make_request(&req_id, isl);
+            queue.enqueue(req).await;
+            receivers.push(rx);
+            req_ids.push(req_id);
+        }
+
+        // Drain pending by cycling mark_prefill_completed + free + update
+        // on already-scheduled requests until all receivers have a response.
+        for _ in 0..num_requests {
+            queue.update().await;
+            for rid in &req_ids {
+                let _ = slots.mark_prefill_completed(rid).await;
+                let _ = slots.free(rid).await;
+            }
+        }
+        queue.update().await;
+
+        let mut ok_count = 0;
+        for mut rx in receivers {
+            if let Ok(result) = rx.try_recv() {
+                result.expect("scheduling returned error");
+                ok_count += 1;
+            }
+        }
+        assert_eq!(ok_count, num_requests, "not all requests were scheduled");
+    }
+
+    #[tokio::test]
+    async fn test_no_workers_returns_error() {
+        let (queue, _slots) = make_queue(0, 16, 512, None);
+
+        let (req, rx) = make_request("lonely-req", 512);
+        queue.enqueue(req).await;
+
+        let resp = rx.await.expect("oneshot dropped");
+        assert!(
+            matches!(resp, Err(crate::scheduling::types::KvSchedulerError::NoEndpoints)),
+            "expected NoEndpoints, got {resp:?}"
+        );
+    }
+}

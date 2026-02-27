@@ -3,16 +3,14 @@
 
 #![allow(dead_code)]
 
-use std::future;
 use std::time::Duration;
 
 use dynamo_kv_router::LocalBlockHash;
 use dynamo_kv_router::protocols::{
-    ActiveLoad, ActiveSequenceEvent, ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData,
-    KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData, RouterEvent, WorkerConfigLike,
-    WorkerId, WorkerWithDpRank, XXH3_SEED, compute_seq_hash_for_block,
+    ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData,
+    KvCacheStoredBlockData, RouterEvent, WorkerId, XXH3_SEED, compute_seq_hash_for_block,
 };
-use dynamo_kv_router::sequences::SequencePublisher;
+pub use dynamo_kv_router::test_utils::{NoopSequencePublisher, SimpleWorkerConfig};
 use dynamo_mocker::common::protocols::{DirectRequest, KvCacheEventSink, MockEngineArgs};
 use dynamo_mocker::scheduler::Scheduler;
 use dynamo_tokens::compute_hash_v2;
@@ -736,50 +734,3 @@ pub fn median(durations: &[Duration]) -> Duration {
     sorted[sorted.len() / 2]
 }
 
-/// No-op [`SequencePublisher`] for benchmarks that don't need event transport.
-pub struct NoopSequencePublisher;
-
-impl SequencePublisher for NoopSequencePublisher {
-    fn publish_event(
-        &self,
-        _event: &ActiveSequenceEvent,
-    ) -> impl future::Future<Output = anyhow::Result<()>> + Send {
-        future::ready(Ok(()))
-    }
-
-    fn publish_load(&self, _load: ActiveLoad) {}
-
-    fn observe_load(&self, _: &WorkerWithDpRank, _: &str, _: usize, _: usize) {}
-}
-
-/// Minimal [`WorkerConfigLike`] for scheduler/queue benchmarks.
-#[derive(Debug, Clone)]
-pub struct SimpleWorkerConfig {
-    pub data_parallel_size: u32,
-    pub max_num_batched_tokens: Option<u64>,
-    pub total_kv_blocks: Option<u64>,
-}
-
-impl Default for SimpleWorkerConfig {
-    fn default() -> Self {
-        Self {
-            data_parallel_size: 1,
-            max_num_batched_tokens: None,
-            total_kv_blocks: None,
-        }
-    }
-}
-
-impl WorkerConfigLike for SimpleWorkerConfig {
-    fn data_parallel_size(&self) -> u32 {
-        self.data_parallel_size
-    }
-
-    fn max_num_batched_tokens(&self) -> Option<u64> {
-        self.max_num_batched_tokens
-    }
-
-    fn total_kv_blocks(&self) -> Option<u64> {
-        self.total_kv_blocks
-    }
-}
