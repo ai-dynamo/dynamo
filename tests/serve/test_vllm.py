@@ -372,12 +372,21 @@ vllm_configs = {
             )
         ],
     ),
-    # NOTE: Pack all workers on 1 GPU for lower CI resource requirements
+    # NOTE: Pack all workers on 1 GPU for lower CI resource requirements.
+    # NOTE: disagg_multimodal_epd.sh uses --kv-cache-memory-bytes=512MB for P/D
+    # workers, which bypasses vLLM memory profiling. Regardless of GPU_MEM fractions
+    # (0.1/0.4/0.4), the 3 workers combined consistently use ~17.6 GiB total on this GPU.
     "multimodal_disagg_qwen3vl_2b_epd": VLLMConfig(
         name="multimodal_disagg_qwen3vl_2b_epd",
         directory=vllm_dir,
         script_name="disagg_multimodal_epd.sh",
-        marks=[pytest.mark.gpu_1, pytest.mark.pre_merge],  # TODO: profile to get max_vram and timeout
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.max_vram(
+                20
+            ),  # peak 17.6 GiB GPU RAM used (+10% safety: 19.4 GiB)
+            pytest.mark.pre_merge,
+        ],
         model="Qwen/Qwen3-VL-2B-Instruct",
         script_args=["--model", "Qwen/Qwen3-VL-2B-Instruct", "--single-gpu"],
         timeout=360,
