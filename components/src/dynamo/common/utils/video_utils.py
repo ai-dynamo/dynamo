@@ -62,7 +62,7 @@ def compute_num_frames(
     return default_num_frames
 
 
-def normalize_video_frames(images) -> list:
+def normalize_video_frames(images: list) -> list:
     """Normalize stage_output.images into a frame list for export_to_video.
 
     Args:
@@ -140,7 +140,7 @@ def encode_to_mp4(
         import imageio.v3 as iio
     except ImportError:
         try:
-            import imageio as iio
+            import imageio as iio  # type: ignore[no-redef]
         except ImportError:
             raise ImportError(
                 "imageio is required for video encoding. "
@@ -160,7 +160,7 @@ def encode_to_mp4(
             iio.imwrite(output_path, frames, fps=fps, codec="libx264")
         else:
             # Fall back to v2 API
-            writer = iio.get_writer(output_path, fps=fps, codec="libx264")
+            writer = iio.get_writer(output_path, fps=fps, codec="libx264")  # type: ignore[attr-defined]
             try:
                 for frame in frames:
                     writer.append_data(frame)
@@ -197,7 +197,7 @@ def encode_to_mp4_bytes(
         import imageio.v3 as iio
     except ImportError:
         try:
-            import imageio as iio
+            import imageio as iio  # type: ignore[no-redef]
         except ImportError:
             raise ImportError(
                 "imageio is required for video encoding. "
@@ -216,7 +216,7 @@ def encode_to_mp4_bytes(
             iio.imwrite(buffer, frames, extension=".mp4", fps=fps, codec="libx264")
         else:
             # v2 API
-            writer = iio.get_writer(
+            writer = iio.get_writer(  # type: ignore[attr-defined]
                 buffer, format="FFMPEG", mode="I", fps=fps, codec="libx264"
             )
             try:

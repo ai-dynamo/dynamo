@@ -19,7 +19,7 @@ async def read_decoded_media_via_nixl(
     connector: nixl_connect.Connector,
     decoded_meta: Dict[str, Any],
     return_metadata: bool = False,
-) -> np.ndarray | Tuple[np.ndarray, Dict[str, Any]]:
+) -> np.ndarray | Tuple[np.ndarray, Dict[str, Any] | None]:
     """
     Read pre-decoded media data via NIXL RDMA transfer, into a CPU numpy array.
 

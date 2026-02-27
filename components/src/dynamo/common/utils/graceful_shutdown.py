@@ -5,7 +5,7 @@ import asyncio
 import logging
 import os
 import signal
-from typing import Iterable, Optional
+from typing import Any, Iterable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +62,7 @@ async def _unregister_endpoints(endpoints: Iterable) -> None:
 
 
 async def graceful_shutdown_with_discovery(
-    runtime,
+    runtime: Any,
     endpoints: Iterable,
     shutdown_event: Optional[asyncio.Event] = None,
     grace_period_s: Optional[float] = None,
@@ -90,7 +90,7 @@ async def graceful_shutdown_with_discovery(
 
 def install_signal_handlers(
     loop: asyncio.AbstractEventLoop,
-    runtime,
+    runtime: Any,
     endpoints: Iterable,
     shutdown_event: Optional[asyncio.Event] = None,
     grace_period_s: Optional[float] = None,
