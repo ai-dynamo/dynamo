@@ -15,7 +15,8 @@ from typing import AsyncIterator, Tuple, Union
 import uvloop
 from transformers import AutoTokenizer
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.entrypoints.openai.protocol import ChatCompletionRequest, CompletionRequest
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.outputs import RequestOutput
 from vllm.tokenizers import TokenizerLike as AnyTokenizer
 from vllm.utils.argparse_utils import FlexibleArgumentParser
