@@ -4,7 +4,7 @@ This recipe demonstrates the performance difference between **aggregated (round-
 
 ## Results
 
-https://github.com/user-attachments/assets/49cfa125-256d-4f9e-b23b-d62bcdef9065
+https://github.com/user-attachments/assets/fcdb703c-7c1a-4109-a7ca-54196fcef885
 
 ## Experiment Overview
 
@@ -70,7 +70,6 @@ The ISL/OSL/cache hit statistics of the resulting trace is below.
 ```
 
 </details>
-
 
 
 ## Prerequisites
