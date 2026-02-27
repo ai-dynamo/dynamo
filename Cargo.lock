@@ -8733,7 +8733,7 @@ dependencies = [
 [[package]]
 name = "velo-backend"
 version = "0.9.0"
-source = "git+ssh://git@github.com/ai-dynamo/dynamo.git?branch=ryan%2Fvelo-backend#7bb1fccfcb38c4e771216b94388c3e9c01be7574"
+source = "git+https://github.com/ai-dynamo/dynamo.git?branch=ryan%2Fvelo-backend#7bb1fccfcb38c4e771216b94388c3e9c01be7574"
 dependencies = [
  "anyhow",
  "async-nats",
@@ -8770,7 +8770,7 @@ dependencies = [
 [[package]]
 name = "velo-common"
 version = "0.9.0"
-source = "git+ssh://git@github.com/ai-dynamo/dynamo.git?branch=ryan%2Fvelo-backend#7bb1fccfcb38c4e771216b94388c3e9c01be7574"
+source = "git+https://github.com/ai-dynamo/dynamo.git?branch=ryan%2Fvelo-backend#7bb1fccfcb38c4e771216b94388c3e9c01be7574"
 dependencies = [
  "bytes",
  "rmp-serde",
@@ -8803,7 +8803,7 @@ dependencies = [
 [[package]]
 name = "velo-events"
 version = "0.9.0"
-source = "git+ssh://git@github.com/ai-dynamo/dynamo.git?branch=ryan%2Fvelo-events#290e0d6e7ea453e9f4ac471f65d554f64c02fb67"
+source = "git+https://github.com/ai-dynamo/dynamo.git?branch=ryan%2Fvelo-events#290e0d6e7ea453e9f4ac471f65d554f64c02fb67"
 dependencies = [
  "anyhow",
  "dashmap 6.1.0",

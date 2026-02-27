@@ -50,10 +50,10 @@ kvbm-kernels = { path = "lib/kvbm-kernels", version = "1.0.0" }
 kvbm-logical = { path = "lib/kvbm-logical", version = "1.0.0" }
 
 velo = { path = "lib/velo", version = "1.0.0" }
-velo-common = { git = "ssh://git@github.com/ai-dynamo/dynamo.git", branch = "ryan/velo-backend" }
-velo-backend = { git = "ssh://git@github.com/ai-dynamo/dynamo.git", branch = "ryan/velo-backend" }
+velo-common = { git = "https://github.com/ai-dynamo/dynamo.git", branch = "ryan/velo-backend" }
+velo-backend = { git = "https://github.com/ai-dynamo/dynamo.git", branch = "ryan/velo-backend" }
 velo-discovery = { path = "lib/velo-discovery", version = "1.0.0" }
-velo-events = { git = "ssh://git@github.com/ai-dynamo/dynamo.git", branch = "ryan/velo-events" }
+velo-events = { git = "https://github.com/ai-dynamo/dynamo.git", branch = "ryan/velo-events" }
 velo-messenger = { path = "lib/velo-messenger", version = "1.0.0" }
 
 # External dependencies
