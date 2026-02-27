@@ -347,20 +347,30 @@ class NixlTransferRequest(BaseModel):
     tensor_size: int
 
 
-class NixlEmbeddingSender(AbstractEmbeddingSender):
-    """
-    The EmbeddingSender implementation of current usage of NIXL connect library,
-    which creates a new NIXL connection for each send operation. Only implemented here
-    for reference and should not be used due to overhead discovered in practice.
+class NixlWriteEmbeddingSender(AbstractEmbeddingSender):
+    """NIXL WRITE-based implementation of the embedding sender interface.
 
-    Note that the sender will initiate the transfer so the workflow is
-    1) (pre-request) Receiver sends its metadata to sender with agent metadata contains
-       the information of its registered memory buffer for transfer.
-    2) (request) Sender prepares embeddings for transfer and return TransferRequest regarding
-       where to send notification and the size of the embedding.
-    3) (request) Receiver send notification with buffer ID and destination address to sender
-    4) (request) Sender initiates the transfer after receiving the notification
+    Designed for scenarios where the sender transmits dynamically allocated
+    tensors. Because these tensors allocation is external to the sender,
+    NIXL memory registration will perform on each send request. The receiver
+    will manage a pre-allocated buffer, so its NIXL metadata is consistent once
+    initialized. In such acenarios, let sender initiate the WRITE operations requires
+    minimal metadata exchange.
 
+    Protocol:
+        1. Record the receiver NIXL metadata, this is done:
+            * Implicitly through the first transfer request as fallback if the metadata
+              hasn't been recorded.
+            * [REMOVED] Explicitly through add_agent() API before calling send_embeddings().
+              The receiver provides get_agent_metadata() API to return its NIXL metadata.
+              This complicates the implementation and add extra responsiblity on the caller side,
+              will revisit the necessity if metadata exchange overhead is significant.
+        2. The sender prepares the embeddings and produces a TransferRequest
+           containing sender contact and tensor metadata (shape, dtype, size, etc).
+        3. The receiver responds with (optional) receiver contact, target tensor
+           metadata (buffer address, device, etc) and done signal through NIXL notification.
+        4. The sender performs a NIXL WRITE to push the data into the
+           receiver's buffer.
     """
 
     def __init__(self):
@@ -370,11 +380,12 @@ class NixlEmbeddingSender(AbstractEmbeddingSender):
             self.sender_id, nixl_agent_config(num_threads=8, capture_telemetry=True)
         )
         self.remote_agents = {}
-        self.handshaked_receivers = set()
         self.agent_metadata = self.nixl_agent.get_agent_metadata()
         self.agent_metadata_b64 = base64.b64encode(self.agent_metadata).decode("utf-8")
 
+        # tracker for the prepared embeddings
         self.transfer_tracker = {}
+
         # Track dynamically registered descriptors for cleanup,
         # there can be case of the same tensor being requested to be transferred multiple times,
         # we want to avoid duplicated registration or early deregistration while other transfer
@@ -383,103 +394,106 @@ class NixlEmbeddingSender(AbstractEmbeddingSender):
         self.registered_descs = {}
 
         self.id_counter = MonolithicCounter()
-        # Create a queue for hinting if there is future transfer
+
+        # Background transfer task..
+        # Create a queue hinting whether the sender is expecting future transfer
         self.transfer_queue = asyncio.Queue()
         self._state_update_task = asyncio.create_task(self._state_update())
 
+    def __del__(self):
+        self._state_update_task.cancel()
+
     async def _state_update(self):
         """Long-running async task that processes transfer requests."""
-        transfer_handlers = {}
-        transfer_task = None
+        inflight_transfers = {}
+        scheduled_transfer_task = None
         while True:
             try:
-                # Wait for transfer requests with timeout to allow periodic checks
-                if transfer_task is None:
-                    transfer_task = await self.transfer_queue.get()
+                # If there is no scheduled transfer task, blocking wait for
+                # a new transfer request because no state needs to be updated.
+                if scheduled_transfer_task is None:
+                    scheduled_transfer_task = await self.transfer_queue.get()
 
                 # check if write is requested, initiate the write
-                notifs = self.nixl_agent.get_new_notifs()
-                for remote_agent_id, notifs in notifs.items():
-                    self.handshaked_receivers.add(remote_agent_id)
-                    for notif in notifs:
-                        (
-                            tensor_id,
-                            (dest_buffer, dest_device_id, dest_mem_str),
-                            write_done_id,
-                            remote_agent_metadata,
-                        ) = pickle.loads(notif)
-                        if remote_agent_id not in self.remote_agents:
-                            if len(remote_agent_metadata) == 0:
-                                logger.error(
-                                    f"Received transfer notification from unknown agent {remote_agent_id} without metadata, cannot add remote agent for transfer"
-                                )
-                                continue
-                            # This means the sender has not handshaked with the receiver before, add remote agent for future transfer
-                            self.remote_agents[
-                                remote_agent_id
-                            ] = self.nixl_agent.add_remote_agent(remote_agent_metadata)
-                        transfer_info = self.transfer_tracker[tensor_id]
-                        remote_memory_info = [
-                            (dest_buffer, transfer_info[0].nbytes, dest_device_id),
-                        ]
-                        remote_desc = self.nixl_agent.get_xfer_descs(
-                            remote_memory_info, mem_type=dest_mem_str
-                        )
-                        done_signal = str(write_done_id).encode()
-                        xfer_handle = self.nixl_agent.initialize_xfer(
-                            "WRITE",
-                            transfer_info[1],
-                            remote_desc,
-                            remote_agent_id,
-                            done_signal,
-                        )
-                        self.nixl_agent.transfer(xfer_handle, done_signal)
-                        transfer_handlers[tensor_id] = (
-                            xfer_handle,
-                            remote_agent_id,
-                            done_signal,
-                            time.perf_counter(),
-                        )
+                write_requests = self._get_receiver_handshakes()
+                for (
+                    remote_agent_id,
+                    remote_agent_metadata,
+                    tensor_id,
+                    (target_buffer, target_byte_size, target_device_id, target_mem_str),
+                    write_done_id,
+                ) in write_requests:
+                    # Just in time add remote agent if not added
+                    if remote_agent_id not in self.remote_agents:
+                        if len(remote_agent_metadata) == 0:
+                            logger.error(
+                                f"Received transfer notification from unknown agent {remote_agent_id} without metadata, cannot add remote agent for transfer"
+                            )
+                            # Can't proceed with the transfer without receiver metadata,
+                            # mark the transfer as completed to unblock the sender.
+                            self._complete_transfer(tensor_id)
+                            continue
+                        self.remote_agents[
+                            remote_agent_id
+                        ] = self.nixl_agent.add_remote_agent(remote_agent_metadata)
 
-                # check inflight transfer state, if completed, get another task
-                done_id = []
+                    # initiate NIXL WRITE transfer
+                    source_tensor, source_desc, _ = self.transfer_tracker[tensor_id]
+                    target_desc = self.nixl_agent.get_xfer_descs(
+                        [
+                            (target_buffer, target_byte_size, target_device_id),
+                        ],
+                        mem_type=target_mem_str,
+                    )
+                    done_signal = str(write_done_id).encode()
+                    xfer_handle = self.nixl_agent.initialize_xfer(
+                        "WRITE",
+                        source_desc,
+                        target_desc,
+                        remote_agent_id,
+                        done_signal,
+                    )
+                    self.nixl_agent.transfer(xfer_handle, done_signal)
+
+                    inflight_transfers[tensor_id] = (
+                        xfer_handle,
+                        time.perf_counter(),
+                    )
+
+                # check inflight transfer state, if completed, get another task to match
+                # remaining transfers count
+                # use list() to create a copy of the dict items since the dict will be modified in the loop
                 for tensor_id, (
                     xfer_handle,
-                    remote_agent_id,
-                    done_signal,
                     start_time,
-                ) in list(transfer_handlers.items()):
+                ) in list(inflight_transfers.items()):
                     state = self.nixl_agent.check_xfer_state(xfer_handle)
                     if state == "ERR":
                         logger.error(f"Transfer failed for tensor_id {tensor_id}")
-                        transfer_handlers.pop(tensor_id)
-                        self.transfer_tracker.pop(tensor_id, None)
                     elif state == "DONE":
                         logger.debug(
                             f"Send completed for tensor_id {tensor_id}, total wait time: {time.perf_counter() - start_time:.2f} seconds"
                         )
-                        done_id.append(tensor_id)
-                        transfer_handlers.pop(tensor_id)
-                        transfer_info = self.transfer_tracker.pop(tensor_id, None)
-                        if transfer_info is not None:
-                            # Clean up registered memory after transfer completion
-                            embeddings, _, fut = transfer_info
-                            desc_key = (embeddings.data_ptr(), embeddings.get_device())
-                            self.registered_descs[desc_key][1] -= 1
-                            if self.registered_descs[desc_key][1] == 0:
-                                self.nixl_agent.deregister_memory(
-                                    self.registered_descs[desc_key][0]
-                                )
-                                del self.registered_descs[desc_key]
-                            # Future can be done if the embeddings is not external
-                            if not fut.done():
-                                fut.set_result(None)
-                        try:
-                            transfer_task = self.transfer_queue.get_nowait()
-                        except asyncio.QueueEmpty:
-                            logger.debug("No pending transfer task in the queue.")
-                            transfer_task = None
-                            break
+                    else:
+                        # still in-flight, check again later
+                        continue
+                    # NOTE future is set with result None in "ERR" and "DONE", so the sender will not
+                    # be able to distinguish failure with success, we can consider
+                    # adding more explicit failure signal in the future if needed.
+                    self._complete_transfer(tensor_id)
+                    inflight_transfers.pop(tensor_id)
+                    try:
+                        scheduled_transfer_task = self.transfer_queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        if inflight_transfers:
+                            logger.error(
+                                f"Unexpected no scheduled transfer request, while there are still {len(inflight_transfers)} inflight transfers"
+                            )
+                            # Continue the loop to check the state of remaining inflight transfers
+                            continue
+                        logger.debug("No pending transfer task in the queue.")
+                        scheduled_transfer_task = None
+                        break
 
                 # short pause to yield control and allow cancellation
                 await asyncio.sleep(0.001)
@@ -487,26 +501,57 @@ class NixlEmbeddingSender(AbstractEmbeddingSender):
                 logger.error(f"Error in state update loop: {e}")
                 await asyncio.sleep(1)  # Backoff on error to prevent tight error loop
 
-    def __del__(self):
-        self._state_update_task.cancel()
+    def _get_receiver_handshakes(self):
+        write_requests = []
+        notifs = self.nixl_agent.get_new_notifs()
+        for remote_agent_id, notifs in notifs.items():
+            for notif in notifs:
+                (
+                    tensor_id,
+                    (target_buffer, target_byte_size, target_device_id, target_mem_str),
+                    write_done_id,
+                    remote_agent_metadata,
+                ) = pickle.loads(notif)
+                write_requests.append(
+                    (
+                        # receiver contact
+                        remote_agent_id,
+                        remote_agent_metadata,
+                        # source tensor
+                        tensor_id,
+                        # target tensor
+                        # (note byte size can be retrieved from source tensor)
+                        (
+                            target_buffer,
+                            target_byte_size,
+                            target_device_id,
+                            target_mem_str,
+                        ),
+                        # done signal
+                        write_done_id,
+                    )
+                )
+        return write_requests
 
-    async def add_agent(self, remote_agent_id, remote_agent_metadata):
-        """
-        Add a remote agent for transfer based on the metadata provided by the receiver.
-
-        Args:
-            remote_agent_metadata: The metadata of the remote agent to add.
-        """
-        if remote_agent_id not in self.remote_agents:
-            self.remote_agents[remote_agent_id] = self.nixl_agent.add_remote_agent(
-                base64.b64decode(remote_agent_metadata)
-            )
+    def _complete_transfer(self, tensor_id):
+        transfer_info = self.transfer_tracker.pop(tensor_id, None)
+        if transfer_info is not None:
+            # Clean up registered memory after transfer completion
+            embeddings, _, fut = transfer_info
+            desc_key = (embeddings.data_ptr(), embeddings.get_device())
+            self.registered_descs[desc_key][1] -= 1
+            if self.registered_descs[desc_key][1] == 0:
+                self.nixl_agent.deregister_memory(self.registered_descs[desc_key][0])
+                del self.registered_descs[desc_key]
+            # Future can be 'done' if the embeddings is not external
+            # (send_embeddings with stage_embeddings=False)
+            if not fut.done():
+                fut.set_result(None)
 
     async def send_embeddings(
         self,
         embeddings: torch.Tensor,
         stage_embeddings: bool = False,
-        remote_agent_id: Optional[str] = None,
     ) -> tuple[TransferRequest, asyncio.Future]:
         """
         Send precomputed embeddings.
@@ -524,16 +569,17 @@ class NixlEmbeddingSender(AbstractEmbeddingSender):
             embeddings = embeddings.clone().detach()
             fut.set_result(None)
 
-        # track the NIXL descriptors for future transfer
+        # In case the same embedding tensor is sent multiple times,
+        # we want to avoid potential issues with duplicated NIXL memory registration.
         desc_key = (embeddings.data_ptr(), embeddings.get_device())
         if desc_key not in self.registered_descs:
-            # [NOTE] registeration can be time consuming, see e2e benchmark for the difference.
             registered_desc = self.nixl_agent.register_memory(embeddings)
             self.registered_descs[desc_key] = [registered_desc, 1]
         else:
             self.registered_descs[desc_key][1] += 1
 
         desc = self.nixl_agent.get_xfer_descs(embeddings)
+        # use tracker to also extend lifecycle of transfer-related objects
         self.transfer_tracker[tensor_id] = (embeddings, desc, fut)
         self.transfer_queue.put_nowait("task_indicator")
 
@@ -542,10 +588,7 @@ class NixlEmbeddingSender(AbstractEmbeddingSender):
             embedding_dtype_str=torch_dtype_to_string(embeddings.dtype),
             serialized_request=NixlTransferRequest(
                 sender_agent_id=self.sender_id,
-                agent_metadata=self.agent_metadata_b64
-                if remote_agent_id is None
-                or remote_agent_id not in self.handshaked_receivers
-                else None,
+                agent_metadata=self.agent_metadata_b64,
                 tensor_id=tensor_id,
                 tensor_size=embeddings.nbytes,
             ).model_dump_json(),
@@ -553,11 +596,9 @@ class NixlEmbeddingSender(AbstractEmbeddingSender):
         return request, fut
 
 
-class NixlEmbeddingReceiver(AbstractEmbeddingReceiver):
+class NixlWriteEmbeddingReceiver(AbstractEmbeddingReceiver):
     """
-    The EmbeddingReceiver implementation of current usage of NIXL connect library,
-    which creates a new NIXL connection for each send operation. Only implemented here
-    for reference and should not be used due to overhead discovered in practice.
+    Counter part of 'NixlWriteEmbeddingSender', see 'NixlWriteEmbeddingSender' for details.
     """
 
     def __init__(self, buffer_size=2 * 8 * 1024 * 1024 * 256 * 2):
@@ -579,13 +620,9 @@ class NixlEmbeddingReceiver(AbstractEmbeddingReceiver):
         self.reg_descs = self.nixl_agent.register_memory(self.transfer_tensor)
 
         self.agent_metadata = self.nixl_agent.get_agent_metadata()
-        self.agent_metadata_b64 = base64.b64encode(self.agent_metadata).decode("utf-8")
 
         self.id_counter = MonolithicCounter()
         self.to_buffer_id = {}
-
-    def get_agent_metadata(self):
-        return self.receiver_id, self.agent_metadata_b64
 
     async def receive_embeddings(
         self, request: TransferRequest
@@ -648,6 +685,7 @@ class NixlEmbeddingReceiver(AbstractEmbeddingReceiver):
                 nixl_request.tensor_id,
                 (
                     transfer_tensor.data_ptr(),
+                    nixl_request.tensor_size,
                     # torch returns -1 for CPU device, need to normalized there
                     max(transfer_tensor.get_device(), 0),
                     "cuda" if str(transfer_tensor.device).startswith("cuda") else "cpu",

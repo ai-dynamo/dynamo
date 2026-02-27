@@ -5,12 +5,12 @@ import asyncio
 import logging
 
 import uvloop
-from protocols import AgentRequest, TransferConfig, TransferRequest
+from protocols import TransferConfig, TransferRequest
 
 from dynamo.common.multimodal.embedding_transfer import (
     LocalEmbeddingReceiver,
-    NixlEmbeddingReceiver,
     NixlPersistentEmbeddingReceiver,
+    NixlWriteEmbeddingReceiver,
 )
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
@@ -23,21 +23,21 @@ class Receiver:
     def __init__(self, runtime: DistributedRuntime):
         self.runtime = runtime
         self.local_receiver = LocalEmbeddingReceiver()
-        self.write_receiver = NixlEmbeddingReceiver(2 * 8 * 1024 * 256 * 1024 * 3)
+        self.write_receiver = NixlWriteEmbeddingReceiver(2 * 8 * 1024 * 256 * 1024 * 3)
         self.read_receiver = NixlPersistentEmbeddingReceiver(
             embedding_hidden_size=8 * 1024, max_item_mm_token=1024
         )
         self.config = TransferConfig(
-            use_gpu=False, tensor_count_per_request=30, transmitter_type="local"
+            use_gpu=False, tensor_count_per_request=30, transfer_type="local"
         )
 
     def get_run_config(self):
         # Select the variant of sender/receiver based on config
-        if self.config.transmitter_type == "local":
+        if self.config.transfer_type == "local":
             receiver = self.local_receiver
-        elif self.config.transmitter_type == "nixl_write":
+        elif self.config.transfer_type == "nixl_write":
             receiver = self.write_receiver
-        elif self.config.transmitter_type == "nixl_read":
+        elif self.config.transfer_type == "nixl_read":
             receiver = self.read_receiver
         # sender size config
         # tensor = self.gpu_tensor if self.config.use_gpu else self.cpu_tensor
@@ -55,13 +55,7 @@ class Receiver:
 
     async def generate(self, request):
         receiver, _, _ = self.get_run_config()
-        # Need to handshake with sender first
-        if isinstance(receiver, NixlEmbeddingReceiver):
-            id, metadata = receiver.get_agent_metadata()
-        else:
-            id, metadata = "dummy_id", "dummy_metadata"
-        request = AgentRequest(agent_id=id, agent_metadata=metadata)
-        stream = await self.send_client.round_robin(request.model_dump_json())
+        stream = await self.send_client.round_robin("send_request")
         async for response in stream:
             response = TransferRequest.model_validate_json(response.data())
 

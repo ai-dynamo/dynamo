@@ -11,7 +11,7 @@ from dynamo.common.configuration.config_base import ConfigBase
 from dynamo.common.configuration.utils import add_argument, add_negatable_bool_argument
 
 from . import __version__
-from .constants import DisaggregationMode, EmbeddingTransmitterMode
+from .constants import DisaggregationMode, EmbeddingTransferMode
 
 
 class DynamoVllmArgGroup(ArgGroup):
@@ -138,12 +138,12 @@ class DynamoVllmArgGroup(ArgGroup):
 
         add_argument(
             g,
-            flag_name="--embedding-transmitter-mode",
-            env_var="DYN_VLLM_EMBEDDING_TRANSMITTER_MODE",
+            flag_name="--embedding-transfer-mode",
+            env_var="DYN_VLLM_EMBEDDING_TRANSFER_MODE",
             default=None,
-            help="Worker embedding transmitter mode: 'local' (default, local file system), "
+            help="Worker embedding transfer mode: 'local' (default, local file system), "
             "'nixl-write' (NIXL transfer with WRITE), or 'nixl-read' (NIXL transfer with READ).",
-            choices=[m.value for m in EmbeddingTransmitterMode],
+            choices=[m.value for m in EmbeddingTransferMode],
         )
 
         # vLLM-Omni
@@ -335,7 +335,7 @@ class DynamoVllmConfig(ConfigBase):
     enable_multimodal: bool
     mm_prompt_template: str
     frontend_decoding: bool
-    embedding_transmitter_mode: EmbeddingTransmitterMode
+    embedding_transfer_mode: EmbeddingTransferMode
 
     # vLLM-Omni
     omni: bool

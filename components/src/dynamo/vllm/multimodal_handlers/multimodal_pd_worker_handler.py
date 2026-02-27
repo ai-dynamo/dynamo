@@ -3,7 +3,6 @@
 
 import copy
 import logging
-import os
 import uuid
 from collections import defaultdict
 from typing import Any
@@ -18,13 +17,13 @@ from dynamo.common.memory.multimodal_embedding_cache_manager import (
 )
 from dynamo.common.multimodal.embedding_transfer import (
     LocalEmbeddingReceiver,
-    NixlEmbeddingReceiver,
     NixlPersistentEmbeddingReceiver,
+    NixlWriteEmbeddingReceiver,
 )
 from dynamo.runtime import Client, DistributedRuntime
 
 from ..args import Config
-from ..constants import DisaggregationMode, EmbeddingTransmitterMode
+from ..constants import DisaggregationMode, EmbeddingTransferMode
 from ..handlers import BaseWorkerHandler, build_sampling_params
 from ..multimodal_utils import (
     MyRequestOutput,
@@ -37,7 +36,6 @@ from ..multimodal_utils.prefill_worker_utils import load_multimodal_embeddings
 logger = logging.getLogger(__name__)
 
 IMAGE_URL_KEY = "image_url"
-TRANSFER_LOCAL = int(os.getenv("TRANSFER_LOCAL", 1))
 
 
 class MultimodalPDWorkerHandler(BaseWorkerHandler):
@@ -96,11 +94,11 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
         self._connector: connect.Connector | None = (
             None  # Will be initialized in async_init
         )
-        if config.embedding_transmitter_mode == EmbeddingTransmitterMode.LOCAL:
+        if config.embedding_transfer_mode == EmbeddingTransferMode.LOCAL:
             self.embedding_receiver = LocalEmbeddingReceiver()
-        elif config.embedding_transmitter_mode == EmbeddingTransmitterMode.NIXL_WRITE:
-            self.embedding_receiver = NixlEmbeddingReceiver()
-        elif config.embedding_transmitter_mode == EmbeddingTransmitterMode.NIXL_READ:
+        elif config.embedding_transfer_mode == EmbeddingTransferMode.NIXL_WRITE:
+            self.embedding_receiver = NixlWriteEmbeddingReceiver()
+        elif config.embedding_transfer_mode == EmbeddingTransferMode.NIXL_READ:
             # [gluo FIXME] can't use pre-registered tensor as NIXL requires descriptors
             # to be at matching size, need to overwrite nixl connect library
             self.embedding_receiver = NixlPersistentEmbeddingReceiver(max_items=0)

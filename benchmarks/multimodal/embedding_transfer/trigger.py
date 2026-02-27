@@ -36,7 +36,7 @@ async def worker(runtime: DistributedRuntime):
 
     # NOTE From CPU is not the same as E/PD, E/PD originates from GPU and has
     # GPU to CPU copy
-    for transmitter_type in ["local", "nixl_write", "nixl_read"]:
+    for transfer_type in ["local", "nixl_write", "nixl_read"]:
         for workflow_string, client in [
             ("receiver-first", receiver_client),
             ("sender-first", sender_client),
@@ -46,7 +46,7 @@ async def worker(runtime: DistributedRuntime):
                 config = TransferConfig(
                     use_gpu=use_gpu,
                     tensor_count_per_request=30,
-                    transmitter_type=transmitter_type,
+                    transfer_type=transfer_type,
                 )
                 async for res in await sender_update_config_client.round_robin(
                     config.model_dump_json()
@@ -57,9 +57,9 @@ async def worker(runtime: DistributedRuntime):
                 ):
                     pass
 
-                if transmitter_type == "nixl_read" and use_gpu:
+                if transfer_type == "nixl_read" and use_gpu:
                     print(
-                        f"Skipping: use_gpu={use_gpu} with transmitter type: {transmitter_type}"
+                        f"Skipping: use_gpu={use_gpu} with transfer type: {transfer_type}"
                     )
                     print(
                         "Reason: nixl_connect errors out on GPU tensor, i.e. NIXL_ERR_NOT_ALLOWED"
@@ -69,7 +69,7 @@ async def worker(runtime: DistributedRuntime):
                 num_requests = NUM_REQUESTS
                 try:
                     print(
-                        f"Workflow: {workflow_string}, From GPU: {use_gpu}, Transmitter Type: {transmitter_type}"
+                        f"Workflow: {workflow_string}, From GPU: {use_gpu}, Transfer Type: {transfer_type}"
                     )
                     # warm up
                     async for response in await client.round_robin(

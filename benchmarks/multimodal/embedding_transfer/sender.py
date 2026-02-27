@@ -6,12 +6,12 @@ import logging
 
 import torch
 import uvloop
-from protocols import AgentRequest, TransferConfig, TransferRequest
+from protocols import TransferConfig, TransferRequest
 
 from dynamo.common.multimodal.embedding_transfer import (
     LocalEmbeddingSender,
-    NixlEmbeddingSender,
     NixlPersistentEmbeddingSender,
+    NixlWriteEmbeddingSender,
 )
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
@@ -25,23 +25,23 @@ class Sender:
         self.runtime = runtime
         self.local_sender = LocalEmbeddingSender()
         self.read_sender = NixlPersistentEmbeddingSender()
-        self.write_sender = NixlEmbeddingSender()
+        self.write_sender = NixlWriteEmbeddingSender()
         # GPU tensor to mimic encoder output
         self.cpu_tensor = torch.randn([256, 8 * 1024], dtype=torch.float16)
         self.gpu_tensor = torch.randn(
             [256, 8 * 1024], dtype=torch.float16, device="cuda"
         )
         self.config = TransferConfig(
-            use_gpu=False, tensor_count_per_request=30, transmitter_type="local"
+            use_gpu=False, tensor_count_per_request=30, transfer_type="local"
         )
 
     def get_run_config(self):
         # Select the variant of sender/receiver based on config
-        if self.config.transmitter_type == "local":
+        if self.config.transfer_type == "local":
             sender = self.local_sender
-        elif self.config.transmitter_type == "nixl_write":
+        elif self.config.transfer_type == "nixl_write":
             sender = self.write_sender
-        elif self.config.transmitter_type == "nixl_read":
+        elif self.config.transfer_type == "nixl_read":
             sender = self.read_sender
         tensor = self.gpu_tensor if self.config.use_gpu else self.cpu_tensor
         tensor_count = self.config.tensor_count_per_request
@@ -75,10 +75,6 @@ class Sender:
     async def write(self, request: str):
         # Select the variant of sender/receiver based on config
         sender, tensor, tensor_count = self.get_run_config()
-
-        if isinstance(sender, NixlEmbeddingSender):
-            request = AgentRequest.model_validate_json(request)
-            await sender.add_agent(request.agent_id, request.agent_metadata)
 
         response = TransferRequest(requests=[])
         futures = []

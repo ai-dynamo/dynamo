@@ -14,8 +14,8 @@ class DisaggregationMode(Enum):
     DECODE = "decode"
 
 
-class EmbeddingTransmitterMode(Enum):
-    """Embedding transmitter mode for LLM workers."""
+class EmbeddingTransferMode(Enum):
+    """Embedding transfer mode for LLM workers."""
 
     LOCAL = "local"
     NIXL_WRITE = "nixl-write"
