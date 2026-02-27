@@ -64,6 +64,7 @@ class Profile:
 
 PROFILES = [
     Profile("max-rps", 32, 32),
+    Profile("stress-1k", 1024, 1024),
     # Profile("ingress-stress", 2048, 32),
     # Profile("egress-stress",  32,   1024),
 ]
