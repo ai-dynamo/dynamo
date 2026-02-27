@@ -30,7 +30,7 @@ Templates for creating consistent Dynamo documentation.
 └──────────────────────────────────────────────────────────────┘
 ```
 
-### Backends (vLLM, SGLang, TRT-LLM)
+### Backends (SGLang, TRT-LLM, vLLM)
 
 ```
 ┌─────────────────────────────────────────────────────┐
@@ -65,9 +65,9 @@ Templates for creating consistent Dynamo documentation.
 ┌─────────────────────────────────────────────────────┐
 │ Tier 2: docs/features/<feature>/                    │ ← User docs
 │   • README.md ← feature_readme.md                   │
-│   • <feature>_vllm.md ← feature_backend.md          │
 │   • <feature>_sglang.md ← feature_backend.md        │
 │   • <feature>_trtllm.md ← feature_backend.md        │
+│   • <feature>_vllm.md ← feature_backend.md          │
 └─────────────────────┬───────────────────────────────┘
                       ▼
 ┌─────────────────────────────────────────────────────┐
@@ -175,4 +175,4 @@ After adding new documentation:
 1. **Sphinx (current):** Update `docs/index.rst` or the appropriate `_sections/*.rst` file to include your new docs in the navigation
 2. **Fern (future):** Update `fern/docs.yml` with your new pages
 
-See [docs/README.md](../README.md) for documentation build instructions.
+See [docs/README.md](../../README.md) for documentation build instructions.

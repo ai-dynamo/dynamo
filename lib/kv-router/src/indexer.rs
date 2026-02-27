@@ -36,12 +36,12 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use dashmap::DashMap;
-use dynamo_runtime::error::DynamoError;
 #[cfg(feature = "metrics")]
 pub use dynamo_runtime::protocols::maybe_error::MaybeError;
 #[cfg(feature = "metrics")]
 use dynamo_runtime::{
     component::Component,
+    error::DynamoError,
     metrics::{MetricsHierarchy, prometheus_names::kvrouter},
 };
 use prometheus::{IntCounterVec, Opts};
@@ -54,7 +54,7 @@ pub trait MaybeError {
     /// Construct an instance from an error.
     fn from_err(err: impl std::error::Error + 'static) -> Self;
     /// Convert to an error instance if this represents an error.
-    fn err(&self) -> Option<DynamoError>;
+    fn err(&self) -> Option<Box<dyn std::error::Error + Send + Sync>>;
 }
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "metrics")]

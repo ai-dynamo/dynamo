@@ -4,8 +4,6 @@
 title: NVIDIA Request Extensions (nvext)
 ---
 
-# NVIDIA Request Extensions (`nvext`)
-
 `nvext` is a top-level JSON object on the request body that provides NVIDIA-specific extensions to the OpenAI-compatible API. `nvext` fields are consumed by the Dynamo frontend, preprocessor, router, and backend workers to control routing, preprocessing, response metadata, scheduling, and engine-level priority.
 
 ## Usage
@@ -42,6 +40,7 @@ Include `nvext` as a top-level field alongside standard OpenAI-compatible fields
 | `prefill_worker_id` | `u64` | `None` | Router | Routes the request to a specific prefill worker (disaggregated serving). |
 | `decode_worker_id` | `u64` | `None` | Router | Routes the request to a specific decode worker (disaggregated serving). |
 | `agent_hints` | object | `None` | Router | Per-request hints for scheduling and load balancing. See [Agent Hints](#agent-hints). |
+| `cache_control` | object | `None` | Router | KV cache pinning hint with TTL. See [Cache Control](#cache-control). |
 
 ### Header Overrides
 
@@ -121,10 +120,10 @@ Backend engine scheduling priority forwarded to the engine's `generate` call. In
 
 The semantics of the priority value differ between backends:
 
-- **vLLM**: Smaller values = higher priority. A request with `priority: 0` is scheduled before `priority: 10`. Ties are broken by arrival time. Requires `--scheduling-policy priority` on the engine.
 - **SGLang**: By default, larger values = higher priority. This can be inverted with `--schedule-low-priority-values-first` to match vLLM's convention. Requires `--enable-priority-scheduling` on the engine.
+- **vLLM**: Smaller values = higher priority. A request with `priority: 0` is scheduled before `priority: 10`. Ties are broken by arrival time. Requires `--scheduling-policy priority` on the engine.
 
-When omitted, vLLM defaults to `0`; SGLang defaults to `None` (engine default). TensorRT-LLM does not currently support per-request priority.
+When omitted, SGLang defaults to `None` (engine default); vLLM defaults to `0`. TensorRT-LLM does not currently support per-request priority.
 
 ```json
 {
@@ -135,6 +134,31 @@ When omitted, vLLM defaults to `0`; SGLang defaults to `None` (engine default). 
     }
 }
 ```
+
+## Cache Control
+
+> [!WARNING]
+> Cache control is experimental and available on development branches only. The API may change.
+
+The `cache_control` object enables explicit KV cache pinning with a TTL. When set, the router fires a `pin_prefix` call to the backend worker after generation completes, protecting the conversation's KV cache from eviction for the specified duration.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `cache_control.type` | `string` | — | Cache control type. Currently only `"ephemeral"` is supported. |
+| `cache_control.ttl` | `string` | `"300"` | TTL as integer seconds (`"600"`) or shorthand (`"5m"`, `"1h"`). Clamped to [300, 3600] seconds. |
+
+```json
+{
+    "nvext": {
+        "cache_control": {
+            "type": "ephemeral",
+            "ttl": "1h"
+        }
+    }
+}
+```
+
+Requires `--enable-cache-control` and `--router-mode=kv` on the frontend. See [SGLang for Agentic Workloads](../../backends/sglang/agents.md#cache-pinning-experimental) for full setup and usage details.
 
 ## Response Extensions
 

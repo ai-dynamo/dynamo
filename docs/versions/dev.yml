@@ -58,8 +58,6 @@ navigation:
             contents:
               - page: Integration with Dynamo
                 path: ../pages/kubernetes/chrek/dynamo.md
-              - page: Standalone Usage
-                path: ../pages/kubernetes/chrek/standalone.md
       - section: Observability (K8s)
         contents:
           - page: Metrics
@@ -97,6 +95,8 @@ navigation:
             path: ../pages/features/multimodal/multimodal-sglang.md
       - page: Tool Calling
         path: ../pages/agents/tool-calling.md
+      - page: SGLang for Agentic Workloads
+        path: ../pages/backends/sglang/agents.md
       - page: LoRA Adapters
         path: ../pages/features/lora/README.md
       - section: Observability (Local)
@@ -130,28 +130,30 @@ navigation:
       - page: Writing Python Workers in Dynamo
         path: ../pages/development/backend-guide.md
 
+  # ==================== Backends ====================
+  - section: Backends
+    contents:
+      - section: SGLang
+        path: ../pages/backends/sglang/README.md
+        contents:
+          - page: Reference Guide
+            path: ../pages/backends/sglang/sglang-reference-guide.md
+          - page: Examples
+            path: ../pages/backends/sglang/sglang-examples.md
+          - page: Disaggregation
+            path: ../pages/backends/sglang/sglang-disaggregation.md
+          - page: Diffusion
+            path: ../pages/backends/sglang/sglang-diffusion.md
+          - page: Observability
+            path: ../pages/backends/sglang/sglang-observability.md
+      - page: TensorRT-LLM
+        path: ../pages/backends/trtllm/README.md
+      - page: vLLM
+        path: ../pages/backends/vllm/README.md
+
   # ==================== Components ====================
   - section: Components
     contents:
-      - section: Backends
-        contents:
-          - page: vLLM
-            path: ../pages/backends/vllm/README.md
-          - section: SGLang
-            path: ../pages/backends/sglang/README.md
-            contents:
-              - page: Reference Guide
-                path: ../pages/backends/sglang/sglang-reference-guide.md
-              - page: Examples
-                path: ../pages/backends/sglang/sglang-examples.md
-              - page: Disaggregation
-                path: ../pages/backends/sglang/sglang-disaggregation.md
-              - page: Diffusion
-                path: ../pages/backends/sglang/sglang-diffusion.md
-              - page: Prometheus
-                path: ../pages/backends/sglang/sglang-prometheus.md
-          - page: TensorRT-LLM
-            path: ../pages/backends/trtllm/README.md
       - section: Frontend
         path: ../pages/components/frontend/README.md
         contents:
@@ -222,9 +224,19 @@ navigation:
 
   # ==================== Blog ====================
   - section: Blog
+    hidden: true
     path: ../blogs/index.mdx
     slug: blog
-    contents: []
+    contents:
+      - page: "Flash Indexer: Inter-Galactic KV Routing"
+        path: ../blogs/flash-indexer/flash-indexer.md
+        slug: flash-indexer
+
+  # ==================== Documentation ====================
+  - section: Documentation
+    contents:
+      - page: Dynamo Docs Guide
+        path: ../README.md
 
   # ==================== Hidden Pages ====================
   # Pages accessible via direct URL but not shown in main navigation.
@@ -317,9 +329,6 @@ navigation:
       # -- Mocker --
       - page: Mocker
         path: ../pages/mocker/mocker.md
-      # -- Docs README --
-      - page: Building Documentation
-        path: ../pages/README.md
       # -- Templates --
       - section: Templates
         path: ../pages/templates/README.md

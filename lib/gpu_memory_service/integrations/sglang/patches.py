@@ -67,11 +67,14 @@ def patch_torch_memory_saver() -> None:
             # Create underlying torch impl for non-weights tags (KV cache etc.)
             torch_impl = _TorchMemorySaverImpl(hook_mode="torch")
 
-            # Create GPU Memory Service impl
+            # Read lock mode set by setup_gms() (defaults to RW_OR_RO)
+            from gpu_memory_service.integrations.sglang import _gms_lock_mode
+
             gms_impl = GMSMemorySaverImpl(
                 torch_impl=torch_impl,
                 socket_path=socket_path,
                 device_index=device_index,
+                mode=_gms_lock_mode,
             )
 
             # Set _impl directly (accessible via gms_impl property)

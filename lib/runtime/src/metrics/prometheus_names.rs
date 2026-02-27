@@ -417,6 +417,18 @@ pub mod kvbm {
     pub const OBJECT_WRITE_FAILURES: &str = "object_write_failures";
 }
 
+/// Router per-request metrics (component-scoped via `MetricsHierarchy`).
+///
+/// Metric names are composed as `"{METRIC_PREFIX}{frontend_service::*}"` at init time,
+/// then passed to `component.metrics().create_*()` which auto-prepends `dynamo_component_`,
+/// yielding e.g. `dynamo_component_router_requests_total`.
+/// See `lib/llm/src/kv_router/metrics.rs` `RouterRequestMetrics::from_component()`.
+pub mod router_request {
+    /// Prefix prepended to `frontend_service::*` names to form router metric names.
+    /// e.g. `"router_"` + `frontend_service::REQUESTS_TOTAL` → `"router_requests_total"`.
+    pub const METRIC_PREFIX: &str = "router_";
+}
+
 /// Routing overhead phase latency histogram suffixes.
 ///
 /// Combined with `name_prefix::ROUTER` ("dynamo_router") in `RoutingOverheadMetrics::register()`,
@@ -437,6 +449,30 @@ pub mod routing_overhead {
 
     /// Total routing overhead per request
     pub const TOTAL_MS: &str = "overhead_total_ms";
+}
+
+/// Router request metrics (component-scoped aggregate histograms + counter)
+///
+/// These constants are the suffix portions of full metric names, combined with
+/// [`name_prefix::COMPONENT`] to form the complete name, e.g.
+/// `dynamo_component_router_requests_total`.
+///
+/// ⚠️  Python codegen: Run gen-python-prometheus-names after changes
+pub mod router {
+    /// Total number of requests processed by the router
+    pub const REQUESTS_TOTAL: &str = "router_requests_total";
+
+    /// Time to first token observed at the router (seconds)
+    pub const TIME_TO_FIRST_TOKEN_SECONDS: &str = "router_time_to_first_token_seconds";
+
+    /// Average inter-token latency observed at the router (seconds)
+    pub const INTER_TOKEN_LATENCY_SECONDS: &str = "router_inter_token_latency_seconds";
+
+    /// Input sequence length in tokens observed at the router
+    pub const INPUT_SEQUENCE_TOKENS: &str = "router_input_sequence_tokens";
+
+    /// Output sequence length in tokens observed at the router
+    pub const OUTPUT_SEQUENCE_TOKENS: &str = "router_output_sequence_tokens";
 }
 
 // KvRouter (including KvInexer) Prometheus metric names

@@ -133,12 +133,18 @@ RUN git clone --depth 1 --branch ${NIXL_GDRCOPY_REF} https://github.com/NVIDIA/g
     rpm -Uvh gdrcopy-*.el8.${ARCH_ALT}.rpm && \
     rpm -Uvh gdrcopy-devel-*.el8.noarch.rpm
 
-# Install SCCACHE if requested
+# sccache binary is pre-installed in dynamo_base; stage it off-PATH so
+# Meson doesn't auto-detect it as a CUDA compiler launcher
+# (https://github.com/mesonbuild/meson/issues/11118).
+# When USE_SCCACHE=true the RUN below symlinks it onto PATH before install.
+COPY --from=dynamo_base /usr/local/bin/sccache /opt/sccache/sccache
+
 ARG USE_SCCACHE
 ARG SCCACHE_BUCKET
 ARG SCCACHE_REGION
 COPY container/use-sccache.sh /tmp/use-sccache.sh
 RUN if [ "$USE_SCCACHE" = "true" ]; then \
+        ln -s /opt/sccache/sccache /usr/local/bin/sccache && \
         /tmp/use-sccache.sh install; \
     fi
 
@@ -147,7 +153,7 @@ RUN if [ "$USE_SCCACHE" = "true" ]; then \
 ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
     SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION}}
 
-# Always built so FFmpeg libs are available for Rust checks in CI
+# Always build FFmpeg so libs are available for Rust checks in CI
 # Do not delete the source tarball for legal reasons
 ARG FFMPEG_VERSION
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
@@ -389,6 +395,7 @@ COPY components/ /opt/dynamo/components/
 # Build kvbm wheel (with nixl linkage via auditwheel repair)
 ARG ARCH_ALT
 ARG ENABLE_KVBM
+ARG ENABLE_MEDIA_FFMPEG
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
     --mount=type=cache,target=/root/.cargo/registry \

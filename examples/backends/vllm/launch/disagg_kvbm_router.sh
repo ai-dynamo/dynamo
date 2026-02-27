@@ -20,13 +20,15 @@ python -m dynamo.frontend \
 CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm \
     --model $MODEL \
     --enforce-eager \
-    --disaggregation-mode decode &
+    --disaggregation-mode decode \
+    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' &
 
 VLLM_NIXL_SIDE_CHANNEL_PORT=20096 \
 CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.vllm \
     --model $MODEL \
     --enforce-eager \
-    --disaggregation-mode decode &
+    --disaggregation-mode decode \
+    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' &
 
 # two prefill workers with KVBM enabled
 # Each worker needs unique ZMQ ports to avoid KVBM coordination conflicts

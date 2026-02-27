@@ -108,7 +108,7 @@ dialoguer = { version = "0.11", default-features = false, features = [
 
 # block_manager
 aligned-vec = { version = "0.6.4", optional = true }
-nixl-sys = { git = "https://github.com/ai-dynamo/nixl.git", rev = "dd35746ceb268f4796f8a9f594fba55c26579ab5", optional = true }
+nixl-sys = { version = "=0.10.0", optional = true }
 cudarc = { workspace = true, optional = true }
 nix = { version = "0.26", optional = true }
 
@@ -141,14 +141,16 @@ tokenizers = { version = "0.21.4", default-features = false, features = [
   "esaxx_fast",
   "rustls-tls",
 ] }
+tiktoken-rs = { version = "0.9", default-features = false }
+rustc-hash = "1.1"
 
 # backend
 galil-seiferas = { version = "0.1" }
 
 # preprocessor
 bs62 = { version = "0.1" }
-minijinja = { version = "2.14.0", features = ["loader"] }
-minijinja-contrib = { version = "2.14.0", features = ["pycompat"] }
+minijinja = { version = "2.15.1", features = ["loader", "loop_controls"] }
+minijinja-contrib = { version = "2.15.1", features = ["pycompat"] }
 json-five = { version = "0.3" }
 
 # media loading in the preprocessor
