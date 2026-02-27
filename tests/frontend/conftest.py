@@ -15,7 +15,6 @@ import time
 
 import pytest
 import requests
-import tritonclient.grpc as grpcclient
 
 from tests.utils.constants import QWEN
 from tests.utils.managed_process import DynamoFrontendProcess, ManagedProcess
@@ -80,6 +79,8 @@ def check_grpc_server_ready(
     Raises:
         Exception: If server is not ready after max_attempts
     """
+    import tritonclient.grpc as grpcclient
+
     for attempt in range(max_attempts):
         try:
             client = grpcclient.InferenceServerClient(f"localhost:{port}")
