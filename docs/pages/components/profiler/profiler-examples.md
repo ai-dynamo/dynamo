@@ -4,7 +4,7 @@
 title: Profiler Examples
 ---
 
-Complete examples for profiling with DGDRs, the interactive WebUI, and direct script usage.
+Complete examples for profiling with DGDRs.
 
 ## DGDR Examples
 
@@ -117,107 +117,6 @@ spec:
     itl: 10
 
   autoApply: true
-```
-
-## Interactive WebUI
-
-Launch an interactive configuration selection interface:
-
-```bash
-python -m dynamo.profiler.profile_sla \
-  --backend trtllm \
-  --config path/to/disagg.yaml \
-  --pick-with-webui \
-  --use-ai-configurator \
-  --model Qwen/Qwen3-32B-FP8 \
-  --aic-system h200_sxm \
-  --ttft 200 --itl 15
-```
-
-The WebUI launches on port 8000 by default (configurable with `--webui-port`).
-
-### Features
-
-- **Interactive Charts**: Visualize prefill TTFT, decode ITL, and GPU hours analysis with hover-to-highlight synchronization between charts and tables
-- **Pareto-Optimal Analysis**: The GPU Hours table shows pareto-optimal configurations balancing latency and throughput
-- **DGD Config Preview**: Click "Show Config" on any row to view the corresponding DynamoGraphDeployment YAML
-- **GPU Cost Estimation**: Toggle GPU cost display to convert GPU hours to cost ($/1000 requests)
-- **SLA Visualization**: Red dashed lines indicate your TTFT and ITL targets
-
-### Selection Methods
-
-1. **GPU Hours Table** (recommended): Click any row to select both prefill and decode configurations at once based on the pareto-optimal combination
-2. **Individual Selection**: Click one row in the Prefill table AND one row in the Decode table to manually choose each
-
-### Example DGD Config Output
-
-When you click "Show Config", you see a DynamoGraphDeployment configuration:
-
-```yaml
-# DynamoGraphDeployment Configuration
-# Prefill: 1 GPU(s), TP=1
-# Decode: 4 GPU(s), TP=4
-# Model: Qwen/Qwen3-32B-FP8
-# Backend: trtllm
-apiVersion: nvidia.com/v1alpha1
-kind: DynamoGraphDeployment
-spec:
-  services:
-    PrefillWorker:
-      subComponentType: prefill
-      replicas: 1
-      extraPodSpec:
-        mainContainer:
-          args:
-          - --tensor-parallel-size=1
-    DecodeWorker:
-      subComponentType: decode
-      replicas: 1
-      extraPodSpec:
-        mainContainer:
-          args:
-          - --tensor-parallel-size=4
-```
-
-Once you select a configuration, the full DGD CRD is saved as `config_with_planner.yaml`.
-
-## Direct Script Examples
-
-### Basic Profiling
-
-```bash
-python -m dynamo.profiler.profile_sla \
-  --backend vllm \
-  --config path/to/disagg.yaml \
-  --model meta-llama/Llama-3-8B \
-  --ttft 200 --itl 15 \
-  --isl 3000 --osl 150
-```
-
-### With GPU Constraints
-
-```bash
-python -m dynamo.profiler.profile_sla \
-  --backend sglang \
-  --config examples/backends/sglang/deploy/disagg.yaml \
-  --model deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
-  --ttft 200 --itl 15 \
-  --isl 3000 --osl 150 \
-  --min-num-gpus 2 \
-  --max-num-gpus 8
-```
-
-### AI Configurator (Offline)
-
-```bash
-python -m dynamo.profiler.profile_sla \
-  --backend trtllm \
-  --config path/to/disagg.yaml \
-  --use-ai-configurator \
-  --model Qwen/Qwen3-32B-FP8 \
-  --aic-system h200_sxm \
-  --ttft 200 --itl 15 \
-  --isl 4000 --osl 500
 ```
 
 ## SGLang Runtime Profiling

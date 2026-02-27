@@ -156,30 +156,6 @@ The profiler enforces these rules at startup:
 | SLA unachievable | Warning logged, SLA updated to best achievable value. |
 | Load-match needs more GPUs than available | Warning logged. |
 
-## CLI Usage
-
-The profiler can be run directly for local development and testing:
-
-```bash
-python -m dynamo.profiler --config <spec.yaml>
-```
-
-Where `<spec.yaml>` is a DGDR spec (JSON or YAML file, or inline JSON string).
-
-### Operational flags
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--output-dir` | `profiling_results` | Directory for output files |
-| `--deployment-timeout` | `3600` | Max seconds to wait for K8s deployment readiness |
-| `--prefill-interpolation-granularity` | `16` | Number of ISL samples for prefill interpolation |
-| `--decode-interpolation-granularity` | `6` | Number of samples for decode interpolation |
-| `--dry-run` | `false` | Skip all deployments and benchmarking (dev mode) |
-
-### Output
-
-The profiler writes `final_config.yaml` to the output directory. When the planner is enabled, this is a multi-document YAML containing ConfigMaps + DGD. The `profiler_status.yaml` file tracks job status (`success` / `failed`).
-
 ## Support Matrix
 
 | Backend | Dense Models | MoE Models |
@@ -293,21 +269,6 @@ curl http://localhost:8000/v1/models
 > [!NOTE]
 > DGDRs are **immutable**. To update SLAs or configuration, delete the existing DGDR and create a new one.
 
-### Direct Script Execution
-
-For advanced use cases or local development:
-
-```bash
-python -m dynamo.profiler.profile_sla \
-  --backend vllm \
-  --config path/to/disagg.yaml \
-  --model meta-llama/Llama-3-8B \
-  --ttft 200 --itl 15 \
-  --isl 3000 --osl 150 \
-  --min-num-gpus 1 \
-  --max-num-gpus 8
-```
-
 ## Profiling Method
 
 The profiler follows a 5-step process:
@@ -354,11 +315,11 @@ Uses performance simulation to rapidly estimate optimal configurations without r
 - **GPU Requirements**: None
 - **Backends**: TensorRT-LLM only (vLLM/SGLang coming soon)
 
-AI Configurator simulation can be enabled via `searchStrategy: rapid`. AIC-specific settings are passed through the profiler CLI arguments (`--use-ai-configurator`, `--aic-system`, `--aic-hf-id`, `--aic-backend-version`):
+AI Configurator is used by default with `searchStrategy: rapid`:
 
 ```yaml
 spec:
-  searchStrategy: rapid  # Fast profiling with AI Configurator simulation
+  searchStrategy: rapid  # Fast profiling with AI Configurator simulation (default)
 ```
 
 > [!NOTE]
@@ -472,19 +433,6 @@ spec:
 - **rapid**: Performs a fast sweep over parallelization mappings (default)
 - **thorough**: Explores more configurations for potentially better results
 
-Additional profiler-internal settings like `prefillInterpolationGranularity` and `decodeInterpolationGranularity` can be configured via CLI arguments when using [Direct Script Execution](#direct-script-execution).
-
-### AI Configurator Configuration
-
-When using AI Configurator simulation (`searchStrategy: rapid`), the following CLI arguments configure AIC behavior:
-
-| CLI Argument | Description |
-|---|---|
-| `--use-ai-configurator` | Enable AI Configurator simulation |
-| `--aic-system` | Hardware system: `h100_sxm`, `h200_sxm`, `b200_sxm`, `gb200_sxm`, `a100_sxm` |
-| `--aic-hf-id` | HuggingFace model ID for AIC lookup |
-| `--aic-backend-version` | TensorRT-LLM version simulated by AIC |
-
 ### Planner Configuration (Optional)
 
 Pass arguments to the SLA planner via the features section:
@@ -546,26 +494,6 @@ overrides:
 ```
 
 The profiler uses the DGD config as a **base template**, then optimizes it based on your SLA targets.
-
-### CLI Arguments
-
-| Argument | Type | Default | Description |
-|----------|------|---------|-------------|
-| `--backend` | string | - | Inference backend: vllm, sglang, trtllm |
-| `--config` | string | - | Path to DGD YAML config file |
-| `--model` | string | - | HuggingFace model ID |
-| `--ttft` | float | - | Target TTFT in milliseconds |
-| `--itl` | float | - | Target ITL in milliseconds |
-| `--isl` | int | - | Average input sequence length |
-| `--osl` | int | - | Average output sequence length |
-| `--min-num-gpus` | int | auto | Minimum GPUs per engine |
-| `--max-num-gpus` | int | 8 | Maximum GPUs per engine |
-| `--use-ai-configurator` | flag | false | Use offline AI Configurator |
-| `--pick-with-webui` | flag | false | Launch interactive WebUI |
-| `--webui-port` | int | 8000 | Port for WebUI |
-
-> [!NOTE]
-> CLI arguments map to DGDR spec fields: `--min-num-gpus` and `--max-num-gpus` control hardware search space, `--use-ai-configurator` maps to `searchStrategy`. See [DGDR Configuration Structure](#dgdr-configuration-structure) for all field mappings.
 
 ## Integration
 

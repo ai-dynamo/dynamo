@@ -56,27 +56,7 @@ kubectl apply -f my-profiling-dgdr.yaml -n $NAMESPACE
 
 ### Using AI Configurator (Fast Offline Profiling)
 
-For TensorRT-LLM, use AI Configurator for rapid profiling (~30 seconds) by setting `searchStrategy: rapid`:
-
-```yaml
-spec:
-  searchStrategy: rapid
-```
-
-AIC-specific settings (`aicSystem`, `aicHfId`, `aicBackendVersion`) can be configured via CLI arguments when using [Direct Script Usage](#direct-script-usage-advanced).
-
-### Direct Script Usage (Advanced)
-
-For advanced scenarios, run the profiler directly:
-
-```bash
-python -m dynamo.profiler.profile_sla \
-  --backend vllm \
-  --config path/to/disagg.yaml \
-  --model meta-llama/Llama-3-8B \
-  --ttft 200 --itl 15 \
-  --isl 3000 --osl 150
-```
+AI Configurator enables rapid offline profiling (~30 seconds) and supports all backends (vLLM, SGLang, TensorRT-LLM). Since `searchStrategy: rapid` is the default, AIC is used automatically unless you explicitly set `searchStrategy: thorough`.
 
 ## Configuration
 
@@ -84,8 +64,8 @@ python -m dynamo.profiler.profile_sla \
 |-----------|---------|-------------|
 | `workload.isl` | 4000 | Average input sequence length (tokens) |
 | `workload.osl` | 1000 | Average output sequence length (tokens) |
-| `sla.ttft` | - | Target Time To First Token (milliseconds) |
-| `sla.itl` | - | Target Inter-Token Latency (milliseconds) |
+| `sla.ttft` | 2000 | Target Time To First Token (milliseconds) |
+| `sla.itl` | 30 | Target Inter-Token Latency (milliseconds) |
 | `hardware.numGpusPerNode` | auto | Number of GPUs per node |
 | `hardware.gpuSku` | auto | GPU SKU identifier |
 
