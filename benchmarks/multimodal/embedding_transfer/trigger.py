@@ -71,6 +71,11 @@ async def worker(runtime: DistributedRuntime):
                     print(
                         f"Workflow: {workflow_string}, From GPU: {use_gpu}, Transmitter Type: {transmitter_type}"
                     )
+                    # warm up
+                    async for response in await client.round_robin(
+                        "world,sun,moon,star"
+                    ):
+                        continue
                     start_time = time.perf_counter()
                     streams = [
                         await client.round_robin("world,sun,moon,star")
