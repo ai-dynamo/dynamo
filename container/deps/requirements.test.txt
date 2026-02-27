@@ -20,9 +20,9 @@ kr8s==0.20.13
 kubernetes_asyncio==32.0.0
 # For NATS object store verification in router tests
 nats-py==2.12.0
+psutil<=7.0.0  # System package, may vary by platform (was >=5.0.0)
 # Required by pyproject.toml warning filters (pydantic.warnings.PydanticDeprecatedSince20)
 pydantic>=2.11.4,<2.13
-psutil<=7.0.0  # System package, may vary by platform (was >=5.0.0)
 pytest==8.4.2
 pytest-asyncio==1.3.0
 pytest-benchmark==5.2.3
