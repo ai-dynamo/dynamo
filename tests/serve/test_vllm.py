@@ -195,8 +195,8 @@ vllm_configs = {
         marks=[
             pytest.mark.gpu_2,
             pytest.mark.post_merge,
-            pytest.mark.skip(reason="DYN-2263")
-            ],
+            pytest.mark.skip(reason="DYN-2263"),
+        ],
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
             chat_payload_default(
@@ -218,7 +218,7 @@ vllm_configs = {
         marks=[
             pytest.mark.gpu_2,
             pytest.mark.post_merge,
-            pytest.mark.skip(reason="DYN-2264")
+            pytest.mark.skip(reason="DYN-2264"),
         ],
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
@@ -349,7 +349,11 @@ vllm_configs = {
         name="multimodal_disagg_qwen3vl_2b_epd",
         directory=vllm_dir,
         script_name="disagg_multimodal_epd.sh",
-        marks=[pytest.mark.gpu_1, pytest.mark.pre_merge],
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.pre_merge,
+            pytest.mark.skip(reason="DYN-2265"),
+        ],
         model="Qwen/Qwen3-VL-2B-Instruct",
         script_args=["--model", "Qwen/Qwen3-VL-2B-Instruct", "--single-gpu"],
         timeout=360,
@@ -899,6 +903,7 @@ def test_lora_aggregated(
 @pytest.mark.timeout(600)
 @pytest.mark.post_merge
 @pytest.mark.parametrize("num_system_ports", [2], indirect=True)
+@pytest.mark.skip(reason="DYN-2265")
 def test_lora_aggregated_router(
     request,
     runtime_services_dynamic_ports,

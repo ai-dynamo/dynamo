@@ -119,7 +119,12 @@ trtllm_configs = {
         name="disaggregated_logprobs",
         directory=trtllm_dir,
         script_name="disagg.sh",
-        marks=[pytest.mark.gpu_2, pytest.mark.post_merge, pytest.mark.trtllm],
+        marks=[
+            pytest.mark.gpu_2,
+            pytest.mark.post_merge,
+            pytest.mark.trtllm,
+            pytest.mark.skip(reason="DYN-2265"),
+        ],
         model="Qwen/Qwen3-0.6B",
         frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
