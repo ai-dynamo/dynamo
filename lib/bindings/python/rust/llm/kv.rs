@@ -142,7 +142,7 @@ impl KvEventPublisher {
         enable_local_indexer: bool,
         zmq_endpoint: Option<String>,
         zmq_topic: Option<String>,
-        batching_timeout_ms: Option<u64>,
+        batching_timeout_us: Option<u64>,
     ) -> PyResult<Self> {
         let _ = worker_id;
 
@@ -155,9 +155,6 @@ impl KvEventPublisher {
             return Err(to_pyerr(anyhow::anyhow!("kv_block_size cannot be 0")));
         }
 
-        // Build batching config from Python parameters (timeout only, no max batch size)
-        let batching_timeout_ms = batching_timeout_ms.unwrap_or(10);
-        // TODO use this timeout!
 
         // Extract component from endpoint
         let component = endpoint.inner.component().clone();
@@ -168,6 +165,7 @@ impl KvEventPublisher {
             source_config,
             enable_local_indexer,
             dp_rank,
+            batching_timeout_us,
         )
         .map_err(to_pyerr)?;
 
