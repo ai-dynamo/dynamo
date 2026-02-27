@@ -412,6 +412,10 @@ def setup_vllm_engine(config, stat_logger=None):
 
     engine_args = config.engine_args
 
+    # if DP > 1, mark data_parallel_external_lb as Dynamo manage load balancing
+    if getattr(engine_args, "data_parallel_size", 1) > 1:
+        engine_args.data_parallel_external_lb = True
+
     if engine_args.enable_lora:
         if "VLLM_ALLOW_RUNTIME_LORA_UPDATING" not in os.environ:
             os.environ["VLLM_ALLOW_RUNTIME_LORA_UPDATING"] = "True"
