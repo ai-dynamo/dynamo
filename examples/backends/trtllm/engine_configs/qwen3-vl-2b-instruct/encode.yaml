@@ -15,7 +15,7 @@
 tensor_parallel_size: 1
 moe_expert_parallel_size: 1
 enable_attention_dp: false
-max_num_tokens: 2048
+max_num_tokens: 1024
 max_batch_size: 4
 trust_remote_code: true
 backend: pytorch
