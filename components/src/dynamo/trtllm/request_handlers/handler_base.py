@@ -18,7 +18,6 @@ import dataclasses
 import logging
 import os
 import re
-import time
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
 from typing import Any, AsyncGenerator, Optional, Union
@@ -604,10 +603,8 @@ class HandlerBase(BaseGenerativeHandler):
         """
         logging.debug(f"Request: {request}")
 
-        # Unified metrics: timing and request type detection
+        # Unified metrics: request type detection
         _um = self.unified_metrics
-        _um_start_time = time.monotonic() if _um else None
-        _um_first_token_time = None
 
         if _um:
             # Detect request types for metrics
@@ -820,21 +817,8 @@ class HandlerBase(BaseGenerativeHandler):
                             "Request finished with no finish reason set - this indicates a possible bug"
                         )
 
-                    # Track first token time for phase timing
-                    if _um and _um_first_token_time is None and out.get("token_ids"):
-                        _um_first_token_time = time.monotonic()
-
                     # Record unified (additional) metrics on request finish
                     if res.finished and _um and out.get("finish_reason"):
-                        _um_e2e = time.monotonic() - _um_start_time
-                        _ttft = (_um_first_token_time - _um_start_time) if _um_first_token_time else None
-                        # Extract queue_time from engine perf metrics if available
-                        _queue_time = None
-                        if output.request_perf_metrics is not None:
-                            _perf = output.request_perf_metrics
-                            if hasattr(_perf, "queue_time") and _perf.queue_time:
-                                _queue_time = _perf.queue_time
-                        _um.record_phase_times(ttft=_ttft, e2e=_um_e2e, queue_time=_queue_time)
                         # KV transfer success from request_perf_metrics
                         if output.request_perf_metrics is not None:
                             if self.disaggregation_mode == DisaggregationMode.PREFILL:

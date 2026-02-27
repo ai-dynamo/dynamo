@@ -3,7 +3,6 @@
 
 """Tests for AdditionalMetricsCollector and unified metrics integration."""
 
-import time
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -73,31 +72,6 @@ class TestAdditionalMetricsCollector(unittest.TestCase):
         output = generate_latest(self.registry).decode()
         self.assertIn("num_aborted_requests_total", output)
 
-    def test_phase_timing_with_ttft(self):
-        """Test phase timing records prefill and decode when TTFT is provided."""
-        self.collector.record_phase_times(ttft=0.05, e2e=1.0)
-        output = generate_latest(self.registry).decode()
-        self.assertIn("request_prefill_time_seconds", output)
-        self.assertIn("request_decode_time_seconds", output)
-
-    def test_phase_timing_with_queue_time(self):
-        """Test phase timing records inference when queue_time is provided."""
-        self.collector.record_phase_times(ttft=0.05, e2e=1.0, queue_time=0.01)
-        output = generate_latest(self.registry).decode()
-        self.assertIn("request_inference_time_seconds", output)
-
-    def test_phase_timing_without_queue_time(self):
-        """Test that inference time is not recorded without queue_time."""
-        self.collector.record_phase_times(ttft=0.05, e2e=1.0)
-        output = generate_latest(self.registry).decode()
-        # inference_time histogram exists but should have 0 observations
-        # when no queue_time is provided
-        lines = [l for l in output.splitlines()
-                 if "request_inference_time_seconds_count" in l and not l.startswith("#")]
-        if lines:
-            count = float(lines[0].split()[-1])
-            self.assertEqual(count, 0.0)
-
     def test_config_info_gauges(self):
         """Test config info gauges are set correctly."""
         self.collector.set_model_config(
@@ -145,6 +119,10 @@ class TestAdditionalMetricsCollector(unittest.TestCase):
         self.assertNotIn("handler_time_to_first_token_seconds", output)
         self.assertNotIn("handler_inter_token_latency_seconds", output)
         self.assertNotIn("handler_e2e_request_latency_seconds", output)
+        # Phase timing metrics also removed (derivable from existing trtllm_* metrics)
+        self.assertNotIn("request_prefill_time_seconds", output)
+        self.assertNotIn("request_decode_time_seconds", output)
+        self.assertNotIn("request_inference_time_seconds", output)
 
 
 class TestBackwardsCompatAlias(unittest.TestCase):
@@ -157,28 +135,6 @@ class TestBackwardsCompatAlias(unittest.TestCase):
 
 class TestHandlerBaseMetricsInstrumentation(unittest.TestCase):
     """Test metrics instrumentation in handler_base.py generate_locally()."""
-
-    def test_single_chunk_ttft(self):
-        """Regression: first-token time must be set before finish recording.
-
-        When the engine returns all tokens in a single chunk (common for
-        short outputs), TTFT must still be recorded correctly.
-        """
-        # This is a structural test - verify first-token tracking appears
-        # before the finish recording block in the source
-        import inspect
-        from dynamo.trtllm.request_handlers.handler_base import HandlerBase
-
-        source = inspect.getsource(HandlerBase.generate_locally)
-
-        # Find positions of key blocks
-        first_token_pos = source.find("_um_first_token_time is None")
-        finish_recording_pos = source.find("Record unified (additional) metrics on request finish")
-
-        self.assertGreater(first_token_pos, -1, "First token tracking not found")
-        self.assertGreater(finish_recording_pos, -1, "Finish recording not found")
-        self.assertLess(first_token_pos, finish_recording_pos,
-                        "First token tracking must appear BEFORE finish recording")
 
     def test_choice_in_structured_output_detection(self):
         """Verify choice is included in structured output detection."""

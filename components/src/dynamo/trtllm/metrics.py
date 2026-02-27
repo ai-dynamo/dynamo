@@ -25,7 +25,6 @@ The Rust frontend (metrics.rs) provides token counters:
   input_tokens_total, output_tokens_total, cached_tokens
 
 This module adds metrics that have no engine/runtime/frontend equivalent:
-  - Phase timing (prefill, decode, inference)
   - Request types (image, structured output)
   - KV transfer metrics (speed, latency, bytes, success/failure)
   - Config info (model, parallel, detailed, cache, engine startup)
@@ -33,21 +32,11 @@ This module adds metrics that have no engine/runtime/frontend equivalent:
 """
 
 import logging
-from typing import Optional
 
 from prometheus_client import Counter, Gauge, Histogram
 
 logger = logging.getLogger(__name__)
 
-# Histogram buckets aligned with vLLM unified-metrics branch
-TTFT_BUCKETS = (
-    0.001, 0.005, 0.01, 0.02, 0.04, 0.06, 0.08, 0.1, 0.25, 0.5,
-    0.75, 1.0, 2.5, 5.0, 7.5, 10.0, 20.0, 40.0, 80.0, 160.0, 640.0, 2560.0,
-)
-E2E_BUCKETS = (
-    0.3, 0.5, 0.8, 1.0, 1.5, 2.0, 2.5, 5.0, 10.0, 15.0, 20.0,
-    30.0, 40.0, 50.0, 60.0, 120.0, 240.0, 480.0, 960.0, 1920.0, 7680.0,
-)
 KV_TRANSFER_BUCKETS = (
     0.001, 0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.2, 0.3, 0.5, 0.75, 1.0, 5.0,
 )
@@ -73,26 +62,6 @@ class AdditionalMetricsCollector:
             "num_aborted_requests_total",
             "Total number of aborted/cancelled requests",
             labelnames=self._labelnames,
-        )
-
-        # --- Phase timing histograms ---
-        self.request_inference_time = Histogram(
-            "request_inference_time_seconds",
-            "Request inference time in seconds",
-            labelnames=self._labelnames,
-            buckets=E2E_BUCKETS,
-        )
-        self.request_prefill_time = Histogram(
-            "request_prefill_time_seconds",
-            "Request prefill time (approximated by TTFT) in seconds",
-            labelnames=self._labelnames,
-            buckets=TTFT_BUCKETS,
-        )
-        self.request_decode_time = Histogram(
-            "request_decode_time_seconds",
-            "Request decode time (e2e - TTFT) in seconds",
-            labelnames=self._labelnames,
-            buckets=E2E_BUCKETS,
         )
 
         # --- Request type counters ---
@@ -173,27 +142,6 @@ class AdditionalMetricsCollector:
     def record_request_abort(self):
         """Increment aborted requests counter."""
         self.num_aborted_requests.labels(*self._labelvalues).inc()
-
-    # --- Phase timing ---
-
-    def record_phase_times(
-        self,
-        ttft: Optional[float],
-        e2e: float,
-        queue_time: Optional[float] = None,
-    ):
-        """Record phase timing histograms (prefill, decode, inference)."""
-        if ttft is not None and ttft > 0:
-            self.request_prefill_time.labels(*self._labelvalues).observe(ttft)
-            decode_time = e2e - ttft
-            if decode_time > 0:
-                self.request_decode_time.labels(*self._labelvalues).observe(decode_time)
-        if queue_time is not None and queue_time > 0:
-            inference_time = e2e - queue_time
-            if inference_time > 0:
-                self.request_inference_time.labels(*self._labelvalues).observe(
-                    inference_time
-                )
 
     # --- Request type tracking ---
 

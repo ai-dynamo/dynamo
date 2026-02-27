@@ -480,8 +480,7 @@ async def init_llm_worker(
                 if config.publish_events_and_metrics:
                     _additional_prefixes = [
                         "num_aborted_requests_total",
-                        "request_inference_time", "request_prefill_time",
-                        "request_decode_time", "request_type_",
+                        "request_type_",
                         "kv_transfer_",
                         "model_config_info", "parallel_config_info",
                         "detailed_config_info", "cache_config_info",
