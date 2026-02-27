@@ -349,9 +349,9 @@ vllm_configs = {
             "DYN_ENCODE_WORKER_GPU": "0",
             "DYN_PREFILL_WORKER_GPU": "0",
             "DYN_DECODE_WORKER_GPU": "0",
-            "DYN_ENCODE_GPU_MEM": "0.10",
-            "DYN_PREFILL_GPU_MEM": "0.45",
-            "DYN_DECODE_GPU_MEM": "0.45",
+            "DYN_ENCODE_GPU_MEM": "0.1",
+            "DYN_PREFILL_GPU_MEM": "0.4",
+            "DYN_DECODE_GPU_MEM": "0.4",
         },
         request_payloads=[
             chat_payload(
