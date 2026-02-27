@@ -29,6 +29,15 @@ runs:
         kubectl get all -n $NAMESPACE || true
         echo "::endgroup::"
 
+    - name: Delete stale DynamoGraphDeployments
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+      run: |
+        echo "::group::Delete stale DynamoGraphDeployments"
+        kubectl delete dynamographdeployments --all -n $NAMESPACE --timeout=60s
+        echo "::endgroup::"
+
     - name: Uninstall Helm chart
       shell: bash
       env:
