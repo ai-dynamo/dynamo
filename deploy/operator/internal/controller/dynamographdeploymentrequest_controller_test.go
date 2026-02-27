@@ -97,7 +97,7 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 					Model:     "test-model",
 					Backend:   "vllm",
 					Image:     "test-profiler:latest",
-					AutoApply: true,
+					AutoApply: ptr.To(true),
 					Hardware: &nvidiacomv1beta1.HardwareSpec{
 						NumGPUsPerNode: ptr.To[int32](8),
 						GPUSKU:         "H100-SXM5-80GB",
@@ -494,7 +494,7 @@ spec:
 						TTFT: ptr.To(100.0),
 						ITL:  ptr.To(1500.0),
 					},
-					AutoApply: true,
+					AutoApply: ptr.To(true),
 				},
 			}
 
@@ -695,7 +695,7 @@ spec:
 						TTFT: ptr.To(100.0),
 						ITL:  ptr.To(1500.0),
 					},
-					AutoApply: true,
+					AutoApply: ptr.To(true),
 				},
 			}
 
@@ -1881,7 +1881,7 @@ spec:
 					Model:     "test-model",
 					Backend:   "vllm",
 					Image:     "test-profiler:latest",
-					AutoApply: true,
+					AutoApply: ptr.To(true),
 					Hardware: &nvidiacomv1beta1.HardwareSpec{
 						NumGPUsPerNode: ptr.To[int32](8),
 						GPUSKU:         "H100-SXM5-80GB",

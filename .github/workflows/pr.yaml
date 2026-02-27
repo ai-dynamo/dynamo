@@ -276,103 +276,41 @@ jobs:
       (needs.operator.result == 'success' || needs.operator.result == 'skipped')
     needs: [changed-files, operator]
     outputs:
-      NAMESPACE: ${{ steps.deploy-operator-step.outputs.namespace }}
+      NAMESPACE: ${{ steps.namespace.outputs.namespace }}
+      OPERATOR_TAG: ${{ steps.operator-tag.outputs.tag }}
     steps:
     - uses: actions/checkout@v4
-    - name: Determine operator image tag
+    - name: Determine operator tag
       id: operator-tag
       run: |
         if [ "${{ needs.operator.result }}" == "success" ]; then
-          echo "tag=${{ needs.operator.outputs.operator_default_tag }}" >> $GITHUB_OUTPUT
-          echo "Using newly built operator image: ${{ needs.operator.outputs.operator_default_tag }}"
+          TAG="${{ needs.operator.outputs.operator_default_tag }}"
         else
-          echo "tag=main-operator" >> $GITHUB_OUTPUT
-          echo "Using stable operator image: main-operator"
+          TAG="main-operator"
         fi
-    - name: Deploy Operator
-      id: deploy-operator-step
+        echo "tag=${TAG}" >> $GITHUB_OUTPUT
+        echo "Using operator tag: ${TAG}"
+    - name: Generate namespace name
+      id: namespace
       env:
         BRANCH: ${{ github.ref_name }}
       run: |
-        set -x
-
-        # Set namespace
+        # Sanitize branch name for k8s namespace
         # Invalid patterns: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/
         BRANCH_SANITIZED="${BRANCH//\//-}"
         BRANCH_SANITIZED="${BRANCH_SANITIZED/pull-request/pr}"
         BRANCH_SANITIZED="${BRANCH_SANITIZED//./-}"
-        # Cap at 10 chars
         BRANCH_SANITIZED="${BRANCH_SANITIZED:0:10}"
         NAMESPACE="gh-id-${{ github.run_id }}-${BRANCH_SANITIZED}-dt"
         echo "namespace=${NAMESPACE}" >> "$GITHUB_OUTPUT"
-
-        # Setup kubeconfig
-        echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
-        chmod 600 .kubeconfig
-        export KUBECONFIG=$(pwd)/.kubeconfig
-        kubectl config set-context --current --namespace=$NAMESPACE --kubeconfig "${KUBECONFIG}"
-        kubectl config current-context
-
-        # Create a namespace for this job
-        echo "Creating an ephemeral namespace..."
-        kubectl create namespace $NAMESPACE
-        echo "Attaching the labels for secrets and cleanup"
-        kubectl label namespaces ${NAMESPACE} nscleanup/enabled=true nscleanup/ttl=7200 gitlab-imagepull=enabled ngc-api=enabled nvcr-imagepull=enabled --overwrite=true
-
-        # Set the namespace as default
-        kubectl config set-context --current --namespace=$NAMESPACE
-
-        # Check if Istio is installed
-        kubectl get pods -n istio-system
-        # Check if default storage class exists
-        kubectl get storageclass
-
-        # Install Helm chart
-        export VIRTUAL_ENV=/opt/dynamo/venv
-        export KUBE_NS=$NAMESPACE
-        export ISTIO_ENABLED=true
-        export ISTIO_GATEWAY=istio-system/ingress-alb
-        export VIRTUAL_SERVICE_SUPPORTS_HTTPS=true
-
-        # Install dynamo env secrets
-        kubectl create secret generic hf-token-secret --from-literal=HF_TOKEN=${{ secrets.HF_TOKEN }} -n $KUBE_NS || true
-        # Install helm dependencies
-        helm repo add bitnami https://charts.bitnami.com/bitnami
-        cd deploy/helm/charts/platform/
-        helm dep build .
-        # Install platform with namespace restriction for single profile testing
-        # we manage crds via Velonix so we skip the crds installation
-        helm upgrade --install dynamo-platform . --namespace ${NAMESPACE} \
-          --skip-crds \
-          --set dynamo-operator.namespaceRestriction.enabled=true \
-          --set dynamo-operator.namespaceRestriction.allowedNamespaces[0]=${NAMESPACE} \
-          --set dynamo-operator.controllerManager.manager.image.repository=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo \
-          --set dynamo-operator.controllerManager.manager.image.tag=${{ steps.operator-tag.outputs.tag }} \
-          --set dynamo-operator.gpuDiscovery.enabled=false \
-          --set dynamo-operator.upgradeCRD=false \
-          --debug
-        # Wait for all deployments to be ready
-        timeout 300s kubectl rollout status deployment -n $NAMESPACE --watch
-    - name: 🔍 Report Unhealthy Pods
-      if: failure()
-      run: |
-        # Setup kubeconfig
-        echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
-        chmod 600 .kubeconfig
-        export KUBECONFIG=$(pwd)/.kubeconfig
-        kubectl config set-context --current --namespace=$NAMESPACE --kubeconfig "${KUBECONFIG}"
-        kubectl config current-context
-        # Descriptive header for the summary
-        echo "### ⚠️ OPERATOR DEPLOYMENT FAILED: Unhealthy Pods Report" >> $GITHUB_STEP_SUMMARY
-        echo "Unhealthy pods:" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-
-        # Get pods, exclude healthy ones, and format output
-        # If the namespace is empty or all pods are healthy, the grep/awk won't output anything, which is handled gracefully.
-        kubectl get pods -n ${{ steps.deploy-operator-step.outputs.namespace }} --no-headers \
-          | grep -v -E '(Running|Completed)' \
-          | awk '{print "- 🔴 **" $1 "** | Status: `" $3 "`"}' >> $GITHUB_STEP_SUMMARY || true
-
+    - name: Setup namespace and operator
+      uses: ./.github/actions/setup-deploy-namespace
+      with:
+        kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
+        namespace: ${{ steps.namespace.outputs.namespace }}
+        registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+        operator_tag: ${{ steps.operator-tag.outputs.tag }}
+        hf_token: ${{ secrets.HF_TOKEN }}
    # ============================================================================
    #
    # End-to-end tests for each framework with various deployment profiles
@@ -406,7 +344,9 @@ jobs:
         with:
           kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
           namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
-          deployment_file: "deploy/${{ matrix.profile }}.yaml"
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          operator_tag: ${{ needs.deploy-operator.outputs.OPERATOR_TAG }}
+          hf_token: ${{ secrets.HF_TOKEN }}
           framework: ${{ env.FRAMEWORK }}
           profile: ${{ matrix.profile }}
           image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-cuda12-amd64
@@ -439,7 +379,9 @@ jobs:
         with:
           kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
           namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
-          deployment_file: "deploy/${{ matrix.profile }}.yaml"
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          operator_tag: ${{ needs.deploy-operator.outputs.OPERATOR_TAG }}
+          hf_token: ${{ secrets.HF_TOKEN }}
           framework: ${{ env.FRAMEWORK }}
           profile: ${{ matrix.profile }}
           image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-sglang-cuda12-amd64
@@ -476,7 +418,9 @@ jobs:
         with:
           kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
           namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
-          deployment_file: "deploy/${{ matrix.profile }}.yaml"
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          operator_tag: ${{ needs.deploy-operator.outputs.OPERATOR_TAG }}
+          hf_token: ${{ secrets.HF_TOKEN }}
           framework: ${{ env.FRAMEWORK }}
           profile: ${{ matrix.profile }}
           image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-trtllm-cuda13-amd64
@@ -511,47 +455,14 @@ jobs:
   cleanup:
     name: Cleanup AKS resources
     runs-on: prod-default-small-v2
-    if:  always()
+    if: always()
     needs: [deploy-operator, deploy-test-trtllm, deploy-test-sglang, deploy-test-vllm]
     steps:
     - name: Checkout code
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-    - name: Setup Kubeconfig
-      env:
-        NAMESPACE: ${{ needs.deploy-operator.outputs.NAMESPACE }}
-      run: |
-        set -x
-        # Setup kubeconfig
-        echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
-        chmod 600 .kubeconfig
-        export KUBECONFIG=$(pwd)/.kubeconfig
-        kubectl config set-context --current --namespace=$NAMESPACE --kubeconfig "${KUBECONFIG}"
-        kubectl config current-context
-    - name: Cleanup
-      timeout-minutes: 5
-      env:
-        NAMESPACE: ${{ needs.deploy-operator.outputs.NAMESPACE }}
-      run: |
-        set -x
-        export KUBECONFIG=$(pwd)/.kubeconfig
-        kubectl config set-context --current --namespace=$NAMESPACE
-
-        echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
-        chmod 600 .kubeconfig
-        export KUBECONFIG=$(pwd)/.kubeconfig
-        kubectl config set-context --current --namespace=$NAMESPACE --kubeconfig "${KUBECONFIG}"
-
-        # For debugging purposes, list all the resources before we uninstall
-        kubectl get dynamographdeployments
-        kubectl get all
-
-        echo "Deleting all DynamoGraphDeployments in namespace $NAMESPACE..."
-        kubectl delete dynamographdeployments --all -n $NAMESPACE || true
-
-        # Uninstall the helm chart
-        helm ls
-        helm uninstall dynamo-platform --namespace $NAMESPACE --timeout 10m || true
-
-        echo "Namespace $NAMESPACE deletion initiated, proceeding with cleanup..."
-        kubectl delete namespace $NAMESPACE || true
-        echo "Namespace $NAMESPACE completed."
+    - name: Teardown namespace
+      if: needs.deploy-operator.outputs.NAMESPACE != ''
+      uses: ./.github/actions/teardown-deploy-namespace
+      with:
+        kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
+        namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
