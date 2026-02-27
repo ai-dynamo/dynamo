@@ -23,6 +23,9 @@ spec:
       resources:
         limits:
           gpu: "1"
+        requests:
+          custom:
+            ephemeral-storage: "2Gi"
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
