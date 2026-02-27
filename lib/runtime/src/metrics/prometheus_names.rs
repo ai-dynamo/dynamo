@@ -451,6 +451,30 @@ pub mod routing_overhead {
     pub const TOTAL_MS: &str = "overhead_total_ms";
 }
 
+/// Router request metrics (component-scoped aggregate histograms + counter)
+///
+/// These constants are the suffix portions of full metric names, combined with
+/// [`name_prefix::COMPONENT`] to form the complete name, e.g.
+/// `dynamo_component_router_requests_total`.
+///
+/// ⚠️  Python codegen: Run gen-python-prometheus-names after changes
+pub mod router {
+    /// Total number of requests processed by the router
+    pub const REQUESTS_TOTAL: &str = "router_requests_total";
+
+    /// Time to first token observed at the router (seconds)
+    pub const TIME_TO_FIRST_TOKEN_SECONDS: &str = "router_time_to_first_token_seconds";
+
+    /// Average inter-token latency observed at the router (seconds)
+    pub const INTER_TOKEN_LATENCY_SECONDS: &str = "router_inter_token_latency_seconds";
+
+    /// Input sequence length in tokens observed at the router
+    pub const INPUT_SEQUENCE_TOKENS: &str = "router_input_sequence_tokens";
+
+    /// Output sequence length in tokens observed at the router
+    pub const OUTPUT_SEQUENCE_TOKENS: &str = "router_output_sequence_tokens";
+}
+
 // KvRouter (including KvInexer) Prometheus metric names
 pub mod kvrouter {
     /// Number of KV cache events applied to the index (including status)

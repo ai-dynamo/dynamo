@@ -5,8 +5,6 @@ title: Reference Guide
 subtitle: Architecture, configuration, and operational details for the SGLang backend
 ---
 
-# Reference Guide
-
 ## Overview
 
 The SGLang backend in Dynamo uses a modular architecture where `main.py` dispatches to specialized initialization modules based on the worker type. Each worker type has its own init module, request handler, health check, and registration logic.

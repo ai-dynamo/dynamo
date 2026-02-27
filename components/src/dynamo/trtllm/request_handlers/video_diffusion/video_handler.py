@@ -4,6 +4,8 @@
 """Video generation request handler for TensorRT-LLM backend.
 
 This handler processes video generation requests using diffusion models.
+It handles MediaOutput from TensorRT-LLM's visual_gen pipelines, which
+can contain video, image, and/or audio tensors depending on the model.
 """
 
 import asyncio
@@ -32,9 +34,14 @@ logger = logging.getLogger(__name__)
 class VideoGenerationHandler(BaseGenerativeHandler):
     """Handler for video generation requests.
 
-    This handler receives video generation requests, runs the diffusion
-    pipeline via DiffusionEngine, encodes the output to MP4, and returns
-    the video URL or base64-encoded data.
+    This handler receives generation requests, runs the diffusion pipeline
+    via DiffusionEngine, encodes the output to the appropriate media format,
+    and returns the media URL or base64-encoded data.
+
+    Supports MediaOutput with:
+    - video: torch.Tensor (num_frames, H, W, 3) uint8 → encoded as MP4
+    - image: logged as unsupported (use an image handler instead)
+    - audio: logged (future: mux into MP4)
 
     Inherits from BaseGenerativeHandler to share the common interface with
     LLM handlers.
@@ -59,8 +66,8 @@ class VideoGenerationHandler(BaseGenerativeHandler):
             )
         self.media_output_fs = get_fs(config.media_output_fs_url)
         self.media_output_http_url = config.media_output_http_url
-        # Serialize pipeline access — visual_gen is not thread-safe (global
-        # singleton configs, mutable instance state, unprotected CUDA graph cache).
+        # Serialize pipeline access — the diffusion pipeline is not thread-safe
+        # (mutable instance state, unprotected CUDA graph cache).
         # asyncio.Lock suspends waiting coroutines cooperatively so the event
         # loop stays free for health checks and signal handling.
         self._generate_lock = asyncio.Lock()
@@ -159,21 +166,26 @@ class VideoGenerationHandler(BaseGenerativeHandler):
     async def generate(
         self, request: dict[str, Any], context: Context
     ) -> AsyncGenerator[dict[str, Any], None]:
-        """Generate video from request.
+        """Generate video/image from request.
 
         This is the main entry point called by Dynamo's endpoint.serve_endpoint().
 
+        Handles MediaOutput from the pipeline:
+        - video tensor → MP4
+        - image tensor → unsupported (raises error)
+        - audio tensor → unsupported (raises error)
+
         Args:
-            request: Request dictionary with video generation parameters.
+            request: Request dictionary with generation parameters.
             context: Dynamo context for request tracking.
 
         Yields:
-            Response dictionary with generated video data.
+            Response dictionary with generated media data.
         """
         start_time = time.time()
         request_id = str(uuid.uuid4())
 
-        logger.info(f"Received video generation request: {request_id}")
+        logger.info(f"Received generation request: {request_id}")
 
         try:
             # Parse request
@@ -202,11 +214,11 @@ class VideoGenerationHandler(BaseGenerativeHandler):
             # Run generation in thread pool (blocking operation).
             # Lock ensures only one request uses the pipeline at a time.
             # TODO: Add cancellation support. This requires:
-            # 1. visual_gen to expose a cancellation hook in the denoising loop
+            # 1. The pipeline to expose a cancellation hook in the denoising loop
             # 2. Passing a cancellation token/event to engine.generate()
             # 3. Checking context.cancelled() and propagating to the pipeline
             async with self._generate_lock:
-                frames = await asyncio.to_thread(
+                output = await asyncio.to_thread(
                     self.engine.generate,
                     prompt=req.prompt,
                     negative_prompt=nvext.negative_prompt,
@@ -218,15 +230,47 @@ class VideoGenerationHandler(BaseGenerativeHandler):
                     seed=nvext.seed,
                 )
 
+            if output is None:
+                raise RuntimeError("Pipeline returned no output (MediaOutput is None)")
+
             # Determine output format
             response_format = req.response_format or "url"
             fps = nvext.fps or self.config.default_fps
 
-            # Encode frames to MP4 bytes in memory
-            video_bytes = await asyncio.to_thread(encode_to_mp4_bytes, frames, fps=fps)
+            # Encode media based on what the pipeline returned
+            if output.video is not None:
+                # Video output: torch.Tensor (num_frames, H, W, 3) uint8 → MP4
+                frames_np = output.video.cpu().numpy()
+                logger.info(
+                    f"Request {request_id}: encoding video output "
+                    f"(shape={frames_np.shape}) to MP4 at {fps} fps"
+                )
+                video_bytes = await asyncio.to_thread(
+                    encode_to_mp4_bytes, frames_np, fps=fps
+                )
 
+            elif output.image is not None:
+                raise RuntimeError(
+                    "Pipeline returned image-only output, but this handler "
+                    "only supports video. Use an image generation handler instead."
+                )
+
+            # Log audio if present (unsupported)
+            elif output.audio is not None:
+                raise RuntimeError(
+                    "Pipeline returned audio-only output, but this handler "
+                    "only supports video. Use an audio generation handler instead."
+                )
+
+            else:
+                raise RuntimeError(
+                    "Pipeline returned MediaOutput with no video or image or audio data. "
+                    f"MediaOutput fields: video={output.video is not None}, "
+                    f"image={output.image is not None}, audio={output.audio is not None}"
+                )
+
+            # Return media via URL or base64
             if response_format == "url":
-                # Upload via filesystem
                 storage_path = f"videos/{request_id}.mp4"
                 video_url = await upload_to_fs(
                     self.media_output_fs,
@@ -236,7 +280,6 @@ class VideoGenerationHandler(BaseGenerativeHandler):
                 )
                 video_data = VideoData(url=video_url)
             else:
-                # Encode to base64
                 b64_video = base64.b64encode(video_bytes).decode("utf-8")
                 video_data = VideoData(b64_json=b64_video)
 

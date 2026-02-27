@@ -4,8 +4,6 @@
 title: Router Design
 ---
 
-# Router Design
-
 This document describes the internal architecture of the Dynamo KV Router, including block tracking mechanisms, the KV cache optimization system, event handling, and transport modes.
 
 ## KV Router Architecture

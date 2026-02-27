@@ -4,19 +4,9 @@
 title: SGLang
 ---
 
-# Running SGLang with Dynamo
-
 ## Use the Latest Release
 
-We recommend using the latest stable release of Dynamo to avoid breaking changes:
-
-[![GitHub Release](https://img.shields.io/github/v/release/ai-dynamo/dynamo)](https://github.com/ai-dynamo/dynamo/releases/latest)
-
-You can find the latest release [here](https://github.com/ai-dynamo/dynamo/releases/latest) and check out the corresponding branch with:
-
-```bash
-git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
-```
+We recommend using the [latest stable release](https://github.com/ai-dynamo/dynamo/releases/latest) of Dynamo to avoid breaking changes.
 
 ---
 
