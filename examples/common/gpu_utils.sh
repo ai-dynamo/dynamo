@@ -13,6 +13,8 @@
 #   get_model_params <model>           Set _MP_* vars for a known model's architecture
 #   estimate_worker_vram <model> ...   Set _EW_* vars with per-worker VRAM estimate
 #   gpu_worker_fraction <engine>       Convert _EW_* estimate → engine-appropriate fraction
+#   gpu_peak_to_engine_fraction <engine> <peak_gib>
+#                                      Convert profiled peak GiB → engine fraction (subtracts overhead)
 #   gpu_gb_to_total_fraction <gib>     Convert absolute GiB → fraction of TOTAL VRAM (vLLM/sglang)
 #   gpu_gb_to_free_fraction <gib>      Convert absolute GiB → fraction of FREE VRAM (TensorRT-LLM)
 
@@ -28,10 +30,20 @@
 # KV cache is assumed BF16 (2 bytes per element) regardless of weight dtype,
 # since FP8 KV cache (--kv-cache-dtype fp8) is opt-in and not the default.
 #
-# To add a model: look up config.json on HuggingFace for num_hidden_layers,
-# num_key_value_heads, and head_dim. For VL/multimodal models, use the
-# text_config section. For MoE, _MP_PARAMS_B is the TOTAL param count
-# (all experts are loaded into VRAM).
+# To add a model:
+#   1. Find config.json at  https://huggingface.co/<model>/raw/main/config.json
+#      For VL/multimodal models, architecture params are under text_config.
+#   2. Map fields:
+#        _MP_LAYERS    ← num_hidden_layers
+#        _MP_KV_HEADS  ← num_key_value_heads
+#        _MP_HEAD_DIM  ← head_dim  (or hidden_size / num_attention_heads)
+#   3. _MP_PARAMS_B: total parameter count in billions.  Derive from:
+#        - safetensors file size:  size_bytes / _MP_WEIGHT_BYTES / 1e9
+#          (single file: ls -l model.safetensors; sharded: metadata.total_size
+#          in model.safetensors.index.json)
+#        - or the model card / paper
+#      For MoE: _MP_PARAMS_B is the TOTAL count (all experts loaded into VRAM).
+#   4. _MP_WEIGHT_BYTES: 2 for BF16/FP16, 1 for FP8/INT8.
 #
 # Usage:
 #   get_model_params "Qwen/Qwen3-0.6B"
@@ -39,25 +51,48 @@
 get_model_params() {
     local model="${1:?usage: get_model_params <model_name>}"
     case "$model" in
+        # https://huggingface.co/Qwen/Qwen3-0.6B/raw/main/config.json
         Qwen/Qwen3-0.6B)
             _MP_PARAMS_B=0.6;  _MP_WEIGHT_BYTES=2
             _MP_LAYERS=28;  _MP_KV_HEADS=8;   _MP_HEAD_DIM=128 ;;
+        # https://huggingface.co/Qwen/Qwen2-VL-2B-Instruct/raw/main/config.json  (text_config)
+        # params_b from model.safetensors.index.json metadata.total_size / 2 / 1e9
+        Qwen/Qwen2-VL-2B-Instruct)
+            _MP_PARAMS_B=2.2;  _MP_WEIGHT_BYTES=2
+            _MP_LAYERS=28;  _MP_KV_HEADS=2;   _MP_HEAD_DIM=128 ;;
+        # https://huggingface.co/Qwen/Qwen2.5-VL-7B-Instruct/raw/main/config.json  (text_config)
         Qwen/Qwen2.5-VL-7B-Instruct)
             _MP_PARAMS_B=8.3;  _MP_WEIGHT_BYTES=2
             _MP_LAYERS=28;  _MP_KV_HEADS=4;   _MP_HEAD_DIM=128 ;;
+        # https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct/raw/main/config.json  (text_config)
+        # params_b from model.safetensors size / 2 / 1e9
+        Qwen/Qwen3-VL-2B-Instruct)
+            _MP_PARAMS_B=2.1;  _MP_WEIGHT_BYTES=2
+            _MP_LAYERS=28;  _MP_KV_HEADS=8;   _MP_HEAD_DIM=128 ;;
+        # https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct/raw/main/config.json  (text_config)
         Qwen/Qwen3-VL-8B-Instruct)
             _MP_PARAMS_B=9.2;  _MP_WEIGHT_BYTES=2
             _MP_LAYERS=36;  _MP_KV_HEADS=8;   _MP_HEAD_DIM=128 ;;
+        # https://huggingface.co/Qwen/Qwen3-30B-A3B/raw/main/config.json
         Qwen/Qwen3-30B-A3B|\
         Qwen/Qwen3-30B-A3B-Instruct)
             _MP_PARAMS_B=30.5; _MP_WEIGHT_BYTES=2
             _MP_LAYERS=48;  _MP_KV_HEADS=4;   _MP_HEAD_DIM=128 ;;
+        # Same architecture as Qwen3-30B-A3B but FP8 quantized (1 byte per weight)
         Qwen/Qwen3-VL-30B-A3B-Instruct-FP8)
             _MP_PARAMS_B=30.5; _MP_WEIGHT_BYTES=1
             _MP_LAYERS=48;  _MP_KV_HEADS=4;   _MP_HEAD_DIM=128 ;;
+        # https://huggingface.co/meta-llama/Meta-Llama-3.1-8B-Instruct/raw/main/config.json
         meta-llama/Meta-Llama-3.1-8B-Instruct)
             _MP_PARAMS_B=8.0;  _MP_WEIGHT_BYTES=2
             _MP_LAYERS=32;  _MP_KV_HEADS=8;   _MP_HEAD_DIM=128 ;;
+        # https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/raw/main/config.json
+        # MHA (not GQA): num_key_value_heads == num_attention_heads == 32
+        deepseek-ai/deepseek-llm-7b-base)
+            _MP_PARAMS_B=6.9;  _MP_WEIGHT_BYTES=2
+            _MP_LAYERS=30;  _MP_KV_HEADS=32;  _MP_HEAD_DIM=128 ;;
+        # https://huggingface.co/llava-hf/llava-1.5-7b-hf/raw/main/config.json  (text_config)
+        # MHA: num_key_value_heads == num_attention_heads == 32
         llava-hf/llava-1.5-7b-hf)
             _MP_PARAMS_B=7.1;  _MP_WEIGHT_BYTES=2
             _MP_LAYERS=32;  _MP_KV_HEADS=32;  _MP_HEAD_DIM=128 ;;
@@ -168,6 +203,51 @@ gpu_worker_fraction() {
             echo "gpu_worker_fraction: unknown engine '$engine'" >&2
             echo "Supported: vllm, sglang, trtllm" >&2
             return 1 ;;
+    esac
+}
+
+# gpu_peak_to_engine_fraction <engine> <peak_gib> [gpu_index]
+#
+# Convert a measured/profiled GPU peak (total VRAM including CUDA context,
+# activations, etc.) into the engine-specific memory fraction flag.
+#
+# Each engine's fraction controls only a SUBSET of GPU memory (e.g. vLLM's
+# --gpu-memory-utilization covers weights + KV cache but not CUDA context).
+# This function subtracts the engine-specific overhead so the fraction
+# targets the right internal budget, keeping the real peak stable across
+# re-profiles.
+#
+# Overhead constants (GiB outside the engine's budget):
+#   vllm   2.0   CUDA ctx ~0.6 + activations/sampler ~0.5 + PyTorch alloc ~0.5
+#   sglang 2.0   (assumed same as vllm; refine when profiled)
+#   trtllm 0.0   free-fraction is measured after model load, no subtraction needed
+#
+# Usage:
+#   gpu_peak_to_engine_fraction vllm 8.6       # on 48 GiB → 0.14
+#   gpu_peak_to_engine_fraction vllm 20.9      # on 48 GiB → 0.40
+#   gpu_peak_to_engine_fraction vllm 8.6 1     # query GPU index 1
+gpu_peak_to_engine_fraction() {
+    local engine=${1:?usage: gpu_peak_to_engine_fraction <engine> <peak_gib> [gpu_index]}
+    local peak_gib=${2:?usage: gpu_peak_to_engine_fraction <engine> <peak_gib> [gpu_index]}
+    local gpu_idx=${3:-0}
+
+    local overhead
+    case "$engine" in
+        vllm|sglang) overhead=2.0 ;;
+        trtllm)      overhead=0.0 ;;
+        *)
+            echo "gpu_peak_to_engine_fraction: unknown engine '$engine'" >&2
+            echo "Supported: vllm, sglang, trtllm" >&2
+            return 1 ;;
+    esac
+
+    local budget
+    budget=$(awk -v g="$peak_gib" -v oh="$overhead" \
+        'BEGIN { b = g - oh; if (b < 1) b = 1; printf "%.1f", b }')
+
+    case "$engine" in
+        vllm|sglang) gpu_gb_to_total_fraction "$budget" "$gpu_idx" ;;
+        trtllm)      gpu_gb_to_free_fraction  "$budget" "$gpu_idx" ;;
     esac
 }
 

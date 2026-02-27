@@ -57,7 +57,7 @@ controls the *overall* VRAM budget (and thus whether the model fits), but the
 KV cache portion is pinned to the explicit byte value.
 
 Consequence for profiling: if a script uses `--kv-cache-memory-bytes`,
-changing `DYN_GPU_MEMORY_FRACTION_OVERRIDE` (which maps to
+changing `_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE` (which maps to
 `--gpu-memory-utilization`) won't change the KV cache size, only the leftover
 headroom for activations and overhead.
 
@@ -291,7 +291,7 @@ kv_cache_gib = kv_bytes_per_token * max_model_len * max_concurrent_seqs / (1024^
 
 ---
 
-## `DYN_GPU_MEMORY_FRACTION_OVERRIDE`
+## `_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE`
 
 Environment variable used by Dynamo's VRAM profiler to binary-search the minimum
 memory fraction a script needs.
@@ -303,4 +303,4 @@ memory fraction a script needs.
   fraction; the override bypasses this and splits the raw value between workers.
 - Scripts that use `--kv-cache-memory-bytes` (vLLM) bypass the fraction-based KV
   cache sizing, making the profiler's fraction override ineffective for KV cache.
-  Those scripts should warn when `DYN_GPU_MEMORY_FRACTION_OVERRIDE` is set.
+  Those scripts should warn when `_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE` is set.

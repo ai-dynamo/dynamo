@@ -42,6 +42,7 @@ def pytest_configure(config):
         "gpu_2: marks tests to run on 2GPUs",
         "gpu_4: marks tests to run on 4GPUs",
         "gpu_8: marks tests to run on 8GPUs",
+        "max_vram_gib(N): peak VRAM in GiB (with 10% safety). Filter with --max-vram-gib=N",
         "e2e: marks tests as end-to-end tests",
         "integration: marks tests as integration tests",
         "unit: marks tests as unit tests",
@@ -100,6 +101,12 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         default=None,  # None = use fixture's default behavior
         help="Skip restarting NATS and etcd services before deployment. "
         "Default: deploy tests skip (for speed), fault-tolerance tests restart (for clean state).",
+    )
+    parser.addoption(
+        "--max-vram-gib",
+        type=float,
+        default=None,
+        help="Skip tests whose @pytest.mark.max_vram_gib(N) exceeds this value (GiB).",
     )
 
 
@@ -292,6 +299,17 @@ def pytest_collection_modifyitems(config, items):
             for item in items:
                 if _item_has_marker(item, marker_name):
                     item.add_marker(skip)
+
+    # Skip tests that exceed --max-vram-gib
+    vram_limit = config.getoption("--max-vram-gib", default=None)
+    if vram_limit is not None:
+        skip_vram = pytest.mark.skip(
+            reason=f"requires more than {vram_limit} GiB VRAM (--max-vram-gib={vram_limit})"
+        )
+        for item in items:
+            vram_mark = item.get_closest_marker("max_vram_gib")
+            if vram_mark and vram_mark.args and vram_mark.args[0] > vram_limit:
+                item.add_marker(skip_vram)
 
     # Collect models via explicit pytest mark from final filtered items only
     models_to_download = set()
@@ -836,11 +854,17 @@ def dynamo_dynamic_ports(num_system_ports) -> Generator[ServicePorts, None, None
 
     - frontend_port: OpenAI-compatible HTTP/gRPC ingress (dynamo.frontend)
     - system_ports: List of worker metrics/system ports (configurable count via num_system_ports)
+    - kv_event_port: ZMQ port for vLLM KV event publishing (avoids collisions under xdist)
     """
     frontend_port = allocate_port(DefaultPort.FRONTEND.value)
     system_port_list = allocate_ports(num_system_ports, DefaultPort.SYSTEM1.value)
-    all_ports = [frontend_port, *system_port_list]
+    kv_event_port = allocate_port(DefaultPort.SYSTEM1.value)
+    all_ports = [frontend_port, *system_port_list, kv_event_port]
     try:
-        yield ServicePorts(frontend_port=frontend_port, system_ports=system_port_list)
+        yield ServicePorts(
+            frontend_port=frontend_port,
+            system_ports=system_port_list,
+            kv_event_port=kv_event_port,
+        )
     finally:
         deallocate_ports(all_ports)

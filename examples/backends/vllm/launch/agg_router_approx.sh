@@ -24,10 +24,16 @@ python -m dynamo.frontend \
 # If multiple workers are launched, they must not share the same system/metrics port.
 # Use DYN_SYSTEM_PORT{1,2} so tests/launchers can provide a simple numbered port set.
 
+GPU_MEM_ARGS=()
+if [[ -n "${_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE:-}" ]]; then
+    GPU_MEM_ARGS=("--gpu-memory-utilization" "$_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE")
+fi
+
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
 CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm \
     --model $MODEL \
     --block-size $BLOCK_SIZE \
+    "${GPU_MEM_ARGS[@]}" \
     --kv-events-config '{"enable_kv_cache_events": false}' &
 
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
@@ -35,6 +41,7 @@ VLLM_NIXL_SIDE_CHANNEL_PORT=20097 \
 CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.vllm \
     --model $MODEL \
     --block-size $BLOCK_SIZE \
+    "${GPU_MEM_ARGS[@]}" \
     --kv-events-config '{"enable_kv_cache_events": false}' &
 
 # Exit on first worker failure; kill 0 in the EXIT trap tears down the rest

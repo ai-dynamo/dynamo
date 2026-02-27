@@ -135,6 +135,21 @@ print_launch_banner() {
     echo "=========================================="
     echo "Model:       $_model"
     echo "Frontend:    http://localhost:$_port"
+
+    # Auto-detect VRAM estimation globals set by gpu_utils.sh estimate_worker_vram.
+    # Scripts set MAX_MODEL_LEN (vllm/trtllm) or CONTEXT_LENGTH (sglang) before calling.
+    if [[ -n "${_EW_TOTAL_GIB:-}" ]]; then
+        local _seq_len="${MAX_MODEL_LEN:-${CONTEXT_LENGTH:-${MAX_SEQ_LEN:-}}}"
+        local _frac="${_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE:-${GPU_MEM_FRACTION:-}}"
+        [[ -n "$_seq_len" ]] && echo "Max seq len: $_seq_len"
+        if [[ -n "$_frac" ]]; then
+            echo "GPU frac:    $_frac (~${_EW_TOTAL_GIB} GiB estimated)"
+        else
+            echo "GPU mem est: ~${_EW_TOTAL_GIB} GiB"
+        fi
+        echo "  breakdown: weights=${_EW_WEIGHTS_GIB} + kv=${_EW_KV_GIB} + overhead=${_EW_OVERHEAD_GIB} GiB"
+    fi
+
     for _line in "$@"; do
         echo "$_line"
     done
