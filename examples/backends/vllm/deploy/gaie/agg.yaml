@@ -13,7 +13,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: docker.io/lambda108/epp-inference-extension-dynamo:epp-discovery
+          image: docker.io/lambda108/epp-inference-extension-dynamo:discovery-logs
           env:
             - name: DYN_KV_CACHE_BLOCK_SIZE
               value: "128"
@@ -109,7 +109,7 @@ spec:
                   fieldRef:
                     fieldPath: metadata.uid
               - name: DYN_LOG
-                value: "info,dynamo_llm::kv_router::queue=debug,dynamo_llm::kv_router::scheduler=debug"
+                value: "info,dynamo_llm::protocols::openai::nvext=debug,dynamo_llm::kv_router::push_router=debug"
             livenessProbe:
               httpGet:
                 path: /live
