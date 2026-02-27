@@ -206,7 +206,7 @@ pub struct AgentHints {
 pub struct CacheControl {
     #[serde(rename = "type")]
     pub control_type: CacheControlType,
-    /// TTL as seconds (integer) or shorthand ("5m", "1h"). Clamped to [300, 3600].
+    /// TTL as seconds (integer) or shorthand ("5m" = 300s, "1h" = 3600s). Clamped to [300, 3600].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ttl: Option<String>,
 }
@@ -216,6 +216,8 @@ pub struct CacheControl {
 pub enum CacheControlType {
     #[default]
     Ephemeral,
+    #[serde(other)]
+    Unknown,
 }
 
 const MIN_TTL_SECONDS: u64 = 300;
