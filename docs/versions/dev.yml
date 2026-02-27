@@ -224,12 +224,19 @@ navigation:
 
   # ==================== Blog ====================
   - section: Blog
+    hidden: true
     path: ../blogs/index.mdx
     slug: blog
     contents:
       - page: "Flash Indexer: Inter-Galactic KV Routing"
         path: ../blogs/flash-indexer/flash-indexer.md
         slug: flash-indexer
+
+  # ==================== Documentation ====================
+  - section: Documentation
+    contents:
+      - page: Dynamo Docs Guide
+        path: ../README.md
 
   # ==================== Hidden Pages ====================
   # Pages accessible via direct URL but not shown in main navigation.
@@ -322,9 +329,6 @@ navigation:
       # -- Mocker --
       - page: Mocker
         path: ../pages/mocker/mocker.md
-      # -- Docs README --
-      - page: Building Documentation
-        path: ../pages/README.md
       # -- Templates --
       - section: Templates
         path: ../pages/templates/README.md
