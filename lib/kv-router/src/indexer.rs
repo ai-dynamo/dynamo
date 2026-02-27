@@ -3519,6 +3519,62 @@ mod tests {
         );
     }
 
+    /// Test double divergence-convergence across jump boundaries.
+    ///
+    /// Worker W2 caches three independent sequences on the same worker:
+    ///   Seq A (right chain): [10,20,30,40,50,60,70,80]         (positions 0-7)
+    ///   Seq B (wrong chain): [11,21,31,41,50,60,70,80]         (positions 0-7)
+    ///   Seq C (wrong chain): [12,22,32,42,52,62,72,82,90,100,110,120] (positions 0-11)
+    ///
+    /// Seq B produces entries at positions 4-7 with the same local hashes as Seq A
+    /// but different seq_hashes (wrong prefix). Seq C produces entries at positions
+    /// 8-11 with the same local hashes as the query but different seq_hashes.
+    ///
+    /// With jump_size=4, the jump boundaries are 0, 4, 8:
+    ///   - Position 4 (convergence 1): W2 has BOTH right (Seq A) and wrong (Seq B)
+    ///     chain entries. SeqEntry is Multi. Indexer must pick the right chain.
+    ///   - Position 8 (convergence 2): W2 has ONLY wrong chain entries (Seq C).
+    ///     Indexer must reject and drain W2.
+    ///
+    /// Expected: W1=12, W2=8.
+    #[tokio::test]
+    #[apply(indexer_template)]
+    async fn test_double_divergence_convergence_across_jumps(variant: &str) {
+        let index = make_indexer(variant);
+
+        // W1: golden reference, full sequence
+        let w1_seq: Vec<u64> = vec![10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120];
+        index.apply_event(make_store_event(0, &w1_seq)).await;
+
+        // W2: three independent sequences creating two convergence points
+        // Seq A — right chain, covers positions 0-7
+        let seq_a: Vec<u64> = vec![10, 20, 30, 40, 50, 60, 70, 80];
+        index.apply_event(make_store_event(1, &seq_a)).await;
+
+        // Seq B — wrong prefix, same local hashes at positions 4-7
+        let seq_b: Vec<u64> = vec![11, 21, 31, 41, 50, 60, 70, 80];
+        index.apply_event(make_store_event(1, &seq_b)).await;
+
+        // Seq C — wrong prefix, same local hashes at positions 8-11
+        let seq_c: Vec<u64> = vec![12, 22, 32, 42, 52, 62, 72, 82, 90, 100, 110, 120];
+        index.apply_event(make_store_event(1, &seq_c)).await;
+
+        index.flush().await;
+
+        let query: Vec<LocalBlockHash> = w1_seq.iter().map(|&h| LocalBlockHash(h)).collect();
+        let scores = index.find_matches(query).await.unwrap();
+
+        // W1 matches the full sequence
+        assert_eq!(
+            *scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(),
+            12
+        );
+
+        // W2 matches positions 0-7 via Seq A (right chain), then drains at
+        // position 8 where only wrong-chain entries exist
+        assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(1, 0)).unwrap(), 8);
+    }
+
     // ============================================================================
     // Tests specific to tree-based implementations (KvIndexer, KvIndexerSharded)
     // These use features not available in PositionalIndexer
