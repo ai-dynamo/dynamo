@@ -18,6 +18,8 @@ members = [
     "lib/bindings/c",
     "lib/bindings/python/codegen",
     "lib/config",
+    "lib/kvbm-config",
+    "lib/kvbm-distributed",
 ]
 resolver = "3"
 
@@ -44,6 +46,8 @@ dynamo-async-openai = { path = "lib/async-openai", version = "1.0.0", features =
 dynamo-parsers = { path = "lib/parsers", version = "1.0.0" }
 kvbm-kernels = { path = "lib/kvbm-kernels", version = "1.0.0" }
 kvbm-logical = { path = "lib/kvbm-logical", version = "1.0.0" }
+dynamo-kvbm-config = { path = "lib/kvbm-config", version = "0.9.0" }
+kvbm-distributed = { path = "lib/kvbm-distributed", version = "0.9.0" }
 # External dependencies
 anyhow = { version = "1" }
 async-nats = { version = "0.45.0", features = ["service"] }
@@ -130,3 +134,12 @@ insta.opt-level = 3
 # These make the build much slower but shrink the binary, and could help performance
 codegen-units = 1
 lto = "thin"
+
+# Patch: velo's transitive deps (via ryan/velo-messenger) use ssh:// URLs for velo-events,
+# velo-common, and velo-backend, but kvbm-physical (via ryan/kvbm-physical) uses https:// URLs.
+# Cargo treats these as different crates even though they resolve to the same commit.
+# Redirect ssh:// sources to https:// so there's only one version of each in the graph.
+[patch."ssh://git@github.com/ai-dynamo/dynamo.git"]
+velo-events = { git = "https://github.com/ai-dynamo/dynamo", branch = "ryan/velo-events" }
+velo-common = { git = "https://github.com/ai-dynamo/dynamo", branch = "ryan/velo-backend" }
+velo-backend = { git = "https://github.com/ai-dynamo/dynamo", branch = "ryan/velo-backend" }
