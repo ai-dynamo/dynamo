@@ -47,7 +47,6 @@ class AggregatedHandler(HandlerBase):
                 messages
             )
             if image_urls:
-                logging.info(f"AggregatedHandler: image_urls={image_urls}")
                 result = await fetch_embeddings_from_encoder(
                     image_urls,
                     request,
