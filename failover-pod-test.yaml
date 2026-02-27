@@ -1,0 +1,280 @@
+# Epoch 4: Two-engine failover with GMS weights + flock leader election
+#
+# Criteria:
+#   1. GMS sidecar starts both device 0 and 1
+#   2. Both engines load weights via GMS (--load-format gms, --gms-mode shadow)
+#   3. Only one engine acquires flock → wakes → registers with discovery
+#   4. The other engine blocks on the lock (sleeping, probes passing)
+#   5. When the active engine's container dies, the shadow takes over
+#   6. Frontend sees exactly one backend at all times
+#
+# Test:
+#   kubectl port-forward failover-frontend 8000:8000
+#   curl http://localhost:8000/v1/completions \
+#     -H "Content-Type: application/json" \
+#     -d '{"model":"Qwen/Qwen3-0.6B","prompt":"Hello","max_tokens":32}'
+#   # kill active engine:
+#   kubectl exec failover-epoch4 -c engine-0 -- kill 1
+#   # re-run curl — should succeed from engine-1
+---
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: failover-epoch4-gpu
+  namespace: default
+spec:
+  spec:
+    devices:
+      requests:
+      - name: gpus
+        exactly:
+          deviceClassName: gpu.nvidia.com
+          allocationMode: ExactCount
+          count: 2
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: failover-epoch4
+  namespace: default
+  labels:
+    app: failover-epoch4
+spec:
+  terminationGracePeriodSeconds: 60
+  restartPolicy: Always
+
+  resourceClaims:
+  - name: shared-gpu
+    resourceClaimTemplateName: failover-epoch4-gpu
+
+  tolerations:
+  - key: nvidia.com/gpu
+    operator: Exists
+    effect: NoSchedule
+
+  # ── GMS weight server (init sidecar) ──────────────────────────────
+  initContainers:
+  - name: gms-weights
+    image: dynamoci.azurecr.io/ai-dynamo/dynamo:failover-m6-88fb83c-vllm-runtime
+    restartPolicy: Always
+    command: ["bash", "-c"]
+    args:
+    - |
+      cleanup() { kill -- -$$ 2>/dev/null; exit 1; }
+      trap cleanup SIGTERM SIGINT
+
+      for dev in 0 1; do
+        python3 -m gpu_memory_service --device "$dev" &
+        echo "Started GMS device=$dev pid=$!"
+      done
+
+      wait -n
+      echo "A GMS subprocess exited, shutting down"
+      cleanup
+    env:
+    - name: TMPDIR
+      value: "/shared"
+    volumeMounts:
+    - name: failover-shared
+      mountPath: /shared
+    startupProbe:
+      exec:
+        command: ["sh", "-c", "test $(ls /shared/gms_*.sock 2>/dev/null | wc -l) -ge 2"]
+      periodSeconds: 2
+      failureThreshold: 150
+    resources:
+      claims:
+      - name: shared-gpu
+
+  # ── Engine containers ─────────────────────────────────────────────
+  containers:
+
+  # engine-0 (shadow): first to grab flock becomes active
+  - name: engine-0
+    image: dynamoci.azurecr.io/ai-dynamo/dynamo:failover-m6-88fb83c-vllm-runtime
+    command: ["python3", "-m", "dynamo.vllm"]
+    args:
+    - --model
+    - Qwen/Qwen3-0.6B
+    - --tensor-parallel-size
+    - "2"
+    - --load-format
+    - gms
+    - --gms-mode
+    - shadow
+    - --no-enable-prefix-caching
+    ports:
+    - name: system-0
+      containerPort: 9090
+      protocol: TCP
+    env:
+    - name: ETCD_ENDPOINTS
+      value: "http://etcd.default.svc.cluster.local:2379"
+    - name: DYN_NAMESPACE
+      value: "default_failover-test"
+    - name: DYN_COMPONENT
+      value: "worker"
+    - name: DYN_SYSTEM_ENABLED
+      value: "true"
+    - name: DYN_SYSTEM_PORT
+      value: "9090"
+    - name: TMPDIR
+      value: "/shared"
+    - name: ENGINE_ID
+      value: "0"
+    - name: FAILOVER_LOCK_PATH
+      value: "/shared/failover.lock"
+    - name: VLLM_NIXL_SIDE_CHANNEL_PORT
+      value: "5600"
+    - name: DYN_VLLM_KV_EVENT_PORT
+      value: "20080"
+    - name: NIXL_TELEMETRY_ENABLE
+      value: "n"
+    volumeMounts:
+    - name: failover-shared
+      mountPath: /shared
+    - name: shared-memory
+      mountPath: /dev/shm
+    startupProbe:
+      httpGet:
+        path: /live
+        port: system-0
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 720
+    livenessProbe:
+      httpGet:
+        path: /live
+        port: system-0
+      periodSeconds: 5
+      timeoutSeconds: 4
+      failureThreshold: 1
+    readinessProbe:
+      httpGet:
+        path: /health
+        port: system-0
+      periodSeconds: 10
+      timeoutSeconds: 4
+      failureThreshold: 3
+    resources:
+      claims:
+      - name: shared-gpu
+
+  # engine-1 (shadow): blocks on flock until engine-0 dies
+  - name: engine-1
+    image: dynamoci.azurecr.io/ai-dynamo/dynamo:failover-m6-88fb83c-vllm-runtime
+    command: ["python3", "-m", "dynamo.vllm"]
+    args:
+    - --model
+    - Qwen/Qwen3-0.6B
+    - --tensor-parallel-size
+    - "2"
+    - --load-format
+    - gms
+    - --gms-mode
+    - shadow
+    - --no-enable-prefix-caching
+    ports:
+    - name: system-1
+      containerPort: 9091
+      protocol: TCP
+    env:
+    - name: ETCD_ENDPOINTS
+      value: "http://etcd.default.svc.cluster.local:2379"
+    - name: DYN_NAMESPACE
+      value: "default_failover-test"
+    - name: DYN_COMPONENT
+      value: "worker"
+    - name: DYN_SYSTEM_ENABLED
+      value: "true"
+    - name: DYN_SYSTEM_PORT
+      value: "9091"
+    - name: TMPDIR
+      value: "/shared"
+    - name: ENGINE_ID
+      value: "1"
+    - name: FAILOVER_LOCK_PATH
+      value: "/shared/failover.lock"
+    - name: VLLM_NIXL_SIDE_CHANNEL_PORT
+      value: "5601"
+    - name: DYN_VLLM_KV_EVENT_PORT
+      value: "20081"
+    - name: NIXL_TELEMETRY_ENABLE
+      value: "n"
+    volumeMounts:
+    - name: failover-shared
+      mountPath: /shared
+    - name: shared-memory
+      mountPath: /dev/shm
+    startupProbe:
+      httpGet:
+        path: /live
+        port: system-1
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 720
+    livenessProbe:
+      httpGet:
+        path: /live
+        port: system-1
+      periodSeconds: 5
+      timeoutSeconds: 4
+      failureThreshold: 1
+    readinessProbe:
+      httpGet:
+        path: /health
+        port: system-1
+      periodSeconds: 10
+      timeoutSeconds: 4
+      failureThreshold: 3
+    resources:
+      claims:
+      - name: shared-gpu
+
+  volumes:
+  - name: failover-shared
+    emptyDir: {}
+  - name: shared-memory
+    emptyDir:
+      medium: Memory
+      sizeLimit: 8Gi
+---
+# Frontend — discovers engine via etcd, exposes OpenAI API on port 8000
+apiVersion: v1
+kind: Pod
+metadata:
+  name: failover-frontend
+  namespace: default
+  labels:
+    app: failover-frontend
+spec:
+  terminationGracePeriodSeconds: 10
+  restartPolicy: Always
+  nodeSelector:
+    agentpool: a100exp
+  tolerations:
+  - key: nvidia.com/gpu
+    operator: Exists
+    effect: NoSchedule
+  containers:
+  - name: frontend
+    image: dynamoci.azurecr.io/ai-dynamo/dynamo:failover-m6-88fb83c-vllm-runtime
+    command: ["python3", "-m", "dynamo.frontend"]
+    args:
+    - --event-plane
+    - zmq
+    ports:
+    - name: http
+      containerPort: 8000
+      protocol: TCP
+    env:
+    - name: ETCD_ENDPOINTS
+      value: "http://etcd.default.svc.cluster.local:2379"
+    - name: DYN_NAMESPACE
+      value: "default_failover-test"
+    readinessProbe:
+      httpGet:
+        path: /health
+        port: http
+      periodSeconds: 5
+      failureThreshold: 3

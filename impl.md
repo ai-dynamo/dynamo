@@ -61,3 +61,29 @@ tests/fault_tolerance/gpu_memory_service/test_failover_lock.py::test_cross_proce
 - Needed to `pip install pytest-asyncio` in the dynamo venv (not pre-installed)
 - Run command: `python -m pytest tests/fault_tolerance/gpu_memory_service/test_failover_lock.py -v -o "addopts=" -o "filterwarnings="`
   - The `-o` overrides are needed because pyproject.toml has `--mypy` in addopts (requires `pytest-mypy` not installed) and a `pytest_benchmark` filter warning
+
+---
+
+## K8s Integration Test (Diff 6)
+
+**Branch:** `failover/m6-operator` (SHA: `bd442b1a6`)
+
+**Images:**
+
+```
+vLLM runtime:  dynamoci.azurecr.io/ai-dynamo/dynamo:failover-m6-bd442b1-vllm-runtime
+Operator:      dynamoci.azurecr.io/ai-dynamo/dynamo:failover-m6-bd442b1-operator
+```
+
+### Status
+
+- [ ] Image pushed to ACR
+- [ ] DGD with `failover.enabled: true` applied
+- [ ] Primary engine comes up and serves inference
+- [ ] Shadow engine initializes, loads weights, enters STANDBY
+- [ ] Kill primary — shadow acquires flock and wakes
+- [ ] Inference resumes on shadow engine
+
+### Test Notes
+
+_Collaboration space for parallel agents — append progress below._

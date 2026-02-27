@@ -1,0 +1,43 @@
+# Frontend pod for testing completions against the failover engine
+#
+# Discovers the engine via etcd (same DYN_NAMESPACE as engine).
+# Exposes OpenAI-compatible API on port 8000.
+#
+# Test:
+#   kubectl port-forward failover-frontend 8000:8000
+#   curl http://localhost:8000/v1/completions \
+#     -H "Content-Type: application/json" \
+#     -d '{"model":"Qwen/Qwen3-0.6B","prompt":"Hello","max_tokens":32}'
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: failover-frontend
+  namespace: default
+  labels:
+    app: failover-frontend
+spec:
+  terminationGracePeriodSeconds: 10
+  restartPolicy: Always
+
+  containers:
+  - name: frontend
+    image: dynamoci.azurecr.io/ai-dynamo/dynamo:failover-m6-88fb83c-vllm-runtime
+    command: ["python3", "-m", "dynamo.frontend"]
+    args:
+    - --no-enable-prefix-caching
+    ports:
+    - name: http
+      containerPort: 8000
+      protocol: TCP
+    env:
+    - name: ETCD_ENDPOINTS
+      value: "http://etcd.default.svc.cluster.local:2379"
+    - name: DYN_NAMESPACE
+      value: "default_failover-test"
+    readinessProbe:
+      httpGet:
+        path: /health
+        port: http
+      periodSeconds: 5
+      failureThreshold: 3

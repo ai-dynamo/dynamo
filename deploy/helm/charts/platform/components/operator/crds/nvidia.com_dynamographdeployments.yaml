@@ -10759,6 +10759,23 @@ spec:
                             x-kubernetes-list-type: map
                         required: []
                         type: object
+                      failover:
+                        description: |-
+                          Failover enables active-passive failover for this worker.
+                          When enabled, two engine containers run in the same pod with a
+                          shared GMS weight sidecar. The first engine to acquire the failover
+                          lock becomes active; the second sleeps as a hot standby.
+                          Only valid for componentType "worker" (or "prefill"/"decode").
+                        properties:
+                          enabled:
+                            description: |-
+                              Enabled activates failover mode. Two engine containers are created
+                              in the same pod, sharing GPUs via DRA and coordinating via a
+                              file-based lock on a shared emptyDir volume.
+                            type: boolean
+                        required:
+                          - enabled
+                        type: object
                       globalDynamoNamespace:
                         description: GlobalDynamoNamespace indicates that the Component will be placed in the global Dynamo namespace
                         type: boolean

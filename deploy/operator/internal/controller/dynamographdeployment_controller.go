@@ -33,6 +33,7 @@ import (
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	resourcev1 "k8s.io/api/resource/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -574,6 +575,19 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveScaling(ctx context.Cont
 
 func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment, restartState *dynamo.RestartState, checkpointInfos map[string]*checkpoint.CheckpointInfo) (ReconcileResult, error) {
 	logger := log.FromContext(ctx)
+
+	// Sync ResourceClaimTemplates for failover-enabled components before creating pods.
+	for serviceName, component := range dynamoDeployment.Spec.Services {
+		svcComponent := component
+		svcName := serviceName
+		_, _, err := commoncontroller.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*resourcev1.ResourceClaimTemplate, bool, error) {
+			return dynamo.GenerateFailoverResourceClaimTemplate(dynamoDeployment.Name, dynamoDeployment.Namespace, svcName, svcComponent)
+		})
+		if err != nil {
+			logger.Error(err, "failed to sync failover ResourceClaimTemplate", "service", svcName)
+			return ReconcileResult{}, fmt.Errorf("failed to sync failover ResourceClaimTemplate for %s: %w", svcName, err)
+		}
+	}
 
 	grovePodCliqueSetAsResource, err := r.reconcileGrovePodCliqueSet(ctx, dynamoDeployment, restartState, checkpointInfos)
 	if err != nil {

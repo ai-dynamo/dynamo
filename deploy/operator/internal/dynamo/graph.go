@@ -1185,7 +1185,7 @@ func GenerateBasePodSpec(
 	}
 
 	if isFailoverEnabled(component) {
-		if err := buildFailoverPod(&podSpec, component, parentGraphDeploymentName, serviceName); err != nil {
+		if err := buildFailoverPod(&podSpec, component, parentGraphDeploymentName, serviceName, controllerConfig.EtcdAddress); err != nil {
 			return nil, fmt.Errorf("failed to build failover pod: %w", err)
 		}
 	}

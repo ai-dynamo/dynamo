@@ -1,0 +1,68 @@
+# Epoch 1: Minimal DRA + GMS validation
+#
+# Validates:
+#   1. ResourceClaimTemplate correctly allocates 1 GPU via DRA
+#   2. GMS sidecar starts and creates /shared/gms_0.sock
+#   3. Busybox main container can see the shared volume
+#
+# Pass criteria:
+#   - Pod reaches Running state
+#   - GMS logs show "waiting for connections"
+#   - busybox can: test -S /shared/gms_0.sock
+---
+apiVersion: resource.k8s.io/v1beta1
+kind: ResourceClaimTemplate
+metadata:
+  name: epoch1-gpu
+spec:
+  spec:
+    devices:
+      requests:
+      - name: gpu
+        deviceClassName: gpu.nvidia.com
+        count: 1
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: epoch1-gms
+spec:
+  terminationGracePeriodSeconds: 30
+  restartPolicy: Never
+
+  resourceClaims:
+  - name: shared-gpu
+    resourceClaimTemplateName: epoch1-gpu
+
+  initContainers:
+  - name: gms-weights
+    image: dynamoci.azurecr.io/ai-dynamo/dynamo:failover-m6-bd442b1-vllm-runtime
+    restartPolicy: Always
+    command: ["python3", "-m", "gpu_memory_service"]
+    args: ["--socket-dir", "/shared", "--devices", "0"]
+    volumeMounts:
+    - name: failover-shared
+      mountPath: /shared
+    startupProbe:
+      exec:
+        command: ["test", "-S", "/shared/gms_0.sock"]
+      periodSeconds: 2
+      failureThreshold: 150
+    resources:
+      claims:
+      - name: shared-gpu
+
+  containers:
+  - name: busybox
+    image: busybox:latest
+    command: ["sh", "-c", "echo 'Checking /shared...'; ls -la /shared/; echo 'Socket test:'; test -S /shared/gms_0.sock && echo 'PASS: gms_0.sock exists' || echo 'FAIL: gms_0.sock missing'; echo 'Sleeping...'; sleep 3600"]
+    volumeMounts:
+    - name: failover-shared
+      mountPath: /shared
+    resources:
+      claims:
+      - name: shared-gpu
+
+  volumes:
+  - name: failover-shared
+    emptyDir: {}

@@ -82,6 +82,30 @@ strip_ansi() {
     sed 's/\x1b\[[0-9;]*m//g'
 }
 
+log_ts_to_epoch_ms() {
+    local line="$1"
+    local ts
+    ts=$(echo "$line" | grep -oP '\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z' | head -1)
+    if [ -n "$ts" ]; then
+        local base="${ts%Z}"
+        local secs frac
+        secs=$(date -u -d "${base}" +%s 2>/dev/null) || return 1
+        frac=$(echo "$base" | grep -oP '\.\K\d+' | head -1)
+        frac="${frac}000"
+        frac="${frac:0:3}"
+        echo $(( secs * 1000 + 10#$frac ))
+        return 0
+    fi
+    ts=$(echo "$line" | grep -oP '\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}' | head -1)
+    if [ -n "$ts" ]; then
+        local secs
+        secs=$(date -u -d "$ts" +%s 2>/dev/null) || return 1
+        echo $(( secs * 1000 ))
+        return 0
+    fi
+    return 1
+}
+
 cleanup() {
     echo ""
     echo "=== Cleaning up ==="
@@ -393,7 +417,7 @@ fi
 echo ""
 echo "=== Phase 5: Failover ==="
 
-FAILOVER_START_NS=$(date +%s%N)
+KILL_EPOCH_MS=$(date +%s%3N)
 
 echo "Killing winner (PID: $WINNER_PID)..."
 kill "$WINNER_PID" 2>/dev/null || true
@@ -423,9 +447,9 @@ for i in $(seq 1 120); do
     sleep 1
 done
 
-echo "Waiting for loser to register with discovery..."
+echo "Waiting for loser to register generate endpoint..."
 for i in $(seq 1 120); do
-    if cat "$LOSER_LOG" 2>/dev/null | strip_ansi | grep -q "Engine awake, registering with discovery"; then
+    if cat "$LOSER_LOG" 2>/dev/null | strip_ansi | grep -q "Registered endpoint 'generate'"; then
         break
     fi
     if [ "$i" -eq 120 ]; then
@@ -436,18 +460,37 @@ for i in $(seq 1 120); do
     sleep 1
 done
 
-# Wait for serve_endpoint + discovery propagation
+# Wait for discovery propagation
 sleep 5
-
-FAILOVER_END_NS=$(date +%s%N)
-FAILOVER_MS=$(( (FAILOVER_END_NS - FAILOVER_START_NS) / 1000000 ))
 
 assert_log_contains "$LOSER_LOG" "Lock acquired, waking engine" \
     "D4: Loser auto-woke via lock release (no HTTP wake)"
 
+LOCK_LINE=$(cat "$LOSER_LOG" | strip_ansi | grep "Lock acquired, waking engine" | tail -1)
+WAKE_LINE=$(cat "$LOSER_LOG" | strip_ansi | grep "It took .* seconds to wake up" | tail -1)
+REG_LINE=$(cat "$LOSER_LOG" | strip_ansi | grep "Registered endpoint 'generate'" | tail -1)
+
+LOCK_MS=$(log_ts_to_epoch_ms "$LOCK_LINE" 2>/dev/null || echo "")
+WAKE_MS=$(log_ts_to_epoch_ms "$WAKE_LINE" 2>/dev/null || echo "")
+REG_MS=$(log_ts_to_epoch_ms "$REG_LINE" 2>/dev/null || echo "")
+
 echo ""
 echo "=========================================="
-echo "  FAILOVER TIME: ${FAILOVER_MS} ms"
+echo "  FAILOVER TIMING BREAKDOWN"
+echo "=========================================="
+if [ -n "$LOCK_MS" ]; then
+    echo "  Kill → Lock acquired:      $(( LOCK_MS - KILL_EPOCH_MS )) ms"
+fi
+if [ -n "$LOCK_MS" ] && [ -n "$WAKE_MS" ]; then
+    echo "  Lock → Engine wake:         $(( WAKE_MS - LOCK_MS )) ms"
+fi
+if [ -n "$WAKE_MS" ] && [ -n "$REG_MS" ]; then
+    echo "  Wake → Generate registered: $(( REG_MS - WAKE_MS )) ms"
+fi
+if [ -n "$REG_MS" ]; then
+    echo "  ─────────────────────────────────────"
+    echo "  Kill → Generate registered: $(( REG_MS - KILL_EPOCH_MS )) ms"
+fi
 echo "=========================================="
 
 # Inference on new active engine (former loser)
@@ -488,6 +531,8 @@ echo "  - Both engines slept, raced for flock"
 echo "  - Winner auto-woke, served inference"
 echo "  - Loser health probe returned 200 while sleeping (STANDBY)"
 echo "  - Kill winner → loser auto-woke via lock release"
-echo "  - Failover time: ${FAILOVER_MS} ms"
+if [ -n "$REG_MS" ]; then
+    echo "  - Kill → generate registered: $(( REG_MS - KILL_EPOCH_MS )) ms"
+fi
 echo "  - Inference after failover: OK"
 echo ""

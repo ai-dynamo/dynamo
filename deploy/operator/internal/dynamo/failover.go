@@ -13,6 +13,8 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
+	resourcev1 "k8s.io/api/resource/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
 )
@@ -57,17 +59,24 @@ func getGPUCount(component *v1alpha1.DynamoComponentDeploymentSharedSpec) (int, 
 // multi-container failover pod with two engine containers and a GMS weight sidecar.
 //
 // The transformation:
-//  1. Clones the main container into engine-0 and engine-1 with staggered system ports
-//  2. Adds a GMS weight sidecar as an init container (restartPolicy: Always)
-//  3. Adds a shared emptyDir volume for GMS UDS sockets and the flock file
-//  4. Sets up DRA resource claims so all containers share GPU access
-//  5. Injects failover-specific env vars (ENGINE_ID, GMS_SOCKET_DIR, FAILOVER_LOCK_PATH, etc.)
+//  1. Validates that etcd discovery is configured (required for shadow-mode register-on-wake)
+//  2. Clones the main container into engine-0 and engine-1 with staggered system ports
+//  3. Adds a GMS weight sidecar as an init container (restartPolicy: Always)
+//  4. Adds a shared emptyDir volume for GMS UDS sockets and the flock file
+//  5. Sets up DRA resource claims so all containers share GPU access
+//  6. Injects failover-specific env vars (ENGINE_ID, TMPDIR, FAILOVER_LOCK_PATH, etc.)
+//  7. Adds GPU toleration for DRA-scheduled pods on tainted nodes
 func buildFailoverPod(
 	podSpec *corev1.PodSpec,
 	component *v1alpha1.DynamoComponentDeploymentSharedSpec,
 	parentName string,
 	serviceName string,
+	etcdAddress string,
 ) error {
+	if etcdAddress == "" {
+		return fmt.Errorf("failover requires etcd discovery: operator must be configured with --etcdAddr")
+	}
+
 	if len(podSpec.Containers) == 0 {
 		return fmt.Errorf("pod spec must have at least one container for failover transformation")
 	}
@@ -90,7 +99,15 @@ func buildFailoverPod(
 	podSpec.InitContainers = append(podSpec.InitContainers, gmsSidecar)
 	podSpec.Volumes = append(podSpec.Volumes, failoverSharedVolume())
 
-	claimTemplateName := fmt.Sprintf("%s-%s-gpu", parentName, strings.ToLower(serviceName))
+	// DRA replaces normal GPU scheduling, so the default GPU toleration that
+	// kubelet/device-plugin would add is lost. Re-add it explicitly.
+	podSpec.Tolerations = append(podSpec.Tolerations, corev1.Toleration{
+		Key:      commonconsts.KubeResourceGPUNvidia,
+		Operator: corev1.TolerationOpExists,
+		Effect:   corev1.TaintEffectNoSchedule,
+	})
+
+	claimTemplateName := FailoverResourceClaimTemplateName(parentName, serviceName)
 	podSpec.ResourceClaims = append(podSpec.ResourceClaims, corev1.PodResourceClaim{
 		Name:                      failoverDRAClaimName,
 		ResourceClaimTemplateName: &claimTemplateName,
@@ -117,11 +134,13 @@ func buildEngineContainer(base corev1.Container, engineID int, systemPort int) c
 
 	// Env vars to remove: replaced by failover-specific values or intentionally omitted.
 	// DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS is omitted to activate Branch 3 in SystemHealth.
+	// DYN_DISCOVERY_BACKEND is removed so we can force "etcd" for failover engines.
 	removeSet := map[string]bool{
 		"DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS": true,
 		"DYN_SYSTEM_PORT":                       true,
 		"DYN_SYSTEM_ENABLED":                    true,
 		"DYN_HEALTH_CHECK_ENABLED":              true,
+		commonconsts.DynamoDiscoveryBackendEnvVar: true,
 	}
 
 	var filtered []corev1.EnvVar
@@ -133,12 +152,15 @@ func buildEngineContainer(base corev1.Container, engineID int, systemPort int) c
 
 	failoverEnvs := []corev1.EnvVar{
 		{Name: "ENGINE_ID", Value: strconv.Itoa(engineID)},
-		{Name: "GMS_SOCKET_DIR", Value: failoverSharedMountPath},
+		{Name: "TMPDIR", Value: failoverSharedMountPath},
 		{Name: "FAILOVER_LOCK_PATH", Value: failoverLockFile},
 		{Name: "DYN_SYSTEM_STARTING_HEALTH_STATUS", Value: "notready"},
 		{Name: "DYN_SYSTEM_PORT", Value: strconv.Itoa(systemPort)},
 		{Name: "DYN_SYSTEM_ENABLED", Value: "true"},
 		{Name: "DYN_VLLM_GMS_MODE", Value: "shadow"},
+		{Name: "VLLM_NIXL_SIDE_CHANNEL_PORT", Value: strconv.Itoa(5600 + engineID)},
+		{Name: "DYN_VLLM_KV_EVENT_PORT", Value: strconv.Itoa(20080 + engineID)},
+		{Name: commonconsts.DynamoDiscoveryBackendEnvVar, Value: "etcd"},
 	}
 	engine.Env = append(filtered, failoverEnvs...)
 
@@ -177,19 +199,20 @@ func removeGPUResources(container *corev1.Container) {
 // buildGMSSidecar creates the GMS weight server as a sidecar init container
 // (restartPolicy: Always). kubelet starts it before regular containers and
 // keeps it running for the pod's lifetime.
+//
+// Each GPU gets its own GMS subprocess via a bash wrapper that forwards
+// signals and exits if any child dies. TMPDIR is set so UUID-based sockets
+// land in the shared volume.
 func buildGMSSidecar(image string, gpuCount int) corev1.Container {
-	devices := make([]string, gpuCount)
-	for i := range gpuCount {
-		devices[i] = strconv.Itoa(i)
-	}
-	deviceList := strings.Join(devices, ",")
-
 	return corev1.Container{
 		Name:          "gms-weights",
 		Image:         image,
-		Command:       []string{"python3", "-m", "gpu_memory_service"},
-		Args:          []string{"--socket-dir", failoverSharedMountPath, "--devices", deviceList},
+		Command:       []string{"bash", "-c"},
+		Args:          []string{gmsWrapperScript(gpuCount)},
 		RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways),
+		Env: []corev1.EnvVar{
+			{Name: "TMPDIR", Value: failoverSharedMountPath},
+		},
 		VolumeMounts: []corev1.VolumeMount{
 			{
 				Name:      failoverSharedVolumeName,
@@ -213,17 +236,34 @@ func buildGMSSidecar(image string, gpuCount int) corev1.Container {
 	}
 }
 
-// gmsReadyCheckCommand returns the exec probe command that verifies all
-// GMS UDS sockets exist on the shared volume.
-func gmsReadyCheckCommand(gpuCount int) []string {
-	if gpuCount == 1 {
-		return []string{"test", "-S", fmt.Sprintf("%s/gms_0.sock", failoverSharedMountPath)}
-	}
-	checks := make([]string, gpuCount)
+// gmsWrapperScript generates a bash script that launches one GMS subprocess
+// per GPU device, waits for any to exit, then tears down the process group.
+func gmsWrapperScript(gpuCount int) string {
+	devList := make([]string, gpuCount)
 	for i := range gpuCount {
-		checks[i] = fmt.Sprintf("test -S %s/gms_%d.sock", failoverSharedMountPath, i)
+		devList[i] = strconv.Itoa(i)
 	}
-	return []string{"sh", "-c", strings.Join(checks, " && ")}
+	return fmt.Sprintf(
+		`cleanup() { kill -- -$$ 2>/dev/null; exit 1; }
+trap cleanup SIGTERM SIGINT
+for dev in %s; do
+  python3 -m gpu_memory_service --device "$dev" &
+  echo "Started GMS device=$dev pid=$!"
+done
+wait -n
+echo "A GMS subprocess exited, shutting down"
+cleanup`, strings.Join(devList, " "))
+}
+
+// gmsReadyCheckCommand returns the exec probe command that verifies the
+// expected number of GMS UDS sockets exist on the shared volume.
+// Sockets are UUID-based (gms_<GPU-UUID>.sock), so we count matching files
+// rather than checking for specific device-index names.
+func gmsReadyCheckCommand(gpuCount int) []string {
+	return []string{
+		"sh", "-c",
+		fmt.Sprintf("test $(ls %s/gms_*.sock 2>/dev/null | wc -l) -ge %d", failoverSharedMountPath, gpuCount),
+	}
 }
 
 func failoverSharedVolume() corev1.Volume {
@@ -233,4 +273,63 @@ func failoverSharedVolume() corev1.Volume {
 			EmptyDir: &corev1.EmptyDirVolumeSource{},
 		},
 	}
+}
+
+// FailoverResourceClaimTemplateName returns the deterministic name for the
+// ResourceClaimTemplate associated with a failover-enabled component.
+func FailoverResourceClaimTemplateName(parentName, serviceName string) string {
+	return fmt.Sprintf("%s-%s-gpu", parentName, strings.ToLower(serviceName))
+}
+
+// GenerateFailoverResourceClaimTemplate builds the ResourceClaimTemplate that
+// provides shared GPU access to all containers in a failover pod via DRA.
+//
+// When failover is not enabled for the component, it returns the template
+// skeleton with toDelete=true so that SyncResource cleans up any previously
+// created template.
+func GenerateFailoverResourceClaimTemplate(
+	parentName, namespace, serviceName string,
+	component *v1alpha1.DynamoComponentDeploymentSharedSpec,
+) (*resourcev1.ResourceClaimTemplate, bool, error) {
+	name := FailoverResourceClaimTemplateName(parentName, serviceName)
+
+	template := &resourcev1.ResourceClaimTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+		},
+	}
+
+	if !isFailoverEnabled(component) {
+		return template, true, nil
+	}
+
+	gpuCount, err := getGPUCount(component)
+	if err != nil {
+		return nil, false, fmt.Errorf("failed to get GPU count for ResourceClaimTemplate: %w", err)
+	}
+
+	deviceClassName := "gpu.nvidia.com"
+	if component.Resources != nil && component.Resources.Limits != nil && component.Resources.Limits.GPUType != "" {
+		deviceClassName = component.Resources.Limits.GPUType
+	}
+
+	template.Spec = resourcev1.ResourceClaimTemplateSpec{
+		Spec: resourcev1.ResourceClaimSpec{
+			Devices: resourcev1.DeviceClaim{
+				Requests: []resourcev1.DeviceRequest{
+					{
+						Name: "gpus",
+						Exactly: &resourcev1.ExactDeviceRequest{
+							DeviceClassName: deviceClassName,
+							AllocationMode:  resourcev1.DeviceAllocationModeExactCount,
+							Count:           int64(gpuCount),
+						},
+					},
+				},
+			},
+		},
+	}
+
+	return template, false, nil
 }
