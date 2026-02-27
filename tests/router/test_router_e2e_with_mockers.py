@@ -12,10 +12,12 @@
 # endpoint_path (e.g., "generate") as the routing key, causing handler collisions when multiple
 # workers register the same endpoint. This is a test-only limitation; production deployments
 # with separate processes per worker work correctly with TCP.
+import asyncio
 import logging
 import os
 from typing import Any, Dict, Optional
 
+import aiohttp
 import pytest
 
 from tests.router.common import (  # utilities
@@ -172,7 +174,12 @@ def _build_mocker_command(
 
 
 class MockerProcess:
-    """Manages mocker engine instances with shared tokio runtime via --num-workers."""
+    """Manages mocker engine instances with shared tokio runtime via --num-workers.
+
+    When standalone_indexer=True, launches mockers one-by-one (each as --num-workers 1)
+    and runs a standalone HTTP KV indexer binary alongside them. Call launch_mockers_with_indexer()
+    in async context to start mockers and register their ZMQ ports with the indexer.
+    """
 
     def __init__(
         self,
@@ -182,6 +189,7 @@ class MockerProcess:
         store_backend: str = "etcd",
         request_plane: str = "nats",
         zmq_kv_events: bool = False,
+        standalone_indexer: bool = False,
     ):
         namespace_suffix = generate_random_suffix()
         self.namespace = f"test-namespace-{namespace_suffix}"
@@ -189,8 +197,17 @@ class MockerProcess:
         self.endpoint = f"dyn://{self.namespace}.{self.component_name}.generate"
         self.num_workers = num_mockers
         self._zmq_kv_events_ports: list[int] = []
+        self._standalone_indexer = standalone_indexer
+        self._standalone_indexer_port: Optional[int] = None
+        self._indexer_process: Optional[ManagedProcess] = None
+        self._mocker_processes: list[ManagedProcess] = []
+        self._request = request
+        self._store_backend = store_backend
+        self._request_plane = request_plane
+        self._mocker_args_orig: Dict[str, Any] = (mocker_args or {}).copy()
+        self.worker_id_to_zmq_ports: dict[int, dict[int, str]] = {}
 
-        mocker_args = (mocker_args or {}).copy()
+        mocker_args = self._mocker_args_orig.copy()
         # Store dp_size for DP-aware test functions
         self.dp_size = mocker_args.get("dp_size")
         # Alias for consistency with vLLM/SGLang workers
@@ -206,44 +223,208 @@ class MockerProcess:
                 num_mockers * dp_size, BASE_PORT_ZMQ
             )
             bases = [self._zmq_kv_events_ports[i * dp_size] for i in range(num_mockers)]
-            mocker_args["zmq_kv_events_ports"] = ",".join(str(p) for p in bases)
+            if not standalone_indexer:
+                mocker_args["zmq_kv_events_ports"] = ",".join(str(p) for p in bases)
             logger.info(
                 f"Allocated ZMQ KV event ports {self._zmq_kv_events_ports} "
                 f"(bases: {bases}) for {num_mockers} workers"
             )
 
-        command = _build_mocker_command(
-            endpoint=self.endpoint,
-            store_backend=store_backend,
-            num_workers=num_mockers,
-            mocker_args=mocker_args,
-        )
+        if standalone_indexer:
+            # Allocate a port for the standalone indexer HTTP server
+            self._standalone_indexer_port = allocate_ports(1, BASE_PORT)[0]
+            request.addfinalizer(
+                lambda: deallocate_ports([self._standalone_indexer_port])
+                if self._standalone_indexer_port
+                else None
+            )
+            # Don't build a single mocker command — we'll launch per-mocker in launch_mockers_with_indexer
+            self._process = None
+        else:
+            command = _build_mocker_command(
+                endpoint=self.endpoint,
+                store_backend=store_backend,
+                num_workers=num_mockers,
+                mocker_args=mocker_args,
+            )
 
-        env = os.environ.copy()
-        env["DYN_REQUEST_PLANE"] = request_plane
+            env = os.environ.copy()
+            env["DYN_REQUEST_PLANE"] = request_plane
 
-        self._process = ManagedProcess(
-            command=command,
-            env=env,
-            timeout=60,
-            display_output=True,
-            health_check_ports=[],
-            health_check_urls=[],
-            log_dir=request.node.name,
-            terminate_all_matching_process_names=False,
-        )
+            self._process = ManagedProcess(
+                command=command,
+                env=env,
+                timeout=60,
+                display_output=True,
+                health_check_ports=[],
+                health_check_urls=[],
+                log_dir=request.node.name,
+                terminate_all_matching_process_names=False,
+            )
         logger.info(
             f"Created mocker process with {num_mockers} worker(s), endpoint: {self.endpoint}"
+            f"{', standalone_indexer=True' if standalone_indexer else ''}"
         )
 
+    @property
+    def standalone_indexer_url(self) -> Optional[str]:
+        if self._standalone_indexer_port is not None:
+            return f"http://localhost:{self._standalone_indexer_port}"
+        return None
+
     def __enter__(self):
-        logger.info(f"Starting mocker process with {self.num_workers} worker(s)")
-        self._process.__enter__()
+        if self._standalone_indexer:
+            # Launch the standalone indexer binary
+            block_size = self._mocker_args_orig.get("block_size", BLOCK_SIZE)
+            indexer_cmd = [
+                "cargo",
+                "run",
+                "-p",
+                "dynamo-kv-router",
+                "--features",
+                "indexer-bin",
+                "--bin",
+                "dynamo-kv-indexer",
+                "--",
+                "--block-size",
+                str(block_size),
+                "--port",
+                str(self._standalone_indexer_port),
+            ]
+            self._indexer_process = ManagedProcess(
+                command=indexer_cmd,
+                timeout=120,
+                display_output=True,
+                health_check_ports=[self._standalone_indexer_port],
+                health_check_urls=[],
+                log_dir=self._request.node.name,
+                terminate_all_matching_process_names=False,
+                display_name="dynamo-kv-indexer",
+            )
+            logger.info(
+                f"Starting standalone indexer on port {self._standalone_indexer_port}"
+            )
+            self._indexer_process.__enter__()
+            # Don't start mocker processes yet — launch_mockers_with_indexer will do it
+        else:
+            logger.info(f"Starting mocker process with {self.num_workers} worker(s)")
+            self._process.__enter__()
         return self
 
+    async def launch_mockers_with_indexer(self, endpoint):
+        """Launch mockers one-by-one and register each with the standalone indexer.
+
+        For each mocker:
+        1. Launch a mocker process with --num-workers 1
+        2. Poll endpoint.client().instance_ids() until a new worker_id appears
+        3. POST /workers to the indexer with the worker_id and its ZMQ addresses
+
+        Args:
+            endpoint: The dynamo endpoint object to discover worker IDs.
+        """
+        client = await endpoint.client()
+        known_ids: set[int] = set()
+        dp_size = self._mocker_args_orig.get("dp_size", 1)
+
+        for i in range(self.num_workers):
+            # Build per-mocker args with its own ZMQ base port
+            mocker_args = self._mocker_args_orig.copy()
+            base_port = self._zmq_kv_events_ports[i * dp_size]
+            mocker_args["zmq_kv_events_ports"] = str(base_port)
+
+            command = _build_mocker_command(
+                endpoint=self.endpoint,
+                store_backend=self._store_backend,
+                num_workers=1,
+                mocker_args=mocker_args,
+            )
+
+            env = os.environ.copy()
+            env["DYN_REQUEST_PLANE"] = self._request_plane
+
+            proc = ManagedProcess(
+                command=command,
+                env=env,
+                timeout=60,
+                display_output=True,
+                health_check_ports=[],
+                health_check_urls=[],
+                log_dir=self._request.node.name,
+                terminate_all_matching_process_names=False,
+                display_name=f"mocker-{i}",
+            )
+            proc.__enter__()
+            self._mocker_processes.append(proc)
+
+            # Poll for the new worker_id
+            new_worker_id = None
+            for _ in range(120):
+                ids = set(client.instance_ids())
+                new = ids - known_ids
+                if new:
+                    new_worker_id = new.pop()
+                    known_ids.add(new_worker_id)
+                    break
+                await asyncio.sleep(0.5)
+
+            if new_worker_id is None:
+                raise RuntimeError(
+                    f"Timed out waiting for mocker {i} to register "
+                    f"(known_ids={known_ids})"
+                )
+
+            # Register each dp_rank endpoint with the standalone indexer
+            zmq_addresses = {}
+            register_url = f"{self.standalone_indexer_url}/register"
+            async with aiohttp.ClientSession() as session:
+                for dp_rank in range(dp_size):
+                    port = self._zmq_kv_events_ports[i * dp_size + dp_rank]
+                    endpoint = f"tcp://127.0.0.1:{port}"
+                    zmq_addresses[str(dp_rank)] = endpoint
+
+                    payload = {
+                        "instance_id": new_worker_id,
+                        "endpoint": endpoint,
+                        "dp_rank": dp_rank,
+                    }
+                    async with session.post(register_url, json=payload) as resp:
+                        if resp.status != 201:
+                            body = await resp.text()
+                            raise RuntimeError(
+                                f"Failed to register instance {new_worker_id} "
+                                f"dp_rank {dp_rank}: {resp.status} {body}"
+                            )
+
+            self.worker_id_to_zmq_ports[new_worker_id] = zmq_addresses
+
+            logger.info(
+                f"Mocker {i}: worker_id={new_worker_id}, "
+                f"zmq_addresses={zmq_addresses}"
+            )
+
+        logger.info(
+            f"All {self.num_workers} mockers launched and registered with indexer"
+        )
+
     def __exit__(self, exc_type, exc_val, exc_tb):
-        logger.info("Stopping mocker process")
-        self._process.__exit__(exc_type, exc_val, exc_tb)
+        logger.info("Stopping mocker process(es)")
+        # Stop individual mocker processes (standalone_indexer mode)
+        for proc in self._mocker_processes:
+            try:
+                proc.__exit__(exc_type, exc_val, exc_tb)
+            except Exception as e:
+                logger.warning(f"Error stopping mocker process: {e}")
+        self._mocker_processes.clear()
+        # Stop standalone indexer
+        if self._indexer_process is not None:
+            try:
+                self._indexer_process.__exit__(exc_type, exc_val, exc_tb)
+            except Exception as e:
+                logger.warning(f"Error stopping indexer process: {e}")
+            self._indexer_process = None
+        # Stop single mocker process (non-standalone mode)
+        if self._process is not None:
+            self._process.__exit__(exc_type, exc_val, exc_tb)
         if self._zmq_kv_events_ports:
             deallocate_ports(self._zmq_kv_events_ports)
             logger.info(f"Deallocated ZMQ KV event ports {self._zmq_kv_events_ports}")
@@ -548,12 +729,18 @@ def test_kv_router_bindings(
 
 
 @pytest.mark.parametrize(
-    "store_backend,durable_kv_events,request_plane,router_event_threads",
+    "store_backend,durable_kv_events,request_plane,router_event_threads,zmq_kv_events",
     [
-        ("etcd", True, "nats", 1),  # JetStream mode - uses JetStream
-        ("etcd", False, "tcp", 1),  # NATS core mode (with gap detection) - no JetStream
-        ("file", True, "nats", 1),  # File backend - uses JetStream
-        ("etcd", False, "tcp", 2),  # NATS core mode - multi-threaded indexer
+        ("etcd", True, "nats", 1, False),  # JetStream mode - uses JetStream
+        ("etcd", False, "tcp", 1, True),  # NATS core mode + standalone indexer
+        ("file", True, "nats", 1, False),  # File backend - uses JetStream
+        (
+            "etcd",
+            False,
+            "tcp",
+            2,
+            True,
+        ),  # NATS core mode - multi-threaded + standalone indexer
     ],
     ids=[
         "jetstream",
@@ -568,21 +755,24 @@ def test_indexers_sync(
     request,
     runtime_services_dynamic_ports,
     predownload_tokenizers,
+    build_kv_indexer,
     file_storage_backend,
     store_backend,
     durable_kv_events,
     request_plane,
     router_event_threads,
+    zmq_kv_events,
 ):
     """
     Test that two KV routers have synchronized indexer states after processing requests.
     This test verifies that both routers converge to the same internal state.
 
-    Tests with three configurations:
+    Tests with four configurations:
     - jetstream: etcd backend, JetStream for KV events, NATS request plane
-    - nats_core: etcd backend, local indexer with NATS Core, TCP request plane
+    - nats_core: etcd backend, ZMQ + standalone HTTP indexer, TCP request plane
                  (includes NATS interruption/recovery testing)
     - file: file backend, JetStream for KV events, NATS request plane
+    - nats_core_multi_thread: etcd backend, ZMQ + standalone HTTP indexer, TCP request plane
     """
     logger.info(
         f"Starting indexers sync test: store_backend={store_backend}, "
@@ -607,6 +797,8 @@ def test_indexers_sync(
         num_mockers=NUM_MOCKERS,
         store_backend=store_backend,
         request_plane=request_plane,
+        zmq_kv_events=zmq_kv_events,
+        standalone_indexer=zmq_kv_events,
     ) as mockers:
         # Start mocker instances (2 workers x 2 DP ranks = 4 independent event streams)
         logger.info(f"Starting {NUM_MOCKERS} mocker instances with dp_size=2")
@@ -622,10 +814,13 @@ def test_indexers_sync(
             num_workers=NUM_MOCKERS,
             store_backend=store_backend,
             request_plane=request_plane,
-            test_nats_interruption=not durable_kv_events,
-            nats_server=nats_process if not durable_kv_events else None,
+            test_nats_interruption=not durable_kv_events and not zmq_kv_events,
+            nats_server=nats_process
+            if (not durable_kv_events and not zmq_kv_events)
+            else None,
             durable_kv_events=durable_kv_events,
             router_event_threads=router_event_threads,
+            standalone_indexer_url=mockers.standalone_indexer_url,
         )
 
         logger.info("Indexers sync test completed successfully")
@@ -685,6 +880,7 @@ def test_router_decisions(
     request,
     runtime_services_dynamic_ports,
     predownload_tokenizers,
+    build_kv_indexer,
     durable_kv_events,
     use_kv_events,
     request_plane,
@@ -719,6 +915,7 @@ def test_router_decisions(
         num_mockers=2,
         request_plane=request_plane,
         zmq_kv_events=zmq_kv_events,
+        standalone_indexer=zmq_kv_events,
     ) as mockers:
         logger.info(f"All mockers using endpoint: {mockers.endpoint}")
 
@@ -737,6 +934,7 @@ def test_router_decisions(
             use_kv_events=use_kv_events,
             durable_kv_events=durable_kv_events,
             router_event_threads=router_event_threads,
+            standalone_indexer_url=mockers.standalone_indexer_url,
         )
 
 

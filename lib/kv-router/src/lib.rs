@@ -18,6 +18,7 @@ pub mod nested_map;
 pub mod protocols;
 pub mod radix_tree;
 pub mod sequence;
+pub mod zmq_wire;
 
 #[cfg(test)]
 pub(crate) mod test_utils;

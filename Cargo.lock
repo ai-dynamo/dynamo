@@ -1878,6 +1878,7 @@ version = "1.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "axum 0.8.4",
  "clap 4.5.60",
  "dashmap 6.1.0",
  "derive-getters",
@@ -1892,6 +1893,7 @@ dependencies = [
  "plotters",
  "prometheus",
  "rand 0.9.2",
+ "rmp-serde",
  "rstest 0.18.2",
  "rstest_reuse",
  "rustc-hash 2.1.1",
@@ -1901,8 +1903,10 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "tracing-subscriber",
  "uuid",
  "xxhash-rust",
+ "zeromq",
 ]
 
 [[package]]

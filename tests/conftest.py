@@ -4,6 +4,7 @@
 import logging
 import os
 import shutil
+import subprocess
 import tempfile
 from pathlib import Path
 from typing import Generator, Optional
@@ -234,6 +235,30 @@ def predownload_tokenizers(pytestconfig):
     os.environ["HF_HUB_OFFLINE"] = "1"
     yield
     os.environ.pop("HF_HUB_OFFLINE", None)
+
+
+@pytest.fixture(scope="session")
+def build_kv_indexer():
+    """Pre-build the standalone KV indexer binary once per session.
+
+    Runs `cargo build` so that `cargo run` in tests starts instantly.
+    No-op if the binary is already cached in target/.
+    """
+    _logger.info("Building dynamo-kv-indexer binary (cached after first build)")
+    subprocess.check_call(
+        [
+            "cargo",
+            "build",
+            "-p",
+            "dynamo-kv-router",
+            "--features",
+            "indexer-bin",
+            "--bin",
+            "dynamo-kv-indexer",
+        ],
+        timeout=600,
+    )
+    _logger.info("dynamo-kv-indexer binary ready")
 
 
 @pytest.fixture(autouse=True)

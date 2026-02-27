@@ -13,7 +13,6 @@ from typing import TYPE_CHECKING, Any, Optional
 import aiohttp
 import nats
 
-from dynamo._internal import start_kv_block_indexer
 from dynamo.llm import KvRouter, KvRouterConfig
 from dynamo.runtime import DistributedRuntime
 from tests.utils.managed_process import ManagedProcess
@@ -1354,6 +1353,7 @@ def _test_router_indexers_sync(
     nats_server: Optional["NatsServer"] = None,
     durable_kv_events: bool = False,
     router_event_threads: int = 1,
+    standalone_indexer_url: Optional[str] = None,
 ):
     """Test that two KV routers have synchronized indexer states after processing requests.
 
@@ -1400,6 +1400,15 @@ def _test_router_indexers_sync(
             durable_kv_events=durable_kv_events,
             router_event_threads=router_event_threads,
         )
+
+        # If standalone indexer mode, launch mockers one-by-one and register.
+        # We need to create a temporary endpoint just to discover worker IDs.
+        if standalone_indexer_url:
+            tmp_runtime = get_runtime(store_backend, request_plane)
+            tmp_endpoint = tmp_runtime.endpoint(
+                f"{engine_workers.namespace}.{engine_workers.component_name}.generate"
+            )
+            await engine_workers.launch_mockers_with_indexer(tmp_endpoint)
 
         async def send_requests_to_router(router, num_requests, router_name, endpoint):
             # Now send the actual requests
@@ -1546,9 +1555,8 @@ def _test_router_indexers_sync(
         await asyncio.sleep(1)
 
         # Verify NATS object store bucket was created with snapshot
-        # Skip this verification for NATS interruption test since NATS restarts fresh
-        # (local indexer recovery doesn't rely on NATS persistence)
-        if not test_nats_interruption:
+        # Skip for NATS interruption test (restarts fresh), and standalone indexer (no JetStream)
+        if not test_nats_interruption and not standalone_indexer_url:
             # Mirror the Rust bucket naming logic from subscriber.rs:
             # component.subject() -> "namespace.{ns}.component.{comp}"
             # then slugify (convert dots to dashes, lowercase, etc) and append "-radix-bucket"
@@ -1624,38 +1632,30 @@ def _test_router_indexers_sync(
         assert_event_dumps_equal(sorted_state1, sorted_state2, "Router 1", "Router 2")
         logger.info("Successfully verified that both router states are equal")
 
-        # Verify standalone indexer builds the same tree (only for non-durable/NATS Core)
-        if not durable_kv_events:
-            logger.info("Starting standalone indexer and verifying tree state")
-            runtime3 = get_runtime(store_backend, request_plane)
-            endpoint3 = runtime3.endpoint(
-                f"{engine_workers.namespace}.{engine_workers.component_name}.generate"
-            )
-            await start_kv_block_indexer(endpoint3, block_size, kv_router_config)
+        # Verify standalone HTTP indexer builds the same tree (non-durable with ZMQ)
+        if standalone_indexer_url:
+            logger.info("Verifying standalone HTTP indexer tree state via /dump")
 
-            # Wait for the standalone indexer to sync events from workers
+            # Wait for ZMQ events to propagate to the indexer
             await asyncio.sleep(3)
 
-            # Query the standalone indexer's tree via kv_indexer_query endpoint
-            # Note: reuse runtime3 to keep the standalone indexer's component alive
-            query_endpoint = runtime3.endpoint(
-                f"{engine_workers.namespace}.{engine_workers.component_name}.kv_indexer_query"
-            )
-            query_client = await query_endpoint.client()
-            await query_client.wait_for_instances()
-            stream = await query_client.generate("DumpTree", annotated=False)
-            response = await stream.__anext__()
-            standalone_state = response["TreeDump"]
+            async with aiohttp.ClientSession() as session:
+                async with session.get(f"{standalone_indexer_url}/dump") as resp:
+                    assert resp.status == 200, f"GET /dump failed: {resp.status}"
+                    standalone_state = await resp.json()
 
             sorted_standalone = sorted(standalone_state, key=sort_key)
-
-            logger.info(f"Standalone indexer has {len(sorted_standalone)} events")
+            logger.info(f"Standalone HTTP indexer has {len(sorted_standalone)} events")
 
             assert_event_dumps_equal(
                 sorted_state1, sorted_standalone, "Router 1", "Standalone"
             )
             logger.info(
-                "Successfully verified standalone indexer state matches router states"
+                "Successfully verified standalone HTTP indexer state matches router states"
+            )
+        elif not durable_kv_events:
+            logger.info(
+                "Skipping standalone indexer verification (no standalone_indexer_url)"
             )
         else:
             logger.info(
@@ -1663,8 +1663,8 @@ def _test_router_indexers_sync(
             )
 
         # Verify NATS consumers are created (while routers are still alive)
-        # Skip this for NATS interruption test since it uses local indexer (NATS Core, not JetStream)
-        if not test_nats_interruption:
+        # Skip for NATS interruption test and standalone indexer (neither uses JetStream)
+        if not test_nats_interruption and not standalone_indexer_url:
             logger.info("Verifying NATS consumers exist for both routers")
             component_subject = f"namespace.{engine_workers.namespace}.component.{engine_workers.component_name}"
             slugified = component_subject.lower().replace(".", "-").replace("_", "-")
@@ -1921,6 +1921,7 @@ def _test_router_decisions(
     use_kv_events: bool = True,
     durable_kv_events: bool = False,
     router_event_threads: int = 1,
+    standalone_indexer_url: Optional[str] = None,
 ):
     """Validate cross-worker routing decisions based on longest prefix match and tree-size tiebreaking.
 
@@ -1949,21 +1950,27 @@ def _test_router_decisions(
     Raises:
         AssertionError: If routing decisions don't match expected prefix/tiebreak logic
     """
-    # Create KvRouterConfig with lower snapshot threshold for testing
-    kv_router_config = KvRouterConfig(
-        router_snapshot_threshold=20,
-        use_kv_events=use_kv_events,
-        durable_kv_events=durable_kv_events,
-        router_event_threads=router_event_threads,
-    )
-    kv_router = KvRouter(
-        endpoint=endpoint,
-        block_size=block_size,
-        kv_router_config=kv_router_config,
-    )
 
+    # Create KvRouterConfig with lower snapshot threshold for testing
     # Use async to manage the test flow
     async def test_sync():
+        # If standalone indexer mode, launch mockers one-by-one and register.
+        # Must happen before KvRouter creation since KvRouter blocks until workers appear.
+        if standalone_indexer_url:
+            await engine_workers.launch_mockers_with_indexer(endpoint)
+
+        kv_router_config = KvRouterConfig(
+            router_snapshot_threshold=20,
+            use_kv_events=use_kv_events,
+            durable_kv_events=durable_kv_events,
+            router_event_threads=router_event_threads,
+        )
+        kv_router = KvRouter(
+            endpoint=endpoint,
+            block_size=block_size,
+            kv_router_config=kv_router_config,
+        )
+
         # Workers register one instance per process (not per dp_rank)
         expected_num_instances = engine_workers.num_workers
 
@@ -2071,6 +2078,7 @@ def _test_router_decisions(
             dp_rank_a,
             dp_rank_b,
             response_worker_ids,
+            A + C + D + F,  # req4 tokens for standalone indexer /score verification
         )
 
     # Run the async test
@@ -2081,6 +2089,7 @@ def _test_router_decisions(
         dp_rank_a,
         dp_rank_b,
         response_worker_ids,
+        req4_tokens,
     ) = asyncio.run(test_sync())
 
     # Verify request 4 routed to worker a (longest prefix match)
@@ -2148,6 +2157,41 @@ def _test_router_decisions(
         f"worker_a {worker_a_key} has {worker_a_events} events, "
         f"worker_b {worker_b_key} has {worker_b_events} events"
     )
+
+    # Verify standalone indexer scores via HTTP POST /query
+    if standalone_indexer_url:
+        _dp_a = dp_rank_a if dp_rank_a is not None else 0
+        _dp_b = dp_rank_b if dp_rank_b is not None else 0
+
+        async def _verify_scores():
+            # Wait for ZMQ events to propagate to the indexer
+            await asyncio.sleep(3)
+
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{standalone_indexer_url}/query",
+                    json={"token_ids": req4_tokens},
+                ) as resp:
+                    assert resp.status == 200, f"POST /query failed: {resp.status}"
+                    scores = (await resp.json())["scores"]
+
+                    id_a = str(worker_a_id)
+                    id_b = str(worker_b_id)
+                    dp_a = str(_dp_a)
+                    dp_b = str(_dp_b)
+                    score_a = scores[id_a][dp_a]
+                    score_b = scores[id_b][dp_b]
+
+                    logger.info(
+                        f"Standalone indexer /query: {id_a}[{dp_a}]={score_a}, "
+                        f"{id_b}[{dp_b}]={score_b}"
+                    )
+                    assert score_a > score_b, (
+                        f"Expected instance {id_a} dp_rank {dp_a} score {score_a} > "
+                        f"instance {id_b} dp_rank {dp_b} score {score_b} for req4 tokens"
+                    )
+
+        asyncio.run(_verify_scores())
 
 
 def _test_busy_threshold_endpoint(

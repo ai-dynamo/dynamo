@@ -14,6 +14,7 @@ repository.workspace = true
 default = []
 metrics = ["dep:dynamo-runtime"]
 bench = ["dep:clap", "dep:indicatif", "dep:serde_json", "dynamo-runtime/integration", "dep:plotters"]
+indexer-bin = ["metrics", "dep:axum", "dep:clap", "dep:zeromq", "dep:tracing-subscriber", "dep:serde_json"]
 
 [dependencies]
 # repo
@@ -39,12 +40,18 @@ xxhash-rust = { workspace = true }
 # dependencies
 flume = "0.12.0"
 parking_lot = { workspace = true }
+rmp-serde = { workspace = true }
 
 # bench (optional)
 clap = { version = "4.5", features = ["derive"], optional = true }
 indicatif = { version = "0.18.0", optional = true }
 plotters = { version = "0.3", optional = true, default-features = false, features = ["svg_backend", "line_series", "point_series", "full_palette"] }
 rustc-hash = "2.1.1"
+
+# indexer-bin (optional)
+axum = { workspace = true, optional = true }
+zeromq = { version = "0.4.1", optional = true }
+tracing-subscriber = { workspace = true, optional = true }
 
 [dev-dependencies]
 dynamo-bench = { path = "../bench" }
@@ -71,3 +78,8 @@ required-features = ["bench"]
 name = "mooncake_bench"
 harness = false
 required-features = ["bench"]
+
+[[bin]]
+name = "dynamo-kv-indexer"
+path = "src/bin/kv_indexer/main.rs"
+required-features = ["indexer-bin"]
