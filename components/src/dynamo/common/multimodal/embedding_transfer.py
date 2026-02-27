@@ -252,6 +252,7 @@ class RingBuffer:
         self.allocated_start_idx = 0
         self.buffer_size = buffer_size
         self.end_idx = buffer_size
+        self.wrapped_around = False
 
         # Track allocated buffers and their release state,
         # keeping released range in 'freed_list' for simpler monotonical buffer release
@@ -260,34 +261,65 @@ class RingBuffer:
         # For generate buffer IDs
         self.id_counter = MonolithicCounter()
 
+    def __repr__(self):
+        return f"RingBuffer(size={self.buffer_size}, free_start_idx={self.free_start_idx}, allocated_start_idx={self.allocated_start_idx}, wrapped_around={self.wrapped_around}, freed_list={self.freed_list}, allocated_buffers={self.allocated_buffer_id_to_range})"
+
     def _flush_freed_list(self):
         allocated_end = self.freed_list.pop(self.allocated_start_idx, None)
         while allocated_end is not None:
             self.allocated_start_idx = allocated_end
             if self.allocated_start_idx == self.end_idx:
                 self.allocated_start_idx = 0
+                self.wrapped_around = False
             allocated_end = self.freed_list.pop(self.allocated_start_idx, None)
+        # No allocated buffer, reset indices. Important as the ring buffer doesn't
+        # support non-contiguous allocation, this make sure the next allocation can
+        # use the full buffer.
+        if not self.allocated_buffer_id_to_range:
+            self.free_start_idx = 0
+            self.allocated_start_idx = 0
+            self.wrapped_around = False
 
     def get_buffer(self, size):
+        """
+        Get a buffer of given size in the form of 1D tensor with dtype int8,
+        the buffer is owned by the RingBuffer instance.
+        The returned ID will be used for releasing the buffer after use, as
+        an indicator that the buffer can be reused for future allocation.
+
+        Args:
+            size: The size of the buffer to allocate.
+
+        Returns:
+            A tuple containing the buffer ID and the allocated tensor, or None if allocation fails.
+        """
         # [gluo TODO] raise exception as there is no way to satisfy the request.
         # Can not allocate for sure
         if size > self.buffer_size:
-            return None
+            return None, None
+        # Sanity clean up freed list
+        self._flush_freed_list()
+
         # If the allocation will go over end boundary, simply try allocate from the start
         if self.free_start_idx + size > self.end_idx:
-            # add artificial entry to freed_list for moving ring buffer
+            # Not enough space even after wrap around, reject the allocation early
+            # so we don't mark the remaining space "used"
+            if self.allocated_start_idx < size:
+                return None, None
+            # add artificial entry to freed_list to treat the remaining space to be
+            # allocated and released.
             self.freed_list[self.free_start_idx] = self.end_idx
             self.free_start_idx = 0
+            self.wrapped_around = True
         start_idx = self.free_start_idx
         end_idx = start_idx + size
 
         # Check availability of the buffer, if the allocation overlaps with allocated buffer,
         # return None for the caller to retry later after some buffers are released.
-        self._flush_freed_list()
-        if start_idx < self.allocated_start_idx and end_idx > self.allocated_start_idx:
-            return None
+        if self.wrapped_around and end_idx > self.allocated_start_idx:
+            return None, None
 
-        # bookkeep allocations
+        # book-keep allocations
         buffer_id = self.id_counter.get_next_id()
         self.allocated_buffer_id_to_range[buffer_id] = (start_idx, end_idx)
         self.free_start_idx = end_idx
