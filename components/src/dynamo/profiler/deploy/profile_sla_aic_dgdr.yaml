@@ -10,14 +10,3 @@ spec:
   model: Qwen/Qwen3-32B
   backend: trtllm
   image: "nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag"
-  searchStrategy: rapid
-
-  workload:
-    isl: 3000
-    osl: 150
-
-  sla:
-    ttft: 500.0
-    itl: 30.0
-
-  autoApply: true

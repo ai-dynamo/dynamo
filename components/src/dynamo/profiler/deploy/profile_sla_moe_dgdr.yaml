@@ -9,7 +9,7 @@ metadata:
 spec:
   model: deepseek-ai/DeepSeek-R1
   backend: sglang
-  image: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:my-tag"
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:my-tag"
   searchStrategy: rapid
 
   modelCache:
@@ -19,14 +19,3 @@ spec:
   hardware:
     # for h200, sweep over 8-16 GPUs per engine
     numGpusPerNode: 8  # Override auto-discovered value if different
-
-  workload:
-    isl: 3000
-    osl: 150
-
-  sla:
-    ttft: 200.0
-    itl: 20.0
-
-  autoApply: true
-

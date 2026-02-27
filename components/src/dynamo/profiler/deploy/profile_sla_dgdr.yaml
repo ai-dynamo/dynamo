@@ -9,15 +9,5 @@ metadata:
 spec:
   model: Qwen/Qwen3-0.6B
   backend: vllm
-  image: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag"
+  image: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag" # tag must be at least 1.0.0
   searchStrategy: thorough
-
-  workload:
-    isl: 3000
-    osl: 150
-
-  sla:
-    ttft: 200.0
-    itl: 20.0
-
-  autoApply: true

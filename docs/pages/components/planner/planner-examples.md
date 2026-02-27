@@ -20,17 +20,7 @@ metadata:
 spec:
   model: Qwen/Qwen3-32B
   backend: vllm
-  image: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1"
-
-  workload:
-    isl: 3000
-    osl: 150
-
-  sla:
-    ttft: 200
-    itl: 20
-
-  autoApply: true
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:my-tag"
 ```
 
 Deploy:
@@ -51,17 +41,7 @@ metadata:
 spec:
   model: meta-llama/Llama-3.3-70B-Instruct
   backend: vllm
-  image: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1"
-
-  workload:
-    isl: 3000
-    osl: 150
-
-  sla:
-    ttft: 200
-    itl: 20
-
-  autoApply: true
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:my-tag"
 ```
 
 Deploy:
@@ -74,7 +54,7 @@ Available sample DGDRs in `components/src/dynamo/profiler/deploy/`:
 - **`profile_sla_aic_dgdr.yaml`**: Fast offline profiling using AI Configurator
 - **`profile_sla_moe_dgdr.yaml`**: Online profiling for MoE models (SGLang)
 
-> **Note**: Starting with v1beta1, DGDR fields use structured spec fields (e.g., `spec.workload`, `spec.sla`, `spec.hardware`) instead of the nested `profilingConfig.config` blob used in v1alpha1.
+> **Note**: Starting with Dynamo 1.0.0 (DGDR API version v1beta1), DGDR fields use structured spec fields (e.g., `spec.workload`, `spec.sla`, `spec.hardware`) instead of the nested `profilingConfig.config` blob used in v1alpha1.
 
 ## Kubernetes Examples
 
@@ -90,17 +70,7 @@ metadata:
 spec:
   model: deepseek-ai/DeepSeek-R1
   backend: sglang
-  image: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.6.1"
-
-  workload:
-    isl: 4000
-    osl: 500
-
-  sla:
-    ttft: 300
-    itl: 10
-
-  autoApply: true
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:my-tag"
 ```
 
 Deploy:
@@ -131,17 +101,7 @@ metadata:
 spec:
   model: deepseek-ai/DeepSeek-R1
   backend: sglang
-  image: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.6.1"
-
-  workload:
-    isl: 4000
-    osl: 500
-
-  sla:
-    ttft: 300
-    itl: 10
-
-  autoApply: true
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:my-tag"
 ```
 
 The profiler uses the DGD config from the ConfigMap as a **base template**, then optimizes it based on your SLA targets. The controller automatically injects `spec.model` and `spec.backend` into the final configuration.
@@ -181,17 +141,7 @@ spec:
     mocker:
       enabled: true  # Deploy mocker instead of real backend
 
-  image: "nvcr.io/nvidia/dynamo/trtllm-runtime:<image-tag>"
-
-  workload:
-    isl: 3000
-    osl: 150
-
-  sla:
-    ttft: 200
-    itl: 20
-
-  autoApply: true
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:my-tag"
 ```
 
 Profiling runs against the real backend (via GPUs or AIC). The mocker deployment then uses profiling data to simulate realistic timing.
