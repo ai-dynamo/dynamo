@@ -557,7 +557,15 @@ async fn start_event_processor<P: EventSink + Send + Sync + 'static>(
     local_indexer: Option<Arc<LocalKvIndexer>>,
     batching_timeout_us: u64,
 ) {
-    run_event_processor_loop(publisher, worker_id, cancellation_token, rx, local_indexer, batching_timeout_us).await
+    run_event_processor_loop(
+        publisher,
+        worker_id,
+        cancellation_token,
+        rx,
+        local_indexer,
+        batching_timeout_us,
+    )
+    .await
 }
 
 /// Batched event processor using JetStream (durable).
@@ -570,7 +578,15 @@ async fn start_event_processor_jetstream(
     local_indexer: Option<Arc<LocalKvIndexer>>,
     batching_timeout_us: u64,
 ) {
-    run_event_processor_loop(publisher, worker_id, cancellation_token, rx, local_indexer, batching_timeout_us).await
+    run_event_processor_loop(
+        publisher,
+        worker_id,
+        cancellation_token,
+        rx,
+        local_indexer,
+        batching_timeout_us,
+    )
+    .await
 }
 
 /// Calculate exponential backoff duration based on consecutive error count
@@ -1742,7 +1758,14 @@ mod tests_startup_helpers {
         tx.send(event).unwrap();
         drop(tx);
 
-        let handle = tokio::spawn(start_event_processor(component, 1, token, rx, None, BATCH_TIMEOUT_US));
+        let handle = tokio::spawn(start_event_processor(
+            component,
+            1,
+            token,
+            rx,
+            None,
+            BATCH_TIMEOUT_US,
+        ));
 
         tokio::time::timeout(tokio::time::Duration::from_secs(1), handle)
             .await
@@ -2541,8 +2564,8 @@ mod batching_state_tests {
     fn test_batching_state_timeout() {
         let state = BatchingState::new();
 
-        // Test that remaining returns positive initially
-        let remaining_before = state.remaining_timeout(10);
+        // Test that remaining returns positive initially (using 10ms = 10_000us)
+        let remaining_before = state.remaining_timeout(10_000);
         assert!(
             remaining_before.as_millis() > 0,
             "Should have remaining time initially"
@@ -2550,7 +2573,11 @@ mod batching_state_tests {
 
         // Test zero timeout returns zero
         let remaining_zero = state.remaining_timeout(0);
-        assert_eq!(remaining_zero.as_millis(), 0, "0 timeout should return zero");
+        assert_eq!(
+            remaining_zero.as_millis(),
+            0,
+            "0 timeout should return zero"
+        );
     }
 
     #[test]
@@ -2573,11 +2600,18 @@ mod batching_state_tests {
 
         // Test that remaining returns positive initially
         let remaining = state.remaining_timeout(10_000); // 10ms
-        assert!(remaining.as_millis() > 0, "Should have remaining time initially");
+        assert!(
+            remaining.as_millis() > 0,
+            "Should have remaining time initially"
+        );
 
         // Test that with 0 timeout, returns zero
         let remaining_zero = state.remaining_timeout(0);
-        assert_eq!(remaining_zero, Duration::ZERO, "0 timeout should return zero");
+        assert_eq!(
+            remaining_zero,
+            Duration::ZERO,
+            "0 timeout should return zero"
+        );
     }
 
     #[test]
@@ -2692,14 +2726,8 @@ mod event_processor_tests {
         let cancellation_token = CancellationToken::new();
 
         let handle = tokio::spawn(async move {
-            run_event_processor_loop(
-                publisher_clone,
-                1,
-                cancellation_token,
-                rx,
-                None,
-                timeout_us,
-            ).await
+            run_event_processor_loop(publisher_clone, 1, cancellation_token, rx, None, timeout_us)
+                .await
         });
 
         for i in 0..event_count {
@@ -2711,15 +2739,23 @@ mod event_processor_tests {
                 dp_rank: 0,
             };
             tx.send(event).unwrap();
+            // Small sleep to allow event processor to batch events
+            tokio::time::sleep(tokio::time::Duration::from_micros(100)).await;
         }
+
+        // Give the processor time to process all events before closing the channel
+        tokio::time::sleep(tokio::time::Duration::from_millis(2)).await;
 
         drop(tx);
         handle.await.unwrap();
 
         let events = publisher.get_events();
-        
-        assert!(!events.is_empty(), "Should have received at least one event");
-        
+
+        assert!(
+            !events.is_empty(),
+            "Should have received at least one event"
+        );
+
         // With a long timeout, events should be batched (fewer output events than input)
         assert!(
             events.len() < event_count,
@@ -2727,8 +2763,9 @@ mod event_processor_tests {
             events.len(),
             event_count
         );
-        
-        let total_hashes: usize = events.iter()
+
+        let total_hashes: usize = events
+            .iter()
             .map(|e| {
                 if let KvCacheEventData::Removed(data) = &e.event.data {
                     data.block_hashes.len()
@@ -2737,7 +2774,11 @@ mod event_processor_tests {
                 }
             })
             .sum();
-        assert_eq!(total_hashes, event_count, "All {} block hashes should be accounted for", event_count);
+        assert_eq!(
+            total_hashes, event_count,
+            "All {} block hashes should be accounted for",
+            event_count
+        );
     }
 
     /// Test sequential stored events accumulate with different counts
@@ -2765,14 +2806,8 @@ mod event_processor_tests {
         let cancellation_token = CancellationToken::new();
 
         let handle = tokio::spawn(async move {
-            run_event_processor_loop(
-                publisher_clone,
-                1,
-                cancellation_token,
-                rx,
-                None,
-                timeout_us,
-            ).await
+            run_event_processor_loop(publisher_clone, 1, cancellation_token, rx, None, timeout_us)
+                .await
         });
 
         for i in 0..event_count {
@@ -2782,7 +2817,7 @@ mod event_processor_tests {
             } else {
                 Some(ExternalSequenceBlockHash((i - 1) as u64)) // Subsequent events reference previous block
             };
-            
+
             let event = KvCacheEvent {
                 event_id: i as u64,
                 data: KvCacheEventData::Stored(KvCacheStoreData {
@@ -2796,15 +2831,23 @@ mod event_processor_tests {
                 dp_rank: 0,
             };
             tx.send(event).unwrap();
+            // Small sleep to allow event processor to batch events
+            tokio::time::sleep(tokio::time::Duration::from_micros(100)).await;
         }
+
+        // Give the processor time to process all events before closing the channel
+        tokio::time::sleep(tokio::time::Duration::from_millis(2)).await;
 
         drop(tx);
         handle.await.unwrap();
 
         let events = publisher.get_events();
-        
-        assert!(!events.is_empty(), "Should have received at least one event");
-        
+
+        assert!(
+            !events.is_empty(),
+            "Should have received at least one event"
+        );
+
         // With a long timeout, events should be batched (fewer output events than input)
         assert!(
             events.len() < event_count,
@@ -2812,8 +2855,9 @@ mod event_processor_tests {
             events.len(),
             event_count
         );
-        
-        let total_blocks: usize = events.iter()
+
+        let total_blocks: usize = events
+            .iter()
             .map(|e| {
                 if let KvCacheEventData::Stored(data) = &e.event.data {
                     data.blocks.len()
@@ -2822,28 +2866,26 @@ mod event_processor_tests {
                 }
             })
             .sum();
-        assert_eq!(total_blocks, event_count, "All {} blocks should be accounted for", event_count);
+        assert_eq!(
+            total_blocks, event_count,
+            "All {} blocks should be accounted for",
+            event_count
+        );
     }
 
     /// Test non-sequential stored events trigger flush
     #[tokio::test]
     async fn test_run_event_processor_loop_non_sequential_flush() {
         let timeout_us = 100_000; // 100ms in microseconds
-        
+
         let (tx, rx) = mpsc::unbounded_channel::<KvCacheEvent>();
         let publisher = MockPublisher::new();
         let publisher_clone = publisher.clone();
         let cancellation_token = CancellationToken::new();
 
         let handle = tokio::spawn(async move {
-            run_event_processor_loop(
-                publisher_clone,
-                1,
-                cancellation_token,
-                rx,
-                None,
-                timeout_us,
-            ).await
+            run_event_processor_loop(publisher_clone, 1, cancellation_token, rx, None, timeout_us)
+                .await
             // SLEEP HERE?! so that events are not batched!
         });
 
@@ -2867,14 +2909,19 @@ mod event_processor_tests {
         handle.await.unwrap();
 
         let events = publisher.get_events();
-        
+
         assert!(!events.is_empty(), "Should have received events");
-        
+
         // With non-sequential parent hashes, each event should trigger a flush
         // So we expect 3 separate events
-        assert_eq!(events.len(), 3, "Non-sequential events should trigger flush, resulting in 3 separate events");
-        
-        let total_blocks: usize = events.iter()
+        assert_eq!(
+            events.len(),
+            3,
+            "Non-sequential events should trigger flush, resulting in 3 separate events"
+        );
+
+        let total_blocks: usize = events
+            .iter()
             .map(|e| {
                 if let KvCacheEventData::Stored(data) = &e.event.data {
                     data.blocks.len()
@@ -2894,21 +2941,15 @@ mod event_processor_tests {
     #[ignore]
     async fn test_run_event_processor_loop_no_batching_with_zero_timeout() {
         let timeout_us = 0; // Zero timeout means immediate flush
-        
+
         let (tx, rx) = mpsc::unbounded_channel::<KvCacheEvent>();
         let publisher = MockPublisher::new();
         let publisher_clone = publisher.clone();
         let cancellation_token = CancellationToken::new();
 
         let handle = tokio::spawn(async move {
-            run_event_processor_loop(
-                publisher_clone,
-                1,
-                cancellation_token,
-                rx,
-                None,
-                timeout_us,
-            ).await
+            run_event_processor_loop(publisher_clone, 1, cancellation_token, rx, None, timeout_us)
+                .await
         });
 
         // Send 5 removed events
@@ -2927,13 +2968,18 @@ mod event_processor_tests {
         handle.await.unwrap();
 
         let events = publisher.get_events();
-        
+
         assert!(!events.is_empty(), "Should have received events");
-        
+
         // With zero timeout, each event should be sent immediately (no batching)
-        assert_eq!(events.len(), 5, "With zero timeout, should have 5 separate events (no batching)");
-        
-        let total_hashes: usize = events.iter()
+        assert_eq!(
+            events.len(),
+            5,
+            "With zero timeout, should have 5 separate events (no batching)"
+        );
+
+        let total_hashes: usize = events
+            .iter()
             .map(|e| {
                 if let KvCacheEventData::Removed(data) = &e.event.data {
                     data.block_hashes.len()
@@ -2942,6 +2988,9 @@ mod event_processor_tests {
                 }
             })
             .sum();
-        assert_eq!(total_hashes, 5, "All 5 block hashes should be accounted for");
+        assert_eq!(
+            total_hashes, 5,
+            "All 5 block hashes should be accounted for"
+        );
     }
 }
