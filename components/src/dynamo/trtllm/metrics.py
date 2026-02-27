@@ -26,19 +26,15 @@ The Rust frontend (metrics.rs) provides token counters:
 
 This module adds metrics that have no engine/runtime/frontend equivalent:
   - Request types (image, structured output)
-  - KV transfer metrics (speed, latency, bytes, success/failure)
+  - KV transfer metrics (success/failure counters)
   - Abort tracking
 """
 
 import logging
 
-from prometheus_client import Counter, Gauge, Histogram
+from prometheus_client import Counter
 
 logger = logging.getLogger(__name__)
-
-KV_TRANSFER_BUCKETS = (
-    0.001, 0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.2, 0.3, 0.5, 0.75, 1.0, 5.0,
-)
 
 
 class AdditionalMetricsCollector:
@@ -76,22 +72,6 @@ class AdditionalMetricsCollector:
         )
 
         # --- KV cache transfer metrics ---
-        self.kv_transfer_speed = Gauge(
-            "kv_transfer_speed_gb_s",
-            "KV cache transfer speed in GB/s",
-            labelnames=self._labelnames,
-        )
-        self.kv_transfer_latency = Histogram(
-            "kv_transfer_latency_seconds",
-            "KV cache transfer duration in seconds",
-            labelnames=self._labelnames,
-            buckets=KV_TRANSFER_BUCKETS,
-        )
-        self.kv_transfer_bytes = Counter(
-            "kv_transfer_bytes_total",
-            "Total bytes transferred for KV cache",
-            labelnames=self._labelnames,
-        )
         self.kv_transfer_success = Counter(
             "kv_transfer_success_total",
             "Total number of successful KV cache transfers",

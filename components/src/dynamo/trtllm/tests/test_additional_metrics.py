@@ -4,9 +4,9 @@
 """Tests for AdditionalMetricsCollector and unified metrics integration."""
 
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
-from prometheus_client import REGISTRY, CollectorRegistry, generate_latest
+from prometheus_client import CollectorRegistry, generate_latest
 
 
 class TestAdditionalMetricsCollector(unittest.TestCase):
@@ -16,33 +16,16 @@ class TestAdditionalMetricsCollector(unittest.TestCase):
         """Create a fresh registry and collector for each test."""
         self.registry = CollectorRegistry()
 
-        # Patch prometheus_client to use our test registry
-        with patch("dynamo.trtllm.metrics.Counter") as MockCounter, \
-             patch("dynamo.trtllm.metrics.Gauge") as MockGauge, \
-             patch("dynamo.trtllm.metrics.Histogram") as MockHistogram:
+        # Patch prometheus_client.Counter to use our test registry
+        with patch("dynamo.trtllm.metrics.Counter") as MockCounter:
 
-            # Create real counters/gauges/histograms on test registry
-            from prometheus_client import Counter, Gauge, Histogram
+            from prometheus_client import Counter
 
             def make_counter(name, documentation, labelnames=None, **kw):
                 return Counter(name, documentation, labelnames=labelnames or [],
                                registry=self.registry)
 
-            def make_gauge(name, documentation, labelnames=None, **kw):
-                return Gauge(name, documentation, labelnames=labelnames or [],
-                             registry=self.registry, **{k: v for k, v in kw.items()
-                                                        if k == "multiprocess_mode"})
-
-            def make_histogram(name, documentation, labelnames=None, buckets=None, **kw):
-                kwargs = {"registry": self.registry}
-                if buckets:
-                    kwargs["buckets"] = buckets
-                return Histogram(name, documentation, labelnames=labelnames or [],
-                                 **kwargs)
-
             MockCounter.side_effect = make_counter
-            MockGauge.side_effect = make_gauge
-            MockHistogram.side_effect = make_histogram
 
             from dynamo.trtllm.metrics import AdditionalMetricsCollector
             self.collector = AdditionalMetricsCollector(
@@ -110,6 +93,10 @@ class TestAdditionalMetricsCollector(unittest.TestCase):
         self.assertNotIn("detailed_config_info", output)
         self.assertNotIn("cache_config_info", output)
         self.assertNotIn("engine_startup_time", output)
+        # Unwired KV transfer metrics removed (defined but never emitted)
+        self.assertNotIn("kv_transfer_speed_gb_s", output)
+        self.assertNotIn("kv_transfer_latency_seconds", output)
+        self.assertNotIn("kv_transfer_bytes_total", output)
 
 
 class TestBackwardsCompatAlias(unittest.TestCase):
