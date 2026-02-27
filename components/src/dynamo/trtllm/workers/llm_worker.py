@@ -517,18 +517,6 @@ async def init_llm_worker(
         if unified_metrics:
             unified_metrics.set_engine_startup_time(time.monotonic() - _engine_start_time)
 
-        # Start worker HTTP metrics server for direct Prometheus scraping.
-        # Only when publish_events_and_metrics is off -- when on, metrics are
-        # already exposed through the Dynamo endpoint callback above.
-        if unified_metrics and not config.publish_events_and_metrics:
-            _worker_metrics_port = int(os.environ.get("WORKER_METRICS_PORT", "8001"))
-            try:
-                import prometheus_client as _pc
-                _pc.start_http_server(_worker_metrics_port)
-                logging.info("Worker metrics HTTP server started on port %d", _worker_metrics_port)
-            except OSError as e:
-                logging.warning("Could not start worker metrics server on port %d: %s", _worker_metrics_port, e)
-
         # Register callback for Dynamo component metrics using dedicated registry
         register_engine_metrics_callback(
             endpoint=endpoint,
