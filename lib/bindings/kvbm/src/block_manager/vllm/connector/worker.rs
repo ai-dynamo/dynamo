@@ -373,10 +373,29 @@ impl Worker for KvConnectorWorker {
             tracing::debug!(request_id, "marking request as finished");
 
             if !self.connector.has_slot(&request_id) {
-                tracing::warn!(
-                    request_id,
-                    "finished request received for unknown request_id; assuming never started"
-                );
+                if self.maybe_finished_offloading.contains(&request_id)
+                    || self.maybe_finished_onboarding.contains(&request_id)
+                {
+                    // The slot was removed but the request is still tracked in a
+                    // maybe_finished set from a prior iteration. It will be
+                    // handled in the completion checks below.
+                    tracing::warn!(
+                        request_id,
+                        "finished request slot is gone but request is still tracked; \
+                         will be resolved in completion check"
+                    );
+                } else {
+                    // No slot and not tracked — the request was never started or
+                    // was already fully cleaned up. Signal immediate completion
+                    // so vLLM can free the request from its hash table (since the
+                    // leader now always returns `true` from request_finished).
+                    tracing::warn!(
+                        request_id,
+                        "finished request received for unknown request_id; \
+                         signaling immediate completion"
+                    );
+                    is_finished_offloading.insert(request_id.clone());
+                }
                 continue;
             }
 
@@ -409,11 +428,15 @@ impl Worker for KvConnectorWorker {
                     tracing::debug!(request_id, "request slot is not finished");
                 }
             } else {
-                // made this condition more strict slot existence checks were added as a prerequesite
-                // to be added to the maybe_finished_offloading set.
-                panic!(
-                    "request slot missing for {request_id}; however, it was present when added to the maybe finished offloading set"
+                // Slot was removed between when we added it to
+                // maybe_finished_offloading and now (e.g., abort race).
+                // Signal completion so vLLM can clean up.
+                tracing::warn!(
+                    request_id,
+                    "request slot missing from maybe_finished_offloading set; \
+                     signaling completion to unblock vLLM"
                 );
+                is_finished_offloading.insert(request_id.clone());
             }
         }
 
@@ -443,9 +466,15 @@ impl Worker for KvConnectorWorker {
                     tracing::debug!(request_id, "request slot is not finished");
                 }
             } else {
-                panic!(
-                    "request slot missing for {request_id}; however, it was present when added to the maybe finished onboarding set"
+                // Slot was removed between when we added it to
+                // maybe_finished_onboarding and now (e.g., abort race).
+                // Signal completion so vLLM can clean up.
+                tracing::warn!(
+                    request_id,
+                    "request slot missing from maybe_finished_onboarding set; \
+                     signaling completion to unblock vLLM"
                 );
+                is_finished_onboarding.insert(request_id.clone());
             }
         }
 
