@@ -53,6 +53,7 @@ ignore:
   - '.github/copy-pr-bot.yaml'
   - '.github/dco.yml'
   - 'container/Dockerfile.docs'
+  - 'container/build_images.sh'
   - 'container/run.sh'
   - 'container/use-sccache.sh'
   - 'container/dev/**'

@@ -158,6 +158,10 @@ python -m benchmarks.profiler.profile_sla \
   --max-num-gpus 8
 ```
 
+## Building Container Images
+
+If you want to use customized Dynamo images, a convenience script (`container/build_images.sh`) is provided to build and push all Docker images (operator, frontend, backend runtimes) needed for DGDR end-to-end testing. See the [Container Development Guide](../../../container/README.md#build_imagessh---build-and-push-all-images) for full usage details.
+
 ## Profiling Method
 
 The profiler follows a 5-step process:

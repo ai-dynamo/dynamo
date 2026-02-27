@@ -150,6 +150,10 @@ The profiler enforces these rules at startup:
 | SLA unachievable | Warning logged, SLA updated to best achievable value. |
 | Load-match needs more GPUs than available | Warning logged. |
 
+## Building Container Images
+
+If you want to use customized Dynamo images, a convenience script (`container/build_images.sh`) is provided to build and push all Docker images needed for DGDR end-to-end testing. See the [Container Development Guide](../../../../container/README.md#build_imagessh---build-and-push-all-images) for full usage details.
+
 ## CLI Usage
 
 The profiler can be run directly for local development and testing:
