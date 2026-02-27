@@ -1168,8 +1168,8 @@ func (r *DynamoGraphDeploymentRequestReconciler) enrichHardwareFromDiscovery(ctx
 		dgdr.Spec.Hardware = &nvidiacomv1beta1.HardwareSpec{}
 	}
 	hw := dgdr.Spec.Hardware
-	if hw.GPUSKU != "" && hw.VRAMMB != nil && hw.NumGPUsPerNode != nil && hw.TotalGPUs != nil {
-		return nil // all fields already set by user
+	if hw.GPUSKU != "" && hw.VRAMMB != nil && hw.NumGPUsPerNode != nil {
+		return nil // all fields already set by user; TotalGPUs is filled below when discovery runs
 	}
 
 	gpuInfo, err := gpu.DiscoverGPUs(ctx, r.APIReader)
