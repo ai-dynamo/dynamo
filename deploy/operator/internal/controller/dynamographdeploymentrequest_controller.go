@@ -460,7 +460,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleDeployingPhase(ctx contex
 	logger := log.FromContext(ctx)
 	logger.Info("Handling deploying phase", "name", dgdr.Name)
 
-	if dgdr.Spec.AutoApply == nil || !*dgdr.Spec.AutoApply {
+	if dgdr.Spec.AutoApply != nil && !*dgdr.Spec.AutoApply {
 		// Shouldn't be in this phase without autoApply
 		logger.Info("AutoApply not enabled, transitioning to Ready")
 		dgdr.Status.Phase = nvidiacomv1beta1.DGDRPhaseReady
