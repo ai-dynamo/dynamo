@@ -221,10 +221,9 @@ class MultimodalEncodeWorkerHandler(BaseGenerativeHandler):
                 mm_group.image_grid_thw = image_grid_thw
                 mm_group.multimodal_input.image_url = None
 
-            # Store one serialized tensor metadata in the first group only.
-            first_group = multimodal_groups[0]
-            first_group.embeddings_shape = tuple(precomputed_embeddings.shape)
-            first_group.serialized_request = None
+            # Store shared serialized tensor metadata at request level.
+            request.embeddings_shape = tuple(precomputed_embeddings.shape)
+            request.serialized_request = None
 
             search_start = 0
             for num_image_tokens in token_counts:
@@ -246,7 +245,7 @@ class MultimodalEncodeWorkerHandler(BaseGenerativeHandler):
 
             descriptor = connect.Descriptor(precomputed_embeddings)
             with await self._connector.create_readable(descriptor) as readable:
-                first_group.serialized_request = readable.metadata()
+                request.serialized_request = readable.metadata()
                 logger.debug(f"Request: {request.model_dump_json()}")
 
                 # Get the response generator from downstream worker

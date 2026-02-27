@@ -81,22 +81,18 @@ class EmbeddingsProcessor:
 
     async def process_embeddings(self, request: SglangMultimodalRequest):
         """Process one concatenated embedding tensor from serialized request."""
-        logger.debug(
-            "Processing embeddings with shape: "
-            f"{request.multimodal_inputs[0].embeddings_shape if request.multimodal_inputs else None}"
-        )
+        logger.debug("Processing embeddings with shape: " f"{request.embeddings_shape}")
 
         multimodal_groups = request.multimodal_inputs
         if not multimodal_groups:
             raise ValueError("multimodal_inputs is required")
 
-        first_group = multimodal_groups[0]
-        serialized_request = first_group.serialized_request
-        embeddings_shape = first_group.embeddings_shape
+        serialized_request = request.serialized_request
+        embeddings_shape = request.embeddings_shape
         if serialized_request is None:
-            raise ValueError("serialized_request is required on first multimodal group")
+            raise ValueError("serialized_request is required on request")
         if embeddings_shape is None:
-            raise ValueError("embeddings_shape is required on first multimodal group")
+            raise ValueError("embeddings_shape is required on request")
         if len(embeddings_shape) < 2:
             raise ValueError(f"Invalid embeddings shape: {embeddings_shape}")
 
@@ -399,17 +395,14 @@ class MultimodalWorkerHandler(BaseWorkerHandler):
                     "Shape mismatch error - this likely indicates a tokenization/embedding alignment issue"
                 )
                 logger.error(f"Request token IDs length: {len(input_ids)}")
-                logger.error(
-                    "Embeddings shape: "
-                    f"{request.multimodal_inputs[0].embeddings_shape if request.multimodal_inputs else None}"
-                )
+                logger.error("Embeddings shape: " f"{request.embeddings_shape}")
                 logger.error(f"Token sequence preview: {input_ids[:20]}...")
                 error_msg = (
                     f"Multimodal embedding alignment error: {str(e)}. "
                     f"This usually happens when the tokenization changes between requests. "
                     "Token count: "
                     f"{len(input_ids)}, Embedding shape: "
-                    f"{request.multimodal_inputs[0].embeddings_shape if request.multimodal_inputs else None}"
+                    f"{request.embeddings_shape}"
                 )
                 yield ErrorResponseBuilder.build_error_response(RuntimeError(error_msg))
             else:
