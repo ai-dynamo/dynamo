@@ -23,6 +23,7 @@ import (
 	"sort"
 	"strings"
 
+	groveconstants "github.com/ai-dynamo/grove/operator/api/common/constants"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"k8s.io/apimachinery/pkg/api/errors"
 
@@ -85,6 +86,7 @@ type DynamoGraphDeploymentReconciler struct {
 // +kubebuilder:rbac:groups=grove.io,resources=podcliquesets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=grove.io,resources=podcliques/scale,verbs=get;update;patch
 // +kubebuilder:rbac:groups=grove.io,resources=podcliquescalinggroups/scale,verbs=get;update;patch
+// +kubebuilder:rbac:groups=grove.io,resources=clustertopologies,verbs=get;list;watch
 // +kubebuilder:rbac:groups=scheduling.run.ai,resources=queues,verbs=get;list
 // +kubebuilder:rbac:groups=inference.networking.k8s.io,resources=inferencepools,verbs=get;list;watch;create;update;patch;delete
 
@@ -142,6 +144,8 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 		if err == nil {
 			dynamoDeployment.Status.ObservedGeneration = dynamoDeployment.Generation
 		}
+		// Propagate topology condition from framework (e.g., Grove PCS) to DGD status
+		r.propagateTopologyCondition(ctx, dynamoDeployment)
 
 		updateErr := r.Status().Update(ctx, dynamoDeployment)
 		if updateErr != nil {
@@ -417,6 +421,72 @@ func (r *DynamoGraphDeploymentReconciler) getUpdatedInProgressForGrove(ctx conte
 	}
 
 	return updatedInProgress
+}
+
+// propagateTopologyCondition reads the PCS topology condition from Grove and maps it
+// to a TopologyLevelsAvailable condition on the DGD. This is a no-op when no
+// topology constraints are set or when the Grove pathway is not in use.
+func (r *DynamoGraphDeploymentReconciler) propagateTopologyCondition(ctx context.Context, dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+	if !dgd.HasAnyTopologyConstraint() || !r.isGrovePathway(dgd) {
+		return
+	}
+	logger := log.FromContext(ctx)
+
+	pcs := &grovev1alpha1.PodCliqueSet{}
+	if err := r.Client.Get(ctx, types.NamespacedName{Name: dgd.Name, Namespace: dgd.Namespace}, pcs); err != nil {
+		if errors.IsNotFound(err) {
+			return
+		}
+		logger.V(1).Info("failed to read PCS for topology condition propagation", "error", err)
+		return
+	}
+
+	// Look for Grove's TopologyLevelsUnavailable condition on the PCS.
+	var groveTopoCond *metav1.Condition
+	for i := range pcs.Status.Conditions {
+		if pcs.Status.Conditions[i].Type == groveconstants.ConditionTopologyLevelsUnavailable {
+			groveTopoCond = &pcs.Status.Conditions[i]
+			break
+		}
+	}
+
+	var dynamoCond metav1.Condition
+	if groveTopoCond == nil {
+		// No topology condition from Grove yet — assume healthy.
+		dynamoCond = metav1.Condition{
+			Type:               nvidiacomv1alpha1.ConditionTypeTopologyLevelsAvailable,
+			Status:             metav1.ConditionTrue,
+			Reason:             nvidiacomv1alpha1.ConditionReasonAllTopologyLevelsAvailable,
+			Message:            "All required topology levels are available in the cluster topology",
+			LastTransitionTime: metav1.Now(),
+		}
+	} else if groveTopoCond.Status == metav1.ConditionTrue {
+		// Grove reports topology levels are unavailable.
+		reason := nvidiacomv1alpha1.ConditionReasonTopologyLevelsUnavailable
+		if groveTopoCond.Reason == groveconstants.ConditionReasonClusterTopologyNotFound {
+			reason = nvidiacomv1alpha1.ConditionReasonTopologyDefinitionNotFound
+		}
+		dynamoCond = metav1.Condition{
+			Type:               nvidiacomv1alpha1.ConditionTypeTopologyLevelsAvailable,
+			Status:             metav1.ConditionFalse,
+			Reason:             reason,
+			Message:            groveTopoCond.Message,
+			LastTransitionTime: metav1.Now(),
+		}
+		logger.Info("Topology constraints no longer enforced", "reason", reason, "message", groveTopoCond.Message)
+		r.Recorder.Eventf(dgd, corev1.EventTypeWarning, reason, "Topology constraints no longer enforced: %s", groveTopoCond.Message)
+	} else {
+		// Grove's TopologyLevelsUnavailable is False → all levels available.
+		dynamoCond = metav1.Condition{
+			Type:               nvidiacomv1alpha1.ConditionTypeTopologyLevelsAvailable,
+			Status:             metav1.ConditionTrue,
+			Reason:             nvidiacomv1alpha1.ConditionReasonAllTopologyLevelsAvailable,
+			Message:            "All required topology levels are available in the cluster topology",
+			LastTransitionTime: metav1.Now(),
+		}
+	}
+
+	dgd.AddStatusCondition(dynamoCond)
 }
 
 func isRestartAlreadyProcessed(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) bool {

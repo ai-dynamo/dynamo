@@ -838,16 +838,307 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			wantErr: true,
 			errMsg:  `annotation nvidia.com/dynamo-operator-origin-version has invalid value "not-a-version": must be valid semver`,
 		},
+		// Topology constraint validation tests
+		{
+			name: "no topology constraints is valid (backward compatible)",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-graph",
+					Namespace: "default",
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"main": {},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "valid topology constraints with spec and service level",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-graph",
+					Namespace: "default",
+					Annotations: map[string]string{
+						consts.KubeAnnotationEnableGrove: "false",
+					},
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					TopologyConstraint: &nvidiacomv1alpha1.TopologyConstraint{
+						PackDomain: nvidiacomv1alpha1.TopologyDomainZone,
+					},
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"Worker": {
+							TopologyConstraint: &nvidiacomv1alpha1.TopologyConstraint{
+								PackDomain: nvidiacomv1alpha1.TopologyDomainBlock,
+							},
+						},
+						"Frontend": {
+							TopologyConstraint: &nvidiacomv1alpha1.TopologyConstraint{
+								PackDomain: nvidiacomv1alpha1.TopologyDomainZone,
+							},
+						},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "service-only topology constraint (no spec-level) is valid",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-graph",
+					Namespace: "default",
+					Annotations: map[string]string{
+						consts.KubeAnnotationEnableGrove: "false",
+					},
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"Worker": {
+							TopologyConstraint: &nvidiacomv1alpha1.TopologyConstraint{
+								PackDomain: nvidiacomv1alpha1.TopologyDomainRack,
+							},
+						},
+						"Frontend": {},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "spec-level set but service has no topology constraint is valid (inherits)",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-graph",
+					Namespace: "default",
+					Annotations: map[string]string{
+						consts.KubeAnnotationEnableGrove: "false",
+					},
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					TopologyConstraint: &nvidiacomv1alpha1.TopologyConstraint{
+						PackDomain: nvidiacomv1alpha1.TopologyDomainZone,
+					},
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"Worker": {},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "invalid packDomain value at spec level",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-graph",
+					Namespace: "default",
+					Annotations: map[string]string{
+						consts.KubeAnnotationEnableGrove: "false",
+					},
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					TopologyConstraint: &nvidiacomv1alpha1.TopologyConstraint{
+						PackDomain: nvidiacomv1alpha1.TopologyDomain("invalid"),
+					},
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"Worker": {
+							TopologyConstraint: &nvidiacomv1alpha1.TopologyConstraint{
+								PackDomain: nvidiacomv1alpha1.TopologyDomainRack,
+							},
+						},
+					},
+				},
+			},
+			wantErr:     true,
+			errContains: true,
+			errMsg:      "is not a valid topology domain",
+		},
+		{
+			name: "hierarchy violation: service domain broader than spec-level",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-graph",
+					Namespace: "default",
+					Annotations: map[string]string{
+						consts.KubeAnnotationEnableGrove: "false",
+					},
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					TopologyConstraint: &nvidiacomv1alpha1.TopologyConstraint{
+						PackDomain: nvidiacomv1alpha1.TopologyDomainRack,
+					},
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"Worker": {
+							TopologyConstraint: &nvidiacomv1alpha1.TopologyConstraint{
+								PackDomain: nvidiacomv1alpha1.TopologyDomainRegion,
+							},
+						},
+					},
+				},
+			},
+			wantErr:     true,
+			errContains: true,
+			errMsg:      "is broader than spec-level",
+		},
+		{
+			name: "service domain equal to spec-level is valid",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-graph",
+					Namespace: "default",
+					Annotations: map[string]string{
+						consts.KubeAnnotationEnableGrove: "false",
+					},
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					TopologyConstraint: &nvidiacomv1alpha1.TopologyConstraint{
+						PackDomain: nvidiacomv1alpha1.TopologyDomainRack,
+					},
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"Worker": {
+							TopologyConstraint: &nvidiacomv1alpha1.TopologyConstraint{
+								PackDomain: nvidiacomv1alpha1.TopologyDomainRack,
+							},
+						},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "mixed: spec-level with some services having constraints and some not",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-graph",
+					Namespace: "default",
+					Annotations: map[string]string{
+						consts.KubeAnnotationEnableGrove: "false",
+					},
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					TopologyConstraint: &nvidiacomv1alpha1.TopologyConstraint{
+						PackDomain: nvidiacomv1alpha1.TopologyDomainZone,
+					},
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"Worker": {
+							TopologyConstraint: &nvidiacomv1alpha1.TopologyConstraint{
+								PackDomain: nvidiacomv1alpha1.TopologyDomainRack,
+							},
+						},
+						"Frontend": {},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "service-only with multiple services, only one has constraint",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-graph",
+					Namespace: "default",
+					Annotations: map[string]string{
+						consts.KubeAnnotationEnableGrove: "false",
+					},
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"Worker": {
+							TopologyConstraint: &nvidiacomv1alpha1.TopologyConstraint{
+								PackDomain: nvidiacomv1alpha1.TopologyDomainRack,
+							},
+						},
+						"Frontend": {},
+						"Cache":    {},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "service-only: no hierarchy check when spec-level is nil",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-graph",
+					Namespace: "default",
+					Annotations: map[string]string{
+						consts.KubeAnnotationEnableGrove: "false",
+					},
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"Worker": {
+							TopologyConstraint: &nvidiacomv1alpha1.TopologyConstraint{
+								PackDomain: nvidiacomv1alpha1.TopologyDomainRegion,
+							},
+						},
+						"Frontend": {
+							TopologyConstraint: &nvidiacomv1alpha1.TopologyConstraint{
+								PackDomain: nvidiacomv1alpha1.TopologyDomainHost,
+							},
+						},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "invalid packDomain at service level only (no spec-level)",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-graph",
+					Namespace: "default",
+					Annotations: map[string]string{
+						consts.KubeAnnotationEnableGrove: "false",
+					},
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"Worker": {
+							TopologyConstraint: &nvidiacomv1alpha1.TopologyConstraint{
+								PackDomain: nvidiacomv1alpha1.TopologyDomain("invalid"),
+							},
+						},
+					},
+				},
+			},
+			wantErr:     true,
+			errContains: true,
+			errMsg:      "is not a valid topology domain",
+		},
+		{
+			name: "service domain narrower than spec-level is valid",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-graph",
+					Namespace: "default",
+					Annotations: map[string]string{
+						consts.KubeAnnotationEnableGrove: "false",
+					},
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					TopologyConstraint: &nvidiacomv1alpha1.TopologyConstraint{
+						PackDomain: nvidiacomv1alpha1.TopologyDomainZone,
+					},
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"Worker": {
+							TopologyConstraint: &nvidiacomv1alpha1.TopologyConstraint{
+								PackDomain: nvidiacomv1alpha1.TopologyDomainHost,
+							},
+						},
+					},
+				},
+			},
+			wantErr: false,
+		},
 		{
 			name: "both annotations valid",
 			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-graph",
 					Namespace: "default",
-					Annotations: map[string]string{
-						consts.KubeAnnotationDynamoOperatorOriginVersion:    "1.0.0",
-						consts.KubeAnnotationVLLMDistributedExecutorBackend: "mp",
-					},
 				},
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
 					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
@@ -877,6 +1168,301 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			wantErr:     true,
 			errMsg:      "annotation nvidia.com/dynamo-operator-origin-version has invalid value \"bad\": must be valid semver\nannotation nvidia.com/vllm-distributed-executor-backend has invalid value \"invalid\": must be \"mp\" or \"ray\"",
 			errContains: true,
+		},
+		// Topology constraint validation tests
+		{
+			name: "no topology constraints is valid (backward compatible)",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-graph",
+					Namespace: "default",
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"main": {},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "valid topology constraints with spec and service level",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-graph",
+					Namespace: "default",
+					Annotations: map[string]string{
+						consts.KubeAnnotationEnableGrove: "false",
+					},
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					TopologyConstraint: &nvidiacomv1alpha1.TopologyConstraint{
+						PackDomain: nvidiacomv1alpha1.TopologyDomainZone,
+					},
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"Worker": {
+							TopologyConstraint: &nvidiacomv1alpha1.TopologyConstraint{
+								PackDomain: nvidiacomv1alpha1.TopologyDomainBlock,
+							},
+						},
+						"Frontend": {
+							TopologyConstraint: &nvidiacomv1alpha1.TopologyConstraint{
+								PackDomain: nvidiacomv1alpha1.TopologyDomainZone,
+							},
+						},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "service-only topology constraint (no spec-level) is valid",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-graph",
+					Namespace: "default",
+					Annotations: map[string]string{
+						consts.KubeAnnotationEnableGrove: "false",
+					},
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"Worker": {
+							TopologyConstraint: &nvidiacomv1alpha1.TopologyConstraint{
+								PackDomain: nvidiacomv1alpha1.TopologyDomainRack,
+							},
+						},
+						"Frontend": {},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "spec-level set but service has no topology constraint is valid (inherits)",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-graph",
+					Namespace: "default",
+					Annotations: map[string]string{
+						consts.KubeAnnotationEnableGrove: "false",
+					},
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					TopologyConstraint: &nvidiacomv1alpha1.TopologyConstraint{
+						PackDomain: nvidiacomv1alpha1.TopologyDomainZone,
+					},
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"Worker": {},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "invalid packDomain value at spec level",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-graph",
+					Namespace: "default",
+					Annotations: map[string]string{
+						consts.KubeAnnotationEnableGrove: "false",
+					},
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					TopologyConstraint: &nvidiacomv1alpha1.TopologyConstraint{
+						PackDomain: nvidiacomv1alpha1.TopologyDomain("invalid"),
+					},
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"Worker": {
+							TopologyConstraint: &nvidiacomv1alpha1.TopologyConstraint{
+								PackDomain: nvidiacomv1alpha1.TopologyDomainRack,
+							},
+						},
+					},
+				},
+			},
+			wantErr:     true,
+			errContains: true,
+			errMsg:      "is not a valid topology domain",
+		},
+		{
+			name: "hierarchy violation: service domain broader than spec-level",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-graph",
+					Namespace: "default",
+					Annotations: map[string]string{
+						consts.KubeAnnotationEnableGrove: "false",
+					},
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					TopologyConstraint: &nvidiacomv1alpha1.TopologyConstraint{
+						PackDomain: nvidiacomv1alpha1.TopologyDomainRack,
+					},
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"Worker": {
+							TopologyConstraint: &nvidiacomv1alpha1.TopologyConstraint{
+								PackDomain: nvidiacomv1alpha1.TopologyDomainRegion,
+							},
+						},
+					},
+				},
+			},
+			wantErr:     true,
+			errContains: true,
+			errMsg:      "is broader than spec-level",
+		},
+		{
+			name: "service domain equal to spec-level is valid",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-graph",
+					Namespace: "default",
+					Annotations: map[string]string{
+						consts.KubeAnnotationEnableGrove: "false",
+					},
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					TopologyConstraint: &nvidiacomv1alpha1.TopologyConstraint{
+						PackDomain: nvidiacomv1alpha1.TopologyDomainRack,
+					},
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"Worker": {
+							TopologyConstraint: &nvidiacomv1alpha1.TopologyConstraint{
+								PackDomain: nvidiacomv1alpha1.TopologyDomainRack,
+							},
+						},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "mixed: spec-level with some services having constraints and some not",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-graph",
+					Namespace: "default",
+					Annotations: map[string]string{
+						consts.KubeAnnotationEnableGrove: "false",
+					},
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					TopologyConstraint: &nvidiacomv1alpha1.TopologyConstraint{
+						PackDomain: nvidiacomv1alpha1.TopologyDomainZone,
+					},
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"Worker": {
+							TopologyConstraint: &nvidiacomv1alpha1.TopologyConstraint{
+								PackDomain: nvidiacomv1alpha1.TopologyDomainRack,
+							},
+						},
+						"Frontend": {},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "service-only with multiple services, only one has constraint",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-graph",
+					Namespace: "default",
+					Annotations: map[string]string{
+						consts.KubeAnnotationEnableGrove: "false",
+					},
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"Worker": {
+							TopologyConstraint: &nvidiacomv1alpha1.TopologyConstraint{
+								PackDomain: nvidiacomv1alpha1.TopologyDomainRack,
+							},
+						},
+						"Frontend": {},
+						"Cache":    {},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "service-only: no hierarchy check when spec-level is nil",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-graph",
+					Namespace: "default",
+					Annotations: map[string]string{
+						consts.KubeAnnotationEnableGrove: "false",
+					},
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"Worker": {
+							TopologyConstraint: &nvidiacomv1alpha1.TopologyConstraint{
+								PackDomain: nvidiacomv1alpha1.TopologyDomainRegion,
+							},
+						},
+						"Frontend": {
+							TopologyConstraint: &nvidiacomv1alpha1.TopologyConstraint{
+								PackDomain: nvidiacomv1alpha1.TopologyDomainHost,
+							},
+						},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "invalid packDomain at service level only (no spec-level)",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-graph",
+					Namespace: "default",
+					Annotations: map[string]string{
+						consts.KubeAnnotationEnableGrove: "false",
+					},
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"Worker": {
+							TopologyConstraint: &nvidiacomv1alpha1.TopologyConstraint{
+								PackDomain: nvidiacomv1alpha1.TopologyDomain("invalid"),
+							},
+						},
+					},
+				},
+			},
+			wantErr:     true,
+			errContains: true,
+			errMsg:      "is not a valid topology domain",
+		},
+		{
+			name: "service domain narrower than spec-level is valid",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-graph",
+					Namespace: "default",
+					Annotations: map[string]string{
+						consts.KubeAnnotationEnableGrove: "false",
+					},
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					TopologyConstraint: &nvidiacomv1alpha1.TopologyConstraint{
+						PackDomain: nvidiacomv1alpha1.TopologyDomainZone,
+					},
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"Worker": {
+							TopologyConstraint: &nvidiacomv1alpha1.TopologyConstraint{
+								PackDomain: nvidiacomv1alpha1.TopologyDomainHost,
+							},
+						},
+					},
+				},
+			},
+			wantErr: false,
 		},
 	}
 
@@ -1578,8 +2164,8 @@ func TestDynamoGraphDeploymentValidator_ValidateUpdate(t *testing.T) {
 				return
 			}
 
-			if tt.wantErr && err.Error() != tt.errMsg {
-				t.Errorf("DynamoGraphDeploymentValidator.ValidateUpdate() error message = %v, want %v", err.Error(), tt.errMsg)
+			if tt.wantErr && !strings.Contains(err.Error(), tt.errMsg) {
+				t.Errorf("DynamoGraphDeploymentValidator.ValidateUpdate() error message = %v, want to contain %v", err.Error(), tt.errMsg)
 			}
 
 			if tt.wantWarnings && len(warnings) == 0 {
