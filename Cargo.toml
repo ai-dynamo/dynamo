@@ -21,6 +21,7 @@ members = [
     "lib/bench",
     "lib/bindings/c",
     "lib/bindings/python/codegen",
+    "lib/kvbm-distributed",
 ]
 resolver = "3"
 
@@ -55,10 +56,10 @@ kvbm-engine = { path = "lib/kvbm-engine", version = "1.0.0" }
 kvbm-kernels = { path = "lib/kvbm-kernels", version = "1.0.0" }
 kvbm-logical = { path = "lib/kvbm-logical", version = "1.0.0" }
 kvbm-physical = { path = "lib/kvbm-physical", version = "1.0.0" }
+kvbm-distributed = { path = "lib/kvbm-distributed", version = "1.0.0" }
 
 # velo
 velo = { version = "0.1.0" }
-
 # External dependencies
 anyhow = { version = "1" }
 async-nats = { version = "0.45.0", features = ["service"] }
