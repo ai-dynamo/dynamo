@@ -62,11 +62,11 @@ spec:
           command:
           - /bin/sh
           - -c
-          image: docker.io/lambda108/dynamo:epp-discovery
+          image: docker.io/lambda108/dynamo:discovery-logs
           workingDir: /workspace/examples/backends/vllm
         containers:
           - name: frontend
-            image: docker.io/lambda108/dynamo:epp-discovery
+            image: docker.io/lambda108/dynamo:discovery-logs
             command:
               - python3
             args:
