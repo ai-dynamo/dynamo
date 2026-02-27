@@ -1220,12 +1220,16 @@ func (r *DynamoGraphDeploymentRequestReconciler) enrichHardwareFromDiscovery(ctx
 		return nil // all fields already set by user; TotalGPUs is filled below when discovery runs
 	}
 
+	hasManualConfig := dgdr.Spec.Hardware != nil && (dgdr.Spec.Hardware.GPUSKU != "" ||
+		dgdr.Spec.Hardware.VRAMMB != nil ||
+		dgdr.Spec.Hardware.NumGPUsPerNode != nil)
+		
 	var gpuInfo *gpu.GPUInfo
 	logger := log.FromContext(ctx)
 
     logger.Info("Attempting GPU discovery for profiling job")
     discoveredInfo, err := gpu.DiscoverGPUsFromDCGM(ctx, r.Client, r.GPUDiscoveryCache)
-    if err != nil {
+    if err != nil && hasManualConfig != nil {
         // This path is expected for namespace-restricted operators without node read permissions
         // Refine the logger message
         reason := GetGPUDiscoveryFailureReason(err)

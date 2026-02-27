@@ -677,6 +677,125 @@ func TestListDCGMExporterPods(t *testing.T) {
 	}
 }
 
+package cloud_test
+
+import (
+	"context"
+	"strings"
+	"testing"
+
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+
+	. "your/module/cloud" // replace with the package where GetCloudProviderInfo is
+)
+
+func TestGetCloudProviderInfo(t *testing.T) {
+	scheme := runtime.NewScheme()
+	corev1.AddToScheme(scheme)
+
+	tests := []struct {
+		name       string
+		nodes      []corev1.Node
+		want       string
+		expectErr  bool
+	}{
+		{
+			name:      "no nodes",
+			nodes:     []corev1.Node{},
+			want:      "unknown",
+			expectErr: true,
+		},
+		{
+			name: "AWS providerID detection",
+			nodes: []corev1.Node{
+				{
+					Spec: corev1.NodeSpec{
+						ProviderID: "aws:///us-east-1/i-1234567890abcdef0",
+					},
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "node1",
+					},
+				},
+			},
+			want:      "aws",
+			expectErr: false,
+		},
+		{
+			name: "AKS label detection",
+			nodes: []corev1.Node{
+				{
+					Spec: corev1.NodeSpec{
+						ProviderID: "unknown",
+					},
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "node1",
+						Labels: map[string]string{
+							"kubernetes.azure.com/cluster": "my-aks-cluster",
+						},
+					},
+				},
+			},
+			want:      "aks",
+			expectErr: false,
+		},
+		{
+			name: "GCP instance type detection",
+			nodes: []corev1.Node{
+				{
+					Spec: corev1.NodeSpec{
+						ProviderID: "unknown",
+					},
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "node1",
+						Labels: map[string]string{
+							"node.kubernetes.io/instance-type": "a2-standard-4",
+						},
+					},
+				},
+			},
+			want:      "gcp",
+			expectErr: false,
+		},
+		{
+			name: "unknown provider",
+			nodes: []corev1.Node{
+				{
+					Spec: corev1.NodeSpec{
+						ProviderID: "my-custom-cloud",
+					},
+					ObjectMeta: metav1.ObjectMeta{
+						Name:   "node1",
+						Labels: map[string]string{},
+					},
+				},
+			},
+			want:      "other",
+			expectErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			clientBuilder := fake.NewClientBuilder().WithScheme(scheme).WithObjects()
+			for _, node := range tt.nodes {
+				clientBuilder.WithObjects(&node)
+			}
+			k8sClient := clientBuilder.Build()
+
+			got, err := GetCloudProviderInfo(context.Background(), k8sClient)
+			if (err != nil) != tt.expectErr {
+				t.Errorf("unexpected error status: got %v, want error: %v", err, tt.expectErr)
+			}
+			if !strings.EqualFold(got, tt.want) {
+				t.Errorf("unexpected provider: got %s, want %s", got, tt.want)
+			}
+		})
+	}
+}
 //
 // ---- Fake client that forces List error ----
 //

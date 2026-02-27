@@ -142,7 +142,7 @@ func (c *GPUDiscoveryCache) Set(info *GPUInfo, ttl time.Duration) {
 // does not represent full cluster GPU inventory. Future improvements should
 // aggregate and return GPU information for all nodes instead of selecting
 // only one.
-func DiscoverGPUsFromDCGM(ctx context.Context, k8sClient client.Client, cache *GPUDiscoveryCache) (*GPUInfo, error) {
+func DiscoverGPUsFromDCGM(ctx context.Context, k8sClient client.Reader, cache *GPUDiscoveryCache) (*GPUInfo, error) {
 	if cache != nil {
 		// Return cached result if still valid
 		if cached, ok := cache.Get(); ok {
@@ -208,7 +208,7 @@ func DiscoverGPUsFromDCGM(ctx context.Context, k8sClient client.Client, cache *G
 	return bestNode, nil
 }
 
-func listDCGMExporterPods(ctx context.Context, k8sClient client.Client) ([]corev1.Pod, error) {
+func listDCGMExporterPods(ctx context.Context, k8sClient client.Reader) ([]corev1.Pod, error) {
 	var result []corev1.Pod
 	seen := make(map[string]struct{})
 
@@ -255,12 +255,7 @@ func listDCGMExporterPods(ctx context.Context, k8sClient client.Client) ([]corev
 //
 // It uses common GPU Operator label selectors and deduplicates results
 // across selectors. If no running pods are found, an error is returned.
-// listGPUOperatorRunningPods lists GPU Operator pods in the GPUOperatorNamespace
-// and returns only those that are in Running phase.
-//
-// It uses known GPU Operator label selectors and deduplicates results
-// across selectors. If no running pods are found, an error is returned.
-func listGPUOperatorRunningPods(ctx context.Context, k8sClient client.Client) ([]corev1.Pod, error) {
+func listGPUOperatorRunningPods(ctx context.Context, k8sClient client.Reader) ([]corev1.Pod, error) {
 
 	var result []corev1.Pod
 	seen := make(map[string]struct{})
@@ -434,8 +429,8 @@ func parseMetrics(ctx context.Context, families map[string]*dto.MetricFamily) (*
 		for _, m := range mf.Metric {
 			gpuID := getLabel(m, "gpu")
 			if gpuID == "" {
-+				continue
-+			}
+				continue
+			}
 			gpuSet[gpuID] = struct{}{}
 
 			// Extract model from label
@@ -455,8 +450,9 @@ func parseMetrics(ctx context.Context, families map[string]*dto.MetricFamily) (*
 		for _, m := range mf.Metric {
 			gpuID := getLabel(m, "gpu")
 			if gpuID == "" {
-+				continue
-+			}
+				continue
+			}
+			
 			fbFree[gpuID] = m.GetGauge().GetValue()
 
 			if hostName == "" {
@@ -469,8 +465,8 @@ func parseMetrics(ctx context.Context, families map[string]*dto.MetricFamily) (*
 		for _, m := range mf.Metric {
 			gpuID := getLabel(m, "gpu")
 			if gpuID == "" {
-+				continue
-+			}
+				continue
+			}
 			fbUsed[gpuID] = m.GetGauge().GetValue()
 
 			if hostName == "" {
@@ -483,8 +479,8 @@ func parseMetrics(ctx context.Context, families map[string]*dto.MetricFamily) (*
 		for _, m := range mf.Metric {
 			gpuID := getLabel(m, "gpu")
 			if gpuID == "" {
-+				continue
-+			}
+				continue
+			}
 			fbReserved[gpuID] = m.GetGauge().GetValue()
 
 			if hostName == "" {
