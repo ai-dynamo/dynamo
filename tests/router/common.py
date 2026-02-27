@@ -1353,7 +1353,7 @@ def _test_router_indexers_sync(
     test_nats_interruption: bool = False,
     nats_server: Optional["NatsServer"] = None,
     durable_kv_events: bool = False,
-    router_event_threads: int = 1,
+    router_event_threads: int = 4,
 ):
     """Test that two KV routers have synchronized indexer states after processing requests.
 
@@ -1920,7 +1920,7 @@ def _test_router_decisions(
     block_size: int = 8,
     use_kv_events: bool = True,
     durable_kv_events: bool = False,
-    router_event_threads: int = 1,
+    router_event_threads: int = 4,
 ):
     """Validate cross-worker routing decisions based on longest prefix match and tree-size tiebreaking.
 

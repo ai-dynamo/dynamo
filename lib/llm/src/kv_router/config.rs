@@ -82,7 +82,7 @@ pub struct KvRouterConfig {
 
     /// Number of event processing threads for the KV indexer.
     /// When > 1, uses ConcurrentRadixTree with a thread pool instead of the
-    /// single-threaded RadixTree. Default: 1.
+    /// single-threaded RadixTree. Default: 4.
     #[validate(range(min = 1))]
     pub router_event_threads: u32,
 }
@@ -104,7 +104,7 @@ impl Default for KvRouterConfig {
             router_max_tree_size: 2usize.pow(20), // 2^20 = 1048576, matches PruneConfig::default()
             router_prune_target_ratio: 0.8,
             router_queue_threshold: None,
-            router_event_threads: 1,
+            router_event_threads: 4,
         }
     }
 }
