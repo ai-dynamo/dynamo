@@ -485,7 +485,7 @@ v1alpha1 is still supported via automatic conversion but will be removed in a fu
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `apiVersion` _string_ | `nvidia.com/v1beta1` | | |
+| `apiVersion` _string_ | `nvidia.com/v1alpha1` | | |
 | `kind` _string_ | `DynamoGraphDeploymentRequest` | | |
 | `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
 | `spec` _[DynamoGraphDeploymentRequestSpec](#dynamographdeploymentrequestspec)_ | Spec defines the desired state for this deployment request. |  |  |

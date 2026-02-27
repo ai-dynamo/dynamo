@@ -31,12 +31,17 @@ spec:
   # "rapid" for fast sweep; "thorough" for deeper exploration
   searchStrategy: thorough
 
-  # Hardware describes the hardware resources available for profiling and deployment
-  # Note: Operator auto-discovers GPU info from cluster nodes when available
+  # Hardware describes the hardware resources available for profiling and deployment.
+  # In cluster-scoped mode the operator auto-discovers GPU info from cluster nodes
+  # (via GPU Feature Discovery labels), so these fields are optional.
+  # In namespace-restricted mode, auto-discovery is intentionally disabled because
+  # the operator lacks permission to list cluster nodes. Validation will reject the
+  # DGDR before any profiling runs, so you must explicitly set numGpusPerNode,
+  # gpuSku, and vramMb.
   hardware:
-    numGpusPerNode: 8       # GPUs per node (optional - auto-discovered if not specified)
-    gpuSku: h200_sxm        # Hardware system (optional - auto-detected if not specified)
-    # vramMb: 141557        # GPU VRAM in MiB (optional - auto-discovered)
+    numGpusPerNode: 8       # GPUs per node (required in namespace-restricted mode)
+    gpuSku: h200_sxm        # Hardware system (required in namespace-restricted mode)
+    # vramMb: 141557        # GPU VRAM in MiB (required in namespace-restricted mode)
 
   # Workload defines the expected workload characteristics
   workload:
