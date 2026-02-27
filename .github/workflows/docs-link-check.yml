@@ -19,14 +19,15 @@ jobs:
       # Cache lychee results (e.g. to avoid hitting rate limits)
       # https://lychee.cli.rs/github_action_recipes/caching/
       - name: Restore lychee cache
-        uses: actions/cache@v4
+        id: restore-lychee-cache
+        uses: actions/cache/restore@v5
         with:
           path: .lycheecache
           key: cache-lychee-${{ github.sha }}
           restore-keys: cache-lychee-
 
       - name: Check documentation links with lychee
-        uses: lycheeverse/lychee-action@a8c4c7cb88f0c7386610c35eb25108e448569cb0 # v2.0.2
+        uses: lycheeverse/lychee-action@v2
         with:
           args: >-
             --cache
@@ -37,14 +38,24 @@ jobs:
             --root-dir ${{ github.workspace }}
             --exclude-path ".*ATTRIBUTIONS.*"
             --exclude-path "./lib/llm/tests/data/.*"
+            --exclude-path "./docs/main.css"
             --accept "200..=299, 403, 429"
             --exclude-all-private
             --exclude 0.0.0.0
-            ${{ github.event_name == 'pull_request' && '--offline' || '' }}
             .
+            # excluded main.css due to broken Figma asset link - waiting on Fern to fix it.
+            # if lychee is unstable again - enable line below to run in offline mode - move it up before the line with the dot.
+            # ${{ github.event_name == 'pull_request' && '--offline' || '' }}
           fail: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Save lychee cache
+        uses: actions/cache/save@v5
+        if: always()
+        with:
+          path: .lycheecache
+          key: ${{ steps.restore-lychee-cache.outputs.cache-primary-key }}
 
   broken-links-check:
     name: Check for broken markdown links
