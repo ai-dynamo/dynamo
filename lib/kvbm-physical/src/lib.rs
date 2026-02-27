@@ -12,14 +12,14 @@ pub use kvbm_common::BlockId;
 pub type SequenceHash = kvbm_common::SequenceHash;
 
 #[cfg(test)]
-#[cfg(not(all(feature = "testing-kvbm", feature = "testing-kvbm")))]
+#[cfg(not(feature = "testing-kvbm"))]
 mod sentinel {
     #[test]
     #[allow(non_snake_case)]
-    fn all_functional_tests_skipped___enable_testing_nixl_and_testing_cuda() {
+    fn all_functional_tests_skipped___enable_testing_kvbm() {
         eprintln!(
-            "kvbm-physical functional tests require features `testing-kvbm` and `testing-kvbm`. \
-             Run with: cargo test -p kvbm-physical --features testing-kvbm,testing-kvbm"
+            "kvbm-physical functional tests require feature `testing-kvbm`. \
+             Run with: cargo test -p kvbm-physical --features testing-kvbm"
         );
     }
 }

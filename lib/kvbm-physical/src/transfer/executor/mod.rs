@@ -570,7 +570,7 @@ fn execute_two_hop_transfer(params: TwoHopTransferParams) -> Result<TransferComp
     Ok(TransferCompleteNotification::from_awaiter(awaiter))
 }
 
-#[cfg(all(test, feature = "testing-kvbm", feature = "testing-kvbm"))]
+#[cfg(all(test, feature = "testing-kvbm"))]
 mod tests {
     use super::*;
 

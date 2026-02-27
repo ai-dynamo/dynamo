@@ -19,7 +19,7 @@ mod physical;
 mod serialize;
 mod validation;
 
-#[cfg(all(test, feature = "testing-kvbm", feature = "testing-kvbm"))]
+#[cfg(all(test, feature = "testing-kvbm"))]
 pub(super) mod tests;
 
 // #[cfg(test)]

@@ -165,7 +165,7 @@ impl LayoutDescriptor {
     }
 }
 
-#[cfg(all(test, feature = "testing-kvbm", feature = "testing-kvbm"))]
+#[cfg(all(test, feature = "testing-kvbm"))]
 mod tests {
     use dynamo_memory::nixl::MemType;
 

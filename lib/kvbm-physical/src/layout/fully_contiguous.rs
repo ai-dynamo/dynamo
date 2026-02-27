@@ -353,7 +353,7 @@ impl super::ContiguousBlockLayout for FullyContiguousLayout {
     }
 }
 
-#[cfg(all(test, feature = "testing-kvbm", feature = "testing-kvbm"))]
+#[cfg(all(test, feature = "testing-kvbm"))]
 mod tests {
     use super::super::tests::*;
     use super::*;

@@ -28,7 +28,6 @@ Abstractions for how KV cache blocks are organized in memory.
 
 - **`TransferConfig` / builder** — Configures event system, NIXL backends, CUDA device, capabilities, and memory pool before building a `TransferManager`.
 - **`TransferOptions`** — Per-transfer configuration: `layer_range`, `nixl_write_notification`, `bounce_buffer`, caller-provided `cuda_stream`, and src/dst `kv_layout` overrides.
-- **`TransferCapabilities`** — Feature flags: `allow_gds` (GPU Direct Storage), `allow_gpu_rdma` (device-to-remote without host staging).
 - **`TransferPreferences`** — Strategy hints via `NativeVsNixlPolicy` (PreferNative / PreferNixl / Automatic).
 - **`TransferCompleteNotification`** — `Either<Ready, EventAwaiter>` implementing `IntoFuture`. Zero-cost for synchronous completions. `aggregate()` composes multiple notifications. `could_yield()` checks if awaiting will suspend.
 - **`BounceBuffer`** — Staging area for two-hop transfers (e.g., Device &rarr; Host &rarr; Remote).
@@ -89,8 +88,7 @@ notification.await?;
 
 All functional tests in `kvbm-physical` require a real NIXL installation and a CUDA GPU. They are gated behind two feature flags:
 
-- **`testing-kvbm`** — enables tests that create `NixlAgent` instances (hard-aborts under NIXL stubs)
-- **`testing-kvbm`** — enables tests that allocate device memory or launch CUDA kernels
+- **`testing-kvbm`** — enables tests requiring NIXL and CUDA (creates NixlAgent instances and allocates device memory / launches kernels)
 
 ### Running tests
 
@@ -99,7 +97,7 @@ All functional tests in `kvbm-physical` require a real NIXL installation and a C
 cargo test -p kvbm-physical
 
 # With GPU + NIXL available
-cargo test -p kvbm-physical --features testing-kvbm,testing-kvbm
+cargo test -p kvbm-physical --features testing-kvbm
 ```
 
 When neither feature is enabled, a single **sentinel test** runs and prints a reminder message. This ensures `cargo test` never silently passes with zero tests.

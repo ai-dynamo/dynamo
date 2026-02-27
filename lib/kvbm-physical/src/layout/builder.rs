@@ -309,7 +309,7 @@ impl PhysicalLayoutBuilder<HasConfig, HasLayout, NoMemory> {
     ///
     /// This is the **CRITICAL** step that enables remote GPU-to-GPU transfers.
     /// Each tensor's memory is wrapped in `ExternalDeviceMemory` and registered
-    /// with NIXL via the agent's UCX backend.
+    /// with NIXL.
     ///
     /// # Arguments
     /// * `tensors` - KV cache tensors from vLLM (one per layer). All tensors must:
@@ -318,7 +318,7 @@ impl PhysicalLayoutBuilder<HasConfig, HasLayout, NoMemory> {
     ///   - Have the same shape
     ///
     /// # Requirements
-    /// - The NIXL agent must have UCX backend enabled for VRAM registration
+    /// - The NIXL agent must be registered with an RDMA-capable backend
     /// - The external framework (vLLM) must keep the tensors valid while registered
     ///
     /// # Example
@@ -787,7 +787,7 @@ fn derive_nixl_metadata(agent: &NixlAgent, entries: &[MemoryEntry]) -> Result<Ni
     }
 }
 
-#[cfg(all(test, feature = "testing-kvbm", feature = "testing-kvbm"))]
+#[cfg(all(test, feature = "testing-kvbm"))]
 mod tests {
     use super::super::{BlockDimension, LayoutConfig};
     use super::*;

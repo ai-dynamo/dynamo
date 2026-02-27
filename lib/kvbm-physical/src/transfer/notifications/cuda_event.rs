@@ -33,7 +33,7 @@ impl CompletionChecker for CudaEventChecker {
     }
 }
 
-#[cfg(all(test, feature = "testing-kvbm", feature = "testing-kvbm"))]
+#[cfg(all(test, feature = "testing-kvbm"))]
 mod tests {
     use crate::manager::TransferManager;
     use crate::transfer::tests::CudaSleep;
