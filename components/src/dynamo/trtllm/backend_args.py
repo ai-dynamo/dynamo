@@ -515,6 +515,10 @@ class DynamoTrtllmConfig(ConfigBase):
     skip_components: str
 
     def validate(self) -> None:
+        if self.enable_handler_timing and not self.enable_unified_metrics:
+            raise ValueError(
+                "--enable-handler-timing requires --enable-unified-metrics"
+            )
         if isinstance(self.disaggregation_mode, str):
             self.disaggregation_mode = DisaggregationMode(self.disaggregation_mode)
         if isinstance(self.modality, str):

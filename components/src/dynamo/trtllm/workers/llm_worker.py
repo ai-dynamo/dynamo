@@ -274,6 +274,7 @@ async def init_llm_worker(
 
     logging.info(f"TensorRT-LLM engine args: {arg_map}")
     engine_args = arg_map
+    _engine_start_time = time.monotonic()
 
     # Populate default sampling params from the model
     tokenizer = tokenizer_factory(arg_map["model"])
@@ -390,8 +391,6 @@ async def init_llm_worker(
         )
         logging.info(f"Set runtime config data_parallel_size: {attention_dp_size}")
 
-        _engine_elapsed = time.monotonic() - _engine_start_time
-
         # The get_engine_runtime_config function exists but is not called here due to:
         # 1. get_stats_async requires active requests to work properly
         # 2. We need runtime config during registration, before any requests are made
@@ -427,7 +426,6 @@ async def init_llm_worker(
 
         # --- Unified (additional) metrics ---
         unified_metrics = None
-        _engine_start_time = time.monotonic()
 
         if config.enable_unified_metrics:
             try:
@@ -477,8 +475,32 @@ async def init_llm_worker(
                     config.enable_handler_timing,
                 )
 
-                # Register unified metrics with Dynamo endpoint callback
-                if not config.publish_events_and_metrics:
+                # Register unified metrics with Dynamo endpoint callback.
+                # When publish_events_and_metrics is also on, the trtllm_ callback
+                # already exists, but it only passes trtllm_-prefixed metrics.
+                # Register a second callback for the unprefixed additional metrics.
+                if config.publish_events_and_metrics:
+                    _additional_prefixes = [
+                        "prompt_tokens_total", "generation_tokens_total",
+                        "num_aborted_requests_total", "gen_throughput",
+                        "request_inference_time", "request_prefill_time",
+                        "request_decode_time", "request_type_",
+                        "kv_transfer_", "kv_cache_hit_tokens",
+                        "model_config_info", "parallel_config_info",
+                        "detailed_config_info", "cache_config_info",
+                        "engine_startup_time", "handler_",
+                    ]
+                    register_engine_metrics_callback(
+                        endpoint=endpoint,
+                        registry=REGISTRY,
+                        metric_prefix_filters=_additional_prefixes,
+                        namespace_name=config.namespace,
+                        component_name=config.component,
+                        endpoint_name="generate",
+                        model_name=model_name_for_metrics,
+                    )
+                    logging.info("Additional metrics callback registered (alongside trtllm_ callback)")
+                else:
                     register_engine_metrics_callback(
                         endpoint=endpoint,
                         registry=REGISTRY,
@@ -493,10 +515,12 @@ async def init_llm_worker(
                 logging.warning("Failed to initialize unified metrics: %s", e)
 
         if unified_metrics:
-            unified_metrics.set_engine_startup_time(_engine_elapsed)
+            unified_metrics.set_engine_startup_time(time.monotonic() - _engine_start_time)
 
-        # Start worker HTTP metrics server for direct Prometheus scraping
-        if config.publish_events_and_metrics or unified_metrics:
+        # Start worker HTTP metrics server for direct Prometheus scraping.
+        # Only when publish_events_and_metrics is off -- when on, metrics are
+        # already exposed through the Dynamo endpoint callback above.
+        if unified_metrics and not config.publish_events_and_metrics:
             _worker_metrics_port = int(os.environ.get("WORKER_METRICS_PORT", "8001"))
             try:
                 import prometheus_client as _pc

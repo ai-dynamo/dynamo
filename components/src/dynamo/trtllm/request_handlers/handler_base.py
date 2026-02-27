@@ -608,13 +608,14 @@ class HandlerBase(BaseGenerativeHandler):
         _um = self.unified_metrics
         _um_start_time = time.monotonic() if _um else None
         _um_first_token_time = None
+        _um_last_token_time = None
 
         if _um:
             # Detect request types for metrics
             sampling_options = request.get("sampling_options", {})
             guided = sampling_options.get("guided_decoding")
             if guided and isinstance(guided, dict):
-                if any(guided.get(k) for k in ("json", "regex", "grammar", "json_object")):
+                if any(guided.get(k) for k in ("json", "regex", "grammar", "json_object", "choice")):
                     _um.record_request_type_structured_output()
             if request.get("multi_modal_data"):
                 _um.record_request_type_image()
@@ -820,6 +821,15 @@ class HandlerBase(BaseGenerativeHandler):
                             "Request finished with no finish reason set - this indicates a possible bug"
                         )
 
+                    # Track first token time and inter-token latency
+                    if _um and out.get("token_ids"):
+                        _now = time.monotonic()
+                        if _um_first_token_time is None:
+                            _um_first_token_time = _now
+                        elif _um.enable_handler_timing and _um_last_token_time is not None:
+                            _um.record_handler_itl(_now - _um_last_token_time)
+                        _um_last_token_time = _now
+
                     # Record unified (additional) metrics on request finish
                     if res.finished and _um and out.get("finish_reason"):
                         _um_e2e = time.monotonic() - _um_start_time
@@ -829,11 +839,17 @@ class HandlerBase(BaseGenerativeHandler):
                             gen_tokens=usage.get("completion_tokens", 0),
                         )
                         _ttft = (_um_first_token_time - _um_start_time) if _um_first_token_time else None
-                        _um.record_phase_times(ttft=_ttft, e2e=_um_e2e)
+                        # Extract queue_time from engine perf metrics if available
+                        _queue_time = None
+                        if output.request_perf_metrics is not None:
+                            _perf = output.request_perf_metrics
+                            if hasattr(_perf, "queue_time") and _perf.queue_time:
+                                _queue_time = _perf.queue_time
+                        _um.record_phase_times(ttft=_ttft, e2e=_um_e2e, queue_time=_queue_time)
                         gen_tokens = usage.get("completion_tokens", 0)
                         if _um_e2e > 0 and gen_tokens > 0:
                             _um.set_gen_throughput(gen_tokens / _um_e2e)
-                        # KV cache hits from request_perf_metrics
+                        # KV cache hits and transfer success from request_perf_metrics
                         if output.request_perf_metrics is not None:
                             kv_metrics = output.request_perf_metrics.kv_cache_metrics
                             cached = min(
@@ -841,6 +857,8 @@ class HandlerBase(BaseGenerativeHandler):
                                 kv_metrics.num_reused_blocks * self.kv_block_size,
                             )
                             _um.record_kv_cache_hits(cached)
+                            if self.disaggregation_mode == DisaggregationMode.PREFILL:
+                                _um.record_kv_transfer_success()
                         # Handler timing (optional)
                         if _um.enable_handler_timing:
                             _um.record_handler_e2e(_um_e2e)
@@ -868,10 +886,6 @@ class HandlerBase(BaseGenerativeHandler):
                                 )
                         except Exception as e:
                             logging.warning(f"Failed to log TensorRT-LLM metrics: {e}")
-
-                    # Track first token time for phase timing
-                    if _um and _um_first_token_time is None and out.get("token_ids"):
-                        _um_first_token_time = time.monotonic()
 
                     # Yield the chunk to the client and update the token count for the next iteration.
                     yield out

@@ -289,16 +289,6 @@ class AdditionalMetricsCollector:
         if cached_tokens > 0:
             self.kv_cache_hit_tokens.labels(*self._labelvalues).inc(cached_tokens)
 
-    def record_kv_transfer_timing(
-        self, latency_seconds: float, bytes_transferred: int
-    ):
-        """Record KV transfer latency and bytes."""
-        self.kv_transfer_latency.labels(*self._labelvalues).observe(latency_seconds)
-        self.kv_transfer_bytes.labels(*self._labelvalues).inc(bytes_transferred)
-        if latency_seconds > 0:
-            speed_gb_s = (bytes_transferred / 1e9) / latency_seconds
-            self.kv_transfer_speed.labels(*self._labelvalues).set(speed_gb_s)
-
     # --- Config info ---
 
     def set_model_config(
@@ -330,7 +320,13 @@ class AdditionalMetricsCollector:
         ).set(1.0)
 
     def set_engine_startup_time(self, seconds: float):
-        """Record engine initialization time."""
+        """Record engine initialization time.
+
+        Note: Dynamo also tracks engine load time internally (engine.py).
+        This metric is part of the unified metrics spec for cross-backend
+        parity with vLLM/SGLang, measured from before get_llm_engine to
+        after the engine context is entered.
+        """
         self.engine_startup_time.labels(*self._labelvalues).set(seconds)
 
     def set_detailed_config(
