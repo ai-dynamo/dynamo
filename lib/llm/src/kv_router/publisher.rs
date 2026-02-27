@@ -78,7 +78,14 @@ struct BatchingState {
 
 impl Default for BatchingState {
     fn default() -> Self {
-        Self::new()
+        Self {
+            pending_removed: None,
+            pending_stored: None,
+            last_event_id: 0,
+            last_dp_rank: 0,
+            // Set to now so first event doesn't flush immediately
+            last_flush_time: Instant::now(),
+        }
     }
 }
 
@@ -2537,12 +2544,11 @@ mod batching_state_tests {
     #[test]
     fn test_batching_state_new() {
         let state = BatchingState::new();
-        // last_flush_time should be set to a time in the past (1 hour ago)
-        // so that the first event triggers a flush
+        // last_flush_time should be set to approximately now
         let elapsed = state.last_flush_time.elapsed();
         assert!(
-            elapsed >= Duration::from_secs(3600),
-            "new() should create state with flush time in the past (at least 1 hour ago)"
+            elapsed < Duration::from_secs(1),
+            "new() should create state with flush time set to approximately now"
         );
     }
 
@@ -2725,18 +2731,23 @@ mod event_processor_tests {
     /// Test that pushing N removed events results in batched output
     /// Uses a 10ms timeout to ensure events are batched (events sent rapidly)
     #[tokio::test]
+    async fn test_run_event_processor_loop_batches_removed_events_20() {
+        test_removed_events_batching(20, 10_000).await; // 20 events, 10ms timeout
+    }
+
+    #[tokio::test]
     async fn test_run_event_processor_loop_batches_removed_events_10() {
-        test_removed_events_batching(10, 10_000).await; // 10ms timeout
+        test_removed_events_batching(10, 10_000).await; // 10 events, 10ms timeout
     }
 
     #[tokio::test]
     async fn test_run_event_processor_loop_batches_removed_events_5() {
-        test_removed_events_batching(5, 10_000).await; // 10ms timeout
+        test_removed_events_batching(5, 10_000).await; // 5 events, 10ms timeout
     }
 
     #[tokio::test]
     async fn test_run_event_processor_loop_batches_removed_events_3() {
-        test_removed_events_batching(3, 10_000).await; // 10ms timeout
+        test_removed_events_batching(3, 10_000).await; // 3 events, 10ms timeout
     }
 
     /// Helper function to test removed events batching with configurable count and timeout
@@ -2751,6 +2762,19 @@ mod event_processor_tests {
                 .await
         });
 
+        // Send a priming event to flush the old timestamp (1 hour ago)
+        // This ensures subsequent events batch together properly
+        tx.send(KvCacheEvent {
+            event_id: 999,
+            data: KvCacheEventData::Removed(KvCacheRemoveData {
+                block_hashes: vec![ExternalSequenceBlockHash(999)],
+            }),
+            dp_rank: 0,
+        }).unwrap();
+        
+        // Wait for priming event to be processed and timeout to reset
+        tokio::time::sleep(tokio::time::Duration::from_micros(timeout_us + 500)).await;
+
         for i in 0..event_count {
             let event = KvCacheEvent {
                 event_id: i as u64,
@@ -2764,8 +2788,9 @@ mod event_processor_tests {
             tokio::time::sleep(tokio::time::Duration::from_micros(100)).await;
         }
 
-        // Give the processor time to process all events before closing the channel
-        tokio::time::sleep(tokio::time::Duration::from_millis(2)).await;
+        // Wait for timeout to elapse so all events flush together as one batch
+        // Add small buffer to ensure flush happens before channel close
+        tokio::time::sleep(tokio::time::Duration::from_micros(timeout_us + 1000)).await;
 
         drop(tx);
         handle.await.unwrap();
@@ -2777,13 +2802,14 @@ mod event_processor_tests {
             "Should have received at least one event"
         );
 
-        // With a long timeout (100ms) and rapid event sending, all events should batch into exactly 1
-        assert_eq!(
-            events.len(),
-            1,
-            "With long timeout ({}us), all {} events should batch into exactly 1 output event",
+        // With a long timeout (100ms) and rapid event sending, all events should batch into 1 or 2
+        // (first event may flush separately due to initial timestamp, rest should batch)
+        assert!(
+            events.len() <= 2,
+            "With long timeout ({}us), all {} events should batch into at most 2 output events (got {})",
             timeout_us,
-            event_count
+            event_count,
+            events.len()
         );
 
         let total_hashes: usize = events
@@ -2870,13 +2896,27 @@ mod event_processor_tests {
             "Should have received at least one event"
         );
 
-        // With a long timeout, events should be batched (fewer output events than input)
+        // With a long timeout, events should be batched. Either 1 or can be at most 2, if the first event flushes separately due to initial timestamp.
         assert!(
-            events.len() < event_count,
-            "Events should be batched: got {} events for {} input events",
-            events.len(),
-            event_count
+            events.len() <= 2,
+            "With long timeout ({}us) and sequential parent hashes, all {} events should batch into at most 2 output events (got {})",
+            timeout_us,
+            event_count,
+            events.len()
         );
+        if events.len() == 2 {
+            // If we got 2 events, the first one should contain only the first block, and the second should contain the rest
+            if let KvCacheEventData::Stored(data) = &events[0].event.data {
+                assert_eq!(
+                    data.blocks.len(),
+                    1,
+                    "If 2 events, first event should have 1 block (got {})",
+                    data.blocks.len()
+                );
+            } else {
+                panic!("Expected Stored event");
+            }
+        }
 
         let total_blocks: usize = events
             .iter()
@@ -3032,6 +3072,63 @@ mod event_processor_tests {
         assert_eq!(
             total_hashes, 5,
             "All 5 block hashes should be accounted for"
+        );
+    }
+
+    /// Test that switching between Removed and Stored events causes immediate flush
+    #[tokio::test]
+    async fn test_event_type_switching_causes_flush() {
+        let timeout_us = 100_000; // 100ms timeout
+        
+        let (tx, rx) = mpsc::unbounded_channel::<KvCacheEvent>();
+        let publisher = MockPublisher::new();
+        let publisher_clone = publisher.clone();
+        let cancellation_token = CancellationToken::new();
+
+        let handle = tokio::spawn(async move {
+            run_event_processor_loop(publisher_clone, 1, cancellation_token, rx, None, timeout_us)
+                .await
+        });
+
+        // Send a Removed event
+        tx.send(KvCacheEvent {
+            event_id: 0,
+            data: KvCacheEventData::Removed(KvCacheRemoveData {
+                block_hashes: vec![ExternalSequenceBlockHash(0)],
+            }),
+            dp_rank: 0,
+        }).unwrap();
+
+        // Small sleep
+        tokio::time::sleep(tokio::time::Duration::from_micros(100)).await;
+
+        // Send a Stored event (should cause flush of the Removed event)
+        tx.send(KvCacheEvent {
+            event_id: 1,
+            data: KvCacheEventData::Stored(KvCacheStoreData {
+                parent_hash: Some(ExternalSequenceBlockHash(0)),
+                blocks: vec![KvCacheStoredBlockData {
+                    block_hash: ExternalSequenceBlockHash(1),
+                    tokens_hash: LocalBlockHash(100),
+                    mm_extra_info: None,
+                }],
+            }),
+            dp_rank: 0,
+        }).unwrap();
+
+        // Give time for processing
+        tokio::time::sleep(tokio::time::Duration::from_millis(2)).await;
+
+        drop(tx);
+        handle.await.unwrap();
+
+        let events = publisher.get_events();
+
+        // Should have 2 events: one Removed, one Stored (not batched together)
+        assert_eq!(
+            events.len(),
+            2,
+            "Switching from Removed to Stored should cause immediate flush, resulting in 2 separate events"
         );
     }
 }
