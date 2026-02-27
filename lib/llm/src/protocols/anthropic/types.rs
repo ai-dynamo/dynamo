@@ -1194,6 +1194,22 @@ pub fn chat_completion_to_anthropic_response(
             }
         }
 
+        // Extract reasoning content (from --dyn-reasoning-parser, e.g. qwen3).
+        // The backend strips <think>...</think> from the text and surfaces it
+        // as reasoning_content on the message. Map this to a Thinking block
+        // so clients see proper extended thinking in the Anthropic response.
+        if let Some(thinking) = choice.message.reasoning_content {
+            if !thinking.is_empty() {
+                content.insert(
+                    0,
+                    AnthropicResponseContentBlock::Thinking {
+                        thinking,
+                        signature: String::new(),
+                    },
+                );
+            }
+        }
+
         // Extract text content
         let text = match choice.message.content {
             Some(dynamo_async_openai::types::ChatCompletionMessageContent::Text(t)) => Some(t),
@@ -1206,14 +1222,11 @@ pub fn chat_completion_to_anthropic_response(
             None => None,
         };
         if let Some(text) = text {
-            // Text goes first in the content array
-            content.insert(
-                0,
-                AnthropicResponseContentBlock::Text {
-                    text,
-                    citations: None,
-                },
-            );
+            // Text goes after thinking block (if any)
+            content.push(AnthropicResponseContentBlock::Text {
+                text,
+                citations: None,
+            });
         }
     }
 
