@@ -271,8 +271,8 @@ The Inference Gateway provides HTTP endpoints for model inference.
 
 #### 1: Populate gateway URL for your k8s cluster ####
 
-To test the gateway in minikube, use the following command:
-a. User minikube tunnel to expose the gateway to the host
+a. To test the gateway in minikube, use the following commands:
+User minikube tunnel to expose the gateway to the host
    This requires `sudo` access to the host machine. alternatively, you can use port-forward to expose the gateway to the host as shown in alternative (b).
 
 ```bash
@@ -284,7 +284,9 @@ minikube tunnel # start the tunnel
 GATEWAY_URL=$(kubectl get svc inference-gateway -n my-model -o jsonpath='{.spec.clusterIP}') && echo $GATEWAY_URL
 ```
 
-b. use port-forward to expose the gateway to the host
+b. To test on a cluster use commands below:
+
+use port-forward to expose the gateway to the host
 
 ```bash
 # in first terminal
@@ -339,6 +341,25 @@ curl $GATEWAY_URL/v1/chat/completions \
       "temperature": 0.0
     }'
 ```
+or
+
+```bash
+MODEL_NAME="RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic"
+curl -H "Host: llama3-70b-disagg.example.com" http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+      "model": "'"${MODEL_NAME}"'",
+      "messages": [
+      {
+          "role": "user",
+          "content": "In the heart of Eldoria, an ancient land of boundless magic and mysterious creatures, lies the long-forgotten city of Aeloria. Once a beacon of knowledge and power, Aeloria was buried beneath the shifting sands of time, lost to the world for centuries. You are an intrepid explorer, known for your unparalleled curiosity and courage, who has stumbled upon an ancient map hinting at ests that Aeloria holds a secret so profound that it has the potential to reshape the very fabric of reality. Your journey will take you through treacherous deserts, enchanted forests, and across perilous mountain ranges. Your Task: Character Background: Develop a detailed background for your character. Describe their motivations for seeking out Aeloria, their skills and weaknesses, and any personal connections to the ancient city or its legends. Are they driven by a quest for knowledge, a search for lost familt clue is hidden."
+      }
+      ],
+      "stream":false,
+      "max_tokens": 30,
+      "temperature": 0.0
+    }'
+```
 
 Sample inference output:
 
@@ -376,7 +397,9 @@ Sample inference output:
 ```
 
 ***If you have more than one HttpRoute running on the cluster***
-Add the host to your HttpRoute.yaml and add the header `curl -H "Host: llama3-70b-agg.example.com" ...` to every request.
+Add the host to your HttpRoute.yaml and add the header
+`curl -H "Host: llama3-70b-agg.example.com" ...` or `curl -H "Host: llama3-70b-disagg.example.com" http://localhost:8000/v1/models`
+
 ```bash
 spec:
   hostnames:

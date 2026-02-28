@@ -125,7 +125,7 @@ spec:
               - name: DYN_HTTP_PORT
                 value: "8000"
               - name: DYN_NAMESPACE
-                value: a-epp-vllm-disagg
+                value: a-epp-llama3-70b-disagg
               - name: DYN_COMPONENT
                 value: frontend
               - name: DYN_DISCOVERY_BACKEND
@@ -228,7 +228,7 @@ spec:
               - name: DYN_HTTP_PORT
                 value: "8000"
               - name: DYN_NAMESPACE
-                value: a-epp-vllm-disagg
+                value: a-epp-llama3-70b-disagg
               - name: DYN_COMPONENT
                 value: frontend
               - name: DYN_DISCOVERY_BACKEND

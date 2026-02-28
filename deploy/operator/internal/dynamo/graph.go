@@ -1163,6 +1163,29 @@ func GenerateBasePodSpec(
 		}
 	}
 
+	// Inject standard env vars into sidecar containers from extraPodSpec so they
+	// can discover the same dynamo namespace, parent DGD, and infrastructure
+	// services (NATS, etcd) without requiring manual configuration.
+	dynamoNamespace := componentContext.DynamoNamespace
+	sidecarEnvDefaults := []corev1.EnvVar{
+		{Name: commonconsts.DynamoNamespaceEnvVar, Value: dynamoNamespace},
+		{Name: "DYN_PARENT_DGD_K8S_NAME", Value: parentGraphDeploymentName},
+		{Name: "DYN_PARENT_DGD_K8S_NAMESPACE", Value: namespace},
+		{Name: "POD_NAME", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"}}},
+		{Name: "POD_NAMESPACE", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.namespace"}}},
+		{Name: "POD_UID", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.uid"}}},
+	}
+	if componentContext.DiscoveryBackend != "etcd" {
+		sidecarEnvDefaults = append(sidecarEnvDefaults, corev1.EnvVar{
+			Name:  commonconsts.DynamoDiscoveryBackendEnvVar,
+			Value: "kubernetes",
+		})
+	}
+	for i := range podSpec.Containers {
+		podSpec.Containers[i].Env = MergeEnvs(sidecarEnvDefaults, podSpec.Containers[i].Env)
+		addStandardEnvVars(&podSpec.Containers[i], operatorConfig)
+	}
+
 	podSpec.Containers = append(podSpec.Containers, container)
 	podSpec.Volumes = append(podSpec.Volumes, volumes...)
 	podSpec.ImagePullSecrets = controller_common.AppendUniqueImagePullSecrets(podSpec.ImagePullSecrets, imagePullSecrets)
