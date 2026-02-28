@@ -451,11 +451,13 @@ impl BatchingState {
     }
 }
 
-/// Common event processor loop using BatchingState.
-/// Accumulates Removed events and sequential Stored events, flushing on:
-/// - Event type change
-/// - Timeout (configurable, default 10ms)
-/// - Shutdown
+/// Batching loop: accumulates Removed/Stored events and flushes them as a single
+/// [`RouterEvent`] when any of the following conditions are met:
+/// - Event type switches (Removed ↔ Stored)
+/// - `dp_rank` changes between consecutive events
+/// - A `Stored` event's `parent_hash` breaks the sequential chain
+/// - The batch window expires (`timeout_us`, default 10 ms)
+/// - Channel is closed or a cancellation signal is received
 async fn run_event_processor_loop<P: EventSink + Send + Sync + 'static>(
     publisher: P,
     worker_id: u64,
@@ -567,7 +569,6 @@ async fn run_event_processor_loop<P: EventSink + Send + Sync + 'static>(
 }
 
 /// Batched event processor for ephemeral transports (NATS Core / ZMQ).
-/// This is a thin wrapper around run_event_processor_loop.
 async fn start_event_processor<P: EventSink + Send + Sync + 'static>(
     publisher: P,
     worker_id: u64,
@@ -588,7 +589,6 @@ async fn start_event_processor<P: EventSink + Send + Sync + 'static>(
 }
 
 /// Batched event processor using JetStream (durable).
-/// This is a thin wrapper around run_event_processor_loop.
 async fn start_event_processor_jetstream(
     publisher: NatsQueue,
     worker_id: u64,
