@@ -156,7 +156,7 @@ def get_config_dump(config: Any, extra_info: Optional[Dict[str, Any]] = None) ->
         return canonical_json_encoder.encode(error_info)
 
 
-def add_config_dump_args(parser: argparse.ArgumentParser):
+def add_config_dump_args(parser: argparse.ArgumentParser) -> None:
     """
     Add arguments to the parser to dump the config to a file.
 
@@ -206,7 +206,7 @@ def _preprocess_for_encode(obj: object) -> object:
     return str(obj)
 
 
-def register_encoder(type_class):
+def register_encoder(type_class: type) -> Any:
     """
     Decorator to register custom encoders for specific types.
 

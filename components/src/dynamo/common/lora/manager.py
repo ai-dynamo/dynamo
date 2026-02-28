@@ -49,7 +49,7 @@ class LoRAManager:
         # Extension point: custom sources
         self._custom_sources: Dict[str, LoRASourceProtocol] = {}
 
-    def register_custom_source(self, scheme: str, source: LoRASourceProtocol):
+    def register_custom_source(self, scheme: str, source: LoRASourceProtocol) -> None:
         """
         Register a custom Python source for a URI scheme.
 

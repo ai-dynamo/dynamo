@@ -55,7 +55,7 @@ def env_or_default(
 
 
 def add_argument(
-    parser,
+    parser: Any,
     *,
     flag_name: str,
     env_var: str,
@@ -109,7 +109,7 @@ def add_argument(
 
 
 def add_negatable_bool_argument(
-    parser,
+    parser: Any,
     *,
     flag_name: str,
     env_var: str,

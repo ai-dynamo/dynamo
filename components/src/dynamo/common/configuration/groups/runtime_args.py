@@ -3,6 +3,7 @@
 
 """Dynamo runtime configuration ArgGroup."""
 
+import argparse
 from typing import List, Optional
 
 from dynamo._core import get_reasoning_parser_names, get_tool_parser_names
@@ -63,7 +64,7 @@ class DynamoRuntimeConfig(ConfigBase):
 class DynamoRuntimeArgGroup(ArgGroup):
     """Dynamo runtime configuration parameters (common to all backends)."""
 
-    def add_arguments(self, parser) -> None:
+    def add_arguments(self, parser: "argparse.ArgumentParser") -> None:
         """Add Dynamo runtime arguments to parser."""
         g = parser.add_argument_group("Dynamo Runtime Options")
 
