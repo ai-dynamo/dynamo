@@ -203,12 +203,10 @@ When GPU discovery is disabled, you must provide hardware configuration manually
 
 ```yaml
 spec:
-  profilingConfig:
-    config:
-      hardware:
-        numGpusPerNode: 8
-        gpuModel: "H100-SXM5-80GB"
-        gpuVramMib: 81920
+  hardware:
+    numGpusPerNode: 8
+    gpuSku: "H100-SXM5-80GB"
+    vramMb: 81920
 ```
 
 > **Note**: If GPU discovery is disabled and no hardware config is provided, the DGDR will be rejected at admission time with a clear error message.

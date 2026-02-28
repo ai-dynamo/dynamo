@@ -123,7 +123,7 @@ sglang_configs = {
         marks=[pytest.mark.gpu_2, pytest.mark.post_merge, pytest.mark.skip(reason="DYN-2265")],
         model="Qwen/Qwen3-0.6B",
         env={
-            "DYN_LOG": "dynamo_llm::kv_router::publisher=trace,dynamo_llm::kv_router::scheduler=info",
+            "DYN_LOG": "dynamo_llm::kv_router::publisher=trace,dynamo_kv_router::scheduling::selector=info",
         },
         frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[

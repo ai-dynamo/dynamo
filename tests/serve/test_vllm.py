@@ -208,7 +208,7 @@ vllm_configs = {
             )
         ],
         env={
-            "DYN_LOG": "dynamo_llm::kv_router::publisher=trace,dynamo_llm::kv_router::scheduler=info",
+            "DYN_LOG": "dynamo_llm::kv_router::publisher=trace,dynamo_kv_router::scheduling::selector=info",
         },
     ),
     "agg-router-approx": VLLMConfig(
@@ -243,7 +243,7 @@ vllm_configs = {
             ),
         ],
         env={
-            "DYN_LOG": "dynamo_llm::kv_router::scheduler=info",
+            "DYN_LOG": "dynamo_kv_router::scheduling::selector=info",
         },
     ),
     "disaggregated": VLLMConfig(
