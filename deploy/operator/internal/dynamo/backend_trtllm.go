@@ -212,9 +212,11 @@ func (b *TRTLLMBackend) setupWorkerContainer(container *corev1.Container) {
 		// relative paths from the connecting user's /etc/passwd home (-> /root/).
 		// StrictModes disabled because /home/dynamo may be owned by a non-root UID
 		// while sshd runs as root, causing permission check failures.
-		// UsePrivilegeSeparation disabled so sshd does not require /run/sshd to exist;
-		// that directory is root-owned and unavailable in non-root containers.
-		fmt.Sprintf("printf 'Port %d\\nHostKey '$HOME'/.ssh/host_keys/ssh_host_rsa_key\\nHostKey '$HOME'/.ssh/host_keys/ssh_host_ecdsa_key\\nHostKey '$HOME'/.ssh/host_keys/ssh_host_ed25519_key\\nPidFile '$HOME'/.ssh/run/sshd.pid\\nStrictModes no\\nUsePrivilegeSeparation no\\nPermitRootLogin yes\\nPasswordAuthentication no\\nPubkeyAuthentication yes\\nAuthorizedKeysFile '$HOME'/.ssh/authorized_keys\\n' > $HOME/.ssh/sshd_config", commonconsts.MpiRunSshPort),
+		// Note: /run/sshd (the privilege separation directory) is not needed here
+		// because sshd started as a non-root user skips the privsep directory check
+		// entirely — privsep requires forking a privileged monitor process, which is
+		// only possible when sshd starts as UID 0.
+		fmt.Sprintf("printf 'Port %d\\nHostKey '$HOME'/.ssh/host_keys/ssh_host_rsa_key\\nHostKey '$HOME'/.ssh/host_keys/ssh_host_ecdsa_key\\nHostKey '$HOME'/.ssh/host_keys/ssh_host_ed25519_key\\nPidFile '$HOME'/.ssh/run/sshd.pid\\nStrictModes no\\nPermitRootLogin yes\\nPasswordAuthentication no\\nPubkeyAuthentication yes\\nAuthorizedKeysFile '$HOME'/.ssh/authorized_keys\\n' > $HOME/.ssh/sshd_config", commonconsts.MpiRunSshPort),
 		"/usr/sbin/sshd -D -f $HOME/.ssh/sshd_config",
 	}
 
