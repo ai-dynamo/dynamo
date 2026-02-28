@@ -508,7 +508,7 @@ def _recommend_markers(
         padded_peak_gib = int(math.ceil(padded_peak_mib / 1024))
         recs.append(
             MarkerRecommendation(
-                f"max_vram({padded_peak_gib})",
+                f"max_vram_gib({padded_peak_gib})",
                 f"peak {_format_mib(max_peak_mib)} GPU RAM used "
                 f"(+10% safety: {_format_mib(padded_peak_mib)})",
             )
@@ -888,7 +888,7 @@ def _find_min_vram(
         f"+10% safety: {_format_mib(padded_peak_mib)})"
     )
     print()
-    print(f"  # {test_short}: @pytest.mark.max_vram({padded_peak_gib})")
+    print(f"  # {test_short}: @pytest.mark.max_vram_gib({padded_peak_gib})")
     if fits_on:
         print(f"  # Fits on: {', '.join(f'{n} ({g} GiB)' for g, n in fits_on)}")
     if oom_on:

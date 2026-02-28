@@ -116,7 +116,7 @@ Markers are required for all tests. They are used for test selection in CI and l
 | Lifecycle [required]    | pre_merge, post_merge, nightly, weekly, release                  | When the test should run           |
 | Test Type [required]    | unit, integration, e2e, benchmark, performance, stress, multimodal | Nature of the test               |
 | Hardware [required]     | gpu_0, gpu_1, gpu_2, gpu_4, gpu_8, h100                         | Number/type of GPUs required       |
-| VRAM Requirement        | max_vram(N)                                                              | Peak VRAM in GiB (with 10% safety). Filter with `--max-vram-gib=N`. Use `profile_pytest.py` to measure. |
+| VRAM Requirement        | max_vram_gib(N)                                                              | Peak VRAM in GiB (with 10% safety). Filter with `--max-vram-gib=N`. Use `profile_pytest.py` to measure. |
 | Component/Framework     | vllm, trtllm, sglang, kvbm, kvbm_concurrency, planner, router   | Backend or component specificity   |
 | Infrastructure          | k8s, deploy, fault_tolerance                                     | Infrastructure/environment needs   |
 | Execution               | parallel                                                         | Test can run in parallel with pytest-xdist. Must use dynamic port allocation (`alloc_ports`) and not share resources (e.g. filesystem) |
@@ -127,7 +127,7 @@ Markers are required for all tests. They are used for test selection in CI and l
 @pytest.mark.pre_merge
 @pytest.mark.integration
 @pytest.mark.gpu_1
-@pytest.mark.max_vram(21)  # peak 18.5 GiB GPU RAM used (+10% safety: 20.4 GiB)
+@pytest.mark.max_vram_gib(21)  # peak 18.5 GiB GPU RAM used (+10% safety: 20.4 GiB)
 @pytest.mark.vllm
 def test_kv_cache_behavior():
     ...
@@ -136,7 +136,7 @@ def test_kv_cache_behavior():
 ### Filtering by VRAM
 
 Use `--max-vram-gib` to skip tests that exceed a given GPU memory budget.
-Tests without a `max_vram` marker always run (no constraint assumed).
+Tests without a `max_vram_gib` marker always run (no constraint assumed).
 
 ```bash
 # Run tests that fit on an L4 (24 GiB)
@@ -494,7 +494,7 @@ MINIMUM VRAM RESULT
   Lowest passing utilization : 36%
   Minimum VRAM needed        : ~17.2 GiB (peak observed: 18.5 GiB, +10% safety: 20.4 GiB)
 
-  # test_serve_deployment[aggregated]: @pytest.mark.max_vram(21)
+  # test_serve_deployment[aggregated]: @pytest.mark.max_vram_gib(21)
   # Fits on: L4 (24 GiB), V100-32GB (32 GiB), A6000/A40 (48 GiB), A100/H100 (80 GiB)
   # Will OOM on: edge/embedded (4 GiB), RTX 3060/4060 (8 GiB), T4 (16 GiB)
 ========================================================================
@@ -505,7 +505,7 @@ Recommended markers to add to your pytest. You can copy-paste this:
 # Measured using: tests/utils/profile_pytest.py tests/serve/test_vllm.py::test_serve_deployment[aggregated]
 @pytest.mark.e2e  # wall time 41.2s, loads a real model
 @pytest.mark.gpu_1  # 1 GPU(s) used, peak 18.5 GiB
-@pytest.mark.max_vram(21)  # peak 18.5 GiB GPU RAM used (+10% safety: 20.4 GiB)
+@pytest.mark.max_vram_gib(21)  # peak 18.5 GiB GPU RAM used (+10% safety: 20.4 GiB)
 @pytest.mark.timeout(124)  # 3x observed 41.2s
 
   WARNING: Wall time 41.2s is too slow for pre_merge (> 20s). Consider post_merge or nightly instead.
@@ -518,7 +518,7 @@ Recommended markers to add to your pytest. You can copy-paste this:
 ### How to use the recommendations
 
 1. **Copy the `@pytest.mark.*` lines** into your test function or `pytestmark` list.
-2. **VRAM marker** `max_vram(N)` tells CI the peak GiB (with 10% safety) the test needs. Run tests on a specific GPU tier with `--max-vram-gib=N` to skip tests that exceed N GiB. Pay attention to the WARNING lines — they tell you which GPUs would OOM.
+2. **VRAM marker** `max_vram_gib(N)` tells CI the peak GiB (with 10% safety) the test needs. Run tests on a specific GPU tier with `--max-vram-gib=N` to skip tests that exceed N GiB. Pay attention to the WARNING lines — they tell you which GPUs would OOM.
 3. **Lifecycle markers** — the profiler only recommends `pre_merge` for tests under 20 seconds. For slower tests, it warns you to consider `post_merge` or `nightly` but does not choose for you — use your judgment based on how critical the test is for catching regressions early.
 4. **Timeout** — the recommended value is 3x the observed wall time. Adjust if your test has high variance (e.g., model download on first run).
 5. **Test type** (`unit`, `integration`, `e2e`) — based on wall time and whether a real model was loaded. Override if you know better (e.g., a fast test that uses a mock engine is `integration`, not `e2e`).

@@ -74,6 +74,9 @@ Dynamo launch scripts recognize a generic env var, `DYN_GPU_MEMORY_FRACTION_OVER
 
 Setting a lower memory fraction leaves more headroom for other CUDA allocations (e.g. activation buffers, NCCL buffers) at the cost of a smaller KV cache. Setting it higher allows more concurrent requests but risks OOM from non-KV-cache allocations. Typical production values are 0.85-0.95.
 
+> [!Important]
+> In vLLM, when `--kv-cache-memory-bytes` is set to an explicit value (not None), it **overrides and ignores** `--gpu-memory-utilization` for KV cache sizing ([vLLM CacheConfig docs](https://docs.vllm.ai/en/stable/api/vllm/config/cache/)). This means `DYN_GPU_MEMORY_FRACTION_OVERRIDE` has no effect on actual VRAM usage for scripts that set `--kv-cache-memory-bytes`. For example, `disagg_multimodal_epd.sh` uses `--kv-cache-memory-bytes=512MB` for its prefill/decode workers, so their VRAM consumption is fixed regardless of the memory fraction.
+
 
 ## Disaggregated Router
 
