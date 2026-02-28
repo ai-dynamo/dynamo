@@ -12,12 +12,12 @@ repository.workspace = true
 
 [features]
 default = []
-metrics = ["dep:dynamo-runtime"]
+metrics = []
 bench = ["dep:clap", "dep:indicatif", "dep:serde_json", "dynamo-runtime/integration", "dep:plotters"]
 
 [dependencies]
 # repo
-dynamo-runtime = { workspace = true, optional = true }
+dynamo-runtime = { workspace = true }
 dynamo-tokens = { workspace = true }
 
 # workspace
@@ -57,12 +57,6 @@ tokio = { workspace = true, features = ["rt", "macros", "time"] }
 dynamo-mocker = { workspace = true }
 dynamo-tokens = { workspace = true }
 minstant = "0.1.7"
-
-
-[[bench]]
-name = "radix_tree_microbench"
-harness = false
-required-features = ["bench"]
 
 [[bench]]
 name = "kv_indexer_bench"
