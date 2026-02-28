@@ -60,54 +60,60 @@ const BATCH_TIMEOUT_US: u64 = 10_000;
 // Batching State -----------------------------------------------------------
 // -------------------------------------------------------------------------
 
-/// Encapsulates the state for dynamic event batching.
-/// Tracks pending events and metadata for batch flushing.
+/// Accumulator for in-flight KV cache events that will be merged into a single
+/// [`RouterEvent`] before being forwarded to the event sink.
 #[derive(Debug)]
 struct BatchingState {
-    /// Pending Removed batch (block hashes to be removed)
+    /// Block hashes accumulating for the next Removed event.
     pending_removed: Option<KvCacheRemoveData>,
-    /// Pending Stored batch (blocks to be stored)
+    /// Blocks accumulating for the next Stored event.
     pending_stored: Option<KvCacheStoreData>,
-    /// Monotonic counter for published batch IDs.
-    /// Increments by 1 per flush, decoupled from raw source event IDs.
+    /// Monotonic published-batch counter. Increments by 1 per flush so downstream
+    /// consumers always see consecutive event IDs, regardless of how many raw source
+    /// events were merged into the batch.
     next_publish_id: u64,
-    /// Last DP rank for batch
+    /// dp_rank of the events in the current pending batch.
+    /// A change signals that the batch must be flushed before accumulating further.
     last_dp_rank: u32,
-    /// Time of last flush (for timeout tracking)
-    last_flush_time: Instant,
+    /// When the current batch started accumulating (set on the first event of each batch).
+    /// Used to compute the remaining window before the batch is force-flushed.
+    batch_start_time: Instant,
 }
 
 impl BatchingState {
-    /// Creates a new BatchingState with current timestamp
     fn new() -> Self {
         Self {
             pending_removed: None,
             pending_stored: None,
             next_publish_id: 1,
             last_dp_rank: 0,
-            last_flush_time: Instant::now(),
+            batch_start_time: Instant::now(),
         }
     }
 
-    /// Returns true if there are pending batches
     fn has_pending(&self) -> bool {
         self.pending_removed.is_some() || self.pending_stored.is_some()
     }
 
-    /// Resets flush time to now
-    fn reset_flush_time(&mut self) {
-        self.last_flush_time = Instant::now();
+    /// Marks the start of a new batch, resetting the flush-window timer.
+    fn start_batch_timer(&mut self) {
+        self.batch_start_time = Instant::now();
     }
 
-    /// Gets remaining time until timeout
+    /// Returns the time remaining in the current batch window (zero if already elapsed).
     fn remaining_timeout(&self, timeout_us: u64) -> Duration {
         let timeout = Duration::from_micros(timeout_us);
-        let elapsed = self.last_flush_time.elapsed();
+        let elapsed = self.batch_start_time.elapsed();
         if elapsed >= timeout {
             Duration::ZERO
         } else {
             timeout - elapsed
         }
+    }
+
+    /// Returns `true` when the batch window has elapsed (or `timeout_us` is zero).
+    fn is_timeout_elapsed(&self, timeout_us: u64) -> bool {
+        self.remaining_timeout(timeout_us) == Duration::ZERO
     }
 }
 
@@ -390,10 +396,10 @@ async fn emit<P: EventSink>(
     event: KvCacheEvent,
 ) {
     let router_event = RouterEvent::new(worker_id, event);
-    if let Some(indexer) = local_indexer {
-        if let Err(e) = indexer.apply_event_with_buffer(router_event.clone()).await {
-            tracing::warn!(worker_id, error = %e, "Failed to apply event to local indexer");
-        }
+    if let Some(indexer) = local_indexer
+        && let Err(e) = indexer.apply_event_with_buffer(router_event.clone()).await
+    {
+        tracing::warn!(worker_id, error = %e, "Failed to apply event to local indexer");
     }
     if let Err(e) = publisher.publish_event(&router_event).await {
         tracing::error!(worker_id, error = %e, "Failed to publish event");
@@ -505,13 +511,11 @@ async fn run_event_processor_loop<P: EventSink + Send + Sync + 'static>(
                         if batching_state.pending_stored.is_some() || dp_rank_changed {
                             batching_state.flush(&publisher, &local_indexer, worker_id).await;
                         }
-                        // Start a new batch or extend the current one.
-                        // The timer resets only when the first event of a new batch arrives.
                         match &mut batching_state.pending_removed {
                             Some(pending) => pending.block_hashes.extend(data.block_hashes),
                             None => {
                                 batching_state.pending_removed = Some(data);
-                                batching_state.reset_flush_time();
+                                batching_state.start_batch_timer();
                             }
                         }
                     }
@@ -531,7 +535,7 @@ async fn run_event_processor_loop<P: EventSink + Send + Sync + 'static>(
                             Some(pending) => pending.blocks.extend(data.blocks),
                             None => {
                                 batching_state.pending_stored = Some(data);
-                                batching_state.reset_flush_time();
+                                batching_state.start_batch_timer();
                             }
                         }
                     }
@@ -550,14 +554,12 @@ async fn run_event_processor_loop<P: EventSink + Send + Sync + 'static>(
                 batching_state.last_dp_rank = event.dp_rank;
 
                 // Flush immediately if the timeout already elapsed (handles timeout_us=0).
-                if batching_state.has_pending()
-                    && batching_state.last_flush_time.elapsed() >= Duration::from_micros(timeout_us)
-                {
+                // The sleep arm below only arms for timeout_us>0; this check covers the rest.
+                if batching_state.has_pending() && batching_state.is_timeout_elapsed(timeout_us) {
                     batching_state.flush(&publisher, &local_indexer, worker_id).await;
                 }
             }
             _ = tokio::time::sleep(remaining), if timeout_us > 0 && batching_state.has_pending() => {
-                // Timeout elapsed - flush pending events
                 batching_state.flush(&publisher, &local_indexer, worker_id).await;
             }
         }
@@ -2542,8 +2544,8 @@ mod batching_state_tests {
     #[test]
     fn test_batching_state_new() {
         let state = BatchingState::new();
-        // last_flush_time should be set to approximately now
-        let elapsed = state.last_flush_time.elapsed();
+        // batch_start_time should be set to approximately now
+        let elapsed = state.batch_start_time.elapsed();
         assert!(
             elapsed < Duration::from_secs(1),
             "new() should create state with flush time set to approximately now"
@@ -2584,7 +2586,7 @@ mod batching_state_tests {
         let mut state = BatchingState::new();
 
         // Reset flush time to now so we can test timeout behavior
-        state.reset_flush_time();
+        state.start_batch_timer();
 
         // Test that remaining returns positive initially (using 10ms = 10_000us)
         let remaining_before = state.remaining_timeout(10_000);
@@ -2603,16 +2605,16 @@ mod batching_state_tests {
     }
 
     #[test]
-    fn test_batching_state_reset_flush_time() {
+    fn test_batching_state_start_batch_timer() {
         let mut state = BatchingState::new();
 
-        let initial_time = state.last_flush_time;
+        let initial_time = state.batch_start_time;
 
-        state.reset_flush_time();
+        state.start_batch_timer();
 
         assert!(
-            state.last_flush_time >= initial_time,
-            "reset_flush_time should update the time"
+            state.batch_start_time >= initial_time,
+            "start_batch_timer should update the time"
         );
     }
 
@@ -2621,7 +2623,7 @@ mod batching_state_tests {
         let mut state = BatchingState::new();
 
         // Reset flush time to now so we can test timeout behavior
-        state.reset_flush_time();
+        state.start_batch_timer();
 
         // Test that remaining returns positive initially
         let remaining = state.remaining_timeout(10_000); // 10ms
@@ -3285,8 +3287,7 @@ mod event_processor_tests {
         );
     }
 
-    /// Test that first event after idle period doesn't flush immediately
-    /// This verifies the reset_flush_time() fix for new batches
+    /// Test that first event after idle period doesn't flush immediately.
     #[tokio::test]
     async fn test_first_event_after_idle_no_immediate_flush() {
         let timeout_us = 50_000; // 50ms timeout
