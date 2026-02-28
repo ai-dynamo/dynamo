@@ -131,6 +131,9 @@ helm fetch https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-$
 helm install dynamo-platform dynamo-platform-${RELEASE_VERSION}.tgz --namespace ${NAMESPACE} --create-namespace
 ```
 
+> [!WARNING]
+> **v0.9.0 Helm Chart Issue:** The initial v0.9.0 `dynamo-platform` Helm chart sets the operator image to v0.7.1 instead of v0.9.0. Use `RELEASE_VERSION=0.9.0-post1` or add `--set dynamo-operator.controllerManager.manager.image.tag=0.9.0` to your helm install command.
+
 **For Shared/Multi-Tenant Clusters:**
 
 If your cluster has namespace-restricted Dynamo operators, you MUST add namespace restriction to your installation:
@@ -200,12 +203,10 @@ When GPU discovery is disabled, you must provide hardware configuration manually
 
 ```yaml
 spec:
-  profilingConfig:
-    config:
-      hardware:
-        numGpusPerNode: 8
-        gpuModel: "H100-SXM5-80GB"
-        gpuVramMib: 81920
+  hardware:
+    numGpusPerNode: 8
+    gpuSku: "H100-SXM5-80GB"
+    vramMb: 81920
 ```
 
 > **Note**: If GPU discovery is disabled and no hardware config is provided, the DGDR will be rejected at admission time with a clear error message.
