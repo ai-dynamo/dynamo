@@ -42,6 +42,23 @@ class distributed_runtime:
     UPTIME_SECONDS = "uptime_seconds"
 
 
+class frontend_perf:
+    """Frontend pipeline stage and event-loop metrics"""
+
+    # Per-stage latency histogram (label: stage = preprocess|route|transport_roundtrip|postprocess)
+    STAGE_DURATION_SECONDS = "stage_duration_seconds"
+    # Tokenization time in preprocessor
+    TOKENIZE_SECONDS = "tokenize_seconds"
+    # Template application time in preprocessor
+    TEMPLATE_SECONDS = "template_seconds"
+    # Per-token detokenization cost (microseconds)
+    DETOKENIZE_PER_TOKEN_US = "detokenize_per_token_us"
+    # Event loop delay canary (sleep 10ms, measure drift)
+    EVENT_LOOP_DELAY_SECONDS = "event_loop_delay_seconds"
+    # Count of event loop stalls (delay > 5ms)
+    EVENT_LOOP_STALL_TOTAL = "event_loop_stall_total"
+
+
 class frontend_service:
     """Frontend service metrics (LLM HTTP service)"""
 
