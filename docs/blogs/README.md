@@ -24,7 +24,7 @@ description: A one-sentence summary shown in search results and social previews.
 
 ## Step 2: Add the Post to Navigation
 
-Open `docs/dev.yml` and add a page entry under the **Blog** section:
+Open `docs/index.yml` and add a page entry under the **Blog** section:
 
 ```yaml
   - section: Blog
@@ -88,6 +88,6 @@ accessible from the landing page and sidebar.
 ## Quick Checklist
 
 - [ ] Blog post `.md` file created in `docs/blogs/`
-- [ ] Page entry added to `docs/dev.yml` under the Blog section
+- [ ] Page entry added to `docs/index.yml` under the Blog section
 - [ ] Card added to `docs/blogs/index.mdx`
 - [ ] (Optional) Link added to the Blog dropdown in `fern/docs.yml`
