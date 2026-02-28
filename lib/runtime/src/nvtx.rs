@@ -133,6 +133,8 @@ pub fn name_current_thread_impl(name: &str) {
 #[cfg(feature = "nvtx")]
 pub struct NvtxRangeGuard {
     active: bool,
+    // NVTX range stacks are thread-local; keep guard thread-affine.
+    _not_send_sync: std::marker::PhantomData<std::rc::Rc<()>>,
 }
 
 /// Zero-sized no-op guard used when the `nvtx` feature is off.
@@ -144,13 +146,17 @@ impl NvtxRangeGuard {
     pub fn new(name: &str) -> Self {
         #[cfg(feature = "nvtx")]
         {
-            let active = NVTX_ENABLED.load(Ordering::Relaxed);
-            if active {
+            let mut active = false;
+            if NVTX_ENABLED.load(Ordering::Relaxed) {
                 if let Ok(cstr) = std::ffi::CString::new(name) {
                     unsafe { ffi::nvtxRangePushA(cstr.as_ptr()) };
+                    active = true;
                 }
             }
-            return NvtxRangeGuard { active };
+            return NvtxRangeGuard {
+                active,
+                _not_send_sync: std::marker::PhantomData,
+            };
         }
         // Feature off: suppress unused-variable warning and return unit-like guard
         #[cfg(not(feature = "nvtx"))]
