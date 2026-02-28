@@ -876,7 +876,7 @@ func GetGPUDiscoveryFailureReason(err error) string {
 		return "unknown"
 	}
 	errMsg := strings.ToLower(err.Error())
-	
+
     switch {
     case strings.Contains(errMsg, "list pods"):
         return "failed to list DCGM exporter pods (RBAC/cluster connectivity issue)"

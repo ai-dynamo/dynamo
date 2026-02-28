@@ -452,7 +452,6 @@ func parseMetrics(ctx context.Context, families map[string]*dto.MetricFamily) (*
 			if gpuID == "" {
 				continue
 			}
-			
 			fbFree[gpuID] = m.GetGauge().GetValue()
 
 			if hostName == "" {
