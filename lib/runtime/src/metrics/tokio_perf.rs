@@ -137,17 +137,27 @@ pub static TOKIO_WORKER_OVERFLOW_COUNT_TOTAL: Lazy<IntGaugeVec> = Lazy::new(|| {
 pub static EVENT_LOOP_DELAY_SECONDS: Lazy<Histogram> = Lazy::new(|| {
     Histogram::with_opts(
         HistogramOpts::new(
-            format!("{}_{}", name_prefix::FRONTEND, frontend_perf::EVENT_LOOP_DELAY_SECONDS),
+            format!(
+                "{}_{}",
+                name_prefix::FRONTEND,
+                frontend_perf::EVENT_LOOP_DELAY_SECONDS
+            ),
             "Event loop delay canary: drift from 10ms sleep (seconds)",
         )
-        .buckets(vec![0.0, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0]),
+        .buckets(vec![
+            0.0, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0,
+        ]),
     )
     .expect("event_loop_delay_seconds histogram")
 });
 
 pub static EVENT_LOOP_STALL_TOTAL: Lazy<Counter> = Lazy::new(|| {
     Counter::new(
-        format!("{}_{}", name_prefix::FRONTEND, frontend_perf::EVENT_LOOP_STALL_TOTAL),
+        format!(
+            "{}_{}",
+            name_prefix::FRONTEND,
+            frontend_perf::EVENT_LOOP_STALL_TOTAL
+        ),
         "Number of event loop stalls (delay > 5ms)",
     )
     .expect("event_loop_stall_total counter")
@@ -158,20 +168,48 @@ static REGISTERED: OnceCell<()> = OnceCell::new();
 /// Register tokio perf and canary metrics with the given registry. Idempotent.
 pub fn ensure_tokio_perf_metrics_registered(registry: &MetricsRegistry) {
     let _ = REGISTERED.get_or_init(|| {
-        registry.add_metric(Box::new(TOKIO_GLOBAL_QUEUE_DEPTH.clone())).ok();
-        registry.add_metric(Box::new(TOKIO_BUDGET_FORCED_YIELD_TOTAL.clone())).ok();
-        registry.add_metric(Box::new(TOKIO_BLOCKING_THREADS.clone())).ok();
-        registry.add_metric(Box::new(TOKIO_BLOCKING_IDLE_THREADS.clone())).ok();
-        registry.add_metric(Box::new(TOKIO_BLOCKING_QUEUE_DEPTH.clone())).ok();
-        registry.add_metric(Box::new(TOKIO_ALIVE_TASKS.clone())).ok();
-        registry.add_metric(Box::new(TOKIO_WORKER_MEAN_POLL_TIME_NS.clone())).ok();
-        registry.add_metric(Box::new(TOKIO_WORKER_BUSY_RATIO_VEC.clone())).ok();
-        registry.add_metric(Box::new(TOKIO_WORKER_PARK_COUNT_TOTAL.clone())).ok();
-        registry.add_metric(Box::new(TOKIO_WORKER_LOCAL_QUEUE_DEPTH.clone())).ok();
-        registry.add_metric(Box::new(TOKIO_WORKER_STEAL_COUNT_TOTAL.clone())).ok();
-        registry.add_metric(Box::new(TOKIO_WORKER_OVERFLOW_COUNT_TOTAL.clone())).ok();
-        registry.add_metric(Box::new(EVENT_LOOP_DELAY_SECONDS.clone())).ok();
-        registry.add_metric(Box::new(EVENT_LOOP_STALL_TOTAL.clone())).ok();
+        registry
+            .add_metric(Box::new(TOKIO_GLOBAL_QUEUE_DEPTH.clone()))
+            .ok();
+        registry
+            .add_metric(Box::new(TOKIO_BUDGET_FORCED_YIELD_TOTAL.clone()))
+            .ok();
+        registry
+            .add_metric(Box::new(TOKIO_BLOCKING_THREADS.clone()))
+            .ok();
+        registry
+            .add_metric(Box::new(TOKIO_BLOCKING_IDLE_THREADS.clone()))
+            .ok();
+        registry
+            .add_metric(Box::new(TOKIO_BLOCKING_QUEUE_DEPTH.clone()))
+            .ok();
+        registry
+            .add_metric(Box::new(TOKIO_ALIVE_TASKS.clone()))
+            .ok();
+        registry
+            .add_metric(Box::new(TOKIO_WORKER_MEAN_POLL_TIME_NS.clone()))
+            .ok();
+        registry
+            .add_metric(Box::new(TOKIO_WORKER_BUSY_RATIO_VEC.clone()))
+            .ok();
+        registry
+            .add_metric(Box::new(TOKIO_WORKER_PARK_COUNT_TOTAL.clone()))
+            .ok();
+        registry
+            .add_metric(Box::new(TOKIO_WORKER_LOCAL_QUEUE_DEPTH.clone()))
+            .ok();
+        registry
+            .add_metric(Box::new(TOKIO_WORKER_STEAL_COUNT_TOTAL.clone()))
+            .ok();
+        registry
+            .add_metric(Box::new(TOKIO_WORKER_OVERFLOW_COUNT_TOTAL.clone()))
+            .ok();
+        registry
+            .add_metric(Box::new(EVENT_LOOP_DELAY_SECONDS.clone()))
+            .ok();
+        registry
+            .add_metric(Box::new(EVENT_LOOP_STALL_TOTAL.clone()))
+            .ok();
     });
 }
 
