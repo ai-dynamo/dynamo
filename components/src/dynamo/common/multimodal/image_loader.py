@@ -25,6 +25,7 @@ import httpx
 from PIL import Image
 
 import dynamo.nixl_connect as nixl_connect
+from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.media_nixl import read_decoded_media_via_nixl
 
 from .http_client import get_http_client
@@ -46,6 +47,7 @@ class ImageLoader:
         self._image_cache: dict[str, Image.Image] = {}
         self._cache_queue: asyncio.Queue[str] = asyncio.Queue(maxsize=cache_size)
 
+    @_nvtx.annotate("mm:img:load_image", color="lime")
     async def load_image(self, image_url: str) -> Image.Image:
         parsed_url = urlparse(image_url)
 
@@ -58,44 +60,47 @@ class ImageLoader:
 
         try:
             if parsed_url.scheme == "data":
-                # Parse data URL format: data:[<media type>][;base64],<data>
-                if not parsed_url.path.startswith("image/"):
-                    raise ValueError("Data URL must be an image type")
+                with _nvtx.annotate("mm:img:base64_decode", color="lime"):
+                    # Parse data URL format: data:[<media type>][;base64],<data>
+                    if not parsed_url.path.startswith("image/"):
+                        raise ValueError("Data URL must be an image type")
 
-                # Split the path into media type and data
-                media_type, data = parsed_url.path.split(",", 1)
-                if ";base64" not in media_type:
-                    raise ValueError("Data URL must be base64 encoded")
+                    # Split the path into media type and data
+                    media_type, data = parsed_url.path.split(",", 1)
+                    if ";base64" not in media_type:
+                        raise ValueError("Data URL must be base64 encoded")
 
-                try:
-                    image_bytes = base64.b64decode(data)
-                    image_data = BytesIO(image_bytes)
-                except binascii.Error as e:
-                    raise ValueError(f"Invalid base64 encoding: {e}")
+                    try:
+                        image_bytes = base64.b64decode(data)
+                        image_data = BytesIO(image_bytes)
+                    except binascii.Error as e:
+                        raise ValueError(f"Invalid base64 encoding: {e}")
             elif parsed_url.scheme in ("http", "https"):
-                http_client = get_http_client(self._http_timeout)
+                with _nvtx.annotate("mm:img:http_fetch", color="lime"):
+                    http_client = get_http_client(self._http_timeout)
 
-                response = await http_client.get(image_url)
-                response.raise_for_status()
+                    response = await http_client.get(image_url)
+                    response.raise_for_status()
 
-                if not response.content:
-                    raise ValueError("Empty response content from image URL")
+                    if not response.content:
+                        raise ValueError("Empty response content from image URL")
 
-                image_data = BytesIO(response.content)
+                    image_data = BytesIO(response.content)
             else:
                 raise ValueError(f"Invalid image source scheme: {parsed_url.scheme}")
 
-            # PIL is sync, so offload to a thread to avoid blocking the event loop
-            # Restrict to supported formats to prevent PSD parsing (GHSA-cfh3-3jmp-rvhc)
-            image = await asyncio.to_thread(
-                Image.open, image_data, formats=["JPEG", "PNG", "WEBP"]
-            )
+            with _nvtx.annotate("mm:img:pil_open_convert", color="lime"):
+                # PIL is sync, so offload to a thread to avoid blocking the event loop
+                # Restrict to supported formats to prevent PSD parsing (GHSA-cfh3-3jmp-rvhc)
+                image = await asyncio.to_thread(
+                    Image.open, image_data, formats=["JPEG", "PNG", "WEBP"]
+                )
 
-            # Validate image format and convert to RGB
-            if image.format not in ("JPEG", "PNG", "WEBP"):
-                raise ValueError(f"Unsupported image format: {image.format}")
+                # Validate image format and convert to RGB
+                if image.format not in ("JPEG", "PNG", "WEBP"):
+                    raise ValueError(f"Unsupported image format: {image.format}")
 
-            image_converted = image.convert("RGB")
+                image_converted = image.convert("RGB")
 
             # Cache HTTP(S) URLs
             if parsed_url.scheme in ("http", "https"):

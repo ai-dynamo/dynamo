@@ -6,6 +6,7 @@ import logging
 from vllm.inputs.data import TokensPrompt
 
 import dynamo.nixl_connect as connect
+from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.runtime import DistributedRuntime
 
 from ..args import Config
@@ -53,6 +54,7 @@ class MultimodalDecodeWorkerHandler(BaseWorkerHandler):
         logger.info("Multimodal Decode Worker async initialization completed.")
 
     async def generate(self, request: vLLMMultimodalRequest, context):
+        rng_decode = _nvtx.start_range("mm:decode_worker_generate", color="blue")
         logger.debug(f"Got raw request: {request}")
         if not isinstance(request, vLLMMultimodalRequest):
             if isinstance(request, str):
@@ -95,15 +97,27 @@ class MultimodalDecodeWorkerHandler(BaseWorkerHandler):
             lora_request=lora_request,
         )
 
-        async for response in gen:
-            logger.debug(f"Response kv_transfer_params: {response.kv_transfer_params}")
-            yield MyRequestOutput(
-                request_id=response.request_id,
-                prompt=response.prompt,
-                prompt_token_ids=response.prompt_token_ids,
-                prompt_logprobs=response.prompt_logprobs,
-                outputs=response.outputs,
-                finished=response.finished,
-                metrics=response.metrics,
-                kv_transfer_params=response.kv_transfer_params,
-            ).model_dump_json()
+        rng_first = _nvtx.start_range("mm:decode:first_token", color="darkred")
+        first_token = True
+        try:
+            async for response in gen:
+                if first_token:
+                    _nvtx.end_range(rng_first)
+                    first_token = False
+                logger.debug(
+                    f"Response kv_transfer_params: {response.kv_transfer_params}"
+                )
+                yield MyRequestOutput(
+                    request_id=response.request_id,
+                    prompt=response.prompt,
+                    prompt_token_ids=response.prompt_token_ids,
+                    prompt_logprobs=response.prompt_logprobs,
+                    outputs=response.outputs,
+                    finished=response.finished,
+                    metrics=response.metrics,
+                    kv_transfer_params=response.kv_transfer_params,
+                ).model_dump_json()
+        finally:
+            if first_token:
+                _nvtx.end_range(rng_first)
+            _nvtx.end_range(rng_decode)

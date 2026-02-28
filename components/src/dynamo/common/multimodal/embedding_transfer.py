@@ -16,6 +16,7 @@ from pydantic import BaseModel
 from safetensors import torch as safetensors_torch
 
 import dynamo.nixl_connect as nixl_connect
+from dynamo.common.utils import nvtx_utils as _nvtx
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +138,7 @@ class LocalEmbeddingSender(AbstractEmbeddingSender):
         )
         return tensor_path
 
+    @_nvtx.annotate("mm:local:send_embeddings", color="magenta")
     async def send_embeddings(
         self, embeddings: torch.Tensor, stage_embeddings: bool = False
     ) -> tuple[TransferRequest, asyncio.Future]:
@@ -181,6 +183,7 @@ class LocalEmbeddingReceiver(AbstractEmbeddingReceiver):
         self.received_tensors = {}
         self.tensor_id_counter = 0
 
+    @_nvtx.annotate("mm:local:receive_embeddings", color="magenta")
     async def receive_embeddings(
         self, request: TransferRequest
     ) -> tuple[int, torch.Tensor]:
@@ -347,6 +350,7 @@ class NixlPersistentEmbeddingSender(AbstractEmbeddingSender):
     def __init__(self):
         self.connector = PersistentConnector()
 
+    @_nvtx.annotate("mm:nixl:send_embeddings", color="magenta")
     async def send_embeddings(
         self, embeddings: torch.Tensor, stage_embeddings: bool = False
     ) -> tuple[TransferRequest, asyncio.Future]:
@@ -365,9 +369,10 @@ class NixlPersistentEmbeddingSender(AbstractEmbeddingSender):
             transfer_buf = embeddings
         else:
             transfer_buf = embeddings.clone().detach()
-        descriptor = nixl_connect.Descriptor(transfer_buf)
-        readable_op = await self.connector.create_readable(descriptor)
-
+        with _nvtx.annotate("mm:nixl:create_descriptor", color="pink"):
+            descriptor = nixl_connect.Descriptor(transfer_buf)
+        with _nvtx.annotate("mm:nixl:create_readable", color="pink"):
+            readable_op = await self.connector.create_readable(descriptor)
         request = TransferRequest(
             embeddings_shape=list(embeddings.shape),
             embedding_dtype_str=torch_dtype_to_string(embeddings.dtype),
@@ -420,6 +425,7 @@ class NixlPersistentEmbeddingReceiver(AbstractEmbeddingReceiver):
             descriptor.register_with_connector(connection)
             self.warmedup_descriptors.put(descriptor)
 
+    @_nvtx.annotate("mm:nixl:receive_embeddings", color="magenta")
     async def receive_embeddings(
         self, request: TransferRequest
     ) -> tuple[int, torch.Tensor]:
@@ -458,10 +464,12 @@ class NixlPersistentEmbeddingReceiver(AbstractEmbeddingReceiver):
             )
             dynamic_descriptor = False
 
-        # Create read operation to read from EncodeHandler
-        read_op = await self.connector.begin_read(readable_metadata, descriptor)
-        # Wait for the read operation to complete
-        await read_op.wait_for_completion()
+        with _nvtx.annotate("mm:nixl:begin_read", color="pink"):
+            # Create read operation to read from EncodeHandler
+            read_op = await self.connector.begin_read(readable_metadata, descriptor)
+        with _nvtx.annotate("mm:nixl:wait_completion", color="pink"):
+            # Wait for the read operation to complete
+            await read_op.wait_for_completion()
         logging.debug(
             f"Successfully read embeddings via NIXL: {encodings_tensor.shape}"
         )

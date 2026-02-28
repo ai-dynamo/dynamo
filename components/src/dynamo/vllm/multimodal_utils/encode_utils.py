@@ -127,7 +127,7 @@ def encode_image_embeddings(
             embeddings = embeddings[0]
         embeddings = embeddings.unsqueeze(0) if embeddings.ndim == 2 else embeddings
 
-        return embeddings
+    return embeddings
 
 
 def get_encoder_components(
