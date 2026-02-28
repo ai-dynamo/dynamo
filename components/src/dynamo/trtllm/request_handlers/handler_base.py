@@ -604,17 +604,17 @@ class HandlerBase(BaseGenerativeHandler):
         logging.debug(f"Request: {request}")
 
         # Additional metrics: request type detection
-        _um = self.additional_metrics
+        metrics_collector = self.additional_metrics
 
-        if _um:
+        if metrics_collector:
             # Detect request types for metrics
             sampling_options = request.get("sampling_options", {})
             guided = sampling_options.get("guided_decoding")
             if guided and isinstance(guided, dict):
                 if any(guided.get(k) for k in ("json", "regex", "grammar", "json_object", "choice")):
-                    _um.record_request_type_structured_output()
+                    metrics_collector.record_request_type_structured_output()
             if request.get("multi_modal_data"):
-                _um.record_request_type_image()
+                metrics_collector.record_request_type_image()
 
         # Normalize OpenAI format to TRT-LLM internal format
         self._normalize_request_format(request)
@@ -818,15 +818,15 @@ class HandlerBase(BaseGenerativeHandler):
                         )
 
                     # Record additional metrics on request finish
-                    if res.finished and _um and out.get("finish_reason"):
+                    if res.finished and metrics_collector and out.get("finish_reason"):
                         # KV transfer metrics from request_perf_metrics
                         if output.request_perf_metrics is not None:
                             if self.disaggregation_mode == DisaggregationMode.PREFILL:
-                                _um.record_kv_transfer_success()
+                                metrics_collector.record_kv_transfer_success()
                             # Record KV transfer latency/bytes/speed from timing_metrics
                             tm = output.request_perf_metrics.timing_metrics
                             if tm is not None:
-                                _um.record_kv_transfer_perf(tm)
+                                metrics_collector.record_kv_transfer_perf(tm)
 
                     # Log metrics to TensorRT-LLM MetricsCollector when request finishes
                     # NOTE: TRT-LLM 1.3.0rc5 (PR #11243) renamed log_metrics_dict → log_request_metrics_dict
@@ -858,16 +858,16 @@ class HandlerBase(BaseGenerativeHandler):
         except asyncio.CancelledError:
             logging.debug(f"Request {request_id}: Client cancelled")
             # _cancellation_monitor already called abort_request
-            if _um:
-                _um.record_request_abort()
+            if metrics_collector:
+                metrics_collector.record_request_abort()
             return  # Just stop, no error response
 
         # 2. Per-request errors - send to client, don't shutdown
         except RequestError as e:
             error_msg = str(e)
             logging.warning(f"Request {request_id} error: {error_msg}")
-            if _um and self.disaggregation_mode == DisaggregationMode.PREFILL:
-                _um.record_kv_transfer_failure()
+            if metrics_collector and self.disaggregation_mode == DisaggregationMode.PREFILL:
+                metrics_collector.record_kv_transfer_failure()
             yield {
                 "finish_reason": {"error": error_msg},
                 "token_ids": [],

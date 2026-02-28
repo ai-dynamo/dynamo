@@ -156,7 +156,7 @@ class DynamoTrtllmArgGroup(ArgGroup):
             g,
             flag_name="--enable-additional-metrics",
             env_var="DYN_TRTLLM_ENABLE_ADDITIONAL_METRICS",
-            default=False,
+            default=True,
             help="Enable additional Prometheus metrics (token counters, phase timing, config info, etc.).",
         )
         add_negatable_bool_argument(
