@@ -135,17 +135,17 @@ If no existing parser fits, generate new parser code:
 2. **Implement required functions**:
    ```rust
    // Detection
-   pub fn detect_tool_call_start_[name](chunk: &str, config: &Config) -> bool
+   pub fn detect_tool_call_start_<name>(chunk: &str, config: &Config) -> bool
 
    // Parsing
-   pub fn try_tool_call_parse_[name](
+   pub fn try_tool_call_parse_<name>(
        message: &str,
        config: &Config,
        tools: Option<&[ToolDefinition]>,
    ) -> Result<(Vec<ToolCallResponse>, Option<String>)>
 
    // End detection (for streaming)
-   pub fn find_tool_call_end_position_[name](chunk: &str, config: &Config) -> usize
+   pub fn find_tool_call_end_position_<name>(chunk: &str, config: &Config) -> usize
    ```
 
 3. **Use regex for token matching**:

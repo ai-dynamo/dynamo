@@ -39,7 +39,6 @@ Claude will:
 ```
 tool-parser-generator/
 ├── SKILL.md                       # Main skill documentation with workflow
-├── LICENSE.txt                    # Apache 2.0 license
 ├── README.md                      # This file
 └── references/
     ├── parser-patterns.md         # Quick reference for common patterns
@@ -75,4 +74,4 @@ See `SKILL.md` for a complete walkthrough of adding support for Qwen/Qwen2.5-72B
 
 ## License
 
-Apache 2.0 - See LICENSE.txt for details.
+Apache 2.0 - See top-level LICENSE for details.
