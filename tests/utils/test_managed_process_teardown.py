@@ -72,6 +72,20 @@ def _collect_tree_pids(root_pid: int) -> set[int]:
     return pids
 
 
+def _wait_for_tree(
+    root_pid: int, min_count: int, timeout: float = 3.0, poll: float = 0.1
+) -> set[int]:
+    """Poll until the process tree has at least min_count members."""
+    deadline = time.monotonic() + timeout
+    pids: set[int] = set()
+    while time.monotonic() < deadline:
+        pids = _collect_tree_pids(root_pid)
+        if len(pids) >= min_count:
+            return pids
+        time.sleep(poll)
+    return pids
+
+
 def _bash_sleep_cmd(marker: str, tag: str = "") -> list[str]:
     """Return a bash command that sleeps 300s with an embedded unique marker.
     The trailing `: noexit` prevents bash from exec-ing into sleep
@@ -101,8 +115,7 @@ class TestSimpleProcessTree:
         with mp:
             assert mp.proc is not None
             root_pid = mp.proc.pid
-            time.sleep(0.5)
-            tree_pids = _collect_tree_pids(root_pid)
+            tree_pids = _wait_for_tree(root_pid, min_count=2)
             assert len(tree_pids) >= 2, f"Expected parent + children, got {tree_pids}"
 
         for pid in tree_pids:
@@ -133,8 +146,7 @@ class TestDeepProcessTree:
         with mp:
             assert mp.proc is not None
             root_pid = mp.proc.pid
-            time.sleep(0.5)
-            tree_pids = _collect_tree_pids(root_pid)
+            tree_pids = _wait_for_tree(root_pid, min_count=3)
             assert (
                 len(tree_pids) >= 3
             ), f"Expected parent + child + grandchild, got {tree_pids}"
@@ -169,8 +181,7 @@ class TestChildWithOwnProcessGroup:
         with mp:
             assert mp.proc is not None
             root_pid = mp.proc.pid
-            time.sleep(1.0)
-            tree_pids = _collect_tree_pids(root_pid)
+            tree_pids = _wait_for_tree(root_pid, min_count=2)
             assert len(tree_pids) >= 2, f"Expected parent + child, got {tree_pids}"
 
             child_pids = tree_pids - {root_pid}
@@ -227,7 +238,15 @@ class TestXdistSafeSkipsStragglers:
                 os.killpg(os.getpgid(bystander_pid), signal.SIGKILL)
             except (ProcessLookupError, PermissionError, OSError):
                 pass
-            bystander.wait()
+            # Reap the zombie so it doesn't linger in the process table
+            # for the rest of the pytest session.
+            try:
+                bystander.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(os.getpgid(bystander_pid), signal.SIGKILL)
+                except (ProcessLookupError, PermissionError, OSError):
+                    pass
 
     def test_stragglers_killed_when_not_xdist_mode(self, tmp_path):
         """With terminate_all_matching_process_names=True, _cleanup_stragglers
@@ -264,10 +283,15 @@ class TestXdistSafeSkipsStragglers:
                 os.killpg(os.getpgid(bystander_pid), signal.SIGKILL)
             except (ProcessLookupError, PermissionError, OSError):
                 pass
+            # Reap the zombie so it doesn't linger in the process table
+            # for the rest of the pytest session.
             try:
                 bystander.wait(timeout=2)
-            except Exception:
-                pass
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(os.getpgid(bystander_pid), signal.SIGKILL)
+                except (ProcessLookupError, PermissionError, OSError):
+                    pass
 
 
 # ---------------------------------------------------------------------------

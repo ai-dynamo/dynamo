@@ -447,19 +447,21 @@ class ManagedProcess:
             )
             return
 
-        # Step 3: poll for process group exit instead of fixed sleep
+        # Step 3: poll for process group exit instead of fixed sleep.
+        # self.proc.poll() reaps the zombie so os.killpg(pgid, 0) can
+        # detect an empty group; without this the zombie keeps the group
+        # "alive" and the loop burns the full timeout.
         poll_interval = 0.1
         elapsed = 0.0
         while elapsed < timeout:
+            if self.proc is not None:
+                self.proc.poll()
             try:
-                # Signal 0 = check existence without killing
-                os.killpg(self._pgid, 0)
+                os.killpg(self._pgid, 0)  # signal 0 = check existence
             except ProcessLookupError:
-                # Process group no longer exists — done
-                return
+                break  # Main group gone; fall through to SIGKILL snapshotted groups
             except Exception:
-                # Other errors (e.g., permission) — assume done
-                return
+                break  # Other errors (e.g., permission) — fall through to cleanup
             time.sleep(poll_interval)
             elapsed += poll_interval
 
@@ -483,6 +485,8 @@ class ManagedProcess:
             # if a process is stuck in uninterruptible I/O).
             kill_wait = 0.0
             while kill_wait < 2.0:
+                if self.proc is not None:
+                    self.proc.poll()
                 try:
                     os.killpg(pgid, 0)
                 except ProcessLookupError:
@@ -491,7 +495,7 @@ class ManagedProcess:
                     self._logger.error(
                         "Error checking if process group %s is gone: %s", pgid, e
                     )
-                    break  # Something else went wrong, but we'll try again.
+                    break  # Can't check reliably, move on
                 time.sleep(0.1)
                 kill_wait += 0.1
             else:
