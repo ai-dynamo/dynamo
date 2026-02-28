@@ -438,6 +438,7 @@ impl BatchingState {
         }
 
         self.reset_flush_time();
+        // reset flush time here?!
     }
 }
 
@@ -522,7 +523,7 @@ async fn run_event_processor_loop<P: EventSink + Send + Sync + 'static>(
                         let is_new_batch = batching_state.pending_stored.is_none();
 
                         if let Some(ref mut pending) = batching_state.pending_stored {
-                            // Preserve parent_hash from the first event in this batch.
+                            // Only extend blocks - parent_hash must remain from first event
                             pending.blocks.extend(stored_data.blocks);
                         } else {
                             batching_state.pending_stored = Some(stored_data);
@@ -3538,18 +3539,17 @@ mod event_processor_tests {
 
         let events = publisher.get_events();
 
-        assert_eq!(events.len(), 1, "All 3 sequential events should batch into 1");
+        assert_eq!(
+            events.len(),
+            1,
+            "All 3 sequential events should batch into 1"
+        );
 
         // The batch should have parent_hash=None (preserved from first event)
         if let KvCacheEventData::Stored(data) = &events[0].event.data {
+            assert_eq!(data.blocks.len(), 3, "Batch should have 3 blocks");
             assert_eq!(
-                data.blocks.len(),
-                3,
-                "Batch should have 3 blocks"
-            );
-            assert_eq!(
-                data.parent_hash,
-                None,
+                data.parent_hash, None,
                 "Batch parent_hash should remain None (from first event), NOT overwritten by subsequent events"
             );
         } else {
