@@ -7,7 +7,7 @@
 use once_cell::sync::{Lazy, OnceCell};
 use prometheus::{Histogram, HistogramOpts, HistogramVec, Registry};
 
-use super::prometheus_names::{name_prefix, frontend_perf};
+use super::prometheus_names::{frontend_perf, name_prefix};
 use crate::MetricsRegistry;
 
 fn frontend_metric_name(suffix: &str) -> String {
@@ -21,7 +21,9 @@ pub static STAGE_DURATION_SECONDS: Lazy<HistogramVec> = Lazy::new(|| {
             frontend_metric_name(frontend_perf::STAGE_DURATION_SECONDS),
             "Pipeline stage duration (seconds)",
         )
-        .buckets(vec![0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 2.5, 5.0]),
+        .buckets(vec![
+            0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 2.5, 5.0,
+        ]),
         &["stage"],
     )
     .expect("stage_duration_seconds histogram vec")
@@ -34,7 +36,9 @@ pub static TOKENIZE_SECONDS: Lazy<Histogram> = Lazy::new(|| {
             frontend_metric_name(frontend_perf::TOKENIZE_SECONDS),
             "Tokenization time in preprocessor (seconds)",
         )
-        .buckets(vec![0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0]),
+        .buckets(vec![
+            0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0,
+        ]),
     )
     .expect("tokenize_seconds histogram")
 });
@@ -46,7 +50,9 @@ pub static TEMPLATE_SECONDS: Lazy<Histogram> = Lazy::new(|| {
             frontend_metric_name(frontend_perf::TEMPLATE_SECONDS),
             "Template application time in preprocessor (seconds)",
         )
-        .buckets(vec![0.00001, 0.00005, 0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05]),
+        .buckets(vec![
+            0.00001, 0.00005, 0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05,
+        ]),
     )
     .expect("template_seconds histogram")
 });
@@ -58,7 +64,9 @@ pub static DETOKENIZE_PER_TOKEN_US: Lazy<Histogram> = Lazy::new(|| {
             frontend_metric_name(frontend_perf::DETOKENIZE_PER_TOKEN_US),
             "Detokenization cost per token (microseconds)",
         )
-        .buckets(vec![1.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0]),
+        .buckets(vec![
+            1.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0,
+        ]),
     )
     .expect("detokenize_per_token_us histogram")
 });
@@ -71,12 +79,8 @@ pub fn ensure_frontend_perf_metrics_registered(registry: &MetricsRegistry) {
         registry
             .add_metric(Box::new(STAGE_DURATION_SECONDS.clone()))
             .ok();
-        registry
-            .add_metric(Box::new(TOKENIZE_SECONDS.clone()))
-            .ok();
-        registry
-            .add_metric(Box::new(TEMPLATE_SECONDS.clone()))
-            .ok();
+        registry.add_metric(Box::new(TOKENIZE_SECONDS.clone())).ok();
+        registry.add_metric(Box::new(TEMPLATE_SECONDS.clone())).ok();
         registry
             .add_metric(Box::new(DETOKENIZE_PER_TOKEN_US.clone()))
             .ok();
