@@ -249,7 +249,8 @@ where
 
     /// Select the next worker according to the routing mode.
     /// Increments round-robin counter if applicable.
-    /// Panics if called on Direct or KV mode - those have their own selection mechanisms.
+    /// Returns None for Direct and KV modes -- those require explicit worker IDs
+    /// provided via routing hints (e.g., headers from an external router like EPP).
     pub fn select_next_worker(&self) -> Option<u64> {
         let instance_ids = self.client.instance_ids_avail();
         let count = instance_ids.len();
@@ -266,17 +267,13 @@ where
                 let counter = rand::rng().random::<u64>() as usize;
                 Some(instance_ids[counter % count])
             }
-            _ => {
-                panic!(
-                    "select_next_worker should not be called for {:?} routing mode",
-                    self.router_mode
-                )
-            }
+            RouterMode::Direct | RouterMode::KV => None,
         }
     }
 
     /// Peek the next worker according to the routing mode without incrementing the counter.
     /// Useful for checking if a worker is suitable before committing to it.
+    /// Returns None for Direct and KV modes -- those require explicit worker IDs.
     pub fn peek_next_worker(&self) -> Option<u64> {
         let instance_ids = self.client.instance_ids_avail();
         let count = instance_ids.len();
@@ -286,7 +283,6 @@ where
 
         match self.router_mode {
             RouterMode::RoundRobin => {
-                // Just peek at the current counter value without incrementing
                 let counter = self.round_robin_counter.load(Ordering::Relaxed) as usize;
                 Some(instance_ids[counter % count])
             }
@@ -296,12 +292,7 @@ where
                 let counter = rand::rng().random::<u64>() as usize;
                 Some(instance_ids[counter % count])
             }
-            _ => {
-                panic!(
-                    "peek_next_worker should not be called for {:?} routing mode",
-                    self.router_mode
-                )
-            }
+            RouterMode::Direct | RouterMode::KV => None,
         }
     }
 

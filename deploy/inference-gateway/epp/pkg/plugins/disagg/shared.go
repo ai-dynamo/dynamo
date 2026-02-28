@@ -43,6 +43,10 @@ const (
 	// PrefillEnabledStateKey is used to communicate prefill-enabled status
 	// from the DisaggProfileHandler to the scorer plugins via CycleState.
 	PrefillEnabledStateKey = plugins.StateKey("disagg-prefill-enabled")
+
+	// PrefillWorkerIDStateKey communicates the prefill worker ID selected by
+	// DynPrefillScorer to DynDecodeScorer so it can set the x-prefill-instance-id header.
+	PrefillWorkerIDStateKey = plugins.StateKey("disagg-prefill-worker-id")
 )
 
 // PrefillEnabledState stores whether prefill is enabled for the current scheduling cycle.
@@ -54,6 +58,17 @@ type PrefillEnabledState struct {
 // Clone implements plugins.StateData.
 func (s *PrefillEnabledState) Clone() plugins.StateData {
 	return &PrefillEnabledState{Enabled: s.Enabled}
+}
+
+// PrefillWorkerIDState stores the prefill worker ID selected by DynPrefillScorer.
+// Written by DynPrefillScorer, read by DynDecodeScorer to set the header.
+type PrefillWorkerIDState struct {
+	WorkerID string
+}
+
+// Clone implements plugins.StateData.
+func (s *PrefillWorkerIDState) Clone() plugins.StateData {
+	return &PrefillWorkerIDState{WorkerID: s.WorkerID}
 }
 
 // readPrefillEnabled reads the PrefillEnabledState from CycleState.

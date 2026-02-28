@@ -616,6 +616,13 @@ impl
             .as_ref()
             .and_then(|r| r.prefill_worker_id);
 
+        if self.router_mode.is_direct_routing() && preselected_worker.is_none() {
+            return Err(anyhow::anyhow!(
+                "Prefill worker ID required in Direct routing mode but none found in request. \
+                 Expected prefill_worker_id to be set via x-prefill-instance-id header by external router (e.g., EPP)."
+            ).into());
+        }
+
         let prefill_result = async {
             if let Some((worker_id, dp_rank, bootstrap_info)) = self
                 .resolve_prefill_worker(&prefill_req, preselected_worker)
