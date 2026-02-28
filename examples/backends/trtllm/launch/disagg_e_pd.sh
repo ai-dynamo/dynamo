@@ -4,7 +4,7 @@
 
 # 1 Encode + 1 PD worker for Qwen3-VL-2B-Instruct
 # GPU 0: Encode (vision encoder)
-# GPU 1: PD worker (prefill + decode, TP=1)
+# GPU 0: PD worker (prefill + decode, TP=1)
 
 # Environment variables with defaults
 export DYNAMO_HOME=${DYNAMO_HOME:-"/workspace"}
