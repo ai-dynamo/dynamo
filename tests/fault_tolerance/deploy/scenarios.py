@@ -22,7 +22,6 @@ from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Dict, List, Optional, Pattern
 
-from kubernetes.client.rest import ApiException
 from typing_extensions import Required, TypedDict
 
 from tests.utils.managed_deployment import DeploymentSpec, ManagedDeployment
@@ -36,13 +35,15 @@ logger = logging.getLogger(__name__)
 # Lazy import to avoid kubernetes dependency during module import
 def _get_gpu_helpers():
     """Lazily import GPU helper functions to avoid kubernetes dependency at module level."""
+    from kubernetes.client.rest import ApiException
+
     from tests.fault_tolerance.hardware.fault_injection_service.helpers import (
         get_available_gpu_ids,
         get_gpu_info,
         get_processes_on_gpu,
     )
 
-    return get_available_gpu_ids, get_gpu_info, get_processes_on_gpu
+    return get_available_gpu_ids, get_gpu_info, get_processes_on_gpu, ApiException
 
 
 # Import checker factory (actual import, not TYPE_CHECKING)
@@ -294,6 +295,8 @@ class TerminateProcessFailure(Failure):
 
     def _log_process_list(self, pod):
         """Log filtered process list from ps aux."""
+        *_, ApiException = _get_gpu_helpers()
+
         try:
             result = pod.exec(["ps", "aux"])
             if result.returncode != 0:
@@ -322,6 +325,8 @@ class TerminateProcessFailure(Failure):
 
     def _get_process_details_string(self, pod, pid: int) -> str:
         """Get detailed information for a specific PID as a string."""
+        *_, ApiException = _get_gpu_helpers()
+
         try:
             ps_result = pod.exec(["ps", "-p", str(pid), "-o", "pid,comm,args"])
             if ps_result.returncode != 0:
@@ -349,6 +354,7 @@ class TerminateProcessFailure(Failure):
                 get_available_gpu_ids,
                 get_gpu_info,
                 get_processes_on_gpu,
+                ApiException,
             ) = _get_gpu_helpers()
             gpu_ids = get_available_gpu_ids(pod)
 
@@ -432,6 +438,8 @@ class TerminateProcessFailure(Failure):
 
     def _log_nvidia_smi_output(self, pod):
         """Log complete nvidia-smi output with parsed process mapping."""
+        *_, ApiException = _get_gpu_helpers()
+
         try:
             result = pod.exec(["nvidia-smi"])
             if result.returncode != 0:
@@ -514,6 +522,8 @@ class TerminateProcessFailure(Failure):
         Returns:
             Elapsed seconds when pod becomes ready, or None if timeout
         """
+        *_, ApiException = _get_gpu_helpers()
+
         for elapsed in range(max_wait):
             time.sleep(poll_interval)
             try:

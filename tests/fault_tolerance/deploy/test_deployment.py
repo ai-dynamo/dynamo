@@ -9,7 +9,7 @@ import re
 import signal
 from contextlib import contextmanager
 from multiprocessing.context import SpawnProcess
-from typing import Any, Optional
+from typing import Any
 
 import pytest
 
