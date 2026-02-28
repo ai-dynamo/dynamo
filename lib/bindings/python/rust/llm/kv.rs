@@ -134,6 +134,7 @@ pub(crate) struct KvEventPublisher {
 impl KvEventPublisher {
     #[new]
     #[pyo3(signature = (endpoint, worker_id=0, kv_block_size=0, dp_rank=0, enable_local_indexer=false, zmq_endpoint=None, zmq_topic=None, batching_timeout_us=None))]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         endpoint: Endpoint,
         worker_id: WorkerId,
