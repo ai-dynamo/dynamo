@@ -73,7 +73,7 @@ class RequestHandlerConfig:
     shutdown_event: Optional[asyncio.Event] = None
     encoder_cache_capacity_gb: float = 0  # Encoder cache capacity in GB
     disable_request_abort: bool = True
-    unified_metrics: Optional[object] = None  # AdditionalMetricsCollector
+    additional_metrics: Optional[object] = None  # AdditionalMetricsCollector
 
 
 class HandlerBase(BaseGenerativeHandler):
@@ -103,7 +103,7 @@ class HandlerBase(BaseGenerativeHandler):
         self.kv_block_size: int = config.kv_block_size
         self.shutdown_event = config.shutdown_event
         self.disable_request_abort = config.disable_request_abort
-        self.unified_metrics = config.unified_metrics
+        self.additional_metrics = config.additional_metrics
 
     def check_error(self, result: dict):
         """
@@ -603,8 +603,8 @@ class HandlerBase(BaseGenerativeHandler):
         """
         logging.debug(f"Request: {request}")
 
-        # Unified metrics: request type detection
-        _um = self.unified_metrics
+        # Additional metrics: request type detection
+        _um = self.additional_metrics
 
         if _um:
             # Detect request types for metrics
@@ -817,7 +817,7 @@ class HandlerBase(BaseGenerativeHandler):
                             "Request finished with no finish reason set - this indicates a possible bug"
                         )
 
-                    # Record unified (additional) metrics on request finish
+                    # Record additional metrics on request finish
                     if res.finished and _um and out.get("finish_reason"):
                         # KV transfer metrics from request_perf_metrics
                         if output.request_perf_metrics is not None:

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for AdditionalMetricsCollector and unified metrics integration."""
+"""Tests for AdditionalMetricsCollector and additional metrics integration."""
 
 import unittest
 from datetime import timedelta
@@ -131,14 +131,6 @@ class TestAdditionalMetricsCollector(unittest.TestCase):
         self.assertNotIn("engine_startup_time", output)
         # KV transfer perf metrics are now wired from request_perf_metrics.timing_metrics
         # (kv_transfer_latency_seconds, kv_transfer_bytes_total, kv_transfer_speed_gb_s)
-
-
-class TestBackwardsCompatAlias(unittest.TestCase):
-    """Test the UnifiedMetricsCollector backwards compatibility alias."""
-
-    def test_alias_exists(self):
-        from dynamo.trtllm.metrics import AdditionalMetricsCollector, UnifiedMetricsCollector
-        self.assertIs(UnifiedMetricsCollector, AdditionalMetricsCollector)
 
 
 class TestHandlerBaseMetricsInstrumentation(unittest.TestCase):

@@ -168,7 +168,3 @@ class AdditionalMetricsCollector:
         if kv_bytes > 0:
             speed_gb_s = kv_bytes / (latency_s * 1e9)
             self.kv_transfer_speed.labels(*self._labelvalues).observe(speed_gb_s)
-
-
-# Backwards compatibility alias
-UnifiedMetricsCollector = AdditionalMetricsCollector
