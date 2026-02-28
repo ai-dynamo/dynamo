@@ -26,7 +26,7 @@ The Rust frontend (metrics.rs) provides token counters:
 
 This module adds metrics that have no engine/runtime/frontend equivalent:
   - Request types (image, structured output)
-  - KV transfer metrics (success/failure counters, latency, throughput, bytes)
+  - KV transfer metrics (success/failure counters, latency, throughput, per-request bytes)
   - Abort tracking
 """
 
@@ -44,6 +44,11 @@ KV_TRANSFER_LATENCY_BUCKETS = (
 )
 KV_TRANSFER_SPEED_BUCKETS = (
     0.1, 0.5, 1.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0,
+    float("inf"),
+)
+KV_TRANSFER_BYTES_BUCKETS = (
+    100_000, 500_000, 1_000_000, 5_000_000, 10_000_000,
+    50_000_000, 100_000_000, 500_000_000, 1_000_000_000, 5_000_000_000,
     float("inf"),
 )
 
@@ -99,10 +104,11 @@ class AdditionalMetricsCollector:
             labelnames=self._labelnames,
             buckets=KV_TRANSFER_LATENCY_BUCKETS,
         )
-        self.kv_transfer_bytes = Counter(
-            "kv_transfer_bytes_total",
-            "Total bytes transferred for KV cache",
+        self.kv_transfer_bytes = Histogram(
+            "kv_transfer_bytes",
+            "KV cache transfer size per request in bytes",
             labelnames=self._labelnames,
+            buckets=KV_TRANSFER_BYTES_BUCKETS,
         )
         self.kv_transfer_speed = Histogram(
             "kv_transfer_speed_gb_s",
@@ -163,7 +169,7 @@ class AdditionalMetricsCollector:
         kv_bytes = timing_metrics.kv_cache_size
 
         self.kv_transfer_latency.labels(*self._labelvalues).observe(latency_s)
-        self.kv_transfer_bytes.labels(*self._labelvalues).inc(kv_bytes)
+        self.kv_transfer_bytes.labels(*self._labelvalues).observe(kv_bytes)
 
         if kv_bytes > 0:
             speed_gb_s = kv_bytes / (latency_s * 1e9)

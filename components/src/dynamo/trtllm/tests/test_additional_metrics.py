@@ -91,7 +91,7 @@ class TestAdditionalMetricsCollector(unittest.TestCase):
         self.collector.record_kv_transfer_perf(tm)
         output = generate_latest(self.registry).decode()
         self.assertIn("kv_transfer_latency_seconds", output)
-        self.assertIn("kv_transfer_bytes_total", output)
+        self.assertIn("kv_transfer_bytes_bucket", output)
         self.assertIn("kv_transfer_speed_gb_s", output)
 
     def test_kv_transfer_perf_skipped_when_no_transfer(self):
@@ -130,7 +130,7 @@ class TestAdditionalMetricsCollector(unittest.TestCase):
         self.assertNotIn("cache_config_info", output)
         self.assertNotIn("engine_startup_time", output)
         # KV transfer perf metrics are now wired from request_perf_metrics.timing_metrics
-        # (kv_transfer_latency_seconds, kv_transfer_bytes_total, kv_transfer_speed_gb_s)
+        # (kv_transfer_latency_seconds, kv_transfer_bytes, kv_transfer_speed_gb_s)
 
 
 class TestHandlerBaseMetricsInstrumentation(unittest.TestCase):
