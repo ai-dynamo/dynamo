@@ -293,8 +293,25 @@ class ManagedProcess:
                 if process:
                     try:
                         process.wait(timeout=5)
-                    except Exception:
-                        pass
+                    except subprocess.TimeoutExpired:
+                        self._logger.warning(
+                            "Process %s (pid=%s) did not exit within 5s, sending SIGKILL",
+                            process.args,
+                            process.pid,
+                        )
+                        process.kill()
+                        try:
+                            process.wait(timeout=3)
+                        except subprocess.TimeoutExpired:
+                            self._logger.error(
+                                "Process %s (pid=%s) still alive after SIGKILL",
+                                process.args,
+                                process.pid,
+                            )
+                    except OSError as e:
+                        self._logger.warning(
+                            "Error waiting for process pid=%s: %s", process.pid, e
+                        )
 
             if self.data_dir:
                 self._remove_directory(self.data_dir)
@@ -453,13 +470,33 @@ class ManagedProcess:
             try:
                 os.killpg(pgid, signal.SIGKILL)
             except ProcessLookupError:
-                # Already gone
-                pass
+                continue
             except PermissionError:
-                pass
+                continue
             except Exception as e:
                 self._logger.warning(
                     "Error sending SIGKILL to process group %s: %s", pgid, e
+                )
+                continue
+
+            # Verify group is gone after SIGKILL (bounded wait to avoid hangs
+            # if a process is stuck in uninterruptible I/O).
+            kill_wait = 0.0
+            while kill_wait < 2.0:
+                try:
+                    os.killpg(pgid, 0)
+                except ProcessLookupError:
+                    break  # Process group is gone
+                except Exception as e:
+                    self._logger.error(
+                        "Error checking if process group %s is gone: %s", pgid, e
+                    )
+                    break  # Something else went wrong, but we'll try again.
+                time.sleep(0.1)
+                kill_wait += 0.1
+            else:
+                self._logger.warning(
+                    "Process group %s still exists 2s after SIGKILL", pgid
                 )
 
     def _remove_directory(self, path: str) -> None:
