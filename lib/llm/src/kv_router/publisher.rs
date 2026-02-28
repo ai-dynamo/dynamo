@@ -522,10 +522,8 @@ async fn run_event_processor_loop<P: EventSink + Send + Sync + 'static>(
                         let is_new_batch = batching_state.pending_stored.is_none();
 
                         if let Some(ref mut pending) = batching_state.pending_stored {
+                            // Preserve parent_hash from the first event in this batch.
                             pending.blocks.extend(stored_data.blocks);
-                            if pending.parent_hash.is_none() {
-                                pending.parent_hash = stored_data.parent_hash;
-                            }
                         } else {
                             batching_state.pending_stored = Some(stored_data);
                         }
@@ -3465,6 +3463,95 @@ mod event_processor_tests {
         }
         if let KvCacheEventData::Stored(data) = &events[1].event.data {
             assert_eq!(data.blocks.len(), 1, "Second batch should have 1 block");
+        } else {
+            panic!("Expected Stored event");
+        }
+    }
+
+    /// Test that extending a batch does NOT change parent_hash
+    /// First event with parent_hash=None should keep it None even if subsequent events have Some(X)
+    #[tokio::test]
+    async fn test_batch_parent_hash_preserved_when_extending() {
+        let timeout_us = 100_000; // 100ms timeout
+
+        let (tx, rx) = mpsc::unbounded_channel::<KvCacheEvent>();
+        let publisher = MockPublisher::new();
+        let publisher_clone = publisher.clone();
+        let cancellation_token = CancellationToken::new();
+
+        let handle = tokio::spawn(async move {
+            run_event_processor_loop(publisher_clone, 1, cancellation_token, rx, None, timeout_us)
+                .await
+        });
+
+        // First event: parent_hash=None, block_hash=1
+        tx.send(KvCacheEvent {
+            event_id: 0,
+            data: KvCacheEventData::Stored(KvCacheStoreData {
+                parent_hash: None, // Root block with no parent
+                blocks: vec![KvCacheStoredBlockData {
+                    block_hash: ExternalSequenceBlockHash(1),
+                    tokens_hash: LocalBlockHash(100),
+                    mm_extra_info: None,
+                }],
+            }),
+            dp_rank: 0,
+        })
+        .unwrap();
+        tokio::task::yield_now().await;
+
+        // Second event: parent_hash=Some(1), block_hash=2 (sequential)
+        tx.send(KvCacheEvent {
+            event_id: 1,
+            data: KvCacheEventData::Stored(KvCacheStoreData {
+                parent_hash: Some(ExternalSequenceBlockHash(1)), // Points to previous block
+                blocks: vec![KvCacheStoredBlockData {
+                    block_hash: ExternalSequenceBlockHash(2),
+                    tokens_hash: LocalBlockHash(200),
+                    mm_extra_info: None,
+                }],
+            }),
+            dp_rank: 0,
+        })
+        .unwrap();
+        tokio::task::yield_now().await;
+
+        // Third event: parent_hash=Some(2), block_hash=3 (sequential)
+        tx.send(KvCacheEvent {
+            event_id: 2,
+            data: KvCacheEventData::Stored(KvCacheStoreData {
+                parent_hash: Some(ExternalSequenceBlockHash(2)),
+                blocks: vec![KvCacheStoredBlockData {
+                    block_hash: ExternalSequenceBlockHash(3),
+                    tokens_hash: LocalBlockHash(300),
+                    mm_extra_info: None,
+                }],
+            }),
+            dp_rank: 0,
+        })
+        .unwrap();
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(2)).await;
+
+        drop(tx);
+        handle.await.unwrap();
+
+        let events = publisher.get_events();
+
+        assert_eq!(events.len(), 1, "All 3 sequential events should batch into 1");
+
+        // The batch should have parent_hash=None (preserved from first event)
+        if let KvCacheEventData::Stored(data) = &events[0].event.data {
+            assert_eq!(
+                data.blocks.len(),
+                3,
+                "Batch should have 3 blocks"
+            );
+            assert_eq!(
+                data.parent_hash,
+                None,
+                "Batch parent_hash should remain None (from first event), NOT overwritten by subsequent events"
+            );
         } else {
             panic!("Expected Stored event");
         }
