@@ -2760,8 +2760,8 @@ mod event_processor_tests {
                 dp_rank: 0,
             };
             tx.send(event).unwrap();
-            // Small sleep (5us) to allow event processor to batch events and yield to the processor task
-            tokio::time::sleep(tokio::time::Duration::from_micros(5)).await;
+            // Yield to allow event processor to process the event
+            tokio::task::yield_now().await;
         }
 
         // Wait for timeout to elapse so all events flush together as one batch
@@ -2779,14 +2779,12 @@ mod event_processor_tests {
         );
 
         // With a long timeout (100ms) and rapid event sending, all events should batch into few output events
-        // (first event may flush separately, and with many events we may get 2-3 batches due to timing)
-        let max_expected = if event_count <= 100 { 2 } else { 3 };
+        // (first event may flush separately, rest should batch together)
         assert!(
-            events.len() <= max_expected,
-            "With long timeout ({}us), all {} events should batch into at most {} output events (got {})",
+            events.len() <= 2,
+            "With long timeout ({}us), all {} events should batch into at most 2 output events (got {})",
             timeout_us,
             event_count,
-            max_expected,
             events.len()
         );
 
