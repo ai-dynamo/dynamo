@@ -214,6 +214,8 @@ pub struct MockVllmEngine {
     engine_args: MockEngineArgs,
     /// Bootstrap server for prefill workers in disaggregated mode
     bootstrap_server: Arc<OnceCell<Arc<BootstrapServer>>>,
+    /// Keep schedulers alive so their CancelGuards don't fire prematurely.
+    _schedulers: OnceCell<Vec<Scheduler>>,
 }
 
 impl MockVllmEngine {
@@ -225,6 +227,7 @@ impl MockVllmEngine {
             senders_ready: Notify::new(),
             engine_args,
             bootstrap_server: Arc::new(OnceCell::new()),
+            _schedulers: OnceCell::new(),
         }
     }
 
@@ -267,6 +270,8 @@ impl MockVllmEngine {
             .await;
 
         Self::start_metrics_publishing(&schedulers, component, cancel_token.clone()).await?;
+
+        let _ = self._schedulers.set(schedulers);
 
         Ok(())
     }
