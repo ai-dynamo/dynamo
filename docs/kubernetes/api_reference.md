@@ -430,19 +430,17 @@ DynamoGraphDeployment is the Schema for the dynamographdeployments API.
 
 
 DynamoGraphDeploymentRequest is the Schema for the dynamographdeploymentrequests API.
-It serves as the primary interface for users to request model deployments with
-specific performance and resource constraints, enabling SLA-driven deployments.
+It provides a simplified, SLA-driven interface for deploying inference models on Dynamo.
+Users specify a model and optional performance targets; the controller handles profiling,
+configuration selection, and deployment.
 
 Lifecycle:
- 1. Initial → Pending: Validates spec and prepares for profiling
- 2. Pending → Profiling: Creates and runs profiling job (online or AIC)
- 3. Profiling → Ready/Deploying: Generates DGD spec after profiling completes
- 4. Deploying → Ready: When autoApply=true, monitors DGD until Ready
- 5. Ready: Terminal state when DGD is operational or spec is available
- 6. DeploymentDeleted: Terminal state when auto-created DGD is manually deleted
-
-The spec becomes immutable once profiling starts. Users must delete and recreate
-the DGDR to modify configuration after this point.
+ 1. Pending: Spec validated, preparing for profiling
+ 2. Profiling: Profiling job is running to discover optimal configurations
+ 3. Ready: Profiling complete, generated DGD spec available in status
+ 4. Deploying: DGD is being created and rolled out (when autoApply=true)
+ 5. Deployed: DGD is running and healthy
+ 6. Failed: An unrecoverable error occurred
 
 
 
@@ -450,7 +448,7 @@ the DGDR to modify configuration after this point.
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `apiVersion` _string_ | `nvidia.com/v1alpha1` | | |
+| `apiVersion` _string_ | `nvidia.com/v1beta1` | | |
 | `kind` _string_ | `DynamoGraphDeploymentRequest` | | |
 | `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
 | `spec` _[DynamoGraphDeploymentRequestSpec](#dynamographdeploymentrequestspec)_ | Spec defines the desired state for this deployment request. |  |  |
@@ -462,8 +460,7 @@ the DGDR to modify configuration after this point.
 
 
 DynamoGraphDeploymentRequestSpec defines the desired state of a DynamoGraphDeploymentRequest.
-This CRD serves as the primary interface for users to request model deployments with
-specific performance constraints and resource requirements, enabling SLA-driven deployments.
+Only the Model field is required; all other fields are optional and have sensible defaults.
 
 
 
@@ -472,12 +469,17 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `model` _string_ | Model specifies the model to deploy (e.g., "Qwen/Qwen3-0.6B", "meta-llama/Llama-3-70b").<br />This is a high-level identifier for easy reference in kubectl output and logs.<br />The controller automatically sets this value in profilingConfig.config.deployment.model. |  | Required: \{\} <br /> |
-| `backend` _string_ | Backend specifies the inference backend for profiling.<br />The controller automatically sets this value in profilingConfig.config.engine.backend.<br />Profiling runs on real GPUs or via AIC simulation to collect performance data. |  | Enum: [vllm sglang trtllm] <br />Required: \{\} <br /> |
-| `useMocker` _boolean_ | UseMocker indicates whether to deploy a mocker DynamoGraphDeployment instead of<br />a real backend deployment. When true, the deployment uses simulated engines that<br />don't require GPUs, using the profiling data to simulate realistic timing behavior.<br />Mocker is available in all backend images and useful for large-scale experiments.<br />Profiling still runs against the real backend (specified above) to collect performance data. | false |  |
-| `profilingConfig` _[ProfilingConfigSpec](#profilingconfigspec)_ | ProfilingConfig provides the complete configuration for the profiling job.<br />Note: GPU discovery is automatically attempted to detect GPU resources from Kubernetes<br />cluster nodes. If the operator has node read permissions (cluster-wide or explicitly granted),<br />discovered GPU configuration is used as defaults when hardware configuration is not manually<br />specified (minNumGpusPerEngine, maxNumGpusPerEngine, numGpusPerNode). User-specified values<br />always take precedence over auto-discovered values. If GPU discovery fails (e.g.,<br />namespace-restricted operator without node permissions), manual hardware config is required.<br />This configuration is passed directly to the profiler.<br />The structure matches the profile_sla config format exactly (see ProfilingConfigSpec for schema).<br />Note: deployment.model and engine.backend are automatically set from the high-level<br />modelName and backend fields and should not be specified in this config. |  | Required: \{\} <br /> |
-| `autoApply` _boolean_ | AutoApply indicates whether to automatically create a DynamoGraphDeployment<br />after profiling completes. If false, only the spec is generated and stored in status.<br />Users can then manually create a DGD using the generated spec. | false |  |
-| `deploymentOverrides` _[DeploymentOverridesSpec](#deploymentoverridesspec)_ | DeploymentOverrides allows customizing metadata for the auto-created DGD.<br />Only applicable when AutoApply is true. |  | Optional: \{\} <br /> |
+| `model` _string_ | Model specifies the model to deploy (e.g., "Qwen/Qwen3-0.6B", "meta-llama/Llama-3-70b").<br />Can be a HuggingFace ID or a private model name. |  | Required: \{\} <br />MinLength: 1 <br /> |
+| `backend` _[BackendType](#backendtype)_ | Backend specifies the inference backend to use for profiling and deployment. | auto | Enum: [auto sglang trtllm vllm] <br /> |
+| `image` _string_ | Image is the container image reference for the profiling job. |  | Optional: \{\} <br /> |
+| `modelCache` _[ModelCacheSpec](#modelcachespec)_ | ModelCache provides optional PVC configuration for pre-downloaded model weights. |  | Optional: \{\} <br /> |
+| `hardware` _[HardwareSpec](#hardwarespec)_ | Hardware describes the hardware resources available for profiling and deployment. |  | Optional: \{\} <br /> |
+| `workload` _[WorkloadSpec](#workloadspec)_ | Workload defines the expected workload characteristics for SLA-based profiling. |  | Optional: \{\} <br /> |
+| `sla` _[SLASpec](#slaspec)_ | SLA defines service-level agreement targets that drive profiling optimization. |  | Optional: \{\} <br /> |
+| `overrides` _[OverridesSpec](#overridesspec)_ | Overrides allows customizing the profiling job and the generated DynamoGraphDeployment. |  | Optional: \{\} <br /> |
+| `features` _[FeaturesSpec](#featuresspec)_ | Features controls optional Dynamo platform features in the generated deployment. |  | Optional: \{\} <br /> |
+| `searchStrategy` _[SearchStrategy](#searchstrategy)_ | SearchStrategy controls the profiling search depth. | rapid | Enum: [rapid thorough] <br /> |
+| `autoApply` _boolean_ | AutoApply indicates whether to automatically create a DynamoGraphDeployment<br />after profiling completes. If false, the generated spec is stored in status<br />for manual review and application. | true |  |
 
 
 #### DynamoGraphDeploymentRequestStatus
@@ -485,7 +487,6 @@ _Appears in:_
 
 
 DynamoGraphDeploymentRequestStatus represents the observed state of a DynamoGraphDeploymentRequest.
-The controller updates this status as the DGDR progresses through its lifecycle.
 
 
 
@@ -494,13 +495,14 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `state` _string_ | State is a high-level textual status of the deployment request lifecycle.<br />Possible values: "", "Pending", "Profiling", "Deploying", "Ready", "DeploymentDeleted", "Failed"<br />Empty string ("") represents the initial state before initialization. |  |  |
-| `backend` _string_ | Backend is extracted from profilingConfig.config.engine.backend for display purposes.<br />This field is populated by the controller and shown in kubectl output. |  | Optional: \{\} <br /> |
-| `observedGeneration` _integer_ | ObservedGeneration reflects the generation of the most recently observed spec.<br />Used to detect spec changes and enforce immutability after profiling starts. |  |  |
-| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions contains the latest observed conditions of the deployment request.<br />Standard condition types include: Validation, Profiling, SpecGenerated, DeploymentReady.<br />Conditions are merged by type on patch updates. |  |  |
-| `profilingResults` _string_ | ProfilingResults contains a reference to the ConfigMap holding profiling data.<br />Format: "configmap/<name>" |  | Optional: \{\} <br /> |
-| `generatedDeployment` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)_ | GeneratedDeployment contains the full generated DynamoGraphDeployment specification<br />including metadata, based on profiling results. Users can extract this to create<br />a DGD manually, or it's used automatically when autoApply is true.<br />Stored as RawExtension to preserve all fields including metadata.<br />For mocker backends, this contains the mocker DGD spec. |  | EmbeddedResource: \{\} <br />Optional: \{\} <br /> |
-| `deployment` _[DeploymentStatus](#deploymentstatus)_ | Deployment tracks the auto-created DGD when AutoApply is true.<br />Contains name, namespace, state, and creation status of the managed DGD. |  | Optional: \{\} <br /> |
+| `phase` _[DGDRPhase](#dgdrphase)_ | Phase is the high-level lifecycle phase of the deployment request. |  | Enum: [Pending Profiling Ready Deploying Deployed Failed] <br /> |
+| `profilingPhase` _[ProfilingPhase](#profilingphase)_ | ProfilingPhase indicates the current sub-phase of the profiling pipeline.<br />Only meaningful when Phase is "Profiling". |  | Optional: \{\} <br /> |
+| `dgdName` _string_ | DGDName is the name of the generated or created DynamoGraphDeployment. |  | Optional: \{\} <br /> |
+| `profilingJobName` _string_ | ProfilingJobName is the name of the Kubernetes Job running the profiler. |  | Optional: \{\} <br /> |
+| `observedGeneration` _integer_ | ObservedGeneration is the most recent generation observed by the controller. |  |  |
+| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions contains the latest observed conditions of the deployment request.<br />Standard condition types include: Succeeded, Validation, Profiling, SpecGenerated, DeploymentReady. |  |  |
+| `profilingResults` _[ProfilingResultsStatus](#profilingresultsstatus)_ | ProfilingResults contains the output of the profiling process including<br />Pareto-optimal configurations and the selected deployment configuration. |  | Optional: \{\} <br /> |
+| `deploymentInfo` _[DeploymentInfoStatus](#deploymentinfostatus)_ | DeploymentInfo tracks the state of the deployed DynamoGraphDeployment. |  | Optional: \{\} <br /> |
 
 
 #### DynamoGraphDeploymentScalingAdapter

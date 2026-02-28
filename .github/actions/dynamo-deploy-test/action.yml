@@ -9,6 +9,17 @@ inputs:
   namespace:
     description: 'Kubernetes namespace for deployment'
     required: true
+  registry:
+    description: 'Container registry hostname. Required for rerun self-bootstrap.'
+    required: true
+  operator_tag:
+    description: 'Operator image tag (default: main-operator). Required for rerun self-bootstrap.'
+    required: false
+    default: 'main-operator'
+  hf_token:
+    description: 'HuggingFace token for model access'
+    required: false
+    default: ''
 
   framework:
     description: 'Framework name (vllm, sglang, trtllm)'
@@ -27,16 +38,61 @@ inputs:
 runs:
   using: "composite"
   steps:
+    - name: Check if namespace exists
+      id: ns-check
+      shell: bash
+      env:
+        KUBECONFIG_B64: ${{ inputs.kubeconfig_base64 }}
+        NAMESPACE: ${{ inputs.namespace }}
+        FRAMEWORK: ${{ inputs.framework }}
+        PROFILE: ${{ inputs.profile }}
+      run: |
+        echo "::group::Check if namespace exists"
+        echo "${KUBECONFIG_B64}" | base64 -d > ${{ github.workspace }}/.kubeconfig_check
+        chmod 600 ${{ github.workspace }}/.kubeconfig_check
+        if KUBECONFIG=${{ github.workspace }}/.kubeconfig_check kubectl get namespace $NAMESPACE --ignore-not-found | grep -q $NAMESPACE; then
+          echo "exists=true" >> $GITHUB_OUTPUT
+          echo "ns=${NAMESPACE}" >> $GITHUB_OUTPUT
+          echo "Namespace $NAMESPACE exists, will reuse it"
+        else
+          echo "exists=false" >> $GITHUB_OUTPUT
+          # Generate a unique namespace for this framework+profile to avoid collisions on parallel reruns
+          # Replace underscores with hyphens for k8s naming compliance
+          PROFILE_SANITIZED="${PROFILE//_/-}"
+          SELF_NS="${NAMESPACE}-${FRAMEWORK}-${PROFILE_SANITIZED}"
+          #TODO: Improve this truncation logic. The operator creates k8s labels as "{namespace}-{deployment_name} which restricts max length to 44 chars
+          # (largest deployment name is "vllm-disagg-router" (18 chars)).
+          SELF_NS="${SELF_NS:0:44}"
+          # Remove trailing dash from truncation
+          SELF_NS="${SELF_NS%-}"
+          echo "ns=${SELF_NS}" >> $GITHUB_OUTPUT
+          echo "Namespace $NAMESPACE not found, will self-bootstrap as ${SELF_NS}"
+        fi
+        rm -f ${{ github.workspace }}/.kubeconfig_check
+        echo "::endgroup::"
+
+    - name: Setup namespace (self-bootstrap on rerun)
+      if: steps.ns-check.outputs.exists != 'true'
+      uses: ./.github/actions/setup-deploy-namespace
+      with:
+        kubeconfig_base64: ${{ inputs.kubeconfig_base64 }}
+        namespace: ${{ steps.ns-check.outputs.ns }}
+        registry: ${{ inputs.registry }}
+        operator_tag: ${{ inputs.operator_tag }}
+        hf_token: ${{ inputs.hf_token }}
+
     - name: Setup Kubeconfig
       id: setup-kubeconfig
       shell: bash
+      env:
+        NAMESPACE: ${{ steps.ns-check.outputs.ns }}
       run: |
         echo "${{ inputs.kubeconfig_base64 }}" | base64 -d > ${{ github.workspace }}/.kubeconfig
         chmod 600 ${{ github.workspace }}/.kubeconfig
         echo "KUBECONFIG=${{ github.workspace }}/.kubeconfig" >> $GITHUB_ENV
 
         export KUBECONFIG=${{ github.workspace }}/.kubeconfig
-        kubectl config set-context --current --namespace=${{ inputs.namespace }}
+        kubectl config set-context --current --namespace=${NAMESPACE}
         kubectl config get-contexts
 
     - name: Set up Python
@@ -56,7 +112,7 @@ runs:
       shell: bash
       env:
         KUBECONFIG: ${{ github.workspace }}/.kubeconfig
-        NAMESPACE: ${{ inputs.namespace }}
+        NAMESPACE: ${{ steps.ns-check.outputs.ns }}
         FRAMEWORK: ${{ inputs.framework }}
         PROFILE: ${{ inputs.profile }}
         IMAGE: ${{ inputs.image }}
@@ -73,12 +129,13 @@ runs:
           --log-cli-level=INFO
 
     - name: Cleanup Deployment
-      if: always() && inputs.skip_cleanup != 'true'
+      if: always()
       shell: bash
       env:
-        NAMESPACE: ${{ inputs.namespace }}
+        NAMESPACE: ${{ steps.ns-check.outputs.ns }}
         GRAPH_NAME: ${{ steps.deploy.outputs.graph_name }}
       run: |
+        echo "::group::Cleanup Deployment"
         set -x
         export KUBECONFIG=${{ github.workspace }}/.kubeconfig
 
@@ -93,8 +150,20 @@ runs:
               kubectl describe dynamographdeployments "$dep_name" -n $NAMESPACE
           done || true
 
-        echo "Deleting DynamoGraphDeployment: ${GRAPH_NAME}"
-        kubectl delete dynamographdeployments ${GRAPH_NAME} -n $NAMESPACE --timeout=60s || true
+        if kubectl get dynamographdeployments "${GRAPH_NAME}" -n $NAMESPACE &>/dev/null; then
+          echo "DGD ${GRAPH_NAME} still exists after test, deleting..."
+          kubectl delete dynamographdeployments ${GRAPH_NAME} -n $NAMESPACE --timeout=60s
+        else
+          echo "DGD ${GRAPH_NAME} already cleaned up by test"
+        fi
+        echo "::endgroup::"
+
+    - name: Teardown namespace (self-cleanup on rerun)
+      if: always() && steps.ns-check.outputs.exists != 'true'
+      uses: ./.github/actions/teardown-deploy-namespace
+      with:
+        kubeconfig_base64: ${{ inputs.kubeconfig_base64 }}
+        namespace: ${{ steps.ns-check.outputs.ns }}
 
     - name: Upload Test Results
       uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f #v6

@@ -97,11 +97,12 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 					Model:     "test-model",
 					Backend:   "vllm",
 					Image:     "test-profiler:latest",
-					AutoApply: true,
+					AutoApply: ptr.To(true),
 					Hardware: &nvidiacomv1beta1.HardwareSpec{
 						NumGPUsPerNode: ptr.To[int32](8),
 						GPUSKU:         "H100-SXM5-80GB",
 						VRAMMB:         ptr.To(81920.0),
+						TotalGPUs:      ptr.To[int32](128),
 					},
 					SLA: &nvidiacomv1beta1.SLASpec{
 						TTFT: ptr.To(100.0),
@@ -153,6 +154,7 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 						NumGPUsPerNode: ptr.To[int32](8),
 						GPUSKU:         "H100-SXM5-80GB",
 						VRAMMB:         ptr.To(81920.0),
+						TotalGPUs:      ptr.To[int32](128),
 					},
 					SLA: &nvidiacomv1beta1.SLASpec{
 						TTFT: ptr.To(100.0),
@@ -227,6 +229,7 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 						NumGPUsPerNode: ptr.To[int32](8),
 						GPUSKU:         "H100-SXM5-80GB",
 						VRAMMB:         ptr.To(81920.0),
+						TotalGPUs:      ptr.To[int32](128),
 					},
 					SLA: &nvidiacomv1beta1.SLASpec{
 						TTFT: ptr.To(100.0),
@@ -313,6 +316,7 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 						NumGPUsPerNode: ptr.To[int32](8),
 						GPUSKU:         "H100-SXM5-80GB",
 						VRAMMB:         ptr.To(81920.0),
+						TotalGPUs:      ptr.To[int32](128),
 					},
 					SLA: &nvidiacomv1beta1.SLASpec{
 						TTFT: ptr.To(100.0),
@@ -373,6 +377,7 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 						NumGPUsPerNode: ptr.To[int32](8),
 						GPUSKU:         "H100-SXM5-80GB",
 						VRAMMB:         ptr.To(81920.0),
+						TotalGPUs:      ptr.To[int32](128),
 					},
 					SLA: &nvidiacomv1beta1.SLASpec{
 						TTFT: ptr.To(100.0),
@@ -483,12 +488,13 @@ spec:
 						NumGPUsPerNode: ptr.To[int32](8),
 						GPUSKU:         "H100-SXM5-80GB",
 						VRAMMB:         ptr.To(81920.0),
+						TotalGPUs:      ptr.To[int32](128),
 					},
 					SLA: &nvidiacomv1beta1.SLASpec{
 						TTFT: ptr.To(100.0),
 						ITL:  ptr.To(1500.0),
 					},
-					AutoApply: true,
+					AutoApply: ptr.To(true),
 				},
 			}
 
@@ -607,6 +613,7 @@ spec:
 						NumGPUsPerNode: ptr.To[int32](8),
 						GPUSKU:         "H100-SXM5-80GB",
 						VRAMMB:         ptr.To(81920.0),
+						TotalGPUs:      ptr.To[int32](128),
 					},
 					SLA: &nvidiacomv1beta1.SLASpec{
 						TTFT: ptr.To(100.0),
@@ -682,12 +689,13 @@ spec:
 						NumGPUsPerNode: ptr.To[int32](8),
 						GPUSKU:         "H100-SXM5-80GB",
 						VRAMMB:         ptr.To(81920.0),
+						TotalGPUs:      ptr.To[int32](128),
 					},
 					SLA: &nvidiacomv1beta1.SLASpec{
 						TTFT: ptr.To(100.0),
 						ITL:  ptr.To(1500.0),
 					},
-					AutoApply: true,
+					AutoApply: ptr.To(true),
 				},
 			}
 
@@ -801,6 +809,7 @@ var _ = Describe("DGDR Validation", func() {
 						NumGPUsPerNode: ptr.To[int32](8),
 						GPUSKU:         "H100-SXM5-80GB",
 						VRAMMB:         ptr.To(81920.0),
+						TotalGPUs:      ptr.To[int32](128),
 					},
 					SLA: &nvidiacomv1beta1.SLASpec{
 						TTFT: ptr.To(100.0),
@@ -824,6 +833,7 @@ var _ = Describe("DGDR Validation", func() {
 						NumGPUsPerNode: ptr.To[int32](8),
 						GPUSKU:         "H100-SXM5-80GB",
 						VRAMMB:         ptr.To(81920.0),
+						TotalGPUs:      ptr.To[int32](128),
 					},
 					SLA: &nvidiacomv1beta1.SLASpec{
 						TTFT: ptr.To(100.0),
@@ -885,6 +895,7 @@ var _ = Describe("DGDR Profiler Arguments", func() {
 						GPUSKU:         "H200-SXM",
 						NumGPUsPerNode: ptr.To[int32](8),
 						VRAMMB:         ptr.To(81920.0),
+						TotalGPUs:      ptr.To[int32](128),
 					},
 					SLA: &nvidiacomv1beta1.SLASpec{
 						TTFT: ptr.To(50.0),
@@ -949,6 +960,7 @@ var _ = Describe("DGDR Profiler Arguments", func() {
 						GPUSKU:         "H200-SXM",
 						NumGPUsPerNode: ptr.To[int32](8),
 						VRAMMB:         ptr.To(81920.0),
+						TotalGPUs:      ptr.To[int32](128),
 					},
 					SLA: &nvidiacomv1beta1.SLASpec{
 						TTFT: ptr.To(50.0),
@@ -1012,6 +1024,7 @@ var _ = Describe("DGDR Profiler Arguments", func() {
 						NumGPUsPerNode: ptr.To[int32](8),
 						GPUSKU:         "H100-SXM5-80GB",
 						VRAMMB:         ptr.To(81920.0),
+						TotalGPUs:      ptr.To[int32](128),
 					},
 					SLA: &nvidiacomv1beta1.SLASpec{
 						TTFT: ptr.To(50.0),
@@ -1093,6 +1106,7 @@ var _ = Describe("DGDR Error Handling", func() {
 						NumGPUsPerNode: ptr.To[int32](8),
 						GPUSKU:         "H100-SXM5-80GB",
 						VRAMMB:         ptr.To(81920.0),
+						TotalGPUs:      ptr.To[int32](128),
 					},
 					SLA: &nvidiacomv1beta1.SLASpec{
 						TTFT: ptr.To(100.0),
@@ -1668,6 +1682,7 @@ spec:
 						NumGPUsPerNode: ptr.To[int32](8),
 						GPUSKU:         "H100-SXM5-80GB",
 						VRAMMB:         ptr.To(81920.0),
+						TotalGPUs:      ptr.To[int32](128),
 					},
 					SLA: &nvidiacomv1beta1.SLASpec{
 						TTFT: ptr.To(100.0),
@@ -1732,6 +1747,7 @@ spec:
 						NumGPUsPerNode: ptr.To[int32](8),
 						GPUSKU:         "H100-SXM5-80GB",
 						VRAMMB:         ptr.To(81920.0),
+						TotalGPUs:      ptr.To[int32](128),
 					},
 					SLA: &nvidiacomv1beta1.SLASpec{
 						TTFT: ptr.To(100.0),
@@ -1776,6 +1792,7 @@ spec:
 						NumGPUsPerNode: ptr.To[int32](8),
 						GPUSKU:         "H100-SXM5-80GB",
 						VRAMMB:         ptr.To(81920.0),
+						TotalGPUs:      ptr.To[int32](128),
 					},
 					SLA: &nvidiacomv1beta1.SLASpec{
 						TTFT: ptr.To(100.0),
@@ -1864,11 +1881,12 @@ spec:
 					Model:     "test-model",
 					Backend:   "vllm",
 					Image:     "test-profiler:latest",
-					AutoApply: true,
+					AutoApply: ptr.To(true),
 					Hardware: &nvidiacomv1beta1.HardwareSpec{
 						NumGPUsPerNode: ptr.To[int32](8),
 						GPUSKU:         "H100-SXM5-80GB",
 						VRAMMB:         ptr.To(81920.0),
+						TotalGPUs:      ptr.To[int32](128),
 					},
 					SLA: &nvidiacomv1beta1.SLASpec{
 						TTFT: ptr.To(100.0),
@@ -1961,6 +1979,7 @@ spec:
 						NumGPUsPerNode: ptr.To[int32](8),
 						GPUSKU:         "H100-SXM5-80GB",
 						VRAMMB:         ptr.To(81920.0),
+						TotalGPUs:      ptr.To[int32](128),
 					},
 					SLA: &nvidiacomv1beta1.SLASpec{
 						TTFT: ptr.To(100.0),
