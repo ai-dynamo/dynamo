@@ -883,7 +883,9 @@ class HandlerBase(BaseGenerativeHandler):
             regex = guided_decoding.get("regex")
             choice = guided_decoding.get("choice")
             if choice and not regex:
-                regex = "(" + "|".join(re.escape(c) for c in choice) + ")"
+                valid_choices = [c for c in choice if c is not None]
+                if valid_choices:
+                    regex = "(" + "|".join(re.escape(c) for c in valid_choices) + ")"
 
             overrides["guided_decoding"] = GuidedDecodingParams(
                 json=guided_decoding.get("json"),
