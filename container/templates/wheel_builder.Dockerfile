@@ -391,6 +391,7 @@ FROM wheel_builder_base AS runtime_wheel_builder
 
 {% if target not in ("dev", "local-dev") %}
 # Copy source code (order matters for layer caching)
+COPY .cargo/ /opt/dynamo/.cargo/
 COPY pyproject.toml README.md LICENSE Cargo.toml Cargo.lock rust-toolchain.toml hatch_build.py /opt/dynamo/
 COPY lib/ /opt/dynamo/lib/
 COPY components/ /opt/dynamo/components/
