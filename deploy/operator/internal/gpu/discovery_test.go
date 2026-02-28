@@ -651,7 +651,7 @@ func TestListDCGMExporterPods(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 
-			var k8sClient client.Client
+			var k8sClient client.Reader
 
 			if tt.errorClient {
 				k8sClient = &errorListClient{}
@@ -785,7 +785,7 @@ func TestGetCloudProviderInfo(t *testing.T) {
 //
 
 type errorListClient struct {
-	client.Client
+	client.Reader
 }
 
 func (e *errorListClient) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {

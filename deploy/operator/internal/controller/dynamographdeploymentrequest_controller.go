@@ -850,7 +850,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) validateGPUHardwareInfo(ctx con
 				"\n   vramMb: 81920")
 	}
 
-	_, err := gpu.DiscoverGPUsFromDCGM(ctx, r.Client, r.GPUDiscoveryCache)
+	_, err := gpu.DiscoverGPUsFromDCGM(ctx, r.APIReader, r.GPUDiscoveryCache)
     if err == nil {
         // GPU discovery is available, validation passes
         return nil
@@ -886,7 +886,7 @@ func GetGPUDiscoveryFailureReason(err error) string {
         return "failed to initialize Helm client (RBAC, kubeconfig, or Helm driver issue)"
     case strings.Contains(errMsg, "timeout waiting for dcgm exporter pods"):
         return "timeout while waiting for DCGM exporter pods to become ready"
-    case strings.Contains(errMsg, "get"):
+    case strings.Contains(errMsg, "http get for"):
         return "failed to reach DCGM metrics endpoint on pod (network/port issue)"
     case strings.Contains(errMsg, "metrics endpoint") &&
         strings.Contains(errMsg, "status"):
@@ -1226,22 +1226,25 @@ func (r *DynamoGraphDeploymentRequestReconciler) enrichHardwareFromDiscovery(ctx
 	logger := log.FromContext(ctx)
 
     logger.Info("Attempting GPU discovery for profiling job")
-    discoveredInfo, err := gpu.DiscoverGPUsFromDCGM(ctx, r.Client, r.GPUDiscoveryCache)
-    if err != nil && hasManualConfig != nil {
+    discoveredInfo, err := gpu.DiscoverGPUsFromDCGM(ctx, r.APIReader, r.GPUDiscoveryCache)
+    if err != nil && hasManualConfig == false {
         // This path is expected for namespace-restricted operators without node read permissions
         // Refine the logger message
         reason := GetGPUDiscoveryFailureReason(err)
         logger.Info("GPU discovery not available, using manual hardware configuration from profiling config",
             "reason", reason, "error", err.Error())
 		return err
-    } else {
-        gpuInfo = discoveredInfo
-        logger.Info("GPU discovery completed successfully",
-            "gpusPerNode", gpuInfo.GPUsPerNode,
-            "model", gpuInfo.Model,
-            "vramMiB", gpuInfo.VRAMPerGPU,
-            "system", gpuInfo.System)
     }
+
+    gpuInfo = discoveredInfo
+    logger.Info("GPU discovery completed successfully",
+        "gpusPerNode", gpuInfo.GPUsPerNode,
+        "model", gpuInfo.Model,
+        "vramMiB", gpuInfo.VRAMPerGPU,
+		"nodesWithGPUs", gpuInfo.NodesWithGPUs,
+		"totalGpus", gpuInfo.GPUsPerNode*gpuInfo.NodesWithGPUs,
+        "system", gpuInfo.System)
+
 
 	if hw.GPUSKU == "" {
 		hw.GPUSKU = gpuInfo.Model
