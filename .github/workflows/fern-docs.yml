@@ -296,11 +296,15 @@ jobs:
         env:
           FERN_TOKEN: ${{ secrets.FERN_TOKEN }}
         run: |
-          OUTPUT=$(fern generate --docs --preview 2>&1)
-          FERN_EXIT=$?
+          if OUTPUT=$(fern generate --docs --preview 2>&1); then
+            FERN_EXIT=0
+          else
+            FERN_EXIT=$?
+          fi
           echo "$OUTPUT"
           if [ $FERN_EXIT -ne 0 ]; then
-            echo "::warning::Fern docs preview generation failed (exit $FERN_EXIT)"
+            echo "::error::Fern docs preview generation failed (exit $FERN_EXIT)"
+            exit 1
           fi
           URL=$(echo "$OUTPUT" | grep -oP 'Published docs to \K\S+') || true
           if [ -n "$URL" ]; then
