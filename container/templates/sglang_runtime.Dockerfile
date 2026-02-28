@@ -66,6 +66,8 @@ COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/nixl/ /o
 COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
 
 ENV SGLANG_VERSION="${RUNTIME_IMAGE_TAG%%-*}"
+
+{% if target not in ("dev", "local-dev") %}
 # Install packages as root to ensure they go to system location (/usr/local/lib/python3.12/dist-packages)
 ARG ENABLE_GPU_MEMORY_SERVICE
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
@@ -83,7 +85,22 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
         fi; \
         pip install --no-cache-dir --break-system-packages "$GMS_WHEEL"; \
     fi
+{% else %}
+# Dev/local-dev: skip dynamo wheel install (users build from source via cargo build + maturin develop).
+# Install NIXL wheel, gpu_memory_service wheel (if enabled), and sglang.
+ARG ENABLE_GPU_MEMORY_SERVICE
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    export PIP_CACHE_DIR=/root/.cache/pip && \
+    pip install --break-system-packages \
+        /opt/dynamo/wheelhouse/nixl/nixl*.whl \
+        sglang==${SGLANG_VERSION} && \
+    if [ "${ENABLE_GPU_MEMORY_SERVICE}" = "true" ]; then \
+        GMS_WHEEL=$(ls /opt/dynamo/wheelhouse/gpu_memory_service*.whl 2>/dev/null | head -1); \
+        if [ -n "$GMS_WHEEL" ]; then pip install --no-cache-dir --break-system-packages "$GMS_WHEEL"; fi; \
+    fi
+{% endif %}
 
+# TODO: optimize by skipping /workspace COPYs for dev/local-dev (bind-mounted from host, these get shadowed)
 # Copy benchmarks after wheel install so benchmarks changes don't invalidate the layer above
 # Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
 COPY --chmod=775 --chown=dynamo:0 benchmarks/ /workspace/benchmarks/
