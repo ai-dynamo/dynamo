@@ -155,7 +155,6 @@ impl KvEventPublisher {
             return Err(to_pyerr(anyhow::anyhow!("kv_block_size cannot be 0")));
         }
 
-
         // Extract component from endpoint
         let component = endpoint.inner.component().clone();
 
