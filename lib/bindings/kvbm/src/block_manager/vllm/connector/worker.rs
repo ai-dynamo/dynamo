@@ -270,7 +270,7 @@ impl Worker for KvConnectorWorker {
                         expected_immediate_ops = slot_info.expected_immediate_ops,
                         "replacing completed Phase 1 slot with Phase 2 slot"
                     );
-                    self.connector.remove_slot(&slot_info.request_id);
+                    self.connector.remove_slot(&slot_info.request_id)?;
                     self.already_signaled_offloading.remove(&slot_info.request_id);
                 } else {
                     // Phase 1 is NOT complete but Phase 2 arrived. This violates the
@@ -316,7 +316,7 @@ impl Worker for KvConnectorWorker {
         // immediately enqueue the onboarding operations
         for operation in onboarding_operations {
             let request_id = operation.request_id.clone();
-            self.connector.enqueue_request(operation);
+            self.connector.enqueue_request(operation)?;
             let state = self
                 .request_lifecycle
                 .entry(request_id)
@@ -336,9 +336,9 @@ impl Worker for KvConnectorWorker {
         self.bound = false;
         self.iteration = 0; // always reset; leader drives the counter
         self.layers_complete = 0;
-        self.connector
-            .mark_iteration_complete()
-            .expect("failed to mark iteration complete");
+        if let Err(e) = self.connector.mark_iteration_complete() {
+            tracing::error!("failed to mark iteration complete: {e}; scheduler channel disconnected");
+        }
     }
 
     /// Trigger layer-wise completion signals.
@@ -372,7 +372,7 @@ impl Worker for KvConnectorWorker {
                     operation_id = %operation.uuid,
                     "Enqueuing offload operation to scheduler"
                 );
-                self.connector.enqueue_request(operation.clone());
+                self.connector.enqueue_request(operation.clone())?;
             }
         }
         Ok(())
@@ -444,7 +444,9 @@ impl Worker for KvConnectorWorker {
                 // Terminal request is fully complete at connector; retire slot now
                 // to avoid stale-slot collisions when a reused request_id appears.
                 if self.connector.has_slot(&request_id) {
-                    self.connector.remove_slot(&request_id);
+                    if let Err(e) = self.connector.remove_slot(&request_id) {
+                        tracing::error!(request_id, "failed to remove slot: {e}; scheduler disconnected");
+                    }
                 }
                 is_finished_offloading.insert(request_id);
                 continue;
@@ -516,7 +518,9 @@ impl Worker for KvConnectorWorker {
                 state.offloading_pending = false;
                 // Once terminal + offload-complete, retire connector slot.
                 if state.terminal_seen && self.connector.has_slot(request_id) {
-                    self.connector.remove_slot(request_id);
+                    if let Err(e) = self.connector.remove_slot(request_id) {
+                        tracing::error!(request_id, "failed to remove slot: {e}; scheduler disconnected");
+                    }
                 }
             }
             self.already_signaled_offloading.insert(request_id.clone());
