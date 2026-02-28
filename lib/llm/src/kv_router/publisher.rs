@@ -476,12 +476,18 @@ async fn run_event_processor_loop<P: EventSink + Send + Sync + 'static>(
 
                 tracing::trace!("Event processor for worker_id {} processing event: {:?}", worker_id, event.data);
 
+                // Check if dp_rank changed before updating state
+                let dp_rank_changed = batching_state.has_pending() && event.dp_rank != batching_state.last_dp_rank;
+                
                 batching_state.last_event_id = event.event_id;
                 batching_state.last_dp_rank = event.dp_rank;
 
                 match event.data {
                     KvCacheEventData::Removed(removed_data) => {
-                        if batching_state.pending_stored.is_some() {
+                        // Flush if switching from Stored, or if dp_rank changed
+                        let should_flush = batching_state.pending_stored.is_some() || dp_rank_changed;
+                        
+                        if should_flush {
                             batching_state.flush(&publisher, &local_indexer, worker_id).await;
                         }
 
@@ -492,12 +498,13 @@ async fn run_event_processor_loop<P: EventSink + Send + Sync + 'static>(
                         }
                     }
                     KvCacheEventData::Stored(stored_data) => {
+                        // Check if we should flush: non-sequential parent_hash, switching from Removed, or dp_rank changed
                         let should_flush = if let Some(ref pending) = batching_state.pending_stored {
                             let last_block_hash = pending.blocks.last().map(|b| b.block_hash);
                             let is_sequential = stored_data.parent_hash == last_block_hash;
-                            !is_sequential
+                            !is_sequential || dp_rank_changed
                         } else {
-                            batching_state.pending_removed.is_some()
+                            batching_state.pending_removed.is_some() || dp_rank_changed
                         };
 
                         if should_flush {
@@ -3112,5 +3119,73 @@ mod event_processor_tests {
             2,
             "Switching from Removed to Stored should cause immediate flush, resulting in 2 separate events"
         );
+    }
+
+    /// Test that dp_rank change causes immediate flush
+    #[tokio::test]
+    async fn test_dp_rank_change_causes_flush() {
+        let timeout_us = 100_000; // 100ms timeout
+        
+        let (tx, rx) = mpsc::unbounded_channel::<KvCacheEvent>();
+        let publisher = MockPublisher::new();
+        let publisher_clone = publisher.clone();
+        let cancellation_token = CancellationToken::new();
+
+        let handle = tokio::spawn(async move {
+            run_event_processor_loop(publisher_clone, 1, cancellation_token, rx, None, timeout_us)
+                .await
+        });
+
+        // Send events with dp_rank=0
+        for i in 0..3 {
+            tx.send(KvCacheEvent {
+                event_id: i as u64,
+                data: KvCacheEventData::Removed(KvCacheRemoveData {
+                    block_hashes: vec![ExternalSequenceBlockHash(i as u64)],
+                }),
+                dp_rank: 0,
+            }).unwrap();
+            tokio::task::yield_now().await;
+        }
+
+        // Send events with dp_rank=1 (should cause flush of previous batch)
+        for i in 3..6 {
+            tx.send(KvCacheEvent {
+                event_id: i as u64,
+                data: KvCacheEventData::Removed(KvCacheRemoveData {
+                    block_hashes: vec![ExternalSequenceBlockHash(i as u64)],
+                }),
+                dp_rank: 1,
+            }).unwrap();
+            tokio::task::yield_now().await;
+        }
+
+        // Give time for processing
+        tokio::time::sleep(tokio::time::Duration::from_millis(2)).await;
+
+        drop(tx);
+        handle.await.unwrap();
+
+        let events = publisher.get_events();
+
+        // Should have 2 events: one for dp_rank=0 batch, one for dp_rank=1 batch
+        assert_eq!(
+            events.len(),
+            2,
+            "dp_rank change should cause immediate flush, resulting in 2 separate events"
+        );
+
+        // Verify all 6 block hashes are accounted for
+        let total_hashes: usize = events
+            .iter()
+            .map(|e| {
+                if let KvCacheEventData::Removed(data) = &e.event.data {
+                    data.block_hashes.len()
+                } else {
+                    0
+                }
+            })
+            .sum();
+        assert_eq!(total_hashes, 6, "All 6 block hashes should be accounted for");
     }
 }
