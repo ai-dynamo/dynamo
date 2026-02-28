@@ -540,16 +540,11 @@ impl ConcurrentRadixTree {
     }
 
     /// Dump the radix tree as a series of RouterEvents that can reconstruct the tree.
-    /// Uses BFS traversal to ensure that the tree reconstruction is unique,
-    /// though the exact event ordering will be lost.
-    fn dump_tree_as_events(
-        &self,
-        lookup: &FxHashMap<WorkerWithDpRank, WorkerLookup>,
-    ) -> Vec<RouterEvent> {
-        tracing::debug!(
-            "Dumping concurrent radix tree as events (contains information about {:?} workers)",
-            lookup.len()
-        );
+    /// Uses BFS traversal over the shared tree. Since all worker/block membership is
+    /// stored in the tree nodes themselves, this can be called from any thread without
+    /// needing per-thread lookup state.
+    fn dump_tree_as_events(&self) -> Vec<RouterEvent> {
+        tracing::debug!("Dumping concurrent radix tree as events");
 
         let mut events = Vec::new();
         let mut event_id = 0u64;
@@ -623,11 +618,10 @@ impl SyncIndexer for ConcurrentRadixTree {
                 WorkerTask::RemoveWorker(worker_id) => {
                     self.remove_or_clear_worker_blocks(&mut lookup, worker_id, false);
                 }
-                WorkerTask::DumpEvents(sender) => {
-                    let events = self.dump_tree_as_events(&lookup);
-                    if let Err(e) = sender.send(Ok(events)) {
-                        tracing::warn!("Failed to send events: {:?}", e);
-                    }
+                WorkerTask::DumpEvents(_sender) => {
+                    // Handled directly via dump_events() on the shared tree.
+                    // Should not be reached, but respond with empty to avoid blocking.
+                    let _ = _sender.send(Ok(Vec::new()));
                 }
                 WorkerTask::Terminate => {
                     break;
@@ -640,7 +634,10 @@ impl SyncIndexer for ConcurrentRadixTree {
     }
 
     fn find_matches(&self, sequence: &[LocalBlockHash], early_exit: bool) -> OverlapScores {
-        // Delegate to the existing find_matches method
         self.find_matches_impl(sequence, early_exit)
+    }
+
+    fn dump_events(&self) -> Option<Vec<RouterEvent>> {
+        Some(self.dump_tree_as_events())
     }
 }

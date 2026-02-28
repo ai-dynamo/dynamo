@@ -385,6 +385,14 @@ pub trait SyncIndexer: Send + Sync + 'static {
 
     /// Find matches for a sequence of block hashes.
     fn find_matches(&self, sequence: &[LocalBlockHash], early_exit: bool) -> OverlapScores;
+
+    /// Dump events directly from the shared structure, bypassing worker channels.
+    /// Returns `Some(events)` for backends whose tree state is fully shared (e.g.
+    /// ConcurrentRadixTree). Returns `None` for backends that keep per-thread
+    /// state and must dump via the worker channel.
+    fn dump_events(&self) -> Option<Vec<RouterEvent>> {
+        None
+    }
 }
 
 /// Generic wrapper that provides [`KvIndexerInterface`] for any [`SyncIndexer`] backend.
@@ -581,6 +589,12 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
     }
 
     async fn dump_events(&self) -> Result<Vec<RouterEvent>, KvRouterError> {
+        // Fast path: backend can dump directly from shared state (e.g. ConcurrentRadixTree).
+        if let Some(events) = self.backend.dump_events() {
+            return Ok(events);
+        }
+
+        // Slow path: collect from each worker thread via channel (e.g. PositionalIndexer).
         let mut receivers = Vec::new();
 
         for channel in &self.worker_event_channels {
