@@ -223,6 +223,8 @@ class name_prefix:
     FRONTEND = "dynamo_frontend"
     # Prefix for KV router metrics (used with router_id label)
     ROUTER = "dynamo_router"
+    # Prefix for tokio runtime metrics
+    TOKIO = "dynamo_tokio"
 
 
 class router:
@@ -299,6 +301,23 @@ class task_tracker:
     TASKS_REJECTED_TOTAL = "tasks_rejected_total"
 
 
+class tokio_perf:
+    """Tokio runtime metrics"""
+
+    WORKER_MEAN_POLL_TIME_NS = "worker_mean_poll_time_ns"
+    GLOBAL_QUEUE_DEPTH = "global_queue_depth"
+    BUDGET_FORCED_YIELD_TOTAL = "budget_forced_yield_total"
+    WORKER_BUSY_RATIO = "worker_busy_ratio"
+    WORKER_PARK_COUNT_TOTAL = "worker_park_count_total"
+    WORKER_LOCAL_QUEUE_DEPTH = "worker_local_queue_depth"
+    WORKER_STEAL_COUNT_TOTAL = "worker_steal_count_total"
+    WORKER_OVERFLOW_COUNT_TOTAL = "worker_overflow_count_total"
+    BLOCKING_THREADS = "blocking_threads"
+    BLOCKING_IDLE_THREADS = "blocking_idle_threads"
+    BLOCKING_QUEUE_DEPTH = "blocking_queue_depth"
+    ALIVE_TASKS = "alive_tasks"
+
+
 class work_handler:
     """Work handler Prometheus metric names"""
 
@@ -315,5 +334,9 @@ class work_handler:
     REQUEST_DURATION_SECONDS = "request_duration_seconds"
     # Total number of errors in work handler processing
     ERRORS_TOTAL = "errors_total"
+    # Network transit: frontend send to backend receive (wall-clock, cross-process)
+    NETWORK_TRANSIT_SECONDS = "network_transit_seconds"
+    # Backend processing: handle_payload entry to first response sent
+    TIME_TO_FIRST_RESPONSE_SECONDS = "time_to_first_response_seconds"
     # Label name for error type classification
     ERROR_TYPE_LABEL = "error_type"
