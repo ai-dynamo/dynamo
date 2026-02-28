@@ -156,14 +156,13 @@ minversion = "8.0"
 tmp_path_retention_policy = "failed"
 
 # NOTE
-# We ignore model.py explicitly here to avoid mypy errors with duplicate modules
-# pytest overrides the default mypy exclude configuration and so we exclude here as well
+# Keep these ignores in pytest collection to avoid duplicate-module collection
+# errors (for example, backend trees that include multiple model.py files).
 addopts = [
     "-ra",
     "--showlocals",
     "--strict-markers",
     "--strict-config",
-    "--mypy",
     "--ignore-glob=*model.py",
     "--ignore-glob=*vllm_integration*",
     "--ignore-glob=*trtllm_integration*",
@@ -332,4 +331,3 @@ extra_content_footer = [
    <script type="text/javascript">if (typeof _satellite !== "undefined") {_satellite.pageBottom();}</script>
    ''',
 ]
-

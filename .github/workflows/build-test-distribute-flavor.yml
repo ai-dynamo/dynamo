@@ -32,6 +32,11 @@ on:
         required: false
         type: boolean
         default: true
+      run_mypy_check:
+        description: 'Whether to run mypy check in this matrix job'
+        required: false
+        type: boolean
+        default: false
       cpu_only_test_markers:
         description: 'CPU-only pytest markers'
         required: false
@@ -330,6 +335,53 @@ jobs:
           else
             echo "✅ Sanity check passed"
           fi
+      - name: Run mypy (shared + framework)
+        if: ${{ inputs.run_mypy_check }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Shared Python components that should be checked in every framework pipeline.
+          SHARED_COMPONENT_TARGETS=(
+            components/src/dynamo/common
+            components/src/dynamo/frontend
+            components/src/dynamo/global_planner
+            components/src/dynamo/global_router
+            components/src/dynamo/mocker
+            components/src/dynamo/planner
+            components/src/dynamo/router
+          )
+
+          # Backend-specific target must match the runtime image used in this job.
+          case "${{ inputs.framework }}" in
+            vllm)
+              BACKEND_COMPONENT_TARGET="components/src/dynamo/vllm"
+              ;;
+            sglang)
+              BACKEND_COMPONENT_TARGET="components/src/dynamo/sglang"
+              ;;
+            trtllm)
+              BACKEND_COMPONENT_TARGET="components/src/dynamo/trtllm"
+              ;;
+            *)
+              echo "Unsupported framework for mypy: ${{ inputs.framework }}"
+              exit 1
+              ;;
+          esac
+
+          COMPONENT_TARGETS=("${SHARED_COMPONENT_TARGETS[@]}" "${BACKEND_COMPONENT_TARGET}")
+
+          echo "Running mypy for components: ${COMPONENT_TARGETS[*]}"
+          docker run --rm -w /workspace \
+            --network host \
+            "${{ steps.calculate-target-tag.outputs.test_image }}" \
+            bash -ec "python3 -m mypy ${COMPONENT_TARGETS[*]}"
+
+          echo "Running mypy for python bindings package: dynamo"
+          docker run --rm -w /workspace \
+            --network host \
+            "${{ steps.calculate-target-tag.outputs.test_image }}" \
+            bash -ec "MYPYPATH=lib/bindings/python/src python3 -m mypy -p dynamo"
       # Run CPU-only tests first (parallelized for speed)
       # These are unit tests marked with gpu_0 that don't require GPU hardware
       - name: Run CPU-only tests (parallelized)
@@ -342,7 +394,7 @@ jobs:
           framework: ${{ inputs.framework }}
           test_type: "pre_merge_cpu"
           platform_arch: ${{ inputs.platform }}
-          enable_mypy: 'true'
+          enable_mypy: 'false' # mypy runs in dedicated step above
           hf_token: ${{ secrets.HF_TOKEN }}
           parallel_mode: 'auto'
           dind_as_sidecar: 'true'
