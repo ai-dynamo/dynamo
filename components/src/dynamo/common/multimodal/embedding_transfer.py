@@ -599,33 +599,35 @@ class NixlWriteEmbeddingSender(AbstractEmbeddingSender):
 class NixlWriteEmbeddingReceiver(AbstractEmbeddingReceiver):
     """
     Counter part of 'NixlWriteEmbeddingSender', see 'NixlWriteEmbeddingSender' for details.
+    The receiver manages a ring buffer for sender to write the embeddings into, and respond
+    to the sender's transfer request with the buffer information for the WRITE transfer.
     """
 
     def __init__(self, buffer_size=2 * 8 * 1024 * 1024 * 256 * 2):
-        # buffer_size is product of:
+        # the default buffer_size is the product of:
         # 2 (typical dtype size float16)
         # 8 * 1024 (typical embedding hidden size for Qwen-VL)
         # 256 * 1024 (1024 count of 256 mm token item)
         # 2 (extra copies) = 8 GB memory
-        # ring buffer imple without wrapped around allocation, i.e. will allocate from
+        # ring buffer without wrapped around allocation, i.e. will allocate from
         # start if the last remaining buffer is not enough
         self.ring_buffer = RingBuffer(buffer_size)
         self.transfer_tensor = self.ring_buffer.buffer_tensor
 
+        # NIXL agent setup
         self.receiver_id = f"receiver_{str(uuid.uuid4())}"
         self.nixl_agent = nixl_agent(
             self.receiver_id, nixl_agent_config(num_threads=8, capture_telemetry=True)
         )
         self.remote_agents = {}
         self.reg_descs = self.nixl_agent.register_memory(self.transfer_tensor)
-
         self.agent_metadata = self.nixl_agent.get_agent_metadata()
 
         self.id_counter = MonolithicCounter()
         self.to_buffer_id = {}
 
     async def receive_embeddings(
-        self, request: TransferRequest
+        self, request: TransferRequest, allocation_timeout=10
     ) -> tuple[int, torch.Tensor]:
         """
         Receive precomputed embeddings for a given request ID.
@@ -651,9 +653,8 @@ class NixlWriteEmbeddingReceiver(AbstractEmbeddingReceiver):
                 base64.b64decode(nixl_request.agent_metadata)
             )
 
-        # Extract dynamic shape, metadata, and auxiliary data
-        embeddings_shape = request.embeddings_shape
-        embeddings_dtype = torch_dtype_from_string(request.embedding_dtype_str)
+        # Allocate tensor to be written into.
+        start_time = time.perf_counter()
         while True:
             buffer_id, transfer_tensor = self.ring_buffer.get_buffer(
                 nixl_request.tensor_size
@@ -661,19 +662,28 @@ class NixlWriteEmbeddingReceiver(AbstractEmbeddingReceiver):
             if transfer_tensor is not None:
                 break
 
-            # [gluo FIXME] This approach will results in deadlock due to
-            # the current usage:
-            # concurrent requests may request 2 buffer in order,
-            # if all request get the first buffer and exhaust the ring buffer,
-            # then no request can get the second buffer and proceed.
-            # Must provide an API for batch allocation so some requests can
-            # proceed.
-            #
             # No available buffer, wait for a short period and retry.
             # The receiver side should have concurrent work on other
             # allocated buffer and release them in a timely manner,
             # so the wait time should not be long.
+            #
+            # NOTE This approach can result in deadlock due to
+            # the current usage of the receiver:
+            # The case of concurrent requests may request 2 buffer in order,
+            # if all request get the first buffer and exhaust the ring buffer,
+            # then no request can get the second buffer and proceed.
+            # On raising the timeout error from this function, the caller must
+            # release all previously allocated tensor of the request to unblock
+            # other requests, and retry the request after some delay to avoid
+            # repeated deadlock.
+            # [gluo WIP] provide an API for batch allocation so some requests can
+            # proceed.
+            if time.perf_counter() - start_time > allocation_timeout:
+                raise TimeoutError("Timeout while waiting for available buffer.")
             await asyncio.sleep(0.005)
+        # view as tensor matching the source tensor..
+        embeddings_shape = request.embeddings_shape
+        embeddings_dtype = torch_dtype_from_string(request.embedding_dtype_str)
         embedding_tensor = transfer_tensor.view(dtype=embeddings_dtype).view(
             embeddings_shape
         )
@@ -700,12 +710,15 @@ class NixlWriteEmbeddingReceiver(AbstractEmbeddingReceiver):
 
         # await for write notification
         start = time.perf_counter()
-        logged = False
         done_signal = str(tensor_id).encode()
-        # 'check_remote_xfer_done' will find occurence of the message in substring which is not
-        # what we want, we want exact match, need to parse by ourselves
         found = False
+        logged = False
         while not found:
+            # parse notifications to find done signal, we can't use 'check_remote_xfer_done' API
+            # because it match requested string pattern in substring of the notifications instead
+            # of exact match, which is not what we want, i.e. for two done signal "1" and "11",
+            # 'check_remote_xfer_done("1")' will return True for both signal and "11" will be cleared
+            # as a result, leading the subsequent 'check_remote_xfer_done("1")' returns False.
             notifs = self.nixl_agent.update_notifs()
             if nixl_request.sender_agent_id in notifs:
                 for notif in notifs[nixl_request.sender_agent_id]:
@@ -769,11 +782,15 @@ def remote_release_overwrite(self) -> None:
 nixl_connect.Remote._release = remote_release_overwrite
 
 
-class NixlPersistentEmbeddingSender(AbstractEmbeddingSender):
+class NixlReadEmbeddingSender(AbstractEmbeddingSender):
     """
-    Initial implementation of another usage of NIXL connect library that persists
+    Initial implementation of NIXL READ based transfer. This implementation uses
+    a monkey-patched version of 'nixl_connect' wrapper library to persist
     connection (agent registration) and descriptors across multiple send operations
     to avoid the overhead of repeated connection setup and teardown.
+    NOTE This implementation or the use of 'nixl_connect' needs to be revisited as
+    the benchmarking result is unexpectedly slow. Keeping it now for completeness,
+    i.e. provide NIXL WRITE based and READ based transfer classes.
     """
 
     def __init__(self):
@@ -808,8 +825,9 @@ class NixlPersistentEmbeddingSender(AbstractEmbeddingSender):
         return request, readable_op.wait_for_completion()
 
 
-class NixlPersistentEmbeddingReceiver(AbstractEmbeddingReceiver):
+class NixlReadEmbeddingReceiver(AbstractEmbeddingReceiver):
     """
+    Counter part of 'NixlReadEmbeddingSender', see 'NixlReadEmbeddingSender' for details.
     Initial implementation of another usage of NIXL connect library that persists
     connection (agent registration) and descriptors (memory registration) across multiple send operations
     to avoid the overhead of repeated connection setup and teardown.

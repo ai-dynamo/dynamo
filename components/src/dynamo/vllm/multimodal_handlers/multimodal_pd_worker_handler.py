@@ -17,7 +17,7 @@ from dynamo.common.memory.multimodal_embedding_cache_manager import (
 )
 from dynamo.common.multimodal.embedding_transfer import (
     LocalEmbeddingReceiver,
-    NixlPersistentEmbeddingReceiver,
+    NixlReadEmbeddingReceiver,
     NixlWriteEmbeddingReceiver,
 )
 from dynamo.runtime import Client, DistributedRuntime
@@ -101,7 +101,7 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
         elif config.embedding_transfer_mode == EmbeddingTransferMode.NIXL_READ:
             # [gluo FIXME] can't use pre-registered tensor as NIXL requires descriptors
             # to be at matching size, need to overwrite nixl connect library
-            self.embedding_receiver = NixlPersistentEmbeddingReceiver(max_items=0)
+            self.embedding_receiver = NixlReadEmbeddingReceiver(max_items=0)
 
         logger.info("Multimodal PD Worker has been initialized")
 

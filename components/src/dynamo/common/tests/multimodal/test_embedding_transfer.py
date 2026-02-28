@@ -14,8 +14,8 @@ import torch
 from dynamo.common.multimodal.embedding_transfer import (
     LocalEmbeddingReceiver,
     LocalEmbeddingSender,
-    NixlPersistentEmbeddingReceiver,
-    NixlPersistentEmbeddingSender,
+    NixlReadEmbeddingReceiver,
+    NixlReadEmbeddingSender,
     NixlWriteEmbeddingReceiver,
     NixlWriteEmbeddingSender,
     RingBuffer,
@@ -131,20 +131,20 @@ class TestNixlEmbeddingTransfer:
 @pytest.mark.gpu_0  # Echo tensor worker is CPU-only (no GPU required)
 class TestNixlPersistentEmbeddingTransfer:
     async def test_correctness(self):
-        sender = NixlPersistentEmbeddingSender()
-        receiver = NixlPersistentEmbeddingReceiver()
+        sender = NixlReadEmbeddingSender()
+        receiver = NixlReadEmbeddingReceiver()
         await correctness(sender, receiver)
 
     async def test_benchmark(self):
-        sender = NixlPersistentEmbeddingSender()
-        receiver = NixlPersistentEmbeddingReceiver(embedding_hidden_size=EMBEDDING_SIZE)
+        sender = NixlReadEmbeddingSender()
+        receiver = NixlReadEmbeddingReceiver(embedding_hidden_size=EMBEDDING_SIZE)
         await benchmark(sender, receiver)
 
     @pytest.mark.asyncio
     @pytest.mark.gpu_1
     async def test_gpu_benchmark(self):
-        sender = NixlPersistentEmbeddingSender()
-        receiver = NixlPersistentEmbeddingReceiver(embedding_hidden_size=EMBEDDING_SIZE)
+        sender = NixlReadEmbeddingSender()
+        receiver = NixlReadEmbeddingReceiver(embedding_hidden_size=EMBEDDING_SIZE)
         await benchmark(sender, receiver, from_cuda=True)
 
 

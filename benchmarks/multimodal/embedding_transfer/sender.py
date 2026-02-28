@@ -10,7 +10,7 @@ from protocols import TransferConfig, TransferRequest
 
 from dynamo.common.multimodal.embedding_transfer import (
     LocalEmbeddingSender,
-    NixlPersistentEmbeddingSender,
+    NixlReadEmbeddingSender,
     NixlWriteEmbeddingSender,
 )
 from dynamo.runtime import DistributedRuntime, dynamo_worker
@@ -24,7 +24,7 @@ class Sender:
     def __init__(self, runtime: DistributedRuntime):
         self.runtime = runtime
         self.local_sender = LocalEmbeddingSender()
-        self.read_sender = NixlPersistentEmbeddingSender()
+        self.read_sender = NixlReadEmbeddingSender()
         self.write_sender = NixlWriteEmbeddingSender()
         # GPU tensor to mimic encoder output
         self.cpu_tensor = torch.randn([256, 8 * 1024], dtype=torch.float16)

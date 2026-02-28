@@ -7,8 +7,8 @@ from dynamo.common.multimodal.async_encoder_cache import AsyncEncoderCache
 from dynamo.common.multimodal.embedding_transfer import (
     LocalEmbeddingReceiver,
     LocalEmbeddingSender,
-    NixlPersistentEmbeddingReceiver,
-    NixlPersistentEmbeddingSender,
+    NixlReadEmbeddingReceiver,
+    NixlReadEmbeddingSender,
     TransferRequest,
 )
 from dynamo.common.multimodal.image_loader import ImageLoader
@@ -16,8 +16,8 @@ from dynamo.common.multimodal.image_loader import ImageLoader
 __all__ = [
     "AsyncEncoderCache",
     "ImageLoader",
-    "NixlPersistentEmbeddingReceiver",
-    "NixlPersistentEmbeddingSender",
+    "NixlReadEmbeddingReceiver",
+    "NixlReadEmbeddingSender",
     "TransferRequest",
     "LocalEmbeddingReceiver",
     "LocalEmbeddingSender",

@@ -15,7 +15,7 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 import dynamo.nixl_connect as connect
 from dynamo.common.multimodal import (
     LocalEmbeddingSender,
-    NixlPersistentEmbeddingSender,
+    NixlReadEmbeddingSender,
     NixlWriteEmbeddingSender,
 )
 from dynamo.runtime import DistributedRuntime
@@ -81,7 +81,7 @@ class EncodeWorkerHandler:
         elif embedding_transfer_mode == EmbeddingTransferMode.NIXL_WRITE:
             self.embedding_sender = NixlWriteEmbeddingSender()
         elif embedding_transfer_mode == EmbeddingTransferMode.NIXL_READ:
-            self.embedding_sender = NixlPersistentEmbeddingSender()
+            self.embedding_sender = NixlReadEmbeddingSender()
 
         self.send_complete_queue = asyncio.Queue()
         self.send_complete_checker_task = asyncio.create_task(

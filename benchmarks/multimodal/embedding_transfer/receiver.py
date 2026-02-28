@@ -9,7 +9,7 @@ from protocols import TransferConfig, TransferRequest
 
 from dynamo.common.multimodal.embedding_transfer import (
     LocalEmbeddingReceiver,
-    NixlPersistentEmbeddingReceiver,
+    NixlReadEmbeddingReceiver,
     NixlWriteEmbeddingReceiver,
 )
 from dynamo.runtime import DistributedRuntime, dynamo_worker
@@ -24,7 +24,7 @@ class Receiver:
         self.runtime = runtime
         self.local_receiver = LocalEmbeddingReceiver()
         self.write_receiver = NixlWriteEmbeddingReceiver(2 * 8 * 1024 * 256 * 1024 * 3)
-        self.read_receiver = NixlPersistentEmbeddingReceiver(
+        self.read_receiver = NixlReadEmbeddingReceiver(
             embedding_hidden_size=8 * 1024, max_item_mm_token=1024
         )
         self.config = TransferConfig(
