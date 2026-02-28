@@ -93,7 +93,7 @@ class VllmWorkerProcess(ManagedProcess):
             "harmony",
             "--dyn-reasoning-parser",
             "gpt_oss",
-            "--max-model-len",
+            "--max-model-len",  # this reduced max context window and amount of GPU memory allocated for context
             "32768",
         ]
 
