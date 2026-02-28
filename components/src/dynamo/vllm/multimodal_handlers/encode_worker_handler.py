@@ -103,6 +103,7 @@ class EncodeWorkerHandler:
         self._connector = connect.Connector()
         logger.info("Encode worker startup completed.")
 
+    @_nvtx.range_decorator("mm:encode_worker_generate", color="blue")
     async def generate(
         self, request: vLLMMultimodalRequest, context
     ) -> AsyncIterator[str]:
@@ -126,7 +127,6 @@ class EncodeWorkerHandler:
         # 7. Await for the write operation to complete.
         # 8. Yield the encode response.
 
-        rng_gen = _nvtx.start_range("mm:encode_worker_generate", color="blue")
         try:
             time_start = time.perf_counter()
 
@@ -304,5 +304,3 @@ class EncodeWorkerHandler:
         except Exception as e:
             logger.error(f"Error processing request {request_id}: {e}")
             raise
-        finally:
-            _nvtx.end_range(rng_gen)

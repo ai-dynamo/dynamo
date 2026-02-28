@@ -298,21 +298,22 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
         logger.debug("Prefill request: %s", prefill_only_request)
 
         lora_request = self._resolve_lora_request(request.model)
-        rng_prefill = _nvtx.start_range("mm:pd:disagg_prefill", color="darkred")
-        gen = self.engine_client.generate(
-            prompt=TokensPrompt(
-                prompt_token_ids=prefill_only_request.engine_prompt["prompt_token_ids"],
-                multi_modal_data=multi_modal_data,
-            ),
-            sampling_params=prefill_only_request.sampling_params,
-            request_id=prefill_only_request.request_id,
-            lora_request=lora_request,
-        )
+        with _nvtx.annotate("mm:pd:disagg_prefill", color="darkred"):
+            gen = self.engine_client.generate(
+                prompt=TokensPrompt(
+                    prompt_token_ids=prefill_only_request.engine_prompt[
+                        "prompt_token_ids"
+                    ],
+                    multi_modal_data=multi_modal_data,
+                ),
+                sampling_params=prefill_only_request.sampling_params,
+                request_id=prefill_only_request.request_id,
+                lora_request=lora_request,
+            )
 
-        # Drain prefill generator (max_tokens=1, expect a single response)
-        async for prefill_response in gen:
-            pass
-        _nvtx.end_range(rng_prefill)
+            # Drain prefill generator (max_tokens=1, expect a single response)
+            async for prefill_response in gen:
+                pass
         if rng_ttft is not None:
             _nvtx.end_range(rng_ttft)
 
@@ -351,20 +352,17 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
                 f"— ensure the same adapter is loaded on the decode worker."
             )
 
-        rng_remote_decode = _nvtx.start_range(
-            "mm:pd:disagg_remote_decode", color="purple"
-        )
-        num_output_tokens_so_far = 0
-        async for (
-            decode_response
-        ) in await self.decode_worker_client.round_robin(  # type: ignore[union-attr]
-            request.model_dump_json()
-        ):
-            output = MyRequestOutput.model_validate_json(decode_response.data())  # type: ignore[attr-defined]
-            yield self._format_engine_output(output, num_output_tokens_so_far)
-            if output.outputs:
-                num_output_tokens_so_far = len(output.outputs[0].token_ids)
-        _nvtx.end_range(rng_remote_decode)
+        with _nvtx.annotate("mm:pd:disagg_remote_decode", color="purple"):
+            num_output_tokens_so_far = 0
+            async for (
+                decode_response
+            ) in await self.decode_worker_client.round_robin(  # type: ignore[union-attr]
+                request.model_dump_json()
+            ):
+                output = MyRequestOutput.model_validate_json(decode_response.data())  # type: ignore[attr-defined]
+                yield self._format_engine_output(output, num_output_tokens_so_far)
+                if output.outputs:
+                    num_output_tokens_so_far = len(output.outputs[0].token_ids)
 
     # ── Public entry point ───────────────────────────────────────────
 

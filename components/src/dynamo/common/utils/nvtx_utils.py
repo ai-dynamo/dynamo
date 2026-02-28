@@ -14,11 +14,15 @@ Usage — same syntax as the bare nvtx module:
     ...
     _nvtx.end_range(rng)
 
-    # Decorator — annotates an entire function
+    # Decorator — annotates an entire function or async generator
     @_nvtx.annotate("my:func", color="green")
     def my_func(): ...
 
-    # Context manager — annotates a block (works with await inside)
+    @_nvtx.range_decorator("my:async_gen", color="green")
+    async def my_async_gen():
+        yield ...
+
+    # Context manager — annotates a block (works with await and yield inside)
     with _nvtx.annotate("my:block", color="cyan"):
         result = await some_coroutine()
 
@@ -28,6 +32,7 @@ start_range incur only a single dict lookup — no object allocation
 or domain cache lookups on the hot path.
 """
 import functools as _functools
+import inspect as _inspect
 import os as _os
 
 ENABLED: bool = bool(int(_os.getenv("DYN_NVTX", "0")))
@@ -58,6 +63,40 @@ if ENABLED:
     # in the "dynamo" domain, keeping all markers in one nsys row.
     annotate = _functools.partial(_nvtx_lib.annotate, domain="dynamo")
 
+    def range_decorator(message: str, color: str = "white"):
+        """Decorator that wraps an async generator function with an NVTX range.
+
+        Unlike annotate(), which only covers the synchronous setup before the
+        first yield, this wraps the full generator iteration in a single range.
+        """
+
+        def decorator(func):
+            if _inspect.isasyncgenfunction(func):
+
+                @_functools.wraps(func)
+                async def wrapper(*args, **kwargs):
+                    rng = start_range(message, color)
+                    try:
+                        async for item in func(*args, **kwargs):
+                            yield item
+                    finally:
+                        end_range(rng)
+
+                return wrapper
+            else:
+
+                @_functools.wraps(func)
+                def wrapper(*args, **kwargs):
+                    rng = start_range(message, color)
+                    try:
+                        return func(*args, **kwargs)
+                    finally:
+                        end_range(rng)
+
+                return wrapper
+
+        return decorator
+
 else:
     # Pure Python no-ops: no C extension calls, no string allocations.
     # The ENV var is read once at import time — no per-call branch overhead.
@@ -86,3 +125,11 @@ else:
 
     def annotate(message: str = "", color: str = "white"):  # type: ignore[misc]
         return _noop_annotate
+
+    def range_decorator(message: str = "", color: str = "white"):  # type: ignore[misc]
+        """No-op decorator: returns the wrapped function unchanged."""
+
+        def decorator(func):
+            return func
+
+        return decorator
