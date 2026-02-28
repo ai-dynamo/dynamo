@@ -330,6 +330,7 @@ impl MockVllmEngine {
                                 source_config,
                                 args.enable_local_indexer,
                                 dp_rank,
+                                None,
                             ) {
                                 Ok(publisher) => (
                                     Some(Arc::new(sink) as Arc<dyn KvCacheEventSink>),
@@ -358,6 +359,7 @@ impl MockVllmEngine {
                         None,
                         args.enable_local_indexer,
                         dp_rank,
+                        None,
                     ) {
                         Ok(publisher) => (
                             Some(Arc::new(KvEventSinkAdapter(publisher))
