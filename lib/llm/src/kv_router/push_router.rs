@@ -13,11 +13,13 @@ use dynamo_runtime::{
 };
 use futures::stream::{self, StreamExt};
 use serde_json::json;
+use tokio::sync::OnceCell;
 use tracing::Instrument;
 
 use crate::{
     kv_router::{
-        KvRouter,
+        CacheControlClient, KvRouter,
+        cache_control::{PinState, create_cache_control_client, spawn_pin_prefix},
         metrics::RouterRequestMetrics,
         protocols::{TokensWithHashes, WorkerWithDpRank},
     },
@@ -31,6 +33,8 @@ use crate::{
 pub struct KvPushRouter {
     inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
     pub chooser: Arc<KvRouter>,
+    /// Lazily initialized on first PIN request. `None` when cache_control is disabled.
+    cache_control_cell: Option<OnceCell<CacheControlClient>>,
 }
 
 /// Result of worker selection containing instance ID, dp_rank, and overlap amount.
@@ -50,7 +54,7 @@ struct RequestGuard {
     chooser: Arc<KvRouter>,
     context_id: String,
     tracker: Option<Arc<RequestTracker>>,
-    request_metrics: Option<Arc<RouterRequestMetrics>>,
+    request_metrics: Arc<RouterRequestMetrics>,
     cumulative_osl: usize,
     metrics_recorded: bool,
     freed: bool,
@@ -61,6 +65,8 @@ struct RequestGuard {
     isl_tokens: usize,
     block_size: usize,
     expected_output_tokens: Option<u32>,
+    // PIN state: set when cache_control TTL is present and a cc_client exists
+    pin_state: Option<PinState>,
 }
 
 impl RequestGuard {
@@ -87,8 +93,10 @@ impl RequestGuard {
         if !self.first_token_recorded && new_tokens > 0 {
             if let Some(ref tracker) = self.tracker {
                 tracker.record_first_token();
-                if let (Some(m), Some(ttft)) = (&self.request_metrics, tracker.ttft_ms()) {
-                    m.time_to_first_token_seconds.observe(ttft / 1000.0);
+                if let Some(ttft) = tracker.ttft_ms() {
+                    self.request_metrics
+                        .time_to_first_token_seconds
+                        .observe(ttft / 1000.0);
                 }
             }
             self.first_token_recorded = true;
@@ -116,9 +124,10 @@ impl RequestGuard {
                 if let Some(ref tracker) = self.tracker {
                     tracker.record_osl(self.cumulative_osl);
                     tracker.record_finish();
-                    if let (Some(m), Some(avg_itl)) = (&self.request_metrics, tracker.avg_itl_ms())
-                    {
-                        m.inter_token_latency_seconds.observe(avg_itl / 1000.0);
+                    if let Some(avg_itl) = tracker.avg_itl_ms() {
+                        self.request_metrics
+                            .inter_token_latency_seconds
+                            .observe(avg_itl / 1000.0);
                     }
                 }
 
@@ -133,6 +142,16 @@ impl RequestGuard {
             tracing::warn!("Failed to free request {}: {e}", self.context_id);
         }
         self.freed = true;
+
+        if let Some(ref pin) = self.pin_state {
+            spawn_pin_prefix(
+                Some(&pin.cc_client),
+                &pin.token_ids,
+                pin.instance_id,
+                &self.context_id,
+                pin.ttl_seconds,
+            );
+        }
     }
 
     fn record_metrics(&mut self) {
@@ -144,10 +163,10 @@ impl RequestGuard {
             tracker.record_finish();
             tracker.record_osl(self.cumulative_osl);
         }
-        if let Some(ref m) = self.request_metrics {
-            m.output_sequence_tokens.observe(self.cumulative_osl as f64);
-            m.requests_total.inc();
-        }
+        self.request_metrics
+            .output_sequence_tokens
+            .observe(self.cumulative_osl as f64);
+        self.request_metrics.requests_total.inc();
     }
 }
 
@@ -175,7 +194,22 @@ impl KvPushRouter {
         inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
         chooser: Arc<KvRouter>,
     ) -> Self {
-        KvPushRouter { inner, chooser }
+        // Eagerly register router request metrics (as zeros) so they are
+        // scrapeable before any requests arrive. Both the frontend pipeline
+        // and the standalone router create KvPushRouter, so this covers both.
+        RouterRequestMetrics::from_component(chooser.client().endpoint.component());
+
+        let cache_control_cell = if chooser.kv_router_config().router_enable_cache_control {
+            tracing::info!("Cache control enabled for PIN operations (lazy init)");
+            Some(OnceCell::new())
+        } else {
+            None
+        };
+        KvPushRouter {
+            inner,
+            chooser,
+            cache_control_cell,
+        }
     }
 
     /// Select a worker for the request, either using a preselected worker or finding the best match.
@@ -193,6 +227,7 @@ impl KvPushRouter {
         let priority_jump = routing.and_then(|r| r.priority_jump).unwrap_or(0.0);
         let dp_rank = routing.and_then(|r| r.dp_rank).unwrap_or(0);
         let expected_output_tokens = routing.and_then(|r| r.expected_output_tokens);
+        let allowed_worker_ids = routing.and_then(|r| r.allowed_worker_ids.clone());
         let (routing_token_ids, block_mm_infos) = request.block_mm_routing_info();
 
         // Get pre-selected worker based on phase, with backend_instance_id as fallback
@@ -217,7 +252,7 @@ impl KvPushRouter {
                     !is_query_only,
                     lora_name,
                     priority_jump,
-                    None,
+                    allowed_worker_ids,
                 )
                 .await?;
 
@@ -366,7 +401,8 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         }
 
         // Record routing metrics on tracker and observe ISL + prefill start.
-        let request_metrics = RouterRequestMetrics::get();
+        let request_metrics =
+            RouterRequestMetrics::from_component(self.chooser.client().endpoint.component());
         if let Some(ref tracker) = request.tracker {
             let (routing_token_ids, _) = request.block_mm_routing_info();
             let isl_blocks = routing_token_ids.len().div_ceil(block_size);
@@ -376,14 +412,13 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 overlap_amount as usize * block_size,
             );
             tracker.record_worker_full(instance_id, dp_rank, self.chooser.worker_type());
-            if let (Some(m), Some(hit_rate)) = (&request_metrics, tracker.kv_hit_rate()) {
-                m.kv_hit_rate.observe(hit_rate);
+            if let Some(hit_rate) = tracker.kv_hit_rate() {
+                request_metrics.kv_hit_rate.observe(hit_rate);
             }
         }
-        if let Some(ref m) = request_metrics {
-            m.input_sequence_tokens
-                .observe(request.token_ids.len() as f64);
-        }
+        request_metrics
+            .input_sequence_tokens
+            .observe(request.token_ids.len() as f64);
 
         // Handle query-only requests: early return with worker info
         if is_query_only {
@@ -417,6 +452,26 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             .and_then(|r| r.expected_output_tokens);
         let track_output_blocks = self.chooser.kv_router_config().router_track_output_blocks;
         let tracker = request.tracker.clone();
+
+        // Extract pin state: lazily init cache_control client on first PIN request
+        let pin_state: Option<PinState> = async {
+            let ttl = request.routing.as_ref().and_then(|r| r.cache_control_ttl)?;
+            let cell = self.cache_control_cell.as_ref()?;
+            let component = self.chooser.client().endpoint.component().clone();
+            let client = cell
+                .get_or_try_init(|| create_cache_control_client(&component))
+                .await
+                .inspect_err(|e| tracing::warn!("Failed to create cache_control client: {e}"))
+                .ok()?
+                .clone();
+            Some(PinState {
+                token_ids: request.token_ids.clone(),
+                cc_client: client,
+                instance_id,
+                ttl_seconds: ttl,
+            })
+        }
+        .await;
 
         let (mut backend_input, context) = request.into_parts();
         backend_input.routing_mut().dp_rank = Some(dp_rank);
@@ -459,6 +514,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 isl_tokens,
                 block_size,
                 expected_output_tokens,
+                pin_state,
             };
 
             loop {

@@ -125,7 +125,9 @@ def build_block_mm_infos(
         mm_objects = [
             {"mm_hash": mm_hash, "offsets": []}
             for mm_hash, (img_start, img_end) in zip(mm_hashes, image_ranges)
-            if block_end > img_start and block_start < img_end
+            # FIXME: Revisit the bounds checks here
+            # https://github.com/ai-dynamo/dynamo/issues/6588
+            if block_end > img_start and block_start <= img_end
         ]
 
         result.append({"mm_objects": mm_objects} if mm_objects else None)

@@ -4,8 +4,6 @@
 title: Multinode Examples
 ---
 
-# Example: Multi-node TRTLLM Workers with Dynamo on Slurm
-
 > **Note:** The scripts referenced in this example (such as `srun_aggregated.sh` and `srun_disaggregated.sh`) can be found in [`examples/basics/multinode/trtllm/`](https://github.com/ai-dynamo/dynamo/tree/main/examples/basics/multinode/trtllm/).
 
 To run a single Dynamo+TRTLLM Worker that spans multiple nodes (ex: TP16),

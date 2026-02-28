@@ -68,7 +68,7 @@ class GMSServerMemoryManager:
       so it doesn't create a CUDA context. This allows it to survive GPU
       driver failures.
     - NOT thread-safe: Callers must provide external synchronization.
-      The GlobalLockFSM's RW/RO semantics ensure single-writer access.
+      The GMSLocalFSM's RW/RO semantics ensure single-writer access.
     """
 
     def __init__(self, device: int = 0):

@@ -4,20 +4,18 @@
 title: Profiler
 ---
 
-# Profiler
-
 The Dynamo Profiler is an automated performance analysis tool that measures model inference characteristics to optimize deployment configurations. It determines optimal tensor parallelism (TP) settings for prefill and decode phases, generates performance interpolation data, and enables SLA-driven autoscaling through the Planner.
 
 ## Feature Matrix
 
-| Feature | vLLM | SGLang | TensorRT-LLM |
-|---------|------|--------|--------------|
+| Feature | SGLang | TensorRT-LLM | vLLM |
+|---------|--------|--------------|------|
 | Dense Model Profiling | ✅ | ✅ | ✅ |
-| MoE Model Profiling | 🚧 | ✅ | 🚧 |
-| AI Configurator (Offline) | ❌ | ❌ | ✅ |
+| MoE Model Profiling | ✅ | 🚧 | 🚧 |
+| AI Configurator (Offline) | ❌ | ✅ | ❌ |
 | Online Profiling (AIPerf) | ✅ | ✅ | ✅ |
 | Interactive WebUI | ✅ | ✅ | ✅ |
-| Runtime Profiling Endpoints | ❌ | ✅ | ❌ |
+| Runtime Profiling Endpoints | ✅ | ❌ | ❌ |
 
 ## Quick Start
 
@@ -32,25 +30,22 @@ The Dynamo Profiler is an automated performance analysis tool that measures mode
 The recommended way to profile models is through DGDRs, which automate the entire profiling and deployment workflow.
 
 ```yaml
-apiVersion: nvidia.com/v1alpha1
+apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeploymentRequest
 metadata:
   name: my-model-profiling
 spec:
   model: "Qwen/Qwen3-0.6B"
   backend: vllm
+  image: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.9.0"
 
-  profilingConfig:
-    profilerImage: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.9.0"
-    config:
-      sla:
-        isl: 3000      # Average input sequence length
-        osl: 150       # Average output sequence length
-        ttft: 200.0    # Target Time To First Token (ms)
-        itl: 20.0      # Target Inter-Token Latency (ms)
+  workload:
+    isl: 3000      # Average input sequence length
+    osl: 150       # Average output sequence length
 
-  deploymentOverrides:
-    workersImage: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.9.0"
+  sla:
+    ttft: 200.0    # Target Time To First Token (ms)
+    itl: 20.0      # Target Inter-Token Latency (ms)
 
   autoApply: true
 ```
@@ -61,42 +56,18 @@ kubectl apply -f my-profiling-dgdr.yaml -n $NAMESPACE
 
 ### Using AI Configurator (Fast Offline Profiling)
 
-For TensorRT-LLM, use AI Configurator for rapid profiling (~30 seconds):
-
-```yaml
-profilingConfig:
-  config:
-    sweep:
-      useAiConfigurator: true
-      aicSystem: h200_sxm
-      aicHfId: Qwen/Qwen3-32B
-      aicBackendVersion: "0.20.0"
-```
-
-### Direct Script Usage (Advanced)
-
-For advanced scenarios, run the profiler directly:
-
-```bash
-python -m dynamo.profiler.profile_sla \
-  --backend vllm \
-  --config path/to/disagg.yaml \
-  --model meta-llama/Llama-3-8B \
-  --ttft 200 --itl 15 \
-  --isl 3000 --osl 150
-```
+AI Configurator enables rapid offline profiling (~30 seconds) and supports all backends (vLLM, SGLang, TensorRT-LLM). Since `searchStrategy: rapid` is the default, AIC is used automatically unless you explicitly set `searchStrategy: thorough`.
 
 ## Configuration
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `sla.isl` | - | Average input sequence length (tokens) |
-| `sla.osl` | - | Average output sequence length (tokens) |
-| `sla.ttft` | - | Target Time To First Token (milliseconds) |
-| `sla.itl` | - | Target Inter-Token Latency (milliseconds) |
-| `sweep.useAiConfigurator` | `false` | Use offline simulation instead of real profiling |
-| `hardware.minNumGpusPerEngine` | auto | Minimum GPUs per engine (auto-detected from model size) |
-| `hardware.maxNumGpusPerEngine` | 8 | Maximum GPUs per engine |
+| `workload.isl` | 4000 | Average input sequence length (tokens) |
+| `workload.osl` | 1000 | Average output sequence length (tokens) |
+| `sla.ttft` | 2000 | Target Time To First Token (milliseconds) |
+| `sla.itl` | 30 | Target Inter-Token Latency (milliseconds) |
+| `hardware.numGpusPerNode` | auto | Number of GPUs per node |
+| `hardware.gpuSku` | auto | GPU SKU identifier |
 
 ## Profiling Methods
 

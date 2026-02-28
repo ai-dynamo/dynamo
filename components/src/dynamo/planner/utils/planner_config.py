@@ -93,6 +93,9 @@ class PlannerConfig(BaseModel):
     metric_reporting_prometheus_port: int = Field(
         default_factory=lambda: int(os.environ.get("PLANNER_PROMETHEUS_PORT", 0))
     )
+    throughput_metrics_source: Literal[
+        "frontend", "router"
+    ] = SLAPlannerDefaults.throughput_metrics_source
 
     no_correction: bool = SLAPlannerDefaults.no_correction
     model_name: Optional[str] = None
@@ -129,6 +132,18 @@ class PlannerConfig(BaseModel):
                 "At least one scaling mode must be enabled "
                 "(enable_throughput_scaling or enable_load_scaling)"
             )
+
+        if self.enable_throughput_scaling:
+            if (
+                self.pre_deployment_sweeping_mode is None
+                or self.pre_deployment_sweeping_mode
+                == PlannerPreDeploymentSweepMode.None_
+            ):
+                raise ValueError(
+                    "pre_deployment_sweeping_mode cannot be 'none' when "
+                    "enable_throughput_scaling is True. Throughput-based scaling "
+                    "requires pre-deployment sweeping to profile engine performance."
+                )
 
         if self.enable_load_scaling:
             # Router metrics URL is required outside kubernetes mode
@@ -167,7 +182,12 @@ class PlannerConfig(BaseModel):
         inline JSON string, loads it, and validates.
         """
         path = Path(config_arg)
-        if path.is_file():
+        try:
+            is_file = path.is_file()
+        except OSError:
+            # Path component too long (e.g. inline JSON string passed as config arg)
+            is_file = False
+        if is_file:
             return cls._load_from_file(path)
 
         # Try parsing as inline JSON
@@ -203,6 +223,9 @@ class PlannerConfig(BaseModel):
                     )
 
         return cls.model_validate(data)
+
+    def scaling_enabled(self) -> bool:
+        return self.enable_throughput_scaling or self.enable_load_scaling
 
 
 if __name__ == "__main__":

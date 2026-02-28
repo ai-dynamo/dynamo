@@ -22,21 +22,63 @@ on:
         description: 'CUDA version to build (e.g., 12.9, 13.0)'
         required: true
         type: string
-      run_tests:
-        description: 'Whether to run pytest'
+      build_timeout_minutes:
+        description: 'Timeout in minutes for the build step'
+        required: false
+        type: number
+        default: 60
+      run_cpu_only_tests:
+        description: 'Whether to run CPU-only tests'
         required: false
         type: boolean
         default: true
+      cpu_only_test_markers:
+        description: 'CPU-only pytest markers'
+        required: false
+        type: string
+      cpu_only_test_timeout_minutes:
+        description: 'Timeout in minutes for CPU tests'
+        required: false
+        type: number
+        default: 10
+      run_single_gpu_tests:
+        description: 'Whether to run single GPU tests'
+        required: false
+        type: boolean
+        default: true
+      single_gpu_test_markers:
+        description: 'Single GPU pytest markers'
+        required: false
+        type: string
+      single_gpu_test_timeout_minutes:
+        description: 'Timeout in minutes for single GPU tests'
+        required: false
+        type: number
+        default: 30
       run_multi_gpu_tests:
         description: 'Whether to run multi-gpu tests'
         required: false
         type: boolean
-        default: false
+        default: true
+      multi_gpu_test_markers:
+        description: 'Multi GPU pytest markers'
+        required: false
+        type: string
+      multi_gpu_test_timeout_minutes:
+        description: 'Timeout in minutes for multi GPU tests'
+        required: false
+        type: number
+        default: 30
       copy_to_acr:
         description: 'Whether to copy images to ACR'
         required: false
         type: boolean
         default: true
+      copy_timeout_minutes:
+        description: 'Timeout in minutes for the copy to ACR step'
+        required: false
+        type: number
+        default: 10
       builder_name:
         description: 'Buildkit builder name'
         required: true
@@ -71,26 +113,11 @@ on:
         required: false
         type: boolean
         default: false
-      build_timeout_minutes:
-        description: 'Timeout in minutes for the build step'
+      make_efa:
+        description: 'Enable AWS EFA support in the build'
         required: false
-        type: number
-        default: 60
-      test_gpu_timeout_minutes:
-        description: 'Timeout in minutes for the GPU test step'
-        required: false
-        type: number
-        default: 30
-      test_cpu_timeout_minutes:
-        description: 'Timeout in minutes for the CPU test step'
-        required: false
-        type: number
-        default: 10
-      copy_timeout_minutes:
-        description: 'Timeout in minutes for the copy to ACR step'
-        required: false
-        type: number
-        default: 10
+        type: boolean
+        default: false
     secrets:
       AWS_DEFAULT_REGION:
         required: true
@@ -169,7 +196,11 @@ jobs:
         run: |
           CUDA_VERSION_RAW=${{ inputs.cuda_version }}
           CUDA_VERSION=${CUDA_VERSION_RAW%%.*}
-          TARGET_TAG_PLAIN="${{ github.sha }}-${{ inputs.framework }}"
+          EFA_SUFFIX=""
+          if [ "${{ inputs.make_efa }}" == "true" ]; then
+            EFA_SUFFIX="-efa"
+          fi
+          TARGET_TAG_PLAIN="${{ github.sha }}-${{ inputs.framework }}${EFA_SUFFIX}"
           DEFAULT_TARGET_IMAGE_URI="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${TARGET_TAG_PLAIN}-cuda${CUDA_VERSION}-${{ inputs.platform }}"
           echo "default_target_image_uri=${DEFAULT_TARGET_IMAGE_URI}" >> $GITHUB_OUTPUT
           echo "target_tag_plain=${TARGET_TAG_PLAIN}" >> $GITHUB_OUTPUT
@@ -197,11 +228,16 @@ jobs:
         shell: bash
         run: |
           echo "Generating Dockerfile for target: ${{ inputs.target }} and framework: ${{ inputs.framework }}"
+          MAKE_EFA_FLAG=""
+          if [ "${{ inputs.make_efa }}" == "true" ]; then
+            MAKE_EFA_FLAG="--make-efa"
+          fi
           python ./container/render.py \
               --target=${{ inputs.target }} \
               --framework=${{ inputs.framework }} \
               --platform=${{ inputs.platform }} \
               --cuda-version=${{ inputs.cuda_version }} \
+              ${MAKE_EFA_FLAG} \
               --show-result \
               --output-short-filename
       - name: Build Container
@@ -239,7 +275,7 @@ jobs:
   # TEST
   # ============================================================================
   test:
-    if: inputs.run_tests && inputs.build_image
+    if: ( inputs.run_cpu_only_tests || inputs.run_single_gpu_tests ) && inputs.build_image
     needs: [build]
     name: Test ${{ inputs.framework }}-cuda${{ inputs.cuda_version }}-${{ inputs.platform }}
     runs-on: ${{ inputs.platform == 'amd64' && 'prod-tester-amd-gpu-v1' || 'prod-tester-arm-v1' }}
@@ -297,11 +333,12 @@ jobs:
       # Run CPU-only tests first (parallelized for speed)
       # These are unit tests marked with gpu_0 that don't require GPU hardware
       - name: Run CPU-only tests (parallelized)
-        timeout-minutes: ${{ inputs.test_cpu_timeout_minutes }}
+        if: ${{ inputs.run_cpu_only_tests }}
+        timeout-minutes: ${{ inputs.cpu_only_test_timeout_minutes }}
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
-          pytest_marks: ${{ format('pre_merge and {0} and gpu_0', inputs.framework) }}
+          pytest_marks: ${{ inputs.cpu_only_test_markers }}
           framework: ${{ inputs.framework }}
           test_type: "pre_merge_cpu"
           platform_arch: ${{ inputs.platform }}
@@ -313,12 +350,12 @@ jobs:
       # Run GPU tests sequentially (only on amd64 runners with GPU)
       # These are e2e tests marked with gpu_1 that require GPU hardware
       - name: Run GPU tests (sequential)
-        timeout-minutes: ${{ inputs.test_gpu_timeout_minutes }}
-        if: ${{ inputs.platform == 'amd64' }} # We only run GPU tests on amd64
+        timeout-minutes: ${{ inputs.single_gpu_test_timeout_minutes }}
+        if: ( inputs.platform == 'amd64' && inputs.run_single_gpu_tests == true ) # We only run GPU tests on amd64
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
-          pytest_marks: ${{ format('pre_merge and {0} and gpu_1', inputs.framework) }}
+          pytest_marks: ${{ inputs.single_gpu_test_markers }}
           framework: ${{ inputs.framework }}
           test_type: "pre_merge_gpu"
           platform_arch: ${{ inputs.platform }}
@@ -374,10 +411,11 @@ jobs:
       # Run GPU tests sequentially (only on amd64 runners with GPU)
       # These are e2e tests marked with gpu_2 or gpu_4 that require GPU hardware
       - name: Run GPU tests (sequential)
+        timeout-minutes: ${{ inputs.multi_gpu_test_timeout_minutes }}
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
-          pytest_marks: '(gpu_2 or gpu_4) and pre_merge'
+          pytest_marks: ${{ inputs.multi_gpu_test_markers }}
           framework: ${{ inputs.framework }}
           test_type: "pre_merge_gpu"
           platform_arch: ${{ inputs.platform }}
@@ -385,6 +423,7 @@ jobs:
           hf_token: ${{ secrets.HF_TOKEN }}
           parallel_mode: 'none'
           dind_as_sidecar: 'true'
+
 
   # ============================================================================
   # COPY TO ACR

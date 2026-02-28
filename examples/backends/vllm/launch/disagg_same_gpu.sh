@@ -57,7 +57,8 @@ python3 -m dynamo.vllm \
   --enforce-eager \
   --disaggregation-mode decode \
   --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
-  --gpu-memory-utilization ${GPU_MEM_FRACTION} &
+  --gpu-memory-utilization ${GPU_MEM_FRACTION} \
+  --max-model-len 16384 &
 DECODE_PID=$!
 
 # Wait for decode worker to initialize before starting prefill worker
@@ -79,5 +80,6 @@ python3 -m dynamo.vllm \
   --disaggregation-mode prefill \
   --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
   --gpu-memory-utilization ${GPU_MEM_FRACTION} \
+  --max-model-len 16384 \
   --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081","enable_kv_cache_events":true}'
 
