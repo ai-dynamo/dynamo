@@ -64,7 +64,7 @@ class DynamoRuntimeConfig(ConfigBase):
 class DynamoRuntimeArgGroup(ArgGroup):
     """Dynamo runtime configuration parameters (common to all backends)."""
 
-    def add_arguments(self, parser: "argparse.ArgumentParser") -> None:
+    def add_arguments(self, parser: argparse.ArgumentParser) -> None:
         """Add Dynamo runtime arguments to parser."""
         g = parser.add_argument_group("Dynamo Runtime Options")
 
