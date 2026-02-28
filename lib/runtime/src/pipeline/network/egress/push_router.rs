@@ -269,8 +269,11 @@ where
                 Some(instance_ids[counter % count])
             }
             RouterMode::Direct => None,
-            RouterMode::KV => {
-                panic!("select_next_worker should not be called for KV routing mode")
+            _ => {
+                panic!(
+                    "select_next_worker should not be called for {:?} routing mode",
+                    self.router_mode
+                )
             }
         }
     }
@@ -278,7 +281,6 @@ where
     /// Peek the next worker according to the routing mode without incrementing the counter.
     /// Useful for checking if a worker is suitable before committing to it.
     /// Returns None for Direct mode -- requires explicit worker IDs via routing hints.
-    /// Panics for KV mode which has its own selection via find_best_match.
     pub fn peek_next_worker(&self) -> Option<u64> {
         let instance_ids = self.client.instance_ids_avail();
         let count = instance_ids.len();
@@ -299,8 +301,11 @@ where
                 Some(instance_ids[counter % count])
             }
             RouterMode::Direct => None,
-            RouterMode::KV => {
-                panic!("peek_next_worker should not be called for KV routing mode")
+            _ => {
+                panic!(
+                    "peek_next_worker should not be called for {:?} routing mode",
+                    self.router_mode
+                )
             }
         }
     }
