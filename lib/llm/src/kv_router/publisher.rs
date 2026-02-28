@@ -477,8 +477,9 @@ async fn run_event_processor_loop<P: EventSink + Send + Sync + 'static>(
                 // Check if dp_rank changed before updating state
                 let dp_rank_changed = batching_state.has_pending() && event.dp_rank != batching_state.last_dp_rank;
 
-                batching_state.last_event_id = event.event_id;
-                batching_state.last_dp_rank = event.dp_rank;
+                // Save metadata for the incoming event (used if we need to flush current batch)
+                let incoming_event_id = event.event_id;
+                let incoming_dp_rank = event.dp_rank;
 
                 match event.data {
                     KvCacheEventData::Removed(removed_data) => {
@@ -489,10 +490,18 @@ async fn run_event_processor_loop<P: EventSink + Send + Sync + 'static>(
                             batching_state.flush(&publisher, &local_indexer, worker_id).await;
                         }
 
+                        // Check if we're starting a new batch (no pending removed)
+                        let is_new_batch = batching_state.pending_removed.is_none();
+
                         if let Some(ref mut pending) = batching_state.pending_removed {
                             pending.block_hashes.extend(removed_data.block_hashes);
                         } else {
                             batching_state.pending_removed = Some(removed_data);
+                        }
+
+                        // Reset flush time when starting a new batch to prevent immediate timeout
+                        if is_new_batch {
+                            batching_state.reset_flush_time();
                         }
                     }
                     KvCacheEventData::Stored(stored_data) => {
@@ -509,6 +518,9 @@ async fn run_event_processor_loop<P: EventSink + Send + Sync + 'static>(
                             batching_state.flush(&publisher, &local_indexer, worker_id).await;
                         }
 
+                        // Check if we're starting a new batch (no pending stored)
+                        let is_new_batch = batching_state.pending_stored.is_none();
+
                         if let Some(ref mut pending) = batching_state.pending_stored {
                             pending.blocks.extend(stored_data.blocks);
                             if pending.parent_hash.is_none() {
@@ -516,6 +528,11 @@ async fn run_event_processor_loop<P: EventSink + Send + Sync + 'static>(
                             }
                         } else {
                             batching_state.pending_stored = Some(stored_data);
+                        }
+
+                        // Reset flush time when starting a new batch to prevent immediate timeout
+                        if is_new_batch {
+                            batching_state.reset_flush_time();
                         }
                     }
                     KvCacheEventData::Cleared => {
@@ -539,6 +556,10 @@ async fn run_event_processor_loop<P: EventSink + Send + Sync + 'static>(
                     }
                 }
 
+                // Update metadata AFTER processing the event (so flush uses correct batch metadata)
+                batching_state.last_event_id = incoming_event_id;
+                batching_state.last_dp_rank = incoming_dp_rank;
+
                 // After processing each event, check if timeout has elapsed and flush if so
                 // This handles both timeout=0 (immediate flush) and timeout>0 (elapsed check)
                 if batching_state.has_pending() {
@@ -549,12 +570,10 @@ async fn run_event_processor_loop<P: EventSink + Send + Sync + 'static>(
                     }
                 }
             }
-            _ = tokio::time::sleep(remaining), if timeout_us > 0 => {
+            _ = tokio::time::sleep(remaining), if timeout_us > 0 && batching_state.has_pending() => {
                 // Timeout elapsed - flush pending events
-                if batching_state.has_pending() {
-                    batching_state.flush(&publisher, &local_indexer, worker_id).await;
-                    batching_state.reset_flush_time();
-                }
+                batching_state.flush(&publisher, &local_indexer, worker_id).await;
+                batching_state.reset_flush_time();
             }
         }
     }
@@ -3192,5 +3211,252 @@ mod event_processor_tests {
             total_hashes, 6,
             "All 6 block hashes should be accounted for"
         );
+
+        // Verify dp_rank is correct for each batch
+        assert_eq!(
+            events[0].event.dp_rank, 0,
+            "First batch should have dp_rank=0"
+        );
+        assert_eq!(
+            events[1].event.dp_rank, 1,
+            "Second batch should have dp_rank=1"
+        );
+    }
+
+    /// Test that flushed events have correct metadata (event_id, dp_rank)
+    /// This verifies that metadata is NOT overwritten before flush
+    #[tokio::test]
+    async fn test_flushed_events_have_correct_metadata() {
+        let timeout_us = 100_000; // 100ms timeout
+
+        let (tx, rx) = mpsc::unbounded_channel::<KvCacheEvent>();
+        let publisher = MockPublisher::new();
+        let publisher_clone = publisher.clone();
+        let cancellation_token = CancellationToken::new();
+
+        let handle = tokio::spawn(async move {
+            run_event_processor_loop(publisher_clone, 1, cancellation_token, rx, None, timeout_us)
+                .await
+        });
+
+        // Send first batch: 3 events with dp_rank=0, event_ids 10-12
+        for i in 0..3 {
+            tx.send(KvCacheEvent {
+                event_id: 10 + i as u64,
+                data: KvCacheEventData::Removed(KvCacheRemoveData {
+                    block_hashes: vec![ExternalSequenceBlockHash(i as u64)],
+                }),
+                dp_rank: 0,
+            })
+            .unwrap();
+            tokio::task::yield_now().await;
+        }
+
+        // Send second batch: 2 events with dp_rank=1, event_ids 20-21
+        // This should flush the first batch with dp_rank=0
+        for i in 0..2 {
+            tx.send(KvCacheEvent {
+                event_id: 20 + i as u64,
+                data: KvCacheEventData::Removed(KvCacheRemoveData {
+                    block_hashes: vec![ExternalSequenceBlockHash((i + 3) as u64)],
+                }),
+                dp_rank: 1,
+            })
+            .unwrap();
+            tokio::task::yield_now().await;
+        }
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(2)).await;
+
+        drop(tx);
+        handle.await.unwrap();
+
+        let events = publisher.get_events();
+
+        assert_eq!(events.len(), 2, "Should have 2 events (one per dp_rank batch)");
+
+        // First event should have dp_rank=0 and event_id from first batch (last event_id = 12)
+        assert_eq!(
+            events[0].event.dp_rank, 0,
+            "First batch should have dp_rank=0"
+        );
+        assert_eq!(
+            events[0].event.event_id, 12,
+            "First batch should have event_id=12 (last event in batch)"
+        );
+
+        // Second event should have dp_rank=1 and event_id from second batch (last event_id = 21)
+        assert_eq!(
+            events[1].event.dp_rank, 1,
+            "Second batch should have dp_rank=1"
+        );
+        assert_eq!(
+            events[1].event.event_id, 21,
+            "Second batch should have event_id=21 (last event in batch)"
+        );
+    }
+
+    /// Test that first event after idle period doesn't flush immediately
+    /// This verifies the reset_flush_time() fix for new batches
+    #[tokio::test]
+    async fn test_first_event_after_idle_no_immediate_flush() {
+        let timeout_us = 50_000; // 50ms timeout
+
+        let (tx, rx) = mpsc::unbounded_channel::<KvCacheEvent>();
+        let publisher = MockPublisher::new();
+        let publisher_clone = publisher.clone();
+        let cancellation_token = CancellationToken::new();
+
+        let handle = tokio::spawn(async move {
+            run_event_processor_loop(publisher_clone, 1, cancellation_token, rx, None, timeout_us)
+                .await
+        });
+
+        // Wait longer than timeout to simulate idle period
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        // Send 3 events rapidly - they should batch together
+        for i in 0..3 {
+            tx.send(KvCacheEvent {
+                event_id: i as u64,
+                data: KvCacheEventData::Removed(KvCacheRemoveData {
+                    block_hashes: vec![ExternalSequenceBlockHash(i as u64)],
+                }),
+                dp_rank: 0,
+            })
+            .unwrap();
+            tokio::task::yield_now().await;
+        }
+
+        // Wait for timeout to elapse so batch flushes
+        tokio::time::sleep(tokio::time::Duration::from_millis(60)).await;
+
+        drop(tx);
+        handle.await.unwrap();
+
+        let events = publisher.get_events();
+
+        // All 3 events should be batched into 1 output event
+        assert_eq!(
+            events.len(),
+            1,
+            "All 3 events should batch into 1 output event (not flush immediately due to stale timer)"
+        );
+
+        let total_hashes: usize = events
+            .iter()
+            .map(|e| {
+                if let KvCacheEventData::Removed(data) = &e.event.data {
+                    data.block_hashes.len()
+                } else {
+                    0
+                }
+            })
+            .sum();
+        assert_eq!(total_hashes, 3, "All 3 block hashes should be accounted for");
+    }
+
+    /// Test that stored events with dp_rank change have correct metadata
+    #[tokio::test]
+    async fn test_stored_events_with_dp_rank_change_correct_metadata() {
+        let timeout_us = 100_000; // 100ms timeout
+
+        let (tx, rx) = mpsc::unbounded_channel::<KvCacheEvent>();
+        let publisher = MockPublisher::new();
+        let publisher_clone = publisher.clone();
+        let cancellation_token = CancellationToken::new();
+
+        let handle = tokio::spawn(async move {
+            run_event_processor_loop(publisher_clone, 1, cancellation_token, rx, None, timeout_us)
+                .await
+        });
+
+        // Send first batch: 2 sequential stored events with dp_rank=0, event_ids 100-101
+        tx.send(KvCacheEvent {
+            event_id: 100,
+            data: KvCacheEventData::Stored(KvCacheStoreData {
+                parent_hash: Some(ExternalSequenceBlockHash(0)),
+                blocks: vec![KvCacheStoredBlockData {
+                    block_hash: ExternalSequenceBlockHash(1),
+                    tokens_hash: LocalBlockHash(100),
+                    mm_extra_info: None,
+                }],
+            }),
+            dp_rank: 0,
+        })
+        .unwrap();
+        tokio::task::yield_now().await;
+
+        tx.send(KvCacheEvent {
+            event_id: 101,
+            data: KvCacheEventData::Stored(KvCacheStoreData {
+                parent_hash: Some(ExternalSequenceBlockHash(1)),
+                blocks: vec![KvCacheStoredBlockData {
+                    block_hash: ExternalSequenceBlockHash(2),
+                    tokens_hash: LocalBlockHash(200),
+                    mm_extra_info: None,
+                }],
+            }),
+            dp_rank: 0,
+        })
+        .unwrap();
+        tokio::task::yield_now().await;
+
+        // Send second batch: 1 event with dp_rank=1, event_id=200
+        // This should flush the first batch with dp_rank=0, event_id=101
+        tx.send(KvCacheEvent {
+            event_id: 200,
+            data: KvCacheEventData::Stored(KvCacheStoreData {
+                parent_hash: Some(ExternalSequenceBlockHash(0)),
+                blocks: vec![KvCacheStoredBlockData {
+                    block_hash: ExternalSequenceBlockHash(100),
+                    tokens_hash: LocalBlockHash(1000),
+                    mm_extra_info: None,
+                }],
+            }),
+            dp_rank: 1,
+        })
+        .unwrap();
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(2)).await;
+
+        drop(tx);
+        handle.await.unwrap();
+
+        let events = publisher.get_events();
+
+        assert_eq!(events.len(), 2, "Should have 2 events (one per dp_rank batch)");
+
+        // First batch: dp_rank=0, event_id=101 (last event in first batch)
+        assert_eq!(
+            events[0].event.dp_rank, 0,
+            "First batch should have dp_rank=0"
+        );
+        assert_eq!(
+            events[0].event.event_id, 101,
+            "First batch should have event_id=101"
+        );
+
+        // Second batch: dp_rank=1, event_id=200
+        assert_eq!(
+            events[1].event.dp_rank, 1,
+            "Second batch should have dp_rank=1"
+        );
+        assert_eq!(
+            events[1].event.event_id, 200,
+            "Second batch should have event_id=200"
+        );
+
+        // Verify block counts
+        if let KvCacheEventData::Stored(data) = &events[0].event.data {
+            assert_eq!(data.blocks.len(), 2, "First batch should have 2 blocks");
+        } else {
+            panic!("Expected Stored event");
+        }
+        if let KvCacheEventData::Stored(data) = &events[1].event.data {
+            assert_eq!(data.blocks.len(), 1, "Second batch should have 1 block");
+        } else {
+            panic!("Expected Stored event");
+        }
     }
 }
