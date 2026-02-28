@@ -256,6 +256,10 @@ jobs:
           # Copy docs.yml from source to get config updates (redirects, layout, etc.)
           cp ../../source-checkout/fern/docs.yml docs.yml
 
+          # Fix asset paths: source uses ../docs/assets/ (relative to fern/ in source repo),
+          # but on docs-website assets live at fern/assets/ so we need ./assets/
+          sed -i 's|\.\./docs/assets/|./assets/|g' docs.yml
+
           # Restore the preserved products[0] block
           yq -i '.products[0] = load("/tmp/preserved_product.yml")' docs.yml
 
