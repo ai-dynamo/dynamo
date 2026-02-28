@@ -9,4 +9,4 @@ metadata:
 spec:
   model: Qwen/Qwen3-32B
   backend: trtllm
-  image: "nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag"
+  image: "nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.0"

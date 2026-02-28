@@ -9,7 +9,7 @@ metadata:
 spec:
   model: deepseek-ai/DeepSeek-R1
   backend: sglang
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:my-tag"
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.0.0"
   searchStrategy: rapid
 
   modelCache:

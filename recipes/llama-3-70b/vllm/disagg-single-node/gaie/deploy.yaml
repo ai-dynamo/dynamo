@@ -16,7 +16,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/epp-image:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/epp-image:1.0.0
       eppConfig:
         config:
           plugins:
@@ -89,13 +89,13 @@ spec:
           command:
           - /bin/sh
           - -c
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0
           workingDir: /workspace/examples/backends/vllm
         # Frontend sidecar: receives requests from kGateway on port 8000
         # and routes them to the vLLM worker in the same pod
         containers:
           - name: frontend
-            image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+            image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0
             command:
               - python3
             args:
@@ -190,13 +190,13 @@ spec:
           command:
           - /bin/sh
           - -c
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0
           workingDir: /workspace/examples/backends/vllm
         # Frontend sidecar: receives requests from kGateway on port 8000
         # and routes them to the vLLM worker in the same pod
         containers:
           - name: frontend
-            image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+            image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0
             command:
               - python3
             args:
