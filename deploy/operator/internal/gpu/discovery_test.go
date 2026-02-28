@@ -677,22 +677,6 @@ func TestListDCGMExporterPods(t *testing.T) {
 	}
 }
 
-package cloud_test
-
-import (
-	"context"
-	"strings"
-	"testing"
-
-	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/types"
-	"sigs.k8s.io/controller-runtime/pkg/client/fake"
-
-	. "your/module/cloud" // replace with the package where GetCloudProviderInfo is
-)
-
 func TestGetCloudProviderInfo(t *testing.T) {
 	scheme := runtime.NewScheme()
 	corev1.AddToScheme(scheme)
