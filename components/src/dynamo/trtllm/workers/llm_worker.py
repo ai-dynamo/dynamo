@@ -426,7 +426,7 @@ async def init_llm_worker(
         # --- Additional metrics ---
         additional_metrics = None
 
-        if config.enable_additional_metrics:
+        if config.enable_additional_metrics and config.publish_events_and_metrics:
             try:
                 from dynamo.trtllm.metrics import AdditionalMetricsCollector
 
@@ -446,37 +446,23 @@ async def init_llm_worker(
                     disagg_mode_str,
                 )
 
-                # Register additional metrics with Dynamo endpoint callback.
-                # When publish_events_and_metrics is also on, the trtllm_ callback
-                # already exists, but it only passes trtllm_-prefixed metrics.
-                # Register a second callback for the unprefixed additional metrics.
-                if config.publish_events_and_metrics:
-                    _additional_prefixes = [
-                        "num_aborted_requests_total",
-                        "request_type_",
-                        "kv_transfer_",
-                    ]
-                    register_engine_metrics_callback(
-                        endpoint=endpoint,
-                        registry=REGISTRY,
-                        metric_prefix_filters=_additional_prefixes,
-                        namespace_name=config.namespace,
-                        component_name=config.component,
-                        endpoint_name="generate",
-                        model_name=model_name_for_metrics,
-                    )
-                    logging.info("Additional metrics callback registered (alongside trtllm_ callback)")
-                else:
-                    register_engine_metrics_callback(
-                        endpoint=endpoint,
-                        registry=REGISTRY,
-                        exclude_prefixes=["python_", "process_", "gc_"],
-                        namespace_name=config.namespace,
-                        component_name=config.component,
-                        endpoint_name="generate",
-                        model_name=model_name_for_metrics,
-                    )
-                    logging.info("Additional metrics callback registered (standalone)")
+                # The trtllm_ callback (registered above) only passes trtllm_-prefixed
+                # metrics. Register a second callback for the additional metrics.
+                _additional_prefixes = [
+                    "num_aborted_requests_total",
+                    "request_type_",
+                    "kv_transfer_",
+                ]
+                register_engine_metrics_callback(
+                    endpoint=endpoint,
+                    registry=REGISTRY,
+                    metric_prefix_filters=_additional_prefixes,
+                    namespace_name=config.namespace,
+                    component_name=config.component,
+                    endpoint_name="generate",
+                    model_name=model_name_for_metrics,
+                )
+                logging.info("Additional metrics callback registered")
             except Exception as e:
                 logging.warning("Failed to initialize additional metrics: %s", e)
 
