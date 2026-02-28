@@ -249,8 +249,9 @@ where
 
     /// Select the next worker according to the routing mode.
     /// Increments round-robin counter if applicable.
-    /// Returns None for Direct and KV modes -- those require explicit worker IDs
-    /// provided via routing hints (e.g., headers from an external router like EPP).
+    /// Returns None for Direct mode -- requires explicit worker IDs via routing hints
+    /// (e.g., headers from an external router like EPP).
+    /// Panics for KV mode which has its own selection via find_best_match.
     pub fn select_next_worker(&self) -> Option<u64> {
         let instance_ids = self.client.instance_ids_avail();
         let count = instance_ids.len();
@@ -267,13 +268,17 @@ where
                 let counter = rand::rng().random::<u64>() as usize;
                 Some(instance_ids[counter % count])
             }
-            RouterMode::Direct | RouterMode::KV => None,
+            RouterMode::Direct => None,
+            RouterMode::KV => {
+                panic!("select_next_worker should not be called for KV routing mode")
+            }
         }
     }
 
     /// Peek the next worker according to the routing mode without incrementing the counter.
     /// Useful for checking if a worker is suitable before committing to it.
-    /// Returns None for Direct and KV modes -- those require explicit worker IDs.
+    /// Returns None for Direct mode -- requires explicit worker IDs via routing hints.
+    /// Panics for KV mode which has its own selection via find_best_match.
     pub fn peek_next_worker(&self) -> Option<u64> {
         let instance_ids = self.client.instance_ids_avail();
         let count = instance_ids.len();
@@ -292,7 +297,10 @@ where
                 let counter = rand::rng().random::<u64>() as usize;
                 Some(instance_ids[counter % count])
             }
-            RouterMode::Direct | RouterMode::KV => None,
+            RouterMode::Direct => None,
+            RouterMode::KV => {
+                panic!("peek_next_worker should not be called for KV routing mode")
+            }
         }
     }
 
