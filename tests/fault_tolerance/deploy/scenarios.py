@@ -526,10 +526,11 @@ class TerminateProcessFailure(Failure):
                     return actual_elapsed
             except ApiException as e:
                 logger.debug(f"Kubernetes API error checking pod status: {e}")
-            except Exception:
+            except Exception as e:
                 logger.exception(
-                    f"Unexpected error checking pod readiness for {pod.name}"
+                    f"Unexpected error checking pod readiness for {pod.name}: {e}"
                 )
+                raise
 
         logger.warning(f"Pod '{pod.name}' did not become ready within {max_wait}s")
         return None
