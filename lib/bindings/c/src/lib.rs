@@ -51,6 +51,8 @@ unsafe fn cstr_or_default<'a>(ptr: *const c_char, default_val: &'a str) -> Cow<'
 }
 
 fn initialize_tracing() {
+    // Sets up RUST_LOG environment variable for logging while KV Publishing
+    // Example: os.environ["RUST_LOG"] = "debug"
     let subscriber = tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .finish();

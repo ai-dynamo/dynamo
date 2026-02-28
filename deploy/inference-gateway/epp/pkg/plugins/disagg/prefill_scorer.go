@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 
 	log "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/plugins"
@@ -113,7 +114,7 @@ func (s *DynPrefillScorer) Score(ctx context.Context, cycleState *schedtypes.Cyc
 		return uniformScores(pods, 0)
 	}
 
-	prefillWorkerID := fmt.Sprintf("%d", result.WorkerID)
+	prefillWorkerID := strconv.FormatUint(result.WorkerID, 10)
 	logger.V(logutil.DEFAULT).Info("DynPrefillScorer: prefill worker selected",
 		"prefillWorkerID", prefillWorkerID,
 		"tokenCount", len(result.TokenData))

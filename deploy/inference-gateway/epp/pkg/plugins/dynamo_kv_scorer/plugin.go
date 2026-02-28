@@ -101,8 +101,11 @@ import (
 	"time"
 	"unsafe"
 
+	ctrl "sigs.k8s.io/controller-runtime"
 	schedtypes "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/scheduling/types"
 )
+
+var logger = ctrl.Log.WithName("dynamo-kv-scorer")
 
 var (
 	ffiOnce sync.Once
@@ -126,11 +129,12 @@ func loadDynamoConfig() {
 	// DYN_KV_CACHE_BLOCK_SIZE and DYN_MODEL_NAME are read by the Rust router (lib.rs)
 	// at create_routers time. They replace the values from the model card discovery.
 	// Set these in the EPP pod env to match the worker configuration.
-	fmt.Printf("Dynamo KV Scorer: namespace=%s, component=%s, decode_fallback=%v, "+
-		"kv_cache_block_size=%s, model_name=%s\n",
-		ffiNamespace, ffiComponent, ffiDecodeFallback,
-		getEnvOrDefault("DYN_KV_CACHE_BLOCK_SIZE", "(from discovery)"),
-		getEnvOrDefault("DYN_MODEL_NAME", "(from discovery)"))
+	logger.Info("Dynamo KV Scorer configuration loaded",
+		"namespace", ffiNamespace,
+		"component", ffiComponent,
+		"decodeFallback", ffiDecodeFallback,
+		"kvCacheBlockSize", getEnvOrDefault("DYN_KV_CACHE_BLOCK_SIZE", "(from discovery)"),
+		"modelName", getEnvOrDefault("DYN_MODEL_NAME", "(from discovery)"))
 }
 
 func getEnvOrDefault(key, def string) string {

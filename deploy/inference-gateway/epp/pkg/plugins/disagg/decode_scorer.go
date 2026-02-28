@@ -143,7 +143,7 @@ func (s *DynDecodeScorer) Score(ctx context.Context, cycleState *schedtypes.Cycl
 	}
 
 	podsJSON := serializePods(pods)
-	logger.V(logutil.DEFAULT).Info("GAIE: DynDecodeScorer: pods received for scoring",
+	logger.V(logutil.DEFAULT).Info("DynDecodeScorer: pods received for scoring",
 		"podCount", len(pods),
 		"podsJSON", string(podsJSON))
 

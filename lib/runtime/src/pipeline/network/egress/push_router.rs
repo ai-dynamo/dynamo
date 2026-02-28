@@ -261,7 +261,6 @@ where
 
         match self.router_mode {
             RouterMode::RoundRobin => {
-                // Just peek at the current counter value without incrementing
                 let counter = self.round_robin_counter.fetch_add(1, Ordering::Relaxed) as usize;
                 Some(instance_ids[counter % count])
             }
@@ -289,6 +288,7 @@ where
 
         match self.router_mode {
             RouterMode::RoundRobin => {
+                // Just peek at the current counter value without incrementing
                 let counter = self.round_robin_counter.load(Ordering::Relaxed) as usize;
                 Some(instance_ids[counter % count])
             }

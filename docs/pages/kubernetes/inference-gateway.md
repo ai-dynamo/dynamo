@@ -271,9 +271,8 @@ The Inference Gateway provides HTTP endpoints for model inference.
 
 #### 1: Populate gateway URL for your k8s cluster ####
 
-a. To test the gateway in minikube, use the following commands:
-User minikube tunnel to expose the gateway to the host
-   This requires `sudo` access to the host machine. alternatively, you can use port-forward to expose the gateway to the host as shown in alternative (b).
+a. To test the integration in minikube, proceed as below:
+Use minikube tunnel to expose the gateway to the host. This requires `sudo` access to the host machine. Alternatively, you can use port-forward to expose the gateway to the host as shown in alternative (b).
 
 ```bash
 # in first terminal
