@@ -19,6 +19,9 @@ python -m dynamo.frontend \
 # run workers with KVBM enabled
 # --enforce-eager is added for quick deployment. for production use, need to remove this flag
 # TODO: honor DYN_GPU_MEMORY_FRACTION_OVERRIDE env var for profiler binary search
+if [[ -n "${DYN_GPU_MEMORY_FRACTION_OVERRIDE:-}" ]]; then
+    echo "WARNING: DYN_GPU_MEMORY_FRACTION_OVERRIDE is set but agg_kvbm_router.sh does not support it yet." >&2
+fi
 # Each worker needs unique ZMQ ports to avoid KVBM coordination conflicts
 DYN_KVBM_LEADER_ZMQ_PUB_PORT=56001 \
 DYN_KVBM_LEADER_ZMQ_ACK_PORT=56002 \

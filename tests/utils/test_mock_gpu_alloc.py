@@ -19,7 +19,7 @@ ALLOC_MIB = 4096  # 4 GiB
 @pytest.mark.gpu_1
 @pytest.mark.timeout(30)
 def test_mock_4gb_gpu_alloc():
-    """Allocate 4 GiB of GPU VRAM, hold 5s, release. Honors DYN_GPU_MEMORY_FRACTION_OVERRIDE."""
+    """Allocate 4 GiB of GPU VRAM, hold 2s, release. Honors DYN_GPU_MEMORY_FRACTION_OVERRIDE."""
     if not torch.cuda.is_available():
         pytest.skip("CUDA not available")
 

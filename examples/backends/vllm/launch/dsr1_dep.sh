@@ -96,6 +96,9 @@ mkdir -p $LOG_DIR
 # reserved by vLLM) can be different and cause model fails to start,
 # adjust '--gpu-memory-utilization' as needed
 # TODO: honor DYN_GPU_MEMORY_FRACTION_OVERRIDE env var for profiler binary search
+if [[ -n "${DYN_GPU_MEMORY_FRACTION_OVERRIDE:-}" ]]; then
+    echo "WARNING: DYN_GPU_MEMORY_FRACTION_OVERRIDE is set but dsr1_dep.sh does not support it yet." >&2
+fi
 for ((i=0; i<GPUS_PER_NODE; i++)); do
     dp_rank=$((i + NODE_RANK * GPUS_PER_NODE))
     CUDA_VISIBLE_DEVICES=$i \

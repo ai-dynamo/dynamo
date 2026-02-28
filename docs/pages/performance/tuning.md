@@ -64,11 +64,11 @@ For most dense models, we find block size 128 is a good choice.
 
 Each engine backend has its own CLI flag to control what fraction of GPU memory is reserved for the KV cache (after model weights and activation buffers are allocated):
 
-| Engine  | CLI flag                         | Engine-specific env var                    | Default |
-|---------|----------------------------------|--------------------------------------------|---------|
-| vLLM    | `--gpu-memory-utilization`       | —                                          | 0.9     |
-| SGLang  | `--mem-fraction-static`          | —                                          | 0.88    |
-| TRT-LLM | `--free-gpu-memory-fraction`    | `DYN_TRTLLM_FREE_GPU_MEMORY_FRACTION`      | 0.9     |
+| Engine  | CLI flag                         | Engine-specific env var                    | Default
+|---------|----------------------------------|--------------------------------------------|--------
+| vLLM    | `--gpu-memory-utilization`       | —                                          | 0.9
+| SGLang  | `--mem-fraction-static`          | —                                          | 0.88
+| TRT-LLM | `--free-gpu-memory-fraction`    | `DYN_TRTLLM_FREE_GPU_MEMORY_FRACTION`      | 0.9
 
 Dynamo launch scripts recognize a generic env var, `DYN_GPU_MEMORY_FRACTION_OVERRIDE` (float 0.0-1.0), and translate it to the engine-specific flag. This is used by `tests/utils/profile_pytest.py` to binary-search the minimum VRAM a test needs. Currently implemented for vLLM launch scripts; SGLang and TRT-LLM support is planned.
 

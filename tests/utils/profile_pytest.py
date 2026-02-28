@@ -4,16 +4,26 @@
 
 """Profile GPU VRAM usage during a pytest run.
 
-By default, runs a binary search on ``DYN_GPU_MEMORY_FRACTION_OVERRIDE`` to find the
-minimum VRAM the test needs, then prints recommended pytest markers.
+How it works
+~~~~~~~~~~~~
+A background thread polls ``nvidia-smi --query-gpu=memory.used`` every 500 ms
+(configurable with ``--interval``) to record GPU memory usage while the test
+runs as a subprocess.  This captures *all* GPU memory (model weights, KV cache,
+CUDA contexts, NCCL buffers — not just PyTorch allocations) without requiring
+any in-process instrumentation.
 
-**IMPORTANT**: The binary search works by setting the ``DYN_GPU_MEMORY_FRACTION_OVERRIDE``
-environment variable to a fraction between 0.0 and 1.0 (fraction of total GPU
-RAM).  The test under profile **MUST** honor this env var — either directly
-(see ``test_mock_gpu_alloc.py`` for an example) or via launch scripts that
-pass it through to the engine (e.g. ``agg.sh`` passes it as
-``--gpu-memory-utilization`` to vLLM).  If the test ignores this variable,
-the binary search cannot find a boundary and every profile will pass.
+In **binary-search mode** (the default), the profiler sets the env var
+``DYN_GPU_MEMORY_FRACTION_OVERRIDE`` to a value between 0.05 and 0.95 and
+re-runs the test at each midpoint.  If the test passes, the fraction is lowered;
+if it OOMs, the fraction is raised — standard bisection to find the minimum
+VRAM the test needs.  The peak ``memory.used`` from the last passing run
+(plus a 10 % safety margin) becomes the ``@pytest.mark.max_vram_gib`` recommendation.
+
+**IMPORTANT**: The test under profile **MUST** honor ``DYN_GPU_MEMORY_FRACTION_OVERRIDE``
+— either directly (see ``test_mock_gpu_alloc.py``) or via launch scripts that
+pass it as ``--gpu-memory-utilization`` to vLLM (e.g. ``agg.sh``).  If the test
+ignores this variable, every probe will pass at the same peak and the profiler
+will warn that the binary search is unreliable.
 
 Usage::
 
@@ -41,6 +51,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from dataclasses import dataclass, field
@@ -69,7 +80,8 @@ def _extract_model_from_markers(pytest_args: list[str]) -> str | None:
     without executing the test.  Returns None if the plugin is missing or the
     test has no ``model`` marker.
     """
-    json_path = "/tmp/_profile_collect.json"
+    fd, json_path = tempfile.mkstemp(prefix="_profile_collect_", suffix=".json")
+    os.close(fd)
     try:
         result = subprocess.run(
             [
@@ -174,7 +186,7 @@ def _query_nvidia_smi() -> list[tuple[int, int, int, int]]:
 class _Sampler:
     """Background thread that polls nvidia-smi at a fixed interval."""
 
-    def __init__(self, interval: float = 1.0):
+    def __init__(self, interval: float = 0.5):
         self.interval = interval
         self.samples: list[GpuSample] = []
         self._stop = threading.Event()
@@ -343,11 +355,7 @@ def _print_report(
     model_name: str | None = None,
 ):
     """Print a human-readable profiling report."""
-    sep = "=" * 72
-
-    print(f"\n{sep}")
-    print("GPU MEMORY PROFILE")
-    print(sep)
+    print("\n--- GPU MEMORY PROFILE ---")
     print(f"  pytest exit code : {pytest_rc}")
     print(f"  wall time        : {wall_secs:.1f}s")
     print(f"  GPUs sampled     : {len(reports)}")
@@ -390,7 +398,7 @@ def _print_report(
                     f"{_format_mib(p.mem_end_mib):>10}"
                 )
 
-    print(f"\n{sep}\n")
+    print()
 
 
 def _write_csv(samples: list[GpuSample], path: str):
@@ -551,10 +559,7 @@ def _print_recommendations(
     warnings: list[str],
     pytest_args: list[str] | None = None,
 ):
-    sep = "=" * 72
-    print(sep)
-    print("Recommended markers to add to your pytest. You can copy-paste this:")
-    print(sep)
+    print("--- Recommended markers (copy-paste into your test) ---")
     if pytest_args:
         print(
             f"# Measured using: tests/utils/profile_pytest.py {' '.join(pytest_args)}"
@@ -563,11 +568,21 @@ def _print_recommendations(
         print("# Measured using: tests/utils/profile_pytest.py")
     for r in recs:
         print(f"@pytest.mark.{r.marker}  # {r.reason}")
+
+    # Show example so user knows where to place the markers
+    test_name = None
+    if pytest_args:
+        test_name = next(
+            (a.rsplit("::", 1)[-1] for a in pytest_args if "::" in a), None
+        )
+    print(f"def {test_name or 'test_something'}(...):")
+    print("    ...")
+
     if warnings:
         print()
         for w in warnings:
             print(f"  WARNING: {w}")
-    print(f"\n{sep}\n")
+    print()
 
 
 _DEFAULT_PROBE_TIMEOUT = 300  # 5 minutes max per profile run
@@ -575,7 +590,7 @@ _DEFAULT_PROBE_TIMEOUT = 300  # 5 minutes max per profile run
 
 def _run_once(
     pytest_args: list[str],
-    interval: float = 1.0,
+    interval: float = 0.5,
     baseline_seconds: float = 3.0,
     teardown_seconds: float = 5.0,
     extra_env: dict[str, str] | None = None,
@@ -649,9 +664,11 @@ def _run_once(
 
 def _find_min_vram(
     pytest_args: list[str],
-    interval: float = 1.0,
+    interval: float = 0.5,
     baseline_seconds: float = 2.0,
     teardown_seconds: float = 2.0,
+    recommend: bool = True,
+    csv_path: str | None = None,
 ) -> int:
     """Binary search DYN_GPU_MEMORY_FRACTION_OVERRIDE to find the minimum VRAM a test needs.
 
@@ -668,10 +685,7 @@ def _find_min_vram(
 
     model_name = _extract_model_from_markers(pytest_args)
 
-    sep = "=" * 72
-    print(f"\n{sep}")
-    print("FIND MINIMUM VRAM (binary search)")
-    print(sep)
+    print("\n--- FIND MINIMUM VRAM (binary search) ---")
     print(f"  GPU total : {total_gib:.1f} GiB")
     print(
         f"  GPU free  : {free_mib / 1024:.1f} GiB  "
@@ -721,7 +735,7 @@ def _find_min_vram(
     sys.stdout.flush()
     t_iter_start = time.monotonic()
     label = f"profile 1/{max_iterations + 1}"
-    rc, wall, reports, _ = _run_once(
+    rc, wall, reports, raw_samples = _run_once(
         pytest_args,
         interval=interval,
         baseline_seconds=baseline_seconds,
@@ -744,6 +758,7 @@ def _find_min_vram(
     last_pass_util = hi
     last_pass_peak_mib = peak_mib
     last_pass_reports = reports
+    last_pass_samples = raw_samples
     pass_wall_times.append(wall)
     print(
         f"  [PASS] allowed GPU = {hi * total_gib:.1f} GiB ({hi:.0%}), "
@@ -777,8 +792,11 @@ def _find_min_vram(
 
         stop_progress = threading.Event()
         t_iter_start = time.monotonic()
+        is_tty = sys.stderr.isatty()
 
         def _print_progress(t0: float, expected: float, stop: threading.Event) -> None:
+            if not is_tty:
+                return
             term_width = shutil.get_terminal_size((80, 24)).columns
             bar_total = max(term_width - 40, 10)
             while not stop.wait(2):
@@ -798,7 +816,7 @@ def _find_min_vram(
         )
         progress_thread.start()
 
-        rc, wall, reports, _ = _run_once(
+        rc, wall, reports, raw_samples = _run_once(
             pytest_args,
             interval=interval,
             baseline_seconds=baseline_seconds,
@@ -811,8 +829,11 @@ def _find_min_vram(
 
         stop_progress.set()
         progress_thread.join(timeout=2)
-        sys.stderr.write("\r" + " " * shutil.get_terminal_size((80, 24)).columns + "\r")
-        sys.stderr.flush()
+        if is_tty:
+            sys.stderr.write(
+                "\r" + " " * shutil.get_terminal_size((80, 24)).columns + "\r"
+            )
+            sys.stderr.flush()
 
         iter_elapsed = time.monotonic() - t_iter_start
         elapsed_times.append(iter_elapsed)
@@ -823,6 +844,7 @@ def _find_min_vram(
             last_pass_util = mid
             last_pass_peak_mib = peak_mib
             last_pass_reports = reports
+            last_pass_samples = raw_samples
             pass_wall_times.append(wall)
             hi = mid
             print(
@@ -875,32 +897,27 @@ def _find_min_vram(
     )
     test_short = test_name.rsplit("::", 1)[-1] if "::" in test_name else test_name
 
-    fits_on = [(g, n) for g, n in _GPU_REFERENCE_CARDS if padded_peak_gib <= g]
-    oom_on = [(g, n) for g, n in _GPU_REFERENCE_CARDS if padded_peak_gib > g]
-
-    print(f"\n{sep}")
-    print("MINIMUM VRAM RESULT")
-    print(sep)
+    print("\n--- RESULT ---")
     print(f"  Lowest passing utilization : {last_pass_util:.0%}")
     print(
         f"  Minimum VRAM needed        : ~{min_vram_gib:.1f} GiB "
         f"(peak observed: {_format_mib(last_pass_peak_mib)}, "
         f"+10% safety: {_format_mib(padded_peak_mib)})"
     )
-    print()
-    print(f"  # {test_short}: @pytest.mark.max_vram_gib({padded_peak_gib})")
-    if fits_on:
-        print(f"  # Fits on: {', '.join(f'{n} ({g} GiB)' for g, n in fits_on)}")
-    if oom_on:
-        print(f"  # Will OOM on: {', '.join(f'{n} ({g} GiB)' for g, n in oom_on)}")
-    print(f"{sep}\n")
+    print(f"  {test_short}: @pytest.mark.max_vram_gib({padded_peak_gib})")
 
     # Full marker recommendations using average wall time across all passing runs
-    avg_pass_wall = sum(pass_wall_times) / len(pass_wall_times)
-    recs, warnings = _recommend_markers(
-        last_pass_reports, avg_pass_wall, model_name, num_runs=len(pass_wall_times)
-    )
-    _print_recommendations(recs, warnings, pytest_args=pytest_args)
+    if recommend:
+        avg_pass_wall = sum(pass_wall_times) / len(pass_wall_times)
+        recs, warnings = _recommend_markers(
+            last_pass_reports, avg_pass_wall, model_name, num_runs=len(pass_wall_times)
+        )
+        _print_recommendations(recs, warnings, pytest_args=pytest_args)
+
+    if csv_path and last_pass_samples:
+        _write_csv(last_pass_samples, csv_path)
+        print(f"Raw samples (last passing run) written to {csv_path}")
+
     return 0
 
 
@@ -916,8 +933,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--interval",
         type=float,
-        default=1.0,
-        help="Sampling interval in seconds (default: 1.0)",
+        default=0.5,
+        help="Sampling interval in seconds (default: 0.5)",
     )
     parser.add_argument(
         "--baseline-seconds",
@@ -968,7 +985,8 @@ def main(argv: list[str] | None = None) -> int:
         if arg.startswith("-"):
             continue
         test_path = arg.split("::")[0]
-        if not os.path.exists(test_path):
+        looks_like_test_path = test_path.endswith(".py") or (os.path.sep in test_path)
+        if looks_like_test_path and not os.path.exists(test_path):
             parser.error(f"Test path does not exist: {test_path}")
 
     gpu_info = _query_nvidia_smi()
@@ -990,6 +1008,8 @@ def main(argv: list[str] | None = None) -> int:
             interval=args.interval,
             baseline_seconds=args.baseline_seconds,
             teardown_seconds=args.teardown_seconds,
+            recommend=not args.no_recommend,
+            csv_path=args.csv,
         )
 
     model_name = _extract_model_from_markers(pytest_args)

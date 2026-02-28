@@ -468,7 +468,7 @@ python tests/utils/profile_pytest.py --no-find-min-vram tests/serve/test_vllm.py
 
 ### Example output
 
-```
+```bash
 ========================================================================
 FIND MINIMUM VRAM (binary search)
 ========================================================================
