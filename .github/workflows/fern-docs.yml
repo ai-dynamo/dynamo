@@ -187,6 +187,10 @@ jobs:
           rm -rf docs-checkout/fern/assets
           cp -r source-checkout/docs/assets docs-checkout/fern/assets
 
+          # Symlink assets into pages-dev/ so relative image paths in markdown resolve correctly
+          # (e.g. ../../assets/img/foo.png from pages-dev/observability/metrics.md)
+          ln -sfn ../assets docs-checkout/fern/pages-dev/assets
+
           # Sync fern.config.json
           echo "Syncing fern.config.json to docs-website branch..."
           cp source-checkout/fern/fern.config.json docs-checkout/fern/fern.config.json
