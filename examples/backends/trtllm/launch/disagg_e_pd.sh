@@ -46,8 +46,8 @@ CUDA_VISIBLE_DEVICES=$ENCODE_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
   --disaggregation-mode encode &
 ENCODE_PID=$!
 
-# run PD worker 1 (GPU 1)
-CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.trtllm \
+# run PD worker 1 (GPU 0)
+CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.trtllm \
   --model-path "$MODEL_PATH" \
   --served-model-name "$SERVED_MODEL_NAME" \
   --extra-engine-args "$PD_ENGINE_ARGS" \
