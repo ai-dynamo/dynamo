@@ -76,8 +76,6 @@ struct BatchingState {
     last_flush_time: Instant,
 }
 
-
-
 impl BatchingState {
     /// Creates a new BatchingState with current timestamp
     fn new() -> Self {
@@ -478,7 +476,7 @@ async fn run_event_processor_loop<P: EventSink + Send + Sync + 'static>(
 
                 // Check if dp_rank changed before updating state
                 let dp_rank_changed = batching_state.has_pending() && event.dp_rank != batching_state.last_dp_rank;
-                
+
                 batching_state.last_event_id = event.event_id;
                 batching_state.last_dp_rank = event.dp_rank;
 
@@ -486,7 +484,7 @@ async fn run_event_processor_loop<P: EventSink + Send + Sync + 'static>(
                     KvCacheEventData::Removed(removed_data) => {
                         // Flush if switching from Stored, or if dp_rank changed
                         let should_flush = batching_state.pending_stored.is_some() || dp_rank_changed;
-                        
+
                         if should_flush {
                             batching_state.flush(&publisher, &local_indexer, worker_id).await;
                         }
@@ -3068,7 +3066,7 @@ mod event_processor_tests {
     #[tokio::test]
     async fn test_event_type_switching_causes_flush() {
         let timeout_us = 100_000; // 100ms timeout
-        
+
         let (tx, rx) = mpsc::unbounded_channel::<KvCacheEvent>();
         let publisher = MockPublisher::new();
         let publisher_clone = publisher.clone();
@@ -3086,7 +3084,8 @@ mod event_processor_tests {
                 block_hashes: vec![ExternalSequenceBlockHash(0)],
             }),
             dp_rank: 0,
-        }).unwrap();
+        })
+        .unwrap();
 
         // Small sleep
         tokio::time::sleep(tokio::time::Duration::from_micros(100)).await;
@@ -3103,7 +3102,8 @@ mod event_processor_tests {
                 }],
             }),
             dp_rank: 0,
-        }).unwrap();
+        })
+        .unwrap();
 
         // Give time for processing
         tokio::time::sleep(tokio::time::Duration::from_millis(2)).await;
@@ -3125,7 +3125,7 @@ mod event_processor_tests {
     #[tokio::test]
     async fn test_dp_rank_change_causes_flush() {
         let timeout_us = 100_000; // 100ms timeout
-        
+
         let (tx, rx) = mpsc::unbounded_channel::<KvCacheEvent>();
         let publisher = MockPublisher::new();
         let publisher_clone = publisher.clone();
@@ -3144,7 +3144,8 @@ mod event_processor_tests {
                     block_hashes: vec![ExternalSequenceBlockHash(i as u64)],
                 }),
                 dp_rank: 0,
-            }).unwrap();
+            })
+            .unwrap();
             tokio::task::yield_now().await;
         }
 
@@ -3156,7 +3157,8 @@ mod event_processor_tests {
                     block_hashes: vec![ExternalSequenceBlockHash(i as u64)],
                 }),
                 dp_rank: 1,
-            }).unwrap();
+            })
+            .unwrap();
             tokio::task::yield_now().await;
         }
 
@@ -3186,6 +3188,9 @@ mod event_processor_tests {
                 }
             })
             .sum();
-        assert_eq!(total_hashes, 6, "All 6 block hashes should be accounted for");
+        assert_eq!(
+            total_hashes, 6,
+            "All 6 block hashes should be accounted for"
+        );
     }
 }
