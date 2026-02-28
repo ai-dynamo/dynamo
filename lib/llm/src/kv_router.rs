@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -27,7 +26,10 @@ use validator::Validate;
 pub use dynamo_kv_router::approx;
 pub use dynamo_kv_router::indexer;
 pub use dynamo_kv_router::protocols;
+pub use dynamo_kv_router::scheduling;
+pub use dynamo_kv_router::selector;
 
+pub mod cache_control;
 pub mod config;
 pub mod indexer_standalone;
 mod jetstream;
@@ -42,6 +44,7 @@ pub mod sequence;
 pub mod subscriber;
 pub mod worker_query;
 
+pub use cache_control::{CacheControlClient, spawn_pin_prefix};
 pub use config::{KvRouterConfig, RouterConfigOverride};
 pub use indexer_standalone::start_kv_block_indexer;
 pub use prefill_router::PrefillRouter;
@@ -54,14 +57,16 @@ use crate::{
         indexer::{GetWorkersRequest, KvIndexer, KvIndexerInterface, KvRouterError},
         protocols::{
             BlockExtraInfo, DpRank, LocalBlockHash, OverlapScores, RouterEvent, RouterRequest,
-            RouterResponse, TokensWithHashes, WorkerId, WorkerSelectionResult, WorkerWithDpRank,
+            RouterResponse, TokensWithHashes, WorkerId, WorkerWithDpRank,
             compute_block_hash_for_seq,
         },
-        scheduler::{KvScheduler, KvSchedulerError, PotentialLoad, SchedulingRequest},
+        scheduler::{KvScheduler, PotentialLoad},
         sequence::{SequenceError, SequenceRequest},
     },
     local_model::runtime_config::ModelRuntimeConfig,
 };
+
+use std::collections::HashSet;
 
 // [gluo TODO] shouldn't need to be public
 // this should be discovered from the component
@@ -114,15 +119,9 @@ pub fn router_discovery_query(namespace: String, component: String) -> Discovery
     }
 }
 
-/// A trait that users can implement to define custom selection logic
-pub trait WorkerSelector {
-    fn select_worker(
-        &self,
-        workers: &HashMap<protocols::WorkerId, ModelRuntimeConfig>,
-        request: &SchedulingRequest,
-        block_size: u32,
-    ) -> Result<WorkerSelectionResult, KvSchedulerError>;
-}
+/// Concrete `WorkerSelector` bound to the runtime config type.
+pub type WorkerSelector =
+    dyn dynamo_kv_router::selector::WorkerSelector<ModelRuntimeConfig> + Send + Sync;
 
 #[derive(Clone)]
 pub enum Indexer {
@@ -151,6 +150,26 @@ impl Indexer {
             return Indexer::None;
         }
 
+        // Approximate mode (--no-kv-events): always use single-threaded KvIndexer
+        // with TTL/pruning regardless of event_threads, since updates come from
+        // routing decisions only, not live KV events from workers.
+        if !kv_router_config.use_kv_events {
+            let kv_indexer_metrics = indexer::KvIndexerMetrics::from_component(component);
+            let cancellation_token = component.drt().primary_token();
+            let prune_config = Some(PruneConfig {
+                ttl: Duration::from_secs_f64(kv_router_config.router_ttl_secs),
+                max_tree_size: kv_router_config.router_max_tree_size,
+                prune_target_ratio: kv_router_config.router_prune_target_ratio,
+            });
+            return Indexer::KvIndexer(KvIndexer::new_with_frequency(
+                cancellation_token,
+                None,
+                block_size,
+                kv_indexer_metrics,
+                prune_config,
+            ));
+        }
+
         if kv_router_config.router_event_threads > 1 {
             return Indexer::Concurrent(Arc::new(ThreadPoolIndexer::new(
                 ConcurrentRadixTree::new(),
@@ -162,23 +181,12 @@ impl Indexer {
         let kv_indexer_metrics = indexer::KvIndexerMetrics::from_component(component);
         let cancellation_token = component.drt().primary_token();
 
-        // If use_kv_events is false, enable TTL and pruning for approximate behavior
-        let prune_config = if !kv_router_config.use_kv_events {
-            Some(PruneConfig {
-                ttl: Duration::from_secs_f64(kv_router_config.router_ttl_secs),
-                max_tree_size: kv_router_config.router_max_tree_size,
-                prune_target_ratio: kv_router_config.router_prune_target_ratio,
-            })
-        } else {
-            None
-        };
-
         Indexer::KvIndexer(KvIndexer::new_with_frequency(
             cancellation_token,
             None, // expiration_duration for frequency tracking
             block_size,
             kv_indexer_metrics,
-            prune_config,
+            None,
         ))
     }
 
@@ -284,7 +292,7 @@ impl KvRouter {
         client: Client,
         mut workers_with_configs: RuntimeConfigWatch,
         block_size: u32,
-        selector: Option<Box<dyn WorkerSelector + Send + Sync>>,
+        selector: Option<Box<WorkerSelector>>,
         kv_router_config: Option<KvRouterConfig>,
         worker_type: &'static str,
     ) -> Result<Self> {
@@ -351,7 +359,9 @@ impl KvRouter {
 
     /// Give these tokens, find the worker with the best match in it's KV cache.
     /// Returns the best worker (with dp_rank) and overlap amount in number of blocks.
-    /// Now also takes optional context_id for request tracking
+    /// Now also takes optional context_id for request tracking.
+    ///
+    /// When `allowed_worker_ids` is Some, only workers in that set are considered for selection.
     #[allow(clippy::too_many_arguments)]
     pub async fn find_best_match(
         &self,
@@ -362,6 +372,7 @@ impl KvRouter {
         update_states: bool,
         lora_name: Option<String>,
         priority_jump: f64,
+        allowed_worker_ids: Option<HashSet<WorkerId>>,
     ) -> anyhow::Result<(WorkerWithDpRank, u32)> {
         let start = Instant::now();
 
@@ -388,6 +399,7 @@ impl KvRouter {
             .await?;
         let find_matches_elapsed = start.elapsed();
 
+        // Compute seq_hashes only if scheduler needs it for active blocks tracking
         let maybe_seq_hashes = tracing::info_span!("kv_router.compute_seq_hashes").in_scope(|| {
             self.kv_router_config.compute_seq_hashes_for_tracking(
                 tokens,
@@ -398,17 +410,18 @@ impl KvRouter {
         });
         let seq_hash_elapsed = start.elapsed();
 
-        let best_worker = self
+        let response = self
             .scheduler
             .schedule(
                 context_id.map(|s| s.to_string()),
                 isl_tokens,
                 maybe_seq_hashes,
-                overlap_scores.clone(),
+                overlap_scores,
                 router_config_override,
                 update_states,
                 lora_name,
                 priority_jump,
+                allowed_worker_ids,
             )
             .instrument(tracing::info_span!("kv_router.schedule"))
             .await?;
@@ -434,15 +447,7 @@ impl KvRouter {
             "find_best_match completed"
         );
 
-        // Note: Routing decision recording (for approximate mode) is now handled
-        // by KvPushRouter::generate after select_worker returns.
-
-        let overlap_amount = overlap_scores
-            .scores
-            .get(&best_worker)
-            .copied()
-            .unwrap_or(0);
-        Ok((best_worker, overlap_amount))
+        Ok((response.best_worker, response.overlap_blocks))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -575,6 +580,7 @@ impl AsyncEngine<SingleIn<RouterRequest>, ManyOut<Annotated<RouterResponse>>, Er
                         true,
                         None,
                         0.0,
+                        None,
                     )
                     .await?;
 

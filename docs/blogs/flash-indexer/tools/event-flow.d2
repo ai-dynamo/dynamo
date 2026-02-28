@@ -1,0 +1,21 @@
+# Flash Indexer: Event Flow (linear chain, curly brace added in post)
+...@theme.d2
+
+direction: right
+
+engine: Engine { class: gpu }
+publisher: Publisher { class: service }
+indexer: Indexer {
+  shape: cylinder
+  class: data_component
+  width: 180
+  height: 56
+}
+router: Router {
+  shape: hexagon
+  class: api
+}
+
+engine -> publisher: KV Events { class: data_flow }
+publisher -> indexer: Enriched Events { class: data_flow }
+indexer -> router: Overlap Scores { class: data_flow }

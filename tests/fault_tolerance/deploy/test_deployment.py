@@ -142,13 +142,8 @@ def _clients(
     procs: list[SpawnProcess] = []
     ctx = multiprocessing.get_context("spawn")
 
-    # Determine retry_delay_or_rate based on client type
-    if load_config.client_type == "legacy":
-        # Legacy client uses max_request_rate for rate limiting
-        retry_delay_or_rate = load_config.max_request_rate
-    else:
-        # AI-Perf client uses retry_delay between attempts (default 5s)
-        retry_delay_or_rate = 5
+    # Both client types use max_request_rate for rate limiting (requests/sec)
+    max_request_rate = load_config.max_request_rate
 
     # Check if this is a continuous load test (rolling upgrade scenarios)
     continuous_load = getattr(load_config, "continuous_load", False)
@@ -177,7 +172,7 @@ def _clients(
                     load_config.overflow_token_length,  # 2x max_seq_len tokens
                     load_config.output_token_length,
                     load_config.max_retries,
-                    retry_delay_or_rate,
+                    max_request_rate,
                     continuous_load,
                 ),
             )
@@ -206,7 +201,7 @@ def _clients(
                     load_config.input_token_length,  # Normal token count
                     load_config.output_token_length,
                     load_config.max_retries,
-                    retry_delay_or_rate,
+                    max_request_rate,
                 ),
             )
             proc_normal.start()
@@ -231,7 +226,7 @@ def _clients(
                         load_config.input_token_length,
                         load_config.output_token_length,
                         load_config.max_retries,
-                        retry_delay_or_rate,
+                        max_request_rate,
                         continuous_load,  # Pass continuous_load flag
                     ),
                 )

@@ -4,13 +4,19 @@
 title: vLLM-Omni
 ---
 
-# [Experimental] Omni Models with vLLM
-
 Dynamo supports multimodal generation through the [vLLM-Omni](https://github.com/vllm-project/vllm-omni) backend. This integration exposes text-to-text, text-to-image, and text-to-video capabilities via OpenAI-compatible API endpoints.
 
 ## Prerequisites
 
 This guide assumes familiarity with deploying Dynamo with vLLM as described in the [vLLM backend guide](/docs/pages/backends/vllm/README.md).
+
+### Installation
+
+Dynamo container images include vLLM-Omni pre-installed. If you are using `pip install ai-dynamo[vllm]`, vLLM-Omni is **not** included automatically because the matching release is not yet available on PyPI. Install it separately from source:
+
+```bash
+pip install git+https://github.com/vllm-project/vllm-omni.git@v0.16.0rc1
+```
 
 ## Supported Modalities
 

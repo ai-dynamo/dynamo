@@ -58,7 +58,7 @@ class WorkerFactory:
         config: Config,
         shutdown_event: asyncio.Event,
         shutdown_endpoints: list,
-        pre_created_engine: Optional[EngineSetupResult] = None,
+        checkpoint_restore_engine: Optional[EngineSetupResult] = None,
     ) -> None:
         """Create the appropriate multimodal worker based on config flags."""
 
@@ -72,7 +72,7 @@ class WorkerFactory:
                 config,
                 shutdown_event,
                 shutdown_endpoints,
-                pre_created_engine=pre_created_engine,
+                checkpoint_restore_engine=checkpoint_restore_engine,
             )
         else:
             raise ValueError(
@@ -85,7 +85,7 @@ class WorkerFactory:
         config: Config,
         shutdown_event: asyncio.Event,
         shutdown_endpoints: list,  # mutated in place
-        pre_created_engine: Optional[EngineSetupResult] = None,
+        checkpoint_restore_engine: Optional[EngineSetupResult] = None,
     ) -> None:
         """
         Initialize multimodal worker component.
@@ -121,14 +121,14 @@ class WorkerFactory:
                 [load_lora_endpoint, unload_lora_endpoint, list_loras_endpoint]
             )
         # Use pre-created engine if provided (checkpoint mode), otherwise create new
-        if pre_created_engine is not None:
+        if checkpoint_restore_engine is not None:
             (
                 engine_client,
                 vllm_config,
                 _default_sampling_params,
                 prometheus_temp_dir,
                 _component_gauges,
-            ) = pre_created_engine
+            ) = checkpoint_restore_engine
         else:
             (
                 engine_client,

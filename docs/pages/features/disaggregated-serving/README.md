@@ -5,8 +5,6 @@ title: Disaggregated Serving
 subtitle: Find optimal prefill/decode configuration for disaggregated serving deployments
 ---
 
-# Disaggregated Serving Guide
-
 [AIConfigurator](https://github.com/ai-dynamo/aiconfigurator/tree/main) is a performance optimization tool that helps you find the optimal configuration for deploying LLMs with Dynamo. It automatically determines the best number of prefill and decode workers, parallelism settings, and deployment parameters to meet your SLA targets while maximizing throughput.
 
 ## Why Use AIConfigurator?
@@ -86,7 +84,7 @@ aiconfigurator cli default \
 - `--total_gpus`: Number of GPUs available for deployment
 - `--isl` / `--osl`: Input/Output sequence lengths in tokens
 - `--ttft` / `--tpot`: SLA targets - Time To First Token (ms) and Time Per Output Token (ms)
-- `--backend`: Inference backend (`vllm`, `trtllm`, or `sglang`)
+- `--backend`: Inference backend (`sglang`, `trtllm`, or `vllm`)
 - `--backend_version`: Backend version (e.g., `0.12.0` for vLLM)
 - `--save_dir`: Directory to save generated deployment configs
 
@@ -623,13 +621,13 @@ AIConfigurator's default predictions assume no prefix caching. Enable it post-de
 
 ### Systems
 
-| GPU System | TensorRT-LLM | vLLM | SGLang |
-|------------|--------------|------|--------|
+| GPU System | SGLang | TensorRT-LLM | vLLM |
+|------------|--------|--------------|------|
 | H200 SXM | Yes | Yes | Yes |
 | H100 SXM | Yes | Yes | Yes |
-| A100 SXM | Yes | Yes | -- |
-| B200 SXM | Yes | -- | Yes |
-| GB200 SXM | Yes | -- | -- |
+| A100 SXM | -- | Yes | Yes |
+| B200 SXM | Yes | Yes | -- |
+| GB200 SXM | -- | Yes | -- |
 
 ### Models
 
