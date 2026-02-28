@@ -100,7 +100,7 @@ operator:
   - *ci
   - 'deploy/operator/**'
   - 'deploy/operator/.*'
-  - 'docs/pages/kubernetes/api-reference.md'
+  - 'docs/kubernetes/api-reference.md'
 
 deploy:
   - '!**/*.md'

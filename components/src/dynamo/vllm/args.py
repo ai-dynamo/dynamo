@@ -305,7 +305,7 @@ def create_kv_events_config(
         "(matching upstream vLLM). To preserve current behavior, pass "
         "--kv-events-config explicitly. For example:\n"
         f'  --kv-events-config \'{{"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"tcp://*:{port}"}}\'\n'
-        "See docs/pages/backends/vllm/README.md for details.",
+        "See docs/backends/vllm/README.md for details.",
         FutureWarning,
         stacklevel=2,
     )
