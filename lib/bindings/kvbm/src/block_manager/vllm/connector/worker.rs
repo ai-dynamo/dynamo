@@ -25,7 +25,6 @@ use dynamo_runtime::DistributedRuntime;
 use dynamo_runtime::utils::task::CriticalTaskExecutionHandle;
 
 pub trait Worker: Send + Sync {
-    #[allow(clippy::too_many_arguments)]
     fn register_kv_caches(
         &mut self,
         num_device_blocks: usize,
@@ -49,9 +48,13 @@ pub trait Worker: Send + Sync {
         &mut self,
         finished_requests: HashSet<String>,
     ) -> (HashSet<String>, HashSet<String>);
+}
 
-    /// Get block IDs that failed to load and clear the set
-    fn get_block_ids_with_load_errors(&mut self) -> HashSet<u32>;
+#[derive(Debug, Default, Clone)]
+struct RequestLifecycle {
+    onboarding_pending: bool,
+    offloading_pending: bool,
+    terminal_seen: bool,
 }
 
 pub struct KvConnectorWorker {
@@ -60,13 +63,15 @@ pub struct KvConnectorWorker {
     connector: WorkerSchedulerClient,
     transfer_client: TransferSchedulerClient,
 
-    kv_cache_layers: Vec<(String, Arc<dyn TorchTensor>)>,
+    kv_cache_layers: Vec<(String, Arc<VllmTensor>)>,
 
-    /// Map of request id to inflight load requests
-    maybe_finished_onboarding: HashSet<String>,
+    /// Per-request lifecycle state used to derive completion emissions.
+    request_lifecycle: HashMap<String, RequestLifecycle>,
 
-    /// Map of request id to inflight finished requests
-    maybe_finished_offloading: HashSet<String>,
+    /// Tracks request_ids whose offloading signal has already been emitted.
+    /// Prevents duplicate offloading signals to vLLM when `finished_requests`
+    /// includes a request_id whose slot was already cleaned up.
+    already_signaled_offloading: HashSet<String>,
 
     /// For now, offloading operations will be enqueued at the end of the forward pass
     offloading_operations: Vec<WorkerTransferRequest>,
@@ -77,83 +82,9 @@ pub struct KvConnectorWorker {
 
     /// cuda events created by the python side
     layer_events: Vec<u64>,
-
-    /// Map request_id to (uuid → block_ids) for error tracking (Load operations only)
-    request_to_blocks: HashMap<String, HashMap<uuid::Uuid, Vec<usize>>>,
-
-    /// Block IDs that failed to load.
-    /// Uses u32 since vLLM block IDs are 32-bit. Protocol uses usize for flexibility,
-    /// but actual block counts won't exceed u32::MAX in practice.
-    failed_block_ids: HashSet<u32>,
-
-    /// Pending failure notifications not yet processed (request_id → failed UUIDs)
-    pending_failures: HashMap<String, HashSet<uuid::Uuid>>,
-
-    /// Request IDs for which we already returned `is_finished_offloading`.
-    /// Prevents duplicate signals in TP>1: a previous step may have returned
-    /// the request via the normal slot-completion path, and a later step
-    /// (where the slot is already gone) must not return it again.
-    already_signaled_offloading: HashMap<String, u64>,
-    finished_poll_counter: u64,
-    signaled_offloading_cap: usize,
-    signaled_offloading_ttl_polls: u64,
-    signaled_offloading_gc_interval: u64,
 }
 
 impl KvConnectorWorker {
-    const DEFAULT_SIGNALED_OFFLOAD_CAP: usize = 131_072;
-    const DEFAULT_SIGNALED_OFFLOAD_TTL_POLLS: u64 = 8_192;
-    const DEFAULT_SIGNALED_OFFLOAD_GC_INTERVAL: u64 = 256;
-
-    fn env_usize(name: &str, default: usize) -> usize {
-        std::env::var(name)
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(default)
-    }
-
-    fn env_u64(name: &str, default: u64) -> u64 {
-        std::env::var(name)
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(default)
-    }
-
-    fn mark_signaled_offloading(&mut self, request_id: String) {
-        self.already_signaled_offloading
-            .insert(request_id, self.finished_poll_counter);
-    }
-
-    fn maybe_gc_signaled_offloading(&mut self) {
-        if self.signaled_offloading_gc_interval == 0
-            || (self.finished_poll_counter % self.signaled_offloading_gc_interval != 0)
-        {
-            return;
-        }
-
-        let now = self.finished_poll_counter;
-        let ttl = self.signaled_offloading_ttl_polls;
-
-        self.already_signaled_offloading
-            .retain(|_, last_seen| now.saturating_sub(*last_seen) <= ttl);
-
-        let len = self.already_signaled_offloading.len();
-        if len <= self.signaled_offloading_cap {
-            return;
-        }
-
-        let remove_n = len - self.signaled_offloading_cap;
-        let mut oldest: Vec<(String, u64)> = self
-            .already_signaled_offloading
-            .iter()
-            .map(|(k, v)| (k.clone(), *v))
-            .collect();
-        oldest.sort_by_key(|(_, seen)| *seen);
-        for (k, _) in oldest.into_iter().take(remove_n) {
-            self.already_signaled_offloading.remove(&k);
-        }
-    }
-
     fn new(drt: Option<Arc<DistributedRuntime>>, vllm_worker_id: String) -> anyhow::Result<Self> {
         let runtime = get_current_tokio_handle();
 
@@ -181,31 +112,14 @@ impl KvConnectorWorker {
             kvbm_worker: OnceLock::new(),
             connector: worker_client,
             transfer_client,
-            maybe_finished_onboarding: HashSet::new(),
-            maybe_finished_offloading: HashSet::new(),
+            request_lifecycle: HashMap::new(),
+            already_signaled_offloading: HashSet::new(),
             offloading_operations: Vec::new(),
             bound: false,
             iteration: 0,
             layers_complete: 0,
             kv_cache_layers: Vec::new(),
             layer_events: Vec::new(),
-            request_to_blocks: HashMap::new(),
-            failed_block_ids: HashSet::new(),
-            pending_failures: HashMap::new(),
-            already_signaled_offloading: HashMap::new(),
-            finished_poll_counter: 0,
-            signaled_offloading_cap: Self::env_usize(
-                "DYN_KVBM_SIGNALED_OFFLOAD_CAP",
-                Self::DEFAULT_SIGNALED_OFFLOAD_CAP,
-            ),
-            signaled_offloading_ttl_polls: Self::env_u64(
-                "DYN_KVBM_SIGNALED_OFFLOAD_TTL_POLLS",
-                Self::DEFAULT_SIGNALED_OFFLOAD_TTL_POLLS,
-            ),
-            signaled_offloading_gc_interval: Self::env_u64(
-                "DYN_KVBM_SIGNALED_OFFLOAD_GC_INTERVAL",
-                Self::DEFAULT_SIGNALED_OFFLOAD_GC_INTERVAL,
-            ),
         })
     }
 }
@@ -251,8 +165,7 @@ impl Worker for KvConnectorWorker {
             }
 
             // Store for later lookup by name
-            self.kv_cache_layers
-                .push((layer_name, vllm_tensor.clone() as Arc<dyn TorchTensor>));
+            self.kv_cache_layers.push((layer_name, vllm_tensor.clone()));
 
             // Build ordered tensor list for worker config
             vllm_tensors.push(vllm_tensor as Arc<dyn TorchTensor>);
@@ -348,12 +261,37 @@ impl Worker for KvConnectorWorker {
         // - send the list of actions to the engine to track completion
 
         for slot_info in &metadata.new_slots {
-            debug_assert!(
-                !self.connector.has_slot(&slot_info.request_id),
-                "slot already exists"
+            if self.connector.has_slot(&slot_info.request_id) {
+                if self.connector.is_complete(&slot_info.request_id) {
+                    // Normal two-phase transition: Phase 1 (onboarding) is complete.
+                    // Cleanly remove the old slot before creating the Phase 2 slot.
+                    tracing::debug!(
+                        request_id = %slot_info.request_id,
+                        expected_immediate_ops = slot_info.expected_immediate_ops,
+                        "replacing completed Phase 1 slot with Phase 2 slot"
+                    );
+                    self.connector.remove_slot(&slot_info.request_id);
+                    self.already_signaled_offloading.remove(&slot_info.request_id);
+                } else {
+                    // Phase 1 is NOT complete but Phase 2 arrived. This violates the
+                    // protocol: vLLM should not schedule prefill until onboarding
+                    // finishes. Return an error instead of risking data corruption
+                    // from stale transfer results contaminating the new slot.
+                    return Err(anyhow::anyhow!(
+                        "Cannot create Phase 2 slot for request '{}': \
+                         Phase 1 slot exists with incomplete operations. \
+                         This indicates a scheduling protocol violation \
+                         (prefill scheduled before onboarding finished).",
+                        slot_info.request_id
+                    ));
+                }
+            }
+
+            tracing::debug!(
+                request_id = %slot_info.request_id,
+                expected_immediate_ops = slot_info.expected_immediate_ops,
+                "creating connector slot"
             );
-            // Create slot with expected immediate ops count BEFORE any operations arrive.
-            // This ensures proper completion tracking and avoids race conditions in TP>1.
             self.connector.create_slot_with_immediate_ops(
                 slot_info.request_id.clone(),
                 slot_info.expected_immediate_ops,
@@ -378,18 +316,12 @@ impl Worker for KvConnectorWorker {
         // immediately enqueue the onboarding operations
         for operation in onboarding_operations {
             let request_id = operation.request_id.clone();
-            let uuid = operation.uuid;
-
-            // Store block_ids per operation UUID for error tracking
-            if !operation.block_ids.is_empty() {
-                self.request_to_blocks
-                    .entry(request_id.clone())
-                    .or_default()
-                    .insert(uuid, operation.block_ids.clone());
-            }
-
             self.connector.enqueue_request(operation);
-            self.maybe_finished_onboarding.insert(request_id);
+            let state = self
+                .request_lifecycle
+                .entry(request_id)
+                .or_default();
+            state.onboarding_pending = true;
         }
 
         self.offloading_operations = offloading_operations;
@@ -433,12 +365,7 @@ impl Worker for KvConnectorWorker {
             // block on the the completion of the last layer
             // todo(ryan): capture the context, pass this to the scheduler to do the await on another thread
             // or put the event on a stream and use stream waits to keep it all on device.
-            if self.layers_complete - 1 < self.layer_events.len() {
-                let ev = self.layer_events[self.layers_complete - 1];
-                if ev != 0 {
-                    event_sync_blocking(ev);
-                }
-            }
+            event_sync_blocking(self.layer_events[self.layers_complete - 1]);
             for operation in &offloading_operations {
                 tracing::debug!(
                     request_id = %operation.request_id,
@@ -455,9 +382,6 @@ impl Worker for KvConnectorWorker {
         &mut self,
         finished_requests: HashSet<String>,
     ) -> (HashSet<String>, HashSet<String>) {
-        self.finished_poll_counter = self.finished_poll_counter.saturating_add(1);
-        self.maybe_gc_signaled_offloading();
-
         tracing::debug!(
             iteration = self.iteration,
             "Getting finished requests: {finished_requests:?}"
@@ -486,11 +410,7 @@ impl Worker for KvConnectorWorker {
             tracing::debug!(request_id, "marking request as finished");
 
             if !self.connector.has_slot(&request_id) {
-                if self.already_signaled_offloading.contains_key(&request_id) {
-                    // We already returned this request as finished_offloading in a
-                    // previous step. Don't signal again — duplicates cause vLLM's
-                    // _update_from_kv_xfer_finished to process the same request twice,
-                    // crashing on the second assert req_id in self.requests.
+                if self.already_signaled_offloading.contains(&request_id) {
                     tracing::debug!(
                         request_id,
                         "finished request with no slot already signaled; skipping duplicate"
@@ -498,41 +418,81 @@ impl Worker for KvConnectorWorker {
                 } else {
                     tracing::warn!(
                         request_id,
-                        "finished request received for unknown request_id; \
-                         signaling as finished_offloading so vLLM can clean up"
+                        "finished request received for unknown request_id; assuming never started"
                     );
-                    // The leader returned `true` from request_finished, so vLLM is keeping
-                    // the request in self.requests until we signal completion. Since we have
-                    // no slot (no in-flight transfers to wait for), signal immediately.
-                    is_finished_offloading.insert(request_id.clone());
-                    self.mark_signaled_offloading(request_id);
                 }
                 continue;
             }
 
-            if self.maybe_finished_onboarding.contains(&request_id) {
+            // If the request is already complete at the connector level,
+            // emit finished_sending immediately so vLLM's scheduler calls
+            // _free_blocks and releases GPU blocks. The leader's
+            // request_finished() returns true to keep the request in
+            // self.requests until this signal arrives.
+            if self.connector.is_complete(&request_id) {
+                tracing::debug!(
+                    request_id,
+                    "finished request already complete at connector; emitting finished_sending"
+                );
+                let state = self
+                    .request_lifecycle
+                    .entry(request_id.clone())
+                    .or_default();
+                state.onboarding_pending = false;
+                state.offloading_pending = false;
+                state.terminal_seen = true;
+                // Terminal request is fully complete at connector; retire slot now
+                // to avoid stale-slot collisions when a reused request_id appears.
+                if self.connector.has_slot(&request_id) {
+                    self.connector.remove_slot(&request_id);
+                }
+                is_finished_offloading.insert(request_id);
+                continue;
+            }
+
+            let state = self
+                .request_lifecycle
+                .entry(request_id.clone())
+                .or_default();
+            if state.onboarding_pending {
                 tracing::info!(
                     request_id,
                     "got a finished warning for a request that is onboarding"
                 );
-            } else if self.maybe_finished_offloading.contains(&request_id) {
+            }
+
+            if state.offloading_pending {
                 tracing::warn!(
                     request_id,
-                    "possibly got a duplicate finished request; request_id already in the maybe_finished_offloading set"
+                    "possibly got a duplicate finished request; request_id already in offloading-pending state"
                 );
             } else {
                 tracing::debug!(
                     request_id,
-                    "received finished request; adding to maybe_finished_offloading set"
+                    "received finished request; adding to offloading-pending state"
                 );
-                self.maybe_finished_offloading.insert(request_id.clone());
+                state.offloading_pending = true;
             }
+            // Terminal request lifecycle must suppress onboarding emissions.
+            state.onboarding_pending = false;
+            state.terminal_seen = true;
         }
 
-        // visit each request slot in the maybe finished set
-        for request_id in self.maybe_finished_offloading.iter() {
-            if self.connector.has_slot(request_id) {
-                if self.connector.is_complete(request_id) {
+        // visit each request slot with offloading pending
+        let offloading_pending_ids: Vec<String> = self
+            .request_lifecycle
+            .iter()
+            .filter_map(|(request_id, state)| {
+                if state.offloading_pending {
+                    Some(request_id.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for request_id in offloading_pending_ids {
+            if self.connector.has_slot(&request_id) {
+                if self.connector.is_complete(&request_id) {
                     tracing::debug!(request_id, "request slot is finished");
                     is_finished_offloading.insert(request_id.clone());
                 } else {
@@ -547,60 +507,37 @@ impl Worker for KvConnectorWorker {
             }
         }
 
-        // remove the finished requests from the maybe finished set
-        // note: when storing is finished we also remove the request from the engine state
+        // remove the finished requests from the pending offload state.
+        // NOTE: Slot teardown is leader-owned via request_finished() lifecycle.
+        // The worker must not remove slots here, otherwise leader may later see
+        // request_finished() for an already-deleted slot and race vLLM request tracking.
         for request_id in &is_finished_offloading {
-            self.maybe_finished_offloading.remove(request_id);
-            // Track that we signaled this request, so we don't duplicate if
-            // get_finished is called again after the slot is removed.
-            self.mark_signaled_offloading(request_id.clone());
-            // Note: Store operations don't track failures or block_ids - no cleanup needed
-
-            // currently chomping the error as the engine is closed and we are shutting down
-            if self.connector.has_slot(request_id) {
-                self.connector.remove_slot(request_id);
-            } else {
-                tracing::debug!(
-                    request_id,
-                    "is_finished_offloading: request slot is not found - likely aborted, removing from is finished offloading set"
-                );
+            if let Some(state) = self.request_lifecycle.get_mut(request_id) {
+                state.offloading_pending = false;
+                // Once terminal + offload-complete, retire connector slot.
+                if state.terminal_seen && self.connector.has_slot(request_id) {
+                    self.connector.remove_slot(request_id);
+                }
             }
+            self.already_signaled_offloading.insert(request_id.clone());
         }
 
-        // Drain failure notifications from channel and merge into pending_failures (non-blocking)
-        for (request_id, failed_uuids) in self.connector.drain_failures() {
-            self.pending_failures
-                .entry(request_id)
-                .or_default()
-                .extend(failed_uuids);
-        }
-
-        // visit each request slot in the maybe finished set to see if it is finished
-        for request_id in self.maybe_finished_onboarding.iter() {
-            if self.connector.has_slot(request_id) {
-                if self.connector.is_complete(request_id) {
+        // visit each request slot with onboarding pending to see if it is finished
+        let onboarding_pending_ids: Vec<String> = self
+            .request_lifecycle
+            .iter()
+            .filter_map(|(request_id, state)| {
+                if state.onboarding_pending && !state.terminal_seen {
+                    Some(request_id.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for request_id in onboarding_pending_ids {
+            if self.connector.has_slot(&request_id) {
+                if self.connector.is_complete(&request_id) {
                     tracing::debug!(request_id, "request slot is finished");
-
-                    // Check for failures for this request
-                    if let Some(failed_uuids) = self.pending_failures.get(request_id) {
-                        // Get block_ids for failed operations
-                        if let Some(uuid_to_blocks) = self.request_to_blocks.get(request_id) {
-                            for failed_uuid in failed_uuids {
-                                if let Some(block_ids) = uuid_to_blocks.get(failed_uuid) {
-                                    for &block_id in block_ids {
-                                        self.failed_block_ids.insert(block_id as u32);
-                                    }
-                                    tracing::warn!(
-                                        request_id = %request_id,
-                                        operation_id = %failed_uuid,
-                                        num_failed_blocks = block_ids.len(),
-                                        "Recorded failed block IDs for load operation"
-                                    );
-                                }
-                            }
-                        }
-                    }
-
                     is_finished_onboarding.insert(request_id.clone());
                 } else {
                     tracing::debug!(request_id, "request slot is not finished");
@@ -614,45 +551,20 @@ impl Worker for KvConnectorWorker {
 
         // remove the finished requests from the maybe finished set
         for request_id in &is_finished_onboarding {
-            self.maybe_finished_onboarding.remove(request_id);
-            // Cleanup UUID → block_ids mapping and pending failures
-            self.request_to_blocks.remove(request_id);
-            self.pending_failures.remove(request_id);
-            if self.connector.has_slot(request_id) {
-                self.connector.remove_slot(request_id);
+            if let Some(state) = self.request_lifecycle.get_mut(request_id) {
+                state.onboarding_pending = false;
             }
+            tracing::debug!(
+                request_id,
+                "onboarding finished; keeping connector slot for later request_finished/offload lifecycle"
+            );
         }
+
+        // Drop inactive entries to keep lifecycle state bounded.
+        self.request_lifecycle
+            .retain(|_, state| state.onboarding_pending || state.offloading_pending);
 
         (is_finished_offloading, is_finished_onboarding)
-    }
-
-    fn get_block_ids_with_load_errors(&mut self) -> HashSet<u32> {
-        // Drain any failures that arrived since last check
-        for (request_id, failed_uuids) in self.connector.drain_failures() {
-            self.pending_failures
-                .entry(request_id)
-                .or_default()
-                .extend(failed_uuids);
-        }
-
-        // Process failures for completed onboarding requests
-        for request_id in self.maybe_finished_onboarding.iter() {
-            if self.connector.has_slot(request_id) && self.connector.is_complete(request_id) {
-                if let Some(failed_uuids) = self.pending_failures.get(request_id) {
-                    if let Some(uuid_to_blocks) = self.request_to_blocks.get(request_id) {
-                        for failed_uuid in failed_uuids {
-                            if let Some(block_ids) = uuid_to_blocks.get(failed_uuid) {
-                                for &block_id in block_ids {
-                                    self.failed_block_ids.insert(block_id as u32);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        std::mem::take(&mut self.failed_block_ids)
     }
 }
 
@@ -679,7 +591,6 @@ impl PyKvConnectorWorker {
         Ok(Self { connector_worker })
     }
 
-    #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (num_device_blocks, page_size, device_id, dtype_width_bytes, kv_caches, raw_event_handles, device_layout_type=None, host_layout_type=None, disk_layout_type=None))]
     pub fn register_kv_caches(
         &mut self,
@@ -737,11 +648,6 @@ impl PyKvConnectorWorker {
         finished_requests: HashSet<String>,
     ) -> (HashSet<String>, HashSet<String>) {
         self.connector_worker.get_finished(finished_requests)
-    }
-
-    /// Get block IDs that failed to load and clear the set
-    pub fn get_block_ids_with_load_errors(&mut self) -> HashSet<u32> {
-        self.connector_worker.get_block_ids_with_load_errors()
     }
 }
 

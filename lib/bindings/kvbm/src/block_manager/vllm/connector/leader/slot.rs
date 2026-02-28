@@ -932,6 +932,7 @@ impl VllmConnectorSlot {
             }
         }
     }
+
 }
 
 impl std::fmt::Debug for VllmConnectorSlot {
@@ -1798,15 +1799,44 @@ impl ExternallyManagedDeviceSlot for VllmConnectorSlot {
         Ok(())
     }
 
+    /// Append device blocks to the slot.
+    ///
+    /// vLLM's `get_blocks()` returns the FULL block table each time (not just newly allocated
+    /// blocks). This method handles that by only appending the new suffix — blocks beyond what
+    /// we already track. Without this deduplication, the second `update_state_after_alloc` call
+    /// would duplicate the entire table, causing `apply_scheduler_output` to offload from wrong
+    /// positions (e.g., system prompt GPU blocks instead of newly computed blocks).
     #[tracing::instrument(level = "debug", skip_all, fields(request_id = self.request_id))]
     fn append_mutable_device_blocks(&mut self, block_ids: &[BlockId]) -> Result<(), SlotError> {
-        let count = block_ids.len();
-        self.device_blocks.extend(block_ids);
-        tracing::debug!(
-            "appended {} mutable device blocks to slot; total device blocks: {}",
-            count,
-            self.num_device_blocks_allocated()
-        );
+        let existing = self.device_blocks.len();
+
+        if block_ids.len() > existing {
+            // Only append the truly new blocks (the suffix beyond what we already have).
+            debug_assert_eq!(
+                &self.device_blocks[..],
+                &block_ids[..existing],
+                "existing device blocks don't match prefix of incoming block table"
+            );
+            let new_blocks = &block_ids[existing..];
+            self.device_blocks.extend(new_blocks);
+            tracing::debug!(
+                "appended {} new device blocks (skipped {} existing); total device blocks: {}",
+                new_blocks.len(),
+                existing,
+                self.num_device_blocks_allocated()
+            );
+        } else if block_ids.len() == existing {
+            tracing::debug!(
+                "no new device blocks to append; total device blocks: {}",
+                self.num_device_blocks_allocated()
+            );
+        } else {
+            tracing::warn!(
+                "received fewer blocks ({}) than already tracked ({}); ignoring",
+                block_ids.len(),
+                existing
+            );
+        }
 
         Ok(())
     }

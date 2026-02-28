@@ -488,11 +488,18 @@ impl MessageHandle {
 }
 
 /// We must always ACK a message.
-/// Panic if we don't.
+/// Log an error if we don't — but do NOT panic, because a panic in Drop
+/// during unwinding triggers abort(), killing the process with no logs.
+/// The leader already handles missing ACKs via broadcast timeouts.
 impl Drop for MessageHandle {
     fn drop(&mut self) {
         if !self.acked {
-            panic!("Message was not acked!");
+            tracing::error!(
+                message_id = self.message_id,
+                function = %self.function,
+                "MessageHandle dropped without ACK -- suppressing panic to avoid \
+                 cascade during thread unwinding. The leader will time out."
+            );
         }
     }
 }
