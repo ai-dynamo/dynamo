@@ -132,6 +132,22 @@ pub(crate) struct KvEventPublisher {
 
 #[pymethods]
 impl KvEventPublisher {
+    /// Create a KV event publisher that batches raw engine events before forwarding
+    /// them to NATS / the event plane.
+    ///
+    /// Args:
+    ///     endpoint: The Dynamo component endpoint for this worker.
+    ///     worker_id: Identifier of this worker (default 0).
+    ///     kv_block_size: KV cache block size in tokens; must be > 0.
+    ///     dp_rank: Data-parallel rank of this worker (default 0).
+    ///     enable_local_indexer: When True, a local KV indexer is kept in-process
+    ///         so that routers can recover events directly from this worker.
+    ///     zmq_endpoint: Optional ZMQ SUB endpoint to read raw engine events from.
+    ///     zmq_topic: ZMQ topic filter (default "").
+    ///     batching_timeout_us: Maximum time (in **microseconds**) to accumulate
+    ///         events into a single batch before flushing.
+    ///         ``None`` uses the default window of 10000 µs (10 ms).
+    ///         ``0`` disables batching: every event is published immediately.
     #[new]
     #[pyo3(signature = (endpoint, worker_id=0, kv_block_size=0, dp_rank=0, enable_local_indexer=false, zmq_endpoint=None, zmq_topic=None, batching_timeout_us=None))]
     #[allow(clippy::too_many_arguments)]
