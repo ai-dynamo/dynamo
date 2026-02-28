@@ -1,0 +1,49 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "velo-messenger"
+version.workspace = true
+edition.workspace = true
+description = "Active messaging layer for Velo distributed systems"
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[features]
+default = ["http", "nats", "grpc"]
+ucx = ["velo-backend/ucx"]
+http = ["velo-backend/http"]
+grpc = ["velo-backend/grpc"]
+nats = ["velo-backend/nats"]
+
+[dependencies]
+velo-backend = { workspace = true }
+velo-common = { workspace = true }
+velo-events = { workspace = true }
+lru = "0.12"
+anyhow = { workspace = true }
+bs58 = "0.5"
+bytes = { workspace = true }
+derive_builder = { workspace = true }
+derive-getters = { workspace = true }
+futures = { workspace = true }
+rmp-serde = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+dashmap = "6.1.0"
+parking_lot = { workspace = true }
+flume = "0.11.1"
+
+[dev-dependencies]
+clap = { version = "4.5", features = ["derive"] }
+xxhash-rust = { workspace = true }
+
+[[example]]
+name = "ping_pong"

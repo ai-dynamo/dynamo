@@ -59,7 +59,6 @@ tensorrtllm_models/
 tensorrtllm_checkpoints/
 tensorrtllm_engines/
 api_server_models/
-server/
 !lib/gpu_memory_service/server/
 # Replay/Snapshot test artifacts
 *.new
