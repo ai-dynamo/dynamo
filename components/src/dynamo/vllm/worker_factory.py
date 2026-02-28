@@ -13,6 +13,7 @@ from dynamo.llm import ModelInput
 from dynamo.runtime import DistributedRuntime
 
 from .args import Config
+from .constants import DisaggregationMode
 from .multimodal_handlers import (
     EncodeWorkerHandler,
     MultimodalDecodeWorkerHandler,
@@ -56,14 +57,22 @@ class WorkerFactory:
         runtime: DistributedRuntime,
         config: Config,
         shutdown_event: asyncio.Event,
-        pre_created_engine: Optional[EngineSetupResult] = None,
+        shutdown_endpoints: list,
+        checkpoint_restore_engine: Optional[EngineSetupResult] = None,
     ) -> None:
         """Create the appropriate multimodal worker based on config flags."""
+
         if config.multimodal_encode_worker:
-            await self._create_multimodal_encode_worker(runtime, config, shutdown_event)
+            await self._create_multimodal_encode_worker(
+                runtime, config, shutdown_event, shutdown_endpoints
+            )
         elif config.multimodal_worker or config.multimodal_decode_worker:
             await self._create_multimodal_worker(
-                runtime, config, shutdown_event, pre_created_engine=pre_created_engine
+                runtime,
+                config,
+                shutdown_event,
+                shutdown_endpoints,
+                checkpoint_restore_engine=checkpoint_restore_engine,
             )
         else:
             raise ValueError(
@@ -75,7 +84,8 @@ class WorkerFactory:
         runtime: DistributedRuntime,
         config: Config,
         shutdown_event: asyncio.Event,
-        pre_created_engine: Optional[EngineSetupResult] = None,
+        shutdown_endpoints: list,  # mutated in place
+        checkpoint_restore_engine: Optional[EngineSetupResult] = None,
     ) -> None:
         """
         Initialize multimodal worker component.
@@ -91,24 +101,34 @@ class WorkerFactory:
         generate_endpoint = runtime.endpoint(
             f"{config.namespace}.{config.component}.{config.endpoint}"
         )
-        component = generate_endpoint.component()
-        clear_endpoint = component.endpoint("clear_kv_blocks")
+        clear_endpoint = runtime.endpoint(
+            f"{config.namespace}.{config.component}.clear_kv_blocks"
+        )
+        shutdown_endpoints[:] = [generate_endpoint, clear_endpoint]
 
         lora_enabled = config.engine_args.enable_lora
         if lora_enabled:
-            load_lora_endpoint = component.endpoint("load_lora")
-            unload_lora_endpoint = component.endpoint("unload_lora")
-            list_loras_endpoint = component.endpoint("list_loras")
-
+            load_lora_endpoint = runtime.endpoint(
+                f"{config.namespace}.{config.component}.load_lora"
+            )
+            unload_lora_endpoint = runtime.endpoint(
+                f"{config.namespace}.{config.component}.unload_lora"
+            )
+            list_loras_endpoint = runtime.endpoint(
+                f"{config.namespace}.{config.component}.list_loras"
+            )
+            shutdown_endpoints.extend(
+                [load_lora_endpoint, unload_lora_endpoint, list_loras_endpoint]
+            )
         # Use pre-created engine if provided (checkpoint mode), otherwise create new
-        if pre_created_engine is not None:
+        if checkpoint_restore_engine is not None:
             (
                 engine_client,
                 vllm_config,
                 _default_sampling_params,
                 prometheus_temp_dir,
                 _component_gauges,
-            ) = pre_created_engine
+            ) = checkpoint_restore_engine
         else:
             (
                 engine_client,
@@ -130,7 +150,7 @@ class WorkerFactory:
 
         # Set up decode worker client for disaggregated mode
         decode_worker_client = None
-        if config.is_prefill_worker:
+        if config.disaggregation_mode == DisaggregationMode.PREFILL:
             decode_worker_client = await runtime.endpoint(
                 f"{config.namespace}.decoder.generate"
             ).client()
@@ -141,7 +161,6 @@ class WorkerFactory:
         if config.multimodal_decode_worker:
             handler = MultimodalDecodeWorkerHandler(
                 runtime,
-                component,
                 engine_client,
                 config,
                 shutdown_event,
@@ -150,7 +169,6 @@ class WorkerFactory:
         else:
             handler = MultimodalPDWorkerHandler(
                 runtime,
-                component,
                 engine_client,
                 config,
                 encode_worker_client,
@@ -164,24 +182,24 @@ class WorkerFactory:
 
         # Set up KV event publisher for prefix caching if enabled
         kv_publisher = self.setup_kv_event_publisher(
-            config, component, generate_endpoint, vllm_config
+            config, generate_endpoint, vllm_config
         )
         if kv_publisher:
             handler.kv_publisher = kv_publisher
 
-        # Register model with the frontend so it can route requests
-        model_type = parse_endpoint_types(config.endpoint_types)
-        model_input = (
-            ModelInput.Text if config.use_vllm_tokenizer else ModelInput.Tokens
-        )
-        await self.register_vllm_model(
-            model_input,
-            model_type,
-            generate_endpoint,
-            config,
-            engine_client,
-            vllm_config,
-        )
+        if not config.multimodal_decode_worker:
+            model_type = parse_endpoint_types(config.endpoint_types)
+            model_input = (
+                ModelInput.Text if config.use_vllm_tokenizer else ModelInput.Tokens
+            )
+            await self.register_vllm_model(
+                model_input,
+                model_type,
+                generate_endpoint,
+                config,
+                engine_client,
+                vllm_config,
+            )
 
         metrics_labels = [("model", config.served_model_name or config.model)]
         try:
@@ -226,11 +244,13 @@ class WorkerFactory:
         runtime: DistributedRuntime,
         config: Config,
         shutdown_event: asyncio.Event,
+        shutdown_endpoints: list,  # mutated in place
     ) -> None:
         """Initialize standalone multimodal encode worker."""
         generate_endpoint = runtime.endpoint(
             f"{config.namespace}.{config.component}.{config.endpoint}"
         )
+        shutdown_endpoints[:] = [generate_endpoint]
 
         handler = EncodeWorkerHandler(config.engine_args)
         await handler.async_init(runtime)

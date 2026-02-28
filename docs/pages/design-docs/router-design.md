@@ -4,8 +4,6 @@
 title: Router Design
 ---
 
-# Router Design
-
 This document describes the internal architecture of the Dynamo KV Router, including block tracking mechanisms, the KV cache optimization system, event handling, and transport modes.
 
 ## KV Router Architecture
@@ -88,7 +86,7 @@ To get a feel for how KV Cache management works on a single worker with KV Cache
 
 1. **Request tokenization**: The incoming prompt is converted into tokens
 2. **Block partitioning**: The token sequence is divided into fixed-size blocks (e.g., 16 or 64 tokens per block)
-3. **Block hashing**: Each block of tokens is hashed to create a unique identifier
+3. **Block hashing**: Each block of tokens is hashed to create a unique identifier. When a LoRA adapter is active, the adapter name is incorporated into the hash so that blocks cached under different adapters produce distinct identifiers.
 4. **Cache lookup**:
     - For each block, the system checks if a matching block already exists in the KV cache
     - If a match is found, the existing KV cache block is reused
@@ -107,7 +105,7 @@ To get a feel for how KV Cache management works on a single worker with KV Cache
     - These tensors are stored in the newly allocated cache blocks
     - **KVPublisher emits a kv stored event notifying KVIndexer about newly stored blocks**.
 
-Further details can be found for: [TRT-LLM](https://developer.nvidia.com/blog/introducing-new-kv-cache-reuse-optimizations-in-nvidia-tensorrt-llm/), [vLLM](https://docs.vllm.ai/en/latest/design/automatic_prefix_caching.html#design-automatic-prefix-caching) and [SGLang](https://lmsys.org/blog/2024-01-17-sglang/).
+Further details can be found for: [SGLang](https://lmsys.org/blog/2024-01-17-sglang/), [TRT-LLM](https://developer.nvidia.com/blog/introducing-new-kv-cache-reuse-optimizations-in-nvidia-tensorrt-llm/) and [vLLM](https://docs.vllm.ai/en/latest/design/automatic_prefix_caching.html#design-automatic-prefix-caching).
 
 ## Events
 
@@ -133,9 +131,9 @@ The KVIndexer has a method `find_matches_for_request`, which takes in tokens and
 
 The KVIndexer supports two backend implementations, selected via `--router-event-threads`:
 
-- **Single-threaded RadixTree** (default, `--router-event-threads 1`): Events are processed in a dedicated single-threaded tokio runtime via channel-based dispatch. Supports TTL-based expiration and size-based pruning (for `--no-kv-events` approximate mode).
+- **Single-threaded RadixTree** (`--router-event-threads 1`): Events are processed in a dedicated single-threaded tokio runtime via channel-based dispatch. Supports TTL-based expiration and size-based pruning (for `--no-kv-events` approximate mode).
 
-- **ConcurrentRadixTree** (`--router-event-threads N` where N > 1): A thread-safe radix tree with a pool of N worker threads for event processing. Uses sticky worker routing (events for the same worker always go to the same thread) to ensure per-worker event serialization. Read operations (`find_matches`) execute concurrently with writes. Does not support TTL/pruning.
+- **ConcurrentRadixTree** (default, `--router-event-threads N` where N > 1): A thread-safe radix tree with a pool of N worker threads for event processing (default: 4). Uses sticky worker routing (events for the same worker always go to the same thread) to ensure per-worker event serialization. Read operations (`find_matches`) execute concurrently with writes. Does not support TTL/pruning.
 
 ### Inter-Router Communication
 
@@ -214,7 +212,7 @@ By default, workers have local indexer enabled. Each worker maintains its own lo
 
 - **Best for**: Lower-latency setups; simpler deployments without JetStream; single-router scenarios; deployments without NATS (using ZMQ event plane)
 - **Tradeoffs**: State persists on workers (not centralized); recovery depends on workers being available
-- **Switch to JetStream**: Use `--durable-kv-events` flag on **both** workers (vLLM, SGLang, TRT-LLM, mocker) **and** frontend
+- **Switch to JetStream**: Use `--durable-kv-events` flag on **both** workers (SGLang, TRT-LLM, vLLM, mocker) **and** frontend
 
 ```mermaid
 graph TD

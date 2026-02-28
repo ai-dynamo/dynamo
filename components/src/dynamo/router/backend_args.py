@@ -133,7 +133,7 @@ class DynamoRouterArgGroup(ArgGroup):
             flag_name="--router-durable-kv-events",
             env_var="DYN_ROUTER_DURABLE_KV_EVENTS",
             default=False,
-            help="KV Router: Enable durable KV events using NATS JetStream instead of NATS Core. By default, the router uses the generic event plane (NATS Core or ZMQ) with local_indexer mode. Use this flag when you need durability and multi-replica consistency. Requires NATS with JetStream enabled.",
+            help="[Deprecated] KV Router: Enable durable KV events using NATS JetStream. This option will be removed in a future release. The event-plane subscriber (local_indexer mode) is now the recommended path.",
             obsolete_flag="--durable-kv-events",
         )
 
@@ -195,7 +195,7 @@ class DynamoRouterArgGroup(ArgGroup):
             g,
             flag_name="--router-event-threads",
             env_var="DYN_ROUTER_EVENT_THREADS",
-            default=1,
-            help="KV Router: Number of event processing threads. >1 uses concurrent radix tree and thread pool for higher throughput.",
+            default=4,
+            help="KV Router: Number of event processing threads. >1 uses concurrent radix tree and thread pool for higher throughput. Ignored when --no-router-kv-events is set (approximate mode always uses single-threaded indexer with TTL/pruning).",
             arg_type=int,
         )

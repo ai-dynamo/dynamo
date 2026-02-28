@@ -4,13 +4,19 @@
 title: vLLM-Omni
 ---
 
-# [Experimental] Omni Models with vLLM
-
 Dynamo supports multimodal generation through the [vLLM-Omni](https://github.com/vllm-project/vllm-omni) backend. This integration exposes text-to-text, text-to-image, and text-to-video capabilities via OpenAI-compatible API endpoints.
 
 ## Prerequisites
 
 This guide assumes familiarity with deploying Dynamo with vLLM as described in the [vLLM backend guide](/docs/pages/backends/vllm/README.md).
+
+### Installation
+
+Dynamo container images include vLLM-Omni pre-installed. If you are using `pip install ai-dynamo[vllm]`, vLLM-Omni is **not** included automatically because the matching release is not yet available on PyPI. Install it separately from source:
+
+```bash
+pip install git+https://github.com/vllm-project/vllm-omni.git@v0.16.0rc1
+```
 
 ## Supported Modalities
 
@@ -161,7 +167,7 @@ The `/v1/videos` endpoint also accepts NVIDIA extensions via the `nvext` field f
 | `--omni` | Enable the vLLM-Omni orchestrator (required for all omni workloads) |
 | `--output-modalities <modality>` | Output modality: `text`, `image`, or `video` |
 | `--stage-configs-path <path>` | Path to stage config YAML (optional; vLLM-Omni uses model defaults if omitted) |
-| `--connector none` | Disable KV connector (recommended for omni workers) |
+| _(no `--kv-transfer-config`)_ | KV connector is disabled by default; omit the flag for omni workers |
 | `--media-output-fs-url <url>` | Filesystem URL for storing generated media (default: `file:///tmp/dynamo_media`) |
 | `--media-output-http-url <url>` | Base URL for rewriting media paths in responses (optional) |
 

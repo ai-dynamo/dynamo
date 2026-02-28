@@ -27,7 +27,6 @@ class BaseOmniHandler(BaseWorkerHandler):
     def __init__(
         self,
         runtime,
-        component,
         config,
         default_sampling_params: Dict[str, Any],
         shutdown_event: asyncio.Event | None = None,
@@ -36,7 +35,6 @@ class BaseOmniHandler(BaseWorkerHandler):
 
         Args:
             runtime: Dynamo distributed runtime.
-            component: Dynamo component handle.
             config: Parsed Config object from args.py.
             default_sampling_params: Default sampling parameters dict.
             shutdown_event: Optional asyncio event for graceful shutdown.
@@ -56,7 +54,6 @@ class BaseOmniHandler(BaseWorkerHandler):
         # TODO: Kv publishers not supported yet
         # TODO: Adopt to baseworker initialization pattern
         self.runtime = runtime
-        self.component = component
         self.default_sampling_params = default_sampling_params
         self.config = config
         self.model_max_len = config.engine_args.max_model_len
@@ -85,37 +82,36 @@ class BaseOmniHandler(BaseWorkerHandler):
         if config.stage_configs_path:
             omni_kwargs["stage_configs_path"] = config.stage_configs_path
 
-        # Add diffusion engine-level params if present on config
-        diffusion_params = [
-            "enable_layerwise_offload",
-            "layerwise_num_gpu_layers",
-            "vae_use_slicing",
-            "vae_use_tiling",
-            "boundary_ratio",
-            "flow_shift",
-            "diffusion_cache_backend",
-            "diffusion_cache_config",
-            "enable_cache_dit_summary",
-            "enable_cpu_offload",
-        ]
-        for param in diffusion_params:
-            if hasattr(config, param):
-                value = getattr(config, param)
+        # Add diffusion engine-level params if present on config.
+        # Config fields use the omni_ prefix; map them to AsyncOmni kwarg names.
+        diffusion_params = {
+            # config attr → AsyncOmni kwarg
+            "omni_enable_layerwise_offload": "enable_layerwise_offload",
+            "omni_layerwise_num_gpu_layers": "layerwise_num_gpu_layers",
+            "omni_vae_use_slicing": "vae_use_slicing",
+            "omni_vae_use_tiling": "vae_use_tiling",
+            "omni_boundary_ratio": "boundary_ratio",
+            "omni_flow_shift": "flow_shift",
+            "omni_diffusion_cache_backend": "cache_backend",
+            "omni_diffusion_cache_config": "cache_config",
+            "omni_enable_cache_dit_summary": "enable_cache_dit_summary",
+            "omni_enable_cpu_offload": "enable_cpu_offload",
+            "omni_enforce_eager": "enforce_eager",
+        }
+        for config_attr, kwarg_name in diffusion_params.items():
+            if hasattr(config, config_attr):
+                value = getattr(config, config_attr)
                 if value is not None:
-                    # Map config attribute names to AsyncOmni kwarg names
-                    kwarg_name = param
-                    if param == "diffusion_cache_backend":
-                        kwarg_name = "cache_backend"
-                    elif param == "diffusion_cache_config":
-                        kwarg_name = "cache_config"
                     omni_kwargs[kwarg_name] = value
 
         # Build DiffusionParallelConfig if parallel params are present
-        if DiffusionParallelConfig is not None and hasattr(config, "ulysses_degree"):
+        if DiffusionParallelConfig is not None and hasattr(
+            config, "omni_ulysses_degree"
+        ):
             parallel_config = DiffusionParallelConfig(
-                ulysses_degree=getattr(config, "ulysses_degree", 1),
-                ring_degree=getattr(config, "ring_degree", 1),
-                cfg_parallel_size=getattr(config, "cfg_parallel_size", 1),
+                ulysses_degree=getattr(config, "omni_ulysses_degree", 1),
+                ring_degree=getattr(config, "omni_ring_degree", 1),
+                cfg_parallel_size=getattr(config, "omni_cfg_parallel_size", 1),
             )
             omni_kwargs["parallel_config"] = parallel_config
         elif DiffusionParallelConfig is None:

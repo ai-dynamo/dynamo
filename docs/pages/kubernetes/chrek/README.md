@@ -4,7 +4,7 @@
 title: Checkpointing
 ---
 
-> ⚠️ **Experimental Feature**: ChReK is currently in **beta/preview**. It requires privileged mode for restore operations, which may not be suitable for all production environments. See [Limitations](#limitations) for details.
+> ⚠️ **Experimental Feature**: ChReK is currently in **beta/preview**. The ChReK DaemonSet runs in privileged mode to perform CRIU operations. See [Limitations](#limitations) for details.
 
 **ChReK** (Checkpoint/Restore in Kubernetes) is an experimental infrastructure for fast-starting GPU applications using CRIU (Checkpoint/Restore in User-space). ChReK dramatically reduces cold-start times for large models from minutes to seconds by capturing initialized application state and restoring it on-demand.
 
@@ -28,15 +28,6 @@ Use ChReK as part of the Dynamo platform for automatic checkpoint management:
 
 📖 **[Read the Dynamo Integration Guide →](dynamo.md)**
 
-### 2. Standalone (Without Dynamo)
-
-Use ChReK independently in your own Kubernetes applications:
-- Manual checkpoint job creation
-- Build your own restore-enabled container images
-- Full control over checkpoint lifecycle
-
-📖 **[Read the Standalone Usage Guide →](standalone.md)**
-
 ## Architecture
 
 ChReK consists of two main components:
@@ -46,16 +37,16 @@ Deploys the checkpoint/restore infrastructure:
 - **DaemonSet**: Runs on GPU nodes to perform CRIU checkpoint operations
 - **PVC**: Stores checkpoint data (rootfs diffs, CUDA memory state)
 - **RBAC**: Namespace-scoped or cluster-wide permissions
-- **Seccomp Profile**: Security policies for CRIU syscalls
+- **Seccomp Profile**: Security policies for CRIU syscalls (needs to be injected into workload pods)
 
-### 2. Smart Entrypoint
-A wrapper script that intelligently decides between:
-- **Cold start**: Normal application startup (when no checkpoint exists)
-- **Restore**: CRIU restore from checkpoint (when checkpoint available)
+### 2. External Restore via DaemonSet
+The DaemonSet performs checkpoint/restore externally using `nsenter` to enter pod namespaces:
+- **Checkpoint**: Freezes the running process and dumps state (CPU + GPU) to storage
+- **Restore**: Enters a placeholder pod's namespaces and restores the checkpointed process via `nsrestore`
 
 ## Quick Start
 
-### Install ChReK Infrastructure
+To install the ChReK DaemonSet in your cluster, run the following:
 
 ```bash
 helm install chrek nvidia/chrek \
@@ -64,16 +55,12 @@ helm install chrek nvidia/chrek \
   --set storage.pvc.size=100Gi
 ```
 
-### Choose Your Integration Path
-
-- **Using Dynamo Platform?** → Follow the [Dynamo Integration Guide](dynamo.md)
-- **Using standalone?** → Follow the [Standalone Usage Guide](standalone.md)
-
 ## Key Features
 
 ### ✅ Currently Supported
-- ✅ **vLLM backend only** (SGLang and TensorRT-LLM planned)
-- ✅ Single-node, single-GPU checkpoints
+- ✅ **vLLM and SGLang backends** (TensorRT-LLM planned)
+- ✅ **LLM decode/prefill workers only** (multimodal, embedding, and diffusion workers are not supported)
+- ✅ Cross-node, single-GPU checkpoints
 - ✅ PVC storage backend (RWX for multi-node)
 - ✅ CUDA checkpoint/restore
 - ✅ PyTorch distributed state (with `GLOO_SOCKET_IFNAME=lo`)
@@ -82,7 +69,6 @@ helm install chrek nvidia/chrek \
 - ✅ Automatic signal-based checkpoint coordination
 
 ### 🚧 Planned Features
-- 🚧 SGLang backend support
 - 🚧 TensorRT-LLM backend support
 - 🚧 S3/MinIO storage backend
 - 🚧 OCI registry storage backend
@@ -94,14 +80,15 @@ helm install chrek nvidia/chrek \
 ⚠️ **Important**: ChReK has significant limitations that may impact production readiness:
 
 ### Security Considerations
-- **🔴 Privileged mode required**: Restore pods **must run in privileged mode** for CRIU to function. This grants containers elevated host access and may violate security policies in many production environments.
-- **Security Impact**: Privileged containers can:
-  - Access all host devices
+- **🔴 Privileged DaemonSet**: The ChReK DaemonSet runs in privileged mode with `hostPID`, `hostIPC`, and `hostNetwork` to perform CRIU operations. Workload pods do **not** need privileged mode — all CRIU privilege lives in the DaemonSet.
+- **Security Impact**: The privileged DaemonSet can:
+  - Access all host devices and processes
   - Bypass most security restrictions
-  - Potentially compromise node security if the container is exploited
+  - Potentially compromise node security if exploited
 
 ### Technical Limitations
-- **vLLM backend only**: Currently only the vLLM backend supports checkpoint/restore. SGLang and TensorRT-LLM support is planned.
+- **vLLM and SGLang backends only**: TensorRT-LLM support is planned.
+- **LLM workers only**: Checkpoint/restore supports LLM decode and prefill workers. Specialized workers (multimodal, embedding, diffusion) are not supported.
 - **Single-node only**: Checkpoints must be created and restored on the same node
 - **Single-GPU only**: Multi-GPU configurations not yet supported
 - **Network state limitations**: Active TCP connections are closed during restore (use `tcp-close` CRIU option)
@@ -118,7 +105,6 @@ ChReK is best suited for:
 
 ### Getting Started
 - [Dynamo Integration Guide](dynamo.md) - Using ChReK with Dynamo Platform
-- [Standalone Usage Guide](standalone.md) - Using ChReK independently
 - [ChReK Helm Chart README](https://github.com/ai-dynamo/dynamo/tree/main/deploy/helm/charts/chrek/README.md) - Helm chart configuration
 
 ### Related Documentation
@@ -128,31 +114,9 @@ ChReK is best suited for:
 
 - Kubernetes 1.21+
 - GPU nodes with NVIDIA runtime (`nvidia` runtime class)
-- CRIU support in container runtime (containerd with CRIU plugin)
+- containerd runtime (for container inspection; CRIU is bundled in ChReK images)
 - RWX storage class (for multi-node deployments)
-- **Security clearance for privileged pods** (required for restore operations)
-
-## Troubleshooting
-
-### Common Issues
-
-**DaemonSet not starting?**
-- Check GPU node labels: `kubectl get nodes -l nvidia.com/gpu.present=true`
-- Verify NVIDIA runtime is available
-
-**Checkpoint fails?**
-- Check DaemonSet logs: `kubectl logs -l app.kubernetes.io/name=chrek -n <namespace>`
-- Ensure application properly signals readiness
-- Verify CRIU is installed in the runtime
-
-**Restore fails?**
-- Ensure restore pod uses the same volumes as checkpoint job
-- Verify `hostIPC: true` is set (required for CUDA)
-- Check for `PSM3_DISABLED=1` and `GLOO_SOCKET_IFNAME=lo` environment variables
-
-For detailed troubleshooting, see:
-- [Dynamo Integration Guide - Troubleshooting](dynamo.md#troubleshooting)
-- [Standalone Guide - Troubleshooting](standalone.md#troubleshooting)
+- **Security clearance for privileged DaemonSet** (the ChReK agent runs privileged with hostPID/hostIPC/hostNetwork)
 
 ## Contributing
 

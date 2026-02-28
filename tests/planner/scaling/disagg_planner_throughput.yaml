@@ -49,6 +49,8 @@ spec:
             - dynamo.vllm
             - --model
             - nvidia/Llama-3.1-8B-Instruct-FP8
+            - --disaggregation-mode
+            - decode
     VllmPrefillWorker:
       envFromSecret: hf-token-secret
       componentType: worker
@@ -68,4 +70,5 @@ spec:
             - dynamo.vllm
             - --model
             - nvidia/Llama-3.1-8B-Instruct-FP8
-            - --is-prefill-worker
+            - --disaggregation-mode
+            - prefill

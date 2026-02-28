@@ -13,13 +13,15 @@
 //!
 //! Run with: cargo bench --package dynamo-kv-router --bench radix_tree_microbench --features bench -- --help
 
+#[path = "common/mod.rs"]
+mod common;
+use common::{SequenceData, generate_sequences};
+
 use clap::{Parser, ValueEnum};
 use dynamo_bench::common::LatencyStats;
 use dynamo_kv_router::{
     ConcurrentRadixTree, OverlapScores, PositionalIndexer, RadixTree, RouterEvent, SyncIndexer,
-    bench_utils::{SequenceData, generate_sequences},
-    compute_block_hash_for_seq,
-    protocols::LocalBlockHash,
+    compute_block_hash_for_seq, protocols::LocalBlockHash,
 };
 use std::time::{Duration, Instant};
 
@@ -302,7 +304,7 @@ fn bench_hash(args: &Args) {
 
     for (i, tokens) in token_sequences.iter().enumerate() {
         let start = Instant::now();
-        let _ = compute_block_hash_for_seq(tokens, args.block_size, None);
+        let _ = compute_block_hash_for_seq(tokens, args.block_size, None, None);
         let elapsed = start.elapsed();
 
         if i >= warmup_iters {

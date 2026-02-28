@@ -44,7 +44,7 @@ class SGLangWithGMSProcess(ManagedProcess):
                 "gms",
                 "--enable-memory-saver",
                 "--mem-fraction-static",
-                "0.8",
+                "0.9",
                 "--port",
                 str(sglang_port),
             ],

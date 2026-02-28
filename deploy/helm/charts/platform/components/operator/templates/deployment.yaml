@@ -44,6 +44,7 @@ spec:
       {{- include "dynamo-operator.selectorLabels" . | nindent 8 }}
       annotations:
         kubectl.kubernetes.io/default-container: manager
+        checksum/config: {{ include (print $.Template.BasePath "/operator-config.yaml") . | sha256sum }}
     spec:
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
@@ -77,98 +78,8 @@ spec:
         securityContext: {{- toYaml .Values.controllerManager.kubeRbacProxy.containerSecurityContext
           | nindent 10 }}
       - args:
-        {{- range .Values.controllerManager.manager.args }}
-          - {{ . }}
-        {{- end }}
-          - --leader-elect
-          - --leader-election-id={{ default "dynamo.nvidia.com" .Values.controllerManager.leaderElection.id }}
-        {{- if .Values.namespaceRestriction.enabled }}
-          {{- $restrictedNs := default .Release.Namespace .Values.namespaceRestriction.targetNamespace }}
-          - --restrictedNamespace={{ $restrictedNs }}
-          - --leader-election-namespace={{ $restrictedNs }}
-        {{- else }}
-          - --leader-election-namespace={{ default "kube-system" .Values.controllerManager.leaderElection.namespace }}
-        {{- end }}
-        {{- if .Values.natsAddr }}
-          - --natsAddr={{ .Values.natsAddr }}
-        {{- else if and .Values.nats .Values.nats.enabled }}
-          - --natsAddr=nats://{{ .Release.Name }}-nats.{{ .Release.Namespace }}.svc.cluster.local:4222
-        {{- end }}
-        {{- if .Values.etcdAddr }}
-          - --etcdAddr={{ .Values.etcdAddr }}
-        {{- else if and .Values.global .Values.global.etcd .Values.global.etcd.install }}
-          - --etcdAddr={{ .Release.Name }}-etcd.{{ .Release.Namespace }}.svc.cluster.local:2379
-        {{- end }}
-        {{- if and .Values.dynamo.istio.enabled .Values.dynamo.istio.gateway }}
-          - --istio-virtual-service-gateway={{ .Values.dynamo.istio.gateway }}
-        {{- end }}
-        {{- if .Values.dynamo.ingress.enabled }}
-        {{- if  .Values.dynamo.ingress.className }}
-          - --ingress-controller-class-name={{ .Values.dynamo.ingress.className }}
-        {{- end }}
-        {{- if  .Values.dynamo.ingress.tlsSecretName }}
-          - --ingress-controller-tls-secret-name={{ .Values.dynamo.ingress.tlsSecretName }}
-        {{- end }}
-        {{- end }}
-        {{- if .Values.dynamo.ingressHostSuffix }}
-          - --ingress-host-suffix={{ .Values.dynamo.ingressHostSuffix }}
-        {{- end }}
-        {{- if .Values.dynamo.virtualServiceSupportsHTTPS }}
-          - --virtual-service-supports-https={{ .Values.dynamo.virtualServiceSupportsHTTPS }}
-        {{- end }}
-        {{- if .Values.dynamo.groveTerminationDelay }}
-          - --grove-termination-delay={{ .Values.dynamo.groveTerminationDelay }}
-        {{- end }}
-        {{- if .Values.modelExpressURL }}
-          - --model-express-url={{ .Values.modelExpressURL }}
-        {{- end }}
-        {{- if .Values.dynamo.metrics.prometheusEndpoint }}
-          - --prometheus-endpoint={{ .Values.dynamo.metrics.prometheusEndpoint }}
-        {{- end }}
-        {{- if .Values.dynamo.mpiRun.secretName }}
-          - --mpi-run-ssh-secret-name={{ .Values.dynamo.mpiRun.secretName }}
-          - --mpi-run-ssh-secret-namespace={{ .Release.Namespace }}
-        {{- end }}
-        {{- if not .Values.namespaceRestriction.enabled }}
-          - --dgdr-profiling-cluster-role-name={{ include "dynamo-operator.fullname" . }}-dgdr-profiling
-          - --planner-cluster-role-name={{ include "dynamo-operator.fullname" . }}-planner
-          - --epp-cluster-role-name={{ include "dynamo-operator.fullname" . }}-epp
-        {{- end }}
-        {{- if .Values.discoveryBackend }}
-          - --discovery-backend={{ .Values.discoveryBackend }}
-        {{- end }}
-        {{- if .Values.namespaceRestriction.enabled }}
-        {{- if .Values.namespaceRestriction.lease }}
-          - --namespace-scope-lease-duration={{ .Values.namespaceRestriction.lease.duration }}
-          - --namespace-scope-lease-renew-interval={{ .Values.namespaceRestriction.lease.renewInterval }}
-        {{- end }}
-          - --gpu-discovery-enabled={{ .Values.gpuDiscovery.enabled }}
-        {{- end }}
-          - --operator-version={{ .Chart.AppVersion }}
-        {{- if .Values.checkpoint.enabled }}
-          - --checkpoint-enabled=true
-          - --checkpoint-storage-type={{ .Values.checkpoint.storage.type }}
-          - --checkpoint-signal-host-path={{ .Values.checkpoint.storage.signalHostPath }}
-          - --checkpoint-init-container-image={{ .Values.checkpoint.initContainerImage }}
-          - --checkpoint-ready-for-checkpoint-file-path={{ .Values.checkpoint.readyForCheckpointFilePath }}
-          - --checkpoint-restore-marker-file-path={{ .Values.checkpoint.restoreMarkerFilePath }}
-          {{- if eq .Values.checkpoint.storage.type "pvc" }}
-          - --checkpoint-pvc-name={{ .Values.checkpoint.storage.pvc.pvcName }}
-          - --checkpoint-pvc-base-path={{ .Values.checkpoint.storage.pvc.basePath }}
-          {{- end }}
-          {{- if eq .Values.checkpoint.storage.type "s3" }}
-          - --checkpoint-s3-uri={{ .Values.checkpoint.storage.s3.uri }}
-          {{- if .Values.checkpoint.storage.s3.credentialsSecretRef }}
-          - --checkpoint-s3-credentials-secret={{ .Values.checkpoint.storage.s3.credentialsSecretRef }}
-          {{- end }}
-          {{- end }}
-          {{- if eq .Values.checkpoint.storage.type "oci" }}
-          - --checkpoint-oci-uri={{ .Values.checkpoint.storage.oci.uri }}
-          {{- if .Values.checkpoint.storage.oci.credentialsSecretRef }}
-          - --checkpoint-oci-credentials-secret={{ .Values.checkpoint.storage.oci.credentialsSecretRef }}
-          {{- end }}
-          {{- end }}
-        {{- end }}
+        - --config=/etc/dynamo-operator/config.yaml
+        - --operator-version={{ .Chart.AppVersion }}
         command:
         - /manager
         env:
@@ -199,6 +110,9 @@ spec:
         securityContext: {{- toYaml .Values.controllerManager.manager.containerSecurityContext
           | nindent 10 }}
         volumeMounts:
+        - mountPath: /etc/dynamo-operator
+          name: operator-config
+          readOnly: true
         - mountPath: /tmp/k8s-webhook-server/serving-certs
           name: cert
           readOnly: true
@@ -207,6 +121,9 @@ spec:
       serviceAccountName: {{ include "dynamo-operator.fullname" . }}-controller-manager
       terminationGracePeriodSeconds: 30
       volumes:
+      - name: operator-config
+        configMap:
+          name: {{ include "dynamo-operator.fullname" . }}-config
       - name: cert
         secret:
           defaultMode: 420
