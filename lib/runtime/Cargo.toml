@@ -19,6 +19,8 @@ testing-etcd = [] # Tests that require an active ETCD server
 tokio-console = ["dep:console-subscriber", "tokio/tracing"]
 compute-validation = [] # Enable validation and timing for compute macros
 tcp-low-latency = [] # Enable Linux-specific TCP optimizations (TCP_QUICKACK, SO_BUSY_POLL)
+# NVTX timeline annotations for Nsight Systems (compile-time off; also gated at runtime by `DYN_ENABLE_RUST_NVTX` env var).
+nvtx = []
 
 [dependencies]
 # Use workspace dependencies where available

@@ -130,3 +130,10 @@ insta.opt-level = 3
 # These make the build much slower but shrink the binary, and could help performance
 codegen-units = 1
 lto = "thin"
+
+# Profiling profile: release-like but retains debug symbols for perf/flamegraph/Nsight.
+# Build: cargo build --profile profiling --features nvtx
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = false
