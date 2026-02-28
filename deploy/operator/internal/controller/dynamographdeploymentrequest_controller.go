@@ -437,7 +437,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleProfilingPhase(ctx contex
 	}
 
 	// If autoApply is enabled, transition to Deploying phase
-	if dgdr.Spec.AutoApply {
+	if dgdr.Spec.AutoApply == nil || *dgdr.Spec.AutoApply {
 		logger.Info("AutoApply enabled, transitioning to Deploying phase")
 		return r.updatePhaseWithCondition(ctx, dgdr, nvidiacomv1beta1.DGDRPhaseDeploying, nvidiacomv1beta1.ConditionTypeSpecGenerated, metav1.ConditionTrue, nvidiacomv1beta1.EventReasonSpecGenerated, MessageSpecGenerated)
 	}
@@ -460,7 +460,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleDeployingPhase(ctx contex
 	logger := log.FromContext(ctx)
 	logger.Info("Handling deploying phase", "name", dgdr.Name)
 
-	if !dgdr.Spec.AutoApply {
+	if dgdr.Spec.AutoApply != nil && !*dgdr.Spec.AutoApply {
 		// Shouldn't be in this phase without autoApply
 		logger.Info("AutoApply not enabled, transitioning to Ready")
 		dgdr.Status.Phase = nvidiacomv1beta1.DGDRPhaseReady
@@ -1169,7 +1169,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) enrichHardwareFromDiscovery(ctx
 	}
 	hw := dgdr.Spec.Hardware
 	if hw.GPUSKU != "" && hw.VRAMMB != nil && hw.NumGPUsPerNode != nil {
-		return nil // all fields already set by user
+		return nil // all fields already set by user; TotalGPUs is filled below when discovery runs
 	}
 
 	gpuInfo, err := gpu.DiscoverGPUs(ctx, r.APIReader)
@@ -1180,6 +1180,8 @@ func (r *DynamoGraphDeploymentRequestReconciler) enrichHardwareFromDiscovery(ctx
 	logger := log.FromContext(ctx)
 	logger.Info("GPU discovery completed successfully",
 		"gpusPerNode", gpuInfo.GPUsPerNode,
+		"nodesWithGPUs", gpuInfo.NodesWithGPUs,
+		"totalGpus", gpuInfo.GPUsPerNode*gpuInfo.NodesWithGPUs,
 		"model", gpuInfo.Model,
 		"vramMiB", gpuInfo.VRAMPerGPU)
 
@@ -1193,6 +1195,10 @@ func (r *DynamoGraphDeploymentRequestReconciler) enrichHardwareFromDiscovery(ctx
 	if hw.NumGPUsPerNode == nil {
 		n := int32(gpuInfo.GPUsPerNode)
 		hw.NumGPUsPerNode = &n
+	}
+	if hw.TotalGPUs == nil {
+		total := int32(gpuInfo.GPUsPerNode * gpuInfo.NodesWithGPUs)
+		hw.TotalGPUs = &total
 	}
 	return nil
 }
