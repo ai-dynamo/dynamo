@@ -381,73 +381,66 @@ impl EventSink for NatsQueue {
     }
 }
 
+/// Publishes a single [`KvCacheEvent`] to the event sink and, when present, the local indexer.
+/// Errors are logged and swallowed so the caller loop can continue uninterrupted.
+async fn emit<P: EventSink>(
+    publisher: &P,
+    local_indexer: &Option<Arc<LocalKvIndexer>>,
+    worker_id: u64,
+    event: KvCacheEvent,
+) {
+    let router_event = RouterEvent::new(worker_id, event);
+    if let Some(indexer) = local_indexer {
+        if let Err(e) = indexer.apply_event_with_buffer(router_event.clone()).await {
+            tracing::warn!(worker_id, error = %e, "Failed to apply event to local indexer");
+        }
+    }
+    if let Err(e) = publisher.publish_event(&router_event).await {
+        tracing::error!(worker_id, error = %e, "Failed to publish event");
+    }
+}
+
 impl BatchingState {
-    /// Flushes pending batches to the publisher and local indexer.
+    /// Publishes any pending batch as a single [`RouterEvent`] and advances the monotonic
+    /// batch ID. No-ops when nothing is pending, so callers may call unconditionally.
     async fn flush<P: EventSink + Send + Sync + 'static>(
         &mut self,
         publisher: &P,
         local_indexer: &Option<Arc<LocalKvIndexer>>,
         worker_id: u64,
     ) {
-        // Only increment publish_id if there is something to publish.
-        // flush() is sometimes called speculatively (e.g. before a Cleared event)
-        // and must not consume an ID when there is nothing pending.
         if !self.has_pending() {
             return;
         }
-
-        let publish_id = self.next_publish_id;
-        let last_dp_rank = self.last_dp_rank;
-
-        if let Some(removed_data) = self.pending_removed.take() {
-            let event = KvCacheEvent {
-                event_id: publish_id,
-                data: KvCacheEventData::Removed(removed_data),
-                dp_rank: last_dp_rank,
-            };
-            let router_event = RouterEvent::new(worker_id, event);
-
-            if let Some(indexer) = local_indexer
-                && let Err(e) = indexer.apply_event_with_buffer(router_event.clone()).await
-            {
-                tracing::warn!(
-                    "Failed to send removed event to local indexer for worker {}: {}",
-                    worker_id,
-                    e
-                );
-            }
-
-            if let Err(e) = publisher.publish_event(&router_event).await {
-                tracing::error!("Failed to publish removed event: {}", e);
-            }
+        let id = self.next_publish_id;
+        let dp_rank = self.last_dp_rank;
+        if let Some(data) = self.pending_removed.take() {
+            emit(
+                publisher,
+                local_indexer,
+                worker_id,
+                KvCacheEvent {
+                    event_id: id,
+                    data: KvCacheEventData::Removed(data),
+                    dp_rank,
+                },
+            )
+            .await;
         }
-
-        if let Some(stored_data) = self.pending_stored.take() {
-            let event = KvCacheEvent {
-                event_id: publish_id,
-                data: KvCacheEventData::Stored(stored_data),
-                dp_rank: last_dp_rank,
-            };
-            let router_event = RouterEvent::new(worker_id, event);
-
-            if let Some(indexer) = local_indexer
-                && let Err(e) = indexer.apply_event_with_buffer(router_event.clone()).await
-            {
-                tracing::warn!(
-                    "Failed to send stored event to local indexer for worker {}: {}",
-                    worker_id,
-                    e
-                );
-            }
-
-            if let Err(e) = publisher.publish_event(&router_event).await {
-                tracing::error!("Failed to publish stored event: {}", e);
-            }
+        if let Some(data) = self.pending_stored.take() {
+            emit(
+                publisher,
+                local_indexer,
+                worker_id,
+                KvCacheEvent {
+                    event_id: id,
+                    data: KvCacheEventData::Stored(data),
+                    dp_rank,
+                },
+            )
+            .await;
         }
-
-        // Advance the monotonic batch ID after each flush so downstream consumers
-        // always see consecutive event_ids (1, 2, 3, ...) regardless of how many
-        // raw source events were merged into this batch.
+        // Consecutive batch IDs (1, 2, 3, …) keep downstream gap-detection happy.
         self.next_publish_id += 1;
     }
 }
@@ -490,8 +483,8 @@ async fn run_event_processor_loop<P: EventSink + Send + Sync + 'static>(
                 // Warn if the raw input event_id is not consecutive — events were dropped
                 // (e.g. channel send error) before they reached the batching layer.
                 let raw_event_id = event.event_id;
-                if let Some(last_id) = last_raw_input_id {
-                    if raw_event_id > last_id + 1 {
+                if let Some(last_id) = last_raw_input_id
+                    && raw_event_id > last_id + 1 {
                         tracing::warn!(
                             worker_id,
                             last_raw_input_id = last_id,
@@ -500,106 +493,67 @@ async fn run_event_processor_loop<P: EventSink + Send + Sync + 'static>(
                             "Input event gap detected: raw events dropped before batching"
                         );
                     }
-                }
                 last_raw_input_id = Some(raw_event_id);
 
                 tracing::trace!("Event processor for worker_id {} processing event: {:?}", worker_id, event.data);
 
-                // Check if dp_rank changed before updating state
-                let dp_rank_changed = batching_state.has_pending() && event.dp_rank != batching_state.last_dp_rank;
-
-                let incoming_dp_rank = event.dp_rank;
+                let dp_rank_changed = batching_state.has_pending()
+                    && event.dp_rank != batching_state.last_dp_rank;
 
                 match event.data {
-                    KvCacheEventData::Removed(removed_data) => {
-                        // Flush if switching from Stored, or if dp_rank changed
-                        let should_flush = batching_state.pending_stored.is_some() || dp_rank_changed;
-
-                        if should_flush {
+                    KvCacheEventData::Removed(data) => {
+                        if batching_state.pending_stored.is_some() || dp_rank_changed {
                             batching_state.flush(&publisher, &local_indexer, worker_id).await;
                         }
-
-                        // Check if we're starting a new batch (no pending removed)
-                        let is_new_batch = batching_state.pending_removed.is_none();
-
-                        if let Some(ref mut pending) = batching_state.pending_removed {
-                            pending.block_hashes.extend(removed_data.block_hashes);
-                        } else {
-                            batching_state.pending_removed = Some(removed_data);
-                        }
-
-                        // Reset flush time when starting a new batch to prevent immediate timeout
-                        if is_new_batch {
-                            batching_state.reset_flush_time();
+                        // Start a new batch or extend the current one.
+                        // The timer resets only when the first event of a new batch arrives.
+                        match &mut batching_state.pending_removed {
+                            Some(pending) => pending.block_hashes.extend(data.block_hashes),
+                            None => {
+                                batching_state.pending_removed = Some(data);
+                                batching_state.reset_flush_time();
+                            }
                         }
                     }
-                    KvCacheEventData::Stored(stored_data) => {
-                        // Check if we should flush: non-sequential parent_hash, switching from Removed, or dp_rank changed
-                        let should_flush = if let Some(ref pending) = batching_state.pending_stored {
-                            let last_block_hash = pending.blocks.last().map(|b| b.block_hash);
-                            let is_sequential = stored_data.parent_hash == last_block_hash;
-                            !is_sequential || dp_rank_changed
-                        } else {
-                            batching_state.pending_removed.is_some() || dp_rank_changed
-                        };
-
+                    KvCacheEventData::Stored(data) => {
+                        // Flush if: type switch, dp_rank change, or the chain is broken
+                        // (new event's parent_hash doesn't continue from the last stored block).
+                        let should_flush = dp_rank_changed
+                            || batching_state.pending_removed.is_some()
+                            || batching_state.pending_stored.as_ref().is_some_and(|p| {
+                                data.parent_hash != p.blocks.last().map(|b| b.block_hash)
+                            });
                         if should_flush {
                             batching_state.flush(&publisher, &local_indexer, worker_id).await;
                         }
-
-                        // Check if we're starting a new batch (no pending stored)
-                        let is_new_batch = batching_state.pending_stored.is_none();
-
-                        if let Some(ref mut pending) = batching_state.pending_stored {
-                            // Only extend blocks - parent_hash must remain from first event
-                            pending.blocks.extend(stored_data.blocks);
-                        } else {
-                            batching_state.pending_stored = Some(stored_data);
-                        }
-
-                        // Reset flush time when starting a new batch to prevent immediate timeout
-                        if is_new_batch {
-                            batching_state.reset_flush_time();
+                        match &mut batching_state.pending_stored {
+                            // Only extend blocks; parent_hash stays fixed from the first event.
+                            Some(pending) => pending.blocks.extend(data.blocks),
+                            None => {
+                                batching_state.pending_stored = Some(data);
+                                batching_state.reset_flush_time();
+                            }
                         }
                     }
                     KvCacheEventData::Cleared => {
                         batching_state.flush(&publisher, &local_indexer, worker_id).await;
-
-                        // Use the monotonic batch ID so Cleared events stay in the
-                        // same consecutive sequence as batched Removed/Stored events.
-                        let cleared_event = KvCacheEvent {
+                        emit(&publisher, &local_indexer, worker_id, KvCacheEvent {
                             event_id: batching_state.next_publish_id,
                             data: KvCacheEventData::Cleared,
                             dp_rank: event.dp_rank,
-                        };
+                        }).await;
                         batching_state.next_publish_id += 1;
-                        let router_event = RouterEvent::new(worker_id, cleared_event);
-
-                        if let Some(indexer) = &local_indexer
-                            && let Err(e) = indexer.apply_event_with_buffer(router_event.clone()).await {
-                                tracing::warn!(
-                                    "Failed to send cleared event to local indexer for worker {}: {}",
-                                    worker_id,
-                                    e
-                                );
-                            }
-
-                        if let Err(e) = publisher.publish_event(&router_event).await {
-                            tracing::error!("Failed to publish cleared event: {}", e);
-                        }
                     }
                 }
 
-                // Update dp_rank metadata AFTER processing the event (so flush uses correct batch metadata)
-                batching_state.last_dp_rank = incoming_dp_rank;
+                // Track dp_rank after the match so in-flight flushes use the old value.
+                batching_state.last_dp_rank = event.dp_rank;
 
-                // After processing each event, check if timeout has elapsed and flush if so
-                // This handles both timeout=0 (immediate flush) and timeout>0 (elapsed check)
-                if batching_state.has_pending() {
-                    let elapsed = batching_state.last_flush_time.elapsed();
-                    if elapsed >= Duration::from_micros(timeout_us) {
-                        batching_state.flush(&publisher, &local_indexer, worker_id).await;
-                    }
+                // Flush immediately if the timeout already elapsed (handles timeout_us=0).
+                if batching_state.has_pending()
+                    && batching_state.last_flush_time.elapsed() >= Duration::from_micros(timeout_us)
+                {
+                    batching_state.flush(&publisher, &local_indexer, worker_id).await;
                 }
             }
             _ = tokio::time::sleep(remaining), if timeout_us > 0 && batching_state.has_pending() => {
