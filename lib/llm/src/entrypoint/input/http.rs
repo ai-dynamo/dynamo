@@ -64,6 +64,11 @@ pub async fn run(
     http_service_builder =
         http_service_builder.drt_discovery(Some(distributed_runtime.discovery()));
 
+    // Pass the Dynamo namespace so Frontend metrics include the dynamo_namespace label
+    // that the Planner uses for client-side filtering.
+    http_service_builder =
+        http_service_builder.dynamo_namespace(local_model.namespace().map(String::from));
+
     let http_service = match engine_config {
         EngineConfig::Dynamic {
             ref model,
