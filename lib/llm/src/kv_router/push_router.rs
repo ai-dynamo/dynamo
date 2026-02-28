@@ -13,11 +13,13 @@ use dynamo_runtime::{
 };
 use futures::stream::{self, StreamExt};
 use serde_json::json;
+use tokio::sync::OnceCell;
 use tracing::Instrument;
 
 use crate::{
     kv_router::{
-        KvRouter,
+        CacheControlClient, KvRouter,
+        cache_control::{PinState, create_cache_control_client, spawn_pin_prefix},
         metrics::RouterRequestMetrics,
         protocols::{TokensWithHashes, WorkerWithDpRank},
     },
@@ -31,6 +33,8 @@ use crate::{
 pub struct KvPushRouter {
     inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
     pub chooser: Arc<KvRouter>,
+    /// Lazily initialized on first PIN request. `None` when cache_control is disabled.
+    cache_control_cell: Option<OnceCell<CacheControlClient>>,
 }
 
 /// Result of worker selection containing instance ID, dp_rank, and overlap amount.
@@ -61,6 +65,8 @@ struct RequestGuard {
     isl_tokens: usize,
     block_size: usize,
     expected_output_tokens: Option<u32>,
+    // PIN state: set when cache_control TTL is present and a cc_client exists
+    pin_state: Option<PinState>,
 }
 
 impl RequestGuard {
@@ -136,6 +142,16 @@ impl RequestGuard {
             tracing::warn!("Failed to free request {}: {e}", self.context_id);
         }
         self.freed = true;
+
+        if let Some(ref pin) = self.pin_state {
+            spawn_pin_prefix(
+                Some(&pin.cc_client),
+                &pin.token_ids,
+                pin.instance_id,
+                &self.context_id,
+                pin.ttl_seconds,
+            );
+        }
     }
 
     fn record_metrics(&mut self) {
@@ -182,7 +198,18 @@ impl KvPushRouter {
         // scrapeable before any requests arrive. Both the frontend pipeline
         // and the standalone router create KvPushRouter, so this covers both.
         RouterRequestMetrics::from_component(chooser.client().endpoint.component());
-        KvPushRouter { inner, chooser }
+
+        let cache_control_cell = if chooser.kv_router_config().router_enable_cache_control {
+            tracing::info!("Cache control enabled for PIN operations (lazy init)");
+            Some(OnceCell::new())
+        } else {
+            None
+        };
+        KvPushRouter {
+            inner,
+            chooser,
+            cache_control_cell,
+        }
     }
 
     /// Select a worker for the request, either using a preselected worker or finding the best match.
@@ -200,6 +227,7 @@ impl KvPushRouter {
         let priority_jump = routing.and_then(|r| r.priority_jump).unwrap_or(0.0);
         let dp_rank = routing.and_then(|r| r.dp_rank).unwrap_or(0);
         let expected_output_tokens = routing.and_then(|r| r.expected_output_tokens);
+        let allowed_worker_ids = routing.and_then(|r| r.allowed_worker_ids.clone());
         let (routing_token_ids, block_mm_infos) = request.block_mm_routing_info();
 
         // Get pre-selected worker based on phase, with backend_instance_id as fallback
@@ -224,7 +252,7 @@ impl KvPushRouter {
                     !is_query_only,
                     lora_name,
                     priority_jump,
-                    None,
+                    allowed_worker_ids,
                 )
                 .await?;
 
@@ -425,6 +453,26 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         let track_output_blocks = self.chooser.kv_router_config().router_track_output_blocks;
         let tracker = request.tracker.clone();
 
+        // Extract pin state: lazily init cache_control client on first PIN request
+        let pin_state: Option<PinState> = async {
+            let ttl = request.routing.as_ref().and_then(|r| r.cache_control_ttl)?;
+            let cell = self.cache_control_cell.as_ref()?;
+            let component = self.chooser.client().endpoint.component().clone();
+            let client = cell
+                .get_or_try_init(|| create_cache_control_client(&component))
+                .await
+                .inspect_err(|e| tracing::warn!("Failed to create cache_control client: {e}"))
+                .ok()?
+                .clone();
+            Some(PinState {
+                token_ids: request.token_ids.clone(),
+                cc_client: client,
+                instance_id,
+                ttl_seconds: ttl,
+            })
+        }
+        .await;
+
         let (mut backend_input, context) = request.into_parts();
         backend_input.routing_mut().dp_rank = Some(dp_rank);
         let updated_request = context.map(|_| backend_input);
@@ -466,6 +514,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 isl_tokens,
                 block_size,
                 expected_output_tokens,
+                pin_state,
             };
 
             loop {

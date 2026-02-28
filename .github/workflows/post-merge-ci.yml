@@ -12,27 +12,175 @@ permissions:
   contents: read
 
 jobs:
-  ci-pipeline:
-    name: Post-Merge CI
-    uses: ./.github/workflows/ci-test-suite.yml
+  # ============================================================================
+  # FRAMEWORK PIPELINES (Build → Test → Copy)
+  # ============================================================================
+  # ============================================================================
+  # VLLM PIPELINE
+  # ============================================================================
+  vllm-pipeline:
+    uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
     with:
-      pipeline_type: post_merge
-      include_nightly_marks: false
-      image_prefix: main
-      enable_slack_notification: true
-    secrets:
-      AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
-      AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
-      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-      NGC_CI_ACCESS_TOKEN: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
-      CI_TOKEN: ${{ secrets.CI_TOKEN }}
-      SCCACHE_S3_BUCKET: ${{ secrets.SCCACHE_S3_BUCKET }}
-      AZURE_ACR_HOSTNAME: ${{ secrets.AZURE_ACR_HOSTNAME }}
-      AZURE_ACR_USER: ${{ secrets.AZURE_ACR_USER }}
-      AZURE_ACR_PASSWORD: ${{ secrets.AZURE_ACR_PASSWORD }}
-      SLACK_NOTIFY_NIGHTLY_WEBHOOK_URL: ${{ secrets.SLACK_NOTIFY_NIGHTLY_WEBHOOK_URL }}
-      SLACK_OPS_SUPPORT_GROUP_ID: ${{ secrets.SLACK_OPS_SUPPORT_GROUP_ID }}
-      AZURE_AKS_CI_KUBECONFIG_B64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
-      HF_TOKEN: ${{ secrets.HF_TOKEN }}
-      DYNAMO_INGRESS_SUFFIX: ${{ secrets.DYNAMO_INGRESS_SUFFIX }}
+      framework: vllm
+      target: runtime
+      platforms: '["amd64", "arm64"]'
+      cuda_versions: '["12.9", "13.0"]'
+      extra_tags: |
+        ${{ github.ref_name == 'main' && 'main-vllm' || '' }}
+        ${{ github.ref_name == 'main' && format('main-vllm-{0}', github.sha) || '' }}
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
+      cpu_only_test_markers: '(pre_merge or post_merge) and vllm and gpu_0'
+      single_gpu_test_markers: '(pre_merge or post_merge) and vllm and gpu_1'
+      multi_gpu_test_markers: '(pre_merge or post_merge) and vllm and (gpu_2 or gpu_4)'
+      cpu_only_test_timeout_minutes: 60
+      single_gpu_test_timeout_minutes: 60
+      multi_gpu_test_timeout_minutes: 60
+    secrets: inherit
+
+  # ============================================================================
+  # SGLANG PIPELINE
+  # ============================================================================
+  sglang-pipeline:
+    uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
+    with:
+      framework: sglang
+      target: runtime
+      platforms: '["amd64", "arm64"]'
+      cuda_versions: '["12.9", "13.0"]'
+      extra_tags: |
+        ${{ github.ref_name == 'main' && 'main-sglang' || '' }}
+        ${{ github.ref_name == 'main' && format('main-sglang-{0}', github.sha) || '' }}
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
+      cpu_only_test_markers: '(pre_merge or post_merge) and sglang and gpu_0'
+      single_gpu_test_markers: '(pre_merge or post_merge) and sglang and gpu_1'
+      multi_gpu_test_markers: '(pre_merge or post_merge) and sglang and (gpu_2 or gpu_4)'
+      cpu_only_test_timeout_minutes: 60
+      single_gpu_test_timeout_minutes: 60
+      multi_gpu_test_timeout_minutes: 60
+    secrets: inherit
+
+  # ============================================================================
+  # TRTLLM PIPELINE
+  # ============================================================================
+  trtllm-pipeline:
+    uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
+    with:
+      framework: trtllm
+      target: runtime
+      platforms: '["amd64", "arm64"]'
+      cuda_versions: '["13.1"]'
+      extra_tags: |
+        ${{ github.ref_name == 'main' && 'main-trtllm' || '' }}
+        ${{ github.ref_name == 'main' && format('main-trtllm-{0}', github.sha) || '' }}
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
+      cpu_only_test_markers: '(pre_merge or post_merge) and trtllm and gpu_0'
+      single_gpu_test_markers: '(pre_merge or post_merge) and trtllm and gpu_1'
+      multi_gpu_test_markers: '(pre_merge or post_merge) and trtllm and (gpu_2 or gpu_4)'
+      cpu_only_test_timeout_minutes: 60
+      single_gpu_test_timeout_minutes: 60
+      multi_gpu_test_timeout_minutes: 60
+    secrets: inherit
+
+  # ============================================================================
+  # EFA PIPELINES (Build only, amd64)
+  # ============================================================================
+  # ============================================================================
+  # VLLM EFA PIPELINE
+  # ============================================================================
+  vllm-efa-pipeline:
+    uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
+    with:
+      framework: vllm
+      target: runtime
+      platforms: '["amd64"]'
+      cuda_versions: '["12.9"]'
+      make_efa: true
+      extra_tags: |
+        ${{ github.ref_name == 'main' && 'main-vllm-efa' || '' }}
+        ${{ github.ref_name == 'main' && format('main-vllm-efa-{0}', github.sha) || '' }}
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
+      cpu_only_test_markers: '(pre_merge or post_merge) and vllm and gpu_0'
+      cpu_only_test_timeout_minutes: 60
+      run_single_gpu_tests: false
+      run_multi_gpu_tests: false
+      copy_to_acr: false
+    secrets: inherit
+
+  # ============================================================================
+  # TRTLLM EFA PIPELINE
+  # ============================================================================
+  trtllm-efa-pipeline:
+    uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
+    with:
+      framework: trtllm
+      target: runtime
+      platforms: '["amd64"]'
+      cuda_versions: '["13.1"]'
+      make_efa: true
+      extra_tags: |
+        ${{ github.ref_name == 'main' && 'main-trtllm-efa' || '' }}
+        ${{ github.ref_name == 'main' && format('main-trtllm-efa-{0}', github.sha) || '' }}
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
+      cpu_only_test_markers: '(pre_merge or post_merge) and trtllm and gpu_0'
+      cpu_only_test_timeout_minutes: 60
+      run_single_gpu_tests: false
+      run_multi_gpu_tests: false
+      copy_to_acr: false
+    secrets: inherit
+
+  ############################## SLACK NOTIFICATION ##############################
+  notify-slack:
+    name: Notify Slack
+    runs-on: prod-builder-amd-v1
+    if: always() && failure()
+    needs: [ vllm-pipeline, sglang-pipeline, trtllm-pipeline, vllm-efa-pipeline, trtllm-efa-pipeline ]
+    permissions:
+      contents: read
+    steps:
+      - name: Get Failed jobs
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          JOBS_JSON=$(mktemp)
+          curl -sSL \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100" \
+            >$JOBS_JSON
+
+          FAILED_JOBS=$(jq -r '.jobs[] | select(.conclusion == "failure") | ":failed: " + (.name | split(" / ") | .[-1]) + "\\n"' "$JOBS_JSON")
+          echo $FAILED_JOBS
+          {
+            echo "FAILED_JOBS<<EOF"
+            echo "$FAILED_JOBS"
+            echo "EOF"
+          } >> "$GITHUB_ENV"
+      - name: Notify Slack
+        uses: slackapi/slack-github-action@91efab103c0de0a537f72a35f6b8cda0ee76bf0a #v2.1.1
+        with:
+          webhook: ${{ secrets.SLACK_NOTIFY_NIGHTLY_WEBHOOK_URL }}
+          webhook-type: incoming-webhook
+          payload: |
+            blocks:
+              - type: "section"
+                text:
+                  type: mrkdwn
+                  text: ":alert: *Github Post-merge Pipeline Failure*"
+              - type: "section"
+                text:
+                  type: mrkdwn
+                  text: "<https://github.com/ai-dynamo/dynamo/actions/runs/${{ github.run_id }}|Workflow Summary>"
+              - type: "section"
+                text:
+                  type: mrkdwn
+                  text: "${{ env.FAILED_JOBS }}"
+              - type: "section"
+                text:
+                  type: mrkdwn
+                  text: "@ops-support Please investigate the failures above."

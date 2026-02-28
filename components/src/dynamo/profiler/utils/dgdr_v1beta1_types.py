@@ -223,7 +223,7 @@ class DynamoGraphDeploymentRequestSpec(BaseModel):
     )
     image: Optional[str] = Field(
         default=None,
-        description='Image is the container image reference for the profiling job (frontend image). Example: "nvcr.io/nvidia/dynamo-runtime:latest" TODO: In a future MR, the operator will derive the backend inference image from the backend type automatically; backend images can be overridden via overrides.dgd.',
+        description='Image is the container image reference for the profiling job (frontend image). Example: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.0.0".',
     )
     modelCache: Optional[ModelCacheSpec] = Field(
         default=None,
@@ -253,7 +253,7 @@ class DynamoGraphDeploymentRequestSpec(BaseModel):
         default="rapid",
         description='SearchStrategy controls the profiling search depth. "rapid" performs a fast sweep; "thorough" explores more configurations.',
     )
-    autoApply: bool = Field(
+    autoApply: Optional[bool] = Field(
         default=True,
         description="AutoApply indicates whether to automatically create a DynamoGraphDeployment after profiling completes. If false, the generated spec is stored in status for manual review and application.",
     )

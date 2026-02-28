@@ -20,11 +20,12 @@ members = [
     "lib/bindings/c",
     "lib/bindings/python/codegen",
     "lib/config",
+    "lib/velo-events",
 ]
 resolver = "3"
 
 [workspace.package]
-version = "0.9.0"
+version = "1.0.0"
 edition = "2024"
 description = "Dynamo Inference Framework"
 authors = ["NVIDIA Inc. <sw-dl-dynamo@nvidia.com>"]
@@ -35,25 +36,24 @@ keywords = ["llm", "genai", "inference", "nvidia", "distributed"]
 
 [workspace.dependencies]
 # Local crates
-dynamo-runtime = { path = "lib/runtime", version = "0.9.0" }
-dynamo-llm = { path = "lib/llm", version = "0.9.0" }
-dynamo-config = { path = "lib/config", version = "0.9.0" }
-dynamo-tokens = { path = "lib/tokens", version = "0.9.0" }
-dynamo-memory = { path = "lib/memory", version = "0.9.0" }
-dynamo-mocker = { path = "lib/mocker", version = "0.9.0" }
-dynamo-kv-router = { path = "lib/kv-router", version = "0.9.0", features = ["metrics"] }
-dynamo-async-openai = { path = "lib/async-openai", version = "0.9.0", features = ["byot"] }
-dynamo-parsers = { path = "lib/parsers", version = "0.9.0" }
+dynamo-runtime = { path = "lib/runtime", version = "1.0.0" }
+dynamo-llm = { path = "lib/llm", version = "1.0.0" }
+dynamo-config = { path = "lib/config", version = "1.0.0" }
+dynamo-tokens = { path = "lib/tokens", version = "1.0.0" }
+dynamo-memory = { path = "lib/memory", version = "1.0.0" }
+dynamo-mocker = { path = "lib/mocker", version = "1.0.0" }
+dynamo-kv-router = { path = "lib/kv-router", version = "1.0.0", features = ["metrics"] }
+dynamo-async-openai = { path = "lib/async-openai", version = "1.0.0", features = ["byot"] }
+dynamo-parsers = { path = "lib/parsers", version = "1.0.0" }
 
 # kvbm
-kvbm-common = { path = "lib/kvbm-common", version = "0.9.0" }
-kvbm-kernels = { path = "lib/kvbm-kernels", version = "0.9.0" }
-kvbm-logical = { path = "lib/kvbm-logical", version = "0.9.0" }
-kvbm-physical = { path = "lib/kvbm-physical", version = "0.9.0" }
+kvbm-common = { path = "lib/kvbm-common", version = "1.0.0" }
+kvbm-kernels = { path = "lib/kvbm-kernels", version = "1.0.0" }
+kvbm-logical = { path = "lib/kvbm-logical", version = "1.0.0" }
+kvbm-physical = { path = "lib/kvbm-physical", version = "1.0.0" }
 
 # velo
-# velo-events = { path = "lib/velo-events", version = "0.9.0" }
-velo-events = { git = "https://github.com/ai-dynamo/dynamo", branch = "ryan/velo-events" }
+velo-events = { path = "lib/velo-events", version = "1.0.0" }
 
 # External dependencies
 anyhow = { version = "1" }

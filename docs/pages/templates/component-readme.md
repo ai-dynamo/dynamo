@@ -31,9 +31,9 @@ title: Component README
 ### Kubernetes
 
 ```yaml
-# Add DGDR example - use apiVersion: nvidia.com/v1alpha1
+# Add DGDR example - use apiVersion: nvidia.com/v1beta1
 # Example pattern (from Router):
-# apiVersion: nvidia.com/v1alpha1
+# apiVersion: nvidia.com/v1beta1
 # kind: DynamoGraphDeployment
 # metadata:
 #   name: <component>-deployment
