@@ -399,14 +399,14 @@ impl BatchingState {
             };
             let router_event = RouterEvent::new(worker_id, event);
 
-            if let Some(indexer) = local_indexer {
-                if let Err(e) = indexer.apply_event_with_buffer(router_event.clone()).await {
-                    tracing::warn!(
-                        "Failed to send removed event to local indexer for worker {}: {}",
-                        worker_id,
-                        e
-                    );
-                }
+            if let Some(indexer) = local_indexer
+                && let Err(e) = indexer.apply_event_with_buffer(router_event.clone()).await
+            {
+                tracing::warn!(
+                    "Failed to send removed event to local indexer for worker {}: {}",
+                    worker_id,
+                    e
+                );
             }
 
             if let Err(e) = publisher.publish_event(&router_event).await {
@@ -422,14 +422,14 @@ impl BatchingState {
             };
             let router_event = RouterEvent::new(worker_id, event);
 
-            if let Some(indexer) = local_indexer {
-                if let Err(e) = indexer.apply_event_with_buffer(router_event.clone()).await {
-                    tracing::warn!(
-                        "Failed to send stored event to local indexer for worker {}: {}",
-                        worker_id,
-                        e
-                    );
-                }
+            if let Some(indexer) = local_indexer
+                && let Err(e) = indexer.apply_event_with_buffer(router_event.clone()).await
+            {
+                tracing::warn!(
+                    "Failed to send stored event to local indexer for worker {}: {}",
+                    worker_id,
+                    e
+                );
             }
 
             if let Err(e) = publisher.publish_event(&router_event).await {
@@ -540,15 +540,14 @@ async fn run_event_processor_loop<P: EventSink + Send + Sync + 'static>(
 
                         let router_event = RouterEvent::new(worker_id, event);
 
-                        if let Some(indexer) = &local_indexer {
-                            if let Err(e) = indexer.apply_event_with_buffer(router_event.clone()).await {
+                        if let Some(indexer) = &local_indexer
+                            && let Err(e) = indexer.apply_event_with_buffer(router_event.clone()).await {
                                 tracing::warn!(
                                     "Failed to send cleared event to local indexer for worker {}: {}",
                                     worker_id,
                                     e
                                 );
                             }
-                        }
 
                         if let Err(e) = publisher.publish_event(&router_event).await {
                             tracing::error!("Failed to publish cleared event: {}", e);
@@ -3273,7 +3272,11 @@ mod event_processor_tests {
 
         let events = publisher.get_events();
 
-        assert_eq!(events.len(), 2, "Should have 2 events (one per dp_rank batch)");
+        assert_eq!(
+            events.len(),
+            2,
+            "Should have 2 events (one per dp_rank batch)"
+        );
 
         // First event should have dp_rank=0 and event_id from first batch (last event_id = 12)
         assert_eq!(
@@ -3353,7 +3356,10 @@ mod event_processor_tests {
                 }
             })
             .sum();
-        assert_eq!(total_hashes, 3, "All 3 block hashes should be accounted for");
+        assert_eq!(
+            total_hashes, 3,
+            "All 3 block hashes should be accounted for"
+        );
     }
 
     /// Test that stored events with dp_rank change have correct metadata
@@ -3425,7 +3431,11 @@ mod event_processor_tests {
 
         let events = publisher.get_events();
 
-        assert_eq!(events.len(), 2, "Should have 2 events (one per dp_rank batch)");
+        assert_eq!(
+            events.len(),
+            2,
+            "Should have 2 events (one per dp_rank batch)"
+        );
 
         // First batch: dp_rank=0, event_id=101 (last event in first batch)
         assert_eq!(
