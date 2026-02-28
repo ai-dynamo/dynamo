@@ -66,6 +66,10 @@ pub mod runtime {
     /// Maximum number of blocking threads for Tokio runtime
     pub const DYN_RUNTIME_MAX_BLOCKING_THREADS: &str = "DYN_RUNTIME_MAX_BLOCKING_THREADS";
 
+    /// Enable Tokio task poll-time histogram (calls enable_metrics_poll_time_histogram on builder).
+    /// Set to "1", "true", or "yes" to enable. Adds ~2× overhead of Instant::now() per task poll.
+    pub const DYN_ENABLE_POLL_HISTOGRAM: &str = "DYN_ENABLE_POLL_HISTOGRAM";
+
     /// System status server configuration
     pub mod system {
         /// Enable system status server for health and metrics endpoints
