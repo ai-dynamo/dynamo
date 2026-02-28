@@ -8,7 +8,8 @@ import os
 import time
 
 import pytest
-import torch
+
+torch = pytest.importorskip("torch", reason="torch required for GPU allocation test")
 
 logger = logging.getLogger(__name__)
 
