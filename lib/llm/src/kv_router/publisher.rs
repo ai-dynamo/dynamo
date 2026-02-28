@@ -68,8 +68,9 @@ struct BatchingState {
     pending_removed: Option<KvCacheRemoveData>,
     /// Pending Stored batch (blocks to be stored)
     pending_stored: Option<KvCacheStoreData>,
-    /// Last event ID for batch
-    last_event_id: u64,
+    /// Monotonic counter for published batch IDs.
+    /// Increments by 1 per flush, decoupled from raw source event IDs.
+    next_publish_id: u64,
     /// Last DP rank for batch
     last_dp_rank: u32,
     /// Time of last flush (for timeout tracking)
@@ -82,7 +83,7 @@ impl BatchingState {
         Self {
             pending_removed: None,
             pending_stored: None,
-            last_event_id: 0,
+            next_publish_id: 1,
             last_dp_rank: 0,
             last_flush_time: Instant::now(),
         }
@@ -388,12 +389,19 @@ impl BatchingState {
         local_indexer: &Option<Arc<LocalKvIndexer>>,
         worker_id: u64,
     ) {
-        let last_event_id = self.last_event_id;
+        // Only increment publish_id if there is something to publish.
+        // flush() is sometimes called speculatively (e.g. before a Cleared event)
+        // and must not consume an ID when there is nothing pending.
+        if !self.has_pending() {
+            return;
+        }
+
+        let publish_id = self.next_publish_id;
         let last_dp_rank = self.last_dp_rank;
 
         if let Some(removed_data) = self.pending_removed.take() {
             let event = KvCacheEvent {
-                event_id: last_event_id,
+                event_id: publish_id,
                 data: KvCacheEventData::Removed(removed_data),
                 dp_rank: last_dp_rank,
             };
@@ -416,7 +424,7 @@ impl BatchingState {
 
         if let Some(stored_data) = self.pending_stored.take() {
             let event = KvCacheEvent {
-                event_id: last_event_id,
+                event_id: publish_id,
                 data: KvCacheEventData::Stored(stored_data),
                 dp_rank: last_dp_rank,
             };
@@ -437,8 +445,10 @@ impl BatchingState {
             }
         }
 
-        self.reset_flush_time();
-        // reset flush time here?!
+        // Advance the monotonic batch ID after each flush so downstream consumers
+        // always see consecutive event_ids (1, 2, 3, ...) regardless of how many
+        // raw source events were merged into this batch.
+        self.next_publish_id += 1;
     }
 }
 
@@ -456,6 +466,10 @@ async fn run_event_processor_loop<P: EventSink + Send + Sync + 'static>(
     timeout_us: u64,
 ) {
     let mut batching_state = BatchingState::new();
+    // Track last raw input event_id for gap detection (dropped events before batching).
+    // The raw event_id is a globally monotonic counter assigned by the ZMQ listener,
+    // so any gap here means events were silently dropped (e.g. send error on the channel).
+    let mut last_raw_input_id: Option<u64> = None;
 
     loop {
         let remaining = batching_state.remaining_timeout(timeout_us);
@@ -473,13 +487,27 @@ async fn run_event_processor_loop<P: EventSink + Send + Sync + 'static>(
                     break;
                 };
 
+                // Warn if the raw input event_id is not consecutive — events were dropped
+                // (e.g. channel send error) before they reached the batching layer.
+                let raw_event_id = event.event_id;
+                if let Some(last_id) = last_raw_input_id {
+                    if raw_event_id > last_id + 1 {
+                        tracing::warn!(
+                            worker_id,
+                            last_raw_input_id = last_id,
+                            raw_event_id,
+                            gap = raw_event_id - last_id - 1,
+                            "Input event gap detected: raw events dropped before batching"
+                        );
+                    }
+                }
+                last_raw_input_id = Some(raw_event_id);
+
                 tracing::trace!("Event processor for worker_id {} processing event: {:?}", worker_id, event.data);
 
                 // Check if dp_rank changed before updating state
                 let dp_rank_changed = batching_state.has_pending() && event.dp_rank != batching_state.last_dp_rank;
 
-                // Save metadata for the incoming event (used if we need to flush current batch)
-                let incoming_event_id = event.event_id;
                 let incoming_dp_rank = event.dp_rank;
 
                 match event.data {
@@ -537,7 +565,15 @@ async fn run_event_processor_loop<P: EventSink + Send + Sync + 'static>(
                     KvCacheEventData::Cleared => {
                         batching_state.flush(&publisher, &local_indexer, worker_id).await;
 
-                        let router_event = RouterEvent::new(worker_id, event);
+                        // Use the monotonic batch ID so Cleared events stay in the
+                        // same consecutive sequence as batched Removed/Stored events.
+                        let cleared_event = KvCacheEvent {
+                            event_id: batching_state.next_publish_id,
+                            data: KvCacheEventData::Cleared,
+                            dp_rank: event.dp_rank,
+                        };
+                        batching_state.next_publish_id += 1;
+                        let router_event = RouterEvent::new(worker_id, cleared_event);
 
                         if let Some(indexer) = &local_indexer
                             && let Err(e) = indexer.apply_event_with_buffer(router_event.clone()).await {
@@ -554,8 +590,7 @@ async fn run_event_processor_loop<P: EventSink + Send + Sync + 'static>(
                     }
                 }
 
-                // Update metadata AFTER processing the event (so flush uses correct batch metadata)
-                batching_state.last_event_id = incoming_event_id;
+                // Update dp_rank metadata AFTER processing the event (so flush uses correct batch metadata)
                 batching_state.last_dp_rank = incoming_dp_rank;
 
                 // After processing each event, check if timeout has elapsed and flush if so
@@ -564,14 +599,12 @@ async fn run_event_processor_loop<P: EventSink + Send + Sync + 'static>(
                     let elapsed = batching_state.last_flush_time.elapsed();
                     if elapsed >= Duration::from_micros(timeout_us) {
                         batching_state.flush(&publisher, &local_indexer, worker_id).await;
-                        batching_state.reset_flush_time();
                     }
                 }
             }
             _ = tokio::time::sleep(remaining), if timeout_us > 0 && batching_state.has_pending() => {
                 // Timeout elapsed - flush pending events
                 batching_state.flush(&publisher, &local_indexer, worker_id).await;
-                batching_state.reset_flush_time();
             }
         }
     }
@@ -3277,24 +3310,24 @@ mod event_processor_tests {
             "Should have 2 events (one per dp_rank batch)"
         );
 
-        // First event should have dp_rank=0 and event_id from first batch (last event_id = 12)
+        // First event should have dp_rank=0 and monotonic batch event_id=1
         assert_eq!(
             events[0].event.dp_rank, 0,
             "First batch should have dp_rank=0"
         );
         assert_eq!(
-            events[0].event.event_id, 12,
-            "First batch should have event_id=12 (last event in batch)"
+            events[0].event.event_id, 1,
+            "First batch should have monotonic event_id=1"
         );
 
-        // Second event should have dp_rank=1 and event_id from second batch (last event_id = 21)
+        // Second event should have dp_rank=1 and monotonic batch event_id=2
         assert_eq!(
             events[1].event.dp_rank, 1,
             "Second batch should have dp_rank=1"
         );
         assert_eq!(
-            events[1].event.event_id, 21,
-            "Second batch should have event_id=21 (last event in batch)"
+            events[1].event.event_id, 2,
+            "Second batch should have monotonic event_id=2"
         );
     }
 
@@ -3436,24 +3469,24 @@ mod event_processor_tests {
             "Should have 2 events (one per dp_rank batch)"
         );
 
-        // First batch: dp_rank=0, event_id=101 (last event in first batch)
+        // First batch: dp_rank=0, monotonic event_id=1
         assert_eq!(
             events[0].event.dp_rank, 0,
             "First batch should have dp_rank=0"
         );
         assert_eq!(
-            events[0].event.event_id, 101,
-            "First batch should have event_id=101"
+            events[0].event.event_id, 1,
+            "First batch should have monotonic event_id=1"
         );
 
-        // Second batch: dp_rank=1, event_id=200
+        // Second batch: dp_rank=1, monotonic event_id=2
         assert_eq!(
             events[1].event.dp_rank, 1,
             "Second batch should have dp_rank=1"
         );
         assert_eq!(
-            events[1].event.event_id, 200,
-            "Second batch should have event_id=200"
+            events[1].event.event_id, 2,
+            "Second batch should have monotonic event_id=2"
         );
 
         // Verify block counts
