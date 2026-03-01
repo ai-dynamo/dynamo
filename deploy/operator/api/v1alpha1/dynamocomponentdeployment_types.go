@@ -131,6 +131,13 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// +optional
 	EPPConfig *EPPConfig `json:"eppConfig,omitempty"`
 
+	// FrontendSidecar configures an auto-generated frontend sidecar container.
+	// When specified, the operator injects a fully configured frontend container
+	// with all standard Dynamo environment variables, health probes, and ports.
+	// This eliminates the need to manually specify these in extraPodSpec.containers. (GAIE)
+	// +optional
+	FrontendSidecar *FrontendSidecarSpec `json:"frontendSidecar,omitempty"`
+
 	// Checkpoint configures container checkpointing for this service.
 	// When enabled, pods can be restored from a checkpoint files for faster cold start.
 	// +optional
@@ -356,6 +363,30 @@ type ModelReference struct {
 	// Revision is the model revision/version (optional)
 	// +optional
 	Revision string `json:"revision,omitempty"`
+}
+
+// FrontendSidecarSpec configures the auto-generated frontend sidecar container.
+// The operator uses these fields together with built-in frontend defaults (command, probes, ports,
+// and Dynamo env vars) to produce a fully configured sidecar container.
+type FrontendSidecarSpec struct {
+	// Image is the container image for the frontend sidecar.
+	// +kubebuilder:validation:Required
+	Image string `json:"image"`
+
+	// Args are additional arguments appended after the default "-m dynamo.frontend".
+	// For example, ["--router-mode", "direct"] for GAIE deployments.
+	// +optional
+	Args []string `json:"args,omitempty"`
+
+	// EnvFromSecret references a Secret whose key/value pairs will be exposed as
+	// environment variables in the frontend sidecar container.
+	// +optional
+	EnvFromSecret *string `json:"envFromSecret,omitempty"`
+
+	// Envs defines additional environment variables for the frontend sidecar.
+	// These are merged with (and can override) the auto-generated Dynamo env vars.
+	// +optional
+	Envs []corev1.EnvVar `json:"envs,omitempty"`
 }
 
 // EPPConfig contains configuration for EPP (Endpoint Picker Plugin) components.
