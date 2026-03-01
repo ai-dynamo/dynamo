@@ -53,6 +53,9 @@ const MAX_BACKOFF_MS: u64 = 5000;
 const MAX_CONSECUTIVE_ERRORS: u32 = 10;
 const MAX_BACKOFF_EXPONENT: u32 = 8; // Cap at 2^8 = 256x multiplier to prevent overflow
 
+// Batching configuration
+const MAX_BATCHING_TIMEOUT_US: u64 = 15_000_000; // 15 seconds, prevents misconfiguration
+
 // -------------------------------------------------------------------------
 // Batching State -----------------------------------------------------------
 // -------------------------------------------------------------------------
@@ -205,7 +208,19 @@ impl KvEventPublisher {
     ) -> Result<Self> {
         let cancellation_token = CancellationToken::new();
         // None = disabled (flush every event); Some(0) normalised to None; Some(us) = opt-in.
-        let batching_timeout_us = batching_timeout_us.filter(|&us| us > 0);
+        // Cap at MAX_BATCHING_TIMEOUT_US to prevent misconfiguration (e.g. passing ms instead of us).
+        let batching_timeout_us = batching_timeout_us
+            .filter(|&us| {
+                if us > MAX_BATCHING_TIMEOUT_US {
+                    tracing::warn!(
+                        requested_us = us,
+                        max_us = MAX_BATCHING_TIMEOUT_US,
+                        "batching_timeout_us too high, capping to 15s"
+                    );
+                }
+                us > 0
+            })
+            .map(|us| us.min(MAX_BATCHING_TIMEOUT_US));
 
         let (tx, rx) = mpsc::unbounded_channel::<KvCacheEvent>();
 
@@ -557,7 +572,7 @@ async fn run_event_processor_loop<P: EventSink + Send + Sync + 'static>(
                 // Flush after every event when disabled (None), or when the window has elapsed.
                 // The sleep arm only arms when batching is enabled; this covers the disabled path.
                 if batching_state.has_pending()
-                    && timeout_us.map_or(true, |us| batching_state.is_timeout_elapsed(us))
+                    && timeout_us.is_none_or(|us| batching_state.is_timeout_elapsed(us))
                 {
                     batching_state.flush(&publisher, &local_indexer, worker_id).await;
                 }
