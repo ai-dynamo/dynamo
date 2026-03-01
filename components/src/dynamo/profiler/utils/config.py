@@ -366,7 +366,12 @@ def set_argument_value(args: list, arg_name: str, value: str):
 
 
 def update_image(config: dict, image: str) -> dict:
-    """Update container image for all DGD services (frontend, planner, workers).
+    """Update container image for non-planner DGD services (frontend, workers).
+
+    The planner service uses a separate ``dynamo-planner`` image that is
+    derived independently via :func:`derive_planner_image`, so it is
+    intentionally skipped here to avoid being overwritten with a backend
+    image.
 
     This is a shared utility function used by all backend config modifiers.
 
@@ -379,8 +384,9 @@ def update_image(config: dict, image: str) -> dict:
     """
     cfg = Config.model_validate(config)
 
-    # Update image for all services
     for service_name, service_config in cfg.spec.services.items():
+        if getattr(service_config, "componentType", None) == "planner":
+            continue
         if service_config.extraPodSpec and service_config.extraPodSpec.mainContainer:
             service_config.extraPodSpec.mainContainer.image = image
             logger.debug(f"Updated image for {service_name} to {image}")

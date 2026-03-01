@@ -13,6 +13,11 @@
         {% include "templates/dynamo_base.Dockerfile" %}
         {% include "templates/wheel_builder.Dockerfile" %}
         {% include "templates/frontend.Dockerfile" %}
+    {% elif target == "planner" %}
+        {% include "templates/dynamo_base.Dockerfile" %}
+        {% include "templates/wheel_builder.Dockerfile" %}
+        {% include "templates/dynamo_runtime.Dockerfile" %}
+        {% include "templates/planner.Dockerfile" %}
     {% elif target == "runtime" or target == "dev" or target == "local-dev" %}
         {% include "templates/dynamo_base.Dockerfile" %}
         {% include "templates/wheel_builder.Dockerfile" %}

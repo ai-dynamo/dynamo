@@ -30,6 +30,7 @@ from dynamo.profiler.utils.config import (
     DgdPlannerServiceConfig,
     set_argument_value,
 )
+from dynamo.profiler.utils.profile_common import derive_planner_image
 
 # Path to mocker disagg config relative to workspace
 MOCKER_DISAGG_CONFIG_PATH = "examples/backends/mocker/deploy/disagg.yaml"
@@ -86,8 +87,10 @@ def generate_dgd_config_with_planner(
 
     # --- Add planner service to DGD ---
     planner_service = DgdPlannerServiceConfig()
-    if planner_service.extraPodSpec.mainContainer:
-        planner_service.extraPodSpec.mainContainer.image = dgdr.image
+    if planner_service.extraPodSpec.mainContainer and dgdr.image:
+        planner_service.extraPodSpec.mainContainer.image = derive_planner_image(
+            dgdr.image
+        )
 
     planner_dict = planner_service.model_dump(exclude_unset=False)
     config_dict = config.model_dump(exclude_unset=False)

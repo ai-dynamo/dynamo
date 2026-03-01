@@ -41,6 +41,43 @@ BACKEND_IMAGE_NAMES: dict[str, str] = {
     "trtllm": "tensorrtllm-runtime",
 }
 
+PLANNER_IMAGE_NAME = "dynamo-planner"
+
+
+def _replace_image_name(image_ref: str, new_name: str) -> str:
+    """Replace the image name component in a Docker image reference.
+
+    Preserves the registry path prefix and tag suffix, only replacing the
+    last ``/``-delimited component (before any ``:tag``).
+    """
+    slash_idx = image_ref.rfind("/")
+    prefix = image_ref[: slash_idx + 1] if slash_idx >= 0 else ""
+    suffix = image_ref[slash_idx + 1 :]
+    colon_idx = suffix.find(":")
+    tag = suffix[colon_idx:] if colon_idx >= 0 else ""
+    return f"{prefix}{new_name}{tag}"
+
+
+def derive_planner_image(profiler_image: str) -> str:
+    """Derive the planner/profiler service image from the profiler image.
+
+    Replaces the image name component with ``dynamo-planner``, preserving
+    the registry path and tag unchanged.
+
+    Examples::
+
+        derive_planner_image("nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.0.0")
+        # → "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.0.0"
+
+    Args:
+        profiler_image: Any Docker image reference of the form
+            ``[REGISTRY/]NAME[:TAG]``.
+
+    Returns:
+        The planner container image string.
+    """
+    return _replace_image_name(profiler_image, PLANNER_IMAGE_NAME)
+
 
 def derive_backend_image(profiler_image: str, backend: str) -> str:
     """Derive the backend worker image from the profiler image.
@@ -78,14 +115,7 @@ def derive_backend_image(profiler_image: str, backend: str) -> str:
             f"Supported backends: {list(BACKEND_IMAGE_NAMES.keys())}"
         )
 
-    # Split off the last path component: "registry/path/name:tag" → "name:tag"
-    slash_idx = profiler_image.rfind("/")
-    prefix = profiler_image[: slash_idx + 1] if slash_idx >= 0 else ""
-    suffix = profiler_image[slash_idx + 1 :]
-    colon_idx = suffix.find(":")
-    tag = suffix[colon_idx:] if colon_idx >= 0 else ""
-
-    return f"{prefix}{backend_image_name}{tag}"
+    return _replace_image_name(profiler_image, backend_image_name)
 
 
 # ---------------------------------------------------------------------------

@@ -34,6 +34,8 @@ try:
 except ImportError as _e:
     pytest.skip(f"Skip testing (refactor in progress): {_e}", allow_module_level=True)
 
+pytestmark = [pytest.mark.profiler]
+
 
 @pytest.fixture(autouse=True)
 def logger(request):

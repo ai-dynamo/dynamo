@@ -24,7 +24,7 @@ from dynamo.planner.utils.planner_core import (
 from dynamo.planner.utils.prefill_planner import PrefillPlanner
 from dynamo.planner.utils.prometheus import Metrics
 
-pytestmark = [pytest.mark.pre_merge, pytest.mark.gpu_0]
+pytestmark = [pytest.mark.pre_merge, pytest.mark.gpu_0, pytest.mark.planner]
 
 
 class PlannerHarness:
