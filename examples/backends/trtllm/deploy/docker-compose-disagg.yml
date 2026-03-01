@@ -1,0 +1,117 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Disaggregated TensorRT-LLM serving with Docker Compose.
+#
+# This deploys separate prefill and decode workers with NIXL-based KV cache transfer.
+# Requires a machine with at least 2 GPUs.
+#
+# Prerequisites:
+#   - Start infrastructure first:
+#       docker compose -f deploy/docker-compose.yml up -d
+#   - Set CONTAINER_IMAGE to a tensorrtllm-runtime image (NGC or custom-built)
+#   - Set MODEL_PATH to the model directory on the host
+#
+# Usage (minimal - 1 prefill + 1 decode):
+#   export CONTAINER_IMAGE=nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.1.post1
+#   export MODEL_PATH=/path/to/Qwen3-4B
+#   docker compose -f examples/backends/trtllm/deploy/docker-compose-disagg.yml up
+#
+# Scaling:
+#   Docker Compose `--scale` does NOT work with network_mode: host because all
+#   replicas would share ports, GPUs, and hostnames. To add more workers, define
+#   additional services (see prefill-1 example below). For dynamic scaling, use
+#   the Kubernetes DynamoGraphDeployment (see disagg_router.yaml).
+#
+# IMPORTANT: Each worker MUST have a globally unique hostname. When using
+# network_mode: host, containers share the host's network namespace and inherit
+# its hostname. TensorRT-LLM uses hostname+PID to identify NIXL agents for KV
+# cache transfer. Identical hostnames cause agents to skip connecting to each
+# other, silently breaking KV cache transfer.
+
+x-worker-common: &worker-common
+  image: ${CONTAINER_IMAGE:?Set CONTAINER_IMAGE to a tensorrtllm-runtime image}
+  network_mode: host
+  ipc: host
+  shm_size: "10g"
+  ulimits:
+    memlock: -1
+    stack: 67108864
+    nofile:
+      soft: 65536
+      hard: 65536
+  cap_add:
+    - SYS_PTRACE
+  volumes:
+    - ${MODEL_PATH:?Set MODEL_PATH to the model directory}:/model
+  environment:
+    - CUDA_VISIBLE_DEVICES=0
+
+services:
+  frontend:
+    image: ${CONTAINER_IMAGE}
+    hostname: dynamo-frontend
+    network_mode: host
+    command: >
+      python3 -m dynamo.frontend
+      --router-mode kv
+      --http-port ${HTTP_PORT:-8000}
+
+  prefill-0:
+    <<: *worker-common
+    hostname: dynamo-prefill-0
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${PREFILL_0_GPU:-0}"]
+              capabilities: [gpu]
+    command: >
+      python3 -m dynamo.trtllm
+      --model-path /model
+      --served-model-name ${SERVED_MODEL_NAME:-model}
+      --disaggregation-mode prefill
+      --publish-events-and-metrics
+      --extra-engine-args /workspace/examples/backends/trtllm/engine_configs/qwen3/prefill.yaml
+
+  decode-0:
+    <<: *worker-common
+    hostname: dynamo-decode-0
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${DECODE_0_GPU:-1}"]
+              capabilities: [gpu]
+    command: >
+      python3 -m dynamo.trtllm
+      --model-path /model
+      --served-model-name ${SERVED_MODEL_NAME:-model}
+      --disaggregation-mode decode
+      --extra-engine-args /workspace/examples/backends/trtllm/engine_configs/qwen3/decode.yaml
+
+  # To scale, add more services with unique hostnames, GPUs, and ports.
+  # Do NOT use `docker compose up --scale` — it does not work with network_mode: host.
+  #
+  # prefill-1:
+  #   <<: *worker-common
+  #   hostname: dynamo-prefill-1
+  #   environment:
+  #     - CUDA_VISIBLE_DEVICES=0
+  #     - DYN_SYSTEM_PORT=8082
+  #   deploy:
+  #     resources:
+  #       reservations:
+  #         devices:
+  #           - driver: nvidia
+  #             device_ids: ["2"]
+  #             capabilities: [gpu]
+  #   command: >
+  #     python3 -m dynamo.trtllm
+  #     --model-path /model
+  #     --served-model-name ${SERVED_MODEL_NAME:-model}
+  #     --disaggregation-mode prefill
+  #     --publish-events-and-metrics
+  #     --extra-engine-args /workspace/examples/backends/trtllm/engine_configs/qwen3/prefill.yaml
