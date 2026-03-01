@@ -161,10 +161,9 @@ impl StreamSender {
             .await?)
     }
 
-    #[allow(clippy::needless_update)]
     pub async fn send_prologue(&mut self, error: Option<String>) -> Result<(), String> {
-        if let Some(prologue) = self.prologue.take() {
-            let prologue = ResponseStreamPrologue { error, ..prologue };
+        if self.prologue.take().is_some() {
+            let prologue = ResponseStreamPrologue { error };
             let header_bytes: Bytes = match serde_json::to_vec(&prologue) {
                 Ok(b) => b.into(),
                 Err(err) => {
