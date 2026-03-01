@@ -12,16 +12,16 @@ python -m dynamo.frontend --router-mode kv &
 # Routing to DP workers managed by Dynamo
 # Chose Qwen3-30B because its a small MOE that can fit on smaller GPUs (L40S for example)
 # --enforce-eager is added for quick deployment. for production use, need to remove this flag
-for i in {0..3}; do
-    VLLM_NIXL_SIDE_CHANNEL_PORT=$((20096 + i)) \
-    CUDA_VISIBLE_DEVICES=$i python3 -m dynamo.vllm \
-    --model Qwen/Qwen3-30B-A3B \
-    --data-parallel-rank $i \
-    --data-parallel-size 4 \
-    --enable-expert-parallel \
-    --enforce-eager \
-    --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:$((20080 + i))\",\"enable_kv_cache_events\":true}" &
-done
+VLLM_NIXL_SIDE_CHANNEL_PORT=20096 \
+python3 -m dynamo.vllm \
+--model Qwen/Qwen3-30B-A3B \
+--data-parallel-hybrid-lb \
+--data-parallel-size 4 \
+--data-parallel-size-local 4 \
+--data-parallel-start-rank 0 \
+--enable-expert-parallel \
+--enforce-eager \
+--kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:$((20080 + i))\",\"enable_kv_cache_events\":true}" &
 
 echo "All workers starting. (press Ctrl+C to stop)..."
 wait

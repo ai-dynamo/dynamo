@@ -463,6 +463,27 @@ class BaseWorkerHandler(ABC):
         if temp_dir is not None:
             self.temp_dirs.append(temp_dir)
 
+    def _to_local_dp_rank(self, dp_rank: int | None) -> int | None:
+        """Convert global DP rank to local DP rank based on engine config."""
+        if dp_rank is None:
+            return None
+        engine_dp_rank = (
+            self.engine_client.vllm_config.parallel_config.data_parallel_rank
+        )
+        engine_local_dp_size = (
+            self.engine_client.vllm_config.parallel_config.data_parallel_size_local
+        )
+        if dp_rank < engine_dp_rank or dp_rank >= engine_dp_rank + engine_local_dp_size:
+            logger.error(
+                f"Received DP rank {dp_rank} is out of range [{engine_dp_rank} - {engine_dp_rank + engine_local_dp_size}), fallback to vLLM internal DP selection"
+            )
+            return None
+        local_dp_rank = (dp_rank - engine_dp_rank) % engine_local_dp_size
+        logger.debug(
+            f"Converted global DP rank {dp_rank} to local DP rank {local_dp_rank}"
+        )
+        return local_dp_rank
+
     def _resolve_lora_request(self, model_name: str | None) -> LoRARequest | None:
         """Return a LoRARequest if model_name is a loaded adapter, else None."""
         if model_name and (lora := self.loaded_loras.get(model_name)):
@@ -1317,7 +1338,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 f"Decode request {request_id} has no LoRA specified (model: {model_name})"
             )
         routing = request.get("routing") or {}
-        dp_rank = routing.get("dp_rank")
+        dp_rank = self._to_local_dp_rank(routing.get("dp_rank"))
         priority = routing.get("priority", 0)
 
         trace_headers = build_trace_headers(context)
@@ -1364,7 +1385,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         )
 
         routing = request.get("routing") or {}
-        dp_rank = routing.get("dp_rank")
+        dp_rank = self._to_local_dp_rank(routing.get("dp_rank"))
         priority = routing.get("priority", 0)
         openai_request_id = request.get("id") or request.get("request_id", request_id)
         previous_text = ""
@@ -1525,7 +1546,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             )
 
         routing = request.get("routing") or {}
-        dp_rank = routing.get("dp_rank")
+        dp_rank = self._to_local_dp_rank(routing.get("dp_rank"))
         priority = routing.get("priority", 0)
 
         trace_headers = build_trace_headers(context)

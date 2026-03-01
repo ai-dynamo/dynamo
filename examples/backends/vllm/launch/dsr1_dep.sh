@@ -95,25 +95,24 @@ mkdir -p $LOG_DIR
 # the GPU memory requires for vLLM reservation and runtime spike (not
 # reserved by vLLM) can be different and cause model fails to start,
 # adjust '--gpu-memory-utilization' as needed
-for ((i=0; i<GPUS_PER_NODE; i++)); do
-    dp_rank=$((i + NODE_RANK * GPUS_PER_NODE))
-    CUDA_VISIBLE_DEVICES=$i \
-        VLLM_NIXL_SIDE_CHANNEL_PORT=$((20096 + i)) \
-        VLLM_ALL2ALL_BACKEND="deepep_low_latency" \
-        VLLM_USE_DEEP_GEMM=1 \
-        VLLM_RANDOMIZE_DP_DUMMY_INPUTS=1 \
-        python3 -m dynamo.vllm \
-        --model $MODEL \
-        --data_parallel_size $DATA_PARALLEL_SIZE \
-        --data-parallel-rank $dp_rank \
-        --enable-expert-parallel \
-        --max-model-len 4096 \
-        --data-parallel-address $MASTER_ADDR \
-        --data-parallel-rpc-port 13345 \
-        --gpu-memory-utilization 0.91 \
-        --enforce-eager \
-        --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:$((20080 + i))\",\"enable_kv_cache_events\":true}" 2>&1 | tee $LOG_DIR/dsr1_dep_${dp_rank}.log &
-done
+dp_start_rank=$((NODE_RANK * GPUS_PER_NODE))
+VLLM_NIXL_SIDE_CHANNEL_PORT=20096 \
+VLLM_ALL2ALL_BACKEND="deepep_low_latency" \
+VLLM_USE_DEEP_GEMM=1 \
+VLLM_RANDOMIZE_DP_DUMMY_INPUTS=1 \
+python3 -m dynamo.vllm \
+--model $MODEL \
+--data-parallel-hybrid-lb \
+--data-parallel-size $DATA_PARALLEL_SIZE \
+--data-parallel-size-local $GPUS_PER_NODE \
+--data-parallel-start-rank $dp_start_rank \
+--enable-expert-parallel \
+--max-model-len 4096 \
+--data-parallel-address $MASTER_ADDR \
+--data-parallel-rpc-port 13345 \
+--gpu-memory-utilization 0.91 \
+--enforce-eager \
+--kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:$((20080 + i))\",\"enable_kv_cache_events\":true}" 2>&1 | tee $LOG_DIR/dsr1_dep_${dp_start_rank}.log &
 
 echo "All workers starting. (press Ctrl+C to stop)..."
 wait
