@@ -76,7 +76,17 @@ DYN_ENCODE_WORKER_GPU=${DYN_ENCODE_WORKER_GPU:-0}
 DYN_PREFILL_WORKER_GPU=${DYN_PREFILL_WORKER_GPU:-1}
 DYN_DECODE_WORKER_GPU=${DYN_DECODE_WORKER_GPU:-2}
 
-# GPU memory utilization for workers
+# GPU memory utilization for workers.
+# NOTE: --kv-cache-memory-bytes (set below for P/D workers) overrides
+# --gpu-memory-utilization for KV cache sizing. Per vLLM CacheConfig:
+# "kv_cache_memory_bytes (when not-None) ignores gpu_memory_utilization"
+# Ref: https://docs.vllm.ai/en/stable/api/vllm/config/cache/
+# Therefore DYN_GPU_MEMORY_FRACTION_OVERRIDE has no effect on actual VRAM
+# usage when --kv-cache-memory-bytes is set.
+if [[ -n "${DYN_GPU_MEMORY_FRACTION_OVERRIDE:-}" ]]; then
+    echo "WARNING: DYN_GPU_MEMORY_FRACTION_OVERRIDE is set but has no effect here because" >&2
+    echo "  --kv-cache-memory-bytes overrides --gpu-memory-utilization in vLLM." >&2
+fi
 DYN_ENCODE_GPU_MEM=${DYN_ENCODE_GPU_MEM:-0.9}
 DYN_PREFILL_GPU_MEM=${DYN_PREFILL_GPU_MEM:-0.9}
 DYN_DECODE_GPU_MEM=${DYN_DECODE_GPU_MEM:-0.9}

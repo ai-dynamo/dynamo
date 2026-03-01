@@ -89,11 +89,17 @@ class VllmWorkerProcess(ManagedProcess):
             "dynamo.vllm",
             "--model",
             TEST_MODEL,
+            "--max-model-len",
+            "32768",  # 32768 uses ~1.5 GiB (original default 131072 used ~6 GiB KV cache)
             "--dyn-tool-call-parser",
             "harmony",
             "--dyn-reasoning-parser",
             "gpt_oss",
         ]
+
+        gpu_util = os.environ.get("DYN_GPU_MEMORY_FRACTION_OVERRIDE")
+        if gpu_util:
+            command.extend(["--gpu-memory-utilization", gpu_util])
 
         env = os.environ.copy()
         env["DYN_LOG"] = "debug"
@@ -220,7 +226,9 @@ def _validate_chat_response(response: requests.Response) -> Dict[str, Any]:
     return response_json
 
 
-@pytest.mark.timeout(240)  # ~3x measured total (~70s/test), rounded up
+# Measured using: tests/utils/profile_pytest.py tests/frontend/test_vllm.py::test_reasoning_effort
+@pytest.mark.max_vram_gib(21)  # peak 18.5 GiB GPU RAM used (+10% safety: 20.4 GiB)
+@pytest.mark.timeout(171)  # 3x observed 56.8s
 @pytest.mark.post_merge
 def test_reasoning_effort(
     request, start_services: ServicePorts, predownload_models
@@ -286,7 +294,9 @@ def test_reasoning_effort(
         )
 
 
-@pytest.mark.timeout(180)  # ~3x measured total (~50s/test), rounded up
+# Measured using: tests/utils/profile_pytest.py tests/frontend/test_vllm.py::test_tool_calling
+@pytest.mark.max_vram_gib(21)  # peak 18.5 GiB GPU RAM used (+10% safety: 20.4 GiB)
+@pytest.mark.timeout(113)  # 3x observed 37.4s
 @pytest.mark.post_merge
 def test_tool_calling(
     request, start_services: ServicePorts, predownload_models
@@ -328,7 +338,9 @@ def test_tool_calling(
     ), "Expected get_current_weather tool to be called"
 
 
-@pytest.mark.timeout(180)  # ~3x measured total (~50s/test), rounded up
+# Measured using: tests/utils/profile_pytest.py tests/frontend/test_vllm.py::test_tool_calling_second_round
+@pytest.mark.max_vram_gib(21)  # peak 18.5 GiB GPU RAM used (+10% safety: 20.4 GiB)
+@pytest.mark.timeout(115)  # 3x observed 38.1s
 @pytest.mark.nightly
 def test_tool_calling_second_round(
     request, start_services: ServicePorts, predownload_models
@@ -392,7 +404,9 @@ def test_tool_calling_second_round(
     ), "Expected response to include temperature information from tool call result (20°C)"
 
 
-@pytest.mark.timeout(180)  # ~3x measured total (~57s/test), rounded up
+# Measured using: tests/utils/profile_pytest.py tests/frontend/test_vllm.py::test_reasoning
+@pytest.mark.max_vram_gib(21)  # peak 18.5 GiB GPU RAM used (+10% safety: 20.4 GiB)
+@pytest.mark.timeout(131)  # 3x observed 43.4s
 @pytest.mark.nightly
 def test_reasoning(request, start_services: ServicePorts, predownload_models) -> None:
     """Test reasoning functionality with a mathematical problem."""

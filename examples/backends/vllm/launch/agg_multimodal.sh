@@ -14,6 +14,9 @@
 set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/../../../common/gpu_utils.sh"
+
 # Default values
 MODEL_NAME="Qwen/Qwen3-VL-30B-A3B-Instruct-FP8"
 
@@ -52,14 +55,20 @@ export DYN_REQUEST_PLANE=tcp
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
 python -m dynamo.frontend &
 
-# Configure GPU memory optimization for specific models (if no extra args override)
-MODEL_SPECIFIC_ARGS="--gpu-memory-utilization 0.85 --max-model-len 16384"
+# Per-model GPU memory and max-model-len configuration.
+# DYN_GPU_MEMORY_FRACTION_OVERRIDE overrides the computed fraction (used by profiler).
 if [[ "$MODEL_NAME" == "Qwen/Qwen2.5-VL-7B-Instruct" ]]; then
-    MODEL_SPECIFIC_ARGS="--gpu-memory-utilization 0.85 --max-model-len 4096"
+    GPU_MEM=${DYN_GPU_MEMORY_FRACTION_OVERRIDE:-$(gpu_gb_to_fraction 18)}
+    MODEL_SPECIFIC_ARGS="--gpu-memory-utilization $GPU_MEM --max-model-len 4096"
 elif [[ "$MODEL_NAME" == "llava-hf/llava-1.5-7b-hf" ]]; then
-    MODEL_SPECIFIC_ARGS="--gpu-memory-utilization 0.85 --max-model-len 4096"
+    GPU_MEM=${DYN_GPU_MEMORY_FRACTION_OVERRIDE:-$(gpu_gb_to_fraction 18)}
+    MODEL_SPECIFIC_ARGS="--gpu-memory-utilization $GPU_MEM --max-model-len 4096"
 elif [[ "$MODEL_NAME" == "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8" ]]; then
-    MODEL_SPECIFIC_ARGS="--tensor-parallel-size=8 --gpu-memory-utilization 0.85 --max-model-len=108960"
+    GPU_MEM=${DYN_GPU_MEMORY_FRACTION_OVERRIDE:-$(gpu_gb_to_fraction 70)}
+    MODEL_SPECIFIC_ARGS="--tensor-parallel-size=8 --gpu-memory-utilization $GPU_MEM --max-model-len=108960"
+else
+    GPU_MEM=${DYN_GPU_MEMORY_FRACTION_OVERRIDE:-$(gpu_gb_to_fraction 40)}
+    MODEL_SPECIFIC_ARGS="--gpu-memory-utilization $GPU_MEM --max-model-len 16384"
 fi
 
 # Start vLLM worker with vision model

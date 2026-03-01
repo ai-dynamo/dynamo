@@ -28,5 +28,10 @@ python -m dynamo.frontend &
 
 # run worker
 # --enforce-eager is added for quick deployment. for production use, need to remove this flag
+GPU_MEM_ARGS=()
+if [[ -n "${DYN_GPU_MEMORY_FRACTION_OVERRIDE:-}" ]]; then
+    GPU_MEM_ARGS=("--gpu-memory-utilization" "$DYN_GPU_MEMORY_FRACTION_OVERRIDE")
+fi
+
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
-    python -m dynamo.vllm --model "$MODEL" --enforce-eager "${EXTRA_ARGS[@]}"
+    python -m dynamo.vllm --model "$MODEL" --enforce-eager "${GPU_MEM_ARGS[@]}" "${EXTRA_ARGS[@]}"
