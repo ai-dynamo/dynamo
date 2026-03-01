@@ -102,6 +102,10 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
             # [gluo FIXME] can't use pre-registered tensor as NIXL requires descriptors
             # to be at matching size, need to overwrite nixl connect library
             self.embedding_receiver = NixlReadEmbeddingReceiver(max_items=0)
+        else:
+            raise ValueError(
+                f"Invalid embedding transfer mode: {config.embedding_transfer_mode}"
+            )
 
         logger.info("Multimodal PD Worker has been initialized")
 

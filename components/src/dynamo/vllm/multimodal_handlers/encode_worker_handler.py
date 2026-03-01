@@ -82,6 +82,10 @@ class EncodeWorkerHandler:
             self.embedding_sender = NixlWriteEmbeddingSender()
         elif embedding_transfer_mode == EmbeddingTransferMode.NIXL_READ:
             self.embedding_sender = NixlReadEmbeddingSender()
+        else:
+            raise ValueError(
+                f"Invalid embedding transfer mode: {embedding_transfer_mode}"
+            )
 
         self.send_complete_queue = asyncio.Queue()
         self.send_complete_checker_task = asyncio.create_task(

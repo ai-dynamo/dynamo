@@ -9,6 +9,8 @@ from dynamo.common.multimodal.embedding_transfer import (
     LocalEmbeddingSender,
     NixlReadEmbeddingReceiver,
     NixlReadEmbeddingSender,
+    NixlWriteEmbeddingReceiver,
+    NixlWriteEmbeddingSender,
     TransferRequest,
 )
 from dynamo.common.multimodal.image_loader import ImageLoader
@@ -18,6 +20,8 @@ __all__ = [
     "ImageLoader",
     "NixlReadEmbeddingReceiver",
     "NixlReadEmbeddingSender",
+    "NixlWriteEmbeddingSender",
+    "NixlWriteEmbeddingReceiver",
     "TransferRequest",
     "LocalEmbeddingReceiver",
     "LocalEmbeddingSender",

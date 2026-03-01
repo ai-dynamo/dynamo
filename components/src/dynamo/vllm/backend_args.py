@@ -335,7 +335,9 @@ class DynamoVllmConfig(ConfigBase):
     enable_multimodal: bool
     mm_prompt_template: str
     frontend_decoding: bool
-    embedding_transfer_mode: EmbeddingTransferMode
+    embedding_transfer_mode: Union[
+        str, EmbeddingTransferMode
+    ]  # resolved to enum in validate()
 
     # vLLM-Omni
     omni: bool
@@ -373,9 +375,17 @@ class DynamoVllmConfig(ConfigBase):
     def validate(self) -> None:
         """Validate vLLM wrapper configuration."""
         self._resolve_disaggregation_mode()
+        self._resolve_embedding_transfer_mode()
         self._validate_multimodal_role_exclusivity()
         self._validate_multimodal_requires_flag()
         self._validate_omni_stage_config()
+
+    def _resolve_embedding_transfer_mode(self) -> None:
+        """Resolve embedding_transfer_mode from string to enum."""
+        if isinstance(self.embedding_transfer_mode, str):
+            self.embedding_transfer_mode = EmbeddingTransferMode(
+                self.embedding_transfer_mode
+            )
 
     def _resolve_disaggregation_mode(self) -> None:
         """Resolve disaggregation_mode from new enum or legacy boolean flags.
