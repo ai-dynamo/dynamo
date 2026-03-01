@@ -114,7 +114,9 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         }
 
         input_param = self._get_input_param(inner_request)
-        priority = (inner_request.get("routing") or {}).get("priority")
+        routing = inner_request.get("routing") or {}
+        priority = routing.get("priority")
+        dp_rank = routing.get("dp_rank")
 
         trace_header = self._get_trace_header(context) if self.enable_trace else None
 
@@ -127,6 +129,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             bootstrap_room=bootstrap_room,
             external_trace_header=trace_header,
             rid=trace_id,
+            data_parallel_rank=dp_rank,
             **self._priority_kwargs(priority),
         )
 
