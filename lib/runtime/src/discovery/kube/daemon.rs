@@ -8,6 +8,7 @@ use futures::StreamExt;
 use k8s_openapi::api::discovery::v1::EndpointSlice;
 use kube::{
     Api, Client as KubeClient,
+    core::{Expression, Selector},
     runtime::{WatchStreamExt, reflector, watcher, watcher::Config},
 };
 use std::collections::{HashMap, HashSet};
@@ -64,13 +65,7 @@ impl DiscoveryDaemon {
 
         let (ep_reader, ep_writer) = reflector::store();
 
-        let ep_watch_config = Config::default()
-            .labels("nvidia.com/dynamo-discovery-backend=kubernetes")
-            .labels("nvidia.com/dynamo-discovery-enabled=true");
-
-        tracing::info!(
-            "Daemon watching EndpointSlices with labels: nvidia.com/dynamo-discovery-backend=kubernetes, nvidia.com/dynamo-discovery-enabled=true"
-        );
+        let ep_watch_config = self.budild_ep_watch_config();
 
         let notify_ep = notify.clone();
         let ep_reflector_stream = reflector(ep_writer, watcher(endpoint_slices, ep_watch_config))
@@ -178,6 +173,28 @@ impl DiscoveryDaemon {
 
         tracing::info!("Discovery daemon stopped");
         Ok(())
+    }
+
+    fn budild_ep_watch_config(&self) -> watcher::Config {
+        let mut selector: Selector = [
+            ("nvidia.com/dynamo-discovery-backend", "kubernetes"),
+            ("nvidia.com/dynamo-discovery-enabled", "true"),
+        ]
+        .into_iter()
+        .collect();
+
+        // if worker is part of a DynamoGraphDeployment, only watch EndpointSlices managed by that DGD
+        if let Ok(parent_dgd_name) = std::env::var("DYN_PARENT_DGD_K8S_NAME") {
+            selector.extend(Expression::Equal(
+                "nvidia.com/dynamo-graph-deployment-name".into(),
+                parent_dgd_name.trim().into(),
+            ));
+        }
+        tracing::info!(
+            "Daemon watching EndpointSlices with labels: {}",
+            selector.to_string()
+        );
+        watcher::Config::default().labels_from(&selector)
     }
 
     /// Aggregate metadata from EndpointSlices and DynamoWorkerMetadata CRs into a snapshot
