@@ -4243,14 +4243,14 @@ func TestExpandRolesForService(t *testing.T) {
 		name            string
 		serviceName     string
 		numberOfNodes   int32
-		serviceReplicas int32
+		serviceReplicas *int32
 		expected        []ServiceRole
 	}{
 		{
 			name:            "single node",
 			serviceName:     "test-service",
 			numberOfNodes:   1,
-			serviceReplicas: 2,
+			serviceReplicas: ptr.To(int32(2)),
 			expected: []ServiceRole{
 				{Name: "test-service", Role: RoleMain, Replicas: 2},
 			},
@@ -4277,7 +4277,15 @@ func TestExpandRolesForService(t *testing.T) {
 			name:            "zero nodes should return main",
 			serviceName:     "test-service",
 			numberOfNodes:   0,
-			serviceReplicas: 1,
+			serviceReplicas: ptr.To(int32(1)),
+			expected: []ServiceRole{
+				{Name: "test-service", Role: RoleMain, Replicas: 1},
+			},
+		},
+		{
+			name:          "nil replicas defaults to 1",
+			serviceName:   "test-service",
+			numberOfNodes: 1,
 			expected: []ServiceRole{
 				{Name: "test-service", Role: RoleMain, Replicas: 1},
 			},
@@ -4286,7 +4294,7 @@ func TestExpandRolesForService(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := expandRolesForService(tt.serviceName, &tt.serviceReplicas, tt.numberOfNodes)
+			result := expandRolesForService(tt.serviceName, tt.serviceReplicas, tt.numberOfNodes)
 			if !reflect.DeepEqual(result, tt.expected) {
 				t.Errorf("expandRolesForService() = %v, want %v", result, tt.expected)
 			}

@@ -25,6 +25,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	admissionv1 "k8s.io/api/admission/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
@@ -161,6 +162,77 @@ func TestDGDDefaulter_Default(t *testing.T) {
 			if got != tt.wantAnnotation {
 				t.Errorf("annotation %q = %q, want %q",
 					consts.KubeAnnotationDynamoOperatorOriginVersion, got, tt.wantAnnotation)
+			}
+		})
+	}
+}
+
+func TestDGDDefaulter_DefaultsNilReplicas(t *testing.T) {
+	tests := []struct {
+		name         string
+		op           admissionv1.Operation
+		services     map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec
+		wantReplicas map[string]int32
+	}{
+		{
+			name: "CREATE defaults nil replicas to 1",
+			op:   admissionv1.Create,
+			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"Frontend":    {Replicas: nil},
+				"VllmWorker":  {Replicas: ptr.To(int32(3))},
+				"NilService":  {Replicas: nil},
+			},
+			wantReplicas: map[string]int32{
+				"Frontend":   1,
+				"VllmWorker": 3,
+				"NilService": 1,
+			},
+		},
+		{
+			name: "UPDATE defaults nil replicas to 1",
+			op:   admissionv1.Update,
+			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"NewService": {Replicas: nil},
+			},
+			wantReplicas: map[string]int32{
+				"NewService": 1,
+			},
+		},
+		{
+			name: "does not overwrite explicit replicas",
+			op:   admissionv1.Create,
+			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"Worker": {Replicas: ptr.To(int32(5))},
+			},
+			wantReplicas: map[string]int32{
+				"Worker": 5,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			defaulter := NewDGDDefaulter("0.9.0")
+			dgd := &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					Services: tt.services,
+				},
+			}
+
+			if err := defaulter.Default(admissionCtx(tt.op), dgd); err != nil {
+				t.Fatalf("Default() unexpected error: %v", err)
+			}
+
+			for name, want := range tt.wantReplicas {
+				svc := dgd.Spec.Services[name]
+				if svc.Replicas == nil {
+					t.Errorf("service %q: replicas is nil, want %d", name, want)
+					continue
+				}
+				if *svc.Replicas != want {
+					t.Errorf("service %q: replicas = %d, want %d", name, *svc.Replicas, want)
+				}
 			}
 		})
 	}
