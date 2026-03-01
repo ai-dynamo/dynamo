@@ -11,7 +11,7 @@ from dynamo.common.configuration.config_base import ConfigBase
 from dynamo.common.configuration.utils import add_argument, add_negatable_bool_argument
 
 from . import __version__
-from .constants import DisaggregationMode
+from .constants import DisaggregationMode, EmbeddingTransferMode
 
 
 class DynamoVllmArgGroup(ArgGroup):
@@ -134,6 +134,16 @@ class DynamoVllmArgGroup(ArgGroup):
                 "When enabled, images are decoded in the Rust frontend and transferred to the backend via NIXL RDMA. "
                 "Without this flag, images are decoded in the Python backend (default behavior)."
             ),
+        )
+
+        add_argument(
+            g,
+            flag_name="--embedding-transfer-mode",
+            env_var="DYN_VLLM_EMBEDDING_TRANSFER_MODE",
+            default=EmbeddingTransferMode.LOCAL.value,
+            help="Worker embedding transfer mode: 'local' (default, local file system), "
+            "'nixl-write' (NIXL transfer with WRITE), or 'nixl-read' (NIXL transfer with READ).",
+            choices=[m.value for m in EmbeddingTransferMode],
         )
 
         # vLLM-Omni
@@ -325,6 +335,9 @@ class DynamoVllmConfig(ConfigBase):
     enable_multimodal: bool
     mm_prompt_template: str
     frontend_decoding: bool
+    embedding_transfer_mode: Union[
+        str, EmbeddingTransferMode
+    ]  # resolved to enum in validate()
 
     # vLLM-Omni
     omni: bool
@@ -362,9 +375,17 @@ class DynamoVllmConfig(ConfigBase):
     def validate(self) -> None:
         """Validate vLLM wrapper configuration."""
         self._resolve_disaggregation_mode()
+        self._resolve_embedding_transfer_mode()
         self._validate_multimodal_role_exclusivity()
         self._validate_multimodal_requires_flag()
         self._validate_omni_stage_config()
+
+    def _resolve_embedding_transfer_mode(self) -> None:
+        """Resolve embedding_transfer_mode from string to enum."""
+        if isinstance(self.embedding_transfer_mode, str):
+            self.embedding_transfer_mode = EmbeddingTransferMode(
+                self.embedding_transfer_mode
+            )
 
     def _resolve_disaggregation_mode(self) -> None:
         """Resolve disaggregation_mode from new enum or legacy boolean flags.
