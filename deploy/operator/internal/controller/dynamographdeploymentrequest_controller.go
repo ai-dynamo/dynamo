@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"text/template"
 
 	batchv1 "k8s.io/api/batch/v1"
@@ -241,7 +242,7 @@ type DynamoGraphDeploymentRequestReconciler struct {
 	Recorder      record.EventRecorder
 	Config        *configv1alpha1.OperatorConfiguration
 	RuntimeConfig *commonController.RuntimeConfig
-
+	GPUDiscoveryCache *gpu.GPUDiscoveryCache
 	// RBACMgr handles RBAC setup for profiling jobs
 	RBACManager RBACManager
 }
@@ -836,14 +837,6 @@ func (r *DynamoGraphDeploymentRequestReconciler) validateGPUHardwareInfo(ctx con
 		return nil
 	}
 
-	_, err := gpu.DiscoverGPUs(ctx, r.APIReader)
-	if err == nil {
-		// GPU discovery is available, validation passes
-		return nil
-	}
-
-	logger.Info("GPU discovery not available", "reason", err.Error())
-
 	isNamespaceScoped := r.Config.Namespace.Restricted != ""
 	if isNamespaceScoped {
 		return fmt.Errorf(
@@ -857,8 +850,63 @@ func (r *DynamoGraphDeploymentRequestReconciler) validateGPUHardwareInfo(ctx con
 				"\n   vramMb: 81920")
 	}
 
+	_, err := gpu.DiscoverGPUsFromDCGM(ctx, r.APIReader, r.GPUDiscoveryCache)
+    if err == nil {
+        // GPU discovery is available, validation passes
+        return nil
+    }
+    // Refine the logger message
+    reason := GetGPUDiscoveryFailureReason(err)
+    logger.Info("GPU discovery not available", "reason", reason, "error", err.Error())
 	return fmt.Errorf("GPU hardware info required but auto-discovery failed. Add spec.hardware.gpuSku, spec.hardware.vramMb, spec.hardware.numGpusPerNode")
 }
+
+// GetGPUDiscoveryFailureReason classifies a GPU discovery error and
+// returns a stable, actionable reason string suitable for structured logging.
+//
+// The classification is based on known error message patterns produced during:
+//   - DCGM exporter pod discovery
+//   - Helm-based GPU operator and DCGM discovery
+//   - Metrics scraping
+//   - Prometheus parsing
+//
+// If the error does not match any known category, "unknown" is returned.
+func GetGPUDiscoveryFailureReason(err error) string {
+    if err == nil {
+		return "unknown"
+	}
+	errMsg := strings.ToLower(err.Error())
+
+    switch {
+    case strings.Contains(errMsg, "list pods"):
+        return "failed to list DCGM exporter pods (RBAC/cluster connectivity issue)"
+    case strings.Contains(errMsg, "gpu operator is not installed"):
+        return "GPU Operator not installed in expected namespace"
+    case strings.Contains(errMsg, "helm init failed"):
+        return "failed to initialize Helm client (RBAC, kubeconfig, or Helm driver issue)"
+    case strings.Contains(errMsg, "timeout waiting for dcgm exporter pods"):
+        return "timeout while waiting for DCGM exporter pods to become ready"
+    case strings.Contains(errMsg, "http get for"):
+        return "failed to reach DCGM metrics endpoint on pod (network/port issue)"
+    case strings.Contains(errMsg, "metrics endpoint") &&
+        strings.Contains(errMsg, "status"):
+        return "DCGM pod metrics endpoint returned non-200 status"
+    case strings.Contains(errMsg, "parse prometheus metrics"):
+        return "failed to parse dcgm Prometheus metrics (invalid format)"
+    case strings.Contains(errMsg, "no gpus detected"):
+        return "no GPUs detected in dcgm metrics (GPU model or metrics missing)"
+    case strings.Contains(errMsg, "dcgm is not enabled in the GPU Operator"):
+        return "DCGM is not enabled in the GPU Operator (check GPU Operator configuration and permissions)"
+    case strings.Contains(errMsg, "failed to scrape any dcgm exporter pod"):
+        return "failed to scrape any dcgm exporter pod (check DCGM exporter pod status and network connectivity)"
+    case strings.Contains(errMsg, "no gpu metrics could be parsed from any dcgm pod"):
+        return "no GPU metrics could be parsed from any DCGM pod (check DCGM exporter pod status and network connectivity)"
+    case strings.Contains(errMsg, "failed to create helm path"):
+        return "failed to initialize Helm client (RBAC, kubeconfig, or Helm driver issue)"
+    }
+    return "unknown"
+}
+
 
 // createProfilingJob creates a Kubernetes Job for profiling using SyncResource
 func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.Context, dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest) error {
@@ -1172,18 +1220,31 @@ func (r *DynamoGraphDeploymentRequestReconciler) enrichHardwareFromDiscovery(ctx
 		return nil // all fields already set by user; TotalGPUs is filled below when discovery runs
 	}
 
-	gpuInfo, err := gpu.DiscoverGPUs(ctx, r.APIReader)
-	if err != nil {
-		return err
-	}
+	hasManualConfig := dgdr.Spec.Hardware != nil && (dgdr.Spec.Hardware.GPUSKU != "" || dgdr.Spec.Hardware.VRAMMB != nil || dgdr.Spec.Hardware.NumGPUsPerNode != nil)
 
+	var gpuInfo *gpu.GPUInfo
 	logger := log.FromContext(ctx)
-	logger.Info("GPU discovery completed successfully",
-		"gpusPerNode", gpuInfo.GPUsPerNode,
+
+    logger.Info("Attempting GPU discovery for profiling job")
+    discoveredInfo, err := gpu.DiscoverGPUsFromDCGM(ctx, r.APIReader, r.GPUDiscoveryCache)
+    if err != nil && hasManualConfig == false {
+        // This path is expected for namespace-restricted operators without node read permissions
+        // Refine the logger message
+        reason := GetGPUDiscoveryFailureReason(err)
+        logger.Info("GPU discovery not available, using manual hardware configuration from profiling config",
+            "reason", reason, "error", err.Error())
+		return err
+    }
+
+    gpuInfo = discoveredInfo
+    logger.Info("GPU discovery completed successfully",
+        "gpusPerNode", gpuInfo.GPUsPerNode,
+        "model", gpuInfo.Model,
+        "vramMiB", gpuInfo.VRAMPerGPU,
 		"nodesWithGPUs", gpuInfo.NodesWithGPUs,
 		"totalGpus", gpuInfo.GPUsPerNode*gpuInfo.NodesWithGPUs,
-		"model", gpuInfo.Model,
-		"vramMiB", gpuInfo.VRAMPerGPU)
+        "system", gpuInfo.System)
+
 
 	if hw.GPUSKU == "" {
 		hw.GPUSKU = gpuInfo.Model
