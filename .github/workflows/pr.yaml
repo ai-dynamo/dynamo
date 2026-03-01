@@ -16,8 +16,18 @@ on:
         required: false
         type: boolean
         default: false
-      build_only:
-        description: 'Build and push images only (skip tests), tagged with branch name'
+      build_vllm:
+        description: 'Build and push vllm image only (skip tests), tagged with branch name'
+        required: false
+        type: boolean
+        default: false
+      build_sglang:
+        description: 'Build and push sglang image only (skip tests), tagged with branch name'
+        required: false
+        type: boolean
+        default: false
+      build_trtllm:
+        description: 'Build and push trtllm image only (skip tests), tagged with branch name'
         required: false
         type: boolean
         default: false
@@ -97,7 +107,7 @@ jobs:
 
   operator:
     needs: changed-files
-    if: needs.changed-files.outputs.operator == 'true'
+    if: !inputs.build_vllm && !inputs.build_sglang && !inputs.build_trtllm && needs.changed-files.outputs.operator == 'true'
     name: Operator
     runs-on: prod-default-v2
     env:
@@ -203,7 +213,7 @@ jobs:
   # ============================================================================
   vllm-pipeline:
     needs: [changed-files]
-    if: inputs.build_only || needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true'
+    if: inputs.build_vllm || needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true'
     uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
     with:
       framework: vllm
@@ -211,18 +221,19 @@ jobs:
       platforms: '["amd64", "arm64"]'
       cuda_versions: '["12.9", "13.0"]'
       extra_tags: |
-        ${{ inputs.build_only && format('{0}-vllm', needs.changed-files.outputs.sanitized_ref_name) || '' }}
+        ${{ inputs.build_vllm && format('{0}-vllm', needs.changed-files.outputs.sanitized_ref_name) || '' }}
         ${{ github.ref_name == 'main' && 'main-vllm' || '' }}
         ${{ github.ref_name == 'main' && format('main-vllm-{0}', github.sha) || '' }}
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
       copy_timeout_minutes: ${{ github.ref_name == 'main' && 20 || 10 }}
-      run_cpu_only_tests: ${{ !inputs.build_only }}
+      run_cpu_only_tests: ${{ !inputs.build_vllm }}
       cpu_only_test_markers: 'pre_merge and vllm and gpu_0'
-      run_single_gpu_tests: ${{ !inputs.build_only }}
+      run_single_gpu_tests: ${{ !inputs.build_vllm }}
       single_gpu_test_markers: 'pre_merge and vllm and gpu_1'
       single_gpu_test_timeout_minutes: 35
       run_multi_gpu_tests: false  # TODO: Dmitry is working on fixing markers for multi-GPU tests, can enable after that is resolved
+      show_summary: ${{ inputs.build_vllm }}
     secrets: inherit
 
   # ============================================================================
@@ -230,7 +241,7 @@ jobs:
   # ============================================================================
   sglang-pipeline:
     needs: [changed-files]
-    if: inputs.build_only || needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true'
+    if: inputs.build_sglang || needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true'
     uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
     with:
       framework: sglang
@@ -238,17 +249,18 @@ jobs:
       platforms: '["amd64", "arm64"]'
       cuda_versions: '["12.9", "13.0"]'
       extra_tags: |
-        ${{ inputs.build_only && format('{0}-sglang', needs.changed-files.outputs.sanitized_ref_name) || '' }}
+        ${{ inputs.build_sglang && format('{0}-sglang', needs.changed-files.outputs.sanitized_ref_name) || '' }}
         ${{ github.ref_name == 'main' && 'main-sglang' || '' }}
         ${{ github.ref_name == 'main' && format('main-sglang-{0}', github.sha) || '' }}
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
       copy_timeout_minutes: ${{ github.ref_name == 'main' && 20 || 10 }}
-      run_cpu_only_tests: ${{ !inputs.build_only }}
+      run_cpu_only_tests: ${{ !inputs.build_sglang }}
       cpu_only_test_markers: 'pre_merge and sglang and gpu_0'
-      run_single_gpu_tests: ${{ !inputs.build_only }}
+      run_single_gpu_tests: ${{ !inputs.build_sglang }}
       single_gpu_test_markers: 'pre_merge and sglang and gpu_1'
       run_multi_gpu_tests: false  # TODO: Dmitry is working on fixing markers for multi-GPU tests, can enable after that is resolved
+      show_summary: ${{ inputs.build_sglang }}
     secrets: inherit
 
   # ============================================================================
@@ -256,7 +268,7 @@ jobs:
   # ============================================================================
   trtllm-pipeline:
     needs: [changed-files]
-    if: inputs.build_only || needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true'
+    if: inputs.build_trtllm || needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true'
     uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
     with:
       framework: trtllm
@@ -264,17 +276,18 @@ jobs:
       platforms: '["amd64", "arm64"]'
       cuda_versions: '["13.1"]'
       extra_tags: |
-        ${{ inputs.build_only && format('{0}-trtllm', needs.changed-files.outputs.sanitized_ref_name) || '' }}
+        ${{ inputs.build_trtllm && format('{0}-trtllm', needs.changed-files.outputs.sanitized_ref_name) || '' }}
         ${{ github.ref_name == 'main' && 'main-trtllm' || '' }}
         ${{ github.ref_name == 'main' && format('main-trtllm-{0}', github.sha) || '' }}
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
       copy_timeout_minutes: ${{ github.ref_name == 'main' && 20 || 10 }}
-      run_cpu_only_tests: ${{ !inputs.build_only }}
+      run_cpu_only_tests: ${{ !inputs.build_trtllm }}
       cpu_only_test_markers: 'pre_merge and trtllm and gpu_0'
-      run_single_gpu_tests: ${{ !inputs.build_only }}
+      run_single_gpu_tests: ${{ !inputs.build_trtllm }}
       single_gpu_test_markers: 'pre_merge and trtllm and gpu_1'
       run_multi_gpu_tests: false  # TODO: Dmitry is working on fixing markers for multi-GPU tests, can enable after that is resolved
+      show_summary: ${{ inputs.build_trtllm }}
     secrets: inherit
 
 

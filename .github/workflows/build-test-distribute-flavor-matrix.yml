@@ -108,6 +108,11 @@ on:
         required: false
         type: boolean
         default: false
+      show_summary:
+        description: 'Show summary'
+        required: false
+        type: boolean
+        default: false
     secrets:
       AWS_DEFAULT_REGION:
         required: true
@@ -162,4 +167,5 @@ jobs:
       copy_to_acr: ${{ inputs.copy_to_acr && matrix.platform == 'amd64' }} # no reason to copy ARM images to ACR
       copy_timeout_minutes: ${{ inputs.copy_timeout_minutes }}
       make_efa: ${{ inputs.make_efa }}
+      show_summary: ${{ inputs.show_summary }}
     secrets: inherit
