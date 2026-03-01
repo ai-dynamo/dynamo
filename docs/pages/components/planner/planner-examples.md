@@ -20,7 +20,7 @@ metadata:
 spec:
   model: Qwen/Qwen3-32B
   backend: vllm
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:my-tag"
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.0.0"
 ```
 
 Deploy:
@@ -41,7 +41,7 @@ metadata:
 spec:
   model: meta-llama/Llama-3.3-70B-Instruct
   backend: vllm
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:my-tag"
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.0.0"
 ```
 
 Deploy:
@@ -70,7 +70,7 @@ metadata:
 spec:
   model: deepseek-ai/DeepSeek-R1
   backend: sglang
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:my-tag"
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.0.0"
 ```
 
 Deploy:
@@ -101,7 +101,7 @@ metadata:
 spec:
   model: deepseek-ai/DeepSeek-R1
   backend: sglang
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:my-tag"
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.0.0"
 ```
 
 The profiler uses the DGD config from the ConfigMap as a **base template**, then optimizes it based on your SLA targets. The controller automatically injects `spec.model` and `spec.backend` into the final configuration.
@@ -141,7 +141,7 @@ spec:
     mocker:
       enabled: true  # Deploy mocker instead of real backend
 
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:my-tag"
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.0.0"
 ```
 
 Profiling runs against the real backend (via GPUs or AIC). The mocker deployment then uses profiling data to simulate realistic timing.

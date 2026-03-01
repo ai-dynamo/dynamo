@@ -26,7 +26,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0
           env:
             - name: DYN_REQUEST_PLANE
               value: tcp
@@ -43,7 +43,7 @@ spec:
         name: Qwen/Qwen3-VL-2B-Instruct
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0
           env:
             - name: DYN_REQUEST_PLANE
               value: tcp
