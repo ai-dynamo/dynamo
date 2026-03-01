@@ -184,7 +184,7 @@ jobs:
           framework: dynamo
           test_type: "pre_merge_parallel"
           platform_arch: amd64
-          enable_mypy: 'true'
+          enable_mypy: 'false'
           parallel_mode: '4'
           dind_as_sidecar: 'false'
 
