@@ -299,13 +299,13 @@ class TestRingBuffer:
         for idx in range(buffer_size):
             ring_buffer.buffer_tensor[idx] = idx % 128  # int8 max value
 
-        allocated_batches = []
+        allocated_batches: list[int] = []
         for _ in range(10):
             # On each batch, allocate buffers with total size of 64, afterwards
             # release previous batch if any.
             # Implementation detail: Each batch takes 1/3 of the buffer to avoid not enough
             # space with possible waste of tailing free space after wrap around.
-            current_batch_ids = []
+            current_batch_ids: list[int] = []
             allocated_bytes = 0
             while allocated_bytes < 64:
                 new_byte_size = min(randint(8, 64), 64 - allocated_bytes)

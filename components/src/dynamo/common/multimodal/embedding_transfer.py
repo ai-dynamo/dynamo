@@ -6,7 +6,6 @@ import base64
 import logging
 import math
 import os
-import pickle
 import tempfile
 import time
 import uuid
@@ -14,6 +13,7 @@ from abc import ABC, abstractmethod
 from queue import Queue
 from typing import Any, List, Optional
 
+import msgpack
 import torch
 from nixl._api import nixl_agent, nixl_agent_config
 from pydantic import BaseModel
@@ -511,7 +511,7 @@ class NixlWriteEmbeddingSender(AbstractEmbeddingSender):
                     (target_buffer, target_byte_size, target_device_id, target_mem_str),
                     write_done_id,
                     remote_agent_metadata,
-                ) = pickle.loads(notif)
+                ) = msgpack.unpackb(notif)
                 write_requests.append(
                     (
                         # receiver contact
@@ -690,7 +690,7 @@ class NixlWriteEmbeddingReceiver(AbstractEmbeddingReceiver):
 
         # Request for transfer
         tensor_id = self.id_counter.get_next_id()
-        notif_msg = pickle.dumps(
+        notif_msg = msgpack.packb(
             (
                 nixl_request.tensor_id,
                 (

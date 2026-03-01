@@ -140,7 +140,7 @@ class DynamoVllmArgGroup(ArgGroup):
             g,
             flag_name="--embedding-transfer-mode",
             env_var="DYN_VLLM_EMBEDDING_TRANSFER_MODE",
-            default=None,
+            default=EmbeddingTransferMode.LOCAL.value,
             help="Worker embedding transfer mode: 'local' (default, local file system), "
             "'nixl-write' (NIXL transfer with WRITE), or 'nixl-read' (NIXL transfer with READ).",
             choices=[m.value for m in EmbeddingTransferMode],
