@@ -3,6 +3,7 @@
 
 import asyncio
 import inspect
+import json
 import logging
 import random
 import socket
@@ -126,13 +127,13 @@ class BaseWorkerHandler(BaseGenerativeHandler):
             self.metrics_publisher = None
             self.kv_publisher = None
         self.serving_mode = config.serving_mode
-        self.skip_tokenizer_init = config.server_args.skip_tokenizer_init
+        self.use_sglang_tokenizer = config.dynamo_args.use_sglang_tokenizer
         self.enable_trace = config.server_args.enable_trace
 
         if engine is not None:
             self.input_param_manager = InputParamManager(
                 self.engine.tokenizer_manager.tokenizer
-                if not self.skip_tokenizer_init
+                if self.use_sglang_tokenizer
                 else None
             )
             self._engine_supports_priority = (
@@ -422,12 +423,23 @@ class BaseWorkerHandler(BaseGenerativeHandler):
 
     def _get_input_param(self, request: Dict[str, Any]) -> Dict[str, Any]:
         request_input = self.input_param_manager.get_input_param(
-            request, use_tokenizer=not self.skip_tokenizer_init
+            request, use_tokenizer=self.use_sglang_tokenizer
         )
 
         return {
             "prompt" if isinstance(request_input, str) else "input_ids": request_input
         }
+
+    @staticmethod
+    def _get_guided_decoding_params(
+        guided_decoding: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Extract guided decoding params (e.g. json_schema) for SGLang sampling_params."""
+        if isinstance(guided_decoding, dict):
+            json_schema = guided_decoding.get("json")
+            if json_schema is not None:
+                return {"json_schema": json.dumps(json_schema)}
+        return {}
 
     @staticmethod
     def _generate_bootstrap_room() -> int:
