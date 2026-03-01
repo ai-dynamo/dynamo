@@ -253,7 +253,7 @@ class DynamoGraphDeploymentRequestSpec(BaseModel):
         default="rapid",
         description='SearchStrategy controls the profiling search depth. "rapid" performs a fast sweep; "thorough" explores more configurations.',
     )
-    autoApply: bool = Field(
+    autoApply: Optional[bool] = Field(
         default=True,
         description="AutoApply indicates whether to automatically create a DynamoGraphDeployment after profiling completes. If false, the generated spec is stored in status for manual review and application.",
     )

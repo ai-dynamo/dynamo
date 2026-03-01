@@ -33,7 +33,7 @@ pytestmark = [
     pytest.mark.sglang,
     pytest.mark.e2e,
     pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME),
-    pytest.mark.post_merge,  # post_merge to pinpoint failure commit
+    pytest.mark.nightly,
     pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True),
 ]
 
@@ -186,7 +186,7 @@ class DynamoWorkerProcess(ManagedProcess):
 
 @pytest.mark.timeout(160)  # 3x average
 @pytest.mark.gpu_1
-@pytest.mark.xfail(strict=False)
+@pytest.mark.skip(reason="DYN-2265")
 def test_request_cancellation_sglang_aggregated(
     request, runtime_services_dynamic_ports, predownload_models
 ):

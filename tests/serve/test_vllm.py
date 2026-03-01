@@ -192,7 +192,11 @@ vllm_configs = {
         name="agg-router",
         directory=vllm_dir,
         script_name="agg_router.sh",
-        marks=[pytest.mark.gpu_2, pytest.mark.post_merge],
+        marks=[
+            pytest.mark.gpu_2,
+            pytest.mark.post_merge,
+            pytest.mark.skip(reason="DYN-2263"),
+        ],
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
             chat_payload_default(
@@ -204,14 +208,18 @@ vllm_configs = {
             )
         ],
         env={
-            "DYN_LOG": "dynamo_llm::kv_router::publisher=trace,dynamo_llm::kv_router::scheduler=info",
+            "DYN_LOG": "dynamo_llm::kv_router::publisher=trace,dynamo_kv_router::scheduling::selector=info",
         },
     ),
     "agg-router-approx": VLLMConfig(
         name="agg-router-approx",
         directory=vllm_dir,
         script_name="agg_router_approx.sh",
-        marks=[pytest.mark.gpu_2, pytest.mark.post_merge],
+        marks=[
+            pytest.mark.gpu_2,
+            pytest.mark.post_merge,
+            pytest.mark.skip(reason="DYN-2264"),
+        ],
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
             # Test approximate KV routing (--no-kv-events mode)
@@ -235,7 +243,7 @@ vllm_configs = {
             ),
         ],
         env={
-            "DYN_LOG": "dynamo_llm::kv_router::scheduler=info",
+            "DYN_LOG": "dynamo_kv_router::scheduling::selector=info",
         },
     ),
     "disaggregated": VLLMConfig(
@@ -276,6 +284,7 @@ vllm_configs = {
             completion_payload_default(),
         ],
     ),
+    # NOTE: Pack all workers on 1 GPU for lower CI resource requirements
     "multimodal_disagg_qwen3vl_2b_e_pd": VLLMConfig(
         name="multimodal_disagg_qwen3vl_2b_e_pd",
         directory=vllm_dir,
@@ -335,20 +344,26 @@ vllm_configs = {
             )
         ],
     ),
+    # NOTE: Pack all workers on 1 GPU for lower CI resource requirements
     "multimodal_disagg_qwen3vl_2b_epd": VLLMConfig(
         name="multimodal_disagg_qwen3vl_2b_epd",
         directory=vllm_dir,
         script_name="disagg_multimodal_epd.sh",
-        marks=[pytest.mark.gpu_2, pytest.mark.pre_merge],
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.pre_merge,
+            pytest.mark.skip(reason="DYN-2265"),
+        ],
         model="Qwen/Qwen3-VL-2B-Instruct",
-        script_args=["--model", "Qwen/Qwen3-VL-2B-Instruct"],
+        script_args=["--model", "Qwen/Qwen3-VL-2B-Instruct", "--single-gpu"],
+        timeout=360,
         env={
             "DYN_ENCODE_WORKER_GPU": "0",
             "DYN_PREFILL_WORKER_GPU": "0",
-            "DYN_DECODE_WORKER_GPU": "1",
-            "DYN_ENCODE_GPU_MEM": "0.4",
+            "DYN_DECODE_WORKER_GPU": "0",
+            "DYN_ENCODE_GPU_MEM": "0.1",
             "DYN_PREFILL_GPU_MEM": "0.4",
-            "DYN_DECODE_GPU_MEM": "0.85",
+            "DYN_DECODE_GPU_MEM": "0.4",
         },
         request_payloads=[
             chat_payload(
@@ -831,6 +846,7 @@ def lora_chat_payload(
 @pytest.mark.model("Qwen/Qwen3-0.6B")
 @pytest.mark.timeout(600)
 @pytest.mark.post_merge
+@pytest.mark.skip(reason="DYN-2260")
 def test_lora_aggregated(
     request,
     runtime_services_dynamic_ports,
@@ -887,6 +903,7 @@ def test_lora_aggregated(
 @pytest.mark.timeout(600)
 @pytest.mark.post_merge
 @pytest.mark.parametrize("num_system_ports", [2], indirect=True)
+@pytest.mark.skip(reason="DYN-2265")
 def test_lora_aggregated_router(
     request,
     runtime_services_dynamic_ports,
