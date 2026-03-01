@@ -82,6 +82,13 @@ impl ZmqPubTransport {
             // Set send timeout to 0 (non-blocking)
             socket.set_sndtimeo(0)?;
 
+            // Production socket options
+            socket.set_linger(1000)?;
+            socket.set_tcp_keepalive(1)?;
+            socket.set_tcp_keepalive_idle(60)?;
+            socket.set_reconnect_ivl(1000)?;
+            socket.set_reconnect_ivl_max(30000)?;
+
             // Bind to endpoint
             socket.bind(&endpoint_for_closure)?;
 
@@ -125,6 +132,13 @@ impl ZmqPubTransport {
             // Set send timeout to 0 (non-blocking)
             socket.set_sndtimeo(0)?;
 
+            // Production socket options
+            socket.set_linger(1000)?;
+            socket.set_tcp_keepalive(1)?;
+            socket.set_tcp_keepalive_idle(60)?;
+            socket.set_reconnect_ivl(1000)?;
+            socket.set_reconnect_ivl_max(30000)?;
+
             // Connect (not bind) to broker's XSUB
             socket.connect(&endpoint_owned)?;
 
@@ -164,6 +178,13 @@ impl ZmqPubTransport {
 
             // Set send timeout to 0 (non-blocking)
             socket.set_sndtimeo(0)?;
+
+            // Production socket options
+            socket.set_linger(1000)?;
+            socket.set_tcp_keepalive(1)?;
+            socket.set_tcp_keepalive_idle(60)?;
+            socket.set_reconnect_ivl(1000)?;
+            socket.set_reconnect_ivl_max(30000)?;
 
             // Connect to all XSUB endpoints (ZMQ handles load balancing)
             for endpoint in &endpoints_owned {
@@ -257,6 +278,13 @@ impl ZmqSubTransport {
             // Set receive timeout to avoid blocking forever (fixes test hangs)
             socket.set_rcvtimeo(ZMQ_RCVTIMEOUT_MS)?;
 
+            // Production socket options
+            socket.set_linger(1000)?;
+            socket.set_tcp_keepalive(1)?;
+            socket.set_tcp_keepalive_idle(60)?;
+            socket.set_reconnect_ivl(1000)?;
+            socket.set_reconnect_ivl_max(30000)?;
+
             // Connect to endpoint
             socket.connect(&endpoint_owned)?;
 
@@ -319,6 +347,13 @@ impl ZmqSubTransport {
 
             // Set receive timeout to avoid blocking forever (fixes test hangs)
             socket.set_rcvtimeo(ZMQ_RCVTIMEOUT_MS)?;
+
+            // Production socket options
+            socket.set_linger(1000)?;
+            socket.set_tcp_keepalive(1)?;
+            socket.set_tcp_keepalive_idle(60)?;
+            socket.set_reconnect_ivl(1000)?;
+            socket.set_reconnect_ivl_max(30000)?;
 
             // Connect to all endpoints
             for endpoint in &endpoints_owned {
@@ -444,8 +479,8 @@ impl ZmqSubTransport {
                         continue;
                     }
                     Ok(Err(e)) => {
-                        tracing::error!(error = %e, "ZMQ receive error in socket pump");
-                        break;
+                        tracing::warn!(error = %e, "ZMQ receive error in socket pump, retrying");
+                        continue;
                     }
                     Err(e) => {
                         tracing::error!(error = %e, "Task join error in socket pump");
