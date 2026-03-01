@@ -27,6 +27,8 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       core: ${{ steps.changes.outputs.core }}
+      planner: ${{ steps.changes.outputs.planner }}
+      frontend: ${{ steps.changes.outputs.frontend }}
       builder_name: ${{ steps.export-builder-name.outputs.builder_name }}
     steps:
       - name: Checkout code
@@ -54,7 +56,7 @@ jobs:
 
   build:
     needs: changed-files
-    if: needs.changed-files.outputs.core == 'true'
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.planner == 'true' || needs.changed-files.outputs.frontend == 'true'
     runs-on: prod-builder-v3
     name: Build
     timeout-minutes: 60
@@ -152,11 +154,13 @@ jobs:
                       cargo fmt -- --check && \
                       cargo clippy --features block-manager,media-ffmpeg,testing-nixl,integration --no-deps --all-targets -- -D warnings && \
                       cargo test --locked --all-targets --features=block-manager,media-ffmpeg,testing-nixl,integration -- --nocapture && \
+                      cargo clippy -p kvbm-physical --no-deps --all-targets -- -D warnings && \
+                      cargo test --locked -p kvbm-physical --features testing-kvbm -- --nocapture --test-threads=4 && \
                       /workspace/container/use-sccache.sh show-stats "Rust Checks"'
 
   test-parallel:
     needs: [changed-files, build]
-    if: needs.changed-files.outputs.core == 'true'
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.planner == 'true' || needs.changed-files.outputs.frontend == 'true'
     runs-on: prod-builder-amd-v1
     name: Pytest (parallel)
     timeout-minutes: 30
@@ -186,7 +190,7 @@ jobs:
 
   test-sequential:
     needs: [changed-files, build]
-    if: needs.changed-files.outputs.core == 'true'
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.planner == 'true' || needs.changed-files.outputs.frontend == 'true'
     runs-on: prod-builder-amd-v1
     name: Pytest (sequential)
     timeout-minutes: 30

@@ -144,7 +144,6 @@ class TestVllmRendererApi:
             "role",
             "content",
             "reasoning",
-            "reasoning_content",
             "tool_calls",
         }
         actual_fields = set(DeltaMessage.model_fields)
@@ -376,6 +375,7 @@ class TestVllmRendererApi:
             "trace_headers",
             "resumable",
             "external_req_id",
+            "reasoning_ended",
         )
         # vllm-omni monkey-patches EngineCoreRequest with an extra field
         # (only installed on amd64, not arm64)
@@ -401,6 +401,7 @@ class TestVllmRendererApi:
             "kv_transfer_params",
             "trace_headers",
             "num_cached_tokens",
+            "num_external_computed_tokens",
             "routed_experts",
             "num_nans_in_logits",
         )
