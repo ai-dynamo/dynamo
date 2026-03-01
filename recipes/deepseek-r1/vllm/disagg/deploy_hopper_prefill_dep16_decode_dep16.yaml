@@ -18,6 +18,7 @@ spec:
         - name: model-cache
           mountPoint: /model-cache
       extraPodSpec:
+        containers: []
         mainContainer:
           startupProbe:
             httpGet:
@@ -44,6 +45,7 @@ spec:
       sharedMemory:
         size: 80Gi
       extraPodSpec:
+        containers: []
         mainContainer:
           startupProbe:
             httpGet:
@@ -68,9 +70,8 @@ spec:
             - name: GLOO_SOCKET_IFNAME
               value: eth0
           command:
-            - python3
-            - -m
-            - dynamo.vllm
+            - /bin/bash
+            - -c
           args:
             - --model
             - /model-cache/deepseek-r1
@@ -116,6 +117,7 @@ spec:
       sharedMemory:
         size: 80Gi
       extraPodSpec:
+        containers: []
         mainContainer:
           startupProbe:
             httpGet:
@@ -138,9 +140,8 @@ spec:
             - name: GLOO_SOCKET_IFNAME
               value: eth0
           command:
-            - python3
-            - -m
-            - dynamo.vllm
+            - /bin/bash
+            - -c
           args:
             - --model
             - /model-cache/deepseek-r1
