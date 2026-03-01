@@ -17,6 +17,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use zeromq::{Socket, SocketRecv, SubSocket};
 
+use dynamo_runtime::metrics::MetricsHierarchy;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::transports::event_plane::EventPublisher;
 use dynamo_runtime::{
@@ -55,6 +56,47 @@ const MAX_BACKOFF_EXPONENT: u32 = 8; // Cap at 2^8 = 256x multiplier to prevent 
 
 // Batching configuration
 const MAX_BATCHING_TIMEOUT_US: u64 = 15_000_000; // 15 seconds, prevents misconfiguration
+
+// ---------------------------------------------------------------------------
+// Engines dropped events metric
+// ---------------------------------------------------------------------------
+
+use std::sync::OnceLock;
+
+/// Global counter for raw events dropped by engines before reaching the publisher.
+/// This is incremented when the publisher detects a gap in event IDs.
+static ENGINES_DROPPED_EVENTS_TOTAL: OnceLock<prometheus::IntCounterVec> = OnceLock::new();
+
+/// Initialize the engines dropped events counter and register it with the component's metrics registry.
+/// Returns the counter for use.
+fn init_engines_dropped_events_counter(
+    component: &Component,
+) -> &'static prometheus::IntCounterVec {
+    ENGINES_DROPPED_EVENTS_TOTAL.get_or_init(|| {
+        let counter = prometheus::IntCounterVec::new(
+            prometheus::Opts::new(
+                "dynamo_kv_publisher_engines_dropped_events_total",
+                "Total number of raw events dropped by engines before reaching publisher (detected via event_id gaps)",
+            ),
+            &["worker_id"],
+        )
+        .expect("failed to create engines_dropped_events counter");
+
+        // Register with the component's metrics registry
+        if let Err(e) = component.get_metrics_registry().get_prometheus_registry().register(Box::new(counter.clone())) {
+            tracing::warn!("Failed to register engines_dropped_events counter: {}", e);
+        }
+
+        counter
+    })
+}
+
+/// Get the engines dropped events counter (must be initialized first with init_engines_dropped_events_counter).
+fn engines_dropped_events_counter() -> &'static prometheus::IntCounterVec {
+    ENGINES_DROPPED_EVENTS_TOTAL
+        .get()
+        .expect("engines_dropped_events counter not initialized")
+}
 
 // -------------------------------------------------------------------------
 // Batching State -----------------------------------------------------------
@@ -226,6 +268,9 @@ impl KvEventPublisher {
 
         // Infer worker_id from component's connection
         let worker_id = component.drt().connection_id();
+
+        // Initialize the engines dropped events counter and register with component's metrics
+        init_engines_dropped_events_counter(&component);
 
         let component_name = component.name();
         tracing::info!(
@@ -506,15 +551,21 @@ async fn run_event_processor_loop<P: EventSink + Send + Sync + 'static>(
                 // (e.g. channel send error) before they reached the batching layer.
                 let raw_event_id = event.event_id;
                 if let Some(last_id) = last_raw_input_id
-                    && raw_event_id > last_id + 1 {
-                        tracing::warn!(
-                            worker_id,
-                            last_raw_input_id = last_id,
-                            raw_event_id,
-                            gap = raw_event_id - last_id - 1,
-                            "Input event gap detected: raw events dropped before batching"
-                        );
-                    }
+                    && raw_event_id > last_id + 1
+                {
+                    let gap = raw_event_id - last_id - 1;
+                    tracing::warn!(
+                        worker_id,
+                        last_raw_input_id = last_id,
+                        raw_event_id,
+                        gap,
+                        "Input event gap detected: raw events dropped before batching"
+                    );
+                    // Increment Prometheus counter for dropped events
+                    engines_dropped_events_counter()
+                        .with_label_values(&[&worker_id.to_string()])
+                        .inc_by(gap);
+                }
                 last_raw_input_id = Some(raw_event_id);
 
                 tracing::trace!("Event processor for worker_id {} processing event: {:?}", worker_id, event.data);
