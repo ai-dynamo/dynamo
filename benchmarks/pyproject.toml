@@ -40,8 +40,8 @@ classifiers = [
 ]
 
 dependencies = [
-    "aiconfigurator[webapp] @ git+https://github.com/ai-dynamo/aiconfigurator.git@7287307c4e3861b90927198da74e1adda53a4caf",
-    "aiperf @ git+https://github.com/ai-dynamo/aiperf.git@c3fc969e9e30e9ddad35b2f613aa7c1d418f2de9",
+    "aiconfigurator[webapp] @ git+https://github.com/ai-dynamo/aiconfigurator.git@369d2002e7702d7b641c652d47048a7cf2bea396",
+    "aiperf @ git+https://github.com/ai-dynamo/aiperf.git@6450d7280de2e844ce5e98c5f6a4edb4b7773e8b",
     "matplotlib",
     "networkx",
     "numpy",
@@ -63,11 +63,6 @@ Repository = "https://github.com/ai-dynamo/dynamo.git"
 [build-system]
 requires = ["setuptools>=42", "wheel"]
 build-backend = "setuptools.build_meta"
-
-[tool.uv]
-override-dependencies = [
-    "gradio==5.47.1"
-]
 
 [tool.setuptools]
 packages = ["prefix_data_generator"]
