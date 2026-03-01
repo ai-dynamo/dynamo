@@ -20,10 +20,9 @@ use cudarc::runtime::sys as cuda_runtime;
 use kvbm_kernels::{MemcpyBatchMode, is_memcpy_batch_available, is_using_stubs, memcpy_batch};
 
 // Direct FFI for cudaMallocHost / cudaFreeHost.
-// We bypass cudarc's runtime::sys because cudarc eagerly resolves ALL runtime
-// symbols on first use, and CUDA 13.x removed `cudaGetDeviceProperties_v2`
-// which causes a panic.  Our test binary links against libcudart directly
-// (through kvbm-kernels' build.rs), so these symbols are always available.
+// We link against libcudart directly (through kvbm-kernels' build.rs),
+// so these symbols are always available without going through cudarc's
+// dynamic loader.
 unsafe extern "C" {
     fn cudaMallocHost(ptr: *mut *mut c_void, size: usize) -> u32;
     fn cudaFreeHost(ptr: *mut c_void) -> u32;

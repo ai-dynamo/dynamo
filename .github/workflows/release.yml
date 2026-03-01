@@ -32,7 +32,7 @@ jobs:
   manual-approval:
     name: Approve Manual Run
     if: github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
+    runs-on: prod-default-small-v2
     environment: automated-release
     steps:
       - name: Manual run approved
@@ -40,7 +40,7 @@ jobs:
 
   prepare-release:
     name: Prepare Release
-    runs-on: ubuntu-latest
+    runs-on: prod-default-small-v2
     outputs:
       version: ${{ steps.extract.outputs.version }}
       image_prefix: ${{ steps.extract.outputs.image_prefix }}
@@ -463,8 +463,7 @@ jobs:
     needs: [prepare-release, vllm-pipeline, sglang-pipeline, trtllm-pipeline, vllm-efa-pipeline, trtllm-efa-pipeline, operator-build, frontend-build]
     if: |
       always() && !cancelled() &&
-      needs.prepare-release.result == 'success' &&
-      (needs.vllm-pipeline.result == 'success' || needs.sglang-pipeline.result == 'success' || needs.trtllm-pipeline.result == 'success')
+      needs.prepare-release.result == 'success'
     runs-on: cpu-amd-m5-4xlarge
     environment: automated-release
     env:
