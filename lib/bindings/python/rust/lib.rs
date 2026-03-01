@@ -175,6 +175,14 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ModelInput>()?;
     m.add_class::<llm::kv::KvRouter>()?;
     m.add_class::<RouterMode>()?;
+    m.add_class::<llm::protocols::ImageNvExt>()?;
+    m.add_class::<llm::protocols::NvCreateImageRequest>()?;
+    m.add_class::<llm::protocols::ImageData>()?;
+    m.add_class::<llm::protocols::NvImagesResponse>()?;
+    m.add_class::<llm::protocols::VideoNvExt>()?;
+    m.add_class::<llm::protocols::NvCreateVideoRequest>()?;
+    m.add_class::<llm::protocols::VideoData>()?;
+    m.add_class::<llm::protocols::NvVideosResponse>()?;
     m.add_class::<kserve_grpc::KserveGrpcService>()?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add_class::<planner::VirtualConnectorCoordinator>()?;

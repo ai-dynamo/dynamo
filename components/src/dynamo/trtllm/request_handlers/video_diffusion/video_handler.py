@@ -189,7 +189,7 @@ class VideoGenerationHandler(BaseGenerativeHandler):
 
         try:
             # Parse request
-            req = NvCreateVideoRequest(**request)
+            req = NvCreateVideoRequest.model_validate(request)
             nvext = req.nvext or VideoNvExt()
 
             # Parse parameters

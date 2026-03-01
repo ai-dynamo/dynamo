@@ -85,10 +85,16 @@ def parse_request_type(
     if modality is OutputModality.IMAGE:
         if "messages" in raw_request:
             return raw_request, RequestType.CHAT_COMPLETION
-        return NvCreateImageRequest(**raw_request), RequestType.IMAGE_GENERATION
+        return (
+            NvCreateImageRequest.model_validate(raw_request),
+            RequestType.IMAGE_GENERATION,
+        )
 
     if modality is OutputModality.VIDEO:
-        return NvCreateVideoRequest(**raw_request), RequestType.VIDEO_GENERATION
+        return (
+            NvCreateVideoRequest.model_validate(raw_request),
+            RequestType.VIDEO_GENERATION,
+        )
 
     if modality is OutputModality.AUDIO:
         # Audio protocol types are not yet defined; pass through the raw dict.
