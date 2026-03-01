@@ -15,7 +15,6 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PID=""
-DURATION=""
 
 # Available scripts
 SCRIPTS=(
@@ -112,7 +111,7 @@ run_script() {
         args+=(-p "$PID")
     fi
 
-    echo "Running: bpftrace ${args[*]} $script"
+    echo "Running: bpftrace ${args[*]-} $script"
     echo "Press Ctrl-C to stop."
     echo ""
     exec bpftrace "${args[@]}" "$script"
@@ -121,7 +120,12 @@ run_script() {
 # Parse arguments
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --pid|-p)    PID="$2"; shift 2 ;;
+        --pid|-p)
+            if [[ -z "${2:-}" ]]; then
+                echo "ERROR: --pid requires a PID argument"
+                exit 1
+            fi
+            PID="$2"; shift 2 ;;
         --check)     check_capabilities; exit $? ;;
         --list|-l)   list_scripts; exit 0 ;;
         -h|--help)

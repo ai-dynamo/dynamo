@@ -42,6 +42,13 @@ done
 
 mkdir -p "$OUTPUT_DIR"
 
+# Validate that we have a target to profile
+if [[ -z "$PID" ]] && [[ $# -eq 0 ]]; then
+    echo "ERROR: Must specify --pid <PID> or provide a command after --"
+    echo "Usage: $0 --pid <PID>  OR  $0 -- <binary> [args...]"
+    exit 1
+fi
+
 # Try cargo-flamegraph first (simplest)
 if command -v flamegraph &>/dev/null && [[ -z "$PID" ]] && [[ $# -gt 0 ]]; then
     echo "Using cargo-flamegraph..."
@@ -84,7 +91,7 @@ else
 fi
 
 # Generate flamegraph if flamegraph.pl is available
-if command -v flamegraph.pl &>/dev/null || command -v stackcollapse-perf.pl &>/dev/null; then
+if command -v flamegraph.pl &>/dev/null && command -v stackcollapse-perf.pl &>/dev/null; then
     perf script -i "$PERF_DATA" | stackcollapse-perf.pl | \
         flamegraph.pl > "${OUTPUT_DIR}/${OUTPUT_NAME}.svg"
     echo "Flame graph: ${OUTPUT_DIR}/${OUTPUT_NAME}.svg"

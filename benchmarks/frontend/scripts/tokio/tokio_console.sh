@@ -19,7 +19,12 @@ ADDR="${TOKIO_CONSOLE_ADDR:-http://localhost:6669}"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --addr|-a)  ADDR="$2"; shift 2 ;;
+        --addr|-a)
+            if [[ -z "${2:-}" ]]; then
+                echo "ERROR: --addr requires an address argument"
+                exit 1
+            fi
+            ADDR="$2"; shift 2 ;;
         -h|--help)
             echo "Usage: $0 [OPTIONS]"
             echo ""

@@ -12,20 +12,21 @@ tracepoint:sched:sched_switch
 {
     if (args.prev_state != 0) {
         // Thread is going off-CPU (not TASK_RUNNING)
-        @off[args.prev_pid, args.prev_comm, kstack] = nsecs;
+        @off[args.prev_pid, args.prev_comm] = nsecs;
     }
 }
 
 tracepoint:sched:sched_switch
 {
-    $key = @off[args.next_pid, args.next_comm, kstack];
+    $key = @off[args.next_pid, args.next_comm];
     if ($key) {
         $delta = nsecs - $key;
         // Only record if off-CPU > 1ms (filter noise)
         if ($delta > 1000000) {
+            // Use kstack at wake time — shows what the thread was blocked on
             @blocked_us[args.next_comm, kstack] = hist($delta / 1000);
         }
-        delete(@off[args.next_pid, args.next_comm, kstack]);
+        delete(@off[args.next_pid, args.next_comm]);
     }
 }
 

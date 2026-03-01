@@ -19,7 +19,8 @@ kprobe:tcp_set_state
         @birth[$sk] = nsecs;
         @saddr[$sk] = ntop($sk->__sk_common.skc_rcv_saddr);
         @daddr[$sk] = ntop($sk->__sk_common.skc_daddr);
-        @dport[$sk] = $sk->__sk_common.skc_dport;
+        @dport[$sk] = ($sk->__sk_common.skc_dport >> 8) |
+            (($sk->__sk_common.skc_dport & 0xff) << 8);
     }
 
     if ($newstate == 7) {

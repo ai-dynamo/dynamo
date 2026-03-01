@@ -24,10 +24,10 @@ fi
 
 BEFORE="$1"
 AFTER="$2"
+shift 2
 
-while [[ $# -gt 2 ]] && [[ $# -gt 0 ]]; do
-    shift 2
-    case ${1:-} in
+while [[ $# -gt 0 ]]; do
+    case $1 in
         --output-dir)  OUTPUT_DIR="$2"; shift 2 ;;
         --output)      OUTPUT_NAME="$2"; shift 2 ;;
         *)  break ;;
