@@ -7,7 +7,7 @@ on:
   push:
     branches:
       - main
-      # - "pull-request/[0-9]+"
+      - "pull-request/[0-9]+"
       # Note: release/* branches are handled by release.yml workflow
   workflow_dispatch:
     inputs:
