@@ -53,9 +53,6 @@ const MAX_BACKOFF_MS: u64 = 5000;
 const MAX_CONSECUTIVE_ERRORS: u32 = 10;
 const MAX_BACKOFF_EXPONENT: u32 = 8; // Cap at 2^8 = 256x multiplier to prevent overflow
 
-// Batching configuration
-const BATCH_TIMEOUT_US: u64 = 10_000;
-
 // -------------------------------------------------------------------------
 // Batching State -----------------------------------------------------------
 // -------------------------------------------------------------------------
@@ -207,7 +204,8 @@ impl KvEventPublisher {
         batching_timeout_us: Option<u64>,
     ) -> Result<Self> {
         let cancellation_token = CancellationToken::new();
-        let batching_timeout_us = batching_timeout_us.unwrap_or(BATCH_TIMEOUT_US);
+        // None = disabled (flush every event); Some(us) = opt-in with that window.
+        let batching_timeout_us = batching_timeout_us.unwrap_or(0);
 
         let (tx, rx) = mpsc::unbounded_channel::<KvCacheEvent>();
 
@@ -1777,14 +1775,7 @@ mod tests_startup_helpers {
         tx.send(event).unwrap();
         drop(tx);
 
-        let handle = tokio::spawn(start_event_processor(
-            component,
-            1,
-            token,
-            rx,
-            None,
-            BATCH_TIMEOUT_US,
-        ));
+        let handle = tokio::spawn(start_event_processor(component, 1, token, rx, None, 10_000));
 
         tokio::time::timeout(tokio::time::Duration::from_secs(1), handle)
             .await
@@ -1841,7 +1832,7 @@ mod tests_startup_helpers {
             token.clone(),
             rx,
             Some(local_indexer.clone()), // arc::clone just increments atomic counters
-            BATCH_TIMEOUT_US,
+            10_000,
         ));
 
         // Wait for processing
@@ -1925,7 +1916,7 @@ mod tests_startup_helpers {
             token.clone(),
             rx,
             Some(local_indexer.clone()),
-            BATCH_TIMEOUT_US,
+            10_000,
         ));
 
         // Then remove same event
@@ -2016,7 +2007,7 @@ mod tests_startup_helpers {
             token.clone(),
             rx,
             Some(local_indexer.clone()),
-            BATCH_TIMEOUT_US,
+            10_000,
         ));
 
         tokio::time::timeout(tokio::time::Duration::from_secs(1), handle)
@@ -2086,7 +2077,7 @@ mod tests_startup_helpers {
             new_token,
             rx,
             Some(local_indexer),
-            BATCH_TIMEOUT_US,
+            10_000,
         ));
 
         tokio::time::timeout(tokio::time::Duration::from_secs(1), handle)
@@ -2213,7 +2204,7 @@ mod tests_startup_helpers {
             token.clone(),
             worker_rx,
             Some(local_indexer_1.clone()),
-            BATCH_TIMEOUT_US,
+            10_000,
         ));
 
         // === SETUP: Router Components ===
