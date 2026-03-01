@@ -36,6 +36,7 @@ validator = { workspace = true }
 default = []
 collectives = []
 testing-kvbm = []
+testing-nixl-gds = []
 
 [dev-dependencies]
 dynamo-memory = { workspace = true, features = ["unsafe-slices"] }
