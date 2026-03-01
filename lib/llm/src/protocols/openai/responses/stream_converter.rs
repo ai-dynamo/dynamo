@@ -203,10 +203,10 @@ impl ResponseStreamConverter {
                             sequence_number: self.next_seq(),
                             output_index,
                             item: OutputItem::Message(OutputMessage {
-                                id: self.message_item_id.clone(),
+                                id: Some(self.message_item_id.clone()),
                                 content: vec![],
                                 role: AssistantRole::Assistant,
-                                status: OutputStatus::InProgress,
+                                status: Some(OutputStatus::InProgress),
                             }),
                         },
                     );
@@ -354,14 +354,14 @@ impl ResponseStreamConverter {
                     sequence_number: self.next_seq(),
                     output_index: self.message_output_index,
                     item: OutputItem::Message(OutputMessage {
-                        id: self.message_item_id.clone(),
+                        id: Some(self.message_item_id.clone()),
                         content: vec![OutputMessageContent::OutputText(OutputTextContent {
                             text: self.accumulated_text.clone(),
                             annotations: vec![],
                             logprobs: Some(vec![]),
                         })],
                         role: AssistantRole::Assistant,
-                        status: OutputStatus::Completed,
+                        status: Some(OutputStatus::Completed),
                     }),
                 });
             events.push(make_sse_event(&item_done));
@@ -413,14 +413,14 @@ impl ResponseStreamConverter {
         let mut output = Vec::new();
         if self.message_started {
             output.push(OutputItem::Message(OutputMessage {
-                id: self.message_item_id.clone(),
+                id: Some(self.message_item_id.clone()),
                 content: vec![OutputMessageContent::OutputText(OutputTextContent {
                     text: self.accumulated_text.clone(),
                     annotations: vec![],
                     logprobs: Some(vec![]),
                 })],
                 role: AssistantRole::Assistant,
-                status: OutputStatus::Completed,
+                status: Some(OutputStatus::Completed),
             }));
         }
         for fc in &self.function_call_items {

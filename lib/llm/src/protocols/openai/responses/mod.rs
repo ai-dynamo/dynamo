@@ -610,9 +610,9 @@ pub(super) fn normalize_tools(tools: Vec<Tool>) -> Vec<Tool> {
 /// Build an assistant text message output item.
 fn make_text_message(id: String, text: String) -> OutputItem {
     OutputItem::Message(OutputMessage {
-        id,
+        id: Some(id),
         role: AssistantRole::Assistant,
-        status: OutputStatus::Completed,
+        status: Some(OutputStatus::Completed),
         content: vec![OutputMessageContent::OutputText(OutputTextContent {
             text,
             annotations: vec![],
@@ -896,9 +896,9 @@ mod tests {
                         status: None,
                     }))),
                     InputItem::Item(Item::Message(MessageItem::Output(OutputMessage {
-                        id: "msg_1".into(),
+                        id: Some("msg_1".into()),
                         role: AssistantRole::Assistant,
-                        status: OutputStatus::Completed,
+                        status: Some(OutputStatus::Completed),
                         content: vec![OutputMessageContent::OutputText(OutputTextContent {
                             text: "4".into(),
                             annotations: vec![],
