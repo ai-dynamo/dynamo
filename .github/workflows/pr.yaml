@@ -107,7 +107,7 @@ jobs:
 
   operator:
     needs: changed-files
-    if: !inputs.build_vllm && !inputs.build_sglang && !inputs.build_trtllm && needs.changed-files.outputs.operator == 'true'
+    if: ${{ !inputs.build_vllm && !inputs.build_sglang && !inputs.build_trtllm && needs.changed-files.outputs.operator == 'true' }}
     name: Operator
     runs-on: prod-default-v2
     env:
