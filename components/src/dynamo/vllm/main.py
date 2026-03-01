@@ -588,6 +588,9 @@ async def register_vllm_model(
         generate_endpoint,
         config.model,
         config.served_model_name,
+        context_length=getattr(
+            getattr(vllm_config, "model_config", None), "max_model_len", None
+        ),
         kv_cache_block_size=runtime_values["block_size"],
         runtime_config=runtime_config,
         custom_template_path=config.custom_jinja_template,

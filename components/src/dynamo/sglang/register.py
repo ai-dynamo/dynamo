@@ -56,6 +56,7 @@ async def _register_model_with_runtime_config(
             endpoint,
             server_args.model_path,
             server_args.served_model_name,
+            context_length=getattr(server_args, "context_length", None),
             kv_cache_block_size=server_args.page_size,
             runtime_config=runtime_config,
             custom_template_path=dynamo_args.custom_jinja_template,

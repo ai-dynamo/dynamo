@@ -456,6 +456,7 @@ async def init_llm_worker(
                 endpoint,
                 config.model,
                 config.served_model_name,
+                context_length=config.max_seq_len,
                 kv_cache_block_size=config.kv_block_size,
                 runtime_config=runtime_config,
                 custom_template_path=config.custom_jinja_template,
