@@ -154,6 +154,13 @@ class DynamoTrtllmArgGroup(ArgGroup):
         )
         add_negatable_bool_argument(
             g,
+            flag_name="--enable-additional-metrics",
+            env_var="DYN_TRTLLM_ENABLE_ADDITIONAL_METRICS",
+            default=True,
+            help="Enable additional Prometheus metrics (token counters, phase timing, config info, etc.).",
+        )
+        add_negatable_bool_argument(
+            g,
             flag_name="--disable-request-abort",
             env_var="DYN_TRTLLM_DISABLE_REQUEST_ABORT",
             default=True,
@@ -460,6 +467,7 @@ class DynamoTrtllmConfig(ConfigBase):
     extra_engine_args: str
     override_engine_args: str
     publish_events_and_metrics: bool
+    enable_additional_metrics: bool
     disable_request_abort: bool
     guided_decoding_backend: Optional[str] = None
 

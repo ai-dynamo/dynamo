@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import sys
+import time
 from typing import Optional
 
 from prometheus_client import REGISTRY
@@ -422,6 +423,49 @@ async def init_llm_worker(
                     f"Failed to initialize TensorRT-LLM Prometheus metrics: {e}"
                 )
 
+        # --- Additional metrics ---
+        additional_metrics = None
+
+        if config.enable_additional_metrics and config.publish_events_and_metrics:
+            try:
+                from dynamo.trtllm.metrics import AdditionalMetricsCollector
+
+                disagg_mode_str = config.disaggregation_mode.value if hasattr(
+                    config.disaggregation_mode, "value"
+                ) else str(config.disaggregation_mode)
+                additional_metrics = AdditionalMetricsCollector(
+                    labels={
+                        "model_name": model_name_for_metrics,
+                        "disaggregation_mode": disagg_mode_str,
+                        "engine_type": "trtllm",
+                    },
+                )
+
+                logging.info(
+                    "Additional metrics initialized (disagg_mode=%s)",
+                    disagg_mode_str,
+                )
+
+                # The trtllm_ callback (registered above) only passes trtllm_-prefixed
+                # metrics. Register a second callback for the additional metrics.
+                _additional_prefixes = [
+                    "num_aborted_requests_total",
+                    "request_type_",
+                    "kv_transfer_",
+                ]
+                register_engine_metrics_callback(
+                    endpoint=endpoint,
+                    registry=REGISTRY,
+                    metric_prefix_filters=_additional_prefixes,
+                    namespace_name=config.namespace,
+                    component_name=config.component,
+                    endpoint_name="generate",
+                    model_name=model_name_for_metrics,
+                )
+                logging.info("Additional metrics callback registered")
+            except Exception as e:
+                logging.warning("Failed to initialize additional metrics: %s", e)
+
         # Register callback for Dynamo component metrics using dedicated registry
         register_engine_metrics_callback(
             endpoint=endpoint,
@@ -444,6 +488,7 @@ async def init_llm_worker(
             shutdown_event=shutdown_event,
             encoder_cache_capacity_gb=config.multimodal_embedding_cache_capacity_gb,
             disable_request_abort=config.disable_request_abort,
+            additional_metrics=additional_metrics,
         )
 
         # Register the model with runtime config
