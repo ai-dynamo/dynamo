@@ -30,6 +30,7 @@ pub struct AnthropicStreamConverter {
     // Token usage (from engine)
     input_token_count: u32,
     output_token_count: u32,
+    cached_token_count: Option<u32>,
     // Tool call tracking
     tool_call_states: Vec<ToolCallState>,
     tool_calls_sent: HashSet<String>,
@@ -57,6 +58,7 @@ impl AnthropicStreamConverter {
             text_block_index: 0,
             input_token_count: 0,
             output_token_count: 0,
+            cached_token_count: None,
             tool_call_states: Vec::new(),
             tool_calls_sent: HashSet::new(),
             next_block_index: 0,
@@ -77,6 +79,8 @@ impl AnthropicStreamConverter {
             usage: AnthropicUsage {
                 input_tokens: 0,
                 output_tokens: 0,
+                cache_creation_input_tokens: None,
+                cache_read_input_tokens: None,
             },
         };
 
@@ -95,6 +99,14 @@ impl AnthropicStreamConverter {
         if let Some(usage) = &chunk.usage {
             self.input_token_count = usage.prompt_tokens;
             self.output_token_count = usage.completion_tokens;
+            if let Some(cached) = usage
+                .prompt_tokens_details
+                .as_ref()
+                .and_then(|d| d.cached_tokens)
+                .filter(|&n| n > 0)
+            {
+                self.cached_token_count = Some(cached);
+            }
         }
 
         for choice in &chunk.choices {
@@ -138,6 +150,7 @@ impl AnthropicStreamConverter {
                         index: self.text_block_index,
                         content_block: AnthropicResponseContentBlock::Text {
                             text: String::new(),
+                            citations: None,
                         },
                     };
                     events.push(make_sse_event("content_block_start", &block_start));
@@ -271,6 +284,8 @@ impl AnthropicStreamConverter {
             usage: AnthropicUsage {
                 input_tokens: self.input_token_count,
                 output_tokens: self.output_token_count,
+                cache_creation_input_tokens: None,
+                cache_read_input_tokens: self.cached_token_count,
             },
         };
         events.push(make_sse_event("message_delta", &message_delta));
@@ -329,6 +344,14 @@ impl AnthropicStreamConverter {
         if let Some(usage) = &chunk.usage {
             self.input_token_count = usage.prompt_tokens;
             self.output_token_count = usage.completion_tokens;
+            if let Some(cached) = usage
+                .prompt_tokens_details
+                .as_ref()
+                .and_then(|d| d.cached_tokens)
+                .filter(|&n| n > 0)
+            {
+                self.cached_token_count = Some(cached);
+            }
         }
 
         for choice in &chunk.choices {
@@ -369,6 +392,7 @@ impl AnthropicStreamConverter {
                         index: self.text_block_index,
                         content_block: AnthropicResponseContentBlock::Text {
                             text: String::new(),
+                            citations: None,
                         },
                     };
                     events.push(make_tagged_event("content_block_start", &ev));
@@ -483,6 +507,8 @@ impl AnthropicStreamConverter {
             usage: AnthropicUsage {
                 input_tokens: self.input_token_count,
                 output_tokens: self.output_token_count,
+                cache_creation_input_tokens: None,
+                cache_read_input_tokens: self.cached_token_count,
             },
         };
         events.push(make_tagged_event("message_delta", &ev));
