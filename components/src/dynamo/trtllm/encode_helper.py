@@ -8,6 +8,11 @@ from dataclasses import asdict
 from typing import Any, Dict, Optional, Union
 
 import torch
+from tensorrt_llm.inputs import (
+    MultimodalDataTracker,
+    add_multimodal_placeholders,
+    apply_chat_template as trtllm_apply_chat_template,
+)
 
 import dynamo.nixl_connect as nixl_connect
 from dynamo.common.multimodal.image_loader import ImageLoader
@@ -21,6 +26,10 @@ class EncodeHelper:
     _image_loader: Optional[ImageLoader] = None
     _image_loader_lock = threading.Lock()
 
+    # Cached AutoProcessor for apply_chat_template (loaded once, shared)
+    _processor = None
+    _processor_lock = threading.Lock()
+
     @classmethod
     def _get_image_loader(cls) -> ImageLoader:
         if cls._image_loader is None:
@@ -28,6 +37,19 @@ class EncodeHelper:
                 if cls._image_loader is None:
                     cls._image_loader = ImageLoader()
         return cls._image_loader
+
+    @classmethod
+    def _get_processor(cls, model_dir: str):
+        """Lazily load and cache an AutoProcessor for chat-template application."""
+        if cls._processor is None:
+            with cls._processor_lock:
+                if cls._processor is None:
+                    from transformers import AutoProcessor
+
+                    cls._processor = AutoProcessor.from_pretrained(
+                        model_dir, use_fast=True, trust_remote_code=True
+                    )
+        return cls._processor
 
     @staticmethod
     def serialize_tensor_dict(tensor_dict: dict) -> dict:
@@ -280,9 +302,57 @@ class EncodeHelper:
             await readable_op.wait_for_completion()
             logging.debug("EncodeHelper completed readable operation.")
 
+    @classmethod
+    def _build_vlm_prompt(cls, text_prompt, num_images, model_type, tokenizer, model_dir):
+        """Build a prompt with model-specific vision placeholders and chat template.
+
+        Reuses TRT-LLM's ``MultimodalDataTracker`` and ``add_multimodal_placeholders``
+        for inserting the correct model-specific image placeholders (e.g.
+        ``<|vision_start|><|image_pad|><|vision_end|>`` for Qwen), then
+        ``apply_chat_template`` for wrapping with the model's chat format.
+
+        This mirrors the prompt-building logic inside TRT-LLM's
+        ``default_multimodal_input_loader`` without the expensive media-loading
+        part, keeping the TTFT improvement from PR #5910 intact.
+
+        Returns:
+            The prompt string with vision placeholders and chat wrapping,
+            or *None* on failure (caller should fall back to raw text).
+        """
+        try:
+            # 1. Count model-specific image placeholders via TRT-LLM's tracker
+            mm_data_tracker = MultimodalDataTracker(model_type)
+            for _ in range(num_images):
+                mm_data_tracker.add_data("image", None)
+            mm_placeholder_counts = mm_data_tracker.placeholder_counts()
+
+            # 2. Insert placeholders into text (position is model-specific)
+            content = text_prompt
+            if mm_placeholder_counts:
+                content = add_multimodal_placeholders(
+                    model_type, text_prompt, mm_placeholder_counts
+                )
+
+            # 3. Apply chat template via TRT-LLM (handles edge-case models)
+            processor = cls._get_processor(model_dir)
+            prompt = trtllm_apply_chat_template(
+                model_type=model_type,
+                tokenizer=tokenizer,
+                processor=processor,
+                conversation=[{"role": "user", "content": content}],
+                add_generation_prompt=True,
+                mm_placeholder_counts=[mm_placeholder_counts],
+            )
+            return prompt
+        except Exception as e:
+            logging.warning(
+                "_build_vlm_prompt failed (%s), falling back to raw text_prompt", e
+            )
+            return None
+
     @staticmethod
     async def _process_full_epd_flow(
-        prompt_token_ids_from_request: list,
+        text_prompt: str,
         image_urls: list,
         tokenizer,
         model_dir: str,
@@ -296,11 +366,11 @@ class EncodeHelper:
         containing multimodal embedding handles for the prefill worker.
 
         Args:
-            prompt_token_ids_from_request: token IDs from the request (Rust preprocessor)
+            text_prompt: Text portion of the prompt
             image_urls: List of image URLs to process
-            tokenizer: Tokenizer for decoding prompt_token_ids_from_request
-            model_dir: Path to model directory (unused; kept for API compatibility)
-            model_type: Model type string (unused; kept for API compatibility)
+            tokenizer: Tokenizer for decoding prompt_token_ids from encoder output
+            model_dir: Path to model directory
+            model_type: Model type string (TRT-LLM model identifier)
             engine: TensorRTLLMEngine with MultimodalEncoder
 
         Yields:
@@ -315,14 +385,21 @@ class EncodeHelper:
             yield {"ep_disaggregated_params": None}
             return
 
+        # Build prompt with model-specific vision placeholders and chat template.
+        # Uses TRT-LLM's MultimodalDataTracker + add_multimodal_placeholders +
+        # apply_chat_template — the same logic as default_multimodal_input_loader
+        # but without the expensive media loading (images are loaded above).
+        prompt = EncodeHelper._build_vlm_prompt(
+            text_prompt, len(pil_images), model_type, tokenizer, model_dir
+        )
+        if prompt is None:
+            prompt = text_prompt
+
+        # IMPORTANT: We pass "prompt" (not "prompt_token_ids") so that TRT-LLM's
+        # _preprocess takes the correct multimodal branch which runs the model's
+        # input processor.
         processed_mm_data = {"image": pil_images}
-        inputs = [
-            {
-                "prompt_token_ids": prompt_token_ids_from_request,
-                "multi_modal_data": processed_mm_data,
-                "mm_processor_kwargs": {},
-            }
-        ]
+        inputs = [{"prompt": prompt, "multi_modal_data": processed_mm_data}]
 
         # NOTE: MultimodalEncoder.generate() is synchronous. Run it off-thread to avoid
         # blocking the encode worker's event loop under concurrency.
@@ -352,26 +429,36 @@ class EncodeHelper:
         encoded_params = DisaggregatedParamsCodec.encode(ep_disaggregated_params)
         params_dict = asdict(encoded_params)
 
-        # Extract processed prompt (includes <image> tokens) for prefill/decode consistency.
-        # NOTE: processed_prompt will contain template/placeholder tokens
-        # (e.g. <image>, [INST], etc.). Adding special tokens here can change
-        # token alignment across EPD stages (prefill/decode), so we explicitly
-        # avoid adding them.
-        processed_prompt = None
-        if tokenizer is not None:
-            processed_prompt = tokenizer.decode(
-                prompt_token_ids_from_request, skip_special_tokens=False
-            )
-
+        # IMPORTANT: Use the *unexpanded* prompt (from _build_vlm_prompt) as
+        # processed_prompt — NOT the decoded encoder output tokens.
+        #
+        # The encoder's input processor expands each <|image_pad|> placeholder
+        # into ~N tokens (one per visual patch, e.g. 1225 for 512x512).  If we
+        # decode those expanded tokens back to text, we get ~N <|image_pad|>
+        # occurrences.  On the prefill side, TRT-LLM's get_prompt_token_ids
+        # re-tokenizes the prompt and expects exactly 1 <|image_pad|> per image
+        # (matching 1 mm_handle), then expands it itself.  Sending the expanded
+        # text causes the "Number of images must match number of mm_handles"
+        # assertion failure.
+        #
+        # The unexpanded `prompt` has exactly 1 <|image_pad|> per image, which
+        # is what get_prompt_token_ids expects.
+        first_output = encoder_outputs[0]
+        prompt_token_ids = (
+            list(first_output.prompt_token_ids)
+            if first_output.prompt_token_ids
+            else None
+        )
+        processed_prompt = prompt  # unexpanded — 1 placeholder per image
         logging.debug(
-            "ENCODE WORKER: Extracted processed_prompt (len=%s)",
+            "ENCODE WORKER: processed_prompt (unexpanded, len=%s)",
             len(processed_prompt) if processed_prompt is not None else None,
         )
 
         yield {
             "ep_disaggregated_params": params_dict,
             "processed_prompt": processed_prompt,
-            "prompt_token_ids": prompt_token_ids_from_request,
+            "prompt_token_ids": prompt_token_ids,
         }
 
     @staticmethod
@@ -410,7 +497,7 @@ class EncodeHelper:
             "messages", request.get("messages", [])
         )
         (
-            _,
+            text_prompt,
             image_urls,
             embedding_paths,
         ) = multimodal_processor.extract_prompt_and_media(messages)
@@ -426,7 +513,7 @@ class EncodeHelper:
                 yield response
 
         # Flow 2: Full EPD flow (image URLs via MultimodalEncoder)
-        elif image_urls and request.get("token_ids"):
+        elif image_urls and text_prompt:
             if model_dir is None or model_type is None:
                 yield {
                     "error": "model_dir and model_type are required for full EPD encode"
@@ -435,22 +522,11 @@ class EncodeHelper:
             if engine is None:
                 yield {"error": "No engine configured on encode worker for full EPD"}
                 return
-            # Use token_ids from request (Rust preprocessor already applied
-            # chat template and tokenized; token_ids then include image placeholder tokens
-            # if the model's tokenizer_config chat template emits them).
-            token_ids = request.get("token_ids")
             async for response in EncodeHelper._process_full_epd_flow(
-                token_ids,
-                image_urls,
-                tokenizer,
-                model_dir,
-                model_type,
-                engine,
+                text_prompt, image_urls, tokenizer, model_dir, model_type, engine
             ):
                 yield response
 
         # No valid multimodal content found
         else:
-            yield {
-                "error": "No embedding_paths or image_urls found in request, or image_urls without text_prompt or token_ids"
-            }
+            yield {"error": "No embedding_paths or image_urls found in request"}

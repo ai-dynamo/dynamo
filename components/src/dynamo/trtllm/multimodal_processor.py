@@ -22,6 +22,11 @@ from urllib.parse import urlparse
 from urllib.request import urlopen
 
 import torch
+from tensorrt_llm.inputs import (
+    MultimodalDataTracker,
+    add_multimodal_placeholders,
+    apply_chat_template as trtllm_apply_chat_template,
+)
 from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
 
 from dynamo.common.multimodal.image_loader import ImageLoader
@@ -69,6 +74,66 @@ class MultimodalRequestProcessor:
             self.tokenizer = tokenizer_factory(model_dir)
 
         self.image_loader = ImageLoader()
+
+        # Cached AutoProcessor for apply_chat_template (loaded once)
+        self._processor = None
+
+    def _get_processor(self):
+        """Lazily load and cache an AutoProcessor for chat-template application."""
+        if self._processor is None:
+            from transformers import AutoProcessor
+
+            self._processor = AutoProcessor.from_pretrained(
+                self.model_dir, use_fast=True, trust_remote_code=True
+            )
+        return self._processor
+
+    def _build_vlm_prompt(self, text_prompt, num_images):
+        """Build a prompt with model-specific vision placeholders and chat template.
+
+        Reuses TRT-LLM's ``MultimodalDataTracker`` and ``add_multimodal_placeholders``
+        for inserting the correct model-specific image placeholders (e.g.
+        ``<|vision_start|><|image_pad|><|vision_end|>`` for Qwen), then
+        ``apply_chat_template`` for wrapping with the model's chat format.
+
+        This mirrors the prompt-building logic inside TRT-LLM's
+        ``default_multimodal_input_loader`` without the expensive media-loading
+        part.
+
+        Returns:
+            The prompt string with vision placeholders and chat wrapping,
+            or *None* on failure (caller should fall back to token_ids decode).
+        """
+        try:
+            # 1. Count model-specific image placeholders via TRT-LLM's tracker
+            mm_data_tracker = MultimodalDataTracker(self.model_type)
+            for _ in range(num_images):
+                mm_data_tracker.add_data("image", None)
+            mm_placeholder_counts = mm_data_tracker.placeholder_counts()
+
+            # 2. Insert placeholders into text (position is model-specific)
+            content = text_prompt
+            if mm_placeholder_counts:
+                content = add_multimodal_placeholders(
+                    self.model_type, text_prompt, mm_placeholder_counts
+                )
+
+            # 3. Apply chat template via TRT-LLM (handles edge-case models)
+            processor = self._get_processor()
+            prompt = trtllm_apply_chat_template(
+                model_type=self.model_type,
+                tokenizer=self.tokenizer,
+                processor=processor,
+                conversation=[{"role": "user", "content": content}],
+                add_generation_prompt=True,
+                mm_placeholder_counts=[mm_placeholder_counts],
+            )
+            return prompt
+        except Exception as e:
+            logging.warning(
+                "_build_vlm_prompt failed (%s), falling back to token_ids decode", e
+            )
+            return None
 
     def is_url(self, path: str) -> bool:
         """Check if a path is a URL."""
@@ -214,6 +279,40 @@ class MultimodalRequestProcessor:
         # mm_processor_kwargs must be a dict (not None) for TRT-LLM's processor
         processed_inputs = {"prompt_token_ids": token_ids, "mm_processor_kwargs": {}}
 
+        # Build text prompt with model-specific vision placeholders.
+        # VLMs (e.g. Qwen2-VL) need placeholders like
+        # <|vision_start|><|image_pad|><|vision_end|> in the prompt.  The Rust
+        # frontend may use a different template that omits these, so we rebuild
+        # using TRT-LLM's MultimodalDataTracker + add_multimodal_placeholders +
+        # apply_chat_template — the same logic as default_multimodal_input_loader.
+        prompt_text = None
+        if self.tokenizer is not None:
+            # Try building VLM prompt with TRT-LLM utilities
+            messages = request.get("extra_args", {}).get(
+                "messages", request.get("messages", [])
+            )
+            if messages:
+                text_from_msgs, image_urls_from_msgs, _ = (
+                    self.extract_prompt_and_media(messages)
+                )
+                if text_from_msgs and image_urls_from_msgs:
+                    prompt_text = self._build_vlm_prompt(
+                        text_from_msgs, len(image_urls_from_msgs)
+                    )
+                    if prompt_text:
+                        logging.debug(
+                            "MM: built VLM prompt via TRT-LLM utilities"
+                        )
+
+            # Fallback: decode Rust token_ids (works when the Rust template
+            # already includes vision placeholders, e.g. LLaVA)
+            if prompt_text is None:
+                prompt_text = self.tokenizer.decode(
+                    token_ids, skip_special_tokens=False
+                )
+
+            processed_inputs["prompt"] = prompt_text
+
         # EPD Flow Case 2: Embeddings received via NIXL from encode worker
         # The encode worker computed vision embeddings and transferred them via RDMA/NIXL
         # We need to pass these embeddings directly to TRT-LLM's generate_async
@@ -306,6 +405,22 @@ class MultimodalRequestProcessor:
 
             if processed_mm_data:
                 processed_inputs["multi_modal_data"] = processed_mm_data
+
+                # IMPORTANT: When multi_modal_data is present, we must NOT include
+                # prompt_token_ids in the dict. TRT-LLM's _preprocess dispatches on
+                # an if/elif chain where "prompt_token_ids" is checked BEFORE "prompt".
+                # If both keys are present, TRT-LLM takes the prompt_token_ids branch
+                # and skips multimodal processing entirely (no input_processor runs,
+                # no multimodal hashing, no multimodal_lengths). By providing only
+                # "prompt" + "multi_modal_data", we ensure TRT-LLM takes the correct
+                # multimodal branch that runs the model-specific input processor.
+                if prompt_text is not None:
+                    processed_inputs.pop("prompt_token_ids", None)
+                else:
+                    logging.warning(
+                        "Cannot remove prompt_token_ids: no tokenizer available "
+                        "to decode prompt text. TRT-LLM may skip multimodal processing."
+                    )
 
         return processed_inputs
 
