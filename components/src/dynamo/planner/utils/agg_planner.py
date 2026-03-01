@@ -212,7 +212,7 @@ class AggPlanner:
             return "up"
 
         # Scale down: ALL workers below boundary
-        if num_workers > 1:
+        if num_workers > self.config.min_endpoint:
             sensitivity = self.config.load_scaling_down_sensitivity / 100.0
             boundary = target * (num_workers - 1) / num_workers * sensitivity
             if all(
@@ -255,7 +255,7 @@ class AggPlanner:
         # Scale down: ALL workers below boundary
         # TODO: should we strictly enforce all workers below boundary?
         # how about user-configurable percentage?
-        if num_workers > 1:
+        if num_workers > self.config.min_endpoint:
             sensitivity = self.config.load_scaling_down_sensitivity / 100.0
             boundary = x_sla * (num_workers - 1) / num_workers * sensitivity
             if all(
