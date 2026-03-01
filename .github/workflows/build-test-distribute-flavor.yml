@@ -118,6 +118,11 @@ on:
         required: false
         type: boolean
         default: false
+      build_only:
+        description: 'Build and push only — skip all tests, show summary'
+        required: false
+        type: boolean
+        default: false
     secrets:
       AWS_DEFAULT_REGION:
         required: true
@@ -161,6 +166,13 @@ jobs:
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
         with:
           lfs: true
+      - name: Sanitize ref name for container tags
+        id: sanitize-ref
+        if: ${{ inputs.build_only }}
+        shell: bash
+        run: |
+          sanitized=$(echo "${{ github.ref_name }}" | sed 's/[^a-zA-Z0-9._-]/-/g' | sed 's/^-//;s/-$//' | cut -c1-128)
+          echo "sanitized_ref_name=${sanitized}" >> $GITHUB_OUTPUT
       - name: Calculate extra tags with platform suffix # will get redundant upon multi arch builds support
         id: extra-tags
         shell: bash
@@ -169,13 +181,22 @@ jobs:
           CUDA_VERSION: ${{ inputs.cuda_version }}
         run: |
           CUDA_VERSION_MAJOR=${CUDA_VERSION%%.*}
+          ECR_REGISTRY="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com"
+          ACR_REGISTRY="${{ secrets.AZURE_ACR_HOSTNAME }}"
+          RESULT=""
           if [ -n "$EXTRA_TAGS" ]; then
-            RESULT=""
             while IFS= read -r tag; do
               if [ -n "$tag" ]; then
-                RESULT+="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${tag}-cuda${CUDA_VERSION_MAJOR}-${{ inputs.platform }}"$'\n'
+                RESULT+="${ECR_REGISTRY}/ai-dynamo/dynamo:${tag}-cuda${CUDA_VERSION_MAJOR}-${{ inputs.platform }}"$'\n'
               fi
             done <<< "$EXTRA_TAGS"
+          fi
+          if [ "${{ inputs.build_only }}" == "true" ]; then
+            BRANCH_TAG="${{ steps.sanitize-ref.outputs.sanitized_ref_name }}-${{ inputs.framework }}"
+            RESULT+="${ECR_REGISTRY}/ai-dynamo/dynamo:${BRANCH_TAG}-cuda${CUDA_VERSION_MAJOR}-${{ inputs.platform }}"$'\n'
+            RESULT+="${ACR_REGISTRY}/ai-dynamo/dynamo:${BRANCH_TAG}-cuda${CUDA_VERSION_MAJOR}-${{ inputs.platform }}"$'\n'
+          fi
+          if [ -n "$RESULT" ]; then
             echo "tags<<EOF" >> $GITHUB_OUTPUT
             echo "$RESULT" >> $GITHUB_OUTPUT
             echo "EOF" >> $GITHUB_OUTPUT
@@ -262,7 +283,7 @@ jobs:
           no_load: ${{ inputs.no_load }}
       - name: Show summary
         shell: bash
-        if: ${{ inputs.push_image && inputs.show_summary }}
+        if: ${{ inputs.push_image && (inputs.show_summary || inputs.build_only) }}
         run: |
           echo "### 🐳 ${{ inputs.framework }}-cuda${{ inputs.cuda_version }}-${{ inputs.platform }} Default Image" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
@@ -275,7 +296,10 @@ jobs:
   # TEST
   # ============================================================================
   test:
-    if: ( inputs.run_cpu_only_tests || inputs.run_single_gpu_tests ) && inputs.build_image
+    if: |
+        !inputs.build_only &&
+        ( inputs.run_cpu_only_tests || inputs.run_single_gpu_tests ) &&
+        inputs.build_image
     needs: [build]
     name: Test ${{ inputs.framework }}-cuda${{ inputs.cuda_version }}-${{ inputs.platform }}
     runs-on: ${{ inputs.platform == 'amd64' && 'prod-tester-amd-gpu-v1' || 'prod-tester-arm-v1' }}
@@ -371,6 +395,7 @@ jobs:
   multi-gpu-test:
     # Multi-GPU support limited to AMD64 only
     if: |
+        !inputs.build_only &&
         inputs.run_multi_gpu_tests &&
         inputs.build_image &&
         ( inputs.platform != 'arm64' )
@@ -433,6 +458,7 @@ jobs:
     # Run if copy_to_acr is true AND build succeeded AND (test succeeded OR test was skipped)
     if: |
       always() &&
+      !inputs.build_only &&
       inputs.copy_to_acr &&
       needs.build.result == 'success' &&
       (needs.test.result == 'success' || needs.test.result == 'skipped')

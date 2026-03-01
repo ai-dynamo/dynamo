@@ -61,7 +61,6 @@ jobs:
       sglang: ${{ steps.changes.outputs.sglang }}
       trtllm: ${{ steps.changes.outputs.trtllm }}
       builder_name: ${{ steps.export-builder-name.outputs.builder_name }}
-      sanitized_ref_name: ${{ steps.sanitize-ref.outputs.sanitized_ref_name }}
     steps:
       - name: Checkout code
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
@@ -76,11 +75,6 @@ jobs:
         id: export-builder-name
         run: |
           echo "builder_name=${{ env.BUILDER_NAME }}" >> $GITHUB_OUTPUT
-      - name: Sanitize ref name for container tags
-        id: sanitize-ref
-        run: |
-          sanitized=$(echo "${{ github.ref_name }}" | sed 's/[^a-zA-Z0-9._-]/-/g' | sed 's/^-//;s/-$//' | cut -c1-128)
-          echo "sanitized_ref_name=${sanitized}" >> $GITHUB_OUTPUT
 
   backend-status-check:
     runs-on: ubuntu-latest
@@ -221,19 +215,16 @@ jobs:
       platforms: '["amd64", "arm64"]'
       cuda_versions: '["12.9", "13.0"]'
       extra_tags: |
-        ${{ inputs.build_vllm && format('{0}-vllm', needs.changed-files.outputs.sanitized_ref_name) || '' }}
         ${{ github.ref_name == 'main' && 'main-vllm' || '' }}
         ${{ github.ref_name == 'main' && format('main-vllm-{0}', github.sha) || '' }}
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
       copy_timeout_minutes: ${{ github.ref_name == 'main' && 20 || 10 }}
-      run_cpu_only_tests: ${{ !inputs.build_vllm }}
       cpu_only_test_markers: 'pre_merge and vllm and gpu_0'
-      run_single_gpu_tests: ${{ !inputs.build_vllm }}
       single_gpu_test_markers: 'pre_merge and vllm and gpu_1'
       single_gpu_test_timeout_minutes: 35
       run_multi_gpu_tests: false  # TODO: Dmitry is working on fixing markers for multi-GPU tests, can enable after that is resolved
-      show_summary: ${{ inputs.build_vllm }}
+      build_only: ${{ inputs.build_vllm }}
     secrets: inherit
 
   # ============================================================================
@@ -249,18 +240,15 @@ jobs:
       platforms: '["amd64", "arm64"]'
       cuda_versions: '["12.9", "13.0"]'
       extra_tags: |
-        ${{ inputs.build_sglang && format('{0}-sglang', needs.changed-files.outputs.sanitized_ref_name) || '' }}
         ${{ github.ref_name == 'main' && 'main-sglang' || '' }}
         ${{ github.ref_name == 'main' && format('main-sglang-{0}', github.sha) || '' }}
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
       copy_timeout_minutes: ${{ github.ref_name == 'main' && 20 || 10 }}
-      run_cpu_only_tests: ${{ !inputs.build_sglang }}
       cpu_only_test_markers: 'pre_merge and sglang and gpu_0'
-      run_single_gpu_tests: ${{ !inputs.build_sglang }}
       single_gpu_test_markers: 'pre_merge and sglang and gpu_1'
       run_multi_gpu_tests: false  # TODO: Dmitry is working on fixing markers for multi-GPU tests, can enable after that is resolved
-      show_summary: ${{ inputs.build_sglang }}
+      build_only: ${{ inputs.build_sglang }}
     secrets: inherit
 
   # ============================================================================
@@ -276,18 +264,15 @@ jobs:
       platforms: '["amd64", "arm64"]'
       cuda_versions: '["13.1"]'
       extra_tags: |
-        ${{ inputs.build_trtllm && format('{0}-trtllm', needs.changed-files.outputs.sanitized_ref_name) || '' }}
         ${{ github.ref_name == 'main' && 'main-trtllm' || '' }}
         ${{ github.ref_name == 'main' && format('main-trtllm-{0}', github.sha) || '' }}
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
       copy_timeout_minutes: ${{ github.ref_name == 'main' && 20 || 10 }}
-      run_cpu_only_tests: ${{ !inputs.build_trtllm }}
       cpu_only_test_markers: 'pre_merge and trtllm and gpu_0'
-      run_single_gpu_tests: ${{ !inputs.build_trtllm }}
       single_gpu_test_markers: 'pre_merge and trtllm and gpu_1'
       run_multi_gpu_tests: false  # TODO: Dmitry is working on fixing markers for multi-GPU tests, can enable after that is resolved
-      show_summary: ${{ inputs.build_trtllm }}
+      build_only: ${{ inputs.build_trtllm }}
     secrets: inherit
 
 
