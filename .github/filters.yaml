@@ -108,6 +108,8 @@ deploy:
   - 'deploy/helm/**'
   - 'deploy/utils/**'
   - 'deploy/chrek/**'
+  - 'deploy/docker/**'
+  - 'deploy/docker/.*'
 
 planner:
   - 'components/src/dynamo/planner/**'
