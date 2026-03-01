@@ -51,8 +51,9 @@ func NewDGDDefaulter(operatorVersion string) *DGDDefaulter {
 }
 
 // Default implements admission.CustomDefaulter.
+// On every operation: defaults nil Replicas to 1 for all services.
 // On CREATE: stamps nvidia.com/dynamo-operator-origin-version with the operator version.
-// On UPDATE: does nothing -- the origin version is immutable once set.
+// On UPDATE/DELETE: the origin version annotation is immutable once set.
 func (d *DGDDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 	logger := log.FromContext(ctx).WithName(dgdDefaultingWebhookName)
 

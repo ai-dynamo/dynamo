@@ -208,6 +208,24 @@ func TestDGDDefaulter_DefaultsNilReplicas(t *testing.T) {
 				"Worker": 5,
 			},
 		},
+		{
+			name: "preserves explicit zero replicas",
+			op:   admissionv1.Create,
+			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"Idle": {Replicas: ptr.To(int32(0))},
+			},
+			wantReplicas: map[string]int32{
+				"Idle": 0,
+			},
+		},
+		{
+			name: "nil service pointer in map is safe",
+			op:   admissionv1.Create,
+			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"Ghost": nil,
+			},
+			wantReplicas: map[string]int32{},
+		},
 	}
 
 	for _, tt := range tests {

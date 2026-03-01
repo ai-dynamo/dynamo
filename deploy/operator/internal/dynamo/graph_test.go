@@ -4290,6 +4290,15 @@ func TestExpandRolesForService(t *testing.T) {
 				{Name: "test-service", Role: RoleMain, Replicas: 1},
 			},
 		},
+		{
+			name:            "zero replicas preserved",
+			serviceName:     "test-service",
+			numberOfNodes:   1,
+			serviceReplicas: ptr.To(int32(0)),
+			expected: []ServiceRole{
+				{Name: "test-service", Role: RoleMain, Replicas: 0},
+			},
+		},
 	}
 
 	for _, tt := range tests {
