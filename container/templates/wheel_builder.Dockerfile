@@ -322,6 +322,7 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     uv build . --wheel --out-dir /opt/dynamo/dist/nixl --python $PYTHON_VERSION
 
 # Copy source code (order matters for layer caching)
+COPY .cargo/ /opt/dynamo/.cargo/
 COPY pyproject.toml README.md LICENSE Cargo.toml Cargo.lock rust-toolchain.toml hatch_build.py /opt/dynamo/
 COPY lib/ /opt/dynamo/lib/
 COPY components/ /opt/dynamo/components/

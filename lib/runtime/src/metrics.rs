@@ -6,7 +6,9 @@
 //! This module provides a trait-based interface for creating and managing Prometheus metrics
 //! with automatic label injection and hierarchical naming support.
 
+pub mod frontend_perf;
 pub mod prometheus_names;
+pub mod tokio_perf;
 
 use parking_lot::Mutex;
 use std::collections::HashSet;
