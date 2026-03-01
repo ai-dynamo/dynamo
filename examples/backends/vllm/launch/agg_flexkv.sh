@@ -1,0 +1,13 @@
+#!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+set -e
+trap 'echo Cleaning up...; kill 0' EXIT
+
+# Run frontend
+python -m dynamo.frontend &
+
+# Run worker with FlexKV
+DYNAMO_USE_FLEXKV=1 \
+FLEXKV_CPU_CACHE_GB=32 \
+  python -m dynamo.vllm --model Qwen/Qwen3-0.6B --kv-transfer-config '{"kv_connector":"FlexKVConnectorV1","kv_role":"kv_both"}'

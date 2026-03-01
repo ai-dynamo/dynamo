@@ -33,6 +33,7 @@ We recommend using the [latest stable release](https://github.com/ai-dynamo/dyna
 | [**Load Based Planner**](../../components/planner/README.md) | 🚧 | WIP |
 | [**KVBM**](../../components/kvbm/README.md) | ✅ |  |
 | [**LMCache**](../../integrations/lmcache-integration.md) | ✅ |  |
+| [**FlexKV**](../../integrations/flexkv-integration.md) | ✅ |  |
 | [**Prompt Embeddings**](./prompt-embeddings.md) | ✅ | Requires `--enable-prompt-embeds` flag |
 
 ### Large Scale P/D and WideEP Features
