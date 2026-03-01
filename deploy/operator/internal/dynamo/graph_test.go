@@ -1509,6 +1509,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														Value: "nats-address",
 													},
 													{
+														Name:  "NVIDIA_VISIBLE_DEVICES",
+														Value: "void",
+													},
+													{
 														Name: "POD_NAME",
 														ValueFrom: &corev1.EnvVarSource{
 															FieldRef: &corev1.ObjectFieldSelector{
@@ -1690,6 +1694,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													{
 														Name:  "NATS_SERVER",
 														Value: "nats-address",
+													},
+													{
+														Name:  "NVIDIA_VISIBLE_DEVICES",
+														Value: "void",
 													},
 													{
 														Name:  "ETCD_ENDPOINTS",
@@ -2495,6 +2503,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														Value: "nats-address",
 													},
 													{
+														Name:  "NVIDIA_VISIBLE_DEVICES",
+														Value: "void",
+													},
+													{
 														Name:  "ETCD_ENDPOINTS",
 														Value: "etcd-address",
 													},
@@ -2667,6 +2679,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													{
 														Name:  "NATS_SERVER",
 														Value: "nats-address",
+													},
+													{
+														Name:  "NVIDIA_VISIBLE_DEVICES",
+														Value: "void",
 													},
 													{
 														Name:  "ETCD_ENDPOINTS",
@@ -3481,6 +3497,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														Value: "nats-address",
 													},
 													{
+														Name:  "NVIDIA_VISIBLE_DEVICES",
+														Value: "void",
+													},
+													{
 														Name:  "ETCD_ENDPOINTS",
 														Value: "etcd-address",
 													},
@@ -3660,6 +3680,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													{
 														Name:  "NATS_SERVER",
 														Value: "nats-address",
+													},
+													{
+														Name:  "NVIDIA_VISIBLE_DEVICES",
+														Value: "void",
 													},
 													{
 														Name:  "ETCD_ENDPOINTS",
@@ -4973,7 +4997,8 @@ func TestGenerateBasePodSpec_Frontend(t *testing.T) {
 			},
 			backendFramework: BackendFrameworkVLLM,
 			wantEnvVars: map[string]string{
-				"DYN_HTTP_PORT": fmt.Sprintf("%d", commonconsts.DynamoServicePort),
+				"DYN_HTTP_PORT":          fmt.Sprintf("%d", commonconsts.DynamoServicePort),
+				"NVIDIA_VISIBLE_DEVICES": "void",
 			},
 		},
 		{
@@ -5039,6 +5064,71 @@ func TestGenerateBasePodSpec_Frontend(t *testing.T) {
 				if envVars[k] != v {
 					t.Errorf("GenerateBasePodSpec() env var %s = %v, want %v",
 						k, envVars[k], v)
+				}
+			}
+		})
+	}
+}
+
+func TestGenerateBasePodSpec_NonGPUComponentsDisableNvidiaRuntime(t *testing.T) {
+	secretsRetriever := &mockSecretsRetriever{}
+	controllerConfig := &configv1alpha1.OperatorConfiguration{}
+
+	nonGPUTypes := []string{
+		commonconsts.ComponentTypeFrontend,
+		commonconsts.ComponentTypeEPP,
+		commonconsts.ComponentTypePlanner,
+	}
+	gpuTypes := []string{
+		commonconsts.ComponentTypeWorker,
+		commonconsts.ComponentTypePrefill,
+		commonconsts.ComponentTypeDecode,
+	}
+
+	for _, ct := range nonGPUTypes {
+		t.Run(ct+" sets NVIDIA_VISIBLE_DEVICES=void", func(t *testing.T) {
+			component := &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: ct,
+			}
+			podSpec, err := GenerateBasePodSpec(
+				component, BackendFrameworkVLLM, secretsRetriever,
+				"test", "default", RoleMain, 1, controllerConfig,
+				commonconsts.MultinodeDeploymentTypeGrove, "test-svc", nil,
+			)
+			if err != nil {
+				t.Fatalf("GenerateBasePodSpec() error = %v", err)
+			}
+			found := false
+			for _, env := range podSpec.Containers[0].Env {
+				if env.Name == "NVIDIA_VISIBLE_DEVICES" {
+					found = true
+					if env.Value != "void" {
+						t.Errorf("NVIDIA_VISIBLE_DEVICES = %q, want \"void\"", env.Value)
+					}
+				}
+			}
+			if !found {
+				t.Error("NVIDIA_VISIBLE_DEVICES env var not found on non-GPU component")
+			}
+		})
+	}
+
+	for _, ct := range gpuTypes {
+		t.Run(ct+" does not set NVIDIA_VISIBLE_DEVICES=void", func(t *testing.T) {
+			component := &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: ct,
+			}
+			podSpec, err := GenerateBasePodSpec(
+				component, BackendFrameworkVLLM, secretsRetriever,
+				"test", "default", RoleMain, 1, controllerConfig,
+				commonconsts.MultinodeDeploymentTypeGrove, "test-svc", nil,
+			)
+			if err != nil {
+				t.Fatalf("GenerateBasePodSpec() error = %v", err)
+			}
+			for _, env := range podSpec.Containers[0].Env {
+				if env.Name == "NVIDIA_VISIBLE_DEVICES" && env.Value == "void" {
+					t.Error("GPU component should not have NVIDIA_VISIBLE_DEVICES=void")
 				}
 			}
 		})
