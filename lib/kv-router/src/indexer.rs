@@ -359,6 +359,14 @@ pub trait KvIndexerInterface {
     async fn flush(&self) -> usize;
 }
 
+pub enum WorkerTask {
+    Event(RouterEvent),
+    /// Permanently remove a worker from tracking (keep_worker: false).
+    RemoveWorker(WorkerId),
+    DumpEvents(oneshot::Sender<anyhow::Result<Vec<RouterEvent>>>),
+    Terminate,
+}
+
 // ============================================================================
 // SyncIndexer trait and ThreadPoolIndexer generic wrapper
 // ============================================================================
@@ -373,17 +381,18 @@ pub trait KvIndexerInterface {
 /// - Sticky event routing to N worker threads
 /// - Inline reads on the caller's thread (no channel dispatch for find_matches)
 pub trait SyncIndexer: Send + Sync + 'static {
+    fn worker(&self, event_receiver: flume::Receiver<WorkerTask>) -> anyhow::Result<()>;
+
     /// Find matches for a sequence of block hashes.
     fn find_matches(&self, sequence: &[LocalBlockHash], early_exit: bool) -> OverlapScores;
 
-    /// Apply a router event to the data structure.
-    fn apply_event(&self, event: RouterEvent) -> Result<(), KvCacheEventError>;
-
-    /// Remove all entries for a worker.
-    fn remove_worker(&self, worker_id: WorkerId);
-
-    /// Dump the data structure as router events for reconstruction.
-    fn dump_events(&self) -> Vec<RouterEvent>;
+    /// Dump events directly from the shared structure, bypassing worker channels.
+    /// Returns `Some(events)` for backends whose tree state is fully shared (e.g.
+    /// ConcurrentRadixTree). Returns `None` for backends that keep per-thread
+    /// state and must dump via the worker channel.
+    fn dump_events(&self) -> Option<Vec<RouterEvent>> {
+        None
+    }
 }
 
 /// Generic wrapper that provides [`KvIndexerInterface`] for any [`SyncIndexer`] backend.
@@ -415,9 +424,9 @@ pub struct ThreadPoolIndexer<T: SyncIndexer> {
     /// Counter for round-robin assignment of new WorkerIds.
     worker_assignment_count: AtomicUsize,
 
-    /// Channels to send events to worker threads (one per thread).
-    /// Sending `None` signals the thread to shut down.
-    worker_event_channels: Vec<flume::Sender<Option<RouterEvent>>>,
+    /// Channels to send tasks to worker threads (one per thread).
+    /// Sending `WorkerTask::Terminate` signals the thread to shut down.
+    worker_event_channels: Vec<flume::Sender<WorkerTask>>,
 
     /// Number of worker threads.
     num_workers: usize,
@@ -450,18 +459,13 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
         let mut worker_event_senders = Vec::new();
         let mut thread_handles = Vec::new();
         for _ in 0..num_workers {
-            let (event_sender, event_receiver) = flume::unbounded::<Option<RouterEvent>>();
+            let (event_sender, event_receiver) = flume::unbounded::<WorkerTask>();
             worker_event_senders.push(event_sender);
 
             let backend = Arc::clone(&backend);
 
             let handle = std::thread::spawn(move || {
-                while let Ok(Some(event)) = event_receiver.recv() {
-                    if let Err(e) = backend.apply_event(event) {
-                        tracing::warn!("Failed to apply event: {:?}", e);
-                    }
-                }
-                tracing::debug!("Worker thread shutting down");
+                backend.worker(event_receiver).unwrap();
             });
             thread_handles.push(handle);
         }
@@ -530,7 +534,7 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
         });
 
         // Send event to the assigned worker thread
-        if let Err(e) = self.worker_event_channels[thread_idx].send(Some(event)) {
+        if let Err(e) = self.worker_event_channels[thread_idx].send(WorkerTask::Event(event)) {
             tracing::error!(
                 "Failed to send event to worker thread {}: {:?}",
                 thread_idx,
@@ -540,14 +544,34 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
     }
 
     async fn remove_worker(&self, worker_id: WorkerId) {
-        // Execute inline - the backend is thread-safe
-        self.backend.remove_worker(worker_id);
+        // Route to the worker's assigned thread (if any), otherwise broadcast
+        // to all threads since dp_ranks may be spread across threads.
+        let thread_idx = self.worker_assignments.get(&worker_id).map(|v| *v);
+        match thread_idx {
+            Some(idx) => {
+                if let Err(e) =
+                    self.worker_event_channels[idx].send(WorkerTask::RemoveWorker(worker_id))
+                {
+                    tracing::error!(
+                        "Failed to send RemoveWorker to worker thread {}: {:?}",
+                        idx,
+                        e
+                    );
+                }
+            }
+            None => {
+                // Worker was never assigned a thread - broadcast to all
+                for channel in &self.worker_event_channels {
+                    let _ = channel.send(WorkerTask::RemoveWorker(worker_id));
+                }
+            }
+        }
     }
 
     fn shutdown(&self) {
-        // Send shutdown signal (None) to all worker threads
+        // Send shutdown signal to all worker threads
         for channel in self.worker_event_channels.iter() {
-            let _ = channel.send(None);
+            let _ = channel.send(WorkerTask::Terminate);
         }
 
         // Take ownership of thread handles and join them
@@ -565,8 +589,41 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
     }
 
     async fn dump_events(&self) -> Result<Vec<RouterEvent>, KvRouterError> {
-        // Execute inline - the backend is thread-safe
-        Ok(self.backend.dump_events())
+        // Fast path: backend can dump directly from shared state (e.g. ConcurrentRadixTree).
+        if let Some(events) = self.backend.dump_events() {
+            return Ok(events);
+        }
+
+        // Slow path: collect from each worker thread via channel (e.g. PositionalIndexer).
+        let mut receivers = Vec::new();
+
+        for channel in &self.worker_event_channels {
+            let (resp_tx, resp_rx) = oneshot::channel::<anyhow::Result<Vec<RouterEvent>>>();
+            let dump_req = WorkerTask::DumpEvents(resp_tx);
+
+            channel
+                .send(dump_req)
+                .map_err(|_| KvRouterError::IndexerOffline)?;
+            receivers.push(resp_rx);
+        }
+
+        let mut event_id_counter = 0;
+
+        let mut all_events = Vec::new();
+
+        for resp_rx in receivers {
+            let mut events = resp_rx
+                .await
+                .map_err(|_| KvRouterError::IndexerDroppedRequest)?
+                .map_err(|_| KvRouterError::IndexerOffline)?;
+            for event in &mut events {
+                event.event.event_id = event_id_counter;
+                event_id_counter += 1;
+            }
+            all_events.extend(events);
+        }
+
+        Ok(all_events)
     }
 
     async fn process_routing_decision_for_request(
@@ -2351,6 +2408,16 @@ mod tests {
     #[apply(indexer_template)]
     async fn test_shutdown(variant: &str) {
         let index = make_indexer(variant);
+        index.shutdown();
+    }
+
+    #[tokio::test]
+    #[apply(indexer_template)]
+    async fn test_shutdown_idempotent(variant: &str) {
+        let index = make_indexer(variant);
+        index.apply_event(make_store_event(0, &[1, 2, 3])).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        index.shutdown();
         index.shutdown();
     }
 

@@ -246,11 +246,22 @@ impl SchedulerState {
     }
 }
 
+/// Cancels its token when dropped. Shared via Arc so the background task is
+/// only cancelled when the last Scheduler clone is dropped.
+struct CancelGuard(CancellationToken);
+
+impl Drop for CancelGuard {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
+
 /// Manages scheduling of requests using KvManager resources
 #[derive(Clone)]
 pub struct Scheduler {
     request_tx: mpsc::UnboundedSender<DirectRequest>,
     metrics_rx: tokio::sync::watch::Receiver<MockerMetrics>,
+    _cancel_guard: Arc<CancelGuard>,
 }
 
 impl Scheduler {
@@ -273,7 +284,9 @@ impl Scheduler {
         let (metrics_tx, metrics_rx) =
             tokio::sync::watch::channel::<MockerMetrics>(initial_metrics);
 
-        let cancel_token_clone = cancellation_token.unwrap_or_default().clone();
+        let cancel_token = cancellation_token.unwrap_or_default();
+        let cancel_token_clone = cancel_token.clone();
+        let cancel_guard = Arc::new(CancelGuard(cancel_token));
 
         // Spawn main background task with cancellation token
         tokio::spawn(async move {
@@ -330,6 +343,7 @@ impl Scheduler {
         Self {
             request_tx,
             metrics_rx,
+            _cancel_guard: cancel_guard,
         }
     }
 
@@ -360,13 +374,16 @@ async fn receive_requests(
     }
 
     if state.is_empty() {
-        // Fully idle - block until new request arrives
+        // Fully idle - block until new request arrives or shutdown
         tokio::select! {
             biased;
             _ = cancel_token.cancelled() => {
                 return None;
             }
-            Some(request) = request_rx.recv() => {
+            result = request_rx.recv() => {
+                let Some(request) = result else {
+                    return None; // channel closed
+                };
                 state.receive(request);
                 return Some(());
             }

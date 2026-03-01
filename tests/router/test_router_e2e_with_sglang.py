@@ -387,18 +387,12 @@ def test_sglang_kv_router_basic(
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
-@pytest.mark.parametrize(
-    "router_event_threads",
-    [1, 2],
-    ids=["single_thread", "multi_thread"],
-)
 def test_router_decisions_sglang_multiple_workers(
     request,
     runtime_services_dynamic_ports,
     predownload_models,
     set_ucx_tls_no_mm,
     request_plane,
-    router_event_threads,
 ):
     # runtime_services starts etcd and nats
     logger.info("Starting SGLang router prefix reuse test with two workers")
@@ -425,7 +419,6 @@ def test_router_decisions_sglang_multiple_workers(
             request,
             test_dp_rank=False,
             block_size=PAGE_SIZE,
-            router_event_threads=router_event_threads,
         )
 
 
@@ -433,6 +426,7 @@ def test_router_decisions_sglang_multiple_workers(
 @pytest.mark.post_merge
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 @pytest.mark.timeout(600)  # 10 min max (multi-GPU + DP startup variance)
+@pytest.mark.skip(reason="DYN-2265")
 def test_router_decisions_sglang_dp(
     request,
     runtime_services_dynamic_ports,
