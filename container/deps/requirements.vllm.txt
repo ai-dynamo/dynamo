@@ -1,0 +1,7 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# vLLM-specific runtime dependencies (multimodal features).
+
+av==15.0.0
+sentencepiece==0.2.1

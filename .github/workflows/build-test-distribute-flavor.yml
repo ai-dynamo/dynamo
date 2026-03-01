@@ -240,7 +240,7 @@ jobs:
               ${MAKE_EFA_FLAG} \
               --show-result \
               --output-short-filename
-      - name: Build Container
+      - name: Build and Push Runtime Image
         id: build-image
         timeout-minutes: ${{ inputs.build_timeout_minutes }}
         uses: ./.github/actions/docker-remote-build
@@ -260,6 +260,29 @@ jobs:
           extra_tags: ${{ steps.extra-tags.outputs.tags }}
           push_image: ${{ inputs.push_image }}
           no_load: ${{ inputs.no_load }}
+      - name: Build and Push Test Image
+        shell: bash
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+        run: |
+          CUDA_MAJOR=${{ steps.calculate-target-tag.outputs.cuda_version_plain }}
+          CACHE_TAG="test-${{ inputs.framework }}-cuda${CUDA_MAJOR}-${{ inputs.platform }}-cache"
+          CACHE_ARGS="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${CACHE_TAG}"
+          CACHE_ARGS+=" --cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:release-${CACHE_TAG}"
+          if [[ "$GITHUB_REF_NAME" == "main" ]]; then
+            CACHE_ARGS+=" --cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${CACHE_TAG},mode=max"
+          elif [[ "$GITHUB_REF_NAME" =~ ^release ]]; then
+            CACHE_ARGS+=" --cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:release-${CACHE_TAG},mode=max"
+          fi
+
+          docker buildx build \
+            --progress=plain \
+            --push \
+            --platform linux/${{ inputs.platform }} \
+            -f container/Dockerfile.test \
+            --build-arg BASE_IMAGE=${{ steps.calculate-target-tag.outputs.default_target_image_uri }} \
+            ${CACHE_ARGS} \
+            -t ${{ steps.calculate-target-tag.outputs.default_target_image_uri }}-test .
       - name: Show summary
         shell: bash
         if: ${{ inputs.push_image && inputs.show_summary }}
@@ -291,8 +314,9 @@ jobs:
           CUDA_VERSION_RAW=${{ inputs.cuda_version }}
           CUDA_VERSION=${CUDA_VERSION_RAW%%.*}
           echo "cuda_version_plain=${CUDA_VERSION}" >> $GITHUB_OUTPUT
-          TEST_IMAGE=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build.outputs.target_tag_plain }}-cuda${CUDA_VERSION}-${{ inputs.platform }}
-          echo "test_image=${TEST_IMAGE}" >> $GITHUB_OUTPUT
+          RUNTIME_IMAGE=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build.outputs.target_tag_plain }}-cuda${CUDA_VERSION}-${{ inputs.platform }}
+          echo "runtime_image=${RUNTIME_IMAGE}" >> $GITHUB_OUTPUT
+          echo "test_image=${RUNTIME_IMAGE}-test" >> $GITHUB_OUTPUT
       - name: Docker Login
         uses: ./.github/actions/docker-login
         with:
@@ -305,6 +329,7 @@ jobs:
         shell: bash
         run: |
           start_time=$(date +%s)
+          docker pull ${{ steps.calculate-target-tag.outputs.runtime_image }}
           docker pull ${{ steps.calculate-target-tag.outputs.test_image }}
           docker pull quay.io/minio/minio
           end_time=$(date +%s)
@@ -314,14 +339,14 @@ jobs:
       - name: Run Sanity Check on Runtime Image
         shell: bash
         run: |
-          echo "Running sanity check on image: ${{ steps.calculate-target-tag.outputs.test_image }}"
+          echo "Running sanity check on image: ${{ steps.calculate-target-tag.outputs.runtime_image }}"
 
           # Run the sanity check script inside the container
           # The script is located in /workspace/deploy/sanity_check.py in runtime containers
           export WORKSPACE=/workspace
 
           set +e
-          docker run --rm "${{ steps.calculate-target-tag.outputs.test_image }}" python ${WORKSPACE}/deploy/sanity_check.py --runtime-check --no-gpu-check
+          docker run --rm "${{ steps.calculate-target-tag.outputs.runtime_image }}" python ${WORKSPACE}/deploy/sanity_check.py --runtime-check --no-gpu-check
           SANITY_CHECK_EXIT_CODE=$?
           set -e
           if [ ${SANITY_CHECK_EXIT_CODE} -ne 0 ]; then
@@ -389,8 +414,9 @@ jobs:
           CUDA_VERSION_RAW=${{ inputs.cuda_version }}
           CUDA_VERSION=${CUDA_VERSION_RAW%%.*}
           echo "cuda_version_plain=${CUDA_VERSION}" >> $GITHUB_OUTPUT
-          TEST_IMAGE=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build.outputs.target_tag_plain }}-cuda${CUDA_VERSION}-${{ inputs.platform }}
-          echo "test_image=${TEST_IMAGE}" >> $GITHUB_OUTPUT
+          RUNTIME_IMAGE=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build.outputs.target_tag_plain }}-cuda${CUDA_VERSION}-${{ inputs.platform }}
+          echo "runtime_image=${RUNTIME_IMAGE}" >> $GITHUB_OUTPUT
+          echo "test_image=${RUNTIME_IMAGE}-test" >> $GITHUB_OUTPUT
       - name: Docker Login
         uses: ./.github/actions/docker-login
         with:
@@ -451,8 +477,6 @@ jobs:
           CUDA_VERSION_RAW=${{ inputs.cuda_version }}
           CUDA_VERSION=${CUDA_VERSION_RAW%%.*}
           echo "cuda_version_plain=${CUDA_VERSION}" >> $GITHUB_OUTPUT
-          TEST_IMAGE=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build.outputs.target_tag_plain }}-cuda${CUDA_VERSION}-${{ inputs.platform }}
-          echo "test_image=${TEST_IMAGE}" >> $GITHUB_OUTPUT
 
       - name: Copy image to target registry
         timeout-minutes: ${{ inputs.copy_timeout_minutes }}

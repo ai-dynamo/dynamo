@@ -72,14 +72,16 @@ RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
     mkdir -p /opt/dynamo/venv && \
     uv venv /opt/dynamo/venv --python $PYTHON_VERSION
 
-# Install common and test dependencies. In an ideal world, we'd use a mirror of PyPI for much more reliable downloads.
-RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
-    --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
+# Install runtime dependencies (common + frontend).
+# Frontend needs tritonclient and its grpcio/protobuf constraints for gRPC serving.
+# Test and dev dependencies are NOT installed here — they go in the test and dev images.
+RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tmp/requirements.common.txt \
+    --mount=type=bind,source=./container/deps/requirements.frontend.txt,target=/tmp/requirements.frontend.txt \
     --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     uv pip install \
-        --requirement /tmp/requirements.txt \
-        --requirement /tmp/requirements.test.txt
+        --requirement /tmp/requirements.common.txt \
+        --requirement /tmp/requirements.frontend.txt
 
 ARG ENABLE_KVBM
 ARG ENABLE_GPU_MEMORY_SERVICE

@@ -234,17 +234,22 @@ RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
     # pip/uv bypasses umask when creating .egg-info files, but chmod -R is fast here (small directory)
     chmod -R g+w /workspace/benchmarks
 
-# Install common and test dependencies
+# Install runtime dependencies (common + trtllm-specific + planner + benchmarks).
+# Test and dev dependencies are NOT installed here — they go in the test and dev images.
 # --no-cache is intentional: mixed indexes (PyPI + PyTorch CUDA wheels) risk serving stale/wrong-variant cached wheels
-RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
-    --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
+RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tmp/requirements.common.txt \
+    --mount=type=bind,source=./container/deps/requirements.trtllm.txt,target=/tmp/requirements.trtllm.txt \
+    --mount=type=bind,source=./container/deps/requirements.planner.txt,target=/tmp/requirements.planner.txt \
+    --mount=type=bind,source=./container/deps/requirements.benchmark.txt,target=/tmp/requirements.benchmark.txt \
     export UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     uv pip install \
         --no-cache \
         --index-strategy unsafe-best-match \
         --extra-index-url https://download.pytorch.org/whl/cu130 \
-        --requirement /tmp/requirements.txt \
-        --requirement /tmp/requirements.test.txt \
+        --requirement /tmp/requirements.common.txt \
+        --requirement /tmp/requirements.trtllm.txt \
+        --requirement /tmp/requirements.planner.txt \
+        --requirement /tmp/requirements.benchmark.txt \
         cupy-cuda13x
 
 # Copy tests, deploy and components for CI with correct ownership

@@ -234,14 +234,19 @@ RUN if [ "${ENABLE_MODELEXPRESS_P2P}" = "true" ]; then \
         uv pip install "modelexpress @ git+https://github.com/ai-dynamo/modelexpress.git@${MODELEXPRESS_REF}#subdirectory=modelexpress_client/python"; \
     fi
 
-# Install common and test dependencies. Cache uv downloads; uv handles its own locking for this cache.
-RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
-    --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
+# Install runtime dependencies (common + vllm-specific + planner + benchmarks).
+# Test and dev dependencies are NOT installed here — they go in the test and dev images.
+RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tmp/requirements.common.txt \
+    --mount=type=bind,source=./container/deps/requirements.vllm.txt,target=/tmp/requirements.vllm.txt \
+    --mount=type=bind,source=./container/deps/requirements.planner.txt,target=/tmp/requirements.planner.txt \
+    --mount=type=bind,source=./container/deps/requirements.benchmark.txt,target=/tmp/requirements.benchmark.txt \
     --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     uv pip install \
-        --requirement /tmp/requirements.txt \
-        --requirement /tmp/requirements.test.txt
+        --requirement /tmp/requirements.common.txt \
+        --requirement /tmp/requirements.vllm.txt \
+        --requirement /tmp/requirements.planner.txt \
+        --requirement /tmp/requirements.benchmark.txt
 
 # Copy tests, deploy and components for CI with correct ownership
 # Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
