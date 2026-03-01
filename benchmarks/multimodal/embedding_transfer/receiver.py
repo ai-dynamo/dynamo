@@ -5,7 +5,7 @@ import asyncio
 import logging
 
 import uvloop
-from protocols import TransferConfig, TransferRequest
+from protocol import BatchTransferRequest, EmbeddingTransferMode, TransferConfig
 
 from dynamo.common.multimodal.embedding_transfer import (
     LocalEmbeddingReceiver,
@@ -27,18 +27,18 @@ class Receiver:
         self.read_receiver = NixlReadEmbeddingReceiver(
             embedding_hidden_size=8 * 1024, max_item_mm_token=1024
         )
-        self.config = TransferConfig(
-            use_gpu=False, tensor_count_per_request=30, transfer_type="local"
-        )
+        self.config = TransferConfig()
 
     def get_run_config(self):
         # Select the variant of sender/receiver based on config
-        if self.config.transfer_type == "local":
+        if self.config.transfer_type == EmbeddingTransferMode.LOCAL:
             receiver = self.local_receiver
-        elif self.config.transfer_type == "nixl_write":
+        elif self.config.transfer_type == EmbeddingTransferMode.NIXL_WRITE:
             receiver = self.write_receiver
-        elif self.config.transfer_type == "nixl_read":
+        elif self.config.transfer_type == EmbeddingTransferMode.NIXL_READ:
             receiver = self.read_receiver
+        else:
+            raise ValueError(f"Invalid transfer type: {self.config.transfer_type}")
         # sender size config
         # tensor = self.gpu_tensor if self.config.use_gpu else self.cpu_tensor
         # tensor_count = self.config.tensor_count_per_request
@@ -53,31 +53,33 @@ class Receiver:
         self.send_client = await self.sender_write_endpoint.client()
         # await self.send_client.wait_for_instances()
 
-    async def generate(self, request):
+    async def batch_receive(self, batch_transfer_request: BatchTransferRequest):
         receiver, _, _ = self.get_run_config()
-        stream = await self.send_client.round_robin("send_request")
-        async for response in stream:
-            response = TransferRequest.model_validate_json(response.data())
-
-            tasks = [
-                asyncio.create_task(receiver.receive_embeddings(tr))
-                for tr in response.requests
-            ]
-            responses = await asyncio.gather(*tasks)
-            for id, _ in responses:
-                receiver.release_tensor(id)
-            yield "done"
-
-    async def read(self, request):
-        receiver, _, _ = self.get_run_config()
-        request = TransferRequest.model_validate_json(request)
         tasks = [
             asyncio.create_task(receiver.receive_embeddings(tr))
-            for tr in request.requests
+            for tr in batch_transfer_request.requests
         ]
-        responses = await asyncio.gather(*tasks)
-        for id, _ in responses:
-            receiver.release_tensor(id)
+        responses = await asyncio.gather(*tasks, return_exceptions=True)
+        first_error = None
+        for result in responses:
+            if isinstance(result, Exception):
+                first_error = first_error or result
+                continue
+            tensor_id, _ = result
+            receiver.release_tensor(tensor_id)
+        if first_error:
+            raise first_error
+
+    async def generate(self, request):
+        stream = await self.send_client.round_robin("send_request")
+        async for response in stream:
+            await self.batch_receive(
+                BatchTransferRequest.model_validate_json(response.data())
+            )
+        yield "done"
+
+    async def read(self, request):
+        await self.batch_receive(BatchTransferRequest.model_validate_json(request))
         yield "done"
 
     async def update_config(self, request):

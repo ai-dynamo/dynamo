@@ -6,7 +6,7 @@ import logging
 
 import torch
 import uvloop
-from protocols import TransferConfig, TransferRequest
+from protocol import BatchTransferRequest, EmbeddingTransferMode, TransferConfig
 
 from dynamo.common.multimodal.embedding_transfer import (
     LocalEmbeddingSender,
@@ -28,21 +28,25 @@ class Sender:
         self.write_sender = NixlWriteEmbeddingSender()
         # GPU tensor to mimic encoder output
         self.cpu_tensor = torch.randn([256, 8 * 1024], dtype=torch.float16)
-        self.gpu_tensor = torch.randn(
-            [256, 8 * 1024], dtype=torch.float16, device="cuda"
+        self.gpu_tensor = (
+            torch.randn([256, 8 * 1024], dtype=torch.float16, device="cuda")
+            if torch.cuda.is_available()
+            else None
         )
-        self.config = TransferConfig(
-            use_gpu=False, tensor_count_per_request=30, transfer_type="local"
-        )
+        self.config = TransferConfig()
 
     def get_run_config(self):
+        if self.config.use_gpu and self.gpu_tensor is None:
+            raise RuntimeError("GPU mode requested but CUDA is not available.")
         # Select the variant of sender/receiver based on config
-        if self.config.transfer_type == "local":
+        if self.config.transfer_type == EmbeddingTransferMode.LOCAL:
             sender = self.local_sender
-        elif self.config.transfer_type == "nixl_write":
+        elif self.config.transfer_type == EmbeddingTransferMode.NIXL_WRITE:
             sender = self.write_sender
-        elif self.config.transfer_type == "nixl_read":
+        elif self.config.transfer_type == EmbeddingTransferMode.NIXL_READ:
             sender = self.read_sender
+        else:
+            raise ValueError(f"Invalid transfer type: {self.config.transfer_type}")
         tensor = self.gpu_tensor if self.config.use_gpu else self.cpu_tensor
         tensor_count = self.config.tensor_count_per_request
         return sender, tensor, tensor_count
@@ -58,7 +62,7 @@ class Sender:
         # Select the variant of sender/receiver based on config
         sender, tensor, tensor_count = self.get_run_config()
 
-        request = TransferRequest(requests=[])
+        request = BatchTransferRequest(requests=[])
         futures = []
         for _ in range(tensor_count):
             transfer_request, send_future = await sender.send_embeddings(
@@ -76,7 +80,7 @@ class Sender:
         # Select the variant of sender/receiver based on config
         sender, tensor, tensor_count = self.get_run_config()
 
-        response = TransferRequest(requests=[])
+        response = BatchTransferRequest(requests=[])
         futures = []
         for _ in range(tensor_count):
             transfer_request, send_future = await sender.send_embeddings(

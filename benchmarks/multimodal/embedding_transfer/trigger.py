@@ -5,7 +5,7 @@ import asyncio
 import time
 
 import uvloop
-from protocols import TransferConfig
+from protocol import EmbeddingTransferMode, TransferConfig
 
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 
@@ -36,7 +36,11 @@ async def worker(runtime: DistributedRuntime):
 
     # NOTE From CPU is not the same as E/PD, E/PD originates from GPU and has
     # GPU to CPU copy
-    for transfer_type in ["local", "nixl_write", "nixl_read"]:
+    for transfer_type in [
+        EmbeddingTransferMode.LOCAL,
+        EmbeddingTransferMode.NIXL_WRITE,
+        EmbeddingTransferMode.NIXL_READ,
+    ]:
         for workflow_string, client in [
             ("receiver-first", receiver_client),
             ("sender-first", sender_client),
@@ -57,7 +61,7 @@ async def worker(runtime: DistributedRuntime):
                 ):
                     pass
 
-                if transfer_type == "nixl_read" and use_gpu:
+                if transfer_type == EmbeddingTransferMode.NIXL_READ and use_gpu:
                     print(
                         f"Skipping: use_gpu={use_gpu} with transfer type: {transfer_type}"
                     )
