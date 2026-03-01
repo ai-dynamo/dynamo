@@ -549,7 +549,14 @@ impl Leader for KvConnectorLeader {
                 "request_finished called for request_id: {request_id} but slot is not found"
             );
             self.inflight_requests.remove(&request_id);
-            return Ok(false);
+            // We must return `true` here even though the leader slot is gone.
+            // The worker may still have this request in its `maybe_finished_offloading`
+            // set from a prior iteration. If we return `false`, vLLM will immediately
+            // delete the request from `self.requests`. When the worker later reports
+            // completion via `finished_sending`, vLLM's scheduler hits
+            // `assert req_id in self.requests` and crashes.
+            // Returning `true` keeps the request alive in vLLM until the worker signals.
+            return Ok(true);
         }
 
         // grab the slot
