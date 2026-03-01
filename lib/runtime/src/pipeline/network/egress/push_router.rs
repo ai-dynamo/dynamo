@@ -107,7 +107,10 @@ impl RouterMode {
     }
 }
 
-async fn addressed_router(endpoint: &Endpoint) -> anyhow::Result<Arc<AddressedPushRouter>> {
+async fn addressed_router(
+    endpoint: &Endpoint,
+    client: &Client,
+) -> anyhow::Result<Arc<AddressedPushRouter>> {
     // Get network manager and create client (no mode checks!)
     let manager = endpoint.drt().network_manager();
     let req_client = manager.create_client()?;
@@ -117,6 +120,11 @@ async fn addressed_router(endpoint: &Endpoint) -> anyhow::Result<Arc<AddressedPu
         transport = req_client.transport_name(),
         "Creating AddressedPushRouter with request plane client"
     );
+
+    // Start eager TCP connection warmup for newly-discovered backends
+    let instance_rx = client.instance_source.as_ref().clone();
+    let cancel_token = endpoint.drt().primary_token();
+    req_client.start_warmup(instance_rx, cancel_token);
 
     AddressedPushRouter::new(req_client, resp_transport)
 }
@@ -140,7 +148,7 @@ where
         client: Client,
         router_mode: RouterMode,
     ) -> anyhow::Result<Self> {
-        let addressed = addressed_router(&client.endpoint).await?;
+        let addressed = addressed_router(&client.endpoint, &client).await?;
 
         Ok(PushRouter {
             client: client.clone(),
@@ -160,7 +168,7 @@ where
         busy_threshold: Option<f64>,
         worker_monitor: Option<Arc<dyn WorkerLoadMonitor>>,
     ) -> anyhow::Result<Self> {
-        let addressed = addressed_router(&client.endpoint).await?;
+        let addressed = addressed_router(&client.endpoint, &client).await?;
 
         // Start worker monitor if provided and in dynamic mode
         if let Some(monitor) = worker_monitor.as_ref() {
