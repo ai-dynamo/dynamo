@@ -173,6 +173,8 @@ navigation:
             path: ../pages/components/planner/planner-guide.md
           - page: Planner Examples
             path: ../pages/components/planner/planner-examples.md
+          - page: Global Planner
+            path: ../pages/components/planner/global-planner.md
       - section: Profiler
         path: ../pages/components/profiler/README.md
         contents:
