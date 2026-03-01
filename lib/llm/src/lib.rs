@@ -19,6 +19,7 @@ pub mod entrypoint;
 pub mod grpc;
 pub mod http;
 pub mod hub;
+pub mod storage;
 // pub mod key_value_store;
 pub mod audit;
 pub mod kv_router;
