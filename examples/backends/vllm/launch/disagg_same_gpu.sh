@@ -32,6 +32,8 @@ else
   exit 1
 fi
 
+MODEL="Qwen/Qwen3-0.6B"
+
 # Setup cleanup trap
 cleanup() {
     echo "Cleaning up background processes..."
@@ -40,6 +42,26 @@ cleanup() {
     echo "Cleanup complete."
 }
 trap cleanup EXIT INT TERM
+
+HTTP_PORT="${DYN_HTTP_PORT:-8000}"
+echo "=========================================="
+echo "Launching Disaggregated on Same GPU (1 GPU)"
+echo "=========================================="
+echo "Model:       $MODEL"
+echo "Frontend:    http://localhost:$HTTP_PORT"
+echo "=========================================="
+echo ""
+echo "Example test command:"
+echo ""
+echo "  curl http://localhost:${HTTP_PORT}/v1/chat/completions \\"
+echo "    -H 'Content-Type: application/json' \\"
+echo "    -d '{"
+echo "      \"model\": \"${MODEL}\","
+echo "      \"messages\": [{\"role\": \"user\", \"content\": \"Hello!\"}],"
+echo "      \"max_tokens\": 32"
+echo "    }'"
+echo ""
+echo "=========================================="
 
 # run ingress
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
@@ -53,7 +75,7 @@ DYNAMO_PID=$!
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
 CUDA_VISIBLE_DEVICES=0 \
 python3 -m dynamo.vllm \
-  --model Qwen/Qwen3-0.6B \
+  --model "$MODEL" \
   --enforce-eager \
   --disaggregation-mode decode \
   --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
@@ -75,7 +97,7 @@ DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
 VLLM_NIXL_SIDE_CHANNEL_PORT=20097 \
 CUDA_VISIBLE_DEVICES=0 \
 python3 -m dynamo.vllm \
-  --model Qwen/Qwen3-0.6B \
+  --model "$MODEL" \
   --enforce-eager \
   --disaggregation-mode prefill \
   --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \

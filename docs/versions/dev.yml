@@ -148,8 +148,25 @@ navigation:
             path: ../pages/backends/sglang/sglang-observability.md
       - page: TensorRT-LLM
         path: ../pages/backends/trtllm/README.md
-      - page: vLLM
+      - section: vLLM
         path: ../pages/backends/vllm/README.md
+        contents:
+          - page: Reference Guide
+            path: ../pages/backends/vllm/vllm-reference-guide.md
+          - page: Examples
+            path: ../pages/backends/vllm/vllm-examples.md
+          - page: Multi-Node
+            path: ../pages/backends/vllm/multi-node.md
+          - page: DeepSeek-R1
+            path: ../pages/backends/vllm/deepseek-r1.md
+          - page: GPT-OSS
+            path: ../pages/backends/vllm/gpt-oss.md
+          - page: Prometheus
+            path: ../pages/backends/vllm/prometheus.md
+          - page: Prompt Embeddings
+            path: ../pages/backends/vllm/prompt-embeddings.md
+          - page: vLLM-Omni
+            path: ../pages/backends/vllm/vllm-omni.md
 
   # ==================== Components ====================
   - section: Components
@@ -289,20 +306,6 @@ navigation:
       - page: Tuning Disaggregated Performance
         path: ../pages/performance/tuning.md
       # -- Backend detail pages --
-      - section: vLLM Details
-        contents:
-          - page: DeepSeek-R1
-            path: ../pages/backends/vllm/deepseek-r1.md
-          - page: GPT-OSS
-            path: ../pages/backends/vllm/gpt-oss.md
-          - page: Multi-Node
-            path: ../pages/backends/vllm/multi-node.md
-          - page: Prometheus
-            path: ../pages/backends/vllm/prometheus.md
-          - page: Prompt Embeddings
-            path: ../pages/backends/vllm/prompt-embeddings.md
-          - page: vLLM-Omni
-            path: ../pages/backends/vllm/vllm-omni.md
       - section: TensorRT-LLM Details
         contents:
           - page: Multinode Examples

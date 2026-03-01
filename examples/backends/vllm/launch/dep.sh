@@ -4,6 +4,29 @@
 set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
+# Common configuration
+MODEL="Qwen/Qwen3-30B-A3B"
+
+HTTP_PORT="${DYN_HTTP_PORT:-8000}"
+echo "=========================================="
+echo "Launching Data Parallel / Expert Parallelism (4 GPUs)"
+echo "=========================================="
+echo "Model:       $MODEL"
+echo "Frontend:    http://localhost:$HTTP_PORT"
+echo "=========================================="
+echo ""
+echo "Example test command:"
+echo ""
+echo "  curl http://localhost:${HTTP_PORT}/v1/chat/completions \\"
+echo "    -H 'Content-Type: application/json' \\"
+echo "    -d '{"
+echo "      \"model\": \"${MODEL}\","
+echo "      \"messages\": [{\"role\": \"user\", \"content\": \"Hello!\"}],"
+echo "      \"max_tokens\": 32"
+echo "    }'"
+echo ""
+echo "=========================================="
+
 # run ingress
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
 python -m dynamo.frontend --router-mode kv &
@@ -15,7 +38,7 @@ python -m dynamo.frontend --router-mode kv &
 for i in {0..3}; do
     VLLM_NIXL_SIDE_CHANNEL_PORT=$((20096 + i)) \
     CUDA_VISIBLE_DEVICES=$i python3 -m dynamo.vllm \
-    --model Qwen/Qwen3-30B-A3B \
+    --model "$MODEL" \
     --data-parallel-rank $i \
     --data-parallel-size 4 \
     --enable-expert-parallel \
