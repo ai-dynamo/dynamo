@@ -4,6 +4,12 @@
 use super::*;
 use anyhow;
 use dynamo_llm::block_manager::kv_consolidator::EventSource;
+use dynamo_llm::block_manager::metrics_kvbm::{KvbmMetrics, KvbmMetricsRegistry};
+use dynamo_llm::recorder::Recorder;
+use std::sync::{Arc, OnceLock};
+use tokio::runtime::Handle;
+use tokio::sync::{mpsc, oneshot};
+use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Action {
@@ -192,15 +198,7 @@ impl KvConnectorLeaderRecorder {
             });
         });
 
-        let connector_leader = KvConnectorLeader {
-            slot_manager: slot_manager_cell,
-            block_size: page_size,
-            inflight_requests: HashSet::new(),
-            onboarding_slots: HashSet::new(),
-            finishing_requests: HashSet::new(),
-            iteration_counter: 0,
-            kvbm_metrics,
-        };
+        let connector_leader = KvConnectorLeader::from_parts(slot_manager_cell, page_size, kvbm_metrics);
 
         Self {
             _recorder: recorder,

@@ -11,6 +11,8 @@
 
 pub mod protocol;
 pub mod scheduler;
+pub mod cache_stats;
+pub mod tier;
 
 use super::*;
 

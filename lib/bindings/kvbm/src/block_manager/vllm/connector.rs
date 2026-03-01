@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_llm::block_manager::{
-    block::BlockId, connector::protocol::WorkerTransferRequest, pool::BlockPoolError,
+    block::BlockId, connector::protocol::WorkerTransferRequest,
 };
+use dynamo_llm::block_manager::distributed::vllm as llm_vllm;
 
 pub mod leader;
 pub mod trtllm_leader;
@@ -186,5 +187,40 @@ impl ConnectorMetadata {
 
     pub fn add_operations(&mut self, xfer_reqs: Vec<WorkerTransferRequest>) {
         self.operations.extend(xfer_reqs);
+    }
+}
+
+impl From<NewRequestData> for llm_vllm::NewRequestData {
+    fn from(value: NewRequestData) -> Self {
+        Self {
+            request_id: value.request_id,
+            prompt_token_ids: value.prompt_token_ids,
+            block_ids: value.block_ids,
+            num_computed_tokens: value.num_computed_tokens,
+            priorities: value.priorities,
+        }
+    }
+}
+
+impl From<CachedRequestData> for llm_vllm::CachedRequestData {
+    fn from(value: CachedRequestData) -> Self {
+        Self {
+            request_id: value.request_id,
+            resumed_from_preemption: value.resumed_from_preemption,
+            new_token_ids: value.new_token_ids,
+            new_block_ids: value.new_block_ids,
+            num_computed_tokens: value.num_computed_tokens,
+            priorities: value.priorities,
+        }
+    }
+}
+
+impl From<SchedulerOutput> for llm_vllm::SchedulerOutput {
+    fn from(value: SchedulerOutput) -> Self {
+        Self {
+            new_requests: value.new_requests.into_iter().map(Into::into).collect(),
+            cached_requests: value.cached_requests.into_iter().map(Into::into).collect(),
+            num_scheduled_tokens: value.num_scheduled_tokens,
+        }
     }
 }
