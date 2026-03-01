@@ -154,6 +154,8 @@ jobs:
                       cargo fmt -- --check && \
                       cargo clippy --features block-manager,media-ffmpeg,testing-nixl,integration --no-deps --all-targets -- -D warnings && \
                       cargo test --locked --all-targets --features=block-manager,media-ffmpeg,testing-nixl,integration -- --nocapture && \
+                      cargo clippy -p kvbm-physical --no-deps --all-targets -- -D warnings && \
+                      cargo test --locked -p kvbm-physical --features testing-kvbm -- --nocapture --test-threads=4 && \
                       /workspace/container/use-sccache.sh show-stats "Rust Checks"'
 
   test-parallel:

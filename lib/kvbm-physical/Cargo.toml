@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [package]
-name = "kvbm-logical"
+name = "kvbm-physical"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -10,30 +10,34 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-dynamo-tokens = { workspace = true }
+dynamo-memory = { workspace = true }
+kvbm-common = { workspace = true }
+kvbm-kernels = { workspace = true }
+velo-events = { workspace = true }
 
+aligned-vec = "0.6.4"
 anyhow = { workspace = true }
-async-stream = "0.3"
-bytes = "1.10"
+bincode = { version = "2.0.0", features = ["serde", "derive"] }
+blake3 = { version = "1" }
+cudarc = { workspace = true }
 derive_builder = { workspace = true }
 futures = { workspace = true }
-lru = "0.16"
+derive-getters = { version = "0.5" }
 parking_lot = { workspace = true }
-prometheus = { workspace = true }
-rmp-serde = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
-tokio-stream = { workspace = true, features = ["sync"] }
 tracing = { workspace = true }
-xxhash-rust = { workspace = true }
+uuid = { workspace = true }
+validator = { workspace = true }
 
 [features]
-testing = []
+default = []
+collectives = []
+testing-kvbm = []
+testing-nixl-gds = []
 
 [dev-dependencies]
-proptest = "1.5.0"
+dynamo-memory = { workspace = true, features = ["unsafe-slices"] }
 rstest = "0.26"
-serde_json = { workspace = true }
-tokio = { workspace = true, features = ["full"] }
