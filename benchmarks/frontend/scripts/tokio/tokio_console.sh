@@ -10,7 +10,7 @@
 #   - Process built with tokio_unstable cfg and console-subscriber
 #
 # Usage:
-#   ./tokio_console.sh                    # connect to default localhost:6669
+#   ./tokio_console.sh                    # connect to default http://localhost:6669
 #   ./tokio_console.sh --addr host:port   # connect to specific address
 
 set -euo pipefail

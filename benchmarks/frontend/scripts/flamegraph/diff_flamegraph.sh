@@ -42,6 +42,10 @@ fold_perf_data() {
     local output=$2
 
     if [[ "$input" == *.perf.data ]]; then
+        if ! command -v perf &>/dev/null; then
+            echo "ERROR: perf not found. Install: apt install linux-tools-$(uname -r)"
+            exit 1
+        fi
         if command -v stackcollapse-perf.pl &>/dev/null; then
             perf script -i "$input" | stackcollapse-perf.pl > "$output"
         elif command -v inferno-collapse-perf &>/dev/null; then

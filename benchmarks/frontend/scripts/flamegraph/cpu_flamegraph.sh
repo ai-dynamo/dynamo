@@ -95,7 +95,7 @@ if command -v flamegraph.pl &>/dev/null && command -v stackcollapse-perf.pl &>/d
     perf script -i "$PERF_DATA" | stackcollapse-perf.pl | \
         flamegraph.pl > "${OUTPUT_DIR}/${OUTPUT_NAME}.svg"
     echo "Flame graph: ${OUTPUT_DIR}/${OUTPUT_NAME}.svg"
-elif command -v inferno-flamegraph &>/dev/null; then
+elif command -v inferno-collapse-perf &>/dev/null && command -v inferno-flamegraph &>/dev/null; then
     perf script -i "$PERF_DATA" | inferno-collapse-perf | \
         inferno-flamegraph > "${OUTPUT_DIR}/${OUTPUT_NAME}.svg"
     echo "Flame graph: ${OUTPUT_DIR}/${OUTPUT_NAME}.svg"
