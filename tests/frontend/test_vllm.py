@@ -428,3 +428,79 @@ def test_reasoning(request, start_services: ServicePorts, predownload_models) ->
     assert any(
         char.isdigit() for char in content
     ), "Expected response to contain numerical calculations"
+
+
+@pytest.mark.timeout(240)
+@pytest.mark.post_merge
+def test_multiple_choices_n5(
+    request, start_services: ServicePorts, predownload_models
+) -> None:
+    """Test that n=5 streaming returns 5 distinct choices with correct indices."""
+    import json
+
+    payload = {
+        "model": TEST_MODEL,
+        "messages": [
+            {
+                "role": "user",
+                "content": "Say a single random word.",
+            }
+        ],
+        "max_tokens": 20,
+        "n": 5,
+        "temperature": 1.0,
+        "stream": True,
+    }
+
+    base_url = f"http://localhost:{start_services.frontend_port}"
+    response = requests.post(
+        f"{base_url}/v1/chat/completions",
+        headers={"Content-Type": "application/json"},
+        json=payload,
+        stream=True,
+        timeout=180,
+    )
+    assert response.status_code == 200, (
+        f"Streaming request failed with status {response.status_code}: {response.text}"
+    )
+
+    # Parse SSE events
+    chunks = []
+    for line in response.iter_lines(decode_unicode=True):
+        if not line or not line.startswith("data: "):
+            continue
+        data_str = line[len("data: "):]
+        if data_str == "[DONE]":
+            break
+        chunks.append(json.loads(data_str))
+
+    assert len(chunks) > 0, "Expected at least one streaming chunk"
+
+    # Collect all choice indices and finished indices across all chunks
+    all_indices = set()
+    finished_indices = set()
+    content_per_choice: dict = {}
+    for chunk in chunks:
+        for choice in chunk.get("choices", []):
+            idx = choice["index"]
+            all_indices.add(idx)
+            delta_content = choice.get("delta", {}).get("content", "")
+            if delta_content:
+                content_per_choice.setdefault(idx, "")
+                content_per_choice[idx] += delta_content
+            if choice.get("finish_reason") is not None:
+                finished_indices.add(idx)
+
+    # Verify all 5 choice indices appeared
+    assert all_indices == {0, 1, 2, 3, 4}, (
+        f"Expected indices {{0,1,2,3,4}}, got {all_indices}"
+    )
+
+    # Verify all 5 choices finished
+    assert finished_indices == {0, 1, 2, 3, 4}, (
+        f"Expected all 5 choices to finish, only got {finished_indices}"
+    )
+
+    # Verify each choice produced some content
+    for i in range(5):
+        assert content_per_choice.get(i), f"Choice {i} has no content"
