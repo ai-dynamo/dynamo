@@ -157,10 +157,8 @@ class HandlerBase(BaseGenerativeHandler):
                 selected_logprob = token_logprobs_dict[actual_token_id]
                 log_probs.append(float(selected_logprob.logprob))
             else:
-                # Fallback: use the first logprob if selected token not found
-                first_logprob = next(iter(token_logprobs_dict.values()), None)
-                if first_logprob:
-                    log_probs.append(float(first_logprob.logprob))
+                # Token not in top-K logprobs; append sentinel to signal effectively zero probability.
+                log_probs.append(-9999.0)
 
             # Build top_logprobs list for this token position
             # NOTE: TRTLLM LogProb API doesn't have decoded_token, will default to None
@@ -180,6 +178,14 @@ class HandlerBase(BaseGenerativeHandler):
                         "logprob": float(logprob_info.logprob),
                     }
                 )
+            # If ranks are missing (0), sort by logprob (descending) and assign ranks manually.
+            if token_top_logprobs and all(
+                item["rank"] == 0 for item in token_top_logprobs
+            ):
+                token_top_logprobs.sort(key=lambda x: x["logprob"], reverse=True)
+                for rank, item in enumerate(token_top_logprobs, 1):
+                    item["rank"] = rank
+
             top_logprobs.append(token_top_logprobs)
 
         return log_probs if log_probs else None, top_logprobs if top_logprobs else None
@@ -751,9 +757,9 @@ class HandlerBase(BaseGenerativeHandler):
                     log_probs, top_logprobs = self._extract_logprobs(
                         output, num_output_tokens_so_far
                     )
-                    if log_probs:
+                    if log_probs is not None:
                         out["log_probs"] = log_probs
-                    if top_logprobs:
+                    if top_logprobs is not None:
                         out["top_logprobs"] = top_logprobs
 
                     if output.finish_reason:
