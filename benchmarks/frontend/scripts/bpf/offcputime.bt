@@ -1,0 +1,42 @@
+#!/usr/bin/env bpftrace
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+//
+// Stack traces of sleeping threads (mutex, I/O, futex, socket waits).
+// Identifies what threads are blocked on.
+//
+// Usage: sudo bpftrace offcputime.bt
+// Filter to specific PID: sudo bpftrace -p <PID> offcputime.bt
+
+tracepoint:sched:sched_switch
+{
+    if (args.prev_state != 0) {
+        // Thread is going off-CPU (not TASK_RUNNING)
+        @off[args.prev_pid, args.prev_comm, kstack] = nsecs;
+    }
+}
+
+tracepoint:sched:sched_switch
+{
+    $key = @off[args.next_pid, args.next_comm, kstack];
+    if ($key) {
+        $delta = nsecs - $key;
+        // Only record if off-CPU > 1ms (filter noise)
+        if ($delta > 1000000) {
+            @blocked_us[args.next_comm, kstack] = hist($delta / 1000);
+        }
+        delete(@off[args.next_pid, args.next_comm, kstack]);
+    }
+}
+
+interval:s:15
+{
+    printf("\n--- Off-CPU Time (us) by thread + kernel stack ---\n");
+    print(@blocked_us, 10);
+    clear(@blocked_us);
+}
+
+END
+{
+    clear(@off);
+}

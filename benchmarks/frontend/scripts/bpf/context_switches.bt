@@ -1,0 +1,31 @@
+#!/usr/bin/env bpftrace
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+//
+// Context switch histograms per thread.
+// High context switch rates on tokio workers indicate contention or starvation.
+//
+// Usage: sudo bpftrace context_switches.bt
+//        sudo bpftrace -p <PID> context_switches.bt
+
+tracepoint:sched:sched_switch
+/comm == "tokio-runtime-w" || args.prev_comm == "tokio-runtime-w"/
+{
+    @voluntary[args.prev_comm] = count();
+
+    if (args.prev_state == 0) {
+        // Involuntary: was TASK_RUNNING but got preempted
+        @involuntary[args.prev_comm] = count();
+    }
+}
+
+interval:s:5
+{
+    printf("\n--- Context Switches (last 5s) ---\n");
+    printf("\nVoluntary (thread yielded/blocked):\n");
+    print(@voluntary, 10);
+    printf("\nInvoluntary (thread preempted while running):\n");
+    print(@involuntary, 10);
+    clear(@voluntary);
+    clear(@involuntary);
+}
