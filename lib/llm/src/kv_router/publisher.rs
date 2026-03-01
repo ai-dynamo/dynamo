@@ -2799,7 +2799,7 @@ mod event_processor_tests {
     /// Uses a 10ms timeout to ensure events are batched (events sent rapidly)
     #[tokio::test]
     async fn test_run_event_processor_loop_batches_removed_events_20() {
-        test_removed_events_batching(20, Some(10_000)).await; // 20 events, 20ms timeout
+        test_removed_events_batching(20, Some(10_000)).await; // 20 events, 10ms timeout
     }
 
     #[tokio::test]
