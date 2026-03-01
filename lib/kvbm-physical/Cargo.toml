@@ -35,6 +35,7 @@ validator = { workspace = true }
 [features]
 default = []
 collectives = []
+testing = []
 testing-kvbm = []
 testing-nixl-gds = []
 
