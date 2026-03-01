@@ -91,11 +91,9 @@ fn init_engines_dropped_events_counter(
     })
 }
 
-/// Get the engines dropped events counter (must be initialized first with init_engines_dropped_events_counter).
-fn engines_dropped_events_counter() -> &'static prometheus::IntCounterVec {
-    ENGINES_DROPPED_EVENTS_TOTAL
-        .get()
-        .expect("engines_dropped_events counter not initialized")
+/// Get the engines dropped events counter if initialized.
+fn engines_dropped_events_counter() -> Option<&'static prometheus::IntCounterVec> {
+    ENGINES_DROPPED_EVENTS_TOTAL.get()
 }
 
 // -------------------------------------------------------------------------
@@ -561,10 +559,10 @@ async fn run_event_processor_loop<P: EventSink + Send + Sync + 'static>(
                         gap,
                         "Input event gap detected: raw events dropped before batching"
                     );
-                    // Increment Prometheus counter for dropped events
-                    engines_dropped_events_counter()
-                        .with_label_values(&[&worker_id.to_string()])
-                        .inc_by(gap);
+                    // Increment Prometheus counter for dropped events (if initialized)
+                    if let Some(counter) = engines_dropped_events_counter() {
+                        counter.with_label_values(&[&worker_id.to_string()]).inc_by(gap);
+                    }
                 }
                 last_raw_input_id = Some(raw_event_id);
 
