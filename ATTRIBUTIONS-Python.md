@@ -938,7 +938,7 @@ POSSIBILITY OF SUCH DAMAGE.
   - `Homepage`: https://github.com/ethanfurman/aenum
 
 
-## ai-dynamo (0.8.0)
+## ai-dynamo (0.9.1)
 
 ### Licenses
 License: `None`
@@ -1150,7 +1150,7 @@ License: `None`
 
 
 
-## ai-dynamo-runtime (0.8.0)
+## ai-dynamo-runtime (0.9.1)
 
 ### Licenses
 License: `None`
