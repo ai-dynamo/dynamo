@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Base ArgGroup interface."""
+import argparse
 from abc import ABC, abstractmethod
 
 
@@ -13,7 +14,7 @@ class ArgGroup(ABC):
     """
 
     @abstractmethod
-    def add_arguments(self, parser) -> None:
+    def add_arguments(self, parser: argparse.ArgumentParser) -> None:
         """
         Register CLI arguments owned by this group.
 

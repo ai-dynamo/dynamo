@@ -1,13 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 import argparse
+from typing import Self
 
 
 class ConfigBase:
     """Base configuration class that allows properties with and without defaults in arbitrary order."""
 
     @classmethod
-    def from_cli_args(cls, args: argparse.Namespace):
+    def from_cli_args(cls, args: argparse.Namespace) -> Self:
         obj = cls.__new__(cls)
 
         # 1) Set everything provided by argparse
