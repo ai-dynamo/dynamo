@@ -28,7 +28,7 @@ global:
     install: false
     # -- Whether to enable Kai Scheduler integration (queue creation, schedulerName injection).
     # Set to true when kai-scheduler is available in the cluster (installed externally).
-    # Automatically true when install=true. The operator uses this to decide whether to
+    # Automatically enabled when install=true. The operator uses this to decide whether to
     # inject schedulerName and queue labels into pod templates.
     enabled: false
 
