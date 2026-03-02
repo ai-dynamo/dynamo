@@ -33,11 +33,11 @@ Ask for:
 - **Page title** — appears in the sidebar and as the H1
 - **Target section** — which sidebar section (e.g., `Getting Started`, `User Guides`, `Components`)
 - **Filename** — kebab-case `.md` file (e.g., `my-new-feature.md`)
-- **Subdirectory** — which `docs/pages/` subdirectory (e.g., `getting-started`, `features`, `components`)
+- **Subdirectory** — which `docs/` subdirectory (e.g., `getting-started`, `features`, `components`)
 
 ### 2. Create the Page
 
-Create `docs/pages/<subdirectory>/<filename>.md` with SPDX header and Fern frontmatter:
+Create `docs/<subdirectory>/<filename>.md` with SPDX header and Fern frontmatter:
 
 ```markdown
 ---
@@ -53,14 +53,14 @@ title: <Page Title>
 
 ### 3. Add Navigation Entry
 
-Edit `docs/versions/dev.yml` and add the page under the correct section:
+Edit `docs/index.yml` and add the page under the correct section:
 
 ```yaml
 - page: <Page Title>
-  path: ../pages/<subdirectory>/<filename>.md
+  path: <subdirectory>/<filename>.md
 ```
 
-**Section locations in `dev.yml`** (search for the comment banner):
+**Section locations in `index.yml`** (search for the comment banner):
 - `# ==================== Getting Started ====================`
 - `# ==================== Kubernetes Deployment ====================`
 - `# ==================== User Guides ====================`
@@ -105,8 +105,6 @@ Reference images from `docs/assets/`:
 ### 5. Validate
 
 ```bash
-cd docs
-ln -sf . fern  # symlink required by Fern CLI
 fern check
 fern docs broken-links
 ```
@@ -114,7 +112,6 @@ fern docs broken-links
 ### 6. Preview Locally (Optional)
 
 ```bash
-cd docs
 fern docs dev
 ```
 
@@ -123,7 +120,8 @@ Opens a local preview at `http://localhost:3000` with hot reload. No token requi
 ### 7. Commit
 
 ```bash
-git add docs/pages/<subdirectory>/<filename>.md docs/versions/dev.yml
+git add docs/<subdirectory>/<filename>.md docs/index.yml
+
 git commit -s -m "docs: add <page-title> page"
 ```
 
@@ -131,8 +129,8 @@ git commit -s -m "docs: add <page-title> page"
 
 ### `fern check` fails
 
-- **Invalid YAML in `dev.yml`:** Check indentation — nav entries use 2-space indent. A `- page:` must be inside a `contents:` block.
-- **Missing file:** The `path:` in `dev.yml` must match the actual file location. Paths are relative to `docs/versions/` (e.g., `../pages/getting-started/quickstart.md`).
+- **Invalid YAML in `index.yml`:** Check indentation — nav entries use 2-space indent. A `- page:` must be inside a `contents:` block.
+- **Missing file:** The `path:` in `index.yml` must match the actual file location. Paths are relative to `docs/` (e.g., `getting-started/quickstart.md`).
 
 ### `fern docs broken-links` reports errors
 
@@ -143,11 +141,11 @@ git commit -s -m "docs: add <page-title> page"
 
 - **MDX parse error:** Angle-bracket URLs like `<https://example.com>` break MDX parsing. Use `[text](https://example.com)` instead.
 - **Broken links check:** The `detect_broken_links.py` job checks relative links across all docs. If your new page links to a file that doesn't exist yet, CI will fail.
-- **Fern publish error:** Check the Actions tab for the `Fern Docs` workflow. Common causes: expired `FERN_TOKEN`, invalid `docs.yml` syntax, or a file referenced in `dev.yml` that wasn't synced to `docs-website`.
+- **Fern publish error:** Check the Actions tab for the `Fern Docs` workflow. Common causes: expired `FERN_TOKEN`, invalid `fern/docs.yml` syntax, or a file referenced in `index.yml` that wasn't synced to `docs-website`.
 
 ### Page doesn't appear on the live site
 
-- **Missing nav entry:** The page exists but isn't in `docs/versions/dev.yml`. Add it.
+- **Missing nav entry:** The page exists but isn't in `docs/index.yml`. Add it.
 - **Hidden section:** The page is inside a `hidden: true` section. It's accessible by direct URL but won't appear in the sidebar.
 - **Sync delay:** After merge to `main`, the sync-dev workflow takes a few minutes to publish.
 
@@ -155,8 +153,9 @@ git commit -s -m "docs: add <page-title> page"
 
 | File | Purpose |
 |------|---------|
-| `docs/versions/dev.yml` | Navigation tree — add entries here |
-| `docs/pages/` | Content directory — create pages here |
+| `docs/index.yml` | Navigation tree — add entries here |
+| `docs/` | Content directory — create pages here |
 | `docs/assets/` | Images, SVGs, fonts |
-| `docs/convert_callouts.py` | Callout conversion rules (GitHub → Fern) |
+| `fern/docs.yml` | Fern site configuration |
+| `fern/convert_callouts.py` | Callout conversion rules (GitHub → Fern) |
 | `docs/README.md` | Full architecture guide |
