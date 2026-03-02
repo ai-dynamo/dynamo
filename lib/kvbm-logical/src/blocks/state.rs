@@ -139,7 +139,9 @@ impl<T: BlockMetadata> Block<T, Registered> {
 
     pub(crate) fn reset(self) -> Block<T, Reset> {
         // Mark absence when destroying Block<T, Registered>
-        self.state.registration_handle.mark_absent::<T>(self.block_id);
+        self.state
+            .registration_handle
+            .mark_absent::<T>(self.block_id);
 
         // Drop the registration handle
         Block {

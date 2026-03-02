@@ -839,9 +839,7 @@ fn test_presence_delegate_fires_on_register_and_reset() {
         },
     );
 
-    let registry = BlockRegistry::builder()
-        .presence_delegate(delegate)
-        .build();
+    let registry = BlockRegistry::builder().presence_delegate(delegate).build();
 
     let staged = create_staged_block::<TestMetadata>(42, &[1, 2, 3, 4]);
     let handle = registry.register_sequence_hash(staged.sequence_hash());
@@ -932,9 +930,7 @@ fn test_presence_delegate_receives_correct_block_id() {
         |_, _, _| {},
     );
 
-    let registry = BlockRegistry::builder()
-        .presence_delegate(delegate)
-        .build();
+    let registry = BlockRegistry::builder().presence_delegate(delegate).build();
 
     let _reg = register_test_block::<TestMetadata>(&registry, 99, &[5, 6, 7, 8]);
     assert_eq!(*received_block_id.lock(), Some(99));

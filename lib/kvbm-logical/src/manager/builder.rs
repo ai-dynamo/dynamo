@@ -26,10 +26,12 @@ use super::BlockManager;
 /// Capacity settings for the TinyLFU frequency tracker used by
 /// [`BlockRegistry`] and the multi-level LRU backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 pub enum FrequencyTrackingCapacity {
     /// Small capacity: 2^18 (262,144) entries
     Small,
     /// Medium capacity: 2^21 (2,097,152) entries - default
+    #[default]
     Medium,
     /// Large capacity: 2^24 (16,777,216) entries
     Large,
@@ -51,11 +53,6 @@ impl FrequencyTrackingCapacity {
     }
 }
 
-impl Default for FrequencyTrackingCapacity {
-    fn default() -> Self {
-        Self::Medium
-    }
-}
 
 /// Configuration for the inactive pool backend.
 pub enum InactiveBackendConfig {

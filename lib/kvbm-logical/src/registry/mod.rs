@@ -106,8 +106,7 @@ impl BlockRegistryBuilder {
 
     /// Builds the BlockRegistry.
     pub fn build(self) -> BlockRegistry {
-        let presence_delegates: Arc<[Arc<dyn PresenceDelegate>]> =
-            self.presence_delegates.into();
+        let presence_delegates: Arc<[Arc<dyn PresenceDelegate>]> = self.presence_delegates.into();
         BlockRegistry {
             frequency_tracker: self.frequency_tracker,
             event_manager: self.event_manager,

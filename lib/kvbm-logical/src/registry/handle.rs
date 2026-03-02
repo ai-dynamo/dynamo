@@ -7,8 +7,8 @@ use super::attachments::{AttachmentError, AttachmentStore, TypedAttachments};
 use super::delegate::PresenceDelegate;
 use super::{BlockRegistry, PositionalRadixTree};
 
-use crate::blocks::{BlockMetadata, SequenceHash};
 use crate::BlockId;
+use crate::blocks::{BlockMetadata, SequenceHash};
 
 use std::any::{Any, TypeId};
 use std::marker::PhantomData;

@@ -8,8 +8,8 @@
 //! — callbacks fire synchronously on the transitioning thread, outside any lock.
 
 use super::handle::BlockRegistrationHandle;
-use crate::blocks::{BlockMetadata, SequenceHash};
 use crate::BlockId;
+use crate::blocks::{BlockMetadata, SequenceHash};
 
 use std::any::TypeId;
 use std::sync::Arc;
