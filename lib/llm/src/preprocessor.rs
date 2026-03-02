@@ -285,6 +285,7 @@ impl OpenAIPreprocessor {
                 priority_jump: hints.and_then(|h| h.latency_sensitivity),
                 priority: hints.and_then(|h| h.priority),
                 lora_name,
+                cache_control_ttl: nvext.cache_control.as_ref().map(|cc| cc.ttl_seconds()),
                 allowed_worker_ids: None,
             };
             builder.routing(Some(routing));

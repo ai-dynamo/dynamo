@@ -24,15 +24,15 @@ description: A one-sentence summary shown in search results and social previews.
 
 ## Step 2: Add the Post to Navigation
 
-Open `docs/versions/dev.yml` and add a page entry under the **Blog** section:
+Open `docs/index.yml` and add a page entry under the **Blog** section:
 
 ```yaml
   - section: Blog
-    path: ../blogs/index.mdx
+    path: blogs/index.mdx
     slug: blog
     contents:
       - page: Your Blog Post Title
-        path: ../blogs/my-post-slug.md
+        path: blogs/my-post-slug.md
 ```
 
 Each new post gets a `- page:` entry in the `contents` list. The `page`
@@ -68,7 +68,7 @@ Browse icons at https://fontawesome.com/icons (Free tier).
 
 ## Step 4 (Optional): Add the Post to the Navbar Dropdown
 
-Open `docs/docs.yml` and add a link under the Blog dropdown in `navbar-links`:
+Open `fern/docs.yml` and add a link under the Blog dropdown in `navbar-links`:
 
 ```yaml
 navbar-links:
@@ -88,6 +88,6 @@ accessible from the landing page and sidebar.
 ## Quick Checklist
 
 - [ ] Blog post `.md` file created in `docs/blogs/`
-- [ ] Page entry added to `docs/versions/dev.yml` under the Blog section
+- [ ] Page entry added to `docs/index.yml` under the Blog section
 - [ ] Card added to `docs/blogs/index.mdx`
-- [ ] (Optional) Link added to the Blog dropdown in `docs/docs.yml`
+- [ ] (Optional) Link added to the Blog dropdown in `fern/docs.yml`

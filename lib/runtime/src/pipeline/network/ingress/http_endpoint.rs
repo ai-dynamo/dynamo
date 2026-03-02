@@ -94,7 +94,7 @@ impl SharedHttpServer {
             .lock()
             .set_endpoint_health_status(&endpoint_name, HealthStatus::Ready);
 
-        tracing::debug!("Registered endpoint handler for subject: {}", subject_clone);
+        tracing::debug!("Registered endpoint handler for subject: {subject_clone}");
         Ok(())
     }
 
@@ -170,7 +170,7 @@ impl SharedHttpServer {
                                 tokio::select! {
                                     result = http2_builder.serve_connection(io, hyper_service) => {
                                         if let Err(e) = result {
-                                            tracing::debug!("HTTP/2 connection error: {}", e);
+                                            tracing::debug!("HTTP/2 connection error: {e}");
                                         }
                                     }
                                     _ = cancel_clone.cancelled() => {
@@ -180,7 +180,7 @@ impl SharedHttpServer {
                             });
                         }
                         Err(e) => {
-                            tracing::error!("Failed to accept connection: {}", e);
+                            tracing::error!("Failed to accept connection: {e}");
                         }
                     }
                 }
@@ -213,7 +213,7 @@ async fn handle_shared_request(
     let handler = match server.handlers.get(&endpoint_path) {
         Some(h) => h.clone(),
         None => {
-            tracing::warn!("No handler found for endpoint: {}", endpoint_path);
+            tracing::warn!("No handler found for endpoint: {endpoint_path}");
             return (StatusCode::NOT_FOUND, "Endpoint not found");
         }
     };

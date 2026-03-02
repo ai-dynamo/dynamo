@@ -729,24 +729,16 @@ def test_kv_router_bindings(
 
 
 @pytest.mark.parametrize(
-    "store_backend,durable_kv_events,request_plane,router_event_threads,zmq_kv_events",
+    "store_backend,durable_kv_events,request_plane",
     [
-        ("etcd", True, "nats", 1, False),  # JetStream mode - uses JetStream
-        ("etcd", False, "tcp", 1, True),  # NATS core mode + standalone indexer
-        ("file", True, "nats", 1, False),  # File backend - uses JetStream
-        (
-            "etcd",
-            False,
-            "tcp",
-            2,
-            True,
-        ),  # NATS core mode - multi-threaded + standalone indexer
+        ("etcd", True, "nats"),  # JetStream mode - uses JetStream
+        ("etcd", False, "tcp"),  # NATS core mode (with gap detection) - no JetStream
+        ("file", True, "nats"),  # File backend - uses JetStream
     ],
     ids=[
         "jetstream",
         "nats_core",
         "file",
-        "nats_core_multi_thread",
     ],
     indirect=["request_plane", "durable_kv_events"],
 )
@@ -760,19 +752,15 @@ def test_indexers_sync(
     store_backend,
     durable_kv_events,
     request_plane,
-    router_event_threads,
-    zmq_kv_events,
 ):
     """
     Test that two KV routers have synchronized indexer states after processing requests.
     This test verifies that both routers converge to the same internal state.
 
-    Tests with four configurations:
+    Tests with three configurations:
     - jetstream: etcd backend, JetStream for KV events, NATS request plane
-    - nats_core: etcd backend, ZMQ + standalone HTTP indexer, TCP request plane
-                 (includes NATS interruption/recovery testing)
+    - nats_core: etcd backend, NATS Core with gap detection, TCP request plane
     - file: file backend, JetStream for KV events, NATS request plane
-    - nats_core_multi_thread: etcd backend, ZMQ + standalone HTTP indexer, TCP request plane
     """
     logger.info(
         f"Starting indexers sync test: store_backend={store_backend}, "
@@ -797,8 +785,6 @@ def test_indexers_sync(
         num_mockers=NUM_MOCKERS,
         store_backend=store_backend,
         request_plane=request_plane,
-        zmq_kv_events=zmq_kv_events,
-        standalone_indexer=zmq_kv_events,
     ) as mockers:
         # Start mocker instances (2 workers x 2 DP ranks = 4 independent event streams)
         logger.info(f"Starting {NUM_MOCKERS} mocker instances with dp_size=2")
@@ -814,12 +800,9 @@ def test_indexers_sync(
             num_workers=NUM_MOCKERS,
             store_backend=store_backend,
             request_plane=request_plane,
-            test_nats_interruption=not durable_kv_events and not zmq_kv_events,
-            nats_server=nats_process
-            if (not durable_kv_events and not zmq_kv_events)
-            else None,
+            test_nats_interruption=not durable_kv_events,
+            nats_server=nats_process if not durable_kv_events else None,
             durable_kv_events=durable_kv_events,
-            router_event_threads=router_event_threads,
             standalone_indexer_url=mockers.standalone_indexer_url,
         )
 
@@ -865,15 +848,14 @@ def test_query_instance_id_returns_worker_and_tokens(
 @pytest.mark.timeout(90)  # bumped for xdist contention (was 29s; ~9.55s serial avg)
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 @pytest.mark.parametrize(
-    "durable_kv_events,use_kv_events,router_event_threads,zmq_kv_events",
+    "durable_kv_events,use_kv_events,zmq_kv_events",
     [
-        (True, True, 1, False),  # JetStream mode with KV events
-        (False, True, 1, False),  # NATS Core mode with local indexer (default)
-        (False, False, 1, False),  # Approximate mode (--no-kv-events) - no KV events
-        (False, True, 2, False),  # NATS Core mode - multi-threaded indexer
-        (False, True, 1, True),  # ZMQ mode: mocker → ZMQ PUB → relay → NATS
+        (True, True, False),  # JetStream mode with KV events
+        (False, True, False),  # NATS Core mode with local indexer (default)
+        (False, False, False),  # Approximate mode (--no-kv-events) - no KV events
+        (False, True, True),  # ZMQ mode: mocker → ZMQ PUB → relay → NATS
     ],
-    ids=["jetstream", "nats_core", "no_kv_events", "nats_core_multi_thread", "zmq"],
+    ids=["jetstream", "nats_core", "no_kv_events", "zmq"],
     indirect=["durable_kv_events"],
 )
 def test_router_decisions(
@@ -884,7 +866,6 @@ def test_router_decisions(
     durable_kv_events,
     use_kv_events,
     request_plane,
-    router_event_threads,
     zmq_kv_events,
 ):
     """Validate KV cache prefix reuse and dp_rank routing by sending progressive requests with overlapping prefixes.
@@ -933,7 +914,6 @@ def test_router_decisions(
             test_dp_rank=True,
             use_kv_events=use_kv_events,
             durable_kv_events=durable_kv_events,
-            router_event_threads=router_event_threads,
             standalone_indexer_url=mockers.standalone_indexer_url,
         )
 
