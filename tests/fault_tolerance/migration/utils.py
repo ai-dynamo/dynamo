@@ -580,8 +580,12 @@ def run_migration_test(
         worker1, worker2, receiving_pattern=receiving_pattern
     )
 
-    # Step 3: Optionally wait for new response before stop (for decode tests)
-    if wait_for_new_response_before_stop:
+    # Step 3: Optionally wait for new response before stop (for decode tests).
+    # Only wait when migration is enabled: we need the worker to be mid-generation
+    # so that ongoing migration can be tested.  When migration is disabled we want
+    # to kill the worker as soon as it confirms receipt of the request so that the
+    # error propagates immediately rather than after wait_for_response times out.
+    if wait_for_new_response_before_stop and migration_limit > 0:
         wait_for_response(response_list)
 
     # Step 4: Stop the worker (kill or graceful shutdown)
@@ -603,10 +607,7 @@ def run_migration_test(
         )
     else:
         try:
-            # Don't validate delay: when migration is disabled, the request is expected
-            # to fail and the error may arrive late (e.g. ~10 s TCP timeout while the
-            # frontend attempts stream recreation before giving up).
-            validate_response(request_thread, response_list, validate_delay=False)
+            validate_response(request_thread, response_list, validate_delay=stream)
             pytest.fail("Request succeeded unexpectedly when migration was disabled")
         except Exception as e:
             # Request failed as expected - verify it's a known error type
