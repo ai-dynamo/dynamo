@@ -36,7 +36,7 @@
 //! (`dynamo_component_inflight_requests`, `dynamo_component_requests_total`, etc.)
 //! via the system status server when `DYN_SYSTEM_PORT` is explicitly set.
 //!
-//! See also: `docs/pages/observability/metrics.md` (Router Metrics section).
+//! See also: `docs/observability/metrics.md` (Router Metrics section).
 
 use std::sync::{Arc, LazyLock, OnceLock};
 use std::time::Duration;

@@ -15,7 +15,6 @@ dynamo-tokens = { workspace = true }
 anyhow = { workspace = true }
 async-stream = "0.3"
 bytes = "1.10"
-bincode = { version = "2.0.1", features = ["serde", "derive"] }
 derive_builder = { workspace = true }
 futures = { workspace = true }
 lru = "0.16"

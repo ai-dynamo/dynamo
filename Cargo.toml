@@ -10,8 +10,10 @@ members = [
     "lib/mocker",
     "lib/kv-router",
     "lib/memory",
+    "lib/kvbm-common",
     "lib/kvbm-kernels",
     "lib/kvbm-logical",
+    "lib/kvbm-physical",
     "lib/async-openai",
     "lib/parsers",
     "lib/bench",
@@ -45,11 +47,13 @@ dynamo-async-openai = { path = "lib/async-openai", version = "1.0.0", features =
 dynamo-parsers = { path = "lib/parsers", version = "1.0.0" }
 
 # kvbm
+kvbm-common = { path = "lib/kvbm-common", version = "1.0.0" }
 kvbm-kernels = { path = "lib/kvbm-kernels", version = "1.0.0" }
 kvbm-logical = { path = "lib/kvbm-logical", version = "1.0.0" }
+kvbm-physical = { path = "lib/kvbm-physical", version = "1.0.0" }
 
 # velo
-velo-events = { path = "lib/velo-events", version = "0.9.0" }
+velo-events = { path = "lib/velo-events", version = "1.0.0" }
 
 # External dependencies
 anyhow = { version = "1" }
@@ -66,7 +70,7 @@ chrono = { version = "0.4", default-features = false, features = [
     "now",
     "serde",
 ] }
-cudarc = { version = "0.19.2", features = ["cuda-12020"] }
+cudarc = { version = "0.19.2", features = ["cuda-version-from-build-system", "fallback-latest"] }
 dashmap = { version = "6.1" }
 derive_builder = { version = "0.20" }
 derive-getters = { version = "0.5" }
