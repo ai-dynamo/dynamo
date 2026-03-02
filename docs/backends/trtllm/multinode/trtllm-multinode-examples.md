@@ -40,8 +40,8 @@ For simplicity of the example, we will make some assumptions about your slurm cl
    `--container-mounts`, and `--container-env` that are added to `srun` by Pyxis.
    If your cluster supports similar container based plugins, you may be able to
    modify the script to use that instead.
-3. Third, we assume you have already built a recent Dynamo+TRTLLM container image as
-   described in the [Building a Custom Container](../trtllm-building-custom-container.md) guide.
+3. Third, we assume you have a Dynamo+TRTLLM container image available.
+   You can use the [prebuilt container](../README.md#quick-start) or [build a custom one](../trtllm-building-custom-container.md).
    This is the image that can be set to the `IMAGE` environment variable in later steps.
 4. Fourth, we assume you pre-allocate a group of nodes using `salloc`. We
    will allocate 8 nodes below as a reference command to have enough capacity
@@ -79,8 +79,11 @@ inside an interactive shell on one of the allocated nodes, set the
 following environment variables based:
 ```bash
 # NOTE: IMAGE must be set manually for now
-# To build an image, see the steps here:
-# ../trtllm-building-custom-container.md
+# Use the prebuilt container from NGC (see ../README.md#quick-start):
+#   export IMAGE="nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.9.0"
+# Or build a custom one (see ../trtllm-building-custom-container.md)
+# Or you can also download the image to shared storage and point
+# IMAGE to the local path.
 export IMAGE="<dynamo_trtllm_image>"
 
 # MOUNTS are the host:container path pairs that are mounted into the containers
