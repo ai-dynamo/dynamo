@@ -426,8 +426,8 @@ class HandlerBase(BaseGenerativeHandler):
 
         For PREFILL_AND_DECODE (aggregated) mode:
         - Uses ep_disaggregated_params from encode worker if available
-          (passes multimodal_embedding_handles to TRT-LLM without setting
-          request_type so the engine runs normal prefill + decode)
+          (passes multimodal_embedding_handles to TRT-LLM and sets
+          request_type="context_and_generation" for full prefill + decode)
 
         Args:
             request: Request dictionary (may contain prefill_result)
