@@ -25,9 +25,9 @@ docker compose -f deploy/docker-compose.yml up -d
 ```
 
 <Note>
-- **etcd** is optional but is the default local discovery backend. You can also use `--discovery-backend file` to use file system based discovery.
-- **NATS** is only needed when using KV routing with events (`--kv-events-config`). Use `--no-router-kv-events` on the frontend for prediction-based routing without NATS.
-- **On Kubernetes**, neither is required when using the Dynamo operator (`DYN_DISCOVERY_BACKEND=kubernetes`).
+- **etcd** is optional but is the default local discovery backend. File-based discovery is also available (see `python -m dynamo.vllm --help` for `--discovery-backend` options).
+- **NATS** is only needed when using KV routing with events. Prediction-based routing does not require NATS.
+- **On Kubernetes**, neither is required when using the Dynamo operator.
 </Note>
 
 <Tip>
@@ -45,18 +45,6 @@ cd $DYNAMO_HOME/examples/backends/vllm
 bash launch/agg.sh
 ```
 
-<Accordion title="Verify the deployment">
-```bash
-curl http://localhost:8000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "Qwen/Qwen3-0.6B",
-    "messages": [{"role": "user", "content": "Hello!"}],
-    "max_tokens": 32
-  }'
-```
-</Accordion>
-
 ### Aggregated Serving with KV Routing
 
 Two workers behind a [KV-aware router](../../components/router/README.md) that maximizes cache reuse. Requires 2 GPUs.
@@ -66,19 +54,7 @@ cd $DYNAMO_HOME/examples/backends/vllm
 bash launch/agg_router.sh
 ```
 
-This launches the frontend with `--router-mode kv` and two workers with ZMQ-based KV event publishing.
-
-<Accordion title="Verify the deployment">
-```bash
-curl http://localhost:8000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "Qwen/Qwen3-0.6B",
-    "messages": [{"role": "user", "content": "Hello!"}],
-    "max_tokens": 32
-  }'
-```
-</Accordion>
+This launches the frontend in KV routing mode with two workers publishing KV events over ZMQ.
 
 ### Disaggregated Serving
 
@@ -89,18 +65,6 @@ cd $DYNAMO_HOME/examples/backends/vllm
 bash launch/disagg.sh
 ```
 
-<Accordion title="Verify the deployment">
-```bash
-curl http://localhost:8000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "Qwen/Qwen3-0.6B",
-    "messages": [{"role": "user", "content": "Hello!"}],
-    "max_tokens": 32
-  }'
-```
-</Accordion>
-
 ### Disaggregated Serving with KV Routing
 
 Scales to 2 prefill + 2 decode workers with KV-aware routing on both pools. Requires 4 GPUs.
@@ -110,19 +74,7 @@ cd $DYNAMO_HOME/examples/backends/vllm
 bash launch/disagg_router.sh
 ```
 
-The frontend uses `--router-mode kv` and automatically detects prefill workers to activate an internal prefill router. Each worker publishes KV events over ZMQ on unique ports.
-
-<Accordion title="Verify the deployment">
-```bash
-curl http://localhost:8000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "Qwen/Qwen3-0.6B",
-    "messages": [{"role": "user", "content": "Hello!"}],
-    "max_tokens": 32
-  }'
-```
-</Accordion>
+The frontend runs in KV routing mode and automatically detects prefill workers to activate an internal prefill router.
 
 ### Data Parallel / Expert Parallelism
 
@@ -132,18 +84,6 @@ Launches 4 data-parallel workers with expert parallelism behind a KV-aware route
 cd $DYNAMO_HOME/examples/backends/vllm
 bash launch/dep.sh
 ```
-
-<Accordion title="Verify the deployment">
-```bash
-curl http://localhost:8000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "Qwen/Qwen3-30B-A3B",
-    "messages": [{"role": "user", "content": "Hello!"}],
-    "max_tokens": 32
-  }'
-```
-</Accordion>
 
 <Tip>
 Run a disaggregated example and try adding another prefill worker once the setup is running! The system will automatically discover and utilize the new worker.
@@ -167,9 +107,38 @@ Serve multimodal models using the vLLM-Omni integration.
 
 ### Multi-Node
 
-Deploy vLLM across multiple nodes for larger models.
+Deploy vLLM across multiple nodes using Dynamo's distributed capabilities. Multi-node deployments require network connectivity between nodes and firewall rules allowing NATS/ETCD communication.
 
-**Guide:** [Multi-Node Deployment](multi-node.md)
+Start NATS/ETCD on the head node so all worker nodes can reach them:
+
+```bash
+# On head node
+docker compose -f deploy/docker-compose.yml up -d
+
+# Set on ALL nodes
+export HEAD_NODE_IP="<your-head-node-ip>"
+export NATS_SERVER="nats://${HEAD_NODE_IP}:4222"
+export ETCD_ENDPOINTS="${HEAD_NODE_IP}:2379"
+```
+
+For multi-node tensor/pipeline parallelism (when TP x PP exceeds GPUs on a single node), see [`launch/multi_node_tp.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/multi_node_tp.sh). For details on distributed execution, see the [vLLM multiprocessing docs](https://docs.vllm.ai/en/stable/serving/parallelism_scaling/#running-vllm-with-multiprocessing).
+
+### DeepSeek-R1
+
+Dynamo supports DeepSeek R1 with data parallel attention and wide expert parallelism. Each DP attention rank is a separate Dynamo component emitting its own KV events and metrics.
+
+Run on 2 nodes (16 GPUs, dp=16):
+
+```bash
+# Node 0
+cd $DYNAMO_HOME/examples/backends/vllm
+./launch/dsr1_dep.sh --num-nodes 2 --node-rank 0 --gpus-per-node 8 --master-addr <node-0-addr>
+
+# Node 1
+./launch/dsr1_dep.sh --num-nodes 2 --node-rank 1 --gpus-per-node 8 --master-addr <node-0-addr>
+```
+
+See [`launch/dsr1_dep.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/dsr1_dep.sh) for configurable options.
 
 ## Kubernetes Deployment
 
@@ -200,7 +169,6 @@ kill -9 <PID>
 
 - **[vLLM README](README.md)**: Quick start and feature overview
 - **[Reference Guide](vllm-reference-guide.md)**: Configuration, arguments, and operational details
-- **[Multi-Node](multi-node.md)**: Multi-node deployment guide
-- **[Prometheus](prometheus.md)**: Metrics and monitoring
+- **[Observability](vllm-observability.md)**: Metrics and monitoring
 - **[Benchmarking](../../benchmarks/benchmarking.md)**: Performance benchmarking tools
 - **[Tuning Disaggregated Performance](../../performance/tuning.md)**: P/D tuning guide

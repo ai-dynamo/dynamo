@@ -8,9 +8,22 @@ title: vLLM
 
 Dynamo vLLM integrates [vLLM](https://github.com/vllm-project/vllm) engines into Dynamo's distributed runtime, enabling disaggregated serving, KV-aware routing, and request cancellation while maintaining full compatibility with vLLM's native engine arguments. Dynamo leverages vLLM's native KV cache events, NIXL-based transfer mechanisms, and metric reporting to enable KV-aware routing and P/D disaggregation.
 
-## Use the Latest Release
+## Installation
 
-We recommend using the [latest stable release](https://github.com/ai-dynamo/dynamo/releases/latest) of Dynamo to avoid breaking changes.
+### Install Latest Release
+
+We recommend using [uv](https://github.com/astral-sh/uv) to install:
+
+```bash
+uv venv --python 3.12 --seed
+uv pip install "ai-dynamo[vllm]"
+```
+
+This installs Dynamo with the compatible vLLM version.
+
+### Development Setup
+
+For development, use the [devcontainer](https://github.com/ai-dynamo/dynamo/tree/main/.devcontainer) which has all dependencies pre-installed.
 
 ---
 
@@ -27,31 +40,23 @@ docker build -f container/rendered.Dockerfile -t dynamo:latest-vllm .
 ./container/run.sh -it --framework VLLM [--mount-workspace]
 ```
 
-This includes the specific commit [vllm-project/vllm#19790](https://github.com/vllm-project/vllm/pull/19790) which enables support for external control of the DP ranks.
 </Accordion>
 
 ## Feature Support Matrix
 
-### Core Dynamo Features
-
-| Feature | vLLM | Notes |
-|---------|------|-------|
-| [**Disaggregated Serving**](../../design-docs/disagg-serving.md) | ✅ |  |
-| [**Conditional Disaggregation**](../../design-docs/disagg-serving.md) | 🚧 | WIP |
-| [**KV-Aware Routing**](../../components/router/README.md) | ✅ |  |
-| [**SLA-Based Planner**](../../components/planner/planner-guide.md) | ✅ |  |
-| [**Load Based Planner**](../../components/planner/README.md) | 🚧 | WIP |
-| [**KVBM**](../../components/kvbm/README.md) | ✅ |  |
-| [**LMCache**](../../integrations/lmcache-integration.md) | ✅ |  |
-| [**Prompt Embeddings**](./prompt-embeddings.md) | ✅ | Requires `--enable-prompt-embeds` flag |
-
-### Large Scale P/D and WideEP Features
-
-| Feature            | vLLM | Notes                                                                 |
-|--------------------|------|-----------------------------------------------------------------------|
-| **WideEP**         | ✅   | Support for PPLX / DeepEP not verified                                           |
-| **DP Rank Routing**| ✅   | Supported via external control of DP ranks |
-| **GB200 Support**  | 🚧   | Container functional on main |
+| Feature | Status | Notes |
+|---------|--------|-------|
+| [**Disaggregated Serving**](../../design-docs/disagg-serving.md) | ✅ | Prefill/decode separation with NIXL KV transfer |
+| [**KV-Aware Routing**](../../components/router/README.md) | ✅ | |
+| [**SLA-Based Planner**](../../components/planner/planner-guide.md) | ✅ | |
+| [**KVBM**](../../components/kvbm/README.md) | ✅ | |
+| [**LMCache**](../../integrations/lmcache-integration.md) | ✅ | |
+| [**Multimodal Support**](vllm-omni.md) | ✅ | Via vLLM-Omni integration |
+| [**Prompt Embeddings**](vllm-prompt-embeddings.md) | ✅ | Opt-in |
+| [**Observability**](vllm-observability.md) | ✅ | Metrics and monitoring |
+| **WideEP** | ✅ | Support for DeepEP |
+| **DP Rank Routing** | ✅ | [Hybrid load balancing](https://docs.vllm.ai/en/stable/serving/data_parallel_deployment/?h=external+dp#hybrid-load-balancing) via external DP rank control |
+| **GB200 Support** | ✅ | Container functional on main |
 
 ## Quick Start
 
@@ -68,27 +73,11 @@ cd $DYNAMO_HOME/examples/backends/vllm
 bash launch/agg.sh
 ```
 
-Verify the deployment:
-
-```bash
-curl http://localhost:8000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "Qwen/Qwen3-0.6B",
-    "messages": [{"role": "user", "content": "Hello!"}],
-    "max_tokens": 32
-  }'
-```
-
 ## Next Steps
 
 - **[Reference Guide](vllm-reference-guide.md)**: Configuration, arguments, and operational details
 - **[Examples](vllm-examples.md)**: All deployment patterns with launch scripts
-- **[Multi-Node](multi-node.md)**: Multi-node deployment guide
-- **[DeepSeek-R1](deepseek-r1.md)**: DeepSeek-R1 deployment guide
-- **[GPT-OSS](gpt-oss.md)**: GPT-OSS deployment guide
-- **[Prometheus](prometheus.md)**: Metrics and monitoring
-- **[Prompt Embeddings](prompt-embeddings.md)**: Pre-computed prompt embeddings
+- **[Observability](vllm-observability.md)**: Metrics and monitoring
 - **[vLLM-Omni](vllm-omni.md)**: Multimodal model serving
-- **[Deploying vLLM with Dynamo on Kubernetes](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/deploy/README.md)**: Kubernetes deployment guide
-- **[vLLM Documentation](https://docs.vllm.ai/en/v0.9.2/configuration/serve_args.html)**: Upstream vLLM serve arguments
+- **[Kubernetes Deployment](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/deploy/README.md)**: Kubernetes deployment guide
+- **[vLLM Documentation](https://docs.vllm.ai/en/stable/)**: Upstream vLLM serve arguments

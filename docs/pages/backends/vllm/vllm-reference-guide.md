@@ -15,36 +15,21 @@ Dynamo vLLM uses vLLM's native argument parser — all vLLM engine arguments are
 
 ## Argument Reference
 
-### Key Configuration Arguments
+The vLLM backend accepts all upstream vLLM engine arguments plus Dynamo-specific arguments. The authoritative source is always the CLI:
 
-| Argument | Default | Description |
-|----------|---------|-------------|
-| `--model` | *(required)* | Model to serve (e.g., `Qwen/Qwen3-0.6B`) |
-| `--disaggregation-mode` | `agg` | Worker role: `prefill`, `decode`, or `agg` (aggregated) |
-| `--kv-transfer-config` | `None` | JSON string for vLLM KVTransferConfig (e.g., `'{"kv_connector":"NixlConnector","kv_role":"kv_both"}'`) |
-| `--kv-events-config` | `None` | JSON string for KV event publishing config |
-| `--enable-prompt-embeds` | `false` | Enable [prompt embeddings](prompt-embeddings.md) feature (opt-in) |
-| `--block-size` | vLLM default | Block size for KV cache management |
-| `--enforce-eager` | `false` | Disable CUDA graphs for quick deployment (remove for production) |
-| `--data-parallel-rank` | `None` | DP rank for expert parallelism deployments |
-| `--data-parallel-size` | `None` | Total DP size for expert parallelism deployments |
-| `--enable-expert-parallel` | `false` | Enable expert parallelism for MoE models |
-| `--metrics-endpoint-port` | `None` | Port for publishing KV metrics to Dynamo |
+```bash
+python -m dynamo.vllm --help
+```
 
-### Upstream vLLM Arguments
+The `--help` output is organized into the following groups:
 
-Dynamo uses the same argument parser as vLLM. Run `vllm serve --help` to see all available CLI arguments, or consult the [vLLM serve args documentation](https://docs.vllm.ai/en/v0.9.2/configuration/serve_args.html).
-
-See `args.py` in the Dynamo source for the full list of Dynamo-specific overrides.
+- **Dynamo Runtime Options** — Namespace, discovery backend, request/event plane, endpoint types, tool/reasoning parsers, and custom chat templates. These are common across all Dynamo backends and use `DYN_*` env vars.
+- **Dynamo vLLM Options** — Disaggregation mode, tokenizer selection, sleep mode, multimodal flags, vLLM-Omni pipeline configuration, headless mode, and ModelExpress. These use `DYN_VLLM_*` env vars.
+- **vLLM Engine Options** — All native vLLM arguments (`--model`, `--tensor-parallel-size`, `--kv-transfer-config`, `--kv-events-config`, `--enable-prefix-caching`, etc.). See the [vLLM serve args documentation](https://docs.vllm.ai/en/stable/configuration/serve_args.html).
 
 ### Prompt Embeddings
 
-The `--enable-prompt-embeds` flag enables accepting pre-computed prompt embeddings via the API:
-
-- **Default behavior:** Prompt embeddings DISABLED — requests with `prompt_embeds` will fail
-- **Error without flag:** `ValueError: You must set --enable-prompt-embeds to input prompt_embeds`
-
-See [Prompt Embeddings](prompt-embeddings.md) for full documentation.
+See [Prompt Embeddings](vllm-prompt-embeddings.md) for documentation on pre-computed embedding support via vLLM's `--enable-prompt-embeds` flag.
 
 ## Hashing Consistency for KV Events
 
@@ -58,6 +43,30 @@ vllm serve ... --enable-prefix-caching --prefix-caching-algo sha256
 ```
 
 See the high-level notes in [Router Design](../../design-docs/router-design.md#deterministic-event-ids) on deterministic event IDs.
+
+## Graceful Shutdown
+
+vLLM workers use Dynamo's graceful shutdown mechanism. When a `SIGTERM` or `SIGINT` is received:
+
+1. **Discovery unregister**: The worker is removed from service discovery so no new requests are routed to it
+2. **Grace period**: In-flight requests are allowed to complete (configurable via `DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS`, default 5s)
+3. **Resource cleanup**: Engine resources and temporary files (Prometheus dirs, LoRA adapters) are released
+
+All vLLM endpoints use `graceful_shutdown=True`, meaning they wait for in-flight requests to finish before exiting. An internal `VllmEngineMonitor` also checks engine health every 2 seconds and initiates shutdown if the engine becomes unresponsive.
+
+For more details, see [Graceful Shutdown](../../fault-tolerance/graceful-shutdown.md).
+
+## Health Checks
+
+Each worker type has a specialized health check payload that validates the full inference pipeline:
+
+| Worker Type | Health Check Strategy |
+|------------|----------------------|
+| Decode / Aggregated | Short generation request (`max_tokens=1`) using the model's BOS token |
+| Prefill | Same payload structure as decode, adapted for prefill request format |
+| vLLM-Omni | Short generation request via AsyncOmni with the model's BOS token |
+
+Health checks are registered with the Dynamo runtime and called by the frontend or Kubernetes liveness probes. The payload can be overridden via `DYN_HEALTH_CHECK_PAYLOAD` environment variable. See [Health Checks](../../observability/health-checks.md) for the broader health check architecture.
 
 ## Request Cancellation
 
@@ -78,6 +87,6 @@ Dynamo supports [request migration](../../fault-tolerance/request-migration.md) 
 
 - **[Examples](vllm-examples.md)**: All deployment patterns with launch scripts
 - **[vLLM README](README.md)**: Quick start and feature overview
-- **[Prometheus](prometheus.md)**: Metrics and monitoring setup
+- **[Observability](vllm-observability.md)**: Metrics and monitoring setup
 - **[Router Guide](../../components/router/router-guide.md)**: KV-aware routing configuration
 - **[Fault Tolerance](../../fault-tolerance/README.md)**: Request migration, cancellation, and graceful shutdown

@@ -8,7 +8,7 @@ Dynamo supports multimodal generation through the [vLLM-Omni](https://github.com
 
 ## Prerequisites
 
-This guide assumes familiarity with deploying Dynamo with vLLM as described in the [vLLM backend guide](/docs/pages/backends/vllm/README.md).
+This guide assumes familiarity with deploying Dynamo with vLLM as described in the [vLLM backend guide](README.md).
 
 ### Installation
 
@@ -162,14 +162,13 @@ The `/v1/videos` endpoint also accepts NVIDIA extensions via the `nvext` field f
 
 ## CLI Reference
 
-| Flag | Description |
-|---|---|
-| `--omni` | Enable the vLLM-Omni orchestrator (required for all omni workloads) |
-| `--output-modalities <modality>` | Output modality: `text`, `image`, or `video` |
-| `--stage-configs-path <path>` | Path to stage config YAML (optional; vLLM-Omni uses model defaults if omitted) |
-| _(no `--kv-transfer-config`)_ | KV connector is disabled by default; omit the flag for omni workers |
-| `--media-output-fs-url <url>` | Filesystem URL for storing generated media (default: `file:///tmp/dynamo_media`) |
-| `--media-output-http-url <url>` | Base URL for rewriting media paths in responses (optional) |
+For the full list of Omni-related flags (including `--omni`, `--output-modalities`, `--stage-configs-path`, `--media-output-fs-url`, `--media-output-http-url`, and the `--omni-*` diffusion flags), run:
+
+```bash
+python -m dynamo.vllm --help
+```
+
+See also the [Argument Reference](vllm-reference-guide.md#argument-reference) in the Reference Guide.
 
 ## Storage Configuration
 
@@ -189,7 +188,7 @@ For S3 credential configuration, set the standard AWS environment variables (`AW
 
 ## Stage Configuration
 
-Omni pipelines are configured via YAML stage configs. See [`examples/backends/vllm/launch/stage_configs/single_stage_llm.yaml`](/examples/backends/vllm/launch/stage_configs/single_stage_llm.yaml) for an example. For full documentation on stage config format and multi-stage pipelines, refer to the [vLLM-Omni Stage Configs documentation](https://docs.vllm.ai/projects/vllm-omni/en/latest/configuration/stage_configs/).
+Omni pipelines are configured via YAML stage configs. See [`examples/backends/vllm/launch/stage_configs/single_stage_llm.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/stage_configs/single_stage_llm.yaml) for an example. For full documentation on stage config format and multi-stage pipelines, refer to the [vLLM-Omni Stage Configs documentation](https://docs.vllm.ai/projects/vllm-omni/en/latest/configuration/stage_configs/).
 
 ## Current Limitations
 

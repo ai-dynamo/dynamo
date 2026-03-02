@@ -155,16 +155,10 @@ navigation:
             path: ../pages/backends/vllm/vllm-reference-guide.md
           - page: Examples
             path: ../pages/backends/vllm/vllm-examples.md
-          - page: Multi-Node
-            path: ../pages/backends/vllm/multi-node.md
-          - page: DeepSeek-R1
-            path: ../pages/backends/vllm/deepseek-r1.md
           - page: GPT-OSS
             path: ../pages/backends/vllm/gpt-oss.md
           - page: Prometheus
             path: ../pages/backends/vllm/prometheus.md
-          - page: Prompt Embeddings
-            path: ../pages/backends/vllm/prompt-embeddings.md
           - page: vLLM-Omni
             path: ../pages/backends/vllm/vllm-omni.md
 
