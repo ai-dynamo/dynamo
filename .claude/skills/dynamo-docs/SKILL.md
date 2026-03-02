@@ -12,12 +12,6 @@ Unified skill for adding, updating, moving, and removing pages on the Dynamo Fer
 **ALL edits happen on `main` (or a feature branch based on `main`).**
 The `docs-website` branch is CI-managed and must **never** be edited by hand.
 
-## Working Directory
-
-Must be in the `dynamo` repo (not `dynamo-tpm`). Architecture details: `docs/README.md`.
-
----
-
 ## Operations
 
 ### Add a Page
