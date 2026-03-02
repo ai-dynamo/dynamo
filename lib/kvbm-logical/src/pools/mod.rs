@@ -24,6 +24,7 @@ pub(crate) use active::ActivePool;
 pub(crate) use inactive::backends;
 pub(crate) use inactive::{InactivePool, InactivePoolBackend};
 pub(crate) use reset::ResetPool;
+pub use reset::FifoBlockAllocator;
 
 // Re-export RAII guards from guards module
 use crate::blocks::{
@@ -33,11 +34,7 @@ use crate::blocks::{
 
 pub(crate) use crate::SequenceHash;
 
-pub(crate) trait BlockAllocator<T: BlockMetadata> {
-    // fn new(blocks: Vec<Block<T, Reset>>) -> Arc<Self>
-    // where
-    //     Self: Sized;
-
+pub trait BlockAllocator<T: BlockMetadata> {
     /// Insert a block into the pool
     fn insert(&mut self, block: Block<T, Reset>);
 
@@ -50,6 +47,20 @@ pub(crate) trait BlockAllocator<T: BlockMetadata> {
     /// Check if the pool is empty
     fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+}
+
+impl<T: BlockMetadata> BlockAllocator<T> for Box<dyn BlockAllocator<T> + Send + Sync> {
+    fn insert(&mut self, block: Block<T, Reset>) {
+        (**self).insert(block)
+    }
+
+    fn pop(&mut self) -> Option<Block<T, Reset>> {
+        (**self).pop()
+    }
+
+    fn len(&self) -> usize {
+        (**self).len()
     }
 }
 

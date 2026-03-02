@@ -28,7 +28,7 @@ impl<T: BlockMetadata> ResetPool<T> {
         block_size: usize,
         metrics: Option<Arc<BlockPoolMetrics>>,
     ) -> Self {
-        let allocator = DequeBlockAllocator::new();
+        let allocator = FifoBlockAllocator::new();
         Self::from_block_allocator(allocator, blocks, block_size, metrics)
     }
 
@@ -117,25 +117,25 @@ impl<T: BlockMetadata> ResetPool<T> {
 }
 
 #[derive(Debug)]
-pub(crate) struct DequeBlockAllocator<T: BlockMetadata> {
+pub struct FifoBlockAllocator<T: BlockMetadata> {
     blocks: VecDeque<Block<T, Reset>>,
 }
 
-impl<T: BlockMetadata> Default for DequeBlockAllocator<T> {
+impl<T: BlockMetadata> Default for FifoBlockAllocator<T> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<T: BlockMetadata> DequeBlockAllocator<T> {
-    pub(crate) fn new() -> Self {
+impl<T: BlockMetadata> FifoBlockAllocator<T> {
+    pub fn new() -> Self {
         Self {
             blocks: VecDeque::new(),
         }
     }
 }
 
-impl<T: BlockMetadata> BlockAllocator<T> for DequeBlockAllocator<T> {
+impl<T: BlockMetadata> BlockAllocator<T> for FifoBlockAllocator<T> {
     fn insert(&mut self, block: Block<T, Reset>) {
         self.blocks.push_back(block);
     }

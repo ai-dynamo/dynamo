@@ -14,8 +14,8 @@ use crate::{BlockId, pools::backends::LineageBackend, tinylfu::TinyLFUTracker};
 use crate::{
     blocks::{Block, BlockMetadata, state::Reset},
     pools::{
-        ActivePool, BlockDuplicationPolicy, InactivePool, InactivePoolBackend, ResetPool,
-        ReusePolicy, SequenceHash,
+        ActivePool, BlockAllocator, BlockDuplicationPolicy, InactivePool, InactivePoolBackend,
+        ResetPool, ReusePolicy, SequenceHash,
         backends::{HashMapBackend, LruBackend, MultiLruBackend},
     },
     registry::BlockRegistry,
@@ -116,6 +116,9 @@ pub struct BlockManagerConfigBuilder<T: BlockMetadata> {
     /// Optional metrics aggregator for prometheus export
     aggregator: Option<MetricsAggregator>,
 
+    /// Custom block allocator for the reset pool
+    block_allocator: Option<Box<dyn BlockAllocator<T> + Send + Sync>>,
+
     /// Phantom data for type parameter
     _phantom: std::marker::PhantomData<T>,
 }
@@ -129,6 +132,7 @@ impl<T: BlockMetadata> Default for BlockManagerConfigBuilder<T> {
             inactive_backend: None,
             duplication_policy: None,
             aggregator: None,
+            block_allocator: None,
             _phantom: std::marker::PhantomData,
         }
     }
@@ -266,6 +270,19 @@ impl<T: BlockMetadata> BlockManagerConfigBuilder<T> {
         self
     }
 
+    /// Set a custom block allocator for the reset pool.
+    ///
+    /// Use this to plug in a custom allocation strategy (e.g., remote/networked
+    /// block allocation). See [`crate::ext`] for the types needed to implement
+    /// a custom allocator.
+    pub fn block_allocator(
+        mut self,
+        allocator: impl BlockAllocator<T> + Send + Sync + 'static,
+    ) -> Self {
+        self.block_allocator = Some(Box::new(allocator));
+        self
+    }
+
     /// Validate the configuration.
     fn validate(&self) -> Result<(), String> {
         let registry = self.registry.as_ref().ok_or("registry is required")?;
@@ -338,7 +355,11 @@ impl<T: BlockMetadata> BlockManagerConfigBuilder<T> {
         let blocks: Vec<Block<T, Reset>> = (0..block_count as BlockId)
             .map(|id| Block::new(id, block_size))
             .collect();
-        let reset_pool = ResetPool::new(blocks, block_size, Some(metrics.clone()));
+        let reset_pool = if let Some(allocator) = self.block_allocator {
+            ResetPool::from_block_allocator(allocator, blocks, block_size, Some(metrics.clone()))
+        } else {
+            ResetPool::new(blocks, block_size, Some(metrics.clone()))
+        };
         metrics.set_reset_pool_size(block_count as i64);
 
         // Create backend based on configuration

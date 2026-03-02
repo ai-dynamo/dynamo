@@ -253,7 +253,7 @@ v1's `BTreeSet<PriorityKey>` approach does handle priority-aware ordering well f
 - **Pool separation**: `ResetPool<T>` (available blocks), `ActivePool<T>` (registered block lookup via registry), `InactivePool<T>` (evictable registered blocks). Each pool is a simple struct with direct method calls.
 - **Orchestrator**: `BlockManager<T>` composes the three pools + `BlockRegistry`. Public methods: `allocate_blocks()`, `register_blocks()`, `match_blocks()`, `scan_matches()`, `reset_inactive_pool()`, `total_blocks()`, `available_blocks()`, `block_size()`.
 - **Block return**: `MutableBlock::drop()` calls a `return_fn: Arc<dyn Fn(Block<T, Reset>)>` closure. `InactivePool` uses `Arc::try_unwrap()` to reclaim blocks on return.
-- **Reset pool allocator**: Pluggable `BlockAllocator<T>` trait. Default is `DequeBlockAllocator` (FIFO).
+- **Reset pool allocator**: Pluggable `BlockAllocator<T>` trait. Default is `FifoBlockAllocator` (FIFO).
 
 ### Comparison Notes
 
