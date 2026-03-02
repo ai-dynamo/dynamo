@@ -563,11 +563,6 @@ async fn run_event_processor_loop<P: EventSink + Send + Sync + 'static>(
     let mut last_raw_input_id: Option<u64> = None;
 
     loop {
-        // When disabled (None) the sleep arm is never armed; 1 year is a harmless sentinel.
-        let remaining = timeout_ms.map_or(Duration::from_days(365), |ms| {
-            batching_state.remaining_timeout(ms)
-        });
-
         tokio::select! {
             _ = cancellation_token.cancelled() => {
                 tracing::info!("KV Event source received cancellation signal");
@@ -668,7 +663,9 @@ async fn run_event_processor_loop<P: EventSink + Send + Sync + 'static>(
                     batching_state.flush(&publisher, &local_indexer, worker_id).await;
                 }
             }
-            _ = tokio::time::sleep(remaining), if timeout_ms.is_some() && batching_state.has_pending() => {
+            _ = tokio::time::sleep(
+                timeout_ms.map(|ms| batching_state.remaining_timeout(ms)).unwrap_or(Duration::from_secs(3600))
+            ), if timeout_ms.is_some() && batching_state.has_pending() => {
                 batching_state.flush(&publisher, &local_indexer, worker_id).await;
             }
         }
