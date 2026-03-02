@@ -16,7 +16,8 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: docker.io/lambda108/epp-inference-extension-dynamo:discovery-logs
+          image: docker.io/lambda108/epp-inference-extension-dynamo:fix-header
+          imagePullPolicy: Always
           env:
             - name: DYN_KV_CACHE_BLOCK_SIZE
               value: "128"
@@ -93,6 +94,8 @@ spec:
               value: "RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic"
             - name: HF_HOME
               value: /opt/models
+            - name: FLASHINFER_DISABLE_VERSION_CHECK
+              value: "1"
           args:
           - "python3 -m dynamo.vllm --model $MODEL_PATH --served-model-name $SERVED_MODEL_NAME --tensor-parallel-size 2 --data-parallel-size 1 --is-prefill-worker --kv-transfer-config '{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\"}' --gpu-memory-utilization 0.90 --no-enable-prefix-caching --block-size 128"
           command:
@@ -105,6 +108,7 @@ spec:
         containers:
           - name: frontend
             image: docker.io/lambda108/dynamo:discovery-logs
+            imagePullPolicy: Always
             command:
               - python3
             args:
@@ -196,6 +200,8 @@ spec:
               value: "RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic"
             - name: HF_HOME
               value: /opt/models
+            - name: FLASHINFER_DISABLE_VERSION_CHECK
+              value: "1"
           args:
           - "python3 -m dynamo.vllm --model $MODEL_PATH --served-model-name $SERVED_MODEL_NAME --tensor-parallel-size 4 --data-parallel-size 1 --kv-transfer-config '{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\"}' --gpu-memory-utilization 0.90 --no-enable-prefix-caching --block-size 128"
           command:
@@ -208,6 +214,7 @@ spec:
         containers:
           - name: frontend
             image: docker.io/lambda108/dynamo:discovery-logs
+            imagePullPolicy: Always
             command:
               - python3
             args:

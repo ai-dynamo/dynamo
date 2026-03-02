@@ -503,9 +503,13 @@ impl PrefillRouter {
         &self,
         request: SingleIn<PreprocessedRequest>,
     ) -> Result<(PrefillResult, Option<(u64, u32)>), PrefillError> {
-        // For call_prefill path, routing is handled by the router itself (no direct routing needed)
-        // No phase permit needed - we wait for completion before changing phase
-        Self::execute_prefill(self.prefill_router.get().cloned(), request, None, None).await
+        // In Direct mode, pass the pre-selected prefill worker ID from routing hints
+        // so execute_prefill calls router.direct() instead of router.generate().
+        let target_worker = request
+            .routing
+            .as_ref()
+            .and_then(|r| r.prefill_worker_id);
+        Self::execute_prefill(self.prefill_router.get().cloned(), request, target_worker, None).await
     }
 
     /// Query the best prefill worker without executing a request.
