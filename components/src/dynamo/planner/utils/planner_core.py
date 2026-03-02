@@ -665,7 +665,7 @@ class BasePlanner:
         self.isl_predictor.add_data_point(metrics.isl)
         self.osl_predictor.add_data_point(metrics.osl)
 
-    def predict_load(self):
+    def predict_load(self) -> tuple[Optional[float], Optional[float], Optional[float]]:
         try:
             # predict the next load
             next_num_req = self.num_req_predictor.predict_next()

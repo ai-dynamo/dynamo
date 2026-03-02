@@ -55,7 +55,7 @@ for _name in (
 class BasePredictor(ABC):
     """Base class for all load predictors"""
 
-    def __init__(self, minimum_data_points=5):
+    def __init__(self, minimum_data_points: int = 5) -> None:
         self.minimum_data_points = minimum_data_points
         self.data_buffer = []
         # Even if we preload historical data, we still want to ignore the initial
@@ -63,11 +63,11 @@ class BasePredictor(ABC):
         # non-zero datapoint from live traffic.
         self._seen_nonzero_since_idle_reset = False
 
-    def reset_idle_skip(self):
+    def reset_idle_skip(self) -> None:
         """Reset idle-period skipping state (e.g., after warmup, before live)."""
         self._seen_nonzero_since_idle_reset = False
 
-    def add_data_point(self, value):
+    def add_data_point(self, value: float) -> None:
         """Add new data point to the buffer"""
         if math.isnan(value):
             value = 0
@@ -82,14 +82,14 @@ class BasePredictor(ABC):
 
         self.data_buffer.append(value)
 
-    def get_last_value(self):
+    def get_last_value(self) -> float:
         """Get the last value from the buffer"""
         if not self.data_buffer:
             return 0
         return self.data_buffer[-1]
 
     @abstractmethod
-    def predict_next(self):
+    def predict_next(self) -> float:
         """Predict the next value"""
         pass
 
@@ -99,10 +99,10 @@ class ConstantPredictor(BasePredictor):
     Assume load is constant and predict the next load to be the same as most recent load
     """
 
-    def __init__(self, _config: PlannerConfig):
+    def __init__(self, _config: PlannerConfig) -> None:
         super().__init__(minimum_data_points=1)
 
-    def predict_next(self):
+    def predict_next(self) -> float:
         return self.get_last_value()
 
 
@@ -112,7 +112,7 @@ class ARIMAPredictor(BasePredictor):
         RAW = "raw"
         LOG1P = "log1p"
 
-    def __init__(self, config: PlannerConfig):
+    def __init__(self, config: PlannerConfig) -> None:
         super().__init__(minimum_data_points=5)
         self.model = None
         # Keep raw values so we can fit in raw space first, then fallback to log1p space.
@@ -125,7 +125,7 @@ class ARIMAPredictor(BasePredictor):
         )
         self._mode: ARIMAPredictor.Mode = self._requested_mode
 
-    def get_last_value(self):
+    def get_last_value(self) -> float:
         """Return last value in original scale."""
         if self._raw_buffer:
             return float(self._raw_buffer[-1])
@@ -133,7 +133,7 @@ class ARIMAPredictor(BasePredictor):
             return 0
         return float(self.data_buffer[-1])
 
-    def add_data_point(self, value):
+    def add_data_point(self, value: float) -> None:
         prev_len = len(self.data_buffer)
         # Use raw value for idle skipping in BasePredictor. We may transform later.
         super().add_data_point(value)
@@ -145,7 +145,7 @@ class ARIMAPredictor(BasePredictor):
             if self._mode == ARIMAPredictor.Mode.LOG1P:
                 self.data_buffer[-1] = math.log1p(raw)
 
-    def predict_next(self):
+    def predict_next(self) -> float:
         """Predict the next value(s)"""
         if len(self._raw_buffer) < self.minimum_data_points:
             return self.get_last_value()
@@ -247,7 +247,7 @@ class ARIMAPredictor(BasePredictor):
 
 # Time-series forecasting model from Meta
 class ProphetPredictor(BasePredictor):
-    def __init__(self, config: PlannerConfig):
+    def __init__(self, config: PlannerConfig) -> None:
         super().__init__(minimum_data_points=5)
         self._use_log1p = config.load_predictor_log1p
         self.window_size = config.prophet_window_size
@@ -257,7 +257,7 @@ class ProphetPredictor(BasePredictor):
         self.data_buffer = []  # Override to store dicts instead of values
         self._seen_nonzero_since_idle_reset = False
 
-    def add_data_point(self, value):
+    def add_data_point(self, value: float) -> None:
         """Add new data point to the buffer"""
         # Use proper datetime for Prophet
         timestamp = self.start_date + timedelta(seconds=self.curr_step * self.step_size)
@@ -279,14 +279,14 @@ class ProphetPredictor(BasePredictor):
         if len(self.data_buffer) > self.window_size:
             self.data_buffer = self.data_buffer[-self.window_size :]
 
-    def get_last_value(self):
+    def get_last_value(self) -> float:
         """Get the last value from the buffer"""
         if not self.data_buffer:
             return 0
         y = float(self.data_buffer[-1]["y"])
         return max(0.0, math.expm1(y)) if self._use_log1p else y
 
-    def predict_next(self):
+    def predict_next(self) -> float:
         """Predict the next value"""
         if len(self.data_buffer) < self.minimum_data_points:
             return self.get_last_value()
@@ -322,7 +322,7 @@ class KalmanPredictor(BasePredictor):
     forecasting in bursty systems.
     """
 
-    def __init__(self, config: PlannerConfig):
+    def __init__(self, config: PlannerConfig) -> None:
         super().__init__(minimum_data_points=config.kalman_min_points)
         self._use_log1p = config.load_predictor_log1p
         q_level = config.kalman_q_level
@@ -348,7 +348,7 @@ class KalmanPredictor(BasePredictor):
         self._has_cached_pred = False
         self._cached_pred: float = 0.0
 
-    def add_data_point(self, value):
+    def add_data_point(self, value: float) -> None:
         prev_len = len(self.data_buffer)
         super().add_data_point(value)
         if len(self.data_buffer) == prev_len:
@@ -367,7 +367,7 @@ class KalmanPredictor(BasePredictor):
         # Consumed this step; clear cached forecast for next interval.
         self._has_cached_pred = False
 
-    def predict_next(self):
+    def predict_next(self) -> float:
         if not self._initialized:
             return self.get_last_value()
         if self._has_cached_pred:
