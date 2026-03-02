@@ -104,8 +104,8 @@ class TestLocalEmbeddingTransfer:
 
 
 @pytest.mark.asyncio
-@pytest.mark.gpu_0  # Echo tensor worker is CPU-only (no GPU required)
-class TestNixlEmbeddingTransfer:
+@pytest.mark.gpu_1  # NIXL init requires proper CUDA environment
+class TestNixlWriteEmbeddingTransfer:
     async def test_correctness(self):
         sender = NixlWriteEmbeddingSender()
         receiver = NixlWriteEmbeddingReceiver()
@@ -118,8 +118,6 @@ class TestNixlEmbeddingTransfer:
 
         await benchmark(sender, receiver)
 
-    @pytest.mark.asyncio
-    @pytest.mark.gpu_1
     async def test_gpu_benchmark(self):
         sender = NixlWriteEmbeddingSender()
         receiver = NixlWriteEmbeddingReceiver()
@@ -128,8 +126,8 @@ class TestNixlEmbeddingTransfer:
 
 
 @pytest.mark.asyncio
-@pytest.mark.gpu_0  # Echo tensor worker is CPU-only (no GPU required)
-class TestNixlPersistentEmbeddingTransfer:
+@pytest.mark.gpu_1  # NIXL init requires proper CUDA environment
+class TestNixlReadEmbeddingTransfer:
     async def test_correctness(self):
         sender = NixlReadEmbeddingSender()
         receiver = NixlReadEmbeddingReceiver()
@@ -140,8 +138,6 @@ class TestNixlPersistentEmbeddingTransfer:
         receiver = NixlReadEmbeddingReceiver(embedding_hidden_size=EMBEDDING_SIZE)
         await benchmark(sender, receiver)
 
-    @pytest.mark.asyncio
-    @pytest.mark.gpu_1
     async def test_gpu_benchmark(self):
         sender = NixlReadEmbeddingSender()
         receiver = NixlReadEmbeddingReceiver(embedding_hidden_size=EMBEDDING_SIZE)

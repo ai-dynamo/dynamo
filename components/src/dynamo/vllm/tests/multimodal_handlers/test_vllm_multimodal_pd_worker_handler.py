@@ -47,7 +47,9 @@ def _make_config(
         if is_prefill_worker
         else DisaggregationMode.AGGREGATED
     )
-    config.embedding_transfer_mode = EmbeddingTransferMode.NIXL_WRITE
+    # NIXL_WRITE / NIXL_READ modes require GPU, the tests may run in CPU-only environments,
+    # so set to LOCAL mode.
+    config.embedding_transfer_mode = EmbeddingTransferMode.LOCAL
     config.enable_multimodal = enable_multimodal
     config.multimodal_embedding_cache_capacity_gb = (
         multimodal_embedding_cache_capacity_gb
