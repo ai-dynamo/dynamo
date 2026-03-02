@@ -1,15 +1,16 @@
 ---
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+title: Profiler Guide
 ---
 
-# Profiler Guide
+## Overview
 
-This guide covers deployment, configuration, integration, and troubleshooting for the Dynamo Profiler.
+The Dynamo Profiler analyzes model inference performance and generates optimized deployment configurations (DynamoGraphDeployments). Given a model, hardware, and SLA targets, it determines the best parallelization strategy, selects optimal prefill and decode engine configurations, and produces a ready-to-deploy DGD YAML.
 
-## What is a DynamoGraphDeploymentRequest (DGDR)?
+The profiler accepts a `DynamoGraphDeploymentRequestSpec` (DGDR) as input and uses [AI Configurator (AIC)](https://github.com/ai-dynamo/aiconfigurator) for performance simulation, candidate enumeration, and configuration picking. When the planner is enabled, the profiler additionally generates engine interpolation curves used for runtime autoscaling.
 
-A **DynamoGraphDeploymentRequest (DGDR)** is a Kubernetes Custom Resource that serves as the primary interface for users to request model deployments with specific performance and resource constraints. You specify:
+## Workflow
 
 - **What** model you want to deploy (`model`)
 - **How** it should perform (SLA targets: `sla.ttft`, `sla.itl`)
@@ -17,15 +18,143 @@ A **DynamoGraphDeploymentRequest (DGDR)** is a Kubernetes Custom Resource that s
 - **Which** backend to use (`backend`: auto, vllm, sglang, or trtllm)
 - **Which** image to use (`image`)
 
-The Dynamo Operator watches for DGDRs and automatically:
-1. Discovers available GPU resources in your cluster
-2. Runs profiling (online or offline) to find optimal configurations
-3. Generates an optimized DynamoGraphDeployment (DGD) configuration
-4. Deploys the DGD to your cluster
+The profiler follows this pipeline:
 
-**Relationship to DGD:**
-- **DGDR**: High-level "intent" - what you want deployed
-- **DGD**: Low-level "implementation" - how it's deployed
+```mermaid
+flowchart TD
+    Input["DGDR Spec"] --> Validate["Validate + Gate Checks"]
+    Validate --> Strategy{searchStrategy?}
+
+    Strategy -->|rapid| AICCheck{"AIC supports\nmodel/hw/backend?"}
+    Strategy -->|thorough| Enumerate["Enumerate candidates\nvia AIC"]
+
+    AICCheck -->|yes| Simulate["AIC Simulation\n+ Picking"]
+    AICCheck -->|no| Naive["Naive Config\nGeneration"]
+
+    Enumerate --> Deploy["Deploy + Benchmark\neach candidate"]
+    Deploy --> Pick["AIC Picking"]
+
+    Simulate --> DGDGen["DGD Generation"]
+    Pick --> DGDGen
+    Naive --> DGDGen
+
+    DGDGen --> PlannerCheck{"Planner\nenabled?"}
+    PlannerCheck -->|yes| Interpolation["Interpolation\nCurves"]
+    PlannerCheck -->|no| MockerCheck
+
+    Interpolation --> AddPlanner["Add Planner\nService + ConfigMaps"]
+    AddPlanner --> MockerCheck{"Mocker\nenabled?"}
+
+    MockerCheck -->|yes| Mocker["Output Mocker DGD"]
+    MockerCheck -->|no| RealDGD["Output Real DGD"]
+
+    Mocker --> Final["final_config.yaml"]
+    RealDGD --> Final
+```
+
+### Stage-by-stage walkthrough
+
+1. **Validation**: The DGDR spec is validated — required fields checked (`image`, `hardware.gpuSku`, `hardware.numGpusPerNode`), SLA targets verified, and gate checks applied (see [Gate Checks](#gate-checks-and-constraints)).
+
+2. **Search Strategy**: The profiler branches based on `searchStrategy`:
+   - **Rapid**: Uses AIC simulation to estimate performance across parallelization configs. No GPUs needed, completes in ~30 seconds.
+   - **Thorough**: Enumerates candidate parallelization configs via AIC, deploys each on real GPUs, benchmarks with AIPerf, then picks the best. Takes 2-4 hours, disagg mode only.
+
+3. **Picking**: The profiler selects the best configuration using one of three modes, determined automatically from the DGDR spec (see [Picking Modes](#picking-modes)).
+
+4. **DGD Generation**: The picked configuration is rendered into a complete DGD YAML via AIC's generator pipeline, including correct parallelization, replica counts, container image, and PVC mounts.
+
+5. **Interpolation** (planner only): When the planner is enabled, the profiler generates detailed performance interpolation curves — TTFT vs ISL for prefill, ITL vs KV-cache utilization for decode. These are saved into ConfigMaps for the planner to use at runtime.
+
+6. **Final Assembly**: The planner service is added to the DGD if enabled. If mocker is enabled, the mocker DGD is used instead of real workers. The result is written to `final_config.yaml`.
+
+## Search Strategies
+
+### Rapid
+
+Uses AIC's performance simulation to estimate optimal configurations without deploying real engines. Completes in ~30 seconds.
+
+```yaml
+searchStrategy: rapid
+```
+
+- Supports all backends: vLLM, SGLang, TensorRT-LLM
+- If the model/hardware/backend combination is not supported by AIC, falls back to a naive config (memory-fit TP calculation)
+- No GPU resources consumed during profiling
+
+### Thorough
+
+Enumerates candidate parallelization configs, deploys each as a real K8s workload, and benchmarks with AIPerf.
+
+```yaml
+searchStrategy: thorough
+```
+
+- Only disaggregated mode is supported
+- Does not support `auto` backend — specify `vllm`, `sglang`, or `trtllm`
+- Takes 2-4 hours depending on the number of candidates
+- Provides highest accuracy since measurements come from real hardware
+
+## Picking Modes
+
+The profiler automatically selects a picking mode based on the DGDR spec:
+
+### Autoscale
+
+Triggered when the **planner is enabled** (scaling enabled in `features.planner`). Picks prefill and decode engines independently, each with 1 replica. The planner handles scaling at runtime.
+
+### Load Match
+
+Triggered when a **target load** is specified (`workload.requestRate` or `workload.concurrency`). Finds the configuration that serves the target load with the minimum number of GPUs under SLA.
+
+```yaml
+workload:
+  requestRate: 5.0   # target 5 req/s
+```
+
+### Default
+
+Triggered when there is **no planner and no target load**. Maximizes throughput for the available GPU budget under SLA.
+
+## Planner Integration
+
+When the planner is enabled, the profiler generates engine interpolation data needed for throughput-based autoscaling. The `pre_deployment_sweeping_mode` field controls how this data is produced:
+
+```yaml
+features:
+  planner:
+    pre_deployment_sweeping_mode: rapid   # rapid | thorough | none
+    enable_throughput_scaling: true
+```
+
+- **rapid**: Uses AIC simulation to generate interpolation curves (~30s, no GPUs)
+- **thorough**: Deploys the selected engine config on real GPUs and sweeps across ISL/concurrency ranges (2-4h)
+- **none**: Skips interpolation. Only valid when using load-based scaling without throughput-based scaling.
+
+The profiler saves two ConfigMaps into the generated DGD:
+- **planner-config-XXXX**: Serialized `PlannerConfig` JSON (with `profile_results_dir` pointing to the profiling data mount)
+- **planner-profile-data-XXXX**: Prefill and decode interpolation data (JSON)
+
+See the [Planner Guide](../planner/planner-guide.md) for the full `PlannerConfig` reference.
+
+## Mocker
+
+When `features.mocker.enabled: true`, the profiler outputs a mocker DGD that simulates engine behavior without real GPUs. This is useful for testing planner behavior and validating configurations at scale.
+
+Mocker requires pre-deployment sweeping to generate simulated performance profiles — `pre_deployment_sweeping_mode` cannot be `none` when mocker is enabled.
+
+## Gate Checks and Constraints
+
+The profiler enforces these rules at startup:
+
+| Condition | Behavior |
+|-----------|----------|
+| `searchStrategy: thorough` + `backend: auto` | Rejected. Specify a concrete backend. |
+| AIC unsupported + `enable_throughput_scaling: true` | Rejected. Throughput planner requires AIC support. |
+| AIC unsupported + `pre_deployment_sweeping_mode: rapid` | Falls back to `none` with a warning. |
+| `e2eLatency` provided without `ttft: null, itl: null` | Rejected by SLA validator. When using `e2eLatency`, explicitly null out `ttft` and `itl`. |
+| SLA unachievable | Warning logged, SLA updated to best achievable value. |
+| Load-match needs more GPUs than available | Warning logged. |
 
 ## Support Matrix
 
@@ -43,14 +172,15 @@ The profiler sweeps over the following parallelization mappings for prefill and 
 | GQA+MoE (Qwen3MoeForCausalLM) | TP, TEP, DEP | TP, TEP, DEP |
 | Other Models | TP | TP |
 
-> [!NOTE]
-> Exact model x parallelization mapping support is dependent on the backend. The profiler does not guarantee that the recommended P/D engine configuration is supported and bug-free by the backend.
+<Note>
+Exact model x parallelization mapping support is dependent on the backend. The profiler does not guarantee that the recommended P/D engine configuration is supported and bug-free by the backend.
+</Note>
 
 ## Deployment
 
 ### Kubernetes Deployment (DGDR)
 
-The recommended deployment method is through DGDRs. Sample configurations are provided in `benchmarks/profiler/deploy/`:
+The recommended deployment method is through DGDRs. Sample configurations are provided in `components/src/dynamo/profiler/deploy/`:
 
 | Sample | Description |
 |--------|-------------|
@@ -83,17 +213,7 @@ metadata:
 spec:
   model: "Qwen/Qwen3-0.6B"
   backend: vllm
-  image: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.9.0"
-
-  workload:
-    isl: 3000
-    osl: 150
-
-  sla:
-    ttft: 200.0
-    itl: 20.0
-
-  autoApply: true
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.0.0"
 ```
 
 **Step 2: Apply the DGDR**
@@ -137,8 +257,9 @@ kubectl port-forward svc/<deployment>-frontend 8000:8000 -n $NAMESPACE
 curl http://localhost:8000/v1/models
 ```
 
-> [!NOTE]
-> DGDRs are **immutable**. To update SLAs or configuration, delete the existing DGDR and create a new one.
+<Note>
+DGDRs are **immutable**. To update SLAs or configuration, delete the existing DGDR and create a new one.
+</Note>
 
 ## Profiling Method
 
@@ -152,12 +273,12 @@ The profiler follows a 5-step process:
    - **Prefill**:
      - TP/TEP: Measure TTFT with batch size = 1 (assuming ISL is long enough to saturate compute) without KV reuse.
      - DEP: Attention uses data parallelism. Send a single burst with total concurrency `attention_dp_size × attn_dp_num_req_ratio` (defaults to 4) and compute the reported TTFT as `time_to_first_token.max / attn_dp_num_req_ratio` from the AIPerf summary of that burst.
-   ![Prefill Performance](../../images/h100_prefill_performance.png)
+   ![Prefill Performance](../../assets/img/h100-prefill-performance.png)
    - **Decode**: Measure the ITL under different numbers of in-flight requests, from 1 to the maximum the KV cache can hold. To measure ITL without being affected by piggy-backed prefill requests, the script enables KV-reuse and warms up the engine by issuing the same prompts before measuring.
-   ![Decode Performance](../../images/h100_decode_performance.png)
+   ![Decode Performance](../../assets/img/h100-decode-performance.png)
 4. **Recommendation**: Select optimal parallelization mapping for prefill and decode that achieves the highest per-GPU throughput while adhering to the SLA on TTFT and ITL.
 5. **In-Depth Profiling on the Recommended P/D Engine**: Interpolate TTFT with ISL and ITL with active KV cache and decode context length for more accurate performance estimation.
-![ITL Interpolation](../../images/pd_interpolation.png)
+![ITL Interpolation](../../assets/img/pd-interpolation.png)
    - **Prefill**: Measures TTFT and throughput per GPU across different input lengths with batch size=1.
    - **Decode**: Measures ITL and throughput per GPU under various KV cache loads and decode context lengths.
 
@@ -168,7 +289,7 @@ Profiles your model by creating real test deployments in Kubernetes and measurin
 - **Duration**: 2-4 hours
 - **Accuracy**: Highest (real measurements)
 - **GPU Requirements**: Full access to test different parallelization mappings
-- **Backends**: SGLang, TensorRT-LLM, vLLM
+- **Backends**: vLLM, SGLang, TensorRT-LLM
 
 AIPerf-based profiling is the default behavior. Use `searchStrategy: thorough` for comprehensive real-engine profiling:
 
@@ -184,17 +305,18 @@ Uses performance simulation to rapidly estimate optimal configurations without r
 - **Duration**: 20-30 seconds
 - **Accuracy**: Estimated (may have errors for unusual configurations)
 - **GPU Requirements**: None
-- **Backends**: All backends (vLLM, SGLang, TensorRT-LLM)
+- **Backends**: TensorRT-LLM only (vLLM/SGLang coming soon)
 
-AI Configurator simulation is enabled by default via `searchStrategy: rapid`:
+AI Configurator is used by default with `searchStrategy: rapid`:
 
 ```yaml
 spec:
-  searchStrategy: rapid  # Fast profiling with AI Configurator simulation
+  searchStrategy: rapid  # Fast profiling with AI Configurator simulation (default)
 ```
 
-> [!NOTE]
-> `aicBackendVersion` specifies the TensorRT-LLM version that AI Configurator simulates. See the [AI Configurator supported features](https://github.com/ai-dynamo/aiconfigurator#supported-features) for available versions.
+<Note>
+`aicBackendVersion` specifies the TensorRT-LLM version that AI Configurator simulates. See the [AI Configurator supported features](https://github.com/ai-dynamo/aiconfigurator#supported-features) for available versions.
+</Note>
 
 **Currently supports:**
 - **Backends**: TensorRT-LLM (versions 0.20.0, 1.0.0rc3, 1.0.0rc6)
@@ -205,15 +327,33 @@ See [AI Configurator documentation](https://github.com/ai-dynamo/aiconfigurator#
 
 ### Automatic GPU Discovery
 
-The operator automatically discovers GPU resources from your Kubernetes cluster nodes when available. GPU discovery provides:
+The operator automatically discovers GPU resources from cluster nodes, providing hardware info (GPU model, VRAM, GPUs per node) and automatic profiling search space calculation.
 
-- Hardware information (GPU model, VRAM, GPUs per node)
-- Automatic calculation of profiling search space based on model size
-- Hardware system identifier for AI Configurator integration
+**Requirements:**
+- **Cluster-scoped operators**: Have node read permissions by default
+- **Namespace-scoped operators**: GPU discovery is enabled by default when installing via Helm — the chart provisions the required ClusterRole/ClusterRoleBinding automatically
 
-**Permissions**: GPU discovery requires cluster-wide node read permissions. Cluster-scoped operators automatically have these permissions. Namespace-restricted operators can also use GPU discovery if granted node read permissions via RBAC.
+**For namespace-scoped operators**, GPU discovery is controlled by a Helm value:
 
-If GPU discovery is unavailable (no permissions or no GPU labels), the profiler will use manually specified hardware configuration or defaults.
+```bash
+# GPU discovery enabled (default) — Helm provisions read-only node access automatically
+helm install dynamo-platform ... --set dynamo-operator.gpuDiscovery.enabled=true
+
+# GPU discovery disabled — you must provide hardware config manually in each DGDR
+helm install dynamo-platform ... --set dynamo-operator.gpuDiscovery.enabled=false
+```
+
+If GPU discovery is disabled, provide hardware config manually in the DGDR:
+
+```yaml
+spec:
+  hardware:
+    numGpusPerNode: 8
+    gpuSku: "H100-SXM5-80GB"
+    vramMb: 81920
+```
+
+If GPU discovery is disabled and no manual hardware config is provided, the DGDR will be rejected at admission time.
 
 ## Configuration
 
@@ -230,6 +370,9 @@ spec:
   model: "Qwen/Qwen3-0.6B"
   backend: vllm
   image: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.9.0"
+
+  searchStrategy: rapid  # or thorough
+  autoApply: true
 
   workload: { ... }
   sla: { ... }
@@ -268,8 +411,9 @@ hardware:
 - **numGpusPerNode**: Determine the upper bound of GPUs per node for dense models and configure Grove for multi-node MoE engines
 - **gpuSku**: GPU SKU identifier, auto-detected by the controller
 
-> [!TIP]
-> If you don't specify hardware constraints, the controller auto-detects based on your model size and available cluster resources.
+<Tip>
+If you don't specify hardware constraints, the controller auto-detects based on your model size and available cluster resources.
+</Tip>
 
 ### Search Strategy (Optional)
 
@@ -295,8 +439,9 @@ features:
     planner_load_predictor: linear             # Load prediction method
 ```
 
-> [!NOTE]
-> Planner arguments use `planner_` prefix. See the AI Configurator documentation for full list.
+<Note>
+Planner arguments use `planner_` prefix. See [SLA Planner documentation](../planner/planner-guide.md) for full list.
+</Note>
 
 ### Model Cache PVC (Advanced)
 
@@ -494,90 +639,33 @@ View traces using Chrome's `chrome://tracing`, [Perfetto UI](https://ui.perfetto
 
 ## Troubleshooting
 
-### Profiling Takes Too Long
-
-**Solution 1**: Use `searchStrategy: rapid` for fast AI Configurator profiling (TensorRT-LLM only):
-```yaml
-spec:
-  searchStrategy: rapid
-```
-
-**Solution 2**: Reduce search space by specifying hardware constraints in the DGDR:
-```yaml
-spec:
-  hardware:
-    numGpusPerNode: 4
-    totalGpus: 8
-```
-
 ### SLA Cannot Be Met
 
-**Symptoms**: Profiler reports no configuration meets targets
+The profiler logs a warning and updates the SLA to the best achievable value. To improve results:
+- Relax SLA targets (increase TTFT/ITL)
+- Add more GPU resources
+- Try a different backend
+- Use a smaller or quantized model
 
-**Solutions:**
-1. Relax SLA targets (increase TTFT/ITL)
-2. Add more GPU resources
-3. Try a different backend
-4. Use a smaller model
+### Profiling Takes Too Long
 
-### AI Configurator: Attention Head Constraint Error
-
-**Symptoms**: Profiling fails with error:
-```text
-AssertionError: num_heads <N> should be divisible by tp_size <M> and the division result should be >= 4
-```
-
-**Cause**: AI Configurator requires **≥4 attention heads per GPU**. Small models with few heads cannot use high TP sizes.
-
-**Affected Models:**
-- **Qwen3-0.6B** (16 heads): Max TP = 4
-- **GPT-2** (12 heads): Max TP = 3
-- Most models **<1B parameters**: May hit this constraint
-
-**Solution**: Limit `maxNumGpusPerEngine`:
-```yaml
-hardware:
-  maxNumGpusPerEngine: 4  # For Qwen3-0.6B (16 heads / 4 = max TP of 4)
-```
-
-**Calculate Max TP**: `max_tp = num_attention_heads / 4`
-
-> [!NOTE]
-> This is an AI Configurator limitation. Online profiling doesn't have this constraint.
-
-### Image Pull Errors
-
-**Symptoms**: `ErrImagePull` or `ImagePullBackOff`
-
-**Solution**: Ensure image pull secrets are configured:
-```bash
-kubectl create secret docker-registry nvcr-imagepullsecret \
-  --docker-server=nvcr.io \
-  --docker-username='$oauthtoken' \
-  --docker-password=<NGC_API_KEY> \
-  --namespace <your-namespace>
-```
+- Use `searchStrategy: rapid` for ~30s profiling
+- Reduce interpolation granularity
+- Reduce the GPU search space via hardware constraints
 
 ### Out of Memory During Profiling
 
-**Symptoms**: OOM errors in profiling jobs
+- Reduce `max_batch_size` in engine config
+- Skip larger TP configurations by constraining hardware
+- Use a quantized model variant
 
-**Solutions:**
-1. Reduce `gpu_memory_utilization` in engine config
-2. Reduce `--max-context-length`
-3. Skip larger TP configurations
-4. Use fewer GPUs per test
+### Image Pull Errors
 
-### Unsupported Parallelization Mapping in Backend
-
-**Symptoms**: Startup/runtime error in the backend (e.g., prime number of attention heads constraining TP to 1, or backend not supporting different TP sizes for prefill and decode).
-
-**Solutions:**
-1. Contact the backend to add support and bump backend version in Dynamo
-2. Constrain the max and min number of GPUs per engine to the supported range
+Ensure image pull secrets are configured in your namespace for the container registry.
 
 ## See Also
 
-- [DGDR Examples](../../../components/src/dynamo/profiler/deploy/) - Complete DGDR YAML examples
-- [DGDR API Reference](/docs/kubernetes/api-reference.md) - DGDR specification
-- [Profiler Arguments Reference](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/profiler/utils/dgdr_v1beta1_types.py) - Full Configuration Reference
+- [Profiler README](README.md) — Quick overview and feature matrix
+- [Profiler Examples](profiler-examples.md) — Complete DGDR YAML examples
+- [Planner Guide](../planner/planner-guide.md) — PlannerConfig reference and scaling modes
+- [DGDR API Reference](../../kubernetes/api-reference.md) — Full DGDR specification

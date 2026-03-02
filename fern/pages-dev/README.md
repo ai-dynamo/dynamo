@@ -288,11 +288,9 @@ Runs two independent link-checking jobs:
 3. Use standard GitHub-flavored markdown. Callouts (admonitions) should use
    GitHub's native syntax — they are automatically converted during sync:
    ```markdown
-   > [!NOTE]
-   > This is a note that will become a Fern `<Note>` component.
+   <Note>This is a note that will become a Fern `<Note>` component.</Note>
 
-   > [!WARNING]
-   > This warning will become a Fern `<Warning>` component.
+   <Warning>This warning will become a Fern `<Warning>` component.</Warning>
    ```
 4. Open a PR. The lint jobs (`fern check`, `fern docs broken-links`, lychee,
    broken-links-check) run automatically.
