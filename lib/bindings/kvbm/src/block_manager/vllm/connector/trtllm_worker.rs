@@ -234,7 +234,7 @@ impl Worker for KvConnectorWorker {
     fn execute_offload_operations(&mut self) -> anyhow::Result<()> {
         let offloading_operations = std::mem::take(&mut self.offloading_operations);
         for operation in offloading_operations {
-            self.connector.enqueue_request(operation);
+            self.connector.enqueue_request(operation)?;
         }
         Ok(())
     }
@@ -257,7 +257,7 @@ impl Worker for KvConnectorWorker {
         let onboarding_operations = self.onboarding_operations.clone();
         for operation in onboarding_operations {
             let request_id = operation.request_id.clone();
-            self.connector.enqueue_request(operation);
+            self.connector.enqueue_request(operation)?;
             self.maybe_finished_onboarding.insert(request_id);
         }
         Ok(())
@@ -362,7 +362,9 @@ impl Worker for KvConnectorWorker {
 
             // currently chomping the error as the engine is closed and we are shutting down
             if self.connector.has_slot(request_id) {
-                self.connector.remove_slot(request_id);
+                if let Err(e) = self.connector.remove_slot(request_id) {
+                    tracing::error!(request_id, "failed to remove slot: {e}; scheduler disconnected");
+                }
             } else {
                 tracing::debug!(
                     request_id,
@@ -391,7 +393,9 @@ impl Worker for KvConnectorWorker {
         for request_id in &is_finished_onboarding {
             self.maybe_finished_onboarding.remove(request_id);
             if self.connector.has_slot(request_id) {
-                self.connector.remove_slot(request_id);
+                if let Err(e) = self.connector.remove_slot(request_id) {
+                    tracing::error!(request_id, "failed to remove slot: {e}; scheduler disconnected");
+                }
             }
         }
 

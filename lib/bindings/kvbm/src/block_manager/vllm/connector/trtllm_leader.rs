@@ -7,7 +7,7 @@ use crate::block_manager::BlockManagerBuilder;
 use crate::block_manager::vllm::connector::leader::slot::{
     ConnectorSlotManager, SlotManager, SlotState,
 };
-use crate::block_manager::vllm::connector::leader::{
+use dynamo_llm::block_manager::distributed::vllm::{
     kvbm_metrics_endpoint_enabled, parse_kvbm_metrics_port,
 };
 use crate::block_manager::{distributed::KvbmLeader as PyKvbmLeader, vllm::KvbmRequest};

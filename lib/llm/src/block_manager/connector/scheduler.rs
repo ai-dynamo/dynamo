@@ -210,19 +210,19 @@ impl WorkerSchedulerClient {
         self.create_slot_with_immediate_ops(request_id, 0)
     }
 
-    pub fn remove_slot(&mut self, request_id: &String) {
+    pub fn remove_slot(&mut self, request_id: &String) -> Result<(), SchedulerError> {
         let slot = self.slots.remove(request_id).expect("slot does not exist");
         assert!(slot.is_complete());
         self.scheduler_tx
             .send(SchedulerMessage::RequestFinished(request_id.clone()))
-            .expect("failed to send request finished message; disconnected");
+            .map_err(|_| SchedulerError::Disconnected)
     }
 
     /// Enqueues a request to the scheduler.
     ///
     /// Both the worker client and the scheduler keep track of outstanding requests.
     /// The atomic counter to mark completion is shared, but only incremented by the scheduler.
-    pub fn enqueue_request(&mut self, request: WorkerTransferRequest) {
+    pub fn enqueue_request(&mut self, request: WorkerTransferRequest) -> Result<(), SchedulerError> {
         debug_assert!(
             self.slots.contains_key(&request.request_id),
             "slot does not exist"
@@ -240,9 +240,10 @@ impl WorkerSchedulerClient {
             RequestType::Scheduled => {
                 self.scheduler_tx
                     .send(SchedulerMessage::EnqueueRequest(request))
-                    .expect("failed to enqueue request; disconnected");
+                    .map_err(|_| SchedulerError::Disconnected)?;
             }
         }
+        Ok(())
     }
 
     pub fn has_slot(&self, request_id: &str) -> bool {
@@ -373,6 +374,11 @@ impl Scheduler {
                 break;
             }
         }
+        tracing::warn!(
+            iteration = self.iteration,
+            slots = self.slots.len(),
+            "scheduler exiting: worker or transfer channel closed"
+        );
         Ok(())
     }
 
@@ -464,14 +470,26 @@ impl Scheduler {
 
     fn remove_slot(&mut self, request_id: String) {
         debug_assert!(self.slots.contains_key(&request_id), "slot not found");
+        // Cancel any in-flight transfer tasks for this request.
+        // Dropping the parent CancellationToken cancels child tokens held by
+        // spawned transfer tasks (via ScheduledTaskHandle).
         self.cancel_tokens.remove(&request_id);
         self.slots.remove(&request_id);
 
-        let maybe_controller = self.enqueued_requests.remove(&request_id);
-        debug_assert!(
-            maybe_controller.is_none() || maybe_controller.unwrap().is_empty(),
-            "any scheduled request should be removed and enqueued/scheduled before the slot is removed"
-        );
+        // Clean up any un-paired enqueued requests. This can happen when a
+        // request is finished (e.g. aborted by vLLM) before the worker-side
+        // and transfer-side of a scheduled operation have both arrived.
+        // Any Transfer controllers left here will have their decision_tx
+        // dropped, signalling cancellation to the transfer client.
+        if let Some(pending) = self.enqueued_requests.remove(&request_id) {
+            if !pending.is_empty() {
+                tracing::warn!(
+                    request_id,
+                    num_pending = pending.len(),
+                    "removing slot with un-paired scheduled operations; cancelling"
+                );
+            }
+        }
 
         // In TP>1, buffered results are NOT removed in add_slot (they're applied to ALL workers).
         // Clean them up here when the request is finished.
@@ -860,13 +878,13 @@ mod tests {
             transfer_type: TransferType::Load,
             request_type: RequestType::Immediate,
         };
-        worker_client.enqueue_request(worker_request);
+        worker_client.enqueue_request(worker_request).unwrap();
         assert_eq!(worker_client.slots.get("test").unwrap().operations.len(), 1);
         assert!(worker_client.is_complete("test"));
 
         // verify that remove_slot() cleans up the buffered results
         assert_eq!(scheduler.unprocessed_immediate_results.len(), 1);
-        worker_client.remove_slot(&"test".to_string());
+        worker_client.remove_slot(&"test".to_string()).unwrap();
         scheduler.step().await;
 
         // after remove_slot(), the buffered results should be cleaned up
@@ -921,7 +939,7 @@ mod tests {
 
         // immediate requests are not passed to the scheduler, but the completion will be automatically
         // visible on the client via the shared atomic counter
-        worker_client.enqueue_request(request);
+        worker_client.enqueue_request(request).unwrap();
 
         let worker_slot = worker_client.slots.get("test").unwrap();
         assert_eq!(worker_slot.operations.len(), 1);
@@ -1007,7 +1025,7 @@ mod tests {
         };
 
         // worker arrives last
-        worker_client.enqueue_request(request);
+        worker_client.enqueue_request(request).unwrap();
         scheduler.step().await;
 
         let handle = handle.await.unwrap().unwrap();
@@ -1064,7 +1082,7 @@ mod tests {
         };
 
         // worker arrives first
-        worker_client.enqueue_request(request);
+        worker_client.enqueue_request(request).unwrap();
         scheduler.step().await;
 
         // enqueued_requests should contain <request id, <uuid, and None>> since worker arrived first
