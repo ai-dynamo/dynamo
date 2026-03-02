@@ -25,9 +25,9 @@ use super::tracker::{CacheStatusTracker, EventSource, StorageTier};
 /// rather than an object {"ts": ..., "events": ..., "rank": ...} for vLLM/TensorRT-LLM compatibility.
 #[derive(Debug, Deserialize)]
 struct VllmEventBatch(
-    f64,              // ts
-    Vec<RawKvEvent>,  // events — reuses the same custom deserializer as the router publisher
-    Option<i32>,      // data_parallel_rank
+    f64,             // ts
+    Vec<RawKvEvent>, // events — reuses the same custom deserializer as the router publisher
+    Option<i32>,     // data_parallel_rank
 );
 
 impl VllmEventBatch {
