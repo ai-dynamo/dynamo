@@ -49,11 +49,14 @@ data:
       {{- end }}
       {{- end }}
     {{- end }}
-    {{- if and .Values.dynamo.groveTerminationDelay (ne (.Values.dynamo.groveTerminationDelay | toString) "15m") }}
     orchestrators:
+      kaiScheduler:
+        enabled: {{ or (and .Values.global (index .Values.global "kai-scheduler") (index .Values.global "kai-scheduler").enabled) (and .Values.global (index .Values.global "kai-scheduler") (index .Values.global "kai-scheduler").install) }}
       grove:
+        enabled: {{ or (and .Values.global .Values.global.grove .Values.global.grove.enabled) (and .Values.global .Values.global.grove .Values.global.grove.install) }}
+        {{- if and .Values.dynamo.groveTerminationDelay (ne (.Values.dynamo.groveTerminationDelay | toString) "15m") }}
         terminationDelay: {{ .Values.dynamo.groveTerminationDelay | quote }}
-    {{- end }}
+        {{- end }}
     {{- $natsAddr := "" }}
     {{- if .Values.natsAddr }}
       {{- $natsAddr = .Values.natsAddr }}
