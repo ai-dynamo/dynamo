@@ -27,7 +27,7 @@ UCX_VERSION="v1.20.0"
 UCX_INSTALL_PATH="/usr/local/ucx/"
 CUDA_PATH="/usr/local/cuda"
 
-NIXL_COMMIT="31c2b7710a3dc96709c869b3a33aad2a982f42ff"
+NIXL_COMMIT="d5c127e558fd4ddb12e47127243057339c2c2b72"
 
 UCX_REPO="https://github.com/openucx/ucx.git"
 NIXL_REPO="https://github.com/ai-dynamo/nixl.git"
