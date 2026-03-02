@@ -8,7 +8,7 @@ on:
     branches:
     - main
     - "pull-request/[0-9]+"
-    # Note: release/* branches are handled by release.yml which calls this workflow
+    # Note: release/* branches are handled by post-merge-ci.yml which calls this workflow
   workflow_call:
     inputs:
       skip_change_detection:
@@ -17,7 +17,7 @@ on:
         type: boolean
         default: false
       image_prefix:
-        description: 'Optional prefix for image tags (e.g., release-0.9.0). When set, images are also tagged as {prefix}-frontend-{arch}.'
+        description: 'Optional prefix(es) for image tags (newline-separated, e.g., release-0.9.0). Each prefix produces a tag as {prefix}-frontend-{arch}.'
         required: false
         type: string
         default: ''
@@ -160,6 +160,27 @@ jobs:
           echo "epp_image_uri=${{ env.ECR_HOSTNAME }}/${{ needs.build-epp-image.outputs.epp_image_ref }}" >> $GITHUB_OUTPUT
           echo "target_tag=${TARGET_TAG}" >> $GITHUB_OUTPUT
           echo "azure_target_image_uri=${{ secrets.AZURE_ACR_HOSTNAME }}/${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_REPOSITORY }}:${TARGET_TAG}" >> $GITHUB_OUTPUT
+      - name: Calculate image prefix tags
+        id: prefix-tags
+        shell: bash
+        env:
+          IMAGE_PREFIX: ${{ inputs.image_prefix }}
+          ECR_IMAGE_BASE: ${{ steps.calculate-target-tag.outputs.ecr_image_base }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          if [ -n "$IMAGE_PREFIX" ]; then
+            RESULT=""
+            while IFS= read -r prefix; do
+              if [ -n "$prefix" ]; then
+                RESULT+="${ECR_IMAGE_BASE}:${prefix}-frontend-${ARCH}"$'\n'
+              fi
+            done <<< "$IMAGE_PREFIX"
+            echo "tags<<EOF" >> $GITHUB_OUTPUT
+            echo "$RESULT" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+          else
+            echo "tags=" >> $GITHUB_OUTPUT
+          fi
       - name: Print Build Container parameters
         run: |
           echo "=== Build Container Parameters ==="
@@ -207,7 +228,7 @@ jobs:
             ${{ matrix.arch == 'amd64' && steps.calculate-target-tag.outputs.azure_target_image_uri || '' }}
             ${{ github.ref_name == 'main' && format('{0}:main-frontend-{1}', steps.calculate-target-tag.outputs.ecr_image_base, matrix.arch) || '' }}
             ${{ github.ref_name == 'main' && format('{0}:main-frontend-{1}-{2}', steps.calculate-target-tag.outputs.ecr_image_base, github.sha, matrix.arch) || '' }}
-            ${{ inputs.image_prefix != '' && format('{0}:{1}-frontend-{2}', steps.calculate-target-tag.outputs.ecr_image_base, inputs.image_prefix, matrix.arch) || '' }}
+            ${{ steps.prefix-tags.outputs.tags }}
 
       - name: Show summary
         shell: bash

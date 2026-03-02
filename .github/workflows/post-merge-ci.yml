@@ -11,14 +11,36 @@ on:
 permissions:
   contents: read
 
+env:
+  BUILDER_NAME: b-${{ github.run_id }}-${{ github.run_attempt }}
+
 jobs:
   # ============================================================================
-  # FRAMEWORK PIPELINES (Build → Test → Copy)
+  # PREPARE: Extract version from release branch for image tagging
+  # ============================================================================
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      image_prefix: ${{ steps.compute.outputs.image_prefix }}
+      image_prefix_runid: ${{ steps.compute.outputs.image_prefix_runid }}
+    steps:
+      - name: Compute image prefix from branch
+        id: compute
+        run: |
+          set -euo pipefail
+          VERSION="${{ github.ref_name }}"
+          VERSION="${VERSION#release/}"
+          echo "image_prefix=release-${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "image_prefix_runid=release-${VERSION}-${{ github.run_id }}" >> "$GITHUB_OUTPUT"
+
+  # ============================================================================
+  # FRAMEWORK PIPELINES (Build -> Test -> Copy)
   # ============================================================================
   # ============================================================================
   # VLLM PIPELINE
   # ============================================================================
   vllm-pipeline:
+    needs: [prepare]
     uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
     with:
       framework: vllm
@@ -26,10 +48,10 @@ jobs:
       platforms: '["amd64", "arm64"]'
       cuda_versions: '["12.9", "13.0"]'
       extra_tags: |
-        ${{ github.ref_name == 'main' && 'main-vllm' || '' }}
-        ${{ github.ref_name == 'main' && format('main-vllm-{0}', github.sha) || '' }}
+        ${{ needs.prepare.outputs.image_prefix }}-vllm
+        ${{ needs.prepare.outputs.image_prefix_runid }}-vllm
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
-      build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
+      build_timeout_minutes: 120
       cpu_only_test_markers: '(pre_merge or post_merge) and vllm and gpu_0'
       single_gpu_test_markers: '(pre_merge or post_merge) and vllm and gpu_1'
       multi_gpu_test_markers: '(pre_merge or post_merge) and vllm and (gpu_2 or gpu_4)'
@@ -42,6 +64,7 @@ jobs:
   # SGLANG PIPELINE
   # ============================================================================
   sglang-pipeline:
+    needs: [prepare]
     uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
     with:
       framework: sglang
@@ -49,10 +72,10 @@ jobs:
       platforms: '["amd64", "arm64"]'
       cuda_versions: '["12.9", "13.0"]'
       extra_tags: |
-        ${{ github.ref_name == 'main' && 'main-sglang' || '' }}
-        ${{ github.ref_name == 'main' && format('main-sglang-{0}', github.sha) || '' }}
+        ${{ needs.prepare.outputs.image_prefix }}-sglang
+        ${{ needs.prepare.outputs.image_prefix_runid }}-sglang
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
-      build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
+      build_timeout_minutes: 120
       cpu_only_test_markers: '(pre_merge or post_merge) and sglang and gpu_0'
       single_gpu_test_markers: '(pre_merge or post_merge) and sglang and gpu_1'
       multi_gpu_test_markers: '(pre_merge or post_merge) and sglang and (gpu_2 or gpu_4)'
@@ -65,6 +88,7 @@ jobs:
   # TRTLLM PIPELINE
   # ============================================================================
   trtllm-pipeline:
+    needs: [prepare]
     uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
     with:
       framework: trtllm
@@ -72,10 +96,10 @@ jobs:
       platforms: '["amd64", "arm64"]'
       cuda_versions: '["13.1"]'
       extra_tags: |
-        ${{ github.ref_name == 'main' && 'main-trtllm' || '' }}
-        ${{ github.ref_name == 'main' && format('main-trtllm-{0}', github.sha) || '' }}
+        ${{ needs.prepare.outputs.image_prefix }}-trtllm
+        ${{ needs.prepare.outputs.image_prefix_runid }}-trtllm
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
-      build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
+      build_timeout_minutes: 120
       cpu_only_test_markers: '(pre_merge or post_merge) and trtllm and gpu_0'
       single_gpu_test_markers: '(pre_merge or post_merge) and trtllm and gpu_1'
       multi_gpu_test_markers: '(pre_merge or post_merge) and trtllm and (gpu_2 or gpu_4)'
@@ -91,6 +115,7 @@ jobs:
   # VLLM EFA PIPELINE
   # ============================================================================
   vllm-efa-pipeline:
+    needs: [prepare]
     uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
     with:
       framework: vllm
@@ -99,10 +124,10 @@ jobs:
       cuda_versions: '["12.9"]'
       make_efa: true
       extra_tags: |
-        ${{ github.ref_name == 'main' && 'main-vllm-efa' || '' }}
-        ${{ github.ref_name == 'main' && format('main-vllm-efa-{0}', github.sha) || '' }}
+        ${{ needs.prepare.outputs.image_prefix }}-vllm-efa
+        ${{ needs.prepare.outputs.image_prefix_runid }}-vllm-efa
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
-      build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
+      build_timeout_minutes: 120
       cpu_only_test_markers: '(pre_merge or post_merge) and vllm and gpu_0'
       cpu_only_test_timeout_minutes: 60
       run_single_gpu_tests: false
@@ -114,6 +139,7 @@ jobs:
   # TRTLLM EFA PIPELINE
   # ============================================================================
   trtllm-efa-pipeline:
+    needs: [prepare]
     uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
     with:
       framework: trtllm
@@ -122,10 +148,10 @@ jobs:
       cuda_versions: '["13.1"]'
       make_efa: true
       extra_tags: |
-        ${{ github.ref_name == 'main' && 'main-trtllm-efa' || '' }}
-        ${{ github.ref_name == 'main' && format('main-trtllm-efa-{0}', github.sha) || '' }}
+        ${{ needs.prepare.outputs.image_prefix }}-trtllm-efa
+        ${{ needs.prepare.outputs.image_prefix_runid }}-trtllm-efa
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
-      build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
+      build_timeout_minutes: 120
       cpu_only_test_markers: '(pre_merge or post_merge) and trtllm and gpu_0'
       cpu_only_test_timeout_minutes: 60
       run_single_gpu_tests: false
@@ -133,12 +159,113 @@ jobs:
       copy_to_acr: false
     secrets: inherit
 
+  # ============================================================================
+  # RELEASE-SPECIFIC BUILDS
+  # ============================================================================
+
+  operator-build:
+    name: Build Operator Image
+    needs: [prepare]
+    runs-on: prod-default-v2
+    env:
+      IMAGE_REGISTRY: ai-dynamo
+      IMAGE_REPOSITORY: dynamo
+      ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+    outputs:
+      operator_tag: ${{ steps.build-and-push.outputs.operator_tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Initialize Dynamo Builder
+        uses: ./.github/actions/init-dynamo-builder
+        with:
+          builder_name: ${{ env.BUILDER_NAME }}
+          flavor: general
+          all_arch: 'true'
+      - name: Docker Login
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      - name: Linter
+        working-directory: ./deploy/operator
+        run: docker buildx build --platform linux/arm64 --target linter --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
+      - name: Tester
+        working-directory: ./deploy/operator
+        run: docker buildx build --platform linux/arm64 --target tester --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
+      - name: Build and push Container
+        id: build-and-push
+        working-directory: ./deploy/operator
+        env:
+          IMAGE_PREFIX: ${{ needs.prepare.outputs.image_prefix }}
+          IMAGE_PREFIX_RUNID: ${{ needs.prepare.outputs.image_prefix_runid }}
+        run: |
+          ECR_BASE="${ECR_HOSTNAME}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}"
+          ACR_BASE="${{ secrets.AZURE_ACR_HOSTNAME }}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}"
+          SHA_TAG="${{ github.sha }}-operator"
+          PREFIX_TAG="${IMAGE_PREFIX}-operator"
+          PREFIX_RUNID_TAG="${IMAGE_PREFIX_RUNID}-operator"
+          IMAGE_URIS=(
+            "${ECR_BASE}:${SHA_TAG}"
+            "${ECR_BASE}:${PREFIX_TAG}"
+            "${ECR_BASE}:${PREFIX_RUNID_TAG}"
+            "${ACR_BASE}:${SHA_TAG}"
+            "${ACR_BASE}:${PREFIX_TAG}"
+            "${ACR_BASE}:${PREFIX_RUNID_TAG}"
+          )
+          echo "operator_tag=${PREFIX_TAG}" >> $GITHUB_OUTPUT
+          TAGGING_FLAGS=$(printf -- '-t %s ' "${IMAGE_URIS[@]}")
+          docker buildx build --push --platform linux/amd64,linux/arm64 \
+              --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
+              ${TAGGING_FLAGS} -f Dockerfile .
+
+  frontend-build:
+    name: Build Frontend Images
+    needs: [prepare]
+    uses: ./.github/workflows/build-frontend-image.yaml
+    with:
+      skip_change_detection: true
+      image_prefix: |
+        ${{ needs.prepare.outputs.image_prefix }}
+        ${{ needs.prepare.outputs.image_prefix_runid }}
+    secrets: inherit
+
+  # ============================================================================
+  # BUILDER CLEANUP
+  # ============================================================================
+  clean-k8s-builder:
+    name: Clean K8s builder if exists
+    runs-on: prod-default-small-v2
+    if: always()
+    needs: [vllm-pipeline, sglang-pipeline, trtllm-pipeline, vllm-efa-pipeline, trtllm-efa-pipeline, operator-build]
+    steps:
+    - uses: actions/checkout@v4
+    - name: Create K8s builders (skip bootstrap)
+      uses: ./.github/actions/bootstrap-buildkit
+      continue-on-error: true
+      with:
+        builder_name: ${{ env.BUILDER_NAME }}
+        buildkit_worker_addresses: ''
+        skip_bootstrap: true
+    - name: Builder Cleanup
+      run: docker buildx rm ${{ env.BUILDER_NAME }} || true
+
   ############################## SLACK NOTIFICATION ##############################
   notify-slack:
     name: Notify Slack
     runs-on: prod-builder-amd-v1
-    if: always() && failure()
-    needs: [ vllm-pipeline, sglang-pipeline, trtllm-pipeline, vllm-efa-pipeline, trtllm-efa-pipeline ]
+    if: |
+      always() &&
+      (needs.vllm-pipeline.result == 'failure' ||
+       needs.sglang-pipeline.result == 'failure' ||
+       needs.trtllm-pipeline.result == 'failure' ||
+       needs.vllm-efa-pipeline.result == 'failure' ||
+       needs.trtllm-efa-pipeline.result == 'failure' ||
+       needs.operator-build.result == 'failure' ||
+       needs.frontend-build.result == 'failure')
+    needs: [vllm-pipeline, sglang-pipeline, trtllm-pipeline, vllm-efa-pipeline, trtllm-efa-pipeline, operator-build, frontend-build]
     permissions:
       contents: read
     steps:

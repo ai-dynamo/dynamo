@@ -4,11 +4,12 @@
 name: Release Pipeline
 
 on:
-  push:
-    branches:
-      - 'release/*'
   workflow_dispatch:
     inputs:
+      post_merge_run_id:
+        description: 'Post-merge CI workflow run ID whose images to publish. Required for image provenance.'
+        required: true
+        type: string
       rc_number:
         description: 'RC number (e.g., 0 for rc0). Leave empty to auto-increment.'
         required: false
@@ -22,21 +23,11 @@ permissions:
 
 env:
   REGISTRY_IMAGE: ai-dynamo/dynamo
-  BUILDER_NAME: b-${{ github.run_id }}-${{ github.run_attempt }}
 
 jobs:
   # ============================================================================
-  # GATE: Approval + Version Extraction
+  # GATE: Version Extraction
   # ============================================================================
-
-  manual-approval:
-    name: Approve Manual Run
-    if: github.event_name == 'workflow_dispatch'
-    runs-on: prod-default-small-v2
-    environment: automated-release
-    steps:
-      - name: Manual run approved
-        run: echo "Manual workflow run approved via automated-release environment"
 
   prepare-release:
     name: Prepare Release
@@ -44,6 +35,7 @@ jobs:
     outputs:
       version: ${{ steps.extract.outputs.version }}
       image_prefix: ${{ steps.extract.outputs.image_prefix }}
+      source_image_prefix: ${{ steps.extract.outputs.source_image_prefix }}
     steps:
       - name: Extract version from branch
         id: extract
@@ -51,13 +43,11 @@ jobs:
           BRANCH_NAME="${GITHUB_REF#refs/heads/}"
           VERSION="${BRANCH_NAME#release/}"
 
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            if [[ ! "$BRANCH_NAME" =~ ^release/[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-              echo "Error: workflow_dispatch can only be triggered from release/* branches"
-              echo "Current branch: $BRANCH_NAME"
-              echo "Expected pattern: release/X.Y.Z (e.g., release/0.7.0)"
-              exit 1
-            fi
+          if [[ ! "$BRANCH_NAME" =~ ^release/[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Error: workflow_dispatch can only be triggered from release/* branches"
+            echo "Current branch: $BRANCH_NAME"
+            echo "Expected pattern: release/X.Y.Z (e.g., release/0.7.0)"
+            exit 1
           fi
 
           if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -68,407 +58,25 @@ jobs:
 
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
           echo "image_prefix=release-${VERSION}" >> $GITHUB_OUTPUT
+          echo "source_image_prefix=release-${VERSION}-${{ github.event.inputs.post_merge_run_id }}" >> $GITHUB_OUTPUT
           echo "Detected version: ${VERSION}"
-
-  # ============================================================================
-  # FRAMEWORK PIPELINES (Build + Test + Distribute)
-  # Builds amd64+arm64 images, runs tests, copies amd64 to ACR.
-  # release-publish then copies both architectures from ECR to NGC.
-  #
-  # NOTE: Each job directly depends on [prepare-release, manual-approval] with
-  # always() instead of going through an intermediate gate job. This avoids a
-  # GitHub Actions quirk where a skipped ancestor (manual-approval on push
-  # events) taints the entire dependency chain, causing downstream jobs to skip
-  # even when the intermediate gate succeeds.
-  # ============================================================================
-
-  vllm-pipeline:
-    name: vllm builds
-    needs: [prepare-release, manual-approval]
-    if: |
-      always() &&
-      needs.prepare-release.result == 'success' &&
-      (github.event_name == 'push' || needs.manual-approval.result == 'success')
-    uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
-    with:
-      framework: vllm
-      target: runtime
-      platforms: '["amd64", "arm64"]'
-      cuda_versions: '["12.9", "13.0"]'
-      extra_tags: |
-        ${{ needs.prepare-release.outputs.image_prefix }}-vllm
-      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
-      build_timeout_minutes: 120
-      cpu_only_test_markers: '(pre_merge or post_merge) and vllm and gpu_0'
-      cpu_only_test_timeout_minutes: 60
-      single_gpu_test_markers: '(pre_merge or post_merge) and vllm and gpu_1'
-      single_gpu_test_timeout_minutes: 60
-      multi_gpu_test_markers: '(pre_merge or post_merge) and vllm and (gpu_2 or gpu_4)'
-      multi_gpu_test_timeout_minutes: 60
-    secrets: inherit
-
-  sglang-pipeline:
-    name: sglang builds
-    needs: [prepare-release, manual-approval]
-    if: |
-      always() &&
-      needs.prepare-release.result == 'success' &&
-      (github.event_name == 'push' || needs.manual-approval.result == 'success')
-    uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
-    with:
-      framework: sglang
-      target: runtime
-      platforms: '["amd64", "arm64"]'
-      cuda_versions: '["12.9", "13.0"]'
-      extra_tags: |
-        ${{ needs.prepare-release.outputs.image_prefix }}-sglang
-      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
-      build_timeout_minutes: 120
-      cpu_only_test_markers: '(pre_merge or post_merge) and sglang and gpu_0'
-      cpu_only_test_timeout_minutes: 60
-      single_gpu_test_markers: '(pre_merge or post_merge) and sglang and gpu_1'
-      single_gpu_test_timeout_minutes: 60
-      multi_gpu_test_markers: '(pre_merge or post_merge) and sglang and (gpu_2 or gpu_4)'
-      multi_gpu_test_timeout_minutes: 60
-    secrets: inherit
-
-  trtllm-pipeline:
-    name: trtllm builds
-    needs: [prepare-release, manual-approval]
-    if: |
-      always() &&
-      needs.prepare-release.result == 'success' &&
-      (github.event_name == 'push' || needs.manual-approval.result == 'success')
-    uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
-    with:
-      framework: trtllm
-      target: runtime
-      platforms: '["amd64", "arm64"]'
-      cuda_versions: '["13.1"]'
-      extra_tags: |
-        ${{ needs.prepare-release.outputs.image_prefix }}-trtllm
-      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
-      build_timeout_minutes: 120
-      cpu_only_test_markers: '(pre_merge or post_merge) and trtllm and gpu_0'
-      cpu_only_test_timeout_minutes: 60
-      single_gpu_test_markers: '(pre_merge or post_merge) and trtllm and gpu_1'
-      single_gpu_test_timeout_minutes: 60
-      multi_gpu_test_markers: '(pre_merge or post_merge) and trtllm and (gpu_2 or gpu_4)'
-      multi_gpu_test_timeout_minutes: 60
-    secrets: inherit
-
-  # ============================================================================
-  # EFA PIPELINES (Build only, amd64)
-  # ============================================================================
-
-  vllm-efa-pipeline:
-    name: vllm EFA builds
-    needs: [prepare-release, manual-approval]
-    if: |
-      always() &&
-      needs.prepare-release.result == 'success' &&
-      (github.event_name == 'push' || needs.manual-approval.result == 'success')
-    uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
-    with:
-      framework: vllm
-      target: runtime
-      platforms: '["amd64"]'
-      cuda_versions: '["12.9"]'
-      make_efa: true
-      extra_tags: |
-        ${{ needs.prepare-release.outputs.image_prefix }}-vllm-efa
-      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
-      build_timeout_minutes: 120
-      cpu_only_test_markers: '(pre_merge or post_merge) and vllm and gpu_0'
-      cpu_only_test_timeout_minutes: 60
-      run_single_gpu_tests: false
-      run_multi_gpu_tests: false
-      copy_to_acr: false
-    secrets: inherit
-
-  trtllm-efa-pipeline:
-    name: trtllm EFA builds
-    needs: [prepare-release, manual-approval]
-    if: |
-      always() &&
-      needs.prepare-release.result == 'success' &&
-      (github.event_name == 'push' || needs.manual-approval.result == 'success')
-    uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
-    with:
-      framework: trtllm
-      target: runtime
-      platforms: '["amd64"]'
-      cuda_versions: '["13.1"]'
-      make_efa: true
-      extra_tags: |
-        ${{ needs.prepare-release.outputs.image_prefix }}-trtllm-efa
-      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
-      build_timeout_minutes: 120
-      cpu_only_test_markers: '(pre_merge or post_merge) and trtllm and gpu_0'
-      cpu_only_test_timeout_minutes: 60
-      run_single_gpu_tests: false
-      run_multi_gpu_tests: false
-      copy_to_acr: false
-    secrets: inherit
-
-  # ============================================================================
-  # RELEASE-SPECIFIC BUILDS
-  # ============================================================================
-
-  operator-build:
-    name: Build Operator Image
-    needs: [prepare-release, manual-approval]
-    if: |
-      always() &&
-      needs.prepare-release.result == 'success' &&
-      (github.event_name == 'push' || needs.manual-approval.result == 'success')
-    runs-on: prod-default-v2
-    env:
-      IMAGE_REGISTRY: ai-dynamo
-      IMAGE_REPOSITORY: dynamo
-      ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-    outputs:
-      operator_tag: ${{ steps.build-and-push.outputs.operator_tag }}
-    steps:
-      - uses: actions/checkout@v4
-      - name: Initialize Dynamo Builder
-        uses: ./.github/actions/init-dynamo-builder
-        with:
-          builder_name: ${{ env.BUILDER_NAME }}
-          flavor: general
-          all_arch: 'true'
-      - name: Docker Login
-        uses: ./.github/actions/docker-login
-        with:
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-      - name: Linter
-        working-directory: ./deploy/operator
-        run: docker buildx build --platform linux/arm64 --target linter --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
-      - name: Tester
-        working-directory: ./deploy/operator
-        run: docker buildx build --platform linux/arm64 --target tester --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
-      - name: Build and push Container
-        id: build-and-push
-        working-directory: ./deploy/operator
-        run: |
-          ECR_BASE="${ECR_HOSTNAME}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}"
-          ACR_BASE="${{ secrets.AZURE_ACR_HOSTNAME }}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}"
-          SHA_TAG="${{ github.sha }}-operator"
-          PREFIX_TAG="${{ needs.prepare-release.outputs.image_prefix }}-operator"
-          IMAGE_URIS=(
-            "${ECR_BASE}:${SHA_TAG}"
-            "${ECR_BASE}:${PREFIX_TAG}"
-            "${ACR_BASE}:${SHA_TAG}"
-            "${ACR_BASE}:${PREFIX_TAG}"
-          )
-          echo "operator_tag=${PREFIX_TAG}" >> $GITHUB_OUTPUT
-          TAGGING_FLAGS=$(printf -- '-t %s ' "${IMAGE_URIS[@]}")
-          docker buildx build --push --platform linux/amd64,linux/arm64 \
-              --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
-              ${TAGGING_FLAGS} -f Dockerfile .
-
-  frontend-build:
-    name: Build Frontend Images
-    needs: [prepare-release, manual-approval]
-    if: |
-      always() &&
-      needs.prepare-release.result == 'success' &&
-      (github.event_name == 'push' || needs.manual-approval.result == 'success')
-    uses: ./.github/workflows/build-frontend-image.yaml
-    with:
-      skip_change_detection: true
-      image_prefix: ${{ needs.prepare-release.outputs.image_prefix }}
-    secrets: inherit
-
-  # ============================================================================
-  # BUILDER CLEANUP
-  # ============================================================================
-
-  clean-k8s-builder:
-    name: Clean K8s builder if exists
-    runs-on: prod-default-small-v2
-    if: always()
-    needs: [vllm-pipeline, sglang-pipeline, trtllm-pipeline, vllm-efa-pipeline, trtllm-efa-pipeline]
-    steps:
-    - uses: actions/checkout@v4
-    - name: Create K8s builders (skip bootstrap)
-      uses: ./.github/actions/bootstrap-buildkit
-      continue-on-error: true
-      with:
-        builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
-        buildkit_worker_addresses: ''
-        skip_bootstrap: true
-    - name: Builder Cleanup
-      run: docker buildx rm b-${{ github.run_id }}-${{ github.run_attempt }} || true
-
-  # ============================================================================
-  # DEPLOYMENT TESTS
-  # ============================================================================
-
-  deploy-operator:
-    name: Deploy Operator
-    runs-on: prod-default-small-v2
-    needs: [prepare-release, vllm-pipeline, sglang-pipeline, trtllm-pipeline, operator-build]
-    if: |
-      always() &&
-      needs.operator-build.result == 'success'
-    outputs:
-      NAMESPACE: ${{ steps.deploy.outputs.namespace }}
-    steps:
-    - uses: actions/checkout@v4
-    - name: Deploy Operator
-      id: deploy
-      run: |
-        set -x
-        BRANCH="${{ github.ref_name }}"
-        BRANCH_SANITIZED="${BRANCH//\//-}"
-        BRANCH_SANITIZED="${BRANCH_SANITIZED//./-}"
-        BRANCH_SANITIZED="${BRANCH_SANITIZED:0:10}"
-        NAMESPACE="gh-ci-${{ github.run_id }}-${BRANCH_SANITIZED}-dt"
-        echo "namespace=${NAMESPACE}" >> "$GITHUB_OUTPUT"
-
-        echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
-        chmod 600 .kubeconfig
-        export KUBECONFIG=$(pwd)/.kubeconfig
-        kubectl config set-context --current --namespace=$NAMESPACE
-
-        kubectl create namespace $NAMESPACE
-        kubectl label namespaces ${NAMESPACE} nscleanup/enabled=true nscleanup/ttl=7200 gitlab-imagepull=enabled ngc-api=enabled nvcr-imagepull=enabled --overwrite=true
-        kubectl config set-context --current --namespace=$NAMESPACE
-        kubectl create secret generic hf-token-secret --from-literal=HF_TOKEN=${{ secrets.HF_TOKEN }} -n $NAMESPACE || true
-        kubectl create secret docker-registry docker-imagepullsecret \
-          --docker-server=${{ secrets.AZURE_ACR_HOSTNAME }} \
-          --docker-username=${{ secrets.AZURE_ACR_USER }} \
-          --docker-password=${{ secrets.AZURE_ACR_PASSWORD }} \
-          --namespace=${NAMESPACE}
-
-        helm repo add bitnami https://charts.bitnami.com/bitnami
-        cd deploy/helm/charts/platform/
-        helm dep build .
-        helm upgrade --install dynamo-platform . --namespace ${NAMESPACE} \
-          --set dynamo-operator.namespaceRestriction.enabled=true \
-          --set dynamo-operator.namespaceRestriction.allowedNamespaces[0]=${NAMESPACE} \
-          --set dynamo-operator.controllerManager.manager.image.repository=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo \
-          --set dynamo-operator.controllerManager.manager.image.tag=${{ needs.prepare-release.outputs.image_prefix }}-operator \
-          --set dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret \
-          --set dynamo-operator.gpuDiscovery.enabled=false \
-          --set dynamo-operator.upgradeCRD=false \
-          --debug
-        timeout 300s kubectl rollout status deployment -n $NAMESPACE --watch
-
-  deploy-test-vllm:
-    if: always() && needs.deploy-operator.result == 'success'
-    runs-on: prod-default-small-v2
-    needs: [deploy-operator, vllm-pipeline]
-    strategy:
-      fail-fast: false
-      max-parallel: 1
-      matrix:
-        profile: [agg, agg_router, disagg, disagg_router]
-    name: deploy-test-vllm (${{ matrix.profile }})
-    steps:
-      - uses: actions/checkout@v4
-      - name: Run Dynamo Deploy Test
-        uses: ./.github/actions/dynamo-deploy-test
-        with:
-          kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
-          namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
-          framework: vllm
-          profile: ${{ matrix.profile }}
-          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-cuda12-amd64
-          platform_arch: amd64
-
-  deploy-test-sglang:
-    if: always() && needs.deploy-operator.result == 'success'
-    runs-on: prod-default-small-v2
-    needs: [deploy-operator, sglang-pipeline]
-    strategy:
-      fail-fast: false
-      max-parallel: 1
-      matrix:
-        profile: [agg, agg_router]
-    name: deploy-test-sglang (${{ matrix.profile }})
-    steps:
-      - uses: actions/checkout@v4
-      - name: Run Dynamo Deploy Test
-        uses: ./.github/actions/dynamo-deploy-test
-        with:
-          kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
-          namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
-          framework: sglang
-          profile: ${{ matrix.profile }}
-          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-sglang-cuda12-amd64
-          platform_arch: amd64
-
-  deploy-test-trtllm:
-    if: always() && needs.deploy-operator.result == 'success'
-    runs-on: prod-default-small-v2
-    needs: [deploy-operator, trtllm-pipeline]
-    strategy:
-      fail-fast: false
-      max-parallel: 1
-      matrix:
-        profile: [agg, agg_router, disagg, disagg_router]
-    name: deploy-test-trtllm (${{ matrix.profile }})
-    steps:
-      - uses: actions/checkout@v4
-      - name: Run Dynamo Deploy Test
-        uses: ./.github/actions/dynamo-deploy-test
-        with:
-          kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
-          namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
-          framework: trtllm
-          profile: ${{ matrix.profile }}
-          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-trtllm-cuda13-amd64
-          platform_arch: amd64
-
-  deploy-cleanup:
-    name: Cleanup AKS resources
-    runs-on: prod-default-small-v2
-    if: always()
-    needs: [deploy-operator, deploy-test-sglang, deploy-test-trtllm, deploy-test-vllm]
-    steps:
-    - uses: actions/checkout@v4
-    - name: Cleanup
-      timeout-minutes: 5
-      env:
-        NAMESPACE: ${{ needs.deploy-operator.outputs.NAMESPACE }}
-      run: |
-        if [ -z "$NAMESPACE" ]; then
-          echo "No namespace to clean up"
-          exit 0
-        fi
-        echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
-        chmod 600 .kubeconfig
-        export KUBECONFIG=$(pwd)/.kubeconfig
-        kubectl config set-context --current --namespace=$NAMESPACE --kubeconfig "${KUBECONFIG}"
-        kubectl get dynamographdeployments || true
-        kubectl get all || true
-        kubectl delete dynamographdeployments --all -n $NAMESPACE || true
-        helm uninstall dynamo-platform --namespace $NAMESPACE --timeout 10m || true
-        kubectl delete namespace $NAMESPACE || true
+          echo "Source image prefix: release-${VERSION}-${{ github.event.inputs.post_merge_run_id }}"
 
   # ============================================================================
   # NGC PUBLISH: RC tag, crane copy to NGC, Helm chart push
-  # Runs after framework builds + operator + frontend complete.
-  # Tests may fail but builds must have produced images for publishing.
+  # Sources images from ECR using run-specific tags produced by post-merge CI.
   # ============================================================================
 
   release-publish:
     name: Tag RC & Publish to NGC
-    needs: [prepare-release, vllm-pipeline, sglang-pipeline, trtllm-pipeline, vllm-efa-pipeline, trtllm-efa-pipeline, operator-build, frontend-build]
-    if: |
-      always() && !cancelled() &&
-      needs.prepare-release.result == 'success'
+    needs: [prepare-release]
+    if: needs.prepare-release.result == 'success'
     runs-on: cpu-amd-m5-4xlarge
     environment: automated-release
     env:
       VERSION: ${{ needs.prepare-release.outputs.version }}
       IMAGE_PREFIX: ${{ needs.prepare-release.outputs.image_prefix }}
+      SOURCE_IMAGE_PREFIX: ${{ needs.prepare-release.outputs.source_image_prefix }}
       REGISTRY_IMAGE: ai-dynamo/dynamo
       AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
     steps:
@@ -569,7 +177,9 @@ jobs:
 
           echo "========================================"
           echo "Copying images from ECR to NGC (registry-to-registry)"
+          echo "Source prefix: ${SOURCE_IMAGE_PREFIX}"
           echo "NGC Version Tag: ${NGC_VERSION_TAG}"
+          echo "Post-merge run ID: ${{ github.event.inputs.post_merge_run_id }}"
           echo "========================================"
 
           copy_image() {
@@ -607,7 +217,7 @@ jobs:
           for FRAMEWORK in "${CUDA12_FRAMEWORKS[@]}"; do
             NGC_NAME="${FRAMEWORK}-runtime"
             for ARCH in "${ARCHITECTURES[@]}"; do
-              SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${IMAGE_PREFIX}-${FRAMEWORK}-cuda12-${ARCH}"
+              SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${SOURCE_IMAGE_PREFIX}-${FRAMEWORK}-cuda12-${ARCH}"
               TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${NGC_NAME}:${NGC_VERSION_TAG}-${ARCH}"
               copy_image "${SOURCE}" "${TARGET}" "${NGC_NAME}:${NGC_VERSION_TAG}-${ARCH}"
             done
@@ -631,7 +241,7 @@ jobs:
             fi
 
             for ARCH in "${ARCHITECTURES[@]}"; do
-              SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${IMAGE_PREFIX}-${FRAMEWORK}-cuda13-${ARCH}"
+              SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${SOURCE_IMAGE_PREFIX}-${FRAMEWORK}-cuda13-${ARCH}"
               TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${NGC_NAME}:${NGC_VERSION_TAG}-cuda13-${ARCH}"
               copy_image "${SOURCE}" "${TARGET}" "${NGC_NAME}:${NGC_VERSION_TAG}-cuda13-${ARCH}"
             done
@@ -648,12 +258,12 @@ jobs:
           echo "=== EFA Runtime Images ==="
 
           # vllm EFA (CUDA 12, amd64 only)
-          SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${IMAGE_PREFIX}-vllm-efa-cuda12-amd64"
+          SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${SOURCE_IMAGE_PREFIX}-vllm-efa-cuda12-amd64"
           TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/vllm-runtime:${NGC_VERSION_TAG}-efa"
           copy_image "${SOURCE}" "${TARGET}" "vllm-runtime:${NGC_VERSION_TAG}-efa"
 
           # trtllm EFA (CUDA 13, amd64 only)
-          SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${IMAGE_PREFIX}-trtllm-efa-cuda13-amd64"
+          SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${SOURCE_IMAGE_PREFIX}-trtllm-efa-cuda13-amd64"
           TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/tensorrtllm-runtime:${NGC_VERSION_TAG}-efa"
           copy_image "${SOURCE}" "${TARGET}" "tensorrtllm-runtime:${NGC_VERSION_TAG}-efa"
 
@@ -662,7 +272,7 @@ jobs:
           echo "=== Frontend Images ==="
           FRONTEND_IMAGES=()
           for ARCH in "${ARCHITECTURES[@]}"; do
-            SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${IMAGE_PREFIX}-frontend-${ARCH}"
+            SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${SOURCE_IMAGE_PREFIX}-frontend-${ARCH}"
             TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/dynamo-frontend:${NGC_VERSION_TAG}-${ARCH}"
             if copy_image "${SOURCE}" "${TARGET}" "dynamo-frontend:${NGC_VERSION_TAG}-${ARCH}"; then
               FRONTEND_IMAGES+=("${TARGET}")
@@ -679,10 +289,10 @@ jobs:
             FAILED_COPIES+=("dynamo-frontend:${NGC_VERSION_TAG} (multi-arch - missing archs)")
           fi
 
-          # ---- Operator image (multi-arch manifest already built by operator-build) ----
+          # ---- Operator image (multi-arch manifest already built by post-merge operator-build) ----
           echo ""
           echo "=== Operator Image ==="
-          OPERATOR_SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${IMAGE_PREFIX}-operator"
+          OPERATOR_SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${SOURCE_IMAGE_PREFIX}-operator"
           OPERATOR_TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/kubernetes-operator:${NGC_VERSION_TAG}"
           copy_image "${OPERATOR_SOURCE}" "${OPERATOR_TARGET}" "kubernetes-operator:${NGC_VERSION_TAG}"
 
@@ -763,6 +373,8 @@ jobs:
           echo "| NGC Version Tag | ${NGC_VERSION_TAG} |" >> $GITHUB_STEP_SUMMARY
           echo "| Commit | ${{ github.sha }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Branch | ${{ github.ref_name }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Post-merge Run ID | ${{ github.event.inputs.post_merge_run_id }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Source Image Prefix | ${SOURCE_IMAGE_PREFIX} |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### NGC Publishing Results" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
@@ -793,3 +405,147 @@ jobs:
           echo "Helm chart:" >> $GITHUB_STEP_SUMMARY
           echo "- \`dynamo-platform:${HELM_CHART_VERSION}\` (pushed to NGC Helm registry)" >> $GITHUB_STEP_SUMMARY
 
+  # ============================================================================
+  # DEPLOYMENT TESTS
+  # Images are referenced from ACR using tags applied by post-merge CI.
+  # ============================================================================
+
+  deploy-operator:
+    name: Deploy Operator
+    runs-on: prod-default-small-v2
+    needs: [prepare-release]
+    outputs:
+      NAMESPACE: ${{ steps.deploy.outputs.namespace }}
+    steps:
+    - uses: actions/checkout@v4
+    - name: Deploy Operator
+      id: deploy
+      run: |
+        set -x
+        BRANCH="${{ github.ref_name }}"
+        BRANCH_SANITIZED="${BRANCH//\//-}"
+        BRANCH_SANITIZED="${BRANCH_SANITIZED//./-}"
+        BRANCH_SANITIZED="${BRANCH_SANITIZED:0:10}"
+        NAMESPACE="gh-ci-${{ github.run_id }}-${BRANCH_SANITIZED}-dt"
+        echo "namespace=${NAMESPACE}" >> "$GITHUB_OUTPUT"
+
+        echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
+        chmod 600 .kubeconfig
+        export KUBECONFIG=$(pwd)/.kubeconfig
+        kubectl config set-context --current --namespace=$NAMESPACE
+
+        kubectl create namespace $NAMESPACE
+        kubectl label namespaces ${NAMESPACE} nscleanup/enabled=true nscleanup/ttl=7200 gitlab-imagepull=enabled ngc-api=enabled nvcr-imagepull=enabled --overwrite=true
+        kubectl config set-context --current --namespace=$NAMESPACE
+        kubectl create secret generic hf-token-secret --from-literal=HF_TOKEN=${{ secrets.HF_TOKEN }} -n $NAMESPACE || true
+        kubectl create secret docker-registry docker-imagepullsecret \
+          --docker-server=${{ secrets.AZURE_ACR_HOSTNAME }} \
+          --docker-username=${{ secrets.AZURE_ACR_USER }} \
+          --docker-password=${{ secrets.AZURE_ACR_PASSWORD }} \
+          --namespace=${NAMESPACE}
+
+        helm repo add bitnami https://charts.bitnami.com/bitnami
+        cd deploy/helm/charts/platform/
+        helm dep build .
+        helm upgrade --install dynamo-platform . --namespace ${NAMESPACE} \
+          --set dynamo-operator.namespaceRestriction.enabled=true \
+          --set dynamo-operator.namespaceRestriction.allowedNamespaces[0]=${NAMESPACE} \
+          --set dynamo-operator.controllerManager.manager.image.repository=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo \
+          --set dynamo-operator.controllerManager.manager.image.tag=${{ needs.prepare-release.outputs.source_image_prefix }}-operator \
+          --set dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret \
+          --set dynamo-operator.gpuDiscovery.enabled=false \
+          --set dynamo-operator.upgradeCRD=false \
+          --debug
+        timeout 300s kubectl rollout status deployment -n $NAMESPACE --watch
+
+  deploy-test-vllm:
+    if: needs.deploy-operator.result == 'success'
+    runs-on: prod-default-small-v2
+    needs: [prepare-release, deploy-operator]
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        profile: [agg, agg_router, disagg, disagg_router]
+    name: deploy-test-vllm (${{ matrix.profile }})
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run Dynamo Deploy Test
+        uses: ./.github/actions/dynamo-deploy-test
+        with:
+          kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
+          namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
+          framework: vllm
+          profile: ${{ matrix.profile }}
+          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-cuda12-amd64
+          platform_arch: amd64
+
+  deploy-test-sglang:
+    if: needs.deploy-operator.result == 'success'
+    runs-on: prod-default-small-v2
+    needs: [prepare-release, deploy-operator]
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        profile: [agg, agg_router]
+    name: deploy-test-sglang (${{ matrix.profile }})
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run Dynamo Deploy Test
+        uses: ./.github/actions/dynamo-deploy-test
+        with:
+          kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
+          namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
+          framework: sglang
+          profile: ${{ matrix.profile }}
+          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-sglang-cuda12-amd64
+          platform_arch: amd64
+
+  deploy-test-trtllm:
+    if: needs.deploy-operator.result == 'success'
+    runs-on: prod-default-small-v2
+    needs: [prepare-release, deploy-operator]
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        profile: [agg, agg_router, disagg, disagg_router]
+    name: deploy-test-trtllm (${{ matrix.profile }})
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run Dynamo Deploy Test
+        uses: ./.github/actions/dynamo-deploy-test
+        with:
+          kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
+          namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
+          framework: trtllm
+          profile: ${{ matrix.profile }}
+          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-trtllm-cuda13-amd64
+          platform_arch: amd64
+
+  deploy-cleanup:
+    name: Cleanup AKS resources
+    runs-on: prod-default-small-v2
+    if: always()
+    needs: [deploy-operator, deploy-test-sglang, deploy-test-trtllm, deploy-test-vllm]
+    steps:
+    - uses: actions/checkout@v4
+    - name: Cleanup
+      timeout-minutes: 5
+      env:
+        NAMESPACE: ${{ needs.deploy-operator.outputs.NAMESPACE }}
+      run: |
+        if [ -z "$NAMESPACE" ]; then
+          echo "No namespace to clean up"
+          exit 0
+        fi
+        echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
+        chmod 600 .kubeconfig
+        export KUBECONFIG=$(pwd)/.kubeconfig
+        kubectl config set-context --current --namespace=$NAMESPACE --kubeconfig "${KUBECONFIG}"
+        kubectl get dynamographdeployments || true
+        kubectl get all || true
+        kubectl delete dynamographdeployments --all -n $NAMESPACE || true
+        helm uninstall dynamo-platform --namespace $NAMESPACE --timeout 10m || true
+        kubectl delete namespace $NAMESPACE || true

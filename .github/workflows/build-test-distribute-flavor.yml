@@ -142,7 +142,7 @@ on:
     outputs:
       image_tag:
         description: 'Image tag in ACR'
-        value: ${{ jobs.copy-to-acr.outputs.target_tag_plain }}-${{ inputs.platform }}
+        value: ${{ jobs.build.outputs.target_tag_plain }}-${{ inputs.platform }}
 
 jobs:
   # ============================================================================
