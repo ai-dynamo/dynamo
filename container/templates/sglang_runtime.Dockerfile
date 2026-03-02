@@ -87,23 +87,22 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     fi
 {% else %}
 # Dev/local-dev: skip dynamo wheel install (users build from source via cargo build + maturin develop).
-# Install NIXL wheel, gpu_memory_service wheel (if enabled), and sglang.
-ARG ENABLE_GPU_MEMORY_SERVICE
+# gpu_memory_service and benchmarks are also skipped; install from source if needed:
+#   pip install -e /workspace/lib/gpu_memory_service
+#   cd /workspace/benchmarks && pip install .
+# Install NIXL wheel and sglang only.
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     export PIP_CACHE_DIR=/root/.cache/pip && \
     pip install --break-system-packages \
         /opt/dynamo/wheelhouse/nixl/nixl*.whl \
-        sglang==${SGLANG_VERSION} && \
-    if [ "${ENABLE_GPU_MEMORY_SERVICE}" = "true" ]; then \
-        GMS_WHEEL=$(ls /opt/dynamo/wheelhouse/gpu_memory_service*.whl 2>/dev/null | head -1); \
-        if [ -n "$GMS_WHEEL" ]; then pip install --no-cache-dir --break-system-packages "$GMS_WHEEL"; fi; \
-    fi
+        sglang==${SGLANG_VERSION}
 {% endif %}
 
-# TODO: optimize by skipping /workspace COPYs for dev/local-dev (bind-mounted from host, these get shadowed)
+{% if target not in ("dev", "local-dev") %}
 # Copy benchmarks after wheel install so benchmarks changes don't invalidate the layer above
 # Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
 COPY --chmod=775 --chown=dynamo:0 benchmarks/ /workspace/benchmarks/
+{% endif %}
 
 # Install common and test dependencies as root
 RUN --mount=type=bind,source=container/deps/requirements.txt,target=/tmp/deps/requirements.txt \
@@ -114,12 +113,17 @@ RUN --mount=type=bind,source=container/deps/requirements.txt,target=/tmp/deps/re
         --requirement /tmp/deps/requirements.txt \
         --requirement /tmp/deps/requirements.test.txt \
         sglang==${SGLANG_VERSION} && \
+    #TODO: Temporary change until upstream sglang runtime image is updated
+    pip install --break-system-packages "urllib3>=2.6.3"
+
+{% if target not in ("dev", "local-dev") %}
+# Install benchmarks and fix permissions (dev/local-dev install from bind-mounted source if needed)
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    export PIP_CACHE_DIR=/root/.cache/pip && \
     cd /workspace/benchmarks && \
     pip install --break-system-packages . && \
-    #TODO: Temporary change until upstream sglang runtime image is updated
-    pip install --break-system-packages "urllib3>=2.6.3" && \
-    # pip/uv bypasses umask when creating .egg-info files, but chmod -R is fast here (small directory)
     chmod -R g+w /workspace/benchmarks
+{% endif %}
 
 # Force-reinstall NVIDIA packages in a separate layer so requirements.txt changes don't trigger re-download
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \

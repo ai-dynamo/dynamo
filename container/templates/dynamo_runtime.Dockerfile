@@ -125,15 +125,12 @@ RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
     fi
 {% else %}
 # Dev/local-dev: skip dynamo wheel install (users build from source via cargo build + maturin develop).
-# Install NIXL wheel and gpu_memory_service wheel (if enabled).
-ARG ENABLE_GPU_MEMORY_SERVICE
+# gpu_memory_service is also skipped; install from source if needed:
+#   pip install -e /workspace/lib/gpu_memory_service
+# Install NIXL wheel only (pre-built C++ binary, not buildable from source).
 RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
-    uv pip install /opt/dynamo/wheelhouse/nixl/nixl*.whl && \
-    if [ "${ENABLE_GPU_MEMORY_SERVICE}" = "true" ]; then \
-        GMS_WHEEL=$(ls /opt/dynamo/wheelhouse/gpu_memory_service*.whl 2>/dev/null | head -1); \
-        if [ -n "$GMS_WHEEL" ]; then uv pip install "$GMS_WHEEL"; fi; \
-    fi
+    uv pip install /opt/dynamo/wheelhouse/nixl/nixl*.whl
 {% endif %}
 
 # Initialize Git LFS (required for git+https dependencies with LFS artifacts)

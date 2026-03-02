@@ -376,11 +376,10 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
 # Create dist dir with a placeholder so downstream COPY --from=wheel_builder /opt/dynamo/dist/*.whl always has a match.
 RUN mkdir -p /opt/dynamo/dist ${CARGO_TARGET_DIR} && \
     touch /opt/dynamo/dist/.placeholder.whl
-# Copy only gpu_memory_service source (full lib/ COPY is skipped for dev)
-COPY lib/gpu_memory_service/ /opt/dynamo/lib/gpu_memory_service/
 {% endif %}
 
-# Build gpu_memory_service wheel for all targets (small C++ extension, fast build)
+{% if target not in ("dev", "local-dev") %}
+# Build gpu_memory_service wheel for runtime targets (dev/local-dev install from source if needed)
 ARG ENABLE_GPU_MEMORY_SERVICE
 RUN --mount=type=cache,target=/root/.cache/uv \
     if [ "$ENABLE_GPU_MEMORY_SERVICE" = "true" ]; then \
@@ -388,3 +387,4 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         source ${VIRTUAL_ENV}/bin/activate && \
         uv build --wheel --out-dir /opt/dynamo/dist /opt/dynamo/lib/gpu_memory_service; \
     fi
+{% endif %}
