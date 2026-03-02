@@ -665,7 +665,7 @@ pub fn fill_and_checksum_manager(
     compute_block_checksums(layout, block_ids)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "testing-kvbm"))]
 mod tests {
     use super::*;
 
