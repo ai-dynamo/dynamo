@@ -120,21 +120,21 @@ When a sequence needs blocks, the manager first checks if they already exist (ca
 
 The following diagram illustrates the block lifecycle, based on vLLM's block manager design:
 
-```
-                        ┌───── Cache hit (Use) ────┐
-                        │                          │
-                        ▼                          │
-┌───────────┐       ┌───────────┐       ┌──────────┴──────┐       ┌───────────┐
-│ New Block │──────►│  Active   │──────►│    Inactive     │──────►│   Freed   │
-└───────────┘ alloc │   Pool    │ deref │      Pool       │ evict └───────────┘
-                    │(ref_count)│       │   (LRU order)   │
-                    └─────┬─────┘       └─────────────────┘
-                          │
-                          │ destroy (preemption)
-                          ▼
-                    ┌───────────┐
-                    │   Freed   │
-                    └───────────┘
+```mermaid
+stateDiagram-v2
+    [*] --> Active : alloc
+    Active --> Inactive : deref
+    Inactive --> Active : cache hit (reuse)
+    Inactive --> Freed : evict
+    Active --> Freed : destroy (preemption)
+    Freed --> [*]
+
+    state Active {
+        [*] : ref_count tracked
+    }
+    state Inactive {
+        [*] : LRU order
+    }
 ```
 
 ### Evictor

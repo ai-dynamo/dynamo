@@ -61,12 +61,10 @@ These combine into four deployment patterns:
 
 All processing happens within a single worker - the simplest setup.
 
-```text
-HTTP Frontend (Rust)
-    ↓
-Worker (Python)
-    ↓ image load + encode + prefill + decode
-Response
+```mermaid
+flowchart TD
+    A["HTTP Frontend (Rust)"] --> B["Worker (Python)"]
+    B -->|"image load + encode + prefill + decode"| C["Response"]
 ```
 
 | Component | Purpose |
@@ -80,16 +78,12 @@ Response
 
 Encoding happens in a separate worker; prefill and decode share the same engine.
 
-```text
-HTTP Frontend (Rust)
-    ↓
-Processor (Python)
-    ↓ tokenizes, extracts media URL
-Encode Worker (Python)
-    ↓ downloads media, generates embeddings, NIXL transfer
-PD Worker (Python)
-    ↓ receives embeddings via NIXL, prefill + decode
-Response
+```mermaid
+flowchart TD
+    A["HTTP Frontend (Rust)"] --> B["Processor (Python)"]
+    B -->|"tokenizes, extracts media URL"| C["Encode Worker (Python)"]
+    C -->|"downloads media, generates embeddings, NIXL transfer"| D["PD Worker (Python)"]
+    D -->|"receives embeddings via NIXL, prefill + decode"| E["Response"]
 ```
 
 | Component | Purpose |
@@ -108,40 +102,27 @@ There are two variants of this workflow:
 - Prefill-first, used by vLLM
 - Decode-first, used by SGLang
 
-Prefill-first:
+**Prefill-first** (vLLM):
 
-```text
-HTTP Frontend (Rust)
-    ↓
-Processor (Python)
-    ↓ tokenizes, extracts media URL
-Encode Worker (Python)
-    ↓ downloads media, generates embeddings, NIXL transfer
-Prefill Worker (Python)
-    ↓ receives embeddings via NIXL, prefill only, KV cache transfer
-Decode Worker (Python)
-    ↓ decode only, token generation
-Response
+```mermaid
+flowchart TD
+    A["HTTP Frontend (Rust)"] --> B["Processor (Python)"]
+    B -->|"tokenizes, extracts media URL"| C["Encode Worker (Python)"]
+    C -->|"embeddings via NIXL"| D["Prefill Worker (Python)"]
+    D -->|"KV cache transfer"| E["Decode Worker (Python)"]
+    E --> F["Response"]
 ```
 
-OR
+**Decode-first** (SGLang):
 
-Decode-first:
-
-```text
-HTTP Frontend (Rust)
-    ↓
-Processor (Python)
-    ↓ tokenizes, extracts media URL
-Encode Worker (Python)
-    ↓ downloads media, generates embeddings, NIXL transfer
-Decode Worker (Python)
-    ↓ Bootstraps prefill worker
-Prefill Worker (Python)
-    ↓ receives embeddings via NIXL, prefill only, KV cache transfer
-Decode Worker (Python)
-    ↓ decode only, token generation
-Response
+```mermaid
+flowchart TD
+    A["HTTP Frontend (Rust)"] --> B["Processor (Python)"]
+    B -->|"tokenizes, extracts media URL"| C["Encode Worker (Python)"]
+    C -->|"embeddings via NIXL"| D1["Decode Worker (Python)"]
+    D1 -->|"bootstraps"| D2["Prefill Worker (Python)"]
+    D2 -->|"KV cache transfer"| D3["Decode Worker (Python)"]
+    D3 --> F["Response"]
 ```
 
 | Component | Purpose |
@@ -158,16 +139,12 @@ Response
 
 Encoding is combined with prefill, with decode separate.
 
-```text
-HTTP Frontend (Rust)
-    ↓
-Processor (Python)
-    ↓ tokenizes, extracts media URL
-Encode+Prefill Worker (Python)
-    ↓ downloads media, encodes inline, prefill, KV cache transfer
-Decode Worker (Python)
-    ↓ decode only, token generation
-Response
+```mermaid
+flowchart TD
+    A["HTTP Frontend (Rust)"] --> B["Processor (Python)"]
+    B -->|"tokenizes, extracts media URL"| C["Encode+Prefill Worker (Python)"]
+    C -->|"encode inline, prefill, KV cache transfer"| D["Decode Worker (Python)"]
+    D -->|"decode only, token generation"| E["Response"]
 ```
 
 | Component | Purpose |

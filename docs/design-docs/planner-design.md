@@ -147,7 +147,7 @@ The interpolators use the profiling sweep granularity to determine precision. Fi
 
 ## Initialization
 
-The planner starts with a 30-second delay (`INIT_PLANNER_START_DELAY`) to allow other components (frontend, workers) to register and stabilize. This is a known workaround (marked TODO in code) that should be replaced with a proper readiness check.
+The planner starts with a 30-second delay (`INIT_PLANNER_START_DELAY`) to allow other components (frontend, workers) to register and stabilize.
 
 After the delay:
 

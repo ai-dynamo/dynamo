@@ -12,21 +12,6 @@ We recommend using the [latest stable release](https://github.com/ai-dynamo/dyna
 
 ---
 
-## Table of Contents
-- [Feature Support Matrix](#feature-support-matrix)
-- [Quick Start](#quick-start)
-- [Single Node Examples](#single-node-examples)
-- [Advanced Examples](#advanced-examples)
-- [KV Cache Transfer](#kv-cache-transfer-in-disaggregated-serving)
-- [Client](#client)
-- [Benchmarking](#benchmarking)
-- [Multimodal Support](#multimodal-support)
-- [Video Diffusion Support](#video-diffusion-support-experimental)
-- [Logits Processing](#logits-processing)
-- [DP Rank Routing](#dp-rank-routing-attention-data-parallelism)
-- [Performance Sweep](#performance-sweep)
-- [Known Issues and Mitigations](#known-issues-and-mitigations)
-
 ## Feature Support Matrix
 
 ### Core Dynamo Features
