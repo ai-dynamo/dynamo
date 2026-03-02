@@ -683,7 +683,7 @@ where
             // Extract trace_id from span attributes
             if let Some(trace_id_input) = visitor.fields.get("trace_id") {
                 if !is_valid_trace_id(trace_id_input) {
-                    tracing::trace!("trace id  '{}' is not valid! Ignoring.", trace_id_input);
+                    tracing::trace!("trace id  '{trace_id_input}' is not valid! Ignoring.");
                 } else {
                     trace_id = Some(trace_id_input.to_string());
                 }
@@ -692,7 +692,7 @@ where
             // Extract span_id from span attributes
             if let Some(span_id_input) = visitor.fields.get("span_id") {
                 if !is_valid_span_id(span_id_input) {
-                    tracing::trace!("span id  '{}' is not valid! Ignoring.", span_id_input);
+                    tracing::trace!("span id  '{span_id_input}' is not valid! Ignoring.");
                 } else {
                     span_id = Some(span_id_input.to_string());
                 }
@@ -701,7 +701,7 @@ where
             // Extract parent_id from span attributes
             if let Some(parent_id_input) = visitor.fields.get("parent_id") {
                 if !is_valid_span_id(parent_id_input) {
-                    tracing::trace!("parent id  '{}' is not valid! Ignoring.", parent_id_input);
+                    tracing::trace!("parent id  '{parent_id_input}' is not valid! Ignoring.");
                 } else {
                     parent_id = Some(parent_id_input.to_string());
                 }

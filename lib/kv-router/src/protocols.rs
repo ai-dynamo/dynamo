@@ -92,6 +92,15 @@ pub fn compute_seq_hash_for_block(block_hashes: &[LocalBlockHash]) -> Vec<Sequen
     sequence_hashes
 }
 
+/// Trait abstracting the worker configuration fields needed by the scheduling layer.
+///
+/// `ModelRuntimeConfig` (in `lib/llm`) implements this directly so no adapter type is needed.
+pub trait WorkerConfigLike {
+    fn data_parallel_size(&self) -> u32;
+    fn max_num_batched_tokens(&self) -> Option<u64>;
+    fn total_kv_blocks(&self) -> Option<u64>;
+}
+
 /// A worker identifier.
 pub type WorkerId = u64;
 

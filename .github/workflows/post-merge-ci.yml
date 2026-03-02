@@ -84,12 +84,61 @@ jobs:
       multi_gpu_test_timeout_minutes: 60
     secrets: inherit
 
+  # ============================================================================
+  # EFA PIPELINES (Build only, amd64)
+  # ============================================================================
+  # ============================================================================
+  # VLLM EFA PIPELINE
+  # ============================================================================
+  vllm-efa-pipeline:
+    uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
+    with:
+      framework: vllm
+      target: runtime
+      platforms: '["amd64"]'
+      cuda_versions: '["12.9"]'
+      make_efa: true
+      extra_tags: |
+        ${{ github.ref_name == 'main' && 'main-vllm-efa' || '' }}
+        ${{ github.ref_name == 'main' && format('main-vllm-efa-{0}', github.sha) || '' }}
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
+      cpu_only_test_markers: '(pre_merge or post_merge) and vllm and gpu_0'
+      cpu_only_test_timeout_minutes: 60
+      run_single_gpu_tests: false
+      run_multi_gpu_tests: false
+      copy_to_acr: false
+    secrets: inherit
+
+  # ============================================================================
+  # TRTLLM EFA PIPELINE
+  # ============================================================================
+  trtllm-efa-pipeline:
+    uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
+    with:
+      framework: trtllm
+      target: runtime
+      platforms: '["amd64"]'
+      cuda_versions: '["13.1"]'
+      make_efa: true
+      extra_tags: |
+        ${{ github.ref_name == 'main' && 'main-trtllm-efa' || '' }}
+        ${{ github.ref_name == 'main' && format('main-trtllm-efa-{0}', github.sha) || '' }}
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
+      cpu_only_test_markers: '(pre_merge or post_merge) and trtllm and gpu_0'
+      cpu_only_test_timeout_minutes: 60
+      run_single_gpu_tests: false
+      run_multi_gpu_tests: false
+      copy_to_acr: false
+    secrets: inherit
+
   ############################## SLACK NOTIFICATION ##############################
   notify-slack:
     name: Notify Slack
     runs-on: prod-builder-amd-v1
     if: always() && failure()
-    needs: [ vllm-pipeline, sglang-pipeline, trtllm-pipeline ]
+    needs: [ vllm-pipeline, sglang-pipeline, trtllm-pipeline, vllm-efa-pipeline, trtllm-efa-pipeline ]
     permissions:
       contents: read
     steps:
