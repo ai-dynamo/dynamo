@@ -55,7 +55,7 @@ const MAX_CONSECUTIVE_ERRORS: u32 = 10;
 const MAX_BACKOFF_EXPONENT: u32 = 8; // Cap at 2^8 = 256x multiplier to prevent overflow
 
 // Batching configuration
-const MAX_BATCHING_TIMEOUT_US: u64 = 15_000_000; // 15 seconds, prevents misconfiguration
+const MAX_BATCHING_TIMEOUT_MS: u64 = 15_000; // 15 seconds, prevents misconfiguration
 
 // ---------------------------------------------------------------------------
 // Engines dropped events metric
@@ -63,37 +63,70 @@ const MAX_BATCHING_TIMEOUT_US: u64 = 15_000_000; // 15 seconds, prevents misconf
 
 use std::sync::OnceLock;
 
-/// Global counter for raw events dropped by engines before reaching the publisher.
-/// This is incremented when the publisher detects a gap in event IDs.
-static ENGINES_DROPPED_EVENTS_TOTAL: OnceLock<prometheus::IntCounterVec> = OnceLock::new();
+use dynamo_runtime::metrics::prometheus_names::kv_publisher;
 
-/// Initialize the engines dropped events counter and register it with the component's metrics registry.
-/// Returns the counter for use.
-fn init_engines_dropped_events_counter(
-    component: &Component,
-) -> &'static prometheus::IntCounterVec {
-    ENGINES_DROPPED_EVENTS_TOTAL.get_or_init(|| {
-        let counter = prometheus::IntCounterVec::new(
-            prometheus::Opts::new(
-                "dynamo_kv_publisher_engines_dropped_events_total",
-                "Total number of raw events dropped by engines before reaching publisher (detected via event_id gaps)",
-            ),
-            &["worker_id"],
-        )
-        .expect("failed to create engines_dropped_events counter");
-
-        // Register with the component's metrics registry
-        if let Err(e) = component.get_metrics_registry().get_prometheus_registry().register(Box::new(counter.clone())) {
-            tracing::warn!("Failed to register engines_dropped_events counter: {}", e);
-        }
-
-        counter
-    })
+/// Metrics for the KV publisher, created via the MetricsHierarchy API.
+/// This provides automatic `dynamo_namespace`, `dynamo_component`, and other
+/// hierarchy labels for free.
+pub struct KvPublisherMetrics {
+    /// Total number of raw events dropped by engines before reaching publisher
+    pub engines_dropped_events_total: prometheus::IntCounterVec,
 }
 
-/// Get the engines dropped events counter if initialized.
-fn engines_dropped_events_counter() -> Option<&'static prometheus::IntCounterVec> {
-    ENGINES_DROPPED_EVENTS_TOTAL.get()
+static KV_PUBLISHER_METRICS: OnceLock<Arc<KvPublisherMetrics>> = OnceLock::new();
+
+impl KvPublisherMetrics {
+    /// Create from a Component, memoized in a static OnceLock.
+    /// Uses the MetricsHierarchy API which auto-prepends `dynamo_component_`,
+    /// injects hierarchy labels, and registers with the DRT `MetricsRegistry`.
+    pub fn from_component(component: &Component) -> Arc<Self> {
+        KV_PUBLISHER_METRICS
+            .get_or_init(|| {
+                let metrics = component.metrics();
+                match metrics.create_intcountervec(
+                    kv_publisher::ENGINES_DROPPED_EVENTS_TOTAL,
+                    "Total number of raw events dropped by engines before reaching publisher (detected via event_id gaps)",
+                    &["worker_id"],
+                    &[],
+                ) {
+                    Ok(engines_dropped_events_total) => {
+                        Arc::new(Self { engines_dropped_events_total })
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to create kv_publisher metrics from component: {}. Using unregistered metrics as fallback.", e);
+                        Arc::new(Self::new_unregistered())
+                    }
+                }
+            })
+            .clone()
+    }
+
+    /// Creates unregistered metrics for use when the MetricsRegistry is not available.
+    /// This is used as a fallback when metric creation fails.
+    pub fn new_unregistered() -> Self {
+        Self {
+            engines_dropped_events_total: prometheus::IntCounterVec::new(
+                prometheus::Opts::new(
+                    kv_publisher::ENGINES_DROPPED_EVENTS_TOTAL,
+                    "Total number of raw events dropped by engines before reaching publisher (detected via event_id gaps)",
+                ),
+                &["worker_id"],
+            )
+            .expect("failed to create engines_dropped_events_total counter"),
+        }
+    }
+
+    /// Increment the engines dropped events counter by the given amount.
+    pub fn increment_engines_dropped_events(&self, worker_id: u64, count: u64) {
+        self.engines_dropped_events_total
+            .with_label_values(&[&worker_id.to_string()])
+            .inc_by(count);
+    }
+}
+
+/// Get the KV publisher metrics if initialized.
+fn kv_publisher_metrics() -> Option<Arc<KvPublisherMetrics>> {
+    KV_PUBLISHER_METRICS.get().cloned()
 }
 
 // -------------------------------------------------------------------------
@@ -141,8 +174,8 @@ impl BatchingState {
     }
 
     /// Returns the time remaining in the current batch window (zero if already elapsed).
-    fn remaining_timeout(&self, timeout_us: u64) -> Duration {
-        let timeout = Duration::from_micros(timeout_us);
+    fn remaining_timeout(&self, timeout_ms: u64) -> Duration {
+        let timeout = Duration::from_millis(timeout_ms);
         let elapsed = self.batch_start_time.elapsed();
         if elapsed >= timeout {
             Duration::ZERO
@@ -151,9 +184,9 @@ impl BatchingState {
         }
     }
 
-    /// Returns `true` when the batch window has elapsed (or `timeout_us` is zero).
-    fn is_timeout_elapsed(&self, timeout_us: u64) -> bool {
-        self.remaining_timeout(timeout_us) == Duration::ZERO
+    /// Returns `true` when the batch window has elapsed (or `timeout_ms` is zero).
+    fn is_timeout_elapsed(&self, timeout_ms: u64) -> bool {
+        self.remaining_timeout(timeout_ms) == Duration::ZERO
     }
 }
 
@@ -244,31 +277,32 @@ impl KvEventPublisher {
         source_config: Option<KvEventSourceConfig>,
         enable_local_indexer: bool,
         dp_rank: DpRank,
-        batching_timeout_us: Option<u64>,
+        batching_timeout_ms: Option<u64>,
     ) -> Result<Self> {
         let cancellation_token = CancellationToken::new();
-        // None = disabled (flush every event); Some(0) normalised to None; Some(us) = opt-in.
-        // Cap at MAX_BATCHING_TIMEOUT_US to prevent misconfiguration (e.g. passing ms instead of us).
-        let batching_timeout_us = batching_timeout_us
-            .filter(|&us| {
-                if us > MAX_BATCHING_TIMEOUT_US {
+        // None = disabled (flush every event); Some(0) normalised to None; Some(ms) = opt-in.
+        // Cap at MAX_BATCHING_TIMEOUT_MS to prevent misconfiguration.
+        let batching_timeout_ms = batching_timeout_ms
+            .filter(|&ms| {
+                if ms > MAX_BATCHING_TIMEOUT_MS {
                     tracing::warn!(
-                        requested_us = us,
-                        max_us = MAX_BATCHING_TIMEOUT_US,
-                        "batching_timeout_us too high, capping to 15s"
+                        requested_ms = ms,
+                        max_ms = MAX_BATCHING_TIMEOUT_MS,
+                        "batching_timeout_ms too high, capping to 15s"
                     );
                 }
-                us > 0
+                ms > 0
             })
-            .map(|us| us.min(MAX_BATCHING_TIMEOUT_US));
+            .map(|ms| ms.min(MAX_BATCHING_TIMEOUT_MS));
 
         let (tx, rx) = mpsc::unbounded_channel::<KvCacheEvent>();
 
         // Infer worker_id from component's connection
         let worker_id = component.drt().connection_id();
 
-        // Initialize the engines dropped events counter and register with component's metrics
-        init_engines_dropped_events_counter(&component);
+        // Initialize the KV publisher metrics via MetricsHierarchy API
+        // This provides automatic hierarchy labels (dynamo_namespace, dynamo_component, etc.)
+        KvPublisherMetrics::from_component(&component);
 
         let component_name = component.name();
         tracing::info!(
@@ -352,7 +386,7 @@ impl KvEventPublisher {
                     cancellation_token_clone,
                     rx,
                     local_indexer_clone,
-                    batching_timeout_us,
+                    batching_timeout_ms,
                 )
                 .await
             });
@@ -378,7 +412,7 @@ impl KvEventPublisher {
                     cancellation_token_clone,
                     rx,
                     local_indexer_clone,
-                    batching_timeout_us,
+                    batching_timeout_ms,
                 )
                 .await
             });
@@ -512,7 +546,7 @@ impl BatchingState {
 /// - Event type switches (Removed ↔ Stored)
 /// - `dp_rank` changes between consecutive events
 /// - A `Stored` event's `parent_hash` breaks the sequential chain
-/// - The batch window expires (`Some(timeout_us)`; `None` = disabled, flush every event)
+/// - The batch window expires (`Some(timeout_ms)`; `None` = disabled, flush every event)
 /// - Channel is closed or a cancellation signal is received
 async fn run_event_processor_loop<P: EventSink + Send + Sync + 'static>(
     publisher: P,
@@ -520,7 +554,7 @@ async fn run_event_processor_loop<P: EventSink + Send + Sync + 'static>(
     cancellation_token: CancellationToken,
     mut rx: mpsc::UnboundedReceiver<KvCacheEvent>,
     local_indexer: Option<Arc<LocalKvIndexer>>,
-    timeout_us: Option<u64>,
+    timeout_ms: Option<u64>,
 ) {
     let mut batching_state = BatchingState::new();
     // Track last raw input event_id for gap detection (dropped events before batching).
@@ -530,7 +564,7 @@ async fn run_event_processor_loop<P: EventSink + Send + Sync + 'static>(
 
     loop {
         // When disabled (None) the sleep arm is never armed; Duration::MAX is a harmless sentinel.
-        let remaining = timeout_us.map_or(Duration::MAX, |us| batching_state.remaining_timeout(us));
+        let remaining = timeout_ms.map_or(Duration::MAX, |ms| batching_state.remaining_timeout(ms));
 
         tokio::select! {
             _ = cancellation_token.cancelled() => {
@@ -560,8 +594,8 @@ async fn run_event_processor_loop<P: EventSink + Send + Sync + 'static>(
                         "Input event gap detected: raw events dropped before batching"
                     );
                     // Increment Prometheus counter for dropped events (if initialized)
-                    if let Some(counter) = engines_dropped_events_counter() {
-                        counter.with_label_values(&[&worker_id.to_string()]).inc_by(gap);
+                    if let Some(metrics) = kv_publisher_metrics() {
+                        metrics.increment_engines_dropped_events(worker_id, gap);
                     }
                 }
                 last_raw_input_id = Some(raw_event_id);
@@ -621,12 +655,12 @@ async fn run_event_processor_loop<P: EventSink + Send + Sync + 'static>(
                 // Flush after every event when disabled (None), or when the window has elapsed.
                 // The sleep arm only arms when batching is enabled; this covers the disabled path.
                 if batching_state.has_pending()
-                    && timeout_us.is_none_or(|us| batching_state.is_timeout_elapsed(us))
+                    && timeout_ms.is_none_or(|ms| batching_state.is_timeout_elapsed(ms))
                 {
                     batching_state.flush(&publisher, &local_indexer, worker_id).await;
                 }
             }
-            _ = tokio::time::sleep(remaining), if timeout_us.is_some() && batching_state.has_pending() => {
+            _ = tokio::time::sleep(remaining), if timeout_ms.is_some() && batching_state.has_pending() => {
                 batching_state.flush(&publisher, &local_indexer, worker_id).await;
             }
         }
@@ -640,7 +674,7 @@ async fn start_event_processor<P: EventSink + Send + Sync + 'static>(
     cancellation_token: CancellationToken,
     rx: mpsc::UnboundedReceiver<KvCacheEvent>,
     local_indexer: Option<Arc<LocalKvIndexer>>,
-    batching_timeout_us: Option<u64>,
+    batching_timeout_ms: Option<u64>,
 ) {
     run_event_processor_loop(
         publisher,
@@ -648,7 +682,7 @@ async fn start_event_processor<P: EventSink + Send + Sync + 'static>(
         cancellation_token,
         rx,
         local_indexer,
-        batching_timeout_us,
+        batching_timeout_ms,
     )
     .await
 }
@@ -660,7 +694,7 @@ async fn start_event_processor_jetstream(
     cancellation_token: CancellationToken,
     rx: mpsc::UnboundedReceiver<KvCacheEvent>,
     local_indexer: Option<Arc<LocalKvIndexer>>,
-    batching_timeout_us: Option<u64>,
+    batching_timeout_ms: Option<u64>,
 ) {
     run_event_processor_loop(
         publisher,
@@ -668,7 +702,7 @@ async fn start_event_processor_jetstream(
         cancellation_token,
         rx,
         local_indexer,
-        batching_timeout_us,
+        batching_timeout_ms,
     )
     .await
 }
@@ -2278,7 +2312,7 @@ mod tests_startup_helpers {
             token.clone(),
             worker_rx,
             Some(local_indexer_1.clone()),
-            Some(10_000),
+            Some(10), // 10ms batching timeout
         ));
 
         // === SETUP: Router Components ===
@@ -2807,23 +2841,23 @@ mod event_processor_tests {
 
     #[tokio::test]
     async fn test_run_event_processor_loop_batches_removed_events_5() {
-        test_removed_events_batching(5, Some(10_000)).await; // 5 events, 10ms timeout
+        test_removed_events_batching(5, Some(10)).await; // 5 events, 10ms timeout
     }
 
     #[tokio::test]
     async fn test_run_event_processor_loop_batches_removed_events_3() {
-        test_removed_events_batching(3, Some(10_000)).await; // 3 events, 10ms timeout
+        test_removed_events_batching(3, Some(10)).await; // 3 events, 10ms timeout
     }
 
     /// Helper function to test removed events batching with configurable count and timeout
-    async fn test_removed_events_batching(event_count: usize, timeout_us: Option<u64>) {
+    async fn test_removed_events_batching(event_count: usize, timeout_ms: Option<u64>) {
         let (tx, rx) = mpsc::unbounded_channel::<KvCacheEvent>();
         let publisher = MockPublisher::new();
         let publisher_clone = publisher.clone();
         let cancellation_token = CancellationToken::new();
 
         let handle = tokio::spawn(async move {
-            run_event_processor_loop(publisher_clone, 1, cancellation_token, rx, None, timeout_us)
+            run_event_processor_loop(publisher_clone, 1, cancellation_token, rx, None, timeout_ms)
                 .await
         });
 
@@ -2842,8 +2876,8 @@ mod event_processor_tests {
 
         // Wait for timeout to elapse so all events flush together as one batch
         // Add small buffer to ensure flush happens before channel close
-        tokio::time::sleep(tokio::time::Duration::from_micros(
-            timeout_us.unwrap_or(0) + 1000,
+        tokio::time::sleep(tokio::time::Duration::from_millis(
+            timeout_ms.unwrap_or(0) + 1,
         ))
         .await;
 
@@ -2861,7 +2895,7 @@ mod event_processor_tests {
         // (first event may flush separately, rest should batch together)
         assert!(
             events.len() <= 2,
-            "With long timeout ({timeout_us:?}), all {event_count} events should batch into at most 2 output events (got {})",
+            "With long timeout ({timeout_ms:?}), all {event_count} events should batch into at most 2 output events (got {})",
             events.len()
         );
 
@@ -2886,33 +2920,33 @@ mod event_processor_tests {
     /// Uses a longer timeout (100ms) to ensure events have time to batch
     #[tokio::test]
     async fn test_run_event_processor_loop_batches_stored_events_20() {
-        test_stored_events_batching(20, Some(100_000)).await; // 20 events, 100ms timeout
+        test_stored_events_batching(20, Some(100)).await; // 20 events, 100ms timeout
     }
 
     #[tokio::test]
     async fn test_run_event_processor_loop_batches_stored_events_10() {
-        test_stored_events_batching(10, Some(100_000)).await; // 10 events, 100ms timeout
+        test_stored_events_batching(10, Some(100)).await; // 10 events, 100ms timeout
     }
 
     #[tokio::test]
     async fn test_run_event_processor_loop_batches_stored_events_5() {
-        test_stored_events_batching(5, Some(100_000)).await; // 5 events, 100ms timeout
+        test_stored_events_batching(5, Some(100)).await; // 5 events, 100ms timeout
     }
 
     #[tokio::test]
     async fn test_run_event_processor_loop_batches_stored_events_3() {
-        test_stored_events_batching(3, Some(100_000)).await; // 3 events, 100ms timeout
+        test_stored_events_batching(3, Some(100)).await; // 3 events, 100ms timeout
     }
 
     /// Helper function to test stored events batching with configurable count and timeout
-    async fn test_stored_events_batching(event_count: usize, timeout_us: Option<u64>) {
+    async fn test_stored_events_batching(event_count: usize, timeout_ms: Option<u64>) {
         let (tx, rx) = mpsc::unbounded_channel::<KvCacheEvent>();
         let publisher = MockPublisher::new();
         let publisher_clone = publisher.clone();
         let cancellation_token = CancellationToken::new();
 
         let handle = tokio::spawn(async move {
-            run_event_processor_loop(publisher_clone, 1, cancellation_token, rx, None, timeout_us)
+            run_event_processor_loop(publisher_clone, 1, cancellation_token, rx, None, timeout_ms)
                 .await
         });
 
@@ -2957,7 +2991,7 @@ mod event_processor_tests {
         // With a long timeout, events should be batched. Either 1 or can be at most 2, if the first event flushes separately due to initial timestamp.
         assert!(
             events.len() <= 2,
-            "With long timeout ({timeout_us:?}) and sequential parent hashes, all {event_count} events should batch into at most 2 output events (got {})",
+            "With long timeout ({timeout_ms:?}) and sequential parent hashes, all {event_count} events should batch into at most 2 output events (got {})",
             events.len()
         );
         if events.len() == 2 {
@@ -2994,7 +3028,7 @@ mod event_processor_tests {
     /// Test non-sequential stored events trigger flush
     #[tokio::test]
     async fn test_run_event_processor_loop_non_sequential_flush() {
-        let timeout_us = Some(100_000); // 100ms in microseconds
+        let timeout_ms = Some(100); // 100ms timeout
 
         let (tx, rx) = mpsc::unbounded_channel::<KvCacheEvent>();
         let publisher = MockPublisher::new();
@@ -3002,7 +3036,7 @@ mod event_processor_tests {
         let cancellation_token = CancellationToken::new();
 
         let handle = tokio::spawn(async move {
-            run_event_processor_loop(publisher_clone, 1, cancellation_token, rx, None, timeout_us)
+            run_event_processor_loop(publisher_clone, 1, cancellation_token, rx, None, timeout_ms)
                 .await
             // SLEEP HERE?! so that events are not batched!
         });
@@ -3061,23 +3095,23 @@ mod event_processor_tests {
 
     #[tokio::test]
     async fn test_run_event_processor_loop_no_batching_with_slow_input_0_1ms() {
-        test_no_batching_with_slow_input(Some(100)).await; // 0.1ms timeout
+        test_no_batching_with_slow_input(Some(1)).await; // 1ms timeout (was 0.1ms in us)
     }
 
     #[tokio::test]
     async fn test_run_event_processor_loop_no_batching_with_slow_input_0_2ms() {
-        test_no_batching_with_slow_input(Some(200)).await; // 0.2ms timeout
+        test_no_batching_with_slow_input(Some(2)).await; // 2ms timeout (was 0.2ms in us)
     }
 
     /// Helper function to test no batching with slow input
-    async fn test_no_batching_with_slow_input(timeout_us: Option<u64>) {
+    async fn test_no_batching_with_slow_input(timeout_ms: Option<u64>) {
         let (tx, rx) = mpsc::unbounded_channel::<KvCacheEvent>();
         let publisher = MockPublisher::new();
         let publisher_clone = publisher.clone();
         let cancellation_token = CancellationToken::new();
 
         let handle = tokio::spawn(async move {
-            run_event_processor_loop(publisher_clone, 1, cancellation_token, rx, None, timeout_us)
+            run_event_processor_loop(publisher_clone, 1, cancellation_token, rx, None, timeout_ms)
                 .await
         });
 
@@ -3111,7 +3145,7 @@ mod event_processor_tests {
         // We expect at least 3 separate events (showing reduced batching)
         assert!(
             events.len() >= 3,
-            "With slow input (2ms delay) and timeout={timeout_us:?}, should have at least 3 separate events (got {})",
+            "With slow input (2ms delay) and timeout={timeout_ms:?}, should have at least 3 separate events (got {})",
             events.len()
         );
 
@@ -3134,7 +3168,7 @@ mod event_processor_tests {
     /// Test that switching between Removed and Stored events causes immediate flush
     #[tokio::test]
     async fn test_event_type_switching_causes_flush() {
-        let timeout_us = Some(100_000); // 100ms timeout
+        let timeout_ms = Some(100); // 100ms timeout
 
         let (tx, rx) = mpsc::unbounded_channel::<KvCacheEvent>();
         let publisher = MockPublisher::new();
@@ -3142,7 +3176,7 @@ mod event_processor_tests {
         let cancellation_token = CancellationToken::new();
 
         let handle = tokio::spawn(async move {
-            run_event_processor_loop(publisher_clone, 1, cancellation_token, rx, None, timeout_us)
+            run_event_processor_loop(publisher_clone, 1, cancellation_token, rx, None, timeout_ms)
                 .await
         });
 
@@ -3193,7 +3227,7 @@ mod event_processor_tests {
     /// Test that dp_rank change causes immediate flush
     #[tokio::test]
     async fn test_dp_rank_change_causes_flush() {
-        let timeout_us = Some(100_000); // 100ms timeout
+        let timeout_ms = Some(100); // 100ms timeout
 
         let (tx, rx) = mpsc::unbounded_channel::<KvCacheEvent>();
         let publisher = MockPublisher::new();
@@ -3201,7 +3235,7 @@ mod event_processor_tests {
         let cancellation_token = CancellationToken::new();
 
         let handle = tokio::spawn(async move {
-            run_event_processor_loop(publisher_clone, 1, cancellation_token, rx, None, timeout_us)
+            run_event_processor_loop(publisher_clone, 1, cancellation_token, rx, None, timeout_ms)
                 .await
         });
 
@@ -3277,7 +3311,7 @@ mod event_processor_tests {
     /// This verifies that metadata is NOT overwritten before flush
     #[tokio::test]
     async fn test_flushed_events_have_correct_metadata() {
-        let timeout_us = Some(100_000); // 100ms timeout
+        let timeout_ms = Some(100); // 100ms timeout
 
         let (tx, rx) = mpsc::unbounded_channel::<KvCacheEvent>();
         let publisher = MockPublisher::new();
@@ -3285,7 +3319,7 @@ mod event_processor_tests {
         let cancellation_token = CancellationToken::new();
 
         let handle = tokio::spawn(async move {
-            run_event_processor_loop(publisher_clone, 1, cancellation_token, rx, None, timeout_us)
+            run_event_processor_loop(publisher_clone, 1, cancellation_token, rx, None, timeout_ms)
                 .await
         });
 
@@ -3353,7 +3387,7 @@ mod event_processor_tests {
     /// Test that first event after idle period doesn't flush immediately.
     #[tokio::test]
     async fn test_first_event_after_idle_no_immediate_flush() {
-        let timeout_us = Some(50_000); // 50ms timeout
+        let timeout_ms = Some(50); // 50ms timeout
 
         let (tx, rx) = mpsc::unbounded_channel::<KvCacheEvent>();
         let publisher = MockPublisher::new();
@@ -3361,7 +3395,7 @@ mod event_processor_tests {
         let cancellation_token = CancellationToken::new();
 
         let handle = tokio::spawn(async move {
-            run_event_processor_loop(publisher_clone, 1, cancellation_token, rx, None, timeout_us)
+            run_event_processor_loop(publisher_clone, 1, cancellation_token, rx, None, timeout_ms)
                 .await
         });
 
@@ -3415,7 +3449,7 @@ mod event_processor_tests {
     /// Test that stored events with dp_rank change have correct metadata
     #[tokio::test]
     async fn test_stored_events_with_dp_rank_change_correct_metadata() {
-        let timeout_us = Some(100_000); // 100ms timeout
+        let timeout_ms = Some(100); // 100ms timeout
 
         let (tx, rx) = mpsc::unbounded_channel::<KvCacheEvent>();
         let publisher = MockPublisher::new();
@@ -3423,7 +3457,7 @@ mod event_processor_tests {
         let cancellation_token = CancellationToken::new();
 
         let handle = tokio::spawn(async move {
-            run_event_processor_loop(publisher_clone, 1, cancellation_token, rx, None, timeout_us)
+            run_event_processor_loop(publisher_clone, 1, cancellation_token, rx, None, timeout_ms)
                 .await
         });
 
@@ -3524,7 +3558,7 @@ mod event_processor_tests {
     /// First event with parent_hash=None should keep it None even if subsequent events have Some(X)
     #[tokio::test]
     async fn test_batch_parent_hash_preserved_when_extending() {
-        let timeout_us = Some(100_000); // 100ms timeout
+        let timeout_ms = Some(100); // 100ms timeout
 
         let (tx, rx) = mpsc::unbounded_channel::<KvCacheEvent>();
         let publisher = MockPublisher::new();
@@ -3532,7 +3566,7 @@ mod event_processor_tests {
         let cancellation_token = CancellationToken::new();
 
         let handle = tokio::spawn(async move {
-            run_event_processor_loop(publisher_clone, 1, cancellation_token, rx, None, timeout_us)
+            run_event_processor_loop(publisher_clone, 1, cancellation_token, rx, None, timeout_ms)
                 .await
         });
 
