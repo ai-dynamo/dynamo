@@ -95,8 +95,6 @@ navigation:
             path: features/multimodal/multimodal-sglang.md
       - page: Tool Calling
         path: agents/tool-calling.md
-      - page: SGLang for Agentic Workloads
-        path: backends/sglang/agents.md
       - page: LoRA Adapters
         path: features/lora/README.md
       - section: Observability (Local)
@@ -146,6 +144,8 @@ navigation:
             path: backends/sglang/sglang-diffusion.md
           - page: Observability
             path: backends/sglang/sglang-observability.md
+          - page: Agentic Workloads
+            path: backends/sglang/agents.md
       - page: TensorRT-LLM
         path: backends/trtllm/README.md
       - page: vLLM
