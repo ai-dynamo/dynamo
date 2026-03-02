@@ -17,16 +17,17 @@ from dynamo.sglang.multimodal_utils import (
     process_sglang_stream_response,
 )
 from dynamo.sglang.protocol import (
+    MultiModalGroup,
     MultiModalInput,
     MultiModalRequest,
     SglangMultimodalRequest,
 )
-from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
+from dynamo.sglang.request_handlers.handler_base import BaseGenerativeHandler
 
 logger = logging.getLogger(__name__)
 
 
-class MultimodalProcessorHandler(BaseWorkerHandler):
+class MultimodalProcessorHandler(BaseGenerativeHandler):
     """
     Handler for multimodal processor component that processes multimodal requests
     and forwards them to the encode worker.
@@ -38,10 +39,11 @@ class MultimodalProcessorHandler(BaseWorkerHandler):
         encode_worker_client: Client,
         shutdown_event: Optional[asyncio.Event] = None,
     ):
-        super().__init__(engine=None, config=config, shutdown_event=shutdown_event)
+        super().__init__(config)
         self.encode_worker_client = encode_worker_client
         self.chat_template = getattr(config.server_args, "chat_template", "qwen2-vl")
         self.model = config.server_args.model_path
+        self.shutdown_event = shutdown_event
 
         # Initialize tokenizer for the model
         self.tokenizer = AutoTokenizer.from_pretrained(
@@ -67,21 +69,37 @@ class MultimodalProcessorHandler(BaseWorkerHandler):
             # If the request is not MultiModalRequest, convert it to MultiModalRequest
             raw_request = MultiModalRequest.model_validate(raw_request)
 
-        multimodal_input = MultiModalInput()
+        image_urls: list[str] = []
+        video_url: str | None = None
 
         for message in raw_request.messages:
             for item in message.content:
                 if item.type == "image_url":
-                    multimodal_input.image_url = item.image_url.url
-                elif item.type == "video_url":
-                    if multimodal_input.image_url is not None:
+                    if video_url is not None:
                         raise ValueError("Cannot provide both image and video URLs")
-                    multimodal_input.video_url = item.video_url.url
+                    image_urls.append(item.image_url.url)
+                elif item.type == "video_url":
+                    if image_urls:
+                        raise ValueError("Cannot provide both image and video URLs")
+                    if video_url is not None:
+                        raise ValueError("Multiple video URLs are not supported")
+                    video_url = item.video_url.url
 
-        if multimodal_input.image_url is None and multimodal_input.video_url is None:
+        if not image_urls and video_url is None:
             raise ValueError("Either image URL or video URL is required")
 
-        async for response in self._generate(raw_request, multimodal_input):
+        multimodal_groups: list[MultiModalGroup] = []
+        if image_urls:
+            multimodal_groups = [
+                MultiModalGroup(multimodal_input=MultiModalInput(image_url=url))
+                for url in image_urls
+            ]
+        elif video_url is not None:
+            multimodal_groups = [
+                MultiModalGroup(multimodal_input=MultiModalInput(video_url=video_url))
+            ]
+
+        async for response in self._generate(raw_request, multimodal_groups):
             logger.debug(
                 f"Generated response type {type(response)}, content: {response}"
             )
@@ -90,7 +108,7 @@ class MultimodalProcessorHandler(BaseWorkerHandler):
     async def _generate(
         self,
         raw_request: MultiModalRequest,
-        multimodal_input: MultiModalInput,
+        multimodal_groups: list[MultiModalGroup],
     ):
         # Generate a unique request ID for tracking
         request_id = str(uuid.uuid4().hex)
@@ -103,7 +121,7 @@ class MultimodalProcessorHandler(BaseWorkerHandler):
 
         worker_request = SglangMultimodalRequest(
             request=sglang_request,
-            multimodal_input=multimodal_input,
+            multimodal_inputs=multimodal_groups,
         )
 
         # Send to encoder worker

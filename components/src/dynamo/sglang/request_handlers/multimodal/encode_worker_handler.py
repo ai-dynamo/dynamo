@@ -20,7 +20,7 @@ from dynamo._core import Client, Context
 from dynamo.runtime import DistributedRuntime
 from dynamo.sglang.args import Config
 from dynamo.sglang.protocol import SglangMultimodalRequest
-from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
+from dynamo.sglang.request_handlers.handler_base import BaseGenerativeHandler
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +38,7 @@ except ImportError as e:
     DEVICE = "cpu"
 
 
-class MultimodalEncodeWorkerHandler(BaseWorkerHandler):
+class MultimodalEncodeWorkerHandler(BaseGenerativeHandler):
     """
     Handler for multimodal encode worker component that processes images/videos
     and forwards them to the downstream worker.
@@ -50,9 +50,10 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler):
         pd_worker_client: Client,
         shutdown_event: Optional[asyncio.Event] = None,
     ) -> None:
-        super().__init__(engine=None, config=config, shutdown_event=shutdown_event)
+        super().__init__(config)
         self.pd_worker_client = pd_worker_client
         self.model = config.server_args.model_path
+        self.shutdown_event = shutdown_event
 
         if MMEncoder is None:
             raise RuntimeError(
@@ -115,50 +116,136 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler):
         # The following steps encode the requested image for SGLang:
         # 1. Pass the image URL to MMEncoder which loads, preprocesses, and
         #    runs the vision encoder.
-        # 2. Add a batch dimension and store metadata on the request.
-        # 3. Expand the single image placeholder token to match patch count.
-        # 4. Create a NIXL descriptor and send embeddings to downstream worker.
+        # 2. Expand each image placeholder token to match patch count.
+        # 3. Create a single NIXL descriptor for concatenated embeddings.
+        # 4. Send request + metadata to downstream worker.
         # 5. Stream the downstream worker's response back to the caller.
 
         try:
-            if not request.multimodal_input.image_url:
-                raise ValueError("image_url is required for the encode worker.")
+            multimodal_groups = request.multimodal_inputs
+            if not multimodal_groups:
+                raise ValueError("multimodal_inputs is required for the encode worker.")
 
-            image_grid_dim, mm_embedding = await self.encoder._encode(
-                [request.multimodal_input.image_url]
+            image_urls = []
+            for idx, mm_group in enumerate(multimodal_groups):
+                mm_input = mm_group.multimodal_input
+                if not mm_input or not mm_input.image_url:
+                    raise ValueError(
+                        f"image_url is required for the encode worker (index={idx})."
+                    )
+                if mm_input.video_url is not None:
+                    raise NotImplementedError(
+                        "video_url encoding is not supported in SGLang encode worker"
+                    )
+                image_urls.append(mm_input.image_url)
+
+            image_grid_dim, precomputed_embeddings = await self.encoder._encode(
+                image_urls
             )
 
-            image_grid_thw = (
+            image_grid_thw_list = (
                 image_grid_dim.tolist()
                 if isinstance(image_grid_dim, torch.Tensor)
                 else image_grid_dim
             )
 
-            # Store the image data info in the request for downstream
-            request.processor_output = {"image_grid_thw": image_grid_thw}
-            request.image_grid_thw = image_grid_thw
-            request.embeddings_shape = tuple(mm_embedding.shape)
+            if len(image_grid_thw_list) != len(multimodal_groups):
+                raise ValueError("image_grid_thw size mismatch")
 
-            # Replace the single image token with multiple image tokens based on embedding shape
-            image_token_id_index = request.request.token_ids.index(self.image_token_id)
+            def _build_token_counts(total_tokens: int) -> list[int]:
+                if total_tokens <= 0:
+                    raise ValueError("Invalid token statistics for embeddings")
 
-            num_image_tokens = mm_embedding.shape[0]  # Number of image patches
+                # image_grid_thw is [t, h, w]. We derive per-item relative sizes
+                # from spatial grid (h * w), then infer merge factor
+                # from the total embedding token count.
+                grid_sizes = []
+                for image_grid_thw in image_grid_thw_list:
+                    if not isinstance(image_grid_thw, list) or len(image_grid_thw) != 3:
+                        raise ValueError(
+                            "Cannot split embeddings: invalid image_grid_thw"
+                        )
+                    grid_sizes.append(int(image_grid_thw[1] * image_grid_thw[2]))
 
-            # Replace single image token with multiple image tokens
-            request.request.token_ids = (
-                request.request.token_ids[:image_token_id_index]
-                + [self.image_token_id] * num_image_tokens
-                + request.request.token_ids[
-                    image_token_id_index + 1 :
-                ]  # Skip the original token
+                total_grid_tokens = sum(grid_sizes)
+                if total_grid_tokens <= 0:
+                    raise ValueError("Invalid grid statistics for embeddings")
+
+                if total_grid_tokens % total_tokens != 0:
+                    raise ValueError(
+                        "Cannot infer merge factor: grid token total is not divisible by embedding token total"
+                    )
+
+                merge_factor = total_grid_tokens // total_tokens
+                token_counts = []
+                for grid_count in grid_sizes:
+                    if grid_count % merge_factor != 0:
+                        raise ValueError(
+                            "Cannot split embeddings: per-image grid token count not divisible by inferred merge factor"
+                        )
+                    token_counts.append(grid_count // merge_factor)
+
+                if sum(token_counts) != total_tokens:
+                    raise ValueError(
+                        "Cannot split embeddings: per-image token counts do not match embedding token total"
+                    )
+
+                return token_counts
+
+            if isinstance(precomputed_embeddings, torch.Tensor):
+                if precomputed_embeddings.ndim != 2:
+                    raise ValueError(
+                        "Unsupported embeddings tensor rank from encoder: "
+                        f"{precomputed_embeddings.ndim}. Expected 2D [tokens, hidden]."
+                    )
+
+                token_counts = _build_token_counts(precomputed_embeddings.shape[0])
+            else:
+                raise ValueError(
+                    "Unsupported embeddings type from encoder: "
+                    f"{type(precomputed_embeddings)}"
+                )
+
+            image_placeholder_count = request.request.token_ids.count(
+                self.image_token_id
             )
+            if image_placeholder_count < len(multimodal_groups):
+                raise ValueError(
+                    "Not enough image placeholders in token_ids for provided images"
+                )
 
-            # Create descriptor for the multimodal data
-            descriptor = connect.Descriptor(mm_embedding)
+            # Keep per-image grid metadata in request groups for worker-side mm_item.
+            for idx, (mm_group, image_grid_thw) in enumerate(
+                zip(multimodal_groups, image_grid_thw_list)
+            ):
+                mm_group.image_grid_thw = image_grid_thw
+                mm_group.multimodal_input.image_url = None
 
+            # Store shared serialized tensor metadata at request level.
+            request.embeddings_shape = tuple(precomputed_embeddings.shape)
+            request.serialized_request = None
+
+            search_start = 0
+            for num_image_tokens in token_counts:
+                try:
+                    image_token_id_index = request.request.token_ids.index(
+                        self.image_token_id, search_start
+                    )
+                except ValueError as e:
+                    raise ValueError(
+                        "Not enough image tokens found for provided images"
+                    ) from e
+
+                request.request.token_ids = (
+                    request.request.token_ids[:image_token_id_index]
+                    + [self.image_token_id] * num_image_tokens
+                    + request.request.token_ids[image_token_id_index + 1 :]
+                )
+                search_start = image_token_id_index + num_image_tokens
+
+            descriptor = connect.Descriptor(precomputed_embeddings)
             with await self._connector.create_readable(descriptor) as readable:
                 request.serialized_request = readable.metadata()
-
                 logger.debug(f"Request: {request.model_dump_json()}")
 
                 # Get the response generator from downstream worker
