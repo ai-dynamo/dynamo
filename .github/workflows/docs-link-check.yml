@@ -18,31 +18,39 @@ jobs:
 
       # Cache lychee results (e.g. to avoid hitting rate limits)
       # https://lychee.cli.rs/github_action_recipes/caching/
+      # actions/cache has no native TTL, so rotate the key once per UTC day
+      # to approximate a 24-hour cache lifetime.
+      - name: Compute cache key date (UTC)
+        id: cache-date
+        run: echo "day=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+
       - name: Restore lychee cache
         uses: actions/cache@v4
         with:
           path: .lycheecache
-          key: cache-lychee-${{ github.sha }}
-          restore-keys: cache-lychee-
+          # Exact daily key (new cache namespace each UTC day).
+          key: cache-lychee-${{ runner.os }}-${{ steps.cache-date.outputs.day }}
+          # Prefix fallback: restore the newest prior cache for this OS if today's key misses.
+          # Trailing '-' keeps the prefix boundary explicit (e.g. Linux-2026-03-02).
+          restore-keys: cache-lychee-${{ runner.os }}-
 
       - name: Check documentation links with lychee
         uses: lycheeverse/lychee-action@v2
         with:
-          # TODO: once DYN-2259 is fixed remove exclusion of ./docs/components/profiler/profiler_guide.md
+          # ${{ github.event_name == 'pull_request' && '--offline' || '' }}
           args: >-
             --cache
             --no-progress
             --max-retries 4
-            --retry-wait-time 3
-            --timeout 30
+            --retry-wait-time 6
+            --timeout 60
+            --max-concurrency 6
             --root-dir ${{ github.workspace }}
             --exclude-path ".*ATTRIBUTIONS.*"
             --exclude-path "./lib/llm/tests/data/.*"
-            --exclude-path "./docs/components/profiler/profiler_guide.md"
             --accept "200..=299, 403, 429"
             --exclude-all-private
             --exclude 0.0.0.0
-            ${{ github.event_name == 'pull_request' && '--offline' || '' }}
             .
           fail: true
         env:
