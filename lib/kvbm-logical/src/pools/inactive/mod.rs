@@ -24,7 +24,7 @@ use super::{
 // pub(crate) use backends::*;
 
 /// Backend trait for InactivePool storage strategies
-pub(crate) trait InactivePoolBackend<T: BlockMetadata>: Send + Sync {
+pub trait InactivePoolBackend<T: BlockMetadata>: Send + Sync {
     /// Find blocks matching the given hashes in order, stopping on first miss.
     fn find_matches(&mut self, hashes: &[SequenceHash], touch: bool) -> Vec<Block<T, Registered>>;
 
@@ -57,6 +57,13 @@ pub(crate) trait InactivePoolBackend<T: BlockMetadata>: Send + Sync {
     fn allocate_all(&mut self) -> Vec<Block<T, Registered>> {
         let count = self.len();
         self.allocate(count)
+    }
+
+    /// Determine if the block should be reset or inserted back into the pool.
+    /// If this returns true, the block will be reset and returned to the reset pool.
+    /// Otherwise, the block will be inserted back into the pool.
+    fn should_reset(&self, _block: &Block<T, Registered>) -> bool {
+        false
     }
 }
 use crate::blocks::{RegisteredReturnFn, ResetReturnFn};
@@ -94,6 +101,7 @@ impl<T: BlockMetadata + Sync> InactivePool<T> {
 
         let inner_clone = inner.clone();
         let metrics_clone = metrics.clone();
+        let reset_return_fn = reset_pool.return_fn();
         let return_fn = Arc::new(move |block: Arc<Block<T, Registered>>| {
             let seq_hash = block.sequence_hash();
 
@@ -101,7 +109,12 @@ impl<T: BlockMetadata + Sync> InactivePool<T> {
             match Arc::try_unwrap(block) {
                 Ok(block) => {
                     let block_id = block.block_id();
-                    inner.backend.insert(block);
+                    if inner.backend.should_reset(&block) {
+                        let reset_block = block.reset();
+                        reset_return_fn(reset_block);
+                    } else {
+                        inner.backend.insert(block);
+                    }
                     if let Some(ref m) = metrics_clone {
                         m.inc_inactive_pool_size();
                     }
@@ -464,6 +477,38 @@ mod tests {
         // RAII return: dropping the found blocks should return them
         drop(found);
         assert_eq!(pool.len(), 2);
+    }
+
+    #[test]
+    fn test_should_reset_sends_blocks_to_reset_pool() {
+        use super::backends::ResetInactiveBlocksBackend;
+
+        let reset_blocks: Vec<_> = (0..10_usize).map(|i| Block::new(i, 4)).collect();
+        let reset_pool = ResetPool::new(reset_blocks, 4, None);
+
+        let backend = Box::new(ResetInactiveBlocksBackend);
+        let inactive_pool = InactivePool::new(backend, &reset_pool, None);
+
+        // Initially: 10 blocks in reset pool, 0 in inactive pool
+        assert_eq!(reset_pool.available_blocks(), 10);
+        assert_eq!(inactive_pool.len(), 0);
+
+        // Allocate a block, stage it, register it, then drop the immutable guard
+        let (block, seq_hash) = create_registered_block::<TestMeta>(100, &tokens_for_id(100));
+
+        // Manually insert via the return_fn path: simulate what happens when an
+        // ImmutableBlock is dropped. The return_fn checks should_reset, which
+        // returns true for ResetInactiveBlocksBackend, so it resets the block.
+        let return_fn = inactive_pool.return_fn();
+        let block_arc = Arc::new(block);
+        return_fn(block_arc);
+
+        // Block should NOT be in the inactive pool (should_reset returned true)
+        assert_eq!(inactive_pool.len(), 0);
+        assert!(!inactive_pool.has_block(seq_hash));
+
+        // Block should have been reset and returned to the reset pool
+        assert_eq!(reset_pool.available_blocks(), 11);
     }
 
     #[test]

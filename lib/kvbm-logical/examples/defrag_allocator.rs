@@ -1,16 +1,18 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Example: DefragAllocator with PresenceDelegate
+//! Example: DefragAllocator with PresenceDelegate and LoggingInactiveBackend
 //!
-//! Demonstrates both KVBM extension points — a custom [`BlockAllocator`] and a
-//! [`PresenceDelegate`] — sharing state through an `Arc<SharedDefragState>`.
+//! Demonstrates all three KVBM extension points:
 //!
-//! The **DefragAllocator** uses a `BTreeSet` so that `pop()` always returns the
-//! lowest available `BlockId`, producing a defragmented allocation pattern.
+//! - **[`BlockAllocator`]** — `DefragAllocator` uses a `BTreeMap` so that
+//!   `pop()` always returns the lowest available `BlockId`.
+//! - **[`PresenceDelegate`]** — `DefragPresenceDelegate` logs registration
+//!   events and maintains a live count of registered blocks.
+//! - **[`InactivePoolBackend`]** — `LoggingInactiveBackend` wraps any inner
+//!   backend, logging `insert`, `allocate`, and `should_reset` calls to stderr.
 //!
-//! The **DefragPresenceDelegate** logs registration events to stderr and
-//! maintains a live count of registered blocks in shared state.
+//! All three share state through an `Arc<SharedDefragState>`.
 //!
 //! Run with:
 //! ```sh
@@ -23,10 +25,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use kvbm_logical::ext::{
-    Block, BlockAllocator, BlockId, BlockMetadata, PresenceDelegate, Reset,
+    Block, BlockAllocator, BlockId, BlockMetadata, InactivePoolBackend, PresenceDelegate,
+    Registered, Reset, SequenceHash,
 };
+use kvbm_logical::pools::LineageBackend;
 use kvbm_logical::registry::BlockRegistrationHandle;
-use kvbm_logical::{BlockManager, BlockRegistry, SequenceHash};
+use kvbm_logical::{BlockManager, BlockRegistry};
 
 // ---------------------------------------------------------------------------
 // Shared state
@@ -157,6 +161,88 @@ impl PresenceDelegate for DefragPresenceDelegate {
 }
 
 // ---------------------------------------------------------------------------
+// LoggingInactiveBackend
+// ---------------------------------------------------------------------------
+
+/// A custom [`InactivePoolBackend`] that wraps an inner backend and logs
+/// `insert`, `allocate`, and `should_reset` calls to stderr.
+///
+/// This demonstrates the wrapping/decorator pattern for inactive backends:
+/// all real work is delegated to the inner backend while the wrapper adds
+/// observability.
+struct LoggingInactiveBackend<T: BlockMetadata> {
+    inner: Box<dyn InactivePoolBackend<T>>,
+}
+
+impl<T: BlockMetadata> LoggingInactiveBackend<T> {
+    fn new(inner: Box<dyn InactivePoolBackend<T>>) -> Self {
+        Self { inner }
+    }
+}
+
+impl<T: BlockMetadata> InactivePoolBackend<T> for LoggingInactiveBackend<T> {
+    fn find_matches(&mut self, hashes: &[SequenceHash], touch: bool) -> Vec<Block<T, Registered>> {
+        let result = self.inner.find_matches(hashes, touch);
+        eprintln!(
+            "  [LoggingBackend] find_matches({} hashes, touch={touch}) → {} hits",
+            hashes.len(),
+            result.len(),
+        );
+        result
+    }
+
+    fn scan_matches(
+        &mut self,
+        hashes: &[SequenceHash],
+        touch: bool,
+    ) -> Vec<(SequenceHash, Block<T, Registered>)> {
+        let result = self.inner.scan_matches(hashes, touch);
+        eprintln!(
+            "  [LoggingBackend] scan_matches({} hashes, touch={touch}) → {} hits",
+            hashes.len(),
+            result.len(),
+        );
+        result
+    }
+
+    fn allocate(&mut self, count: usize) -> Vec<Block<T, Registered>> {
+        let result = self.inner.allocate(count);
+        eprintln!(
+            "  [LoggingBackend] allocate({count}) → {} blocks (pool now {})",
+            result.len(),
+            self.inner.len(),
+        );
+        result
+    }
+
+    fn insert(&mut self, block: Block<T, Registered>) {
+        let block_id = block.block_id();
+        self.inner.insert(block);
+        eprintln!(
+            "  [LoggingBackend] insert(block={block_id}) (pool now {})",
+            self.inner.len(),
+        );
+    }
+
+    fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    fn has_block(&self, seq_hash: SequenceHash) -> bool {
+        self.inner.has_block(seq_hash)
+    }
+
+    fn should_reset(&self, block: &Block<T, Registered>) -> bool {
+        let result = self.inner.should_reset(block);
+        eprintln!(
+            "  [LoggingBackend] should_reset(block={}) → {result}",
+            block.block_id(),
+        );
+        result
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Helper: create unique sequence hashes
 // ---------------------------------------------------------------------------
 
@@ -191,14 +277,20 @@ fn main() {
         .presence_delegate(delegate)
         .build();
 
-    // 3. Build BlockManager with DefragAllocator --------------------------------
+    // 3. Build BlockManager with DefragAllocator + LoggingInactiveBackend --------
     let allocator = DefragAllocator::<GpuTier>::new(Arc::clone(&shared));
+
+    // Wrap the default LineageBackend in a logging decorator
+    let logging_backend = LoggingInactiveBackend::<GpuTier>::new(
+        Box::new(LineageBackend::default()),
+    );
 
     let manager = BlockManager::<GpuTier>::builder()
         .block_count(BLOCK_COUNT)
         .block_size(BLOCK_SIZE)
         .registry(registry)
         .block_allocator(allocator)
+        .with_inactive_backend(logging_backend)
         .build()
         .expect("failed to build BlockManager");
 

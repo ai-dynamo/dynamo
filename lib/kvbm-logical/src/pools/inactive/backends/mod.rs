@@ -10,6 +10,7 @@ mod hashmap_backend;
 mod lineage;
 mod lru_backend;
 mod multi_lru_backend;
+mod reset_backend;
 mod reuse_policy;
 
 #[cfg(test)]
@@ -19,10 +20,11 @@ mod tests;
 pub use fifo::FifoReusePolicy;
 
 pub(crate) use hashmap_backend::HashMapBackend;
-pub(crate) use lineage::LineageBackend;
+pub use lineage::LineageBackend;
 pub(crate) use lru_backend::LruBackend;
 pub(crate) use multi_lru_backend::MultiLruBackend; // Not used widely yet
 
+pub use reset_backend::ResetInactiveBlocksBackend;
 pub use reuse_policy::{ReusePolicy, ReusePolicyError};
 
 use super::SequenceHash;

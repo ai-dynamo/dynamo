@@ -22,7 +22,8 @@ mod block_proptest;
 
 pub(crate) use active::ActivePool;
 pub(crate) use inactive::backends;
-pub(crate) use inactive::{InactivePool, InactivePoolBackend};
+pub(crate) use inactive::InactivePool;
+pub use inactive::InactivePoolBackend;
 pub use reset::FifoBlockAllocator;
 pub(crate) use reset::ResetPool;
 
@@ -73,7 +74,7 @@ pub(crate) trait BlockMatcher<T: BlockMetadata> {
 pub use crate::blocks::BlockDuplicationPolicy;
 
 // Re-export reuse policy from inactive backends
-pub use inactive::backends::{ReusePolicy, ReusePolicyError};
+pub use inactive::backends::{LineageBackend, ResetInactiveBlocksBackend, ReusePolicy, ReusePolicyError};
 
 // Re-export the new RAII guard types - no need to re-export here since they're defined in this module
 

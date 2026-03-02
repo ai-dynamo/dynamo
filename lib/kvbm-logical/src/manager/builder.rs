@@ -116,6 +116,9 @@ pub struct BlockManagerConfigBuilder<T: BlockMetadata> {
     /// Custom block allocator for the reset pool
     block_allocator: Option<Box<dyn BlockAllocator<T> + Send + Sync>>,
 
+    /// Custom inactive pool backend (takes priority over `inactive_backend` config)
+    custom_inactive_backend: Option<Box<dyn InactivePoolBackend<T>>>,
+
     /// Phantom data for type parameter
     _phantom: std::marker::PhantomData<T>,
 }
@@ -130,6 +133,7 @@ impl<T: BlockMetadata> Default for BlockManagerConfigBuilder<T> {
             duplication_policy: None,
             aggregator: None,
             block_allocator: None,
+            custom_inactive_backend: None,
             _phantom: std::marker::PhantomData,
         }
     }
@@ -280,6 +284,21 @@ impl<T: BlockMetadata> BlockManagerConfigBuilder<T> {
         self
     }
 
+    /// Set a custom inactive pool backend.
+    ///
+    /// When set, this takes priority over the inactive backend configuration
+    /// (e.g., `with_lru_backend()`, `with_lineage_backend()`). Use this to
+    /// plug in a custom [`InactivePoolBackend`] implementation.
+    ///
+    /// See [`crate::ext`] for the types needed to implement a custom backend.
+    pub fn with_inactive_backend(
+        mut self,
+        backend: impl InactivePoolBackend<T> + 'static,
+    ) -> Self {
+        self.custom_inactive_backend = Some(Box::new(backend));
+        self
+    }
+
     /// Validate the configuration.
     fn validate(&self) -> Result<(), String> {
         let registry = self.registry.as_ref().ok_or("registry is required")?;
@@ -359,8 +378,11 @@ impl<T: BlockMetadata> BlockManagerConfigBuilder<T> {
         };
         metrics.set_reset_pool_size(block_count as i64);
 
-        // Create backend based on configuration
-        let backend: Box<dyn InactivePoolBackend<T>> = match self.inactive_backend.take() {
+        // Create backend based on configuration (custom backend takes priority)
+        let backend: Box<dyn InactivePoolBackend<T>> = if let Some(custom) = self.custom_inactive_backend.take() {
+            tracing::info!("Using custom inactive pool backend");
+            custom
+        } else { match self.inactive_backend.take() {
             Some(InactiveBackendConfig::HashMap { reuse_policy }) => {
                 tracing::info!("Using HashMap for inactive pool");
                 Box::new(HashMapBackend::new(reuse_policy))
@@ -407,7 +429,7 @@ impl<T: BlockMetadata> BlockManagerConfigBuilder<T> {
                 tracing::info!("Using default inactive backend: Lineage");
                 Box::new(LineageBackend::default())
             }
-        };
+        } };
 
         // Create pools
         let inactive_pool = InactivePool::new(backend, &reset_pool, Some(metrics.clone()));

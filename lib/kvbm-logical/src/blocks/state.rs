@@ -129,7 +129,7 @@ fn into_registered<T: BlockMetadata>(
 
 // Implementation for Registered state
 impl<T: BlockMetadata> Block<T, Registered> {
-    pub(crate) fn sequence_hash(&self) -> SequenceHash {
+    pub fn sequence_hash(&self) -> SequenceHash {
         self.state.sequence_hash
     }
 
@@ -137,7 +137,7 @@ impl<T: BlockMetadata> Block<T, Registered> {
         &self.state.registration_handle
     }
 
-    pub(crate) fn reset(self) -> Block<T, Reset> {
+    pub fn reset(self) -> Block<T, Reset> {
         // Mark absence when destroying Block<T, Registered>
         self.state
             .registration_handle
