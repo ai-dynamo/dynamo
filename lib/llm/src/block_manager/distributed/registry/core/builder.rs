@@ -1,0 +1,258 @@
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+//! Builder patterns for registry components.
+//!
+//! Provides ergonomic construction of registry clients and hubs with
+//! sensible defaults and fluent configuration.
+//!
+//! Uses simple `(K, V)` pairs. If you need metadata, compose it into
+//! your Value type: `V = (ActualValue, Metadata)`.
+
+use std::marker::PhantomData;
+use std::time::Duration;
+
+use anyhow::Result;
+
+use super::codec::{BinaryCodec, RegistryCodec};
+use super::hub::RegistryHub;
+use super::hub_transport::HubTransport;
+use super::key::RegistryKey;
+use super::registry::RegistryClient;
+use super::storage::Storage;
+use super::transport::RegistryTransport;
+use super::value::RegistryValue;
+
+/// Builder for constructing a `RegistryClient`.
+///
+/// # Example
+///
+/// ```text
+/// let client = ClientBuilder::new(transport, BinaryCodec::new())
+///     .batch_size(50)
+///     .batch_timeout(Duration::from_millis(20))
+///     .build();
+/// ```
+pub struct ClientBuilder<K, V, T, C>
+where
+    K: RegistryKey,
+    V: RegistryValue,
+    T: RegistryTransport,
+    C: RegistryCodec<K, V>,
+{
+    transport: T,
+    codec: C,
+    batch_size: usize,
+    batch_timeout: Duration,
+    _phantom: PhantomData<(K, V)>,
+}
+
+impl<K, V, T, C> ClientBuilder<K, V, T, C>
+where
+    K: RegistryKey,
+    V: RegistryValue,
+    T: RegistryTransport,
+    C: RegistryCodec<K, V>,
+{
+    /// Create a new client builder with the given transport and codec.
+    pub fn new(transport: T, codec: C) -> Self {
+        Self {
+            transport,
+            codec,
+            batch_size: 100,
+            batch_timeout: Duration::from_millis(10),
+            _phantom: PhantomData,
+        }
+    }
+
+    /// Set the batch size for registrations.
+    ///
+    /// When this many registrations are pending, they are automatically flushed.
+    /// Default: 100
+    pub fn batch_size(mut self, size: usize) -> Self {
+        self.batch_size = size;
+        self
+    }
+
+    /// Set the batch timeout for registrations.
+    ///
+    /// Pending registrations are flushed after this duration even if
+    /// the batch size hasn't been reached. Default: 10ms
+    pub fn batch_timeout(mut self, timeout: Duration) -> Self {
+        self.batch_timeout = timeout;
+        self
+    }
+
+    /// Build the registry client.
+    pub fn build(self) -> RegistryClient<K, V, T, C> {
+        RegistryClient::new(self.transport, self.codec)
+            .with_batch_size(self.batch_size)
+            .with_batch_timeout(self.batch_timeout)
+    }
+}
+
+/// Builder for constructing a `RegistryHub`.
+///
+/// # Example
+///
+/// ```text
+/// let hub = HubBuilder::new(storage, BinaryCodec::new())
+///     .lease_ttl(Duration::from_secs(60))
+///     .build();
+/// ```
+pub struct HubBuilder<K, V, S, C>
+where
+    K: RegistryKey,
+    V: RegistryValue,
+    S: Storage<K, V>,
+    C: RegistryCodec<K, V>,
+{
+    storage: S,
+    codec: C,
+    lease_ttl: Duration,
+    _phantom: PhantomData<(K, V)>,
+}
+
+impl<K, V, S, C> HubBuilder<K, V, S, C>
+where
+    K: RegistryKey,
+    V: RegistryValue,
+    S: Storage<K, V>,
+    C: RegistryCodec<K, V>,
+{
+    /// Create a new hub builder with the given storage and codec.
+    pub fn new(storage: S, codec: C) -> Self {
+        Self {
+            storage,
+            codec,
+            lease_ttl: Duration::from_secs(30),
+            _phantom: PhantomData,
+        }
+    }
+
+    /// Set the lease TTL for can_offload claims.
+    ///
+    /// Leases expire after this duration if not converted to registrations.
+    /// Default: 30 seconds
+    pub fn lease_ttl(mut self, ttl: Duration) -> Self {
+        self.lease_ttl = ttl;
+        self
+    }
+
+    /// Build the registry hub.
+    ///
+    /// Note: To enable periodic lease cleanup, spawn `lease_cleanup_task`
+    /// with the hub's `lease_manager()` and your desired cleanup interval.
+    pub fn build(self) -> RegistryHub<K, V, S, C> {
+        use super::hub::HubConfig;
+        let config = HubConfig {
+            lease_ttl: self.lease_ttl,
+        };
+        RegistryHub::with_config(self.storage, self.codec, config)
+    }
+
+    /// Build and serve the hub with the given transport.
+    ///
+    /// This consumes the builder and starts serving requests.
+    pub async fn serve<T: HubTransport>(self, transport: &mut T) -> Result<()> {
+        let hub = self.build();
+        hub.serve(transport).await
+    }
+}
+
+/// Convenience function to create a client builder with binary codec.
+///
+/// # Example
+///
+/// ```text
+/// let client = client(transport)
+///     .batch_size(50)
+///     .build();
+/// ```
+pub fn client<K, V, T>(transport: T) -> ClientBuilder<K, V, T, BinaryCodec<K, V>>
+where
+    K: RegistryKey,
+    V: RegistryValue,
+    T: RegistryTransport,
+{
+    ClientBuilder::new(transport, BinaryCodec::new())
+}
+
+/// Convenience function to create a hub builder with binary codec.
+///
+/// # Example
+///
+/// ```text
+/// let hub = hub(storage)
+///     .lease_ttl(Duration::from_secs(60))
+///     .build();
+/// ```
+pub fn hub<K, V, S>(storage: S) -> HubBuilder<K, V, S, BinaryCodec<K, V>>
+where
+    K: RegistryKey,
+    V: RegistryValue,
+    S: Storage<K, V>,
+{
+    HubBuilder::new(storage, BinaryCodec::new())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::block_manager::distributed::registry::core::{
+        HashMapStorage, InProcessTransport, OffloadStatus, QueryType, Registry, ResponseType,
+    };
+
+    #[tokio::test]
+    async fn test_client_builder() {
+        let codec: BinaryCodec<u64, u64> = BinaryCodec::new();
+
+        let (transport, _rx) = InProcessTransport::new(move |data| {
+            let query = codec.decode_query(data);
+            match query {
+                Some(QueryType::CanOffload(keys)) => {
+                    let statuses: Vec<_> = keys.iter().map(|_| OffloadStatus::Granted).collect();
+                    let mut buf = Vec::new();
+                    codec
+                        .encode_response(&ResponseType::CanOffload(statuses), &mut buf)
+                        .unwrap();
+                    buf
+                }
+                _ => Vec::new(),
+            }
+        });
+
+        let built_client: RegistryClient<u64, u64, _, _> = client(transport)
+            .batch_size(50)
+            .batch_timeout(Duration::from_millis(20))
+            .build();
+
+        let result = built_client.can_offload(&[1, 2, 3]).await.unwrap();
+        assert_eq!(result.can_offload.len(), 3);
+    }
+
+    #[test]
+    fn test_hub_builder() {
+        let storage: HashMapStorage<u64, u64> = HashMapStorage::new();
+
+        let built_hub: RegistryHub<u64, u64, _, _> =
+            hub(storage).lease_ttl(Duration::from_secs(60)).build();
+
+        assert!(built_hub.is_empty());
+
+        // Verify lease TTL was set
+        assert_eq!(built_hub.lease_manager().ttl(), Duration::from_secs(60));
+    }
+
+    #[test]
+    fn test_builder_with_custom_codec() {
+        let storage: HashMapStorage<u64, u64> = HashMapStorage::new();
+        let codec: BinaryCodec<u64, u64> = BinaryCodec::new();
+
+        let built_hub = HubBuilder::new(storage, codec)
+            .lease_ttl(Duration::from_secs(120))
+            .build();
+
+        assert_eq!(built_hub.lease_manager().ttl(), Duration::from_secs(120));
+    }
+}
