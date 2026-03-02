@@ -248,7 +248,7 @@ class BasePlanner:
 
     def __init__(
         self,
-        runtime: Optional[DistributedRuntime],
+        runtime: DistributedRuntime,
         config: PlannerConfig,
         dryrun: bool = False,
         shared_state: Optional[PlannerSharedState] = None,
@@ -389,6 +389,7 @@ class BasePlanner:
             self.config.backend
         ].decode_worker_k8s_name
 
+        self.prometheus_metrics: PlannerPrometheusMetrics | None = None
         if not self.dryrun:
             self.prefill_client = None
             self.workers_client = None
@@ -948,7 +949,7 @@ class BasePlanner:
             logger.info(f"Detected model name from deployment: {model_name}")
             self.model_name = model_name.lower()
         else:
-            model_name = getattr(self.config, "model_name", None)
+            model_name = getattr(self.config, "model_name", "")
             if not model_name:
                 raise ValueError(
                     "Model name is required in no-operation mode. "

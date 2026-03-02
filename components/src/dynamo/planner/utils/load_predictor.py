@@ -19,6 +19,7 @@ import warnings
 from abc import ABC, abstractmethod
 from datetime import datetime, timedelta
 from enum import Enum
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -57,7 +58,7 @@ class BasePredictor(ABC):
 
     def __init__(self, minimum_data_points: int = 5) -> None:
         self.minimum_data_points = minimum_data_points
-        self.data_buffer = []
+        self.data_buffer: list[Any] = []
         # Even if we preload historical data, we still want to ignore the initial
         # post-deployment idle period (a run of zeros) until we see the first
         # non-zero datapoint from live traffic.
@@ -234,6 +235,7 @@ class ARIMAPredictor(BasePredictor):
             self._pending_raw_updates = []
 
             # Make prediction
+            assert self.model is not None
             forecast = float(self.model.predict(n_periods=1)[0])
             if self._mode == ARIMAPredictor.Mode.LOG1P:
                 return max(0.0, math.expm1(forecast))
