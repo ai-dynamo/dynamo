@@ -1172,12 +1172,6 @@ func GenerateBasePodSpec(
 
 	// Inject auto-generated frontend sidecar if configured
 	if component.FrontendSidecar != nil {
-		for _, c := range podSpec.Containers {
-			if c.Name == commonconsts.FrontendSidecarContainerName {
-				return nil, fmt.Errorf("cannot inject frontend sidecar: a container named %q already exists in the pod spec (check extraPodSpec.containers)", commonconsts.FrontendSidecarContainerName)
-			}
-		}
-
 		sidecar, err := generateFrontendSidecar(component.FrontendSidecar, componentContext, operatorConfig)
 		if err != nil {
 			return nil, fmt.Errorf("failed to generate frontend sidecar: %w", err)

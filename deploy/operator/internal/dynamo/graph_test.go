@@ -7064,77 +7064,6 @@ func TestGenerateBasePodSpec_FrontendSidecar(t *testing.T) {
 			wantSidecarProbes: true,
 			wantSidecarPorts:  true,
 		},
-		{
-			name: "frontendSidecar rejects duplicate container name",
-			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
-				ComponentType: commonconsts.ComponentTypeWorker,
-				FrontendSidecar: &v1alpha1.FrontendSidecarSpec{
-					Image: "my-frontend:latest",
-				},
-				ExtraPodSpec: &v1alpha1.ExtraPodSpec{
-					PodSpec: &corev1.PodSpec{
-						Containers: []corev1.Container{
-							{Name: commonconsts.FrontendSidecarContainerName, Image: "conflict:latest"},
-						},
-					},
-				},
-			},
-			parentDGDName: "test-dgd",
-			namespace:     "test-ns",
-			wantErr:       true,
-func TestPropagateDGDAnnotations(t *testing.T) {
-	tests := []struct {
-		name               string
-		dgdAnnotations     map[string]string
-		serviceAnnotations map[string]string
-		expectedAnnotation map[string]string
-	}{
-		{
-			name: "DGD annotation propagates to empty service annotations",
-			dgdAnnotations: map[string]string{
-				commonconsts.KubeAnnotationVLLMDistributedExecutorBackend: "ray",
-			},
-			serviceAnnotations: nil,
-			expectedAnnotation: map[string]string{
-				commonconsts.KubeAnnotationVLLMDistributedExecutorBackend: "ray",
-			},
-		},
-		{
-			name: "service-level annotation takes precedence over DGD",
-			dgdAnnotations: map[string]string{
-				commonconsts.KubeAnnotationVLLMDistributedExecutorBackend: "ray",
-			},
-			serviceAnnotations: map[string]string{
-				commonconsts.KubeAnnotationVLLMDistributedExecutorBackend: "mp",
-			},
-			expectedAnnotation: map[string]string{
-				commonconsts.KubeAnnotationVLLMDistributedExecutorBackend: "mp",
-			},
-		},
-		{
-			name:               "no DGD annotation, no service annotation",
-			dgdAnnotations:     nil,
-			serviceAnnotations: nil,
-			expectedAnnotation: nil,
-		},
-		{
-			name: "origin version also propagates",
-			dgdAnnotations: map[string]string{
-				commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.0.0",
-			},
-			serviceAnnotations: nil,
-			expectedAnnotation: map[string]string{
-				commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.0.0",
-			},
-		},
-		{
-			name: "unrelated DGD annotations are not propagated",
-			dgdAnnotations: map[string]string{
-				"some-other-annotation": "value",
-			},
-			serviceAnnotations: nil,
-			expectedAnnotation: nil,
-		},
 	}
 
 	for _, tt := range tests {
@@ -7195,17 +7124,17 @@ func TestPropagateDGDAnnotations(t *testing.T) {
 				assert.Equal(t, envFromSecret, sidecar.EnvFrom[0].SecretRef.Name, "sidecar envFromSecret name")
 			}
 
-		if tt.wantSidecarProbes {
-			assert.NotNil(t, sidecar.LivenessProbe, "sidecar should have liveness probe")
-			assert.NotNil(t, sidecar.ReadinessProbe, "sidecar should have readiness probe")
-			assert.Equal(t, "/live", sidecar.LivenessProbe.HTTPGet.Path)
-			assert.Equal(t, "/health", sidecar.ReadinessProbe.HTTPGet.Path)
+			if tt.wantSidecarProbes {
+				assert.NotNil(t, sidecar.LivenessProbe, "sidecar should have liveness probe")
+				assert.NotNil(t, sidecar.ReadinessProbe, "sidecar should have readiness probe")
+				assert.Equal(t, "/live", sidecar.LivenessProbe.HTTPGet.Path)
+				assert.Equal(t, "/health", sidecar.ReadinessProbe.HTTPGet.Path)
 
-			assert.NotNil(t, sidecar.StartupProbe, "sidecar should have startup probe")
-			assert.Equal(t, "/live", sidecar.StartupProbe.HTTPGet.Path)
-			assert.Equal(t, int32(5), sidecar.StartupProbe.PeriodSeconds)
-			assert.Equal(t, int32(60), sidecar.StartupProbe.FailureThreshold)
-		}
+				assert.NotNil(t, sidecar.StartupProbe, "sidecar should have startup probe")
+				assert.Equal(t, "/live", sidecar.StartupProbe.HTTPGet.Path)
+				assert.Equal(t, int32(5), sidecar.StartupProbe.PeriodSeconds)
+				assert.Equal(t, int32(60), sidecar.StartupProbe.FailureThreshold)
+			}
 
 			if tt.wantSidecarPorts {
 				assert.NotEmpty(t, sidecar.Ports, "sidecar should have ports")
@@ -7221,6 +7150,68 @@ func TestPropagateDGDAnnotations(t *testing.T) {
 			}
 			for name, found := range hasDownwardAPI {
 				assert.True(t, found, "sidecar should have downward API env var %s", name)
+			}
+		})
+	}
+}
+
+func TestPropagateDGDAnnotations(t *testing.T) {
+	tests := []struct {
+		name               string
+		dgdAnnotations     map[string]string
+		serviceAnnotations map[string]string
+		expectedAnnotation map[string]string
+	}{
+		{
+			name: "DGD annotation propagates to empty service annotations",
+			dgdAnnotations: map[string]string{
+				commonconsts.KubeAnnotationVLLMDistributedExecutorBackend: "ray",
+			},
+			serviceAnnotations: nil,
+			expectedAnnotation: map[string]string{
+				commonconsts.KubeAnnotationVLLMDistributedExecutorBackend: "ray",
+			},
+		},
+		{
+			name: "service-level annotation takes precedence over DGD",
+			dgdAnnotations: map[string]string{
+				commonconsts.KubeAnnotationVLLMDistributedExecutorBackend: "ray",
+			},
+			serviceAnnotations: map[string]string{
+				commonconsts.KubeAnnotationVLLMDistributedExecutorBackend: "mp",
+			},
+			expectedAnnotation: map[string]string{
+				commonconsts.KubeAnnotationVLLMDistributedExecutorBackend: "mp",
+			},
+		},
+		{
+			name:               "no DGD annotation, no service annotation",
+			dgdAnnotations:     nil,
+			serviceAnnotations: nil,
+			expectedAnnotation: nil,
+		},
+		{
+			name: "origin version also propagates",
+			dgdAnnotations: map[string]string{
+				commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.0.0",
+			},
+			serviceAnnotations: nil,
+			expectedAnnotation: map[string]string{
+				commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.0.0",
+			},
+		},
+		{
+			name: "unrelated DGD annotations are not propagated",
+			dgdAnnotations: map[string]string{
+				"some-other-annotation": "value",
+			},
+			serviceAnnotations: nil,
+			expectedAnnotation: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
 			component := &v1alpha1.DynamoComponentDeploymentSharedSpec{
 				Annotations: tt.serviceAnnotations,
 			}
