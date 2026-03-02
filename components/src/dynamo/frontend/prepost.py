@@ -294,10 +294,10 @@ class StreamingPostProcessor:
         # vLLM output_processor already applies stop-token/stop-string trimming
         # to text. Re-detokenizing from token_ids can reintroduce stop markers.
         delta_text = output.text or ""
-
+        delta: dict[str, Any] = {}
         if self._fast_plain_text:
             if delta_text:
-                delta: dict[str, Any] = {
+                delta = {
                     "role": "assistant",
                     "content": delta_text,
                 }
@@ -327,11 +327,10 @@ class StreamingPostProcessor:
                 delta_token_ids,
             )
 
-        should_parse_tools = (
+        if (
             self.tool_parser is not None
             and self.request_for_sampling.tool_choice != "none"
-        )
-        if should_parse_tools:
+        ):
             no_prev_reasoning = (
                 delta_message and delta_message.content and not delta_message.reasoning
             )
@@ -390,7 +389,7 @@ class StreamingPostProcessor:
                 merged = self._merge_tool_call(existing, tool_delta)
                 self.in_progress_tool_calls[tool_delta.index] = merged
         elif delta_message.content or delta_message.reasoning:
-            delta: dict[str, Any] = {"role": "assistant"}
+            delta = {"role": "assistant"}
             content = delta_message.content
             if self.in_progress_tool_calls and self._is_control_only_content(content):
                 content = None

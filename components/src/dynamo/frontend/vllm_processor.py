@@ -37,7 +37,7 @@ from dynamo.llm import (
     RouterMode,
     fetch_model,
 )
-from dynamo.runtime import DistributedRuntime
+from dynamo.runtime import Client, DistributedRuntime
 
 from .prepost import (
     StreamingPostProcessor,
@@ -163,6 +163,7 @@ def _preprocess_worker(
     This replaces _request_handler's Phase A.  No queues — errors propagate
     naturally via the Future.
     """
+    assert _w_input_processor is not None
     pre = preprocess_chat_request_sync(
         request,
         tokenizer=_w_tokenizer,
@@ -287,7 +288,7 @@ class VllmProcessor:
         self,
         tokenizer: TokenizerLike,
         input_processor: InputProcessor,
-        router,  # Client or KvRouter
+        router: Any,  # Client or KvRouter
         output_processor: OutputProcessor,
         tool_parser_class: type[ToolParser] | None,
         reasoning_parser_class: type[ReasoningParser] | None,
@@ -660,7 +661,9 @@ class VllmProcessor:
 
         # --- Phase 1: Preprocess (semaphore held) ---
         try:
+            assert self._worker_semaphore is not None
             async with self._worker_semaphore:
+                assert self.preprocess_pool is not None
                 future = self.preprocess_pool.submit(
                     _preprocess_worker, request, request_id, request["model"]
                 )
@@ -809,7 +812,7 @@ class EngineFactory:
         generate_endpoint = self.runtime.endpoint(
             f"{namespace_name}.{component_name}.{endpoint_name}"
         )
-
+        router: Client | KvRouter
         if self.router_config.router_mode == RouterMode.KV:
             router = KvRouter(
                 endpoint=generate_endpoint,
