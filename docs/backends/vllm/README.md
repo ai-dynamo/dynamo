@@ -52,10 +52,10 @@ docker build -f container/rendered.Dockerfile -t dynamo:latest-vllm .
 | [**KVBM**](../../components/kvbm/README.md) | ✅ | |
 | [**LMCache**](../../integrations/lmcache-integration.md) | ✅ | |
 | [**Multimodal Support**](vllm-omni.md) | ✅ | Via vLLM-Omni integration |
-| [**Prompt Embeddings**](vllm-prompt-embeddings.md) | ✅ | Opt-in |
 | [**Observability**](vllm-observability.md) | ✅ | Metrics and monitoring |
 | **WideEP** | ✅ | Support for DeepEP |
 | **DP Rank Routing** | ✅ | [Hybrid load balancing](https://docs.vllm.ai/en/stable/serving/data_parallel_deployment/?h=external+dp#hybrid-load-balancing) via external DP rank control |
+| [**LoRA**](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/launch/lora/README.md) | ✅ | Dynamic loading/unloading from S3-compatible storage |
 | **GB200 Support** | ✅ | Container functional on main |
 
 ## Quick Start
