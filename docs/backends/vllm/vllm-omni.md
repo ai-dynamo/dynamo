@@ -25,6 +25,7 @@ pip install git+https://github.com/vllm-project/vllm-omni.git@v0.16.0rc1
 | Text-to-Text | `/v1/chat/completions` | `text` (default) |
 | Text-to-Image | `/v1/chat/completions`, `/v1/images/generations` | `image` |
 | Text-to-Video | `/v1/videos` | `video` |
+| Image-to-Video | `/v1/videos` | `video` |
 
 The `--output-modalities` flag determines which endpoint(s) the worker registers. When set to `image`, both `/v1/chat/completions` (returns inline base64 images) and `/v1/images/generations` are available. When set to `video`, the worker serves `/v1/videos`.
 
@@ -35,6 +36,7 @@ The `--output-modalities` flag determines which endpoint(s) the worker registers
 | Text-to-Text | `Qwen/Qwen2.5-Omni-7B` |
 | Text-to-Image | `Qwen/Qwen-Image`, `AIDC-AI/Ovis-Image-7B` |
 | Text-to-Video | `Wan-AI/Wan2.1-T2V-1.3B-Diffusers`, `Wan-AI/Wan2.2-T2V-A14B-Diffusers` |
+| Image-to-Video | `Wan-AI/Wan2.2-TI2V-5B-Diffusers`, `Wan-AI/Wan2.2-I2V-A14B-Diffusers` |
 
 To run a non-default model, pass `--model` to any launch script:
 
@@ -159,6 +161,47 @@ The `/v1/videos` endpoint also accepts NVIDIA extensions via the `nvext` field f
 | `nvext.num_inference_steps` | Number of denoising steps | 50 |
 | `nvext.guidance_scale` | CFG guidance scale | 5.0 |
 | `nvext.seed` | Random seed for reproducibility | -- |
+| `nvext.boundary_ratio` | MoE expert switching boundary (I2V) | 0.875 |
+| `nvext.guidance_scale_2` | CFG scale for low-noise expert (I2V) | 1.0 |
+
+## Image-to-Video
+
+Image-to-video (I2V) uses the same `/v1/videos` endpoint as text-to-video, with an additional `input_reference` field that provides the source image. The image can be an HTTP URL, a base64 data URI, or a local file path.
+
+Launch with the provided script using `Wan-AI/Wan2.2-I2V-A14B-Diffusers`:
+
+```bash
+bash examples/backends/vllm/launch/agg_omni_i2v.sh
+```
+
+Generate a video from an image:
+
+```bash
+curl -s http://localhost:8000/v1/videos \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "Wan-AI/Wan2.2-I2V-A14B-Diffusers",
+    "prompt": "A bear playing with yarn, smooth motion",
+    "input_reference": "https://example.com/bear.png",
+    "size": "832x480",
+    "response_format": "url",
+    "nvext": {
+      "num_inference_steps": 40,
+      "num_frames": 33,
+      "guidance_scale": 1.0,
+      "boundary_ratio": 0.875,
+      "guidance_scale_2": 1.0,
+      "seed": 42
+    }
+  }'
+```
+
+The `input_reference` field accepts:
+- **HTTP/HTTPS URL**: `"https://example.com/image.png"`
+- **Base64 data URI**: `"data:image/png;base64,iVBORw0KGgo..."`
+- **Local file path**: `"/path/to/image.png"` or `"file:///path/to/image.png"`
+
+The I2V-specific `nvext` fields (`boundary_ratio`, `guidance_scale_2`) control the dual-expert MoE denoising schedule in Wan2.x models. See [Wan2.2-I2V model card](https://huggingface.co/Wan-AI/Wan2.2-I2V-A14B-Diffusers) for details.
 
 ## CLI Reference
 
@@ -192,6 +235,6 @@ Omni pipelines are configured via YAML stage configs. See [`examples/backends/vl
 
 ## Current Limitations
 
-- Only text prompts are supported as input (no multimodal input yet).
+- Image input is supported only for I2V via `input_reference` in `/v1/videos`. Other endpoints accept text prompts only.
 - KV cache events are not published for omni workers.
 - Each worker supports a single output modality at a time.
