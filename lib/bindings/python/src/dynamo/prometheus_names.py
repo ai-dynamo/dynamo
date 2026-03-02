@@ -245,16 +245,18 @@ class name_prefix:
     FRONTEND = "dynamo_frontend"
     # Prefix for KV router metrics (used with router_id label)
     ROUTER = "dynamo_router"
+    # Prefix for request-plane (transport-agnostic) metrics at AddressedPushRouter
+    REQUEST_PLANE = "dynamo_request_plane"
     # Prefix for tokio runtime metrics
     TOKIO = "dynamo_tokio"
     # Prefix for standalone KV indexer metrics
     KVINDEXER = "dynamo_kvindexer"
-    # Prefix for request-plane metrics at AddressedPushRouter
-    REQUEST_PLANE = "dynamo_request_plane"
     # Prefix for transport-layer metrics (TCP / NATS)
     TRANSPORT = "dynamo_transport"
     # Prefix for work-handler transport breakdown metrics (backend side)
     WORK_HANDLER = "dynamo_work_handler"
+    # Prefix for routing overhead metrics (raw Prometheus, not component-scoped)
+    ROUTING_OVERHEAD = "dynamo_routing_overhead"
 
 
 class request_plane:

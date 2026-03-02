@@ -1801,6 +1801,7 @@ dependencies = [
  "blake3",
  "bytes",
  "chrono",
+ "cudarc",
  "dashmap 6.1.0",
  "derive-getters",
  "derive_builder",

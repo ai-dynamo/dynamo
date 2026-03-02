@@ -159,8 +159,13 @@ impl TcpStreamServer {
 
                 match resolved_ip {
                     Ok(addr) => addr,
-                    Err(Error::LocalIpAddressNotFound) => IpAddr::from([127, 0, 0, 1]),
-                    Err(err) => return Err(err.into()),
+                    // Fall back to loopback when no routable IP is found
+                    Err(_) => {
+                        tracing::warn!(
+                            "Failed to resolve local IP address; falling back to 127.0.0.1"
+                        );
+                        IpAddr::from([127, 0, 0, 1])
+                    }
                 }
                 .to_string()
             }
