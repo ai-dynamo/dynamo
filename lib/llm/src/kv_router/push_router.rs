@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use dynamo_runtime::{
+    dynamo_nvtx_range,
     pipeline::{
         AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, PushRouter, ResponseStream,
         SingleIn, async_trait,
@@ -222,6 +223,7 @@ impl KvPushRouter {
         phase: RequestPhase,
         is_query_only: bool,
     ) -> Result<WorkerSelection, Error> {
+        let _nvtx_select = dynamo_nvtx_range!("route.select_worker");
         let routing = request.routing.as_ref();
         let lora_name = routing.and_then(|r| r.lora_name.clone());
         let priority_jump = routing.and_then(|r| r.priority_jump).unwrap_or(0.0);
@@ -242,6 +244,7 @@ impl KvPushRouter {
         };
 
         let Some(id) = preselected_id else {
+            let _nvtx_kv = dynamo_nvtx_range!("route.kv_match");
             let (best_worker, overlap_amount) = self
                 .chooser
                 .find_best_match(

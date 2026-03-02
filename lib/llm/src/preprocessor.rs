@@ -25,6 +25,11 @@ use futures::Stream;
 use futures::stream::{self, StreamExt};
 use prompt::OAIPromptFormatter;
 use std::time::{Duration, Instant};
+
+use dynamo_runtime::dynamo_nvtx_range;
+use dynamo_runtime::metrics::frontend_perf::{
+    STAGE_DURATION_SECONDS, TEMPLATE_SECONDS, TOKENIZE_SECONDS,
+};
 use std::{collections::HashMap, pin::Pin, sync::Arc};
 use tracing;
 
@@ -219,16 +224,32 @@ impl OpenAIPreprocessor {
         request: &R,
         tracker: Option<&RequestTracker>,
     ) -> Result<(PreprocessedRequest, HashMap<String, String>)> {
+        let preprocess_start = Instant::now();
         let mut builder = self.builder(request)?;
-        let formatted_prompt = self
-            .apply_template(request)
-            .with_context(|| "Failed to apply prompt template")?;
-        let annotations = self
-            .gather_tokens(request, &mut builder, formatted_prompt, tracker)
-            .with_context(|| "Failed to gather tokens")?;
+
+        let template_start = Instant::now();
+        let formatted_prompt = {
+            let _nvtx = dynamo_nvtx_range!("preprocess.template");
+            self.apply_template(request)
+                .with_context(|| "Failed to apply prompt template")?
+        };
+        TEMPLATE_SECONDS.observe(template_start.elapsed().as_secs_f64());
+
+        let tokenize_start = Instant::now();
+        let annotations = {
+            let _nvtx = dynamo_nvtx_range!("preprocess.tokenize");
+            self.gather_tokens(request, &mut builder, formatted_prompt, tracker)
+                .with_context(|| "Failed to gather tokens")?
+        };
+        TOKENIZE_SECONDS.observe(tokenize_start.elapsed().as_secs_f64());
+
         self.gather_multi_modal_data(request, &mut builder)
             .await
             .with_context(|| "Failed to gather multimodal data")?;
+
+        STAGE_DURATION_SECONDS
+            .with_label_values(&["preprocess"])
+            .observe(preprocess_start.elapsed().as_secs_f64());
 
         Ok((builder.build()?, annotations))
     }

@@ -27,6 +27,12 @@ use dynamo_runtime::config::env_is_truthy;
 use dynamo_runtime::config::environment_names::llm as env_llm;
 use dynamo_runtime::discovery::Discovery;
 use dynamo_runtime::logging::make_request_span;
+use dynamo_runtime::metrics::{
+    frontend_perf::ensure_frontend_perf_metrics_registered_prometheus,
+    request_plane::ensure_request_plane_metrics_registered_prometheus,
+    tokio_perf::{ensure_tokio_perf_metrics_registered_prometheus, tokio_metrics_and_canary_loop},
+    transport_metrics::ensure_transport_metrics_registered_prometheus,
+};
 use std::net::SocketAddr;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -250,6 +256,9 @@ impl HttpService {
         let protocol = if self.enable_tls { "HTTPS" } else { "HTTP" };
         tracing::info!(protocol, address, "Starting HTTP(S) service");
 
+        // Spawn tokio runtime metrics collector and event-loop canary on this runtime
+        tokio::spawn(tokio_metrics_and_canary_loop());
+
         let router = self.router.clone();
         let observer = cancel_token.child_token();
 
@@ -431,6 +440,19 @@ impl HttpServiceConfigBuilder {
             if let Err(e) = RoutingOverheadMetrics::register(&registry, instance_id) {
                 tracing::warn!("Failed to register routing overhead metrics: {}", e);
             }
+        }
+
+        if let Err(e) = ensure_request_plane_metrics_registered_prometheus(&registry) {
+            tracing::warn!("Failed to register request-plane metrics: {}", e);
+        }
+        if let Err(e) = ensure_frontend_perf_metrics_registered_prometheus(&registry) {
+            tracing::warn!("Failed to register frontend perf metrics: {}", e);
+        }
+        if let Err(e) = ensure_tokio_perf_metrics_registered_prometheus(&registry) {
+            tracing::warn!("Failed to register tokio perf metrics: {}", e);
+        }
+        if let Err(e) = ensure_transport_metrics_registered_prometheus(&registry) {
+            tracing::warn!("Failed to register transport metrics: {}", e);
         }
 
         let mut router = axum::Router::new();

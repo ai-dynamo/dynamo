@@ -4,6 +4,9 @@
 use super::*;
 
 use crate::metrics::prometheus_names::work_handler;
+use crate::metrics::work_handler_perf::{
+    WORK_HANDLER_NETWORK_TRANSIT_SECONDS, WORK_HANDLER_TIME_TO_FIRST_RESPONSE_SECONDS,
+};
 use crate::protocols::maybe_error::MaybeError;
 use prometheus::{Histogram, IntCounter, IntCounterVec, IntGauge};
 use serde::{Deserialize, Serialize};
@@ -137,6 +140,10 @@ where
     }
 
     async fn handle_payload(&self, payload: Bytes) -> Result<(), PipelineError> {
+        let t2_wallclock_ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64;
         let start_time = std::time::Instant::now();
 
         // Increment inflight and ensure it's decremented on all exits via RAII guard
@@ -194,6 +201,12 @@ where
             }
         };
 
+        // Compute network transit time (T2 - T1) using cross-process wall-clock timestamps
+        if let Some(t1_ns) = control_msg.frontend_send_ts_ns {
+            let transit_ns = t2_wallclock_ns.saturating_sub(t1_ns);
+            WORK_HANDLER_NETWORK_TRANSIT_SECONDS.observe(transit_ns as f64 / 1_000_000_000.0);
+        }
+
         // extend request with context
         tracing::trace!("received control message: {:?}", control_msg);
         tracing::trace!("received request: {:?}", request);
@@ -238,6 +251,8 @@ where
             Ok(stream) => {
                 tracing::trace!("Successfully generated response stream; sending prologue");
                 let _result = publisher.send_prologue(None).await;
+                WORK_HANDLER_TIME_TO_FIRST_RESPONSE_SECONDS
+                    .observe(start_time.elapsed().as_secs_f64());
                 stream
             }
             Err(e) => {

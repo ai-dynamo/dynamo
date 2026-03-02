@@ -61,25 +61,36 @@
 use once_cell::sync::Lazy;
 use regex::Regex;
 
-/// Metric name prefixes used across the metrics system
+/// Metric name prefixes used across the metrics system.
 pub mod name_prefix {
-    /// Prefix for all Prometheus metric names.
+    /// Prefix for component-scoped metrics, auto-labeled with namespace/endpoint.
     pub const COMPONENT: &str = "dynamo_component";
 
-    /// Prefix for frontend service metrics
+    /// Prefix for frontend HTTP service metrics (requests, TTFT, ITL, disconnects).
     pub const FRONTEND: &str = "dynamo_frontend";
 
-    /// Prefix for KV router metrics (used with router_id label)
+    /// Prefix for KV router instance metrics (carries `router_id` label).
     pub const ROUTER: &str = "dynamo_router";
 
-    /// Prefix for tokio runtime metrics
-    pub const TOKIO: &str = "dynamo_tokio";
+    /// Note: REQUEST_PLANE vs TRANSPORT: REQUEST_PLANE measures *what requests do* (latency,
+    /// concurrency) and is transport-agnostic. TRANSPORT measures *how the wire behaves*
+    /// (bytes transferred, protocol errors) and is protocol-specific (TCP/NATS).
 
-    /// Prefix for request-plane metrics at AddressedPushRouter
+    /// Prefix for request-plane metrics at AddressedPushRouter.
+    /// Transport-agnostic: measures request lifecycle latency and concurrency
+    /// (queue → send → roundtrip TTFT, inflight gauge).
     pub const REQUEST_PLANE: &str = "dynamo_request_plane";
 
-    /// Prefix for transport-layer metrics (TCP / NATS)
+    /// Prefix for transport-layer metrics (TCP / NATS).
+    /// Protocol-specific: measures wire-level health (bytes sent/received, error counts).
     pub const TRANSPORT: &str = "dynamo_transport";
+
+    /// Prefix for tokio runtime metrics (poll times, queue depths, stalls).
+    pub const TOKIO: &str = "dynamo_tokio";
+
+    /// Prefix for per-phase routing overhead latency (hashing, scheduling).
+    /// Raw Prometheus, not component-scoped.
+    pub const ROUTING_OVERHEAD: &str = "dynamo_routing_overhead";
 }
 
 /// Automatically inserted Prometheus label names used across the metrics system
