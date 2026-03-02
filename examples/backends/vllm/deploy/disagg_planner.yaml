@@ -72,12 +72,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-<<<<<<< HEAD
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0
-          workingDir: /workspace/components/src/dynamo/planner
-=======
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
->>>>>>> a3cf35c3c (fix: disagg_planner.yaml using new planner CLI (#6760))
           command:
           - python3
           - -m

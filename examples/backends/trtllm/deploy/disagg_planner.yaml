@@ -90,12 +90,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-<<<<<<< HEAD
           image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.0
-          workingDir: /workspace/components/src/dynamo/planner
-=======
-          image: my-registry/tensorrtllm-runtime:my-tag
->>>>>>> a3cf35c3c (fix: disagg_planner.yaml using new planner CLI (#6760))
           ports:
             - name: metrics
               containerPort: 9085
