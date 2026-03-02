@@ -274,6 +274,11 @@ struct RequestControlMessage {
     request_type: RequestType,
     response_type: ResponseType,
     connection_info: ConnectionInfo,
+    /// Wall-clock send timestamp (nanos since UNIX epoch) for transport latency breakdown.
+    /// Uses `SystemTime` so accuracy depends on NTP sync between frontend and backend hosts.
+    /// Reliable for single-machine profiling; treat cross-host values as approximate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    frontend_send_ts_ns: Option<u64>,
 }
 
 pub struct Ingress<Req: PipelineIO, Resp: PipelineIO> {
@@ -305,6 +310,11 @@ impl<Req: PipelineIO + Sync, Resp: PipelineIO> Ingress<Req, Resp> {
     ) -> Result<()> {
         let metrics = WorkHandlerMetrics::from_endpoint(endpoint, metrics_labels)
             .map_err(|e| anyhow::anyhow!("Failed to create work handler metrics: {}", e))?;
+
+        // Register global transport breakdown metrics (idempotent)
+        crate::metrics::work_handler_perf::ensure_work_handler_perf_metrics_registered(
+            endpoint.get_metrics_registry(),
+        );
 
         self.metrics
             .set(Arc::new(metrics))

@@ -5,6 +5,9 @@
 //!
 
 use super::unified_client::{ClientStats, Headers, RequestPlaneClient};
+use crate::metrics::transport_metrics::{
+    TCP_BYTES_RECEIVED_TOTAL, TCP_BYTES_SENT_TOTAL, TCP_ERRORS_TOTAL,
+};
 use anyhow::Result;
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -508,6 +511,7 @@ impl RequestPlaneClient for TcpRequestClient {
         self.stats
             .bytes_sent
             .fetch_add(payload.len() as u64, Ordering::Relaxed);
+        TCP_BYTES_SENT_TOTAL.inc_by(payload.len() as f64);
 
         let (addr, endpoint_name) = Self::parse_address(&address)?;
 
@@ -535,6 +539,7 @@ impl RequestPlaneClient for TcpRequestClient {
                 self.stats
                     .bytes_received
                     .fetch_add(response.len() as u64, Ordering::Relaxed);
+                TCP_BYTES_RECEIVED_TOTAL.inc_by(response.len() as f64);
 
                 // Return connection to pool (health check happens inside)
                 self.pool.return_connection(conn).await;
@@ -543,6 +548,7 @@ impl RequestPlaneClient for TcpRequestClient {
             }
             Ok(Err(e)) => {
                 self.stats.errors.fetch_add(1, Ordering::Relaxed);
+                TCP_ERRORS_TOTAL.inc();
                 tracing::warn!("TCP request failed to {}: {}", addr, e);
                 // Don't return unhealthy connection to pool, let it drop
                 let cause = crate::error::DynamoError::from(
@@ -558,6 +564,7 @@ impl RequestPlaneClient for TcpRequestClient {
             }
             Err(_) => {
                 self.stats.errors.fetch_add(1, Ordering::Relaxed);
+                TCP_ERRORS_TOTAL.inc();
                 tracing::warn!("TCP request timeout to {}", addr);
                 // Don't return timed-out connection to pool
                 Err(anyhow::anyhow!(

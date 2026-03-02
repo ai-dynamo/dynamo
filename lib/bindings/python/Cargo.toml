@@ -24,6 +24,7 @@ crate-type = ["cdylib", "rlib"]
 [features]
 default = []
 media-ffmpeg = ["dynamo-llm/media-ffmpeg"]
+nvtx = ["dynamo-runtime/nvtx"]
 
 [dependencies]
 dynamo-runtime = { path = "../../runtime" }
@@ -70,3 +71,8 @@ dynamo-llm = { path = "../../llm" }
 dynamo-llm = { path = "../../llm", default-features = false }
 
 [dev-dependencies]
+
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = false

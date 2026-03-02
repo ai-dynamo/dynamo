@@ -221,8 +221,27 @@ class name_prefix:
     FRONTEND = "dynamo_frontend"
     # Prefix for KV router metrics (used with router_id label)
     ROUTER = "dynamo_router"
+    # Prefix for request-plane (transport-agnostic) metrics at AddressedPushRouter
+    REQUEST_PLANE = "dynamo_request_plane"
     # Prefix for tokio runtime metrics
     TOKIO = "dynamo_tokio"
+    # Prefix for transport-layer metrics (TCP / NATS)
+    TRANSPORT = "dynamo_transport"
+    # Prefix for routing overhead metrics (raw Prometheus, not component-scoped)
+    ROUTING_OVERHEAD = "dynamo_routing_overhead"
+
+
+class request_plane:
+    """Request plane metrics at AddressedPushRouter"""
+
+    # Time from generate() entry to send_request() (serialization + encoding)
+    QUEUE_SECONDS = "queue_seconds"
+    # Time for send_request() to complete (frontend view: network + queue + ack)
+    SEND_SECONDS = "send_seconds"
+    # Time from send_request() to first response item (transport roundtrip TTFT)
+    ROUNDTRIP_TTFT_SECONDS = "roundtrip_ttft_seconds"
+    # Currently in-flight requests (gauge)
+    INFLIGHT = "inflight"
 
 
 class router:
@@ -295,6 +314,21 @@ class tokio_perf:
     BLOCKING_IDLE_THREADS = "blocking_idle_threads"
     BLOCKING_QUEUE_DEPTH = "blocking_queue_depth"
     ALIVE_TASKS = "alive_tasks"
+
+
+class transport:
+    """Transport-specific metrics (TCP / NATS)"""
+
+    # TCP metrics
+    TCP_POOL_ACTIVE = "tcp_pool_active"
+    TCP_POOL_IDLE = "tcp_pool_idle"
+    TCP_BYTES_SENT_TOTAL = "tcp_bytes_sent_total"
+    TCP_BYTES_RECEIVED_TOTAL = "tcp_bytes_received_total"
+    TCP_ERRORS_TOTAL = "tcp_errors_total"
+    TCP_SERVER_QUEUE_DEPTH = "tcp_server_queue_depth"
+
+    # NATS metrics
+    NATS_ERRORS_TOTAL = "nats_errors_total"
 
 
 class work_handler:
