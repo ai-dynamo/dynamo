@@ -218,6 +218,7 @@ impl PrefillRouter {
                     kv_cache_block_size,
                     kv_router_config,
                     WORKER_TYPE_PREFILL,
+                    Default::default(),
                 )
                 .await?;
 
@@ -505,11 +506,14 @@ impl PrefillRouter {
     ) -> Result<(PrefillResult, Option<(u64, u32)>), PrefillError> {
         // In Direct mode, pass the pre-selected prefill worker ID from routing hints
         // so execute_prefill calls router.direct() instead of router.generate().
-        let target_worker = request
-            .routing
-            .as_ref()
-            .and_then(|r| r.prefill_worker_id);
-        Self::execute_prefill(self.prefill_router.get().cloned(), request, target_worker, None).await
+        let target_worker = request.routing.as_ref().and_then(|r| r.prefill_worker_id);
+        Self::execute_prefill(
+            self.prefill_router.get().cloned(),
+            request,
+            target_worker,
+            None,
+        )
+        .await
     }
 
     /// Query the best prefill worker without executing a request.
@@ -624,7 +628,7 @@ impl
             return Err(anyhow::anyhow!(
                 "Prefill worker ID required in Direct routing mode but none found in request. \
                  Expected prefill_worker_id to be set via x-prefill-instance-id header by external router (e.g., EPP)."
-            ).into());
+            ));
         }
 
         let prefill_result = async {

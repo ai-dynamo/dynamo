@@ -639,8 +639,8 @@ pub unsafe extern "C" fn create_routers(
                 }
             };
 
-        let mut kv_router_config = kv_router_config_from_env();
-        kv_router_config.worker_discovery_mode = WorkerDiscoveryMode::External;
+        let kv_router_config = kv_router_config_from_env();
+        let worker_discovery_mode = WorkerDiscoveryMode::External;
 
         // Get component and endpoint
         let component_handle = match drt.namespace(&namespace_str) {
@@ -667,6 +667,7 @@ pub unsafe extern "C" fn create_routers(
                 block_size,
                 Some(kv_router_config),
                 WORKER_TYPE_DECODE,
+                worker_discovery_mode,
             )
             .await
         {

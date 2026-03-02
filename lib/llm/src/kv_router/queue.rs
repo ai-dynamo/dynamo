@@ -59,7 +59,7 @@ pub struct SchedulerQueue {
     /// Reference instant for computing arrival offsets.
     start_time: Instant,
     block_size: u32,
-    selector: Box<dyn WorkerSelector + Send + Sync>,
+    selector: Box<WorkerSelector>,
     worker_discovery_mode: WorkerDiscoveryMode,
 }
 
@@ -69,7 +69,7 @@ impl SchedulerQueue {
         workers_with_configs: RuntimeConfigWatch,
         threshold_frac: Option<f64>,
         block_size: u32,
-        selector: Box<dyn WorkerSelector + Send + Sync>,
+        selector: Box<WorkerSelector>,
         worker_discovery_mode: WorkerDiscoveryMode,
     ) -> Self {
         if let Some(frac) = threshold_frac {
@@ -157,7 +157,7 @@ impl SchedulerQueue {
         }
 
         let (decode_blocks, prefill_tokens) = self.slots.potential_blocks_and_tokens(
-            request.token_seq.clone(),
+            request.token_seq.as_deref(),
             request.isl_tokens,
             request.overlaps.clone(),
         );

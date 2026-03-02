@@ -101,13 +101,13 @@ spec:
           command:
           - /bin/sh
           - -c
-          image: docker.io/lambda108/dynamo:discovery-logs
+          image: docker.io/lambda108/dynamo:fix-header
           workingDir: /workspace/examples/backends/vllm
         # Frontend sidecar: receives requests from kGateway on port 8000
         # and routes them to the vLLM worker in the same pod
         containers:
           - name: frontend
-            image: docker.io/lambda108/dynamo:discovery-logs
+            image: docker.io/lambda108/dynamo:fix-header
             imagePullPolicy: Always
             command:
               - python3
@@ -207,13 +207,13 @@ spec:
           command:
           - /bin/sh
           - -c
-          image: docker.io/lambda108/dynamo:discovery-logs
+          image: docker.io/lambda108/dynamo:fix-header
           workingDir: /workspace/examples/backends/vllm
         # Frontend sidecar: receives requests from kGateway on port 8000
         # and routes them to the vLLM worker in the same pod
         containers:
           - name: frontend
-            image: docker.io/lambda108/dynamo:discovery-logs
+            image: docker.io/lambda108/dynamo:fix-header
             imagePullPolicy: Always
             command:
               - python3

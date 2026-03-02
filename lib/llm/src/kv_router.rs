@@ -287,6 +287,7 @@ pub struct KvRouter {
 }
 
 impl KvRouter {
+    #[allow(clippy::too_many_arguments)]
     pub async fn new(
         endpoint: Endpoint,
         client: Client,
@@ -295,6 +296,7 @@ impl KvRouter {
         selector: Option<Box<WorkerSelector>>,
         kv_router_config: Option<KvRouterConfig>,
         worker_type: &'static str,
+        worker_discovery_mode: WorkerDiscoveryMode,
     ) -> Result<Self> {
         let kv_router_config = kv_router_config.unwrap_or_default();
         kv_router_config.validate()?;
@@ -304,7 +306,7 @@ impl KvRouter {
         let indexer = Indexer::new(component, &kv_router_config, block_size);
 
         // Wait for at least one worker with a known runtime config before starting scheduler if discovery mode is Dynamo
-        if kv_router_config.worker_discovery_mode == WorkerDiscoveryMode::Dynamo {
+        if worker_discovery_mode == WorkerDiscoveryMode::Dynamo {
             let _ = workers_with_configs
                 .wait_for(|m| !m.is_empty())
                 .await
@@ -324,6 +326,7 @@ impl KvRouter {
             selector,
             &kv_router_config,
             worker_type,
+            worker_discovery_mode,
         )
         .await?;
 

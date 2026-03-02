@@ -615,6 +615,7 @@ async fn create_kv_router_from_endpoint(
             block_size as u32,
             kv_router_config,
             worker_type,
+            Default::default(),
         )
         .await
         .map_err(to_pyerr)?;

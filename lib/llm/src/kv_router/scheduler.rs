@@ -42,9 +42,10 @@ impl KvScheduler {
         selector: Option<Box<WorkerSelector>>,
         kv_router_config: &KvRouterConfig,
         worker_type: &'static str,
+        worker_discovery_mode: WorkerDiscoveryMode,
     ) -> Result<Self, KvSchedulerError> {
         let selector = selector.unwrap_or(Box::new(DefaultWorkerSelector::default()));
-        let discovery_mode = kv_router_config.worker_discovery_mode;
+        let discovery_mode = worker_discovery_mode;
 
         let initial_workers: HashMap<WorkerId, ModelRuntimeConfig> = match discovery_mode {
             WorkerDiscoveryMode::External => HashMap::new(),
@@ -93,7 +94,7 @@ impl KvScheduler {
                                 .iter()
                                 .map(|(&id, c)| (id, c.data_parallel_size))
                                 .collect();
-                            slots_monitor.update_workers(dp_sizes);
+                            slots_monitor.update_workers(&dp_sizes);
                             last_workers = current_workers;
                         }
                     }
@@ -135,7 +136,7 @@ impl KvScheduler {
             kv_router_config.router_queue_threshold,
             block_size,
             selector,
-            kv_router_config.worker_discovery_mode,
+            worker_discovery_mode,
         ));
         let queue_clone = queue.clone();
 
