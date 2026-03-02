@@ -563,8 +563,8 @@ async fn run_event_processor_loop<P: EventSink + Send + Sync + 'static>(
     let mut last_raw_input_id: Option<u64> = None;
 
     loop {
-        // When disabled (None) the sleep arm is never armed; Duration::MAX is a harmless sentinel.
-        let remaining = timeout_ms.map_or(Duration::MAX, |ms| batching_state.remaining_timeout(ms));
+        // When disabled (None) the sleep arm is never armed; 1 year is a harmless sentinel.
+        let remaining = timeout_ms.map_or(Duration::from_days(365), |ms| batching_state.remaining_timeout(ms));
 
         tokio::select! {
             _ = cancellation_token.cancelled() => {
@@ -596,6 +596,12 @@ async fn run_event_processor_loop<P: EventSink + Send + Sync + 'static>(
                     // Increment Prometheus counter for dropped events (if initialized)
                     if let Some(metrics) = kv_publisher_metrics() {
                         metrics.increment_engines_dropped_events(worker_id, gap);
+                    } else {
+                        tracing::warn!(
+                            worker_id,
+                            gap,
+                            "Failed to record dropped events metric: metrics not initialized"
+                        );
                     }
                 }
                 last_raw_input_id = Some(raw_event_id);
@@ -2831,12 +2837,12 @@ mod event_processor_tests {
     /// Uses a 10ms timeout to ensure events are batched (events sent rapidly)
     #[tokio::test]
     async fn test_run_event_processor_loop_batches_removed_events_20() {
-        test_removed_events_batching(20, Some(10_000)).await; // 20 events, 10ms timeout
+        test_removed_events_batching(20, Some(10)).await; // 20 events, 10ms timeout
     }
 
     #[tokio::test]
     async fn test_run_event_processor_loop_batches_removed_events_10() {
-        test_removed_events_batching(10, Some(10_000)).await; // 10 events, 10ms timeout
+        test_removed_events_batching(10, Some(10)).await; // 10 events, 10ms timeout
     }
 
     #[tokio::test]
