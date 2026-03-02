@@ -75,17 +75,17 @@ def _get_common_aiperf_cmd(
 
 
 def get_prefill_aiperf_cmd(
-    isl,
-    artifact_dir,
-    seed=100,
-    model="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
-    tokenizer="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
-    osl=AIPERF_PREFILL_BENCHMARK_OSL,
-    base_url="http://localhost:8000",
+    isl: int,
+    artifact_dir: str,
+    seed: int = 100,
+    model: str = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+    tokenizer: str = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+    osl: int = AIPERF_PREFILL_BENCHMARK_OSL,
+    base_url: str = "http://localhost:8000",
     concurrency: int = 1,
     request_count: int = 1,
     warmup_request_count: int = AIPERF_WARMUP_REQUEST_PER_DP_RANK,
-):
+) -> list[str]:
     return _get_common_aiperf_cmd(
         artifact_dir,
         seed,
@@ -114,16 +114,16 @@ def get_prefill_aiperf_cmd(
 
 
 def get_decode_aiperf_cmd(
-    isl,
-    osl,
-    artifact_dir,
-    num_request,
-    seed=100,
-    model="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
-    tokenizer="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
-    base_url="http://localhost:8000",
+    isl: int,
+    osl: int,
+    artifact_dir: str,
+    num_request: int,
+    seed: int = 100,
+    model: str = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+    tokenizer: str = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+    base_url: str = "http://localhost:8000",
     warmup_request_count: int = AIPERF_WARMUP_REQUEST_PER_DP_RANK,
-):
+) -> list[str]:
     return _get_common_aiperf_cmd(
         artifact_dir,
         seed,
@@ -168,15 +168,15 @@ def get_aiperf_result(artifact_dir: str) -> dict:
 
 
 def benchmark_prefill(
-    isl,
-    aiperf_artifact_dir,
-    model_name,
-    tokenizer,
-    base_url="http://localhost:8000",
+    isl: int,
+    aiperf_artifact_dir: str,
+    model_name: str,
+    tokenizer: str,
+    base_url: str = "http://localhost:8000",
     concurrency: int = 1,
     request_count: int = 1,
     warmup_request_count: int = 3,
-):
+) -> Optional[dict]:
     logger.info(f"Running aiperf with isl {isl}")
     aiperf_cmd = get_prefill_aiperf_cmd(
         isl,
@@ -244,6 +244,7 @@ def get_prefill_ttft(
             warmup_request_count=AIPERF_WARMUP_REQUEST_PER_DP_RANK * attention_dp_size,
         )
         try:
+            assert aiperf_result is not None
             max_ttft = float(aiperf_result["time_to_first_token"]["max"])
             # subtract the decoding time in-between prefill runs
             max_ttft -= (
@@ -267,6 +268,7 @@ def get_prefill_ttft(
         base_url=base_url,
     )
     try:
+        assert aiperf_result is not None
         return float(aiperf_result["time_to_first_token"]["avg"])
     except (KeyError, TypeError, ValueError):
         logger.warning("Failed to extract TTFT from AIPerf result")
@@ -311,15 +313,15 @@ def get_decode_itl_and_thpt_per_gpu(
 
 
 def benchmark_decode(
-    isl,
-    osl,
-    num_request,
-    aiperf_artifact_dir,
-    model_name,
-    tokenizer,
-    base_url="http://localhost:8000",
+    isl: int,
+    osl: int,
+    num_request: int,
+    aiperf_artifact_dir: str,
+    model_name: str,
+    tokenizer: str,
+    base_url: str = "http://localhost:8000",
     warmup_request_count: int = AIPERF_WARMUP_REQUEST_PER_DP_RANK,
-):
+) -> Optional[dict]:
     logger.info(f"Profiling decode with num_request {num_request}...")
 
     # first warm-up the engine by pre-computing all prefill tokens

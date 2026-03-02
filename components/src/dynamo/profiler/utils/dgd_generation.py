@@ -30,6 +30,10 @@ from dynamo.profiler.utils.config import (
     DgdPlannerServiceConfig,
     set_argument_value,
 )
+from dynamo.profiler.utils.config_modifiers.parallelization_mapping import (
+    PickedParallelConfig,
+)
+from dynamo.profiler.utils.dgdr_v1beta1_types import DynamoGraphDeploymentRequestSpec
 
 # Path to mocker disagg config relative to workspace
 MOCKER_DISAGG_CONFIG_PATH = "examples/backends/mocker/deploy/disagg.yaml"
@@ -45,11 +49,11 @@ def _make_cm_name(prefix: str) -> str:
 
 
 def generate_dgd_config_with_planner(
-    dgdr,
+    dgdr: DynamoGraphDeploymentRequestSpec,
     config_path: str,
     output_dir: str | None,
-    best_prefill_mapping=None,
-    best_decode_mapping=None,
+    best_prefill_mapping: Optional[PickedParallelConfig] = None,
+    best_decode_mapping: Optional[PickedParallelConfig] = None,
 ) -> tuple[list[dict] | dict, list[dict] | dict]:
     """Generate DGD config with planner based on profiling results.
 

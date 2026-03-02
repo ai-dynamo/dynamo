@@ -1,8 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+from typing import Any
 
-def compute_pareto(x, y):
+
+def compute_pareto(x: Any, y: Any) -> tuple[list, list, list]:
     """
     Compute the pareto front (top-left is better) for the given x and y values.
 

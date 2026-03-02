@@ -289,7 +289,7 @@ def _write_final_output(ops: ProfilerOperationalConfig, final_config: Any) -> bo
 async def run_profile(
     dgdr: DynamoGraphDeploymentRequestSpec,
     ops: ProfilerOperationalConfig | None = None,
-):
+) -> None:
     """Run the profiling pipeline.
 
     Args:

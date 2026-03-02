@@ -13,11 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from __future__ import annotations
+
 import json
 import logging
 import math
 import shlex
-from typing import Optional
+from typing import Any, Optional
 
 from pydantic import BaseModel
 
@@ -59,6 +61,7 @@ class Service(BaseModel):
     resources: Optional[ServiceResources] = None
     extraPodSpec: Optional[PodSpec] = None
     subComponentType: Optional[str] = None
+    multinode: Optional[MultinodeConfig | dict[str, Any]] = None
     model_config = {"extra": "allow"}
 
 
@@ -141,7 +144,7 @@ def remove_valued_arguments(args: list[str], key: str) -> list[str]:
     return args
 
 
-def append_argument(args: list[str], to_append) -> list[str]:
+def append_argument(args: list[str], to_append: str | list[str]) -> list[str]:
     idx = find_arg_index(args)
     if isinstance(to_append, list):
         args[idx:idx] = to_append
@@ -191,7 +194,9 @@ def parse_override_engine_args(args: list[str]) -> tuple[dict, list[str]]:
     return override_dict, args
 
 
-def set_multinode_config(worker_service, gpu_count: int, num_gpus_per_node: int):
+def set_multinode_config(
+    worker_service: Service, gpu_count: int, num_gpus_per_node: int
+) -> None:
     """Helper function to set multinode configuration based on GPU count and GPUs per node."""
     if gpu_count <= num_gpus_per_node:
         # Single node: remove multinode configuration if present
@@ -261,7 +266,7 @@ def get_worker_service_from_config(
     config: Config,
     backend: str = "sglang",
     sub_component_type: SubComponentType = SubComponentType.DECODE,
-):
+) -> Service:
     """Helper function to get a worker service from config.
 
     First tries to find service by subComponentType, then falls back to component name.
@@ -287,8 +292,8 @@ def get_worker_service_from_config(
 
 
 def setup_worker_service_resources(
-    worker_service, gpu_count: int, num_gpus_per_node: Optional[int] = None
-):
+    worker_service: Service, gpu_count: int, num_gpus_per_node: Optional[int] = None
+) -> None:
     """Helper function to set up worker service resources (requests and limits)."""
     # Handle multinode configuration if num_gpus_per_node is provided
     if num_gpus_per_node is not None:
@@ -309,7 +314,9 @@ def setup_worker_service_resources(
         else gpu_count
     )
 
-    def _update_resource_dict(resource_dict: dict[str, str], gpu_value: int):
+    def _update_resource_dict(
+        resource_dict: dict[str, str | dict[str, Any]], gpu_value: int
+    ) -> None:
         """Helper function to update gpu and custom rdma/ib fields in a resource dictionary.
 
         Args:
@@ -331,7 +338,7 @@ def setup_worker_service_resources(
         _update_resource_dict(worker_service.resources.requests, gpu_value)
 
 
-def validate_and_get_worker_args(worker_service, backend):
+def validate_and_get_worker_args(worker_service: Service, backend: str) -> list[str]:
     """Helper function to validate worker service and get its arguments.
 
     Args:
@@ -355,7 +362,7 @@ def validate_and_get_worker_args(worker_service, backend):
     return break_arguments(args)
 
 
-def set_argument_value(args: list, arg_name: str, value: str):
+def set_argument_value(args: list[str], arg_name: str, value: str) -> list[str]:
     """Helper function to set an argument value, adding it if not present."""
     try:
         idx = args.index(arg_name)
