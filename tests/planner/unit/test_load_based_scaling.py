@@ -261,7 +261,7 @@ def _build_load_config(**overrides) -> PlannerConfig:
         load_min_observations=5,
     )
     defaults.update(overrides)
-    return PlannerConfig.model_construct(**defaults)
+    return PlannerConfig.model_construct(_fields_set=None, **defaults)  # type: ignore[arg-type]
 
 
 def _avg(per_worker: dict[str, dict[str, float]]) -> dict[str, float]:
