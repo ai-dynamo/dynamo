@@ -31,7 +31,8 @@ jobs:
         ${{ github.ref_name == 'main' && 'main-vllm' || '' }}
         ${{ github.ref_name == 'main' && format('main-vllm-{0}', github.sha) || '' }}
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
-      build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
+      build_timeout_minutes: 120
+      copy_timeout_minutes: 20
       cpu_only_test_markers: '(pre_merge or post_merge) and vllm and gpu_0'
       single_gpu_test_markers: '(pre_merge or post_merge) and vllm and gpu_1'
       multi_gpu_test_markers: '(pre_merge or post_merge) and vllm and (gpu_2 or gpu_4)'
@@ -54,7 +55,8 @@ jobs:
         ${{ github.ref_name == 'main' && 'main-sglang' || '' }}
         ${{ github.ref_name == 'main' && format('main-sglang-{0}', github.sha) || '' }}
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
-      build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
+      build_timeout_minutes: 120
+      copy_timeout_minutes: 20
       cpu_only_test_markers: '(pre_merge or post_merge) and sglang and gpu_0'
       single_gpu_test_markers: '(pre_merge or post_merge) and sglang and gpu_1'
       multi_gpu_test_markers: '(pre_merge or post_merge) and sglang and (gpu_2 or gpu_4)'
@@ -77,7 +79,8 @@ jobs:
         ${{ github.ref_name == 'main' && 'main-trtllm' || '' }}
         ${{ github.ref_name == 'main' && format('main-trtllm-{0}', github.sha) || '' }}
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
-      build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
+      build_timeout_minutes: 120
+      copy_timeout_minutes: 20
       cpu_only_test_markers: '(pre_merge or post_merge) and trtllm and gpu_0'
       single_gpu_test_markers: '(pre_merge or post_merge) and trtllm and gpu_1'
       multi_gpu_test_markers: '(pre_merge or post_merge) and trtllm and (gpu_2 or gpu_4)'
@@ -104,7 +107,8 @@ jobs:
         ${{ github.ref_name == 'main' && 'main-vllm-efa' || '' }}
         ${{ github.ref_name == 'main' && format('main-vllm-efa-{0}', github.sha) || '' }}
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
-      build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
+      build_timeout_minutes: 120
+      copy_timeout_minutes: 20
       cpu_only_test_markers: '(pre_merge or post_merge) and vllm and gpu_0'
       cpu_only_test_timeout_minutes: 60
       run_single_gpu_tests: false
@@ -127,7 +131,8 @@ jobs:
         ${{ github.ref_name == 'main' && 'main-trtllm-efa' || '' }}
         ${{ github.ref_name == 'main' && format('main-trtllm-efa-{0}', github.sha) || '' }}
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
-      build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
+      build_timeout_minutes: 120
+      copy_timeout_minutes: 20
       cpu_only_test_markers: '(pre_merge or post_merge) and trtllm and gpu_0'
       cpu_only_test_timeout_minutes: 60
       run_single_gpu_tests: false
