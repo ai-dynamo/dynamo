@@ -84,19 +84,26 @@ fi
 echo "Using perf record..."
 PERF_DATA="${OUTPUT_DIR}/${OUTPUT_NAME}.perf.data"
 
+# perf record may exit non-zero (e.g. target exits, signal interrupts) but still
+# produce valid data — don't let set -e abort before SVG generation.
 if [[ -n "$PID" ]]; then
-    perf record -F "$FREQ" -g --pid "$PID" -o "$PERF_DATA" -- sleep "$DURATION"
+    perf record -F "$FREQ" -g --pid "$PID" -o "$PERF_DATA" -- sleep "$DURATION" || true
 else
-    perf record -F "$FREQ" -g -o "$PERF_DATA" -- "$@"
+    perf record -F "$FREQ" -g -o "$PERF_DATA" -- "$@" || true
 fi
 
-# Generate flamegraph if flamegraph.pl is available
+if [[ ! -f "$PERF_DATA" ]]; then
+    echo "ERROR: perf record produced no data"
+    exit 1
+fi
+
+# Generate flamegraph SVG
 if command -v flamegraph.pl &>/dev/null && command -v stackcollapse-perf.pl &>/dev/null; then
-    perf script -i "$PERF_DATA" | stackcollapse-perf.pl | \
+    perf script -i "$PERF_DATA" 2>/dev/null | stackcollapse-perf.pl | \
         flamegraph.pl > "${OUTPUT_DIR}/${OUTPUT_NAME}.svg"
     echo "Flame graph: ${OUTPUT_DIR}/${OUTPUT_NAME}.svg"
 elif command -v inferno-collapse-perf &>/dev/null && command -v inferno-flamegraph &>/dev/null; then
-    perf script -i "$PERF_DATA" | inferno-collapse-perf | \
+    perf script -i "$PERF_DATA" 2>/dev/null | inferno-collapse-perf | \
         inferno-flamegraph > "${OUTPUT_DIR}/${OUTPUT_NAME}.svg"
     echo "Flame graph: ${OUTPUT_DIR}/${OUTPUT_NAME}.svg"
 else

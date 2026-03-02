@@ -44,13 +44,15 @@ if [[ -z "$PID" ]]; then
 fi
 
 mkdir -p "$OUTPUT_DIR"
-STACKS_FILE="${OUTPUT_DIR}/${OUTPUT_NAME}.stacks"
+RAW_STACKS="${OUTPUT_DIR}/${OUTPUT_NAME}.raw"
+FOLDED_STACKS="${OUTPUT_DIR}/${OUTPUT_NAME}.stacks"
+NEEDS_FOLD=false
 
 # Try bpftrace-based offcputime
 if command -v bpftrace &>/dev/null; then
     echo "Capturing off-CPU stacks for PID $PID for ${DURATION}s..."
 
-    # Use timeout to limit duration
+    # Use timeout to limit duration; keep stderr separate from stack data
     timeout "$DURATION" bpftrace -p "$PID" -e '
         tracepoint:sched:sched_switch {
             if (args.prev_state != 0) {
@@ -70,29 +72,69 @@ if command -v bpftrace &>/dev/null; then
             }
         }
         END { print(@stacks); clear(@off); clear(@stack); }
-    ' > "$STACKS_FILE" 2>&1 || true
+    ' > "$RAW_STACKS" 2>/dev/null || true
 
-    echo "Stacks captured: $STACKS_FILE"
+    NEEDS_FOLD=true
+    echo "Raw stacks captured: $RAW_STACKS"
 
-# Try bcc offcputime
+# Try bcc offcputime — outputs folded format directly with -f
 elif command -v offcputime-bpfcc &>/dev/null; then
     echo "Using bcc offcputime for PID $PID for ${DURATION}s..."
-    offcputime-bpfcc -d "$DURATION" -p "$PID" -m "$MIN_US" -f > "$STACKS_FILE"
+    offcputime-bpfcc -d "$DURATION" -p "$PID" -m "$MIN_US" -f > "$FOLDED_STACKS"
 else
     echo "ERROR: No BPF tool found. Install bpftrace or bcc-tools."
     exit 1
 fi
 
-# Generate flamegraph
+# Convert bpftrace native format to folded stacks.
+# bpftrace @stacks[kstack, comm] format:
+#   @stacks[
+#       leaf_func+offset
+#       ...
+#       root_func+offset
+#   , comm_name]: value
+# Folded format: comm;root_func;...;leaf_func value
+if [[ "$NEEDS_FOLD" == true ]] && [[ -f "$RAW_STACKS" ]]; then
+    awk '
+    /^@stacks\[/ { n=0; next }
+    /^[[:space:]]+[a-zA-Z_]/ {
+        gsub(/^[[:space:]]+/, "")
+        sub(/\+[0-9]+$/, "")
+        frames[n++] = $0
+        next
+    }
+    /^, / {
+        sub(/^, /, "")
+        idx = index($0, "]: ")
+        comm = substr($0, 1, idx-1)
+        val = substr($0, idx+3) + 0
+        if (n > 0 && val > 0) {
+            printf "%s", comm
+            for (i=n-1; i>=0; i--) printf ";%s", frames[i]
+            printf " %d\n", val
+        }
+        n = 0
+        next
+    }
+    ' "$RAW_STACKS" > "$FOLDED_STACKS"
+    echo "Folded stacks: $FOLDED_STACKS ($(wc -l < "$FOLDED_STACKS") entries)"
+fi
+
+# Generate flamegraph SVG from folded stacks
+if [[ ! -s "$FOLDED_STACKS" ]]; then
+    echo "WARNING: No stacks captured — SVG not generated"
+    exit 0
+fi
+
 if command -v flamegraph.pl &>/dev/null; then
     flamegraph.pl --color=io --title="Off-CPU Flame Graph (PID $PID)" \
-        --countname="us" < "$STACKS_FILE" > "${OUTPUT_DIR}/${OUTPUT_NAME}.svg"
+        --countname="us" < "$FOLDED_STACKS" > "${OUTPUT_DIR}/${OUTPUT_NAME}.svg"
     echo "Flame graph: ${OUTPUT_DIR}/${OUTPUT_NAME}.svg"
 elif command -v inferno-flamegraph &>/dev/null; then
-    inferno-flamegraph --color io --title "Off-CPU Flame Graph (PID $PID)" \
-        --countname "us" < "$STACKS_FILE" > "${OUTPUT_DIR}/${OUTPUT_NAME}.svg"
+    inferno-flamegraph --colors io --title "Off-CPU Flame Graph (PID $PID)" \
+        --countname "us" < "$FOLDED_STACKS" > "${OUTPUT_DIR}/${OUTPUT_NAME}.svg"
     echo "Flame graph: ${OUTPUT_DIR}/${OUTPUT_NAME}.svg"
 else
-    echo "Raw stacks: $STACKS_FILE"
+    echo "Folded stacks: $FOLDED_STACKS"
     echo "Install flamegraph tools to generate SVG: cargo install inferno"
 fi
