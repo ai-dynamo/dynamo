@@ -292,7 +292,7 @@ COPY --from=wheel_builder --chown=dynamo:0 --chmod=775 /workspace/.venv/bin/matu
 
 {% if framework == "sglang" %}
 # SGLang: Create venv with --system-site-packages to inherit runtime packages
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /tmp/uv-binary
+COPY --from=ghcr.io/astral-sh/uv:0.10.7 /uv /tmp/uv-binary
 RUN mkdir -p /opt/dynamo/venv && \
     python3 -m venv --system-site-packages /opt/dynamo/venv && \
     cp -r --no-preserve=mode /usr/local/lib/python${PYTHON_VERSION}/dist-packages/* \
