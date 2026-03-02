@@ -403,7 +403,7 @@ mod tests {
         // First request goes through (worker is idle)
         let (req1, rx1) = make_request("req-1", isl);
         queue.enqueue(req1).await;
-        let resp1 = rx1.await.unwrap().unwrap();
+        let _resp1 = rx1.await.unwrap().unwrap();
         assert_eq!(queue.pending_count(), 0); // scheduled immediately
 
         // Second and third requests should be queued (worker is now busy)
@@ -439,8 +439,6 @@ mod tests {
         queue.update().await;
 
         assert_eq!(queue.pending_count(), 0, "all requests should be drained");
-
-        drop(resp1);
     }
 
     #[tokio::test]
