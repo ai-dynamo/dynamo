@@ -18,7 +18,9 @@ use super::metrics;
 use super::metrics::register_worker_timing_metrics;
 use crate::discovery::ModelManager;
 use crate::endpoint_type::EndpointType;
-use crate::kv_router::metrics::{RoutingOverheadMetrics, register_worker_load_metrics};
+use crate::kv_router::metrics::{
+    RoutingOverheadMetrics, register_router_queue_metrics, register_worker_load_metrics,
+};
 use crate::request_template::RequestTemplate;
 use anyhow::Result;
 use axum_server::tls_rustls::RustlsConfig;
@@ -424,6 +426,12 @@ impl HttpServiceConfigBuilder {
         // These are updated by ResponseMetricCollector when observing TTFT/ITL
         if let Err(e) = register_worker_timing_metrics(&registry) {
             tracing::warn!("Failed to register worker timing metrics: {}", e);
+        }
+
+        // Register router queue metrics (pending requests per worker_type)
+        // These are updated by KvScheduler on enqueue/update/free
+        if let Err(e) = register_router_queue_metrics(&registry) {
+            tracing::warn!("Failed to register router queue metrics: {}", e);
         }
 
         if let Some(ref discovery) = config.drt_discovery {

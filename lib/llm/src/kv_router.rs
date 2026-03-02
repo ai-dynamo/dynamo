@@ -493,6 +493,11 @@ impl KvRouter {
         self.scheduler.free(request_id).await
     }
 
+    /// Number of requests currently parked in the scheduler queue.
+    pub fn pending_count(&self) -> usize {
+        self.scheduler.pending_count()
+    }
+
     /// Get the worker type for this router ("prefill" or "decode").
     /// Used for Prometheus metric labeling.
     pub fn worker_type(&self) -> &'static str {
