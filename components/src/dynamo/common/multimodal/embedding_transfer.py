@@ -399,6 +399,7 @@ class NixlWriteEmbeddingSender(AbstractEmbeddingSender):
         # Create a queue hinting whether the sender is expecting future transfer
         self.transfer_queue = asyncio.Queue()
         self._state_update_task = asyncio.create_task(self._state_update())
+        self.transfer_timeout = 60  # seconds, can be tuned based on expected transfer time and network condition
 
     def __del__(self):
         self._state_update_task.cancel()
@@ -455,14 +456,15 @@ class NixlWriteEmbeddingSender(AbstractEmbeddingSender):
                     )
                     self.nixl_agent.transfer(xfer_handle, done_signal)
 
-                    inflight_transfers[tensor_id] = (
+                    inflight_transfers[tensor_id] = [
                         xfer_handle,
                         time.perf_counter(),
-                    )
+                    ]
 
                 # check inflight transfer state, if completed, get another task to match
                 # remaining transfers count
                 # use list() to create a copy of the dict items since the dict will be modified in the loop
+                now_time = time.perf_counter()
                 for tensor_id, (
                     xfer_handle,
                     start_time,
@@ -472,10 +474,15 @@ class NixlWriteEmbeddingSender(AbstractEmbeddingSender):
                         logger.error(f"Transfer failed for tensor_id {tensor_id}")
                     elif state == "DONE":
                         logger.debug(
-                            f"Send completed for tensor_id {tensor_id}, total wait time: {time.perf_counter() - start_time:.2f} seconds"
+                            f"Send completed for tensor_id {tensor_id}, total wait time: {now_time - start_time:.2f} seconds"
                         )
                     else:
                         # still in-flight, check again later
+                        if now_time - start_time > self.transfer_timeout:
+                            logger.warning(
+                                f"Transfer for tensor_id {tensor_id} has been in-flight for more than {self.transfer_timeout} seconds, reseting its timer"
+                            )
+                            inflight_transfers[tensor_id][1] = now_time
                         continue
                     # NOTE future is set with result None in "ERR" and "DONE", so the sender will not
                     # be able to distinguish failure with success, we can consider
@@ -627,13 +634,15 @@ class NixlWriteEmbeddingReceiver(AbstractEmbeddingReceiver):
         self.to_buffer_id = {}
 
     async def receive_embeddings(
-        self, request: TransferRequest, allocation_timeout=10
+        self, request: TransferRequest, receive_timeout=60
     ) -> tuple[int, torch.Tensor]:
         """
         Receive precomputed embeddings for a given request ID.
 
         Args:
             request: The TransferRequest object containing information to receive embeddings for.
+            receive_timeout: Maximum time to wait for the transfer to complete before raising a TimeoutError.
+            The timeout will be applied separately for waiting for available buffer and waiting for transfer completion.
 
         Returns:
             A tuple containing the tensor ID and the received embeddings as a torch.Tensor.
@@ -678,7 +687,7 @@ class NixlWriteEmbeddingReceiver(AbstractEmbeddingReceiver):
             # repeated deadlock.
             # [gluo WIP] provide an API for batch allocation so some requests can
             # proceed.
-            if time.perf_counter() - start_time > allocation_timeout:
+            if time.perf_counter() - start_time > receive_timeout:
                 raise TimeoutError("Timeout while waiting for available buffer.")
             await asyncio.sleep(0.005)
         # view as tensor matching the source tensor..
@@ -709,10 +718,9 @@ class NixlWriteEmbeddingReceiver(AbstractEmbeddingReceiver):
         self.nixl_agent.send_notif(nixl_request.sender_agent_id, notif_msg=notif_msg)
 
         # await for write notification
-        start = time.perf_counter()
+        start_time = time.perf_counter()
         done_signal = str(tensor_id).encode()
         found = False
-        logged = False
         while not found:
             # parse notifications to find done signal, we can't use 'check_remote_xfer_done' API
             # because it match requested string pattern in substring of the notifications instead
@@ -731,14 +739,12 @@ class NixlWriteEmbeddingReceiver(AbstractEmbeddingReceiver):
 
             await asyncio.sleep(0.001)
             # Waited for too long without transfer completion, log for debugging
-            timeout = 3
-            if (time.perf_counter() - start) > timeout and not logged:
-                logger.debug(
-                    f"still waiting for transfer completion for tensor_id {tensor_id} for more than {timeout} seconds"
+            if (time.perf_counter() - start_time) > receive_timeout:
+                raise TimeoutError(
+                    f"Timeout while waiting for transfer completion for tensor_id {tensor_id} for more than {receive_timeout} seconds"
                 )
-                logged = True
         logger.debug(
-            f"Transfer completed for tensor_id {tensor_id}, total wait time: {time.perf_counter() - start:.2f} seconds"
+            f"Transfer completed for tensor_id {tensor_id}, total wait time: {time.perf_counter() - start_time:.2f} seconds"
         )
 
         self.to_buffer_id[tensor_id] = buffer_id
