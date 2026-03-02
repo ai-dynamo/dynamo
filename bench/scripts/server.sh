@@ -16,12 +16,14 @@ set -euo pipefail
 SCENARIO=""
 MODEL=""
 LOG_DIR=""
+PREPROCESS_WORKERS=32
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --scenario)  SCENARIO="$2"; shift 2 ;;
         --model)     MODEL="$2"; shift 2 ;;
         --log-dir)   LOG_DIR="$2"; shift 2 ;;
+        --preprocess-workers) PREPROCESS_WORKERS="$2"; shift 2 ;;
         --dry-run)   shift ;;  # accepted but ignored
         *)           echo "ERROR: server.sh: Unknown option: $1" >&2; exit 1 ;;
     esac
@@ -148,10 +150,14 @@ launch_scenario_3() {
     wait_for_port 4222 "nats-server"
 
     # Start dynamo frontend with vllm processor
-    python -m dynamo.frontend \
-        --dyn-chat-processor vllm \
-        --dyn-preprocess-workers 32 \
-        --model-name "$MODEL" &
+    FRONTEND_CMD=(python -m dynamo.frontend
+        --dyn-chat-processor vllm
+        --model-name "$MODEL"
+    )
+    if [[ "$PREPROCESS_WORKERS" -gt 0 ]]; then
+        FRONTEND_CMD+=(--dyn-preprocess-workers "$PREPROCESS_WORKERS")
+    fi
+    "${FRONTEND_CMD[@]}" &
     CHILD_PIDS+=($!)
     echo "[server.sh] dynamo.frontend (vllm processor) PID: ${CHILD_PIDS[-1]}"
 

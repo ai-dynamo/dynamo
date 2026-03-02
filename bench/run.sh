@@ -31,6 +31,7 @@ PARTITION="batch"
 TIME_LIMIT="04:00:00"
 OUTPUT_DIR=""
 RUN_NAME=""
+PREPROCESS_WORKERS=32
 EXTRA_SRUN_FLAGS="${EXTRA_SRUN_FLAGS:-}"
 COOLDOWN_SECS=30
 
@@ -69,6 +70,7 @@ Options:
   --time TIME               Slurm time limit (default: 04:00:00)
   --output-dir DIR          Results output directory (default: $PWD/bench_results)
   --concurrencies "C1 C2.." Space-separated concurrency levels (default: "1 2 4 8 16 32 64 128 256 512 1024")
+  --preprocess-workers N    Scenario 3: --dyn-preprocess-workers value (default: 32)
   --scenario {1,2,3,all}    Which scenario(s) to run (default: all)
   --sqsh PATH               Container sqsh image path
   --dry-run                 Lightweight validation run (small model, concurrency 1)
@@ -89,6 +91,7 @@ while [[ $# -gt 0 ]]; do
         --time)         TIME_LIMIT="$2"; shift 2 ;;
         --output-dir)   OUTPUT_DIR="$2"; shift 2 ;;
         --concurrencies) CONCURRENCIES="$2"; shift 2 ;;
+        --preprocess-workers) PREPROCESS_WORKERS="$2"; shift 2 ;;
         --sqsh)         SQSH="$2"; shift 2 ;;
         --scenario)
             if [[ "$2" == "all" ]]; then
@@ -131,7 +134,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
     echo "  Time limit: $TIME_LIMIT"
 
     # Rebuild the argument list for re-invocation
-    RERUN_ARGS=(--account "$ACCOUNT" --model "$MODEL" --isl "$ISL" --osl "$OSL" --req-multiplier "$REQ_MULTIPLIER" --partition "$PARTITION" --time "$TIME_LIMIT")
+    RERUN_ARGS=(--account "$ACCOUNT" --model "$MODEL" --isl "$ISL" --osl "$OSL" --req-multiplier "$REQ_MULTIPLIER" --partition "$PARTITION" --time "$TIME_LIMIT" --preprocess-workers "$PREPROCESS_WORKERS")
     [[ -n "$RUN_NAME" ]] && RERUN_ARGS+=(--name "$RUN_NAME")
     [[ -n "$OUTPUT_DIR" ]] && RERUN_ARGS+=(--output-dir "$OUTPUT_DIR")
     RERUN_ARGS+=(--sqsh "$SQSH")
@@ -194,6 +197,7 @@ cat > "${RUN_DIR}/config.json" <<CONFIGEOF
   "req_multiplier": ${REQ_MULTIPLIER},
   "concurrencies": "$(echo $CONCURRENCIES | tr ' ' ',')",
   "scenarios": "$(echo $SCENARIOS | tr ' ' ',')",
+  "preprocess_workers": ${PREPROCESS_WORKERS},
   "dry_run": ${DRY_RUN},
   "timestamp": "${TIMESTAMP}"
 }
@@ -236,6 +240,7 @@ for SCENARIO in $SCENARIOS; do
         --scenario "$SCENARIO"
         --model "$MODEL"
         --log-dir "$LOG_DIR"
+        --preprocess-workers "$PREPROCESS_WORKERS"
     )
     [[ "$DRY_RUN" == "true" ]] && SERVER_CMD+=(--dry-run)
 
