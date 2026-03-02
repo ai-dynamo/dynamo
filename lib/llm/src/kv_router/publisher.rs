@@ -538,16 +538,19 @@ pub async fn start_zmq_listener(
 
                 let dp_rank = batch.data_parallel_rank.unwrap_or(0) as u32;
                 for raw_event in batch.events.into_iter() {
-                    // Use shared monotonic event_id counter instead of engine's sequence number
-                    let event_id = next_event_id.fetch_add(1, Ordering::SeqCst);
-
-                    let event = convert_event(raw_event, event_id, kv_block_size, dp_rank, &warning_count);
-                    if tx.send(event).is_err() {
-                        tracing::warn!("Failed to send message to channel - receiver dropped");
-                        exit_reason = "channel receiver dropped";
-                        break 'main;
+                    // First check if the event passes filtering (e.g. attn_type filter for hybrid models).
+                    // Only allocate an event_id for events that survive filtering, so downstream
+                    // consumers see consecutive IDs and don't trigger spurious gap-recovery RPCs.
+                    if let Some(mut event) = convert_event(raw_event, 0, kv_block_size, dp_rank, &warning_count) {
+                        let event_id = next_event_id.fetch_add(1, Ordering::SeqCst);
+                        event.event_id = event_id;
+                        if tx.send(event).is_err() {
+                            tracing::warn!("Failed to send message to channel - receiver dropped");
+                            exit_reason = "channel receiver dropped";
+                            break 'main;
+                        }
+                        messages_processed += 1;
                     }
-                    messages_processed += 1;
                 }
             }
         }
@@ -561,13 +564,34 @@ pub async fn start_zmq_listener(
 
 /// Convert a raw event coming from the ZMQ channel into the internal
 /// [`KvCacheEvent`] representation used by the router.
+///
+/// Returns `None` for events from non-full-attention layers in hybrid models
+/// (e.g. mamba/SSM layers), since those don't use traditional KV cache.
 fn convert_event(
     raw: RawKvEvent,
     event_id: u64,
     kv_block_size: u32,
     dp_rank: u32,
     warning_count: &Arc<AtomicU32>,
-) -> KvCacheEvent {
+) -> Option<KvCacheEvent> {
+    // Filter out non-full-attention events from hybrid models.
+    // Events with attn_type=None pass through (backward compat with non-hybrid models).
+    let attn_type = match &raw {
+        RawKvEvent::BlockStored { attn_type, .. } => attn_type.as_deref(),
+        RawKvEvent::BlockRemoved { attn_type, .. } => attn_type.as_deref(),
+        RawKvEvent::AllBlocksCleared => None,
+    };
+    if let Some(at) = attn_type {
+        if at != "full_attention" {
+            tracing::trace!(
+                event_id,
+                attn_type = at,
+                "Filtering out non-full-attention KV event"
+            );
+            return None;
+        }
+    }
+
     match raw {
         RawKvEvent::BlockStored {
             block_hashes,
@@ -590,11 +614,11 @@ fn convert_event(
                         event_id,
                         "Self-referencing block detected: duplicate hash in store event; dropping"
                     );
-                    return KvCacheEvent {
+                    return Some(KvCacheEvent {
                         event_id,
                         data: KvCacheEventData::Cleared,
                         dp_rank,
-                    };
+                    });
                 }
             }
 
@@ -603,7 +627,7 @@ fn convert_event(
                 .into_iter()
                 .map(BlockHashValue::into_u64)
                 .collect();
-            KvCacheEvent {
+            Some(KvCacheEvent {
                 event_id,
                 data: KvCacheEventData::Stored(KvCacheStoreData {
                     parent_hash: parent_block_hash
@@ -620,7 +644,7 @@ fn convert_event(
                     ),
                 }),
                 dp_rank,
-            }
+            })
         }
         RawKvEvent::BlockRemoved { block_hashes, .. } => {
             let hashes = block_hashes
@@ -628,19 +652,19 @@ fn convert_event(
                 .map(BlockHashValue::into_u64)
                 .map(ExternalSequenceBlockHash::from)
                 .collect();
-            KvCacheEvent {
+            Some(KvCacheEvent {
                 event_id,
                 data: KvCacheEventData::Removed(KvCacheRemoveData {
                     block_hashes: hashes,
                 }),
                 dp_rank,
-            }
+            })
         }
-        RawKvEvent::AllBlocksCleared => KvCacheEvent {
+        RawKvEvent::AllBlocksCleared => Some(KvCacheEvent {
             event_id,
             data: KvCacheEventData::Cleared,
             dp_rank,
-        },
+        }),
     }
 }
 
@@ -778,11 +802,18 @@ enum RawKvEvent {
         /// Multimodal extra info for each block (length should match block_hashes)
         #[serde(default, skip_serializing_if = "Option::is_none")]
         block_mm_infos: Option<Vec<Option<BlockExtraInfo>>>,
+        /// Attention type for this KV cache group (e.g. "full_attention", "mamba").
+        /// None for non-hybrid models (backward compatible).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attn_type: Option<String>,
     },
     BlockRemoved {
         block_hashes: Vec<BlockHashValue>,
         #[serde(skip_serializing_if = "Option::is_none")]
         medium: Option<String>,
+        /// Attention type for this KV cache group.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attn_type: Option<String>,
     },
     AllBlocksCleared,
 }
@@ -878,6 +909,7 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
         let mut lora_name: Option<Option<String>> = None;
         let mut extra_keys: Option<Option<Vec<Option<Vec<String>>>>> = None;
         let mut block_mm_infos: Option<Option<Vec<Option<BlockExtraInfo>>>> = None;
+        let mut attn_type: Option<Option<String>> = None;
 
         while let Some(key) = map.next_key::<String>()? {
             match key.as_str() {
@@ -911,6 +943,9 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                 "block_mm_infos" => {
                     block_mm_infos = Some(map.next_value()?);
                 }
+                "attn_type" => {
+                    attn_type = Some(map.next_value()?);
+                }
                 _ => {
                     map.next_value::<IgnoredAny>()?;
                 }
@@ -936,6 +971,7 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                     medium: medium.unwrap_or(None),
                     lora_name: lora_name.unwrap_or(None),
                     block_mm_infos,
+                    attn_type: attn_type.unwrap_or(None),
                 })
             }
             Some("BlockRemoved") => {
@@ -944,6 +980,7 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                 Ok(RawKvEvent::BlockRemoved {
                     block_hashes,
                     medium: medium.unwrap_or(None),
+                    attn_type: attn_type.unwrap_or(None),
                 })
             }
             Some("AllBlocksCleared") => Ok(RawKvEvent::AllBlocksCleared),
@@ -982,15 +1019,11 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                 let lora_id: Option<u64> = seq.next_element()?.unwrap_or(None);
                 let medium: Option<String> = seq.next_element()?.unwrap_or(None);
                 let lora_name: Option<String> = seq.next_element()?.unwrap_or(None);
-                let extra_keys: Option<Vec<Option<Vec<String>>>> =
-                    seq.next_element()?.unwrap_or(None);
-                let block_mm_infos: Option<Vec<Option<BlockExtraInfo>>> =
-                    seq.next_element()?.unwrap_or(None);
+                // Position 8: attn_type (this experiment branch) or extra_keys (upstream).
+                // We read as attn_type since our vLLM emits it here.
+                let attn_type: Option<String> = seq.next_element()?.unwrap_or(None);
 
                 while seq.next_element::<IgnoredAny>()?.is_some() {}
-
-                let block_mm_infos =
-                    block_mm_infos.or_else(|| extra_keys_to_block_mm_infos(extra_keys));
 
                 Ok(RawKvEvent::BlockStored {
                     block_hashes,
@@ -1000,7 +1033,8 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                     lora_id,
                     medium,
                     lora_name,
-                    block_mm_infos,
+                    block_mm_infos: None,
+                    attn_type,
                 })
             }
             "BlockRemoved" => {
@@ -1008,12 +1042,14 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                     .next_element()?
                     .ok_or_else(|| de::Error::invalid_length(1, &"missing block_hashes"))?;
                 let medium: Option<String> = seq.next_element()?.unwrap_or(None);
+                let attn_type: Option<String> = seq.next_element()?.unwrap_or(None);
 
                 while seq.next_element::<IgnoredAny>()?.is_some() {}
 
                 Ok(RawKvEvent::BlockRemoved {
                     block_hashes,
                     medium,
+                    attn_type,
                 })
             }
             "AllBlocksCleared" => {
@@ -1245,9 +1281,10 @@ mod test_event_processing {
             medium: None,
             lora_name: None,
             block_mm_infos: None,
+            attn_type: None,
         };
 
-        let out = convert_event(raw_evt, 42, kv_block_size, 0, &Arc::new(AtomicU32::new(0)));
+        let out = convert_event(raw_evt, 42, kv_block_size, 0, &Arc::new(AtomicU32::new(0))).unwrap();
         assert!(matches!(out.data, KvCacheEventData::Stored(_)));
     }
 
@@ -1257,8 +1294,9 @@ mod test_event_processing {
         let raw_evt = RawKvEvent::BlockRemoved {
             block_hashes: vec![BlockHashValue::Unsigned(123), BlockHashValue::Signed(456)],
             medium: None,
+            attn_type: None,
         };
-        let out = convert_event(raw_evt, 7, kv_block_size, 0, &Arc::new(AtomicU32::new(0)));
+        let out = convert_event(raw_evt, 7, kv_block_size, 0, &Arc::new(AtomicU32::new(0))).unwrap();
 
         assert!(matches!(out.data, KvCacheEventData::Removed(_)));
     }
@@ -1267,8 +1305,73 @@ mod test_event_processing {
     fn test_convert_event_all_blocks_cleared() {
         let kv_block_size = 4;
         let raw_evt = RawKvEvent::AllBlocksCleared;
-        let out = convert_event(raw_evt, 1, kv_block_size, 0, &Arc::new(AtomicU32::new(0)));
+        let out = convert_event(raw_evt, 1, kv_block_size, 0, &Arc::new(AtomicU32::new(0))).unwrap();
         assert!(matches!(out.data, KvCacheEventData::Cleared));
+    }
+
+    // -----------------------------------------------------------------
+    // attn_type filtering tests ----------------------------------------
+    // -----------------------------------------------------------------
+    #[test]
+    fn test_convert_event_filters_mamba_block_stored() {
+        let raw_evt = RawKvEvent::BlockStored {
+            block_hashes: vec![BlockHashValue::Unsigned(10)],
+            parent_block_hash: None,
+            token_ids: vec![1, 2, 3, 4],
+            block_size: 4,
+            lora_id: None,
+            medium: None,
+            lora_name: None,
+            block_mm_infos: None,
+            attn_type: Some("mamba".to_string()),
+        };
+        assert!(convert_event(raw_evt, 1, 4, 0, &Arc::new(AtomicU32::new(0))).is_none());
+    }
+
+    #[test]
+    fn test_convert_event_filters_mamba_block_removed() {
+        let raw_evt = RawKvEvent::BlockRemoved {
+            block_hashes: vec![BlockHashValue::Unsigned(10)],
+            medium: None,
+            attn_type: Some("mamba".to_string()),
+        };
+        assert!(convert_event(raw_evt, 1, 4, 0, &Arc::new(AtomicU32::new(0))).is_none());
+    }
+
+    #[test]
+    fn test_convert_event_passes_full_attention() {
+        let raw_evt = RawKvEvent::BlockStored {
+            block_hashes: vec![BlockHashValue::Unsigned(10)],
+            parent_block_hash: None,
+            token_ids: vec![1, 2, 3, 4],
+            block_size: 4,
+            lora_id: None,
+            medium: None,
+            lora_name: None,
+            block_mm_infos: None,
+            attn_type: Some("full_attention".to_string()),
+        };
+        let out = convert_event(raw_evt, 1, 4, 0, &Arc::new(AtomicU32::new(0)));
+        assert!(out.is_some());
+        assert!(matches!(out.unwrap().data, KvCacheEventData::Stored(_)));
+    }
+
+    #[test]
+    fn test_convert_event_passes_none_attn_type() {
+        // Backward compat: events without attn_type should pass through
+        let raw_evt = RawKvEvent::BlockStored {
+            block_hashes: vec![BlockHashValue::Unsigned(10)],
+            parent_block_hash: None,
+            token_ids: vec![1, 2, 3, 4],
+            block_size: 4,
+            lora_id: None,
+            medium: None,
+            lora_name: None,
+            block_mm_infos: None,
+            attn_type: None,
+        };
+        let out = convert_event(raw_evt, 1, 4, 0, &Arc::new(AtomicU32::new(0)));
+        assert!(out.is_some());
     }
 
     #[test]
@@ -1307,10 +1410,9 @@ mod test_event_processing {
     }
 
     #[test]
-    fn test_seq_block_stored_field8_supports_extra_keys() {
-        let mm_hash =
-            "0123456789abcdef00112233445566778899aabbccddeefffedcba9876543210".to_string();
-        let extra_keys_payload = rmps::to_vec(&(
+    fn test_seq_block_stored_field8_supports_attn_type() {
+        // On this experiment branch, position 8 is attn_type (string).
+        let payload = rmps::to_vec(&(
             "BlockStored",
             vec![10_u64],
             None::<u64>,
@@ -1319,23 +1421,36 @@ mod test_event_processing {
             None::<u64>,
             None::<String>,
             None::<String>,
-            vec![Some(vec![mm_hash])],
+            "full_attention",
         ))
         .unwrap();
-        let extra_keys_event: RawKvEvent = rmps::from_slice(&extra_keys_payload).unwrap();
+        let event: RawKvEvent = rmps::from_slice(&payload).unwrap();
         let RawKvEvent::BlockStored {
             lora_name,
-            block_mm_infos,
+            attn_type,
             ..
-        } = extra_keys_event
+        } = event
         else {
             panic!("expected BlockStored");
         };
         assert!(lora_name.is_none());
-        assert_eq!(
-            block_mm_infos.unwrap()[0].as_ref().unwrap().mm_objects[0].mm_hash,
-            0x0123_4567_89ab_cdef
-        );
+        assert_eq!(attn_type.as_deref(), Some("full_attention"));
+    }
+
+    #[test]
+    fn test_seq_block_removed_field3_supports_attn_type() {
+        let payload = rmps::to_vec(&(
+            "BlockRemoved",
+            vec![10_u64],
+            None::<String>,
+            "mamba",
+        ))
+        .unwrap();
+        let event: RawKvEvent = rmps::from_slice(&payload).unwrap();
+        let RawKvEvent::BlockRemoved { attn_type, .. } = event else {
+            panic!("expected BlockRemoved");
+        };
+        assert_eq!(attn_type.as_deref(), Some("mamba"));
     }
 
     #[test]
@@ -1354,7 +1469,9 @@ mod test_event_processing {
             extra_keys: Option<Vec<Option<Vec<String>>>>,
         }
 
-        let payload = rmps::to_vec(&MapBlockStoredEvent {
+        // Use to_vec_named to force map-format serialization so this goes
+        // through visit_map (which handles extra_keys by name).
+        let payload = rmps::to_vec_named(&MapBlockStoredEvent {
             event_type: "BlockStored",
             block_hashes: vec![10],
             parent_block_hash: None,
@@ -1799,6 +1916,7 @@ mod tests_startup_helpers {
             medium: None,
             lora_name: None,
             block_mm_infos: None,
+            attn_type: None,
         }];
 
         let batch = KvEventBatch {
