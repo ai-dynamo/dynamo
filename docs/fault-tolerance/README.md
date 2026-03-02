@@ -75,7 +75,7 @@ See [Health Checks](../observability/health-checks.md) for details.
 | Feature | Environment Variable | Default |
 |---------|---------------------|---------|
 | Worker health port | `DYN_SYSTEM_PORT` | `9090` |
-| Canary health checks | `DYN_HEALTH_CHECK_ENABLED` | `false` (K8s: `true`) |
+| Canary health checks | `DYN_HEALTH_CHECK_ENABLED` | `false` |
 | Canary wait time | `DYN_CANARY_WAIT_TIME` | `10` seconds |
 | Health check timeout | `DYN_HEALTH_CHECK_REQUEST_TIMEOUT` | `3` seconds |
 | Decode blocks threshold | `--active-decode-blocks-threshold` | None (disabled) |

@@ -352,7 +352,7 @@ graph TD
 
 ## Serving Multiple Router Replicas
 
-For improved fault tolerance, you can launch multiple frontend + router replicas. Since the frontend and router are currently tied together, you'll need to use different HTTP ports for each instance. (The separation of the frontend and Router is WIP.)
+For improved fault tolerance, you can launch multiple frontend + router replicas. Since the frontend and router are currently tied together, you'll need to use different HTTP ports for each instance. Alternatively, you can run the router as a [standalone service](standalone-indexer.md).
 
 ### Router State Management
 
