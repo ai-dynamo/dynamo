@@ -15,7 +15,6 @@ pub mod nested_map;
 pub mod protocols;
 pub mod radix_tree;
 pub mod scheduling;
-pub mod sequence;
 pub mod sequences;
 pub mod zmq_wire;
 
