@@ -129,8 +129,6 @@ on:
         required: true
       AZURE_ACR_PASSWORD:
         required: true
-      CI_TOKEN:
-        required: false
       SCCACHE_S3_BUCKET:
         required: false
       AWS_ACCESS_KEY_ID:

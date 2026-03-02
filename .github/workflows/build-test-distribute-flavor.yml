@@ -134,8 +134,6 @@ on:
         required: true
       AZURE_ACR_PASSWORD:
         required: true
-      CI_TOKEN:
-        required: false
       SCCACHE_S3_BUCKET:
         required: false
       AWS_ACCESS_KEY_ID:
@@ -272,7 +270,6 @@ jobs:
           target: ${{ inputs.target }}
           platform: ${{ inputs.platform }}
           cuda_version: ${{ inputs.cuda_version }}
-          ci_token: ${{ secrets.CI_TOKEN }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
