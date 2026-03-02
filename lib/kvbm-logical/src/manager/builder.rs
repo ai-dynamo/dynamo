@@ -14,8 +14,8 @@ use crate::{BlockId, pools::backends::LineageBackend, tinylfu::TinyLFUTracker};
 use crate::{
     blocks::{Block, BlockMetadata, state::Reset},
     pools::{
-        ActivePool, BlockDuplicationPolicy, InactivePool, InactivePoolBackend, ResetPool,
-        ReusePolicy, SequenceHash,
+        ActivePool, BlockAllocator, BlockDuplicationPolicy, InactivePool, InactivePoolBackend,
+        ResetPool, ReusePolicy, SequenceHash,
         backends::{HashMapBackend, LruBackend, MultiLruBackend},
     },
     registry::BlockRegistry,
@@ -26,10 +26,12 @@ use super::BlockManager;
 /// Capacity settings for the TinyLFU frequency tracker used by
 /// [`BlockRegistry`] and the multi-level LRU backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 pub enum FrequencyTrackingCapacity {
     /// Small capacity: 2^18 (262,144) entries
     Small,
     /// Medium capacity: 2^21 (2,097,152) entries - default
+    #[default]
     Medium,
     /// Large capacity: 2^24 (16,777,216) entries
     Large,
@@ -51,11 +53,6 @@ impl FrequencyTrackingCapacity {
     }
 }
 
-impl Default for FrequencyTrackingCapacity {
-    fn default() -> Self {
-        Self::Medium
-    }
-}
 
 /// Configuration for the inactive pool backend.
 pub enum InactiveBackendConfig {
@@ -116,6 +113,12 @@ pub struct BlockManagerConfigBuilder<T: BlockMetadata> {
     /// Optional metrics aggregator for prometheus export
     aggregator: Option<MetricsAggregator>,
 
+    /// Custom block allocator for the reset pool
+    block_allocator: Option<Box<dyn BlockAllocator<T> + Send + Sync>>,
+
+    /// Custom inactive pool backend (takes priority over `inactive_backend` config)
+    custom_inactive_backend: Option<Box<dyn InactivePoolBackend<T>>>,
+
     /// Phantom data for type parameter
     _phantom: std::marker::PhantomData<T>,
 }
@@ -129,6 +132,8 @@ impl<T: BlockMetadata> Default for BlockManagerConfigBuilder<T> {
             inactive_backend: None,
             duplication_policy: None,
             aggregator: None,
+            block_allocator: None,
+            custom_inactive_backend: None,
             _phantom: std::marker::PhantomData,
         }
     }
@@ -266,6 +271,34 @@ impl<T: BlockMetadata> BlockManagerConfigBuilder<T> {
         self
     }
 
+    /// Set a custom block allocator for the reset pool.
+    ///
+    /// Use this to plug in a custom allocation strategy (e.g., remote/networked
+    /// block allocation). See [`crate::ext`] for the types needed to implement
+    /// a custom allocator.
+    pub fn block_allocator(
+        mut self,
+        allocator: impl BlockAllocator<T> + Send + Sync + 'static,
+    ) -> Self {
+        self.block_allocator = Some(Box::new(allocator));
+        self
+    }
+
+    /// Set a custom inactive pool backend.
+    ///
+    /// When set, this takes priority over the inactive backend configuration
+    /// (e.g., `with_lru_backend()`, `with_lineage_backend()`). Use this to
+    /// plug in a custom [`InactivePoolBackend`] implementation.
+    ///
+    /// See [`crate::ext`] for the types needed to implement a custom backend.
+    pub fn with_inactive_backend(
+        mut self,
+        backend: impl InactivePoolBackend<T> + 'static,
+    ) -> Self {
+        self.custom_inactive_backend = Some(Box::new(backend));
+        self
+    }
+
     /// Validate the configuration.
     fn validate(&self) -> Result<(), String> {
         let registry = self.registry.as_ref().ok_or("registry is required")?;
@@ -338,11 +371,18 @@ impl<T: BlockMetadata> BlockManagerConfigBuilder<T> {
         let blocks: Vec<Block<T, Reset>> = (0..block_count as BlockId)
             .map(|id| Block::new(id, block_size))
             .collect();
-        let reset_pool = ResetPool::new(blocks, block_size, Some(metrics.clone()));
+        let reset_pool = if let Some(allocator) = self.block_allocator {
+            ResetPool::from_block_allocator(allocator, blocks, block_size, Some(metrics.clone()))
+        } else {
+            ResetPool::new(blocks, block_size, Some(metrics.clone()))
+        };
         metrics.set_reset_pool_size(block_count as i64);
 
-        // Create backend based on configuration
-        let backend: Box<dyn InactivePoolBackend<T>> = match self.inactive_backend.take() {
+        // Create backend based on configuration (custom backend takes priority)
+        let backend: Box<dyn InactivePoolBackend<T>> = if let Some(custom) = self.custom_inactive_backend.take() {
+            tracing::info!("Using custom inactive pool backend");
+            custom
+        } else { match self.inactive_backend.take() {
             Some(InactiveBackendConfig::HashMap { reuse_policy }) => {
                 tracing::info!("Using HashMap for inactive pool");
                 Box::new(HashMapBackend::new(reuse_policy))
@@ -389,7 +429,7 @@ impl<T: BlockMetadata> BlockManagerConfigBuilder<T> {
                 tracing::info!("Using default inactive backend: Lineage");
                 Box::new(LineageBackend::default())
             }
-        };
+        } };
 
         // Create pools
         let inactive_pool = InactivePool::new(backend, &reset_pool, Some(metrics.clone()));

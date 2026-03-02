@@ -22,7 +22,9 @@ mod block_proptest;
 
 pub(crate) use active::ActivePool;
 pub(crate) use inactive::backends;
-pub(crate) use inactive::{InactivePool, InactivePoolBackend};
+pub(crate) use inactive::InactivePool;
+pub use inactive::InactivePoolBackend;
+pub use reset::FifoBlockAllocator;
 pub(crate) use reset::ResetPool;
 
 // Re-export RAII guards from guards module
@@ -33,11 +35,7 @@ use crate::blocks::{
 
 pub(crate) use crate::SequenceHash;
 
-pub(crate) trait BlockAllocator<T: BlockMetadata> {
-    // fn new(blocks: Vec<Block<T, Reset>>) -> Arc<Self>
-    // where
-    //     Self: Sized;
-
+pub trait BlockAllocator<T: BlockMetadata> {
     /// Insert a block into the pool
     fn insert(&mut self, block: Block<T, Reset>);
 
@@ -53,6 +51,20 @@ pub(crate) trait BlockAllocator<T: BlockMetadata> {
     }
 }
 
+impl<T: BlockMetadata> BlockAllocator<T> for Box<dyn BlockAllocator<T> + Send + Sync> {
+    fn insert(&mut self, block: Block<T, Reset>) {
+        (**self).insert(block)
+    }
+
+    fn pop(&mut self) -> Option<Block<T, Reset>> {
+        (**self).pop()
+    }
+
+    fn len(&self) -> usize {
+        (**self).len()
+    }
+}
+
 #[expect(dead_code)]
 pub(crate) trait BlockMatcher<T: BlockMetadata> {
     fn find_match(&self, seq_hash: SequenceHash) -> Option<ImmutableBlock<T>>;
@@ -62,7 +74,7 @@ pub(crate) trait BlockMatcher<T: BlockMetadata> {
 pub use crate::blocks::BlockDuplicationPolicy;
 
 // Re-export reuse policy from inactive backends
-pub use inactive::backends::{ReusePolicy, ReusePolicyError};
+pub use inactive::backends::{LineageBackend, ResetInactiveBlocksBackend, ReusePolicy, ReusePolicyError};
 
 // Re-export the new RAII guard types - no need to re-export here since they're defined in this module
 

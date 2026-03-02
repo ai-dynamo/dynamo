@@ -29,6 +29,7 @@
 //! - RAII attachment guards
 
 mod attachments;
+mod delegate;
 mod handle;
 mod registration;
 
@@ -37,6 +38,7 @@ pub(crate) mod tests;
 
 // Re-export public types
 pub use attachments::{AttachmentError, TypedAttachments};
+pub use delegate::{PresenceDelegate, typed_presence_delegate};
 pub use handle::BlockRegistrationHandle;
 
 use crate::{events::EventsManager, tinylfu::FrequencyTracker};
@@ -74,6 +76,7 @@ pub(crate) type PositionalRadixTree<V> = dynamo_tokens::PositionalRadixTree<V, S
 pub struct BlockRegistryBuilder {
     frequency_tracker: Option<Arc<dyn FrequencyTracker<u128>>>,
     event_manager: Option<Arc<EventsManager>>,
+    presence_delegates: Vec<Arc<dyn PresenceDelegate>>,
 }
 
 impl BlockRegistryBuilder {
@@ -95,11 +98,19 @@ impl BlockRegistryBuilder {
         self
     }
 
+    /// Adds a presence delegate that will be notified on block state transitions.
+    pub fn presence_delegate(mut self, delegate: Arc<dyn PresenceDelegate>) -> Self {
+        self.presence_delegates.push(delegate);
+        self
+    }
+
     /// Builds the BlockRegistry.
     pub fn build(self) -> BlockRegistry {
+        let presence_delegates: Arc<[Arc<dyn PresenceDelegate>]> = self.presence_delegates.into();
         BlockRegistry {
             frequency_tracker: self.frequency_tracker,
             event_manager: self.event_manager,
+            presence_delegates,
             prt: Arc::new(PositionalRadixTree::new()),
         }
     }
@@ -113,6 +124,7 @@ pub struct BlockRegistry {
     frequency_tracker: Option<Arc<dyn FrequencyTracker<u128>>>,
     // TODO(delegate): Replace direct EventsManager field with a delegate/observer trait.
     event_manager: Option<Arc<EventsManager>>,
+    presence_delegates: Arc<[Arc<dyn PresenceDelegate>]>,
 }
 
 impl BlockRegistry {
@@ -246,6 +258,7 @@ impl BlockRegistry {
         Arc::new(BlockRegistrationHandleInner::new(
             seq_hash,
             Arc::downgrade(&self.prt),
+            self.presence_delegates.clone(),
         ))
     }
 

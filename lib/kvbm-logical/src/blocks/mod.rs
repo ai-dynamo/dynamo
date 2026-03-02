@@ -68,7 +68,7 @@ pub use complete::CompleteBlock;
 pub use immutable::{ImmutableBlock, WeakBlock};
 pub use mutable::MutableBlock;
 
-pub(crate) mod state;
+pub mod state;
 pub(crate) use registered::{DuplicateBlock, PrimaryBlock, WeakBlockEntry};
 
 // Re-export from the new registry module location for backward compatibility
@@ -142,10 +142,12 @@ pub enum BlockDuplicationPolicy {
 
 /// The raw block value parameterised by metadata `T` and a type-state marker.
 ///
-/// External code never sees this type directly; it is always wrapped in one of
-/// the public RAII guards ([`MutableBlock`], [`CompleteBlock`], [`ImmutableBlock`]).
+/// External code typically interacts with blocks through the public RAII guards
+/// ([`MutableBlock`], [`CompleteBlock`], [`ImmutableBlock`]). This type is also
+/// available for implementing custom [`BlockAllocator`](crate::pools::BlockAllocator)
+/// strategies via the [`ext`](crate::ext) module.
 #[derive(Debug)]
-pub(crate) struct Block<T, State> {
+pub struct Block<T, State> {
     block_id: BlockId,
     block_size: usize,
     state: State,

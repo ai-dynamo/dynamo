@@ -5,6 +5,7 @@
 
 pub mod blocks;
 pub mod events;
+pub mod ext;
 pub mod manager;
 pub mod metrics;
 pub mod pools;

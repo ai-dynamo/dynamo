@@ -11,12 +11,14 @@ use crate::blocks::{
     state::{Registered, Staged},
 };
 use crate::pools::InactivePool;
+use crate::registry::typed_presence_delegate;
 use crate::testing::{
     self, MetadataA, MetadataB, MetadataC, TestMeta, TestPoolSetupBuilder, create_staged_block,
 };
 
 use std::any::TypeId;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 // Type aliases for backward compatibility with existing tests
 type TestMetadata = TestMeta;
@@ -817,4 +819,132 @@ fn test_is_from_registry() {
         !handle.is_from_registry(&registry2),
         "Handle should NOT be from registry2"
     );
+}
+
+// ── Presence delegate tests ──────────────────────────────────────────
+
+#[test]
+fn test_presence_delegate_fires_on_register_and_reset() {
+    let present_count = Arc::new(AtomicU32::new(0));
+    let absent_count = Arc::new(AtomicU32::new(0));
+    let pc = present_count.clone();
+    let ac = absent_count.clone();
+
+    let delegate = typed_presence_delegate::<TestMetadata>(
+        move |_, _, _| {
+            pc.fetch_add(1, Ordering::Relaxed);
+        },
+        move |_, _, _| {
+            ac.fetch_add(1, Ordering::Relaxed);
+        },
+    );
+
+    let registry = BlockRegistry::builder().presence_delegate(delegate).build();
+
+    let staged = create_staged_block::<TestMetadata>(42, &[1, 2, 3, 4]);
+    let handle = registry.register_sequence_hash(staged.sequence_hash());
+    let registered = staged.register_with_handle(handle);
+
+    assert_eq!(present_count.load(Ordering::Relaxed), 1);
+    assert_eq!(absent_count.load(Ordering::Relaxed), 0);
+
+    let _reset = registered.reset();
+    assert_eq!(absent_count.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn test_presence_delegate_type_filtering() {
+    let a_count = Arc::new(AtomicU32::new(0));
+    let b_count = Arc::new(AtomicU32::new(0));
+    let ac = a_count.clone();
+    let bc = b_count.clone();
+
+    let delegate_a = typed_presence_delegate::<MetadataA>(
+        move |_, _, _| {
+            ac.fetch_add(1, Ordering::Relaxed);
+        },
+        |_, _, _| {},
+    );
+    let delegate_b = typed_presence_delegate::<MetadataB>(
+        move |_, _, _| {
+            bc.fetch_add(1, Ordering::Relaxed);
+        },
+        |_, _, _| {},
+    );
+
+    let registry = BlockRegistry::builder()
+        .presence_delegate(delegate_a)
+        .presence_delegate(delegate_b)
+        .build();
+
+    // Register a MetadataA block — only delegate_a should fire
+    let _reg_a = register_test_block::<MetadataA>(&registry, 1, &[10, 11, 12, 13]);
+    assert_eq!(a_count.load(Ordering::Relaxed), 1);
+    assert_eq!(b_count.load(Ordering::Relaxed), 0);
+
+    // Register a MetadataB block — only delegate_b should fire
+    let _reg_b = register_test_block::<MetadataB>(&registry, 2, &[20, 21, 22, 23]);
+    assert_eq!(a_count.load(Ordering::Relaxed), 1);
+    assert_eq!(b_count.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn test_presence_delegate_multiple_delegates() {
+    let counter1 = Arc::new(AtomicU32::new(0));
+    let counter2 = Arc::new(AtomicU32::new(0));
+    let c1 = counter1.clone();
+    let c2 = counter2.clone();
+
+    let d1 = typed_presence_delegate::<TestMetadata>(
+        move |_, _, _| {
+            c1.fetch_add(1, Ordering::Relaxed);
+        },
+        |_, _, _| {},
+    );
+    let d2 = typed_presence_delegate::<TestMetadata>(
+        move |_, _, _| {
+            c2.fetch_add(10, Ordering::Relaxed);
+        },
+        |_, _, _| {},
+    );
+
+    let registry = BlockRegistry::builder()
+        .presence_delegate(d1)
+        .presence_delegate(d2)
+        .build();
+
+    let _reg = register_test_block::<TestMetadata>(&registry, 1, &[1, 2, 3, 4]);
+    assert_eq!(counter1.load(Ordering::Relaxed), 1);
+    assert_eq!(counter2.load(Ordering::Relaxed), 10);
+}
+
+#[test]
+fn test_presence_delegate_receives_correct_block_id() {
+    let received_block_id = Arc::new(parking_lot::Mutex::new(None));
+    let rbid = received_block_id.clone();
+
+    let delegate = typed_presence_delegate::<TestMetadata>(
+        move |_, block_id, _| {
+            *rbid.lock() = Some(block_id);
+        },
+        |_, _, _| {},
+    );
+
+    let registry = BlockRegistry::builder().presence_delegate(delegate).build();
+
+    let _reg = register_test_block::<TestMetadata>(&registry, 99, &[5, 6, 7, 8]);
+    assert_eq!(*received_block_id.lock(), Some(99));
+}
+
+#[test]
+fn test_no_delegates_is_noop() {
+    // Regression test: registry with no delegates should work identically to before
+    let registry = BlockRegistry::new();
+    let staged = create_staged_block::<TestMetadata>(42, &[1, 2, 3, 4]);
+    let handle = registry.register_sequence_hash(staged.sequence_hash());
+    let registered = staged.register_with_handle(handle.clone());
+
+    assert!(handle.has_block::<TestMetadata>());
+    let _reset = registered.reset();
+    assert!(!handle.has_block::<TestMetadata>());
 }
