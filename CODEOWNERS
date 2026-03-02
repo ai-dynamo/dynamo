@@ -48,4 +48,4 @@ CODEOWNERS @ai-dynamo/Devops
 /SECURITY.md @ai-dynamo/Devops
 
 # Claude Code
-/.claude/ @ishandhanani @alec-flowers @MatejKosec @dagil-nvidia
+/.claude/ @ishandhanani @alec-flowers @MatejKosec @dagil-nvidia @athreesh
