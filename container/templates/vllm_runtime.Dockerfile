@@ -44,7 +44,13 @@ RUN CUDA_VERSION_MAJOR="${CUDA_VERSION%%.*}" &&\
 
 # DeepGemm runs nvcc for JIT kernel compilation, however the CUDA include path
 # is not properly set for complilation. Set CPATH to help nvcc find the headers.
-ENV CPATH=/usr/local/cuda/include
+ENV CPATH=/usr/local/cuda/include \
+    TRITON_CUPTI_PATH=/usr/local/cuda/include \
+    TRITON_CUDACRT_PATH=/usr/local/cuda/include \
+    TRITON_CUOBJDUMP_PATH=/usr/local/cuda/bin/cuobjdump \
+    TRITON_NVDISASM_PATH=/usr/local/cuda/bin/nvdisasm \
+    TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas \
+    TRITON_CUDART_PATH=/usr/local/cuda/include
 
 ### COPY NATS & ETCD ###
 # Copy nats and etcd from dev image

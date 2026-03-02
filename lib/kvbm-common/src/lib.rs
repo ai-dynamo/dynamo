@@ -14,10 +14,13 @@ pub use dynamo_tokens as tokens;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum LogicalLayoutHandle {
     /// Representation of GPU / Device Memory
+    /// G1 is fixed sized and managed by either the framework or the local instance of KVBM.
     G1,
     /// Representation of CPU / Host Memory
+    /// G2 is fixed sized and managed by the local instance of KVBM.
     G2,
-    /// Representation of Disk Storage
+    /// Representation of Disk Storage (Local or AttachedStorage)
+    /// G3 is fixed sized and managed by the local instance of KVBM.
     G3,
     /// Representation of Blocks held in an external service
     /// outside the control of the KVBM system.

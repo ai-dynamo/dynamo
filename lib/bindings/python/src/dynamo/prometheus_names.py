@@ -214,6 +214,35 @@ class router_request:
     METRIC_PREFIX = "router_"
 
 
+class router:
+    """Router request metrics (dynamo_component_router_* with dynamo_namespace label).
+
+    These constants are the full suffix portions combined with name_prefix.COMPONENT
+    ("dynamo_component") to form the complete metric name, e.g.
+    dynamo_component_router_requests_total.
+
+    Registered via MetricsHierarchy (from_component()) which auto-injects
+    dynamo_namespace (underscores) and dynamo_component labels and registers
+    with the component's registry (port 9090).
+    """
+
+    # Total number of requests processed by the router
+    REQUESTS_TOTAL = "router_requests_total"
+    # Time to first token observed at the router (seconds)
+    TIME_TO_FIRST_TOKEN_SECONDS = "router_time_to_first_token_seconds"
+    # Average inter-token latency observed at the router (seconds)
+    INTER_TOKEN_LATENCY_SECONDS = "router_inter_token_latency_seconds"
+    # Input sequence length in tokens observed at the router
+    INPUT_SEQUENCE_TOKENS = "router_input_sequence_tokens"
+    # Output sequence length in tokens observed at the router
+    OUTPUT_SEQUENCE_TOKENS = "router_output_sequence_tokens"
+    # TODO: Add REQUEST_DURATION_SECONDS = "router_request_duration_seconds" once
+    #       RouterRequestMetrics in lib/llm/src/kv_router/metrics.rs registers a
+    #       dynamo_component_router_request_duration_seconds histogram. Until then,
+    #       get_avg_request_duration (router path) falls back to the work_handler
+    #       constant and queries a non-existent metric, silently returning 0.
+
+
 class routing_overhead:
     """Routing overhead phase latency histogram suffixes."""
 

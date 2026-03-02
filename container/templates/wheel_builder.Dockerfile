@@ -130,16 +130,18 @@ RUN git clone --depth 1 --branch ${NIXL_GDRCOPY_REF} https://github.com/NVIDIA/g
     rpm -Uvh gdrcopy-*.el8.${ARCH_ALT}.rpm && \
     rpm -Uvh gdrcopy-devel-*.el8.noarch.rpm
 
-# sccache binary is pre-installed in dynamo_base;
-# COPY it so the install call below skips the GitHub download.
-# Wrapper scripts (sccache-cc, sccache-cxx) are created by use-sccache.sh install.
-COPY --from=dynamo_base /usr/local/bin/sccache /usr/local/bin/sccache
+# sccache binary is pre-installed in dynamo_base; stage it off-PATH so
+# Meson doesn't auto-detect it as a CUDA compiler launcher
+# (https://github.com/mesonbuild/meson/issues/11118).
+# When USE_SCCACHE=true the RUN below symlinks it onto PATH before install.
+COPY --from=dynamo_base /usr/local/bin/sccache /opt/sccache/sccache
 
 ARG USE_SCCACHE
 ARG SCCACHE_BUCKET
 ARG SCCACHE_REGION
 COPY container/use-sccache.sh /tmp/use-sccache.sh
 RUN if [ "$USE_SCCACHE" = "true" ]; then \
+        ln -s /opt/sccache/sccache /usr/local/bin/sccache && \
         /tmp/use-sccache.sh install; \
     fi
 

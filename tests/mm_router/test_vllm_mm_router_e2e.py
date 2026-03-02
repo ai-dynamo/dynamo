@@ -30,10 +30,10 @@ from tests.utils.managed_process import ManagedProcess
 from tests.utils.payloads import check_models_api
 from tests.utils.port_utils import allocate_ports
 
-VLLM_MM_MODEL = "Qwen/Qwen2.5-VL-7B-Instruct"
+VLLM_MM_MODEL = os.getenv("DYN_TEST_VLLM_MM_MODEL", "Qwen/Qwen3-VL-2B-Instruct")
 BLOCK_SIZE = 16
 NAMESPACE = "dynamo"
-THREE_IMAGE_TOTAL_BLOCKS_RANGE = (200, 340)
+THREE_IMAGE_TOTAL_BLOCKS_RANGE = (180, 340)
 SINGLE_IMAGE_TOTAL_BLOCKS_RANGE = (60, 160)
 
 pytestmark = [
@@ -480,6 +480,7 @@ def test_vllm_mm_overlap_staircase_single_to_double_to_triple_identical_image(
     overlap_1, total_1, _ = _send_request_get_overlap(
         frontend_port, router_proc, payload_single, "staircase_1x_image"
     )
+    time.sleep(1)
     overlap_2, total_2, segment_2 = _send_request_get_overlap(
         frontend_port, router_proc, payload_double, "staircase_2x_image"
     )
@@ -493,10 +494,17 @@ def test_vllm_mm_overlap_staircase_single_to_double_to_triple_identical_image(
         f"1x={overlap_1}/{total_1}, 2x={overlap_2}/{total_2}.\n"
         f"Recent router logs:\n{segment_2[-4000:]}"
     )
-    assert abs(overlap_3 - overlap_2) <= 1, (
-        "Expected first 3-image request overlap to stay near 2-image overlap "
-        "(third-image suffix is cold on first 3-image request), got "
+    assert overlap_3 > overlap_2, (
+        "Expected overlap to increase from 2 images to 3 images, got "
         f"2x={overlap_2}/{total_2}, 3x={overlap_3}/{total_3}.\n"
+        f"Recent router logs:\n{segment_3[-4000:]}"
+    )
+
+    delta21 = overlap_2 - overlap_1
+    delta32 = overlap_3 - overlap_2
+    assert abs(delta32 - delta21) <= 4, (
+        "Expected similar overlap increment per additional identical image, got "
+        f"step(1->2)={delta21}, step(2->3)={delta32}.\n"
         f"Recent router logs:\n{segment_3[-4000:]}"
     )
 

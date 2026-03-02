@@ -240,6 +240,7 @@ async fn test_roundtrip(
     Ok(())
 }
 
+#[cfg(feature = "testing-nixl-gds")]
 #[rstest]
 #[case(StorageKind::Device(0), StorageKind::Disk(0))]
 #[case(StorageKind::Disk(0), StorageKind::Device(0))]

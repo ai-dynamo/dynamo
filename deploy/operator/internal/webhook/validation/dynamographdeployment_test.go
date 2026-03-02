@@ -790,7 +790,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					Name:      "test-graph",
 					Namespace: "default",
 					Annotations: map[string]string{
-						consts.KubeAnnotationDynamoOperatorOriginVersion: "1.0.0-dev",
+						consts.KubeAnnotationDynamoOperatorOriginVersion: "1.0.0",
 					},
 				},
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
