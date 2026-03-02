@@ -74,6 +74,7 @@ impl SequenceData {
                             mm_extra_info: None,
                         })
                         .collect(),
+                    group_id: None,
                 }),
                 dp_rank: 0,
             },
@@ -88,6 +89,7 @@ impl SequenceData {
                 event_id,
                 data: KvCacheEventData::Removed(KvCacheRemoveData {
                     block_hashes: self.external_hashes.clone(),
+                    group_id: None,
                 }),
                 dp_rank: 0,
             },

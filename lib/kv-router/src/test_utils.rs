@@ -27,6 +27,7 @@ pub fn add_blocks(
     KvCacheEventData::Stored(KvCacheStoreData {
         parent_hash,
         blocks: make_blocks(hashes),
+        group_id: None,
     })
 }
 
@@ -56,6 +57,52 @@ pub fn create_remove_event(worker_id: WorkerId, event_id: u64, hashes: Vec<u64>)
                     .iter()
                     .map(|i| ExternalSequenceBlockHash(*i * 100))
                     .collect(),
+                group_id: None,
+            }),
+            dp_rank: 0,
+        },
+    }
+}
+
+/// Create a store event with a specific group_id (for hybrid model testing).
+pub fn create_store_event_with_group(
+    worker_id: WorkerId,
+    event_id: u64,
+    hashes: Vec<u64>,
+    parent: Option<ExternalSequenceBlockHash>,
+    group_id: u32,
+) -> RouterEvent {
+    RouterEvent {
+        worker_id,
+        event: KvCacheEvent {
+            event_id,
+            data: KvCacheEventData::Stored(KvCacheStoreData {
+                parent_hash: parent,
+                blocks: make_blocks(hashes),
+                group_id: Some(group_id),
+            }),
+            dp_rank: 0,
+        },
+    }
+}
+
+/// Create a remove event with a specific group_id (for hybrid model testing).
+pub fn create_remove_event_with_group(
+    worker_id: WorkerId,
+    event_id: u64,
+    hashes: Vec<u64>,
+    group_id: u32,
+) -> RouterEvent {
+    RouterEvent {
+        worker_id,
+        event: KvCacheEvent {
+            event_id,
+            data: KvCacheEventData::Removed(KvCacheRemoveData {
+                block_hashes: hashes
+                    .iter()
+                    .map(|i| ExternalSequenceBlockHash(*i * 100))
+                    .collect(),
+                group_id: Some(group_id),
             }),
             dp_rank: 0,
         },

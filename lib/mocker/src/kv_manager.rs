@@ -167,6 +167,7 @@ impl KvManager {
                         mm_extra_info: None,
                     })
                     .collect(),
+                group_id: None,
             })
         } else {
             KvCacheEventData::Removed(KvCacheRemoveData {
@@ -174,6 +175,7 @@ impl KvManager {
                     .into_iter()
                     .map(ExternalSequenceBlockHash)
                     .collect(),
+                group_id: None,
             })
         };
 

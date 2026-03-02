@@ -709,6 +709,7 @@ impl KvIndexer {
                                         event_id: event_id_counter,
                                         data: KvCacheEventData::Removed(KvCacheRemoveData {
                                             block_hashes: vec![p.key],
+                                            group_id: None,
                                         }),
                                         dp_rank: p.worker.dp_rank,
                                     }
@@ -779,6 +780,7 @@ impl KvIndexer {
                                     block_hash: ExternalSequenceBlockHash(*sequence_hash),
                                 mm_extra_info: None,
                                 }).collect(),
+                                group_id: None,
                             });
 
                             let event = RouterEvent::new(
@@ -851,6 +853,7 @@ impl KvIndexer {
                                         event_id: event_id_counter,
                                         data: KvCacheEventData::Removed(KvCacheRemoveData {
                                             block_hashes: vec![e.key],
+                                            group_id: None,
                                         }),
                                         dp_rank: e.worker.dp_rank,
                                     }
@@ -1508,6 +1511,7 @@ impl KvIndexerSharded {
                                             event_id: event_id_counter,
                                             data: KvCacheEventData::Removed(KvCacheRemoveData {
                                                 block_hashes: vec![p.key],
+                                                group_id: None,
                                             }),
                                             dp_rank: p.worker.dp_rank,
                                         }
@@ -1567,6 +1571,7 @@ impl KvIndexerSharded {
                                         block_hash: ExternalSequenceBlockHash(*sequence_hash),
                                 mm_extra_info: None,
                                     }).collect(),
+                                    group_id: None,
                                 });
 
                                 let event = RouterEvent::new(
@@ -1646,6 +1651,7 @@ impl KvIndexerSharded {
                                             event_id: event_id_counter,
                                             data: KvCacheEventData::Removed(KvCacheRemoveData {
                                                 block_hashes: vec![e.key],
+                                                group_id: None,
                                             }),
                                             dp_rank: e.worker.dp_rank,
                                         }
@@ -1971,6 +1977,7 @@ mod tests {
                             mm_extra_info: None,
                         })
                         .collect(),
+                    group_id: None,
                 }),
                 dp_rank: 0,
             },
@@ -2003,6 +2010,7 @@ mod tests {
                             mm_extra_info: None,
                         })
                         .collect(),
+                    group_id: None,
                 }),
                 dp_rank,
             },
@@ -2033,6 +2041,7 @@ mod tests {
                         .iter()
                         .map(|&h| ExternalSequenceBlockHash(h))
                         .collect(),
+                    group_id: None,
                 }),
                 dp_rank,
             },
@@ -2466,6 +2475,7 @@ mod tests {
                 event_id: 0,
                 data: KvCacheEventData::Removed(KvCacheRemoveData {
                     block_hashes: vec![block_3_seq_hash],
+                    group_id: None,
                 }),
                 dp_rank: 0,
             },
@@ -2794,6 +2804,7 @@ mod tests {
                 event_id: 0,
                 data: KvCacheEventData::Removed(KvCacheRemoveData {
                     block_hashes: remove_hashes,
+                    group_id: None,
                 }),
                 dp_rank: 0,
             },
@@ -3475,6 +3486,7 @@ mod tests {
                             tokens_hash: LocalBlockHash(id * 200),
                             mm_extra_info: None,
                         }],
+                        group_id: None,
                     }),
                     dp_rank: 0,
                 },
@@ -3549,6 +3561,7 @@ mod tests {
                         tokens_hash: LocalBlockHash(200),
                         mm_extra_info: None,
                     }],
+                    group_id: None,
                 }),
                 dp_rank: 0,
             },

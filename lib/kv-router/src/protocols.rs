@@ -294,6 +294,10 @@ pub struct KvCacheStoreData {
     pub parent_hash: Option<ExternalSequenceBlockHash>,
     /// A list of stored blocked data.
     pub blocks: Vec<KvCacheStoredBlockData>,
+    /// The KV cache group ID that emitted this event (for hybrid models).
+    /// None for non-hybrid models (backward compatible).
+    #[serde(default)]
+    pub group_id: Option<u32>,
 }
 
 /// Multimodal object information within a block.
@@ -420,6 +424,10 @@ pub struct KvCacheStoredBlockData {
 pub struct KvCacheRemoveData {
     /// A list of block hashes to remove.
     pub block_hashes: Vec<ExternalSequenceBlockHash>,
+    /// The KV cache group ID that emitted this event (for hybrid models).
+    /// None for non-hybrid models (backward compatible).
+    #[serde(default)]
+    pub group_id: Option<u32>,
 }
 
 impl Serialize for LocalBlockHash {
@@ -677,6 +685,7 @@ mod tests {
                     mm_extra_info: None,
                     tokens_hash: LocalBlockHash(13226331709069118873),
                 }],
+                group_id: None,
             }),
             dp_rank: 0,
         };
@@ -752,6 +761,7 @@ mod tests {
                 tokens_hash: LocalBlockHash(3),
                 mm_extra_info: None,
             }],
+            group_id: None,
         });
 
         let event = KvCacheEvent {
@@ -785,6 +795,7 @@ mod tests {
     fn test_kv_cache_remove_data_serialization() {
         let remove_data = KvCacheRemoveData {
             block_hashes: vec![ExternalSequenceBlockHash(4), ExternalSequenceBlockHash(5)],
+            group_id: None,
         };
 
         let serialized = serde_json::to_string(&remove_data).unwrap();

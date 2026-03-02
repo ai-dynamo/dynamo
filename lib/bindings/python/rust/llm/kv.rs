@@ -271,6 +271,7 @@ impl KvEventPublisher {
                         &warning_count,
                         mm_infos_rust.as_deref(),
                     ),
+                    group_id: None,
                 }),
                 dp_rank,
             };
@@ -293,7 +294,7 @@ impl KvEventPublisher {
                 .collect();
             let event = KvCacheEvent {
                 event_id,
-                data: KvCacheEventData::Removed(KvCacheRemoveData { block_hashes }),
+                data: KvCacheEventData::Removed(KvCacheRemoveData { block_hashes, group_id: None }),
                 dp_rank,
             };
 

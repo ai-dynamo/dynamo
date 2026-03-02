@@ -203,6 +203,7 @@ impl SyncIndexer for PositionalIndexer {
                                 tokens_hash: local_hash,
                                 mm_extra_info: None,
                             }],
+                            group_id: None,
                         }),
                         dp_rank: worker.dp_rank,
                     },

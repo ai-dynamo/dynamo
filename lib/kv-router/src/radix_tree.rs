@@ -16,7 +16,7 @@
 
 use std::{
     cell::RefCell,
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{BTreeSet, HashMap, HashSet, VecDeque},
     rc::Rc,
     time::{Duration, Instant},
 };
@@ -38,6 +38,11 @@ pub(crate) struct RadixBlock {
     pub(crate) block_hash: Option<ExternalSequenceBlockHash>,
     /// A buffer of times that this block was last traversed
     pub(crate) recent_uses: VecDeque<Instant>,
+    /// Per-worker group tracking for hybrid models.
+    /// Maps worker -> set of group_ids that have stored this block.
+    /// A worker is only removed from `workers` when all groups that stored
+    /// the block have also evicted it.
+    pub(crate) worker_groups: HashMap<WorkerWithDpRank, BTreeSet<u32>>,
 }
 
 impl RadixBlock {
@@ -52,6 +57,7 @@ impl RadixBlock {
             workers: HashSet::new(),
             block_hash: None,
             recent_uses: VecDeque::new(),
+            worker_groups: HashMap::new(),
         }
     }
 
@@ -66,6 +72,7 @@ impl RadixBlock {
             workers: HashSet::new(),
             block_hash: Some(block_hash),
             recent_uses: VecDeque::new(),
+            worker_groups: HashMap::new(),
         }
     }
 }
@@ -360,6 +367,9 @@ impl RadixTree {
 
                     if needs_worker_insert {
                         parent_mut.workers.insert(worker);
+                        if let Some(gid) = op.group_id {
+                            parent_mut.worker_groups.entry(worker).or_default().insert(gid);
+                        }
                     }
                     needs_worker_insert = true;
 
@@ -414,7 +424,11 @@ impl RadixTree {
 
                 // Insert worker into the last child.
                 if needs_worker_insert {
-                    current.borrow_mut().workers.insert(worker);
+                    let mut last_mut = current.borrow_mut();
+                    last_mut.workers.insert(worker);
+                    if let Some(gid) = op.group_id {
+                        last_mut.worker_groups.entry(worker).or_default().insert(gid);
+                    }
                 }
 
                 Ok(())
@@ -444,13 +458,39 @@ impl RadixTree {
                     };
 
                     let mut guard = entry.borrow_mut();
-                    guard.workers.remove(&worker);
-                    if guard.workers.is_empty() {
-                        // if no workers are using this block, that is true for all children
-                        guard.children.clear();
+
+                    // Group-aware removal: only remove the worker when all groups
+                    // that stored this block have also evicted it.
+                    let should_remove = match remove.group_id {
+                        Some(gid) => {
+                            if let Some(groups) = guard.worker_groups.get_mut(&worker) {
+                                groups.remove(&gid);
+                                groups.is_empty()
+                            } else {
+                                // No group tracking for this worker; conservative remove
+                                true
+                            }
+                        }
+                        None => {
+                            // Legacy behavior (non-hybrid model): immediate remove
+                            guard.worker_groups.remove(&worker);
+                            true
+                        }
+                    };
+
+                    if should_remove {
+                        guard.workers.remove(&worker);
+                        guard.worker_groups.remove(&worker);
+                        if guard.workers.is_empty() {
+                            // if no workers are using this block, that is true for all children
+                            guard.children.clear();
+                            guard.worker_groups.clear();
+                        }
+                        // remove the block from the worker's lookup table
+                        worker_lookup.remove(&block);
                     }
-                    // remove the block from the worker's lookup table
-                    worker_lookup.remove(&block);
+                    // If !should_remove: block stays in tree and lookup —
+                    // other groups still have it cached.
                 }
                 kv_cache_err.map_or(Ok(()), Err)
             }
@@ -476,10 +516,13 @@ impl RadixTree {
         for worker in workers {
             if let Some((worker_key, blocks)) = self.lookup.remove_entry(&worker) {
                 for (_, block) in blocks {
-                    block.borrow_mut().workers.remove(&worker);
+                    let mut bmut = block.borrow_mut();
+                    bmut.workers.remove(&worker);
+                    bmut.worker_groups.remove(&worker);
                     // If no workers are using this block, that is true for all children
-                    if block.borrow().workers.is_empty() {
-                        block.borrow_mut().children.clear();
+                    if bmut.workers.is_empty() {
+                        bmut.children.clear();
+                        bmut.worker_groups.clear();
                     }
                 }
 
@@ -552,6 +595,7 @@ impl RadixTree {
                                 mm_extra_info: None,
                                 tokens_hash,
                             }],
+                            group_id: None,
                         }),
                         dp_rank: worker.dp_rank,
                     },
@@ -578,7 +622,10 @@ impl RadixTree {
 mod tests {
     use super::*;
     use crate::protocols::{ExternalSequenceBlockHash, LocalBlockHash};
-    use crate::test_utils::{create_remove_event, create_store_event};
+    use crate::test_utils::{
+        create_remove_event, create_remove_event_with_group, create_store_event,
+        create_store_event_with_group,
+    };
 
     #[test]
     fn test_radix_tree() {
@@ -1161,5 +1208,224 @@ mod tests {
         assert!(!result.contains_key(&WorkerWithDpRank::from_worker_id(worker_0)));
         assert!(result.contains_key(&WorkerWithDpRank::from_worker_id(worker_1)));
         assert!(result.contains_key(&WorkerWithDpRank::from_worker_id(worker_2)));
+    }
+
+    // =====================================================================
+    // Group-aware radix tree tests (for hybrid models like mamba)
+    // =====================================================================
+
+    #[test]
+    fn test_block_survives_partial_group_eviction() {
+        // Store a block with group_id=0 and group_id=1.
+        // Remove with group_id=0 -> worker should still be present.
+        // Remove with group_id=1 -> worker should be removed.
+        let mut trie = RadixTree::new();
+        let worker = 0;
+
+        // Store block [1] from group 0
+        trie.apply_event(create_store_event_with_group(worker, 1, vec![1], None, 0))
+            .unwrap();
+
+        // Store same block [1] from group 1
+        trie.apply_event(create_store_event_with_group(worker, 2, vec![1], None, 1))
+            .unwrap();
+
+        // Verify worker is present
+        let scores = trie.find_matches(vec![LocalBlockHash(1)], false);
+        assert_eq!(
+            scores
+                .scores
+                .get(&WorkerWithDpRank::from_worker_id(worker)),
+            Some(&1)
+        );
+
+        // Remove block from group 0 only
+        trie.apply_event(create_remove_event_with_group(worker, 3, vec![1], 0))
+            .unwrap();
+
+        // Worker should still be present (group 1 still has it)
+        let scores = trie.find_matches(vec![LocalBlockHash(1)], false);
+        assert_eq!(
+            scores
+                .scores
+                .get(&WorkerWithDpRank::from_worker_id(worker)),
+            Some(&1),
+            "Worker should remain after partial group eviction"
+        );
+
+        // Block should still be in lookup
+        assert_eq!(
+            trie.lookup
+                .get(&WorkerWithDpRank::from_worker_id(worker))
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // Remove block from group 1
+        trie.apply_event(create_remove_event_with_group(worker, 4, vec![1], 1))
+            .unwrap();
+
+        // Now worker should be gone from this block
+        let scores = trie.find_matches(vec![LocalBlockHash(1)], false);
+        assert!(
+            scores
+                .scores
+                .get(&WorkerWithDpRank::from_worker_id(worker))
+                .is_none(),
+            "Worker should be removed after all groups evicted"
+        );
+
+        // Block should be removed from lookup
+        assert_eq!(
+            trie.lookup
+                .get(&WorkerWithDpRank::from_worker_id(worker))
+                .unwrap()
+                .len(),
+            0
+        );
+    }
+
+    #[test]
+    fn test_backward_compat_group_id_none() {
+        // Store and remove with group_id=None should behave exactly like before.
+        let mut trie = RadixTree::new();
+        let worker = 0;
+
+        trie.apply_event(create_store_event(worker, 1, vec![1, 2], None))
+            .unwrap();
+
+        let scores = trie.find_matches(vec![LocalBlockHash(1), LocalBlockHash(2)], false);
+        assert_eq!(
+            scores
+                .scores
+                .get(&WorkerWithDpRank::from_worker_id(worker)),
+            Some(&2)
+        );
+
+        // Remove with group_id=None (legacy behavior)
+        trie.apply_event(create_remove_event(worker, 2, vec![2]))
+            .unwrap();
+
+        // Block 2 should be removed immediately
+        assert_eq!(
+            trie.lookup
+                .get(&WorkerWithDpRank::from_worker_id(worker))
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn test_all_blocks_cleared_clears_groups() {
+        // Store with multiple groups, send Cleared, verify empty.
+        let mut trie = RadixTree::new();
+        let worker = 0;
+
+        trie.apply_event(create_store_event_with_group(worker, 1, vec![1], None, 0))
+            .unwrap();
+        trie.apply_event(create_store_event_with_group(worker, 2, vec![1], None, 1))
+            .unwrap();
+
+        // Clear all blocks
+        trie.clear_all_blocks(worker);
+
+        // Worker should have no blocks
+        assert!(
+            trie.lookup
+                .get(&WorkerWithDpRank::from_worker_id(worker))
+                .unwrap()
+                .is_empty()
+        );
+
+        // No matches
+        let scores = trie.find_matches(vec![LocalBlockHash(1)], false);
+        assert!(
+            scores
+                .scores
+                .get(&WorkerWithDpRank::from_worker_id(worker))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn test_mixed_group_id_presence() {
+        // Store with group_id=Some(0), remove with group_id=None → conservative remove.
+        let mut trie = RadixTree::new();
+        let worker = 0;
+
+        // Store with group tracking
+        trie.apply_event(create_store_event_with_group(worker, 1, vec![1], None, 0))
+            .unwrap();
+
+        // Remove without group tracking (legacy) → should remove conservatively
+        trie.apply_event(create_remove_event(worker, 2, vec![1]))
+            .unwrap();
+
+        // Worker should be removed (None means legacy immediate remove)
+        let scores = trie.find_matches(vec![LocalBlockHash(1)], false);
+        assert!(
+            scores
+                .scores
+                .get(&WorkerWithDpRank::from_worker_id(worker))
+                .is_none(),
+            "Legacy remove (group_id=None) should remove worker immediately"
+        );
+    }
+
+    #[test]
+    fn test_multi_block_chain_with_groups() {
+        // Store a chain of blocks from two groups, evict from one group,
+        // verify the chain stays until both groups evict.
+        let mut trie = RadixTree::new();
+        let worker = 0;
+
+        // Group 0 stores blocks [1, 2]
+        trie.apply_event(create_store_event_with_group(
+            worker,
+            1,
+            vec![1, 2],
+            None,
+            0,
+        ))
+        .unwrap();
+
+        // Group 1 stores same blocks [1, 2]
+        trie.apply_event(create_store_event_with_group(
+            worker,
+            2,
+            vec![1, 2],
+            None,
+            1,
+        ))
+        .unwrap();
+
+        // Evict block 2 from group 0
+        trie.apply_event(create_remove_event_with_group(worker, 3, vec![2], 0))
+            .unwrap();
+
+        // Block 2 should still be present (group 1 has it)
+        let scores = trie.find_matches(vec![LocalBlockHash(1), LocalBlockHash(2)], false);
+        assert_eq!(
+            scores
+                .scores
+                .get(&WorkerWithDpRank::from_worker_id(worker)),
+            Some(&2)
+        );
+
+        // Evict block 2 from group 1
+        trie.apply_event(create_remove_event_with_group(worker, 4, vec![2], 1))
+            .unwrap();
+
+        // Now block 2 should be gone, but block 1 should still be there
+        let scores = trie.find_matches(vec![LocalBlockHash(1), LocalBlockHash(2)], false);
+        assert_eq!(
+            scores
+                .scores
+                .get(&WorkerWithDpRank::from_worker_id(worker)),
+            Some(&1),
+            "Only block 1 should remain"
+        );
     }
 }

@@ -576,6 +576,7 @@ fn convert_event(
             block_size,
             lora_id,
             block_mm_infos,
+            group_id,
             ..
         } => {
             // Reject self-referencing blocks: all block hashes (including parent) must be unique.
@@ -618,11 +619,16 @@ fn convert_event(
                         warning_count,
                         block_mm_infos.as_deref(),
                     ),
+                    group_id,
                 }),
                 dp_rank,
             }
         }
-        RawKvEvent::BlockRemoved { block_hashes, .. } => {
+        RawKvEvent::BlockRemoved {
+            block_hashes,
+            group_id,
+            ..
+        } => {
             let hashes = block_hashes
                 .into_iter()
                 .map(BlockHashValue::into_u64)
@@ -632,6 +638,7 @@ fn convert_event(
                 event_id,
                 data: KvCacheEventData::Removed(KvCacheRemoveData {
                     block_hashes: hashes,
+                    group_id,
                 }),
                 dp_rank,
             }
@@ -778,11 +785,17 @@ enum RawKvEvent {
         /// Multimodal extra info for each block (length should match block_hashes)
         #[serde(default, skip_serializing_if = "Option::is_none")]
         block_mm_infos: Option<Vec<Option<BlockExtraInfo>>>,
+        /// KV cache group ID for hybrid models (e.g. hybrid mamba).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        group_id: Option<u32>,
     },
     BlockRemoved {
         block_hashes: Vec<BlockHashValue>,
         #[serde(skip_serializing_if = "Option::is_none")]
         medium: Option<String>,
+        /// KV cache group ID for hybrid models (e.g. hybrid mamba).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        group_id: Option<u32>,
     },
     AllBlocksCleared,
 }
@@ -878,6 +891,7 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
         let mut lora_name: Option<Option<String>> = None;
         let mut extra_keys: Option<Option<Vec<Option<Vec<String>>>>> = None;
         let mut block_mm_infos: Option<Option<Vec<Option<BlockExtraInfo>>>> = None;
+        let mut group_id: Option<Option<u32>> = None;
 
         while let Some(key) = map.next_key::<String>()? {
             match key.as_str() {
@@ -911,6 +925,9 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                 "block_mm_infos" => {
                     block_mm_infos = Some(map.next_value()?);
                 }
+                "group_id" => {
+                    group_id = Some(map.next_value()?);
+                }
                 _ => {
                     map.next_value::<IgnoredAny>()?;
                 }
@@ -936,6 +953,7 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                     medium: medium.unwrap_or(None),
                     lora_name: lora_name.unwrap_or(None),
                     block_mm_infos,
+                    group_id: group_id.unwrap_or(None),
                 })
             }
             Some("BlockRemoved") => {
@@ -944,6 +962,7 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                 Ok(RawKvEvent::BlockRemoved {
                     block_hashes,
                     medium: medium.unwrap_or(None),
+                    group_id: group_id.unwrap_or(None),
                 })
             }
             Some("AllBlocksCleared") => Ok(RawKvEvent::AllBlocksCleared),
@@ -982,6 +1001,7 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                 let lora_id: Option<u64> = seq.next_element()?.unwrap_or(None);
                 let medium: Option<String> = seq.next_element()?.unwrap_or(None);
                 let lora_name: Option<String> = seq.next_element()?.unwrap_or(None);
+                let group_id: Option<u32> = seq.next_element()?.unwrap_or(None);
                 let extra_keys: Option<Vec<Option<Vec<String>>>> =
                     seq.next_element()?.unwrap_or(None);
                 let block_mm_infos: Option<Vec<Option<BlockExtraInfo>>> =
@@ -1001,6 +1021,7 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                     medium,
                     lora_name,
                     block_mm_infos,
+                    group_id,
                 })
             }
             "BlockRemoved" => {
@@ -1008,12 +1029,14 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                     .next_element()?
                     .ok_or_else(|| de::Error::invalid_length(1, &"missing block_hashes"))?;
                 let medium: Option<String> = seq.next_element()?.unwrap_or(None);
+                let group_id: Option<u32> = seq.next_element()?.unwrap_or(None);
 
                 while seq.next_element::<IgnoredAny>()?.is_some() {}
 
                 Ok(RawKvEvent::BlockRemoved {
                     block_hashes,
                     medium,
+                    group_id,
                 })
             }
             "AllBlocksCleared" => {
@@ -1245,10 +1268,34 @@ mod test_event_processing {
             medium: None,
             lora_name: None,
             block_mm_infos: None,
+            group_id: None,
         };
 
         let out = convert_event(raw_evt, 42, kv_block_size, 0, &Arc::new(AtomicU32::new(0)));
         assert!(matches!(out.data, KvCacheEventData::Stored(_)));
+    }
+
+    #[test]
+    fn test_convert_event_block_stored_with_group_id() {
+        let kv_block_size = 4;
+        let raw_evt = RawKvEvent::BlockStored {
+            block_hashes: vec![BlockHashValue::Unsigned(10)],
+            parent_block_hash: None,
+            token_ids: vec![1, 2, 3, 4],
+            block_size: 4,
+            lora_id: None,
+            medium: None,
+            lora_name: None,
+            block_mm_infos: None,
+            group_id: Some(2),
+        };
+
+        let out = convert_event(raw_evt, 42, kv_block_size, 0, &Arc::new(AtomicU32::new(0)));
+        if let KvCacheEventData::Stored(store_data) = &out.data {
+            assert_eq!(store_data.group_id, Some(2));
+        } else {
+            panic!("Expected Stored event");
+        }
     }
 
     #[test]
@@ -1257,10 +1304,28 @@ mod test_event_processing {
         let raw_evt = RawKvEvent::BlockRemoved {
             block_hashes: vec![BlockHashValue::Unsigned(123), BlockHashValue::Signed(456)],
             medium: None,
+            group_id: None,
         };
         let out = convert_event(raw_evt, 7, kv_block_size, 0, &Arc::new(AtomicU32::new(0)));
 
         assert!(matches!(out.data, KvCacheEventData::Removed(_)));
+    }
+
+    #[test]
+    fn test_convert_event_block_removed_with_group_id() {
+        let kv_block_size = 4;
+        let raw_evt = RawKvEvent::BlockRemoved {
+            block_hashes: vec![BlockHashValue::Unsigned(123)],
+            medium: None,
+            group_id: Some(1),
+        };
+        let out = convert_event(raw_evt, 7, kv_block_size, 0, &Arc::new(AtomicU32::new(0)));
+
+        if let KvCacheEventData::Removed(remove_data) = &out.data {
+            assert_eq!(remove_data.group_id, Some(1));
+        } else {
+            panic!("Expected Removed event");
+        }
     }
 
     #[test]
@@ -1319,6 +1384,7 @@ mod test_event_processing {
             None::<u64>,
             None::<String>,
             None::<String>,
+            None::<u32>,  // group_id
             vec![Some(vec![mm_hash])],
         ))
         .unwrap();
@@ -1351,6 +1417,7 @@ mod test_event_processing {
             lora_id: Option<u64>,
             medium: Option<String>,
             lora_name: Option<String>,
+            group_id: Option<u32>,
             extra_keys: Option<Vec<Option<Vec<String>>>>,
         }
 
@@ -1363,6 +1430,7 @@ mod test_event_processing {
             lora_id: None,
             medium: Some("GPU".to_string()),
             lora_name: None,
+            group_id: None,
             extra_keys: Some(vec![Some(vec![
                 "0123456789abcdef00112233445566778899aabbccddeefffedcba9876543210".to_string(),
             ])]),
@@ -1436,6 +1504,7 @@ mod tests_startup_helpers {
             event_id: 1,
             data: KvCacheEventData::Removed(KvCacheRemoveData {
                 block_hashes: vec![ExternalSequenceBlockHash(1), ExternalSequenceBlockHash(2)],
+                group_id: None,
             }),
             dp_rank: 0,
         };
@@ -1487,6 +1556,7 @@ mod tests_startup_helpers {
                         mm_extra_info: None,
                     },
                 ],
+                group_id: None,
             }),
             dp_rank: 0,
         };
@@ -1571,6 +1641,7 @@ mod tests_startup_helpers {
                     tokens_hash: LocalBlockHash(200),
                     mm_extra_info: None,
                 }],
+                group_id: None,
             }),
             dp_rank: 0,
         };
@@ -1592,6 +1663,7 @@ mod tests_startup_helpers {
             event_id: 2,
             data: KvCacheEventData::Removed(KvCacheRemoveData {
                 block_hashes: vec![ExternalSequenceBlockHash(100)],
+                group_id: None,
             }),
             dp_rank: 0,
         };
@@ -1652,6 +1724,7 @@ mod tests_startup_helpers {
                     tokens_hash: LocalBlockHash(200),
                     mm_extra_info: None,
                 }],
+                group_id: None,
             }),
             dp_rank: 0,
         };
@@ -1728,6 +1801,7 @@ mod tests_startup_helpers {
             event_id: 1,
             data: KvCacheEventData::Removed(KvCacheRemoveData {
                 block_hashes: vec![ExternalSequenceBlockHash(1)],
+                group_id: None,
             }),
             dp_rank: 0,
         };
@@ -1799,6 +1873,7 @@ mod tests_startup_helpers {
             medium: None,
             lora_name: None,
             block_mm_infos: None,
+            group_id: None,
         }];
 
         let batch = KvEventBatch {
@@ -1830,6 +1905,7 @@ mod tests_startup_helpers {
         let KvCacheEventData::Stored(KvCacheStoreData {
             parent_hash,
             blocks,
+            ..
         }) = event.data
         else {
             panic!("expected KvCacheStoreData");
@@ -1897,6 +1973,7 @@ mod tests_startup_helpers {
                         mm_extra_info: None,
                     },
                 ],
+                group_id: None,
             }),
             dp_rank: 0,
         };
@@ -1963,6 +2040,7 @@ mod tests_startup_helpers {
                         mm_extra_info: None,
                     },
                 ],
+                group_id: None,
             }),
             dp_rank: 0,
         };

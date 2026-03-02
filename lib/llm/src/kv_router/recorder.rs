@@ -36,6 +36,7 @@ mod tests {
         KvCacheEventData::Stored(KvCacheStoreData {
             parent_hash,
             blocks: make_blocks(hashes),
+            group_id: None,
         })
     }
 
@@ -65,6 +66,7 @@ mod tests {
                         .iter()
                         .map(|i| ExternalSequenceBlockHash(*i * 100))
                         .collect(),
+                    group_id: None,
                 }),
                 dp_rank: 0,
             },

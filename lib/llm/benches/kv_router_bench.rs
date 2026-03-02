@@ -573,6 +573,7 @@ impl SequenceData {
                         mm_extra_info: None,
                     })
                     .collect(),
+                group_id: None,
             }),
             dp_rank: 0,
         };
