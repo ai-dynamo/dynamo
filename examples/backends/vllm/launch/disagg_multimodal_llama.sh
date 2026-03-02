@@ -52,8 +52,11 @@ echo "=========================================="
 echo "Launching Disaggregated Multimodal Llama 4 (Multi-Node)"
 echo "=========================================="
 echo "Model:       $MODEL_NAME"
+if [[ $HEAD_NODE -eq 1 ]]; then
 echo "Frontend:    http://localhost:$HTTP_PORT"
+fi
 echo "=========================================="
+if [[ $HEAD_NODE -eq 1 ]]; then
 echo ""
 echo "Example test command:"
 echo ""
@@ -71,6 +74,7 @@ echo "      }],"
 echo "      \"max_tokens\": 50"
 echo "    }'"
 echo ""
+fi
 echo "=========================================="
 
 # Use TCP transport to avoid NATS payload limits for multimodal

@@ -59,7 +59,12 @@ PD_MAX_MODEL_LEN="16384"
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 echo "=========================================="
-echo "Launching Disaggregated Multimodal E+PD (2 GPUs)"
+if [[ "$SINGLE_GPU" == "true" ]]; then
+    GPU_LABEL="1 GPU"
+else
+    GPU_LABEL="2 GPUs"
+fi
+echo "Launching Disaggregated Multimodal E+PD ($GPU_LABEL)"
 echo "=========================================="
 echo "Model:       $MODEL_NAME"
 echo "Frontend:    http://localhost:$HTTP_PORT"

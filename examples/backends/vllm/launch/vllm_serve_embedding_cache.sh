@@ -54,6 +54,7 @@ echo "=========================================="
 
 CUDA_VISIBLE_DEVICES=2 \
 vllm serve $MODEL \
+    --port "$HTTP_PORT" \
     --enable-log-requests \
     --max-model-len 16384 \
     --gpu-memory-utilization .9 \

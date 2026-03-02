@@ -39,7 +39,7 @@ Dynamo supports [vLLM prompt embeddings](https://docs.vllm.ai/en/stable/features
 
 When using KV-aware routing, ensure deterministic hashing across processes to avoid radix tree mismatches. Choose one of the following:
 
-- Set `PYTHONHASHSEED=0` for all vLLM processes when relying on Python's builtin hashing for prefix caching.
+- Set `PYTHONHASHSEED=0` for all vLLM processes when relying on Python's built-in hashing for prefix caching.
 - If your vLLM version supports it, configure a deterministic prefix caching algorithm:
 
 ```bash

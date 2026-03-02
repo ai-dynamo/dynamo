@@ -58,7 +58,12 @@ done
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 echo "=========================================="
-echo "Launching Disaggregated Multimodal E/P/D (3 GPUs)"
+if [[ "$SINGLE_GPU" == "true" ]]; then
+    GPU_LABEL="1 GPU"
+else
+    GPU_LABEL="3 GPUs"
+fi
+echo "Launching Disaggregated Multimodal E/P/D ($GPU_LABEL)"
 echo "=========================================="
 echo "Model:       $MODEL_NAME"
 echo "Frontend:    http://localhost:$HTTP_PORT"

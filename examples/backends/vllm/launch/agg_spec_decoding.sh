@@ -28,7 +28,7 @@ echo "=========================================="
 # ---------------------------
 # 1. Frontend (Ingress)
 # ---------------------------
-python -m dynamo.frontend --http-port=8000 &
+python -m dynamo.frontend --http-port="$HTTP_PORT" &
 
 
 # ---------------------------
