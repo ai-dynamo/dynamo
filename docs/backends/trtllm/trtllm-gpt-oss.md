@@ -4,6 +4,10 @@
 title: GPT-OSS
 ---
 
+For general TensorRT-LLM features and configuration, see the [Reference Guide](trtllm-reference-guide.md).
+
+---
+
 Dynamo supports disaggregated serving of gpt-oss-120b with TensorRT-LLM. This guide demonstrates how to deploy gpt-oss-120b using disaggregated prefill/decode serving on a single B200 node with 8 GPUs, running 1 prefill worker on 4 GPUs and 1 decode worker on 4 GPUs.
 
 ## Overview
@@ -170,7 +174,7 @@ CUDA_VISIBLE_DEVICES=4,5,6,7 python3 -m dynamo.trtllm \
   --expert-parallel-size 4
 ```
 
-### 6. Verify the Deployment is Ready
+### 5. Verify the Deployment is Ready
 
 Poll the `/health` endpoint to verify that both the prefill and decode worker endpoints have started:
 ```
@@ -210,7 +214,7 @@ The server exposes a standard OpenAI-compatible API endpoint that accepts JSON r
 ### 8. Reasoning and Tool Calling
 
 Dynamo has supported reasoning and tool calling in OpenAI Chat Completion endpoint. A typical workflow for application built on top of Dynamo
-is that the application has a set of tools to aid the assistant provide accurate answer, and it is ususally
+is that the application has a set of tools to aid the assistant provide accurate answer, and it is usually
 multi-turn as it involves tool selection and generation based on the tool result.
 
 In addition, the reasoning effort can be configured through ```chat_template_args```. Increasing the reasoning effort makes the model more accurate but also slower. It supports three levels: ```low```, ```medium```, and ```high```.

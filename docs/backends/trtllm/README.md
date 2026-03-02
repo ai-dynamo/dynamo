@@ -88,4 +88,3 @@ You can deploy TensorRT-LLM with Dynamo on Kubernetes using a `DynamoGraphDeploy
 - **[Prometheus Metrics](trtllm-prometheus.md)**: Metrics and monitoring
 - **[Multinode Examples](multinode/trtllm-multinode-examples.md)**: Multi-node deployment with SLURM
 - **[Deploying TensorRT-LLM with Dynamo on Kubernetes](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm/deploy/README.md)**: Kubernetes deployment guide
-- **[Building a Custom Container](trtllm-building-custom-container.md)**: Build a TensorRT-LLM container from source

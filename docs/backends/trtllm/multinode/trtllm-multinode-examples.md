@@ -4,6 +4,10 @@
 title: Multinode Examples
 ---
 
+For general TensorRT-LLM features and configuration, see the [Reference Guide](../trtllm-reference-guide.md).
+
+---
+
 > **Note:** The scripts referenced in this example (such as `srun_aggregated.sh` and `srun_disaggregated.sh`) can be found in [`examples/basics/multinode/trtllm/`](https://github.com/ai-dynamo/dynamo/tree/main/examples/basics/multinode/trtllm/).
 
 To run a single Dynamo+TRTLLM Worker that spans multiple nodes (ex: TP16),
@@ -37,7 +41,7 @@ For simplicity of the example, we will make some assumptions about your slurm cl
    If your cluster supports similar container based plugins, you may be able to
    modify the script to use that instead.
 3. Third, we assume you have already built a recent Dynamo+TRTLLM container image as
-   described [here](../README.md#build-container).
+   described in the [Building a Custom Container](../trtllm-building-custom-container.md) guide.
    This is the image that can be set to the `IMAGE` environment variable in later steps.
 4. Fourth, we assume you pre-allocate a group of nodes using `salloc`. We
    will allocate 8 nodes below as a reference command to have enough capacity
@@ -75,8 +79,8 @@ inside an interactive shell on one of the allocated nodes, set the
 following environment variables based:
 ```bash
 # NOTE: IMAGE must be set manually for now
-# To build an iamge, see the steps here:
-# ../README.md#build-container
+# To build an image, see the steps here:
+# ../trtllm-building-custom-container.md
 export IMAGE="<dynamo_trtllm_image>"
 
 # MOUNTS are the host:container path pairs that are mounted into the containers
