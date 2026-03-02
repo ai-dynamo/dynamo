@@ -4,6 +4,9 @@
 name: Release Pipeline
 
 on:
+  push:
+    branches:
+      - 'pvijayakrish/remove-builds-release'  # TEMPORARY: remove after testing
   workflow_dispatch:
     inputs:
       post_merge_run_id:
@@ -41,19 +44,13 @@ jobs:
         id: extract
         run: |
           BRANCH_NAME="${GITHUB_REF#refs/heads/}"
-          VERSION="${BRANCH_NAME#release/}"
 
-          if [[ ! "$BRANCH_NAME" =~ ^release/[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "Error: workflow_dispatch can only be triggered from release/* branches"
-            echo "Current branch: $BRANCH_NAME"
-            echo "Expected pattern: release/X.Y.Z (e.g., release/0.7.0)"
-            exit 1
-          fi
-
-          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "Error: Invalid version format: $VERSION"
-            echo "Expected format: X.Y.Z (e.g., 0.7.0)"
-            exit 1
+          # TEMPORARY: hardcode test version for non-release branches
+          if [[ "$BRANCH_NAME" =~ ^release/[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            VERSION="${BRANCH_NAME#release/}"
+          else
+            echo "Warning: Not a release branch ($BRANCH_NAME), using test version 0.0.0-test"
+            VERSION="0.0.0-test"
           fi
 
           echo "version=${VERSION}" >> $GITHUB_OUTPUT

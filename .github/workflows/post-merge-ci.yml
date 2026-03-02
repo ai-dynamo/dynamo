@@ -7,6 +7,7 @@ on:
   push:
     branches:
       - 'release/*.*.*'
+      - 'pvijayakrish/remove-builds-release'  # TEMPORARY: remove after testing
 
 permissions:
   contents: read
@@ -28,8 +29,14 @@ jobs:
         id: compute
         run: |
           set -euo pipefail
-          VERSION="${{ github.ref_name }}"
-          VERSION="${VERSION#release/}"
+          BRANCH="${{ github.ref_name }}"
+          # TEMPORARY: hardcode test version for non-release branches
+          if [[ "$BRANCH" =~ ^release/[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            VERSION="${BRANCH#release/}"
+          else
+            echo "Warning: Not a release branch ($BRANCH), using test version 0.0.0-test"
+            VERSION="0.0.0-test"
+          fi
           echo "image_prefix=release-${VERSION}" >> "$GITHUB_OUTPUT"
           echo "image_prefix_runid=release-${VERSION}-${{ github.run_id }}" >> "$GITHUB_OUTPUT"
 
