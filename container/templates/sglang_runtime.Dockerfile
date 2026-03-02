@@ -69,34 +69,31 @@ ENV SGLANG_VERSION="${RUNTIME_IMAGE_TAG%%-*}"
 
 {% if target not in ("dev", "local-dev") %}
 # Install packages as root to ensure they go to system location (/usr/local/lib/python3.12/dist-packages)
-ARG ENABLE_GPU_MEMORY_SERVICE
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     export PIP_CACHE_DIR=/root/.cache/pip && \
     pip install --break-system-packages \
         /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
         /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
         /opt/dynamo/wheelhouse/nixl/nixl*.whl \
-        sglang==${SGLANG_VERSION} && \
-    if [ "${ENABLE_GPU_MEMORY_SERVICE}" = "true" ]; then \
-        GMS_WHEEL=$(ls /opt/dynamo/wheelhouse/gpu_memory_service*.whl 2>/dev/null | head -1); \
-        if [ -z "$GMS_WHEEL" ]; then \
-            echo "ERROR: ENABLE_GPU_MEMORY_SERVICE is true but no gpu_memory_service wheel found in wheelhouse" >&2; \
-            exit 1; \
-        fi; \
-        pip install --no-cache-dir --break-system-packages "$GMS_WHEEL"; \
-    fi
+        sglang==${SGLANG_VERSION}
 {% else %}
 # Dev/local-dev: skip dynamo wheel install (users build from source via cargo build + maturin develop).
-# gpu_memory_service and benchmarks are also skipped; install from source if needed:
-#   pip install -e /workspace/lib/gpu_memory_service
-#   cd /workspace/benchmarks && pip install .
-# Install NIXL wheel and sglang only.
+# Install NIXL wheel (pre-built C++ binary, not buildable from source) and sglang.
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     export PIP_CACHE_DIR=/root/.cache/pip && \
     pip install --break-system-packages \
         /opt/dynamo/wheelhouse/nixl/nixl*.whl \
         sglang==${SGLANG_VERSION}
 {% endif %}
+
+# Install gpu_memory_service wheel if enabled (all targets)
+ARG ENABLE_GPU_MEMORY_SERVICE
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    if [ "${ENABLE_GPU_MEMORY_SERVICE}" = "true" ]; then \
+        export PIP_CACHE_DIR=/root/.cache/pip && \
+        GMS_WHEEL=$(ls /opt/dynamo/wheelhouse/gpu_memory_service*.whl 2>/dev/null | head -1); \
+        if [ -n "$GMS_WHEEL" ]; then pip install --no-cache-dir --break-system-packages "$GMS_WHEEL"; fi; \
+    fi
 
 {% if target not in ("dev", "local-dev") %}
 # Copy benchmarks after wheel install so benchmarks changes don't invalidate the layer above

@@ -100,21 +100,12 @@ ENV VIRTUAL_ENV=/opt/dynamo/venv \
 # Install dynamo wheels (runtime packages only, no test dependencies)
 # uv handles its own locking for the cache, no need to add sharing=locked
 ARG ENABLE_KVBM
-ARG ENABLE_GPU_MEMORY_SERVICE
 RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
     uv pip install \
     /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
     /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
     /opt/dynamo/wheelhouse/nixl/nixl*.whl && \
-    if [ "$ENABLE_GPU_MEMORY_SERVICE" = "true" ]; then \
-        GMS_WHEEL=$(ls /opt/dynamo/wheelhouse/gpu_memory_service*.whl 2>/dev/null | head -1); \
-        if [ -z "$GMS_WHEEL" ]; then \
-            echo "ERROR: ENABLE_GPU_MEMORY_SERVICE is true but no gpu_memory_service wheel found in wheelhouse" >&2; \
-            exit 1; \
-        fi; \
-        uv pip install "$GMS_WHEEL"; \
-    fi && \
     if [ "$ENABLE_KVBM" = "true" ]; then \
         KVBM_WHEEL=$(ls /opt/dynamo/wheelhouse/kvbm*.whl 2>/dev/null | head -1); \
         if [ -z "$KVBM_WHEEL" ]; then \
@@ -125,13 +116,20 @@ RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
     fi
 {% else %}
 # Dev/local-dev: skip dynamo wheel install (users build from source via cargo build + maturin develop).
-# gpu_memory_service is also skipped; install from source if needed:
-#   pip install -e /workspace/lib/gpu_memory_service
 # Install NIXL wheel only (pre-built C++ binary, not buildable from source).
 RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
     uv pip install /opt/dynamo/wheelhouse/nixl/nixl*.whl
 {% endif %}
+
+# Install gpu_memory_service wheel if enabled (all targets)
+ARG ENABLE_GPU_MEMORY_SERVICE
+RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
+    if [ "${ENABLE_GPU_MEMORY_SERVICE}" = "true" ]; then \
+        export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
+        GMS_WHEEL=$(ls /opt/dynamo/wheelhouse/gpu_memory_service*.whl 2>/dev/null | head -1); \
+        if [ -n "$GMS_WHEEL" ]; then uv pip install "$GMS_WHEEL"; fi; \
+    fi
 
 # Initialize Git LFS (required for git+https dependencies with LFS artifacts)
 RUN git lfs install

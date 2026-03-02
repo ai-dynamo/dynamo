@@ -378,8 +378,7 @@ RUN mkdir -p /opt/dynamo/dist ${CARGO_TARGET_DIR} && \
     touch /opt/dynamo/dist/.placeholder.whl
 {% endif %}
 
-{% if target not in ("dev", "local-dev") %}
-# Build gpu_memory_service wheel for runtime targets (dev/local-dev install from source if needed)
+# Build gpu_memory_service wheel (small C++ extension, fast build -- built for all targets)
 ARG ENABLE_GPU_MEMORY_SERVICE
 RUN --mount=type=cache,target=/root/.cache/uv \
     if [ "$ENABLE_GPU_MEMORY_SERVICE" = "true" ]; then \
@@ -387,4 +386,3 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         source ${VIRTUAL_ENV}/bin/activate && \
         uv build --wheel --out-dir /opt/dynamo/dist /opt/dynamo/lib/gpu_memory_service; \
     fi
-{% endif %}
