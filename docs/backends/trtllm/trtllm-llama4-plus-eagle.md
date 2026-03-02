@@ -33,7 +33,7 @@ export MODEL_PATH="nvidia/Llama-4-Maverick-17B-128E-Instruct-FP8"
 export SERVED_MODEL_NAME="nvidia/Llama-4-Maverick-17B-128E-Instruct-FP8"
 ```
 
-See [this](./multinode/trtllm-multinode-examples.md#setup) section from multinode guide to learn more about the above options.
+See the [multinode setup instructions](./multinode/trtllm-multinode-examples.md#setup) to learn more about the above options.
 
 
 ## Aggregated Serving
@@ -55,7 +55,7 @@ export DECODE_ENGINE_CONFIG="/mnt/examples/backends/trtllm/engine_configs/llama4
 
 ## Example Request
 
-See [here](./multinode/trtllm-multinode-examples.md#example-request) to learn how to send a request to the deployment.
+See the [example request section](./multinode/trtllm-multinode-examples.md#example-request) to learn how to send a request to the deployment.
 
 ```
 curl localhost:8000/v1/chat/completions -H "Content-Type: application/json" -d '{
