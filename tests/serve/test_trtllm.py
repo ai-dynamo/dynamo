@@ -260,8 +260,6 @@ trtllm_configs = {
             )
         ],
         env={
-            "PREFILL_CUDA_VISIBLE_DEVICES": "0",
-            "DECODE_CUDA_VISIBLE_DEVICES": "0",
             "ENCODE_CUDA_VISIBLE_DEVICES": "0",
         },
     ),
