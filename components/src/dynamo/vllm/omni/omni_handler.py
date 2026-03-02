@@ -132,12 +132,24 @@ class OmniHandler(BaseOmniHandler):
             and isinstance(parsed_request, NvCreateVideoRequest)
             and parsed_request.input_reference
         ):
-            logger.info(
-                "Loading input_reference for I2V: %s",
-                parsed_request.input_reference[:120],
-            )
-            image = await self._image_loader.load_image(parsed_request.input_reference)
-            logger.info("Image loaded: size=%s, mode=%s", image.size, image.mode)
+            try:
+                logger.info("Loading input_reference for I2V request")
+                image = await self._image_loader.load_image(
+                    parsed_request.input_reference
+                )
+                logger.info(
+                    "I2V image loaded: size=%s, mode=%s", image.size, image.mode
+                )
+            except Exception as e:
+                logger.warning("Failed to load I2V input_reference: %s", e)
+                yield {
+                    "id": request_id,
+                    "object": "video",
+                    "model": self.config.model,
+                    "status": "failed",
+                    "error": f"Failed to load input_reference: {e}",
+                }
+                return
 
         inputs = self.build_engine_inputs(parsed_request, request_type, image=image)
 

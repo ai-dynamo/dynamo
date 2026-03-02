@@ -21,6 +21,10 @@ EXTRA_ARGS=()
 while [[ $# -gt 0 ]]; do
     case $1 in
         --model)
+            if [[ $# -lt 2 || "$2" == --* ]]; then
+                echo "Error: --model requires a value" >&2
+                exit 1
+            fi
             MODEL="$2"
             shift 2
             ;;
