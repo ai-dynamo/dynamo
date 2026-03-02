@@ -603,7 +603,10 @@ def run_migration_test(
         )
     else:
         try:
-            validate_response(request_thread, response_list, validate_delay=stream)
+            # Don't validate delay: when migration is disabled, the request is expected
+            # to fail and the error may arrive late (e.g. ~10 s TCP timeout while the
+            # frontend attempts stream recreation before giving up).
+            validate_response(request_thread, response_list, validate_delay=False)
             pytest.fail("Request succeeded unexpectedly when migration was disabled")
         except Exception as e:
             # Request failed as expected - verify it's a known error type
