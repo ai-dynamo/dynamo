@@ -49,16 +49,16 @@ const (
 	LabelValueGPUOperator        = "gpu-operator"
 	GPUOperatorNamespace         = "gpu-operator"
 
-	requestTimeout       = 5 * time.Second
-	dialTimeout          = 3 * time.Second
-	tlsHandshakeTimeout  = 3 * time.Second
+	requestTimeout      = 5 * time.Second
+	dialTimeout         = 3 * time.Second
+	tlsHandshakeTimeout = 3 * time.Second
 )
 
 // GPUInfo contains discovered GPU configuration from cluster nodes
 type GPUInfo struct {
 	NodeName      string         // Name of the node with this GPU configuration
 	GPUsPerNode   int            // Maximum GPUs per node found in the cluster
-	NodesWithGPUs int    		// Number of nodes that have GPUs
+	NodesWithGPUs int            // Number of nodes that have GPUs
 	Model         string         // GPU product name (e.g., "H100-SXM5-80GB")
 	VRAMPerGPU    int            // VRAM in MiB per GPU
 	System        string         // AIC hardware system identifier (e.g., "h100_sxm", "h200_sxm"), empty if unknown
@@ -76,15 +76,14 @@ type GPUDiscoveryCache struct {
 }
 
 type GPUDiscovery struct {
-    Scraper ScrapeMetricsFunc
+	Scraper ScrapeMetricsFunc
 }
 
 func NewGPUDiscovery(scraper ScrapeMetricsFunc) *GPUDiscovery {
-    return &GPUDiscovery{
-        Scraper: scraper,
-    }
+	return &GPUDiscovery{
+		Scraper: scraper,
+	}
 }
-
 
 // NewGPUDiscoveryCache creates a new GPUDiscoveryCache instance.
 //

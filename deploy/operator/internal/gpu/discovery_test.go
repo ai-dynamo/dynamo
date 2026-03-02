@@ -730,10 +730,10 @@ func TestGetCloudProviderInfo(t *testing.T) {
 	_ = corev1.AddToScheme(scheme)
 
 	tests := []struct {
-		name     string
-		node     corev1.Node
-		want     string
-		wantErr  bool
+		name    string
+		node    corev1.Node
+		want    string
+		wantErr bool
 	}{
 		{
 			name: "AKS via providerID",
