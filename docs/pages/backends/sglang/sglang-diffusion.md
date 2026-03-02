@@ -8,11 +8,11 @@ Dynamo SGLang supports three types of diffusion-based generation: **LLM diffusio
 
 ## Overview
 
-| Type | Worker Flag | API Endpoint |
-|------|------------|--------------|
-| LLM Diffusion | `--dllm-algorithm <algo>` | `/v1/chat/completions`, `/v1/completions` |
-| Image Diffusion | `--image-diffusion-worker` | `/v1/images/generations` |
-| Video Generation | `--video-generation-worker` | `/v1/videos` |
+| Type             | Worker Flag                 | API Endpoint                              |
+| ---------------- | --------------------------- | ----------------------------------------- |
+| LLM Diffusion    | `--dllm-algorithm <algo>`   | `/v1/chat/completions`, `/v1/completions` |
+| Image Diffusion  | `--image-diffusion-worker`  | `/v1/images/generations`                  |
+| Video Generation | `--video-generation-worker` | `/v1/videos`                              |
 
 <Note>
 If you see a CuDNN version mismatch error on startup (`cuDNN frontend 1.8.1 requires cuDNN lib >= 9.5.0`), set `SGLANG_DISABLE_CUDNN_CHECK=1` before launching. This is common when PyTorch ships a CuDNN version older than what SGLang requires for Conv3d operations.
@@ -40,7 +40,7 @@ curl -X POST http://localhost:8001/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "inclusionAI/LLaDA2.0-mini-preview",
-    "messages": [{"role": "user", "content": "Hello! How are you?"}],
+    "messages": [{"role": "user", "content": "Explain why Roger Federer is considered one of the greatest tennis players of all time"}],
     "temperature": 0.7,
     "max_tokens": 512
   }'
@@ -66,7 +66,7 @@ curl http://localhost:8000/v1/images/generations \
   -H "Content-Type: application/json" \
   -d '{
     "model": "black-forest-labs/FLUX.1-dev",
-    "prompt": "A sunset over the ocean",
+    "prompt": "Explain why Roger Federer is considered one of the greatest tennis players of all time",
     "size": "1024x1024",
     "response_format": "url",
     "nvext": {
@@ -94,7 +94,7 @@ Use `--wan-size 1b` (default, 1 GPU) or `--wan-size 14b` (2 GPUs). See the launc
 curl http://localhost:8000/v1/videos \
   -H "Content-Type: application/json" \
   -d '{
-    "prompt": "A curious raccoon exploring a garden",
+    "prompt": "Roger Federer winning his 19th grand slam",
     "model": "Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
     "seconds": 2,
     "size": "832x480",
