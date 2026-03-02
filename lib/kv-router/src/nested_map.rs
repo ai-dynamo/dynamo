@@ -255,10 +255,15 @@ impl PositionalIndexer {
             worker_blocks_entry.insert(seq_hash, (position, local_hash));
         }
 
-        self.tree_sizes
-            .entry(worker)
-            .or_insert_with(|| AtomicUsize::new(0))
-            .fetch_add(num_stored_blocks, Ordering::Relaxed);
+        match self.tree_sizes.get(&worker) {
+            Some(size) => {
+                size.fetch_add(num_stored_blocks, Ordering::Relaxed);
+            }
+            None => {
+                self.tree_sizes
+                    .insert(worker, AtomicUsize::new(num_stored_blocks));
+            }
+        }
 
         Ok(())
     }

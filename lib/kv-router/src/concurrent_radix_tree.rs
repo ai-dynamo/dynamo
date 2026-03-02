@@ -400,10 +400,15 @@ impl ConcurrentRadixTree {
             current = child;
         }
 
-        self.tree_sizes
-            .entry(worker)
-            .or_insert_with(|| AtomicUsize::new(0))
-            .fetch_add(num_blocks_added, Ordering::Relaxed);
+        match self.tree_sizes.get(&worker) {
+            Some(size) => {
+                size.fetch_add(num_blocks_added, Ordering::Relaxed);
+            }
+            None => {
+                self.tree_sizes
+                    .insert(worker, AtomicUsize::new(num_blocks_added));
+            }
+        }
 
         // Insert worker into the last child (not yet handled since there is
         // no subsequent iteration to pick it up).
@@ -456,10 +461,15 @@ impl ConcurrentRadixTree {
             num_removed += 1;
         }
 
-        self.tree_sizes
-            .entry(worker)
-            .or_insert_with(|| AtomicUsize::new(0))
-            .fetch_sub(num_removed, Ordering::Relaxed);
+        match self.tree_sizes.get(&worker) {
+            Some(size) => {
+                size.fetch_sub(num_removed, Ordering::Relaxed);
+            }
+            None => {
+                self.tree_sizes
+                    .insert(worker, AtomicUsize::new(num_removed));
+            }
+        }
 
         Ok(())
     }

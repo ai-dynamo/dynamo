@@ -526,12 +526,16 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
         let worker_id = event.worker_id;
 
         // Get or assign worker thread index using sticky round-robin
-        let thread_idx = *self.worker_assignments.entry(worker_id).or_insert_with(|| {
+        let thread_idx = if let Some(idx) = self.worker_assignments.get(&worker_id) {
+            *idx
+        } else {
             let idx = self
                 .worker_assignment_count
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            idx % self.num_workers
-        });
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                % self.num_workers;
+            self.worker_assignments.insert(worker_id, idx);
+            idx
+        };
 
         // Send event to the assigned worker thread
         if let Err(e) = self.worker_event_channels[thread_idx].send(WorkerTask::Event(event)) {
@@ -1831,26 +1835,27 @@ impl KvIndexerInterface for KvIndexerSharded {
     }
 
     async fn apply_event(&self, event: RouterEvent) {
-        let shard = self
-            .worker_assignments
-            .entry(event.worker_id)
-            .or_insert_with(|| {
-                // Get the shard with the smallest amount of workers.
-                let worker_counts = self.worker_counts.lock().unwrap();
-                let selected_shard = worker_counts
-                    .iter()
-                    .enumerate()
-                    .min_by_key(|&(_, value)| value)
-                    .unwrap()
-                    .0;
-                drop(worker_counts);
+        let shard = if let Some(s) = self.worker_assignments.get(&event.worker_id) {
+            *s
+        } else {
+            // Get the shard with the smallest amount of workers.
+            let worker_counts = self.worker_counts.lock().unwrap();
+            let selected_shard = worker_counts
+                .iter()
+                .enumerate()
+                .min_by_key(|&(_, value)| value)
+                .unwrap()
+                .0;
+            drop(worker_counts);
 
-                // Increment the count for this shard
-                self.worker_counts.lock().unwrap()[selected_shard] += 1;
-                selected_shard
-            });
+            // Increment the count for this shard
+            self.worker_counts.lock().unwrap()[selected_shard] += 1;
+            self.worker_assignments
+                .insert(event.worker_id, selected_shard);
+            selected_shard
+        };
 
-        self.event_tx[*shard].send(event).await.unwrap();
+        self.event_tx[shard].send(event).await.unwrap();
     }
 
     async fn remove_worker(&self, worker: WorkerId) {
