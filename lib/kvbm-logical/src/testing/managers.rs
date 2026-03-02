@@ -8,10 +8,10 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
+use crate::SequenceHash;
 use crate::blocks::{BlockMetadata, BlockRegistry};
 use crate::events::EventsManager;
 use crate::manager::{BlockManager, FrequencyTrackingCapacity};
-use crate::SequenceHash;
 
 use super::token_blocks;
 

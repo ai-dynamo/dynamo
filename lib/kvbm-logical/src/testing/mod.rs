@@ -62,8 +62,8 @@ pub use managers::{
 pub use sequences::BlockSequenceBuilder;
 pub use token_blocks::{
     create_disjoint_sequences, create_iota_token_block, create_sequential_block,
-    create_test_token_block, create_token_block, create_token_sequence,
-    default_request_salt_hash, generate_sequence_hashes, sequential_tokens, tokens_for_id,
+    create_test_token_block, create_token_block, create_token_sequence, default_request_salt_hash,
+    generate_sequence_hashes, sequential_tokens, tokens_for_id,
 };
 
 // pub(crate) items — internal helpers using internal types
