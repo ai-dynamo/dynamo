@@ -28,14 +28,14 @@ from ..multimodal_utils.model import is_qwen_vl_model
 
 logger = logging.getLogger(__name__)
 
-CACHE_SIZE_MAXIMUM = 8
+CACHE_SIZE_MAXIMUM = 2000
 
 # Both embedding transmitter suffers from increasing latency as
 # number of concurrent requests increases, NixlPersistentEmbedding transmitters
 # scale worse than local. Need to investigate why.
 TRANSFER_LOCAL = int(os.getenv("TRANSFER_LOCAL", 1))
 # [gluo NOTE] default off to benchmark standalone encoder
-ENABLE_ENCODER_CACHE = int(os.getenv("ENABLE_ENCODER_CACHE", 1))
+ENABLE_ENCODER_CACHE = int(os.getenv("ENABLE_ENCODER_CACHE", 0))
 
 
 @dataclass
