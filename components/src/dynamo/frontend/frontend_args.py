@@ -357,9 +357,10 @@ class FrontendArgGroup(ArgGroup):
             g,
             flag_name="--router-event-threads",
             env_var="DYN_ROUTER_EVENT_THREADS",
-            default=1,
+            default=4,
             help=(
-                "KV Router: Number of event processing threads. When > 1, uses a concurrent radix tree with a thread pool for higher throughput."
+                "KV Router: Number of event processing threads. When > 1, uses a concurrent radix tree with a thread pool for higher throughput. "
+                "Ignored when --no-router-kv-events is set (approximate mode always uses single-threaded indexer with TTL/pruning)."
             ),
             arg_type=int,
         )

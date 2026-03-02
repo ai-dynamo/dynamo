@@ -6,7 +6,7 @@ use std::collections::{BinaryHeap, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tokio::sync::Mutex;
+pub use dynamo_kv_router::queue::DEFAULT_MAX_BATCHED_TOKENS;
 
 use super::WorkerDiscoveryMode;
 use super::WorkerSelector;
@@ -16,8 +16,7 @@ use super::sequence::{ActiveSequencesMulti, SequenceRequest};
 use crate::discovery::RuntimeConfigWatch;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 
-/// Large default for max_num_batched_tokens when not configured (effectively disables queueing for that worker)
-const DEFAULT_MAX_BATCHED_TOKENS: u64 = 10_000_000;
+use tokio::sync::Mutex;
 
 /// Entry in the priority queue, ordered by effective arrival time (lower = higher priority).
 /// Effective arrival = elapsed time since queue start minus `priority_jump`.

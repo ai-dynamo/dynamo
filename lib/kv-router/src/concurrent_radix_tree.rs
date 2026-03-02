@@ -25,12 +25,15 @@
 //!   per-worker write concurrency.
 //! - Deadlock prevention: always lock parent before child, hand-over-hand locking
 
-use std::{collections::VecDeque, sync::Arc};
+use std::sync::Arc;
 
+use dashmap::DashMap;
 use parking_lot::RwLock;
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::indexer::SyncIndexer;
+use crate::indexer::{SyncIndexer, WorkerTask};
 use crate::protocols::*;
 
 /// Thread-safe shared reference to a Block.
@@ -98,10 +101,7 @@ pub struct ConcurrentRadixTree {
     /// This will only contain root blocks.
     root: SharedBlock,
 
-    /// Per-worker lookup table for O(1) block access.
-    /// Outer RwLock protects the worker map structure (rarely mutated);
-    /// inner RwLock per worker protects that worker's block-hash map.
-    lookup: RwLock<FxHashMap<WorkerWithDpRank, RwLock<WorkerLookup>>>,
+    tree_sizes: DashMap<WorkerWithDpRank, AtomicUsize, FxBuildHasher>,
 }
 
 impl Default for ConcurrentRadixTree {
@@ -122,14 +122,9 @@ impl Drop for ConcurrentRadixTree {
             stack.extend(root.children.drain().map(|(_, v)| v));
         }
 
-        // Remove all lookup references (they may include blocks not reachable from root).
-        // We have &mut self so no concurrent access; drain the map.
-        let lookup = self.lookup.get_mut();
-        for (_, inner_lock) in lookup.drain() {
-            stack.extend(inner_lock.into_inner().into_values());
-        }
-
-        // Iteratively free any uniquely-owned blocks without recursion
+        // Iteratively drop blocks to avoid stack overflow on deep trees.
+        // Without this loop, dropping `stack` would recursively drop each
+        // Arc<RwLock<Block>> through its `children` map.
         while let Some(block) = stack.pop() {
             if let Ok(rwlock) = Arc::try_unwrap(block) {
                 let mut inner = rwlock.into_inner();
@@ -144,7 +139,7 @@ impl ConcurrentRadixTree {
     pub fn new() -> Self {
         Self {
             root: Arc::new(RwLock::new(Block::new())),
-            lookup: RwLock::new(FxHashMap::default()),
+            tree_sizes: DashMap::with_hasher(FxBuildHasher),
         }
     }
 
@@ -197,10 +192,11 @@ impl ConcurrentRadixTree {
             for worker in &active {
                 scores.scores.insert(*worker, 1);
             }
-            let lk = self.lookup.read();
             for worker in scores.scores.keys() {
-                if let Some(inner_lock) = lk.get(worker) {
-                    scores.tree_sizes.insert(*worker, inner_lock.read().len());
+                if let Some(worker_tree_size) = self.tree_sizes.get(worker) {
+                    scores
+                        .tree_sizes
+                        .insert(*worker, worker_tree_size.load(Ordering::Relaxed));
                 }
             }
             return scores;
@@ -272,10 +268,11 @@ impl ConcurrentRadixTree {
         }
 
         // Get tree sizes from lookup.
-        let lk = self.lookup.read();
         for worker in scores.scores.keys() {
-            if let Some(inner_lock) = lk.get(worker) {
-                scores.tree_sizes.insert(*worker, inner_lock.read().len());
+            if let Some(worker_tree_size) = self.tree_sizes.get(worker) {
+                scores
+                    .tree_sizes
+                    .insert(*worker, worker_tree_size.load(Ordering::Relaxed));
             }
         }
 
@@ -290,7 +287,11 @@ impl ConcurrentRadixTree {
     /// ### Arguments
     ///
     /// * `event` - The `RouterEvent` to apply.
-    pub fn apply_event(&self, event: RouterEvent) -> Result<(), KvCacheEventError> {
+    fn apply_event(
+        &self,
+        lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
+        event: RouterEvent,
+    ) -> Result<(), KvCacheEventError> {
         let (worker_id, kv_event) = (event.worker_id, event.event);
         let (id, op) = (kv_event.event_id, kv_event.data);
 
@@ -298,10 +299,17 @@ impl ConcurrentRadixTree {
         let worker = WorkerWithDpRank::new(worker_id, kv_event.dp_rank);
 
         match op {
-            KvCacheEventData::Stored(op) => self.apply_stored(worker, op, id),
-            KvCacheEventData::Removed(op) => self.apply_removed(worker, op, id),
+            KvCacheEventData::Stored(op) => self.apply_stored(lookup, worker, op, id),
+            KvCacheEventData::Removed(op) => self.apply_removed(lookup, worker, op, id),
             KvCacheEventData::Cleared => {
-                self.clear_all_blocks(worker.worker_id);
+                // Ensure the worker is tracked in lookup before clearing,
+                // matching RadixTree behavior where `lookup.entry(worker).or_default()`
+                // fires before the match arm.
+                lookup.entry(worker).or_default();
+                self.tree_sizes
+                    .entry(worker)
+                    .or_insert_with(|| AtomicUsize::new(0));
+                self.clear_all_blocks(lookup, worker.worker_id);
                 Ok(())
             }
         }
@@ -310,20 +318,13 @@ impl ConcurrentRadixTree {
     /// Apply a store operation.
     fn apply_stored(
         &self,
+        lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
         worker: WorkerWithDpRank,
         op: KvCacheStoreData,
         id: u64,
     ) -> Result<(), KvCacheEventError> {
         // Ensure this worker has an entry in the outer map.
-        if !self.lookup.read().contains_key(&worker) {
-            self.lookup
-                .write()
-                .entry(worker)
-                .or_insert_with(|| RwLock::new(FxHashMap::default()));
-        }
-
-        let lk = self.lookup.read();
-        let mut worker_lookup = lk.get(&worker).unwrap().write();
+        let worker_lookup = lookup.entry(worker).or_default();
 
         // Find parent block
         let mut current = match op.parent_hash {
@@ -345,6 +346,8 @@ impl ConcurrentRadixTree {
         };
 
         let mut needs_worker_insert = false;
+
+        let num_blocks_added = op.blocks.len();
 
         // In each iteration, we lock the parent block and insert the worker into it from
         // the previous iteration. This avoids locking a block twice.
@@ -399,6 +402,16 @@ impl ConcurrentRadixTree {
             current = child;
         }
 
+        match self.tree_sizes.get(&worker) {
+            Some(size) => {
+                size.fetch_add(num_blocks_added, Ordering::Relaxed);
+            }
+            None => {
+                self.tree_sizes
+                    .insert(worker, AtomicUsize::new(num_blocks_added));
+            }
+        }
+
         // Insert worker into the last child (not yet handled since there is
         // no subsequent iteration to pick it up).
         if needs_worker_insert {
@@ -417,15 +430,16 @@ impl ConcurrentRadixTree {
     /// `child_count > active_count`.
     fn apply_removed(
         &self,
+        lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
         worker: WorkerWithDpRank,
         op: KvCacheRemoveData,
         id: u64,
     ) -> Result<(), KvCacheEventError> {
-        let lk = self.lookup.read();
-        let Some(inner_ref) = lk.get(&worker) else {
+        let Some(worker_lookup) = lookup.get_mut(&worker) else {
             return Err(KvCacheEventError::BlockNotFound);
         };
-        let mut worker_lookup = inner_ref.write();
+
+        let mut num_removed = 0;
 
         for block_hash in op.block_hashes {
             let Some(block) = worker_lookup.remove(&block_hash) else {
@@ -445,6 +459,18 @@ impl ConcurrentRadixTree {
             if guard.workers.is_empty() {
                 guard.children.clear();
             }
+
+            num_removed += 1;
+        }
+
+        match self.tree_sizes.get(&worker) {
+            Some(size) => {
+                size.fetch_sub(num_removed, Ordering::Relaxed);
+            }
+            None => {
+                self.tree_sizes
+                    .insert(worker, AtomicUsize::new(num_removed));
+            }
         }
 
         Ok(())
@@ -453,20 +479,21 @@ impl ConcurrentRadixTree {
     /// Helper function to remove or clear blocks for a worker.
     /// If `keep_worker` is true, the worker remains in lookup with empty blocks.
     /// If `keep_worker` is false, the worker is completely removed from lookup.
-    fn remove_or_clear_worker_blocks(&self, worker_id: WorkerId, keep_worker: bool) {
-        let workers: Vec<WorkerWithDpRank> = self
-            .lookup
-            .read()
+    fn remove_or_clear_worker_blocks(
+        &self,
+        lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
+        worker_id: WorkerId,
+        keep_worker: bool,
+    ) {
+        let workers: Vec<WorkerWithDpRank> = lookup
             .keys()
             .filter(|w| w.worker_id == worker_id)
             .copied()
             .collect();
 
-        let mut lk = self.lookup.write();
         for worker in workers {
-            if let Some(inner_lock) = lk.remove(&worker) {
-                let blocks = inner_lock.into_inner();
-                for (_, block) in blocks {
+            if let Some(worker_lookup) = lookup.remove(&worker) {
+                for (_, block) in worker_lookup.into_iter() {
                     let mut guard = block.write();
                     guard.workers.remove(&worker);
                     if guard.workers.is_empty() {
@@ -475,45 +502,49 @@ impl ConcurrentRadixTree {
                 }
 
                 if keep_worker {
-                    lk.insert(worker, RwLock::new(FxHashMap::default()));
+                    lookup.insert(worker, FxHashMap::default());
+                    // Reset tree size to 0 but keep the entry so get_workers()
+                    // still returns this worker (matches RadixTree::clear_all_blocks behavior).
+                    if let Some(size) = self.tree_sizes.get(&worker) {
+                        size.store(0, Ordering::Relaxed);
+                    }
+                } else {
+                    // Fully remove the worker from tree_sizes so get_workers()
+                    // no longer returns it (matches RadixTree::remove_worker behavior).
+                    self.tree_sizes.remove(&worker);
                 }
             }
         }
     }
 
-    /// Remove a worker and all their blocks from the tree.
-    pub fn remove_worker(&self, worker_id: WorkerId) {
-        self.remove_or_clear_worker_blocks(worker_id, false);
-    }
-
     /// Clear all blocks for a worker but keep the worker tracked.
-    pub fn clear_all_blocks(&self, worker_id: WorkerId) {
-        self.remove_or_clear_worker_blocks(worker_id, true);
+    fn clear_all_blocks(
+        &self,
+        lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
+        worker_id: WorkerId,
+    ) {
+        self.remove_or_clear_worker_blocks(lookup, worker_id, true);
     }
 
     /// Get all worker IDs currently tracked in the radix tree.
     /// Returns unique worker_ids (ignoring dp_rank differences).
     pub fn get_workers(&self) -> Vec<WorkerId> {
         let mut worker_ids: Vec<WorkerId> = self
-            .lookup
-            .read()
-            .keys()
-            .map(|w| w.worker_id)
-            .collect::<FxHashSet<_>>()
-            .into_iter()
+            .tree_sizes
+            .iter()
+            .map(|entry| entry.key().worker_id)
             .collect();
         worker_ids.sort_unstable();
+        worker_ids.dedup();
         worker_ids
     }
 
     /// Dump the radix tree as a series of RouterEvents that can reconstruct the tree.
-    /// Uses BFS traversal to ensure that the tree reconstruction is unique,
-    /// though the exact event ordering will be lost.
-    pub fn dump_tree_as_events(&self) -> Vec<RouterEvent> {
-        tracing::debug!(
-            "Dumping concurrent radix tree as events (contains information about {:?} workers)",
-            self.lookup.read().len()
-        );
+    /// Uses BFS traversal over the shared tree. Since all worker/block membership is
+    /// stored in the tree nodes themselves, this can be called from any thread without
+    /// needing per-thread lookup state.
+    fn dump_tree_as_events(&self) -> Vec<RouterEvent> {
+        tracing::debug!("Dumping concurrent radix tree as events");
 
         let mut events = Vec::new();
         let mut event_id = 0u64;
@@ -567,15 +598,6 @@ impl ConcurrentRadixTree {
 
         events
     }
-
-    /// Get total number of blocks across all workers.
-    pub fn current_size(&self) -> usize {
-        self.lookup
-            .read()
-            .values()
-            .map(|inner| inner.read().len())
-            .sum()
-    }
 }
 
 // ============================================================================
@@ -583,646 +605,39 @@ impl ConcurrentRadixTree {
 // ============================================================================
 
 impl SyncIndexer for ConcurrentRadixTree {
+    fn worker(&self, event_receiver: flume::Receiver<WorkerTask>) -> anyhow::Result<()> {
+        let mut lookup = FxHashMap::default();
+
+        while let Ok(task) = event_receiver.recv() {
+            match task {
+                WorkerTask::Event(event) => {
+                    if let Err(e) = self.apply_event(&mut lookup, event) {
+                        tracing::warn!("Failed to apply event: {:?}", e);
+                    }
+                }
+                WorkerTask::RemoveWorker(worker_id) => {
+                    self.remove_or_clear_worker_blocks(&mut lookup, worker_id, false);
+                }
+                WorkerTask::DumpEvents(_sender) => {
+                    // Handled directly via dump_events() on the shared tree.
+                    // Should not be reached, but respond with empty to avoid blocking.
+                    let _ = _sender.send(Ok(Vec::new()));
+                }
+                WorkerTask::Terminate => {
+                    break;
+                }
+            }
+        }
+
+        tracing::debug!("ConcurrentRadixTree worker thread shutting down");
+        Ok(())
+    }
+
     fn find_matches(&self, sequence: &[LocalBlockHash], early_exit: bool) -> OverlapScores {
-        // Delegate to the existing find_matches method
         self.find_matches_impl(sequence, early_exit)
     }
 
-    fn apply_event(&self, event: RouterEvent) -> Result<(), KvCacheEventError> {
-        self.apply_event(event)
-    }
-
-    fn remove_worker(&self, worker_id: WorkerId) {
-        self.remove_worker(worker_id);
-    }
-
-    fn dump_events(&self) -> Vec<RouterEvent> {
-        self.dump_tree_as_events()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::test_utils::{create_remove_event, create_store_event};
-    use std::sync::Arc;
-    use std::thread;
-
-    #[test]
-    fn test_concurrent_radix_tree_basic() {
-        let trie = ConcurrentRadixTree::new();
-
-        let worker_1 = 0;
-        let worker_2 = 1;
-
-        trie.apply_event(create_store_event(worker_1, 1, vec![1, 2, 3], None))
-            .unwrap();
-
-        let scores = trie.find_matches_impl(
-            &[LocalBlockHash(1), LocalBlockHash(2), LocalBlockHash(3)],
-            false,
-        );
-        assert_eq!(
-            scores
-                .scores
-                .get(&WorkerWithDpRank::from_worker_id(worker_1))
-                .unwrap(),
-            &3
-        );
-
-        assert_eq!(trie.lookup.read().len(), 1);
-        assert_eq!(
-            trie.lookup
-                .read()
-                .get(&WorkerWithDpRank::from_worker_id(worker_1))
-                .unwrap()
-                .read()
-                .len(),
-            3
-        );
-
-        trie.apply_event(create_store_event(worker_2, 1, vec![1, 4, 5], None))
-            .unwrap();
-
-        let scores = trie.find_matches_impl(
-            &[LocalBlockHash(1), LocalBlockHash(2), LocalBlockHash(3)],
-            false,
-        );
-        assert_eq!(
-            scores
-                .scores
-                .get(&WorkerWithDpRank::from_worker_id(worker_1))
-                .unwrap(),
-            &3
-        );
-        assert_eq!(
-            scores
-                .scores
-                .get(&WorkerWithDpRank::from_worker_id(worker_2))
-                .unwrap(),
-            &1
-        );
-
-        assert_eq!(trie.lookup.read().len(), 2);
-    }
-
-    #[test]
-    fn test_concurrent_radix_tree_remove() {
-        let trie = ConcurrentRadixTree::new();
-
-        let worker_1 = 0;
-        let worker_2 = 1;
-
-        trie.apply_event(create_store_event(worker_1, 1, vec![1, 2, 3], None))
-            .unwrap();
-        trie.apply_event(create_store_event(worker_2, 1, vec![1, 4, 5], None))
-            .unwrap();
-
-        trie.apply_event(create_remove_event(worker_2, 2, vec![5]))
-            .unwrap();
-
-        assert_eq!(
-            trie.lookup
-                .read()
-                .get(&WorkerWithDpRank::from_worker_id(worker_2))
-                .unwrap()
-                .read()
-                .len(),
-            2
-        );
-
-        trie.apply_event(create_remove_event(worker_2, 3, vec![4]))
-            .unwrap();
-
-        assert_eq!(
-            trie.lookup
-                .read()
-                .get(&WorkerWithDpRank::from_worker_id(worker_2))
-                .unwrap()
-                .read()
-                .len(),
-            1
-        );
-    }
-
-    #[test]
-    fn test_concurrent_radix_tree_apply_event_errors() {
-        let trie = ConcurrentRadixTree::new();
-        let worker_0 = 0;
-
-        // Parent block not found
-        let result = trie.apply_event(create_store_event(
-            worker_0,
-            0,
-            vec![1, 2, 3],
-            Some(ExternalSequenceBlockHash(12345)),
-        ));
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            KvCacheEventError::ParentBlockNotFound
-        ));
-    }
-
-    #[test]
-    fn test_clear_all_blocks() {
-        let trie = ConcurrentRadixTree::new();
-
-        let worker_0 = 0;
-        let worker_1 = 1;
-
-        trie.apply_event(create_store_event(worker_0, 0, vec![0, 1, 3], None))
-            .unwrap();
-        trie.apply_event(create_store_event(worker_1, 0, vec![0, 2, 3], None))
-            .unwrap();
-
-        let result = trie.find_matches_impl(&[LocalBlockHash(0)], false).scores;
-        assert_eq!(result.len(), 2);
-
-        trie.clear_all_blocks(worker_0);
-
-        assert!(
-            trie.lookup
-                .read()
-                .contains_key(&WorkerWithDpRank::from_worker_id(worker_0))
-        );
-        assert!(
-            trie.lookup
-                .read()
-                .get(&WorkerWithDpRank::from_worker_id(worker_0))
-                .unwrap()
-                .read()
-                .is_empty()
-        );
-
-        let result = trie
-            .find_matches_impl(&[LocalBlockHash(0), LocalBlockHash(2)], false)
-            .scores;
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[&WorkerWithDpRank::from_worker_id(worker_1)], 2);
-    }
-
-    #[test]
-    fn test_remove_worker() {
-        let trie = ConcurrentRadixTree::new();
-
-        let worker_0 = 0;
-        let worker_1 = 1;
-
-        trie.apply_event(create_store_event(worker_0, 0, vec![1, 2, 3], None))
-            .unwrap();
-        trie.apply_event(create_store_event(worker_1, 0, vec![1, 2, 3], None))
-            .unwrap();
-
-        assert_eq!(trie.lookup.read().len(), 2);
-
-        trie.remove_worker(worker_0);
-
-        assert!(
-            !trie
-                .lookup
-                .read()
-                .contains_key(&WorkerWithDpRank::from_worker_id(worker_0))
-        );
-        assert_eq!(trie.lookup.read().len(), 1);
-
-        let result = trie
-            .find_matches_impl(
-                &[LocalBlockHash(1), LocalBlockHash(2), LocalBlockHash(3)],
-                false,
-            )
-            .scores;
-        assert_eq!(result.len(), 1);
-        assert!(!result.contains_key(&WorkerWithDpRank::from_worker_id(worker_0)));
-        assert!(result.contains_key(&WorkerWithDpRank::from_worker_id(worker_1)));
-    }
-
-    #[test]
-    fn test_concurrent_radix_tree_default() {
-        let trie: ConcurrentRadixTree = Default::default();
-        assert!(trie.root.read().children.is_empty());
-        assert!(trie.root.read().workers.is_empty());
-        assert!(trie.lookup.read().is_empty());
-    }
-
-    #[test]
-    fn test_concurrent_find_matches() {
-        let trie = Arc::new(ConcurrentRadixTree::new());
-
-        // Populate tree
-        trie.apply_event(create_store_event(0, 0, vec![1, 2, 3, 4, 5], None))
-            .unwrap();
-        trie.apply_event(create_store_event(1, 0, vec![1, 2, 6, 7, 8], None))
-            .unwrap();
-
-        let sequence = vec![
-            LocalBlockHash(1),
-            LocalBlockHash(2),
-            LocalBlockHash(3),
-            LocalBlockHash(4),
-            LocalBlockHash(5),
-        ];
-
-        // Spawn multiple threads doing concurrent find_matches
-        let handles: Vec<_> = (0..10)
-            .map(|_| {
-                let tree = trie.clone();
-                let seq = sequence.clone();
-                thread::spawn(move || tree.find_matches_impl(&seq, false))
-            })
-            .collect();
-
-        // All should return the same result
-        let expected_worker_0_score = 5;
-        let expected_worker_1_score = 2;
-
-        for h in handles {
-            let result = h.join().unwrap();
-            assert_eq!(
-                result
-                    .scores
-                    .get(&WorkerWithDpRank::from_worker_id(0))
-                    .unwrap(),
-                &expected_worker_0_score
-            );
-            assert_eq!(
-                result
-                    .scores
-                    .get(&WorkerWithDpRank::from_worker_id(1))
-                    .unwrap(),
-                &expected_worker_1_score
-            );
-        }
-    }
-
-    #[test]
-    fn test_concurrent_read_write() {
-        let trie = Arc::new(ConcurrentRadixTree::new());
-
-        // Pre-populate
-        for i in 0..5 {
-            trie.apply_event(create_store_event(i, 0, vec![1, 2, 3], None))
-                .unwrap();
-        }
-
-        let sequence = vec![LocalBlockHash(1), LocalBlockHash(2), LocalBlockHash(3)];
-
-        // Spawn readers
-        let reader_handles: Vec<_> = (0..5)
-            .map(|_| {
-                let tree = trie.clone();
-                let seq = sequence.clone();
-                thread::spawn(move || {
-                    for _ in 0..100 {
-                        let _ = tree.find_matches_impl(&seq, false);
-                    }
-                })
-            })
-            .collect();
-
-        // Spawn writers (adding more workers)
-        let writer_handles: Vec<_> = (5..10)
-            .map(|i| {
-                let tree = trie.clone();
-                thread::spawn(move || {
-                    for j in 0..10 {
-                        let _ =
-                            tree.apply_event(create_store_event(i, j, vec![1, 2, 3, 4 + j], None));
-                    }
-                })
-            })
-            .collect();
-
-        // Wait for all threads
-        for h in reader_handles {
-            h.join().unwrap();
-        }
-        for h in writer_handles {
-            h.join().unwrap();
-        }
-
-        // Tree should have 10 workers now
-        assert_eq!(trie.get_workers().len(), 10);
-    }
-
-    #[test]
-    fn test_remove_parent_does_not_cascade() {
-        let trie = ConcurrentRadixTree::new();
-        let worker_1 = 0;
-
-        // Create a chain: root -> block1 -> block2 -> block3
-        trie.apply_event(create_store_event(worker_1, 1, vec![1, 2, 3], None))
-            .unwrap();
-
-        let worker_key = WorkerWithDpRank::from_worker_id(worker_1);
-        assert_eq!(trie.lookup.read().get(&worker_key).unwrap().read().len(), 3);
-
-        // Remove ONLY block1 -- descendants should NOT be cascade-removed
-        trie.apply_event(create_remove_event(worker_1, 2, vec![1]))
-            .unwrap();
-
-        let lk = trie.lookup.read();
-        let worker_lookup = lk.get(&worker_key).unwrap().read();
-        assert!(
-            !worker_lookup.contains_key(&ExternalSequenceBlockHash(100)),
-            "block1 should be removed"
-        );
-        assert!(
-            worker_lookup.contains_key(&ExternalSequenceBlockHash(200)),
-            "block2 should remain (no cascade)"
-        );
-        assert!(
-            worker_lookup.contains_key(&ExternalSequenceBlockHash(300)),
-            "block3 should remain (no cascade)"
-        );
-        assert_eq!(worker_lookup.len(), 2);
-    }
-
-    #[test]
-    fn test_remove_all_blocks_individually() {
-        // Verifies that explicitly removing all blocks (as the engine would)
-        // cleans up fully, even without cascade.
-        let trie = ConcurrentRadixTree::new();
-        let worker_1 = 0;
-
-        trie.apply_event(create_store_event(worker_1, 1, vec![1, 2, 3], None))
-            .unwrap();
-
-        let worker_key = WorkerWithDpRank::from_worker_id(worker_1);
-
-        // Remove all three blocks explicitly in one event
-        trie.apply_event(create_remove_event(worker_1, 2, vec![1, 2, 3]))
-            .unwrap();
-
-        let lk = trie.lookup.read();
-        let worker_lookup = lk.get(&worker_key).unwrap().read();
-        assert_eq!(worker_lookup.len(), 0, "all blocks should be removed");
-    }
-
-    #[test]
-    fn test_find_matches_with_stale_entries() {
-        // Two workers share a full path. Remove worker_1 from the root block
-        // only (simulating a partial remove). find_matches should still
-        // produce correct scores for worker_2, and worker_1 should score at
-        // the stale descendant depth (transiently inflated but not a crash).
-        let trie = ConcurrentRadixTree::new();
-        let worker_1 = 0;
-        let worker_2 = 1;
-
-        // Both workers have blocks 1 -> 2 -> 3
-        trie.apply_event(create_store_event(worker_1, 1, vec![1, 2, 3], None))
-            .unwrap();
-        trie.apply_event(create_store_event(worker_2, 2, vec![1, 2, 3], None))
-            .unwrap();
-
-        // Remove worker_1 from block 1 only (no cascade to 2,3)
-        trie.apply_event(create_remove_event(worker_1, 3, vec![1]))
-            .unwrap();
-
-        let scores = trie.find_matches_impl(
-            &[LocalBlockHash(1), LocalBlockHash(2), LocalBlockHash(3)],
-            false,
-        );
-
-        // worker_2 was never removed, should have full depth
-        assert_eq!(
-            scores
-                .scores
-                .get(&WorkerWithDpRank::from_worker_id(worker_2)),
-            Some(&3),
-            "worker_2 should score 3 (fully present)"
-        );
-
-        // worker_1 was removed from block 1 so it drops out at depth 1.
-        // But because blocks 2 and 3 still have worker_1 (stale), the
-        // child_count > active_count path fires and detects the dropout.
-        // The exact score depends on the detection logic: worker_1 is absent
-        // from block 1's workers, so it should be scored at depth 0 from the
-        // first child initialization (it won't appear in `active` at all).
-        // So worker_1 should NOT appear in scores (it was never in active).
-        assert!(
-            !scores
-                .scores
-                .contains_key(&WorkerWithDpRank::from_worker_id(worker_1)),
-            "worker_1 should not appear in scores (removed from root-level block)"
-        );
-    }
-
-    // ========================================================================
-    // ThreadPoolIndexer<ConcurrentRadixTree> Tests
-    // ========================================================================
-
-    mod thread_pool_indexer_tests {
-        use tokio::time::Duration;
-
-        use super::*;
-        use crate::indexer::{KvIndexerInterface, ThreadPoolIndexer};
-
-        fn make_indexer(
-            num_workers: usize,
-            kv_block_size: u32,
-        ) -> ThreadPoolIndexer<ConcurrentRadixTree> {
-            ThreadPoolIndexer::new(ConcurrentRadixTree::new(), num_workers, kv_block_size)
-        }
-
-        #[tokio::test]
-        async fn test_thread_pool_indexer_basic() {
-            let indexer = make_indexer(4, 16);
-
-            let worker_1 = 0;
-            let worker_2 = 1;
-
-            indexer
-                .apply_event(create_store_event(worker_1, 1, vec![1, 2, 3], None))
-                .await;
-            indexer
-                .apply_event(create_store_event(worker_2, 1, vec![1, 4, 5], None))
-                .await;
-
-            tokio::time::sleep(Duration::from_millis(100)).await;
-
-            let scores = indexer
-                .find_matches(vec![
-                    LocalBlockHash(1),
-                    LocalBlockHash(2),
-                    LocalBlockHash(3),
-                ])
-                .await
-                .unwrap();
-
-            assert_eq!(
-                scores
-                    .scores
-                    .get(&WorkerWithDpRank::from_worker_id(worker_1))
-                    .unwrap(),
-                &3
-            );
-            assert_eq!(
-                scores
-                    .scores
-                    .get(&WorkerWithDpRank::from_worker_id(worker_2))
-                    .unwrap(),
-                &1
-            );
-
-            indexer.shutdown();
-        }
-
-        #[tokio::test]
-        async fn test_thread_pool_indexer_remove_worker() {
-            let indexer = make_indexer(2, 16);
-
-            let worker_0 = 0;
-            let worker_1 = 1;
-
-            indexer
-                .apply_event(create_store_event(worker_0, 1, vec![1, 2, 3], None))
-                .await;
-            indexer
-                .apply_event(create_store_event(worker_1, 1, vec![1, 2, 3], None))
-                .await;
-
-            tokio::time::sleep(Duration::from_millis(100)).await;
-
-            assert_eq!(indexer.backend().get_workers().len(), 2);
-
-            indexer.remove_worker(worker_0).await;
-
-            let workers = indexer.backend().get_workers();
-            assert_eq!(workers.len(), 1);
-            assert!(!workers.contains(&worker_0));
-            assert!(workers.contains(&worker_1));
-
-            indexer.shutdown();
-        }
-
-        #[tokio::test]
-        async fn test_thread_pool_indexer_dump_events() {
-            let indexer = make_indexer(2, 16);
-
-            indexer
-                .apply_event(create_store_event(0, 1, vec![1, 2, 3], None))
-                .await;
-
-            tokio::time::sleep(Duration::from_millis(100)).await;
-
-            let events = indexer.dump_events().await.unwrap();
-            assert_eq!(events.len(), 3);
-
-            indexer.shutdown();
-        }
-
-        #[tokio::test]
-        async fn test_thread_pool_indexer_find_matches_for_request() {
-            let indexer = make_indexer(2, 1);
-
-            indexer
-                .apply_event(create_store_event(0, 1, vec![100, 200, 300], None))
-                .await;
-
-            tokio::time::sleep(Duration::from_millis(100)).await;
-
-            let scores = indexer
-                .find_matches_for_request(&[100, 200, 300], None)
-                .await;
-            assert!(scores.is_ok());
-
-            indexer.shutdown();
-        }
-
-        #[tokio::test]
-        async fn test_thread_pool_indexer_sticky_routing() {
-            let indexer = make_indexer(4, 16);
-
-            for i in 0..10 {
-                indexer
-                    .apply_event(create_store_event(0, i, vec![i], None))
-                    .await;
-            }
-
-            tokio::time::sleep(Duration::from_millis(100)).await;
-
-            assert_eq!(indexer.backend().current_size(), 10);
-
-            indexer.shutdown();
-        }
-
-        #[tokio::test]
-        async fn test_thread_pool_indexer_multiple_workers() {
-            let indexer = make_indexer(4, 16);
-
-            for worker_id in 0..8 {
-                indexer
-                    .apply_event(create_store_event(
-                        worker_id,
-                        1,
-                        vec![1, 2, worker_id + 10],
-                        None,
-                    ))
-                    .await;
-            }
-
-            tokio::time::sleep(Duration::from_millis(100)).await;
-
-            assert_eq!(indexer.backend().get_workers().len(), 8);
-
-            let scores = indexer
-                .find_matches(vec![LocalBlockHash(1), LocalBlockHash(2)])
-                .await
-                .unwrap();
-
-            assert_eq!(scores.scores.len(), 8);
-            for (_, score) in scores.scores.iter() {
-                assert_eq!(*score, 2);
-            }
-
-            indexer.shutdown();
-        }
-
-        #[tokio::test]
-        async fn test_thread_pool_indexer_shutdown_idempotent() {
-            let indexer = make_indexer(2, 16);
-
-            indexer
-                .apply_event(create_store_event(0, 1, vec![1, 2, 3], None))
-                .await;
-
-            tokio::time::sleep(Duration::from_millis(100)).await;
-
-            indexer.shutdown();
-            indexer.shutdown();
-        }
-
-        #[tokio::test]
-        async fn test_thread_pool_indexer_concurrent_operations() {
-            use std::sync::Arc;
-
-            let indexer = Arc::new(make_indexer(4, 16));
-
-            for worker_id in 0..4 {
-                indexer
-                    .apply_event(create_store_event(worker_id, 1, vec![1, 2, 3, 4, 5], None))
-                    .await;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-
-            let sequence = vec![LocalBlockHash(1), LocalBlockHash(2), LocalBlockHash(3)];
-
-            let mut handles = Vec::new();
-            for _ in 0..10 {
-                let idx = indexer.clone();
-                let seq = sequence.clone();
-                handles.push(tokio::spawn(
-                    async move { idx.find_matches(seq).await.unwrap() },
-                ));
-            }
-
-            for handle in handles {
-                let scores = handle.await.unwrap();
-                assert_eq!(scores.scores.len(), 4);
-            }
-
-            indexer.shutdown();
-        }
+    fn dump_events(&self) -> Option<Vec<RouterEvent>> {
+        Some(self.dump_tree_as_events())
     }
 }

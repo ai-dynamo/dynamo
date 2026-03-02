@@ -56,7 +56,7 @@ trtllm =[
 
 vllm = [
     "uvloop",
-    "nixl[cu12]<=0.9.0",
+    "nixl[cu12]<=0.10.0",
     "vllm[flashinfer,runai]==0.16.0",
     # vllm-omni 0.16.0rc1 is not on PyPI; installed from source in container builds
     # (see container/deps/vllm/install_vllm.sh). pip install ai-dynamo[vllm] will
@@ -68,7 +68,7 @@ vllm = [
 sglang = [
     "uvloop",
     "sglang[diffusion]==0.5.9",
-    "nixl[cu12]<=0.9.0",
+    "nixl[cu12]<=0.10.0",
     "cupy-cuda12x>=13.0.0",
 ]
 

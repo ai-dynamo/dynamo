@@ -101,4 +101,4 @@ request arrives.
 4. The KV router routes the speculative request to the same worker, warming its cache.
 5. When the real next-turn request arrives, the KV router sees high cache overlap on that worker and routes there, yielding a much lower TTFT.
 
-See also: [Agent Hints documentation](../../../../docs/pages/components/router/agent-hints.md)
+See also: [Agent Hints documentation](../../../../docs/components/router/agent-hints.md)
