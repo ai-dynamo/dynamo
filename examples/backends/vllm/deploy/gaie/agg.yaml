@@ -15,7 +15,7 @@ spec:
         mainContainer:
           image: docker.io/lambda108/epp-inference-extension-dynamo:bug
           env:
-            - name: DECODE_FALLBACK
+            - name: DYN_DECODE_FALLBACK
               value: "true"
       eppConfig:
         config:
