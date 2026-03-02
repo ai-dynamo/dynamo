@@ -62,7 +62,7 @@ runs:
         fi
 
     - name: Check for changes
-      uses: tj-actions/changed-files@v42  # TODO: upgrade to latest
+      uses: tj-actions/changed-files@aa08304bd477b800d468db44fe10f6c61f7f7b11 # 42.1.0
       id: filter
       with:
         files_yaml_from_source_file: .github/filters.yaml
