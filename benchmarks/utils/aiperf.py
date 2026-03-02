@@ -8,6 +8,10 @@ from typing import List
 
 # Default concurrency levels - can be overridden with CONCURRENCIES environment variable
 DEFAULT_CONCURRENCIES: List[int] = [1, 2, 5, 10, 50, 100, 250]
+# Default request count per concurrency level - can be overridden with REQUEST_COUNT env var
+# When set to 0 or unset, defaults to max(concurrency * 3, 10) to ensure the concurrency
+# level is fully utilized and each slot runs enough requests for stable measurements
+DEFAULT_REQUEST_COUNT: int = 0
 
 
 def get_concurrency_levels() -> List[int]:
@@ -30,6 +34,24 @@ def get_concurrency_levels() -> List[int]:
     return DEFAULT_CONCURRENCIES
 
 
+def get_request_count() -> int:
+    """Get request count from environment variable or use default.
+
+    Returns 0 to indicate 'auto' mode (will be computed per concurrency level).
+    """
+    request_count_env = os.getenv("REQUEST_COUNT")
+    if request_count_env:
+        try:
+            count = int(request_count_env.strip())
+            if count < 0:
+                raise ValueError(f"Request count must be non-negative, got: {count}")
+            return count
+        except ValueError as e:
+            print(f"WARNING: Invalid REQUEST_COUNT environment variable: {e}")
+            return DEFAULT_REQUEST_COUNT
+    return DEFAULT_REQUEST_COUNT
+
+
 CONCURRENCIES: List[int] = get_concurrency_levels()
 
 
@@ -41,8 +63,21 @@ def run_aiperf(
     stddev: int,
     concurrency: int,
     output_dir: Path,
+    request_count: int = 0,
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Auto-compute request count: need enough requests to fully utilize concurrency
+    # and run each slot at least 3 times for stable measurements
+    if request_count <= 0:
+        request_count = max(concurrency * 3, 10)
+    elif request_count < concurrency:
+        print(
+            f"WARNING: request_count ({request_count}) < concurrency ({concurrency}). "
+            f"Actual in-flight concurrency will be capped at {request_count}.",
+            flush=True,
+        )
+
     cmd = [
         "aiperf",
         "profile",
@@ -59,6 +94,8 @@ def run_aiperf(
         str(stddev),
         "--concurrency",
         str(concurrency),
+        "--request-count",
+        str(request_count),
         "--output-tokens-mean",
         str(osl),
         "--extra-inputs",
@@ -73,7 +110,7 @@ def run_aiperf(
         str(output_dir),
     ]
     print(
-        f"Running aiperf with isl {isl}, osl {osl}, concurrency {concurrency}",
+        f"Running aiperf with isl {isl}, osl {osl}, concurrency {concurrency}, request_count {request_count}",
         flush=True,
     )
 
@@ -102,12 +139,26 @@ def run_concurrency_sweep(
     service_url: str, model_name: str, isl: int, osl: int, stddev: int, output_dir: Path
 ) -> None:
     concurrency_levels = get_concurrency_levels()
+    request_count = get_request_count()
     print(
         f"Running concurrency sweep for {model_name} with ISL {isl} and OSL {osl} and standard deviation {stddev}",
         flush=True,
     )
     print(f"Concurrency levels: {concurrency_levels}", flush=True)
+    print(
+        f"Request count: {request_count if request_count > 0 else 'auto (max(concurrency*3, 10))'}",
+        flush=True,
+    )
 
     for c in concurrency_levels:
         print(f"Starting concurrency level {c}", flush=True)
-        run_aiperf(service_url, model_name, isl, osl, stddev, c, output_dir / f"c{c}")
+        run_aiperf(
+            service_url,
+            model_name,
+            isl,
+            osl,
+            stddev,
+            c,
+            output_dir / f"c{c}",
+            request_count=request_count,
+        )
