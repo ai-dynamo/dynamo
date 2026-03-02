@@ -128,7 +128,7 @@ data:
       readyForCheckpointFilePath: {{ .Values.checkpoint.readyForCheckpointFilePath | quote }}
       {{- end }}
       storage:
-        {{- if ne (.Values.checkpoint.storage.type | toString) "pvc" }}
+        {{- if and .Values.checkpoint.storage.type (ne (.Values.checkpoint.storage.type | toString) "pvc") }}
         type: {{ .Values.checkpoint.storage.type | quote }}
         {{- end }}
         {{- if or (eq (.Values.checkpoint.storage.type | toString) "pvc") (not .Values.checkpoint.storage.type) }}
