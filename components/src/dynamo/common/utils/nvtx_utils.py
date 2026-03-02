@@ -31,11 +31,11 @@ objects (cached lazily by (message, color)) so that repeated calls to
 start_range incur only a single dict lookup — no object allocation
 or domain cache lookups on the hot path.
 """
-import functools as _functools
-import inspect as _inspect
-import os as _os
+import functools
+import inspect
+import os
 
-ENABLED: bool = bool(int(_os.getenv("DYN_NVTX", "0")))
+ENABLED: bool = bool(int(os.getenv("DYN_NVTX", "0")))
 
 if ENABLED:
     import nvtx as _nvtx_lib
@@ -61,7 +61,7 @@ if ENABLED:
 
     # functools.partial so decorator and context-manager usage both land
     # in the "dynamo" domain, keeping all markers in one nsys row.
-    annotate = _functools.partial(_nvtx_lib.annotate, domain="dynamo")
+    annotate = functools.partial(_nvtx_lib.annotate, domain="dynamo")
 
     def range_decorator(message: str, color: str = "white"):
         """Decorator that wraps an async generator function with an NVTX range.
@@ -71,9 +71,9 @@ if ENABLED:
         """
 
         def decorator(func):
-            if _inspect.isasyncgenfunction(func):
+            if inspect.isasyncgenfunction(func):
 
-                @_functools.wraps(func)
+                @functools.wraps(func)
                 async def wrapper(*args, **kwargs):
                     rng = start_range(message, color)
                     try:
@@ -85,7 +85,7 @@ if ENABLED:
                 return wrapper
             else:
 
-                @_functools.wraps(func)
+                @functools.wraps(func)
                 def wrapper(*args, **kwargs):
                     rng = start_range(message, color)
                     try:
