@@ -3,7 +3,7 @@
 
 //! Type-state markers for the block lifecycle.
 //!
-//! This module defines three `pub(crate)` marker types -- [`Reset`],
+//! This module defines three marker types -- [`Reset`],
 //! [`Staged`], and [`Registered`] -- that are used as the `State` parameter
 //! of `Block<T, State>`. Each marker carries only the data relevant to its
 //! state (e.g. `Staged` holds the [`SequenceHash`](crate::SequenceHash),
@@ -54,7 +54,7 @@ impl<T> Block<T, Reset> {
 
     /// Transition from Reset to Staged via a TokenBlock.
     /// Computes the sequence hash from the token block and stores only the hash.
-    pub fn complete(
+    pub(crate) fn complete(
         self,
         token_block: &TokenBlock,
     ) -> Result<Block<T, Staged>, BlockError<Block<T, Reset>>> {
@@ -71,7 +71,7 @@ impl<T> Block<T, Reset> {
 
     /// Stage a block directly with a known sequence hash (no TokenBlock needed).
     /// Used by the mutable-block path.
-    pub fn stage(self, sequence_hash: SequenceHash) -> Block<T, Staged> {
+    pub(crate) fn stage(self, sequence_hash: SequenceHash) -> Block<T, Staged> {
         Block {
             block_id: self.block_id,
             block_size: self.block_size,
@@ -94,11 +94,11 @@ impl<T: BlockMetadata> Block<T, Staged> {
         into_registered(self.block_id, self.block_size, registration_handle)
     }
 
-    pub fn sequence_hash(&self) -> SequenceHash {
+    pub(crate) fn sequence_hash(&self) -> SequenceHash {
         self.state.sequence_hash
     }
 
-    pub fn reset(self) -> Block<T, Reset> {
+    pub(crate) fn reset(self) -> Block<T, Reset> {
         Block {
             block_id: self.block_id,
             block_size: self.block_size,
@@ -114,7 +114,7 @@ fn into_registered<T: BlockMetadata>(
     block_size: usize,
     registration_handle: BlockRegistrationHandle,
 ) -> Block<T, Registered> {
-    registration_handle.mark_present::<T>();
+    registration_handle.mark_present::<T>(block_id);
 
     Block {
         block_id,
@@ -129,7 +129,7 @@ fn into_registered<T: BlockMetadata>(
 
 // Implementation for Registered state
 impl<T: BlockMetadata> Block<T, Registered> {
-    pub fn sequence_hash(&self) -> SequenceHash {
+    pub(crate) fn sequence_hash(&self) -> SequenceHash {
         self.state.sequence_hash
     }
 
@@ -137,9 +137,9 @@ impl<T: BlockMetadata> Block<T, Registered> {
         &self.state.registration_handle
     }
 
-    pub fn reset(self) -> Block<T, Reset> {
+    pub(crate) fn reset(self) -> Block<T, Reset> {
         // Mark absence when destroying Block<T, Registered>
-        self.state.registration_handle.mark_absent::<T>();
+        self.state.registration_handle.mark_absent::<T>(self.block_id);
 
         // Drop the registration handle
         Block {

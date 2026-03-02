@@ -4,9 +4,11 @@
 //! Block registration handle and its inner implementation.
 
 use super::attachments::{AttachmentError, AttachmentStore, TypedAttachments};
+use super::delegate::PresenceDelegate;
 use super::{BlockRegistry, PositionalRadixTree};
 
 use crate::blocks::{BlockMetadata, SequenceHash};
+use crate::BlockId;
 
 use std::any::{Any, TypeId};
 use std::marker::PhantomData;
@@ -33,6 +35,8 @@ pub(crate) struct BlockRegistrationHandleInner {
     touch_callbacks: Mutex<Vec<TouchCallback>>,
     /// Weak reference to the registry - allows us to remove the block from the registry on drop
     registry: Weak<PositionalRadixTree<Weak<BlockRegistrationHandleInner>>>,
+    /// Delegates notified on presence transitions (immutable, shared from registry)
+    pub(crate) presence_delegates: Arc<[Arc<dyn PresenceDelegate>]>,
 }
 
 impl std::fmt::Debug for BlockRegistrationHandleInner {
@@ -44,6 +48,10 @@ impl std::fmt::Debug for BlockRegistrationHandleInner {
                 "touch_callbacks",
                 &format!("[{} callbacks]", self.touch_callbacks.lock().len()),
             )
+            .field(
+                "presence_delegates",
+                &format!("[{} delegates]", self.presence_delegates.len()),
+            )
             .finish()
     }
 }
@@ -52,12 +60,14 @@ impl BlockRegistrationHandleInner {
     pub(super) fn new(
         seq_hash: SequenceHash,
         registry: Weak<PositionalRadixTree<Weak<BlockRegistrationHandleInner>>>,
+        presence_delegates: Arc<[Arc<dyn PresenceDelegate>]>,
     ) -> Self {
         Self {
             seq_hash,
             attachments: Mutex::new(AttachmentStore::new()),
             touch_callbacks: Mutex::new(Vec::new()),
             registry,
+            presence_delegates,
         }
     }
 }
@@ -95,18 +105,38 @@ impl BlockRegistrationHandle {
 
     /// Mark that a Block<T, Registered> exists for this sequence hash.
     /// Called when transitioning from Complete to Registered state.
-    pub(crate) fn mark_present<T: BlockMetadata>(&self) {
+    /// Fires presence delegates outside the attachments lock.
+    pub(crate) fn mark_present<T: BlockMetadata>(&self, block_id: BlockId) {
         let type_id = TypeId::of::<T>();
-        let mut attachments = self.inner.attachments.lock();
-        attachments.presence_markers.insert(type_id, ());
+        {
+            let mut attachments = self.inner.attachments.lock();
+            attachments.presence_markers.insert(type_id, ());
+        }
+        // Fire delegates outside the lock
+        if !self.inner.presence_delegates.is_empty() {
+            let seq_hash = self.inner.seq_hash;
+            for delegate in self.inner.presence_delegates.iter() {
+                delegate.on_present(seq_hash, block_id, type_id, self);
+            }
+        }
     }
 
     /// Mark that Block<T, Registered> no longer exists for this sequence hash.
     /// Called when transitioning from Registered to Reset state.
-    pub(crate) fn mark_absent<T: BlockMetadata>(&self) {
+    /// Fires presence delegates outside the attachments lock.
+    pub(crate) fn mark_absent<T: BlockMetadata>(&self, block_id: BlockId) {
         let type_id = TypeId::of::<T>();
-        let mut attachments = self.inner.attachments.lock();
-        attachments.presence_markers.remove(&type_id);
+        {
+            let mut attachments = self.inner.attachments.lock();
+            attachments.presence_markers.remove(&type_id);
+        }
+        // Fire delegates outside the lock
+        if !self.inner.presence_delegates.is_empty() {
+            let seq_hash = self.inner.seq_hash;
+            for delegate in self.inner.presence_delegates.iter() {
+                delegate.on_absent(seq_hash, block_id, type_id, self);
+            }
+        }
     }
 
     /// Check if a Block<T, Registered> currently exists for this sequence hash.
