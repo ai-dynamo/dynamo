@@ -99,7 +99,9 @@ impl KvScheduler {
         kv_router_config: &KvRouterConfig,
         worker_type: &'static str,
     ) -> Result<Self, KvSchedulerError> {
-        let selector = selector.unwrap_or(Box::new(DefaultWorkerSelector::default()));
+        let selector = selector.unwrap_or(Box::new(DefaultWorkerSelector::new(Some(
+            *kv_router_config,
+        ))));
 
         // Get initial workers from watch receiver.
         // Caller must ensure at least one worker is present (via wait_for).
@@ -276,7 +278,9 @@ impl KvScheduler {
         kv_router_config: &KvRouterConfig,
         worker_type: &'static str,
     ) -> Result<Self, KvSchedulerError> {
-        let selector = selector.unwrap_or(Box::new(DefaultWorkerSelector::default()));
+        let selector = selector.unwrap_or(Box::new(DefaultWorkerSelector::new(Some(
+            *kv_router_config,
+        ))));
 
         let slots = Arc::new(
             ActiveSequencesMultiWorker::new_standalone(
