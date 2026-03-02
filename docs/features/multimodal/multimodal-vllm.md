@@ -418,12 +418,12 @@ Dynamo supports embedding cache in both aggregated and disaggregated settings:
 
 | Setting | Implementation | Launch Script |
 |---------|---------------|---------------|
-| **Aggregated** | `ec_both` via upstream vLLM (main or v0.17.0+) | `vllm_serve_embedding_cache.sh` |
-| **Disaggregated** | Dynamo-managed cache in the worker layer on top of vLLM engine | `disagg_multimodal_e_pd.sh` |
+| **Disaggregated encoder** | Dynamo-managed cache in the worker layer on top of vLLM engine | `disagg_multimodal_e_pd.sh` |
+| **Aggregated** | Experimental via vLLM git patches | N/A |
 
 ### ec_both (Aggregated)
 
-A single vLLM instance acts as both **producer** (encodes and saves embeddings to CPU cache) and **consumer** (loads cached embeddings back to GPU). Repeated images skip encoding entirely.
+A single vLLM instance caches encoded embeddings on CPU so repeated images skip encoding entirely. Experimental — requires vLLM patches (see below).
 
 ```mermaid
 flowchart LR
@@ -436,8 +436,25 @@ flowchart LR
 **Launch:**
 
 ```bash
-cd $DYNAMO_HOME/examples/backends/vllm
-bash launch/vllm_serve_embedding_cache.sh --multimodal-embedding-cache-capacity-gb 10
+
+cd /opt/dynamo/venv/lib/python3.12/site-packages
+
+curl -sL https://github.com/vllm-project/vllm/pull/34182.diff | patch -p1
+
+curl -sL https://github.com/vllm-project/vllm/pull/34783.diff | python3 -c "
+import sys
+chunks = sys.stdin.read().split('diff --git ')
+filtered = [c for c in chunks if c.startswith('a/vllm/')]
+print(''.join('diff --git ' + c for c in filtered))
+" | patch -p1
+
+vllm serve $model \
+    --ec-transfer-config "{
+        \"ec_role\": \"ec_both\",
+        \"ec_connector\": \"DynamoMultimodalEmbeddingCacheConnector\",
+        \"ec_connector_module_path\": \"dynamo.vllm.multimodal_utils.multimodal_embedding_cache_connector\",
+        \"ec_connector_extra_config\": {\"multimodal_embedding_cache_capacity_gb\": 10}
+    }"
 ```
 
 This configures `vllm serve` with `ec_role=ec_both` and the `DynamoMultimodalEmbeddingCacheConnector` automatically. The capacity parameter controls the CPU-side LRU cache size in GB (0 = disabled).
