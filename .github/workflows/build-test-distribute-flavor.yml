@@ -283,7 +283,7 @@ jobs:
           no_load: ${{ inputs.no_load }}
       - name: Show summary
         shell: bash
-        if: ${{ inputs.push_image && (inputs.show_summary || inputs.build_only) }}
+        if: ${{ inputs.push_image && inputs.show_summary }}
         run: |
           echo "### 🐳 ${{ inputs.framework }}-cuda${{ inputs.cuda_version }}-${{ inputs.platform }} Default Image" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
