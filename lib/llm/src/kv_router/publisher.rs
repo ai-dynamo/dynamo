@@ -564,7 +564,9 @@ async fn run_event_processor_loop<P: EventSink + Send + Sync + 'static>(
 
     loop {
         // When disabled (None) the sleep arm is never armed; 1 year is a harmless sentinel.
-        let remaining = timeout_ms.map_or(Duration::from_days(365), |ms| batching_state.remaining_timeout(ms));
+        let remaining = timeout_ms.map_or(Duration::from_days(365), |ms| {
+            batching_state.remaining_timeout(ms)
+        });
 
         tokio::select! {
             _ = cancellation_token.cancelled() => {
