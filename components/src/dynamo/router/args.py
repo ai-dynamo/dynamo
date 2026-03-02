@@ -4,6 +4,7 @@
 """Router CLI parsing and config assembly."""
 
 import argparse
+from typing import Optional
 
 from dynamo.llm import KvRouterConfig
 
@@ -34,7 +35,7 @@ def build_kv_router_config(router_config: DynamoRouterConfig) -> KvRouterConfig:
     )
 
 
-def parse_args(argv=None) -> DynamoRouterConfig:
+def parse_args(argv: Optional[list[str]] = None) -> DynamoRouterConfig:
     """Parse command-line arguments for the standalone router.
 
     Returns:
