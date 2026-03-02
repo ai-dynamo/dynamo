@@ -35,7 +35,13 @@ Dynamo TensorRT-LLM integrates [TensorRT-LLM](https://github.com/NVIDIA/TensorRT
 
 ## Quick Start
 
-Pull and run the prebuilt container:
+**Step 1 (host terminal):** Start infrastructure services:
+
+```bash
+docker compose -f deploy/docker-compose.yml up -d
+```
+
+**Step 2 (host terminal):** Pull and run the prebuilt container:
 
 ```bash
 DYNAMO_VERSION=0.9.0
@@ -48,13 +54,7 @@ docker run --gpus all -it --network host --ipc host \
 > The `DYNAMO_VERSION` variable above can be set to any specific available version of the container.
 > To find the available `tensorrtllm-runtime` versions for Dynamo, visit the [NVIDIA NGC Catalog for Dynamo TensorRT-LLM Runtime](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/tensorrtllm-runtime).
 
-Start infrastructure services for local development:
-
-```bash
-docker compose -f deploy/docker-compose.yml up -d
-```
-
-Launch an aggregated serving deployment (uses `Qwen/Qwen3-0.6B` by default):
+**Step 3 (inside the container):** Launch an aggregated serving deployment (uses `Qwen/Qwen3-0.6B` by default):
 
 ```bash
 cd $DYNAMO_HOME/examples/backends/trtllm
@@ -63,7 +63,7 @@ cd $DYNAMO_HOME/examples/backends/trtllm
 
 The launch script will automatically download the model and start the TensorRT-LLM engine. You can override the model by setting `MODEL_PATH` and `SERVED_MODEL_NAME` environment variables before running the script.
 
-Verify the deployment:
+**Step 4 (host terminal):** Verify the deployment:
 
 ```bash
 curl localhost:8000/v1/chat/completions \
