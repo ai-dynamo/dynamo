@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -27,6 +26,8 @@ use validator::Validate;
 pub use dynamo_kv_router::approx;
 pub use dynamo_kv_router::indexer;
 pub use dynamo_kv_router::protocols;
+pub use dynamo_kv_router::scheduling;
+pub use dynamo_kv_router::selector;
 
 pub mod cache_control;
 pub mod config;
@@ -56,10 +57,10 @@ use crate::{
         indexer::{GetWorkersRequest, KvIndexer, KvIndexerInterface, KvRouterError},
         protocols::{
             BlockExtraInfo, DpRank, LocalBlockHash, OverlapScores, RouterEvent, RouterRequest,
-            RouterResponse, TokensWithHashes, WorkerId, WorkerSelectionResult, WorkerWithDpRank,
+            RouterResponse, TokensWithHashes, WorkerId, WorkerWithDpRank,
             compute_block_hash_for_seq,
         },
-        scheduler::{KvScheduler, KvSchedulerError, PotentialLoad, SchedulingRequest},
+        scheduler::{KvScheduler, PotentialLoad},
         sequence::{SequenceError, SequenceRequest},
     },
     local_model::runtime_config::ModelRuntimeConfig,
@@ -118,15 +119,9 @@ pub fn router_discovery_query(namespace: String, component: String) -> Discovery
     }
 }
 
-/// A trait that users can implement to define custom selection logic
-pub trait WorkerSelector {
-    fn select_worker(
-        &self,
-        workers: &HashMap<protocols::WorkerId, ModelRuntimeConfig>,
-        request: &SchedulingRequest,
-        block_size: u32,
-    ) -> Result<WorkerSelectionResult, KvSchedulerError>;
-}
+/// Concrete `WorkerSelector` bound to the runtime config type.
+pub type WorkerSelector =
+    dyn dynamo_kv_router::selector::WorkerSelector<ModelRuntimeConfig> + Send + Sync;
 
 #[derive(Clone)]
 pub enum Indexer {
@@ -297,7 +292,7 @@ impl KvRouter {
         client: Client,
         mut workers_with_configs: RuntimeConfigWatch,
         block_size: u32,
-        selector: Option<Box<dyn WorkerSelector + Send + Sync>>,
+        selector: Option<Box<WorkerSelector>>,
         kv_router_config: Option<KvRouterConfig>,
         worker_type: &'static str,
     ) -> Result<Self> {

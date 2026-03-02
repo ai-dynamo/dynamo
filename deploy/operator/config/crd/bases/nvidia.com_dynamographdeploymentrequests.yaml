@@ -9108,7 +9108,7 @@ spec:
                 conditions:
                   description: |-
                     Conditions contains the latest observed conditions of the deployment request.
-                    Standard condition types include: Validated, ProfilingComplete, DeploymentReady.
+                    Standard condition types include: Succeeded, Validation, Profiling, SpecGenerated, DeploymentReady.
                   items:
                     description: Condition contains details for one aspect of the current state of this API Resource.
                     properties:
