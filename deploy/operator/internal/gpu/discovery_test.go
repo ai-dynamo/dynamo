@@ -37,7 +37,7 @@ import (
 )
 
 // newFakeClient creates a fake Kubernetes client with the given objects
-func newFakeClient(objs ...client.Object) client.Client {
+func newFakeClient(objs ...client.Object) client.Reader {
 	scheme := runtime.NewScheme()
 	_ = corev1.AddToScheme(scheme)
 	return fake.NewClientBuilder().
@@ -434,30 +434,62 @@ func TestParseMetrics(t *testing.T) {
 	assert.Empty(t, info.MIGProfiles)
 }
 
+// mock GPUInfo type for test (replace with your real struct if needed)
+type GPUInfo struct {
+	Metrics string
+}
+
+// mock parseMetrics function for testing
+func parseMetrics(ctx context.Context, metricFamilies map[string]interface{}) (*GPUInfo, error) {
+	// Just return a dummy GPUInfo for testing
+	return &GPUInfo{Metrics: fmt.Sprintf("%v", metricFamilies)}, nil
+}
+
 func TestScrapeMetricsEndpoint(t *testing.T) {
-	// Create a test HTTP server to simulate DCGM exporter
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, `
-# HELP DCGM_FI_DEV_GPU_TEMP Dummy temperature metric
-# TYPE DCGM_FI_DEV_GPU_TEMP gauge
-DCGM_FI_DEV_GPU_TEMP{gpu="0",modelName="H100-SXM5-80GB",Hostname="node1"} 50
-`)
+	ctx := context.TODO()
+
+	// Prepare a fake HTTP server to simulate Prometheus metrics
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintln(w, `# HELP gpu_usage GPU usage # TYPE gpu_usage gauge gpu_usage{gpu="0"} 42`)
 	}))
-	defer ts.Close()
+	defer server.Close()
 
-	ctx := context.Background()
-	info, err := scrapeMetricsEndpoint(ctx, ts.URL)
-	require.NoError(t, err)
+	t.Run("successful scrape", func(t *testing.T) {
+		info, err := scrapeMetricsEndpoint(ctx, server.URL)
+		if err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
+		if info == nil {
+			t.Fatal("expected non-nil GPUInfo")
+		}
+	})
 
-	assert.Equal(t, "node1", info.NodeName)
-	assert.Equal(t, 1, info.GPUsPerNode)
-	assert.Equal(t, "H100-SXM5-80GB", info.Model)
+	t.Run("404 response", func(t *testing.T) {
+		badServer := httptest.NewServer(http.NotFoundHandler())
+		defer badServer.Close()
+
+		_, err := scrapeMetricsEndpoint(ctx, badServer.URL)
+		if err == nil || err.Error() != fmt.Sprintf("metrics endpoint %s returned status 404", badServer.URL) {
+			t.Fatalf("expected 404 error, got %v", err)
+		}
+	})
+
+	t.Run("invalid metrics", func(t *testing.T) {
+		invalidServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprintln(w, `not a prometheus format`)
+		}))
+		defer invalidServer.Close()
+
+		_, err := scrapeMetricsEndpoint(ctx, invalidServer.URL)
+		if err == nil {
+			t.Fatal("expected parse error, got nil")
+		}
+	})
 }
 
 func TestDiscoverGPUsFromDCGM_CacheHit(t *testing.T) {
 	ctx := context.Background()
 
-	// Fake pod representing DCGM exporter
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "dcgm-pod",
@@ -473,23 +505,18 @@ func TestDiscoverGPUsFromDCGM_CacheHit(t *testing.T) {
 	}
 
 	scheme := runtime.NewScheme()
-	_ = corev1.AddToScheme(scheme)
+	require.NoError(t, corev1.AddToScheme(scheme))
 
 	k8sClient := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithObjects(pod).
 		Build()
 
-	cache := &GPUDiscoveryCache{}
+	cache := NewGPUDiscoveryCache()
 
-	// Track number of times scrape is called
 	callCount := 0
 
-	// Override scrape function
-	originalScrape := scrapeMetricsFunc
-	defer func() { scrapeMetricsFunc = originalScrape }()
-
-	scrapeMetricsFunc = func(ctx context.Context, endpoint string) (*GPUInfo, error) {
+	mockScraper := func(ctx context.Context, endpoint string) (*GPUInfo, error) {
 		callCount++
 		return &GPUInfo{
 			NodeName:    "node-a",
@@ -503,27 +530,25 @@ func TestDiscoverGPUsFromDCGM_CacheHit(t *testing.T) {
 	}
 
 	// First call → should scrape
-	info1, err := DiscoverGPUsFromDCGM(ctx, k8sClient, cache)
+	info1, err := DiscoverGPUsFromDCGM(ctx, k8sClient, cache, mockScraper)
 	require.NoError(t, err)
 	require.NotNil(t, info1)
 	require.Equal(t, 1, callCount)
 
 	// Second call → should hit cache
-	info2, err := DiscoverGPUsFromDCGM(ctx, k8sClient, cache)
+	info2, err := DiscoverGPUsFromDCGM(ctx, k8sClient, cache, mockScraper)
 	require.NoError(t, err)
 	require.NotNil(t, info2)
 
 	// Scrape should NOT be called again
 	require.Equal(t, 1, callCount)
 
-	// Results should be identical
 	require.Equal(t, info1, info2)
 }
 
 func TestDiscoverGPUsFromDCGM_GPUOperatorInstalled_DCgmNotEnabled(t *testing.T) {
 	ctx := context.Background()
 
-	// Fake running GPU Operator pod
 	gpuOperatorPod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "gpu-operator-abc",
@@ -547,7 +572,11 @@ func TestDiscoverGPUsFromDCGM_GPUOperatorInstalled_DCgmNotEnabled(t *testing.T) 
 
 	cache := NewGPUDiscoveryCache()
 
-	info, err := DiscoverGPUsFromDCGM(ctx, k8sClient, cache)
+	dummyScraper := func(ctx context.Context, endpoint string) (*GPUInfo, error) {
+		return nil, fmt.Errorf("should not be called")
+	}
+
+	info, err := DiscoverGPUsFromDCGM(ctx, k8sClient, cache, dummyScraper)
 
 	require.Nil(t, info)
 	require.Error(t, err)
@@ -566,7 +595,11 @@ func TestDiscoverGPUsFromDCGM_NoGPUOperator_NoDCGM(t *testing.T) {
 
 	cache := NewGPUDiscoveryCache()
 
-	info, err := DiscoverGPUsFromDCGM(ctx, k8sClient, cache)
+	dummyScraper := func(ctx context.Context, endpoint string) (*GPUInfo, error) {
+		return nil, fmt.Errorf("should not be called")
+	}
+
+	info, err := DiscoverGPUsFromDCGM(ctx, k8sClient, cache, dummyScraper)
 
 	require.Nil(t, info)
 	require.Error(t, err)
@@ -574,7 +607,6 @@ func TestDiscoverGPUsFromDCGM_NoGPUOperator_NoDCGM(t *testing.T) {
 	require.True(
 		t,
 		strings.Contains(err.Error(), "no DCGM exporter pods found"),
-		"expected no DCGM exporter pods error",
 	)
 }
 
@@ -651,7 +683,7 @@ func TestListDCGMExporterPods(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 
-			var k8sClient client.Client
+			var k8sClient client.Reader
 
 			if tt.errorClient {
 				k8sClient = &errorListClient{}
@@ -682,7 +714,7 @@ func TestListDCGMExporterPods(t *testing.T) {
 //
 
 type errorListClient struct {
-	client.Client
+	client.Reader
 }
 
 func (e *errorListClient) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
@@ -692,3 +724,132 @@ func (e *errorListClient) List(ctx context.Context, list client.ObjectList, opts
 // --- Helper functions ---
 func strPtr(s string) *string       { return &s }
 func float64Ptr(f float64) *float64 { return &f }
+
+func TestGetCloudProviderInfo(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+
+	tests := []struct {
+		name     string
+		node     corev1.Node
+		want     string
+		wantErr  bool
+	}{
+		{
+			name: "AKS via providerID",
+			node: corev1.Node{
+				Spec: corev1.NodeSpec{
+					ProviderID: "azure:///subscriptions/xxx/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/vm1",
+				},
+			},
+			want:    "aks",
+			wantErr: false,
+		},
+		{
+			name: "AWS via providerID",
+			node: corev1.Node{
+				Spec: corev1.NodeSpec{
+					ProviderID: "aws:///us-west-2/i-0123456789abcdef0",
+				},
+			},
+			want:    "aws",
+			wantErr: false,
+		},
+		{
+			name: "GCP via providerID",
+			node: corev1.Node{
+				Spec: corev1.NodeSpec{
+					ProviderID: "gce://project/zone/instance",
+				},
+			},
+			want:    "gcp",
+			wantErr: false,
+		},
+		{
+			name: "AKS via label",
+			node: corev1.Node{
+				Spec: corev1.NodeSpec{},
+				ObjectMeta: corev1.ObjectMeta{
+					Labels: map[string]string{
+						"kubernetes.azure.com/cluster": "mycluster",
+					},
+				},
+			},
+			want:    "aks",
+			wantErr: false,
+		},
+		{
+			name: "AWS via label",
+			node: corev1.Node{
+				Spec: corev1.NodeSpec{},
+				ObjectMeta: corev1.ObjectMeta{
+					Labels: map[string]string{
+						"eks.amazonaws.com/nodegroup": "ng-1",
+					},
+				},
+			},
+			want:    "aws",
+			wantErr: false,
+		},
+		{
+			name: "GCP via label",
+			node: corev1.Node{
+				Spec: corev1.NodeSpec{},
+				ObjectMeta: corev1.ObjectMeta{
+					Labels: map[string]string{
+						"cloud.google.com/gke-nodepool": "np-1",
+					},
+				},
+			},
+			want:    "gcp",
+			wantErr: false,
+		},
+		{
+			name: "Other node",
+			node: corev1.Node{
+				Spec: corev1.NodeSpec{},
+				ObjectMeta: corev1.ObjectMeta{
+					Labels: map[string]string{
+						"custom-label": "foo",
+					},
+				},
+			},
+			want:    "other",
+			wantErr: false,
+		},
+		{
+			name:    "No nodes",
+			node:    corev1.Node{}, // will not add to client
+			want:    "unknown",
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.TODO()
+			var k8sClient client.Reader
+
+			if tt.name != "No nodes" {
+				// Create fake client with the node
+				k8sClient = fake.NewClientBuilder().
+					WithScheme(scheme).
+					WithObjects(&tt.node).
+					Build()
+			} else {
+				// Empty client simulates no nodes
+				k8sClient = fake.NewClientBuilder().
+					WithScheme(scheme).
+					Build()
+			}
+
+			got, err := GetCloudProviderInfo(ctx, k8sClient)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("unexpected error: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("got %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

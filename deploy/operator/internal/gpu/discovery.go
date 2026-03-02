@@ -20,6 +20,7 @@ package gpu
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -47,12 +48,17 @@ const (
 	LabelValueDCGMExporter       = "dcgm-exporter"
 	LabelValueGPUOperator        = "gpu-operator"
 	GPUOperatorNamespace         = "gpu-operator"
+
+	requestTimeout       = 5 * time.Second
+	dialTimeout          = 3 * time.Second
+	tlsHandshakeTimeout  = 3 * time.Second
 )
 
 // GPUInfo contains discovered GPU configuration from cluster nodes
 type GPUInfo struct {
 	NodeName      string         // Name of the node with this GPU configuration
 	GPUsPerNode   int            // Maximum GPUs per node found in the cluster
+	NodesWithGPUs int    		// Number of nodes that have GPUs
 	Model         string         // GPU product name (e.g., "H100-SXM5-80GB")
 	VRAMPerGPU    int            // VRAM in MiB per GPU
 	System        string         // AIC hardware system identifier (e.g., "h100_sxm", "h200_sxm"), empty if unknown
@@ -61,13 +67,24 @@ type GPUInfo struct {
 	CloudProvider string         // NEW: aws | gcp | aks | other | unknown
 }
 
+type ScrapeMetricsFunc func(ctx context.Context, endpoint string) (*GPUInfo, error)
+
 type GPUDiscoveryCache struct {
 	mu        sync.RWMutex
 	value     *GPUInfo
 	expiresAt time.Time
 }
 
-var scrapeMetricsFunc = scrapeMetricsEndpoint
+type GPUDiscovery struct {
+    Scraper ScrapeMetricsFunc
+}
+
+func NewGPUDiscovery(scraper ScrapeMetricsFunc) *GPUDiscovery {
+    return &GPUDiscovery{
+        Scraper: scraper,
+    }
+}
+
 
 // NewGPUDiscoveryCache creates a new GPUDiscoveryCache instance.
 //
@@ -142,7 +159,7 @@ func (c *GPUDiscoveryCache) Set(info *GPUInfo, ttl time.Duration) {
 // does not represent full cluster GPU inventory. Future improvements should
 // aggregate and return GPU information for all nodes instead of selecting
 // only one.
-func DiscoverGPUsFromDCGM(ctx context.Context, k8sClient client.Client, cache *GPUDiscoveryCache) (*GPUInfo, error) {
+func DiscoverGPUsFromDCGM(ctx context.Context, k8sClient client.Reader, cache *GPUDiscoveryCache, scrapeFunc *GPUDiscovery) (*GPUInfo, error) {
 	if cache != nil {
 		// Return cached result if still valid
 		if cached, ok := cache.Get(); ok {
@@ -167,18 +184,21 @@ func DiscoverGPUsFromDCGM(ctx context.Context, k8sClient client.Client, cache *G
 	// Scrape each running pod individually
 	var bestNode *GPUInfo
 	var scrapeErrors []error
+	nodesWithGPUs := 0
+
 	for _, pod := range dcgmPods {
 		if pod.Status.Phase != corev1.PodRunning || pod.Status.PodIP == "" {
 			continue
 		}
 
 		endpoint := fmt.Sprintf("http://%s:9400/metrics", pod.Status.PodIP)
-		info, err := scrapeMetricsFunc(ctx, endpoint)
+		info, err := scrapeFunc.Scraper(ctx, endpoint)
 		if err != nil {
 			scrapeErrors = append(scrapeErrors, fmt.Errorf("pod %s (%s): %w", pod.Name, pod.Status.PodIP, err))
 			continue
 		}
-
+		// Increment NodesWithGPUs for every node that successfully reports GPU metrics
+		nodesWithGPUs++
 		// Select best node: highest GPU count, tie-breaker by VRAM
 		if bestNode == nil ||
 			info.GPUsPerNode > bestNode.GPUsPerNode ||
@@ -202,13 +222,15 @@ func DiscoverGPUsFromDCGM(ctx context.Context, k8sClient client.Client, cache *G
 		cloudProvider = "unknown"
 	}
 	bestNode.CloudProvider = cloudProvider
-	// Cache result for 60 seconds
-	cache.Set(bestNode, 60*time.Second)
-
+	bestNode.NodesWithGPUs = nodesWithGPUs
+	if cache != nil {
+		// Cache result for 60 seconds
+		cache.Set(bestNode, 60*time.Second)
+	}
 	return bestNode, nil
 }
 
-func listDCGMExporterPods(ctx context.Context, k8sClient client.Client) ([]corev1.Pod, error) {
+func listDCGMExporterPods(ctx context.Context, k8sClient client.Reader) ([]corev1.Pod, error) {
 	var result []corev1.Pod
 	seen := make(map[string]struct{})
 
@@ -255,12 +277,7 @@ func listDCGMExporterPods(ctx context.Context, k8sClient client.Client) ([]corev
 //
 // It uses common GPU Operator label selectors and deduplicates results
 // across selectors. If no running pods are found, an error is returned.
-// listGPUOperatorRunningPods lists GPU Operator pods in the GPUOperatorNamespace
-// and returns only those that are in Running phase.
-//
-// It uses known GPU Operator label selectors and deduplicates results
-// across selectors. If no running pods are found, an error is returned.
-func listGPUOperatorRunningPods(ctx context.Context, k8sClient client.Client) ([]corev1.Pod, error) {
+func listGPUOperatorRunningPods(ctx context.Context, k8sClient client.Reader) ([]corev1.Pod, error) {
 
 	var result []corev1.Pod
 	seen := make(map[string]struct{})
@@ -331,19 +348,30 @@ func listGPUOperatorRunningPods(ctx context.Context, k8sClient client.Client) ([
 //
 // This function does not implement retries or fallback logic.
 // Error handling and multi-pod aggregation are managed by the caller.
-func scrapeMetricsEndpoint(ctx context.Context, endpoint string) (*GPUInfo, error) {
+func ScrapeMetricsEndpoint(ctx context.Context, endpoint string) (*GPUInfo, error) {
 	// Set a timeout for the request
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
 	defer cancel()
+
+	// Create a custom HTTP client with transport-level timeouts
+	client := &http.Client{
+		Transport: &http.Transport{
+			DialContext: (&net.Dialer{
+				Timeout:   dialTimeout,      // Dial timeout
+				KeepAlive: 30 * time.Second, // Keep-alive for connections
+			}).DialContext,
+			TLSHandshakeTimeout: tlsHandshakeTimeout, // TLS handshake timeout
+		},
+	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create request for %s: %w", endpoint, err)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("GET %s failed: %w", endpoint, err)
+		return nil, fmt.Errorf("GET HTTP%s failed: %w", endpoint, err)
 	}
 	defer resp.Body.Close()
 
@@ -434,8 +462,8 @@ func parseMetrics(ctx context.Context, families map[string]*dto.MetricFamily) (*
 		for _, m := range mf.Metric {
 			gpuID := getLabel(m, "gpu")
 			if gpuID == "" {
-+				continue
-+			}
+				continue
+			}
 			gpuSet[gpuID] = struct{}{}
 
 			// Extract model from label
@@ -455,8 +483,8 @@ func parseMetrics(ctx context.Context, families map[string]*dto.MetricFamily) (*
 		for _, m := range mf.Metric {
 			gpuID := getLabel(m, "gpu")
 			if gpuID == "" {
-+				continue
-+			}
+				continue
+			}
 			fbFree[gpuID] = m.GetGauge().GetValue()
 
 			if hostName == "" {
@@ -469,8 +497,8 @@ func parseMetrics(ctx context.Context, families map[string]*dto.MetricFamily) (*
 		for _, m := range mf.Metric {
 			gpuID := getLabel(m, "gpu")
 			if gpuID == "" {
-+				continue
-+			}
+				continue
+			}
 			fbUsed[gpuID] = m.GetGauge().GetValue()
 
 			if hostName == "" {
@@ -483,8 +511,8 @@ func parseMetrics(ctx context.Context, families map[string]*dto.MetricFamily) (*
 		for _, m := range mf.Metric {
 			gpuID := getLabel(m, "gpu")
 			if gpuID == "" {
-+				continue
-+			}
+				continue
+			}
 			fbReserved[gpuID] = m.GetGauge().GetValue()
 
 			if hostName == "" {
@@ -536,7 +564,7 @@ func parseMetrics(ctx context.Context, families map[string]*dto.MetricFamily) (*
 //
 // This function requires cluster-wide node read permissions and expects nodes
 // to have GFD labels. If no nodes with GPU labels are found, it returns an error.
-func DiscoverGPUs(ctx context.Context, k8sClient client.Client) (*GPUInfo, error) {
+func DiscoverGPUs(ctx context.Context, k8sClient client.Reader) (*GPUInfo, error) {
 	logger := log.FromContext(ctx)
 	logger.Info("Starting GPU discovery from cluster nodes")
 
@@ -688,7 +716,7 @@ func InferHardwareSystem(gpuProduct string) string {
 	return ""
 }
 
-func GetCloudProviderInfo(ctx context.Context, k8sClient client.Client) (string, error) {
+func GetCloudProviderInfo(ctx context.Context, k8sClient client.Reader) (string, error) {
 	var nodeList corev1.NodeList
 	if err := k8sClient.List(ctx, &nodeList); err != nil {
 		return "unknown", fmt.Errorf("failed to list nodes: %w", err)

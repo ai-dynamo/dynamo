@@ -243,6 +243,7 @@ type DynamoGraphDeploymentRequestReconciler struct {
 	Config        *configv1alpha1.OperatorConfiguration
 	RuntimeConfig *commonController.RuntimeConfig
 	GPUDiscoveryCache *gpu.GPUDiscoveryCache
+	GPUDiscovery *gpu.GPUDiscovery
 	// RBACMgr handles RBAC setup for profiling jobs
 	RBACManager RBACManager
 }
@@ -850,7 +851,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) validateGPUHardwareInfo(ctx con
 				"\n   vramMb: 81920")
 	}
 
-	_, err := gpu.DiscoverGPUsFromDCGM(ctx, r.Client, r.GPUDiscoveryCache)
+	_, err := gpu.DiscoverGPUsFromDCGM(ctx, r.APIReader, r.GPUDiscoveryCache, r.GPUDiscovery)
     if err == nil {
         // GPU discovery is available, validation passes
         return nil
@@ -873,9 +874,9 @@ func (r *DynamoGraphDeploymentRequestReconciler) validateGPUHardwareInfo(ctx con
 // If the error does not match any known category, "unknown" is returned.
 func GetGPUDiscoveryFailureReason(err error) string {
     if err == nil {
-+		return "unknown"
-+	}
-+	errMsg := strings.ToLower(err.Error())
+		return "unknown"
+	}
+	errMsg := strings.ToLower(err.Error())
 	
     switch {
     case strings.Contains(errMsg, "list pods"):
@@ -886,7 +887,7 @@ func GetGPUDiscoveryFailureReason(err error) string {
         return "failed to initialize Helm client (RBAC, kubeconfig, or Helm driver issue)"
     case strings.Contains(errMsg, "timeout waiting for dcgm exporter pods"):
         return "timeout while waiting for DCGM exporter pods to become ready"
-    case strings.Contains(errMsg, "get"):
+    case strings.Contains(errMsg, "get http"):
         return "failed to reach DCGM metrics endpoint on pod (network/port issue)"
     case strings.Contains(errMsg, "metrics endpoint") &&
         strings.Contains(errMsg, "status"):
@@ -1222,25 +1223,33 @@ func (r *DynamoGraphDeploymentRequestReconciler) enrichHardwareFromDiscovery(ctx
 
 	var gpuInfo *gpu.GPUInfo
 	logger := log.FromContext(ctx)
+	// Check if user provided hardware info in the typed spec
+	hasManualConfig := dgdr.Spec.Hardware != nil && (dgdr.Spec.Hardware.GPUSKU != "" ||
+		dgdr.Spec.Hardware.VRAMMB != nil ||
+		dgdr.Spec.Hardware.NumGPUsPerNode != nil)
+	if hasManualConfig == false {	
 
-    logger.Info("Attempting GPU discovery for profiling job")
-    discoveredInfo, err := gpu.DiscoverGPUsFromDCGM(ctx, r.Client, r.GPUDiscoveryCache)
-    if err != nil {
-        // This path is expected for namespace-restricted operators without node read permissions
-        // Refine the logger message
-        reason := GetGPUDiscoveryFailureReason(err)
-        logger.Info("GPU discovery not available, using manual hardware configuration from profiling config",
-            "reason", reason, "error", err.Error())
-		return err
-    } else {
-        gpuInfo = discoveredInfo
-        logger.Info("GPU discovery completed successfully",
-            "gpusPerNode", gpuInfo.GPUsPerNode,
-            "model", gpuInfo.Model,
-            "vramMiB", gpuInfo.VRAMPerGPU,
-            "system", gpuInfo.System)
-    }
-
+    	logger.Info("Attempting GPU discovery for profiling job")
+    	discoveredInfo, err := gpu.DiscoverGPUsFromDCGM(ctx, r.APIReader, r.GPUDiscoveryCache, r.GPUDiscovery)
+    	if err != nil {
+        	// This path is expected for namespace-restricted operators without node read permissions
+        	// Refine the logger message
+        	reason := GetGPUDiscoveryFailureReason(err)
+        	logger.Info("GPU discovery not available, using manual hardware configuration from profiling config",
+            	"reason", reason, "error", err.Error())
+			return err
+    	} else {
+        	gpuInfo = discoveredInfo
+        	logger.Info("GPU discovery completed successfully",
+            	"gpusPerNode", gpuInfo.GPUsPerNode,
+				"nodesWithGPUs", gpuInfo.NodesWithGPUs,
+				"totalGpus", gpuInfo.GPUsPerNode*gpuInfo.NodesWithGPUs,
+            	"model", gpuInfo.Model,
+            	"vramMiB", gpuInfo.VRAMPerGPU,
+            	"system", gpuInfo.System,
+				"cloudprovider", gpuInfo.CloudProvider)
+    	}
+	}
 	if hw.GPUSKU == "" {
 		hw.GPUSKU = gpuInfo.Model
 	}

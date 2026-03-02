@@ -558,6 +558,7 @@ func main() {
 		Config:        operatorCfg,
 		RuntimeConfig: runtimeConfig,
 		GPUDiscoveryCache: gpu.NewGPUDiscoveryCache(),
+		GPUDiscovery: gpu.NewGPUDiscovery(gpu.ScrapeMetricsEndpoint),
 		RBACManager:   rbacManager,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "DynamoGraphDeploymentRequest")
