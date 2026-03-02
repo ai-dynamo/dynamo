@@ -66,6 +66,7 @@ validator = { workspace = true }
 xxhash-rust = { workspace = true }
 
 arc-swap = { version = "1" }
+crossbeam-queue = { version = "0.3" }
 async-once-cell = { version = "0.5.4" }
 bincode = { version = "1" }
 console-subscriber = { version = "0.4", optional = true }
