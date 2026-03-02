@@ -102,19 +102,10 @@ impl SeqEntry {
 
 pub type LevelIndex = FxHashMap<ExternalSequenceBlockHash, (usize, LocalBlockHash)>;
 
-/// Pre-allocated number of position slots in the index Vec.
-/// Positions beyond this will be silently ignored.
-const MAX_POSITIONS: usize = 10_000;
-
 /// Positional HashMap-based KV cache index.
 ///
 /// Implements [`SyncIndexer`] for use with [`ThreadPoolIndexer`](crate::indexer::ThreadPoolIndexer).
 /// All methods are synchronous and thread-safe.
-///
-/// The index is a `Vec<DashMap<LocalBlockHash, SeqEntry>>` where the Vec
-/// is indexed by position. This separates hot prefix positions (small DashMaps
-/// that stay in L1/L2 cache) from cold tail positions, improving cache locality
-/// for the common shared-prefix access pattern.
 pub struct PositionalIndexer {
     index: DashMap<(usize, LocalBlockHash), SeqEntry, FxBuildHasher>,
 
@@ -264,15 +255,10 @@ impl PositionalIndexer {
             worker_blocks_entry.insert(seq_hash, (position, local_hash));
         }
 
-        match self.tree_sizes.get(&worker) {
-            Some(size) => {
-                size.fetch_add(num_stored_blocks, Ordering::Relaxed);
-            }
-            None => {
-                self.tree_sizes
-                    .insert(worker, AtomicUsize::new(num_stored_blocks));
-            }
-        }
+        self.tree_sizes
+            .entry(worker)
+            .or_insert_with(|| AtomicUsize::new(0))
+            .fetch_add(num_stored_blocks, Ordering::Relaxed);
 
         Ok(())
     }
@@ -504,7 +490,7 @@ impl PositionalIndexer {
         seq_hashes: &mut Vec<ExternalSequenceBlockHash>,
         sequence: &[LocalBlockHash],
     ) -> Option<FxHashSet<WorkerWithDpRank>> {
-        let entry = self.index.get(position)?.get(&local_hash)?;
+        let entry = self.index.get(&(position, local_hash))?;
 
         // Always compute and verify seq_hash to handle divergent queries correctly.
         // Even if there's only one seq_hash entry, the query's seq_hash might differ
@@ -521,7 +507,7 @@ impl PositionalIndexer {
         seq_hashes: &mut Vec<ExternalSequenceBlockHash>,
         sequence: &[LocalBlockHash],
     ) -> Option<usize> {
-        let entry = self.index.get(position)?.get(&local_hash)?;
+        let entry = self.index.get(&(position, local_hash))?;
 
         // Always compute and verify seq_hash to handle divergent queries correctly.
         // Even if there's only one seq_hash entry, the query's seq_hash might differ
