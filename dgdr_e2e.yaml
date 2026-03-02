@@ -1,0 +1,5 @@
+model: "Qwen/Qwen3-32B-FP8"
+backend: vllm
+image: "nvcr.io/nvidian/dynamo-dev/dynamo-vllm:hzhou-0220-01"
+workload:
+  requestRate: 5.0

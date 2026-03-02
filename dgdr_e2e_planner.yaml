@@ -1,0 +1,10 @@
+model: "Qwen/Qwen3-32B-FP8"
+backend: vllm
+image: "nvcr.io/nvidian/dynamo-dev/dynamo-vllm:hzhou-0220-01"
+features:
+  planner:
+    pre_deployment_sweeping_mode: rapid
+    enable_throughput_scaling: true
+    enable_load_scaling: false
+    mode: disagg
+    backend: vllm

@@ -1,6 +1,60 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Planner profiling data ConfigMap
+#
+# The planner requires pre-deployment profiling data (prefill & decode
+# interpolation curves) for throughput-based scaling.  The values below are
+# PLACEHOLDERS for Qwen/Qwen3-0.6B — replace them with real measurements
+# before deploying to production.
+#
+# How to obtain real data:
+#   • Run the Dynamo Profiler against your target GPU/model combination.
+#     See docs/components/profiler/profiler-guide.md for instructions.
+#   • Or run manual benchmarks and fill in the arrays below.
+#
+# Key format (JSON files mounted into the planner container):
+#   prefill_raw_data.json — prefill_isl (input sequence lengths),
+#       prefill_ttft (time-to-first-token in ms), prefill_thpt_per_gpu
+#       (tokens/s per GPU) — all 1-D arrays of equal length.
+#   decode_raw_data.json  — x_kv_usage (KV-cache utilisation fractions),
+#       y_context_length (context lengths), z_itl (inter-token latency in ms,
+#       shape [len(x_kv_usage), len(y_context_length)]), z_thpt_per_gpu
+#       (tokens/s per GPU, same shape), max_kv_tokens (scalar).
+# ──────────────────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: planner-profile-data
+data:
+  prefill_raw_data.json: |
+    {
+      "prefill_isl":          [128, 256, 512, 1024, 2048],
+      "prefill_ttft":         [12,  18,  30,  55,   105],
+      "prefill_thpt_per_gpu": [9800, 8500, 6200, 3800, 2000]
+    }
+  decode_raw_data.json: |
+    {
+      "x_kv_usage":       [0.1, 0.3, 0.5, 0.7, 0.9],
+      "y_context_length":  [128, 512, 1024, 2048],
+      "z_itl": [
+        [5,  6,  7,  9 ],
+        [6,  7,  8,  10],
+        [7,  8,  10, 12],
+        [8,  10, 12, 15],
+        [10, 12, 15, 20]
+      ],
+      "z_thpt_per_gpu": [
+        [4500, 4000, 3500, 2800],
+        [4200, 3700, 3200, 2500],
+        [3800, 3300, 2800, 2200],
+        [3400, 2900, 2400, 1800],
+        [2800, 2400, 1900, 1400]
+      ],
+      "max_kv_tokens": 32768
+    }
+---
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
@@ -36,8 +90,12 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
+<<<<<<< HEAD
           image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.0
           workingDir: /workspace/components/src/dynamo/planner
+=======
+          image: my-registry/tensorrtllm-runtime:my-tag
+>>>>>>> a3cf35c3c (fix: disagg_planner.yaml using new planner CLI (#6760))
           ports:
             - name: metrics
               containerPort: 9085
@@ -45,11 +103,9 @@ spec:
             - python3
           args:
             - -m
-            - planner_sla
-            - --environment=kubernetes
-            - --backend=trtllm
-            - --adjustment-interval=60
-            - --profile-results-dir=/workspace/profiling_results
+            - dynamo.planner
+            - --config
+            - '{"environment": "kubernetes", "backend": "trtllm", "throughput_adjustment_interval": 60, "profile_results_dir": "/workspace/profiling_results"}'
           volumeMounts:
             - name: planner-profile-data
               mountPath: /workspace/profiling_results
@@ -57,8 +113,6 @@ spec:
         volumes:
           - name: planner-profile-data
             configMap:
-              # Must be pre-created before deployment by the profiler
-              # See docs/planner/sla_planner_quickstart.md for more details
               name: planner-profile-data
     TRTLLMDecodeWorker:
       envFromSecret: hf-token-secret
