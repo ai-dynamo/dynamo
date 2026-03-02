@@ -15,9 +15,7 @@ from dynamo.runtime import DistributedRuntime, dynamo_worker
 
 @dynamo_worker()
 async def echo_tensor_worker(runtime: DistributedRuntime):
-    component = runtime.namespace("tensor").component("echo")
-
-    endpoint = component.endpoint("generate")
+    endpoint = runtime.endpoint("tensor.echo.generate")
 
     triton_model_config = mc.ModelConfig()
     triton_model_config.name = "echo"

@@ -13,4 +13,4 @@ python -m dynamo.frontend &
 
 # run worker with LMCache enabled (without PROMETHEUS_MULTIPROC_DIR set externally)
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
-  python -m dynamo.vllm --model Qwen/Qwen3-0.6B --connector lmcache
+  python -m dynamo.vllm --model Qwen/Qwen3-0.6B --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'

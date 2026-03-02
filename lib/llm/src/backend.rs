@@ -41,9 +41,8 @@ use crate::protocols::{
         timing::RequestTracker,
     },
 };
-use crate::tokenizers::{DecodeStream, HuggingFaceTokenizer, Tokenizer};
+use crate::tokenizers::{DecodeStream, Tokenizer};
 use dynamo_async_openai::types::StopReason;
-use tokenizers::Tokenizer as HfTokenizer;
 
 /// Represents the output stream from the execution engine
 pub type ExecutionOutputStream = Annotated<LLMEngineOutput>;
@@ -69,10 +68,7 @@ struct DecoderUnfoldState {
 }
 
 impl Backend {
-    pub fn from_tokenizer(tokenizer: HfTokenizer) -> Arc<Self> {
-        let tokenizer = HuggingFaceTokenizer::from_tokenizer(tokenizer);
-        let tokenizer = Tokenizer::from(Arc::new(tokenizer));
-
+    pub fn from_tokenizer(tokenizer: Tokenizer) -> Arc<Self> {
         Arc::new(Self {
             tokenizer: Some(tokenizer),
             validate_engine_decode: false,
@@ -80,10 +76,10 @@ impl Backend {
     }
 
     pub fn from_mdc(mdc: &ModelDeploymentCard) -> Arc<Self> {
-        match mdc.tokenizer_hf() {
+        match mdc.tokenizer() {
             Ok(tokenizer) => Self::from_tokenizer(tokenizer),
             Err(err) => {
-                tracing::warn!(%err, "tokenizer_hf error converting ModelDeploymentCard to HF tokenizer");
+                tracing::warn!(%err, "error loading tokenizer from ModelDeploymentCard");
                 Arc::new(Self {
                     tokenizer: None,
                     validate_engine_decode: false,

@@ -215,6 +215,40 @@ func TestSharedSpecValidator_Validate(t *testing.T) {
 			wantErr:             true,
 			errMsg:              "spec.services[main].replicas must be non-negative",
 		},
+		{
+			name: "valid service annotation vllm-distributed-executor-backend=ray",
+			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				Annotations: map[string]string{
+					"nvidia.com/vllm-distributed-executor-backend": "ray",
+				},
+			},
+			fieldPath:           "spec.services[decode]",
+			calculatedNamespace: "default-my-dgd",
+			wantErr:             false,
+		},
+		{
+			name: "valid service annotation vllm-distributed-executor-backend=mp",
+			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				Annotations: map[string]string{
+					"nvidia.com/vllm-distributed-executor-backend": "mp",
+				},
+			},
+			fieldPath:           "spec.services[decode]",
+			calculatedNamespace: "default-my-dgd",
+			wantErr:             false,
+		},
+		{
+			name: "invalid service annotation vllm-distributed-executor-backend",
+			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				Annotations: map[string]string{
+					"nvidia.com/vllm-distributed-executor-backend": "invalid",
+				},
+			},
+			fieldPath:           "spec.services[decode]",
+			calculatedNamespace: "default-my-dgd",
+			wantErr:             true,
+			errMsg:              `spec.services[decode].annotations[nvidia.com/vllm-distributed-executor-backend] has invalid value "invalid": must be "mp" or "ray"`,
+		},
 	}
 
 	for _, tt := range tests {

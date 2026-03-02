@@ -377,10 +377,8 @@ impl GrpcInferenceService for KserveService {
             }
         }
 
-        let model = completion_request.inner.model.clone();
-        let parsing_options = self.state.manager.get_parsing_options(&model);
-
-        let stream = completion_response_stream(self.state_clone(), completion_request).await?;
+        let (stream, parsing_options) =
+            completion_response_stream(self.state_clone(), completion_request).await?;
 
         let completion_response =
             NvCreateCompletionResponse::from_annotated_stream(stream, parsing_options)
@@ -494,12 +492,9 @@ impl GrpcInferenceService for KserveService {
                     }
                 }
 
-                let model = completion_request.inner.model.clone();
-                let parsing_options = state.manager.get_parsing_options(&model);
-
                 let streaming = completion_request.inner.stream.unwrap_or(false);
 
-                let stream = completion_response_stream(state.clone(), completion_request).await?;
+                let (stream, parsing_options) = completion_response_stream(state.clone(), completion_request).await?;
 
                 if streaming {
                     pin_mut!(stream);

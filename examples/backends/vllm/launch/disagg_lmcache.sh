@@ -15,10 +15,10 @@ CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B &
 sleep 20
 
 # run prefill worker on GPU 1 with LMCache
-DYN_VLLM_KV_EVENT_PORT=20081 \
 VLLM_NIXL_SIDE_CHANNEL_PORT=20097 \
 CUDA_VISIBLE_DEVICES=1 \
   python3 -m dynamo.vllm \
     --model Qwen/Qwen3-0.6B \
-    --is-prefill-worker \
-    --connector lmcache nixl
+    --disaggregation-mode prefill \
+    --kv-transfer-config '{"kv_connector":"PdConnector","kv_role":"kv_both","kv_connector_extra_config":{"connectors":[{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"},{"kv_connector":"NixlConnector","kv_role":"kv_both"}]},"kv_connector_module_path":"kvbm.vllm_integration.connector"}' \
+    --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081","enable_kv_cache_events":true}'

@@ -1,6 +1,9 @@
 #!/bin/bash
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Aggregated serving: single worker handles both prefill and decode.
+# GPUs: 1
 
 # Setup cleanup trap
 cleanup() {
@@ -53,6 +56,26 @@ if [ "$ENABLE_OTEL" = true ]; then
     export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:-http://localhost:4317}
     TRACE_ARGS+=(--enable-trace --otlp-traces-endpoint localhost:4317)
 fi
+
+HTTP_PORT="${DYN_HTTP_PORT:-8000}"
+echo "=========================================="
+echo "Launching Aggregated LLM Worker"
+echo "=========================================="
+echo "Model:       $MODEL"
+echo "Frontend:    http://localhost:$HTTP_PORT"
+echo "=========================================="
+echo ""
+echo "Example test command:"
+echo ""
+echo "  curl http://localhost:${HTTP_PORT}/v1/chat/completions \\"
+echo "    -H 'Content-Type: application/json' \\"
+echo "    -d '{"
+echo "      \"model\": \"${MODEL}\","
+echo "      \"messages\": [{\"role\": \"user\", \"content\": \"Hello!\"}],"
+echo "      \"max_tokens\": 32"
+echo "    }'"
+echo ""
+echo "=========================================="
 
 # run ingress
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)

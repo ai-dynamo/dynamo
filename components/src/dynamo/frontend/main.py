@@ -57,7 +57,7 @@ def setup_engine_factory(
     """
     from .vllm_processor import EngineFactory
 
-    return EngineFactory(runtime, router_config, config, vllm_flags)
+    return EngineFactory(runtime, router_config, config, vllm_flags, config.debug_perf)
 
 
 def parse_args() -> tuple[FrontendConfig, Optional[Namespace]]:
@@ -193,6 +193,7 @@ async def async_main():
             router_prune_target_ratio=config.router_prune_target_ratio,
             router_queue_threshold=config.router_queue_threshold,
             router_event_threads=config.router_event_threads,
+            router_enable_cache_control=config.router_enable_cache_control,
         )
     elif config.router_mode == "random":
         router_mode = RouterMode.Random
@@ -210,7 +211,7 @@ async def async_main():
         active_decode_blocks_threshold=config.active_decode_blocks_threshold,
         active_prefill_tokens_threshold=config.active_prefill_tokens_threshold,
         active_prefill_tokens_threshold_frac=config.active_prefill_tokens_threshold_frac,
-        enforce_disagg=config.enforce_disagg,
+        decode_fallback=config.decode_fallback,
     )
     kwargs = {
         "http_host": config.http_host,
@@ -230,6 +231,8 @@ async def async_main():
         kwargs["tls_key_path"] = config.tls_key_path
     if config.namespace:
         kwargs["namespace"] = config.namespace
+    if config.namespace_prefix:
+        kwargs["namespace_prefix"] = config.namespace_prefix
     if config.kserve_grpc_server and config.grpc_metrics_port:
         kwargs["http_metrics_port"] = config.grpc_metrics_port
 

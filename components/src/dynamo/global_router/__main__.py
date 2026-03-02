@@ -69,13 +69,14 @@ async def worker(runtime: DistributedRuntime):
     # Initialize connections to local routers
     await handler.initialize()
 
-    # Create component in the global router namespace
-    component = runtime.namespace(config.namespace).component(config.component_name)
-
     # Create endpoints for prefill and decode
     # Note: We use separate endpoints so we can register them with different ModelTypes
-    prefill_endpoint = component.endpoint("prefill_generate")
-    decode_endpoint = component.endpoint("decode_generate")
+    prefill_endpoint = runtime.endpoint(
+        f"{config.namespace}.{config.component_name}.prefill_generate"
+    )
+    decode_endpoint = runtime.endpoint(
+        f"{config.namespace}.{config.component_name}.decode_generate"
+    )
 
     logger.info("Registering as prefill worker...")
     # Register as prefill worker - frontend will send prefill requests here

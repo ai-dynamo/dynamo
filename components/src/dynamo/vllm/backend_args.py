@@ -3,13 +3,15 @@
 
 """Dynamo vLLM wrapper configuration ArgGroup."""
 
-from typing import Optional
+import warnings
+from typing import Optional, Union
 
 from dynamo.common.configuration.arg_group import ArgGroup
 from dynamo.common.configuration.config_base import ConfigBase
 from dynamo.common.configuration.utils import add_argument, add_negatable_bool_argument
 
 from . import __version__
+from .constants import DisaggregationMode
 
 
 class DynamoVllmArgGroup(ArgGroup):
@@ -25,12 +27,23 @@ class DynamoVllmArgGroup(ArgGroup):
         )
         g = parser.add_argument_group("Dynamo vLLM Options")
 
+        add_argument(
+            g,
+            flag_name="--disaggregation-mode",
+            env_var="DYN_VLLM_DISAGGREGATION_MODE",
+            default=None,
+            help="Worker disaggregation mode: 'agg' (default, aggregated), "
+            "'prefill' (prefill-only worker), or 'decode' (decode-only worker).",
+            choices=[m.value for m in DisaggregationMode],
+        )
+
         add_negatable_bool_argument(
             g,
             flag_name="--is-prefill-worker",
             env_var="DYN_VLLM_IS_PREFILL_WORKER",
             default=False,
-            help="Enable prefill functionality for this worker. Uses the provided namespace to construct dyn://namespace.prefill.generate",
+            help="DEPRECATED: use --disaggregation-mode=prefill. "
+            "Enable prefill functionality for this worker.",
         )
 
         add_negatable_bool_argument(
@@ -38,7 +51,8 @@ class DynamoVllmArgGroup(ArgGroup):
             flag_name="--is-decode-worker",
             env_var="DYN_VLLM_IS_DECODE_WORKER",
             default=False,
-            help="Mark this as a decode worker which does not publish KV events",
+            help="DEPRECATED: use --disaggregation-mode=decode. "
+            "Mark this as a decode worker which does not publish KV events.",
         )
 
         add_negatable_bool_argument(
@@ -138,6 +152,148 @@ class DynamoVllmArgGroup(ArgGroup):
             help="Path to vLLM-Omni stage configuration YAML file for --omni mode (optional).",
         )
 
+        # Video encoding
+        add_argument(
+            g,
+            flag_name="--default-video-fps",
+            env_var="DYN_VLLM_DEFAULT_VIDEO_FPS",
+            default=16,
+            arg_type=int,
+            help="Default frames per second for generated videos.",
+        )
+
+        # Diffusion engine-level args (passed to AsyncOmni constructor).
+        # All flags use the --omni- prefix to avoid collisions with vLLM's
+        # native engine flags (e.g. --enforce-eager), which are parsed by a
+        # separate argparse pass and would otherwise be silently consumed here.
+        add_negatable_bool_argument(
+            g,
+            flag_name="--omni-enable-layerwise-offload",
+            env_var="DYN_VLLM_ENABLE_LAYERWISE_OFFLOAD",
+            default=False,
+            help="Enable layerwise (blockwise) offloading on DiT modules to reduce GPU memory.",
+        )
+        add_argument(
+            g,
+            flag_name="--omni-layerwise-num-gpu-layers",
+            env_var="DYN_VLLM_LAYERWISE_NUM_GPU_LAYERS",
+            default=1,
+            arg_type=int,
+            help="Number of ready layers (blocks) to keep on GPU during generation.",
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--omni-vae-use-slicing",
+            env_var="DYN_VLLM_VAE_USE_SLICING",
+            default=False,
+            help="Enable VAE slicing for memory optimization in diffusion models.",
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--omni-vae-use-tiling",
+            env_var="DYN_VLLM_VAE_USE_TILING",
+            default=False,
+            help="Enable VAE tiling for memory optimization in diffusion models.",
+        )
+        add_argument(
+            g,
+            flag_name="--omni-boundary-ratio",
+            env_var="DYN_VLLM_BOUNDARY_RATIO",
+            default=0.875,
+            arg_type=float,
+            help=(
+                "Boundary split ratio for low/high DiT transformers. "
+                "Default 0.875 uses both transformers for best quality. "
+                "Set to 1.0 to load only the low-noise transformer (saves memory). "
+                "Only used with --omni."
+            ),
+        )
+        add_argument(
+            g,
+            flag_name="--omni-flow-shift",
+            env_var="DYN_VLLM_FLOW_SHIFT",
+            default=None,
+            arg_type=float,
+            help="Scheduler flow_shift parameter (5.0 for 720p, 12.0 for 480p). Only used with --omni.",
+        )
+        add_argument(
+            g,
+            flag_name="--omni-diffusion-cache-backend",
+            env_var="DYN_VLLM_DIFFUSION_CACHE_BACKEND",
+            default=None,
+            choices=["cache_dit", "tea_cache"],
+            help=(
+                "Cache backend for diffusion acceleration. "
+                "'cache_dit' enables DBCache + SCM + TaylorSeer. "
+                "'tea_cache' enables TeaCache. Only used with --omni."
+            ),
+        )
+        add_argument(
+            g,
+            flag_name="--omni-diffusion-cache-config",
+            env_var="DYN_VLLM_DIFFUSION_CACHE_CONFIG",
+            default=None,
+            help="Cache configuration as JSON string (overrides defaults). Only used with --omni.",
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--omni-enable-cache-dit-summary",
+            env_var="DYN_VLLM_ENABLE_CACHE_DIT_SUMMARY",
+            default=False,
+            help="Enable cache-dit summary logging after diffusion forward passes.",
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--omni-enable-cpu-offload",
+            env_var="DYN_VLLM_ENABLE_CPU_OFFLOAD",
+            default=False,
+            help="Enable CPU offloading for diffusion models to reduce GPU memory usage.",
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--omni-enforce-eager",
+            env_var="DYN_VLLM_ENFORCE_EAGER",
+            default=False,
+            help="Disable torch.compile and force eager execution for diffusion models.",
+        )
+        # Diffusion parallel configuration
+        add_argument(
+            g,
+            flag_name="--omni-ulysses-degree",
+            env_var="DYN_VLLM_ULYSSES_DEGREE",
+            default=1,
+            arg_type=int,
+            help="Number of GPUs used for Ulysses sequence parallelism in diffusion.",
+        )
+        add_argument(
+            g,
+            flag_name="--omni-ring-degree",
+            env_var="DYN_VLLM_RING_DEGREE",
+            default=1,
+            arg_type=int,
+            help="Number of GPUs used for ring sequence parallelism in diffusion.",
+        )
+        add_argument(
+            g,
+            flag_name="--omni-cfg-parallel-size",
+            env_var="DYN_VLLM_CFG_PARALLEL_SIZE",
+            default=1,
+            arg_type=int,
+            choices=[1, 2],
+            help="Number of GPUs used for classifier free guidance parallelism.",
+        )
+
+        # Headless mode for multi-node TP/PP
+        add_negatable_bool_argument(
+            g,
+            flag_name="--headless",
+            env_var="DYN_VLLM_HEADLESS",
+            default=False,
+            help="Run in headless mode for multi-node TP/PP. "
+            "Secondary nodes run vLLM workers only, no dynamo endpoints. "
+            "See vLLM multi-node data parallel documentation for more details.",
+        )
+
         # ModelExpress P2P
         add_argument(
             g,
@@ -153,6 +309,9 @@ class DynamoVllmArgGroup(ArgGroup):
 class DynamoVllmConfig(ConfigBase):
     """Configuration for Dynamo vLLM wrapper (vLLM-specific only). All fields optional."""
 
+    disaggregation_mode: Union[
+        None, str, DisaggregationMode
+    ]  # None when not provided; resolved to enum in validate()
     is_prefill_worker: bool
     is_decode_worker: bool
     use_vllm_tokenizer: bool
@@ -171,22 +330,94 @@ class DynamoVllmConfig(ConfigBase):
     omni: bool
     stage_configs_path: Optional[str] = None
 
+    # Video encoding
+    default_video_fps: int = 16
+
+    # Diffusion engine-level parameters (passed to AsyncOmni constructor).
+    # Field names use omni_ prefix to match the --omni-* CLI flags and avoid
+    # collisions with vLLM's native engine args (e.g. enforce_eager).
+    omni_enable_layerwise_offload: bool = False
+    omni_layerwise_num_gpu_layers: int = 1
+    omni_vae_use_slicing: bool = False
+    omni_vae_use_tiling: bool = False
+    omni_boundary_ratio: float = 0.875
+    omni_flow_shift: Optional[float] = None
+    omni_diffusion_cache_backend: Optional[str] = None
+    omni_diffusion_cache_config: Optional[str] = None
+    omni_enable_cache_dit_summary: bool = False
+    omni_enable_cpu_offload: bool = False
+    omni_enforce_eager: bool = False
+
+    # Diffusion parallel configuration
+    omni_ulysses_degree: int = 1
+    omni_ring_degree: int = 1
+    omni_cfg_parallel_size: int = 1
+
+    # Headless mode for multi-node TP/PP
+    headless: bool = False
+
     # ModelExpress P2P
     model_express_url: Optional[str] = None
 
     def validate(self) -> None:
         """Validate vLLM wrapper configuration."""
-        self._validate_prefill_decode_exclusive()
+        self._resolve_disaggregation_mode()
         self._validate_multimodal_role_exclusivity()
         self._validate_multimodal_requires_flag()
         self._validate_omni_stage_config()
 
-    def _validate_prefill_decode_exclusive(self) -> None:
-        """Ensure at most one of is_prefill_worker and is_decode_worker is set."""
-        if self.is_prefill_worker and self.is_decode_worker:
+    def _resolve_disaggregation_mode(self) -> None:
+        """Resolve disaggregation_mode from new enum or legacy boolean flags.
+
+        Priority:
+        1. If --disaggregation-mode was explicitly provided, use it.
+           Raise if legacy booleans are also set.
+        2. If legacy --is-prefill-worker or --is-decode-worker is set,
+           emit DeprecationWarning and translate to enum.
+        3. Apply default (AGGREGATED) if nothing was provided.
+        4. Sync boolean fields from the resolved enum value.
+        """
+        # Convert string to enum (non-None means explicitly provided)
+        explicit_mode = self.disaggregation_mode is not None
+        if isinstance(self.disaggregation_mode, str):
+            self.disaggregation_mode = DisaggregationMode(self.disaggregation_mode)
+
+        # Check for legacy boolean flags
+        has_legacy = self.is_prefill_worker or self.is_decode_worker
+
+        if has_legacy and explicit_mode:
             raise ValueError(
-                "Cannot set both --is-prefill-worker and --is-decode-worker"
+                "Cannot combine --is-prefill-worker/--is-decode-worker with "
+                "--disaggregation-mode. Use only --disaggregation-mode."
             )
+
+        if has_legacy:
+            if self.is_prefill_worker and self.is_decode_worker:
+                raise ValueError(
+                    "Cannot set both --is-prefill-worker and --is-decode-worker"
+                )
+            if self.is_prefill_worker:
+                warnings.warn(
+                    "--is-prefill-worker is deprecated, use --disaggregation-mode=prefill",
+                    DeprecationWarning,
+                    stacklevel=2,
+                )
+                self.disaggregation_mode = DisaggregationMode.PREFILL
+            elif self.is_decode_worker:
+                warnings.warn(
+                    "--is-decode-worker is deprecated, use --disaggregation-mode=decode",
+                    DeprecationWarning,
+                    stacklevel=2,
+                )
+                self.disaggregation_mode = DisaggregationMode.DECODE
+
+        # Apply default if neither new flag nor legacy flags were provided
+        if self.disaggregation_mode is None:
+            self.disaggregation_mode = DisaggregationMode.AGGREGATED
+
+        # Sync booleans from enum (canonical source of truth)
+        self.is_prefill_worker = self.disaggregation_mode == DisaggregationMode.PREFILL
+        self.is_decode_worker = self.disaggregation_mode == DisaggregationMode.DECODE
 
     def _count_multimodal_roles(self) -> int:
         """Return the number of multimodal worker roles set (0 or 1 allowed).

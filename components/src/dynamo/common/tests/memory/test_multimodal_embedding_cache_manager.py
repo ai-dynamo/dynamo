@@ -7,6 +7,7 @@ import pytest
 import torch
 
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
+    CachedEmbedding,
     MultimodalEmbeddingCacheManager,
 )
 
@@ -19,12 +20,25 @@ class TestMultimodalEmbeddingCacheManagerBasicOperations:
         cache = MultimodalEmbeddingCacheManager(capacity_bytes=1024 * 1024)  # 1MB
         tensor = torch.randn(100, 100)  # ~40KB for float32
 
-        result = cache.set("key1", tensor)
+        result = cache.set("key1", CachedEmbedding(tensor))
         assert result is True
 
         retrieved = cache.get("key1")
         assert retrieved is not None
-        assert torch.equal(retrieved, tensor)
+        assert torch.equal(retrieved.tensor, tensor)
+        assert retrieved.image_grid_thw is None
+
+    def test_set_and_get_with_grid(self):
+        cache = MultimodalEmbeddingCacheManager(capacity_bytes=1024 * 1024)
+        tensor = torch.randn(100, 100)
+        grid = [[1, 2, 3]]
+
+        cache.set("key1", CachedEmbedding(tensor, grid))
+        retrieved = cache.get("key1")
+
+        assert retrieved is not None
+        assert torch.equal(retrieved.tensor, tensor)
+        assert retrieved.image_grid_thw == grid
 
     def test_get_nonexistent_key(self):
         """Test get returns None for nonexistent key."""
@@ -39,11 +53,11 @@ class TestMultimodalEmbeddingCacheManagerBasicOperations:
         tensor1 = torch.randn(10, 10)
         tensor2 = torch.randn(10, 10)
 
-        cache.set("key1", tensor1)
-        cache.set("key1", tensor2)
+        cache.set("key1", CachedEmbedding(tensor1))
+        cache.set("key1", CachedEmbedding(tensor2))
 
         retrieved = cache.get("key1")
-        assert torch.equal(retrieved, tensor2)
+        assert torch.equal(retrieved.tensor, tensor2)
         assert cache.stats["entries"] == 1
 
 
@@ -61,11 +75,11 @@ class TestMultimodalEmbeddingCacheManagerLRUEviction:
         t2 = torch.randn(10, 10)
         t3 = torch.randn(10, 10)
 
-        cache.set("key1", t1)
-        cache.set("key2", t2)
+        cache.set("key1", CachedEmbedding(t1))
+        cache.set("key2", CachedEmbedding(t2))
 
         # Adding third should evict first (LRU)
-        cache.set("key3", t3)
+        cache.set("key3", CachedEmbedding(t3))
 
         assert cache.get("key1") is None  # Evicted
         assert cache.get("key2") is not None
@@ -81,14 +95,14 @@ class TestMultimodalEmbeddingCacheManagerLRUEviction:
         t2 = torch.randn(10, 10)
         t3 = torch.randn(10, 10)
 
-        cache.set("key1", t1)
-        cache.set("key2", t2)
+        cache.set("key1", CachedEmbedding(t1))
+        cache.set("key2", CachedEmbedding(t2))
 
         # Access key1, making key2 the LRU
         cache.get("key1")
 
         # Adding third should evict key2 (now LRU)
-        cache.set("key3", t3)
+        cache.set("key3", CachedEmbedding(t3))
 
         assert cache.get("key1") is not None  # Not evicted (recently accessed)
         assert cache.get("key2") is None  # Evicted (LRU)
@@ -99,7 +113,7 @@ class TestMultimodalEmbeddingCacheManagerLRUEviction:
         cache = MultimodalEmbeddingCacheManager(capacity_bytes=100)  # Very small
         tensor = torch.randn(100, 100)  # ~40KB, way larger than capacity
 
-        result = cache.set("key1", tensor)
+        result = cache.set("key1", CachedEmbedding(tensor))
 
         assert result is False
         assert cache.get("key1") is None
@@ -119,10 +133,10 @@ class TestMultimodalEmbeddingCacheManagerSizeTracking:
         expected_size_1 = t1.element_size() * t1.numel()
         expected_size_2 = t2.element_size() * t2.numel()
 
-        cache.set("key1", t1)
+        cache.set("key1", CachedEmbedding(t1))
         assert cache.stats["current_bytes"] == expected_size_1
 
-        cache.set("key2", t2)
+        cache.set("key2", CachedEmbedding(t2))
         assert cache.stats["current_bytes"] == expected_size_1 + expected_size_2
 
     def test_size_updated_on_overwrite(self):
@@ -132,10 +146,10 @@ class TestMultimodalEmbeddingCacheManagerSizeTracking:
         small_tensor = torch.randn(10, 10)  # 400 bytes
         large_tensor = torch.randn(20, 20)  # 1600 bytes
 
-        cache.set("key1", small_tensor)
+        cache.set("key1", CachedEmbedding(small_tensor))
         initial_size = cache.stats["current_bytes"]
 
-        cache.set("key1", large_tensor)
+        cache.set("key1", CachedEmbedding(large_tensor))
 
         expected_size = large_tensor.element_size() * large_tensor.numel()
         assert cache.stats["current_bytes"] == expected_size
@@ -150,7 +164,7 @@ class TestMultimodalEmbeddingCacheManagerStats:
         cache = MultimodalEmbeddingCacheManager(capacity_bytes=1024 * 1024)
         tensor = torch.randn(10, 10)
 
-        cache.set("key1", tensor)
+        cache.set("key1", CachedEmbedding(tensor))
 
         # Misses
         cache.get("nonexistent1")
@@ -170,7 +184,7 @@ class TestMultimodalEmbeddingCacheManagerStats:
         """Test stats dictionary contains expected keys."""
         cache = MultimodalEmbeddingCacheManager(capacity_bytes=1024 * 1024)
         tensor = torch.randn(10, 10)
-        cache.set("key1", tensor)
+        cache.set("key1", CachedEmbedding(tensor))
 
         stats = cache.stats
 
@@ -190,10 +204,9 @@ class TestMultimodalEmbeddingCacheManagerStats:
         capacity = 1000
         cache = MultimodalEmbeddingCacheManager(capacity_bytes=capacity)
 
-        # Create tensor of known size
         # float32 = 4 bytes, so 25 elements = 100 bytes
         tensor = torch.zeros(25, dtype=torch.float32)
-        cache.set("key1", tensor)
+        cache.set("key1", CachedEmbedding(tensor))
 
         stats = cache.stats
         expected_utilization = 100 / capacity
@@ -209,7 +222,7 @@ class TestMultimodalEmbeddingCacheManagerContiguousTensor:
         tensor = torch.randn(10, 10)
 
         assert tensor.is_contiguous()
-        result = cache.set("key1", tensor)
+        result = cache.set("key1", CachedEmbedding(tensor))
         assert result is True
 
     def test_set_non_contiguous_tensor_raises(self):
@@ -221,4 +234,29 @@ class TestMultimodalEmbeddingCacheManagerContiguousTensor:
         assert not tensor.is_contiguous()
 
         with pytest.raises(AssertionError, match="Tensor must be contiguous"):
-            cache.set("key1", tensor)
+            cache.set("key1", CachedEmbedding(tensor))
+
+
+class TestCachedEmbeddingNamedTuple:
+    """Tests for CachedEmbedding NamedTuple."""
+
+    def test_fields(self):
+        tensor = torch.randn(4, 4)
+        grid = [[1, 2, 3]]
+        entry = CachedEmbedding(tensor=tensor, image_grid_thw=grid)
+
+        assert torch.equal(entry.tensor, tensor)
+        assert entry.image_grid_thw == grid
+
+    def test_none_grid(self):
+        tensor = torch.randn(4, 4)
+        entry = CachedEmbedding(tensor=tensor, image_grid_thw=None)
+        assert entry.image_grid_thw is None
+
+    def test_unpacking(self):
+        tensor = torch.randn(4, 4)
+        grid = [[1, 2, 3]]
+        entry = CachedEmbedding(tensor=tensor, image_grid_thw=grid)
+        t, g = entry
+        assert torch.equal(t, tensor)
+        assert g == grid

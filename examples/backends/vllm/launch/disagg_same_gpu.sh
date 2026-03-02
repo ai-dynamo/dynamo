@@ -55,8 +55,10 @@ CUDA_VISIBLE_DEVICES=0 \
 python3 -m dynamo.vllm \
   --model Qwen/Qwen3-0.6B \
   --enforce-eager \
-  --is-decode-worker \
-  --gpu-memory-utilization ${GPU_MEM_FRACTION} &
+  --disaggregation-mode decode \
+  --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
+  --gpu-memory-utilization ${GPU_MEM_FRACTION} \
+  --max-model-len 16384 &
 DECODE_PID=$!
 
 # Wait for decode worker to initialize before starting prefill worker
@@ -70,12 +72,14 @@ sleep 10
 
 # run prefill worker with metrics on port 8082 (foreground)
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
-DYN_VLLM_KV_EVENT_PORT=20081 \
 VLLM_NIXL_SIDE_CHANNEL_PORT=20097 \
 CUDA_VISIBLE_DEVICES=0 \
 python3 -m dynamo.vllm \
   --model Qwen/Qwen3-0.6B \
   --enforce-eager \
-  --is-prefill-worker \
-  --gpu-memory-utilization ${GPU_MEM_FRACTION}
+  --disaggregation-mode prefill \
+  --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
+  --gpu-memory-utilization ${GPU_MEM_FRACTION} \
+  --max-model-len 16384 \
+  --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081","enable_kv_cache_events":true}'
 

@@ -43,8 +43,7 @@ async def main(runtime: DistributedRuntime):
     """Main worker function for template verification."""
 
     # Create service
-    component = runtime.namespace("test").component("backend")
-    endpoint = component.endpoint("generate")
+    endpoint = runtime.endpoint("test.backend.generate")
 
     # Use the existing custom template from fixtures
     template_path = Path(SERVE_TEST_DIR) / "fixtures" / "custom_template.jinja"

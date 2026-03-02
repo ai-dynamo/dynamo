@@ -20,7 +20,7 @@
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: {{ include "dynamo-operator.fullname" . }}-gpu-discovery
+  name: {{ include "dynamo-operator.fullname" . }}-{{ .Release.Namespace }}-gpu-discovery
   labels:
     {{- include "dynamo-operator.labels" . | nindent 4 }}
 rules:
@@ -31,13 +31,13 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: {{ include "dynamo-operator.fullname" . }}-gpu-discovery
+  name: {{ include "dynamo-operator.fullname" . }}-{{ .Release.Namespace }}-gpu-discovery
   labels:
     {{- include "dynamo-operator.labels" . | nindent 4 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: {{ include "dynamo-operator.fullname" . }}-gpu-discovery
+  name: {{ include "dynamo-operator.fullname" . }}-{{ .Release.Namespace }}-gpu-discovery
 subjects:
   - kind: ServiceAccount
     name: {{ include "dynamo-operator.fullname" . }}-controller-manager

@@ -4,6 +4,7 @@
 import argparse
 import dataclasses
 import functools
+import importlib.metadata
 import json
 import logging
 import pathlib
@@ -21,58 +22,41 @@ from .system_info import (
 logger = logging.getLogger(__name__)
 
 
-def _get_sglang_version() -> Optional[str]:
-    """Get SGLang version if available.
+def _get_package_version(dist_name: str) -> Optional[str]:
+    """Get installed package version via metadata, without importing the module.
+
+    Uses importlib.metadata to avoid module-level side effects. Importing
+    framework packages (tensorrt_llm, vllm, sglang) triggers heavy native
+    initialization (CUDA context, TensorRT bindings, torch extensions) that
+    can crash the process when the runtime environment doesn't match—e.g.,
+    importing tensorrt_llm in a frontend pod that has no GPU allocation.
+
+    Args:
+        dist_name: Distribution name (e.g., "tensorrt-llm", "vllm", "sglang").
 
     Returns:
-        Version string if SGLang is installed, None otherwise.
+        Version string if the package is installed, None otherwise.
     """
     try:
-        import sglang as sgl
+        return importlib.metadata.version(dist_name)
+    except importlib.metadata.PackageNotFoundError:
+        logger.debug(f"{dist_name} not installed")
+        return None
 
-        return sgl.__version__
-    except ImportError:
-        logger.debug("SGLang not available")
-        return None
-    except AttributeError:
-        logger.warning("SGLang installed but version not available")
-        return None
+
+def _get_sglang_version() -> Optional[str]:
+    """Get SGLang version if installed, without importing the module."""
+    return _get_package_version("sglang")
 
 
 def _get_trtllm_version() -> Optional[str]:
-    """Get TensorRT-LLM version if available.
-
-    Returns:
-        Version string if TensorRT-LLM is installed, None otherwise.
-    """
-    try:
-        import tensorrt_llm
-
-        return tensorrt_llm.__version__
-    except ImportError:
-        logger.debug("TensorRT-LLM not available")
-        return None
-    except AttributeError:
-        logger.warning("TensorRT-LLM installed but version not available")
-        return None
+    """Get TensorRT-LLM version if installed, without importing the module."""
+    return _get_package_version("tensorrt-llm")
 
 
 def _get_vllm_version() -> Optional[str]:
-    """Get vLLM version if available.
-
-    Returns:
-        Version string if vLLM is installed, None otherwise.
-    """
-    try:
-        import vllm
-
-        return vllm.__version__
-    except ImportError:
-        logger.debug("vLLM not available")
-        return None
-    except AttributeError:
-        logger.warning("vLLM installed but version not available")
-        return None
+    """Get vLLM version if installed, without importing the module."""
+    return _get_package_version("vllm")
 
 
 def _get_dynamo_version() -> str:

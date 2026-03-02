@@ -1,6 +1,9 @@
 #!/bin/bash
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Diffusion language model (LLaDA2.0). Text generation via iterative refinement.
+# GPUs: 1
 
 set -e
 
@@ -37,6 +40,19 @@ echo "Frontend Port: $HTTP_PORT"
 echo "TP Size: $TP_SIZE"
 echo "Diffusion Algorithm: ${DLLM_ALGORITHM:-LowConfidence}"
 echo "Algorithm Config: ${DLLM_ALGORITHM_CONFIG:-default}"
+echo "=========================================="
+echo ""
+echo "Example test command:"
+echo ""
+echo "  curl http://localhost:${HTTP_PORT}/v1/chat/completions \\"
+echo "    -H 'Content-Type: application/json' \\"
+echo "    -d '{"
+echo "      \"model\": \"${MODEL_PATH}\","
+echo "      \"messages\": [{\"role\": \"user\", \"content\": \"Hello! How are you?\"}],"
+echo "      \"temperature\": 0.7,"
+echo "      \"max_tokens\": 512"
+echo "    }'"
+echo ""
 echo "=========================================="
 
 # Launch frontend (OpenAI-compatible API server)

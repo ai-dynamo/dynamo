@@ -1,6 +1,9 @@
 #!/bin/bash
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Aggregated embedding model serving.
+# GPUs: 1
 
 # Setup cleanup trap
 cleanup() {
@@ -30,6 +33,26 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+MODEL="Qwen/Qwen3-Embedding-4B"
+HTTP_PORT="${DYN_HTTP_PORT:-8000}"
+echo "=========================================="
+echo "Launching Embedding Worker"
+echo "=========================================="
+echo "Model:       $MODEL"
+echo "Frontend:    http://localhost:$HTTP_PORT"
+echo "=========================================="
+echo ""
+echo "Example test command:"
+echo ""
+echo "  curl http://localhost:${HTTP_PORT}/v1/embeddings \\"
+echo "    -H 'Content-Type: application/json' \\"
+echo "    -d '{"
+echo "      \"model\": \"${MODEL}\","
+echo "      \"input\": \"Hello world\""
+echo "    }'"
+echo ""
+echo "=========================================="
 
 # run ingress
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)

@@ -33,7 +33,7 @@ DYN_NAMESPACE=prefill_pool_0 python -m dynamo.router \
 python -m dynamo.mocker \
   --model-path Qwen/Qwen3-0.6B \
   --endpoint dyn://prefill_pool_0.worker.generate \
-  --is-prefill-worker \
+  --disaggregation-mode prefill \
   --block-size 16 &
 
 # ============================================================================
@@ -47,7 +47,7 @@ DYN_NAMESPACE=prefill_pool_1 python -m dynamo.router \
 python -m dynamo.mocker \
   --model-path Qwen/Qwen3-0.6B \
   --endpoint dyn://prefill_pool_1.worker.generate \
-  --is-prefill-worker \
+  --disaggregation-mode prefill \
   --block-size 16 &
 
 # ============================================================================
@@ -61,7 +61,7 @@ DYN_NAMESPACE=decode_pool_0 python -m dynamo.router \
 python -m dynamo.mocker \
   --model-path Qwen/Qwen3-0.6B \
   --endpoint dyn://decode_pool_0.worker.generate \
-  --is-decode-worker \
+  --disaggregation-mode decode \
   --block-size 16 &
 
 # ============================================================================

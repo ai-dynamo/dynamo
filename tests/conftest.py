@@ -121,7 +121,11 @@ def set_ucx_tls_no_mm():
     #   (uct_mem.c:482: mem.memh != UCT_MEM_HANDLE_NULL) when two workers
     #   start on the same node (maybe a shared-memory segment collision/limits).
     # - Mitigation: disable UCX "mm" shared-memory transport globally for tests
-    mp.setenv("UCX_TLS", "^mm")
+    #
+    # Also exclude gdr_copy transport to prevent GDRCopy driver initialization
+    # failures (driverInitFileInfo result=11) that can abort the process when
+    # the gdrdrv kernel module is not loaded.
+    mp.setenv("UCX_TLS", "^mm,gdr_copy")
     yield
     mp.undo()
 

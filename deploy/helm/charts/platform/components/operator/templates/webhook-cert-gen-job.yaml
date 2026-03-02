@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-{{- if and .Values.webhook.enabled (not .Values.webhook.certManager.enabled) (not .Values.webhook.certificateSecret.external) }}
+{{- if and (not .Values.webhook.certManager.enabled) (not .Values.webhook.certificateSecret.external) }}
 ---
 # ServiceAccount for certificate generation job
 apiVersion: v1

@@ -108,7 +108,8 @@ class VllmV1ConfigModifier(BaseConfigModifier):
             args = validate_and_get_worker_args(worker_service, backend="vllm")
             args = break_arguments(args)
 
-            # remove --is-prefill-worker flag
+            # remove --disaggregation-mode and its value (or legacy --is-prefill-worker)
+            args = remove_valued_arguments(args, "--disaggregation-mode")
             if "--is-prefill-worker" in args:
                 args.remove("--is-prefill-worker")
 

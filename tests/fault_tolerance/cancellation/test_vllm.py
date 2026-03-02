@@ -9,6 +9,7 @@ Test Execution Times (Last Run: 2025-12-09):
 - Total: 161.65s (0:02:41)
 """
 
+import json
 import logging
 import os
 import shutil
@@ -34,7 +35,6 @@ pytestmark = [
     pytest.mark.gpu_1,
     pytest.mark.e2e,
     pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME),
-    pytest.mark.post_merge,  # post_merge to pinpoint failure commit
     pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True),
 ]
 
@@ -69,7 +69,7 @@ class DynamoWorkerProcess(ManagedProcess):
         # Configure health check based on worker type
         if is_prefill:
             # Prefill workers check their own status endpoint
-            command.append("--is-prefill-worker")
+            command.extend(["--disaggregation-mode", "prefill"])
             health_check_urls = [
                 (f"http://localhost:{system_port}/health", self.is_ready)
             ]
@@ -96,10 +96,22 @@ class DynamoWorkerProcess(ManagedProcess):
         env["DYN_SYSTEM_PORT"] = str(system_port)
         env["DYN_HTTP_PORT"] = str(frontend_port)
 
-        # Set KV event port and NIXL side channel port only for prefill worker
+        # Set KV events config and NIXL side channel port only for prefill worker
         # to avoid conflicts with decode worker
         if is_prefill:
-            env["DYN_VLLM_KV_EVENT_PORT"] = "20082"  # TODO: use dynamic port allocation
+            command.extend(
+                [
+                    "--kv-events-config",
+                    json.dumps(
+                        {
+                            "publisher": "zmq",
+                            "topic": "kv-events",
+                            "endpoint": "tcp://*:20082",
+                            "enable_kv_cache_events": True,
+                        }
+                    ),
+                ]
+            )
             env[
                 "VLLM_NIXL_SIDE_CHANNEL_PORT"
             ] = "5601"  # TODO: use dynamic port allocation
@@ -166,6 +178,7 @@ class DynamoWorkerProcess(ManagedProcess):
 
 
 @pytest.mark.timeout(110)  # 3x average
+@pytest.mark.post_merge
 def test_request_cancellation_vllm_aggregated(
     request, runtime_services_dynamic_ports, predownload_models
 ):
@@ -247,6 +260,7 @@ def test_request_cancellation_vllm_aggregated(
 
 
 @pytest.mark.timeout(150)  # 3x average
+@pytest.mark.nightly
 def test_request_cancellation_vllm_decode_cancel(
     request, runtime_services_dynamic_ports, set_ucx_tls_no_mm, predownload_models
 ):
@@ -328,6 +342,7 @@ def test_request_cancellation_vllm_decode_cancel(
 
 
 @pytest.mark.timeout(150)  # 3x average
+@pytest.mark.nightly
 def test_request_cancellation_vllm_prefill_cancel(
     request, runtime_services_dynamic_ports, set_ucx_tls_no_mm, predownload_models
 ):

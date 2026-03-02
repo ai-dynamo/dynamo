@@ -41,6 +41,7 @@ pub use dynamo_runtime::protocols::maybe_error::MaybeError;
 #[cfg(feature = "metrics")]
 use dynamo_runtime::{
     component::Component,
+    error::DynamoError,
     metrics::{MetricsHierarchy, prometheus_names::kvrouter},
 };
 use prometheus::{IntCounterVec, Opts};
@@ -51,9 +52,9 @@ use rustc_hash::FxBuildHasher;
 #[cfg(not(feature = "metrics"))]
 pub trait MaybeError {
     /// Construct an instance from an error.
-    fn from_err(err: Box<dyn std::error::Error + Send + Sync>) -> Self;
+    fn from_err(err: impl std::error::Error + 'static) -> Self;
     /// Convert to an error instance if this represents an error.
-    fn err(&self) -> Option<anyhow::Error>;
+    fn err(&self) -> Option<Box<dyn std::error::Error + Send + Sync>>;
 }
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "metrics")]
@@ -125,14 +126,15 @@ pub enum WorkerKvQueryResponse {
     Error(String),
 }
 
+#[cfg(feature = "metrics")]
 impl MaybeError for WorkerKvQueryResponse {
-    fn from_err(err: Box<dyn std::error::Error + Send + Sync>) -> Self {
+    fn from_err(err: impl std::error::Error + 'static) -> Self {
         WorkerKvQueryResponse::Error(err.to_string())
     }
 
-    fn err(&self) -> Option<anyhow::Error> {
+    fn err(&self) -> Option<DynamoError> {
         match self {
-            WorkerKvQueryResponse::Error(msg) => Some(anyhow::Error::msg(msg.clone())),
+            WorkerKvQueryResponse::Error(msg) => Some(DynamoError::msg(msg.clone())),
             _ => None,
         }
     }
@@ -300,6 +302,7 @@ pub trait KvIndexerInterface {
     /// ### Arguments
     ///
     /// * `tokens` - A vector of `u32` tokens.
+    /// * `lora_name` - Optional LoRA adapter name to include in block hash computation.
     ///
     /// ### Returns
     ///
@@ -307,6 +310,7 @@ pub trait KvIndexerInterface {
     async fn find_matches_for_request(
         &self,
         tokens: &[u32],
+        lora_name: Option<&str>,
     ) -> Result<OverlapScores, KvRouterError>;
 
     /// Apply a `RouterEvent` to the KV store.
@@ -355,6 +359,14 @@ pub trait KvIndexerInterface {
     async fn flush(&self) -> usize;
 }
 
+pub enum WorkerTask {
+    Event(RouterEvent),
+    /// Permanently remove a worker from tracking (keep_worker: false).
+    RemoveWorker(WorkerId),
+    DumpEvents(oneshot::Sender<anyhow::Result<Vec<RouterEvent>>>),
+    Terminate,
+}
+
 // ============================================================================
 // SyncIndexer trait and ThreadPoolIndexer generic wrapper
 // ============================================================================
@@ -369,17 +381,18 @@ pub trait KvIndexerInterface {
 /// - Sticky event routing to N worker threads
 /// - Inline reads on the caller's thread (no channel dispatch for find_matches)
 pub trait SyncIndexer: Send + Sync + 'static {
+    fn worker(&self, event_receiver: flume::Receiver<WorkerTask>) -> anyhow::Result<()>;
+
     /// Find matches for a sequence of block hashes.
     fn find_matches(&self, sequence: &[LocalBlockHash], early_exit: bool) -> OverlapScores;
 
-    /// Apply a router event to the data structure.
-    fn apply_event(&self, event: RouterEvent) -> Result<(), KvCacheEventError>;
-
-    /// Remove all entries for a worker.
-    fn remove_worker(&self, worker_id: WorkerId);
-
-    /// Dump the data structure as router events for reconstruction.
-    fn dump_events(&self) -> Vec<RouterEvent>;
+    /// Dump events directly from the shared structure, bypassing worker channels.
+    /// Returns `Some(events)` for backends whose tree state is fully shared (e.g.
+    /// ConcurrentRadixTree). Returns `None` for backends that keep per-thread
+    /// state and must dump via the worker channel.
+    fn dump_events(&self) -> Option<Vec<RouterEvent>> {
+        None
+    }
 }
 
 /// Generic wrapper that provides [`KvIndexerInterface`] for any [`SyncIndexer`] backend.
@@ -411,9 +424,9 @@ pub struct ThreadPoolIndexer<T: SyncIndexer> {
     /// Counter for round-robin assignment of new WorkerIds.
     worker_assignment_count: AtomicUsize,
 
-    /// Channels to send events to worker threads (one per thread).
-    /// Sending `None` signals the thread to shut down.
-    worker_event_channels: Vec<flume::Sender<Option<RouterEvent>>>,
+    /// Channels to send tasks to worker threads (one per thread).
+    /// Sending `WorkerTask::Terminate` signals the thread to shut down.
+    worker_event_channels: Vec<flume::Sender<WorkerTask>>,
 
     /// Number of worker threads.
     num_workers: usize,
@@ -446,18 +459,13 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
         let mut worker_event_senders = Vec::new();
         let mut thread_handles = Vec::new();
         for _ in 0..num_workers {
-            let (event_sender, event_receiver) = flume::unbounded::<Option<RouterEvent>>();
+            let (event_sender, event_receiver) = flume::unbounded::<WorkerTask>();
             worker_event_senders.push(event_sender);
 
             let backend = Arc::clone(&backend);
 
             let handle = std::thread::spawn(move || {
-                while let Ok(Some(event)) = event_receiver.recv() {
-                    if let Err(e) = backend.apply_event(event) {
-                        tracing::warn!("Failed to apply event: {:?}", e);
-                    }
-                }
-                tracing::debug!("Worker thread shutting down");
+                backend.worker(event_receiver).unwrap();
             });
             thread_handles.push(handle);
         }
@@ -508,8 +516,9 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
     async fn find_matches_for_request(
         &self,
         tokens: &[u32],
+        lora_name: Option<&str>,
     ) -> Result<OverlapScores, KvRouterError> {
-        let sequence = compute_block_hash_for_seq(tokens, self.kv_block_size, None);
+        let sequence = compute_block_hash_for_seq(tokens, self.kv_block_size, None, lora_name);
         Ok(self.backend.find_matches(&sequence, false))
     }
 
@@ -525,7 +534,7 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
         });
 
         // Send event to the assigned worker thread
-        if let Err(e) = self.worker_event_channels[thread_idx].send(Some(event)) {
+        if let Err(e) = self.worker_event_channels[thread_idx].send(WorkerTask::Event(event)) {
             tracing::error!(
                 "Failed to send event to worker thread {}: {:?}",
                 thread_idx,
@@ -535,14 +544,34 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
     }
 
     async fn remove_worker(&self, worker_id: WorkerId) {
-        // Execute inline - the backend is thread-safe
-        self.backend.remove_worker(worker_id);
+        // Route to the worker's assigned thread (if any), otherwise broadcast
+        // to all threads since dp_ranks may be spread across threads.
+        let thread_idx = self.worker_assignments.get(&worker_id).map(|v| *v);
+        match thread_idx {
+            Some(idx) => {
+                if let Err(e) =
+                    self.worker_event_channels[idx].send(WorkerTask::RemoveWorker(worker_id))
+                {
+                    tracing::error!(
+                        "Failed to send RemoveWorker to worker thread {}: {:?}",
+                        idx,
+                        e
+                    );
+                }
+            }
+            None => {
+                // Worker was never assigned a thread - broadcast to all
+                for channel in &self.worker_event_channels {
+                    let _ = channel.send(WorkerTask::RemoveWorker(worker_id));
+                }
+            }
+        }
     }
 
     fn shutdown(&self) {
-        // Send shutdown signal (None) to all worker threads
+        // Send shutdown signal to all worker threads
         for channel in self.worker_event_channels.iter() {
-            let _ = channel.send(None);
+            let _ = channel.send(WorkerTask::Terminate);
         }
 
         // Take ownership of thread handles and join them
@@ -560,8 +589,41 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
     }
 
     async fn dump_events(&self) -> Result<Vec<RouterEvent>, KvRouterError> {
-        // Execute inline - the backend is thread-safe
-        Ok(self.backend.dump_events())
+        // Fast path: backend can dump directly from shared state (e.g. ConcurrentRadixTree).
+        if let Some(events) = self.backend.dump_events() {
+            return Ok(events);
+        }
+
+        // Slow path: collect from each worker thread via channel (e.g. PositionalIndexer).
+        let mut receivers = Vec::new();
+
+        for channel in &self.worker_event_channels {
+            let (resp_tx, resp_rx) = oneshot::channel::<anyhow::Result<Vec<RouterEvent>>>();
+            let dump_req = WorkerTask::DumpEvents(resp_tx);
+
+            channel
+                .send(dump_req)
+                .map_err(|_| KvRouterError::IndexerOffline)?;
+            receivers.push(resp_rx);
+        }
+
+        let mut event_id_counter = 0;
+
+        let mut all_events = Vec::new();
+
+        for resp_rx in receivers {
+            let mut events = resp_rx
+                .await
+                .map_err(|_| KvRouterError::IndexerDroppedRequest)?
+                .map_err(|_| KvRouterError::IndexerOffline)?;
+            for event in &mut events {
+                event.event.event_id = event_id_counter;
+                event_id_counter += 1;
+            }
+            all_events.extend(events);
+        }
+
+        Ok(all_events)
     }
 
     async fn process_routing_decision_for_request(
@@ -970,13 +1032,14 @@ impl KvIndexerInterface for KvIndexer {
     async fn find_matches_for_request(
         &self,
         tokens: &[u32],
+        lora_name: Option<&str>,
     ) -> Result<OverlapScores, KvRouterError> {
         tracing::debug!(
             "Finding matches for request tokens: {:?} / len: {}",
             tokens,
             tokens.len()
         );
-        let sequence = compute_block_hash_for_seq(tokens, self.kv_block_size, None);
+        let sequence = compute_block_hash_for_seq(tokens, self.kv_block_size, None, lora_name);
         tracing::debug!("Computed sequence: {:?}", sequence);
         self.find_matches(sequence).await
     }
@@ -1305,8 +1368,11 @@ impl KvIndexerInterface for LocalKvIndexer {
     async fn find_matches_for_request(
         &self,
         tokens: &[u32],
+        lora_name: Option<&str>,
     ) -> Result<OverlapScores, KvRouterError> {
-        self.indexer.find_matches_for_request(tokens).await
+        self.indexer
+            .find_matches_for_request(tokens, lora_name)
+            .await
     }
 
     async fn apply_event(&self, event: RouterEvent) {
@@ -1758,8 +1824,9 @@ impl KvIndexerInterface for KvIndexerSharded {
     async fn find_matches_for_request(
         &self,
         tokens: &[u32],
+        lora_name: Option<&str>,
     ) -> Result<OverlapScores, KvRouterError> {
-        let sequence = compute_block_hash_for_seq(tokens, self.kv_block_size, None);
+        let sequence = compute_block_hash_for_seq(tokens, self.kv_block_size, None, lora_name);
         self.find_matches(sequence).await
     }
 
@@ -1901,7 +1968,10 @@ mod tests {
     use super::*;
     use crate::concurrent_radix_tree::ConcurrentRadixTree;
     use crate::nested_map::PositionalIndexer;
-    use crate::protocols::{ExternalSequenceBlockHash, LocalBlockHash, compute_seq_hash_for_block};
+    use crate::protocols::{
+        ExternalSequenceBlockHash, LocalBlockHash, compute_block_hash_for_seq,
+        compute_seq_hash_for_block,
+    };
     use rstest::rstest;
     use rstest_reuse::{self, *};
     use std::time::Instant;
@@ -2343,12 +2413,22 @@ mod tests {
 
     #[tokio::test]
     #[apply(indexer_template)]
+    async fn test_shutdown_idempotent(variant: &str) {
+        let index = make_indexer(variant);
+        index.apply_event(make_store_event(0, &[1, 2, 3])).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        index.shutdown();
+        index.shutdown();
+    }
+
+    #[tokio::test]
+    #[apply(indexer_template)]
     async fn test_find_matches_for_request(variant: &str) {
         let index = make_indexer(variant);
 
         // Empty index should return no matches
         let tokens = vec![1, 2, 3, 4];
-        let scores = index.find_matches_for_request(&tokens).await.unwrap();
+        let scores = index.find_matches_for_request(&tokens, None).await.unwrap();
         assert!(scores.scores.is_empty());
 
         // Store some data and verify we can find it via tokens
@@ -2360,7 +2440,7 @@ mod tests {
         // Note: find_matches_for_request computes block hashes from tokens,
         // so we need tokens that hash to the same LocalBlockHash values.
         // For this test, we just verify the method works without error.
-        let scores = index.find_matches_for_request(&tokens).await.unwrap();
+        let scores = index.find_matches_for_request(&tokens, None).await.unwrap();
         // The tokens [1,2,3,4] won't match our stored [1,2,3] local hashes
         // because find_matches_for_request computes different hashes from raw tokens
         assert!(scores.scores.is_empty() || !scores.scores.is_empty());
@@ -2619,6 +2699,296 @@ mod tests {
             scores.scores.is_empty(),
             "Cleared event should clear all dp_ranks for a worker"
         );
+    }
+
+    // ============================================================================
+    // LoRA isolation tests
+    // ============================================================================
+
+    #[tokio::test]
+    #[apply(indexer_template)]
+    async fn test_lora_and_base_model_blocks_do_not_conflict(variant: &str) {
+        let index = make_indexer(variant);
+        let kv_block_size: u32 = 32;
+
+        // Same token sequence for both base model and LoRA adapter
+        let tokens: Vec<u32> = (0..kv_block_size * 3).collect();
+
+        let base_hashes = compute_block_hash_for_seq(&tokens, kv_block_size, None, None);
+        let lora_hashes =
+            compute_block_hash_for_seq(&tokens, kv_block_size, None, Some("my-adapter"));
+
+        // Hashes must differ despite identical tokens
+        assert_ne!(
+            base_hashes, lora_hashes,
+            "Base and LoRA hashes must differ for the same tokens"
+        );
+
+        let base_seq = compute_seq_hash_for_block(&base_hashes);
+        let lora_seq = compute_seq_hash_for_block(&lora_hashes);
+
+        // Store base-model blocks on worker 0
+        let base_event = RouterEvent {
+            worker_id: 0,
+            event: KvCacheEvent {
+                event_id: 0,
+                data: KvCacheEventData::Stored(KvCacheStoreData {
+                    parent_hash: None,
+                    blocks: base_hashes
+                        .iter()
+                        .zip(base_seq.iter())
+                        .map(|(&local, &seq)| KvCacheStoredBlockData {
+                            tokens_hash: local,
+                            block_hash: ExternalSequenceBlockHash(seq),
+                            mm_extra_info: None,
+                        })
+                        .collect(),
+                }),
+                dp_rank: 0,
+            },
+        };
+        index.apply_event(base_event).await;
+
+        // Store LoRA blocks on worker 1
+        let lora_event = RouterEvent {
+            worker_id: 1,
+            event: KvCacheEvent {
+                event_id: 0,
+                data: KvCacheEventData::Stored(KvCacheStoreData {
+                    parent_hash: None,
+                    blocks: lora_hashes
+                        .iter()
+                        .zip(lora_seq.iter())
+                        .map(|(&local, &seq)| KvCacheStoredBlockData {
+                            tokens_hash: local,
+                            block_hash: ExternalSequenceBlockHash(seq),
+                            mm_extra_info: None,
+                        })
+                        .collect(),
+                }),
+                dp_rank: 0,
+            },
+        };
+        index.apply_event(lora_event).await;
+
+        // flush + settle time for thread-pool variants
+        index.flush().await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Query with base-model hashes → only worker 0
+        let base_scores = index.find_matches(base_hashes.clone()).await.unwrap();
+        assert_eq!(
+            base_scores.scores.len(),
+            1,
+            "Only base-model worker should match"
+        );
+        assert_eq!(
+            *base_scores
+                .scores
+                .get(&WorkerWithDpRank::new(0, 0))
+                .unwrap(),
+            3
+        );
+
+        // Query with LoRA hashes → only worker 1
+        let lora_scores = index.find_matches(lora_hashes.clone()).await.unwrap();
+        assert_eq!(lora_scores.scores.len(), 1, "Only LoRA worker should match");
+        assert_eq!(
+            *lora_scores
+                .scores
+                .get(&WorkerWithDpRank::new(1, 0))
+                .unwrap(),
+            3
+        );
+    }
+
+    /// Reproduces the "block_hash mismatch: sequence hashes should be uniform
+    /// across workers" warning seen when the same prompt is sent to both a base
+    /// model worker and a LoRA worker.
+    ///
+    /// On main (without LoRA-aware hashing), both workers compute the same
+    /// LocalBlockHash for identical tokens.  But vLLM's engine includes the
+    /// adapter in its rolling ExternalSequenceBlockHash, so the radix tree
+    /// sees conflicting sequence hashes at the same tree node.
+    ///
+    /// With LoRA-aware hashing, compute_block_hash_for_seq produces distinct
+    /// LocalBlockHash values for different adapters, so the blocks land on
+    /// separate tree paths and no mismatch occurs.
+    #[tokio::test]
+    #[apply(indexer_template)]
+    async fn test_lora_base_same_tokens_no_seq_hash_mismatch(variant: &str) {
+        let index = make_indexer(variant);
+        let kv_block_size: u32 = 32;
+
+        let tokens: Vec<u32> = (0..kv_block_size * 3).collect();
+
+        // With LoRA-aware hashing, base and adapter produce different LocalBlockHash
+        let base_local = compute_block_hash_for_seq(&tokens, kv_block_size, None, None);
+        let lora_local =
+            compute_block_hash_for_seq(&tokens, kv_block_size, None, Some("my-adapter"));
+
+        assert_ne!(
+            base_local, lora_local,
+            "LoRA-aware hashing must produce different LocalBlockHash values"
+        );
+
+        // Simulate what vLLM does: same tokens, different rolling seq hashes
+        // because the engine accounts for the adapter internally.
+        let base_seq = compute_seq_hash_for_block(&base_local);
+        let lora_seq = compute_seq_hash_for_block(&lora_local);
+
+        // Worker 0: base model
+        index
+            .apply_event(RouterEvent {
+                worker_id: 0,
+                event: KvCacheEvent {
+                    event_id: 0,
+                    data: KvCacheEventData::Stored(KvCacheStoreData {
+                        parent_hash: None,
+                        blocks: base_local
+                            .iter()
+                            .zip(base_seq.iter())
+                            .map(|(&local, &seq)| KvCacheStoredBlockData {
+                                tokens_hash: local,
+                                block_hash: ExternalSequenceBlockHash(seq),
+                                mm_extra_info: None,
+                            })
+                            .collect(),
+                    }),
+                    dp_rank: 0,
+                },
+            })
+            .await;
+
+        // Worker 1: LoRA adapter — different LocalBlockHash, so this goes to
+        // a separate tree path instead of colliding with worker 0's node.
+        index
+            .apply_event(RouterEvent {
+                worker_id: 1,
+                event: KvCacheEvent {
+                    event_id: 0,
+                    data: KvCacheEventData::Stored(KvCacheStoreData {
+                        parent_hash: None,
+                        blocks: lora_local
+                            .iter()
+                            .zip(lora_seq.iter())
+                            .map(|(&local, &seq)| KvCacheStoredBlockData {
+                                tokens_hash: local,
+                                block_hash: ExternalSequenceBlockHash(seq),
+                                mm_extra_info: None,
+                            })
+                            .collect(),
+                    }),
+                    dp_rank: 0,
+                },
+            })
+            .await;
+
+        index.flush().await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Base query finds only worker 0
+        let base_scores = index.find_matches(base_local.clone()).await.unwrap();
+        assert_eq!(base_scores.scores.len(), 1);
+        assert_eq!(
+            *base_scores
+                .scores
+                .get(&WorkerWithDpRank::new(0, 0))
+                .unwrap(),
+            3
+        );
+
+        // LoRA query finds only worker 1
+        let lora_scores = index.find_matches(lora_local.clone()).await.unwrap();
+        assert_eq!(lora_scores.scores.len(), 1);
+        assert_eq!(
+            *lora_scores
+                .scores
+                .get(&WorkerWithDpRank::new(1, 0))
+                .unwrap(),
+            3
+        );
+    }
+
+    #[tokio::test]
+    #[apply(indexer_template)]
+    async fn test_different_lora_adapters_do_not_conflict(variant: &str) {
+        let index = make_indexer(variant);
+        let kv_block_size: u32 = 32;
+
+        let tokens: Vec<u32> = (0..kv_block_size * 2).collect();
+
+        let hashes_a = compute_block_hash_for_seq(&tokens, kv_block_size, None, Some("adapter-a"));
+        let hashes_b = compute_block_hash_for_seq(&tokens, kv_block_size, None, Some("adapter-b"));
+
+        assert_ne!(
+            hashes_a, hashes_b,
+            "Different adapters must produce different hashes"
+        );
+
+        let seq_a = compute_seq_hash_for_block(&hashes_a);
+        let seq_b = compute_seq_hash_for_block(&hashes_b);
+
+        // Store adapter-a blocks on worker 0
+        index
+            .apply_event(RouterEvent {
+                worker_id: 0,
+                event: KvCacheEvent {
+                    event_id: 0,
+                    data: KvCacheEventData::Stored(KvCacheStoreData {
+                        parent_hash: None,
+                        blocks: hashes_a
+                            .iter()
+                            .zip(seq_a.iter())
+                            .map(|(&local, &seq)| KvCacheStoredBlockData {
+                                tokens_hash: local,
+                                block_hash: ExternalSequenceBlockHash(seq),
+                                mm_extra_info: None,
+                            })
+                            .collect(),
+                    }),
+                    dp_rank: 0,
+                },
+            })
+            .await;
+
+        // Store adapter-b blocks on worker 1
+        index
+            .apply_event(RouterEvent {
+                worker_id: 1,
+                event: KvCacheEvent {
+                    event_id: 0,
+                    data: KvCacheEventData::Stored(KvCacheStoreData {
+                        parent_hash: None,
+                        blocks: hashes_b
+                            .iter()
+                            .zip(seq_b.iter())
+                            .map(|(&local, &seq)| KvCacheStoredBlockData {
+                                tokens_hash: local,
+                                block_hash: ExternalSequenceBlockHash(seq),
+                                mm_extra_info: None,
+                            })
+                            .collect(),
+                    }),
+                    dp_rank: 0,
+                },
+            })
+            .await;
+
+        index.flush().await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Query adapter-a → only worker 0
+        let scores_a = index.find_matches(hashes_a.clone()).await.unwrap();
+        assert_eq!(scores_a.scores.len(), 1);
+        assert!(scores_a.scores.contains_key(&WorkerWithDpRank::new(0, 0)));
+        assert!(!scores_a.scores.contains_key(&WorkerWithDpRank::new(1, 0)));
+
+        // Query adapter-b → only worker 1
+        let scores_b = index.find_matches(hashes_b.clone()).await.unwrap();
+        assert_eq!(scores_b.scores.len(), 1);
+        assert!(scores_b.scores.contains_key(&WorkerWithDpRank::new(1, 0)));
+        assert!(!scores_b.scores.contains_key(&WorkerWithDpRank::new(0, 0)));
     }
 
     // ============================================================================

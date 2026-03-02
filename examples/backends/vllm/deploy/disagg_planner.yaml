@@ -77,4 +77,7 @@ spec:
             - dynamo.vllm
             - --model
             - Qwen/Qwen3-0.6B
-            - --is-prefill-worker
+            - --disaggregation-mode
+            - prefill
+            - --kv-transfer-config
+            - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'

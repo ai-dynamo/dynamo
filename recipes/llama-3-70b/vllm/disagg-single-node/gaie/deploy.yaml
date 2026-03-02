@@ -1,0 +1,258 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: llama3-70b-disagg
+spec:
+  backendFramework: vllm
+  pvcs:
+    - name: model-cache
+      create: false
+  services:
+    Epp:
+      envFromSecret: hf-token-secret
+      componentType: epp
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/epp-image:my-tag
+      eppConfig:
+        config:
+          plugins:
+            - type: disagg-profile-handler
+            - name: prefill-filter
+              type: label-filter
+              parameters:
+                label: "nvidia.com/dynamo-sub-component-type"
+                validValues:
+                  - "prefill"
+                allowsNoLabel: false
+            - name: decode-filter
+              type: label-filter
+              parameters:
+                label: "nvidia.com/dynamo-sub-component-type"
+                validValues:
+                  - "decode"
+                allowsNoLabel: false
+            - name: picker
+              type: max-score-picker
+            - name: dyn-prefill
+              type: dyn-prefill-scorer
+            - name: dyn-decode
+              type: dyn-decode-scorer
+          schedulingProfiles:
+          - name: prefill
+            plugins:
+            - pluginRef: prefill-filter
+            - pluginRef: dyn-prefill
+              weight: 1
+            - pluginRef: picker
+          - name: decode
+            plugins:
+            - pluginRef: decode-filter
+            - pluginRef: dyn-decode
+              weight: 1
+            - pluginRef: picker
+    VllmPrefillWorker:
+      componentType: worker
+      subComponentType: prefill
+      envFromSecret: hf-token-secret
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /opt/models
+      sharedMemory:
+        size: 80Gi
+      extraPodSpec:
+        affinity:
+          podAffinity:
+            preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                  - key: nvidia.com/dynamo-component-type
+                    operator: In
+                    values:
+                    - worker
+                topologyKey: kubernetes.io/hostname
+        mainContainer:
+          env:
+            - name: SERVED_MODEL_NAME
+              value: "RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic"
+            - name: MODEL_PATH
+              value: "RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic"
+            - name: HF_HOME
+              value: /opt/models
+          args:
+          - "python3 -m dynamo.vllm --model $MODEL_PATH --served-model-name $SERVED_MODEL_NAME --tensor-parallel-size 2 --data-parallel-size 1 --is-prefill-worker --gpu-memory-utilization 0.90 --no-enable-prefix-caching --block-size 128"
+          command:
+          - /bin/sh
+          - -c
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          workingDir: /workspace/examples/backends/vllm
+        # Frontend sidecar: receives requests from kGateway on port 8000
+        # and routes them to the vLLM worker in the same pod
+        containers:
+          - name: frontend
+            image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+            command:
+              - python3
+            args:
+              - -m
+              - dynamo.frontend
+              - --router-mode
+              - direct
+            ports:
+              - containerPort: 8000
+                name: http
+                protocol: TCP
+            envFrom:
+              - secretRef:
+                  name: hf-token-secret
+            env:
+              - name: DYNAMO_PORT
+                value: "8000"
+              - name: DYN_HTTP_PORT
+                value: "8000"
+              - name: DYN_NAMESPACE
+                value: a-epp-vllm-disagg
+              - name: DYN_COMPONENT
+                value: frontend
+              - name: DYN_DISCOVERY_BACKEND
+                value: kubernetes
+              - name: DYN_PARENT_DGD_K8S_NAME
+                value: llama3-70b-disagg
+              - name: DYN_PARENT_DGD_K8S_NAMESPACE
+                value: a-epp
+              - name: POD_NAME
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.name
+              - name: POD_NAMESPACE
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.namespace
+              - name: POD_UID
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.uid
+            livenessProbe:
+              httpGet:
+                path: /live
+                port: http
+              initialDelaySeconds: 15
+              periodSeconds: 10
+            readinessProbe:
+              httpGet:
+                path: /health
+                port: http
+              initialDelaySeconds: 10
+              periodSeconds: 10
+      replicas: 2
+      resources:
+        limits:
+          gpu: "2"
+        requests:
+          gpu: "2"
+    VllmDecodeWorker:
+      componentType: worker
+      subComponentType: decode
+      envFromSecret: hf-token-secret
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /opt/models
+      sharedMemory:
+        size: 80Gi
+      extraPodSpec:
+        affinity:
+          podAffinity:
+            preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                  - key: nvidia.com/dynamo-component-type
+                    operator: In
+                    values:
+                    - worker
+                topologyKey: kubernetes.io/hostname
+        mainContainer:
+          env:
+            - name: SERVED_MODEL_NAME
+              value: "RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic"
+            - name: MODEL_PATH
+              value: "RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic"
+            - name: HF_HOME
+              value: /opt/models
+          args:
+          - "python3 -m dynamo.vllm --model $MODEL_PATH --served-model-name $SERVED_MODEL_NAME --tensor-parallel-size 4 --data-parallel-size 1 --gpu-memory-utilization 0.90 --no-enable-prefix-caching --block-size 128"
+          command:
+          - /bin/sh
+          - -c
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          workingDir: /workspace/examples/backends/vllm
+        # Frontend sidecar: receives requests from kGateway on port 8000
+        # and routes them to the vLLM worker in the same pod
+        containers:
+          - name: frontend
+            image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+            command:
+              - python3
+            args:
+              - -m
+              - dynamo.frontend
+              - --router-mode
+              - direct
+            ports:
+              - containerPort: 8000
+                name: http
+                protocol: TCP
+            envFrom:
+              - secretRef:
+                  name: hf-token-secret
+            env:
+              - name: DYNAMO_PORT
+                value: "8000"
+              - name: DYN_HTTP_PORT
+                value: "8000"
+              - name: DYN_NAMESPACE
+                value: a-epp-vllm-disagg
+              - name: DYN_COMPONENT
+                value: frontend
+              - name: DYN_DISCOVERY_BACKEND
+                value: kubernetes
+              - name: DYN_PARENT_DGD_K8S_NAME
+                value: llama3-70b-disagg
+              - name: DYN_PARENT_DGD_K8S_NAMESPACE
+                value: a-epp
+              - name: POD_NAME
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.name
+              - name: POD_NAMESPACE
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.namespace
+              - name: POD_UID
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.uid
+            livenessProbe:
+              httpGet:
+                path: /live
+                port: http
+              initialDelaySeconds: 15
+              periodSeconds: 10
+            readinessProbe:
+              httpGet:
+                path: /health
+                port: http
+              initialDelaySeconds: 10
+              periodSeconds: 10
+      replicas: 1
+      resources:
+        limits:
+          gpu: "4"
+        requests:
+          gpu: "4"

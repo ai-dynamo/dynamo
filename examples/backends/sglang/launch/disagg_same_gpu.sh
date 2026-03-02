@@ -2,6 +2,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
+# Disaggregated serving on a single GPU (prefill + decode share memory).
+# GPUs: 1 (requires 16+ GB VRAM)
+#
 # Usage: ./disagg_same_gpu.sh [GPU_MEM_FRACTION]
 #   GPU_MEM_FRACTION: Fraction of GPU memory to use per worker (default: 0.45)
 #   Example: ./disagg_same_gpu.sh 0.45
@@ -35,6 +38,28 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+
+MODEL="Qwen/Qwen3-0.6B"
+HTTP_PORT="${DYN_HTTP_PORT:-8000}"
+echo "=========================================="
+echo "Launching Disaggregated (same GPU)"
+echo "=========================================="
+echo "Model:       $MODEL"
+echo "Frontend:    http://localhost:$HTTP_PORT"
+echo "GPU Mem:     ${GPU_MEM_FRACTION} per worker"
+echo "=========================================="
+echo ""
+echo "Example test command:"
+echo ""
+echo "  curl http://localhost:${HTTP_PORT}/v1/chat/completions \\"
+echo "    -H 'Content-Type: application/json' \\"
+echo "    -d '{"
+echo "      \"model\": \"${MODEL}\","
+echo "      \"messages\": [{\"role\": \"user\", \"content\": \"Hello!\"}],"
+echo "      \"max_tokens\": 32"
+echo "    }'"
+echo ""
+echo "=========================================="
 
 # run ingress with KV router mode for disaggregated setup
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
