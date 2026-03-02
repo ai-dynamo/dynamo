@@ -156,13 +156,30 @@ Found existing namespace-restricted Dynamo operators in namespaces: ...
 For multinode deployments, you need to install multinode orchestration components:
 
 **Option 1 (Recommended): Grove + KAI Scheduler**
-- Grove and KAI Scheduler can be installed manually or through the dynamo-platform helm install command.
-- When using the dynamo-platform helm install command, Grove and KAI Scheduler are NOT installed by default. You can enable their installation by setting the following flags:
+
+For production environments, Grove and KAI Scheduler should be installed **separately** from the dynamo-platform chart. This allows independent lifecycle management, version pinning, and upgrade control.
+
+**Compatibility Matrix:**
+
+| dynamo-platform | kai-scheduler | Grove |
+|-----------------|---------------|-------|
+| 1.0.x           | >= v0.13.0    | >= v0.1.0-alpha.6 |
+
+After installing them separately, enable Dynamo integration:
 
 ```bash
---set "grove.enabled=true"
---set "kai-scheduler.enabled=true"
+--set "global.kai-scheduler.enabled=true"
+--set "global.grove.enabled=true"
 ```
+
+For **development/testing only**, you can install them as bundled subcharts:
+
+```bash
+--set "global.grove.install=true"
+--set "global.kai-scheduler.install=true"
+```
+
+Note: `global.kai-scheduler.install` / `global.grove.install` control whether the bundled subcharts are deployed. When set, integration is automatically enabled. `global.kai-scheduler.enabled` / `global.grove.enabled` can be set independently when using externally-managed installations.
 
 **Option 2: LeaderWorkerSet (LWS) + Volcano**
 - If using LWS for multinode deployments, you must also install Volcano (required dependency):
