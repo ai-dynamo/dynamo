@@ -740,6 +740,7 @@ class NixlWriteEmbeddingReceiver(AbstractEmbeddingReceiver):
             await asyncio.sleep(0.001)
             # Waited for too long without transfer completion, log for debugging
             if (time.perf_counter() - start_time) > receive_timeout:
+                self.ring_buffer.release_buffer(buffer_id)
                 raise TimeoutError(
                     f"Timeout while waiting for transfer completion for tensor_id {tensor_id} for more than {receive_timeout} seconds"
                 )
