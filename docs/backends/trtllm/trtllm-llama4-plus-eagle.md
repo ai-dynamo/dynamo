@@ -4,7 +4,7 @@
 title: Llama4 + Eagle
 ---
 
-This guide demonstrates how to deploy Llama 4 Maverick Instruct with Eagle Speculative Decoding on GB200x4 nodes. We will be following the [multi-node deployment instructions](./multinode/multinode-examples.md) to set up the environment for the following scenarios:
+This guide demonstrates how to deploy Llama 4 Maverick Instruct with Eagle Speculative Decoding on GB200x4 nodes. We will be following the [multi-node deployment instructions](./multinode/trtllm-multinode-examples.md) to set up the environment for the following scenarios:
 
 - **Aggregated Serving:**
   Deploy the entire Llama 4 model on a single GB200x4 node for end-to-end serving.
