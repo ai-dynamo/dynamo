@@ -194,7 +194,7 @@ Make sure that both of the endpoints are available before sending an inference r
 
 If only one worker endpoint is listed, the other may still be starting up. Monitor the worker logs to track startup progress.
 
-### 7. Test the Deployment
+### 6. Test the Deployment
 
 Send a test request to verify the deployment:
 
@@ -211,7 +211,7 @@ curl -X POST http://localhost:8000/v1/responses \
 
 The server exposes a standard OpenAI-compatible API endpoint that accepts JSON requests. You can adjust parameters like `max_tokens`, `temperature`, and others according to your needs.
 
-### 8. Reasoning and Tool Calling
+### 7. Reasoning and Tool Calling
 
 Dynamo has supported reasoning and tool calling in OpenAI Chat Completion endpoint. A typical workflow for application built on top of Dynamo
 is that the application has a set of tools to aid the assistant provide accurate answer, and it is usually
