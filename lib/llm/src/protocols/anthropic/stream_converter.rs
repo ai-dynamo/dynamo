@@ -99,14 +99,10 @@ impl AnthropicStreamConverter {
         if let Some(usage) = &chunk.usage {
             self.input_token_count = usage.prompt_tokens;
             self.output_token_count = usage.completion_tokens;
-            if let Some(cached) = usage
+            self.cached_token_count = usage
                 .prompt_tokens_details
                 .as_ref()
-                .and_then(|d| d.cached_tokens)
-                .filter(|&n| n > 0)
-            {
-                self.cached_token_count = Some(cached);
-            }
+                .and_then(|d| d.cached_tokens);
         }
 
         for choice in &chunk.choices {
@@ -344,14 +340,10 @@ impl AnthropicStreamConverter {
         if let Some(usage) = &chunk.usage {
             self.input_token_count = usage.prompt_tokens;
             self.output_token_count = usage.completion_tokens;
-            if let Some(cached) = usage
+            self.cached_token_count = usage
                 .prompt_tokens_details
                 .as_ref()
-                .and_then(|d| d.cached_tokens)
-                .filter(|&n| n > 0)
-            {
-                self.cached_token_count = Some(cached);
-            }
+                .and_then(|d| d.cached_tokens);
         }
 
         for choice in &chunk.choices {
