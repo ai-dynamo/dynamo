@@ -39,12 +39,9 @@ class Receiver:
             receiver = self.read_receiver
         else:
             raise ValueError(f"Invalid transfer type: {self.config.transfer_type}")
-        # sender size config
-        # tensor = self.gpu_tensor if self.config.use_gpu else self.cpu_tensor
-        # tensor_count = self.config.tensor_count_per_request
-        tensor = None
-        tensor_count = None
-        return receiver, tensor, tensor_count
+        # other fields in self.config are sender-side config, receiver only
+        # relies on BatchTransferRequest for completing the transfer.
+        return receiver
 
     async def async_init(self):
         self.sender_write_endpoint = self.runtime.endpoint(
@@ -54,7 +51,7 @@ class Receiver:
         # await self.send_client.wait_for_instances()
 
     async def batch_receive(self, batch_transfer_request: BatchTransferRequest):
-        receiver, _, _ = self.get_run_config()
+        receiver = self.get_run_config()
         tasks = [
             asyncio.create_task(receiver.receive_embeddings(tr))
             for tr in batch_transfer_request.requests
