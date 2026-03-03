@@ -304,7 +304,7 @@ jobs:
       - name: Pull relevant images
         shell: bash
         run: |
-          source ./.github/actions/docker-tag-push/retry_docker.sh
+          source ./.github/scripts/retry_docker.sh
           start_time=$(date +%s)
           retry_pull ${{ steps.calculate-target-tag.outputs.test_image }}
           retry_pull quay.io/minio/minio
@@ -403,7 +403,7 @@ jobs:
       - name: Pull relevant images
         shell: bash
         run: |
-          source ./.github/actions/docker-tag-push/retry_docker.sh
+          source ./.github/scripts/retry_docker.sh
           start_time=$(date +%s)
           retry_pull ${{ steps.calculate-target-tag.outputs.test_image }}
           retry_pull quay.io/minio/minio
