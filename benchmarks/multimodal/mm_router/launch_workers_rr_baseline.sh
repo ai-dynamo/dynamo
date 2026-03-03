@@ -141,6 +141,7 @@ for i in $(seq 1 "${NUM_WORKERS}"); do
         "${PYTHON_BIN}" -m dynamo.vllm \
             --model "${MODEL}" \
             --served-model-name "${served_name}" \
+            --enable-prefix-caching \
             --enable-multimodal \
             --block-size "${BLOCK_SIZE}" \
             --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION}" \
