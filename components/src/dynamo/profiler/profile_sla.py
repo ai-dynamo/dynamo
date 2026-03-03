@@ -38,8 +38,8 @@ from dynamo.profiler.utils.dgdr_v1beta1_types import (
     DynamoGraphDeploymentRequestSpec,
 )
 from dynamo.profiler.utils.dgdr_validate import (
-    run_gate_checks,
-    validate_dgdr_for_profiler,
+    valid_dgdr_spec,
+    validate_dgdr_dynamo_features,
 )
 from dynamo.profiler.utils.profile_common import (
     ProfilerOperationalConfig,
@@ -311,9 +311,8 @@ async def run_profile(
     )
 
     try:
-        # Validate and normalise — after this, required fields are guaranteed non-None
-        validate_dgdr_for_profiler(dgdr)
-
+        # Validate DGDR spec — after this, required fields are guaranteed non-None
+        valid_dgdr_spec(dgdr)
         (
             model,
             backend,
@@ -327,12 +326,12 @@ async def run_profile(
             search_strategy,
             picking_mode,
         ) = _extract_profiler_params(dgdr)
-
         if backend == "auto":
             aic_supported = _check_auto_backend_support(model, system)
         else:
             aic_supported = check_model_hardware_support(model, system, backend)
-        run_gate_checks(dgdr, aic_supported, search_strategy, backend)
+        # then validate DGDR features based on AIC support
+        validate_dgdr_dynamo_features(dgdr, aic_supported)
 
         (
             pick_result,
