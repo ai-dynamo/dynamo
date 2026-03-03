@@ -265,12 +265,15 @@ impl TransferChecksums {
     /// Verify that destination blocks match using specific layers only.
     pub fn verify_layers_against(
         &self,
+        src_layout: &PhysicalLayout,
         dst_layout: &PhysicalLayout,
         dst_ids: &[BlockId],
         layer_range: std::ops::Range<usize>,
     ) -> Result<()> {
+        let src_layer_checksums =
+            compute_layer_checksums(src_layout, &self.block_ids, layer_range.clone())?;
         verify_layer_checksums_by_position(
-            &self.checksums,
+            &src_layer_checksums,
             &self.block_ids,
             dst_layout,
             dst_ids,
