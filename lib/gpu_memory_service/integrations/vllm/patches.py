@@ -306,10 +306,15 @@ def patch_allocate_kv_cache_on_wake() -> None:
 
         logger.info("[Shadow] Allocating KV cache on wake")
 
-        kv_caches = self.initialize_kv_cache_tensors(
-            self._shadow_kv_cache_config,
-            self._shadow_kernel_block_sizes,
-        )
+        # vLLM 0.16+ requires the config context for internal operations
+        # (e.g., attention backend selection) that run during KV cache init.
+        from vllm.config import set_current_vllm_config
+
+        with set_current_vllm_config(self.vllm_config):
+            kv_caches = self.initialize_kv_cache_tensors(
+                self._shadow_kv_cache_config,
+                self._shadow_kernel_block_sizes,
+            )
 
         try:
             from vllm.distributed.kv_transfer.kv_connector.v1.base import (

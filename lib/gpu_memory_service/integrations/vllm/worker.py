@@ -24,6 +24,7 @@ from gpu_memory_service import (
     get_or_create_gms_client_memory_manager,
 )
 from gpu_memory_service.client.memory_manager import StaleMemoryLayoutError
+from gpu_memory_service.common.types import RequestedLockType
 from gpu_memory_service.common.utils import get_socket_path, get_weight_lock_type
 from gpu_memory_service.integrations.common import patch_empty_cache
 from gpu_memory_service.integrations.vllm.model_loader import register_gms_loader
