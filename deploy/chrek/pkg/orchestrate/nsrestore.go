@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"strings"
 	"syscall"
 	"time"
 
@@ -22,6 +21,10 @@ type RestoreOptions struct {
 	CheckpointPath string
 	CUDADeviceMap  string
 	CgroupRoot     string
+
+	// DebugResumeRestoreSignalFile, when non-empty, pauses CUDA restore until this
+	// file appears on disk. Set via DEBUG_PAUSE_CUDA_CHECKPOINT env var on the agent.
+	DebugResumeRestoreSignalFile string
 }
 
 // RestoreInNamespace performs a full restore from inside the target container's namespaces.
@@ -123,22 +126,19 @@ func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.Ch
 			"inner_to_outer_map", innerToOuter,
 			"ordered_cuda_pids", orderedCUDAPids)
 
-		// Debug pause: wait for /tmp/chrek-debug-continue before running cuda-checkpoint restore.
-		// Set CHREK_DEBUG_PAUSE_BEFORE_CUDA_RESTORE=1 on the agent to enable.
-		if strings.TrimSpace(os.Getenv("CHREK_DEBUG_PAUSE_BEFORE_CUDA_RESTORE")) != "" {
-			log.Info("DEBUG PAUSE: CRIU restore done, waiting before cuda-checkpoint restore",
-				"restored_pid", restoredPID, "ordered_cuda_pids", orderedCUDAPids,
-				"nsrestore_pid", os.Getpid(),
-				"signal_file", "/tmp/chrek-debug-continue")
+		if opts.DebugResumeRestoreSignalFile != "" {
+			log.Info("Debug pause: waiting for signal file before CUDA restore",
+				"signal_file", opts.DebugResumeRestoreSignalFile,
+				"restored_pid", restoredPID, "ordered_cuda_pids", orderedCUDAPids)
 			for {
 				select {
 				case <-ctx.Done():
 					return 0, ctx.Err()
 				default:
 				}
-				if _, err := os.Stat("/tmp/chrek-debug-continue"); err == nil {
-					os.Remove("/tmp/chrek-debug-continue")
-					log.Info("DEBUG PAUSE: continue signal received, proceeding with cuda-checkpoint restore")
+				if _, err := os.Stat(opts.DebugResumeRestoreSignalFile); err == nil {
+					os.Remove(opts.DebugResumeRestoreSignalFile)
+					log.Info("Debug pause: signal file detected, proceeding with CUDA restore")
 					break
 				}
 				time.Sleep(1 * time.Second)
