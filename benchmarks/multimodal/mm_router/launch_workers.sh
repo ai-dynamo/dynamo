@@ -144,9 +144,9 @@ fi
 
 for i in $(seq 1 "${NUM_WORKERS}"); do
     gpu_id=$((i - 1))
-    sys_var="VLLM${i}_SYSTEM_PORT";        sp="${!sys_var}";  system_port="${sp:-$((18079 + i * 2))}"
-    kv_var="KV_EVENT_PORT_${i}";           kp="${!kv_var}";   kv_port="${kp:-$((20079 + i))}"
-    name_var="VLLM${i}_SERVED_MODEL_NAME"; sn="${!name_var}"; served_name="${sn:-${MODEL}__internal_${i}}"
+    sys_var="VLLM${i}_SYSTEM_PORT";        sp="${!sys_var:-}";  system_port="${sp:-$((18079 + i * 2))}"
+    kv_var="KV_EVENT_PORT_${i}";           kp="${!kv_var:-}";   kv_port="${kp:-$((20079 + i))}"
+    name_var="VLLM${i}_SERVED_MODEL_NAME"; sn="${!name_var:-}"; served_name="${sn:-${MODEL}__internal_${i}}"
 
     echo "=== Starting vLLM backend worker #${i} (GPU ${gpu_id}) ==="
     env "${COMMON_ENV[@]}" \
