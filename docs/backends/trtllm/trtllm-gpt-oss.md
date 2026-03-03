@@ -4,6 +4,10 @@
 title: GPT-OSS
 ---
 
+For general TensorRT-LLM features and configuration, see the [Reference Guide](trtllm-reference-guide.md).
+
+---
+
 Dynamo supports disaggregated serving of gpt-oss-120b with TensorRT-LLM. This guide demonstrates how to deploy gpt-oss-120b using disaggregated prefill/decode serving on a single B200 node with 8 GPUs, running 1 prefill worker on 4 GPUs and 1 decode worker on 4 GPUs.
 
 ## Overview
@@ -170,7 +174,7 @@ CUDA_VISIBLE_DEVICES=4,5,6,7 python3 -m dynamo.trtllm \
   --expert-parallel-size 4
 ```
 
-### 6. Verify the Deployment is Ready
+### 5. Verify the Deployment is Ready
 
 Poll the `/health` endpoint to verify that both the prefill and decode worker endpoints have started:
 ```
@@ -190,7 +194,7 @@ Make sure that both of the endpoints are available before sending an inference r
 
 If only one worker endpoint is listed, the other may still be starting up. Monitor the worker logs to track startup progress.
 
-### 7. Test the Deployment
+### 6. Test the Deployment
 
 Send a test request to verify the deployment:
 
@@ -207,10 +211,10 @@ curl -X POST http://localhost:8000/v1/responses \
 
 The server exposes a standard OpenAI-compatible API endpoint that accepts JSON requests. You can adjust parameters like `max_tokens`, `temperature`, and others according to your needs.
 
-### 8. Reasoning and Tool Calling
+### 7. Reasoning and Tool Calling
 
 Dynamo has supported reasoning and tool calling in OpenAI Chat Completion endpoint. A typical workflow for application built on top of Dynamo
-is that the application has a set of tools to aid the assistant provide accurate answer, and it is ususally
+is that the application has a set of tools to aid the assistant provide accurate answer, and it is usually
 multi-turn as it involves tool selection and generation based on the tool result.
 
 In addition, the reasoning effort can be configured through ```chat_template_args```. Increasing the reasoning effort makes the model more accurate but also slower. It supports three levels: ```low```, ```medium```, and ```high```.
@@ -514,7 +518,7 @@ flowchart TD
      ```bash
      curl localhost:8000/v1/chat/completions -H "Content-Type: application/json" -d '{
        "model": "openai/gpt-oss-120b",
-       "messages": [{"role": "user", "content": "Hello"}],
+       "messages": [{"role": "user", "content": "Explain why Roger Federer is considered one of the greatest tennis players of all time"}],
        "chat_template_args": {
           "reasoning_effort": "high"
         },

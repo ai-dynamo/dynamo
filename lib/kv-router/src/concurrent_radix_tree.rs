@@ -8,7 +8,7 @@
 //!
 //! Unlike `RadixTree` which uses `Rc<RefCell<>>` and requires single-threaded access,
 //! `ConcurrentRadixTree` uses `Arc<RwLock<>>` per node and a
-//! `RwLock<FxHashMap<..., RwLock<FxHashMap<...>>>>` for the lookup table.
+//! `DashMap<..., RwLock<FxHashMap<...>>>` for the lookup table.
 //!
 //! # Limitations vs RadixTree
 //!
@@ -20,9 +20,8 @@
 //!
 //! - Multiple `find_matches` can run in parallel (read locks only)
 //! - Write operations (`apply_event`, `remove_worker`) acquire write locks
-//! - Outer `RwLock` is read-locked on the hot path; structural mutations
-//!   (adding/removing workers) are rare. Inner `RwLock` per worker allows
-//!   per-worker write concurrency.
+//! - Outer `DashMap` provides shard-level locking for per-worker access.
+//!   Inner `RwLock` per worker allows per-worker write concurrency.
 //! - Deadlock prevention: always lock parent before child, hand-over-hand locking
 
 use std::sync::Arc;
@@ -79,7 +78,7 @@ impl Block {
 ///
 /// Unlike `RadixTree` which uses `Rc<RefCell<>>` and requires single-threaded access,
 /// `ConcurrentRadixTree` uses `Arc<RwLock<>>` per node and a
-/// `RwLock<FxHashMap<..., RwLock<FxHashMap<...>>>>` for the lookup table,
+/// `DashMap<..., RwLock<FxHashMap<...>>>` for the lookup table,
 /// enabling concurrent `find_matches` operations.
 ///
 /// # Limitations vs RadixTree
@@ -92,8 +91,7 @@ impl Block {
 ///
 /// - Multiple `find_matches` can run in parallel (read locks only)
 /// - Write operations (`apply_event`, `remove_worker`) acquire write locks
-/// - Outer RwLock is read-locked on the hot path; structural mutations
-///   (adding/removing workers) are rare and take a write lock.
+/// - Outer `DashMap` provides shard-level locking for per-worker access.
 /// - Inner `RwLock` per worker allows per-worker write concurrency.
 /// - Deadlock prevention: always lock parent before child, hand-over-hand locking
 pub struct ConcurrentRadixTree {
