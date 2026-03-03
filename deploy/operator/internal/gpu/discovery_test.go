@@ -434,11 +434,6 @@ func TestParseMetrics(t *testing.T) {
 	assert.Empty(t, info.MIGProfiles)
 }
 
-// mock GPUInfo type for test (replace with your real struct if needed)
-type GPUInfo struct {
-	Metrics string
-}
-
 func TestScrapeMetricsEndpoint(t *testing.T) {
 	ctx := context.TODO()
 
