@@ -18,7 +18,9 @@ import base64
 import os
 import re
 import shutil
+import threading
 import time
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from io import BytesIO
 from typing import Any, Generator
 
@@ -58,6 +60,7 @@ _SINGLE_IMAGE_FRESH_COLOR = (123, 45, 67)
 _DOUBLE_IMAGE_FRESH_COLOR = (89, 210, 34)
 _STAIRCASE_IMAGE_FRESH_COLOR = (17, 99, 201)
 _SWAP_ORDER_FRESH_COLORS = [(14, 141, 77), (211, 66, 101), (44, 91, 233)]
+_HTTP_IMAGE_COLORS = [(180, 30, 90), (30, 180, 90), (90, 30, 180)]
 # Contract with lib/llm/src/kv_router/push_router.rs "[ROUTING]" debug log.
 # Keep this parser in sync with the router log format.
 _ROUTING_RECORD_PATTERN = re.compile(
@@ -76,7 +79,7 @@ def _make_process_env(log_level: str = "debug", **extra) -> dict[str, str]:
     env = os.environ.copy()
     env["DYN_LOG"] = log_level
     env["DYN_NAMESPACE"] = NAMESPACE
-    env["DYN_REQUEST_PLANE"] = "nats"
+    env["DYN_REQUEST_PLANE"] = "tcp"
     env.update(extra)
     return env
 
@@ -210,13 +213,17 @@ def start_vllm_mm_services(
                 yield frontend_port, router_proc
 
 
-def _make_data_uri(color: tuple[int, int, int], size: int = 1024) -> str:
+def _make_png_bytes(color: tuple[int, int, int], size: int = 1024) -> bytes:
     from PIL import Image
 
     img = Image.new("RGB", (size, size), color)
     buf = BytesIO()
     img.save(buf, format="PNG")
-    b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+    return buf.getvalue()
+
+
+def _make_data_uri(color: tuple[int, int, int], size: int = 1024) -> str:
+    b64 = base64.b64encode(_make_png_bytes(color, size)).decode("utf-8")
     return f"data:image/png;base64,{b64}"
 
 
@@ -681,6 +688,129 @@ def test_vllm_mm_overlap_swapped_order_less_than_same_order(
         "Expected near-zero overlap for swapped order of three distinct images "
         f"(allowing 1 shared text block), got {overlap_swapped}/{total_swapped}.\n"
         f"Recent router logs:\n{segment_swapped[-4000:]}"
+    )
+
+
+def _make_image_handler(image_map: dict[str, bytes]) -> type:
+    """Create an HTTP handler class that serves images from the given map."""
+
+    class _ImageHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            data = image_map.get(self.path)
+            if data is None:
+                self.send_error(404)
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "image/png")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def log_message(self, format, *args):
+            pass  # suppress noisy request logs
+
+    return _ImageHandler
+
+
+@pytest.fixture(scope="module")
+def http_image_server() -> Generator[list[str], None, None]:
+    """Serve pre-generated PNG images over HTTP for the duration of the module."""
+    (port,) = allocate_ports(count=1, start_port=18000)
+
+    image_map: dict[str, bytes] = {}
+    for i, color in enumerate(_HTTP_IMAGE_COLORS):
+        image_map[f"/image_{i}.png"] = _make_png_bytes(color)
+
+    server = HTTPServer(("127.0.0.1", port), _make_image_handler(image_map))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    urls = [
+        f"http://127.0.0.1:{port}/image_{i}.png"
+        for i in range(len(_HTTP_IMAGE_COLORS))
+    ]
+    yield urls
+
+    server.shutdown()
+
+
+@pytest.mark.timeout(1800)
+@pytest.mark.nightly
+def test_vllm_mm_overlap_repeated_http_images(
+    start_vllm_mm_services, predownload_models, http_image_server
+):
+    """For repeated same 3-HTTP-image request: low first overlap, then increase, then stable."""
+    frontend_port, router_proc = start_vllm_mm_services
+
+    payload = _build_payload(
+        http_image_server, prompt="MM routing e2e: repeated same 3 HTTP images."
+    )
+    overlap_1, total_1, _ = _send_request_get_overlap(
+        frontend_port, router_proc, payload, "http_3_images_req1"
+    )
+    overlap_2, total_2, _ = _send_request_get_overlap(
+        frontend_port, router_proc, payload, "http_3_images_req2"
+    )
+    overlap_3, total_3, segment_3 = _send_request_get_overlap(
+        frontend_port, router_proc, payload, "http_3_images_req3"
+    )
+
+    assert overlap_1 <= 1, (
+        f"Expected first overlap <=1, got req1={overlap_1}/{total_1}.\n"
+        f"Recent router logs:\n{segment_3[-4000:]}"
+    )
+    assert overlap_2 > overlap_1, (
+        f"Expected second overlap > first, got req1={overlap_1}/{total_1}, req2={overlap_2}/{total_2}.\n"
+        f"Recent router logs:\n{segment_3[-4000:]}"
+    )
+    assert overlap_3 == overlap_2, (
+        f"Expected third overlap == second, got req2={overlap_2}/{total_2}, req3={overlap_3}/{total_3}.\n"
+        f"Recent router logs:\n{segment_3[-4000:]}"
+    )
+    low, high = THREE_IMAGE_TOTAL_BLOCKS_RANGE
+    assert low <= total_3 <= high, (
+        f"Unexpected total blocks for same 3 HTTP images (1024): "
+        f"got {total_3}, expected in [{low}, {high}]"
+    )
+
+
+@pytest.mark.timeout(1800)
+@pytest.mark.nightly
+def test_vllm_mm_overlap_http_vs_data_uri_same_image(
+    start_vllm_mm_services, predownload_models, http_image_server
+):
+    """HTTP URL and data URI for the same image should produce identical KV cache hashes."""
+    frontend_port, router_proc = start_vllm_mm_services
+
+    # Use the first HTTP image color to build both representations
+    color = _HTTP_IMAGE_COLORS[0]
+    data_uri = _make_data_uri(color)
+    http_url = http_image_server[0]
+
+    # Seed KV cache with data URI request
+    data_uri_payload = _build_payload(
+        [data_uri], prompt="MM routing e2e: HTTP vs data URI same image."
+    )
+    overlap_data, total_data, _ = _send_request_get_overlap(
+        frontend_port, router_proc, data_uri_payload, "data_uri_seed"
+    )
+
+    # Now send HTTP URL request for the identical image
+    http_payload = _build_payload(
+        [http_url], prompt="MM routing e2e: HTTP vs data URI same image."
+    )
+    overlap_http, total_http, segment_http = _send_request_get_overlap(
+        frontend_port, router_proc, http_payload, "http_probe"
+    )
+
+    assert total_http > 0, (
+        f"No routing score for HTTP request.\n"
+        f"Recent router logs:\n{segment_http[-4000:]}"
+    )
+    assert overlap_http > 0, (
+        f"Expected overlap > 0 when HTTP image matches previously cached data URI image, "
+        f"got overlap={overlap_http}/{total_http}.\n"
+        f"Recent router logs:\n{segment_http[-4000:]}"
     )
 
 

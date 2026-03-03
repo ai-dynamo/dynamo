@@ -5,24 +5,25 @@
 Multimodal processing utilities for vLLM MM Router Worker.
 
 Key differences from TRT-LLM version:
-- Image loading: PIL + requests/base64 (no TRT-LLM dependency)
+- Image loading: async ImageLoader (no TRT-LLM dependency)
 - mm_hash: SHA256 of normalized PNG bytes (matches vLLM multi_modal_uuids)
 - Token replacement: NOT needed — vLLM keeps the original image_token_id as-is
 """
 
+import asyncio
 import base64
 import logging
 from dataclasses import dataclass
-from io import BytesIO
 from typing import Any
-from urllib.parse import urlparse
 
-import requests
 from PIL import Image
 
+from dynamo.common.multimodal.image_loader import ImageLoader
 from dynamo.vllm.multimodal_utils.hash_utils import compute_mm_uuids_from_images
 
 logger = logging.getLogger(__name__)
+
+_IMAGE_LOADER = ImageLoader(cache_size=512)
 
 
 # =============================================================================
@@ -37,6 +38,7 @@ class ProcessedInput:
     tokens: list[int]
     mm_hashes: list[int] | None
     image_ranges: list[tuple[int, int]] | None  # [(start, end), ...] per image
+    data_uris: list[str] | None  # base64 data URIs for forwarding to backend
 
 
 # =============================================================================
@@ -58,17 +60,18 @@ def extract_image_urls(messages: list[dict]) -> list[str]:
     return urls
 
 
-def process_multimodal(
+async def process_multimodal(
     messages: list[dict],
     image_urls: list[str],
     tokenizer: Any,
     processor: Any,
     model: str,
+    image_loader: ImageLoader,
 ) -> ProcessedInput:
     """
     Process multimodal request: load images, get expanded tokens and mm_hashes.
 
-    Uses PIL for image loading and hashlib for mm_hash computation.
+    Uses async ImageLoader for non-blocking image download with LRU cache.
     Unlike TRT-LLM, vLLM keeps original image_token_id (no replacement).
     """
     # The preprocessed request does not carry a rendered template string; it carries
@@ -76,11 +79,12 @@ def process_multimodal(
     prompt = _build_prompt_with_images(messages, tokenizer, processor)
     logger.info(f"Prompt (first 300 chars): {prompt[:300]}")
 
-    # Load images as PIL
-    pil_images = []
-    for url in image_urls:
-        pil_img = _load_image(url)
-        pil_images.append(pil_img)
+    # Load images as PIL + raw bytes in parallel (async, cached)
+    results = await asyncio.gather(
+        *[image_loader.load_image_with_raw_bytes(url) for url in image_urls]
+    )
+    pil_images = [r[0] for r in results]
+    raw_bytes_list = [r[1] for r in results]
 
     # Get expanded tokens and image ranges (no token replacement for vLLM)
     tokens, image_ranges = _get_expanded_tokens(
@@ -94,7 +98,15 @@ def process_multimodal(
 
     logger.info(f"mm_hashes={mm_hashes}")
 
-    return ProcessedInput(tokens=tokens, mm_hashes=mm_hashes, image_ranges=image_ranges)
+    # Build data URIs from raw bytes (no PIL re-encode)
+    data_uris = _raw_bytes_to_data_uris(raw_bytes_list)
+
+    return ProcessedInput(
+        tokens=tokens,
+        mm_hashes=mm_hashes,
+        image_ranges=image_ranges,
+        data_uris=data_uris,
+    )
 
 
 def build_block_mm_infos(
@@ -167,24 +179,25 @@ def _build_prompt_with_images(
     raise ValueError("Neither processor nor tokenizer provides apply_chat_template")
 
 
-def _load_image(url: str) -> Image.Image:
-    """
-    Load an image from URL (http/https or data URI) and return a PIL RGB image.
-    """
-    parsed = urlparse(url)
+def _detect_mime_type(raw_bytes: bytes) -> str:
+    """Detect image MIME type from magic bytes."""
+    if raw_bytes[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if raw_bytes[:4] == b"\x89PNG":
+        return "image/png"
+    if len(raw_bytes) >= 12 and raw_bytes[:4] == b"RIFF" and raw_bytes[8:12] == b"WEBP":
+        return "image/webp"
+    return "application/octet-stream"
 
-    if parsed.scheme == "data":
-        # data:image/png;base64,<data>
-        _, data = parsed.path.split(",", 1)
-        raw_bytes = base64.b64decode(data)
-    elif parsed.scheme in ("http", "https"):
-        response = requests.get(url, timeout=30)
-        response.raise_for_status()
-        raw_bytes = response.content
-    else:
-        raise ValueError(f"Unsupported URL scheme: {parsed.scheme}")
 
-    return Image.open(BytesIO(raw_bytes)).convert("RGB")
+def _raw_bytes_to_data_uris(raw_bytes_list: list[bytes]) -> list[str]:
+    """Convert raw image bytes to base64 data URIs (no PIL re-encode)."""
+    data_uris = []
+    for raw_bytes in raw_bytes_list:
+        mime = _detect_mime_type(raw_bytes)
+        b64 = base64.b64encode(raw_bytes).decode("ascii")
+        data_uris.append(f"data:{mime};base64,{b64}")
+    return data_uris
 
 
 def _get_expanded_tokens(
