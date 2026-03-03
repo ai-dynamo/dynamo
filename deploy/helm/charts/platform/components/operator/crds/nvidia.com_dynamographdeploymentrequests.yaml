@@ -94,6 +94,7 @@ spec:
                     The controller automatically sets this value in profilingConfig.config.engine.backend.
                     Profiling runs on real GPUs or via AIC simulation to collect performance data.
                   enum:
+                    - auto
                     - vllm
                     - sglang
                     - trtllm
