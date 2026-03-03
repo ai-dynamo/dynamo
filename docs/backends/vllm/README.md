@@ -27,9 +27,16 @@ For development, use the [devcontainer](https://github.com/ai-dynamo/dynamo/tree
 
 ---
 
-<Accordion title="Build and run container">
+### Container
 
-We have public images available on [NGC Catalog](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo/artifacts). If you'd like to build your own container from source:
+We have public images available on [NGC Catalog](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo/artifacts):
+
+```bash
+docker pull nvcr.io/nvidia/ai-dynamo/vllm-runtime:<version>
+./container/run.sh -it --framework VLLM --image nvcr.io/nvidia/ai-dynamo/vllm-runtime:<version>
+```
+
+<Accordion title="Build from source">
 
 ```bash
 python container/render.py --framework vllm --output-short-filename
