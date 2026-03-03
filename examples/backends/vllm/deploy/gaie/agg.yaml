@@ -14,6 +14,9 @@ spec:
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/epp-image:my-tag
+          env:
+            - name: DYN_DECODE_FALLBACK
+              value: "true"
       eppConfig:
         config:
           plugins:
@@ -33,9 +36,11 @@ spec:
             - name: decode
               plugins:
                 - pluginRef: decode-filter
+                  weight: 1
                 - pluginRef: dyn-decode
                   weight: 1
                 - pluginRef: picker
+                  weight: 1
     VllmDecodeWorker:
       componentType: worker
       envFromSecret: hf-token-secret

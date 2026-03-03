@@ -6,7 +6,6 @@ name: PR
 on:
   push:
     branches:
-      - main
       - "pull-request/[0-9]+"
       # Note: release/* branches are handled by release.yml workflow
   workflow_dispatch:
@@ -18,12 +17,9 @@ on:
         default: false
 
 concurrency:
-    # The group name is a ternary operation. If the ref_name is 'main',
-    # then the group name uses the run_id to ensure a unique group for
-    # 'main' pushes. Otherwise, the group name is the ref_name, so that
-    # workflows on the same PR/branch have the same group name for cancelling.
-    group: docker-build-test-${{ github.ref_name == 'main' && github.run_id || github.ref_name }}
-    cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  # The group name is the ref_name, so that workflows on the same PR/branch have the same group name for cancelling.
+  group: docker-build-test-${{ github.ref_name }}
+  cancel-in-progress: true
 
 env:
   BUILDER_NAME: b-${{ github.run_id }}-${{ github.run_attempt }}
@@ -156,13 +152,6 @@ jobs:
             "${ACR_IMAGE_BASE}:${DEFAULT_TAG}"
           )
 
-          if [[ "${{ github.ref_name }}" == "main" ]]; then
-            IMAGE_URIS+=(
-              "${ECR_DEFAULT_IMAGE_BASE}:main-operator"
-              "${ACR_IMAGE_BASE}:main-operator"
-            )
-          fi
-
           echo "operator_default_tag=${DEFAULT_TAG}" >> $GITHUB_OUTPUT
           TAGGING_FLAGS=$(printf -- '-t %s ' "${IMAGE_URIS[@]}")
           echo "flags for docker buildx: ${TAGGING_FLAGS}"
@@ -199,12 +188,9 @@ jobs:
       target: runtime
       platforms: '["amd64", "arm64"]'
       cuda_versions: '["12.9", "13.0"]'
-      extra_tags: |
-        ${{ github.ref_name == 'main' && 'main-vllm' || '' }}
-        ${{ github.ref_name == 'main' && format('main-vllm-{0}', github.sha) || '' }}
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
-      build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
-      copy_timeout_minutes: ${{ github.ref_name == 'main' && 20 || 10 }}
+      build_timeout_minutes: 60
+      copy_timeout_minutes: 10
       cpu_only_test_markers: 'pre_merge and vllm and gpu_0'
       single_gpu_test_markers: 'pre_merge and vllm and gpu_1'
       single_gpu_test_timeout_minutes: 35
@@ -223,12 +209,9 @@ jobs:
       target: runtime
       platforms: '["amd64", "arm64"]'
       cuda_versions: '["12.9", "13.0"]'
-      extra_tags: |
-        ${{ github.ref_name == 'main' && 'main-sglang' || '' }}
-        ${{ github.ref_name == 'main' && format('main-sglang-{0}', github.sha) || '' }}
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
-      build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
-      copy_timeout_minutes: ${{ github.ref_name == 'main' && 20 || 10 }}
+      build_timeout_minutes: 60
+      copy_timeout_minutes: 10
       cpu_only_test_markers: 'pre_merge and sglang and gpu_0'
       single_gpu_test_markers: 'pre_merge and sglang and gpu_1'
       run_multi_gpu_tests: false  # TODO: Dmitry is working on fixing markers for multi-GPU tests, can enable after that is resolved
@@ -246,12 +229,9 @@ jobs:
       target: runtime
       platforms: '["amd64", "arm64"]'
       cuda_versions: '["13.1"]'
-      extra_tags: |
-        ${{ github.ref_name == 'main' && 'main-trtllm' || '' }}
-        ${{ github.ref_name == 'main' && format('main-trtllm-{0}', github.sha) || '' }}
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
-      build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
-      copy_timeout_minutes: ${{ github.ref_name == 'main' && 20 || 10 }}
+      build_timeout_minutes: 60
+      copy_timeout_minutes: 10
       cpu_only_test_markers: 'pre_merge and trtllm and gpu_0'
       single_gpu_test_markers: 'pre_merge and trtllm and gpu_1'
       run_multi_gpu_tests: false  # TODO: Dmitry is working on fixing markers for multi-GPU tests, can enable after that is resolved

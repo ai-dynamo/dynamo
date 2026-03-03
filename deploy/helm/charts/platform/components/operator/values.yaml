@@ -120,6 +120,12 @@ dynamo:
 
   metrics:
     prometheusEndpoint: ""
+    podMonitors:
+      # -- Whether to create PodMonitor resources for Prometheus scraping of dynamo components.
+      # null=auto-detect (creates PodMonitors if prometheus-operator CRDs exist in cluster),
+      # true=always create (use for helm template / GitOps workflows),
+      # false=never create
+      enabled: null
 
   mpiRun:
     secretName: "mpi-run-ssh-secret"
@@ -129,8 +135,13 @@ dynamo:
 
 #imagePullSecrets: []
 kubernetesClusterDomain: cluster.local
+
 metricsService:
-  enabled: true
+  # -- Whether to create the operator metrics Service and ServiceMonitor.
+  # null=auto-detect (Service always created; ServiceMonitor created if prometheus-operator CRDs exist),
+  # true=always create both (use for helm template / GitOps workflows),
+  # false=never create either
+  enabled: null
   ports:
   - name: https
     port: 8443

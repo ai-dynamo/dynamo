@@ -115,11 +115,11 @@ impl Server {
         // but we also propagate the error to the caller's cancellation token
         let watch_task = tokio::spawn(async move {
             let result = primary_task.await.inspect_err(|e| {
-                tracing::error!("zmq server/router task failed: {}", e);
+                tracing::error!("zmq server/router task failed: {e}");
                 cancel_token.cancel();
             })?;
             result.inspect_err(|e| {
-                tracing::error!("zmq server/router task failed: {}", e);
+                tracing::error!("zmq server/router task failed: {e}");
                 cancel_token.cancel();
             })
         });
@@ -155,7 +155,7 @@ impl Server {
         // let port = addr.as_socket().map(|s| s.port());
 
         // if let Some(port) = port {
-        //     tracing::info!("Server listening on port {}", port);
+        //     tracing::info!("Server listening on port {port}");
         // }
 
         loop {
@@ -168,7 +168,7 @@ impl Server {
                             frames
                         },
                         Some(Err(e)) => {
-                            tracing::warn!("Error receiving message: {}", e);
+                            tracing::warn!("Error receiving message: {e}");
                             continue;
                         }
                         None => break,
