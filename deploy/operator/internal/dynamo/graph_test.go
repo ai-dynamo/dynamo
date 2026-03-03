@@ -6966,3 +6966,77 @@ func TestFrontendDefaults_NamespacePrefixEnvVar(t *testing.T) {
 	}
 	assert.True(t, found, "DYN_NAMESPACE_PREFIX should be set on frontend")
 }
+
+func TestPropagateDGDAnnotations(t *testing.T) {
+	tests := []struct {
+		name               string
+		dgdAnnotations     map[string]string
+		serviceAnnotations map[string]string
+		expectedAnnotation map[string]string
+	}{
+		{
+			name: "DGD annotation propagates to empty service annotations",
+			dgdAnnotations: map[string]string{
+				commonconsts.KubeAnnotationVLLMDistributedExecutorBackend: "ray",
+			},
+			serviceAnnotations: nil,
+			expectedAnnotation: map[string]string{
+				commonconsts.KubeAnnotationVLLMDistributedExecutorBackend: "ray",
+			},
+		},
+		{
+			name: "service-level annotation takes precedence over DGD",
+			dgdAnnotations: map[string]string{
+				commonconsts.KubeAnnotationVLLMDistributedExecutorBackend: "ray",
+			},
+			serviceAnnotations: map[string]string{
+				commonconsts.KubeAnnotationVLLMDistributedExecutorBackend: "mp",
+			},
+			expectedAnnotation: map[string]string{
+				commonconsts.KubeAnnotationVLLMDistributedExecutorBackend: "mp",
+			},
+		},
+		{
+			name:               "no DGD annotation, no service annotation",
+			dgdAnnotations:     nil,
+			serviceAnnotations: nil,
+			expectedAnnotation: nil,
+		},
+		{
+			name: "origin version also propagates",
+			dgdAnnotations: map[string]string{
+				commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.0.0",
+			},
+			serviceAnnotations: nil,
+			expectedAnnotation: map[string]string{
+				commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.0.0",
+			},
+		},
+		{
+			name: "unrelated DGD annotations are not propagated",
+			dgdAnnotations: map[string]string{
+				"some-other-annotation": "value",
+			},
+			serviceAnnotations: nil,
+			expectedAnnotation: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			component := &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				Annotations: tt.serviceAnnotations,
+			}
+			propagateDGDAnnotations(tt.dgdAnnotations, component)
+
+			if tt.expectedAnnotation == nil {
+				assert.True(t, len(component.Annotations) == 0 || component.Annotations == nil,
+					"expected no annotations, got %v", component.Annotations)
+			} else {
+				for k, v := range tt.expectedAnnotation {
+					assert.Equal(t, v, component.Annotations[k], "annotation %s mismatch", k)
+				}
+			}
+		})
+	}
+}

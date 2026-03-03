@@ -49,6 +49,27 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 			expectProbesRemoved: true,
 		},
 		{
+			name:              "multinode leader uses ray with JSON args (no annotations = legacy)",
+			numberOfNodes:     3,
+			role:              RoleLeader,
+			component:         &v1alpha1.DynamoComponentDeploymentSharedSpec{},
+			multinodeDeployer: &GroveMultinodeDeployer{},
+			initialContainer: &corev1.Container{
+				Command: []string{"python3", "-m", "dynamo.vllm"},
+				Args: []string{
+					"--model", "test", tensorParallelSizeFlag, "8",
+					"--kv-transfer-config",
+					`{"kv_connector": "NixlConnector", "kv_role": "kv_both"}`,
+				},
+			},
+			gpuCount: 4,
+			expectedArgs: []string{fmt.Sprintf(
+				`ray start --head --port=%s && python3 -m dynamo.vllm --model test %s 8 --kv-transfer-config "{\"kv_connector\": \"NixlConnector\", \"kv_role\": \"kv_both\"}" --distributed-executor-backend ray`,
+				VLLMPort, tensorParallelSizeFlag,
+			)},
+			expectProbesRemoved: true,
+		},
+		{
 			name:                "multinode worker uses ray (no annotations = legacy)",
 			numberOfNodes:       3,
 			role:                RoleWorker,

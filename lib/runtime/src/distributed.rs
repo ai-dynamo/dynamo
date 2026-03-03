@@ -145,7 +145,7 @@ impl DistributedRuntime {
                 (Arc::new(client) as Arc<dyn Discovery>, Some(metadata))
             }
             DiscoveryBackend::KvStore(kv_selector) => {
-                tracing::info!("Initializing KV store discovery backend: {}", kv_selector);
+                tracing::info!("Initializing KV store discovery backend: {kv_selector}");
                 let runtime_clone = runtime.clone();
                 let store = match kv_selector {
                     kv::Selector::Etcd(etcd_config) => {
@@ -227,7 +227,7 @@ impl DistributedRuntime {
             .await
             {
                 Ok((addr, handle)) => {
-                    tracing::info!("System status server started successfully on {}", addr);
+                    tracing::info!("System status server started successfully on {addr}");
 
                     // Store system status server information
                     let system_status_server_info =
@@ -243,7 +243,7 @@ impl DistributedRuntime {
                         .expect("System status server info should only be set once");
                 }
                 Err(e) => {
-                    tracing::error!("System status server startup failed: {}", e);
+                    tracing::error!("System status server startup failed: {e}");
                 }
             }
         } else {
@@ -274,7 +274,7 @@ impl DistributedRuntime {
                     config.canary_wait_time_secs,
                     config.health_check_request_timeout_secs
                 ),
-                Err(e) => tracing::error!("Health check manager failed to start: {}", e),
+                Err(e) => tracing::error!("Health check manager failed to start: {e}"),
             }
         }
 
@@ -402,7 +402,7 @@ impl DistributedRuntime {
     ) -> anyhow::Result<()> {
         let Some(nats_client) = self.nats_client.as_ref() else {
             // NATS not available - this is expected in approximate mode (--no-kv-events)
-            tracing::trace!("Skipping NATS publish (NATS not configured): {}", subject);
+            tracing::trace!("Skipping NATS publish (NATS not configured): {subject}");
             return Ok(());
         };
         Ok(nats_client.client().publish(subject, payload).await?)
