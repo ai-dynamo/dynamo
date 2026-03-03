@@ -1170,6 +1170,12 @@ func GenerateBasePodSpec(
 		return nil, fmt.Errorf("failed to inject checkpoint config: %w", err)
 	}
 
+	if isFailoverEnabled(component) {
+		if err := buildFailoverPod(&podSpec, component, parentGraphDeploymentName, serviceName, controllerConfig.EtcdAddress); err != nil {
+			return nil, fmt.Errorf("failed to build failover pod: %w", err)
+		}
+	}
+
 	return &podSpec, nil
 }
 
@@ -1629,8 +1635,12 @@ func GenerateBasePodSpecForController(
 	}
 
 	// Generate base PodSpec with standard env vars using merged component envs
-	// For controller usage, we may not have serviceName, so use the component name as fallback
-	serviceName := dynComponent.Name
+	// Prefer the original DGD service name so that resource names (e.g. ResourceClaimTemplate)
+	// stay consistent between the RCT created in reconcileDeploymentResources and the pod spec.
+	serviceName := dynComponent.Spec.ServiceName
+	if serviceName == "" {
+		serviceName = dynComponent.Name
+	}
 	podSpec, err := GenerateBasePodSpec(
 		componentSpec,
 		backendFramework,
