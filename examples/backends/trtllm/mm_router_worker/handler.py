@@ -12,7 +12,6 @@ from urllib.parse import urlparse
 from dynamo.common.multimodal.image_loader import ImageLoader
 from dynamo.llm import KvRouter
 from dynamo.runtime.logging import configure_dynamo_logging
-from examples.backends.mm_router_worker_utils import rewrite_multimodal_data_urls
 
 from .mm_processor import build_block_mm_infos, extract_image_urls, process_multimodal
 
@@ -78,7 +77,6 @@ class MMRouterHandler:
         # Extract messages from extra_args (set by Frontend preprocessor)
         messages = request.get("extra_args", {}).get("messages", [])
         image_urls = extract_image_urls(messages)
-        multi_modal_data = request.get("multi_modal_data")
 
         if image_urls:
             # Process multimodal: download images, compute mm_hash
@@ -93,12 +91,6 @@ class MMRouterHandler:
                 model_type=self.model_type,
                 image_loader=self.image_loader,
             )
-            if processed.data_uris:
-                multi_modal_data = rewrite_multimodal_data_urls(
-                    multi_modal_data=multi_modal_data,
-                    rewritten_image_urls=processed.data_uris,
-                    logger=logger,
-                )
 
             # Build block_mm_infos for MM-aware hash computation
             block_mm_infos = build_block_mm_infos(

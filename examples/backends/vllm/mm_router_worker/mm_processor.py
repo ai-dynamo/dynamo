@@ -71,7 +71,7 @@ async def process_multimodal(
     """
     Process multimodal request: load images, get expanded tokens and mm_hashes.
 
-    Uses async ImageLoader for non-blocking image download with LRU cache.
+    Uses async ImageLoader for non-blocking image download with FIFO cache.
     Unlike TRT-LLM, vLLM keeps original image_token_id (no replacement).
     """
     # The preprocessed request does not carry a rendered template string; it carries

@@ -818,9 +818,15 @@ def test_trtllm_mm_overlap_http_vs_data_uri_same_image(
         f"No routing score for HTTP request.\n"
         f"Recent router logs:\n{segment_http[-4000:]}"
     )
-    assert overlap_http > 0, (
-        f"Expected overlap > 0 when HTTP image matches previously cached data URI image, "
-        f"got overlap={overlap_http}/{total_http}.\n"
+    assert abs(total_http - total_data) <= 2, (
+        f"Expected HTTP and data URI total blocks to match, "
+        f"got http={total_http}, data_uri={total_data}.\n"
+        f"Recent router logs:\n{segment_http[-4000:]}"
+    )
+    assert overlap_http > overlap_data, (
+        f"Expected HTTP probe overlap > data URI seed overlap "
+        f"(proving image cache hit, not just text overlap), "
+        f"got http={overlap_http}/{total_http}, data_uri={overlap_data}/{total_data}.\n"
         f"Recent router logs:\n{segment_http[-4000:]}"
     )
 
