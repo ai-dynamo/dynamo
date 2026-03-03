@@ -162,13 +162,21 @@ The `/v1/videos` endpoint also accepts NVIDIA extensions via the `nvext` field f
 
 ## CLI Reference
 
-For the full list of Omni-related flags (including `--omni`, `--output-modalities`, `--stage-configs-path`, `--media-output-fs-url`, `--media-output-http-url`, and the `--omni-*` diffusion flags), run:
+The omni backend uses a dedicated entrypoint: `python -m dynamo.vllm.omni`.
 
-```bash
-python -m dynamo.vllm --help
-```
-
-See also the [Argument Reference](vllm-reference-guide.md#argument-reference) in the Reference Guide.
+| Flag | Description |
+|---|---|
+| `--output-modalities <modality>` | Output modality: `text`, `image`, or `video` |
+| `--stage-configs-path <path>` | Path to stage config YAML (optional; vLLM-Omni uses model defaults if omitted) |
+| `--boundary-ratio <float>` | MoE expert switching boundary (default: 0.875) |
+| `--flow-shift <float>` | Scheduler flow_shift (5.0 for 720p, 12.0 for 480p) |
+| `--vae-use-slicing` | Enable VAE slicing for memory optimization |
+| `--vae-use-tiling` | Enable VAE tiling for memory optimization |
+| `--cache-backend <backend>` | Diffusion cache: `cache_dit` or `tea_cache` |
+| `--enforce-eager` | Disable torch.compile for diffusion models |
+| `--enable-cpu-offload` | Enable CPU offloading for diffusion models |
+| `--media-output-fs-url <url>` | Filesystem URL for storing generated media (default: `file:///tmp/dynamo_media`) |
+| `--media-output-http-url <url>` | Base URL for rewriting media paths in responses (optional) |
 
 ## Storage Configuration
 

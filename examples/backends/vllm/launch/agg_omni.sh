@@ -59,8 +59,7 @@ sleep 2
 
 echo "Starting Omni worker..."
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
-    python -m dynamo.vllm \
+    python -m dynamo.vllm.omni \
     --model "$MODEL" \
-    --omni \
     --stage-configs-path "$STAGE_CONFIG" \
     "${EXTRA_ARGS[@]}"
