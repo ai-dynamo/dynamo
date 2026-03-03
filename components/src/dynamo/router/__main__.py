@@ -163,10 +163,10 @@ async def worker(runtime: DistributedRuntime):
     logger.info("Starting Standalone Router Service")
     logger.debug(
         f"Configuration: endpoint={config.endpoint}, router_block_size={config.router_block_size}, "
-        f"overlap_score_weight={config.router_kv_overlap_score_weight}, "
+        f"overlap_score_weight={config.overlap_score_weight}, "
         f"router_temperature={config.router_temperature}, "
-        f"router_use_kv_events={config.router_use_kv_events}, "
-        f"router_durable_kv_events={config.router_durable_kv_events}, "
+        f"use_kv_events={config.use_kv_events}, "
+        f"durable_kv_events={config.durable_kv_events}, "
         f"router_replica_sync={config.router_replica_sync}, "
         f"router_reset_states={config.router_reset_states}, "
         f"router_track_active_blocks={config.router_track_active_blocks}, "
