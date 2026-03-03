@@ -8,7 +8,10 @@
 
 pub mod frontend_perf;
 pub mod prometheus_names;
+pub mod request_plane;
 pub mod tokio_perf;
+pub mod transport_metrics;
+pub mod work_handler_perf;
 
 use parking_lot::Mutex;
 use std::collections::HashSet;
