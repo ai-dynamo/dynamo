@@ -63,17 +63,7 @@ class BaseOmniHandler(BaseWorkerHandler):
         logger.info(f"{self.__class__.__name__} initialized successfully")
 
     def _build_omni_kwargs(self, config) -> Dict[str, Any]:
-        """Build keyword arguments for AsyncOmni constructor.
-
-        Constructs the full kwargs dict including engine-level diffusion
-        parameters and parallel configuration when available.
-
-        Args:
-            config: Parsed Config object.
-
-        Returns:
-            Dictionary of keyword arguments for AsyncOmni.
-        """
+        """Build keyword arguments for AsyncOmni constructor."""
         omni_kwargs: Dict[str, Any] = {
             "model": config.model,
             "trust_remote_code": config.engine_args.trust_remote_code,
@@ -82,39 +72,34 @@ class BaseOmniHandler(BaseWorkerHandler):
         if config.stage_configs_path:
             omni_kwargs["stage_configs_path"] = config.stage_configs_path
 
-        # Add diffusion engine-level params if present on config.
-        # Config fields use the omni_ prefix; map them to AsyncOmni kwarg names.
-        diffusion_params = {
-            # config attr → AsyncOmni kwarg
-            "omni_enable_layerwise_offload": "enable_layerwise_offload",
-            "omni_layerwise_num_gpu_layers": "layerwise_num_gpu_layers",
-            "omni_vae_use_slicing": "vae_use_slicing",
-            "omni_vae_use_tiling": "vae_use_tiling",
-            "omni_boundary_ratio": "boundary_ratio",
-            "omni_flow_shift": "flow_shift",
-            "omni_diffusion_cache_backend": "cache_backend",
-            "omni_diffusion_cache_config": "cache_config",
-            "omni_enable_cache_dit_summary": "enable_cache_dit_summary",
-            "omni_enable_cpu_offload": "enable_cpu_offload",
-            "omni_enforce_eager": "enforce_eager",
-        }
-        for config_attr, kwarg_name in diffusion_params.items():
-            if hasattr(config, config_attr):
-                value = getattr(config, config_attr)
-                if value is not None:
-                    omni_kwargs[kwarg_name] = value
+        # Diffusion engine-level params — read directly from config namespace
+        diffusion_fields = [
+            "enable_layerwise_offload",
+            "layerwise_num_gpu_layers",
+            "vae_use_slicing",
+            "vae_use_tiling",
+            "boundary_ratio",
+            "flow_shift",
+            "cache_backend",
+            "cache_config",
+            "enable_cache_dit_summary",
+            "enable_cpu_offload",
+            "enforce_eager",
+        ]
+        for field in diffusion_fields:
+            value = getattr(config, field, None)
+            if value is not None:
+                omni_kwargs[field] = value
 
-        # Build DiffusionParallelConfig if parallel params are present
-        if DiffusionParallelConfig is not None and hasattr(
-            config, "omni_ulysses_degree"
-        ):
+        # Build DiffusionParallelConfig if available
+        if DiffusionParallelConfig is not None:
             parallel_config = DiffusionParallelConfig(
-                ulysses_degree=getattr(config, "omni_ulysses_degree", 1),
-                ring_degree=getattr(config, "omni_ring_degree", 1),
-                cfg_parallel_size=getattr(config, "omni_cfg_parallel_size", 1),
+                ulysses_degree=getattr(config, "ulysses_degree", 1),
+                ring_degree=getattr(config, "ring_degree", 1),
+                cfg_parallel_size=getattr(config, "cfg_parallel_size", 1),
             )
             omni_kwargs["parallel_config"] = parallel_config
-        elif DiffusionParallelConfig is None:
+        else:
             logger.warning(
                 "DiffusionParallelConfig not available; "
                 "skipping parallel config for AsyncOmni"
