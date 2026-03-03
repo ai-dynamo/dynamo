@@ -158,7 +158,7 @@ func (c *GPUDiscoveryCache) Set(info *GPUInfo, ttl time.Duration) {
 // does not represent full cluster GPU inventory. Future improvements should
 // aggregate and return GPU information for all nodes instead of selecting
 // only one.
-func DiscoverGPUsFromDCGM(ctx context.Context, k8sClient client.Reader, cache *GPUDiscoveryCache, scrapeFunc *GPUDiscovery) (*GPUInfo, error) {
+func  (g *GPUDiscovery) DiscoverGPUsFromDCGM(ctx context.Context, k8sClient client.Reader, cache *GPUDiscoveryCache) (*GPUInfo, error) {
 	if cache != nil {
 		// Return cached result if still valid
 		if cached, ok := cache.Get(); ok {
@@ -191,7 +191,7 @@ func DiscoverGPUsFromDCGM(ctx context.Context, k8sClient client.Reader, cache *G
 		}
 
 		endpoint := fmt.Sprintf("http://%s:9400/metrics", pod.Status.PodIP)
-		info, err := scrapeFunc.Scraper(ctx, endpoint)
+		info, err := g.Scraper(ctx, endpoint)
 		if err != nil {
 			scrapeErrors = append(scrapeErrors, fmt.Errorf("pod %s (%s): %w", pod.Name, pod.Status.PodIP, err))
 			continue

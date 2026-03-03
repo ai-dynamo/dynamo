@@ -851,7 +851,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) validateGPUHardwareInfo(ctx con
 				"\n   vramMb: 81920")
 	}
 
-	_, err := gpu.DiscoverGPUsFromDCGM(ctx, r.APIReader, r.GPUDiscoveryCache, r.GPUDiscovery)
+	_, err := r.GPUDiscovery.DiscoverGPUsFromDCGM(ctx, r.APIReader, r.GPUDiscoveryCache)
 	if err == nil {
 		// GPU discovery is available, validation passes
 		return nil
@@ -1229,7 +1229,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) enrichHardwareFromDiscovery(ctx
 	if hasManualConfig == false {
 
 		logger.Info("Attempting GPU discovery for profiling job")
-		discoveredInfo, err := gpu.DiscoverGPUsFromDCGM(ctx, r.APIReader, r.GPUDiscoveryCache, r.GPUDiscovery)
+		discoveredInfo, err := r.GPUDiscovery.DiscoverGPUsFromDCGM(ctx, r.APIReader, r.GPUDiscoveryCache)
 		if err != nil {
 			// This path is expected for namespace-restricted operators without node read permissions
 			// Refine the logger message

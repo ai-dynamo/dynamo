@@ -518,14 +518,16 @@ func TestDiscoverGPUsFromDCGM_CacheHit(t *testing.T) {
 		}, nil
 	}
 
+	discovery := NewGPUDiscovery(mockScraper)
+
 	// First call → should scrape
-	info1, err := DiscoverGPUsFromDCGM(ctx, k8sClient, cache, mockScraper)
+	info1, err := discovery.DiscoverGPUsFromDCGM(ctx, k8sClient, cache)
 	require.NoError(t, err)
 	require.NotNil(t, info1)
 	require.Equal(t, 1, callCount)
 
 	// Second call → should hit cache
-	info2, err := DiscoverGPUsFromDCGM(ctx, k8sClient, cache, mockScraper)
+	info2, err := discovery.DiscoverGPUsFromDCGM(ctx, k8sClient, cache)
 	require.NoError(t, err)
 	require.NotNil(t, info2)
 
@@ -565,7 +567,9 @@ func TestDiscoverGPUsFromDCGM_GPUOperatorInstalled_DCgmNotEnabled(t *testing.T) 
 		return nil, fmt.Errorf("should not be called")
 	}
 
-	info, err := DiscoverGPUsFromDCGM(ctx, k8sClient, cache, dummyScraper)
+	discovery := NewGPUDiscovery(dummyScraper)
+
+	info, err := discovery.DiscoverGPUsFromDCGM(ctx, k8sClient, cache)
 
 	require.Nil(t, info)
 	require.Error(t, err)
@@ -588,7 +592,9 @@ func TestDiscoverGPUsFromDCGM_NoGPUOperator_NoDCGM(t *testing.T) {
 		return nil, fmt.Errorf("should not be called")
 	}
 
-	info, err := DiscoverGPUsFromDCGM(ctx, k8sClient, cache, dummyScraper)
+	discovery := NewGPUDiscovery(dummyScraper)
+
+	info, err := discovery.DiscoverGPUsFromDCGM(ctx, k8sClient, cache)
 
 	require.Nil(t, info)
 	require.Error(t, err)
