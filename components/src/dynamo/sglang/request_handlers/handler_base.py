@@ -330,6 +330,65 @@ class BaseWorkerHandler(BaseGenerativeHandler):
             "new_version": req.new_version,
         }
 
+    async def flush_cache(self, body: dict) -> dict:
+        """Flush the radix cache. Drains working queue before memory offload."""
+        try:
+            ret = await self.engine.tokenizer_manager.flush_cache()
+            return {"status": "ok" if ret.success else "error"}
+        except Exception as e:
+            logging.error(f"Failed to flush cache: {e}")
+            return {"status": "error", "message": str(e)}
+
+    async def pause_generation(self, body: dict) -> dict:
+        """Pause generation (e.g. before weight update)."""
+        from sglang.srt.managers.io_struct import PauseGenerationReqInput
+
+        try:
+            req = PauseGenerationReqInput(**body)
+            await self.engine.tokenizer_manager.pause_generation(req)
+            return {"message": "Generation paused successfully.", "status": "ok"}
+        except Exception as e:
+            logging.error(f"Failed to pause generation: {e}")
+            return {"status": "error", "message": str(e)}
+
+    async def continue_generation(self, body: dict) -> dict:
+        """Continue generation (e.g. after weight update)."""
+        from sglang.srt.managers.io_struct import ContinueGenerationReqInput
+
+        try:
+            req = ContinueGenerationReqInput(**body)
+            await self.engine.tokenizer_manager.continue_generation(req)
+            return {"message": "Generation continued successfully.", "status": "ok"}
+        except Exception as e:
+            logging.error(f"Failed to continue generation: {e}")
+            return {"status": "error", "message": str(e)}
+
+    async def init_weights_update_group(self, body: dict) -> dict:
+        """Initialize NCCL weight update group for distributed weight sync."""
+        from sglang.srt.managers.io_struct import InitWeightsUpdateGroupReqInput
+
+        req = InitWeightsUpdateGroupReqInput(**body)
+        success, message = (
+            await self.engine.tokenizer_manager.init_weights_update_group(req, None)
+        )
+        return {"success": success, "message": message}
+
+    async def destroy_weights_update_group(self, body: dict) -> dict:
+        """Destroy NCCL weight update group."""
+        from sglang.srt.managers.io_struct import DestroyWeightsUpdateGroupReqInput
+
+        req = DestroyWeightsUpdateGroupReqInput(**body)
+        success, message = (
+            await self.engine.tokenizer_manager.destroy_weights_update_group(req, None)
+        )
+        return {"success": success, "message": message}
+
+    async def get_weight_version(self, body: dict) -> dict:
+        """Get the current weight version."""
+        return {
+            "weight_version": self.engine.tokenizer_manager.server_args.weight_version,
+        }
+
     async def pin_prefix(self, body: dict) -> dict:
         """Pin a prefix by token_ids to resist eviction.
 
@@ -400,6 +459,20 @@ class BaseWorkerHandler(BaseGenerativeHandler):
         )
         runtime.register_engine_route(
             "update_weight_version", self.update_weight_version
+        )
+        runtime.register_engine_route("flush_cache", self.flush_cache)
+        runtime.register_engine_route("pause_generation", self.pause_generation)
+        runtime.register_engine_route(
+            "continue_generation", self.continue_generation
+        )
+        runtime.register_engine_route(
+            "init_weights_update_group", self.init_weights_update_group
+        )
+        runtime.register_engine_route(
+            "destroy_weights_update_group", self.destroy_weights_update_group
+        )
+        runtime.register_engine_route(
+            "get_weight_version", self.get_weight_version
         )
 
     @abstractmethod
