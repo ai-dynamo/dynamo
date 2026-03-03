@@ -84,15 +84,23 @@ navigation:
         path: components/kvbm/kvbm-guide.md
       - page: Dynamo Benchmarking
         path: benchmarks/benchmarking.md
-      - section: Multimodality Support
+      - section: Multimodality
         path: features/multimodal/README.md
         contents:
-          - page: vLLM Multimodal
-            path: features/multimodal/multimodal-vllm.md
-          - page: TensorRT-LLM Multimodal
-            path: features/multimodal/multimodal-trtllm.md
-          - page: SGLang Multimodal
-            path: features/multimodal/multimodal-sglang.md
+          - page: Embedding Cache
+            path: features/multimodal/embedding-cache.md
+          - page: Encoder Disaggregation
+            path: features/multimodal/encoder-disaggregation.md
+          - page: Multimodal KV Routing
+            path: features/multimodal/multimodal-kv-routing.md
+          - section: Backend Specifics
+            contents:
+              - page: vLLM Multimodal
+                path: features/multimodal/multimodal-vllm.md
+              - page: TensorRT-LLM Multimodal
+                path: features/multimodal/multimodal-trtllm.md
+              - page: SGLang Multimodal
+                path: features/multimodal/multimodal-sglang.md
       - page: Tool Calling
         path: agents/tool-calling.md
       - page: SGLang for Agentic Workloads
