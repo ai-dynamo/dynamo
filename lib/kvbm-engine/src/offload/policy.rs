@@ -28,8 +28,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use anyhow::Result;
-use kvbm_config::{PolicyType, TierOffloadConfig};
 use futures::future::Either;
+use kvbm_config::{PolicyType, TierOffloadConfig};
 
 use crate::{BlockId, SequenceHash};
 use kvbm_logical::blocks::{BlockMetadata, BlockRegistry, ImmutableBlock};

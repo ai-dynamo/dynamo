@@ -13,8 +13,8 @@ use anyhow::Result;
 use derive_builder::Builder;
 use futures::StreamExt;
 
-use crate::pubsub::{StubBus, Subscriber, Subscription};
 use crate::InstanceId;
+use crate::pubsub::{StubBus, Subscriber, Subscription};
 use kvbm_logical::blocks::BlockMetadata;
 use kvbm_logical::events::{
     BatchingConfig, EventsManager, KvbmCacheEvents, KvbmCacheEventsPublisher,
@@ -205,14 +205,14 @@ mod tests {
 
     use futures::StreamExt;
 
-    use crate::pubsub::{StubBus, Subscriber};
+    use super::super::managers::TestManagerBuilder;
+    use super::super::token_blocks;
     use crate::G1;
+    use crate::pubsub::{StubBus, Subscriber};
     use kvbm_logical::events::{
         BatchingConfig, EventsManager, KvCacheEvents, KvbmCacheEvents, KvbmCacheEventsPublisher,
         PowerOfTwoPolicy,
     };
-    use super::super::managers::TestManagerBuilder;
-    use super::super::token_blocks;
 
     /// Full end-to-end test: G1 BlockManager -> EventsManager -> Batcher -> Publisher -> Subscriber
     ///

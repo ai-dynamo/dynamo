@@ -12,13 +12,13 @@ pub mod physical;
 pub mod token_blocks;
 
 // Re-export commonly used testing utilities
-pub use physical::{TestAgent, TestAgentBuilder, TransferChecksums};
+pub use distributed::TestSession;
+pub use events::{EventsPipelineConfig, EventsPipelineConfigBuilder, EventsPipelineFixture};
 pub use managers::{
     InstancePopulationResult, InstancePopulationSpec, MultiInstancePopulator,
     MultiInstancePopulatorBuilder, PopulatedInstances, TestManagerBuilder, TestRegistryBuilder,
-    populate_manager_with_blocks, create_and_populate_manager,
+    create_and_populate_manager, populate_manager_with_blocks,
 };
-pub use distributed::TestSession;
-pub use events::{EventsPipelineConfig, EventsPipelineConfigBuilder, EventsPipelineFixture};
-pub use messenger::{MessengerPair, create_messenger_tcp, create_messenger_pair_tcp};
+pub use messenger::{MessengerPair, create_messenger_pair_tcp, create_messenger_tcp};
+pub use physical::{TestAgent, TestAgentBuilder, TransferChecksums};
 pub use token_blocks::*;

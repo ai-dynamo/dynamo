@@ -11,8 +11,8 @@ use std::sync::Arc;
 use crate::G2;
 use kvbm_logical::blocks::ImmutableBlock;
 
-use super::session::SessionId;
 use super::onboarding::{OnboardingStatus, SessionHandle};
+use super::session::SessionId;
 
 /// Staging mode for matched blocks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]

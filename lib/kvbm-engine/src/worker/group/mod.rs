@@ -12,10 +12,10 @@ mod spmd;
 
 use std::sync::Arc;
 
-use crate::object::ObjectBlockOps;
 use super::{
     ImportMetadataResponse, SerializedLayout, SerializedLayoutResponse, Worker, WorkerTransfers, *,
 };
+use crate::object::ObjectBlockOps;
 use anyhow::Result;
 
 pub use spmd::SpmdParallelWorkers;

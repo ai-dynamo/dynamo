@@ -37,7 +37,7 @@ pub mod runtime;
 #[doc = include_str!("../docs/worker.md")]
 pub mod worker;
 
-#[cfg(any(test, feature = "testing"))]
+#[cfg(feature = "testing")]
 pub mod testing;
 
 pub use runtime::{KvbmRuntime, KvbmRuntimeBuilder, RuntimeHandle};

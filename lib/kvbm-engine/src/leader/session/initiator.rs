@@ -9,7 +9,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::{
-    BlockId, G2, G3, InstanceId, SequenceHash, object::ObjectBlockOps, worker::group::ParallelWorkers,
+    BlockId, G2, G3, InstanceId, SequenceHash, object::ObjectBlockOps,
+    worker::group::ParallelWorkers,
 };
 use kvbm_common::LogicalLayoutHandle;
 use kvbm_logical::{blocks::ImmutableBlock, manager::BlockManager};

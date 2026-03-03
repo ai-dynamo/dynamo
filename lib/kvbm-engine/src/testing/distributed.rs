@@ -12,13 +12,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::{
+    BlockId, G2, G3, InstanceId, SequenceHash,
     leader::InstanceLeader,
     worker::{DirectWorker, Worker},
-    BlockId, G2, G3, InstanceId, SequenceHash,
 };
-use kvbm_physical::transfer::StorageKind;
 use kvbm_logical::manager::BlockManager;
 use kvbm_physical::manager::{LayoutHandle, TransferManager};
+use kvbm_physical::transfer::StorageKind;
 use kvbm_physical::{
     layout::LayoutConfig,
     transfer::{BlockChecksum, FillPattern},

@@ -7,9 +7,9 @@
 //! types. When kvbm-logical moves to a workspace path dependency, these can
 //! be replaced with re-exports from `kvbm_logical::testing`.
 
+use crate::SequenceHash;
 use kvbm_common::tokens::{TokenBlock, TokenBlockSequence, compute_hash_v2};
 use kvbm_logical::KvbmSequenceHashProvider;
-use crate::SequenceHash;
 
 /// Compute the default salt hash for requests with no salt and no lora.
 pub fn default_request_salt_hash() -> u64 {

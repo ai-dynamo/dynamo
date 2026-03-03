@@ -22,12 +22,12 @@ mod tests {
     use bytes::Bytes;
     use futures::future::BoxFuture;
 
+    use crate::LogicalLayoutHandle;
     use crate::object::{LockFileContent, ObjectBlockOps, ObjectLockManager};
     use crate::offload::{
         BoxFuture as PolicyBoxFuture, EvalContext, ObjectLockPresenceFilter, OffloadPolicy,
         PendingTracker,
     };
-    use crate::LogicalLayoutHandle;
     use crate::{BlockId, G2, SequenceHash};
 
     /// Create a test sequence hash from a simple integer.
