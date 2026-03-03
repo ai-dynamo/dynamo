@@ -497,7 +497,7 @@ class BaseWorkerHandler(ABC):
         if dp_rank is None:
             return None
         if dp_rank < self.dp_range[0] or dp_rank >= self.dp_range[0] + self.dp_range[1]:
-            logger.error(
+            logger.warning(
                 f"Received DP rank {dp_rank} is out of range [{self.dp_range[0]} - {self.dp_range[0] + self.dp_range[1]}), fallback to vLLM internal DP selection"
             )
             return None
