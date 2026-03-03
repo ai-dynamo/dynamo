@@ -148,7 +148,10 @@ def validate_dgdr_dynamo_features(
         # throughput scaling requires in-depth profiling data
         if planner_cfg.enable_throughput_scaling:
             planner_sweep_mode = planner_cfg.pre_deployment_sweeping_mode
-            if planner_sweep_mode == PlannerPreDeploymentSweepMode.None_:
+            if (
+                planner_sweep_mode is None
+                or planner_sweep_mode == PlannerPreDeploymentSweepMode.None_
+            ):
                 raise ValueError(
                     "pre_deployment_sweeping_mode in PlannerConfig cannot be 'none' when enable_throughput_scaling is enabled. "
                     "Throughput-based scaling requires pre-deployment sweeping to generate engine performance data."
@@ -158,7 +161,7 @@ def validate_dgdr_dynamo_features(
                 and not aic_supported
             ):
                 raise ValueError(
-                    f"AIC does not support {dgdr.model} on {dgdr.hardware.gpuSku.lower()} and {dgdr.backend}"
+                    f"AIC does not support {dgdr.model} on {dgdr.hardware.gpuSku.lower()} and {dgdr.backend}. "
                     "pre_deployment_sweeping_mode in PlannerConfig can only be 'thorough' when AIC does not support the model/hardware/backend combination. "
                 )
 
