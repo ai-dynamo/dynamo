@@ -57,6 +57,14 @@ jobs:
         run: |
           if [ -f .lycheecache ]; then
             grep -E ',2[0-9]{2},' .lycheecache > .lycheecache.tmp || true
+            cutoff=$(( $(date +%s) - 93600 ))
+            stale=$(awk -F',' -v c="$cutoff" '$3 < c' .lycheecache.tmp)
+            if [ -n "$stale" ]; then
+              echo "Removing stale cache entries (>26h old):"
+              echo "$stale"
+              awk -F',' -v c="$cutoff" '$3 >= c' .lycheecache.tmp > .lycheecache.tmp2 || true
+              mv .lycheecache.tmp2 .lycheecache.tmp
+            fi
             mv .lycheecache.tmp .lycheecache
           fi
 
