@@ -6,7 +6,7 @@
 set -euo pipefail
 
 
-NIXL_VERSION="0.10.0"
+NIXL_VERSION="0.10.1"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Function to check if a command exists
