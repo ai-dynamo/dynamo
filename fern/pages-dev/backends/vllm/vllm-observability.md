@@ -8,7 +8,7 @@ title: Prometheus
 
 When running vLLM through Dynamo, vLLM engine metrics are automatically passed through and exposed on Dynamo's `/metrics` endpoint (default port 8081). This allows you to access both vLLM engine metrics (prefixed with `vllm:`) and Dynamo runtime metrics (prefixed with `dynamo_*`) from a single worker backend endpoint.
 
-**For the complete and authoritative list of all vLLM metrics**, always refer to the [official vLLM Metrics Design documentation](https://docs.vllm.ai/en/latest/design/metrics.html).
+**For the complete and authoritative list of all vLLM metrics**, always refer to the [official vLLM Metrics Design documentation](https://docs.vllm.ai/en/stable/design/metrics.html).
 
 **For LMCache metrics and integration**, see the [LMCache Integration Guide](../../integrations/lmcache-integration.md).
 
@@ -18,10 +18,9 @@ When running vLLM through Dynamo, vLLM engine metrics are automatically passed t
 
 ## Environment Variables and Flags
 
-| Variable/Flag | Description | Default | Example |
-|---------------|-------------|---------|---------|
+| Variable | Description | Default | Example |
+|----------|-------------|---------|---------|
 | `DYN_SYSTEM_PORT` | System metrics/health port. Required to expose `/metrics` endpoint. | `-1` (disabled) | `8081` |
-| `--kv-transfer-config` | KV transfer configuration JSON. Use LMCache connector to enable LMCache metrics. | - | `--kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'` |
 
 ## Getting Started Quickly
 
@@ -33,30 +32,16 @@ For visualizing metrics with Prometheus and Grafana, start the observability sta
 
 ### Launch Dynamo Components
 
-Launch a frontend and vLLM backend to test metrics:
+The launch scripts in `examples/backends/vllm/launch/` already enable metrics on port 8081 by default. For example:
 
 ```bash
-# Start frontend (default port 8000, override with --http-port or DYN_HTTP_PORT env var)
-$ python -m dynamo.frontend
-
-# Enable system metrics server on port 8081
-$ DYN_SYSTEM_PORT=8081 python -m dynamo.vllm --model <model_name> \
-   --enforce-eager --no-enable-prefix-caching --max-num-seqs 3
+cd $DYNAMO_HOME/examples/backends/vllm
+bash launch/agg.sh
 ```
 
-Wait for the vLLM worker to start, then send requests and check metrics:
+Once the deployment is running, send a request and check metrics:
 
 ```bash
-# Send a request
-curl -H 'Content-Type: application/json' \
--d '{
-  "model": "<model_name>",
-  "max_completion_tokens": 100,
-  "messages": [{"role": "user", "content": "Hello"}]
-}' \
-http://localhost:8000/v1/chat/completions
-
-# Check metrics from the worker
 curl -s localhost:8081/metrics | grep "^vllm:"
 ```
 
@@ -80,7 +65,7 @@ vllm:time_to_first_token_seconds_count{model_name="meta-llama/Llama-3.1-8B"} 165
 vllm:time_to_first_token_seconds_sum{model_name="meta-llama/Llama-3.1-8B"} 89.38
 ```
 
-**Note:** The specific metrics shown above are examples and may vary depending on your vLLM version. Always inspect your actual `/metrics` endpoint or refer to the [official documentation](https://docs.vllm.ai/en/latest/design/metrics.html) for the current list.
+**Note:** The specific metrics shown above are examples and may vary depending on your vLLM version. Always inspect your actual `/metrics` endpoint or refer to the [official documentation](https://docs.vllm.ai/en/stable/design/metrics.html) for the current list.
 
 ### Metric Categories
 
@@ -92,7 +77,7 @@ vLLM provides metrics in the following categories (all prefixed with `vllm:`):
 - **Scheduler metrics** - Scheduling and queue management
 - **Disaggregation metrics** - Metrics specific to disaggregated deployments (when enabled)
 
-**Note:** Specific metrics are subject to change between vLLM versions. Always refer to the [official documentation](https://docs.vllm.ai/en/latest/design/metrics.html) or inspect the `/metrics` endpoint for your vLLM version.
+**Note:** Specific metrics are subject to change between vLLM versions. Always refer to the [official documentation](https://docs.vllm.ai/en/stable/design/metrics.html) or inspect the `/metrics` endpoint for your vLLM version.
 
 ## Available Metrics
 
@@ -103,28 +88,22 @@ The official vLLM documentation includes complete metric definitions with:
 - Information about v1 metrics migration
 - Future work and deprecated metrics
 
-For the complete and authoritative list of all vLLM metrics, see the [official vLLM Metrics Design documentation](https://docs.vllm.ai/en/latest/design/metrics.html).
+For the complete and authoritative list of all vLLM metrics, see the [official vLLM Metrics Design documentation](https://docs.vllm.ai/en/stable/design/metrics.html).
 
 ## LMCache Metrics
 
-When LMCache is enabled with `--kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'` and `DYN_SYSTEM_PORT` is set, LMCache metrics (prefixed with `lmcache:`) are automatically exposed via Dynamo's `/metrics` endpoint alongside vLLM and Dynamo metrics.
+When LMCache is enabled, LMCache metrics (prefixed with `lmcache:`) are automatically exposed via Dynamo's `/metrics` endpoint alongside vLLM and Dynamo metrics.
 
-### Minimum Requirements
+To try it out, use the LMCache launch script:
 
-To access LMCache metrics, both of these are required:
-1. `--kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'` - Enables LMCache in vLLM
-2. `DYN_SYSTEM_PORT=8081` - Enables Dynamo's metrics HTTP endpoint
-
-**Example:**
 ```bash
-DYN_SYSTEM_PORT=8081 \
-python -m dynamo.vllm --model Qwen/Qwen3-0.6B --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'
+cd $DYNAMO_HOME/examples/backends/vllm
+bash launch/agg_lmcache.sh
 ```
 
-### Viewing LMCache Metrics
+Send a request and view LMCache metrics:
 
 ```bash
-# View all LMCache metrics
 curl -s localhost:8081/metrics | grep "^lmcache:"
 ```
 
@@ -146,13 +125,13 @@ Troubleshooting LMCache-related metrics and logs (including `PrometheusLogger in
 - Metrics are filtered by the `vllm:` and `lmcache:` prefixes before being exposed (when LMCache is enabled)
 - The integration uses Dynamo's `register_engine_metrics_callback()` function with the global `REGISTRY`
 - Metrics appear after vLLM engine initialization completes
-- vLLM v1 metrics are different from v0 - see the [official documentation](https://docs.vllm.ai/en/latest/design/metrics.html) for migration details
+- vLLM v1 metrics are different from v0 - see the [official documentation](https://docs.vllm.ai/en/stable/design/metrics.html) for migration details
 
 ## Related Documentation
 
 ### vLLM Metrics
-- [Official vLLM Metrics Design Documentation](https://docs.vllm.ai/en/latest/design/metrics.html)
-- [vLLM Production Metrics User Guide](https://docs.vllm.ai/en/latest/usage/metrics.html)
+- [Official vLLM Metrics Design Documentation](https://docs.vllm.ai/en/stable/design/metrics.html)
+- [vLLM Production Metrics User Guide](https://docs.vllm.ai/en/stable/usage/metrics.html)
 - [vLLM GitHub - Metrics Implementation](https://github.com/vllm-project/vllm/tree/main/vllm/v1/metrics)
 
 ### Dynamo Metrics
