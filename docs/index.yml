@@ -93,14 +93,8 @@ navigation:
             path: features/multimodal/encoder-disaggregation.md
           - page: Multimodal KV Routing
             path: features/multimodal/multimodal-kv-routing.md
-          - section: Backend Specifics
-            contents:
-              - page: vLLM Multimodal
-                path: features/multimodal/multimodal-vllm.md
-              - page: TensorRT-LLM Multimodal
-                path: features/multimodal/multimodal-trtllm.md
-              - page: SGLang Multimodal
-                path: features/multimodal/multimodal-sglang.md
+          - page: Diffusion (Experimental)
+            path: features/multimodal/diffusion.md
       - page: Tool Calling
         path: agents/tool-calling.md
       - page: SGLang for Agentic Workloads

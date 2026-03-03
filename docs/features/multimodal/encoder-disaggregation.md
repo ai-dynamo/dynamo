@@ -91,4 +91,4 @@ cd $DYNAMO_HOME/examples/backends/sglang
 ./launch/multimodal_disagg.sh
 ```
 
-See the backend-specific documentation ([vLLM](multimodal-vllm.md), [TRT-LLM](multimodal-trtllm.md), [SGLang](multimodal-sglang.md)) for full configuration details and component flags.
+See the backend-specific documentation ([vLLM](https://github.com/ai-dynamo/dynamo/blob/main/docs/features/multimodal/multimodal-vllm.md), [TRT-LLM](https://github.com/ai-dynamo/dynamo/blob/main/docs/features/multimodal/multimodal-trtllm.md), [SGLang](https://github.com/ai-dynamo/dynamo/blob/main/docs/features/multimodal/multimodal-sglang.md)) for full configuration details and component flags.

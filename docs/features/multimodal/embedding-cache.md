@@ -65,4 +65,4 @@ cd $DYNAMO_HOME/examples/backends/trtllm
 
 Set the capacity based on your expected working set of unique images. A larger cache holds more embeddings but consumes more host memory.
 
-See the backend-specific documentation ([vLLM](multimodal-vllm.md#embedding-cache), [TRT-LLM](multimodal-trtllm.md#embedding-cache)) for more details.
+See the backend-specific documentation ([vLLM](https://github.com/ai-dynamo/dynamo/blob/main/docs/features/multimodal/multimodal-vllm.md#embedding-cache), [TRT-LLM](https://github.com/ai-dynamo/dynamo/blob/main/docs/features/multimodal/multimodal-trtllm.md#embedding-cache)) for more details.

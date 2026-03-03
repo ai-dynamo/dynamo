@@ -18,14 +18,7 @@ Dynamo supports multimodal inference across multiple LLM backends, enabling mode
 | **[Embedding Cache](embedding-cache.md)** | CPU-side LRU cache that skips re-encoding repeated images |
 | **[Encoder Disaggregation](encoder-disaggregation.md)** | Separate vision encoder worker for independent scaling |
 | **[Multimodal KV Routing](multimodal-kv-routing.md)** | MM-aware KV cache routing for optimal worker selection |
-
-## Backend Documentation
-
-Detailed deployment guides, configuration, and examples for each backend:
-
-- **[vLLM Multimodal](multimodal-vllm.md)**
-- **[TensorRT-LLM Multimodal](multimodal-trtllm.md)**
-- **[SGLang Multimodal](multimodal-sglang.md)**
+| **[Diffusion (Experimental)](diffusion.md)** | Text-to-image, text-to-video, and image-to-video diffusion model serving |
 
 ## Support Matrix
 
@@ -33,9 +26,9 @@ Detailed deployment guides, configuration, and examples for each backend:
 
 | Stack | Image | Video | Audio |
 |-------|-------|-------|-------|
-| **[vLLM](multimodal-vllm.md)** | ✅ | 🧪  | 🧪 |
-| **[TRT-LLM](multimodal-trtllm.md)** | ✅ | ❌ | ❌ |
-| **[SGLang](multimodal-sglang.md)** | ✅ | ❌ | ❌ |
+| **[vLLM](https://github.com/ai-dynamo/dynamo/blob/main/docs/features/multimodal/multimodal-vllm.md)** | ✅ | 🧪  | 🧪 |
+| **[TRT-LLM](https://github.com/ai-dynamo/dynamo/blob/main/docs/features/multimodal/multimodal-trtllm.md)** | ✅ | ❌ | ❌ |
+| **[SGLang](https://github.com/ai-dynamo/dynamo/blob/main/docs/features/multimodal/multimodal-sglang.md)** | ✅ | ❌ | ❌ |
 
 **Status:** ✅ Supported | 🧪 Experimental | ❌ Not supported
 
@@ -55,3 +48,11 @@ Reference implementations for deploying multimodal models:
 - [TRT-LLM multimodal examples](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm/launch)
 - [SGLang multimodal examples](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/sglang/launch)
 - [Experimental multimodal examples](https://github.com/ai-dynamo/dynamo/tree/main/examples/multimodal/launch) (video, audio)
+
+## Backend Documentation
+
+Detailed deployment guides, configuration, and examples for each backend:
+
+- **[vLLM Multimodal](https://github.com/ai-dynamo/dynamo/blob/main/docs/features/multimodal/multimodal-vllm.md)**
+- **[TensorRT-LLM Multimodal](https://github.com/ai-dynamo/dynamo/blob/main/docs/features/multimodal/multimodal-trtllm.md)**
+- **[SGLang Multimodal](https://github.com/ai-dynamo/dynamo/blob/main/docs/features/multimodal/multimodal-sglang.md)**
