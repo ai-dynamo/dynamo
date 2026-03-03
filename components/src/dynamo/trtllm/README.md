@@ -3,4 +3,4 @@
 
 # TensorRT-LLM
 
-See [docs/pages/backends/trtllm/](../../../../docs/pages/backends/trtllm/README.md) for documentation.
+See [docs/pages/backends/trtllm/](../../../../docs/backends/trtllm/README.md) for documentation.

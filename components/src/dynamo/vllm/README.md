@@ -3,4 +3,4 @@
 
 # vLLM
 
-See [docs/pages/backends/vllm/](../../../../docs/pages/backends/vllm/README.md) for documentation.
+See [docs/backends/vllm/](../../../../docs/backends/vllm/README.md) for documentation.

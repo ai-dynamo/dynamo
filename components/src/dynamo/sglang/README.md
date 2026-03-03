@@ -3,4 +3,4 @@
 
 # SGLang
 
-See [docs/pages/backends/sglang/](../../../../docs/pages/backends/sglang/README.md) for documentation.
+See [docs/backends/sglang/](../../../../docs/backends/sglang/README.md) for documentation.
