@@ -9,9 +9,11 @@ from typing import List
 # Default concurrency levels - can be overridden with CONCURRENCIES environment variable
 DEFAULT_CONCURRENCIES: List[int] = [1, 2, 5, 10, 50, 100, 250]
 # Default request count per concurrency level - can be overridden with REQUEST_COUNT env var
-# When set to 0 or unset, defaults to max(concurrency * 3, 10) to ensure the concurrency
-# level is fully utilized and each slot runs enough requests for stable measurements
+# When set to 0 or unset, defaults to max(concurrency * REQUEST_COUNT_SCALE_FACTOR, 10)
+# to ensure the concurrency level is fully utilized and each slot runs enough requests
+# for stable measurements
 DEFAULT_REQUEST_COUNT: int = 0
+REQUEST_COUNT_SCALE_FACTOR: int = 3
 
 
 def get_concurrency_levels() -> List[int]:
@@ -68,9 +70,9 @@ def run_aiperf(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Auto-compute request count: need enough requests to fully utilize concurrency
-    # and run each slot at least 3 times for stable measurements
+    # and run each slot at least REQUEST_COUNT_SCALE_FACTOR times for stable measurements
     if request_count <= 0:
-        request_count = max(concurrency * 3, 10)
+        request_count = max(concurrency * REQUEST_COUNT_SCALE_FACTOR, 10)
     elif request_count < concurrency:
         print(
             f"WARNING: request_count ({request_count}) < concurrency ({concurrency}). "
@@ -146,7 +148,7 @@ def run_concurrency_sweep(
     )
     print(f"Concurrency levels: {concurrency_levels}", flush=True)
     print(
-        f"Request count: {request_count if request_count > 0 else 'auto (max(concurrency*3, 10))'}",
+        f"Request count: {request_count if request_count > 0 else f'auto (max(concurrency*{REQUEST_COUNT_SCALE_FACTOR}, 10))'}",
         flush=True,
     )
 
