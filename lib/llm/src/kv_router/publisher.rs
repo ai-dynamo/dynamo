@@ -56,6 +56,7 @@ const MAX_BACKOFF_EXPONENT: u32 = 8; // Cap at 2^8 = 256x multiplier to prevent 
 
 // Batching configuration
 const MAX_BATCHING_TIMEOUT_MS: u64 = 15_000; // 15 seconds, prevents misconfiguration
+pub const DEFAULT_BATCHING_TIMEOUT_MS: u64 = 5; // 5ms default batch window for merging events
 
 // ---------------------------------------------------------------------------
 // Engines dropped events metric
@@ -270,7 +271,14 @@ impl KvEventPublisher {
         kv_block_size: u32,
         source_config: Option<KvEventSourceConfig>,
     ) -> Result<Self> {
-        Self::new_with_local_indexer(component, kv_block_size, source_config, false, 0, None)
+        Self::new_with_local_indexer(
+            component,
+            kv_block_size,
+            source_config,
+            false,
+            0,
+            Some(DEFAULT_BATCHING_TIMEOUT_MS),
+        )
     }
 
     pub fn new_with_local_indexer(
@@ -293,6 +301,7 @@ impl KvEventPublisher {
                         "batching_timeout_ms too high, capping to 15s"
                     );
                 }
+                // if ms is 0, treat as disabled (None)
                 ms > 0
             })
             .map(|ms| ms.min(MAX_BATCHING_TIMEOUT_MS));
