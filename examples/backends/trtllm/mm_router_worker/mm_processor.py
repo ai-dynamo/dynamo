@@ -318,9 +318,28 @@ def _compute_mm_hashes(multi_modal_data: dict | None) -> list[int] | None:
     if not multi_modal_data:
         return None
     try:
-        result = apply_mm_hashes(multi_modal_data)
-        if "image" in result and result["image"]:
-            return [int(h[:16], 16) for h in result["image"]]
+        # TRT-LLM 1.2 returns Dict[str, List[str]],
+        # TRT-LLM 1.3 returns Tuple[Dict[str, List[str]], Optional[List[Optional[str]]]].
+        apply_result = apply_mm_hashes(multi_modal_data)
+        mm_hashes_dict = (
+            apply_result[0]
+            if isinstance(apply_result, tuple)
+            else apply_result
+        )
+
+        if not isinstance(mm_hashes_dict, dict) or not mm_hashes_dict:
+            return None
+
+        # Prefer image modality for stable behavior, but fall back to flattening
+        # all modality hashes to stay forward-compatible.
+        hash_hexes = mm_hashes_dict.get("image")
+        if not hash_hexes:
+            hash_hexes = [
+                h for hashes in mm_hashes_dict.values() for h in (hashes or [])
+            ]
+
+        if hash_hexes:
+            return [int(h[:16], 16) for h in hash_hexes]
     except Exception as e:
         logger.warning(f"Failed to compute mm_hashes: {e}")
     return None
