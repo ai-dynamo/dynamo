@@ -308,7 +308,6 @@ RUN git lfs install
 ARG FRAMEWORK
 RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tmp/requirements.common.txt \
     --mount=type=bind,source=./container/deps/requirements.vllm.txt,target=/tmp/requirements.vllm.txt \
-    --mount=type=bind,source=./container/deps/requirements.trtllm.txt,target=/tmp/requirements.trtllm.txt \
     --mount=type=bind,source=./container/deps/requirements.planner.txt,target=/tmp/requirements.planner.txt \
     --mount=type=bind,source=./container/deps/requirements.frontend.txt,target=/tmp/requirements.frontend.txt \
     --mount=type=bind,source=./container/deps/requirements.benchmark.txt,target=/tmp/requirements.benchmark.txt \
@@ -322,7 +321,6 @@ RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tm
         --extra-index-url https://download.pytorch.org/whl/cu130 \
         --requirement /tmp/requirements.common.txt \
         --requirement /tmp/requirements.vllm.txt \
-        --requirement /tmp/requirements.trtllm.txt \
         --requirement /tmp/requirements.planner.txt \
         --requirement /tmp/requirements.frontend.txt \
         --requirement /tmp/requirements.benchmark.txt \
