@@ -518,7 +518,7 @@ flowchart TD
      ```bash
      curl localhost:8000/v1/chat/completions -H "Content-Type: application/json" -d '{
        "model": "openai/gpt-oss-120b",
-       "messages": [{"role": "user", "content": "Hello"}],
+       "messages": [{"role": "user", "content": "Explain why Roger Federer is considered one of the greatest tennis players of all time"}],
        "chat_template_args": {
           "reasoning_effort": "high"
         },

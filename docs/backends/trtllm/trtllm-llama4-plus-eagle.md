@@ -60,7 +60,7 @@ See the [example request section](./multinode/trtllm-multinode-examples.md#examp
 ```
 curl localhost:8000/v1/chat/completions -H "Content-Type: application/json" -d '{
         "model": "nvidia/Llama-4-Maverick-17B-128E-Instruct-FP8",
-        "messages": [{"role": "user", "content": "Why is NVIDIA a great company?"}],
+        "messages": [{"role": "user", "content": "Explain why Roger Federer is considered one of the greatest tennis players of all time"}],
         "max_tokens": 1024
     }' -w "\n"
 

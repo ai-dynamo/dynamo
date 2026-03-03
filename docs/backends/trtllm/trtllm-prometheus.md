@@ -56,7 +56,7 @@ curl -H 'Content-Type: application/json' \
 -d '{
   "model": "<model_name>",
   "max_completion_tokens": 100,
-  "messages": [{"role": "user", "content": "Hello"}]
+  "messages": [{"role": "user", "content": "Explain why Roger Federer is considered one of the greatest tennis players of all time"}]
 }' \
 http://localhost:8000/v1/chat/completions
 

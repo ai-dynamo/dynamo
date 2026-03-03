@@ -248,7 +248,7 @@ curl -w "%{http_code}" ${HOST}:${PORT}/v1/chat/completions \
   "messages": [
   {
     "role": "user",
-    "content": "Tell me a story as if we were playing dungeons and dragons."
+    "content": "Explain why Roger Federer is considered one of the greatest tennis players of all time"
   }
   ],
   "stream": true,
