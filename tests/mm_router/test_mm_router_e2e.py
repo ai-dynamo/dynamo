@@ -40,6 +40,7 @@ SINGLE_IMAGE_TOTAL_BLOCKS_RANGE = (20, 260)
 
 pytestmark = [
     pytest.mark.e2e,
+    pytest.mark.pre_merge,
     pytest.mark.trtllm,
     pytest.mark.multimodal,
     pytest.mark.gpu_1,
