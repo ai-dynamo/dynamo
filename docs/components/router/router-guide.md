@@ -208,7 +208,7 @@ The main KV-aware routing arguments (frontend uses the same `--router-*` flag na
 
 To implement KV event publishing for custom inference engines, enabling them to participate in Dynamo's KV cache-aware routing, see [KV Event Publishing for Custom Engines](../../integrations/kv-events-custom-engines.md).
 
-For details on per-request agent hints (`latency_sensitivity`, `osl`, `speculative_prefill`), see the [Agent Hints Guide](agent-hints.md).
+For details on per-request agent hints (`latency_sensitivity`, `osl`, `speculative_prefill`), see the [NVIDIA Request Extensions (`nvext`)](../frontend/nvext.md#agent-hints) documentation.
 
 ### Tuning Guidelines
 
