@@ -213,6 +213,14 @@ class OmniConfig(DynamoRuntimeConfig):
 
     def validate(self) -> None:
         DynamoRuntimeConfig.validate(self)
+        if self.default_video_fps <= 0:
+            raise ValueError("--default-video-fps must be > 0")
+        if self.ulysses_degree <= 0:
+            raise ValueError("--ulysses-degree must be > 0")
+        if self.ring_degree <= 0:
+            raise ValueError("--ring-degree must be > 0")
+        if not (0 < self.boundary_ratio <= 1):
+            raise ValueError("--boundary-ratio must be in (0, 1]")
 
 
 def parse_omni_args() -> OmniConfig:
@@ -243,7 +251,6 @@ def parse_omni_args() -> OmniConfig:
 
     args, unknown = parser.parse_known_args()
     config = OmniConfig.from_cli_args(args)
-    config.validate()
 
     vllm_args = vllm_parser.parse_args(unknown)
     config.model = vllm_args.model
@@ -257,4 +264,5 @@ def parse_omni_args() -> OmniConfig:
         config.served_model_name = served[0]
 
     config.engine_args = engine_args
+    config.validate()
     return config
