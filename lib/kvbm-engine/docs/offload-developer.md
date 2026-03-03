@@ -1,6 +1,6 @@
 # Offload Module Developer Guide
 
-This document provides implementation details for developers working on the offload pipeline. For high-level concepts and policy statements, see [README.md](README.md).
+This document provides implementation details for developers working on the offload pipeline. For high-level concepts and policy statements, see [offload.md](offload.md).
 
 ## Container-Based Architecture
 
@@ -8,7 +8,7 @@ This document provides implementation details for developers working on the offl
 
 The container is the fundamental unit that flows through the pipeline:
 
-```rust
+```rust,ignore
 struct OffloadContainer<T: BlockMetadata> {
     /// Source blocks to transfer
     blocks: Vec<SourceBlock<T>>,
@@ -36,7 +36,7 @@ impl<T: BlockMetadata> OffloadContainer<T> {
 
 Batches group multiple containers for efficient transfer:
 
-```rust
+```rust,ignore
 struct OffloadBatch<T: BlockMetadata> {
     containers: Vec<OffloadContainer<T>>,
 }
@@ -82,7 +82,7 @@ impl<T: BlockMetadata> OffloadBatch<T> {
 3. **Propagation**: Token travels with container through pipeline
 4. **Termination**: Token is consumed at upgrade (commitment point)
 
-```rust
+```rust,ignore
 // At enqueue
 let (cancel_token, cancel_updater) = CancellationToken::new();
 
@@ -99,7 +99,7 @@ let container = OffloadContainer {
 
 ### CancellationToken API
 
-```rust
+```rust,ignore
 impl CancellationToken {
     /// Request cancellation (called by handle)
     fn request(&self);
@@ -119,7 +119,7 @@ impl CancellationToken {
 
 The awaiter uses `select!` to handle both event completion and cancellation:
 
-```rust
+```rust,ignore
 async fn process(&self, mut container: OffloadContainer<T>) {
     // Fast path: event already satisfied
     if let Some(ref event) = container.precondition {
@@ -154,7 +154,7 @@ async fn process(&self, mut container: OffloadContainer<T>) {
 
 The queue supports active cancellation via sweeping:
 
-```rust
+```rust,ignore
 impl<T: HasCancellationToken> CancellableQueue<T> {
     /// Push item, reject if already cancelled
     fn push(&self, item: T) -> bool {
@@ -200,7 +200,7 @@ impl<T: HasCancellationToken> CancellableQueue<T> {
 
 For `CancellableQueue<OffloadBatch<T>>`, sweeping removes cancelled containers within batches:
 
-```rust
+```rust,ignore
 fn sweep(&self) -> usize {
     let mut removed_containers = 0;
     let mut kept_batches = Vec::new();
@@ -234,7 +234,7 @@ fn sweep(&self) -> usize {
 
 ### Cancellation Boundary at Upgrade
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                        CANCELLABLE ZONE                                 │
 │                                                                         │
@@ -268,7 +268,7 @@ fn sweep(&self) -> usize {
 
 ### Sweep → Upgrade → Flat Map → Transfer
 
-```rust
+```rust,ignore
 impl<T: BlockMetadata, D: TransferDestination> TransferExecutor<T, D> {
     async fn run(self) {
         while let Some(mut batch) = self.input_queue.pop() {
@@ -305,7 +305,7 @@ impl<T: BlockMetadata, D: TransferDestination> TransferExecutor<T, D> {
 
 ### Generic TransferDestination Trait
 
-```rust
+```rust,ignore
 trait TransferDestination {
     type Output;
 
@@ -321,7 +321,7 @@ trait TransferDestination {
 
 For transfers to another `BlockManager`:
 
-```rust
+```rust,ignore
 struct BlockDestination<Dst: BlockMetadata> {
     leader: Arc<InstanceLeader>,
     dst_manager: Arc<BlockManager<Dst>>,
@@ -360,7 +360,7 @@ impl<Dst: BlockMetadata> TransferDestination for BlockDestination<Dst> {
 
 For transfers to object storage:
 
-```rust
+```rust,ignore
 struct ObjectDestination {
     object_ops: Arc<dyn ObjectBlockOps>,
     src_layout: LogicalLayoutHandle,
@@ -402,7 +402,7 @@ The batcher accumulates containers and flushes when:
 - Flush interval expires and `min_batch_size` is met
 - All blocks for a transfer have been processed (sentinel flush)
 
-```rust
+```rust,ignore
 struct Batcher<T: BlockMetadata> {
     config: BatchConfig,
     input_queue: Arc<CancellableQueue<OffloadContainer<T>>>,
@@ -469,7 +469,7 @@ Each container retains its own `cancel_token`. When the batch is in the executor
 2. Add to pipeline configuration
 3. Policy must be fast or async-compatible
 
-```rust
+```rust,ignore
 trait OffloadPolicy<T: BlockMetadata>: Send + Sync {
     fn name(&self) -> &str;
     fn evaluate(&self, ctx: &EvalContext<T>) -> impl Future<Output = Result<bool>>;

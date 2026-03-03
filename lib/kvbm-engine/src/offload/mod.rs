@@ -40,6 +40,9 @@
 //!   are released and no outstanding operations remain
 //! - **Pipeline chaining**: G1→G2 completions can automatically feed G2→G3
 //!
+//! See also: [Developer Guide](../../docs/offload-developer.md) for implementation
+//! details and extension rules.
+//!
 //! # Example
 //!
 //! ```ignore
@@ -74,6 +77,8 @@
 //!     }
 //! }
 //! ```
+//!
+//! See also: [Developer Guide](../../docs/offload-developer.md)
 
 mod batch;
 mod cancel;

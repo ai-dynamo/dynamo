@@ -1,12 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Testing utilities for KVBM distributed engine.
-//!
-//! Core block and token utilities are re-exported from `kvbm_logical::testing`
-//! and `kvbm_physical::testing`. This module adds engine-specific test
-//! infrastructure: messenger pairing, events pipeline, distributed sessions,
-//! and multi-instance population helpers.
+#![doc = include_str!("../../docs/testing.md")]
 
 pub mod distributed;
 pub mod events;

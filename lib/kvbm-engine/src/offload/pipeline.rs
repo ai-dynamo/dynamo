@@ -879,7 +879,7 @@ impl<T: BlockMetadata> PolicyEvaluator<T> {
     }
 
     async fn evaluate(&self, input: PipelineInput<T>) {
-        let _nvtx = nvtx_range!("offload::policy");
+        nvtx_range!("offload::policy");
         let transfer_id = input.transfer_id;
 
         // Set total_expected_blocks for per-transfer sentinel flush
@@ -1237,7 +1237,7 @@ impl<T: BlockMetadata> PreconditionAwaiter<T> {
 
             // Spawn task for each batch - unbounded
             tokio::spawn(async move {
-                let _nvtx = nvtx_range!("offload::precondition");
+                nvtx_range!("offload::precondition");
                 if let Some(event_handle) = batch.precondition {
                     tracing::debug!(?event_handle, "Awaiting precondition for batch");
 
@@ -1412,7 +1412,7 @@ impl<Src: BlockMetadata, Dst: BlockMetadata> BlockTransferExecutor<Src, Dst> {
         shared: &SharedBlockExecutorState<Dst>,
         mut batch: ResolvedBatch<Src>,
     ) -> anyhow::Result<()> {
-        let _nvtx = nvtx_range!("offload::transfer");
+        nvtx_range!("offload::transfer");
         if batch.is_empty() {
             return Ok(());
         }
@@ -1858,7 +1858,7 @@ impl<Src: BlockMetadata> ObjectTransferExecutor<Src> {
         // Extract shared state for concurrent tasks
         let shared = Arc::new(SharedObjectExecutorState {
             object_ops: self.object_ops.clone(),
-            src_layout: self.src_layout.clone(),
+            src_layout: self.src_layout,
             skip_transfers: self.skip_transfers,
             lock_manager: self.lock_manager.clone(),
         });
@@ -1914,7 +1914,7 @@ impl<Src: BlockMetadata> ObjectTransferExecutor<Src> {
         shared: &SharedObjectExecutorState,
         mut batch: ResolvedBatch<Src>,
     ) -> anyhow::Result<()> {
-        let _nvtx = nvtx_range!("offload::transfer");
+        nvtx_range!("offload::transfer");
         if batch.is_empty() {
             return Ok(());
         }
@@ -1946,7 +1946,7 @@ impl<Src: BlockMetadata> ObjectTransferExecutor<Src> {
             // Execute object put via ObjectBlockOps
             let results = shared
                 .object_ops
-                .put_blocks(keys.clone(), shared.src_layout.clone(), block_ids)
+                .put_blocks(keys.clone(), shared.src_layout, block_ids)
                 .await;
 
             // Log results and track successful transfers

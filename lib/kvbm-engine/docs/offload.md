@@ -13,7 +13,7 @@ Offloading moves blocks from a source tier (e.g., GPU memory) to a destination t
 
 ## Pipeline Architecture
 
-```
+```text
 ┌─────────────────┐     ┌─────────────────────┐     ┌─────────────────────┐     ┌──────────────────┐
 │ PolicyEvaluator │────►│ PreconditionAwaiter │────►│       Batcher       │────►│ TransferExecutor │
 └─────────────────┘     └─────────────────────┘     └─────────────────────┘     └──────────────────┘
@@ -37,7 +37,7 @@ Offloading moves blocks from a source tier (e.g., GPU memory) to a destination t
 
 The fundamental unit flowing through the pipeline is an **OffloadContainer**:
 
-```rust
+```rust,ignore
 struct OffloadContainer<T: BlockMetadata> {
     /// The blocks to offload
     blocks: Vec<SourceBlock<T>>,
@@ -50,7 +50,7 @@ struct OffloadContainer<T: BlockMetadata> {
 
 Containers are grouped into batches for efficient transfer:
 
-```rust
+```rust,ignore
 struct OffloadBatch<T: BlockMetadata> {
     /// Multiple containers, each independently cancellable
     containers: Vec<OffloadContainer<T>>,
@@ -59,7 +59,7 @@ struct OffloadBatch<T: BlockMetadata> {
 
 ## Policy Statements
 
-The following policies govern the behavior of this module. See [AGENTS.md](AGENTS.md) for governance rules.
+The following policies govern the behavior of this module. See [AGENTS.md](../src/offload/AGENTS.md) for governance rules.
 
 ### P1: Container is the Unit of Cancellation
 
@@ -105,7 +105,7 @@ Pipeline behavior is controlled via `PipelineConfig`:
 
 ### Enqueueing Blocks
 
-```rust
+```rust,ignore
 let handle = pipeline.enqueue(source_blocks, precondition_event);
 
 // Track progress
@@ -117,7 +117,7 @@ let result = handle.wait().await?;
 
 ### Cancelling a Transfer
 
-```rust
+```rust,ignore
 // Request cancellation and wait for confirmation
 handle.cancel().await;
 // All blocks are now released
@@ -125,8 +125,8 @@ handle.cancel().await;
 
 ## Related Documentation
 
-- [DEVELOPER.md](DEVELOPER.md) - Implementation details and extension rules
-- [AGENTS.md](AGENTS.md) - AI agent governance rules
+- [offload-developer.md](offload-developer.md) - Implementation details and extension rules
+- [AGENTS.md](../src/offload/AGENTS.md) - AI agent governance rules
 
 
 

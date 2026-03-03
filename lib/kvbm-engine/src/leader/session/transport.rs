@@ -75,13 +75,13 @@ impl MessageTransport {
     /// Request worker metadata from a remote leader for RDMA transfers.
     ///
     /// This makes a synchronous RPC call to the remote leader's export_metadata
-    /// handler and returns the Vec<SerializedLayout> from all remote workers.
+    /// handler and returns the `Vec<SerializedLayout>` from all remote workers.
     ///
     /// # Arguments
     /// * `target` - Instance ID of the remote leader
     ///
     /// # Returns
-    /// Vec<SerializedLayout> containing metadata from each remote worker (in rank order)
+    /// `Vec<SerializedLayout>` containing metadata from each remote worker (in rank order)
     pub async fn request_metadata(&self, target: InstanceId) -> Result<Vec<SerializedLayout>> {
         match self {
             MessageTransport::Velo(transport) => transport.request_metadata(target).await,
@@ -162,7 +162,7 @@ impl VeloTransport {
 
     /// Request worker metadata from a remote leader for RDMA transfers.
     ///
-    /// Makes a unary RPC call to get Vec<SerializedLayout> from
+    /// Makes a unary RPC call to get `Vec<SerializedLayout>` from
     /// the remote leader's workers.
     pub async fn request_metadata(&self, target: InstanceId) -> Result<Vec<SerializedLayout>> {
         tracing::debug!(target = %target, "Requesting metadata from instance");

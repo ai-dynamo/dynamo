@@ -31,31 +31,41 @@ use super::*;
 
 /// PhysicalWorker executes transfer operations using a local TransferManager.
 ///
-/// This is the fundamental worker type that directly owns a TransferManager and
-/// handles for executing data transfers. It implements the [`Worker`] and
+/// This is the fundamental worker type that directly owns a `TransferManager` and
+/// layout handles for executing data transfers. It implements the [`Worker`] and
 /// [`WorkerTransfers`] traits for single-worker scenarios.
+///
+/// # Builder fields
+///
+/// | Field | Required | Description |
+/// |-------|----------|-------------|
+/// | `manager` | **yes** | `TransferManager` that executes actual data movement |
+/// | `g1_handle` | no | GPU KV cache layout handle (for GPU transfers) |
+/// | `g2_handle` | no | Host/pinned cache layout handle (for host transfers) |
+/// | `g3_handle` | no | Disk cache layout handle (for disk-tier transfers) |
+/// | `rank` | no | Worker rank for object-key prefixing in SPMD setups |
+/// | `object_client` | no | Object storage client for G4 tier (S3, etc.) |
 ///
 /// # Execution State vs Coordination State
 ///
-/// PhysicalWorker maintains **execution state** - the handles and manager needed to
-/// actually perform RDMA/local transfers. This is distinct from **coordination state**
-/// which the leader tracks in [`CoordinatedWorker`].
+/// PhysicalWorker maintains **execution state** -- the handles and manager needed
+/// to actually perform RDMA/local transfers. This is distinct from
+/// **coordination state** which the leader tracks in [`CoordinatedWorker`].
 ///
 /// When a leader wraps a PhysicalWorker in a CoordinatedWorker:
 /// - PhysicalWorker: owns handles for TransferManager execution
 /// - CoordinatedWorker: tracks the same handles for leader coordination
 ///
-/// This duplication is intentional - PhysicalWorker needs handles to execute,
+/// This duplication is intentional -- PhysicalWorker needs handles to execute,
 /// and CoordinatedWorker provides a uniform API regardless of whether the
 /// inner worker is local (PhysicalWorker) or remote (VeloWorkerClient).
 ///
-/// # Usage
+/// # Typical lifecycle
 ///
-/// PhysicalWorker is typically:
 /// 1. Created via `PhysicalWorker::builder()` during deferred initialization
 /// 2. Wrapped by [`VeloWorkerService`] to expose RPC handlers
 /// 3. Wrapped by [`CoordinatedWorker`] for leader coordination
-/// 4. Used as a building block in parallel workers (e.g., `TensorParallelWorker`)
+/// 4. Used as a building block in parallel workers (e.g., `SpmdParallelWorkers`)
 ///
 /// [`CoordinatedWorker`]: super::CoordinatedWorker
 /// [`VeloWorkerService`]: super::VeloWorkerService

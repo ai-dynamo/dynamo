@@ -25,7 +25,7 @@ use kvbm_physical::manager::{LayoutHandle, SerializedLayout};
 
 use super::{
     super::worker::Worker,
-    super::workers::{ParallelWorkers, SpmdParallelWorkers},
+    super::worker::group::{ParallelWorkers, SpmdParallelWorkers},
     AsyncSessionResult,
     FindMatchesOptions,
     FindMatchesResult,
@@ -65,10 +65,22 @@ use super::{
     velo::{ExportMetadataCallback, VeloLeaderService},
 };
 
-/// Represents a leader instance in the distributed KVBM system.
+/// Primary leader implementation for the distributed KVBM system.
 ///
-/// The InstanceLeader coordinates block onboarding across local and remote instances,
-/// managing G2 (host memory) and optional G3 (disk) block managers.
+/// `InstanceLeader` coordinates block onboarding across local and remote
+/// instances. It owns a G2 (host memory) `BlockManager` and an optional G3
+/// (disk) `BlockManager`, a set of workers for executing physical transfers,
+/// and a parallel worker abstraction for multi-rank RDMA operations.
+///
+/// Key responsibilities:
+/// - **Block matching**: finding which requested sequence hashes are already
+///   cached locally (via `BlockAccessor` policies).
+/// - **Session management**: creating, attaching, and driving onboard sessions
+///   between endpoint (source) and controller (destination) roles.
+/// - **Remote connectivity**: exchanging serialized layout metadata with peer
+///   instances so workers can perform RDMA transfers.
+/// - **Velo RPC**: registering handlers via `VeloLeaderService` so remote
+///   leaders can initiate sessions and exchange metadata.
 #[derive(Clone)]
 pub struct InstanceLeader {
     /// Nova instance for distributed communication.
@@ -1099,7 +1111,7 @@ impl InstanceLeader {
 
     /// Export metadata from all workers.
     ///
-    /// Returns a Vec<SerializedLayout> where each element corresponds to a worker
+    /// Returns a `Vec<SerializedLayout>` where each element corresponds to a worker
     /// in rank order. This metadata can be sent to remote instances to enable
     /// RDMA transfers.
     ///

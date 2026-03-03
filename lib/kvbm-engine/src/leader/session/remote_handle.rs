@@ -24,7 +24,7 @@ use anyhow::Result;
 use std::sync::Arc;
 use tokio::sync::watch;
 
-use crate::workers::ParallelWorkers;
+use crate::worker::group::ParallelWorkers;
 use crate::{BlockId, InstanceId, SequenceHash};
 use kvbm_common::LogicalLayoutHandle;
 use kvbm_physical::transfer::TransferCompleteNotification;

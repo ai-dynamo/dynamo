@@ -13,7 +13,7 @@ use anyhow::Result;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-use crate::{BlockId, G2, G3, InstanceId, SequenceHash, workers::ParallelWorkers};
+use crate::{BlockId, G2, G3, InstanceId, SequenceHash, worker::group::ParallelWorkers};
 use kvbm_common::LogicalLayoutHandle;
 use kvbm_logical::{blocks::ImmutableBlock, manager::BlockManager};
 use kvbm_physical::manager::LayoutHandle;

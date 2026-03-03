@@ -464,7 +464,7 @@ impl<T: BlockMetadata> BatchCollector<T> {
 
     /// Flush the current batch to the output channel.
     async fn flush(&mut self) {
-        let _nvtx = nvtx_range!("offload::batch");
+        nvtx_range!("offload::batch");
         if self.current_batch.is_empty() {
             return;
         }
@@ -601,7 +601,7 @@ impl<T: BlockMetadata> BatchCollectorQueue<T> {
 
     /// Flush the current batch to the output channel.
     async fn flush(&mut self) {
-        let _nvtx = nvtx_range!("offload::batch");
+        nvtx_range!("offload::batch");
         if self.current_batch.is_empty() {
             return;
         }

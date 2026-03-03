@@ -9,12 +9,11 @@
 //! # Architecture
 //!
 //! Traits are defined here; implementations are in feature-gated submodules:
-//! - [`ObjectBlockOps`] - High-level block operations (put, get, has)
-//! - [`ObjectLockManager`] - Distributed locking for coordinated offloads
+//! - [`ObjectBlockOps`](crate::object::ObjectBlockOps) - High-level block operations (put, get, has)
+//! - [`ObjectLockManager`](crate::object::ObjectLockManager) - Distributed locking for coordinated offloads
 //!
-//! Consumers should use the factory functions ([`create_object_client`],
-//! [`create_lock_manager`]) to obtain trait objects without depending on
-//! specific feature flags.
+//! Consumers should use factory functions to obtain trait objects without
+//! depending on specific feature flags.
 
 use std::sync::Arc;
 
@@ -44,7 +43,7 @@ pub trait KeyFormatter: Send + Sync {
 
 /// Default key formatter - uses Display representation of PositionalLineageHash.
 ///
-/// Produces keys like: `0:abc123` or `5:abc123:def456` (position:current[:parent])
+/// Produces keys like: `0:abc123` or `5:abc123:def456` (position:current\[:parent\])
 /// using base58 encoding for hash fragments.
 /// Suitable for single-worker scenarios or testing.
 #[derive(Debug, Clone, Default)]

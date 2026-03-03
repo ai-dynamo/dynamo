@@ -17,7 +17,7 @@ use crate::leader::session::{
 use kvbm_physical::manager::SerializedLayout;
 
 /// Type alias for async export metadata callback.
-/// Returns a boxed future that resolves to Vec<SerializedLayout>.
+/// Returns a boxed future that resolves to `Vec<SerializedLayout>`.
 pub type ExportMetadataCallback = Arc<
     dyn Fn() -> Pin<Box<dyn Future<Output = Result<Vec<SerializedLayout>>> + Send>> + Send + Sync,
 >;
@@ -106,7 +106,7 @@ impl VeloLeaderService {
     /// Set the callback for exporting worker metadata (RDMA).
     ///
     /// This callback is invoked when a remote leader requests metadata
-    /// to enable RDMA transfers. The callback should return Vec<SerializedLayout>
+    /// to enable RDMA transfers. The callback should return `Vec<SerializedLayout>`
     /// containing metadata from all workers.
     pub fn with_export_metadata(mut self, callback: ExportMetadataCallback) -> Self {
         self.export_metadata = Some(callback);
@@ -273,7 +273,7 @@ impl VeloLeaderService {
 
     /// Register the "kvbm.leader.export_metadata" handler.
     ///
-    /// This handler returns Vec<SerializedLayout> containing metadata from all workers.
+    /// This handler returns `Vec<SerializedLayout>` containing metadata from all workers.
     /// Used by remote leaders to enable RDMA transfers.
     fn register_export_metadata_handler(&self) -> Result<()> {
         let export_metadata = self

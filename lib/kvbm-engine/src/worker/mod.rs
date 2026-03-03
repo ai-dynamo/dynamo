@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 mod coordinated;
+#[doc = include_str!("../../docs/worker-group.md")]
+pub mod group;
 mod physical;
 mod protocol;
 pub mod velo;

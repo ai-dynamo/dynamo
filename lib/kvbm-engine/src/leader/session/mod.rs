@@ -5,30 +5,28 @@
 //!
 //! This module provides session management for distributed block transfers.
 //!
-//! ## New Unified Model (Recommended)
+//! ## Core Building Blocks
 //!
-//! The new session model uses composable building blocks:
+//! Composable building blocks for session management:
 //!
-//! - [`BlockHolder<T>`]: RAII container for holding blocks during sessions
-//! - [`SessionEndpoint`]: Point-to-point session primitive with state machine
-//! - [`SessionHandle`]: Unified handle for controlling remote sessions
-//! - [`SessionMessage`]: Unified message protocol with bidirectional control
-//! - [`SessionPhase`], [`ControlRole`], [`AttachmentState`]: State machine types
+//! - `BlockHolder<T>`: RAII container for holding blocks during sessions
+//! - `SessionEndpoint`: Point-to-point session primitive with state machine
+//! - `SessionHandle`: Unified handle for controlling remote sessions
+//! - `SessionMessage`: Unified message protocol with bidirectional control
+//! - `SessionPhase`, `ControlRole`, `AttachmentState`: State machine types
 //!
-//! ## Legacy Types (Migration Path)
+//! ## Session Implementations
 //!
-//! The following types are being migrated to the new model:
-//!
-//! - `OnboardMessage` → Use [`SessionMessage`] for new code
-//! - `RemoteSessionMessage` → Use [`SessionMessage`] for new code
-//! - `RemoteSessionHandle` → Use [`SessionHandle`] for new code
-//! - `RemoteSessionPhase` → Use [`SessionPhase`] for new code
-//!
-//! Existing session implementations (`InitiatorSession`, `ResponderSession`,
-//! `ControllableSession`) still use the legacy types but internally use
-//! the new [`BlockHolder`] for RAII block management.
+// Migration notes:
+// - OnboardMessage corresponds to SessionMessage
+// - RemoteSessionMessage corresponds to SessionMessage
+// - RemoteSessionHandle corresponds to SessionHandle
+// - RemoteSessionPhase corresponds to SessionPhase
+//
+// InitiatorSession, ResponderSession, and ControllableSession use
+// the older message types but internally use BlockHolder for RAII block management.
 
-// Core session building blocks (new unified model)
+// Core session building blocks
 mod blocks;
 mod endpoint;
 mod endpoint_session;
@@ -45,7 +43,7 @@ mod responder;
 pub mod transport;
 
 // =============================================================================
-// New Unified Session Model (Recommended)
+// Core Building Blocks
 // =============================================================================
 
 /// RAII container for holding blocks during sessions.
@@ -69,23 +67,21 @@ pub use state::{AttachmentState, ControlRole, SessionPhase};
 pub use messages::{BlockInfo, SessionMessage, SessionStateSnapshot};
 
 // =============================================================================
-// Legacy Types (For Backward Compatibility)
+// Session Implementations
 // =============================================================================
-// These types are being incrementally migrated to the new unified model.
-// Use the new types above for new code.
 
-/// Legacy session implementations.
+/// Session implementations for initiator, responder, and controllable patterns.
 pub use controllable::{ControllableSession, ControllableSessionResult};
 pub use initiator::InitiatorSession;
 pub use responder::ResponderSession;
 
-/// Legacy message types (use [`SessionMessage`] for new code).
+/// Message types for session communication.
 pub use messages::{
     BlockMatch, ControllableSessionOptions, G2BlockInfo, G3BlockInfo, OnboardMessage,
     RemoteSessionMessage, RemoteSessionPhase,
 };
 
-/// Legacy remote session handle (use [`SessionHandle`] for new code).
+/// Remote session handle and state channel.
 pub use remote_handle::{
     RemoteSessionHandle, RemoteSessionState, RemoteSessionStateTx, remote_session_state_channel,
 };
@@ -103,8 +99,11 @@ use tokio::sync::mpsc;
 pub type SessionId = uuid::Uuid;
 pub type OnboardSessionTx = mpsc::Sender<OnboardMessage>;
 
-/// Dispatch an inbound active message to the per-session task via its channel.
-/// Each session's channel serializes message handling for that session.
+/// Route an [`OnboardMessage`] to its per-session task channel.
+///
+/// Looks up the session ID in the `DashMap` registry and forwards the message
+/// through the session's mpsc sender. Each session processes messages serially
+/// via its channel, so ordering is preserved per-session.
 pub async fn dispatch_onboard_message(
     sessions: &DashMap<SessionId, OnboardSessionTx>,
     message: OnboardMessage,
@@ -123,10 +122,13 @@ pub async fn dispatch_onboard_message(
     anyhow::bail!("no session task registered for session {session_id}");
 }
 
-/// Dispatch a remote session message to the appropriate session task.
+/// Route a [`RemoteSessionMessage`] to either the Decode-side or Prefill-side session task.
 ///
-/// Routes messages to either controllable_sessions (Decode side) or remote_sessions (Prefill side)
-/// based on the message type.
+/// Message routing by variant:
+/// - `AttachSession`, `TriggerStaging`, `BlocksPulled`, `DetachSession` ->
+///   `controllable_sessions` (commands sent **to** Decode)
+/// - `SessionState`, `BlocksStaged`, `SessionError` ->
+///   `remote_sessions` (responses sent **to** Prefill)
 pub async fn dispatch_remote_session_message(
     controllable_sessions: &DashMap<SessionId, RemoteSessionTx>,
     remote_sessions: &DashMap<SessionId, RemoteSessionTx>,
@@ -159,10 +161,12 @@ pub async fn dispatch_remote_session_message(
     anyhow::bail!("no remote session registered for session {session_id}");
 }
 
-/// Dispatch a unified SessionMessage to the appropriate session task.
+/// Route a unified [`SessionMessage`] to its session task.
 ///
-/// This is the new unified protocol that will replace both dispatch_onboard_message
-/// and dispatch_remote_session_message.
+/// This is the new unified protocol that replaces both [`dispatch_onboard_message`]
+/// and [`dispatch_remote_session_message`]. All message variants are routed through
+/// a single `DashMap<SessionId, SessionMessageTx>` registry since the unified
+/// protocol no longer splits by direction.
 pub async fn dispatch_session_message(
     sessions: &DashMap<SessionId, SessionMessageTx>,
     message: SessionMessage,

@@ -227,7 +227,7 @@ impl LeaderState {
 /// # Examples
 /// - TP=4 local, TP=4 remote: 1:1 mapping (rank 0→0, 1→1, 2→2, 3→3)
 /// - TP=4 local, TP=2 remote: 0→0, 1→0, 2→1, 3→1 (many-to-one)
-/// - TP=2 local, TP=4 remote: 0→[0,1], 1→[2,3] (one-to-many)
+/// - TP=2 local, TP=4 remote: 0→\[0,1\], 1→\[2,3\] (one-to-many)
 pub fn route_local_to_remote(
     local_rank: usize,
     local_count: usize,

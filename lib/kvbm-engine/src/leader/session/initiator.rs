@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::{
-    BlockId, G2, G3, InstanceId, SequenceHash, object::ObjectBlockOps, workers::ParallelWorkers,
+    BlockId, G2, G3, InstanceId, SequenceHash, object::ObjectBlockOps, worker::group::ParallelWorkers,
 };
 use kvbm_common::LogicalLayoutHandle;
 use kvbm_logical::{blocks::ImmutableBlock, manager::BlockManager};
@@ -382,12 +382,11 @@ impl InitiatorSession {
                             let won_hashes = self.process_g4_results(found_hashes, matched_hashes);
 
                             // If G4 won any hashes, start loading them
-                            if !won_hashes.is_empty() {
-                                if let Some(ref tx) = g4_tx {
+                            if !won_hashes.is_empty()
+                                && let Some(ref tx) = g4_tx {
                                     self.load_g4_blocks(won_hashes, tx.clone()).await?;
                                     pending_g4_load = true;
                                 }
-                            }
                         }
                         OnboardMessage::G4LoadComplete { success, failures, blocks, .. } => {
                             self.handle_g4_load_complete(success, failures, blocks);

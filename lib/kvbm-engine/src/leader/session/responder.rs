@@ -7,7 +7,7 @@ use tokio::sync::mpsc;
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use crate::{BlockId, G2, G3, InstanceId, SequenceHash, workers::ParallelWorkers};
+use crate::{BlockId, G2, G3, InstanceId, SequenceHash, worker::group::ParallelWorkers};
 use kvbm_common::LogicalLayoutHandle;
 use kvbm_logical::{blocks::ImmutableBlock, manager::BlockManager};
 use kvbm_physical::manager::LayoutHandle;
@@ -20,7 +20,7 @@ use super::{BlockHolder, SessionId, messages::OnboardMessage, transport::Message
 /// Lifecycle:
 /// 1. Spawned when receiving CreateSession
 /// 2. Searches local G2 for matches
-/// 3. Holds ImmutableBlock<G2> references (RAII)
+/// 3. Holds `ImmutableBlock<G2>` references (RAII)
 /// 4. Sends G2Results immediately
 /// 5. Searches local G3 for remaining matches (if G3 available)
 /// 6. Sends G3Results

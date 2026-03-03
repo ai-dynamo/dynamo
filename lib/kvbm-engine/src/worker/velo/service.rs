@@ -209,7 +209,7 @@ impl VeloWorkerService {
             let metadata: Vec<SerializedLayout> = message
                 .metadata
                 .into_iter()
-                .map(|bytes| SerializedLayout::from_bytes(bytes))
+                .map(SerializedLayout::from_bytes)
                 .collect();
 
             // Call DirectWorker.connect_remote()

@@ -60,8 +60,8 @@ use super::source::SourceBlocks;
 ///
 /// # Storage Tier Model
 ///
-/// - G1→G2: BlockManager<G2> destination (host memory)
-/// - G2→G3: BlockManager<G3> destination (disk/NVMe)
+/// - G1→G2: `BlockManager<G2>` destination (host memory)
+/// - G2→G3: `BlockManager<G3>` destination (disk/NVMe)
 /// - G2→G4: ObjectBlockOps destination (object storage like S3)
 ///
 /// # Distributed G2→G4 Offloading
@@ -285,7 +285,7 @@ pub struct OffloadEngineBuilder {
     g1_manager: Option<Arc<BlockManager<G1>>>,
     g2_manager: Option<Arc<BlockManager<G2>>>,
     g3_manager: Option<Arc<BlockManager<G3>>>,
-    /// Object storage operations for G4 (replaces BlockManager<G4>)
+    /// Object storage operations for G4 (replaces `BlockManager<G4>`)
     object_ops: Option<Arc<dyn ObjectBlockOps>>,
     /// G2 physical layout for object transfers (needed by ObjectTransferExecutor)
     g2_physical_layout: Option<PhysicalLayout>,

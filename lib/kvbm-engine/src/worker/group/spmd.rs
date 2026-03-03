@@ -11,8 +11,20 @@ use futures::future::BoxFuture;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-/// A parallel [`Worker`]. Actions on this [`Worker`] are executed in
-/// parallel on all workers.
+/// SPMD (Single Program, Multiple Data) parallel worker group.
+///
+/// Wraps a set of rank-indexed [`Worker`]s and executes every operation on
+/// all of them in parallel. Each worker has its own rank, physical layout
+/// handles, and `TransferManager`, but they all receive the same logical
+/// commands (transfer, connect, import/export metadata).
+///
+/// Transfer completion notifications from individual workers are aggregated
+/// into a single notification via the event system, so callers see one
+/// completion event per logical operation regardless of worker count.
+///
+/// Remote handle mappings are stored per `(InstanceId, worker_idx,
+/// LogicalLayoutHandle)` so that each rank resolves to its own peer handle
+/// during RDMA transfers.
 pub struct SpmdParallelWorkers {
     workers: Vec<Arc<dyn Worker>>,
     events: Arc<::velo::EventManager>,
@@ -358,8 +370,7 @@ impl ObjectBlockOps for SpmdParallelWorkers {
             let num_keys = keys.len();
             let mut aggregated = Vec::with_capacity(num_keys);
 
-            for key_idx in 0..num_keys {
-                let key = &keys[key_idx];
+            for (key_idx, key) in keys.iter().enumerate() {
                 let all_succeeded = results.iter().all(|worker_results| {
                     worker_results
                         .get(key_idx)
@@ -368,9 +379,9 @@ impl ObjectBlockOps for SpmdParallelWorkers {
                 });
 
                 if all_succeeded {
-                    aggregated.push(Ok(key.clone()));
+                    aggregated.push(Ok(*key));
                 } else {
-                    aggregated.push(Err(key.clone()));
+                    aggregated.push(Err(*key));
                 }
             }
 
@@ -408,8 +419,7 @@ impl ObjectBlockOps for SpmdParallelWorkers {
             let num_keys = keys.len();
             let mut aggregated = Vec::with_capacity(num_keys);
 
-            for key_idx in 0..num_keys {
-                let key = &keys[key_idx];
+            for (key_idx, key) in keys.iter().enumerate() {
                 let all_succeeded = results.iter().all(|worker_results| {
                     worker_results
                         .get(key_idx)
@@ -418,9 +428,9 @@ impl ObjectBlockOps for SpmdParallelWorkers {
                 });
 
                 if all_succeeded {
-                    aggregated.push(Ok(key.clone()));
+                    aggregated.push(Ok(*key));
                 } else {
-                    aggregated.push(Err(key.clone()));
+                    aggregated.push(Err(*key));
                 }
             }
 

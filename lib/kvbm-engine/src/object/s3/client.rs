@@ -415,7 +415,7 @@ impl S3ObjectBlockClient {
         let formatter = self.key_formatter.clone();
 
         Box::pin(async move {
-            let work_items: Vec<_> = keys.into_iter().zip(block_ids.into_iter()).collect();
+            let work_items: Vec<_> = keys.into_iter().zip(block_ids).collect();
 
             let tasks = work_items.into_iter().map(|(key, block_id)| {
                 let client = client.clone();
@@ -494,7 +494,7 @@ impl S3ObjectBlockClient {
         let formatter = self.key_formatter.clone();
 
         Box::pin(async move {
-            let work_items: Vec<_> = keys.into_iter().zip(block_ids.into_iter()).collect();
+            let work_items: Vec<_> = keys.into_iter().zip(block_ids).collect();
 
             let tasks = work_items.into_iter().map(|(key, block_id)| {
                 let client = client.clone();

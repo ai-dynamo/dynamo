@@ -12,8 +12,8 @@ mod spmd;
 
 use std::sync::Arc;
 
-use super::object::ObjectBlockOps;
-use super::worker::{
+use crate::object::ObjectBlockOps;
+use super::{
     ImportMetadataResponse, SerializedLayout, SerializedLayoutResponse, Worker, WorkerTransfers, *,
 };
 use anyhow::Result;
