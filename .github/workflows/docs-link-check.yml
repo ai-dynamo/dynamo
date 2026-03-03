@@ -52,7 +52,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Strip cached errors before saving
-        if: always()
+        if: always() && github.ref == 'refs/heads/main'
         run: |
           if [ -f .lycheecache ]; then
             grep -E ',2[0-9]{2},' .lycheecache > .lycheecache.tmp || true
@@ -61,7 +61,7 @@ jobs:
 
       - name: Save lychee cache
         uses: actions/cache/save@v5
-        if: always()
+        if: always() && github.ref == 'refs/heads/main'
         with:
           path: .lycheecache
           key: cache-lychee-${{ github.run_id }}
