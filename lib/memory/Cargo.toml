@@ -27,7 +27,7 @@ dynamo-config = { workspace = true }
 
 anyhow = { workspace = true }
 cudarc = { workspace = true }
-nixl-sys = { git = "https://github.com/ai-dynamo/nixl.git", rev = "d5c127e558fd4ddb12e47127243057339c2c2b72" }
+nixl-sys = { version = "=0.10.1" }
 serde = { workspace = true}
 thiserror = { workspace = true }
 tracing = { workspace = true }
