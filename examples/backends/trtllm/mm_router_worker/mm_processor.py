@@ -10,13 +10,12 @@ from dataclasses import dataclass
 from typing import Any
 
 from tensorrt_llm.inputs.multimodal import apply_mm_hashes
-from tensorrt_llm.inputs.utils import default_multimodal_input_loader
+from tensorrt_llm.inputs.utils import default_multimodal_input_loader, load_image
 from transformers import AutoConfig
 
 from dynamo.common.multimodal.image_loader import ImageLoader
 
 logger = logging.getLogger(__name__)
-_IMAGE_LOADER = ImageLoader(cache_size=512)
 
 
 # =============================================================================
@@ -84,9 +83,6 @@ async def process_multimodal(
     """
     try:
         prompt = build_prompt_from_messages(messages)
-        loaded_images = [_IMAGE_LOADER.load(url) for url in image_urls]
-        pil_images = [loaded.pil_image for loaded in loaded_images]
-        data_uris = [loaded.data_url for loaded in loaded_images]
 
         # Pre-download all images asynchronously via ImageLoader (parallel + cached)
         results = await asyncio.gather(
@@ -196,7 +192,7 @@ def _raw_bytes_to_data_uris(raw_bytes_list: list[bytes]) -> list[str]:
 
 def _get_expanded_tokens(
     prompt: str,
-    pil_images: list[Any],
+    image_urls: list[str],
     tokenizer: Any,
     processor: Any,
     model_path: str,
