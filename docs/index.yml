@@ -306,6 +306,8 @@ navigation:
             path: backends/vllm/vllm-reference-guide.md
           - page: Examples
             path: backends/vllm/vllm-examples.md
+          - page: KV Cache Offloading
+            path: backends/vllm/vllm-kv-offloading.md
           - page: Observability
             path: backends/vllm/vllm-observability.md
           - page: vLLM-Omni
