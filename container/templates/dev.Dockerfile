@@ -107,7 +107,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         # Native deps for Python/Rust wheels
         patchelf \
         clang \
-        libclang-dev && \
+        libclang-dev \
+        libfontconfig-dev && \
     rm -rf /var/lib/apt/lists/* && \
     # Initialize Git LFS for the dynamo user (required for requirements with lfs=true)
     git lfs install

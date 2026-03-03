@@ -119,7 +119,14 @@ trtllm_configs = {
         name="disaggregated_logprobs",
         directory=trtllm_dir,
         script_name="disagg.sh",
-        marks=[pytest.mark.gpu_2, pytest.mark.post_merge, pytest.mark.trtllm],
+        marks=[
+            pytest.mark.gpu_2,
+            pytest.mark.post_merge,
+            pytest.mark.trtllm,
+            pytest.mark.skip(
+                reason="DYN-2265 https://github.com/ai-dynamo/dynamo/pull/6704/changes#r2866554157 TODO enable this test when upgrading from trtllm 1.3.0rc5 to 1.3.0rc5.post1"
+            ),
+        ],
         model="Qwen/Qwen3-0.6B",
         frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
@@ -152,7 +159,7 @@ trtllm_configs = {
             )
         ],
         env={
-            "DYN_LOG": "dynamo_llm::kv_router::publisher=trace,dynamo_llm::kv_router::scheduler=info",
+            "DYN_LOG": "dynamo_llm::kv_router::publisher=trace,dynamo_kv_router::scheduling::selector=info",
         },
     ),
     "disaggregated_router": TRTLLMConfig(
@@ -230,6 +237,32 @@ trtllm_configs = {
             "ENCODE_CUDA_VISIBLE_DEVICES": "0",
         },
     ),
+    # Test Encoder with Aggregated PD worker on same GPU
+    # Make this pre-merge after TRTLLM #5938603 is fixed
+    "e_pd_multimodal": TRTLLMConfig(
+        name="e_pd_multimodal",
+        directory=trtllm_dir,
+        script_name="disagg_e_pd.sh",
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.trtllm,
+            pytest.mark.multimodal,
+            pytest.mark.nightly,
+        ],
+        model="Qwen/Qwen3-VL-2B-Instruct",
+        frontend_port=DefaultPort.FRONTEND.value,
+        timeout=900,
+        delayed_start=120,
+        request_payloads=[
+            multimodal_payload_default(
+                text="Describe what you see in this image.",
+                expected_response=["mountain", "rock", "trees", "road"],
+            )
+        ],
+        env={
+            "ENCODE_CUDA_VISIBLE_DEVICES": "0",
+        },
+    ),
     "completions_only": TRTLLMConfig(
         name="completions_only",
         directory=trtllm_dir,
@@ -238,6 +271,7 @@ trtllm_configs = {
             pytest.mark.gpu_1,
             pytest.mark.trtllm,
             pytest.mark.post_merge,
+            pytest.mark.skip(reason="DIS-1566"),
             pytest.mark.timeout(
                 480
             ),  # 3x measured time (83.85s) + download time (210s) for 7B model

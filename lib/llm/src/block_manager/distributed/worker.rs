@@ -148,7 +148,8 @@ async fn perform_allocation_and_build_handler(
     )?);
     // host
     let host_blocks = if leader_meta.num_host_blocks > 0 {
-        let host_allocator = Arc::new(PinnedAllocator::default());
+        let host_allocator = Arc::new(PinnedAllocator::new(device_id)?);
+
         let host_layout = layout_builder
             .num_blocks(leader_meta.num_host_blocks)
             .build()?
