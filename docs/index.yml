@@ -144,8 +144,6 @@ navigation:
             path: backends/sglang/sglang-diffusion.md
           - page: Observability
             path: backends/sglang/sglang-observability.md
-          - page: Agentic Workloads
-            path: backends/sglang/agents.md
       - section: TensorRT-LLM
         path: backends/trtllm/README.md
         contents:
