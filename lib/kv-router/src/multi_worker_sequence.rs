@@ -118,7 +118,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     pub fn new(
         publisher: P,
         block_size: usize,
-        dp_range: HashMap<u64, (u32, u32)>,
+        dp_range: &HashMap<u64, (u32, u32)>,
         replica_sync: bool,
         router_id: u64,
         worker_type: &'static str,

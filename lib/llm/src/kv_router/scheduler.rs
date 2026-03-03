@@ -9,7 +9,6 @@ use super::queue::SchedulerQueue;
 use super::sequence::{
     ActiveSequencesMulti, SequenceError, SequenceRequest, create_multi_worker_sequences,
 };
-use crate::block_manager::block::data;
 use crate::discovery::RuntimeConfigWatch;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 use anyhow::Result;

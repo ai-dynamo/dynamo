@@ -116,7 +116,7 @@ pub async fn create_multi_worker_sequences(
     let multi_worker = ActiveSequencesMultiWorker::new(
         publisher,
         block_size,
-        dp_range,
+        &dp_range,
         replica_sync,
         router_id,
         worker_type,
