@@ -128,3 +128,6 @@ spec:
         secret:
           defaultMode: 420
           secretName: {{ .Values.webhook.certificateSecret.name }}
+          # Allow the pod to start before the secret exists so the
+          # in-operator cert-controller can bootstrap it at runtime.
+          optional: true

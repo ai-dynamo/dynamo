@@ -14,11 +14,11 @@
 # limitations under the License.
 
 ---
-# Role to read the webhook certificate secret
+# Role to manage the webhook certificate secret (create placeholder, read, update)
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: {{ include "dynamo-operator.fullname" . }}-webhook-cert-reader
+  name: {{ include "dynamo-operator.fullname" . }}-webhook-cert-manager
   namespace: {{ .Release.Namespace }}
   labels:
     app.kubernetes.io/component: webhook
@@ -36,11 +36,19 @@ rules:
   - get
   - list
   - watch
+  - update
+  - patch
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - create
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: {{ include "dynamo-operator.fullname" . }}-webhook-cert-reader
+  name: {{ include "dynamo-operator.fullname" . }}-webhook-cert-manager
   namespace: {{ .Release.Namespace }}
   labels:
     app.kubernetes.io/component: webhook
@@ -50,9 +58,60 @@ metadata:
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: {{ include "dynamo-operator.fullname" . }}-webhook-cert-reader
+  name: {{ include "dynamo-operator.fullname" . }}-webhook-cert-manager
 subjects:
 - kind: ServiceAccount
   name: {{ include "dynamo-operator.fullname" . }}-controller-manager
   namespace: {{ .Release.Namespace }}
-
+{{- if .Values.namespaceRestriction.enabled }}
+---
+# ClusterRole for patching webhook configurations and CRDs (cluster-scoped resources).
+# Only needed in namespace-restricted mode; in cluster-wide mode the manager
+# ClusterRole already has full access.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "dynamo-operator.fullname" . }}-{{ .Release.Namespace }}-webhook-injector
+  labels:
+    app.kubernetes.io/component: webhook
+    app.kubernetes.io/created-by: dynamo-operator
+    app.kubernetes.io/part-of: dynamo-operator
+  {{- include "dynamo-operator.labels" . | nindent 4 }}
+rules:
+- apiGroups:
+  - admissionregistration.k8s.io
+  resources:
+  - validatingwebhookconfigurations
+  - mutatingwebhookconfigurations
+  verbs:
+  - get
+  - list
+  - update
+  - patch
+- apiGroups:
+  - apiextensions.k8s.io
+  resources:
+  - customresourcedefinitions
+  verbs:
+  - get
+  - update
+  - patch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "dynamo-operator.fullname" . }}-{{ .Release.Namespace }}-webhook-injector-binding
+  labels:
+    app.kubernetes.io/component: webhook
+    app.kubernetes.io/created-by: dynamo-operator
+    app.kubernetes.io/part-of: dynamo-operator
+  {{- include "dynamo-operator.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "dynamo-operator.fullname" . }}-{{ .Release.Namespace }}-webhook-injector
+subjects:
+- kind: ServiceAccount
+  name: {{ include "dynamo-operator.fullname" . }}-controller-manager
+  namespace: {{ .Release.Namespace }}
+{{- end }}
