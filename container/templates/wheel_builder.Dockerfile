@@ -310,6 +310,7 @@ RUN echo "$NIXL_LIB_DIR" > /etc/ld.so.conf.d/nixl.conf && \
     echo "$NIXL_PLUGIN_DIR" >> /etc/ld.so.conf.d/nixl.conf && \
     ldconfig
 
+# Build NIXL wheel → /opt/dynamo/dist/nixl/nixl*.whl (C++ transport library, all targets)
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
     --mount=type=cache,target=/root/.cache/uv \
@@ -327,7 +328,11 @@ COPY pyproject.toml README.md LICENSE Cargo.toml Cargo.lock rust-toolchain.toml 
 COPY lib/ /opt/dynamo/lib/
 COPY components/ /opt/dynamo/components/
 
-# Build dynamo wheels. The caches do not need the "shared" lock because Cargo has its own locking mechanism.
+# Build dynamo wheels → /opt/dynamo/dist/:
+#   uv build        → ai_dynamo*any.whl          (main Python package)
+#   maturin build   → ai_dynamo_runtime*.whl     (Rust bindings)
+#   maturin build   → kvbm*.whl                  (KV block manager, conditional on ENABLE_KVBM)
+# The caches do not need the "shared" lock because Cargo has its own locking mechanism.
 ARG ENABLE_KVBM
 ARG ENABLE_MEDIA_FFMPEG
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
@@ -376,9 +381,12 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
 # Create dist dir with a placeholder so downstream COPY --from=wheel_builder /opt/dynamo/dist/*.whl always has a match.
 RUN mkdir -p /opt/dynamo/dist ${CARGO_TARGET_DIR} && \
     touch /opt/dynamo/dist/.placeholder.whl
+
+# Dev/local-dev skip the full COPY lib/ above, so copy gpu_memory_service source explicitly for the wheel build below
+COPY lib/gpu_memory_service/ /opt/dynamo/lib/gpu_memory_service/
 {% endif %}
 
-# Build gpu_memory_service wheel (small C++ extension, fast build -- built for all targets)
+# Build gpu-memory-service wheel → /opt/dynamo/dist/gpu_memory_service*.whl (small C++ extension, fast build -- all targets, all frameworks)
 ARG ENABLE_GPU_MEMORY_SERVICE
 RUN --mount=type=cache,target=/root/.cache/uv \
     if [ "$ENABLE_GPU_MEMORY_SERVICE" = "true" ]; then \
