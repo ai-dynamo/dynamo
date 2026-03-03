@@ -327,14 +327,8 @@ class ServiceAPI:
         if not multi_modal_data:
             return None
 
-        # TRT-LLM 1.2 returns Dict[str, List[str]],
         # TRT-LLM 1.3 returns Tuple[Dict[str, List[str]], Optional[List[Optional[str]]]].
-        apply_result = apply_mm_hashes(multi_modal_data)
-        mm_hashes_dict = (
-            apply_result[0]
-            if isinstance(apply_result, tuple)
-            else apply_result
-        )
+        mm_hashes_dict = apply_mm_hashes(multi_modal_data)[0]
         if not isinstance(mm_hashes_dict, dict) or not mm_hashes_dict:
             return None
 
