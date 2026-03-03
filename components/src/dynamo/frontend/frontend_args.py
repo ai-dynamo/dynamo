@@ -567,7 +567,7 @@ class FrontendArgGroup(ArgGroup):
             help=(
                 "[EXPERIMENTAL] Enable performance instrumentation for diagnosing preprocessing bottlenecks. "
                 "Logs per-function timing, request concurrency, and hot-path section durations. "
-                "'--dyn-chat-processor vllm' only."
+                "Supported with '--dyn-chat-processor vllm' and '--dyn-chat-processor sglang'."
             ),
         )
 
@@ -581,7 +581,8 @@ class FrontendArgGroup(ArgGroup):
                 "[EXPERIMENTAL] Number of worker processes for preprocessing and output processing. "
                 "When > 0, offloads CPU-bound work (tokenization, template rendering, "
                 "detokenization) to a ProcessPoolExecutor with N workers, each with its "
-                "own GIL. 0 (default) keeps all processing on the main event loop. '--dyn-chat-processor vllm' only."
+                "own GIL. 0 (default) keeps all processing on the main event loop. "
+                "Supported with '--dyn-chat-processor vllm' and '--dyn-chat-processor sglang'."
             ),
             arg_type=int,
         )

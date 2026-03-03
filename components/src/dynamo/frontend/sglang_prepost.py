@@ -59,6 +59,42 @@ def _materialize_messages(messages: list[Any]) -> list[dict[str, Any]]:
     return normalized
 
 
+def create_parsers(
+    request: dict[str, Any],
+    *,
+    tool_call_parser_name: str | None,
+    reasoning_parser_name: str | None,
+    sglang_tools: list[SglangTool] | None = None,
+) -> tuple[FunctionCallParser | None, ReasoningParser | None]:
+    """Create tool call and reasoning parsers for a request.
+
+    Shared by both the single-process preprocessing path and the pool path
+    (which must recreate non-picklable parsers in the main process).
+
+    If ``sglang_tools`` is provided, reuses them; otherwise converts from
+    the request's ``tools`` field.
+    """
+    if sglang_tools is None:
+        sglang_tools = convert_tools(request.get("tools"))
+    tool_choice = request.get("tool_choice", "auto")
+
+    tool_call_parser = None
+    if tool_call_parser_name and sglang_tools and tool_choice != "none":
+        tool_call_parser = FunctionCallParser(
+            tools=sglang_tools,
+            tool_call_parser=tool_call_parser_name,
+        )
+
+    reasoning_parser = None
+    if reasoning_parser_name:
+        reasoning_parser = ReasoningParser(
+            model_type=reasoning_parser_name,
+            stream_reasoning=True,
+        )
+
+    return tool_call_parser, reasoning_parser
+
+
 def preprocess_chat_request(
     request: dict[str, Any],
     *,
@@ -71,11 +107,9 @@ def preprocess_chat_request(
     Synchronous -- suitable for both main-process and worker-process execution.
     """
     messages = _materialize_messages(request.get("messages", []))
-    tools = request.get("tools")
-    tool_choice = request.get("tool_choice", "auto")
 
-    # Convert tools to SGLang format
-    sglang_tools = convert_tools(tools)
+    # Convert tools to SGLang format (done once, shared with parser creation)
+    sglang_tools = convert_tools(request.get("tools"))
 
     # Build template kwargs -- single call for rendering + tokenization
     template_kwargs: dict[str, Any] = {
@@ -89,21 +123,12 @@ def preprocess_chat_request(
     if not isinstance(prompt_token_ids, list):
         prompt_token_ids = list(prompt_token_ids)
 
-    # Tool call parser
-    tool_call_parser = None
-    if tool_call_parser_name and sglang_tools and tool_choice != "none":
-        tool_call_parser = FunctionCallParser(
-            tools=sglang_tools,
-            tool_call_parser=tool_call_parser_name,
-        )
-
-    # Reasoning parser
-    reasoning_parser = None
-    if reasoning_parser_name:
-        reasoning_parser = ReasoningParser(
-            model_type=reasoning_parser_name,
-            stream_reasoning=True,
-        )
+    tool_call_parser, reasoning_parser = create_parsers(
+        request,
+        tool_call_parser_name=tool_call_parser_name,
+        reasoning_parser_name=reasoning_parser_name,
+        sglang_tools=sglang_tools,
+    )
 
     return SglangPreprocessResult(
         prompt_token_ids=prompt_token_ids,
@@ -145,18 +170,24 @@ class SglangStreamingPostProcessor:
         self._all_token_ids: list[int] = []
         # Tool call state tracking
         self._tool_call_ids: dict[int, str] = {}  # tool_index -> call_id
-        self._prev_tool_params: dict[int, str] = {}  # tool_index -> accumulated params
 
     def _incremental_decode(self, new_token_ids: list[int]) -> str:
         """Decode new tokens with lookback window for multi-byte char boundaries.
 
         Re-decodes a small window of previous tokens alongside new tokens so that
         multi-byte characters spanning token boundaries are correctly resolved.
+        Only retains the last LOOKBACK tokens to bound memory usage.
         """
         prev_count = len(self._all_token_ids)
         self._all_token_ids.extend(new_token_ids)
 
         start = max(0, prev_count - self.LOOKBACK)
+
+        # Trim to avoid unbounded growth -- only the tail matters for decoding
+        if len(self._all_token_ids) > self.LOOKBACK * 4:
+            self._all_token_ids = self._all_token_ids[-(self.LOOKBACK + len(new_token_ids)):]
+            prev_count = len(self._all_token_ids) - len(new_token_ids)
+            start = max(0, prev_count - self.LOOKBACK)
 
         # Decode lookback-only prefix (before new tokens)
         prefix_tokens = self._all_token_ids[start:prev_count]
@@ -228,11 +259,9 @@ class SglangStreamingPostProcessor:
                 if idx not in self._tool_call_ids:
                     self._tool_call_ids[idx] = _random_call_id()
 
-                # Compute parameter delta (SGLang returns accumulated params)
-                prev_params = self._prev_tool_params.get(idx, "")
-                current_params = tc.parameters or ""
-                param_delta = current_params[len(prev_params):]
-                self._prev_tool_params[idx] = current_params
+                # SGLang's FunctionCallParser returns parameter deltas
+                # (not accumulated), so use them directly.
+                param_delta = tc.parameters or ""
 
                 tc_delta: dict[str, Any] = {
                     "index": idx,

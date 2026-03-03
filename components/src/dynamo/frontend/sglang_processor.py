@@ -31,14 +31,14 @@ from dynamo.llm import (
 from dynamo.runtime import DistributedRuntime
 
 from .sglang_prepost import (
+    _MASK_64_BITS,
     SglangStreamingPostProcessor,
-    convert_tools,
+    create_parsers,
     preprocess_chat_request,
 )
 
 logger = logging.getLogger(__name__)
 
-_MASK_64_BITS = (1 << 64) - 1
 _FINISH_REASON_MAP: dict[str, str] = {
     "eos": "stop",
     "stop": "stop",
@@ -354,26 +354,11 @@ class SglangProcessor:
             return
 
         # --- Phase 2: Recreate parsers in main process (not picklable) ---
-        from sglang.srt.function_call.function_call_parser import FunctionCallParser
-        from sglang.srt.parser.reasoning_parser import ReasoningParser
-
-        tool_call_parser = None
-        tools = request.get("tools")
-        tool_choice = request.get("tool_choice", "auto")
-        if self.tool_call_parser_name and tools and tool_choice != "none":
-            sglang_tools = convert_tools(tools)
-            if sglang_tools:
-                tool_call_parser = FunctionCallParser(
-                    tools=sglang_tools,
-                    tool_call_parser=self.tool_call_parser_name,
-                )
-
-        reasoning_parser = None
-        if self.reasoning_parser_name:
-            reasoning_parser = ReasoningParser(
-                model_type=self.reasoning_parser_name,
-                stream_reasoning=True,
-            )
+        tool_call_parser, reasoning_parser = create_parsers(
+            request,
+            tool_call_parser_name=self.tool_call_parser_name,
+            reasoning_parser_name=self.reasoning_parser_name,
+        )
 
         post = SglangStreamingPostProcessor(
             tokenizer=self.tokenizer,
@@ -401,6 +386,7 @@ class SglangProcessor:
         """Shared streaming logic for both single-process and pool paths."""
         token_count = 0
         post_proc_total_ms = 0.0
+        created_ts = int(time.time())
 
         try:
             if self.is_kv_router:
@@ -459,7 +445,7 @@ class SglangProcessor:
                     dynamo_out: dict[str, Any] = {
                         "id": request_id,
                         "choices": [choice],
-                        "created": int(time.time()),
+                        "created": created_ts,
                         "model": request["model"],
                         "object": "chat.completion.chunk",
                     }
