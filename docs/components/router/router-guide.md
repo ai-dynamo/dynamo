@@ -210,7 +210,7 @@ To implement KV event publishing for custom inference engines, enabling them to 
 
 For details on per-request agent hints (`latency_sensitivity`, `osl`, `speculative_prefill`), see the [Agent Hints Guide](agent-hints.md).
 
-## Tuning Guidelines
+### Tuning Guidelines
 
 The `--router-kv-overlap-score-weight` parameter is the primary knob for balancing prefill efficiency against decode load. Prefill-heavy workloads (long prompts, short generations) benefit from a higher weight, which steers requests toward workers with better cache overlap and reduces TTFT. Decode-heavy workloads (short prompts, long generations) benefit from a lower weight, which distributes decode load more evenly and reduces ITL. The default of 1.0 is a reasonable starting point; monitor TTFT and ITL metrics and adjust from there. This weight can also be overridden per request via `nvext.agent_hints.kv_overlap_score_weight`, which is useful when different request types in the same deployment have different latency profiles.
 
