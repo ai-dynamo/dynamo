@@ -133,6 +133,51 @@ pub fn register_worker_load_metrics(
 }
 
 // ---------------------------------------------------------------------------
+// Router queue metrics (gauge)
+// ---------------------------------------------------------------------------
+
+/// Gauge tracking the number of requests pending in the router's scheduler queue.
+/// Labeled by `worker_type` ("prefill" or "decode") to distinguish queues in
+/// disaggregated mode. At most 2 label combinations.
+pub struct RouterQueueMetrics {
+    pub pending_requests: IntGaugeVec,
+}
+
+pub static ROUTER_QUEUE_METRICS: LazyLock<RouterQueueMetrics> =
+    LazyLock::new(|| RouterQueueMetrics {
+        pending_requests: IntGaugeVec::new(
+            Opts::new(
+                format!(
+                    "{}_{}",
+                    name_prefix::FRONTEND,
+                    frontend_service::ROUTER_QUEUE_PENDING_REQUESTS
+                ),
+                "Number of requests pending in the router scheduler queue",
+            ),
+            &[labels::WORKER_TYPE],
+        )
+        .expect("Failed to create router_queue_pending_requests gauge"),
+    });
+
+impl RouterQueueMetrics {
+    pub fn set_pending(&self, worker_type: &str, count: usize) {
+        self.pending_requests
+            .with_label_values(&[worker_type])
+            .set(count as i64);
+    }
+}
+
+/// Register the router queue gauge with the given Prometheus registry.
+/// Called during frontend HTTP service setup (`service_v2.rs`), served on port 8000.
+pub fn register_router_queue_metrics(
+    registry: &prometheus::Registry,
+) -> Result<(), prometheus::Error> {
+    let m = &*ROUTER_QUEUE_METRICS;
+    registry.register(Box::new(m.pending_requests.clone()))?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Routing overhead metrics (histograms)
 // ---------------------------------------------------------------------------
 
@@ -419,6 +464,41 @@ dynamo_frontend_worker_active_decode_blocks{dp_rank=\"0\",worker_id=\"123\",work
 # HELP dynamo_frontend_worker_active_prefill_tokens Active prefill tokens queued per worker
 # TYPE dynamo_frontend_worker_active_prefill_tokens gauge
 dynamo_frontend_worker_active_prefill_tokens{dp_rank=\"0\",worker_id=\"123\",worker_type=\"decode\"} 100
+";
+        assert_eq!(
+            output, expected,
+            "\nActual PEF:\n{output}\nExpected PEF:\n{expected}"
+        );
+    }
+
+    #[test]
+    fn test_router_queue_metrics_pef() {
+        let registry = prometheus::Registry::new();
+        let metrics = RouterQueueMetrics {
+            pending_requests: IntGaugeVec::new(
+                Opts::new(
+                    format!(
+                        "{}_{}",
+                        name_prefix::FRONTEND,
+                        frontend_service::ROUTER_QUEUE_PENDING_REQUESTS
+                    ),
+                    "Number of requests pending in the router scheduler queue",
+                ),
+                &[labels::WORKER_TYPE],
+            )
+            .unwrap(),
+        };
+        registry
+            .register(Box::new(metrics.pending_requests.clone()))
+            .unwrap();
+
+        metrics.set_pending("decode", 5);
+
+        let output = gather_pef(&registry);
+        let expected = "\
+# HELP dynamo_frontend_router_queue_pending_requests Number of requests pending in the router scheduler queue
+# TYPE dynamo_frontend_router_queue_pending_requests gauge
+dynamo_frontend_router_queue_pending_requests{worker_type=\"decode\"} 5
 ";
         assert_eq!(
             output, expected,

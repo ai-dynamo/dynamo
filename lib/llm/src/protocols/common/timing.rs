@@ -160,6 +160,9 @@ pub struct RequestTracker {
 
     /// Number of detokenize samples accumulated for this request
     detokenize_count: AtomicU64,
+
+    /// Router scheduler queue depth at routing time (how many requests were pending)
+    router_queue_depth: OnceLock<usize>,
 }
 
 impl RequestTracker {
@@ -193,6 +196,7 @@ impl RequestTracker {
             tokenize_latency: OnceLock::new(),
             detokenize_total_ns: AtomicU64::new(0),
             detokenize_count: AtomicU64::new(0),
+            router_queue_depth: OnceLock::new(),
         }
     }
 
@@ -382,6 +386,16 @@ impl RequestTracker {
         self.detokenize_count.load(Ordering::Relaxed)
     }
 
+    /// Record router scheduler queue depth at routing time.
+    pub fn record_router_queue_depth(&self, depth: usize) {
+        let _ = self.router_queue_depth.set(depth);
+    }
+
+    /// Get the router scheduler queue depth recorded at routing time.
+    pub fn router_queue_depth(&self) -> Option<usize> {
+        self.router_queue_depth.get().copied()
+    }
+
     /// Get worker ID information if any worker IDs have been recorded.
     pub fn get_worker_info(&self) -> Option<WorkerIdInfo> {
         let prefill = self.prefill_worker_id();
@@ -486,6 +500,7 @@ impl RequestTracker {
             ttft_ms: self.ttft_ms(),
             total_time_ms: self.total_time_ms(),
             kv_hit_rate: self.kv_hit_rate(),
+            router_queue_depth: self.router_queue_depth(),
         }
     }
 }
@@ -524,6 +539,10 @@ pub struct TimingInfo {
     /// KV cache hit rate (0.0 to 1.0) - ratio of cached blocks to total input blocks
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kv_hit_rate: Option<f64>,
+
+    /// Number of requests pending in the router scheduler queue at routing time
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub router_queue_depth: Option<usize>,
 }
 
 #[cfg(test)]
@@ -618,6 +637,22 @@ mod tests {
             total >= 5.0,
             "total time should be at least 5ms, got {total}"
         );
+    }
+
+    #[test]
+    fn test_router_queue_depth() {
+        let tracker = RequestTracker::new();
+        assert!(tracker.router_queue_depth().is_none());
+
+        tracker.record_router_queue_depth(42);
+        assert_eq!(tracker.router_queue_depth(), Some(42));
+
+        // OnceLock: second write is ignored
+        tracker.record_router_queue_depth(99);
+        assert_eq!(tracker.router_queue_depth(), Some(42));
+
+        let timing = tracker.get_timing_info();
+        assert_eq!(timing.router_queue_depth, Some(42));
     }
 
     #[test]
