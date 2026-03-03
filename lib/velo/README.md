@@ -55,6 +55,7 @@ async fn main() -> anyhow::Result<()> {
 |---|---|
 | `velo-messenger` | `Messenger`, `Handler`, `Context`, `TypedContext`, send/unary/typed-unary builders, `VeloEvents`, `PeerDiscovery` |
 | `velo-events` | `Event`, `EventManager`, `EventHandle`, `EventAwaiter`, `EventStatus`, `EventPoison` |
+| `velo-backend` | `*` as `velo::backend` |
 | `velo-common` | `InstanceId`, `PeerInfo`, `WorkerId`, `WorkerAddress` |
 
 The `Velo` struct itself is a thin wrapper around `Arc<Messenger>` that
