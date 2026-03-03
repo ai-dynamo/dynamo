@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from tensorrt_llm.inputs.multimodal import apply_mm_hashes
-from tensorrt_llm.inputs.utils import default_multimodal_input_loader, load_image
+from tensorrt_llm.inputs.utils import load_image
 from transformers import AutoConfig
 
 logger = logging.getLogger(__name__)
@@ -69,36 +69,48 @@ def process_multimodal(
     processor: Any,
     model: str,
     model_type: str,
+    request_token_ids: list[int] | None = None,
+    request_multi_modal_data: dict | None = None,
 ) -> ProcessedInput:
     """Process multimodal request: load images, get expanded tokens and mm_hashes."""
     try:
-        prompt = build_prompt_from_messages(messages)
-
-        # Use TRT-LLM loader to process images and get mm data
-        inputs = default_multimodal_input_loader(
-            tokenizer=tokenizer,
-            model_dir=model,
-            model_type=model_type,
-            modality="multiple_image" if len(image_urls) > 1 else "image",
-            prompts=[prompt],
-            media=[image_urls],
-            # Align hash input type with backend multimodal processor, which hashes
-            # PIL images in the TRT-LLM request path.
-            image_data_format="pil",
-            device="cuda",
+        # Prefer the exact image sources from preprocessed request payload so routing
+        # hash inputs follow the same media path as backend execution.
+        effective_image_urls = (
+            _extract_image_urls_from_request_mm_data(request_multi_modal_data)
+            or image_urls
         )
+        if not effective_image_urls:
+            raise ValueError("No image URLs found for multimodal processing")
 
-        mm_input = inputs[0]
-        processed_prompt = mm_input.get("prompt", prompt)
-        multi_modal_data = mm_input.get("multi_modal_data")
+        if not request_token_ids:
+            raise ValueError("Missing request token_ids for multimodal routing")
+
+        # Match TRT-LLM 1.3 preprocessing path:
+        # request has prompt_token_ids -> decode to prompt text -> processor re-encodes.
+        processed_prompt = _decode_prompt_from_token_ids(tokenizer, request_token_ids)
+        if processed_prompt is None:
+            raise ValueError(
+                "Failed to decode request token_ids for multimodal routing"
+            )
+
+        # Load PIL images once from effective image sources. Reuse for both token
+        # expansion and mm_hash computation to keep routing inputs self-consistent.
+        pil_images = [load_image(url, format="pil") for url in effective_image_urls]
 
         # Get expanded tokens and image ranges
         tokens, image_ranges = _get_expanded_tokens(
-            processed_prompt, image_urls, tokenizer, processor, model, model_type
+            processed_prompt,
+            effective_image_urls,
+            tokenizer,
+            processor,
+            model,
+            model_type,
+            pil_images=pil_images,
         )
 
-        # Compute mm_hash for each image
-        mm_hashes = _compute_mm_hashes(multi_modal_data)
+        # Compute mm_hash for each image from backend-like multimodal structure.
+        mm_hashes = _compute_mm_hashes({"image": pil_images})
 
         return ProcessedInput(
             tokens=tokens, mm_hashes=mm_hashes, image_ranges=image_ranges
@@ -149,6 +161,24 @@ def build_block_mm_infos(
 # =============================================================================
 
 
+def _decode_prompt_from_token_ids(
+    tokenizer: Any, request_token_ids: list[int] | None
+) -> str | None:
+    """Decode frontend token_ids back to prompt text (TRT-LLM 1.3 VLM path)."""
+    if not request_token_ids:
+        return None
+
+    # tensorrt_llm tokenizers and HF tokenizers expose slightly different decode signatures.
+    decode = getattr(tokenizer, "decode", None)
+    if decode is None:
+        return None
+
+    try:
+        return decode(request_token_ids, skip_special_tokens=False)
+    except TypeError:
+        return decode(request_token_ids)
+
+
 def _get_expanded_tokens(
     prompt: str,
     image_urls: list[str],
@@ -156,14 +186,16 @@ def _get_expanded_tokens(
     processor: Any,
     model_path: str,
     model_type: str,
+    pil_images: list[Any] | None = None,
 ) -> tuple[list[int], list[tuple[int, int]] | None]:
     """Get tokens with visual expansion and find each image's token range."""
     if processor is None:
         return tokenizer.encode(prompt), None
 
     try:
-        # TODO @zdren: use async_load_image or batch load
-        pil_images = [load_image(url, format="pil") for url in image_urls]
+        if pil_images is None:
+            # TODO @zdren: use async_load_image or batch load
+            pil_images = [load_image(url, format="pil") for url in image_urls]
         output = processor(
             text=[prompt], images=pil_images, return_tensors="pt", padding=True
         )
@@ -328,3 +360,26 @@ def _compute_mm_hashes(multi_modal_data: dict | None) -> list[int] | None:
     except Exception as e:
         logger.warning(f"Failed to compute mm_hashes: {e}")
     return None
+
+
+def _extract_image_urls_from_request_mm_data(
+    request_multi_modal_data: dict | None,
+) -> list[str] | None:
+    """Extract image URLs from request multi_modal_data.image_url payload."""
+    if not isinstance(request_multi_modal_data, dict):
+        return None
+
+    image_items = request_multi_modal_data.get("image_url")
+    if not isinstance(image_items, list):
+        return None
+
+    urls: list[str] = []
+    for item in image_items:
+        if isinstance(item, dict):
+            url = item.get("Url")
+            if isinstance(url, str) and url:
+                urls.append(url)
+        elif isinstance(item, str) and item:
+            urls.append(item)
+
+    return urls if urls else None

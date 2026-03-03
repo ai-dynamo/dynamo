@@ -507,10 +507,17 @@ def test_trtllm_mm_overlap_staircase_single_to_double_to_triple_identical_image(
         f"1x={overlap_1}/{total_1}, 2x={overlap_2}/{total_2}.\n"
         f"Recent router logs:\n{segment_2[-4000:]}"
     )
-    assert abs(overlap_3 - overlap_2) <= 1, (
-        "Expected first 3-image request overlap to stay near 2-image overlap "
-        "(third-image suffix is cold on first 3-image request), got "
+    assert overlap_3 > overlap_2, (
+        "Expected overlap to increase from 2 images to 3 images, got "
         f"2x={overlap_2}/{total_2}, 3x={overlap_3}/{total_3}.\n"
+        f"Recent router logs:\n{segment_3[-4000:]}"
+    )
+
+    delta21 = overlap_2 - overlap_1
+    delta32 = overlap_3 - overlap_2
+    assert abs(delta32 - delta21) <= 4, (
+        "Expected similar overlap increment per additional identical image, got "
+        f"step(1->2)={delta21}, step(2->3)={delta32}.\n"
         f"Recent router logs:\n{segment_3[-4000:]}"
     )
 
