@@ -142,6 +142,7 @@ kubectl apply -f recipes/llama-3-70b/model-cache/model-cache.yaml  -n ${NAMESPAC
 kubectl apply -f recipes/llama-3-70b/model-cache/model-download.yaml  -n ${NAMESPACE}
 ```
 We provide examples for llama-3-70b vLLM under the `recipes/llama-3-70b/vllm/agg/gaie/` for aggregated and `recipes/llama-3-70b/vllm/disagg-single-node/gaie/` for disaggregated serving.
+If you deployed into the namespace other than my-model, update the env vars `DYN_PARENT_DGD_K8S_NAMESPACE` and `DYN_NAMESPACE`
 Use the proper folder in commands below.
 
 ```bash
