@@ -124,6 +124,8 @@ class frontend_service:
     # Last observed inter-token latency per worker (in seconds)
     # Gauge metric tracking the most recent ITL for each worker
     WORKER_LAST_INTER_TOKEN_LATENCY_SECONDS = "worker_last_inter_token_latency_seconds"
+    # Number of requests pending in the router's scheduler queue (gauge per worker_type)
+    ROUTER_QUEUE_PENDING_REQUESTS = "router_queue_pending_requests"
     # Label name for the type of migration
     MIGRATION_TYPE_LABEL = "migration_type"
     # Label name for tokenizer operation

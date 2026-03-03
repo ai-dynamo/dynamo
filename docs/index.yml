@@ -291,16 +291,12 @@ navigation:
       # -- Backend detail pages --
       - section: vLLM Details
         contents:
-          - page: DeepSeek-R1
-            path: backends/vllm/deepseek-r1.md
-          - page: GPT-OSS
-            path: backends/vllm/gpt-oss.md
-          - page: Multi-Node
-            path: backends/vllm/multi-node.md
-          - page: Prometheus
-            path: backends/vllm/prometheus.md
-          - page: Prompt Embeddings
-            path: backends/vllm/prompt-embeddings.md
+          - page: Reference Guide
+            path: backends/vllm/vllm-reference-guide.md
+          - page: Examples
+            path: backends/vllm/vllm-examples.md
+          - page: Observability
+            path: backends/vllm/vllm-observability.md
           - page: vLLM-Omni
             path: backends/vllm/vllm-omni.md
       - section: TensorRT-LLM Details

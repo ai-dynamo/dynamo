@@ -9,6 +9,7 @@ pub use dynamo_kv_router::selector::DefaultWorkerSelector;
 use super::KvRouterConfig;
 use super::RouterConfigOverride;
 use super::WorkerSelector;
+use super::metrics::ROUTER_QUEUE_METRICS;
 use super::protocols::{OverlapScores, WorkerId};
 use super::queue::SchedulerQueue;
 use super::sequence::{
@@ -127,9 +128,11 @@ impl KvScheduler {
                         };
                         tracing::trace!("received request to be scheduled");
                         queue_clone.enqueue(request).await;
+                        ROUTER_QUEUE_METRICS.set_pending(worker_type, queue_clone.pending_count());
                     }
                     _ = recheck_interval.tick() => {
                         queue_clone.update().await;
+                        ROUTER_QUEUE_METRICS.set_pending(worker_type, queue_clone.pending_count());
                     }
                 }
             }
@@ -210,13 +213,20 @@ impl KvScheduler {
             .mark_prefill_completed(&request_id.to_string())
             .await?;
         self.queue.update().await;
+        ROUTER_QUEUE_METRICS.set_pending(self.worker_type(), self.queue.pending_count());
         Ok(())
     }
 
     pub async fn free(&self, request_id: &str) -> Result<(), SequenceError> {
         self.slots.free(&request_id.to_string()).await?;
         self.queue.update().await;
+        ROUTER_QUEUE_METRICS.set_pending(self.worker_type(), self.queue.pending_count());
         Ok(())
+    }
+
+    /// Number of requests currently parked in the scheduler queue.
+    pub fn pending_count(&self) -> usize {
+        self.queue.pending_count()
     }
 
     /// Get the worker type for this scheduler ("prefill" or "decode").
