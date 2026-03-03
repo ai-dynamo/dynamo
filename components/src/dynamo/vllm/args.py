@@ -375,6 +375,10 @@ def _connector_to_kv_transfer_json(connectors: list[str]) -> str:
             multi_connectors.append(
                 {"kv_connector": "LMCacheConnectorV1", "kv_role": "kv_both"}
             )
+        elif c == "flexkv":
+            multi_connectors.append(
+                {"kv_connector": "FlexKVConnectorV1", "kv_role": "kv_both"}
+            )
         elif c == "nixl":
             multi_connectors.append(
                 {"kv_connector": "NixlConnector", "kv_role": "kv_both"}
