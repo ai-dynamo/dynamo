@@ -373,8 +373,9 @@ type FrontendSidecarSpec struct {
 	// +kubebuilder:validation:Required
 	Image string `json:"image"`
 
-	// Args are additional arguments appended after the default "-m dynamo.frontend".
-	// For example, ["--router-mode", "direct"] for GAIE deployments.
+	// Args overrides the default frontend arguments. When specified, these replace
+	// the default ["-m", "dynamo.frontend"] entirely.
+	// For example, ["-m", "dynamo.frontend", "--router-mode", "direct"] for GAIE deployments.
 	// +optional
 	Args []string `json:"args,omitempty"`
 

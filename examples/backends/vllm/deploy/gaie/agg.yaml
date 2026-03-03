@@ -33,9 +33,11 @@ spec:
             - name: decode
               plugins:
                 - pluginRef: decode-filter
+                  weight: 1
                 - pluginRef: dyn-decode
                   weight: 1
                 - pluginRef: picker
+                  weight: 1
     VllmDecodeWorker:
       componentType: worker
       envFromSecret: hf-token-secret
@@ -44,6 +46,8 @@ spec:
       frontendSidecar:
         image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
         args:
+          - -m
+          - dynamo.frontend
           - --router-mode
           - direct
         envFromSecret: hf-token-secret

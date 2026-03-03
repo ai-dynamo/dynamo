@@ -7003,7 +7003,7 @@ func TestGenerateBasePodSpec_FrontendSidecar(t *testing.T) {
 				ComponentType: commonconsts.ComponentTypeWorker,
 				FrontendSidecar: &v1alpha1.FrontendSidecarSpec{
 					Image: "my-frontend:latest",
-					Args:  []string{"--router-mode", "direct"},
+					Args:  []string{"-m", "dynamo.frontend", "--router-mode", "direct"},
 				},
 			},
 			parentDGDName:    "test-dgd",
@@ -7129,11 +7129,6 @@ func TestGenerateBasePodSpec_FrontendSidecar(t *testing.T) {
 				assert.NotNil(t, sidecar.ReadinessProbe, "sidecar should have readiness probe")
 				assert.Equal(t, "/live", sidecar.LivenessProbe.HTTPGet.Path)
 				assert.Equal(t, "/health", sidecar.ReadinessProbe.HTTPGet.Path)
-
-				assert.NotNil(t, sidecar.StartupProbe, "sidecar should have startup probe")
-				assert.Equal(t, "/live", sidecar.StartupProbe.HTTPGet.Path)
-				assert.Equal(t, int32(5), sidecar.StartupProbe.PeriodSeconds)
-				assert.Equal(t, int32(60), sidecar.StartupProbe.FailureThreshold)
 			}
 
 			if tt.wantSidecarPorts {

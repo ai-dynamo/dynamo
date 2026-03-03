@@ -66,6 +66,8 @@ spec:
       frontendSidecar:
         image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
         args:
+          - -m
+          - dynamo.frontend
           - --router-mode
           - direct
         envFromSecret: hf-token-secret
@@ -115,6 +117,8 @@ spec:
       frontendSidecar:
         image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
         args:
+          - -m
+          - dynamo.frontend
           - --router-mode
           - direct
         envFromSecret: hf-token-secret

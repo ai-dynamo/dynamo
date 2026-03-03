@@ -505,6 +505,18 @@ type SecretsRetriever interface {
 	GetSecrets(namespace, registry string) ([]string, error)
 }
 
+func resolveImagePullSecrets(retriever SecretsRetriever, namespace, image string) []corev1.LocalObjectReference {
+	names, err := retriever.GetSecrets(namespace, image)
+	if err != nil {
+		return nil
+	}
+	refs := make([]corev1.LocalObjectReference, 0, len(names))
+	for _, name := range names {
+		refs = append(refs, corev1.LocalObjectReference{Name: name})
+	}
+	return refs
+}
+
 // applyCliqueStartupDependencies configures StartsAfter dependencies for cliques in a PodCliqueSet
 // based on the backend framework and multinode deployment patterns.
 //
@@ -1049,12 +1061,7 @@ func GenerateBasePodSpec(
 
 	imagePullSecrets := []corev1.LocalObjectReference{}
 	if !shouldDisableImagePullSecret && secretsRetriever != nil && component.ExtraPodSpec != nil && component.ExtraPodSpec.MainContainer != nil && component.ExtraPodSpec.MainContainer.Image != "" {
-		secretsName, err := secretsRetriever.GetSecrets(namespace, component.ExtraPodSpec.MainContainer.Image)
-		if err == nil {
-			for _, secretName := range secretsName {
-				imagePullSecrets = append(imagePullSecrets, corev1.LocalObjectReference{Name: secretName})
-			}
-		}
+		imagePullSecrets = resolveImagePullSecrets(secretsRetriever, namespace, component.ExtraPodSpec.MainContainer.Image)
 	}
 	if component.EnvFromSecret != nil {
 		container.EnvFrom = append(container.EnvFrom, corev1.EnvFromSource{
@@ -1179,14 +1186,10 @@ func GenerateBasePodSpec(
 		podSpec.Containers = append(podSpec.Containers, sidecar)
 
 		if !shouldDisableImagePullSecret && secretsRetriever != nil {
-			sidecarSecrets, err := secretsRetriever.GetSecrets(namespace, component.FrontendSidecar.Image)
-			if err == nil {
-				var refs []corev1.LocalObjectReference
-				for _, name := range sidecarSecrets {
-					refs = append(refs, corev1.LocalObjectReference{Name: name})
-				}
-				podSpec.ImagePullSecrets = controller_common.AppendUniqueImagePullSecrets(podSpec.ImagePullSecrets, refs)
-			}
+			podSpec.ImagePullSecrets = controller_common.AppendUniqueImagePullSecrets(
+				podSpec.ImagePullSecrets,
+				resolveImagePullSecrets(secretsRetriever, namespace, component.FrontendSidecar.Image),
+			)
 		}
 	}
 
@@ -1252,24 +1255,8 @@ func generateFrontendSidecar(
 	container.Name = commonconsts.FrontendSidecarContainerName
 	container.Image = spec.Image
 
-	// As a sidecar the frontend shares a pod with a worker that may take minutes
-	// to load a model.  Without a startup probe Kubernetes would run the
-	// liveness probe immediately and could restart the frontend container before
-	// the worker (and therefore the pod) is even close to ready.
-	container.StartupProbe = &corev1.Probe{
-		ProbeHandler: corev1.ProbeHandler{
-			HTTPGet: &corev1.HTTPGetAction{
-				Path: "/live",
-				Port: intstr.FromString(commonconsts.DynamoContainerPortName),
-			},
-		},
-		PeriodSeconds:    5,
-		TimeoutSeconds:   2,
-		FailureThreshold: 60, // 5s × 60 = 300s — generous for a process that starts in seconds
-	}
-
 	if len(spec.Args) > 0 {
-		container.Args = append(container.Args, spec.Args...)
+		container.Args = spec.Args
 	}
 
 	if spec.EnvFromSecret != nil {
