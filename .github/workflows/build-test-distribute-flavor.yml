@@ -275,9 +275,16 @@ jobs:
             CACHE_ARGS+=" --cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:release-${CACHE_TAG},mode=max"
           fi
 
+          PUSH_ARGS=""
+          if [ "${{ inputs.push_image }}" == "true" ]; then
+            PUSH_ARGS="--push"
+          elif [ "${{ inputs.no_load }}" == "false" ]; then
+            PUSH_ARGS="--load"
+          fi
+
           docker buildx build \
             --progress=plain \
-            --push \
+            ${PUSH_ARGS} \
             --platform linux/${{ inputs.platform }} \
             -f container/Dockerfile.test \
             --build-arg BASE_IMAGE=${{ steps.calculate-target-tag.outputs.default_target_image_uri }} \
