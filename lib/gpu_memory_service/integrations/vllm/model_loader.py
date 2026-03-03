@@ -4,8 +4,8 @@
 """vLLM model loader for GPU Memory Service integration.
 
 Provides a model loader that loads weights via GMS for cross-process sharing.
-The loader uses RW_OR_RO mode: first process loads from disk (RW), subsequent
-processes import from GMS metadata (RO).
+Lock mode is determined by ENGINE_ID (see get_weight_lock_type): engine-0
+uses RW_OR_RO (load from disk or import), engine-1+ uses RO (import only).
 """
 
 from __future__ import annotations
