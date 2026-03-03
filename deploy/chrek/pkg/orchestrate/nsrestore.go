@@ -99,6 +99,9 @@ func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.Ch
 			return 0, fmt.Errorf("failed to parse pstree.img: %w", err)
 		}
 		restoredBFS := common.ProcessTreePIDs(int(restoredPID))
+		log.Info("PID mapping inputs",
+			"pstree_count", len(originalBFS), "proc_count", len(restoredBFS),
+			"pstree_first5", firstN(originalBFS, 5), "proc_first5", firstNInt(restoredBFS, 5))
 		pidMapping, err := criu.BuildPIDMapping(originalBFS, restoredBFS)
 		if err != nil {
 			return 0, fmt.Errorf("failed to build PID mapping: %w", err)
@@ -146,4 +149,18 @@ func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.Ch
 	}
 
 	return int(restoredPID), nil
+}
+
+func firstN(s []uint32, n int) []uint32 {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
+}
+
+func firstNInt(s []int, n int) []int {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
 }
