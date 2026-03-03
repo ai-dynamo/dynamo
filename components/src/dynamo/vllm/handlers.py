@@ -278,7 +278,8 @@ def get_dp_range_for_worker(vllm_config: VllmConfig) -> range:
     else:
         # internal load balancing, the worker is responsible for all DP ranks
         logger.warning(
-            "vLLM selects internal DP load balancing, for Dynamo deployment, hybrid or external load balancing is recommended."
+            "vLLM selects internal DP load balancing. If you are launching multiple workers for DP deployment,"
+            " hybrid or external load balancing is recommended."
         )
         return (
             vllm_config.parallel_config.data_parallel_rank,
