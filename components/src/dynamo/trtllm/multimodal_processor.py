@@ -222,8 +222,11 @@ class MultimodalRequestProcessor:
                 f"Using NIXL embeddings from encoder: shape={embeddings.shape if hasattr(embeddings, 'shape') else 'N/A'}"
             )
 
-            # Structure embeddings in the format TRT-LLM's generate_async expects
-            processed_inputs["multi_modal_embeddings"] = embeddings
+            # Same structure as PD flow (TRT-LLM expects dict with "image" key)
+            image_embeddings = (
+                embeddings if isinstance(embeddings, list) else [embeddings]
+            )
+            processed_inputs["multi_modal_embeddings"] = {"image": image_embeddings}
 
             return processed_inputs
 
