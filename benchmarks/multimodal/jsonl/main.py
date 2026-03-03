@@ -22,6 +22,7 @@ from args import parse_args
 from generate_images import (
     generate_image_pool_base64,
     generate_image_pool_http,
+    paths_to_data_uris,
     sample_slots,
 )
 from generate_input_text import generate_filler
@@ -46,6 +47,11 @@ def main() -> None:
         )
     slot_refs = sample_slots(py_rng, pool, num_requests, images_per_request)
 
+    if args.image_mode == "datauri":
+        unique_paths = list(dict.fromkeys(slot_refs))  # preserve order, deduplicate
+        path_to_uri = dict(zip(unique_paths, paths_to_data_uris(unique_paths)))
+        slot_refs = [path_to_uri[p] for p in slot_refs]
+
     unique_images = len(set(slot_refs))
     output_path = args.output
     if output_path is None:
@@ -54,9 +60,11 @@ def main() -> None:
             / f"{num_requests}req_{images_per_request}img_{unique_images}pool_{args.user_text_tokens}word_{args.image_mode}.jsonl"
         )
 
+    fixed_prompt = args.prompt
+
     with open(output_path, "w") as f:
         for i in range(num_requests):
-            user_text = generate_filler(py_rng, args.user_text_tokens)
+            user_text = fixed_prompt if fixed_prompt is not None else generate_filler(py_rng, args.user_text_tokens)
             start = i * images_per_request
             images = slot_refs[start : start + images_per_request]
             line = json.dumps(

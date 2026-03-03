@@ -3,6 +3,7 @@
 
 """Utilities for generating and sampling image pools."""
 
+import base64
 import json
 import random
 from pathlib import Path
@@ -29,6 +30,15 @@ def generate_image_pool_base64(
         f"  {pool_size} unique {image_size[0]}x{image_size[1]} images saved to {image_dir}"
     )
     return pool
+
+
+def paths_to_data_uris(paths: list[str]) -> list[str]:
+    """Convert a list of PNG file paths to data:image/png;base64,... strings."""
+    uris = []
+    for p in paths:
+        data = base64.b64encode(Path(p).read_bytes()).decode("ascii")
+        uris.append(f"data:image/png;base64,{data}")
+    return uris
 
 
 def generate_image_pool_http(
@@ -65,8 +75,16 @@ def sample_slots(
     ), f"images-pool ({len(pool)}) must be >= images-per-request ({images_per_request})"
     total_slots = num_requests * images_per_request
     slot_refs: list[str] = []
-    for _ in range(num_requests):
-        slot_refs.extend(py_rng.sample(pool, images_per_request))
+    if len(pool) >= total_slots:
+        # Pool is large enough: assign without replacement across all requests
+        # so every image slot gets a unique image (0% cross-request reuse).
+        shuffled = list(pool)
+        py_rng.shuffle(shuffled)
+        slot_refs = shuffled[:total_slots]
+    else:
+        # Pool smaller than total slots: sample per request (with cross-request reuse).
+        for _ in range(num_requests):
+            slot_refs.extend(py_rng.sample(pool, images_per_request))
 
     num_unique = len(set(slot_refs))
     print(

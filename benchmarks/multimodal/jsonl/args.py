@@ -58,10 +58,12 @@ def parse_args(description: str = "") -> argparse.Namespace:
     )
     parser.add_argument(
         "--image-mode",
-        choices=["base64", "http"],
+        choices=["base64", "datauri", "http"],
         default="base64",
-        help="Image loading mode: 'base64' generates local PNGs and puts file paths in "
-        "the JSONL so aiperf reads and base64-encodes them before sending (default); "
+        help="Image loading mode: "
+        "'base64' generates local PNGs and puts file paths in the JSONL so aiperf "
+        "reads and base64-encodes them before sending (default); "
+        "'datauri' embeds images directly as data:image/png;base64,... strings in the JSONL; "
         "'http' puts COCO HTTP URLs in the JSONL so the LLM server downloads images itself",
     )
     parser.add_argument(
@@ -69,6 +71,13 @@ def parse_args(description: str = "") -> argparse.Namespace:
         type=Path,
         default=COCO_ANNOTATIONS,
         help=f"Path to COCO image_info JSON for --image-mode http (default: {COCO_ANNOTATIONS})",
+    )
+    parser.add_argument(
+        "--prompt",
+        type=str,
+        default=None,
+        help="Fixed text prompt used for every request. "
+        "If omitted, each request gets random filler text (~--user-text-tokens words).",
     )
     parser.add_argument(
         "--image-size",
