@@ -158,7 +158,6 @@ class PrefillHandler(HandlerBase):
             # Handle image URLs (full E-PD flow with MultimodalEncoder)
             elif image_urls:
                 if self.encode_client:
-                    logging.info(f"PrefillHandler: image_urls={image_urls}")
                     result = await fetch_embeddings_from_encoder(
                         image_urls,
                         request,

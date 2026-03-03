@@ -107,6 +107,8 @@ class frontend_service:
     # Last observed inter-token latency per worker (in seconds)
     # Gauge metric tracking the most recent ITL for each worker
     WORKER_LAST_INTER_TOKEN_LATENCY_SECONDS = "worker_last_inter_token_latency_seconds"
+    # Number of requests pending in the router's scheduler queue (gauge per worker_type)
+    ROUTER_QUEUE_PENDING_REQUESTS = "router_queue_pending_requests"
     # Label name for the type of migration
     MIGRATION_TYPE_LABEL = "migration_type"
     # Label name for tokenizer operation
@@ -204,6 +206,21 @@ class name_prefix:
     FRONTEND = "dynamo_frontend"
     # Prefix for KV router metrics (used with router_id label)
     ROUTER = "dynamo_router"
+
+
+class router:
+    """Router request metrics (component-scoped aggregate histograms + counter)"""
+
+    # Total number of requests processed by the router
+    REQUESTS_TOTAL = "router_requests_total"
+    # Time to first token observed at the router (seconds)
+    TIME_TO_FIRST_TOKEN_SECONDS = "router_time_to_first_token_seconds"
+    # Average inter-token latency observed at the router (seconds)
+    INTER_TOKEN_LATENCY_SECONDS = "router_inter_token_latency_seconds"
+    # Input sequence length in tokens observed at the router
+    INPUT_SEQUENCE_TOKENS = "router_input_sequence_tokens"
+    # Output sequence length in tokens observed at the router
+    OUTPUT_SEQUENCE_TOKENS = "router_output_sequence_tokens"
 
 
 class router_request:

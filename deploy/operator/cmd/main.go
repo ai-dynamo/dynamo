@@ -552,6 +552,7 @@ func main() {
 
 	if err = (&controller.DynamoGraphDeploymentRequestReconciler{
 		Client:        mgr.GetClient(),
+		APIReader:     mgr.GetAPIReader(),
 		Recorder:      mgr.GetEventRecorderFor("dynamographdeploymentrequest"),
 		Config:        operatorCfg,
 		RuntimeConfig: runtimeConfig,
@@ -622,8 +623,9 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Register the DGDR conversion webhook using the hub version (v1beta1).
 	if err = ctrl.NewWebhookManagedBy(mgr).
-		For(&nvidiacomv1alpha1.DynamoGraphDeploymentRequest{}).
+		For(&nvidiacomv1beta1.DynamoGraphDeploymentRequest{}).
 		Complete(); err != nil {
 		setupLog.Error(err, "unable to register conversion webhook", "webhook", "DynamoGraphDeploymentRequest-conversion")
 		os.Exit(1)
@@ -637,6 +639,12 @@ func main() {
 	dgdDefaulter := webhookdefaulting.NewDGDDefaulter(operatorVersion)
 	if err = dgdDefaulter.RegisterWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to register webhook", "webhook", "DynamoGraphDeployment-defaulting")
+		os.Exit(1)
+	}
+
+	dgdrDefaulter := webhookdefaulting.NewDGDRDefaulter(operatorVersion)
+	if err = dgdrDefaulter.RegisterWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to register webhook", "webhook", "DynamoGraphDeploymentRequest-defaulting")
 		os.Exit(1)
 	}
 

@@ -94,6 +94,7 @@ spec:
                     The controller automatically sets this value in profilingConfig.config.engine.backend.
                     Profiling runs on real GPUs or via AIC simulation to collect performance data.
                   enum:
+                    - auto
                     - vllm
                     - sglang
                     - trtllm
@@ -461,7 +462,7 @@ spec:
               type: object
           type: object
       served: true
-      storage: true
+      storage: false
       subresources:
         status: {}
     - additionalPrinterColumns:
@@ -594,8 +595,7 @@ spec:
                 image:
                   description: |-
                     Image is the container image reference for the profiling job (frontend image).
-                    Example: "nvcr.io/nvidia/dynamo-runtime:latest"
-                    backend type automatically; backend images can be overridden via overrides.dgd.
+                    Example: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.0.0".
                   type: string
                 model:
                   description: |-
@@ -9109,7 +9109,7 @@ spec:
                 conditions:
                   description: |-
                     Conditions contains the latest observed conditions of the deployment request.
-                    Standard condition types include: Validated, ProfilingComplete, DeploymentReady.
+                    Standard condition types include: Succeeded, Validation, Profiling, SpecGenerated, DeploymentReady.
                   items:
                     description: Condition contains details for one aspect of the current state of this API Resource.
                     properties:
@@ -9247,6 +9247,6 @@ spec:
               type: object
           type: object
       served: true
-      storage: false
+      storage: true
       subresources:
         status: {}
