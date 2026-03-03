@@ -143,8 +143,19 @@ navigation:
             path: ../pages-dev/backends/sglang/sglang-observability.md
           - page: Agentic Workloads
             path: ../pages-dev/backends/sglang/agents.md
-      - page: TensorRT-LLM
+      - section: TensorRT-LLM
         path: ../pages-dev/backends/trtllm/README.md
+        contents:
+          - page: Reference Guide
+            path: ../pages-dev/backends/trtllm/trtllm-reference-guide.md
+          - page: Examples
+            path: ../pages-dev/backends/trtllm/trtllm-examples.md
+          - page: Prometheus Metrics
+            path: ../pages-dev/backends/trtllm/trtllm-prometheus.md
+          - page: Video Diffusion (Experimental)
+            path: ../pages-dev/backends/trtllm/trtllm-video-diffusion.md
+          - page: Known Issues and Mitigations
+            path: ../pages-dev/backends/trtllm/trtllm-known-issues.md
       - page: vLLM
         path: ../pages-dev/backends/vllm/README.md
   # ==================== Components ====================
@@ -292,18 +303,22 @@ navigation:
             path: ../pages-dev/backends/vllm/vllm-omni.md
       - section: TensorRT-LLM Details
         contents:
-          - page: Multinode Examples
-            path: ../pages-dev/backends/trtllm/multinode/multinode-examples.md
-          - page: Llama4 + Eagle
-            path: ../pages-dev/backends/trtllm/llama4-plus-eagle.md
+          - page: Building a Custom Container
+            path: ../pages-dev/backends/trtllm/trtllm-building-custom-container.md
           - page: KV Cache Transfer
-            path: ../pages-dev/backends/trtllm/kv-cache-transfer.md
+            path: ../pages-dev/backends/trtllm/trtllm-kv-cache-transfer.md
+          - page: Logits Processing
+            path: ../pages-dev/backends/trtllm/trtllm-logits-processing.md
+          - page: DP Rank Routing
+            path: ../pages-dev/backends/trtllm/trtllm-dp-rank-routing.md
+          - page: Multinode Examples
+            path: ../pages-dev/backends/trtllm/multinode/trtllm-multinode-examples.md
+          - page: Llama4 + Eagle
+            path: ../pages-dev/backends/trtllm/trtllm-llama4-plus-eagle.md
           - page: Gemma3 Sliding Window
-            path: ../pages-dev/backends/trtllm/gemma3-sliding-window-attention.md
+            path: ../pages-dev/backends/trtllm/trtllm-gemma3-sliding-window-attention.md
           - page: GPT-OSS
-            path: ../pages-dev/backends/trtllm/gpt-oss.md
-          - page: Prometheus
-            path: ../pages-dev/backends/trtllm/prometheus.md
+            path: ../pages-dev/backends/trtllm/trtllm-gpt-oss.md
       # -- Features (hidden sub-pages) --
       - section: Speculative Decoding
         path: ../pages-dev/features/speculative-decoding/README.md
