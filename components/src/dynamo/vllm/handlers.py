@@ -311,6 +311,26 @@ class BaseWorkerHandler(ABC):
         # Store shutdown event for graceful shutdown monitoring
         self.shutdown_event = shutdown_event
 
+    async def sleep_engine(self, level: int = 1) -> None:
+        """Put the vLLM engine to sleep (GPU-only, no discovery changes).
+
+        Drains in-flight requests then sleeps the engine at the given level.
+        Callers that also need to manipulate discovery should use the ``sleep``
+        HTTP-route handler instead.
+        """
+        await self.engine_client.pause_generation()
+        await self.engine_client.sleep(level)
+
+    async def wake_engine(self, tags=None) -> None:
+        """Wake the vLLM engine (GPU-only, no discovery changes).
+
+        Remaps weights / allocates KV cache and resumes the scheduler.
+        Callers that also need to manipulate discovery should use the
+        ``wake_up`` HTTP-route handler instead.
+        """
+        await self.engine_client.wake_up(tags)
+        await self.engine_client.resume_generation()
+
     async def sleep(self, body: dict) -> dict:
         """Sleep the engine to release GPU memory and unregister from discovery.
 
@@ -324,7 +344,6 @@ class BaseWorkerHandler(ABC):
         """
         level = body.get("level", 1)
         try:
-            # Step 1: Unregister endpoint instance FIRST to stop new requests from arriving
             try:
                 await self.generate_endpoint.unregister_endpoint_instance()
                 logger.info(
@@ -335,12 +354,7 @@ class BaseWorkerHandler(ABC):
                     f"[Sleep] Failed to unregister endpoint from discovery: {unreg_err}"
                 )
 
-            # Step 2: Abort in-flight requests and wait for them to drain so the
-            # GPU is fully quiesced before unmapping memory.
-            await self.engine_client.pause_generation()
-
-            # Step 3: Now safe to sleep - no in-flight GPU work
-            await self.engine_client.sleep(level)
+            await self.sleep_engine(level)
 
             return {"status": "ok", "message": f"Engine slept (level={level})"}
         except Exception as e:
@@ -359,13 +373,8 @@ class BaseWorkerHandler(ABC):
         """
         tags = body.get("tags")
         try:
-            # Step 1: Wake engine first - must be ready before accepting requests
-            await self.engine_client.wake_up(tags)
+            await self.wake_engine(tags)
 
-            # Step 2: Resume generation so new requests can be processed
-            await self.engine_client.resume_generation()
-
-            # Step 3: Re-register endpoint instance to discovery so frontend can route to us again
             try:
                 await self.generate_endpoint.register_endpoint_instance()
                 logger.info(
