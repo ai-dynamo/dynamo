@@ -135,6 +135,14 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// When enabled, pods can be restored from a checkpoint files for faster cold start.
 	// +optional
 	Checkpoint *ServiceCheckpointConfig `json:"checkpoint,omitempty"`
+
+	// Failover enables active-passive failover for this worker.
+	// When enabled, two engine containers run in the same pod with a
+	// shared GMS weight sidecar. The first engine to acquire the failover
+	// lock becomes active; the second sleeps as a hot standby.
+	// Only valid for componentType "worker" (or "prefill"/"decode").
+	// +optional
+	Failover *FailoverSpec `json:"failover,omitempty"`
 }
 
 type MultinodeSpec struct {
