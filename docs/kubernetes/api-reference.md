@@ -240,12 +240,12 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `model` _string_ | Model is the model identifier (e.g., "meta-llama/Llama-3-70B") |  | Required: \{\} <br /> |
 | `backendFramework` _string_ | BackendFramework is the runtime framework (vllm, sglang, trtllm) |  | Enum: [vllm sglang trtllm] <br />Required: \{\} <br /> |
-| `dynamoVersion` _string_ | DynamoVersion is the Dynamo platform version (optional)<br />If not specified, version is not included in identity hash<br />This ensures checkpoint compatibility across Dynamo releases |  | Optional: \{\} <br /> |
-| `tensorParallelSize` _integer_ | TensorParallelSize is the tensor parallel configuration | 1 | Minimum: 1 <br />Optional: \{\} <br /> |
-| `pipelineParallelSize` _integer_ | PipelineParallelSize is the pipeline parallel configuration | 1 | Minimum: 1 <br />Optional: \{\} <br /> |
-| `dtype` _string_ | Dtype is the data type (fp16, bf16, fp8, etc.) |  | Optional: \{\} <br /> |
-| `maxModelLen` _integer_ | MaxModelLen is the maximum sequence length |  | Minimum: 1 <br />Optional: \{\} <br /> |
-| `extraParameters` _object (keys:string, values:string)_ | ExtraParameters are additional parameters that affect the checkpoint hash<br />Use for any framework-specific or custom parameters not covered above |  | Optional: \{\} <br /> |
+| `dynamoVersion` _string_ | DynamoVersion is the Dynamo platform version (optional)<br />If not specified, version is not included in identity hash<br />This ensures checkpoint compatibility across Dynamo releases |  |  |
+| `tensorParallelSize` _integer_ | TensorParallelSize is the tensor parallel configuration | 1 | Minimum: 1 <br /> |
+| `pipelineParallelSize` _integer_ | PipelineParallelSize is the pipeline parallel configuration | 1 | Minimum: 1 <br /> |
+| `dtype` _string_ | Dtype is the data type (fp16, bf16, fp8, etc.) |  |  |
+| `maxModelLen` _integer_ | MaxModelLen is the maximum sequence length |  | Minimum: 1 <br /> |
+| `extraParameters` _object (keys:string, values:string)_ | ExtraParameters are additional parameters that affect the checkpoint hash<br />Use for any framework-specific or custom parameters not covered above |  |  |
 
 
 #### DynamoCheckpointJobConfig
@@ -262,9 +262,9 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `podTemplateSpec` _[PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core)_ | PodTemplateSpec allows customizing the checkpoint Job pod<br />This should include the container that runs the workload to be checkpointed |  | Required: \{\} <br /> |
-| `activeDeadlineSeconds` _integer_ | ActiveDeadlineSeconds specifies the maximum time the Job can run | 3600 | Optional: \{\} <br /> |
-| `backoffLimit` _integer_ | BackoffLimit specifies the number of retries before marking the Job failed | 3 | Optional: \{\} <br /> |
-| `ttlSecondsAfterFinished` _integer_ | TTLSecondsAfterFinished specifies how long to keep the Job after completion | 300 | Optional: \{\} <br /> |
+| `activeDeadlineSeconds` _integer_ | ActiveDeadlineSeconds specifies the maximum time the Job can run | 3600 |  |
+| `backoffLimit` _integer_ | BackoffLimit specifies the number of retries before marking the Job failed | 3 |  |
+| `ttlSecondsAfterFinished` _integer_ | TTLSecondsAfterFinished specifies how long to keep the Job after completion | 300 |  |
 
 
 #### DynamoCheckpointPhase
@@ -317,14 +317,14 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `phase` _[DynamoCheckpointPhase](#dynamocheckpointphase)_ | Phase represents the current phase of the checkpoint lifecycle |  | Enum: [Pending Creating Ready Failed] <br />Optional: \{\} <br /> |
-| `identityHash` _string_ | IdentityHash is the computed hash of the checkpoint identity<br />This hash is used to identify equivalent checkpoints |  | Optional: \{\} <br /> |
-| `location` _string_ | Location is the full URI/path to the checkpoint in the storage backend<br />For PVC: same as TarPath (e.g., /checkpoints/\{hash\}.tar)<br />For S3: s3://bucket/prefix/\{hash\}.tar<br />For OCI: oci://registry/repo:\{hash\} |  | Optional: \{\} <br /> |
-| `storageType` _[DynamoCheckpointStorageType](#dynamocheckpointstoragetype)_ | StorageType indicates the storage backend type used for this checkpoint |  | Enum: [pvc s3 oci] <br />Optional: \{\} <br /> |
-| `jobName` _string_ | JobName is the name of the checkpoint creation Job |  | Optional: \{\} <br /> |
-| `createdAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ | CreatedAt is the timestamp when the checkpoint tar was created |  | Optional: \{\} <br /> |
-| `message` _string_ | Message provides additional information about the current state |  | Optional: \{\} <br /> |
-| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions represent the latest available observations of the checkpoint's state |  | Optional: \{\} <br /> |
+| `phase` _[DynamoCheckpointPhase](#dynamocheckpointphase)_ | Phase represents the current phase of the checkpoint lifecycle |  | Enum: [Pending Creating Ready Failed] <br /> |
+| `identityHash` _string_ | IdentityHash is the computed hash of the checkpoint identity<br />This hash is used to identify equivalent checkpoints |  |  |
+| `location` _string_ | Location is the full URI/path to the checkpoint in the storage backend<br />For PVC: same as TarPath (e.g., /checkpoints/\{hash\}.tar)<br />For S3: s3://bucket/prefix/\{hash\}.tar<br />For OCI: oci://registry/repo:\{hash\} |  |  |
+| `storageType` _[DynamoCheckpointStorageType](#dynamocheckpointstoragetype)_ | StorageType indicates the storage backend type used for this checkpoint |  | Enum: [pvc s3 oci] <br /> |
+| `jobName` _string_ | JobName is the name of the checkpoint creation Job |  |  |
+| `createdAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ | CreatedAt is the timestamp when the checkpoint tar was created |  |  |
+| `message` _string_ | Message provides additional information about the current state |  |  |
+| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions represent the latest available observations of the checkpoint's state |  |  |
 
 
 #### DynamoCheckpointStorageType
@@ -386,17 +386,18 @@ _Appears in:_
 | `envFromSecret` _string_ | EnvFromSecret references a Secret whose key/value pairs will be exposed as<br />environment variables in the component containers. |  |  |
 | `volumeMounts` _[VolumeMount](#volumemount) array_ | VolumeMounts references PVCs defined at the top level for volumes to be mounted by the component. |  |  |
 | `ingress` _[IngressSpec](#ingressspec)_ | Ingress config to expose the component outside the cluster (or through a service mesh). |  |  |
-| `modelRef` _[ModelReference](#modelreference)_ | ModelRef references a model that this component serves<br />When specified, a headless service will be created for endpoint discovery |  | Optional: \{\} <br /> |
+| `modelRef` _[ModelReference](#modelreference)_ | ModelRef references a model that this component serves<br />When specified, a headless service will be created for endpoint discovery |  |  |
 | `sharedMemory` _[SharedMemorySpec](#sharedmemoryspec)_ | SharedMemory controls the tmpfs mounted at /dev/shm (enable/disable and size). |  |  |
-| `extraPodMetadata` _[ExtraPodMetadata](#extrapodmetadata)_ | ExtraPodMetadata adds labels/annotations to the created Pods. |  | Optional: \{\} <br /> |
-| `extraPodSpec` _[ExtraPodSpec](#extrapodspec)_ | ExtraPodSpec allows to override the main pod spec configuration.<br />It is a k8s standard PodSpec. It also contains a MainContainer (standard k8s Container) field<br />that allows overriding the main container configuration. |  | Optional: \{\} <br /> |
+| `extraPodMetadata` _[ExtraPodMetadata](#extrapodmetadata)_ | ExtraPodMetadata adds labels/annotations to the created Pods. |  |  |
+| `extraPodSpec` _[ExtraPodSpec](#extrapodspec)_ | ExtraPodSpec allows to override the main pod spec configuration.<br />It is a k8s standard PodSpec. It also contains a MainContainer (standard k8s Container) field<br />that allows overriding the main container configuration. |  |  |
 | `livenessProbe` _[Probe](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#probe-v1-core)_ | LivenessProbe to detect and restart unhealthy containers. |  |  |
 | `readinessProbe` _[Probe](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#probe-v1-core)_ | ReadinessProbe to signal when the container is ready to receive traffic. |  |  |
 | `replicas` _integer_ | Replicas is the desired number of Pods for this component.<br />When scalingAdapter is enabled, this field is managed by the<br />DynamoGraphDeploymentScalingAdapter and should not be modified directly. |  | Minimum: 0 <br /> |
 | `multinode` _[MultinodeSpec](#multinodespec)_ | Multinode is the configuration for multinode components. |  |  |
-| `scalingAdapter` _[ScalingAdapter](#scalingadapter)_ | ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter.<br />When enabled, replicas are managed via DGDSA and external autoscalers can scale<br />the service using the Scale subresource. When disabled, replicas can be modified directly. |  | Optional: \{\} <br /> |
-| `eppConfig` _[EPPConfig](#eppconfig)_ | EPPConfig defines EPP-specific configuration options for Endpoint Picker Plugin components.<br />Only applicable when ComponentType is "epp". |  | Optional: \{\} <br /> |
-| `checkpoint` _[ServiceCheckpointConfig](#servicecheckpointconfig)_ | Checkpoint configures container checkpointing for this service.<br />When enabled, pods can be restored from a checkpoint files for faster cold start. |  | Optional: \{\} <br /> |
+| `scalingAdapter` _[ScalingAdapter](#scalingadapter)_ | ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter.<br />When enabled, replicas are managed via DGDSA and external autoscalers can scale<br />the service using the Scale subresource. When disabled, replicas can be modified directly. |  |  |
+| `eppConfig` _[EPPConfig](#eppconfig)_ | EPPConfig defines EPP-specific configuration options for Endpoint Picker Plugin components.<br />Only applicable when ComponentType is "epp". |  |  |
+| `frontendSidecar` _[FrontendSidecarSpec](#frontendsidecarspec)_ | FrontendSidecar configures an auto-generated frontend sidecar container.<br />When specified, the operator injects a fully configured frontend container<br />with all standard Dynamo environment variables, health probes, and ports.<br />This eliminates the need to manually specify these in extraPodSpec.containers. (GAIE) |  |  |
+| `checkpoint` _[ServiceCheckpointConfig](#servicecheckpointconfig)_ | Checkpoint configures container checkpointing for this service.<br />When enabled, pods can be restored from a checkpoint files for faster cold start. |  |  |
 
 
 #### DynamoComponentDeploymentSpec
@@ -426,17 +427,18 @@ _Appears in:_
 | `envFromSecret` _string_ | EnvFromSecret references a Secret whose key/value pairs will be exposed as<br />environment variables in the component containers. |  |  |
 | `volumeMounts` _[VolumeMount](#volumemount) array_ | VolumeMounts references PVCs defined at the top level for volumes to be mounted by the component. |  |  |
 | `ingress` _[IngressSpec](#ingressspec)_ | Ingress config to expose the component outside the cluster (or through a service mesh). |  |  |
-| `modelRef` _[ModelReference](#modelreference)_ | ModelRef references a model that this component serves<br />When specified, a headless service will be created for endpoint discovery |  | Optional: \{\} <br /> |
+| `modelRef` _[ModelReference](#modelreference)_ | ModelRef references a model that this component serves<br />When specified, a headless service will be created for endpoint discovery |  |  |
 | `sharedMemory` _[SharedMemorySpec](#sharedmemoryspec)_ | SharedMemory controls the tmpfs mounted at /dev/shm (enable/disable and size). |  |  |
-| `extraPodMetadata` _[ExtraPodMetadata](#extrapodmetadata)_ | ExtraPodMetadata adds labels/annotations to the created Pods. |  | Optional: \{\} <br /> |
-| `extraPodSpec` _[ExtraPodSpec](#extrapodspec)_ | ExtraPodSpec allows to override the main pod spec configuration.<br />It is a k8s standard PodSpec. It also contains a MainContainer (standard k8s Container) field<br />that allows overriding the main container configuration. |  | Optional: \{\} <br /> |
+| `extraPodMetadata` _[ExtraPodMetadata](#extrapodmetadata)_ | ExtraPodMetadata adds labels/annotations to the created Pods. |  |  |
+| `extraPodSpec` _[ExtraPodSpec](#extrapodspec)_ | ExtraPodSpec allows to override the main pod spec configuration.<br />It is a k8s standard PodSpec. It also contains a MainContainer (standard k8s Container) field<br />that allows overriding the main container configuration. |  |  |
 | `livenessProbe` _[Probe](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#probe-v1-core)_ | LivenessProbe to detect and restart unhealthy containers. |  |  |
 | `readinessProbe` _[Probe](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#probe-v1-core)_ | ReadinessProbe to signal when the container is ready to receive traffic. |  |  |
 | `replicas` _integer_ | Replicas is the desired number of Pods for this component.<br />When scalingAdapter is enabled, this field is managed by the<br />DynamoGraphDeploymentScalingAdapter and should not be modified directly. |  | Minimum: 0 <br /> |
 | `multinode` _[MultinodeSpec](#multinodespec)_ | Multinode is the configuration for multinode components. |  |  |
-| `scalingAdapter` _[ScalingAdapter](#scalingadapter)_ | ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter.<br />When enabled, replicas are managed via DGDSA and external autoscalers can scale<br />the service using the Scale subresource. When disabled, replicas can be modified directly. |  | Optional: \{\} <br /> |
-| `eppConfig` _[EPPConfig](#eppconfig)_ | EPPConfig defines EPP-specific configuration options for Endpoint Picker Plugin components.<br />Only applicable when ComponentType is "epp". |  | Optional: \{\} <br /> |
-| `checkpoint` _[ServiceCheckpointConfig](#servicecheckpointconfig)_ | Checkpoint configures container checkpointing for this service.<br />When enabled, pods can be restored from a checkpoint files for faster cold start. |  | Optional: \{\} <br /> |
+| `scalingAdapter` _[ScalingAdapter](#scalingadapter)_ | ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter.<br />When enabled, replicas are managed via DGDSA and external autoscalers can scale<br />the service using the Scale subresource. When disabled, replicas can be modified directly. |  |  |
+| `eppConfig` _[EPPConfig](#eppconfig)_ | EPPConfig defines EPP-specific configuration options for Endpoint Picker Plugin components.<br />Only applicable when ComponentType is "epp". |  |  |
+| `frontendSidecar` _[FrontendSidecarSpec](#frontendsidecarspec)_ | FrontendSidecar configures an auto-generated frontend sidecar container.<br />When specified, the operator injects a fully configured frontend container<br />with all standard Dynamo environment variables, health probes, and ports.<br />This eliminates the need to manually specify these in extraPodSpec.containers. (GAIE) |  |  |
+| `checkpoint` _[ServiceCheckpointConfig](#servicecheckpointconfig)_ | Checkpoint configures container checkpointing for this service.<br />When enabled, pods can be restored from a checkpoint files for faster cold start. |  |  |
 
 
 #### DynamoGraphDeployment
@@ -513,7 +515,7 @@ _Appears in:_
 | `backend` _string_ | Backend specifies the inference backend for profiling.<br />The controller automatically sets this value in profilingConfig.config.engine.backend.<br />Profiling runs on real GPUs or via AIC simulation to collect performance data. |  | Enum: [vllm sglang trtllm] <br />Required: \{\} <br /> |
 | `useMocker` _boolean_ | UseMocker indicates whether to deploy a mocker DynamoGraphDeployment instead of<br />a real backend deployment. When true, the deployment uses simulated engines that<br />don't require GPUs, using the profiling data to simulate realistic timing behavior.<br />Mocker is available in all backend images and useful for large-scale experiments.<br />Profiling still runs against the real backend (specified above) to collect performance data. | false |  |
 | `profilingConfig` _[ProfilingConfigSpec](#profilingconfigspec)_ | ProfilingConfig provides the complete configuration for the profiling job.<br />Note: GPU discovery is automatically attempted to detect GPU resources from Kubernetes<br />cluster nodes. If the operator has node read permissions (cluster-wide or explicitly granted),<br />discovered GPU configuration is used as defaults when hardware configuration is not manually<br />specified (minNumGpusPerEngine, maxNumGpusPerEngine, numGpusPerNode). User-specified values<br />always take precedence over auto-discovered values. If GPU discovery fails (e.g.,<br />namespace-restricted operator without node permissions), manual hardware config is required.<br />This configuration is passed directly to the profiler.<br />The structure matches the profile_sla config format exactly (see ProfilingConfigSpec for schema).<br />Note: deployment.model and engine.backend are automatically set from the high-level<br />modelName and backend fields and should not be specified in this config. |  | Required: \{\} <br /> |
-| `enableGpuDiscovery` _boolean_ | EnableGPUDiscovery controls whether the operator attempts to discover GPU hardware from cluster nodes.<br />DEPRECATED: This field is deprecated and will be removed in v1beta1. GPU discovery is now always<br />attempted automatically. Setting this field has no effect - the operator will always try to discover<br />GPU hardware when node read permissions are available. If discovery is unavailable (e.g., namespace-scoped<br />operator without permissions), manual hardware configuration is required regardless of this setting. | true | Optional: \{\} <br /> |
+| `enableGpuDiscovery` _boolean_ | EnableGPUDiscovery controls whether the operator attempts to discover GPU hardware from cluster nodes.<br />DEPRECATED: This field is deprecated and will be removed in v1beta1. GPU discovery is now always<br />attempted automatically. Setting this field has no effect - the operator will always try to discover<br />GPU hardware when node read permissions are available. If discovery is unavailable (e.g., namespace-scoped<br />operator without permissions), manual hardware configuration is required regardless of this setting. | true |  |
 | `autoApply` _boolean_ | AutoApply indicates whether to automatically create a DynamoGraphDeployment<br />after profiling completes. If false, only the spec is generated and stored in status.<br />Users can then manually create a DGD using the generated spec. | false |  |
 | `deploymentOverrides` _[DeploymentOverridesSpec](#deploymentoverridesspec)_ | DeploymentOverrides allows customizing metadata for the auto-created DGD.<br />Only applicable when AutoApply is true. |  | Optional: \{\} <br /> |
 
@@ -596,9 +598,9 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `replicas` _integer_ | Replicas is the current number of replicas for the target service.<br />This is synced from the DGD's service replicas and is required for the scale subresource. |  | Optional: \{\} <br /> |
-| `selector` _string_ | Selector is a label selector string for the pods managed by this adapter.<br />Required for HPA compatibility via the scale subresource. |  | Optional: \{\} <br /> |
-| `lastScaleTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ | LastScaleTime is the last time the adapter scaled the target service. |  | Optional: \{\} <br /> |
+| `replicas` _integer_ | Replicas is the current number of replicas for the target service.<br />This is synced from the DGD's service replicas and is required for the scale subresource. |  |  |
+| `selector` _string_ | Selector is a label selector string for the pods managed by this adapter.<br />Required for HPA compatibility via the scale subresource. |  |  |
+| `lastScaleTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ | LastScaleTime is the last time the adapter scaled the target service. |  |  |
 
 
 #### DynamoGraphDeploymentServiceRef
@@ -651,13 +653,13 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `observedGeneration` _integer_ | ObservedGeneration is the most recent generation observed by the controller. |  | Optional: \{\} <br /> |
+| `observedGeneration` _integer_ | ObservedGeneration is the most recent generation observed by the controller. |  |  |
 | `state` _[DGDState](#dgdstate)_ | State is a high-level textual status of the graph deployment lifecycle. | initializing | Enum: [initializing pending successful failed] <br /> |
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions contains the latest observed conditions of the graph deployment.<br />The slice is merged by type on patch updates. |  |  |
-| `services` _object (keys:string, values:[ServiceReplicaStatus](#servicereplicastatus))_ | Services contains per-service replica status information.<br />The map key is the service name from spec.services. |  | Optional: \{\} <br /> |
-| `restart` _[RestartStatus](#restartstatus)_ | Restart contains the status of the restart of the graph deployment. |  | Optional: \{\} <br /> |
-| `checkpoints` _object (keys:string, values:[ServiceCheckpointStatus](#servicecheckpointstatus))_ | Checkpoints contains per-service checkpoint status information.<br />The map key is the service name from spec.services. |  | Optional: \{\} <br /> |
-| `rollingUpdate` _[RollingUpdateStatus](#rollingupdatestatus)_ | RollingUpdate tracks the progress of operator manged rolling updates.<br />Currently only supported for singl-node, non-Grove deployments (DCD/Deployment). |  | Optional: \{\} <br /> |
+| `services` _object (keys:string, values:[ServiceReplicaStatus](#servicereplicastatus))_ | Services contains per-service replica status information.<br />The map key is the service name from spec.services. |  |  |
+| `restart` _[RestartStatus](#restartstatus)_ | Restart contains the status of the restart of the graph deployment. |  |  |
+| `checkpoints` _object (keys:string, values:[ServiceCheckpointStatus](#servicecheckpointstatus))_ | Checkpoints contains per-service checkpoint status information.<br />The map key is the service name from spec.services. |  |  |
+| `rollingUpdate` _[RollingUpdateStatus](#rollingupdatestatus)_ | RollingUpdate tracks the progress of operator manged rolling updates.<br />Currently only supported for singl-node, non-Grove deployments (DCD/Deployment). |  |  |
 
 
 #### DynamoModel
@@ -694,8 +696,8 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `modelName` _string_ | ModelName is the full model identifier (e.g., "meta-llama/Llama-3.3-70B-Instruct-lora") |  | Required: \{\} <br /> |
 | `baseModelName` _string_ | BaseModelName is the base model identifier that matches the service label<br />This is used to discover endpoints via headless services |  | Required: \{\} <br /> |
-| `modelType` _string_ | ModelType specifies the type of model (e.g., "base", "lora", "adapter") | base | Enum: [base lora adapter] <br />Optional: \{\} <br /> |
-| `source` _[ModelSource](#modelsource)_ | Source specifies the model source location (only applicable for lora model type) |  | Optional: \{\} <br /> |
+| `modelType` _string_ | ModelType specifies the type of model (e.g., "base", "lora", "adapter") | base | Enum: [base lora adapter] <br /> |
+| `source` _[ModelSource](#modelsource)_ | Source specifies the model source location (only applicable for lora model type) |  |  |
 
 
 #### DynamoModelStatus
@@ -711,10 +713,10 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `endpoints` _[EndpointInfo](#endpointinfo) array_ | Endpoints is the current list of all endpoints for this model |  | Optional: \{\} <br /> |
+| `endpoints` _[EndpointInfo](#endpointinfo) array_ | Endpoints is the current list of all endpoints for this model |  |  |
 | `readyEndpoints` _integer_ | ReadyEndpoints is the count of endpoints that are ready |  |  |
 | `totalEndpoints` _integer_ | TotalEndpoints is the total count of endpoints |  |  |
-| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions represents the latest available observations of the model's state |  | Optional: \{\} <br /> |
+| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions represents the latest available observations of the model's state |  |  |
 
 
 #### EPPConfig
@@ -732,8 +734,8 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `configMapRef` _[ConfigMapKeySelector](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#configmapkeyselector-v1-core)_ | ConfigMapRef references a user-provided ConfigMap containing EPP configuration.<br />The ConfigMap should contain EndpointPickerConfig YAML.<br />Mutually exclusive with Config. |  | Optional: \{\} <br /> |
-| `config` _[EndpointPickerConfig](#endpointpickerconfig)_ | Config allows specifying EPP EndpointPickerConfig directly as a structured object.<br />The operator will marshal this to YAML and create a ConfigMap automatically.<br />Mutually exclusive with ConfigMapRef.<br />One of ConfigMapRef or Config must be specified (no default configuration).<br />Uses the upstream type from github.com/kubernetes-sigs/gateway-api-inference-extension |  | Type: object <br />Optional: \{\} <br /> |
+| `configMapRef` _[ConfigMapKeySelector](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#configmapkeyselector-v1-core)_ | ConfigMapRef references a user-provided ConfigMap containing EPP configuration.<br />The ConfigMap should contain EndpointPickerConfig YAML.<br />Mutually exclusive with Config. |  |  |
+| `config` _[EndpointPickerConfig](#endpointpickerconfig)_ | Config allows specifying EPP EndpointPickerConfig directly as a structured object.<br />The operator will marshal this to YAML and create a ConfigMap automatically.<br />Mutually exclusive with ConfigMapRef.<br />One of ConfigMapRef or Config must be specified (no default configuration).<br />Uses the upstream type from github.com/kubernetes-sigs/gateway-api-inference-extension |  | Type: object <br /> |
 
 
 #### EndpointInfo
@@ -750,7 +752,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `address` _string_ | Address is the full address of the endpoint (e.g., "http://10.0.1.5:9090") |  |  |
-| `podName` _string_ | PodName is the name of the pod serving this endpoint |  | Optional: \{\} <br /> |
+| `podName` _string_ | PodName is the name of the pod serving this endpoint |  |  |
 | `ready` _boolean_ | Ready indicates whether the endpoint is ready to serve traffic<br />For LoRA models: true if the POST /loras request succeeded with a 2xx status code<br />For base models: always false (no probing performed) |  |  |
 
 
@@ -787,6 +789,28 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `mainContainer` _[Container](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#container-v1-core)_ |  |  |  |
+
+
+#### FrontendSidecarSpec
+
+
+
+FrontendSidecarSpec configures the auto-generated frontend sidecar container.
+The operator uses these fields together with built-in frontend defaults (command, probes, ports,
+and Dynamo env vars) to produce a fully configured sidecar container.
+
+
+
+_Appears in:_
+- [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
+- [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `image` _string_ | Image is the container image for the frontend sidecar. |  | Required: \{\} <br /> |
+| `args` _string array_ | Args overrides the default frontend arguments. When specified, these replace<br />the default ["-m", "dynamo.frontend"] entirely.<br />For example, ["-m", "dynamo.frontend", "--router-mode", "direct"] for GAIE deployments. |  |  |
+| `envFromSecret` _string_ | EnvFromSecret references a Secret whose key/value pairs will be exposed as<br />environment variables in the frontend sidecar container. |  |  |
+| `envs` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core) array_ | Envs defines additional environment variables for the frontend sidecar.<br />These are merged with (and can override) the auto-generated Dynamo env vars. |  |  |
 
 
 #### IngressSpec
@@ -848,7 +872,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `name` _string_ | Name is the base model identifier (e.g., "llama-3-70b-instruct-v1") |  | Required: \{\} <br /> |
-| `revision` _string_ | Revision is the model revision/version (optional) |  | Optional: \{\} <br /> |
+| `revision` _string_ | Revision is the model revision/version (optional) |  |  |
 
 
 #### ModelSource
@@ -1020,7 +1044,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `observedID` _string_ | ObservedID is the restart ID that has been observed and is being processed.<br />Matches the Restart.ID field in the spec. |  |  |
 | `phase` _[RestartPhase](#restartphase)_ | Phase is the phase of the restart. |  |  |
-| `inProgress` _string array_ | InProgress contains the names of the services that are currently being restarted. |  | Optional: \{\} <br /> |
+| `inProgress` _string array_ | InProgress contains the names of the services that are currently being restarted. |  |  |
 
 
 #### RestartStrategy
@@ -1090,10 +1114,10 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `phase` _[RollingUpdatePhase](#rollingupdatephase)_ | Phase indicates the current phase of the rolling update. |  | Enum: [Pending InProgress Completed Failed ] <br />Optional: \{\} <br /> |
-| `startTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ | StartTime is when the rolling update began. |  | Optional: \{\} <br /> |
-| `endTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ | EndTime is when the rolling update completed (successfully or failed). |  | Optional: \{\} <br /> |
-| `updatedServices` _string array_ | UpdatedServices is the list of services that have completed the rolling update.<br />A service is considered updated when its new replicas are all ready and old replicas are fully scaled down.<br />Only services of componentType Worker (or Prefill/Decode) are considered. |  | Optional: \{\} <br /> |
+| `phase` _[RollingUpdatePhase](#rollingupdatephase)_ | Phase indicates the current phase of the rolling update. |  | Enum: [Pending InProgress Completed Failed ] <br /> |
+| `startTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ | StartTime is when the rolling update began. |  |  |
+| `endTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ | EndTime is when the rolling update completed (successfully or failed). |  |  |
+| `updatedServices` _string array_ | UpdatedServices is the list of services that have completed the rolling update.<br />A service is considered updated when its new replicas are all ready and old replicas are fully scaled down.<br />Only services of componentType Worker (or Prefill/Decode) are considered. |  |  |
 
 
 #### ScalingAdapter
@@ -1112,7 +1136,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `enabled` _boolean_ | Enabled indicates whether the ScalingAdapter should be enabled for this service.<br />When true, a DGDSA is created and owns the replicas field.<br />When false (default), no DGDSA is created and replicas can be modified directly in the DGD. | false | Optional: \{\} <br /> |
+| `enabled` _boolean_ | Enabled indicates whether the ScalingAdapter should be enabled for this service.<br />When true, a DGDSA is created and owns the replicas field.<br />When false (default), no DGDSA is created and replicas can be modified directly in the DGD. | false |  |
 
 
 #### ServiceCheckpointConfig
@@ -1129,10 +1153,10 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `enabled` _boolean_ | Enabled indicates whether checkpointing is enabled for this service | false | Optional: \{\} <br /> |
-| `mode` _[CheckpointMode](#checkpointmode)_ | Mode defines how checkpoint creation is handled<br />- Auto: DGD controller creates Checkpoint CR automatically<br />- Manual: User must create Checkpoint CR | Auto | Enum: [Auto Manual] <br />Optional: \{\} <br /> |
-| `checkpointRef` _string_ | CheckpointRef references an existing Checkpoint CR to use<br />If specified, Identity is ignored and this checkpoint is used directly |  | Optional: \{\} <br /> |
-| `identity` _[DynamoCheckpointIdentity](#dynamocheckpointidentity)_ | Identity defines the checkpoint identity for hash computation<br />Used when Mode is Auto or when looking up existing checkpoints<br />Required when checkpointRef is not specified |  | Optional: \{\} <br /> |
+| `enabled` _boolean_ | Enabled indicates whether checkpointing is enabled for this service | false |  |
+| `mode` _[CheckpointMode](#checkpointmode)_ | Mode defines how checkpoint creation is handled<br />- Auto: DGD controller creates Checkpoint CR automatically<br />- Manual: User must create Checkpoint CR | Auto | Enum: [Auto Manual] <br /> |
+| `checkpointRef` _string_ | CheckpointRef references an existing Checkpoint CR to use<br />If specified, Identity is ignored and this checkpoint is used directly |  |  |
+| `identity` _[DynamoCheckpointIdentity](#dynamocheckpointidentity)_ | Identity defines the checkpoint identity for hash computation<br />Used when Mode is Auto or when looking up existing checkpoints<br />Required when checkpointRef is not specified |  |  |
 
 
 #### ServiceCheckpointStatus
@@ -1148,9 +1172,9 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `checkpointName` _string_ | CheckpointName is the name of the associated Checkpoint CR |  | Optional: \{\} <br /> |
-| `identityHash` _string_ | IdentityHash is the computed hash of the checkpoint identity |  | Optional: \{\} <br /> |
-| `ready` _boolean_ | Ready indicates if the checkpoint is ready for use |  | Optional: \{\} <br /> |
+| `checkpointName` _string_ | CheckpointName is the name of the associated Checkpoint CR |  |  |
+| `identityHash` _string_ | IdentityHash is the computed hash of the checkpoint identity |  |  |
+| `ready` _boolean_ | Ready indicates if the checkpoint is ready for use |  |  |
 
 
 #### ServiceReplicaStatus
@@ -1168,11 +1192,11 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `componentKind` _[ComponentKind](#componentkind)_ | ComponentKind is the underlying resource kind (e.g., "PodClique", "PodCliqueScalingGroup", "Deployment", "LeaderWorkerSet"). |  | Enum: [PodClique PodCliqueScalingGroup Deployment LeaderWorkerSet] <br /> |
 | `componentName` _string_ | ComponentName is the name of the primary underlying resource.<br />DEPRECATED: Use ComponentNames instead. This field will be removed in a future release.<br />During rolling updates, this reflects the new (target) component name. |  |  |
-| `componentNames` _string array_ | ComponentNames is the list of underlying resource names for this service.<br />During normal operation, this contains a single name.<br />During rolling updates, this contains both old and new component names. |  | Optional: \{\} <br /> |
+| `componentNames` _string array_ | ComponentNames is the list of underlying resource names for this service.<br />During normal operation, this contains a single name.<br />During rolling updates, this contains both old and new component names. |  |  |
 | `replicas` _integer_ | Replicas is the total number of non-terminated replicas.<br />Required for all component kinds. |  | Minimum: 0 <br /> |
 | `updatedReplicas` _integer_ | UpdatedReplicas is the number of replicas at the current/desired revision.<br />Required for all component kinds. |  | Minimum: 0 <br /> |
-| `readyReplicas` _integer_ | ReadyReplicas is the number of ready replicas.<br />Populated for PodClique, Deployment, and LeaderWorkerSet.<br />Not available for PodCliqueScalingGroup.<br />When nil, the field is omitted from the API response. |  | Minimum: 0 <br />Optional: \{\} <br /> |
-| `availableReplicas` _integer_ | AvailableReplicas is the number of available replicas.<br />For Deployment: replicas ready for >= minReadySeconds.<br />For PodCliqueScalingGroup: replicas where all constituent PodCliques have >= MinAvailable ready pods.<br />Not available for PodClique or LeaderWorkerSet.<br />When nil, the field is omitted from the API response. |  | Minimum: 0 <br />Optional: \{\} <br /> |
+| `readyReplicas` _integer_ | ReadyReplicas is the number of ready replicas.<br />Populated for PodClique, Deployment, and LeaderWorkerSet.<br />Not available for PodCliqueScalingGroup.<br />When nil, the field is omitted from the API response. |  | Minimum: 0 <br /> |
+| `availableReplicas` _integer_ | AvailableReplicas is the number of available replicas.<br />For Deployment: replicas ready for >= minReadySeconds.<br />For PodCliqueScalingGroup: replicas where all constituent PodCliques have >= MinAvailable ready pods.<br />Not available for PodClique or LeaderWorkerSet.<br />When nil, the field is omitted from the API response. |  | Minimum: 0 <br /> |
 
 
 #### SharedMemorySpec
@@ -1277,8 +1301,8 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `replicas` _integer_ | Replicas is the desired number of replicas. |  | Optional: \{\} <br /> |
-| `availableReplicas` _integer_ | AvailableReplicas is the number of replicas that are available and ready. |  | Optional: \{\} <br /> |
+| `replicas` _integer_ | Replicas is the desired number of replicas. |  |  |
+| `availableReplicas` _integer_ | AvailableReplicas is the number of replicas that are available and ready. |  |  |
 
 
 #### v1beta1 DynamoGraphDeploymentRequest
@@ -1326,16 +1350,16 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `model` _string_ | Model specifies the model to deploy (e.g., "Qwen/Qwen3-0.6B", "meta-llama/Llama-3-70b").<br />Can be a HuggingFace ID or a private model name. |  | MinLength: 1 <br />Required: \{\} <br /> |
-| `backend` _[BackendType](#backendtype)_ | Backend specifies the inference backend to use for profiling and deployment. | auto | Enum: [auto sglang trtllm vllm] <br />Optional: \{\} <br /> |
-| `image` _string_ | Image is the container image reference for the profiling job (frontend image).<br />Example: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.0.0". |  | Optional: \{\} <br /> |
-| `modelCache` _[ModelCacheSpec](#modelcachespec)_ | ModelCache provides optional PVC configuration for pre-downloaded model weights.<br />When provided, weights are loaded from the PVC instead of downloading from HuggingFace. |  | Optional: \{\} <br /> |
-| `hardware` _[HardwareSpec](#hardwarespec)_ | Hardware describes the hardware resources available for profiling and deployment.<br />Typically auto-filled by the operator from cluster discovery. |  | Optional: \{\} <br /> |
-| `workload` _[WorkloadSpec](#workloadspec)_ | Workload defines the expected workload characteristics for SLA-based profiling. |  | Optional: \{\} <br /> |
-| `sla` _[SLASpec](#slaspec)_ | SLA defines service-level agreement targets that drive profiling optimization. |  | Optional: \{\} <br /> |
-| `overrides` _[OverridesSpec](#overridesspec)_ | Overrides allows customizing the profiling job and the generated DynamoGraphDeployment. |  | Optional: \{\} <br /> |
-| `features` _[FeaturesSpec](#featuresspec)_ | Features controls optional Dynamo platform features in the generated deployment. |  | Optional: \{\} <br /> |
-| `searchStrategy` _[SearchStrategy](#searchstrategy)_ | SearchStrategy controls the profiling search depth.<br />"rapid" performs a fast sweep; "thorough" explores more configurations. | rapid | Enum: [rapid thorough] <br />Optional: \{\} <br /> |
-| `autoApply` _boolean_ | AutoApply indicates whether to automatically create a DynamoGraphDeployment<br />after profiling completes. If false, the generated spec is stored in status<br />for manual review and application. | true | Optional: \{\} <br /> |
+| `backend` _[BackendType](#backendtype)_ | Backend specifies the inference backend to use for profiling and deployment. | auto | Enum: [auto sglang trtllm vllm] <br /> |
+| `image` _string_ | Image is the container image reference for the profiling job (frontend image).<br />Example: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.0.0". |  |  |
+| `modelCache` _[ModelCacheSpec](#modelcachespec)_ | ModelCache provides optional PVC configuration for pre-downloaded model weights.<br />When provided, weights are loaded from the PVC instead of downloading from HuggingFace. |  |  |
+| `hardware` _[HardwareSpec](#hardwarespec)_ | Hardware describes the hardware resources available for profiling and deployment.<br />Typically auto-filled by the operator from cluster discovery. |  |  |
+| `workload` _[WorkloadSpec](#workloadspec)_ | Workload defines the expected workload characteristics for SLA-based profiling. |  |  |
+| `sla` _[SLASpec](#slaspec)_ | SLA defines service-level agreement targets that drive profiling optimization. |  |  |
+| `overrides` _[OverridesSpec](#overridesspec)_ | Overrides allows customizing the profiling job and the generated DynamoGraphDeployment. |  |  |
+| `features` _[FeaturesSpec](#featuresspec)_ | Features controls optional Dynamo platform features in the generated deployment. |  |  |
+| `searchStrategy` _[SearchStrategy](#searchstrategy)_ | SearchStrategy controls the profiling search depth.<br />"rapid" performs a fast sweep; "thorough" explores more configurations. | rapid | Enum: [rapid thorough] <br /> |
+| `autoApply` _boolean_ | AutoApply indicates whether to automatically create a DynamoGraphDeployment<br />after profiling completes. If false, the generated spec is stored in status<br />for manual review and application. | true |  |
 
 
 #### v1beta1 DynamoGraphDeploymentRequestStatus
@@ -1351,14 +1375,14 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `phase` _[DGDRPhase](#dgdrphase)_ | Phase is the high-level lifecycle phase of the deployment request. |  | Enum: [Pending Profiling Ready Deploying Deployed Failed] <br />Optional: \{\} <br /> |
-| `profilingPhase` _[ProfilingPhase](#profilingphase)_ | ProfilingPhase indicates the current sub-phase of the profiling pipeline.<br />Only meaningful when Phase is "Profiling". Cleared when profiling completes or fails. |  | Enum: [Initializing SweepingPrefill SweepingDecode SelectingConfig BuildingCurves GeneratingDGD Done] <br />Optional: \{\} <br /> |
-| `dgdName` _string_ | DGDName is the name of the generated or created DynamoGraphDeployment. |  | Optional: \{\} <br /> |
-| `profilingJobName` _string_ | ProfilingJobName is the name of the Kubernetes Job running the profiler. |  | Optional: \{\} <br /> |
-| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions contains the latest observed conditions of the deployment request.<br />Standard condition types include: Succeeded, Validation, Profiling, SpecGenerated, DeploymentReady. |  | Optional: \{\} <br /> |
-| `profilingResults` _[ProfilingResultsStatus](#profilingresultsstatus)_ | ProfilingResults contains the output of the profiling process including<br />Pareto-optimal configurations and the selected deployment configuration. |  | Optional: \{\} <br /> |
-| `deploymentInfo` _[DeploymentInfoStatus](#deploymentinfostatus)_ | DeploymentInfo tracks the state of the deployed DynamoGraphDeployment.<br />Populated when a DGD has been created (either via autoApply or manually). |  | Optional: \{\} <br /> |
-| `observedGeneration` _integer_ | ObservedGeneration is the most recent generation observed by the controller. |  | Optional: \{\} <br /> |
+| `phase` _[DGDRPhase](#dgdrphase)_ | Phase is the high-level lifecycle phase of the deployment request. |  | Enum: [Pending Profiling Ready Deploying Deployed Failed] <br /> |
+| `profilingPhase` _[ProfilingPhase](#profilingphase)_ | ProfilingPhase indicates the current sub-phase of the profiling pipeline.<br />Only meaningful when Phase is "Profiling". Cleared when profiling completes or fails. |  | Enum: [Initializing SweepingPrefill SweepingDecode SelectingConfig BuildingCurves GeneratingDGD Done] <br /> |
+| `dgdName` _string_ | DGDName is the name of the generated or created DynamoGraphDeployment. |  |  |
+| `profilingJobName` _string_ | ProfilingJobName is the name of the Kubernetes Job running the profiler. |  |  |
+| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions contains the latest observed conditions of the deployment request.<br />Standard condition types include: Succeeded, Validation, Profiling, SpecGenerated, DeploymentReady. |  |  |
+| `profilingResults` _[ProfilingResultsStatus](#profilingresultsstatus)_ | ProfilingResults contains the output of the profiling process including<br />Pareto-optimal configurations and the selected deployment configuration. |  |  |
+| `deploymentInfo` _[DeploymentInfoStatus](#deploymentinfostatus)_ | DeploymentInfo tracks the state of the deployed DynamoGraphDeployment.<br />Populated when a DGD has been created (either via autoApply or manually). |  |  |
+| `observedGeneration` _integer_ | ObservedGeneration is the most recent generation observed by the controller. |  |  |
 
 
 #### FeaturesSpec
@@ -1374,8 +1398,8 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `planner` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)_ | Planner is the raw SLA planner configuration passed to the planner service.<br />Its schema is defined by dynamo.planner.utils.planner_config.PlannerConfig.<br />Go treats this as opaque bytes; the Planner service validates it at startup.<br />The presence of this field (non-null) enables the planner in the generated DGD. |  | Type: object <br />Optional: \{\} <br /> |
-| `mocker` _[MockerSpec](#mockerspec)_ | Mocker configures the simulated (mocker) backend for testing without GPUs. |  | Optional: \{\} <br /> |
+| `planner` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)_ | Planner is the raw SLA planner configuration passed to the planner service.<br />Its schema is defined by dynamo.planner.utils.planner_config.PlannerConfig.<br />Go treats this as opaque bytes; the Planner service validates it at startup.<br />The presence of this field (non-null) enables the planner in the generated DGD. |  | Type: object <br /> |
+| `mocker` _[MockerSpec](#mockerspec)_ | Mocker configures the simulated (mocker) backend for testing without GPUs. |  |  |
 
 
 #### HardwareSpec
@@ -1392,10 +1416,10 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `gpuSku` _string_ | GPUSKU is the GPU SKU identifier (e.g., "H100_SXM", "A100_80GB"). |  | Optional: \{\} <br /> |
-| `vramMb` _float_ | VRAMMB is the VRAM per GPU in MiB. |  | Optional: \{\} <br /> |
-| `totalGpus` _integer_ | TotalGPUs is the total number of GPUs available in the cluster. |  | Optional: \{\} <br /> |
-| `numGpusPerNode` _integer_ | NumGPUsPerNode is the number of GPUs per node. |  | Optional: \{\} <br /> |
+| `gpuSku` _string_ | GPUSKU is the GPU SKU identifier (e.g., "H100_SXM", "A100_80GB"). |  |  |
+| `vramMb` _float_ | VRAMMB is the VRAM per GPU in MiB. |  |  |
+| `totalGpus` _integer_ | TotalGPUs is the total number of GPUs available in the cluster. |  |  |
+| `numGpusPerNode` _integer_ | NumGPUsPerNode is the number of GPUs per node. |  |  |
 
 
 
@@ -1413,7 +1437,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `enabled` _boolean_ | Enabled indicates whether to deploy mocker workers instead of real inference workers.<br />Useful for large-scale testing without GPUs. |  | Optional: \{\} <br /> |
+| `enabled` _boolean_ | Enabled indicates whether to deploy mocker workers instead of real inference workers.<br />Useful for large-scale testing without GPUs. |  |  |
 
 
 #### ModelCacheSpec
@@ -1429,9 +1453,9 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `pvcName` _string_ | PVCName is the name of the PersistentVolumeClaim containing model weights.<br />The PVC must exist in the same namespace as the DGDR. |  | Optional: \{\} <br /> |
-| `pvcModelPath` _string_ | PVCModelPath is the path to the model checkpoint directory within the PVC<br />(e.g. "deepseek-r1" or "models/Llama-3.1-405B-FP8"). |  | Optional: \{\} <br /> |
-| `pvcMountPath` _string_ | PVCMountPath is the mount path for the PVC inside the container. | /opt/model-cache | Optional: \{\} <br /> |
+| `pvcName` _string_ | PVCName is the name of the PersistentVolumeClaim containing model weights.<br />The PVC must exist in the same namespace as the DGDR. |  |  |
+| `pvcModelPath` _string_ | PVCModelPath is the path to the model checkpoint directory within the PVC<br />(e.g. "deepseek-r1" or "models/Llama-3.1-405B-FP8"). |  |  |
+| `pvcMountPath` _string_ | PVCMountPath is the mount path for the PVC inside the container. | /opt/model-cache |  |
 
 
 #### OptimizationType
@@ -1465,8 +1489,8 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `profilingJob` _[JobSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#jobspec-v1-batch)_ | ProfilingJob allows overriding the profiling Job specification.<br />Fields set here are merged into the controller-generated Job spec. |  | Optional: \{\} <br /> |
-| `dgd` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)_ | DGD allows providing a full or partial nvidia.com/v1alpha1 DynamoGraphDeployment<br />to use as the base for the generated deployment. Fields from profiling results<br />are merged on top. Use this to override backend worker images.<br />The field is stored as a raw embedded resource rather than a typed<br />*v1alpha1.DynamoGraphDeployment to avoid a circular import: v1alpha1 already<br />imports v1beta1 as the conversion hub and Go does not allow import cycles.<br />The EmbeddedResource marker tells the API server to validate that the value is a<br />well-formed Kubernetes object (has apiVersion/kind), but does not enforce that it<br />is specifically a DynamoGraphDeployment. Full type validation (correct apiVersion,<br />kind, and field schema) is performed by the controller during reconciliation. |  | EmbeddedResource: \{\} <br />Optional: \{\} <br /> |
+| `profilingJob` _[JobSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#jobspec-v1-batch)_ | ProfilingJob allows overriding the profiling Job specification.<br />Fields set here are merged into the controller-generated Job spec. |  |  |
+| `dgd` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)_ | DGD allows providing a full or partial nvidia.com/v1alpha1 DynamoGraphDeployment<br />to use as the base for the generated deployment. Fields from profiling results<br />are merged on top. Use this to override backend worker images.<br />The field is stored as a raw embedded resource rather than a typed<br />*v1alpha1.DynamoGraphDeployment to avoid a circular import: v1alpha1 already<br />imports v1beta1 as the conversion hub and Go does not allow import cycles.<br />The EmbeddedResource marker tells the API server to validate that the value is a<br />well-formed Kubernetes object (has apiVersion/kind), but does not enforce that it<br />is specifically a DynamoGraphDeployment. Full type validation (correct apiVersion,<br />kind, and field schema) is performed by the controller during reconciliation. |  | EmbeddedResource: \{\} <br /> |
 
 
 #### ParetoConfig
@@ -1524,8 +1548,8 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `pareto` _[ParetoConfig](#paretoconfig) array_ | Pareto is the list of Pareto-optimal deployment configurations discovered during profiling.<br />Each entry represents a different cost/performance trade-off. |  | Optional: \{\} <br /> |
-| `selectedConfig` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)_ | SelectedConfig is the recommended configuration chosen by the profiler<br />based on the SLA targets. This is the configuration used for deployment<br />when autoApply is true. |  | Type: object <br />Optional: \{\} <br /> |
+| `pareto` _[ParetoConfig](#paretoconfig) array_ | Pareto is the list of Pareto-optimal deployment configurations discovered during profiling.<br />Each entry represents a different cost/performance trade-off. |  |  |
+| `selectedConfig` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)_ | SelectedConfig is the recommended configuration chosen by the profiler<br />based on the SLA targets. This is the configuration used for deployment<br />when autoApply is true. |  | Type: object <br /> |
 
 
 #### SLASpec
@@ -1542,10 +1566,10 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `optimizationType` _[OptimizationType](#optimizationtype)_ | OptimizationType controls the profiling optimization strategy.<br />Use when explicit SLA targets (ttft+itl or e2eLatency) are not known. |  | Enum: [latency throughput] <br />Optional: \{\} <br /> |
-| `ttft` _float_ | TTFT is the Time To First Token target in milliseconds. |  | Optional: \{\} <br /> |
-| `itl` _float_ | ITL is the Inter-Token Latency target in milliseconds. |  | Optional: \{\} <br /> |
-| `e2eLatency` _float_ | E2ELatency is the target end-to-end request latency in milliseconds.<br />Alternative to specifying TTFT + ITL. |  | Optional: \{\} <br /> |
+| `optimizationType` _[OptimizationType](#optimizationtype)_ | OptimizationType controls the profiling optimization strategy.<br />Use when explicit SLA targets (ttft+itl or e2eLatency) are not known. |  | Enum: [latency throughput] <br /> |
+| `ttft` _float_ | TTFT is the Time To First Token target in milliseconds. |  |  |
+| `itl` _float_ | ITL is the Inter-Token Latency target in milliseconds. |  |  |
+| `e2eLatency` _float_ | E2ELatency is the target end-to-end request latency in milliseconds.<br />Alternative to specifying TTFT + ITL. |  |  |
 
 
 #### SearchStrategy
@@ -1579,10 +1603,10 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `isl` _integer_ | ISL is the Input Sequence Length (number of tokens). | 4000 | Optional: \{\} <br /> |
-| `osl` _integer_ | OSL is the Output Sequence Length (number of tokens). | 1000 | Optional: \{\} <br /> |
-| `concurrency` _float_ | Concurrency is the target concurrency level.<br />Required (or RequestRate) when the planner is disabled. |  | Optional: \{\} <br /> |
-| `requestRate` _float_ | RequestRate is the target request rate (req/s).<br />Required (or Concurrency) when the planner is disabled. |  | Optional: \{\} <br /> |
+| `isl` _integer_ | ISL is the Input Sequence Length (number of tokens). | 4000 |  |
+| `osl` _integer_ | OSL is the Output Sequence Length (number of tokens). | 1000 |  |
+| `concurrency` _float_ | Concurrency is the target concurrency level.<br />Required (or RequestRate) when the planner is disabled. |  |  |
+| `requestRate` _float_ | RequestRate is the target request rate (req/s).<br />Required (or Concurrency) when the planner is disabled. |  |  |
 
 
 
