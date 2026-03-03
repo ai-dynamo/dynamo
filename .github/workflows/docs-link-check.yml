@@ -14,16 +14,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
 
+      - name: Check out repository
+        uses: actions/checkout@v4
+
       - name: Restore lychee cache
         id: restore-cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: .lycheecache
           key: cache-lychee-${{ github.sha }}
           restore-keys: cache-lychee-
-
-      - name: Check out repository
-        uses: actions/checkout@v4
 
       # # Cache lychee results (e.g. to avoid hitting rate limits)
       # # https://lychee.cli.rs/github_action_recipes/caching/
@@ -62,7 +62,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Save lychee cache
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         if: always()
         with:
           path: .lycheecache
