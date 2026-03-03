@@ -38,8 +38,8 @@ jobs:
         uses: lycheeverse/lychee-action@v2
         with:
           # TODO: once DYN-2259 is fixed remove exclusion of ./docs/components/profiler/profiler_guide.md
+          #  ${{ github.event_name == 'pull_request' && '--offline' || '' }}
           args: >-
-            #  ${{ github.event_name == 'pull_request' && '--offline' || '' }}
             --cache
             --no-progress
             --max-retries 4
