@@ -12,7 +12,7 @@ Deployment recipe for **Kimi-K2.5** using TensorRT-LLM with Dynamo's KV-aware ro
 
 ## Prerequisites
 
-1. **Dynamo Platform installed** — See [Kubernetes Deployment Guide](../../docs/pages/kubernetes/README.md)
+1. **Dynamo Platform installed** — See [Kubernetes Deployment Guide](../../docs/kubernetes/README.md)
 2. **GPU cluster** with B200 GPUs (8x per worker)
 3. **HuggingFace token** with access to the model
 
