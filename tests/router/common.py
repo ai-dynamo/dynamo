@@ -1671,11 +1671,15 @@ def _test_router_indexers_sync(
                     assert resp.status == 200, f"GET /dump failed: {resp.status}"
                     dump_by_key = await resp.json()
 
-            # /dump now returns {model:tenant -> events}, flatten all values
-            standalone_state = []
-            for events in dump_by_key.values():
-                if isinstance(events, list):
-                    standalone_state.extend(events)
+            # /dump returns {model:tenant -> events}, extract the expected key
+            expected_key = f"{model_name}:default"
+            assert expected_key in dump_by_key, (
+                f"Expected dump key '{expected_key}', "
+                f"got keys={list(dump_by_key.keys())}"
+            )
+            for k, v in dump_by_key.items():
+                assert isinstance(v, list), f"Dump key '{k}' returned error: {v}"
+            standalone_state = dump_by_key[expected_key]
             sorted_standalone = sorted(standalone_state, key=sort_key)
             logger.info(f"Standalone HTTP indexer has {len(sorted_standalone)} events")
 
