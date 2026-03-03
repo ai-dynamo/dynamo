@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import logging
 import time
 from io import BytesIO
@@ -22,6 +23,7 @@ from urllib.parse import urlparse
 from urllib.request import urlopen
 
 import torch
+from tensorrt_llm.inputs import default_multimodal_input_loader
 from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
 
 from dynamo.common.multimodal.image_loader import ImageLoader
@@ -187,6 +189,11 @@ class MultimodalRequestProcessor:
             "prompt": str,
             "prompt_token_ids": List[int]
         }
+
+        -----------------------------------------------------------------------------
+        TODO: Revert default_multimodal_input_loader calls having fixed TRT-LLM's
+        token IDs & MM data path in generate_async() for the embeddings case.
+        -----------------------------------------------------------------------------
         """
         self.previous_decoded_text = ""
 
@@ -218,14 +225,33 @@ class MultimodalRequestProcessor:
         # The encode worker computed vision embeddings and transferred them via RDMA/NIXL
         # We need to pass these embeddings directly to TRT-LLM's generate_async
         if embeddings is not None:
-            logging.info(
-                f"Using NIXL embeddings from encoder: shape={embeddings.shape if hasattr(embeddings, 'shape') else 'N/A'}"
+            # The aforementioned fallback to default_multimodal_input_loader:
+            messages = request.get("extra_args", {}).get(
+                "messages", request.get("messages", [])
             )
+            text_prompt, _, _ = self.extract_prompt_and_media(messages)
+            loader_kwargs = {}
+            loader_kwargs["mm_embeddings"] = [embeddings]
 
-            # Structure embeddings in the format TRT-LLM's generate_async expects
-            processed_inputs["multi_modal_embeddings"] = embeddings
-
-            return processed_inputs
+            # NOTE: default_multimodal_input_loader downloads images and preprocesses them
+            # synchronously. Wrap in asyncio.to_thread to allow concurrent image loading
+            # across multiple requests, improving throughput at high concurrency.
+            processed_inputs = await asyncio.to_thread(
+                lambda: default_multimodal_input_loader(
+                    tokenizer=self.tokenizer,
+                    model_dir=self.model_dir,
+                    model_type=self.model_type,
+                    modality=self.modality,
+                    prompts=[text_prompt],
+                    image_data_format="pt",
+                    device="cuda",
+                    **loader_kwargs,
+                )
+            )
+            # Return the first processed input if available
+            if processed_inputs:
+                return processed_inputs[0]
+            return None
 
         # PD Flow: Pre-tokenized by Rust frontend with direct media loading
         # TODO: Add frontend decoding support
