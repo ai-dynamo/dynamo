@@ -43,11 +43,11 @@ docker build -f container/rendered.Dockerfile -t dynamo:latest-vllm .
 ./container/run.sh -it --framework VLLM [--mount-workspace]
 ```
 
+</Accordion>
+
 ### Development Setup
 
 For development, use the [devcontainer](https://github.com/ai-dynamo/dynamo/tree/main/.devcontainer) which has all dependencies pre-installed.
-
-</Accordion>
 
 ## Feature Support Matrix
 
