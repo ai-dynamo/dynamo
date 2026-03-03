@@ -71,7 +71,10 @@ const GAUGE_DEFS: &[(&str, &str)] = &[
         "Current ImmutableBlocks held outside pool",
     ),
     ("dynamo_kvbm_reset_pool_size", "Current reset pool size"),
-    ("dynamo_kvbm_inactive_pool_size", "Current inactive pool size"),
+    (
+        "dynamo_kvbm_inactive_pool_size",
+        "Current inactive pool size",
+    ),
 ];
 
 /// Aggregates metrics from multiple `BlockPoolMetrics` sources and exports
