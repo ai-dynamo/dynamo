@@ -131,7 +131,8 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
             let data_parallel_size = config.data_parallel_size();
             let data_parallel_start_rank = config.data_parallel_start_rank();
 
-            for dp_rank in data_parallel_start_rank..(data_parallel_start_rank + data_parallel_size) {
+            for dp_rank in data_parallel_start_rank..(data_parallel_start_rank + data_parallel_size)
+            {
                 let worker = WorkerWithDpRank::new(*worker_id, dp_rank);
 
                 let overlap = *overlaps.get(&worker).unwrap_or(&0);

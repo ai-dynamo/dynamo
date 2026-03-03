@@ -91,7 +91,7 @@ impl KvScheduler {
                         .iter()
                         .map(|(&id, c)| (id, (c.data_parallel_start_rank, c.data_parallel_size)))
                         .collect();
-                    slots_monitor.update_workers(dp_range);
+                    slots_monitor.update_workers(&dp_range);
                     last_workers = current_workers;
                 }
             }
