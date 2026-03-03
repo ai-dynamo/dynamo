@@ -141,6 +141,7 @@ func inspectContainer(ctx context.Context, ctrd *containerd.Client, log logr.Log
 		if err != nil {
 			return nil, fmt.Errorf("failed to resolve CUDA namespace PIDs: %w", err)
 		}
+		log.Info("Discovered CUDA processes", "host_pids", cudaPIDs, "namespace_pids", cudaNamespacePIDs, "gpu_uuids", gpuUUIDs)
 	}
 
 	return &types.CheckpointContainerSnapshot{
