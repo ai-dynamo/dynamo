@@ -362,6 +362,15 @@ class BaseWorkerHandler(BaseGenerativeHandler):
                     "message": result[1],
                     "num_paused_requests": result[2],
                 }
+        if isinstance(result, list):
+            return {
+                "result": [
+                    dataclasses.asdict(item)
+                    if dataclasses.is_dataclass(item) and not isinstance(item, type)
+                    else item
+                    for item in result
+                ]
+            }
         if dataclasses.is_dataclass(result) and not isinstance(result, type):
             return dataclasses.asdict(result)
         if isinstance(result, dict):

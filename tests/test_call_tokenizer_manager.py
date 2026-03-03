@@ -210,6 +210,35 @@ class TestNormalizeResult:
             "nodes_pinned": 10,
         }
 
+    def test_list_of_dataclasses(self):
+        @dataclasses.dataclass
+        class LoadInfo:
+            dp_rank: int
+            num_reqs: int
+
+        items = [LoadInfo(dp_rank=0, num_reqs=5), LoadInfo(dp_rank=1, num_reqs=3)]
+        assert self.handler._normalize_result(items) == {
+            "result": [
+                {"dp_rank": 0, "num_reqs": 5},
+                {"dp_rank": 1, "num_reqs": 3},
+            ]
+        }
+
+    def test_list_of_plain_values(self):
+        assert self.handler._normalize_result([1, "two", 3]) == {
+            "result": [1, "two", 3]
+        }
+
+    def test_list_mixed(self):
+        @dataclasses.dataclass
+        class Info:
+            val: int
+
+        items = [Info(val=1), "plain", 42]
+        assert self.handler._normalize_result(items) == {
+            "result": [{"val": 1}, "plain", 42]
+        }
+
     def test_other_value(self):
         assert self.handler._normalize_result(42) == {"result": 42}
         assert self.handler._normalize_result("text") == {"result": "text"}
