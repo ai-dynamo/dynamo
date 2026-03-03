@@ -138,7 +138,9 @@ jobs:
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
       - name: Pull image
-        run: docker pull ${{ env.IMAGE_TAG }}
+        run: |
+          source ./.github/actions/docker-tag-push/retry_docker.sh
+          retry_pull ${{ env.IMAGE_TAG }}
       - name: Run Rust checks (block-manager + media-ffmpeg + integration tests)
         run: |
           docker run --rm --runtime=nvidia --gpus all --user root -w /workspace/lib/llm \
@@ -175,7 +177,9 @@ jobs:
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
       - name: Pull image
-        run: docker pull ${{ env.IMAGE_TAG }}
+        run: |
+          source ./.github/actions/docker-tag-push/retry_docker.sh
+          retry_pull ${{ env.IMAGE_TAG }}
       - name: Run pytest (parallel tests with xdist)
         uses: ./.github/actions/pytest
         with:
@@ -205,7 +209,9 @@ jobs:
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
       - name: Pull image
-        run: docker pull ${{ env.IMAGE_TAG }}
+        run: |
+          source ./.github/actions/docker-tag-push/retry_docker.sh
+          retry_pull ${{ env.IMAGE_TAG }}
       - name: Run pytest (sequential tests)
         uses: ./.github/actions/pytest
         with:

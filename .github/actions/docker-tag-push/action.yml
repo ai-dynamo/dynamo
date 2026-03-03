@@ -51,7 +51,7 @@ runs:
         ECR_HOSTNAME: ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com
       run: |
         set -euo pipefail
-        source "${{ github.action_path }}/retry_push.sh"
+        source "${{ github.action_path }}/retry_docker.sh"
 
         if [[ -n "${CONDITIONAL_TAG}" ]]; then
             docker tag "${LOCAL_IMAGE}" "${ECR_HOSTNAME}/${CONDITIONAL_TAG}"
@@ -74,7 +74,7 @@ runs:
         AZURE_ACR_HOSTNAME: ${{ inputs.azure_acr_hostname }}
       run: |
         set -euo pipefail
-        source "${{ github.action_path }}/retry_push.sh"
+        source "${{ github.action_path }}/retry_docker.sh"
 
         while IFS= read -r TAG; do
           if [ -z "$TAG" ]; then
