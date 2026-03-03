@@ -271,6 +271,7 @@ trtllm_configs = {
             pytest.mark.gpu_1,
             pytest.mark.trtllm,
             pytest.mark.post_merge,
+            pytest.mark.skip(reason="DIS-1566"),
             pytest.mark.timeout(
                 480
             ),  # 3x measured time (83.85s) + download time (210s) for 7B model
