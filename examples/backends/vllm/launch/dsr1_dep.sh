@@ -70,14 +70,35 @@ fi
 # Calculate data parallel size
 DATA_PARALLEL_SIZE=$((NUM_NODES * GPUS_PER_NODE))
 
-echo "Configuration:"
-echo "  Number of nodes: $NUM_NODES"
-echo "  Node rank: $NODE_RANK"
-echo "  GPUs per node: $GPUS_PER_NODE"
-echo "  Data parallel size: $DATA_PARALLEL_SIZE"
-echo "  Master address: $MASTER_ADDR"
-echo "  Log directory: $LOG_DIR"
-echo "  Model name: $MODEL"
+HTTP_PORT="${DYN_HTTP_PORT:-8000}"
+echo "=========================================="
+echo "Launching DeepSeek-R1 Data Parallel (Multi-Node)"
+echo "=========================================="
+echo "Model:       $MODEL"
+if [ "$NODE_RANK" -eq 0 ]; then
+echo "Frontend:    http://localhost:$HTTP_PORT"
+fi
+echo "Number of nodes: $NUM_NODES"
+echo "Node rank:       $NODE_RANK"
+echo "GPUs per node:   $GPUS_PER_NODE"
+echo "Data parallel:   $DATA_PARALLEL_SIZE"
+echo "Master address:  $MASTER_ADDR"
+echo "Log directory:   $LOG_DIR"
+echo "=========================================="
+if [ "$NODE_RANK" -eq 0 ]; then
+echo ""
+echo "Example test command:"
+echo ""
+echo "  curl http://localhost:${HTTP_PORT}/v1/chat/completions \\"
+echo "    -H 'Content-Type: application/json' \\"
+echo "    -d '{"
+echo "      \"model\": \"${MODEL}\","
+echo "      \"messages\": [{\"role\": \"user\", \"content\": \"Explain why Roger Federer is considered one of the greatest tennis players of all time\"}],"
+echo "      \"max_tokens\": 32"
+echo "    }'"
+echo ""
+echo "=========================================="
+fi
 
 trap 'echo Cleaning up...; kill 0' EXIT
 

@@ -230,7 +230,7 @@ text-to-video-diffusion.sh  # 1-2 GPUs - Text-to-video (Wan2.1)
   survives parent kill. Always check `nvidia-smi` after teardown.
 
 For troubleshooting (CuDNN, config.json errors, OOM, disagg connectivity), see
-`docs/pages/backends/sglang/sglang-examples.md#troubleshooting`.
+`docs/backends/sglang/sglang-examples.md#troubleshooting`.
 
 ## Adding a New Worker Type
 
@@ -268,7 +268,7 @@ Checklist for adding a new worker (e.g., a new modality or serving mode):
   pass engine=None. Guard any engine access in shared base class code.
 - **Rebuild after Rust changes**: If changing registration (register.py interacts with Rust
   bindings), rebuild: `cd lib/bindings/python && maturin develop --uv && cd <root> && uv pip install -e .`
-- **Troubleshooting**: See `docs/pages/backends/sglang/sglang-examples.md#troubleshooting`
+- **Troubleshooting**: See `docs/backends/sglang/sglang-examples.md#troubleshooting`
   for CuDNN, config.json, OOM, and disagg connectivity issues.
 
 ## File Index

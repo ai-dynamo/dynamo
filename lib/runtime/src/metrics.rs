@@ -733,7 +733,7 @@ impl MetricsRegistry {
         for registry in &registries {
             for result in registry.execute_update_callbacks() {
                 if let Err(e) = result {
-                    tracing::error!("Error executing metrics callback: {}", e);
+                    tracing::error!("Error executing metrics callback: {e}");
                 }
             }
         }
@@ -870,7 +870,7 @@ impl MetricsRegistry {
                     }
                 }
                 Err(e) => {
-                    tracing::error!("Error executing exposition text callback: {}", e);
+                    tracing::error!("Error executing exposition text callback: {e}");
                 }
             }
         }
