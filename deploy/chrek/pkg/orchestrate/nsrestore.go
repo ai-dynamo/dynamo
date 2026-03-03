@@ -89,44 +89,19 @@ func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.Ch
 		return 0, err
 	}
 
-	// CUDA restore — map checkpoint-time PIDs to restore-time PIDs using pstree.img.
-	// CRIU assigns new PIDs at restore (--rst-sibling), so we parse the checkpoint's
-	// pstree.img to get the original tree structure, BFS both trees in parallel, and
-	// build a positional old→new PID mapping to preserve checkpoint-time ordering.
+	// CUDA restore — use manifest namespace PIDs directly.
+	// With rstSibling=false, CRIU creates a nested PID namespace that preserves the
+	// original namespace-relative PIDs. FilterProcesses validates they hold CUDA contexts.
 	if !m.CUDA.IsEmpty() {
-		originalBFS, err := criu.PstreeOrderedPIDs(opts.CheckpointPath)
-		if err != nil {
-			return 0, fmt.Errorf("failed to parse pstree.img: %w", err)
-		}
-		restoredBFS := common.ProcessTreePIDs(int(restoredPID))
-		log.Info("PID mapping inputs",
-			"pstree_count", len(originalBFS), "proc_count", len(restoredBFS),
-			"pstree_first5", firstN(originalBFS, 5), "proc_first5", firstNInt(restoredBFS, 5))
-		pidMapping, err := criu.BuildPIDMapping(originalBFS, restoredBFS)
-		if err != nil {
-			return 0, fmt.Errorf("failed to build PID mapping: %w", err)
-		}
-
-		// Translate manifest namespace PIDs to new restore-time PIDs
-		cudaPIDs := make([]int, len(m.CUDA.NamespacePIDs))
-		for i, oldPID := range m.CUDA.NamespacePIDs {
-			newPID, ok := pidMapping[oldPID]
-			if !ok {
-				return 0, fmt.Errorf("no PID mapping for checkpoint namespace PID %d", oldPID)
-			}
-			cudaPIDs[i] = newPID
-		}
-		log.Info("Mapped CUDA PIDs from checkpoint to restore",
-			"checkpoint_nspids", m.CUDA.NamespacePIDs, "restored_pids", cudaPIDs)
-
-		// Validate that the mapped PIDs actually hold CUDA contexts
-		validated := cuda.FilterProcesses(ctx, cudaPIDs, log)
+		cudaPIDs := cuda.FilterProcesses(ctx, m.CUDA.NamespacePIDs, log)
+		log.Info("CUDA restore using manifest namespace PIDs",
+			"manifest_nspids", m.CUDA.NamespacePIDs, "validated_count", len(cudaPIDs))
 
 		// Debug pause: wait for /tmp/chrek-debug-continue before running cuda-checkpoint restore.
 		// Set CHREK_DEBUG_PAUSE_BEFORE_CUDA_RESTORE=1 on the agent to enable.
 		if strings.TrimSpace(os.Getenv("CHREK_DEBUG_PAUSE_BEFORE_CUDA_RESTORE")) != "" {
 			log.Info("DEBUG PAUSE: CRIU restore done, waiting before cuda-checkpoint restore",
-				"restored_pid", restoredPID, "cuda_pids", validated,
+				"restored_pid", restoredPID, "cuda_pids", cudaPIDs,
 				"nsrestore_pid", os.Getpid(),
 				"signal_file", "/tmp/chrek-debug-continue")
 			for {
@@ -139,28 +114,14 @@ func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.Ch
 			}
 		}
 
-		if len(validated) != len(cudaPIDs) {
-			return 0, fmt.Errorf("CUDA PID mismatch: mapped %d PIDs but only %d hold CUDA contexts after restore",
-				len(cudaPIDs), len(validated))
+		if len(cudaPIDs) != len(m.CUDA.NamespacePIDs) {
+			return 0, fmt.Errorf("CUDA PID mismatch: manifest has %d namespace PIDs, but only %d hold CUDA contexts after restore",
+				len(m.CUDA.NamespacePIDs), len(cudaPIDs))
 		}
-		if err := cuda.RestoreAndUnlockProcessTree(ctx, validated, opts.CUDADeviceMap, log); err != nil {
+		if err := cuda.RestoreAndUnlockProcessTree(ctx, cudaPIDs, opts.CUDADeviceMap, log); err != nil {
 			return 0, fmt.Errorf("CUDA restore failed: %w", err)
 		}
 	}
 
 	return int(restoredPID), nil
-}
-
-func firstN(s []uint32, n int) []uint32 {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n]
-}
-
-func firstNInt(s []int, n int) []int {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n]
 }

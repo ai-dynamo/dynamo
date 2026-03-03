@@ -163,7 +163,7 @@ config:
     manageCgroupsMode: soft # CRIU cgroup management mode (ignore/soft/full/strict)
 
     # Restore-specific options (only apply during CRIU restore, not dump)
-    rstSibling: true         # Restore as sibling process (required for go-criu swrk mode)
+    rstSibling: false        # When false, CRIU creates a nested PID namespace preserving original PIDs
     mntnsCompatMode: false   # Mount namespace compatibility mode
     evasiveDevices: true     # Use any device path if original is inaccessible
     forceIrmap: true         # Force resolving inotify/fsnotify watch names
