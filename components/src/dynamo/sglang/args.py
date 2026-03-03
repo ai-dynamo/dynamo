@@ -8,6 +8,7 @@ import os
 import socket
 import sys
 import tempfile
+import warnings
 from argparse import Namespace
 from pathlib import Path
 from typing import Any, Dict, Generator, Optional
@@ -374,6 +375,14 @@ async def parse_args(args: list[str]) -> Config:
     server_args.stream_output = True
 
     if dynamo_config.use_sglang_tokenizer:
+        warnings.warn(
+            "--use-sglang-tokenizer is deprecated and will be removed in a future "
+            "release. Use '--dyn-chat-processor sglang' on the frontend instead, "
+            "which provides the same SGLang-native pre/post processing with KV "
+            "router support.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         logging.info(
             "Using SGLang's built in tokenizer. Setting skip_tokenizer_init to False"
         )
