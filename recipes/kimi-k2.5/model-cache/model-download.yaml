@@ -23,18 +23,16 @@ spec:
                 name: hf-token-secret
           env:
             - name: MODEL_NAME
-              value: moonshotai/Kimi-K2.5
+              value: baseten-admin/Kimi-2.5-text-nvfp4-v3  #  text-only variant
             - name: HF_HOME
               value: /model-store
             - name: HF_HUB_ENABLE_HF_TRANSFER
               value: "1"
-            - name: MODEL_REVISION
-              value: 3367c8d1c68584429fab7faf845a32d5195b6ac1
           args:
             - |
               set -eux
               pip install --no-cache-dir huggingface_hub hf_transfer
-              hf download $MODEL_NAME --revision $MODEL_REVISION --exclude "docs/*" --exclude "figures/*"
+              hf download $MODEL_NAME
           volumeMounts:
             - name: model-cache
               mountPath: /model-store

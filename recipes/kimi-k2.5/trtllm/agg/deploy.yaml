@@ -6,8 +6,21 @@ metadata:
   name: llm-config
 data:
   config.yaml: |
+    max_batch_size: 128
+    max_num_tokens: 8448
+    max_seq_len: 8212
     tensor_parallel_size: 8
     moe_expert_parallel_size: 8
+    enable_attention_dp: true
+    pipeline_parallel_size: 1
+    print_iter_log: true
+    kv_cache_config:
+      free_gpu_memory_fraction: 0.75
+      dtype: fp8
+    cache_transceiver_config:
+      backend: UCX
+      max_tokens_in_buffer: 8448
+    trust_remote_code: true
 ---
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
@@ -38,7 +51,7 @@ spec:
           command:
           - /bin/sh
           - -c
-          image: nvcr.io/nvidian/dynamo-dev/biswa:trtllm-runtime-fd27461e6
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag
       replicas: 1
     TrtllmWorker:
       componentType: worker
@@ -62,25 +75,23 @@ spec:
           args:
           - |
             python3 -m dynamo.trtllm \
-              --model-path "${MODEL_PATH}" \
-              --served-model-name "moonshotai/Kimi-K2.5" \
+              --model-path "${MODEL_NAME}" \
+              --served-model-name "${MODEL_NAME}" \
               --extra-engine-args "${ENGINE_ARGS}" \
-              --tensor-parallel-size 8
+              --tensor-parallel-size 8 \
+              --dyn-reasoning-parser kimi_k25 \
+              --dyn-tool-call-parser kimi_k2
           command:
           - /bin/sh
           - -c
-          image: nvcr.io/nvidian/dynamo-dev/biswa:trtllm-runtime-fd27461e6
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag
           env:
-          # - name: TRTLLM_ENABLE_PDL
-          #   value: "1"
-          # - name: TRT_LLM_DISABLE_LOAD_WEIGHTS_IN_PARALLEL
-          #   value: "True"
-          - name: SERVED_MODEL_NAME
-            value: "moonshotai/Kimi-K2.5"
+          - name: TRTLLM_ENABLE_PDL
+            value: "1"
+          - name: MODEL_NAME
+            value: baseten-admin/Kimi-2.5-text-nvfp4-v3 (text-only variant)
           - name: ENGINE_ARGS
-            value: "/opt/dynamo/configs/config.yaml"
-          - name: MODEL_PATH
-            value: "moonshotai/Kimi-K2.5"
+            value: /opt/dynamo/configs/config.yaml
           - name: HF_HOME
             value: /opt/models
           volumeMounts:
