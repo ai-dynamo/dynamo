@@ -120,7 +120,7 @@ spec:
               - name: DYN_HTTP_PORT
                 value: "8000"
               - name: DYN_NAMESPACE
-                value: a-epp-vllm-disagg
+                value: my-model-llama3-70b-disagg
               - name: DYN_COMPONENT
                 value: frontend
               - name: DYN_DISCOVERY_BACKEND
@@ -128,7 +128,7 @@ spec:
               - name: DYN_PARENT_DGD_K8S_NAME
                 value: llama3-70b-disagg
               - name: DYN_PARENT_DGD_K8S_NAMESPACE
-                value: a-epp
+                value: my-model
               - name: POD_NAME
                 valueFrom:
                   fieldRef:
@@ -221,7 +221,7 @@ spec:
               - name: DYN_HTTP_PORT
                 value: "8000"
               - name: DYN_NAMESPACE
-                value: a-epp-vllm-disagg
+                value: my-model-llama3-70b-disagg
               - name: DYN_COMPONENT
                 value: frontend
               - name: DYN_DISCOVERY_BACKEND
@@ -229,7 +229,7 @@ spec:
               - name: DYN_PARENT_DGD_K8S_NAME
                 value: llama3-70b-disagg
               - name: DYN_PARENT_DGD_K8S_NAMESPACE
-                value: a-epp
+                value: my-model
               - name: POD_NAME
                 valueFrom:
                   fieldRef:
