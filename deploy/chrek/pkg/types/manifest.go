@@ -122,14 +122,18 @@ func NewOverlayManifest(exclusions OverlaySettings, upperDir string, ociSpec *sp
 }
 
 // CUDAManifest captures CUDA state from checkpoint time for restore.
+// NamespacePIDs preserves the checkpoint-time ordering of CUDA processes using their
+// namespace-relative PIDs. Restore uses this list verbatim (CRIU preserves namespace PIDs).
 type CUDAManifest struct {
 	PIDs           []int    `yaml:"pids"`
+	NamespacePIDs  []int    `yaml:"namespacePids"`
 	SourceGPUUUIDs []string `yaml:"sourceGpuUuids"`
 }
 
-func NewCUDAManifest(pids []int, sourceGPUUUIDs []string) CUDAManifest {
+func NewCUDAManifest(hostPIDs, namespacePIDs []int, sourceGPUUUIDs []string) CUDAManifest {
 	return CUDAManifest{
-		PIDs:           append([]int(nil), pids...),
+		PIDs:           append([]int(nil), hostPIDs...),
+		NamespacePIDs:  append([]int(nil), namespacePIDs...),
 		SourceGPUUUIDs: append([]string(nil), sourceGPUUUIDs...),
 	}
 }

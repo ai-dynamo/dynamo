@@ -141,31 +141,24 @@ func BuildDeviceMap(sourceUUIDs, targetUUIDs []string) (string, error) {
 	return strings.Join(pairs, ","), nil
 }
 
-// LockAndCheckpointProcessTree locks and checkpoints CUDA state for all given PIDs.
-// On partial failure, already-checkpointed PIDs are restored+unlocked.
+// LockAndCheckpointProcessTree locks all PIDs, then checkpoints all PIDs.
+// No recovery is attempted on failure — partial CUDA state is left as-is since
+// the container will be killed by the caller anyway.
 func LockAndCheckpointProcessTree(ctx context.Context, cudaPIDs []int, log logr.Logger) error {
-	locked := make([]int, 0, len(cudaPIDs))
 	for _, pid := range cudaPIDs {
 		if err := lock(ctx, pid, log); err != nil {
-			bulkUnlock(context.Background(), locked, log)
 			return fmt.Errorf("cuda lock failed for PID %d: %w", pid, err)
 		}
-		locked = append(locked, pid)
 	}
-
-	checkpointed := make([]int, 0, len(cudaPIDs))
 	for _, pid := range cudaPIDs {
 		if err := checkpoint(ctx, pid, log); err != nil {
-			recoverCheckpointed(context.Background(), checkpointed, locked, log)
 			return fmt.Errorf("cuda checkpoint failed for PID %d: %w", pid, err)
 		}
-		checkpointed = append(checkpointed, pid)
 	}
-
 	return nil
 }
 
-// RestoreAndUnlockProcessTree restores and unlocks CUDA state for the given PIDs.
+// RestoreAndUnlockProcessTree restores all PIDs, then unlocks all PIDs.
 func RestoreAndUnlockProcessTree(ctx context.Context, cudaPIDs []int, deviceMap string, log logr.Logger) error {
 	for _, pid := range cudaPIDs {
 		if err := restoreProcess(ctx, pid, deviceMap, log); err != nil {
@@ -183,39 +176,4 @@ func RestoreAndUnlockProcessTree(ctx context.Context, cudaPIDs []int, deviceMap 
 		}
 	}
 	return nil
-}
-
-// bulkUnlock unlocks a list of CUDA PIDs (best-effort).
-func bulkUnlock(ctx context.Context, pids []int, log logr.Logger) {
-	for _, pid := range pids {
-		if err := unlock(ctx, pid, log); err != nil {
-			log.Error(err, "Failed to unlock CUDA process", "pid", pid)
-		}
-	}
-}
-
-// recoverCheckpointed is best-effort cleanup when checkpoint fails partway.
-// Checkpointed PIDs need restore+unlock; locked-only PIDs just need unlock.
-func recoverCheckpointed(ctx context.Context, checkpointed, locked []int, log logr.Logger) {
-	checkpointedSet := make(map[int]struct{}, len(checkpointed))
-	for _, pid := range checkpointed {
-		checkpointedSet[pid] = struct{}{}
-	}
-	for _, pid := range checkpointed {
-		if err := restoreProcess(ctx, pid, "", log); err != nil {
-			log.Error(err, "Failed to restore CUDA process during cleanup", "pid", pid)
-			continue
-		}
-		if err := unlock(ctx, pid, log); err != nil {
-			log.Error(err, "Failed to unlock CUDA process after restore during cleanup", "pid", pid)
-		}
-	}
-	for _, pid := range locked {
-		if _, ok := checkpointedSet[pid]; ok {
-			continue
-		}
-		if err := unlock(ctx, pid, log); err != nil {
-			log.Error(err, "Failed to unlock CUDA process during cleanup", "pid", pid)
-		}
-	}
 }

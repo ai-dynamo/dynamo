@@ -129,24 +129,32 @@ func inspectContainer(ctx context.Context, ctrd *containerd.Client, log logr.Log
 	allPIDs := common.ProcessTreePIDs(pid)
 	cudaPIDs := cuda.FilterProcesses(ctx, allPIDs, log)
 	var gpuUUIDs []string
+	var cudaNamespacePIDs []int
 	if len(cudaPIDs) > 0 {
 		gpuUUIDs, err = cuda.GetPodGPUUUIDs(ctx, req.PodName, req.PodNamespace, req.ContainerName)
 		if err != nil {
 			return nil, fmt.Errorf("failed to discover source GPU UUIDs: %w", err)
 		}
+		// Resolve namespace-relative PIDs so restore can use the exact checkpoint-time ordering.
+		// CRIU preserves namespace PIDs, so these are valid after restore.
+		cudaNamespacePIDs, err = common.ResolveNamespacePIDs(cudaPIDs)
+		if err != nil {
+			return nil, fmt.Errorf("failed to resolve CUDA namespace PIDs: %w", err)
+		}
 	}
 
 	return &types.CheckpointContainerSnapshot{
-		PID:            pid,
-		RootFS:         rootFS,
-		UpperDir:       upperDir,
-		OCISpec:        ociSpec,
-		Mounts:         mounts,
-		NetNSInode:     netNSInode,
-		StdioFDs:       stdioFDs,
-		HostCgroupPath: hostCgroupPath,
-		CUDAPIDs:       cudaPIDs,
-		GPUUUIDs:       gpuUUIDs,
+		PID:               pid,
+		RootFS:            rootFS,
+		UpperDir:          upperDir,
+		OCISpec:           ociSpec,
+		Mounts:            mounts,
+		NetNSInode:        netNSInode,
+		StdioFDs:          stdioFDs,
+		HostCgroupPath:    hostCgroupPath,
+		CUDAPIDs:          cudaPIDs,
+		CUDANamespacePIDs: cudaNamespacePIDs,
+		GPUUUIDs:          gpuUUIDs,
 	}, nil
 }
 
@@ -169,7 +177,7 @@ func configureCheckpoint(
 		types.NewOverlayManifest(cfg.Overlay, state.UpperDir, state.OCISpec),
 	)
 	if len(state.CUDAPIDs) > 0 {
-		m.CUDA = types.NewCUDAManifest(state.CUDAPIDs, state.GPUUUIDs)
+		m.CUDA = types.NewCUDAManifest(state.CUDAPIDs, state.CUDANamespacePIDs, state.GPUUUIDs)
 	}
 
 	if err := types.WriteManifest(checkpointDir, m); err != nil {

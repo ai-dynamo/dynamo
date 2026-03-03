@@ -4,6 +4,59 @@ import (
 	"testing"
 )
 
+func TestParseInnermostNSpid(t *testing.T) {
+	tests := []struct {
+		name    string
+		status  string
+		want    int
+		wantErr bool
+	}{
+		{
+			name:   "single PID namespace (host process)",
+			status: "Name:\tbash\nNSpid:\t12345\nPPid:\t1\n",
+			want:   12345,
+		},
+		{
+			name:   "two PID namespaces (container process)",
+			status: "Name:\tpython3\nNSpid:\t98765\t42\nPPid:\t1\n",
+			want:   42,
+		},
+		{
+			name:   "three nested PID namespaces",
+			status: "Name:\tworker\nNSpid:\t98765\t500\t1\nPPid:\t1\n",
+			want:   1,
+		},
+		{
+			name:    "missing NSpid line",
+			status:  "Name:\tbash\nPPid:\t1\n",
+			wantErr: true,
+		},
+		{
+			name:    "malformed NSpid line (no values)",
+			status:  "NSpid:\n",
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseInnermostNSpid(tc.status, 999)
+			if tc.wantErr {
+				if err == nil {
+					t.Errorf("expected error, got %d", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("got %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestParseProcExitCode(t *testing.T) {
 	tests := []struct {
 		name     string
