@@ -6974,19 +6974,19 @@ func TestGenerateBasePodSpec_FrontendSidecar(t *testing.T) {
 	envFromSecret := "hf-token-secret"
 
 	tests := []struct {
-		name                   string
-		component              *v1alpha1.DynamoComponentDeploymentSharedSpec
-		parentDGDName          string
-		namespace              string
-		wantSidecarCount       int
-		wantSidecarName        string
-		wantSidecarImage       string
-		wantSidecarArgs        []string
-		wantSidecarEnvVars     map[string]string
-		wantSidecarEnvFrom     int
-		wantSidecarProbes      bool
-		wantSidecarPorts       bool
-		wantErr                bool
+		name               string
+		component          *v1alpha1.DynamoComponentDeploymentSharedSpec
+		parentDGDName      string
+		namespace          string
+		wantSidecarCount   int
+		wantSidecarName    string
+		wantSidecarImage   string
+		wantSidecarArgs    []string
+		wantSidecarEnvVars map[string]string
+		wantSidecarEnvFrom int
+		wantSidecarProbes  bool
+		wantSidecarPorts   bool
+		wantErr            bool
 	}{
 		{
 			name: "worker without frontendSidecar has no sidecar",
@@ -7013,10 +7013,10 @@ func TestGenerateBasePodSpec_FrontendSidecar(t *testing.T) {
 			wantSidecarImage: "my-frontend:latest",
 			wantSidecarArgs:  []string{"-m", "dynamo.frontend", "--router-mode", "direct"},
 			wantSidecarEnvVars: map[string]string{
-				"DYN_NAMESPACE":          "test-ns-test-dgd",
-				"DYN_COMPONENT":          commonconsts.ComponentTypeFrontend,
-				"DYN_DISCOVERY_BACKEND":  "kubernetes",
-				"DYN_HTTP_PORT":          fmt.Sprintf("%d", commonconsts.DynamoServicePort),
+				"DYN_NAMESPACE":                "test-ns-test-dgd",
+				"DYN_COMPONENT":                commonconsts.ComponentTypeFrontend,
+				"DYN_DISCOVERY_BACKEND":        "kubernetes",
+				"DYN_HTTP_PORT":                fmt.Sprintf("%d", commonconsts.DynamoServicePort),
 				"DYN_PARENT_DGD_K8S_NAME":      "test-dgd",
 				"DYN_PARENT_DGD_K8S_NAMESPACE": "test-ns",
 			},
@@ -7032,15 +7032,15 @@ func TestGenerateBasePodSpec_FrontendSidecar(t *testing.T) {
 					EnvFromSecret: &envFromSecret,
 				},
 			},
-			parentDGDName:    "test-dgd",
-			namespace:        "test-ns",
-			wantSidecarCount: 2,
-			wantSidecarName:  commonconsts.FrontendSidecarContainerName,
-			wantSidecarImage: "my-frontend:latest",
-			wantSidecarArgs:  []string{"-m", "dynamo.frontend"},
+			parentDGDName:      "test-dgd",
+			namespace:          "test-ns",
+			wantSidecarCount:   2,
+			wantSidecarName:    commonconsts.FrontendSidecarContainerName,
+			wantSidecarImage:   "my-frontend:latest",
+			wantSidecarArgs:    []string{"-m", "dynamo.frontend"},
 			wantSidecarEnvFrom: 1,
-			wantSidecarProbes: true,
-			wantSidecarPorts:  true,
+			wantSidecarProbes:  true,
+			wantSidecarPorts:   true,
 		},
 		{
 			name: "frontendSidecar with custom env vars",
