@@ -94,7 +94,17 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         """Build logprob kwargs for SGLang async_generate from output_options.
 
         Maps the Dynamo output_options format (shared with vLLM/TRT-LLM) to
-        SGLang's async_generate keyword arguments.
+        SGLang's async_generate keyword arguments:
+
+          - return_logprob (bool): enables logprob computation
+          - top_logprobs_num (int): number of top-k logprobs per token
+          - logprob_start_len (int): absolute position in the sequence where
+            logprob computation begins. SGLang defaults this to -1, which
+            means len(prompt) - 1 (i.e. output tokens only). Setting it to 0
+            computes logprobs from the start of the prompt — this is how we
+            implement prompt_logprobs. We don't expose logprob_start_len
+            directly; it's an SGLang-internal detail derived from whether the
+            user requested prompt_logprobs.
 
         Args:
             request: Request dict containing optional output_options.
@@ -135,11 +145,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         "(must be non-negative), ignoring"
                     )
                 else:
-                    # Enable logprob computation (prompt logprobs require it).
-                    # logprob_start_len=0 tells SGLang to compute logprobs from
-                    # the start of the sequence, covering prompt tokens.
                     kwargs["return_logprob"] = True
                     kwargs.setdefault("top_logprobs_num", 0)
+                    # logprob_start_len=0 computes from prompt start;
+                    # omitting it (or -1) computes output tokens only.
                     kwargs["logprob_start_len"] = 0
             except (ValueError, TypeError):
                 logging.warning(
