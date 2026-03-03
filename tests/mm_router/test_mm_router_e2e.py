@@ -453,9 +453,11 @@ def test_trtllm_mm_overlap_repeated_two_identical_images(
     overlap_1, total_1, _ = _send_request_get_overlap(
         frontend_port, router_proc, payload, "same_two_identical_images_req1"
     )
+    time.sleep(1)
     overlap_2, total_2, _ = _send_request_get_overlap(
         frontend_port, router_proc, payload, "same_two_identical_images_req2"
     )
+    time.sleep(1)
     overlap_3, total_3, segment_3 = _send_request_get_overlap(
         frontend_port, router_proc, payload, "same_two_identical_images_req3"
     )
