@@ -6,6 +6,7 @@ MM Router Handler - Routes requests to best vLLM worker based on KV cache overla
 """
 
 import logging
+import time
 from typing import Any, AsyncGenerator
 
 from dynamo.llm import KvRouter
@@ -65,6 +66,15 @@ class MMRouterHandler:
         Yields:
             Response chunks from the downstream vLLM worker
         """
+        t0 = time.perf_counter()
+        t0_ns = time.time_ns()
+
+        # Hop 1: frontend → MM router TCP transfer
+        t_frontend_send_ns = request.get("_t_frontend_send_ns")
+        if t_frontend_send_ns:
+            hop1_ms = (t0_ns - t_frontend_send_ns) / 1e6
+            logger.info(f"[timing] hop1_frontend_to_router={hop1_ms:.1f}ms")
+
         # Extract messages from extra_args (set by Frontend preprocessor)
         messages = request.get("extra_args", {}).get("messages", [])
         image_urls = extract_image_urls(messages)
@@ -82,6 +92,7 @@ class MMRouterHandler:
                 processor=self.processor,
                 model=self.model,
             )
+            t1 = time.perf_counter()
 
             # Build block_mm_infos for MM-aware hash computation
             block_mm_infos = build_block_mm_infos(
@@ -90,6 +101,8 @@ class MMRouterHandler:
                 mm_hashes=processed.mm_hashes,
                 image_ranges=processed.image_ranges,
             )
+            t2 = time.perf_counter()
+
             if block_mm_infos is None:
                 raise ValueError(
                     "Failed to build block_mm_infos for multimodal request"
@@ -99,9 +112,11 @@ class MMRouterHandler:
             routing_blocks = (
                 len(routing_tokens) + self.block_size - 1
             ) // self.block_size
-            logger.debug(
-                f"MM request: {len(routing_tokens)} routing tokens, "
-                f"{len(image_urls)} images, {routing_blocks} routing blocks"
+            logger.info(
+                f"[timing] n_images={len(image_urls)} n_urls_bytes={sum(len(u) for u in image_urls)} "
+                f"process_multimodal={1000*(t1-t0):.1f}ms "
+                f"build_block_mm_infos={1000*(t2-t1):.1f}ms "
+                f"routing_tokens={len(routing_tokens)} routing_blocks={routing_blocks}"
             )
         else:
             # Text-only: rely on frontend-preprocessed token_ids (ModelInput.Tokens contract)
@@ -115,6 +130,7 @@ class MMRouterHandler:
             routing_blocks = (
                 len(routing_tokens) + self.block_size - 1
             ) // self.block_size
+            t1 = t2 = time.perf_counter()
             logger.debug(
                 f"Text request: {len(routing_tokens)} routing tokens, {routing_blocks} routing blocks"
             )
@@ -146,6 +162,16 @@ class MMRouterHandler:
             multi_modal_data=request.get("multi_modal_data"),
             mm_routing_info=mm_routing_info,
         )
+        t3 = time.perf_counter()
 
+        first_chunk = True
         async for response in stream:
+            if first_chunk:
+                t4 = time.perf_counter()
+                logger.info(
+                    f"[timing] kv_router.generate={1000*(t3-t2):.1f}ms "
+                    f"first_chunk={1000*(t4-t3):.1f}ms "
+                    f"total_handler={1000*(t4-t0):.1f}ms"
+                )
+                first_chunk = False
             yield response

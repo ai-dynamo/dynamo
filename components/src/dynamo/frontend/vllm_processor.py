@@ -548,6 +548,7 @@ class VllmProcessor:
         post_proc_total_ms = 0.0
 
         try:
+            dynamo_preproc["_t_frontend_send_ns"] = time.time_ns()
             if self.is_kv_router:
                 dynamo_stream = await self.router.generate(
                     token_ids=tokens,
