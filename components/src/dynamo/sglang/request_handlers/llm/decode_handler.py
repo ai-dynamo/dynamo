@@ -155,8 +155,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
     ) -> tuple:
         """Extract logprobs from SGLang meta_info for new tokens.
 
-        Converts SGLang's cumulative logprob format to Dynamo's per-chunk
-        format, matching the output of vLLM and TRT-LLM handlers.
+        While Dynamo forces stream_output=True (args.py) so that output_ids
+        are disjoint per chunk, SGLang's output_token_logprobs and
+        output_top_logprobs in meta_info are always cumulative. We track an
+        offset to slice out only the new entries each chunk.
 
         Args:
             meta_info: SGLang response meta_info dict.
@@ -173,7 +175,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         if not output_token_logprobs:
             return None, None, num_output_logprobs_so_far
 
-        # SGLang returns cumulative logprobs; slice to get new entries only
         new_logprobs = output_token_logprobs[num_output_logprobs_so_far:]
         if not new_logprobs:
             return None, None, num_output_logprobs_so_far
@@ -337,7 +338,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         """
         # Use Future pattern for request ID - will be set when first response arrives
         request_id_future = asyncio.Future()
-        # Track cumulative logprob offset (SGLang returns cumulative, we yield disjoint)
+        # Logprob offset: output_ids are disjoint (stream_output=True) but
+        # meta_info logprobs are cumulative — track how many we've emitted.
         num_output_logprobs_so_far = 0
         async with self._cancellation_monitor(request_id_future, context):
             async for res in stream_source:
