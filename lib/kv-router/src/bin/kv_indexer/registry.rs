@@ -31,7 +31,6 @@ pub struct EndpointEntry {
 
 pub struct WorkerEntry {
     pub endpoints: HashMap<u32, EndpointEntry>,
-    pub _indexer_key: IndexerKey,
     cancel: CancellationToken,
 }
 
@@ -102,7 +101,6 @@ impl WorkerRegistry {
             .entry(instance_id)
             .or_insert_with(|| WorkerEntry {
                 endpoints: HashMap::new(),
-                _indexer_key: key,
                 cancel: CancellationToken::new(),
             });
 
