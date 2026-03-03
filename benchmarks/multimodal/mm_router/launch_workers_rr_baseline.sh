@@ -11,7 +11,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DYNAMO_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
+DYNAMO_ROOT="${DYNAMO_ROOT:-/workspace}"
 cd "${DYNAMO_ROOT}"
 
 # ---------------------------------------------------------------------------
