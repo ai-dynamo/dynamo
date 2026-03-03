@@ -238,10 +238,7 @@ fn build_effective_workers<C: WorkerConfigLike + Default + Clone>(
 ) -> HashMap<WorkerId, C> {
     let mut workers = HashMap::with_capacity(allowed_ids.len());
     for &id in allowed_ids {
-        let config = discovery_workers
-            .get(&id)
-            .cloned()
-            .unwrap_or_default();
+        let config = discovery_workers.get(&id).cloned().unwrap_or_default();
         workers.insert(id, config);
     }
     workers
