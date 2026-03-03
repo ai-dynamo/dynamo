@@ -4513,7 +4513,6 @@ dependencies = [
  "tracing",
  "validator",
  "velo",
- "velo-backend",
  "velo-discovery",
 ]
 
@@ -4560,7 +4559,6 @@ dependencies = [
  "tracing",
  "uuid",
  "velo",
- "velo-backend",
 ]
 
 [[package]]
@@ -4623,7 +4621,7 @@ dependencies = [
  "tracing",
  "uuid",
  "validator",
- "velo-events 1.0.0",
+ "velo-events 1.0.0 (git+https://github.com/ai-dynamo/dynamo?branch=ryan%2Fvelo-backend)",
 ]
 
 [[package]]
@@ -9452,7 +9450,7 @@ checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 [[package]]
 name = "velo"
 version = "1.0.0"
-source = "git+https://github.com/ai-dynamo/dynamo?branch=ryan%2Fvelo-messenger#4e45a0d031a139bcc27dfaf33164e8d44f86df01"
+source = "git+https://github.com/ai-dynamo/dynamo?branch=ryan%2Fvelo-messenger#93a644c9a4032c201fd5af74ac800c64021585c9"
 dependencies = [
  "anyhow",
  "serde",
@@ -9461,14 +9459,14 @@ dependencies = [
  "tracing",
  "velo-backend",
  "velo-common",
- "velo-events 0.9.0",
+ "velo-events 1.0.0 (git+https://github.com/ai-dynamo/dynamo?branch=ryan%2Fvelo-backend)",
  "velo-messenger",
 ]
 
 [[package]]
 name = "velo-backend"
-version = "0.9.0"
-source = "git+https://github.com/ai-dynamo/dynamo?branch=ryan%2Fvelo-backend#7bb1fccfcb38c4e771216b94388c3e9c01be7574"
+version = "1.0.0"
+source = "git+https://github.com/ai-dynamo/dynamo?branch=ryan%2Fvelo-backend#ccd1706e138fe41b54b85305598ad6b748f377fe"
 dependencies = [
  "anyhow",
  "async-nats",
@@ -9503,8 +9501,8 @@ dependencies = [
 
 [[package]]
 name = "velo-common"
-version = "0.9.0"
-source = "git+https://github.com/ai-dynamo/dynamo?branch=ryan%2Fvelo-backend#7bb1fccfcb38c4e771216b94388c3e9c01be7574"
+version = "1.0.0"
+source = "git+https://github.com/ai-dynamo/dynamo?branch=ryan%2Fvelo-backend#ccd1706e138fe41b54b85305598ad6b748f377fe"
 dependencies = [
  "bytes",
  "rmp-serde",
@@ -9519,7 +9517,7 @@ dependencies = [
 [[package]]
 name = "velo-discovery"
 version = "1.0.0"
-source = "git+https://github.com/ai-dynamo/dynamo?branch=ryan%2Fvelo-messenger#4e45a0d031a139bcc27dfaf33164e8d44f86df01"
+source = "git+https://github.com/ai-dynamo/dynamo?branch=ryan%2Fvelo-messenger#93a644c9a4032c201fd5af74ac800c64021585c9"
 dependencies = [
  "anyhow",
  "fs4",
@@ -9535,8 +9533,7 @@ dependencies = [
 
 [[package]]
 name = "velo-events"
-version = "0.9.0"
-source = "git+https://github.com/ai-dynamo/dynamo?branch=ryan%2Fvelo-events#290e0d6e7ea453e9f4ac471f65d554f64c02fb67"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "dashmap 6.1.0",
@@ -9553,6 +9550,7 @@ dependencies = [
 [[package]]
 name = "velo-events"
 version = "1.0.0"
+source = "git+https://github.com/ai-dynamo/dynamo?branch=ryan%2Fvelo-backend#ccd1706e138fe41b54b85305598ad6b748f377fe"
 dependencies = [
  "anyhow",
  "dashmap 6.1.0",
@@ -9569,7 +9567,7 @@ dependencies = [
 [[package]]
 name = "velo-messenger"
 version = "1.0.0"
-source = "git+https://github.com/ai-dynamo/dynamo?branch=ryan%2Fvelo-messenger#4e45a0d031a139bcc27dfaf33164e8d44f86df01"
+source = "git+https://github.com/ai-dynamo/dynamo?branch=ryan%2Fvelo-messenger#93a644c9a4032c201fd5af74ac800c64021585c9"
 dependencies = [
  "anyhow",
  "bs58",
@@ -9591,7 +9589,7 @@ dependencies = [
  "uuid",
  "velo-backend",
  "velo-common",
- "velo-events 0.9.0",
+ "velo-events 1.0.0 (git+https://github.com/ai-dynamo/dynamo?branch=ryan%2Fvelo-backend)",
 ]
 
 [[package]]
@@ -10588,3 +10586,8 @@ checksum = "410e9ecef634c709e3831c2cfdb8d9c32164fae1c67496d5b68fff728eec37fe"
 dependencies = [
  "zune-core 0.5.1",
 ]
+
+[[patch.unused]]
+name = "velo-events"
+version = "0.9.0"
+source = "git+https://github.com/ai-dynamo/dynamo?branch=ryan%2Fvelo-events#290e0d6e7ea453e9f4ac471f65d554f64c02fb67"

@@ -17,7 +17,6 @@ kvbm-kernels = { workspace = true }
 kvbm-logical = { workspace = true }
 kvbm-physical = { workspace = true }
 velo = { workspace = true }
-velo-backend = { workspace = true }
 
 # Workspace deps
 dynamo-tokens = { workspace = true }

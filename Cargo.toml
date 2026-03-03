@@ -58,8 +58,8 @@ kvbm-physical = { path = "lib/kvbm-physical", version = "1.0.0" }
 
 # velo
 velo = { git = "https://github.com/ai-dynamo/dynamo", branch = "ryan/velo-messenger" }
-velo-backend = { git = "https://github.com/ai-dynamo/dynamo.git", branch = "ryan/velo-backend" }
-velo-events = { path = "lib/velo-events", version = "1.0.0" }
+velo-discovery = { git = "https://github.com/ai-dynamo/dynamo", branch = "ryan/velo-messenger" }
+velo-events = { git = "https://github.com/ai-dynamo/dynamo.git", branch = "ryan/velo-backend" }
 
 # External dependencies
 anyhow = { version = "1" }

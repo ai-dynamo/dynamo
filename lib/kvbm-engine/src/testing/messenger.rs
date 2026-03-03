@@ -8,8 +8,8 @@ use std::net::TcpListener;
 use std::sync::Arc;
 use tokio::time::Duration;
 use velo::Messenger;
-use velo_backend::tcp::TcpTransportBuilder;
-use velo_backend::Transport;
+use velo::backend::tcp::TcpTransportBuilder;
+use velo::backend::Transport;
 
 /// Create a single Messenger instance with TCP transport on a random port.
 ///
