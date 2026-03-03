@@ -18,7 +18,6 @@ Dynamo supports multimodal inference across multiple LLM backends, enabling mode
 | **[Embedding Cache](embedding-cache.md)** | CPU-side LRU cache that skips re-encoding repeated images |
 | **[Encoder Disaggregation](encoder-disaggregation.md)** | Separate vision encoder worker for independent scaling |
 | **[Multimodal KV Routing](multimodal-kv-routing.md)** | MM-aware KV cache routing for optimal worker selection |
-| **[Diffusion (Experimental)](diffusion.md)** | Text-to-image, text-to-video, and image-to-video diffusion model serving |
 
 ## Support Matrix
 

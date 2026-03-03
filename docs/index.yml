@@ -85,14 +85,16 @@ navigation:
       - page: Dynamo Benchmarking
         path: benchmarks/benchmarking.md
       - section: Multimodality
-        path: features/multimodal/README.md
         contents:
-          - page: Embedding Cache
-            path: features/multimodal/embedding-cache.md
-          - page: Encoder Disaggregation
-            path: features/multimodal/encoder-disaggregation.md
-          - page: Multimodal KV Routing
-            path: features/multimodal/multimodal-kv-routing.md
+          - section: Vision Language Models (VLMs)
+            path: features/multimodal/README.md
+            contents:
+              - page: Embedding Cache
+                path: features/multimodal/embedding-cache.md
+              - page: Encoder Disaggregation
+                path: features/multimodal/encoder-disaggregation.md
+              - page: Multimodal KV Routing
+                path: features/multimodal/multimodal-kv-routing.md
           - section: Diffusion (Experimental)
             path: features/multimodal/diffusion.md
             contents:
