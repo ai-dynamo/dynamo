@@ -312,7 +312,7 @@ impl NetworkManager {
         let server_clone = server.clone();
         tokio::spawn(async move {
             if let Err(e) = server_clone.start().await {
-                tracing::error!("HTTP request plane server error: {}", e);
+                tracing::error!("HTTP request plane server error: {e}");
             }
         });
 

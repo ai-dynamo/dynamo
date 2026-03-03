@@ -3,7 +3,7 @@
 
 [package]
 name = "kvbm-engine"
-version = "0.9.0"
+version = "1.0.0"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -11,17 +11,12 @@ repository.workspace = true
 description = "Distributed coordination primitives for KVBM"
 
 [dependencies]
-# Local crate (on this branch)
-kvbm-config = { path = "../kvbm-config" }
-
-# Git deps → ryan/kvbm-physical-testing
-kvbm-common = { git = "https://github.com/ai-dynamo/dynamo", branch = "ryan/kvbm-physical-testing" }
-kvbm-kernels = { git = "https://github.com/ai-dynamo/dynamo", branch = "ryan/kvbm-physical-testing" }
-kvbm-logical = { git = "https://github.com/ai-dynamo/dynamo", branch = "ryan/kvbm-physical-testing" }
-kvbm-physical = { git = "https://github.com/ai-dynamo/dynamo", branch = "ryan/kvbm-physical-testing" }
-
-# Git deps → velo (facade crate re-exports messenger, events, common)
-velo = { git = "https://github.com/ai-dynamo/dynamo", branch = "ryan/velo-messenger" }
+kvbm-common = { workspace = true }
+kvbm-config = { workspace = true }
+kvbm-kernels = { workspace = true }
+kvbm-logical = { workspace = true }
+kvbm-physical = { workspace = true }
+velo = { workspace = true }
 
 # Workspace deps
 dynamo-tokens = { workspace = true }
@@ -61,7 +56,6 @@ tokio-rayon = { version = "2", optional = true }
 chrono = { version = "0.4", optional = true }
 async-nats = { workspace = true, optional = true }
 flume = { version = "0.11", optional = true }
-velo-backend = { workspace = true, optional = true }
 
 [features]
 default = ["s3"]
@@ -70,5 +64,5 @@ collectives = ["dep:nixl-sys", "nccl"]
 nccl = ["dep:cudarc"]
 testing-nccl = ["collectives"]
 nats = ["dep:async-nats", "dep:flume"]
-testing = ["kvbm-logical/testing", "kvbm-physical/testing", "dep:velo-backend"]
+testing = ["kvbm-logical/testing", "kvbm-physical/testing"]
 nvtx = ["kvbm-config/nvtx"]
