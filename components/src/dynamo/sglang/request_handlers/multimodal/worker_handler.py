@@ -256,7 +256,7 @@ class MultimodalWorkerHandler(BaseWorkerHandler):
         self,
         engine: sgl.Engine,
         config: Config,
-        prefill_client: Client = None,
+        prefill_client: Client | None = None,
         shutdown_event: Optional[asyncio.Event] = None,
     ):
         super().__init__(engine, config, None, None, shutdown_event)
@@ -399,6 +399,7 @@ class MultimodalWorkerHandler(BaseWorkerHandler):
     async def _get_bootstrap_from_prefill(
         self, request: SglangMultimodalRequest, sampling_params: dict
     ) -> dict:
+        assert self.prefill_client is not None
         """Get bootstrap info from prefill worker"""
         prefill_stream = await self.prefill_client.generate(
             DisaggSglangMultimodalRequest(
@@ -478,7 +479,7 @@ class MultimodalPrefillWorkerHandler(BaseWorkerHandler):
                 "bootstrap_room": bootstrap_room,
             }
 
-            yield bootstrap_info
+            yield json.dumps(bootstrap_info)
 
             # Process prefill generation
             await self._process_prefill_generation(disagg_request, bootstrap_room)
