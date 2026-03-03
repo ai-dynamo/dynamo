@@ -93,8 +93,15 @@ navigation:
             path: features/multimodal/encoder-disaggregation.md
           - page: Multimodal KV Routing
             path: features/multimodal/multimodal-kv-routing.md
-          - page: Diffusion (Experimental)
+          - section: Diffusion (Experimental)
             path: features/multimodal/diffusion.md
+            contents:
+              - page: vLLM-Omni
+                path: backends/vllm/vllm-omni.md
+              - page: SGLang Diffusion
+                path: backends/sglang/sglang-diffusion.md
+              - page: TRT-LLM Diffusion
+                path: backends/trtllm/trtllm-video-diffusion.md
       - page: Tool Calling
         path: agents/tool-calling.md
       - page: LoRA Adapters
