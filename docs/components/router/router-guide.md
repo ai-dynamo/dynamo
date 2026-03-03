@@ -142,7 +142,7 @@ To evaluate the benefits of KV-aware routing, compare your workload's performanc
 
 For detailed CLI arguments and advanced configuration options, see [Advanced Router Usage](#advanced-router-usage).
 
-## Basic Routing
+### Basic Routing
 
 Dynamo supports several routing strategies when sending requests from one component to another component's endpoint.
 
@@ -220,7 +220,7 @@ Use `--no-router-assume-kv-reuse` in disaggregated setups where the decode worke
 
 Set `--router-queue-threshold` (e.g. `1.5`) to enable backpressure under very high concurrency workloads. When set, the router holds incoming requests in a priority queue while all workers exceed the given fraction of `max_num_batched_tokens`, releasing them as capacity frees up. This defers the routing decision so it is made with the freshest load metrics, rather than dispatching into an already-saturated system. It also enables priority scheduling via `nvext.agent_hints.latency_sensitivity`.
 
-## Prometheus Metrics
+### Prometheus Metrics
 
 The router exposes Prometheus metrics on the frontend's HTTP port (default 8000) at `/metrics`:
 
@@ -364,40 +364,6 @@ If you need to start with a fresh state in JetStream mode, you have two options:
 
 </Note>
 
-## Dynamic Threshold Configuration
-
-Dynamic threshold configuration allows you to adjust worker busy thresholds at runtime without restarting the frontend, enabling real-time tuning of load balancing behavior based on observed system performance.
-
-The busy thresholds can be updated at runtime without restarting the frontend. The frontend exposes HTTP endpoints at `/busy_threshold`:
-
-**Get or set a model's thresholds (POST):**
-```bash
-# Set both thresholds for a model
-curl -X POST http://localhost:8000/busy_threshold \
-  -H "Content-Type: application/json" \
-  -d '{"model": "meta-llama/Llama-2-7b-hf", "active_decode_blocks_threshold": 0.85, "active_prefill_tokens_threshold": 1000}'
-# Response: {"model": "meta-llama/Llama-2-7b-hf", "active_decode_blocks_threshold": 0.85, "active_prefill_tokens_threshold": 1000}
-
-# Set only active decode blocks threshold
-curl -X POST http://localhost:8000/busy_threshold \
-  -H "Content-Type: application/json" \
-  -d '{"model": "meta-llama/Llama-2-7b-hf", "active_decode_blocks_threshold": 0.85}'
-# Response: {"model": "meta-llama/Llama-2-7b-hf", "active_decode_blocks_threshold": 0.85, "active_prefill_tokens_threshold": <current_value>}
-
-# Get current thresholds (omit threshold fields)
-curl -X POST http://localhost:8000/busy_threshold \
-  -H "Content-Type: application/json" \
-  -d '{"model": "meta-llama/Llama-2-7b-hf"}'
-# Response: {"model": "meta-llama/Llama-2-7b-hf", "active_decode_blocks_threshold": 0.85, "active_prefill_tokens_threshold": 1000}
-# Or if not configured: {"model": "...", "active_decode_blocks_threshold": null, "active_prefill_tokens_threshold": null}
-```
-
-**List all configured thresholds (GET):**
-```bash
-curl http://localhost:8000/busy_threshold
-# Response: {"thresholds": [{"model": "meta-llama/Llama-2-7b-hf", "active_decode_blocks_threshold": 0.85, "active_prefill_tokens_threshold": 1000}]}
-```
-
 ## Additional Notes
 
 **State persistence** depends on the event transport mode:
@@ -417,7 +383,7 @@ When `--router-kv-overlap-score-weight` is set to 0, no KVIndexer is created and
 
 The cli args `--router-ttl-secs`, `--router-max-tree-size`, and `--router-prune-target-ratio` control local cache management when the router operates without receiving events from workers. When workers are configured to publish KV events (via `--kv-events-config`), the router relies on worker-side eviction events and these parameters are ignored.
 
-**Queue threshold vs. busy rejection thresholds:** `--router-queue-threshold` and the busy thresholds (`--active-decode-blocks-threshold`, `--active-prefill-tokens-threshold`, `--active-prefill-tokens-threshold-frac`) serve different purposes. The busy thresholds **reject** a worker entirely from the candidate set when it exceeds a utilization limit — no traffic is sent until it drops below the threshold. In contrast, `--router-queue-threshold` does not reject workers; it **defers the entire routing decision** until at least one worker has capacity, so the request is routed with the freshest load metrics. The queue also enables priority scheduling via `nvext.agent_hints.latency_sensitivity`.
+**Queue threshold vs. busy rejection thresholds:** `--router-queue-threshold` and the busy thresholds (`--active-decode-blocks-threshold`, `--active-prefill-tokens-threshold`, `--active-prefill-tokens-threshold-frac`) serve different purposes. The busy thresholds **reject** a worker entirely from the candidate set when it exceeds a utilization limit — no traffic is sent until it drops below the threshold. In contrast, `--router-queue-threshold` does not reject workers; it **defers the entire routing decision** until at least one worker has capacity, so the request is routed with the freshest load metrics. The queue also enables priority scheduling via `nvext.agent_hints.latency_sensitivity`. The busy thresholds can be updated at runtime without restarting the frontend via the `/busy_threshold` HTTP endpoint. For details on busy detection, threshold tuning, and the runtime API, see [Request Rejection](../../fault-tolerance/request-rejection.md).
 
 ## See Also
 
