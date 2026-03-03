@@ -44,7 +44,7 @@ python3 -m dynamo.vllm \
 --data-parallel-start-rank 0 \
 --enable-expert-parallel \
 --enforce-eager \
---kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:$((20080 + i))\",\"enable_kv_cache_events\":true}" &
+--kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:20080\",\"enable_kv_cache_events\":true}" &
 
 echo "All workers starting. (press Ctrl+C to stop)..."
 wait

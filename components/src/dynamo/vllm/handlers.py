@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from typing import Any, AsyncGenerator, Dict, Final
 
 import torch
+from vllm.config import VllmConfig
 from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
@@ -260,6 +261,28 @@ def build_sampling_params_openai(
     return sampling_params
 
 
+def get_dp_range_for_worker(vllm_config: VllmConfig) -> range:
+    """
+    Get the global DP rank range that this worker is responsible for based on vLLM config.
+    Note that the 'vllm_config' is normalized so the load balancing flags are set properly.
+    The return value is in the format of (start_dp_rank, managed_dp_size)."""
+    if vllm_config.parallel_config.data_parallel_external_lb:
+        # external load balancing, each worker is responsible for exactly 1 rank
+        return (vllm_config.parallel_config.data_parallel_rank, 1)
+    elif vllm_config.parallel_config.data_parallel_hybrid_lb:
+        # hybrid load balancing, each worker is responsible for a subset of local ranks
+        return (
+            vllm_config.parallel_config.data_parallel_rank,
+            vllm_config.parallel_config.data_parallel_size_local,
+        )
+    else:
+        # internal load balancing, the worker is responsible for all DP ranks
+        return (
+            vllm_config.parallel_config.data_parallel_rank,
+            vllm_config.parallel_config.data_parallel_size,
+        )
+
+
 class BaseWorkerHandler(ABC):
     """
     Request handler for the generate and clear_kv_blocks endpoints.
@@ -301,6 +324,8 @@ class BaseWorkerHandler(ABC):
         self._lora_load_locks_guard = threading.Lock()
 
         self.use_vllm_tokenizer = use_vllm_tokenizer
+
+        self.dp_range = get_dp_range_for_worker(self.engine_client.vllm_config)
 
         # Initialize InputParamManager for text-in-text-out mode
         tokenizer = None
@@ -467,18 +492,12 @@ class BaseWorkerHandler(ABC):
         """Convert global DP rank to local DP rank based on engine config."""
         if dp_rank is None:
             return None
-        engine_dp_rank = (
-            self.engine_client.vllm_config.parallel_config.data_parallel_rank
-        )
-        engine_local_dp_size = (
-            self.engine_client.vllm_config.parallel_config.data_parallel_size_local
-        )
-        if dp_rank < engine_dp_rank or dp_rank >= engine_dp_rank + engine_local_dp_size:
+        if dp_rank < self.dp_range[0] or dp_rank >= self.dp_range[0] + self.dp_range[1]:
             logger.error(
-                f"Received DP rank {dp_rank} is out of range [{engine_dp_rank} - {engine_dp_rank + engine_local_dp_size}), fallback to vLLM internal DP selection"
+                f"Received DP rank {dp_rank} is out of range [{self.dp_range[0]} - {self.dp_range[0] + self.dp_range[1]}), fallback to vLLM internal DP selection"
             )
             return None
-        local_dp_rank = (dp_rank - engine_dp_rank) % engine_local_dp_size
+        local_dp_rank = (dp_rank - self.dp_range[0]) % self.dp_range[1]
         logger.debug(
             f"Converted global DP rank {dp_rank} to local DP rank {local_dp_rank}"
         )
