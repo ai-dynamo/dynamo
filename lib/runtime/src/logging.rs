@@ -361,7 +361,7 @@ pub fn make_handle_payload_span(
     let trace_parent = TraceParent::from_headers(headers);
 
     if let (Some(trace_id), Some(parent_id)) = (trace_id.as_ref(), parent_span_id.as_ref()) {
-        let span = tracing::info_span!(
+        let span = tracing::debug_span!(
             "handle_payload",
             trace_id = trace_id.as_str(),
             parent_id = parent_id.as_str(),
@@ -379,7 +379,7 @@ pub fn make_handle_payload_span(
         }
         span
     } else {
-        tracing::info_span!(
+        tracing::debug_span!(
             "handle_payload",
             x_request_id = trace_parent.x_request_id,
             x_dynamo_request_id = trace_parent.x_dynamo_request_id,
@@ -406,7 +406,7 @@ pub fn make_handle_payload_span_from_tcp_headers(
     let tracestate = headers.get("tracestate").cloned();
 
     if let (Some(trace_id), Some(parent_id)) = (trace_id.as_ref(), parent_span_id.as_ref()) {
-        let span = tracing::info_span!(
+        let span = tracing::debug_span!(
             "handle_payload",
             trace_id = trace_id.as_str(),
             parent_id = parent_id.as_str(),
@@ -424,7 +424,7 @@ pub fn make_handle_payload_span_from_tcp_headers(
         }
         span
     } else {
-        tracing::info_span!(
+        tracing::debug_span!(
             "handle_payload",
             x_request_id = x_request_id,
             x_dynamo_request_id = x_dynamo_request_id,
@@ -588,7 +588,7 @@ pub fn make_client_request_span(
             extract_otel_context_from_nats_headers(&headers);
 
         let span = if let Some(inst_id) = instance_id {
-            tracing::info_span!(
+            tracing::debug_span!(
                 "client_request",
                 operation = operation,
                 request_id = request_id,
@@ -600,7 +600,7 @@ pub fn make_client_request_span(
                 // tracestate = ctx.tracestate.as_deref(),
             )
         } else {
-            tracing::info_span!(
+            tracing::debug_span!(
                 "client_request",
                 operation = operation,
                 request_id = request_id,
@@ -618,14 +618,14 @@ pub fn make_client_request_span(
 
         span
     } else if let Some(inst_id) = instance_id {
-        tracing::info_span!(
+        tracing::debug_span!(
             "client_request",
             operation = operation,
             request_id = request_id,
             instance_id = inst_id,
         )
     } else {
-        tracing::info_span!(
+        tracing::debug_span!(
             "client_request",
             operation = operation,
             request_id = request_id,
@@ -900,7 +900,6 @@ fn setup_logging() {
 #[cfg(not(feature = "tokio-console"))]
 fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
     let fmt_filter_layer = filters(load_config());
-    let trace_filter_layer = filters(load_config());
     let otel_filter_layer = filters(load_config());
 
     if jsonl_logging_enabled() {
@@ -964,7 +963,7 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
                     .with_tracer(tracer)
                     .with_filter(otel_filter_layer),
             )
-            .with(DistributedTraceIdLayer.with_filter(trace_filter_layer))
+            .with(DistributedTraceIdLayer)
             .with(l)
             .init();
 
