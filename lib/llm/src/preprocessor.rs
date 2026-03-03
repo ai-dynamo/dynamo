@@ -18,11 +18,11 @@ pub mod tools;
 use anyhow::Context;
 use anyhow::{Result, bail};
 
-use crate::http::service::error::HttpError;
 use dynamo_async_openai::types::{
     ChatCompletionRequestMessage, ChatCompletionRequestUserMessageContent,
     ChatCompletionRequestUserMessageContentPart, ChatCompletionToolChoiceOption, EncodingFormat,
 };
+use dynamo_runtime::error::{DynamoError, ErrorType};
 use futures::Stream;
 use futures::stream::{self, StreamExt};
 use prompt::OAIPromptFormatter;
@@ -538,22 +538,29 @@ impl OpenAIPreprocessor {
 
         // Validate prompt token count against model's context length
         if let Some(count) = token_count {
-            let max_len = self.context_length as usize;
-            if max_len > 0 && count >= max_len {
-                return Err(HttpError {
-                    code: 400,
-                    message: format!(
-                        "This model's maximum context length is {} tokens. \
-                         However, your messages resulted in {} tokens. \
-                         Please reduce the length of the messages.",
-                        max_len, count,
-                    ),
-                }
-                .into());
-            }
+            Self::validate_token_count(count, self.context_length)?;
         }
 
         Ok(annotations)
+    }
+
+    /// Validate that the prompt token count does not consume the model's entire context length.
+    /// Returns an error if the prompt leaves no room for output tokens.
+    fn validate_token_count(token_count: usize, context_length: u32) -> Result<()> {
+        let max_len = context_length as usize;
+        if max_len > 0 && token_count >= max_len {
+            return Err(DynamoError::builder()
+                .error_type(ErrorType::InvalidArgument)
+                .message(format!(
+                    "This model's maximum context length is {} tokens. \
+                     However, your messages resulted in {} tokens. \
+                     Please reduce the length of the messages.",
+                    max_len, token_count,
+                ))
+                .build()
+                .into());
+        }
+        Ok(())
     }
 
     fn encode_with_timing(

@@ -624,10 +624,10 @@ async fn test_media_url_passthrough(#[case] media_chunks: &[(&str, usize)]) {
 }
 
 mod context_length_validation {
-    use dynamo_llm::http::service::error::HttpError;
     use dynamo_llm::model_card::ModelDeploymentCard;
     use dynamo_llm::preprocessor::OpenAIPreprocessor;
     use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
+    use dynamo_runtime::error::{DynamoError, ErrorType};
 
     // mock-llama has a chat_template in tokenizer_config.json (required for preprocessing)
     const MODEL_PATH: &str = "tests/data/sample-models/mock-llama-3.1-8b-instruct";
@@ -664,23 +664,23 @@ mod context_length_validation {
 
         let result = preprocessor.preprocess_request(&request, None).await;
 
-        // Should fail with an HttpError containing code 400
+        // Should fail with a DynamoError with InvalidArgument type
         let err = result.expect_err("should reject prompt exceeding context_length");
-        let http_err = err
-            .downcast_ref::<HttpError>()
-            .expect("error should be HttpError");
-        assert_eq!(http_err.code, 400);
+        let dynamo_err = err
+            .downcast_ref::<DynamoError>()
+            .expect("error should be DynamoError");
+        assert_eq!(dynamo_err.error_type(), ErrorType::InvalidArgument);
         assert!(
-            http_err
-                .message
+            dynamo_err
+                .message()
                 .contains("maximum context length is 5 tokens"),
             "error message should state the context limit, got: {}",
-            http_err.message
+            dynamo_err.message()
         );
         assert!(
-            http_err.message.contains("Please reduce the length"),
+            dynamo_err.message().contains("Please reduce the length"),
             "error message should tell user what to do, got: {}",
-            http_err.message
+            dynamo_err.message()
         );
     }
 
@@ -728,10 +728,10 @@ mod context_length_validation {
 
         // Should reject: prompt fills entire context, no room for output
         let err = result.expect_err("should reject prompt that fills entire context_length");
-        let http_err = err
-            .downcast_ref::<HttpError>()
-            .expect("error should be HttpError");
-        assert_eq!(http_err.code, 400);
+        let dynamo_err = err
+            .downcast_ref::<DynamoError>()
+            .expect("error should be DynamoError");
+        assert_eq!(dynamo_err.error_type(), ErrorType::InvalidArgument);
     }
 
     #[tokio::test]
