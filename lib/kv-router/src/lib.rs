@@ -16,6 +16,7 @@ pub mod protocols;
 pub mod radix_tree;
 pub mod scheduling;
 pub mod sequences;
+pub mod zmq_wire;
 
 // Backward-compat re-exports: preserve old module paths for external consumers
 pub use scheduling::config;

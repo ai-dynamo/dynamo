@@ -4,6 +4,10 @@
 title: Prometheus
 ---
 
+For general TensorRT-LLM features and configuration, see the [Reference Guide](trtllm-reference-guide.md).
+
+---
+
 ## Overview
 
 When running TensorRT-LLM through Dynamo, TensorRT-LLM's Prometheus metrics are automatically passed through and exposed on Dynamo's `/metrics` endpoint (default port 8081). This allows you to access both TensorRT-LLM engine metrics (prefixed with `trtllm_`) and Dynamo runtime metrics (prefixed with `dynamo_*`) from a single worker backend endpoint.
@@ -52,7 +56,7 @@ curl -H 'Content-Type: application/json' \
 -d '{
   "model": "<model_name>",
   "max_completion_tokens": 100,
-  "messages": [{"role": "user", "content": "Hello"}]
+  "messages": [{"role": "user", "content": "Explain why Roger Federer is considered one of the greatest tennis players of all time"}]
 }' \
 http://localhost:8000/v1/chat/completions
 

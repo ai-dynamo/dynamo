@@ -123,7 +123,6 @@ class LLMServerManager:
                 "DYN_KVBM_METRICS_PORT": str(self.metrics_port),
                 # Enable vLLM batch invariant for deterministic batching
                 "VLLM_BATCH_INVARIANT": "1",
-                "VLLM_ATTENTION_BACKEND": "FLASH_ATTN",
             }
         )
 
@@ -154,6 +153,8 @@ class LLMServerManager:
             "--kv-transfer-config",
             '{"kv_connector":"DynamoConnector","kv_role":"kv_both", "kv_connector_module_path": "kvbm.vllm_integration.connector"}',
             os.environ.get("KVBM_MODEL_ID", "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"),
+            "--attention-config.backend",
+            "FLASH_ATTN",
             "--max-model-len",
             "8000",  # required to fit on L4 GPU when using 8b model
         ]

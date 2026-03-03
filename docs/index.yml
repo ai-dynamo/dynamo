@@ -39,22 +39,20 @@ navigation:
         contents:
           - page: Detailed Installation Guide
             path: kubernetes/installation-guide.md
+          - page: Dynamo Operator
+            path: kubernetes/dynamo-operator.md
+          - page: Service Discovery
+            path: kubernetes/service-discovery.md
+          - page: Webhooks
+            path: kubernetes/webhooks.md
           - page: Minikube Setup
             path: kubernetes/deployment/minikube.md
           - page: Managing Models with DynamoModel
             path: kubernetes/deployment/dynamomodel-guide.md
-          - page: Model Caching
-            path: kubernetes/model-caching.md
           - page: Autoscaling
             path: kubernetes/autoscaling.md
           - page: Inference Gateway (GAIE)
             path: kubernetes/inference-gateway.md
-          - page: Multinode Deployments
-            path: kubernetes/deployment/multinode-deployment.md
-          - page: Grove
-            path: kubernetes/grove.md
-          - page: Rolling Updates
-            path: kubernetes/rolling-update.md
           - section: Checkpointing
             path: kubernetes/chrek/README.md
             contents:
@@ -68,14 +66,12 @@ navigation:
             path: kubernetes/observability/logging.md
           - page: Operator Metrics
             path: kubernetes/observability/operator-metrics.md
-      - section: Reference
+      - section: Multinode
         contents:
-          - page: Dynamo Operator
-            path: kubernetes/dynamo-operator.md
-          - page: Service Discovery
-            path: kubernetes/service-discovery.md
-          - page: Webhooks
-            path: kubernetes/webhooks.md
+          - page: Multinode Deployments
+            path: kubernetes/deployment/multinode-deployment.md
+          - page: Grove
+            path: kubernetes/grove.md
 
   # ==================== User Guides ====================
   - section: User Guides
@@ -99,8 +95,6 @@ navigation:
             path: features/multimodal/multimodal-sglang.md
       - page: Tool Calling
         path: agents/tool-calling.md
-      - page: SGLang for Agentic Workloads
-        path: backends/sglang/agents.md
       - page: LoRA Adapters
         path: features/lora/README.md
       - section: Observability (Local)
@@ -121,14 +115,14 @@ navigation:
       - section: Fault Tolerance
         path: fault-tolerance/README.md
         contents:
-          - page: Request Cancellation
-            path: fault-tolerance/request-cancellation.md
           - page: Request Migration
             path: fault-tolerance/request-migration.md
-          - page: Request Rejection
-            path: fault-tolerance/request-rejection.md
+          - page: Request Cancellation
+            path: fault-tolerance/request-cancellation.md
           - page: Graceful Shutdown
             path: fault-tolerance/graceful-shutdown.md
+          - page: Request Rejection
+            path: fault-tolerance/request-rejection.md
           - page: Testing
             path: fault-tolerance/testing.md
       - page: Writing Python Workers in Dynamo
@@ -150,36 +144,23 @@ navigation:
             path: backends/sglang/sglang-diffusion.md
           - page: Observability
             path: backends/sglang/sglang-observability.md
+          - page: Agentic Workloads
+            path: backends/sglang/agents.md
       - section: TensorRT-LLM
         path: backends/trtllm/README.md
         contents:
-          - page: Multinode Examples
-            path: backends/trtllm/multinode/multinode-examples.md
-          - page: Llama4 + Eagle
-            path: backends/trtllm/llama4-plus-eagle.md
-          - page: KV Cache Transfer
-            path: backends/trtllm/kv-cache-transfer.md
-          - page: Gemma3 Sliding Window
-            path: backends/trtllm/gemma3-sliding-window-attention.md
-          - page: GPT-OSS
-            path: backends/trtllm/gpt-oss.md
-          - page: Prometheus
-            path: backends/trtllm/prometheus.md
-      - section: vLLM
+          - page: Reference Guide
+            path: backends/trtllm/trtllm-reference-guide.md
+          - page: Examples
+            path: backends/trtllm/trtllm-examples.md
+          - page: Prometheus Metrics
+            path: backends/trtllm/trtllm-prometheus.md
+          - page: Video Diffusion (Experimental)
+            path: backends/trtllm/trtllm-video-diffusion.md
+          - page: Known Issues and Mitigations
+            path: backends/trtllm/trtllm-known-issues.md
+      - page: vLLM
         path: backends/vllm/README.md
-        contents:
-          - page: DeepSeek-R1
-            path: backends/vllm/deepseek-r1.md
-          - page: GPT-OSS
-            path: backends/vllm/gpt-oss.md
-          - page: Multi-Node
-            path: backends/vllm/multi-node.md
-          - page: Prometheus
-            path: backends/vllm/prometheus.md
-          - page: Prompt Embeddings
-            path: backends/vllm/prompt-embeddings.md
-          - page: vLLM-Omni
-            path: backends/vllm/vllm-omni.md
 
   # ==================== Components ====================
   - section: Components
@@ -187,12 +168,8 @@ navigation:
       - section: Frontend
         path: components/frontend/README.md
         contents:
-          - page: Configuration Reference
-            path: components/frontend/configuration.md
           - page: Frontend Guide
             path: components/frontend/frontend-guide.md
-          - page: NVIDIA Request Extensions (nvext)
-            path: components/frontend/nvext.md
       - section: Router
         path: components/router/README.md
         contents:
@@ -200,10 +177,6 @@ navigation:
             path: components/router/router-guide.md
           - page: Router Examples
             path: components/router/router-examples.md
-          - page: Agent Hints
-            path: components/router/agent-hints.md
-          - page: Standalone KV Indexer
-            path: components/router/standalone-indexer.md
       - section: Planner
         path: components/planner/README.md
         contents:
@@ -319,11 +292,44 @@ navigation:
         path: kubernetes/deployment/create-deployment.md
       - page: FluxCD
         path: kubernetes/fluxcd.md
+      - page: Model Caching with Fluid
+        path: kubernetes/model-caching-with-fluid.md
       # -- Reference --
       - page: Glossary
         path: reference/glossary.md
       - page: Tuning Disaggregated Performance
         path: performance/tuning.md
+      # -- Backend detail pages --
+      - section: vLLM Details
+        contents:
+          - page: Reference Guide
+            path: backends/vllm/vllm-reference-guide.md
+          - page: Examples
+            path: backends/vllm/vllm-examples.md
+          - page: KV Cache Offloading
+            path: backends/vllm/vllm-kv-offloading.md
+          - page: Observability
+            path: backends/vllm/vllm-observability.md
+          - page: vLLM-Omni
+            path: backends/vllm/vllm-omni.md
+      - section: TensorRT-LLM Details
+        contents:
+          - page: Building a Custom Container
+            path: backends/trtllm/trtllm-building-custom-container.md
+          - page: KV Cache Transfer
+            path: backends/trtllm/trtllm-kv-cache-transfer.md
+          - page: Logits Processing
+            path: backends/trtllm/trtllm-logits-processing.md
+          - page: DP Rank Routing
+            path: backends/trtllm/trtllm-dp-rank-routing.md
+          - page: Multinode Examples
+            path: backends/trtllm/multinode/trtllm-multinode-examples.md
+          - page: Llama4 + Eagle
+            path: backends/trtllm/trtllm-llama4-plus-eagle.md
+          - page: Gemma3 Sliding Window
+            path: backends/trtllm/trtllm-gemma3-sliding-window-attention.md
+          - page: GPT-OSS
+            path: backends/trtllm/trtllm-gpt-oss.md
       # -- Features (hidden sub-pages) --
       - section: Speculative Decoding
         path: features/speculative-decoding/README.md

@@ -50,7 +50,7 @@ curl -H 'Content-Type: application/json' \
 -d '{
   "model": "<model_name>",
   "max_completion_tokens": 100,
-  "messages": [{"role": "user", "content": "Hello"}]
+  "messages": [{"role": "user", "content": "Explain why Roger Federer is considered one of the greatest tennis players of all time"}]
 }' \
 http://localhost:8000/v1/chat/completions
 
@@ -259,7 +259,7 @@ Send a request with `x-request-id` for easy lookup:
 curl -H 'Content-Type: application/json' \
   -H 'x-request-id: my-trace-001' \
   -d '{"model": "Qwen/Qwen3-0.6B", "max_completion_tokens": 50,
-       "messages": [{"role": "user", "content": "Hello"}]}' \
+       "messages": [{"role": "user", "content": "Explain why Roger Federer is considered one of the greatest tennis players of all time"}]}' \
   http://localhost:8000/v1/chat/completions
 ```
 

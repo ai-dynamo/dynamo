@@ -31,7 +31,6 @@ pub use dynamo_kv_router::selector;
 
 pub mod cache_control;
 pub mod config;
-pub mod indexer_standalone;
 mod jetstream;
 pub mod metrics;
 pub mod prefill_router;
@@ -46,7 +45,6 @@ pub mod worker_query;
 
 pub use cache_control::{CacheControlClient, spawn_pin_prefix};
 pub use config::{KvRouterConfig, RouterConfigOverride};
-pub use indexer_standalone::start_kv_block_indexer;
 pub use prefill_router::PrefillRouter;
 pub use push_router::{DirectRoutingRouter, KvPushRouter};
 
@@ -493,6 +491,11 @@ impl KvRouter {
 
     pub async fn free(&self, request_id: &str) -> Result<(), SequenceError> {
         self.scheduler.free(request_id).await
+    }
+
+    /// Number of requests currently parked in the scheduler queue.
+    pub fn pending_count(&self) -> usize {
+        self.scheduler.pending_count()
     }
 
     /// Get the worker type for this router ("prefill" or "decode").

@@ -63,7 +63,7 @@ impl GracefulShutdownTracker {
             let notified = self.shutdown_complete.notified();
 
             let count = self.active_endpoints.load(Ordering::SeqCst);
-            tracing::trace!("Checking completion status, active endpoints: {}", count);
+            tracing::trace!("Checking completion status, active endpoints: {count}");
 
             if count == 0 {
                 tracing::debug!("All endpoints completed");
@@ -71,7 +71,7 @@ impl GracefulShutdownTracker {
             }
 
             // Only wait if there are still active endpoints
-            tracing::debug!("Waiting for {} endpoints to complete", count);
+            tracing::debug!("Waiting for {count} endpoints to complete");
             notified.await;
             tracing::trace!("Received notification, rechecking...");
         }
