@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import dataclasses
+import importlib
 import inspect
 import logging
 import random
@@ -330,58 +332,66 @@ class BaseWorkerHandler(BaseGenerativeHandler):
             "new_version": req.new_version,
         }
 
-    async def flush_cache(self, body: dict) -> dict:
-        """Flush the radix cache. Drains working queue before memory offload."""
-        try:
-            ret = await self.engine.tokenizer_manager.flush_cache()
-            return {"status": "ok" if ret.success else "error"}
-        except Exception as e:
-            logging.error(f"Failed to flush cache: {e}")
-            return {"status": "error", "message": str(e)}
+    def _resolve_arg(self, arg: Any) -> Any:
+        """Resolve a single argument from the generic call body.
 
-    async def pause_generation(self, body: dict) -> dict:
-        """Pause generation (e.g. before weight update)."""
-        from sglang.srt.managers.io_struct import PauseGenerationReqInput
+        If ``arg`` is a dict with exactly one key starting with ``"io_struct."``,
+        treat it as a typed constructor: import the class from
+        ``sglang.srt.managers.io_struct`` and construct it with the nested kwargs.
+        Otherwise return the value as-is.
+        """
+        if isinstance(arg, dict) and len(arg) == 1:
+            key = next(iter(arg))
+            if isinstance(key, str) and key.startswith("io_struct."):
+                class_name = key[len("io_struct.") :]
+                module = importlib.import_module("sglang.srt.managers.io_struct")
+                cls = getattr(module, class_name)
+                return cls(**arg[key])
+        return arg
 
-        try:
-            req = PauseGenerationReqInput(**body)
-            await self.engine.tokenizer_manager.pause_generation(req)
-            return {"message": "Generation paused successfully.", "status": "ok"}
-        except Exception as e:
-            logging.error(f"Failed to pause generation: {e}")
-            return {"status": "error", "message": str(e)}
+    def _normalize_result(self, result: Any) -> dict:
+        """Convert a tokenizer_manager method return value to a JSON-safe dict."""
+        if result is None:
+            return {"status": "ok"}
+        if isinstance(result, tuple):
+            if len(result) == 2:
+                return {"success": result[0], "message": result[1]}
+            if len(result) == 3:
+                return {
+                    "success": result[0],
+                    "message": result[1],
+                    "num_paused_requests": result[2],
+                }
+        if dataclasses.is_dataclass(result) and not isinstance(result, type):
+            return dataclasses.asdict(result)
+        if isinstance(result, dict):
+            return result
+        return {"result": result}
 
-    async def continue_generation(self, body: dict) -> dict:
-        """Continue generation (e.g. after weight update)."""
-        from sglang.srt.managers.io_struct import ContinueGenerationReqInput
+    async def call_tokenizer_manager(self, body: dict) -> dict:
+        """Generic passthrough to any tokenizer_manager method.
 
-        try:
-            req = ContinueGenerationReqInput(**body)
-            await self.engine.tokenizer_manager.continue_generation(req)
-            return {"message": "Generation continued successfully.", "status": "ok"}
-        except Exception as e:
-            logging.error(f"Failed to continue generation: {e}")
-            return {"status": "error", "message": str(e)}
+        Body format::
 
-    async def init_weights_update_group(self, body: dict) -> dict:
-        """Initialize NCCL weight update group for distributed weight sync."""
-        from sglang.srt.managers.io_struct import InitWeightsUpdateGroupReqInput
+            {
+                "method": "method_name",
+                "args": [arg1, arg2, ...],
+                "kwargs": {"key": value, ...}
+            }
 
-        req = InitWeightsUpdateGroupReqInput(**body)
-        success, message = (
-            await self.engine.tokenizer_manager.init_weights_update_group(req, None)
-        )
-        return {"success": success, "message": message}
+        Each element in args/kwargs is either a plain value or a typed
+        constructor ``{"io_struct.ClassName": {kwargs}}``.
+        """
+        method_name = body["method"]
+        raw_args = body.get("args", [])
+        raw_kwargs = body.get("kwargs", {})
 
-    async def destroy_weights_update_group(self, body: dict) -> dict:
-        """Destroy NCCL weight update group."""
-        from sglang.srt.managers.io_struct import DestroyWeightsUpdateGroupReqInput
+        args = [self._resolve_arg(a) for a in raw_args]
+        kwargs = {k: self._resolve_arg(v) for k, v in raw_kwargs.items()}
 
-        req = DestroyWeightsUpdateGroupReqInput(**body)
-        success, message = (
-            await self.engine.tokenizer_manager.destroy_weights_update_group(req, None)
-        )
-        return {"success": success, "message": message}
+        method = getattr(self.engine.tokenizer_manager, method_name)
+        result = await method(*args, **kwargs)
+        return self._normalize_result(result)
 
     async def get_weight_version(self, body: dict) -> dict:
         """Get the current weight version."""
@@ -460,20 +470,10 @@ class BaseWorkerHandler(BaseGenerativeHandler):
         runtime.register_engine_route(
             "update_weight_version", self.update_weight_version
         )
-        runtime.register_engine_route("flush_cache", self.flush_cache)
-        runtime.register_engine_route("pause_generation", self.pause_generation)
         runtime.register_engine_route(
-            "continue_generation", self.continue_generation
+            "call_tokenizer_manager", self.call_tokenizer_manager
         )
-        runtime.register_engine_route(
-            "init_weights_update_group", self.init_weights_update_group
-        )
-        runtime.register_engine_route(
-            "destroy_weights_update_group", self.destroy_weights_update_group
-        )
-        runtime.register_engine_route(
-            "get_weight_version", self.get_weight_version
-        )
+        runtime.register_engine_route("get_weight_version", self.get_weight_version)
 
     @abstractmethod
     async def generate(self, request: Dict[str, Any], context: Context):
