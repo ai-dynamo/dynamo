@@ -68,21 +68,21 @@ def check_kvbm_metrics(phase_name: str, metrics_port: int) -> dict[str, int]:
 
     Returns:
         Dictionary containing KVBM metrics with keys:
-        - kvbm_offload_blocks_d2h: Blocks offloaded from GPU to CPU
-        - kvbm_onboard_blocks_h2d: Blocks onboarded from CPU to GPU
+        - dynamo_kvbm_offload_blocks_d2h: Blocks offloaded from GPU to CPU
+        - dynamo_kvbm_onboard_blocks_h2d: Blocks onboarded from CPU to GPU
     """
     print(f"\n--- Checking KVBM metrics after {phase_name} ---")
     metrics = fetch_kvbm_metrics(port=metrics_port)
 
-    offload_d2h = metrics.get("kvbm_offload_blocks_d2h", 0)
-    onboard_h2d = metrics.get("kvbm_onboard_blocks_h2d", 0)
+    offload_d2h = metrics.get("dynamo_kvbm_offload_blocks_d2h", 0)
+    onboard_h2d = metrics.get("dynamo_kvbm_onboard_blocks_h2d", 0)
 
-    print(f"  kvbm_offload_blocks_d2h: {offload_d2h}")
-    print(f"  kvbm_onboard_blocks_h2d: {onboard_h2d}")
+    print(f"  dynamo_kvbm_offload_blocks_d2h: {offload_d2h}")
+    print(f"  dynamo_kvbm_onboard_blocks_h2d: {onboard_h2d}")
 
     return {
-        "kvbm_offload_blocks_d2h": offload_d2h,
-        "kvbm_onboard_blocks_h2d": onboard_h2d,
+        "dynamo_kvbm_offload_blocks_d2h": offload_d2h,
+        "dynamo_kvbm_onboard_blocks_h2d": onboard_h2d,
     }
 
 
@@ -139,12 +139,12 @@ def test_offload_and_onboard(tester, llm_server_kvbm):  # noqa: F811
 
     metrics = check_kvbm_metrics("Phase 1", llm_server_kvbm.metrics_port)
     assert (
-        metrics["kvbm_offload_blocks_d2h"] > 0
+        metrics["dynamo_kvbm_offload_blocks_d2h"] > 0
     ), "Phase 1: No blocks offloaded. KVBM may not be triggering offloads."
     assert (
-        metrics["kvbm_onboard_blocks_h2d"] == 0
-    ), f"Phase 1: Expected 0 onboarded blocks, got {metrics['kvbm_onboard_blocks_h2d']}"
-    print(f"✓ Phase 1: {metrics['kvbm_offload_blocks_d2h']} blocks offloaded")
+        metrics["dynamo_kvbm_onboard_blocks_h2d"] == 0
+    ), f"Phase 1: Expected 0 onboarded blocks, got {metrics['dynamo_kvbm_onboard_blocks_h2d']}"
+    print(f"✓ Phase 1: {metrics['dynamo_kvbm_offload_blocks_d2h']} blocks offloaded")
 
     # Phase 2: Reset GPU cache
     print_phase(2, "Clean up GPU cache")
@@ -159,9 +159,11 @@ def test_offload_and_onboard(tester, llm_server_kvbm):  # noqa: F811
 
     metrics = check_kvbm_metrics("Phase 3", llm_server_kvbm.metrics_port)
     assert (
-        metrics["kvbm_onboard_blocks_h2d"] > 0
+        metrics["dynamo_kvbm_onboard_blocks_h2d"] > 0
     ), "Phase 3: No blocks onboarded. Expected CPU→GPU transfer after cache reset."
-    print(f"✓ Phase 3: {metrics['kvbm_onboard_blocks_h2d']} blocks onboarded from CPU")
+    print(
+        f"✓ Phase 3: {metrics['dynamo_kvbm_onboard_blocks_h2d']} blocks onboarded from CPU"
+    )
 
     # Verify determinism
     print_test_header("DETERMINISM VERIFICATION")
@@ -208,14 +210,14 @@ def test_gpu_cache_eviction(tester, llm_server_kvbm):  # noqa: F811
     tester.make_request(prompt_1, max_tokens=MAX_TOKENS)
 
     metrics_p1 = check_kvbm_metrics("Phase 1", llm_server_kvbm.metrics_port)
-    assert metrics_p1["kvbm_offload_blocks_d2h"] >= MIN_OFFLOAD_BLOCKS, (
+    assert metrics_p1["dynamo_kvbm_offload_blocks_d2h"] >= MIN_OFFLOAD_BLOCKS, (
         f"Phase 1: Expected >= {MIN_OFFLOAD_BLOCKS} blocks offloaded, "
-        f"got {metrics_p1['kvbm_offload_blocks_d2h']}"
+        f"got {metrics_p1['dynamo_kvbm_offload_blocks_d2h']}"
     )
     assert (
-        metrics_p1["kvbm_onboard_blocks_h2d"] == 0
-    ), f"Phase 1: Expected 0 onboarded, got {metrics_p1['kvbm_onboard_blocks_h2d']}"
-    print(f"✓ Phase 1: {metrics_p1['kvbm_offload_blocks_d2h']} blocks offloaded")
+        metrics_p1["dynamo_kvbm_onboard_blocks_h2d"] == 0
+    ), f"Phase 1: Expected 0 onboarded, got {metrics_p1['dynamo_kvbm_onboard_blocks_h2d']}"
+    print(f"✓ Phase 1: {metrics_p1['dynamo_kvbm_offload_blocks_d2h']} blocks offloaded")
 
     # Phase 2: Second request may evict first from GPU
     print_phase(2, "Send second request (may evict first from GPU)")
@@ -225,13 +227,15 @@ def test_gpu_cache_eviction(tester, llm_server_kvbm):  # noqa: F811
 
     metrics_p2 = check_kvbm_metrics("Phase 2", llm_server_kvbm.metrics_port)
     assert (
-        metrics_p2["kvbm_offload_blocks_d2h"] > metrics_p1["kvbm_offload_blocks_d2h"]
+        metrics_p2["dynamo_kvbm_offload_blocks_d2h"]
+        > metrics_p1["dynamo_kvbm_offload_blocks_d2h"]
     ), (
-        f"Phase 2: Expected additional offloads, got {metrics_p2['kvbm_offload_blocks_d2h']} "
-        f"(was {metrics_p1['kvbm_offload_blocks_d2h']})"
+        f"Phase 2: Expected additional offloads, got {metrics_p2['dynamo_kvbm_offload_blocks_d2h']} "
+        f"(was {metrics_p1['dynamo_kvbm_offload_blocks_d2h']})"
     )
     additional_offloads = (
-        metrics_p2["kvbm_offload_blocks_d2h"] - metrics_p1["kvbm_offload_blocks_d2h"]
+        metrics_p2["dynamo_kvbm_offload_blocks_d2h"]
+        - metrics_p1["dynamo_kvbm_offload_blocks_d2h"]
     )
     print(f"✓ Phase 2: {additional_offloads} additional blocks offloaded")
 
@@ -243,9 +247,9 @@ def test_gpu_cache_eviction(tester, llm_server_kvbm):  # noqa: F811
 
     metrics_p3 = check_kvbm_metrics("Phase 3", llm_server_kvbm.metrics_port)
     assert (
-        metrics_p3["kvbm_onboard_blocks_h2d"] > 0
+        metrics_p3["dynamo_kvbm_onboard_blocks_h2d"] > 0
     ), "Phase 3: No blocks onboarded. Expected CPU→GPU retrieval after eviction."
-    print(f"✓ Phase 3: {metrics_p3['kvbm_onboard_blocks_h2d']} blocks onboarded")
+    print(f"✓ Phase 3: {metrics_p3['dynamo_kvbm_onboard_blocks_h2d']} blocks onboarded")
     print("✓ Eviction mechanics verified: offload → eviction → onboard")
 
     print("\n=== TEST PASSED ===")

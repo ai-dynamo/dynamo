@@ -295,14 +295,14 @@ Access Grafana at http://localhost:3000 (default login: `dynamo`/`dynamo`) and l
 
 | Metric | Description |
 |--------|-------------|
-| `kvbm_matched_tokens` | Number of matched tokens |
-| `kvbm_offload_blocks_d2h` | Offload blocks from device to host |
-| `kvbm_offload_blocks_h2d` | Offload blocks from host to disk |
-| `kvbm_offload_blocks_d2d` | Offload blocks from device to disk (bypassing host) |
-| `kvbm_onboard_blocks_d2d` | Onboard blocks from disk to device |
-| `kvbm_onboard_blocks_h2d` | Onboard blocks from host to device |
-| `kvbm_host_cache_hit_rate` | Host cache hit rate (0.0-1.0) |
-| `kvbm_disk_cache_hit_rate` | Disk cache hit rate (0.0-1.0) |
+| `dynamo_kvbm_matched_tokens` | Number of matched tokens |
+| `dynamo_kvbm_offload_blocks_d2h` | Offload blocks from device to host |
+| `dynamo_kvbm_offload_blocks_h2d` | Offload blocks from host to disk |
+| `dynamo_kvbm_offload_blocks_d2d` | Offload blocks from device to disk (bypassing host) |
+| `dynamo_kvbm_onboard_blocks_d2d` | Onboard blocks from disk to device |
+| `dynamo_kvbm_onboard_blocks_h2d` | Onboard blocks from host to device |
+| `dynamo_kvbm_host_cache_hit_rate` | Host cache hit rate (0.0-1.0) |
+| `dynamo_kvbm_disk_cache_hit_rate` | Disk cache hit rate (0.0-1.0) |
 
 ## Benchmarking KVBM
 

@@ -791,7 +791,9 @@ class TestDeterminism:
 
             try:
                 current_metrics = fetch_kvbm_metrics(port=metrics_port)
-                current_offload = current_metrics.get("kvbm_offload_blocks_d2h", 0)
+                current_offload = current_metrics.get(
+                    "dynamo_kvbm_offload_blocks_d2h", 0
+                )
 
                 if current_offload > initial_offload:
                     offload_delta = current_offload - initial_offload
@@ -953,8 +955,8 @@ class TestDeterminism:
         print(f"{'='*70}")
         try:
             final_metrics = fetch_kvbm_metrics(port=metrics_port)
-            final_offload = final_metrics.get("kvbm_offload_blocks_d2h", 0)
-            final_onboard = final_metrics.get("kvbm_onboard_blocks_h2d", 0)
+            final_offload = final_metrics.get("dynamo_kvbm_offload_blocks_d2h", 0)
+            final_onboard = final_metrics.get("dynamo_kvbm_onboard_blocks_h2d", 0)
 
             offload_delta = final_offload - initial_offload
             print(f"Initial offload: {initial_offload} blocks")
@@ -1035,7 +1037,9 @@ class TestDeterminism:
             print("\nChecking initial KVBM metrics...")
             try:
                 initial_metrics = fetch_kvbm_metrics(port=llm_server.metrics_port)
-                initial_offload = initial_metrics.get("kvbm_offload_blocks_d2h", 0)
+                initial_offload = initial_metrics.get(
+                    "dynamo_kvbm_offload_blocks_d2h", 0
+                )
                 print(f"Initial offload: {initial_offload} blocks")
             except Exception as e:
                 print(f"Could not fetch initial metrics: {e}")
@@ -1285,11 +1289,11 @@ def parse_kvbm_metrics(metrics_text: str) -> dict:
         if line.startswith("#") or not line.strip():
             continue
         for metric_name in [
-            "kvbm_offload_blocks_d2h",
-            "kvbm_onboard_blocks_h2d",
-            "kvbm_offload_blocks_h2d",
-            "kvbm_onboard_blocks_d2d",
-            "kvbm_matched_tokens",
+            "dynamo_kvbm_offload_blocks_d2h",
+            "dynamo_kvbm_onboard_blocks_h2d",
+            "dynamo_kvbm_offload_blocks_h2d",
+            "dynamo_kvbm_onboard_blocks_d2d",
+            "dynamo_kvbm_matched_tokens",
         ]:
             if line.startswith(metric_name + " "):
                 parts = line.strip().split()

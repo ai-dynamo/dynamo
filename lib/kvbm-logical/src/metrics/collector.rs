@@ -16,62 +16,62 @@ use super::pool_metrics::BlockPoolMetrics;
 /// Metric definitions: (name, help, type).
 const COUNTER_DEFS: &[(&str, &str)] = &[
     (
-        "kvbm_allocations_total",
+        "dynamo_kvbm_allocations_total",
         "Total blocks allocated from pools",
     ),
     (
-        "kvbm_allocations_from_reset_total",
+        "dynamo_kvbm_allocations_from_reset_total",
         "Total blocks allocated from the reset pool",
     ),
     (
-        "kvbm_evictions_total",
+        "dynamo_kvbm_evictions_total",
         "Total blocks evicted from inactive pool",
     ),
     (
-        "kvbm_registrations_total",
+        "dynamo_kvbm_registrations_total",
         "Total blocks registered (CompleteBlock -> ImmutableBlock)",
     ),
     (
-        "kvbm_duplicate_blocks_total",
+        "dynamo_kvbm_duplicate_blocks_total",
         "Total duplicate blocks created (Allow policy)",
     ),
     (
-        "kvbm_registration_dedup_total",
+        "dynamo_kvbm_registration_dedup_total",
         "Total block registrations deduplicated (Reject policy)",
     ),
     (
-        "kvbm_stagings_total",
+        "dynamo_kvbm_stagings_total",
         "Total MutableBlock -> CompleteBlock transitions",
     ),
     (
-        "kvbm_match_hashes_requested_total",
+        "dynamo_kvbm_match_hashes_requested_total",
         "Total hashes requested in match_blocks calls",
     ),
     (
-        "kvbm_match_blocks_returned_total",
+        "dynamo_kvbm_match_blocks_returned_total",
         "Total blocks returned from match_blocks calls",
     ),
     (
-        "kvbm_scan_hashes_requested_total",
+        "dynamo_kvbm_scan_hashes_requested_total",
         "Total hashes requested in scan_matches calls",
     ),
     (
-        "kvbm_scan_blocks_returned_total",
+        "dynamo_kvbm_scan_blocks_returned_total",
         "Total blocks returned from scan_matches calls",
     ),
 ];
 
 const GAUGE_DEFS: &[(&str, &str)] = &[
     (
-        "kvbm_inflight_mutable",
+        "dynamo_kvbm_inflight_mutable",
         "Current MutableBlocks held outside pool",
     ),
     (
-        "kvbm_inflight_immutable",
+        "dynamo_kvbm_inflight_immutable",
         "Current ImmutableBlocks held outside pool",
     ),
-    ("kvbm_reset_pool_size", "Current reset pool size"),
-    ("kvbm_inactive_pool_size", "Current inactive pool size"),
+    ("dynamo_kvbm_reset_pool_size", "Current reset pool size"),
+    ("dynamo_kvbm_inactive_pool_size", "Current inactive pool size"),
 ];
 
 /// Aggregates metrics from multiple `BlockPoolMetrics` sources and exports
@@ -285,7 +285,7 @@ mod tests {
         // Find allocations counter
         let alloc_family = families
             .iter()
-            .find(|f| f.get_name() == "kvbm_allocations_total")
+            .find(|f| f.get_name() == "dynamo_kvbm_allocations_total")
             .expect("should have allocations family");
         assert_eq!(alloc_family.get_field_type(), MetricType::COUNTER);
         let m = &alloc_family.get_metric()[0];
@@ -296,7 +296,7 @@ mod tests {
         // Find reset_pool_size gauge
         let reset_family = families
             .iter()
-            .find(|f| f.get_name() == "kvbm_reset_pool_size")
+            .find(|f| f.get_name() == "dynamo_kvbm_reset_pool_size")
             .expect("should have reset pool size family");
         assert_eq!(reset_family.get_field_type(), MetricType::GAUGE);
         assert_eq!(reset_family.get_metric()[0].get_gauge().value(), 42.0);
@@ -316,7 +316,7 @@ mod tests {
         let families = agg.collect();
         let alloc_family = families
             .iter()
-            .find(|f| f.get_name() == "kvbm_allocations_total")
+            .find(|f| f.get_name() == "dynamo_kvbm_allocations_total")
             .unwrap();
         let labels = alloc_family.get_metric()[0].get_label();
         assert_eq!(labels.len(), 3); // pool + 2 external
@@ -344,7 +344,7 @@ mod tests {
         // Families should be merged by name
         let alloc_family = families
             .iter()
-            .find(|f| f.get_name() == "kvbm_allocations_total")
+            .find(|f| f.get_name() == "dynamo_kvbm_allocations_total")
             .expect("should have allocations family");
         assert_eq!(alloc_family.get_metric().len(), 2);
 
@@ -373,7 +373,7 @@ mod tests {
 
         let alloc_family = gathered
             .iter()
-            .find(|f| f.get_name() == "kvbm_allocations_total")
+            .find(|f| f.get_name() == "dynamo_kvbm_allocations_total")
             .expect("should find allocations in gathered metrics");
         assert_eq!(alloc_family.get_metric()[0].get_counter().value(), 42.0);
     }

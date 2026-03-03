@@ -120,7 +120,7 @@
       "targets": [
         {
           "editorMode": "builder",
-          "expr": "kvbm_host_cache_hit_rate",
+          "expr": "dynamo_kvbm_host_cache_hit_rate",
           "interval": "",
           "legendFormat": "__auto",
           "range": true,
@@ -215,7 +215,7 @@
       "targets": [
         {
           "editorMode": "builder",
-          "expr": "kvbm_disk_cache_hit_rate",
+          "expr": "dynamo_kvbm_disk_cache_hit_rate",
           "legendFormat": "__auto",
           "range": true,
           "refId": "A"
@@ -310,7 +310,7 @@
         {
           "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "kvbm_matched_tokens",
+          "expr": "dynamo_kvbm_matched_tokens",
           "fullMetaSearch": false,
           "includeNullMetadata": true,
           "legendFormat": "__auto",
@@ -421,7 +421,7 @@
         {
           "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "kvbm_offload_blocks_d2h",
+          "expr": "dynamo_kvbm_offload_blocks_d2h",
           "fullMetaSearch": false,
           "includeNullMetadata": true,
           "legendFormat": "__auto",
@@ -519,7 +519,7 @@
         {
           "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "kvbm_offload_blocks_h2d",
+          "expr": "dynamo_kvbm_offload_blocks_h2d",
           "fullMetaSearch": false,
           "includeNullMetadata": true,
           "legendFormat": "__auto",
@@ -617,7 +617,7 @@
         {
           "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "kvbm_offload_blocks_d2d",
+          "expr": "dynamo_kvbm_offload_blocks_d2d",
           "fullMetaSearch": false,
           "includeNullMetadata": true,
           "legendFormat": "__auto",
@@ -728,7 +728,7 @@
         {
           "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "kvbm_onboard_blocks_h2d",
+          "expr": "dynamo_kvbm_onboard_blocks_h2d",
           "fullMetaSearch": false,
           "includeNullMetadata": true,
           "legendFormat": "__auto",
@@ -826,7 +826,7 @@
         {
           "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "kvbm_onboard_blocks_d2d",
+          "expr": "dynamo_kvbm_onboard_blocks_d2d",
           "fullMetaSearch": false,
           "includeNullMetadata": true,
           "legendFormat": "__auto",

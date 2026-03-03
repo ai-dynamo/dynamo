@@ -265,7 +265,7 @@ impl Drop for KvbmMetrics {
     }
 }
 
-/// A raw, standalone Prometheus metrics registry implementation using the fixed prefix: `kvbm_`
+/// A raw, standalone Prometheus metrics registry implementation using the fixed prefix: `dynamo_kvbm_`
 #[derive(Debug, Clone)]
 pub struct KvbmMetricsRegistry {
     registry: Arc<Registry>,
@@ -276,7 +276,7 @@ impl KvbmMetricsRegistry {
     pub fn new() -> Self {
         Self {
             registry: Arc::new(Registry::new()),
-            prefix: "kvbm".to_string(),
+            prefix: "dynamo_kvbm".to_string(),
         }
     }
 

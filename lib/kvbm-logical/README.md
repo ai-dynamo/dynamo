@@ -95,23 +95,23 @@ All metrics carry a `pool` label identifying the storage tier.
 
 | Name | Description |
 |------|-------------|
-| `kvbm_allocations_total` | Total blocks allocated from pools |
-| `kvbm_allocations_from_reset_total` | Total blocks allocated from the reset pool |
-| `kvbm_evictions_total` | Total blocks evicted from inactive pool |
-| `kvbm_registrations_total` | Total blocks registered (CompleteBlock → ImmutableBlock) |
-| `kvbm_duplicate_blocks_total` | Total duplicate blocks created (Allow policy) |
-| `kvbm_registration_dedup_total` | Total block registrations deduplicated (Reject policy) |
-| `kvbm_stagings_total` | Total MutableBlock → CompleteBlock transitions |
-| `kvbm_match_hashes_requested_total` | Total hashes requested in match_blocks calls |
-| `kvbm_match_blocks_returned_total` | Total blocks returned from match_blocks calls |
-| `kvbm_scan_hashes_requested_total` | Total hashes requested in scan_matches calls |
-| `kvbm_scan_blocks_returned_total` | Total blocks returned from scan_matches calls |
+| `dynamo_kvbm_allocations_total` | Total blocks allocated from pools |
+| `dynamo_kvbm_allocations_from_reset_total` | Total blocks allocated from the reset pool |
+| `dynamo_kvbm_evictions_total` | Total blocks evicted from inactive pool |
+| `dynamo_kvbm_registrations_total` | Total blocks registered (CompleteBlock → ImmutableBlock) |
+| `dynamo_kvbm_duplicate_blocks_total` | Total duplicate blocks created (Allow policy) |
+| `dynamo_kvbm_registration_dedup_total` | Total block registrations deduplicated (Reject policy) |
+| `dynamo_kvbm_stagings_total` | Total MutableBlock → CompleteBlock transitions |
+| `dynamo_kvbm_match_hashes_requested_total` | Total hashes requested in match_blocks calls |
+| `dynamo_kvbm_match_blocks_returned_total` | Total blocks returned from match_blocks calls |
+| `dynamo_kvbm_scan_hashes_requested_total` | Total hashes requested in scan_matches calls |
+| `dynamo_kvbm_scan_blocks_returned_total` | Total blocks returned from scan_matches calls |
 
 ### Gauges
 
 | Name | Description |
 |------|-------------|
-| `kvbm_inflight_mutable` | Current MutableBlocks held outside pool |
-| `kvbm_inflight_immutable` | Current ImmutableBlocks held outside pool |
-| `kvbm_reset_pool_size` | Current reset pool size |
-| `kvbm_inactive_pool_size` | Current inactive pool size |
+| `dynamo_kvbm_inflight_mutable` | Current MutableBlocks held outside pool |
+| `dynamo_kvbm_inflight_immutable` | Current ImmutableBlocks held outside pool |
+| `dynamo_kvbm_reset_pool_size` | Current reset pool size |
+| `dynamo_kvbm_inactive_pool_size` | Current inactive pool size |

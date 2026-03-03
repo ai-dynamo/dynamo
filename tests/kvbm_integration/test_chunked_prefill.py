@@ -69,21 +69,21 @@ def check_kvbm_metrics(phase_name: str, metrics_port: int) -> dict[str, int]:
 
     Returns:
         Dictionary containing KVBM metrics with keys:
-        - kvbm_offload_blocks_d2h: Blocks offloaded from GPU to CPU
-        - kvbm_onboard_blocks_h2d: Blocks onboarded from CPU to GPU
+        - dynamo_kvbm_offload_blocks_d2h: Blocks offloaded from GPU to CPU
+        - dynamo_kvbm_onboard_blocks_h2d: Blocks onboarded from CPU to GPU
     """
     print(f"\n--- Checking KVBM metrics after {phase_name} ---")
     metrics = fetch_kvbm_metrics(port=metrics_port)
 
-    offload_d2h = metrics.get("kvbm_offload_blocks_d2h", 0)
-    onboard_h2d = metrics.get("kvbm_onboard_blocks_h2d", 0)
+    offload_d2h = metrics.get("dynamo_kvbm_offload_blocks_d2h", 0)
+    onboard_h2d = metrics.get("dynamo_kvbm_onboard_blocks_h2d", 0)
 
-    print(f"  kvbm_offload_blocks_d2h: {offload_d2h}")
-    print(f"  kvbm_onboard_blocks_h2d: {onboard_h2d}")
+    print(f"  dynamo_kvbm_offload_blocks_d2h: {offload_d2h}")
+    print(f"  dynamo_kvbm_onboard_blocks_h2d: {onboard_h2d}")
 
     return {
-        "kvbm_offload_blocks_d2h": offload_d2h,
-        "kvbm_onboard_blocks_h2d": onboard_h2d,
+        "dynamo_kvbm_offload_blocks_d2h": offload_d2h,
+        "dynamo_kvbm_onboard_blocks_h2d": onboard_h2d,
     }
 
 
@@ -153,7 +153,7 @@ def test_chunked_prefill_offload(tester, llm_server_kvbm):  # noqa: F811
     metrics_p1 = check_kvbm_metrics("Phase 1", llm_server_kvbm.metrics_port)
 
     # Verify offload occurred
-    offloaded_blocks = metrics_p1["kvbm_offload_blocks_d2h"]
+    offloaded_blocks = metrics_p1["dynamo_kvbm_offload_blocks_d2h"]
     assert offloaded_blocks > 0, (
         "Phase 1: No blocks offloaded. KVBM may not be triggering offloads "
         "during chunked prefill."
@@ -191,7 +191,7 @@ def test_chunked_prefill_offload(tester, llm_server_kvbm):  # noqa: F811
     metrics_p3 = check_kvbm_metrics("Phase 3", llm_server_kvbm.metrics_port)
 
     # Verify onboarding occurred
-    onboarded_blocks = metrics_p3["kvbm_onboard_blocks_h2d"]
+    onboarded_blocks = metrics_p3["dynamo_kvbm_onboard_blocks_h2d"]
     assert (
         onboarded_blocks > 0
     ), "Phase 3: No blocks onboarded. Expected CPU→GPU transfer after cache eviction."
