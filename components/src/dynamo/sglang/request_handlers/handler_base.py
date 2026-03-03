@@ -389,7 +389,14 @@ class BaseWorkerHandler(BaseGenerativeHandler):
         args = [self._resolve_arg(a) for a in raw_args]
         kwargs = {k: self._resolve_arg(v) for k, v in raw_kwargs.items()}
 
-        method = getattr(self.engine.tokenizer_manager, method_name)
+        tm = self.engine.tokenizer_manager
+        # Ensure the handle_loop task is running so communicator responses
+        # are received.  Several tokenizer_manager methods call this
+        # internally, but not all of them (e.g. flush_cache does not).
+        if hasattr(tm, "auto_create_handle_loop"):
+            tm.auto_create_handle_loop()
+
+        method = getattr(tm, method_name)
         result = await method(*args, **kwargs)
         return self._normalize_result(result)
 
