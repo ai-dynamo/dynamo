@@ -172,7 +172,6 @@ done
 echo "=== Starting vLLM MM Router Worker ==="
 env "${COMMON_ENV[@]}" \
     "PYTHONPATH=${PYTHONPATH_VALUE}" \
-    "DYN_LOG=debug" \
     "DYN_SYSTEM_PORT=${MM_ROUTER_SYSTEM_PORT}" \
     "MM_ROUTER_REWRITE_IMAGE_URLS=${MM_ROUTER_REWRITE_IMAGE_URLS}" \
     'DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS=["generate"]' \
