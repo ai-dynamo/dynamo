@@ -64,6 +64,7 @@ impl KvScheduler {
         .await
         .map_err(|e| KvSchedulerError::InitFailed(e.to_string()))?;
 
+        // Spawn background task to sync slots when the watch value changes.
         match discovery_mode {
             WorkerDiscoveryMode::Dynamo => {
                 let slots_monitor = slots.clone();
@@ -102,7 +103,7 @@ impl KvScheduler {
             }
             WorkerDiscoveryMode::External => {
                 tracing::info!(
-                    "GAIE: External worker discovery mode: worker set will be provided per-request by EPP"
+                    "External worker discovery mode: worker set will be provided per-request"
                 );
 
                 let mut monitor_rx = workers_with_configs.clone();
@@ -120,7 +121,7 @@ impl KvScheduler {
                         tracing::debug!(
                             ?worker_ids,
                             count = worker_ids.len(),
-                            "GAIE: External mode: discovery-registered workers updated (used for RuntimeConfig lookup)"
+                            "External mode: discovery-registered workers updated (used for RuntimeConfig lookup)"
                         );
                     }
                 });
