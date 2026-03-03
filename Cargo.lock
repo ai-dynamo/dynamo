@@ -1105,7 +1105,7 @@ version = "3.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "faf9468729b8cbcea668e36183cb69d317348c2e08e994829fb56ebfdfbaac34"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
@@ -5816,7 +5816,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "be769465445e8c1474e9c5dac2018218498557af32d9ed057325ec9a41ae81bf"
 dependencies = [
  "heck 0.5.0",
- "itertools 0.14.0",
+ "itertools 0.11.0",
  "log",
  "multimap",
  "once_cell",
@@ -5836,7 +5836,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "343d3bd7056eda839b03204e68deff7d1b13aba7af2b2fd16890697274262ee7"
 dependencies = [
  "heck 0.5.0",
- "itertools 0.14.0",
+ "itertools 0.11.0",
  "log",
  "multimap",
  "petgraph 0.8.3",
@@ -5857,7 +5857,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a56d757972c98b346a9b766e3f02746cde6dd1cd1d1d563472929fdd74bec4d"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.11.0",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -5870,7 +5870,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "27c6023962132f4b30eb4c172c91ce92d933da334c59c23cddee82358ddafb0b"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.11.0",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -8732,8 +8732,8 @@ dependencies = [
 
 [[package]]
 name = "velo-backend"
-version = "0.9.0"
-source = "git+https://github.com/ai-dynamo/dynamo.git?branch=ryan%2Fvelo-backend#7bb1fccfcb38c4e771216b94388c3e9c01be7574"
+version = "1.0.0"
+source = "git+https://github.com/ai-dynamo/dynamo.git?branch=ryan%2Fvelo-backend#ccd1706e138fe41b54b85305598ad6b748f377fe"
 dependencies = [
  "anyhow",
  "async-nats",
@@ -8769,8 +8769,8 @@ dependencies = [
 
 [[package]]
 name = "velo-common"
-version = "0.9.0"
-source = "git+https://github.com/ai-dynamo/dynamo.git?branch=ryan%2Fvelo-backend#7bb1fccfcb38c4e771216b94388c3e9c01be7574"
+version = "1.0.0"
+source = "git+https://github.com/ai-dynamo/dynamo.git?branch=ryan%2Fvelo-backend#ccd1706e138fe41b54b85305598ad6b748f377fe"
 dependencies = [
  "bytes",
  "rmp-serde",
@@ -8802,8 +8802,8 @@ dependencies = [
 
 [[package]]
 name = "velo-events"
-version = "0.9.0"
-source = "git+https://github.com/ai-dynamo/dynamo.git?branch=ryan%2Fvelo-events#290e0d6e7ea453e9f4ac471f65d554f64c02fb67"
+version = "1.0.0"
+source = "git+https://github.com/ai-dynamo/dynamo.git?branch=ryan%2Fvelo-backend#ccd1706e138fe41b54b85305598ad6b748f377fe"
 dependencies = [
  "anyhow",
  "dashmap 6.1.0",
@@ -9129,7 +9129,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
