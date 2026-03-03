@@ -20,8 +20,8 @@ package controller_common
 import (
 	"context"
 	"strings"
-	"time"
 
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/client-go/discovery"
@@ -36,153 +36,22 @@ type ExcludedNamespacesInterface interface {
 	Contains(namespace string) bool
 }
 
-type GroveConfig struct {
-	// Enabled is automatically determined by checking if Grove CRDs are installed in the cluster
-	Enabled bool
-	// TerminationDelay configures the termination delay for Grove PodCliqueSets
-	TerminationDelay time.Duration
-}
-
-type LWSConfig struct {
-	// Enabled is automatically determined by checking if LWS CRDs are installed in the cluster
-	Enabled bool
-}
-
-type KaiSchedulerConfig struct {
-	// Enabled is automatically determined by checking if Kai-scheduler CRDs are installed in the cluster
-	Enabled bool
-}
-
-type MpiRunConfig struct {
-	// SecretName is the name of the secret containing the SSH key for MPI Run
-	SecretName string
-}
-
-type Config struct {
-	// Enable resources filtering, only the resources belonging to the given namespace will be handled.
-	RestrictedNamespace string
-	Grove               GroveConfig
-	LWS                 LWSConfig
-	KaiScheduler        KaiSchedulerConfig
-	EtcdAddress         string
-	NatsAddress         string
-	IngressConfig       IngressConfig
-	// ModelExpressURL is the URL of the Model Express server to inject into all pods
-	ModelExpressURL string
-	// PrometheusEndpoint is the URL of the Prometheus endpoint to use for metrics
-	PrometheusEndpoint string
-	MpiRun             MpiRunConfig
-	// RBAC configuration for cross-namespace resource management
-	RBAC RBACConfig
-	// ExcludedNamespaces is a thread-safe set of namespaces to exclude (cluster-wide mode only)
-	ExcludedNamespaces ExcludedNamespacesInterface
-
-	// DiscoveryBackend is the discovery backend to use. Default is "kubernetes" for Kubernetes API service discovery. Set to "etcd" to use ETCD for discovery.
-	DiscoveryBackend string
-
-	// GPUDiscoveryEnabled indicates whether Helm provisioned node read access for the namespace-scoped operator.
-	// Only relevant for namespace-scoped operators (RestrictedNamespace != "").
-	GPUDiscoveryEnabled bool
-
-	// Checkpoint configuration for checkpoint/restore functionality
-	Checkpoint CheckpointConfig
-}
-
-// RBACConfig holds configuration for RBAC management
-type RBACConfig struct {
-	// PlannerClusterRoleName is the name of the ClusterRole for planner (cluster-wide mode only)
-	PlannerClusterRoleName string
-	// DGDRProfilingClusterRoleName is the name of the ClusterRole for DGDR profiling jobs (cluster-wide mode only)
-	DGDRProfilingClusterRoleName string
-	// EPPClusterRoleName is the name of the ClusterRole for EPP (cluster-wide mode only)
-	EPPClusterRoleName string
-}
-
-// CheckpointConfig holds configuration for checkpoint/restore functionality
-type CheckpointConfig struct {
-	// Enabled indicates if checkpoint functionality is enabled
-	Enabled bool
-	// Storage holds storage backend configuration
-	Storage CheckpointStorageConfig
-	// ReadyForCheckpointFilePath is the file path used to signal model readiness for checkpoint jobs
-	ReadyForCheckpointFilePath string
-}
-
-// Checkpoint storage type constants
-const (
-	CheckpointStorageTypePVC = "pvc"
-	CheckpointStorageTypeS3  = "s3"
-	CheckpointStorageTypeOCI = "oci"
-)
-
-// CheckpointStorageConfig holds storage backend configuration for checkpoints
-type CheckpointStorageConfig struct {
-	// Type is the storage backend type: pvc, s3, or oci
-	Type string
-	// PVC configuration (used when Type=pvc)
-	PVC CheckpointPVCConfig
-	// S3 configuration (used when Type=s3)
-	S3 CheckpointS3Config
-	// OCI configuration (used when Type=oci)
-	OCI CheckpointOCIConfig
-}
-
-// CheckpointPVCConfig holds PVC storage configuration
-type CheckpointPVCConfig struct {
-	// PVCName is the name of the PVC
-	PVCName string
-	// BasePath is the base directory within the PVC
-	BasePath string
-}
-
-// CheckpointS3Config holds S3 storage configuration
-type CheckpointS3Config struct {
-	// URI is the S3 URI (s3://[endpoint/]bucket/prefix)
-	URI string
-	// CredentialsSecretRef is the name of the credentials secret
-	// (should contain AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, and optionally AWS_REGION)
-	CredentialsSecretRef string
-}
-
-// CheckpointOCIConfig holds OCI registry storage configuration
-type CheckpointOCIConfig struct {
-	// URI is the OCI URI (oci://registry/repository)
-	URI string
-	// CredentialsSecretRef is the name of the docker config secret
-	CredentialsSecretRef string
-}
-
-type IngressConfig struct {
-	VirtualServiceGateway      string
-	IngressControllerClassName string
-	IngressControllerTLSSecret string
-	IngressHostSuffix          string
-}
-
-func (i *IngressConfig) UseVirtualService() bool {
-	return i.VirtualServiceGateway != ""
-}
-
 // DetectGroveAvailability checks if Grove is available by checking if the Grove API group is registered
-// This approach uses the discovery client which is simpler and more reliable
 func DetectGroveAvailability(ctx context.Context, mgr ctrl.Manager) bool {
 	return detectAPIGroupAvailability(ctx, mgr, "grove.io")
 }
 
 // DetectLWSAvailability checks if LWS is available by checking if the LWS API group is registered
-// This approach uses the discovery client which is simpler and more reliable
 func DetectLWSAvailability(ctx context.Context, mgr ctrl.Manager) bool {
 	return detectAPIGroupAvailability(ctx, mgr, "leaderworkerset.x-k8s.io")
 }
 
-// detectVolcanoAvailability checks if Volcano is available by checking if the Volcano API group is registered
-// This approach uses the discovery client which is simpler and more reliable
+// DetectVolcanoAvailability checks if Volcano is available by checking if the Volcano API group is registered
 func DetectVolcanoAvailability(ctx context.Context, mgr ctrl.Manager) bool {
 	return detectAPIGroupAvailability(ctx, mgr, "scheduling.volcano.sh")
 }
 
 // DetectKaiSchedulerAvailability checks if Kai-scheduler is available by checking if the scheduling.run.ai API group is registered
-// This approach uses the discovery client which is simpler and more reliable
 func DetectKaiSchedulerAvailability(ctx context.Context, mgr ctrl.Manager) bool {
 	return detectAPIGroupAvailability(ctx, mgr, "scheduling.run.ai")
 }
@@ -226,20 +95,23 @@ func detectAPIGroupAvailability(ctx context.Context, mgr ctrl.Manager, groupName
 	return false
 }
 
-// For DGD, pass in the meta annotations
-// For DCD, pass in the spec annotations
-func (c Config) IsK8sDiscoveryEnabled(annotations map[string]string) bool {
-	return c.GetDiscoveryBackend(annotations) == "kubernetes"
-}
-
-func (c Config) GetDiscoveryBackend(annotations map[string]string) string {
+// GetDiscoveryBackend returns the discovery backend for the given annotations,
+// falling back to the configured default.
+// For DGD, pass in the meta annotations; for DCD, pass in the spec annotations.
+func GetDiscoveryBackend(discoveryBackend configv1alpha1.DiscoveryBackend, annotations map[string]string) configv1alpha1.DiscoveryBackend {
 	if dgdDiscoveryBackend, exists := annotations[commonconsts.KubeAnnotationDynamoDiscoveryBackend]; exists {
-		return dgdDiscoveryBackend
+		return configv1alpha1.DiscoveryBackend(dgdDiscoveryBackend)
 	}
-	return c.DiscoveryBackend
+	return discoveryBackend
 }
 
-func EphemeralDeploymentEventFilter(config Config) predicate.Predicate {
+// IsK8sDiscoveryEnabled returns whether Kubernetes discovery is enabled for the given annotations.
+func IsK8sDiscoveryEnabled(discoveryBackend configv1alpha1.DiscoveryBackend, annotations map[string]string) bool {
+	return GetDiscoveryBackend(discoveryBackend, annotations) == configv1alpha1.DiscoveryBackendKubernetes
+}
+
+// EphemeralDeploymentEventFilter returns a predicate that filters events based on namespace configuration.
+func EphemeralDeploymentEventFilter(config *configv1alpha1.OperatorConfiguration, runtimeConfig *RuntimeConfig) predicate.Predicate {
 	return predicate.NewPredicateFuncs(func(o client.Object) bool {
 		l := log.FromContext(context.Background())
 		objMeta, err := meta.Accessor(o)
@@ -247,13 +119,13 @@ func EphemeralDeploymentEventFilter(config Config) predicate.Predicate {
 			l.Error(err, "Error extracting object metadata")
 			return false
 		}
-		if config.RestrictedNamespace != "" {
+		if config.Namespace.Restricted != "" {
 			// in case of a restricted namespace, we only want to process the events that are in the restricted namespace
-			return objMeta.GetNamespace() == config.RestrictedNamespace
+			return objMeta.GetNamespace() == config.Namespace.Restricted
 		}
 
 		// Cluster-wide mode: check if namespace is excluded
-		if config.ExcludedNamespaces != nil && config.ExcludedNamespaces.Contains(objMeta.GetNamespace()) {
+		if runtimeConfig.ExcludedNamespaces != nil && runtimeConfig.ExcludedNamespaces.Contains(objMeta.GetNamespace()) {
 			l.V(1).Info("Skipping resource - namespace is excluded",
 				"namespace", objMeta.GetNamespace(),
 				"resource", objMeta.GetName(),

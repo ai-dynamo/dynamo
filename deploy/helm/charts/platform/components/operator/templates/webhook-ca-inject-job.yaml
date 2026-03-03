@@ -247,12 +247,19 @@ spec:
             ]"
 
           echo "📝 Patching MutatingWebhookConfiguration..."
-          # Patch mutating webhook (DynamoGraphDeployment defaulting)
+          # Patch all mutating webhooks:
+          #   0: mdynamographdeployment.kb.io (DGD defaulting)
+          #   1: mdynamographdeploymentrequestv1beta1.kb.io (DGDR defaulting)
           kubectl patch mutatingwebhookconfiguration ${MUTATING_WEBHOOK_NAME} \
             --type='json' -p="[
               {
                 \"op\": \"add\",
                 \"path\": \"/webhooks/0/clientConfig/caBundle\",
+                \"value\": \"${CA_BUNDLE}\"
+              },
+              {
+                \"op\": \"add\",
+                \"path\": \"/webhooks/1/clientConfig/caBundle\",
                 \"value\": \"${CA_BUNDLE}\"
               }
             ]"

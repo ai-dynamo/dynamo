@@ -6,12 +6,13 @@
 # Installation order:
 # 1. LMCache (installed first so vLLM's dependencies take precedence)
 # 2. vLLM
-# 3. DeepGEMM
-# 4. EP kernels
+# 3. vLLM-Omni
+# 4. DeepGEMM
+# 5. EP kernels
 
 set -euo pipefail
 
-VLLM_VER="0.15.1"
+VLLM_VER="0.16.0"
 VLLM_REF="v${VLLM_VER}"
 
 # Basic Configurations
@@ -23,8 +24,9 @@ INSTALLATION_DIR=/tmp
 TORCH_CUDA_ARCH_LIST="9.0;10.0" # For EP Kernels -- TODO: check if we need to add 12.0+PTX
 DEEPGEMM_REF=""
 CUDA_VERSION="12.9"
-FLASHINF_REF="v0.6.1"
-LMCACHE_REF="0.3.13"
+FLASHINF_REF="v0.6.3"
+LMCACHE_REF="0.3.14"
+VLLM_OMNI_REF="v0.16.0rc1"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -56,6 +58,10 @@ while [[ $# -gt 0 ]]; do
             LMCACHE_REF="$2"
             shift 2
             ;;
+        --vllm-omni-ref)
+            VLLM_OMNI_REF="$2"
+            shift 2
+            ;;
         --torch-cuda-arch-list)
             TORCH_CUDA_ARCH_LIST="$2"
             shift 2
@@ -65,7 +71,7 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         -h|--help)
-            echo "Usage: $0 [--vllm-ref REF] [--max-jobs NUM] [--arch ARCH] [--deepgemm-ref REF] [--flashinf-ref REF] [--lmcache-ref REF] [--torch-cuda-arch-list LIST] [--cuda-version VERSION]"
+            echo "Usage: $0 [--vllm-ref REF] [--max-jobs NUM] [--arch ARCH] [--deepgemm-ref REF] [--flashinf-ref REF] [--lmcache-ref REF] [--vllm-omni-ref REF] [--torch-cuda-arch-list LIST] [--cuda-version VERSION]"
             echo "Options:"
             echo "  --vllm-ref REF      vLLM release version (default: ${VLLM_REF})"
             echo "  --max-jobs NUM      Maximum parallel jobs (default: ${MAX_JOBS})"
@@ -74,6 +80,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --deepgemm-ref REF  DeepGEMM git ref (default: ${DEEPGEMM_REF})"
             echo "  --flashinf-ref REF  FlashInfer version (default: ${FLASHINF_REF})"
             echo "  --lmcache-ref REF   LMCache version (default: ${LMCACHE_REF})"
+            echo "  --vllm-omni-ref REF vLLM-Omni version (default: ${VLLM_OMNI_REF})"
             echo "  --torch-cuda-arch-list LIST  CUDA architectures (default: ${TORCH_CUDA_ARCH_LIST})"
             echo "  --cuda-version VERSION  CUDA version (default: ${CUDA_VERSION})"
             exit 0
@@ -139,26 +146,69 @@ echo "✓ vLLM repository cloned"
 
 
 echo "\n=== Installing vLLM & FlashInfer ==="
+
+# Build GitHub release wheel URL per CUDA version
+# CUDA 12 wheels have no +cu suffix and use manylinux_2_31
+# CUDA 13 wheels have +cu130 suffix and use manylinux_2_35
 if [[ "$CUDA_VERSION_MAJOR" == "12" ]]; then
-    echo "Installing vLLM $VLLM_REF from PyPI..."
-    uv pip install vllm[flashinfer,runai]==$VLLM_REF --torch-backend=${TORCH_BACKEND}
-    uv pip install flashinfer-cubin==$FLASHINF_REF
-    uv pip install flashinfer-jit-cache==$FLASHINF_REF --extra-index-url https://flashinfer.ai/whl/${TORCH_BACKEND}
+    VLLM_GITHUB_WHEEL="vllm-${VLLM_VER}-cp38-abi3-manylinux_2_31_${ALT_ARCH}.whl"
+    EXTRA_PIP_ARGS=""
 elif [[ "$CUDA_VERSION_MAJOR" == "13" ]]; then
-    echo "⚠ Skipping LMCache on CUDA 13 env since LMCache doesn't support CUDA 13 "
-    echo "Installing vLLM $VLLM_REF from GitHub since CUDA 13 x86_64 wheel is only present on GitHub..."
-    uv pip install \
-        --index-strategy=unsafe-best-match \
-        --extra-index-url https://download.pytorch.org/whl/${TORCH_BACKEND} \
-        https://github.com/vllm-project/vllm/releases/download/v${VLLM_VER}/vllm-${VLLM_VER}+${TORCH_BACKEND}-cp38-abi3-manylinux_2_35_${ALT_ARCH}.whl[flashinfer,runai] \
-        --torch-backend=${TORCH_BACKEND}
-    uv pip install flashinfer-cubin==$FLASHINF_REF
-    uv pip install flashinfer-jit-cache==$FLASHINF_REF --extra-index-url https://flashinfer.ai/whl/${TORCH_BACKEND}
+    VLLM_GITHUB_WHEEL="vllm-${VLLM_VER}+${TORCH_BACKEND}-cp38-abi3-manylinux_2_35_${ALT_ARCH}.whl"
+    EXTRA_PIP_ARGS="--index-strategy=unsafe-best-match --extra-index-url https://download.pytorch.org/whl/${TORCH_BACKEND}"
 else
     echo "❌ Unsupported CUDA version for vLLM installation: ${CUDA_VERSION}"
     exit 1
 fi
+VLLM_GITHUB_URL="https://github.com/vllm-project/vllm/releases/download/v${VLLM_VER}/${VLLM_GITHUB_WHEEL}"
+
+# Install vLLM wheel
+# CUDA 12: Try PyPI first, fall back to GitHub release
+# CUDA 13: Always use GitHub release (PyPI only has cu12 wheels, --torch-backend
+#           does not prevent uv from resolving the cu12 variant)
+echo "Installing vLLM $VLLM_VER (torch backend: $TORCH_BACKEND)..."
+if [[ "$CUDA_VERSION_MAJOR" == "12" ]]; then
+    if uv pip install "vllm[flashinfer,runai]==${VLLM_VER}" ${EXTRA_PIP_ARGS} --torch-backend=${TORCH_BACKEND} 2>&1; then
+        echo "✓ vLLM ${VLLM_VER} installed from PyPI"
+    else
+        echo "⚠ PyPI install failed, installing from GitHub release..."
+        uv pip install ${EXTRA_PIP_ARGS} \
+            "${VLLM_GITHUB_URL}[flashinfer,runai]" \
+            --torch-backend=${TORCH_BACKEND}
+        echo "✓ vLLM ${VLLM_VER} installed from GitHub"
+    fi
+else
+    echo "Installing vLLM from GitHub release (cu130 wheel not available on PyPI)..."
+    uv pip install ${EXTRA_PIP_ARGS} \
+        "${VLLM_GITHUB_URL}[flashinfer,runai]" \
+        --torch-backend=${TORCH_BACKEND}
+    echo "✓ vLLM ${VLLM_VER} installed from GitHub"
+fi
+uv pip install flashinfer-cubin==$FLASHINF_REF
+uv pip install flashinfer-jit-cache==$FLASHINF_REF --extra-index-url https://flashinfer.ai/whl/${TORCH_BACKEND}
 echo "✓ vLLM installation completed"
+
+echo "\n=== Installing vLLM-Omni ==="
+if [ -n "$VLLM_OMNI_REF" ] && [ "$ARCH" = "amd64" ]; then
+    # Save original vllm entrypoint before vllm-omni overwrites it
+    VLLM_BIN=$(which vllm)
+    cp "$VLLM_BIN" /tmp/vllm-entrypoint-backup
+    # Try PyPI first, fall back to building from source
+    if uv pip install vllm-omni==${VLLM_OMNI_REF#v} 2>&1; then
+        echo "✓ vLLM-Omni ${VLLM_OMNI_REF} installed from PyPI"
+    else
+        echo "⚠ PyPI install failed, building from source..."
+        git clone --depth 1 --branch ${VLLM_OMNI_REF} https://github.com/vllm-project/vllm-omni.git $INSTALLATION_DIR/vllm-omni
+        uv pip install $INSTALLATION_DIR/vllm-omni
+        rm -rf $INSTALLATION_DIR/vllm-omni
+        echo "✓ vLLM-Omni ${VLLM_OMNI_REF} installed from source"
+    fi
+    # Restore original vllm CLI entrypoint (vllm-omni replaces it with its own)
+    cp /tmp/vllm-entrypoint-backup "$VLLM_BIN"
+    echo "✓ Original vllm entrypoint preserved"
+else
+    echo "⚠ Skipping vLLM-Omni (no ref provided or ARM64 not supported)"
+fi
 
 echo "\n=== Installing DeepGEMM ==="
 cd $INSTALLATION_DIR/vllm/tools

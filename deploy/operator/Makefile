@@ -83,6 +83,10 @@ manifests: controller-gen ensure-yq ## Generate WebhookConfiguration, ClusterRol
 	for file in config/crd/bases/*.yaml; do \
 		yq eval '(.. | select(has("extraPodSpec")) | .extraPodSpec.required) |= (. - ["containers"])' -i --indent 2 $$file || exit 1; \
 	done
+	echo "Fixing PluginSpec parameters field: json.RawMessage needs x-kubernetes-preserve-unknown-fields instead of type: string"
+	for file in config/crd/bases/*.yaml; do \
+		yq eval '(.. | select(has("parameters")) | .parameters | select(has("format") and .format == "byte")) |= (del(.format) | del(.type) | .x-kubernetes-preserve-unknown-fields = true)' -i --indent 2 $$file || exit 1; \
+	done
 	echo "Adding NVIDIA header to CRD files"
 	for file in config/crd/bases/*.yaml; do \
 		if ! head -20 "$$file" | grep -q "NVIDIA CORPORATION"; then \
@@ -310,12 +314,12 @@ generate-api-docs: crd-ref-docs ## Generate API reference documentation from CRD
 		--output-path=./docs/api_reference.md
 	@echo "✅ Generated API reference at ./docs/api_reference.md"
 	# concatenate header.md, api_reference.md, and footer.md
-	cat docs/header.md ./docs/api_reference.md docs/footer.md > ../../docs/pages/kubernetes/api-reference.md
+	cat docs/header.md ./docs/api_reference.md docs/footer.md > ../../docs/kubernetes/api-reference.md
 	rm ./docs/api_reference.md
 	@echo "✅ Concatenated header.md, api_reference.md, and footer.md"
 	# Fix duplicate anchors: crd-ref-docs generates identical anchors for same-named types
 	# across API versions; prepend "v1beta1 " to affected v1beta1 headings and links.
-	python3 docs/fix-api-anchors.py ../../docs/pages/kubernetes/api-reference.md
+	python3 docs/fix-api-anchors.py ../../docs/kubernetes/api-reference.md
 
 HELM_CHART_DIR := ../helm/charts/platform
 

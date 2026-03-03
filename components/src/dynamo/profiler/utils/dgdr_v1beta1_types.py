@@ -151,17 +151,49 @@ class HardwareSpec(BaseModel):
 class DynamoGraphDeploymentRequestSpec(BaseModel):
     """DynamoGraphDeploymentRequestSpec defines the desired state of a DynamoGraphDeploymentRequest. Only the Model field is required; all other fields are optional and have sensible defaults."""
 
-    model: str = Field(description="Model specifies the model to deploy (e.g., \"Qwen/Qwen3-0.6B\", \"meta-llama/Llama-3-70b\"). Can be a HuggingFace ID or a private model name.")
-    backend: BackendType = Field(default="auto", description="Backend specifies the inference backend to use for profiling and deployment.")
-    image: Optional[str] = Field(default=None, description="Image is the container image reference for the profiling job (frontend image). Example: \"nvcr.io/nvidia/dynamo-runtime:latest\" TODO: In a future MR, the operator will derive the backend inference image from the backend type automatically; backend images can be overridden via overrides.dgd.")
-    modelCache: Optional[ModelCacheSpec] = Field(default=None, description="ModelCache provides optional PVC configuration for pre-downloaded model weights. When provided, weights are loaded from the PVC instead of downloading from HuggingFace.")
-    hardware: Optional[HardwareSpec] = Field(default=None, description="Hardware describes the hardware resources available for profiling and deployment. Typically auto-filled by the operator from cluster discovery.")
-    workload: Optional[WorkloadSpec] = Field(default=None, description="Workload defines the expected workload characteristics for SLA-based profiling.")
-    sla: Optional[SLASpec] = Field(default=None, description="SLA defines service-level agreement targets that drive profiling optimization.")
-    overrides: Optional[OverridesSpec] = Field(default=None, description="Overrides allows customizing the profiling job and the generated DynamoGraphDeployment.")
-    features: Optional[FeaturesSpec] = Field(default=None, description="Features controls optional Dynamo platform features in the generated deployment.")
-    searchStrategy: SearchStrategy = Field(default="rapid", description="SearchStrategy controls the profiling search depth. \"rapid\" performs a fast sweep; \"thorough\" explores more configurations.")
-    autoApply: bool = Field(default=True, description="AutoApply indicates whether to automatically create a DynamoGraphDeployment after profiling completes. If false, the generated spec is stored in status for manual review and application.")
+    model: str = Field(
+        description='Model specifies the model to deploy (e.g., "Qwen/Qwen3-0.6B", "meta-llama/Llama-3-70b"). Can be a HuggingFace ID or a private model name.'
+    )
+    backend: BackendType = Field(
+        default="auto",
+        description="Backend specifies the inference backend to use for profiling and deployment.",
+    )
+    image: Optional[str] = Field(
+        default=None,
+        description='Image is the container image reference for the profiling job (frontend image). Example: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.0.0".',
+    )
+    modelCache: Optional[ModelCacheSpec] = Field(
+        default=None,
+        description="ModelCache provides optional PVC configuration for pre-downloaded model weights. When provided, weights are loaded from the PVC instead of downloading from HuggingFace.",
+    )
+    hardware: Optional[HardwareSpec] = Field(
+        default=None,
+        description="Hardware describes the hardware resources available for profiling and deployment. Typically auto-filled by the operator from cluster discovery.",
+    )
+    workload: Optional[WorkloadSpec] = Field(
+        default=None,
+        description="Workload defines the expected workload characteristics for SLA-based profiling.",
+    )
+    sla: Optional[SLASpec] = Field(
+        default=None,
+        description="SLA defines service-level agreement targets that drive profiling optimization.",
+    )
+    overrides: Optional[OverridesSpec] = Field(
+        default=None,
+        description="Overrides allows customizing the profiling job and the generated DynamoGraphDeployment.",
+    )
+    features: Optional[FeaturesSpec] = Field(
+        default=None,
+        description="Features controls optional Dynamo platform features in the generated deployment.",
+    )
+    searchStrategy: SearchStrategy = Field(
+        default="rapid",
+        description='SearchStrategy controls the profiling search depth. "rapid" performs a fast sweep; "thorough" explores more configurations.',
+    )
+    autoApply: Optional[bool] = Field(
+        default=True,
+        description="AutoApply indicates whether to automatically create a DynamoGraphDeployment after profiling completes. If false, the generated spec is stored in status for manual review and application.",
+    )
 
 
 class ParetoConfig(BaseModel):

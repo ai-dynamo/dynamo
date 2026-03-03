@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use derive_builder::Builder;
@@ -9,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use super::timing::RequestTracker;
 use super::{OutputOptions, SamplingOptions, StopConditions};
 use crate::kv_router::RouterConfigOverride;
-use crate::kv_router::protocols::BlockExtraInfo;
+use crate::kv_router::protocols::{BlockExtraInfo, WorkerId};
 use crate::preprocessor::media::RdmaMediaDataDescriptor;
 use crate::protocols::TokenIdType;
 
@@ -54,6 +55,15 @@ pub struct RoutingHints {
     /// Backend engine scheduling priority forwarded to the generate call.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<i32>,
+
+    /// TTL in seconds for cache control pinning. None = no pinning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_control_ttl: Option<u64>,
+
+    /// Optional set of allowed worker IDs to restrict routing decisions (EPP).
+    /// When set, only workers in this set are considered during scoring.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_worker_ids: Option<HashSet<WorkerId>>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]

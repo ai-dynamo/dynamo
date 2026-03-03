@@ -10,6 +10,26 @@ export PYTHONHASHSEED=0
 # Common configuration
 MODEL="Qwen/Qwen3-0.6B"
 
+HTTP_PORT="${DYN_HTTP_PORT:-8000}"
+echo "=========================================="
+echo "Launching Disaggregated + KVBM + KV Routing (4 GPUs)"
+echo "=========================================="
+echo "Model:       $MODEL"
+echo "Frontend:    http://localhost:$HTTP_PORT"
+echo "=========================================="
+echo ""
+echo "Example test command:"
+echo ""
+echo "  curl http://localhost:${HTTP_PORT}/v1/chat/completions \\"
+echo "    -H 'Content-Type: application/json' \\"
+echo "    -d '{"
+echo "      \"model\": \"${MODEL}\","
+echo "      \"messages\": [{\"role\": \"user\", \"content\": \"Explain why Roger Federer is considered one of the greatest tennis players of all time\"}],"
+echo "      \"max_tokens\": 32"
+echo "    }'"
+echo ""
+echo "=========================================="
+
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
 python -m dynamo.frontend \
     --router-mode kv \
@@ -20,13 +40,15 @@ python -m dynamo.frontend \
 CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm \
     --model $MODEL \
     --enforce-eager \
-    --disaggregation-mode decode &
+    --disaggregation-mode decode \
+    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' &
 
 VLLM_NIXL_SIDE_CHANNEL_PORT=20096 \
 CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.vllm \
     --model $MODEL \
     --enforce-eager \
-    --disaggregation-mode decode &
+    --disaggregation-mode decode \
+    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' &
 
 # two prefill workers with KVBM enabled
 # Each worker needs unique ZMQ ports to avoid KVBM coordination conflicts
@@ -38,7 +60,7 @@ CUDA_VISIBLE_DEVICES=2 DYN_KVBM_CPU_CACHE_GB=20 \
     --model $MODEL \
     --enforce-eager \
     --disaggregation-mode prefill \
-    --connector kvbm nixl \
+    --kv-transfer-config '{"kv_connector":"PdConnector","kv_role":"kv_both","kv_connector_extra_config":{"connectors":[{"kv_connector":"DynamoConnector","kv_connector_module_path":"kvbm.vllm_integration.connector","kv_role":"kv_both"},{"kv_connector":"NixlConnector","kv_role":"kv_both"}]},"kv_connector_module_path":"kvbm.vllm_integration.connector"}' \
     --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081"}' &
 
 VLLM_NIXL_SIDE_CHANNEL_PORT=20098 \
@@ -49,5 +71,5 @@ CUDA_VISIBLE_DEVICES=3 DYN_KVBM_CPU_CACHE_GB=20 \
     --model $MODEL \
     --enforce-eager \
     --disaggregation-mode prefill \
-    --connector kvbm nixl \
+    --kv-transfer-config '{"kv_connector":"PdConnector","kv_role":"kv_both","kv_connector_extra_config":{"connectors":[{"kv_connector":"DynamoConnector","kv_connector_module_path":"kvbm.vllm_integration.connector","kv_role":"kv_both"},{"kv_connector":"NixlConnector","kv_role":"kv_both"}]},"kv_connector_module_path":"kvbm.vllm_integration.connector"}' \
     --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20082"}'

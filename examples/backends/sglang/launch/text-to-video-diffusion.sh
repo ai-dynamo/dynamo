@@ -1,6 +1,9 @@
 #!/bin/bash
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Text-to-video generation with Wan2.1 models.
+# GPUs: 1 (--wan-size 1b) or 2 (--wan-size 14b)
 
 set -e
 
@@ -110,7 +113,7 @@ echo ""
 echo "  curl http://localhost:${HTTP_PORT}/v1/videos \\"
 echo "    -H 'Content-Type: application/json' \\"
 echo "    -d '{"
-echo "      \"prompt\": \"A curious raccoon exploring a garden\","
+echo "      \"prompt\": \"Explain why Roger Federer is considered one of the greatest tennis players of all time\","
 echo "      \"model\": \"${MODEL_PATH}\","
 echo "      \"seconds\": 2,"
 echo "      \"size\": \"${WIDTH}x${HEIGHT}\","
