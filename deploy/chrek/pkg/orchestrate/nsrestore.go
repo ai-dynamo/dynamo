@@ -42,7 +42,7 @@ func RestoreInNamespace(ctx context.Context, opts RestoreOptions, log logr.Logge
 		"checkpoint_has_cuda", !m.CUDA.IsEmpty(),
 	)
 	// Phase 1: Configure — build CRIU opts from manifest
-	criuOpts, err := criu.BuildRestoreOpts(m, opts.CgroupRoot, log)
+	criuOpts, err := criu.BuildRestoreOpts(m, opts.CheckpointPath, opts.CgroupRoot, log)
 	if err != nil {
 		return 0, err
 	}
@@ -56,7 +56,6 @@ func RestoreInNamespace(ctx context.Context, opts RestoreOptions, log logr.Logge
 	log.Info("nsrestore completed", "restored_pid", restoredPID, "duration", time.Since(restoreStart))
 	return restoredPID, nil
 }
-
 
 func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.CheckpointManifest, opts RestoreOptions, log logr.Logger) (int, error) {
 	// Apply rootfs diff inside the namespace (target root is /)
