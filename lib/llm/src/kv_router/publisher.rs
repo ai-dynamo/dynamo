@@ -148,9 +148,10 @@ struct BatchingState {
     /// dp_rank of the events in the current pending batch.
     /// A change signals that the batch must be flushed before accumulating further.
     last_dp_rank: u32,
-    /// When the current batch started accumulating (set on the first event of each batch).
-    /// Used to compute the remaining window before the batch is force-flushed.
-    batch_start_time: Instant,
+    /// When we last flushed (or initialized). Used to detect stale pending data:
+    /// if a new event arrives after a long idle period (exceeding timeout),
+    /// we flush immediately for lower latency on sparse important events.
+    last_flush_time: Instant,
 }
 
 impl BatchingState {
@@ -160,7 +161,7 @@ impl BatchingState {
             pending_stored: None,
             next_publish_id: 1,
             last_dp_rank: 0,
-            batch_start_time: Instant::now(),
+            last_flush_time: Instant::now(),
         }
     }
 
@@ -168,15 +169,16 @@ impl BatchingState {
         self.pending_removed.is_some() || self.pending_stored.is_some()
     }
 
-    /// Marks the start of a new batch, resetting the flush-window timer.
-    fn start_batch_timer(&mut self) {
-        self.batch_start_time = Instant::now();
+    /// Records that a flush just happened. Called after every flush to track
+    /// idle periods for stale-data detection.
+    fn record_flush_time(&mut self) {
+        self.last_flush_time = Instant::now();
     }
 
     /// Returns the time remaining in the current batch window (zero if already elapsed).
     fn remaining_timeout(&self, timeout_ms: u64) -> Duration {
         let timeout = Duration::from_millis(timeout_ms);
-        let elapsed = self.batch_start_time.elapsed();
+        let elapsed = self.last_flush_time.elapsed();
         if elapsed >= timeout {
             Duration::ZERO
         } else {
@@ -538,6 +540,8 @@ impl BatchingState {
         }
         // Consecutive batch IDs (1, 2, 3, …) keep downstream gap-detection happy.
         self.next_publish_id += 1;
+        // Record when we flushed for stale-data detection on next event.
+        self.record_flush_time();
     }
 }
 
@@ -617,7 +621,6 @@ async fn run_event_processor_loop<P: EventSink + Send + Sync + 'static>(
                             Some(pending) => pending.block_hashes.extend(data.block_hashes),
                             None => {
                                 batching_state.pending_removed = Some(data);
-                                batching_state.start_batch_timer();
                             }
                         }
                     }
@@ -637,7 +640,6 @@ async fn run_event_processor_loop<P: EventSink + Send + Sync + 'static>(
                             Some(pending) => pending.blocks.extend(data.blocks),
                             None => {
                                 batching_state.pending_stored = Some(data);
-                                batching_state.start_batch_timer();
                             }
                         }
                     }
@@ -663,6 +665,7 @@ async fn run_event_processor_loop<P: EventSink + Send + Sync + 'static>(
                     batching_state.flush(&publisher, &local_indexer, worker_id).await;
                 }
             }
+            // if has some pending and has timeout, and no new events come in, then flush when timeout elapsed to prevent stale events
             _ = tokio::time::sleep(
                 timeout_ms.map(|ms| batching_state.remaining_timeout(ms)).unwrap_or(Duration::from_secs(3600))
             ), if timeout_ms.is_some() && batching_state.has_pending() => {
@@ -2648,8 +2651,8 @@ mod batching_state_tests {
     #[test]
     fn test_batching_state_new() {
         let state = BatchingState::new();
-        // batch_start_time should be set to approximately now
-        let elapsed = state.batch_start_time.elapsed();
+        // last_flush_time should be set to approximately now
+        let elapsed = state.last_flush_time.elapsed();
         assert!(
             elapsed < Duration::from_secs(1),
             "new() should create state with flush time set to approximately now"
@@ -2690,10 +2693,10 @@ mod batching_state_tests {
         let mut state = BatchingState::new();
 
         // Reset flush time to now so we can test timeout behavior
-        state.start_batch_timer();
+        state.record_flush_time();
 
-        // Test that remaining returns positive initially (using 10ms = 10_000us)
-        let remaining_before = state.remaining_timeout(10_000);
+        // Test that remaining returns positive initially (10ms timeout)
+        let remaining_before = state.remaining_timeout(10);
         assert!(
             remaining_before.as_millis() > 0,
             "Should have remaining time initially"
@@ -2709,16 +2712,16 @@ mod batching_state_tests {
     }
 
     #[test]
-    fn test_batching_state_start_batch_timer() {
+    fn test_batching_state_record_flush_time() {
         let mut state = BatchingState::new();
 
-        let initial_time = state.batch_start_time;
+        let initial_time = state.last_flush_time;
 
-        state.start_batch_timer();
+        state.record_flush_time();
 
         assert!(
-            state.batch_start_time >= initial_time,
-            "start_batch_timer should update the time"
+            state.last_flush_time >= initial_time,
+            "record_flush_time should update the time"
         );
     }
 
@@ -2727,10 +2730,10 @@ mod batching_state_tests {
         let mut state = BatchingState::new();
 
         // Reset flush time to now so we can test timeout behavior
-        state.start_batch_timer();
+        state.record_flush_time();
 
-        // Test that remaining returns positive initially
-        let remaining = state.remaining_timeout(10_000); // 10ms
+        // Test that remaining returns positive initially (10ms timeout)
+        let remaining = state.remaining_timeout(10);
         assert!(
             remaining.as_millis() > 0,
             "Should have remaining time initially"
@@ -3389,9 +3392,11 @@ mod event_processor_tests {
         );
     }
 
-    /// Test that first event after idle period doesn't flush immediately.
+    /// Test that events after a long idle period flush immediately (stale timer).
+    /// This gives low latency for sparse important events after idle periods.
+    /// After the initial stale flush, subsequent rapid events batch normally.
     #[tokio::test]
-    async fn test_first_event_after_idle_no_immediate_flush() {
+    async fn test_first_event_after_idle_flushes_immediately_then_batches() {
         let timeout_ms = Some(50); // 50ms timeout
 
         let (tx, rx) = mpsc::unbounded_channel::<KvCacheEvent>();
@@ -3404,10 +3409,11 @@ mod event_processor_tests {
                 .await
         });
 
-        // Wait longer than timeout to simulate idle period
+        // Wait longer than timeout to simulate idle period (timer becomes stale)
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-        // Send 3 events rapidly - they should batch together
+        // Send 3 events rapidly - first should flush immediately (stale timer),
+        // remaining 2 should batch together
         for i in 0..3 {
             tx.send(KvCacheEvent {
                 event_id: i as u64,
@@ -3420,7 +3426,7 @@ mod event_processor_tests {
             tokio::task::yield_now().await;
         }
 
-        // Wait for timeout to elapse so batch flushes
+        // Wait for timeout to elapse so remaining batch flushes
         tokio::time::sleep(tokio::time::Duration::from_millis(60)).await;
 
         drop(tx);
@@ -3428,27 +3434,26 @@ mod event_processor_tests {
 
         let events = publisher.get_events();
 
-        // All 3 events should be batched into 1 output event
+        // First event flushes immediately (stale timer), remaining 2 batch together
         assert_eq!(
             events.len(),
-            1,
-            "All 3 events should batch into 1 output event (not flush immediately due to stale timer)"
+            2,
+            "First event should flush immediately (stale), remaining 2 should batch"
         );
 
-        let total_hashes: usize = events
-            .iter()
-            .map(|e| {
-                if let KvCacheEventData::Removed(data) = &e.event.data {
-                    data.block_hashes.len()
-                } else {
-                    0
-                }
-            })
-            .sum();
-        assert_eq!(
-            total_hashes, 3,
-            "All 3 block hashes should be accounted for"
-        );
+        // First event has 1 hash, second event (batch) has 2 hashes
+        let first_len = if let KvCacheEventData::Removed(data) = &events[0].event.data {
+            data.block_hashes.len()
+        } else {
+            0
+        };
+        let second_len = if let KvCacheEventData::Removed(data) = &events[1].event.data {
+            data.block_hashes.len()
+        } else {
+            0
+        };
+        assert_eq!(first_len, 1, "First event should have 1 hash");
+        assert_eq!(second_len, 2, "Second event (batched) should have 2 hashes");
     }
 
     /// Test that stored events with dp_rank change have correct metadata
