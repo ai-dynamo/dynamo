@@ -44,7 +44,7 @@ impl HandlerManager {
         dispatcher: std::sync::Arc<dyn ActiveMessageDispatcher>,
     ) -> Result<()> {
         self.control_tx
-            .send(ControlMessage::Register { dispatcher })
+            .try_send(ControlMessage::Register { dispatcher })
             .map_err(|_| anyhow::anyhow!("Failed to register handler: control channel closed"))
     }
 }

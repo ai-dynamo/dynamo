@@ -4,7 +4,7 @@ Active messaging layer for Velo distributed systems. Sits between `velo-backend`
 
 ## Architecture
 
-```
+```text
 velo-common  →  velo-backend  →  velo-messenger  →  (higher-level crates)
   (types)       (transports)     (messaging)
 ```

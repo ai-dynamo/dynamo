@@ -911,9 +911,10 @@ mod tests {
         let manager = ResponseManager::new(worker_id);
 
         // Create a fake response_id with out-of-bounds slot index
-        let fake_slot_index = (RESPONSE_SLOT_CAPACITY + 1000) as u64;
-        let worker_bits = (worker_id as u128) << 64;
-        let fake_id = ResponseId::from_u128(worker_bits | fake_slot_index as u128);
+        let fake_slot_index = (RESPONSE_SLOT_CAPACITY + 1000) as u16;
+        let worker_bits = worker_id as u128;
+        let slot_bits = (fake_slot_index as u128) << 64;
+        let fake_id = ResponseId::from_u128(worker_bits | slot_bits);
 
         // Should reject out-of-bounds slot
         assert!(!manager.complete_outcome(fake_id, Ok(None)));

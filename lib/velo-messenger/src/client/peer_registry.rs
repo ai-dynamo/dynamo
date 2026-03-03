@@ -57,9 +57,7 @@ impl PeerRegistry {
     /// Register a peer without handler information.
     /// If the peer is already registered, preserves existing state (including cached handlers).
     pub fn register_peer(&self, instance_id: InstanceId) {
-        self.peers
-            .entry(instance_id)
-            .or_insert_with(PeerState::new);
+        self.peers.entry(instance_id).or_insert_with(PeerState::new);
     }
 
     /// Check if we have handler information for a peer.

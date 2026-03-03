@@ -96,7 +96,7 @@ impl From<MessageId> for ResponseId {
 impl fmt::Display for MessageId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let (worker, message) = self.display_parts();
-        write!(f, "{}/{}", worker, message)
+        write!(f, "w:{} / m:{}", worker, message)
     }
 }
 

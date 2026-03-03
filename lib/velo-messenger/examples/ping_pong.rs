@@ -120,7 +120,7 @@ fn main() -> Result<()> {
                 Ok(_) => println!("Warmup complete"),
                 Err(e) => {
                     println!("Warmup failed: {}", e);
-                    return Ok(());
+                    return Err(e.into());
                 }
             }
 

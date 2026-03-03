@@ -5,7 +5,7 @@ API from the underlying crates so consumers only need a single dependency.
 
 ## Crate map
 
-```
+```text
 velo              ← you are here (facade + re-exports)
 ├── velo-messenger   active messaging, handlers, distributed events
 ├── velo-events      generational event system

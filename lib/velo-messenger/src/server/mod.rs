@@ -231,7 +231,8 @@ mod tests {
         drop(tx);
 
         let result = timeout(Duration::from_millis(200), awaiter.recv()).await;
-        assert!(result.is_ok());
+        let outcome = result.expect("timed out waiting for ack");
+        assert_eq!(outcome.unwrap(), Some(Bytes::from("ok")));
 
         handler.await??;
         Ok(())
