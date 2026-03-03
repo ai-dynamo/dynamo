@@ -9,7 +9,9 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use velo_backend::Transport;
+
+pub use velo_backend as backend;
+pub use backend::Transport;
 
 // Re-exports: Messaging (from velo-messenger)
 pub use velo_messenger::{
