@@ -26,10 +26,9 @@ func main() {
 	}
 
 	opts := orchestrate.RestoreOptions{
-		CheckpointPath:               *checkpointPath,
-		CUDADeviceMap:                *cudaDeviceMap,
-		CgroupRoot:                   *cgroupRoot,
-		DebugResumeRestoreSignalFile: os.Getenv("DEBUG_PAUSE_CUDA_CHECKPOINT"),
+		CheckpointPath: *checkpointPath,
+		CUDADeviceMap:  *cudaDeviceMap,
+		CgroupRoot:     *cgroupRoot,
 	}
 
 	restoredPID, err := orchestrate.RestoreInNamespace(context.Background(), opts, log)

@@ -21,10 +21,6 @@ type RestoreOptions struct {
 	CheckpointPath string
 	CUDADeviceMap  string
 	CgroupRoot     string
-
-	// DebugResumeRestoreSignalFile, when non-empty, pauses CUDA restore until this
-	// file appears on disk. Set via DEBUG_PAUSE_CUDA_CHECKPOINT env var on the agent.
-	DebugResumeRestoreSignalFile string
 }
 
 // RestoreInNamespace performs a full restore from inside the target container's namespaces.
@@ -126,9 +122,11 @@ func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.Ch
 			"inner_to_outer_map", innerToOuter,
 			"ordered_cuda_pids", orderedCUDAPids)
 
-		if opts.DebugResumeRestoreSignalFile != "" {
+		// Debug pause: set DYN_CHREK_CUDA_DEBUG_SIGNAL_FILE to a file path to pause
+		// CUDA restore until that file appears on disk (e.g. `touch /tmp/resume`).
+		if signalFile := os.Getenv("DYN_CHREK_CUDA_DEBUG_SIGNAL_FILE"); signalFile != "" {
 			log.Info("Debug pause: waiting for signal file before CUDA restore",
-				"signal_file", opts.DebugResumeRestoreSignalFile,
+				"signal_file", signalFile,
 				"restored_pid", restoredPID, "ordered_cuda_pids", orderedCUDAPids)
 			for {
 				select {
@@ -136,8 +134,8 @@ func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.Ch
 					return 0, ctx.Err()
 				default:
 				}
-				if _, err := os.Stat(opts.DebugResumeRestoreSignalFile); err == nil {
-					os.Remove(opts.DebugResumeRestoreSignalFile)
+				if _, err := os.Stat(signalFile); err == nil {
+					os.Remove(signalFile)
 					log.Info("Debug pause: signal file detected, proceeding with CUDA restore")
 					break
 				}
