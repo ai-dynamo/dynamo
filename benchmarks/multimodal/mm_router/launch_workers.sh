@@ -158,7 +158,6 @@ for i in $(seq 1 "${NUM_WORKERS}"); do
             --served-model-name "${served_name}" \
             --enable-multimodal \
             --block-size "${BLOCK_SIZE}" \
-            --enforce-eager \
             --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION}" \
             --max-model-len "${MAX_MODEL_LEN}" \
             --max-num-seqs "${MAX_NUM_SEQS}" \
