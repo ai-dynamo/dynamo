@@ -39,6 +39,7 @@ jobs:
         with:
           # TODO: once DYN-2259 is fixed remove exclusion of ./docs/components/profiler/profiler_guide.md
           args: >-
+            #  ${{ github.event_name == 'pull_request' && '--offline' || '' }}
             --cache
             --no-progress
             --max-retries 4
@@ -51,7 +52,10 @@ jobs:
             --accept "200..=299, 403, 429"
             --exclude-all-private
             --exclude 0.0.0.0
-            ${{ github.event_name == 'pull_request' && '--offline' || '' }}
+            --verbose
+            --host-concurrency 10
+            --host-request-interval 1s
+            --host-stats
             .
           fail: true
         env:
