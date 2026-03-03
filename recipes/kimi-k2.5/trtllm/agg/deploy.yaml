@@ -89,7 +89,7 @@ spec:
           - name: TRTLLM_ENABLE_PDL
             value: "1"
           - name: MODEL_NAME
-            value: baseten-admin/Kimi-2.5-text-nvfp4-v3 (text-only variant)
+            value: baseten-admin/Kimi-2.5-text-nvfp4-v3
           - name: ENGINE_ARGS
             value: /opt/dynamo/configs/config.yaml
           - name: HF_HOME
