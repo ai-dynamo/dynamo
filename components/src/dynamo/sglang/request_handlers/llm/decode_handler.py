@@ -89,6 +89,124 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
         return {k: v for k, v in param_mapping.items() if v is not None}
 
+    @staticmethod
+    def _build_logprob_kwargs(request: Dict[str, Any]) -> Dict[str, Any]:
+        """Build logprob kwargs for SGLang async_generate from output_options.
+
+        Maps the Dynamo output_options format (shared with vLLM/TRT-LLM) to
+        SGLang's async_generate keyword arguments.
+
+        Args:
+            request: Request dict containing optional output_options.
+
+        Returns:
+            Dict of logprob-related kwargs for engine.async_generate().
+        """
+        kwargs: Dict[str, Any] = {}
+        output_options = request.get("output_options", {})
+        if not output_options:
+            return kwargs
+
+        logprobs_value = output_options.get("logprobs")
+        if logprobs_value is not None:
+            try:
+                parsed = int(logprobs_value)
+                if parsed < 0:
+                    logging.warning(
+                        f"Invalid logprobs value: {logprobs_value} "
+                        "(must be non-negative), ignoring"
+                    )
+                else:
+                    kwargs["return_logprob"] = True
+                    kwargs["top_logprobs_num"] = parsed
+            except (ValueError, TypeError):
+                logging.warning(
+                    f"Invalid logprobs value: {logprobs_value} "
+                    "(must be integer), ignoring"
+                )
+
+        prompt_logprobs_value = output_options.get("prompt_logprobs")
+        if prompt_logprobs_value is not None:
+            try:
+                parsed = int(prompt_logprobs_value)
+                if parsed < 0:
+                    logging.warning(
+                        f"Invalid prompt_logprobs value: {prompt_logprobs_value} "
+                        "(must be non-negative), ignoring"
+                    )
+                else:
+                    # Enable logprob computation (prompt logprobs require it).
+                    # logprob_start_len=0 tells SGLang to compute logprobs from
+                    # the start of the sequence, covering prompt tokens.
+                    kwargs["return_logprob"] = True
+                    kwargs.setdefault("top_logprobs_num", 0)
+                    kwargs["logprob_start_len"] = 0
+            except (ValueError, TypeError):
+                logging.warning(
+                    f"Invalid prompt_logprobs value: {prompt_logprobs_value} "
+                    "(must be integer), ignoring"
+                )
+
+        return kwargs
+
+    @staticmethod
+    def _extract_logprobs(
+        meta_info: Dict[str, Any], num_output_logprobs_so_far: int
+    ) -> tuple:
+        """Extract logprobs from SGLang meta_info for new tokens.
+
+        Converts SGLang's cumulative logprob format to Dynamo's per-chunk
+        format, matching the output of vLLM and TRT-LLM handlers.
+
+        Args:
+            meta_info: SGLang response meta_info dict.
+            num_output_logprobs_so_far: Number of logprob entries already
+                processed in previous chunks.
+
+        Returns:
+            Tuple of (log_probs, top_logprobs, new_total):
+            - log_probs: List of floats (selected token logprob per position)
+            - top_logprobs: List of lists of dicts with rank/token_id/token/logprob
+            - new_total: Updated count of logprob entries processed so far
+        """
+        output_token_logprobs = meta_info.get("output_token_logprobs")
+        if not output_token_logprobs:
+            return None, None, num_output_logprobs_so_far
+
+        # SGLang returns cumulative logprobs; slice to get new entries only
+        new_logprobs = output_token_logprobs[num_output_logprobs_so_far:]
+        if not new_logprobs:
+            return None, None, num_output_logprobs_so_far
+
+        # Extract selected-token logprobs: each entry is (logprob, token_id, text_or_None)
+        log_probs = [float(entry[0]) for entry in new_logprobs]
+
+        # Extract top logprobs if available
+        top_logprobs = None
+        output_top = meta_info.get("output_top_logprobs")
+        if output_top:
+            new_top = output_top[num_output_logprobs_so_far:]
+            if new_top:
+                top_logprobs = []
+                for position_entries in new_top:
+                    if position_entries is None:
+                        top_logprobs.append([])
+                        continue
+                    position_list = []
+                    for rank_idx, entry in enumerate(position_entries):
+                        position_list.append(
+                            {
+                                "rank": rank_idx + 1,
+                                "token_id": entry[1],
+                                "token": entry[2],
+                                "logprob": float(entry[0]),
+                            }
+                        )
+                    top_logprobs.append(position_list)
+
+        new_total = len(output_token_logprobs)
+        return log_probs, top_logprobs, new_total
+
     async def generate(
         self, request: Dict[str, Any], context: Context
     ) -> AsyncGenerator[Dict[str, Any], None]:
@@ -112,6 +230,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             self.config.server_args, "enable_return_routed_experts", False
         )
         priority = (request.get("routing") or {}).get("priority")
+        logprob_kwargs = self._build_logprob_kwargs(request)
 
         if self.serving_mode == DisaggregationMode.DECODE:
             # Check if bootstrap_info is pre-computed in the request (from frontend)
@@ -148,6 +267,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 external_trace_header=trace_header,
                 rid=trace_id,
                 data_parallel_rank=dp_rank,
+                **logprob_kwargs,
                 **self._priority_kwargs(priority),
             )
 
@@ -188,6 +308,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 external_trace_header=trace_header,
                 rid=trace_id,
                 data_parallel_rank=dp_rank,
+                **logprob_kwargs,
                 **self._priority_kwargs(priority),
             )
             if self.skip_tokenizer_init:
@@ -216,6 +337,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         """
         # Use Future pattern for request ID - will be set when first response arrives
         request_id_future = asyncio.Future()
+        # Track cumulative logprob offset (SGLang returns cumulative, we yield disjoint)
+        num_output_logprobs_so_far = 0
         async with self._cancellation_monitor(request_id_future, context):
             async for res in stream_source:
                 # Extract SGLang request ID from the first response and set the future
@@ -248,6 +371,18 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
                 # Pass through disjoint token segments directly
                 out["token_ids"] = output_ids
+
+                # Extract logprobs for new tokens if available
+                log_probs, top_logprobs, num_output_logprobs_so_far = (
+                    self._extract_logprobs(
+                        res["meta_info"], num_output_logprobs_so_far
+                    )
+                )
+                if log_probs is not None:
+                    out["log_probs"] = log_probs
+                if top_logprobs is not None:
+                    out["top_logprobs"] = top_logprobs
+
                 routed_experts = res["meta_info"].get("routed_experts")
                 if routed_experts is not None:
                     # Base64-encode tensor bytes to match sglang's output format.
