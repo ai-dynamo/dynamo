@@ -315,8 +315,6 @@ class MultimodalRequestProcessor:
                 processed_inputs["multi_modal_embeddings"] = {
                     "image": loaded_embeddings
                 }
-                if not processed_mm_data:
-                    processed_inputs["multi_modal_data"] = {}
 
         return processed_inputs
 
