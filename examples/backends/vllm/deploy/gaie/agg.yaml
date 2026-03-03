@@ -13,7 +13,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: docker.io/lambda108/epp-inference-extension-dynamo:discovery-logs
+          image: nvcr.io/nvidia/ai-dynamo/epp-image:my-tag
           env:
             - name: DYN_KV_CACHE_BLOCK_SIZE
               value: "128"
@@ -40,9 +40,11 @@ spec:
             - name: decode
               plugins:
                 - pluginRef: decode-filter
+                  weight: 1
                 - pluginRef: dyn-decode
                   weight: 1
                 - pluginRef: picker
+                  weight: 1
     VllmDecodeWorker:
       componentType: worker
       envFromSecret: hf-token-secret

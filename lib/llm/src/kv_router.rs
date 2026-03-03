@@ -31,7 +31,6 @@ pub use dynamo_kv_router::selector;
 
 pub mod cache_control;
 pub mod config;
-pub mod indexer_standalone;
 mod jetstream;
 pub mod metrics;
 pub mod prefill_router;
@@ -46,7 +45,6 @@ pub mod worker_query;
 
 pub use cache_control::{CacheControlClient, spawn_pin_prefix};
 pub use config::{KvRouterConfig, RouterConfigOverride, WorkerDiscoveryMode};
-pub use indexer_standalone::start_kv_block_indexer;
 pub use prefill_router::PrefillRouter;
 pub use push_router::{DirectRoutingRouter, KvPushRouter};
 

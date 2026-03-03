@@ -51,19 +51,19 @@ spec:
           - name: prefill
             plugins:
             - pluginRef: prefill-filter
-              weight: 0
+              weight: 1
             - pluginRef: dyn-prefill
               weight: 1
             - pluginRef: picker
-              weight: 0
+              weight: 1
           - name: decode
             plugins:
             - pluginRef: decode-filter
-              weight: 0
+              weight: 1
             - pluginRef: dyn-decode
               weight: 1
             - pluginRef: picker
-              weight: 0
+              weight: 1
     VllmPrefillWorker:
       componentType: worker
       subComponentType: prefill
