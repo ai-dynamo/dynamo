@@ -45,7 +45,7 @@ done
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 echo "=========================================="
-echo "Launching Aggregated Multimodal Serving (1 GPU)"
+echo "Launching Aggregated Multimodal Serving"
 echo "=========================================="
 echo "Model:       $MODEL_NAME"
 echo "Frontend:    http://localhost:$HTTP_PORT"

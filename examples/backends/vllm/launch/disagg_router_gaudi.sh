@@ -41,7 +41,7 @@ echo "=========================================="
 # edit --router-mode to random / round-robin / kv
 python -m dynamo.frontend \
     --router-mode kv \
-    --http-port 8000 \
+    --http-port "$HTTP_PORT" \
     --router-reset-states &
 
 # two decode workers
