@@ -33,8 +33,6 @@ pub struct RegisterRequest {
     pub block_size: u32,
     #[serde(default)]
     pub dp_rank: Option<u32>,
-    #[serde(default)]
-    pub lora_name: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -89,7 +87,6 @@ async fn register(
         req.model_name,
         req.tenant_id,
         req.block_size,
-        req.lora_name,
     ) {
         Ok(()) => (
             StatusCode::CREATED,
@@ -192,12 +189,11 @@ async fn query(
         );
     };
     let block_size = ie.block_size;
-    let lora_name = req.lora_name.or_else(|| ie.lora_name.clone());
     let indexer = ie.indexer.clone();
     drop(ie);
 
     let block_hashes =
-        compute_block_hash_for_seq(&req.token_ids, block_size, None, lora_name.as_deref());
+        compute_block_hash_for_seq(&req.token_ids, block_size, None, req.lora_name.as_deref());
     match indexer.find_matches(block_hashes).await {
         Ok(overlap) => (
             StatusCode::OK,

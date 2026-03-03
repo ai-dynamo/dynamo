@@ -22,7 +22,6 @@ pub struct IndexerKey {
 pub struct IndexerEntry {
     pub indexer: Indexer,
     pub block_size: u32,
-    pub lora_name: Option<String>,
 }
 
 pub struct WorkerEntry {
@@ -45,7 +44,6 @@ impl WorkerRegistry {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn register(
         &self,
         instance_id: WorkerId,
@@ -54,7 +52,6 @@ impl WorkerRegistry {
         model_name: String,
         tenant_id: String,
         block_size: u32,
-        lora_name: Option<String>,
     ) -> Result<()> {
         let key = IndexerKey {
             model_name,
@@ -68,13 +65,11 @@ impl WorkerRegistry {
                 model_name = %key.model_name,
                 tenant_id = %key.tenant_id,
                 block_size,
-                lora_name = ?lora_name,
                 "Creating new indexer"
             );
             IndexerEntry {
                 indexer: create_indexer(block_size, self.num_threads),
                 block_size,
-                lora_name: lora_name.clone(),
             }
         });
 

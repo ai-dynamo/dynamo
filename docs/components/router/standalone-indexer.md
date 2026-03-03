@@ -72,7 +72,7 @@ curl -X POST http://localhost:8090/register \
     "block_size": 16
   }'
 
-# With tenant isolation and LoRA
+# With tenant isolation
 curl -X POST http://localhost:8090/register \
   -H 'Content-Type: application/json' \
   -d '{
@@ -81,8 +81,7 @@ curl -X POST http://localhost:8090/register \
     "model_name": "llama-3-8b",
     "tenant_id": "customer-a",
     "block_size": 16,
-    "dp_rank": 0,
-    "lora_name": "my-adapter"
+    "dp_rank": 0
   }'
 ```
 
@@ -94,7 +93,6 @@ curl -X POST http://localhost:8090/register \
 | `block_size` | yes | — | KV cache block size (must match the engine) |
 | `tenant_id` | no | `"default"` | Tenant identifier for isolation |
 | `dp_rank` | no | `0` | Data parallel rank |
-| `lora_name` | no | — | LoRA adapter name (mixed into hash salt for the indexer) |
 
 ### `POST /unregister` — Deregister an instance
 
