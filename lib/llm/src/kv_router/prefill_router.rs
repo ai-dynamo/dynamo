@@ -547,6 +547,7 @@ impl PrefillRouter {
                         update_states,
                         lora_name,
                         priority_jump,
+                        None,
                         allowed_worker_ids,
                     )
                     .await?;

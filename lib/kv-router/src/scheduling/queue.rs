@@ -4,6 +4,7 @@
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::time::{Duration, Instant};
 
 use tokio::sync::Mutex;
@@ -51,6 +52,9 @@ impl PartialOrd for QueueEntry {
 /// If queueing is disabled (threshold_frac is None), requests are scheduled immediately.
 pub struct SchedulerQueue<P: SequencePublisher, C: WorkerConfigLike> {
     pending: Mutex<BinaryHeap<QueueEntry>>,
+    /// Number of requests currently parked in the pending queue.
+    /// Incremented after push, decremented after pop. Lock-free reads via `Relaxed` load.
+    pending_count: AtomicUsize,
     slots: Arc<ActiveSequencesMultiWorker<P>>,
     workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
     /// Cached threshold fraction; None means queueing is disabled.
@@ -74,6 +78,7 @@ impl<P: SequencePublisher + 'static, C: WorkerConfigLike + Default + Clone> Sche
         }
         Self {
             pending: Mutex::new(BinaryHeap::new()),
+            pending_count: AtomicUsize::new(0),
             slots,
             workers_with_configs,
             threshold_frac,
@@ -116,6 +121,7 @@ impl<P: SequencePublisher + 'static, C: WorkerConfigLike + Default + Clone> Sche
             tracing::debug!("all workers busy, queueing request");
             let entry = self.make_entry(request);
             self.pending.lock().await.push(entry);
+            self.pending_count.fetch_add(1, AtomicOrdering::Relaxed);
         } else {
             self.schedule(request).await;
         }
@@ -136,6 +142,7 @@ impl<P: SequencePublisher + 'static, C: WorkerConfigLike + Default + Clone> Sche
             let Some(entry) = self.pending.lock().await.pop() else {
                 break;
             };
+            self.pending_count.fetch_sub(1, AtomicOrdering::Relaxed);
             tracing::debug!("scheduling request from pending queue");
             self.schedule(entry.request).await;
         }
@@ -194,7 +201,7 @@ impl<P: SequencePublisher + 'static, C: WorkerConfigLike + Default + Clone> Sche
                 token_sequence: request.token_seq,
                 isl: request.isl_tokens,
                 overlap: selection.overlap_blocks,
-                expected_output_tokens: None,
+                expected_output_tokens: request.expected_output_tokens,
                 worker: selection.worker,
                 lora_name: request.lora_name.clone(),
             })
@@ -202,6 +209,11 @@ impl<P: SequencePublisher + 'static, C: WorkerConfigLike + Default + Clone> Sche
         {
             tracing::warn!("Failed to add request {request_id}: {e}");
         }
+    }
+
+    /// Number of requests currently parked in the pending queue (lock-free).
+    pub fn pending_count(&self) -> usize {
+        self.pending_count.load(AtomicOrdering::Relaxed)
     }
 
     /// Check if all workers are busy based on threshold.
@@ -212,11 +224,12 @@ impl<P: SequencePublisher + 'static, C: WorkerConfigLike + Default + Clone> Sche
 
         for (&worker_id, config) in configs.iter() {
             let dp_size = config.data_parallel_size();
+            let dp_start_rank = config.data_parallel_start_rank();
             let max_batched = config
                 .max_num_batched_tokens()
                 .unwrap_or(DEFAULT_MAX_BATCHED_TOKENS);
 
-            for dp_rank in 0..dp_size {
+            for dp_rank in dp_start_rank..dp_start_rank + dp_size {
                 let worker = WorkerWithDpRank::new(worker_id, dp_rank);
                 let tokens = active_tokens.get(&worker).copied().unwrap_or(0);
                 if (tokens as f64) <= threshold * (max_batched as f64) {
@@ -266,11 +279,12 @@ mod tests {
         Arc<SchedulerQueue<NoopSequencePublisher, SimpleWorkerConfig>>,
         Arc<ActiveSequencesMultiWorker<NoopSequencePublisher>>,
     ) {
-        let dp_sizes: HashMap<u64, u32> = (0..num_workers as u64).map(|id| (id, 1)).collect();
+        let dp_range: HashMap<u64, (u32, u32)> =
+            (0..num_workers as u64).map(|id| (id, (0, 1))).collect();
         let slots = Arc::new(ActiveSequencesMultiWorker::new(
             NoopSequencePublisher,
             block_size as usize,
-            dp_sizes,
+            dp_range,
             false,
             0,
             "test",
@@ -322,6 +336,7 @@ mod tests {
             update_states: true,
             lora_name: None,
             priority_jump: 0.0,
+            expected_output_tokens: None,
             allowed_worker_ids: None,
             resp_tx: Some(tx),
         };
@@ -407,6 +422,57 @@ mod tests {
             }
         }
         assert_eq!(ok_count, num_requests, "not all requests were scheduled");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_pending_count() {
+        let block_size = 16;
+        let isl = 512;
+        let num_workers = 1;
+
+        // threshold_frac=0.0 means any active tokens trigger queueing
+        let (queue, slots) = make_queue(num_workers, block_size, isl, Some(0.0));
+        assert_eq!(queue.pending_count(), 0);
+
+        // First request goes through (worker is idle)
+        let (req1, rx1) = make_request("req-1", isl);
+        queue.enqueue(req1).await;
+        let _resp1 = rx1.await.unwrap().unwrap();
+        assert_eq!(queue.pending_count(), 0); // scheduled immediately
+
+        // Second and third requests should be queued (worker is now busy)
+        let (req2, _rx2) = make_request("req-2", isl);
+        queue.enqueue(req2).await;
+        assert_eq!(queue.pending_count(), 1);
+
+        let (req3, _rx3) = make_request("req-3", isl);
+        queue.enqueue(req3).await;
+        assert_eq!(queue.pending_count(), 2);
+
+        // Free the first request and update — should drain one from pending
+        slots
+            .mark_prefill_completed(&"req-1".to_string())
+            .await
+            .unwrap();
+        slots.free(&"req-1".to_string()).await.unwrap();
+        queue.update().await;
+
+        // After update, one pending request should have been scheduled
+        assert!(
+            queue.pending_count() < 2,
+            "pending_count should decrease after free+update, got {}",
+            queue.pending_count()
+        );
+
+        // Free req-2 and update to drain remaining
+        let _ = slots.mark_prefill_completed(&"req-2".to_string()).await;
+        let _ = slots.free(&"req-2".to_string()).await;
+        queue.update().await;
+        let _ = slots.mark_prefill_completed(&"req-3".to_string()).await;
+        let _ = slots.free(&"req-3".to_string()).await;
+        queue.update().await;
+
+        assert_eq!(queue.pending_count(), 0, "all requests should be drained");
     }
 
     #[tokio::test]
