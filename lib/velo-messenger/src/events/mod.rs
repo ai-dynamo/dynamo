@@ -898,9 +898,9 @@ fn get_event_nack_error_handler() -> Arc<dyn velo_backend::TransportErrorHandler
 #[cfg(test)]
 mod tests {
     use super::remote::*;
+    use std::num::NonZero;
     use std::sync::Arc;
     use std::time::Duration;
-    use std::num::NonZero;
     use velo_events::{
         DistributedEventFactory, EventHandle, EventManager, EventPoison, EventStatus,
     };

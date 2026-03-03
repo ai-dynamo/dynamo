@@ -413,8 +413,7 @@ mod tests {
     #[tokio::test]
     async fn test_persistence() {
         let temp_dir = std::env::temp_dir();
-        let file_path =
-            temp_dir.join(format!("test-velo-discovery-{}.json", uuid::Uuid::new_v4()));
+        let file_path = temp_dir.join(format!("test-velo-discovery-{}.json", uuid::Uuid::new_v4()));
 
         let (instance_id, worker_address) = create_test_peer_info();
         let worker_id = instance_id.worker_id();
@@ -506,8 +505,7 @@ mod tests {
     #[tokio::test]
     async fn test_concurrent_access() {
         let temp_dir = std::env::temp_dir();
-        let file_path =
-            temp_dir.join(format!("test-velo-discovery-{}.json", uuid::Uuid::new_v4()));
+        let file_path = temp_dir.join(format!("test-velo-discovery-{}.json", uuid::Uuid::new_v4()));
 
         let discovery = FilesystemPeerDiscovery::new(&file_path).unwrap();
 
@@ -545,8 +543,7 @@ mod tests {
     #[tokio::test]
     async fn test_sequential_multi_instance() {
         let temp_dir = std::env::temp_dir();
-        let file_path =
-            temp_dir.join(format!("test-velo-discovery-{}.json", uuid::Uuid::new_v4()));
+        let file_path = temp_dir.join(format!("test-velo-discovery-{}.json", uuid::Uuid::new_v4()));
 
         let discovery1 = FilesystemPeerDiscovery::new(&file_path).unwrap();
         let (instance_id1, worker_address1) = create_test_peer_info();

@@ -10,8 +10,8 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
-pub use velo_backend as backend;
 pub use backend::Transport;
+pub use velo_backend as backend;
 
 // Re-exports: Messaging (from velo-messenger)
 pub use velo_messenger::{
@@ -141,9 +141,7 @@ impl Velo {
 
     /// Discover a peer by instance_id and register it for communication.
     pub async fn discover_and_register_peer(&self, instance_id: InstanceId) -> Result<()> {
-        self.messenger
-            .discover_and_register_peer(instance_id)
-            .await
+        self.messenger.discover_and_register_peer(instance_id).await
     }
 
     /// Get the list of handlers available on a remote instance.
