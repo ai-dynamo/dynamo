@@ -141,7 +141,6 @@ func inspectContainer(ctx context.Context, ctrd *containerd.Client, log logr.Log
 		if err != nil {
 			return nil, fmt.Errorf("failed to resolve CUDA namespace PIDs: %w", err)
 		}
-		log.Info("Discovered CUDA processes", "host_pids", cudaPIDs, "namespace_pids", cudaNamespacePIDs, "gpu_uuids", gpuUUIDs)
 	}
 
 	return &types.CheckpointContainerSnapshot{
@@ -191,7 +190,7 @@ func configureCheckpoint(
 func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSettings *types.CRIUSettings, data *types.CheckpointManifest, state *types.CheckpointContainerSnapshot, checkpointDir string, log logr.Logger) (time.Duration, error) {
 	// CUDA lock+checkpoint must happen before CRIU dump
 	if len(state.CUDAPIDs) > 0 {
-		if err := cuda.LockAndCheckpointProcessTree(ctx, state.CUDAPIDs, log); err != nil {
+		if err := cuda.LockAndCheckpointProcessTree(ctx, state.CUDAPIDs, state.CUDANamespacePIDs, log); err != nil {
 			return 0, fmt.Errorf("CUDA checkpoint failed: %w", err)
 		}
 	}
