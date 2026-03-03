@@ -791,7 +791,6 @@ async def init(
         factory = StatLoggerFactory(
             endpoint=generate_endpoint,
             component_gauges=component_gauges,
-            dp_rank=config.engine_args.data_parallel_rank or 0,
         )
     else:
         # Factory is created without component_gauges; setup_vllm_engine() will
@@ -799,7 +798,6 @@ async def init(
         # on the factory before vLLM calls create_stat_logger().
         factory = StatLoggerFactory(
             endpoint=generate_endpoint,
-            dp_rank=config.engine_args.data_parallel_rank or 0,
         )
         (
             engine_client,
