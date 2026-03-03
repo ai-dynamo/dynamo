@@ -15,6 +15,10 @@ spec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/epp-image:my-tag
           env:
+            - name: DYN_KV_CACHE_BLOCK_SIZE
+              value: "128"
+            - name: DYN_MODEL_NAME
+              value: "Qwen/Qwen3-0.6B"
             - name: DYN_DECODE_FALLBACK
               value: "true"
       eppConfig:
@@ -106,6 +110,8 @@ spec:
                 valueFrom:
                   fieldRef:
                     fieldPath: metadata.uid
+              - name: DYN_LOG
+                value: "info,dynamo_llm::protocols::openai::nvext=debug,dynamo_llm::kv_router::push_router=debug"
             livenessProbe:
               httpGet:
                 path: /live

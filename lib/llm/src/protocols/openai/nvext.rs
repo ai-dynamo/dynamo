@@ -35,6 +35,12 @@ pub fn apply_header_routing_overrides(nvext: Option<NvExt>, headers: &HeaderMap)
         return nvext;
     }
 
+    tracing::debug!(
+        worker_id = ?worker_id,
+        prefill_id = ?prefill_id,
+        "Routing overrides from HTTP headers skipping routing"
+    );
+
     let mut ext = nvext.unwrap_or_default();
     if let Some(id) = worker_id {
         ext.backend_instance_id = Some(id);

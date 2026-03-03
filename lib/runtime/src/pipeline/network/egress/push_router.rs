@@ -249,7 +249,8 @@ where
 
     /// Select the next worker according to the routing mode.
     /// Increments round-robin counter if applicable.
-    /// Panics if called on Direct or KV mode - those have their own selection mechanisms.
+    /// Returns None for Direct mode - requires explicit worker IDs via routing hints
+    /// Panics for KV mode which has its own selection via find_best_match.
     pub fn select_next_worker(&self) -> Option<u64> {
         let instance_ids = self.client.instance_ids_avail();
         let count = instance_ids.len();
@@ -266,6 +267,7 @@ where
                 let counter = rand::rng().random::<u64>() as usize;
                 Some(instance_ids[counter % count])
             }
+            RouterMode::Direct => None,
             _ => {
                 panic!(
                     "select_next_worker should not be called for {:?} routing mode",
@@ -277,6 +279,7 @@ where
 
     /// Peek the next worker according to the routing mode without incrementing the counter.
     /// Useful for checking if a worker is suitable before committing to it.
+    /// Returns None for Direct mode - requires explicit worker IDs via routing hints.
     pub fn peek_next_worker(&self) -> Option<u64> {
         let instance_ids = self.client.instance_ids_avail();
         let count = instance_ids.len();
@@ -296,6 +299,7 @@ where
                 let counter = rand::rng().random::<u64>() as usize;
                 Some(instance_ids[counter % count])
             }
+            RouterMode::Direct => None,
             _ => {
                 panic!(
                     "peek_next_worker should not be called for {:?} routing mode",

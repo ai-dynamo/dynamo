@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 
 	log "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/plugins"
@@ -113,9 +114,12 @@ func (s *DynPrefillScorer) Score(ctx context.Context, cycleState *schedtypes.Cyc
 		return uniformScores(pods, 0)
 	}
 
+	prefillWorkerID := strconv.FormatUint(result.WorkerID, 10)
 	logger.V(logutil.DEFAULT).Info("DynPrefillScorer: prefill worker selected",
-		"prefillWorkerID", fmt.Sprintf("%d", result.WorkerID),
+		"prefillWorkerID", prefillWorkerID,
 		"tokenCount", len(result.TokenData))
+
+	cycleState.Write(PrefillWorkerIDStateKey, &PrefillWorkerIDState{WorkerID: prefillWorkerID})
 
 	// Score: 1.0 for all pods. The label-filter has already restricted to prefill workers,
 	// and the FFI router's internal selection is authoritative.

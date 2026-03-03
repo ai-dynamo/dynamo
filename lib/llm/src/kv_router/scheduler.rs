@@ -8,6 +8,7 @@ pub use dynamo_kv_router::selector::DefaultWorkerSelector;
 
 use super::KvRouterConfig;
 use super::RouterConfigOverride;
+use super::WorkerDiscoveryMode;
 use super::WorkerSelector;
 use super::metrics::ROUTER_QUEUE_METRICS;
 use super::protocols::{OverlapScores, WorkerId};
@@ -42,13 +43,15 @@ impl KvScheduler {
         selector: Option<Box<WorkerSelector>>,
         kv_router_config: &KvRouterConfig,
         worker_type: &'static str,
+        worker_discovery_mode: WorkerDiscoveryMode,
     ) -> Result<Self, KvSchedulerError> {
         let selector = selector.unwrap_or(Box::new(DefaultWorkerSelector::default()));
+        let discovery_mode = worker_discovery_mode;
 
-        // Get initial workers from watch receiver.
-        // Caller must ensure at least one worker is present (via wait_for).
-        let initial_workers: HashMap<WorkerId, ModelRuntimeConfig> =
-            workers_with_configs.borrow().clone();
+        let initial_workers: HashMap<WorkerId, ModelRuntimeConfig> = match discovery_mode {
+            WorkerDiscoveryMode::External => HashMap::new(),
+            WorkerDiscoveryMode::Dynamo => workers_with_configs.borrow().clone(),
+        };
 
         let router_id = component.drt().discovery().instance_id();
         let slots = create_multi_worker_sequences(
@@ -63,39 +66,70 @@ impl KvScheduler {
         .map_err(|e| KvSchedulerError::InitFailed(e.to_string()))?;
 
         // Spawn background task to sync slots when the watch value changes.
-        let slots_monitor = slots.clone();
-        let mut monitor_rx = workers_with_configs.clone();
-        let monitor_cancel_token = component.drt().child_token();
-        tokio::spawn(async move {
-            tracing::trace!("KvScheduler workers monitoring task started");
-            let mut last_workers: HashMap<WorkerId, ModelRuntimeConfig> = HashMap::new();
+        match discovery_mode {
+            WorkerDiscoveryMode::Dynamo => {
+                let slots_monitor = slots.clone();
+                let mut monitor_rx = workers_with_configs.clone();
+                let monitor_cancel_token = component.drt().child_token();
+                tokio::spawn(async move {
+                    tracing::trace!("KvScheduler workers monitoring task started");
+                    let mut last_workers: HashMap<WorkerId, ModelRuntimeConfig> = HashMap::new();
 
-            loop {
-                tokio::select! {
-                    _ = monitor_cancel_token.cancelled() => {
-                        tracing::trace!("KvScheduler workers monitoring task shutting down");
-                        break;
-                    }
-                    result = monitor_rx.changed() => {
-                        if result.is_err() {
-                            tracing::warn!("KvScheduler: config watch sender dropped, shutting down");
-                            break;
+                    loop {
+                        tokio::select! {
+                            _ = monitor_cancel_token.cancelled() => {
+                                tracing::trace!("KvScheduler workers monitoring task shutting down");
+                                break;
+                            }
+                            result = monitor_rx.changed() => {
+                                if result.is_err() {
+                                    tracing::warn!("KvScheduler: config watch sender dropped, shutting down");
+                                    break;
+                                }
+                            }
+                        }
+
+                        let current_workers = monitor_rx.borrow_and_update().clone();
+
+                        if current_workers != last_workers {
+                            let dp_range: HashMap<u64, (u32, u32)> = current_workers
+                                .iter()
+                                .map(|(&id, c)| {
+                                    (id, (c.data_parallel_start_rank, c.data_parallel_size))
+                                })
+                                .collect();
+                            slots_monitor.update_workers(&dp_range);
+                            last_workers = current_workers;
                         }
                     }
-                }
-
-                let current_workers = monitor_rx.borrow_and_update().clone();
-
-                if current_workers != last_workers {
-                    let dp_range: HashMap<u64, (u32, u32)> = current_workers
-                        .iter()
-                        .map(|(&id, c)| (id, (c.data_parallel_start_rank, c.data_parallel_size)))
-                        .collect();
-                    slots_monitor.update_workers(&dp_range);
-                    last_workers = current_workers;
-                }
+                });
             }
-        });
+            WorkerDiscoveryMode::External => {
+                tracing::info!(
+                    "External worker discovery mode: worker set will be provided per-request"
+                );
+
+                let mut monitor_rx = workers_with_configs.clone();
+                let monitor_cancel_token = component.drt().child_token();
+                tokio::spawn(async move {
+                    loop {
+                        tokio::select! {
+                            _ = monitor_cancel_token.cancelled() => break,
+                            result = monitor_rx.changed() => {
+                                if result.is_err() { break; }
+                            }
+                        }
+                        let current = monitor_rx.borrow_and_update();
+                        let worker_ids: Vec<u64> = current.keys().copied().collect();
+                        tracing::debug!(
+                            ?worker_ids,
+                            count = worker_ids.len(),
+                            "External mode: discovery-registered workers updated (used for RuntimeConfig lookup)"
+                        );
+                    }
+                });
+            }
+        }
 
         let (request_tx, request_rx) = tokio::sync::mpsc::channel::<SchedulingRequest>(1024);
         let scheduler_cancel_token = component.drt().primary_token();

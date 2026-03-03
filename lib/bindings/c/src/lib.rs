@@ -19,9 +19,9 @@ use dynamo_runtime::{DistributedRuntime, Worker};
 use dynamo_runtime::Runtime;
 
 use dynamo_llm::discovery::{ModelManager, WORKER_TYPE_DECODE};
-use dynamo_llm::kv_router::KvRouterConfig;
 use dynamo_llm::kv_router::protocols::WorkerWithDpRank;
 use dynamo_llm::kv_router::{KvRouter, PrefillRouter, RouterConfigOverride};
+use dynamo_llm::kv_router::{KvRouterConfig, WorkerDiscoveryMode};
 use dynamo_runtime::pipeline::RouterMode;
 
 use std::collections::HashSet;
@@ -57,9 +57,9 @@ fn initialize_tracing() {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .finish();
 
-    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
-
-    tracing::debug!("Tracing initialized");
+    if tracing::subscriber::set_global_default(subscriber).is_ok() {
+        tracing::debug!("Tracing initialized");
+    }
 }
 
 #[repr(u32)]
@@ -590,6 +590,8 @@ pub unsafe extern "C" fn create_routers(
     decode_fallback: bool,
     out_handle: *mut RouterHandlesPtr,
 ) -> QueryRouterResult {
+    initialize_tracing();
+
     if namespace.is_null() || out_handle.is_null() {
         return QueryRouterResult::ErrInvalidParam;
     }
@@ -629,21 +631,17 @@ pub unsafe extern "C" fn create_routers(
             }
         };
 
-        // Wait for at least one worker to be discovered before proceeding
-        // This ensures the decode router can be created successfully
-        let instance_count = wait_for_discovery_sync(&drt).await;
-        if instance_count == 0 {
-            tracing::error!(
-                "Discovery sync failed: no worker instances found. Is the backend running?"
-            );
-            return Err(QueryRouterResult::ErrInitFailed);
-        }
-        tracing::info!(
-            "Discovery sync complete, {} worker(s) found",
-            instance_count
-        );
+        let (preprocessor, block_size, model_name) =
+            match init_preprocessor(&drt, &namespace_str).await {
+                Ok(result) => result,
+                Err(e) => {
+                    tracing::error!(error = %e, "Failed to initialize preprocessor");
+                    return Err(QueryRouterResult::ErrInitFailed);
+                }
+            };
 
         let kv_router_config = kv_router_config_from_env();
+        let worker_discovery_mode = WorkerDiscoveryMode::External;
 
         // Get component and endpoint
         let component_handle = match drt.namespace(&namespace_str) {
@@ -663,25 +661,6 @@ pub unsafe extern "C" fn create_routers(
 
         let model_manager = Arc::new(ModelManager::new());
 
-        // Fetch model card via discovery and create preprocessor + get block_size
-        let (preprocessor, block_size, model_name) =
-            match fetch_preprocessor_from_discovery(&drt, &namespace_str).await {
-                Ok((prep, bs, name)) => {
-                    tracing::info!(
-                        kv_cache_block_size = bs,
-                        "Preprocessor created from discovery"
-                    );
-                    (Some(prep), bs, name)
-                }
-                Err(e) => {
-                    tracing::error!(
-                        error = %e,
-                        "Failed to fetch model card from discovery - cannot determine block_size"
-                    );
-                    return Err(QueryRouterResult::ErrInitFailed);
-                }
-            };
-
         // Create decode router
         let decode_router = match model_manager
             .kv_chooser_for(
@@ -689,6 +668,7 @@ pub unsafe extern "C" fn create_routers(
                 block_size,
                 Some(kv_router_config),
                 WORKER_TYPE_DECODE,
+                worker_discovery_mode,
             )
             .await
         {
@@ -726,7 +706,9 @@ pub unsafe extern "C" fn create_routers(
             }
             None if !decode_fallback => {
                 tracing::error!(
-                    "Prefill workers required but none found and decode fallback is disabled"
+                    "No prefill workers found and decode_fallback is disabled. \
+                     If running in aggregated mode, set DYN_DECODE_FALLBACK=true. \
+                     If running in disaggregated mode, ensure prefill workers are deployed."
                 );
                 return Err(QueryRouterResult::ErrDisaggEnforced);
             }
@@ -1236,6 +1218,37 @@ pub unsafe extern "C" fn route_decode_request(
         }
         Err(code) => code,
     }
+}
+
+/// Initialize the preprocessor, block size, and model name.
+///
+/// Waits for discovery to sync (model card must be available for tokenization),
+/// then creates the preprocessor from the model card. The `kv_cache_block_size`
+/// and `model_name` are taken from the model card to ensure consistency with
+/// the worker configuration.
+async fn init_preprocessor(
+    drt: &DistributedRuntime,
+    target_namespace: &str,
+) -> anyhow::Result<(Option<Arc<OpenAIPreprocessor>>, u32, String)> {
+    let instance_count = wait_for_discovery_sync(drt).await;
+    if instance_count == 0 {
+        anyhow::bail!("Discovery sync failed: no worker instances found. Is the backend running?");
+    }
+    tracing::info!(
+        "Discovery sync complete, {} worker(s) found",
+        instance_count
+    );
+
+    let (prep, block_size, model_name) =
+        fetch_preprocessor_from_discovery(drt, target_namespace).await?;
+
+    tracing::info!(
+        kv_cache_block_size = block_size,
+        model_name = model_name,
+        "Preprocessor initialized from model card"
+    );
+
+    Ok((Some(prep), block_size, model_name))
 }
 
 /// Fetch model card via discovery and create preprocessor.

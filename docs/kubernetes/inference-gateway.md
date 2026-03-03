@@ -88,10 +88,6 @@ kubectl create secret generic hf-token-secret \
   -n ${NAMESPACE}
 ```
 
-Create a model configuration file similar to the vllm_agg_qwen.yaml for your model.
-This file demonstrates the values needed for the Vllm Agg setup in [agg.yaml](../../examples/backends/vllm/deploy/agg.yaml)
-Take a note of the model's block size provided in the model card.
-
 ### 4. Build EPP image (Optional)
 
 You can either use the provided Dynamo FrontEnd image for the EPP image or you need to build your own Dynamo EPP custom image following the steps below.
@@ -130,6 +126,7 @@ you could deploy it as a standalone pod
 We provide an example for the Qwen vLLM below.
 ```bash
 cd <dynamo-source-root>
+# kubectl get httproutes -n my-model # Make sure you do not have an incompatible HttpRoute running, delete if so.
 kubectl apply -f examples/backends/vllm/deploy/gaie/agg.yaml -n my-model
 kubectl apply -f examples/backends/vllm/deploy/gaie/http-route.yaml -n my-model
 ```
@@ -142,6 +139,11 @@ kubectl apply -f recipes/llama-3-70b/model-cache/model-cache.yaml  -n ${NAMESPAC
 kubectl apply -f recipes/llama-3-70b/model-cache/model-download.yaml  -n ${NAMESPACE}
 ```
 We provide examples for llama-3-70b vLLM under the `recipes/llama-3-70b/vllm/agg/gaie/` for aggregated and `recipes/llama-3-70b/vllm/disagg-single-node/gaie/` for disaggregated serving.
+Note for the aggregated serving you need to enable DYN_DECODE_FALLBACK in epp config.
+```bash
+  - name: DYN_DECODE_FALLBACK
+    value: "true"
+```
 Use the proper folder in commands below.
 
 ```bash
@@ -184,7 +186,7 @@ extraPodSpec:
 
 **Gateway Namespace**
 Note that this assumes your gateway is installed into `NAMESPACE=my-model` (examples' default)
-If you installed it into a different namespace, you need to adjust the HttpRoute entry in http-route.yaml.
+If you installed it into a different namespace, you need to adjust the HttpRoute entry in `http-route.yaml`.
 
 
 #### 5.b. Deploy as a standalone pod
@@ -201,6 +203,7 @@ cd deploy/inference-gateway/standalone
 # Export the EPP image - use the Dynamo FrontEnd image or build your own EPP image (see section 4)
 export EPP_IMAGE=<the-epp-image>
 ```
+Create a model configuration file similar to the vllm_agg_qwen.yaml for your model.
 
 ```bash
 helm upgrade --install dynamo-gaie ./helm/dynamo-gaie -n my-model -f ./vllm_agg_qwen.yaml --set-string extension.image=$EPP_IMAGE
@@ -268,9 +271,8 @@ The Inference Gateway provides HTTP endpoints for model inference.
 
 #### 1: Populate gateway URL for your k8s cluster ####
 
-To test the gateway in minikube, use the following command:
-a. User minikube tunnel to expose the gateway to the host
-   This requires `sudo` access to the host machine. alternatively, you can use port-forward to expose the gateway to the host as shown in alternative (b).
+a. To test the integration in minikube, proceed as below:
+Use minikube tunnel to expose the gateway to the host. This requires `sudo` access to the host machine. Alternatively, you can use port-forward to expose the gateway to the host as shown in alternative (b).
 
 ```bash
 # in first terminal
@@ -281,11 +283,13 @@ minikube tunnel # start the tunnel
 GATEWAY_URL=$(kubectl get svc inference-gateway -n my-model -o jsonpath='{.spec.clusterIP}') && echo $GATEWAY_URL
 ```
 
-b. use port-forward to expose the gateway to the host
+b. To test on a cluster use commands below:
+
+use port-forward to expose the gateway to the host
 
 ```bash
 # in first terminal
-kubectl port-forward svc/inference-gateway 8000:80 -n {NAMESPACE} # for NAMESPACE put wherever you installed thee gateway i.e. kgateway-system
+kubectl port-forward svc/inference-gateway 8000:80 -n {NAMESPACE} # for NAMESPACE put wherever you installed the gateway i.e. kgateway-system
 
 # in second terminal where you want to send inference requests
 GATEWAY_URL=http://localhost:8000
@@ -322,6 +326,25 @@ b. Send inference request to gateway:
 ```bash
 MODEL_NAME="Qwen/Qwen3-0.6B"
 curl $GATEWAY_URL/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+      "model": "'"${MODEL_NAME}"'",
+      "messages": [
+      {
+          "role": "user",
+          "content": "In the heart of Eldoria, an ancient land of boundless magic and mysterious creatures, lies the long-forgotten city of Aeloria. Once a beacon of knowledge and power, Aeloria was buried beneath the shifting sands of time, lost to the world for centuries. You are an intrepid explorer, known for your unparalleled curiosity and courage, who has stumbled upon an ancient map hinting at ests that Aeloria holds a secret so profound that it has the potential to reshape the very fabric of reality. Your journey will take you through treacherous deserts, enchanted forests, and across perilous mountain ranges. Your Task: Character Background: Develop a detailed background for your character. Describe their motivations for seeking out Aeloria, their skills and weaknesses, and any personal connections to the ancient city or its legends. Are they driven by a quest for knowledge, a search for lost familt clue is hidden."
+      }
+      ],
+      "stream":false,
+      "max_tokens": 30,
+      "temperature": 0.0
+    }'
+```
+or
+
+```bash
+MODEL_NAME="RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic"
+curl -H "Host: llama3-70b-disagg.example.com" http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
       "model": "'"${MODEL_NAME}"'",
@@ -373,7 +396,9 @@ Sample inference output:
 ```
 
 ***If you have more than one HttpRoute running on the cluster***
-Add the host to your HttpRoute.yaml and add the header `curl -H "Host: llama3-70b-agg.example.com" ...` to every request.
+Add the host to your HttpRoute.yaml and add the header
+`curl -H "Host: llama3-70b-agg.example.com" ...` or `curl -H "Host: llama3-70b-disagg.example.com" http://localhost:8000/v1/models`
+
 ```bash
 spec:
   hostnames:

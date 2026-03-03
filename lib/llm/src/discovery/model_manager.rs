@@ -18,7 +18,7 @@ use dynamo_runtime::{
 
 use crate::{
     kv_router::{
-        KvRouter, KvRouterConfig, protocols::WorkerId, router_endpoint_id,
+        KvRouter, KvRouterConfig, WorkerDiscoveryMode, protocols::WorkerId, router_endpoint_id,
         scheduler::DefaultWorkerSelector,
     },
     local_model::runtime_config::DisaggregatedEndpoint,
@@ -573,6 +573,7 @@ impl ModelManager {
         kv_cache_block_size: u32,
         kv_router_config: Option<KvRouterConfig>,
         worker_type: &'static str,
+        worker_discovery_mode: WorkerDiscoveryMode,
     ) -> anyhow::Result<Arc<KvRouter>> {
         let client = endpoint.client().await?;
 
@@ -607,6 +608,7 @@ impl ModelManager {
             Some(selector),
             kv_router_config,
             worker_type,
+            worker_discovery_mode,
         )
         .await?;
         Ok(Arc::new(chooser))

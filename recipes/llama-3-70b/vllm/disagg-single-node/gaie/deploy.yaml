@@ -16,7 +16,13 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/epp-image:my-tag
+          image: docker.io/lambda108/epp-inference-extension-dynamo:fix-header
+          imagePullPolicy: Always
+          env:
+            - name: DYN_KV_CACHE_BLOCK_SIZE
+              value: "128"
+            - name: DYN_MODEL_NAME
+              value: "RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic"
       eppConfig:
         config:
           plugins:
@@ -120,7 +126,7 @@ spec:
               - name: DYN_HTTP_PORT
                 value: "8000"
               - name: DYN_NAMESPACE
-                value: a-epp-vllm-disagg
+                value: a-epp-llama3-70b-disagg
               - name: DYN_COMPONENT
                 value: frontend
               - name: DYN_DISCOVERY_BACKEND
@@ -141,6 +147,8 @@ spec:
                 valueFrom:
                   fieldRef:
                     fieldPath: metadata.uid
+              - name: DYN_LOG
+                value: "info,dynamo_llm::protocols::openai::nvext=debug,dynamo_llm::kv_router::push_router=debug"
             livenessProbe:
               httpGet:
                 path: /live
@@ -221,7 +229,7 @@ spec:
               - name: DYN_HTTP_PORT
                 value: "8000"
               - name: DYN_NAMESPACE
-                value: a-epp-vllm-disagg
+                value: a-epp-llama3-70b-disagg
               - name: DYN_COMPONENT
                 value: frontend
               - name: DYN_DISCOVERY_BACKEND
@@ -242,6 +250,8 @@ spec:
                 valueFrom:
                   fieldRef:
                     fieldPath: metadata.uid
+              - name: DYN_LOG
+                value: "info,dynamo_llm::protocols::openai::nvext=debug,dynamo_llm::kv_router::push_router=debug"
             livenessProbe:
               httpGet:
                 path: /live

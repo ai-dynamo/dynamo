@@ -95,6 +95,10 @@ func (e *EPPDefaults) GetBaseContainer(context ComponentContext) (corev1.Contain
 			Name:  "RUST_LOG",
 			Value: "debug,dynamo_llm::kv_router=trace",
 		},
+		{
+			Name:  "DYN_DECODE_FALLBACK",
+			Value: "true",
+		},
 	}...)
 
 	// EPP default args

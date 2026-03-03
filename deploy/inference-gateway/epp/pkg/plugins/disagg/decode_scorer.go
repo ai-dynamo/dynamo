@@ -167,10 +167,13 @@ func (s *DynDecodeScorer) Score(ctx context.Context, cycleState *schedtypes.Cycl
 
 	if isDisaggregated {
 		req.Headers[RoutingModeHeader] = "disaggregated"
-		// In disagg mode, the prefill worker was selected by the prefill scorer profile.
-		// The prefill worker ID would need to be communicated from the prefill profile result.
-		// For now we set the mode header; the prefill worker header will be set
-		// when the framework processes the prefill profile result.
+		// Read the prefill worker ID selected by DynPrefillScorer via CycleState.
+		prefillState, err := schedtypes.ReadCycleStateKey[*PrefillWorkerIDState](cycleState, PrefillWorkerIDStateKey)
+		if err == nil && prefillState != nil && prefillState.WorkerID != "" {
+			req.Headers[PrefillWorkerIDHeader] = prefillState.WorkerID
+			logger.V(logutil.DEFAULT).Info("DynDecodeScorer: setting prefill worker header",
+				"prefillWorkerID", prefillState.WorkerID)
+		}
 	} else {
 		req.Headers[RoutingModeHeader] = "aggregated"
 	}
