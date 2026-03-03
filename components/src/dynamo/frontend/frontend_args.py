@@ -550,10 +550,12 @@ class FrontendArgGroup(ArgGroup):
             default="dynamo",
             dest="chat_processor",
             help=(
-                "[EXPERIMENTAL] When set to 'vllm', use local vllm for the pre and post "
-                "processor."
+                "[EXPERIMENTAL] Chat pre/post processor backend. 'dynamo' uses the Rust "
+                "preprocessor. 'vllm' uses local vLLM for pre and post processing. "
+                "'sglang' uses SGLang APIs for chat template rendering, tool call "
+                "parsing, and reasoning parsing."
             ),
-            choices=["dynamo", "vllm"],
+            choices=["dynamo", "vllm", "sglang"],
         )
 
         add_negatable_bool_argument(

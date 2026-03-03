@@ -60,6 +60,20 @@ def setup_engine_factory(
     return EngineFactory(runtime, router_config, config, vllm_flags, config.debug_perf)
 
 
+def setup_sglang_engine_factory(
+    runtime: DistributedRuntime,
+    router_config: RouterConfig,
+    config: FrontendConfig,
+):
+    """
+    When using sglang pre and post processor, create the SglangEngineFactory
+    that creates the engines that run requests.
+    """
+    from .sglang_processor import SglangEngineFactory
+
+    return SglangEngineFactory(runtime, router_config, config, config.debug_perf)
+
+
 def parse_args() -> tuple[FrontendConfig, Optional[Namespace]]:
     """Parse command-line arguments for the Dynamo frontend.
 
@@ -245,6 +259,11 @@ async def async_main():
         ), "vllm_flags is required when chat_processor is vllm"
         chat_engine_factory = setup_engine_factory(
             runtime, router_config, config, vllm_flags
+        ).chat_engine_factory
+        kwargs["chat_engine_factory"] = chat_engine_factory
+    elif config.chat_processor == "sglang":
+        chat_engine_factory = setup_sglang_engine_factory(
+            runtime, router_config, config
         ).chat_engine_factory
         kwargs["chat_engine_factory"] = chat_engine_factory
 
