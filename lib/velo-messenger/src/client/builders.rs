@@ -633,6 +633,10 @@ impl MessageBuilder {
 
                 if let Err(e) = self.client.send_message(target, message) {
                     tracing::error!(target: "velo_messenger::client", error = %e, "Failed to send message in fast path");
+                    let _ = self.client.response_manager.complete_outcome(
+                        response_id,
+                        Err(format!("Fast-path send failed: {}", e)),
+                    );
                 }
 
                 SyncResult::new(awaiter)
@@ -684,6 +688,10 @@ impl MessageBuilder {
 
                 if let Err(e) = self.client.send_message(target, message) {
                     tracing::error!(target: "velo_messenger::client", error = %e, "Failed to send message in fast path");
+                    let _ = self.client.response_manager.complete_outcome(
+                        response_id,
+                        Err(format!("Fast-path send failed: {}", e)),
+                    );
                 }
 
                 UnaryResult::new(awaiter)
@@ -738,6 +746,10 @@ impl MessageBuilder {
 
                 if let Err(e) = self.client.send_message(target, message) {
                     tracing::error!(target: "velo_messenger::client", error = %e, "Failed to send message in fast path");
+                    let _ = self.client.response_manager.complete_outcome(
+                        response_id,
+                        Err(format!("Fast-path send failed: {}", e)),
+                    );
                 }
 
                 TypedUnaryResult::new(awaiter)

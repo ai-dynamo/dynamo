@@ -18,7 +18,6 @@ use dashmap::DashMap;
 use lru::LruCache;
 use parking_lot::{Mutex, RwLock};
 use serde::Serialize;
-use std::collections::BTreeSet;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use tokio_util::task::TaskTracker;
@@ -793,7 +792,7 @@ impl VeloEvents {
         if remote_event.is_cacheable() {
             let info = CompletedEventInfo {
                 highest_generation: remote_event.known_generation(),
-                poisoned_generations: BTreeSet::new(), // simplified
+                poisoned_generations: remote_event.poisoned_generations(),
             };
 
             self.completed_cache.lock().put(key, info);

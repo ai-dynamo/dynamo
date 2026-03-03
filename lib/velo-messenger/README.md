@@ -31,7 +31,7 @@ src/
 messenger.am_send("notify")?.payload(&data)?.instance(peer).send().await?;
 ```
 
-All four patterns are async. For fire-and-forget, the future completes once the message has been issued to the transport. Because most transports are reliable (TCP, gRPC, NATS), this provides strong delivery guarantees even without a response. For the remaining three patterns, the future completes only after the remote handler has finished executing.
+All four patterns are async. For fire-and-forget, the future completes once the message has been issued to the transport -- delivery is best-effort with no application-level acknowledgement. While the underlying transport may be reliable (TCP, gRPC, NATS), the sender receives no confirmation that the remote handler processed the message. For the remaining three patterns, the future completes only after the remote handler has finished executing.
 
 **Synchronous (ack/nack)** -- send and wait for the remote handler to complete:
 ```rust

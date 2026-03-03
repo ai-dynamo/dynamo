@@ -142,6 +142,9 @@ pub(crate) enum DecodeError {
     #[error("Invalid headers length")]
     InvalidHeadersLength,
 
+    #[error("Unsupported schema version: got {0}, expected {1}")]
+    UnsupportedSchemaVersion(u8, u8),
+
     #[error("Failed to deserialize headers: {0}")]
     HeaderDeserializationError(#[from] rmp_serde::decode::Error),
 }
@@ -227,6 +230,12 @@ pub(crate) fn decode_active_message(
     }
 
     let schema_version = header.get_u8();
+    if schema_version != CURRENT_SCHEMA_VERSION {
+        return Err(DecodeError::UnsupportedSchemaVersion(
+            schema_version,
+            CURRENT_SCHEMA_VERSION,
+        ));
+    }
     let response_type_raw = header.get_u8();
     let response_id = ResponseId::from_u128(header.get_u128_le());
     let handler_name_len = header.get_u16_le() as usize;

@@ -123,9 +123,8 @@ impl RemoteEvent {
     }
 
     pub fn complete_generation(&self, generation: u32, completion: CompletionKind) {
-        self.update_known_generation(generation);
-
-        // Store completion with bounded history
+        // Store completion BEFORE updating known_generation to avoid a race where
+        // another thread sees the new generation but misses the completion entry.
         {
             let mut completions = self.completions.lock();
             completions.insert(generation, Arc::new(completion.clone()));
@@ -136,6 +135,9 @@ impl RemoteEvent {
                 completions.retain(|&g, _| g > known_gen - MAX_COMPLETION_HISTORY);
             }
         }
+
+        // Now that the completion is visible, advance the generation marker
+        self.update_known_generation(generation);
 
         // Trigger or poison all proxy events for generations <= this one
         let handles_to_complete = {
@@ -191,6 +193,17 @@ impl RemoteEvent {
         } else {
             EventStatus::Pending
         }
+    }
+
+    pub fn poisoned_generations(&self) -> BTreeSet<u32> {
+        self.completions
+            .lock()
+            .iter()
+            .filter_map(|(generation, kind)| match kind.as_ref() {
+                CompletionKind::Poisoned(_) => Some(*generation),
+                _ => None,
+            })
+            .collect()
     }
 
     pub fn is_cacheable(&self) -> bool {

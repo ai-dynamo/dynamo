@@ -100,7 +100,6 @@ impl std::fmt::Debug for FilesystemPeerDiscovery {
 struct FilesystemPeerDiscoveryInner {
     by_worker_id: HashMap<WorkerId, InstanceId>,
     by_instance_id: HashMap<InstanceId, PeerInfo>,
-    cache_valid: bool,
 }
 
 impl FilesystemPeerDiscoveryInner {
@@ -108,7 +107,6 @@ impl FilesystemPeerDiscoveryInner {
         Self {
             by_worker_id: HashMap::new(),
             by_instance_id: HashMap::new(),
-            cache_valid: false,
         }
     }
 }
@@ -183,11 +181,13 @@ impl FilesystemPeerDiscovery {
 
         let file_path = self.file_path.clone();
         let content = tokio::task::spawn_blocking(move || -> Result<String> {
-            let file = std::fs::File::open(&file_path).context("Failed to open discovery file")?;
+            let mut file =
+                std::fs::File::open(&file_path).context("Failed to open discovery file")?;
             file.lock_shared()
                 .context("Failed to acquire shared lock")?;
-            let content =
-                std::fs::read_to_string(&file_path).context("Failed to read discovery file")?;
+            let mut content = String::new();
+            std::io::Read::read_to_string(&mut file, &mut content)
+                .context("Failed to read discovery file")?;
             // Lock is released when file is dropped
             Ok(content)
         })
@@ -209,7 +209,6 @@ impl FilesystemPeerDiscovery {
             inner.by_instance_id.insert(instance_id, peer_info);
         }
 
-        inner.cache_valid = true;
         Ok(())
     }
 
@@ -267,10 +266,7 @@ impl FilesystemPeerDiscovery {
     }
 
     async fn discover_by_worker_id_async(&self, worker_id: WorkerId) -> Result<PeerInfo> {
-        let cache_valid = self.inner.read().cache_valid;
-        if !cache_valid {
-            self.load_from_disk().await?;
-        }
+        self.load_from_disk().await?;
 
         let state = self.inner.read();
         if let Some(instance_id) = state.by_worker_id.get(&worker_id)
@@ -282,10 +278,7 @@ impl FilesystemPeerDiscovery {
     }
 
     async fn discover_by_instance_id_async(&self, instance_id: InstanceId) -> Result<PeerInfo> {
-        let cache_valid = self.inner.read().cache_valid;
-        if !cache_valid {
-            self.load_from_disk().await?;
-        }
+        self.load_from_disk().await?;
 
         let state = self.inner.read();
         if let Some(peer_info) = state.by_instance_id.get(&instance_id) {
@@ -566,8 +559,7 @@ mod tests {
             .await
             .unwrap();
 
-        // Invalidate discovery1's cache to simulate detecting external change
-        discovery1.inner.write().cache_valid = false;
+        // discovery1 always re-reads from disk, so it sees discovery2's registration
         let peer_info = discovery1
             .discover_by_worker_id_async(instance_id2.worker_id())
             .await

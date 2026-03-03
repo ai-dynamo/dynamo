@@ -135,6 +135,15 @@ pub(crate) fn decode_response_header(
     Ok((response_id, outcome, headers))
 }
 
+#[derive(Debug, Error)]
+pub(crate) enum EncodeError {
+    #[error("Response headers too large: {0} bytes exceeds u16 maximum of 65535")]
+    HeadersTooLarge(usize),
+
+    #[error("Failed to serialize headers: {0}")]
+    HeaderSerializationError(#[from] rmp_serde::encode::Error),
+}
+
 /// Encodes a response header with outcome.
 ///
 /// Wire format (19+ bytes):
@@ -147,7 +156,7 @@ pub(crate) fn encode_response_header(
     response_id: ResponseId,
     outcome: Outcome,
     headers: Option<HashMap<String, String>>,
-) -> Result<Bytes, rmp_serde::encode::Error> {
+) -> Result<Bytes, EncodeError> {
     // Encode headers to MessagePack if present
     let headers_bytes = if let Some(ref h) = headers {
         let msgpack_bytes = rmp_serde::to_vec(h)?;
@@ -157,6 +166,9 @@ pub(crate) fn encode_response_header(
     };
 
     let headers_len = headers_bytes.as_ref().map(|b| b.len()).unwrap_or(0);
+    if headers_len > u16::MAX as usize {
+        return Err(EncodeError::HeadersTooLarge(headers_len));
+    }
     // response_id (16) + outcome (1) + headers_len (2) + msgpack
     let capacity = size_of::<u128>() + 1 + 2 + headers_len;
     let mut bytes = BytesMut::with_capacity(capacity);

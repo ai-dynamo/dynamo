@@ -8,6 +8,7 @@ mod peer_registry;
 
 use anyhow::Result;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::{
     PeerDiscovery,
@@ -18,12 +19,15 @@ use peer_registry::PeerRegistry;
 use velo_backend::{TransportErrorHandler, VeloBackend};
 use velo_common::InstanceId;
 
+const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
+
 pub(crate) struct ActiveMessageClient {
     pub(crate) response_manager: ResponseManager,
     pub(crate) backend: Arc<VeloBackend>,
     error_handler: Arc<dyn TransportErrorHandler>,
     peer_registry: Arc<PeerRegistry>,
     discovery: Option<Arc<dyn PeerDiscovery>>,
+    handshake_timeout: Duration,
 }
 
 impl ActiveMessageClient {
@@ -39,6 +43,7 @@ impl ActiveMessageClient {
             error_handler,
             peer_registry: Arc::new(PeerRegistry::new()),
             discovery,
+            handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
         }
     }
 
@@ -118,15 +123,22 @@ impl ActiveMessageClient {
 
         self.send_message(target, message)?;
 
-        // Wait for response
-        let result = outcome.recv().await;
+        // Wait for response with timeout
+        let result = tokio::time::timeout(self.handshake_timeout, outcome.recv()).await;
         let response_bytes = match result {
-            Ok(Some(bytes)) => bytes,
-            Ok(None) => {
+            Ok(Ok(Some(bytes))) => bytes,
+            Ok(Ok(None)) => {
                 anyhow::bail!("Expected response from _hello, got empty acknowledgment");
             }
-            Err(err) => {
+            Ok(Err(err)) => {
                 anyhow::bail!("Handshake failed: {}", err);
+            }
+            Err(_elapsed) => {
+                anyhow::bail!(
+                    "Handshake with peer {} timed out after {:?}",
+                    target,
+                    self.handshake_timeout
+                );
             }
         };
 
