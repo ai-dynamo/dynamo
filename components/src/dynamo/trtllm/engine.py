@@ -4,8 +4,9 @@
 import enum
 import logging
 import time
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from typing import AsyncGenerator, Optional
+from typing import Any, Optional
 
 from tensorrt_llm import LLM, MultimodalEncoder
 from tensorrt_llm.llmapi.llm import BaseLLM
@@ -25,9 +26,9 @@ class Backend(str, enum.Enum):
 class TensorRTLLMEngine:
     def __init__(
         self,
-        engine_args,
+        engine_args: dict[str, Any],
         disaggregation_mode: Optional[DisaggregationMode] = None,
-    ):
+    ) -> None:
         self._llm: Optional[LLM] = None
         self.disaggregation_mode = (
             disaggregation_mode
@@ -52,7 +53,7 @@ class TensorRTLLMEngine:
 
         self.engine_args = engine_args
 
-    async def initialize(self):
+    async def initialize(self) -> None:
         if not self._llm:
             if self.disaggregation_mode == DisaggregationMode.ENCODE:
                 # Initialize the multimodal encoder for full EPD
@@ -76,7 +77,7 @@ class TensorRTLLMEngine:
                 # (model path, backend settings, KV cache config, disaggregation settings, etc.)
                 self._llm = self._llm_cls(**self.engine_args)
 
-    async def cleanup(self):
+    async def cleanup(self) -> None:
         if self._llm:
             try:
                 self._llm.shutdown()
@@ -138,9 +139,9 @@ class TensorRTLLMEngine:
 
 @asynccontextmanager
 async def get_llm_engine(
-    engine_args,
+    engine_args: dict[str, Any],
     disaggregation_mode: Optional[DisaggregationMode] = None,
-    component_gauges=None,
+    component_gauges: Any = None,
 ) -> AsyncGenerator[TensorRTLLMEngine, None]:
     """Get TensorRT-LLM engine instance with load time tracking.
 

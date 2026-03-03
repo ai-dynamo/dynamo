@@ -38,7 +38,12 @@ class TokenizerProtocol(Protocol):
     the tokenizer's decode method not being found on a generic 'object' type.
     """
 
-    def decode(self, token_ids: List[int]) -> str:
+    def decode(
+        self,
+        token_ids: List[int],
+        skip_special_tokens: bool = True,
+        clean_up_tokenization_spaces: bool = True,
+    ) -> str:
         ...
 
 

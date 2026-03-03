@@ -18,9 +18,10 @@ import dataclasses
 import logging
 import os
 import re
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
-from typing import Any, AsyncGenerator, Optional, Union
+from typing import Any, Optional, Union
 
 import torch
 from tensorrt_llm.executor.result import GenerationResult
@@ -103,7 +104,7 @@ class HandlerBase(BaseGenerativeHandler):
         self.shutdown_event = config.shutdown_event
         self.disable_request_abort = config.disable_request_abort
 
-    def check_error(self, result: dict):
+    def check_error(self, result: dict) -> bool:
         """
         Check if there is an error in the result.
         """
@@ -194,8 +195,10 @@ class HandlerBase(BaseGenerativeHandler):
         Raise GeneratorExit if shutdown event is triggered.
         """
         try:
-            cancellation_triggers = [
-                context.async_killed_or_stopped(),  # Request cancellation
+            cancellation_triggers: list[asyncio.Future[Any]] = [
+                asyncio.create_task(
+                    context.async_killed_or_stopped()
+                ),  # Request cancellation
             ]
             # Shutdown cancellation
             shutdown_task = None
@@ -437,7 +440,7 @@ class HandlerBase(BaseGenerativeHandler):
             Tuple of (disaggregated_params, ep_disaggregated_params, epd_metadata)
         """
         disaggregated_params = None
-        epd_metadata = {}
+        epd_metadata: dict[str, Any] = {}
 
         # PREFILL mode: setup context_only params
         if self.disaggregation_mode == DisaggregationMode.PREFILL:
@@ -608,7 +611,7 @@ class HandlerBase(BaseGenerativeHandler):
         context: Context,
         embeddings: Optional[Union[torch.Tensor, dict]] = None,
         ep_disaggregated_params: Optional[DisaggregatedParams] = None,
-    ):
+    ) -> AsyncGenerator[dict, None]:
         """
         Generate responses based on the disaggregation mode in the request.
 
