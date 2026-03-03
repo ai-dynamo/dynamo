@@ -21,15 +21,18 @@ uv pip install "ai-dynamo[vllm]"
 
 This installs Dynamo with the compatible vLLM version.
 
-### Development Setup
-
-For development, use the [devcontainer](https://github.com/ai-dynamo/dynamo/tree/main/.devcontainer) which has all dependencies pre-installed.
-
 ---
 
-<Accordion title="Build and run container">
+### Container
 
-We have public images available on [NGC Catalog](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo/artifacts). If you'd like to build your own container from source:
+We have public images available on [NGC Catalog](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo/artifacts):
+
+```bash
+docker pull nvcr.io/nvidia/ai-dynamo/vllm-runtime:<version>
+./container/run.sh -it --framework VLLM --image nvcr.io/nvidia/ai-dynamo/vllm-runtime:<version>
+```
+
+<Accordion title="Build from source">
 
 ```bash
 python container/render.py --framework vllm --output-short-filename
@@ -41,6 +44,10 @@ docker build -f container/rendered.Dockerfile -t dynamo:latest-vllm .
 ```
 
 </Accordion>
+
+### Development Setup
+
+For development, use the [devcontainer](https://github.com/ai-dynamo/dynamo/tree/main/.devcontainer) which has all dependencies pre-installed.
 
 ## Feature Support Matrix
 
@@ -78,6 +85,7 @@ bash launch/agg.sh
 
 - **[Reference Guide](vllm-reference-guide.md)**: Configuration, arguments, and operational details
 - **[Examples](vllm-examples.md)**: All deployment patterns with launch scripts
+- **[KV Cache Offloading](vllm-kv-offloading.md)**: KVBM, LMCache, and FlexKV integrations
 - **[Observability](vllm-observability.md)**: Metrics and monitoring
 - **[vLLM-Omni](vllm-omni.md)**: Multimodal model serving
 - **[Kubernetes Deployment](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/deploy/README.md)**: Kubernetes deployment guide
