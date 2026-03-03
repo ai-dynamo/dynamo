@@ -103,6 +103,11 @@ on:
         required: false
         type: boolean
         default: true
+      make_efa:
+        description: 'Enable AWS EFA support in the build'
+        required: false
+        type: boolean
+        default: false
     secrets:
       AWS_DEFAULT_REGION:
         required: true
@@ -156,4 +161,5 @@ jobs:
       multi_gpu_test_timeout_minutes: ${{ inputs.multi_gpu_test_timeout_minutes }}
       copy_to_acr: ${{ inputs.copy_to_acr && matrix.platform == 'amd64' }} # no reason to copy ARM images to ACR
       copy_timeout_minutes: ${{ inputs.copy_timeout_minutes }}
+      make_efa: ${{ inputs.make_efa }}
     secrets: inherit
