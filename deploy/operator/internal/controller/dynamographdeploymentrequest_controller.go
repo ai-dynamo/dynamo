@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"io"
 	"text/template"
+	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -400,8 +401,8 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleProfilingPhase(ctx contex
 
 	if !completed {
 		logger.Info("Profiling job still running", "name", dgdr.Name)
-		// Don't requeue - we'll be triggered when the Job completes/fails
-		return ctrl.Result{}, nil
+		// Requeue periodically
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
 	// Profiling complete — clear the profiling sub-phase
@@ -1271,6 +1272,25 @@ func (r *DynamoGraphDeploymentRequestReconciler) checkProfilingJobStatus(ctx con
 				return false, fmt.Errorf("profiling job failed: %s. Details: %s", condition.Message, detailedError)
 			}
 			return false, fmt.Errorf("profiling job failed: %s", condition.Message)
+		}
+	}
+
+	// Check for failures in the profiler container
+	podList := &corev1.PodList{}
+	if err := r.List(ctx, podList, client.InNamespace(dgdr.Namespace), client.MatchingLabels{"job-name": jobName}); err != nil {
+		logger.Error(err, "Failed to list pods for profiling job while checking for stuck profiler")
+	} else {
+		for _, pod := range podList.Items {
+			for _, cs := range pod.Status.ContainerStatuses {
+				if cs.Name == ContainerNameProfiler && cs.State.Terminated != nil && cs.State.Terminated.ExitCode != 0 {
+					errMsg := fmt.Sprintf("profiler container exited with code %d (pod %s/%s)", cs.State.Terminated.ExitCode, pod.Namespace, pod.Name)
+					if cs.State.Terminated.Message != "" {
+						errMsg += ": " + cs.State.Terminated.Message
+					}
+					logger.Info("Detected failed profiler container before Job reached terminal state", "pod", pod.Name, "exitCode", cs.State.Terminated.ExitCode)
+					return false, fmt.Errorf("%s", errMsg)
+				}
+			}
 		}
 	}
 
