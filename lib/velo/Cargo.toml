@@ -20,7 +20,6 @@ anyhow = { workspace = true }
 serde = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
-tracing = { workspace = true }
 
 [dev-dependencies]
 velo-discovery = { workspace = true }
