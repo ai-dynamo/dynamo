@@ -58,7 +58,6 @@ class BaseOmniHandler(BaseWorkerHandler):
         self.config = config
         self.model_max_len = config.engine_args.max_model_len
         self.shutdown_event = shutdown_event
-        self.use_vllm_tokenizer = config.use_vllm_tokenizer
 
         logger.info(f"{self.__class__.__name__} initialized successfully")
 
