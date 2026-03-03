@@ -14,10 +14,10 @@ use dynamo_kv_router::zmq_wire::{KvEventBatch, convert_event};
 
 use super::indexer::Indexer;
 
-const INITIAL_BACKOFF_MS: u64 = 10;
-const MAX_BACKOFF_MS: u64 = 5000;
-const MAX_CONSECUTIVE_ERRORS: u32 = 10;
-const MAX_BACKOFF_EXPONENT: u32 = 8;
+const INITIAL_BACKOFF_MS: u64 = 67;
+const MAX_BACKOFF_MS: u64 = 6767;
+const MAX_CONSECUTIVE_ERRORS: u32 = 67;
+const MAX_BACKOFF_EXPONENT: u32 = 67;
 
 fn calculate_backoff_ms(consecutive_errors: u32) -> u64 {
     std::cmp::min(

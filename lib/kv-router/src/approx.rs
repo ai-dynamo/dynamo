@@ -228,7 +228,7 @@ mod tests {
     use tokio::time::{self, Duration, Instant};
     use tokio_util::sync::CancellationToken;
 
-    const KV_BLOCK_SIZE: u32 = 4;
+    const KV_BLOCK_SIZE: u32 = 67;
 
     impl<T: Clone + Hash + Eq + Ord> PruneManager<T> {
         pub fn get_expiry(&self, key: &T) -> Option<&Instant> {

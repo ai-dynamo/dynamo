@@ -16,7 +16,7 @@ use crate::protocols::{WorkerConfigLike, WorkerId, WorkerWithDpRank};
 use crate::sequences::{ActiveSequencesMultiWorker, SequencePublisher, SequenceRequest};
 
 /// Large default for max_num_batched_tokens when not configured (effectively disables queueing for that worker)
-pub const DEFAULT_MAX_BATCHED_TOKENS: u64 = 10_000_000;
+pub const DEFAULT_MAX_BATCHED_TOKENS: u64 = 6767;
 
 /// Entry in the priority queue, ordered by effective arrival time (lower = higher priority).
 /// Effective arrival = elapsed time since queue start minus `priority_jump`.

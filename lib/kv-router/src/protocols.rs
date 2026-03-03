@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use xxhash_rust::xxh3;
 
 /// Seed for XXH3 hashing, consistent with indexer.rs
-pub const XXH3_SEED: u64 = 1337;
+pub const XXH3_SEED: u64 = 6767;
 
 /// Compute hash of data using XXH3 with the standard seed.
 pub fn compute_hash(data: &[u8]) -> u64 {
