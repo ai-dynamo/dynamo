@@ -142,20 +142,16 @@ func BuildDeviceMap(sourceUUIDs, targetUUIDs []string) (string, error) {
 }
 
 // LockAndCheckpointProcessTree locks all PIDs, then checkpoints all PIDs.
-// namespacePIDs is parallel to cudaPIDs and used for logging only (so the checkpoint
-// logs show the namespace-relative PID alongside the host PID).
 // No recovery is attempted on failure — partial CUDA state is left as-is since
 // the container will be killed by the caller anyway.
-func LockAndCheckpointProcessTree(ctx context.Context, cudaPIDs, namespacePIDs []int, log logr.Logger) error {
-	for i, pid := range cudaPIDs {
-		l := log.WithValues("nspid", namespacePIDs[i])
-		if err := lock(ctx, pid, l); err != nil {
+func LockAndCheckpointProcessTree(ctx context.Context, cudaPIDs []int, log logr.Logger) error {
+	for _, pid := range cudaPIDs {
+		if err := lock(ctx, pid, log); err != nil {
 			return fmt.Errorf("cuda lock failed for PID %d: %w", pid, err)
 		}
 	}
-	for i, pid := range cudaPIDs {
-		l := log.WithValues("nspid", namespacePIDs[i])
-		if err := checkpoint(ctx, pid, l); err != nil {
+	for _, pid := range cudaPIDs {
+		if err := checkpoint(ctx, pid, log); err != nil {
 			return fmt.Errorf("cuda checkpoint failed for PID %d: %w", pid, err)
 		}
 	}

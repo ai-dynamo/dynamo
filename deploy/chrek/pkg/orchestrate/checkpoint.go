@@ -177,7 +177,7 @@ func configureCheckpoint(
 		types.NewOverlayManifest(cfg.Overlay, state.UpperDir, state.OCISpec),
 	)
 	if len(state.CUDAPIDs) > 0 {
-		m.CUDA = types.NewCUDAManifest(state.CUDAPIDs, state.CUDANamespacePIDs, state.GPUUUIDs)
+		m.CUDA = types.NewCUDAManifest(state.CUDANamespacePIDs, state.GPUUUIDs)
 	}
 
 	if err := types.WriteManifest(checkpointDir, m); err != nil {
@@ -190,7 +190,9 @@ func configureCheckpoint(
 func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSettings *types.CRIUSettings, data *types.CheckpointManifest, state *types.CheckpointContainerSnapshot, checkpointDir string, log logr.Logger) (time.Duration, error) {
 	// CUDA lock+checkpoint must happen before CRIU dump
 	if len(state.CUDAPIDs) > 0 {
-		if err := cuda.LockAndCheckpointProcessTree(ctx, state.CUDAPIDs, state.CUDANamespacePIDs, log); err != nil {
+		log.Info("CUDA checkpoint: host→namespace PID mapping",
+			"host_pids", state.CUDAPIDs, "namespace_pids", state.CUDANamespacePIDs)
+		if err := cuda.LockAndCheckpointProcessTree(ctx, state.CUDAPIDs, log); err != nil {
 			return 0, fmt.Errorf("CUDA checkpoint failed: %w", err)
 		}
 	}

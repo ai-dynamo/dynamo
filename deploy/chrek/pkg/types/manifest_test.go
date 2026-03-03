@@ -30,7 +30,7 @@ func TestManifestRoundTrip(t *testing.T) {
 			BindMountDests: []string{"/data"},
 		},
 	)
-	original.CUDA = NewCUDAManifest([]int{42, 43}, []int{1, 2}, []string{"GPU-aaa", "GPU-bbb"})
+	original.CUDA = NewCUDAManifest([]int{1, 2}, []string{"GPU-aaa", "GPU-bbb"})
 
 	if err := WriteManifest(dir, original); err != nil {
 		t.Fatalf("WriteManifest: %v", err)
@@ -74,9 +74,6 @@ func TestManifestRoundTrip(t *testing.T) {
 	}
 	if len(loaded.Overlay.BindMountDests) != 1 || loaded.Overlay.BindMountDests[0] != "/data" {
 		t.Errorf("Overlay.BindMountDests = %v", loaded.Overlay.BindMountDests)
-	}
-	if len(loaded.CUDA.PIDs) != 2 || loaded.CUDA.PIDs[0] != 42 {
-		t.Errorf("CUDA.PIDs = %v", loaded.CUDA.PIDs)
 	}
 	if len(loaded.CUDA.NamespacePIDs) != 2 || loaded.CUDA.NamespacePIDs[0] != 1 || loaded.CUDA.NamespacePIDs[1] != 2 {
 		t.Errorf("CUDA.NamespacePIDs = %v, want [1 2]", loaded.CUDA.NamespacePIDs)

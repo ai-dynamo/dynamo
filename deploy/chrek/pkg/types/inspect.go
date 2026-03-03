@@ -17,14 +17,14 @@ type MountInfo struct {
 
 // CheckpointContainerSnapshot holds runtime container state collected during checkpoint inspection.
 type CheckpointContainerSnapshot struct {
-	PID            int
-	RootFS         string
-	UpperDir       string
-	OCISpec        *specs.Spec
-	Mounts         []MountInfo
-	NetNSInode     uint64
-	StdioFDs       []string // readlink targets for FDs 0, 1, 2 (e.g. "pipe:[12345]")
-	HostCgroupPath string   // host filesystem path for CRIU's --freeze-cgroup
+	PID               int
+	RootFS            string
+	UpperDir          string
+	OCISpec           *specs.Spec
+	Mounts            []MountInfo
+	NetNSInode        uint64
+	StdioFDs          []string // readlink targets for FDs 0, 1, 2 (e.g. "pipe:[12345]")
+	HostCgroupPath    string   // host filesystem path for CRIU's --freeze-cgroup
 	CUDAPIDs          []int    // host-visible PIDs with CUDA state
 	CUDANamespacePIDs []int    // namespace-relative PIDs, same order as CUDAPIDs (used at restore time)
 	GPUUUIDs          []string // source GPU UUIDs from kubelet PodResources API

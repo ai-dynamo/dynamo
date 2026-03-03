@@ -100,14 +100,13 @@ func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.Ch
 		cudaPIDs := cuda.FilterProcesses(ctx, candidates, log)
 
 		// Build inner→outer PID mapping via NSpid field
+		nsPIDs, err := common.ResolveNamespacePIDs(cudaPIDs)
+		if err != nil {
+			return 0, fmt.Errorf("failed to resolve namespace PIDs for restored CUDA processes: %w", err)
+		}
 		innerToOuter := make(map[int]int, len(cudaPIDs))
-		for _, outerPID := range cudaPIDs {
-			nsPIDs, err := common.ResolveNamespacePIDs([]int{outerPID})
-			if err != nil {
-				log.Error(err, "Failed to resolve NSpid", "outer_pid", outerPID)
-				continue
-			}
-			innerToOuter[nsPIDs[0]] = outerPID
+		for i, outerPID := range cudaPIDs {
+			innerToOuter[nsPIDs[i]] = outerPID
 		}
 
 		// Reorder outer PIDs to match the manifest's namespace PID ordering
@@ -132,6 +131,11 @@ func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.Ch
 				"nsrestore_pid", os.Getpid(),
 				"signal_file", "/tmp/chrek-debug-continue")
 			for {
+				select {
+				case <-ctx.Done():
+					return 0, ctx.Err()
+				default:
+				}
 				if _, err := os.Stat("/tmp/chrek-debug-continue"); err == nil {
 					os.Remove("/tmp/chrek-debug-continue")
 					log.Info("DEBUG PAUSE: continue signal received, proceeding with cuda-checkpoint restore")
