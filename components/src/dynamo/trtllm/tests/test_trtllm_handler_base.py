@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import re as re_mod
 from dataclasses import dataclass
 from unittest import mock
 from unittest.mock import MagicMock
@@ -220,6 +221,111 @@ class TestGuidedDecodingFromToolChoice:
         # Downstream code (TRT-LLM sampling_params.py) accesses these attributes:
         assert result.guided_decoding.json_object is False
         assert result.guided_decoding.json == self.GUIDED_DECODING_DICT["json"]
+
+    def test_choice_converted_to_regex(self):
+        """guided_decoding with 'choice' must be converted to a regex pattern.
+
+        TRT-LLM's GuidedDecodingParams doesn't have a 'choice' field.
+        The handler should convert choice=["yes", "no", "maybe"] to
+        regex="(yes|no|maybe)" so that GuidedDecodingParams can enforce it.
+        """
+        sampling_params = MockSamplingParams()
+        request = {
+            "sampling_options": {
+                "guided_decoding": {
+                    "choice": ["yes", "no", "maybe"],
+                },
+            }
+        }
+
+        result = HandlerBase._override_sampling_params(sampling_params, request)
+
+        assert not isinstance(result.guided_decoding, dict)
+        assert result.guided_decoding.regex == "(yes|no|maybe)"
+        assert result.guided_decoding.json is None
+
+    def test_choice_with_special_chars_escaped(self):
+        """Choice values with regex special characters must be escaped."""
+        sampling_params = MockSamplingParams()
+        request = {
+            "sampling_options": {
+                "guided_decoding": {
+                    "choice": ["yes (confirmed)", "no [rejected]"],
+                },
+            }
+        }
+
+        result = HandlerBase._override_sampling_params(sampling_params, request)
+
+        assert not isinstance(result.guided_decoding, dict)
+        expected = (
+            "("
+            + "|".join(re_mod.escape(c) for c in ["yes (confirmed)", "no [rejected]"])
+            + ")"
+        )
+        assert result.guided_decoding.regex == expected
+
+    def test_choice_not_used_when_regex_present(self):
+        """If both choice and regex are specified, regex takes priority."""
+        sampling_params = MockSamplingParams()
+        request = {
+            "sampling_options": {
+                "guided_decoding": {
+                    "choice": ["yes", "no"],
+                    "regex": "[0-9]+",
+                },
+            }
+        }
+
+        result = HandlerBase._override_sampling_params(sampling_params, request)
+
+        assert result.guided_decoding.regex == "[0-9]+"
+
+    def test_empty_choice_ignored(self):
+        """Empty choice list should not produce a regex."""
+        sampling_params = MockSamplingParams()
+        request = {
+            "sampling_options": {
+                "guided_decoding": {
+                    "choice": [],
+                },
+            }
+        }
+
+        result = HandlerBase._override_sampling_params(sampling_params, request)
+
+        assert result.guided_decoding.regex is None
+
+    def test_choice_with_none_items_filtered(self):
+        """Choice list with None items should filter them out."""
+        sampling_params = MockSamplingParams()
+        request = {
+            "sampling_options": {
+                "guided_decoding": {
+                    "choice": [None, "yes", None, "no"],
+                },
+            }
+        }
+
+        result = HandlerBase._override_sampling_params(sampling_params, request)
+
+        assert not isinstance(result.guided_decoding, dict)
+        assert result.guided_decoding.regex == "(yes|no)"
+
+    def test_choice_all_none_items_no_regex(self):
+        """Choice list with all None items should not produce a regex."""
+        sampling_params = MockSamplingParams()
+        request = {
+            "sampling_options": {
+                "guided_decoding": {
+                    "choice": [None, None],
+                },
+            }
+        }
+
+        result = HandlerBase._override_sampling_params(sampling_params, request)
+
+        assert result.guided_decoding.regex is None
 
 
 class _ConcreteHandler(HandlerBase):

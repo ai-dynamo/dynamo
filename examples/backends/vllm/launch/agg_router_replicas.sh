@@ -10,6 +10,27 @@ export PYTHONHASHSEED=0
 # Common configuration
 MODEL="Qwen/Qwen3-0.6B"
 BLOCK_SIZE=64
+HTTP_PORT_R1="${DYN_HTTP_PORT_R1:-8000}"
+HTTP_PORT_R2="${DYN_HTTP_PORT_R2:-8001}"
+echo "=========================================="
+echo "Launching Aggregated + KV Routing + Replicas (2 GPUs)"
+echo "=========================================="
+echo "Model:       $MODEL"
+echo "Frontend R1: http://localhost:$HTTP_PORT_R1"
+echo "Frontend R2: http://localhost:$HTTP_PORT_R2"
+echo "=========================================="
+echo ""
+echo "Example test command:"
+echo ""
+echo "  curl http://localhost:${HTTP_PORT_R1}/v1/chat/completions \\"
+echo "    -H 'Content-Type: application/json' \\"
+echo "    -d '{"
+echo "      \"model\": \"${MODEL}\","
+echo "      \"messages\": [{\"role\": \"user\", \"content\": \"Explain why Roger Federer is considered one of the greatest tennis players of all time\"}],"
+echo "      \"max_tokens\": 32"
+echo "    }'"
+echo ""
+echo "=========================================="
 
 # run two routers (different HTTP + system ports)
 # Note: use --router-reset-states only on one router to avoid wiping shared state twice.
@@ -30,7 +51,6 @@ CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm \
     --model $MODEL \
     --block-size $BLOCK_SIZE \
     --enforce-eager \
-    --connector none \
     --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}' &
 
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
@@ -39,5 +59,4 @@ CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.vllm \
     --model $MODEL \
     --block-size $BLOCK_SIZE \
     --enforce-eager \
-    --connector none \
     --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081","enable_kv_cache_events":true}'

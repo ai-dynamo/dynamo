@@ -23,6 +23,7 @@ import (
 	"context"
 	"testing"
 
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
@@ -436,7 +437,7 @@ func TestDynamoComponentDeploymentReconciler_generateVolcanoPodGroup(t *testing.
 	type fields struct {
 		Client   client.Client
 		Recorder record.EventRecorder
-		Config   controller_common.Config
+		Config   *configv1alpha1.OperatorConfiguration
 	}
 	type args struct {
 		ctx context.Context
@@ -579,7 +580,8 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 	type fields struct {
 		Client                client.Client
 		Recorder              record.EventRecorder
-		Config                controller_common.Config
+		Config                *configv1alpha1.OperatorConfiguration
+		RuntimeConfig         *controller_common.RuntimeConfig
 		DockerSecretRetriever *mockDockerSecretRetriever
 	}
 	type args struct {
@@ -600,8 +602,9 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 		{
 			name: "generateLeaderWorkerSet - nominal case",
 			fields: fields{
-				Recorder: record.NewFakeRecorder(100),
-				Config:   controller_common.Config{}, // Provide default or test-specific config
+				Recorder:      record.NewFakeRecorder(100),
+				Config:        &configv1alpha1.OperatorConfiguration{},
+				RuntimeConfig: &controller_common.RuntimeConfig{},
 				DockerSecretRetriever: &mockDockerSecretRetriever{
 					GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
 						return []string{}, nil
@@ -973,7 +976,14 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 		{
 			name: "nil instanceID", // This test should fail before r.List is called in generatePodTemplateSpec
 			fields: fields{
-				Recorder: record.NewFakeRecorder(100),
+				Recorder:      record.NewFakeRecorder(100),
+				Config:        &configv1alpha1.OperatorConfiguration{},
+				RuntimeConfig: &controller_common.RuntimeConfig{},
+				DockerSecretRetriever: &mockDockerSecretRetriever{
+					GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
+						return []string{}, nil
+					},
+				},
 			},
 			args: args{
 				ctx: context.Background(),
@@ -1016,7 +1026,14 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 		{
 			name: "error from generateLeaderPodTemplateSpec", // This case involves an error from generatePodTemplateSpec
 			fields: fields{
-				Recorder: record.NewFakeRecorder(100),
+				Recorder:      record.NewFakeRecorder(100),
+				Config:        &configv1alpha1.OperatorConfiguration{},
+				RuntimeConfig: &controller_common.RuntimeConfig{},
+				DockerSecretRetriever: &mockDockerSecretRetriever{
+					GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
+						return []string{}, nil
+					},
+				},
 			},
 			args: args{
 				ctx: context.Background(),
@@ -1095,6 +1112,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 				Client:                fakeKubeClient, // Use the fake client
 				Recorder:              tt.fields.Recorder,
 				Config:                tt.fields.Config,
+				RuntimeConfig:         tt.fields.RuntimeConfig,
 				DockerSecretRetriever: tt.fields.DockerSecretRetriever,
 				// Scheme: s, // Pass scheme if reconciler uses it directly, often client uses it
 			}
@@ -1159,9 +1177,10 @@ func TestDynamoComponentDeploymentReconciler_createOrUpdateOrDeleteDeployments_R
 	// Set up reconciler
 	recorder := record.NewFakeRecorder(100)
 	reconciler := &DynamoComponentDeploymentReconciler{
-		Client:   fakeKubeClient,
-		Recorder: recorder,
-		Config:   controller_common.Config{},
+		Client:        fakeKubeClient,
+		Recorder:      recorder,
+		Config:        &configv1alpha1.OperatorConfiguration{},
+		RuntimeConfig: &controller_common.RuntimeConfig{},
 		DockerSecretRetriever: &mockDockerSecretRetriever{
 			GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
 				return []string{}, nil
@@ -1273,12 +1292,12 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 				WithScheme(s).
 				WithObjects(objs...).
 				Build(),
-			Config: controller_common.Config{
-				Checkpoint: controller_common.CheckpointConfig{
+			Config: &configv1alpha1.OperatorConfiguration{
+				Checkpoint: configv1alpha1.CheckpointConfiguration{
 					Enabled: true,
-					Storage: controller_common.CheckpointStorageConfig{
-						Type: controller_common.CheckpointStorageTypePVC,
-						PVC: controller_common.CheckpointPVCConfig{
+					Storage: configv1alpha1.CheckpointStorageConfiguration{
+						Type: configv1alpha1.CheckpointStorageTypePVC,
+						PVC: configv1alpha1.CheckpointPVCConfig{
 							PVCName:  "chrek-pvc",
 							BasePath: "/checkpoints",
 						},
@@ -1405,12 +1424,12 @@ func TestDynamoComponentDeploymentReconciler_generateDeployment_RestoreStrategy(
 				WithScheme(s).
 				WithObjects(objs...).
 				Build(),
-			Config: controller_common.Config{
-				Checkpoint: controller_common.CheckpointConfig{
+			Config: &configv1alpha1.OperatorConfiguration{
+				Checkpoint: configv1alpha1.CheckpointConfiguration{
 					Enabled: true,
-					Storage: controller_common.CheckpointStorageConfig{
-						Type: controller_common.CheckpointStorageTypePVC,
-						PVC: controller_common.CheckpointPVCConfig{
+					Storage: configv1alpha1.CheckpointStorageConfiguration{
+						Type: configv1alpha1.CheckpointStorageTypePVC,
+						PVC: configv1alpha1.CheckpointPVCConfig{
 							PVCName:  "chrek-pvc",
 							BasePath: "/checkpoints",
 						},
@@ -1520,9 +1539,10 @@ func Test_createOrUpdateOrDeleteDeployments_K8sAPIDefaults(t *testing.T) {
 
 	recorder := record.NewFakeRecorder(100)
 	reconciler := &DynamoComponentDeploymentReconciler{
-		Client:   fakeKubeClient,
-		Recorder: recorder,
-		Config:   controller_common.Config{},
+		Client:        fakeKubeClient,
+		Recorder:      recorder,
+		Config:        &configv1alpha1.OperatorConfiguration{},
+		RuntimeConfig: &controller_common.RuntimeConfig{},
 		DockerSecretRetriever: &mockDockerSecretRetriever{
 			GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
 				return []string{}, nil
@@ -1856,9 +1876,10 @@ func Test_reconcileLeaderWorkerSetResources(t *testing.T) {
 			// Set up reconciler
 			recorder := record.NewFakeRecorder(100)
 			reconciler := &DynamoComponentDeploymentReconciler{
-				Client:   fakeKubeClient,
-				Recorder: recorder,
-				Config:   controller_common.Config{},
+				Client:        fakeKubeClient,
+				Recorder:      recorder,
+				Config:        &configv1alpha1.OperatorConfiguration{},
+				RuntimeConfig: &controller_common.RuntimeConfig{},
 				DockerSecretRetriever: &mockDockerSecretRetriever{
 					GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
 						return []string{}, nil
@@ -2026,9 +2047,10 @@ func Test_reconcileDeploymentResources(t *testing.T) {
 			// Set up reconciler
 			recorder := record.NewFakeRecorder(100)
 			reconciler := &DynamoComponentDeploymentReconciler{
-				Client:   fakeKubeClient,
-				Recorder: recorder,
-				Config:   controller_common.Config{},
+				Client:        fakeKubeClient,
+				Recorder:      recorder,
+				Config:        &configv1alpha1.OperatorConfiguration{},
+				RuntimeConfig: &controller_common.RuntimeConfig{},
 				DockerSecretRetriever: &mockDockerSecretRetriever{
 					GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
 						return []string{}, nil
@@ -2446,9 +2468,10 @@ func Test_generateDeployment_Strategy(t *testing.T) {
 
 			recorder := record.NewFakeRecorder(100)
 			reconciler := &DynamoComponentDeploymentReconciler{
-				Client:   fakeKubeClient,
-				Recorder: recorder,
-				Config:   controller_common.Config{},
+				Client:        fakeKubeClient,
+				Recorder:      recorder,
+				Config:        &configv1alpha1.OperatorConfiguration{},
+				RuntimeConfig: &controller_common.RuntimeConfig{},
 				DockerSecretRetriever: &mockDockerSecretRetriever{
 					GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
 						return []string{}, nil

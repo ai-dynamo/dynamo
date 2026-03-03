@@ -23,6 +23,41 @@ export PYTHONHASHSEED=0
 MODEL="Qwen/Qwen3-0.6B"
 BLOCK_SIZE=64
 
+SYSTEM_PORT1="${DYN_SYSTEM_PORT1:-8081}"
+SYSTEM_PORT2="${DYN_SYSTEM_PORT2:-8082}"
+HTTP_PORT="${DYN_HTTP_PORT:-8000}"
+echo "=========================================="
+echo "Launching Aggregated + LoRA + KV Routing (2 GPUs)"
+echo "=========================================="
+echo "Model:       $MODEL"
+echo "Frontend:    http://localhost:$HTTP_PORT"
+echo "=========================================="
+echo ""
+echo "Once running, test with:"
+echo ""
+echo "  # Check available models"
+echo "  curl http://localhost:${HTTP_PORT}/v1/models | jq ."
+echo ""
+echo "  # Load LoRA to both instances (using S3 URI)"
+echo "  curl -s -X POST http://localhost:${SYSTEM_PORT1}/v1/loras \\"
+echo "    -H 'Content-Type: application/json' \\"
+echo "    -d '{\"lora_name\": \"codelion/Qwen3-0.6B-accuracy-recovery-lora\","
+echo "         \"source\": {\"uri\": \"s3://my-loras/codelion/Qwen3-0.6B-accuracy-recovery-lora\"}}' | jq ."
+echo ""
+echo "  curl -s -X POST http://localhost:${SYSTEM_PORT2}/v1/loras \\"
+echo "    -H 'Content-Type: application/json' \\"
+echo "    -d '{\"lora_name\": \"codelion/Qwen3-0.6B-accuracy-recovery-lora\","
+echo "         \"source\": {\"uri\": \"s3://my-loras/codelion/Qwen3-0.6B-accuracy-recovery-lora\"}}' | jq ."
+echo ""
+echo "  # Test LoRA inference"
+echo "  curl http://localhost:${HTTP_PORT}/v1/chat/completions \\"
+echo "    -H 'Content-Type: application/json' \\"
+echo "    -d '{\"model\": \"codelion/Qwen3-0.6B-accuracy-recovery-lora\","
+echo "         \"messages\": [{\"role\": \"user\", \"content\": \"Hello!\"}],"
+echo "         \"max_tokens\": 32}' | jq ."
+echo ""
+echo "=========================================="
+
 # run frontend + KV router
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
 python -m dynamo.frontend \
@@ -31,63 +66,28 @@ python -m dynamo.frontend \
 
 # run workers
 # --enforce-eager is added for quick deployment. for production use, need to remove this flag
-DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
+DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=${SYSTEM_PORT1} \
 CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm \
     --model $MODEL \
     --block-size $BLOCK_SIZE \
     --enforce-eager \
-    --connector none \
     --enable-lora \
     --max-lora-rank 64 \
     --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}' &
 
-DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
+DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=${SYSTEM_PORT2} \
 VLLM_NIXL_SIDE_CHANNEL_PORT=20097 \
 CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.vllm \
     --model $MODEL \
     --block-size $BLOCK_SIZE \
     --enforce-eager \
-    --connector none \
     --enable-lora \
     --max-lora-rank 64 \
     --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081","enable_kv_cache_events":true}'
 
-# below commands are not executed automatically in the script because previous backend launch command is blocking.
-
-################################## Example Usage ##################################
-
-# Check available models
-curl http://localhost:8000/v1/models | jq .
-
-# Load LoRA to instances using s3 uri
-curl -s  -X POST http://localhost:8081/v1/loras \
-       -H "Content-Type: application/json" \
-       -d '{"lora_name": "codelion/Qwen3-0.6B-accuracy-recovery-lora",
-     "source": {"uri": "s3://my-loras/codelion/Qwen3-0.6B-accuracy-recovery-lora"}}' | jq .
-
-curl -s  -X POST http://localhost:8082/v1/loras \
-       -H "Content-Type: application/json" \
-       -d '{"lora_name": "codelion/Qwen3-0.6B-accuracy-recovery-lora",
-     "source": {"uri": "s3://my-loras/codelion/Qwen3-0.6B-accuracy-recovery-lora"}}' | jq .
-
- # Test LoRA inference
-curl localhost:8000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "codelion/Qwen3-0.6B-accuracy-recovery-lora",
-    "messages": [
-    {
-        "role": "user",
-        "content": "In the heart of Eldoria, an ancient land of boundless magic and mysterious creatures, lies the long-forgotten city of Aeloria. Once a beacon of knowledge and power, Aeloria was buried beneath the shifting sands of time, lost to the world for centuries. You are an intrepid explorer, known for your unparalleled curiosity and courage, who has stumbled upon an ancient map hinting at ests that Aeloria holds a secret so profound that it has the potential to reshape the very fabric of reality. Your journey will take you through treacherous deserts, enchanted forests, and across perilous mountain ranges. Your Task: Character Background: Develop a detailed background for your character. Describe their motivations for seeking out Aeloria, their skills and weaknesses, and any personal connections to the ancient city or its legends. Are they driven by a quest for knowledge, a search for lost familt clue is hidden."
-    }
-    ],
-    "stream": false,
-    "max_tokens": 30
-  }' | jq .
-
-
- # Sample output after running above curl request twice.
+# Sample output after running LoRA inference curl request twice.
  # usage.prompt_tokens_details.cached_tokens is the number of tokens that were cached from the previous request.
+ : <<'SAMPLE_OUTPUT'
 {
   "id": "chatcmpl-0cf880c2-fe98-45c4-9c76-84c3ad1a56cc",
   "choices": [
@@ -120,3 +120,4 @@ curl localhost:8000/v1/chat/completions \
     }
   }
 }
+SAMPLE_OUTPUT

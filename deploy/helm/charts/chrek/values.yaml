@@ -52,8 +52,8 @@ storage:
 daemonset:
   # Container image
   image:
-    repository: nvcr.io/nvidian/dynamo-dev/chrek-agent
-    tag: latest
+    repository: nvcr.io/nvidia/ai-dynamo/chrek-agent
+    tag: 1.0.0
     pullPolicy: Always
 
   # Image pull secrets

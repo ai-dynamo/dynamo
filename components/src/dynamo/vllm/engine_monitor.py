@@ -44,6 +44,7 @@ class VllmEngineMonitor:
         self.engine_client = engine_client
         self.shutdown_event = shutdown_event
         self._monitor_task = asyncio.create_task(self._check_engine_health())
+        self._stats_task = asyncio.create_task(self._periodic_log_stats())
 
         logger.info(
             f"{self.__class__.__name__} initialized and health check task started."
@@ -51,6 +52,7 @@ class VllmEngineMonitor:
 
     def __del__(self):
         self._monitor_task.cancel()
+        self._stats_task.cancel()
 
     def _shutdown_engine(self):
         """
@@ -117,3 +119,40 @@ class VllmEngineMonitor:
             except asyncio.CancelledError:
                 logger.debug(f"{self.__class__.__name__}: Health check task cancelled.")
                 break
+
+    async def _periodic_log_stats(self):
+        """Periodically flush vLLM engine stats (throughput, cache usage, etc.)."""
+        try:
+            interval = float(os.environ.get("VLLM_LOG_STATS_INTERVAL", "10.0"))
+        except ValueError:
+            logger.warning(
+                "Invalid VLLM_LOG_STATS_INTERVAL value: %r, using default 10.0",
+                os.environ.get("VLLM_LOG_STATS_INTERVAL"),
+            )
+            interval = 10.0
+        if interval <= 0:
+            return
+        if not getattr(self.engine_client, "log_stats", True):
+            return
+
+        while True:
+            try:
+                if self.shutdown_event and self.shutdown_event.is_set():
+                    break
+
+                if self.shutdown_event:
+                    try:
+                        await asyncio.wait_for(
+                            self.shutdown_event.wait(), timeout=interval
+                        )
+                        break
+                    except asyncio.TimeoutError:
+                        pass
+                else:
+                    await asyncio.sleep(interval)
+
+                await self.engine_client.do_log_stats()
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                logger.debug("Error in periodic stats logging", exc_info=True)

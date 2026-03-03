@@ -148,7 +148,7 @@ class VLLMProcess:
         # - When data_parallel_size is set, launch one process per DP rank
         # - Each process gets --data-parallel-rank and --data-parallel-size
         # - Each process runs on its own GPU via CUDA_VISIBLE_DEVICES
-        # - --connector nixl enables KV cache transfer between ranks
+        # - --kv-transfer-config enables KV cache transfer between ranks
 
         for worker_idx in range(num_workers):
             # Calculate GPU device for this process
@@ -207,7 +207,7 @@ class VLLMProcess:
                         str(data_parallel_size),
                         # "--data-parallel-address", "127.0.0.1",  # Required for DP coordination
                         # "--data-parallel-rpc-port", "13345",  # RPC port for DP coordination
-                        # "--connector", "nixl",  # Required for KV transfer between DP ranks
+                        # "--kv-transfer-config", '{"kv_connector":"NixlConnector","kv_role":"kv_both"}',  # Required for KV transfer between DP ranks
                     ]
                 )
 
@@ -415,18 +415,12 @@ def test_vllm_kv_router_basic(
 @pytest.mark.gpu_1
 @pytest.mark.timeout(150)  # ~3x average (~43s/test), rounded up
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
-@pytest.mark.parametrize(
-    "router_event_threads",
-    [1, 2],
-    ids=["single_thread", "multi_thread"],
-)
 def test_router_decisions_vllm_multiple_workers(
     request,
     runtime_services_dynamic_ports,
     predownload_models,
     set_ucx_tls_no_mm,
     request_plane,
-    router_event_threads,
 ):
     # runtime_services starts etcd and nats
     logger.info("Starting vLLM router prefix reuse test with two workers")
@@ -453,7 +447,7 @@ def test_router_decisions_vllm_multiple_workers(
             MODEL_NAME,
             request,
             test_dp_rank=False,
-            router_event_threads=router_event_threads,
+            block_size=BLOCK_SIZE,
         )
 
 
@@ -497,7 +491,12 @@ def test_router_decisions_vllm_dp(
         )  # endpoint is backend.generate
 
         _test_router_decisions(
-            vllm_workers, endpoint, MODEL_NAME, request, test_dp_rank=True
+            vllm_workers,
+            endpoint,
+            MODEL_NAME,
+            request,
+            test_dp_rank=True,
+            block_size=BLOCK_SIZE,
         )
 
 

@@ -20,6 +20,7 @@ package validation
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
@@ -108,8 +109,13 @@ func (v *SharedSpecValidator) Validate(ctx context.Context) (admission.Warnings,
 	if v.spec.Autoscaling != nil {
 		warnings = append(warnings, fmt.Sprintf(
 			"%s.autoscaling is deprecated and ignored. Use DynamoGraphDeploymentScalingAdapter "+
-				"with HPA, KEDA, or Planner for autoscaling instead. See docs/pages/kubernetes/autoscaling.md",
+				"with HPA, KEDA, or Planner for autoscaling instead. See docs/kubernetes/autoscaling.md",
 			v.fieldPath))
+	}
+
+	// Validate service-level annotations
+	if err := v.validateServiceAnnotations(); err != nil {
+		return nil, err
 	}
 
 	// Validate EPP-specific constraints
@@ -222,5 +228,22 @@ func (v *SharedSpecValidator) checkInferencePoolAPIAvailability(ctx context.Cont
 			epp.InferencePoolGroup)
 	}
 
+	return nil
+}
+
+// validateServiceAnnotations validates known annotations on the service-level spec.
+func (v *SharedSpecValidator) validateServiceAnnotations() error {
+	if v.spec.Annotations == nil {
+		return nil
+	}
+	if value, exists := v.spec.Annotations[consts.KubeAnnotationVLLMDistributedExecutorBackend]; exists {
+		switch strings.ToLower(value) {
+		case "mp", "ray":
+			// valid
+		default:
+			return fmt.Errorf("%s.annotations[%s] has invalid value %q: must be \"mp\" or \"ray\"",
+				v.fieldPath, consts.KubeAnnotationVLLMDistributedExecutorBackend, value)
+		}
+	}
 	return nil
 }

@@ -37,6 +37,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
@@ -70,7 +71,8 @@ type DynamoModelReconciler struct {
 	client.Client
 	Recorder       record.EventRecorder
 	EndpointClient *modelendpoint.Client
-	Config         commoncontroller.Config
+	Config         *configv1alpha1.OperatorConfiguration
+	RuntimeConfig  *commoncontroller.RuntimeConfig
 }
 
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamomodels,verbs=get;list;watch;create;update;patch;delete
@@ -264,7 +266,7 @@ func (r *DynamoModelReconciler) SetupWithManager(mgr ctrl.Manager) error {
 				GenericFunc: func(e event.GenericEvent) bool { return false },
 			}),
 		).
-		WithEventFilter(commoncontroller.EphemeralDeploymentEventFilter(r.Config)). // set the event filter to ignore resources handled by other controllers in namespace-restricted mode
+		WithEventFilter(commoncontroller.EphemeralDeploymentEventFilter(r.Config, r.RuntimeConfig)). // set the event filter to ignore resources handled by other controllers in namespace-restricted mode
 		Complete(observability.NewObservedReconciler(r, consts.ResourceTypeDynamoModel))
 }
 

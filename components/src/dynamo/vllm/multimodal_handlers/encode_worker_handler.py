@@ -13,9 +13,14 @@ from transformers import AutoImageProcessor
 from vllm.engine.arg_utils import AsyncEngineArgs
 
 import dynamo.nixl_connect as connect
-from dynamo.common.multimodal import LocalEmbeddingSender, NixlPersistentEmbeddingSender
+from dynamo.common.multimodal import (
+    LocalEmbeddingSender,
+    NixlReadEmbeddingSender,
+    NixlWriteEmbeddingSender,
+)
 from dynamo.runtime import DistributedRuntime
 
+from ..constants import EmbeddingTransferMode
 from ..multimodal_utils import (
     ImageLoader,
     encode_image_embeddings,
@@ -30,10 +35,10 @@ logger = logging.getLogger(__name__)
 
 CACHE_SIZE_MAXIMUM = 8
 
-# Both embedding transmitter suffers from increasing latency as
-# number of concurrent requests increases, NixlPersistentEmbedding transmitters
+# [gluo WIP] now it's time to revisit
+# Both embedding transfer suffers from increasing latency as
+# number of concurrent requests increases, NixlPersistentEmbedding transfers
 # scale worse than local. Need to investigate why.
-TRANSFER_LOCAL = int(os.getenv("TRANSFER_LOCAL", 1))
 # [gluo NOTE] default off to benchmark standalone encoder
 ENABLE_ENCODER_CACHE = int(os.getenv("ENABLE_ENCODER_CACHE", 1))
 
@@ -42,13 +47,14 @@ ENABLE_ENCODER_CACHE = int(os.getenv("ENABLE_ENCODER_CACHE", 1))
 class EmbeddingItem:
     key: str
     image_grid_thw: list
-    embeddings_cpu: torch.Tensor
+    embeddings: torch.Tensor
 
 
 class EncodeWorkerHandler:
     def __init__(
         self,
         engine_args: AsyncEngineArgs,
+        embedding_transfer_mode: EmbeddingTransferMode,
     ) -> None:
         self.engine_args = engine_args
         self.model = self.engine_args.model
@@ -58,7 +64,12 @@ class EncodeWorkerHandler:
             self.model, trust_remote_code=True
         )
         self.vision_model = load_vision_model(self.model)
-        logger.debug(f"embedding hidden dim: {self.vision_model.out_hidden_size}")
+        hidden_size = getattr(self.vision_model, "out_hidden_size", None)
+        if hidden_size is None:
+            hidden_size = getattr(
+                getattr(self.vision_model, "config", None), "hidden_size", "unknown"
+            )
+        logger.debug(f"embedding hidden dim: {hidden_size}")
         self.min_workers = 1
 
         # Get encoder components for the model
@@ -70,11 +81,17 @@ class EncodeWorkerHandler:
         self._processed_requests = 0
         self.readables = []
         self.embedding_cache = EmbeddingCache() if ENABLE_ENCODER_CACHE else None
-        self.embedding_sender = (
-            LocalEmbeddingSender()
-            if TRANSFER_LOCAL
-            else NixlPersistentEmbeddingSender()
-        )
+        if embedding_transfer_mode == EmbeddingTransferMode.LOCAL:
+            self.embedding_sender = LocalEmbeddingSender()
+        elif embedding_transfer_mode == EmbeddingTransferMode.NIXL_WRITE:
+            self.embedding_sender = NixlWriteEmbeddingSender()
+        elif embedding_transfer_mode == EmbeddingTransferMode.NIXL_READ:
+            self.embedding_sender = NixlReadEmbeddingSender()
+        else:
+            raise ValueError(
+                f"Invalid embedding transfer mode: {embedding_transfer_mode}"
+            )
+
         self.send_complete_queue = asyncio.Queue()
         self.send_complete_checker_task = asyncio.create_task(
             self.check_complete(self.send_complete_queue)
@@ -140,11 +157,11 @@ class EncodeWorkerHandler:
                 if self.embedding_cache is not None and self.embedding_cache.has_key(
                     embedding_key
                 ):
-                    (image_grid_thw, embeddings_cpu) = self.embedding_cache.get(
+                    (image_grid_thw, embeddings) = self.embedding_cache.get(
                         embedding_key
                     )
                     embedding_lists[idx] = EmbeddingItem(
-                        embedding_key, image_grid_thw, embeddings_cpu
+                        embedding_key, image_grid_thw, embeddings
                     )
                 # compute
                 else:
@@ -200,7 +217,7 @@ class EncodeWorkerHandler:
                         // merge_size
                         // merge_size
                     ).tolist()
-                    splitted_embeddings = embeddings.cpu().squeeze(0).split(sizes)
+                    splitted_embeddings = embeddings.squeeze(0).split(sizes)
                     logger.debug(
                         f"Splitted embeddings lengths: {[e.shape for e in splitted_embeddings]}"
                     )
@@ -209,7 +226,7 @@ class EncodeWorkerHandler:
                     # embeddings already has batch dimension for images, so we can directly
                     # split by batch dimension
                     logger.debug(f"image embedding shape: {embeddings.shape}")
-                    splitted_embeddings = embeddings.cpu()
+                    splitted_embeddings = embeddings
 
                 image_grid_thw = (
                     image_embeds["image_grid_thw"].tolist()
@@ -230,7 +247,7 @@ class EncodeWorkerHandler:
                         embedding_lists[list_idx].key,
                         (
                             embedding_lists[list_idx].image_grid_thw,
-                            embedding_lists[list_idx].embeddings_cpu,
+                            embedding_lists[list_idx].embeddings,
                         ),
                     )
 
@@ -240,7 +257,7 @@ class EncodeWorkerHandler:
             send_tasks = [
                 asyncio.create_task(
                     self.embedding_sender.send_embeddings(
-                        embedding_item.embeddings_cpu, stage_embeddings=True
+                        embedding_item.embeddings, stage_embeddings=True
                     )
                 )
                 for embedding_item in embedding_lists
@@ -252,7 +269,7 @@ class EncodeWorkerHandler:
             for idx, item in enumerate(zip(embedding_lists, transfer_requests)):
                 embedding_item, transfer_request = item
                 logger.debug(
-                    f"{embedding_item.embeddings_cpu.shape} prepared for transfer."
+                    f"{embedding_item.embeddings.shape} prepared for transfer."
                 )
                 # Update request for transfer metadata
                 request.multimodal_inputs[idx].multimodal_input.image_url = None
@@ -260,13 +277,13 @@ class EncodeWorkerHandler:
                     idx
                 ].image_grid_thw = embedding_item.image_grid_thw
                 request.multimodal_inputs[idx].embeddings_shape = tuple(
-                    embedding_item.embeddings_cpu.shape
+                    embedding_item.embeddings.shape
                 )
                 request.multimodal_inputs[idx].serialized_request = transfer_request[0]
 
-                # Keep a reference of the embedding_cpu and only drop reference when the transfer is done
+                # Keep a reference of the embedding and only drop reference when the transfer is done
                 self.send_complete_queue.put_nowait(
-                    (transfer_request[1], embedding_item.embeddings_cpu)
+                    (transfer_request[1], embedding_item.embeddings)
                 )
 
             logger.debug(f"Request: {request.model_dump_json()}")

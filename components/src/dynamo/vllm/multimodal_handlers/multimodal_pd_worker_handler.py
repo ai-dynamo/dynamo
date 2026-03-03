@@ -3,7 +3,6 @@
 
 import copy
 import logging
-import os
 import uuid
 from collections import defaultdict
 from typing import Any
@@ -18,12 +17,13 @@ from dynamo.common.memory.multimodal_embedding_cache_manager import (
 )
 from dynamo.common.multimodal.embedding_transfer import (
     LocalEmbeddingReceiver,
-    NixlPersistentEmbeddingReceiver,
+    NixlReadEmbeddingReceiver,
+    NixlWriteEmbeddingReceiver,
 )
 from dynamo.runtime import Client, DistributedRuntime
 
 from ..args import Config
-from ..constants import DisaggregationMode
+from ..constants import DisaggregationMode, EmbeddingTransferMode
 from ..handlers import BaseWorkerHandler, build_sampling_params
 from ..multimodal_utils import (
     MyRequestOutput,
@@ -36,7 +36,6 @@ from ..multimodal_utils.prefill_worker_utils import load_multimodal_embeddings
 logger = logging.getLogger(__name__)
 
 IMAGE_URL_KEY = "image_url"
-TRANSFER_LOCAL = int(os.getenv("TRANSFER_LOCAL", 1))
 
 
 class MultimodalPDWorkerHandler(BaseWorkerHandler):
@@ -95,13 +94,18 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
         self._connector: connect.Connector | None = (
             None  # Will be initialized in async_init
         )
-        # [gluo FIXME] can't use pre-registered tensor as NIXL requires descriptors
-        # to be at matching size, need to overwrite nixl connect library
-        self.embedding_receiver = (
-            LocalEmbeddingReceiver()
-            if TRANSFER_LOCAL
-            else NixlPersistentEmbeddingReceiver(max_items=0)
-        )
+        if config.embedding_transfer_mode == EmbeddingTransferMode.LOCAL:
+            self.embedding_receiver = LocalEmbeddingReceiver()
+        elif config.embedding_transfer_mode == EmbeddingTransferMode.NIXL_WRITE:
+            self.embedding_receiver = NixlWriteEmbeddingReceiver()
+        elif config.embedding_transfer_mode == EmbeddingTransferMode.NIXL_READ:
+            # [gluo FIXME] can't use pre-registered tensor as NIXL requires descriptors
+            # to be at matching size, need to overwrite nixl connect library
+            self.embedding_receiver = NixlReadEmbeddingReceiver(max_items=0)
+        else:
+            raise ValueError(
+                f"Invalid embedding transfer mode: {config.embedding_transfer_mode}"
+            )
 
         logger.info("Multimodal PD Worker has been initialized")
 
@@ -129,6 +133,8 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
             for item in mm_data.get(IMAGE_URL_KEY, []):
                 if isinstance(item, dict) and "Url" in item:
                     image_urls.append(item["Url"])
+                elif isinstance(item, dict) and "Decoded" in item:
+                    image_urls.append(item["Decoded"])
 
         sampling_params = build_sampling_params(
             raw_request, self.default_sampling_params
@@ -198,22 +204,6 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
 
         logger.debug(f"Prepared multimodal data size: {len(multi_modal_data['image'])}")
         logger.debug("Multimodal data keys: %s", list(multi_modal_data.keys()))
-
-    # ── Response serialization ───────────────────────────────────────
-
-    @staticmethod
-    def _serialize_response(response) -> str:
-        """Build a JSON-serialized ``MyRequestOutput`` from an engine response."""
-        return MyRequestOutput(
-            request_id=response.request_id,
-            prompt=response.prompt,
-            prompt_token_ids=response.prompt_token_ids,
-            prompt_logprobs=response.prompt_logprobs,
-            outputs=response.outputs,
-            finished=response.finished,
-            metrics=response.metrics,
-            kv_transfer_params=response.kv_transfer_params,
-        ).model_dump_json()
 
     @staticmethod
     def _format_engine_output(
@@ -346,13 +336,16 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
                 f"— ensure the same adapter is loaded on the decode worker."
             )
 
+        num_output_tokens_so_far = 0
         async for (
             decode_response
         ) in await self.decode_worker_client.round_robin(  # type: ignore[union-attr]
             request.model_dump_json()
         ):
             output = MyRequestOutput.model_validate_json(decode_response.data())  # type: ignore[attr-defined]
-            yield self._serialize_response(output)
+            yield self._format_engine_output(output, num_output_tokens_so_far)
+            if output.outputs:
+                num_output_tokens_so_far = len(output.outputs[0].token_ids)
 
     # ── Public entry point ───────────────────────────────────────────
 

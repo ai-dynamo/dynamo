@@ -26,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
@@ -790,7 +791,7 @@ func TestGenerateComponentContext(t *testing.T) {
 		parentGraphDeploymentName  string
 		namespace                  string
 		numberOfNodes              int32
-		discoveryBackend           string
+		discoveryBackend           configv1alpha1.DiscoveryBackend
 		expectedDynamoNamespace    string
 		expectedComponentType      string
 		expectedParentDGDName      string
@@ -806,7 +807,7 @@ func TestGenerateComponentContext(t *testing.T) {
 			parentGraphDeploymentName:  "my-deployment",
 			namespace:                  "my-namespace",
 			numberOfNodes:              1,
-			discoveryBackend:           "kubernetes",
+			discoveryBackend:           configv1alpha1.DiscoveryBackendKubernetes,
 			expectedDynamoNamespace:    "my-namespace-my-deployment",
 			expectedComponentType:      commonconsts.ComponentTypePlanner,
 			expectedParentDGDName:      "my-deployment",
@@ -822,7 +823,7 @@ func TestGenerateComponentContext(t *testing.T) {
 			parentGraphDeploymentName:  "vllm-disagg",
 			namespace:                  "djangoz",
 			numberOfNodes:              1,
-			discoveryBackend:           "kubernetes",
+			discoveryBackend:           configv1alpha1.DiscoveryBackendKubernetes,
 			expectedDynamoNamespace:    "djangoz-vllm-disagg",
 			expectedComponentType:      commonconsts.ComponentTypeFrontend,
 			expectedParentDGDName:      "vllm-disagg",
@@ -839,7 +840,7 @@ func TestGenerateComponentContext(t *testing.T) {
 			parentGraphDeploymentName:  "shared-frontend",
 			namespace:                  "production",
 			numberOfNodes:              2,
-			discoveryBackend:           "etcd",
+			discoveryBackend:           configv1alpha1.DiscoveryBackendEtcd,
 			expectedDynamoNamespace:    commonconsts.GlobalDynamoNamespace,
 			expectedComponentType:      commonconsts.ComponentTypeWorker,
 			expectedParentDGDName:      "shared-frontend",
@@ -854,7 +855,7 @@ func TestGenerateComponentContext(t *testing.T) {
 			parentGraphDeploymentName:  "test-dgd",
 			namespace:                  "default",
 			numberOfNodes:              1,
-			discoveryBackend:           "kubernetes",
+			discoveryBackend:           configv1alpha1.DiscoveryBackendKubernetes,
 			expectedDynamoNamespace:    "default-test-dgd",
 			expectedComponentType:      commonconsts.ComponentTypePlanner,
 			expectedParentDGDName:      "test-dgd",
@@ -868,7 +869,7 @@ func TestGenerateComponentContext(t *testing.T) {
 			parentGraphDeploymentName:  "llama-70b-prod",
 			namespace:                  "ml-inference",
 			numberOfNodes:              4,
-			discoveryBackend:           "nats",
+			discoveryBackend:           configv1alpha1.DiscoveryBackendEtcd,
 			expectedDynamoNamespace:    "ml-inference-llama-70b-prod",
 			expectedComponentType:      commonconsts.ComponentTypeFrontend,
 			expectedParentDGDName:      "llama-70b-prod",
@@ -1220,7 +1221,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 	type args struct {
 		ctx              context.Context
 		dynamoDeployment *v1alpha1.DynamoGraphDeployment
-		controllerConfig controller_common.Config
+		controllerConfig *configv1alpha1.OperatorConfiguration
 	}
 	tests := []struct {
 		name    string
@@ -1232,14 +1233,18 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 			name: "test_generate_grove_pod_clique_set_single_node",
 			args: args{
 				ctx: context.Background(),
-				controllerConfig: controller_common.Config{
-					EtcdAddress:     "etcd-address",
-					NatsAddress:     "nats-address",
-					ModelExpressURL: "model-express-url",
-					Grove: controller_common.GroveConfig{
-						TerminationDelay: 15 * time.Minute,
+				controllerConfig: &configv1alpha1.OperatorConfiguration{
+					Infrastructure: configv1alpha1.InfrastructureConfiguration{
+						ETCDAddress:        "etcd-address",
+						NATSAddress:        "nats-address",
+						ModelExpressURL:    "model-express-url",
+						PrometheusEndpoint: "http://localhost:9090",
 					},
-					PrometheusEndpoint: "http://localhost:9090",
+					Orchestrators: configv1alpha1.OrchestratorConfiguration{
+						Grove: configv1alpha1.GroveConfiguration{
+							TerminationDelay: metav1.Duration{Duration: 15 * time.Minute},
+						},
+					},
 				},
 				dynamoDeployment: &v1alpha1.DynamoGraphDeployment{
 					ObjectMeta: metav1.ObjectMeta{
@@ -1790,11 +1795,15 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 			name: "test_generate_grove_pod_gang_set_multinode sglang",
 			args: args{
 				ctx: context.Background(),
-				controllerConfig: controller_common.Config{
-					EtcdAddress: "etcd-address",
-					NatsAddress: "nats-address",
-					Grove: controller_common.GroveConfig{
-						TerminationDelay: 15 * time.Minute,
+				controllerConfig: &configv1alpha1.OperatorConfiguration{
+					Infrastructure: configv1alpha1.InfrastructureConfiguration{
+						ETCDAddress: "etcd-address",
+						NATSAddress: "nats-address",
+					},
+					Orchestrators: configv1alpha1.OrchestratorConfiguration{
+						Grove: configv1alpha1.GroveConfiguration{
+							TerminationDelay: metav1.Duration{Duration: 15 * time.Minute},
+						},
 					},
 				},
 				dynamoDeployment: &v1alpha1.DynamoGraphDeployment{
@@ -2755,11 +2764,15 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 			name: "test_generate_grove_pod_gang_set_multinode vllm",
 			args: args{
 				ctx: context.Background(),
-				controllerConfig: controller_common.Config{
-					EtcdAddress: "etcd-address",
-					NatsAddress: "nats-address",
-					Grove: controller_common.GroveConfig{
-						TerminationDelay: 15 * time.Minute,
+				controllerConfig: &configv1alpha1.OperatorConfiguration{
+					Infrastructure: configv1alpha1.InfrastructureConfiguration{
+						ETCDAddress: "etcd-address",
+						NATSAddress: "nats-address",
+					},
+					Orchestrators: configv1alpha1.OrchestratorConfiguration{
+						Grove: configv1alpha1.GroveConfiguration{
+							TerminationDelay: metav1.Duration{Duration: 15 * time.Minute},
+						},
 					},
 				},
 				dynamoDeployment: &v1alpha1.DynamoGraphDeployment{
@@ -3736,7 +3749,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := GenerateGrovePodCliqueSet(tt.args.ctx, tt.args.dynamoDeployment, tt.args.controllerConfig, nil, nil, nil, nil)
+			got, err := GenerateGrovePodCliqueSet(tt.args.ctx, tt.args.dynamoDeployment, tt.args.controllerConfig, &controller_common.RuntimeConfig{}, nil, nil, nil, nil)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("GenerateGrovePodCliqueSet() error = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -3797,7 +3810,7 @@ func Test_GeneratePodCliqueSetGlobalDynamoNamespace(t *testing.T) {
 		},
 	}
 
-	got, err := GenerateGrovePodCliqueSet(context.Background(), dynamoDeployment, controller_common.Config{}, nil, nil, nil, nil)
+	got, err := GenerateGrovePodCliqueSet(context.Background(), dynamoDeployment, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil)
 	if !assert.NoError(t, err) {
 		return
 	}
@@ -3868,7 +3881,7 @@ func TestGeneratePodSpecForComponent_SGLang(t *testing.T) {
 			Namespace: "default",
 		},
 	}
-	controllerConfig := controller_common.Config{}
+	controllerConfig := &configv1alpha1.OperatorConfiguration{}
 
 	tests := []struct {
 		name              string
@@ -4015,7 +4028,7 @@ func TestGeneratePodSpecForComponent_VLLM(t *testing.T) {
 			Namespace: "default",
 		},
 	}
-	controllerConfig := controller_common.Config{}
+	controllerConfig := &configv1alpha1.OperatorConfiguration{}
 
 	tests := []struct {
 		name              string
@@ -4168,7 +4181,7 @@ func TestGeneratePodSpecForComponent_UnsupportedBackend(t *testing.T) {
 			Namespace: "default",
 		},
 	}
-	controllerConfig := controller_common.Config{}
+	controllerConfig := &configv1alpha1.OperatorConfiguration{}
 
 	component := &v1alpha1.DynamoComponentDeploymentSharedSpec{
 		ComponentType: commonconsts.ComponentTypeWorker,
@@ -4878,12 +4891,14 @@ func TestGenerateGrovePodCliqueSet_StartsAfterDependencies(t *testing.T) {
 				},
 			}
 
-			controllerConfig := controller_common.Config{
-				EtcdAddress: "etcd-av1alpha1",
-				NatsAddress: "nats-address",
+			controllerConfig := &configv1alpha1.OperatorConfiguration{
+				Infrastructure: configv1alpha1.InfrastructureConfiguration{
+					ETCDAddress: "etcd-av1alpha1",
+					NATSAddress: "nats-address",
+				},
 			}
 
-			got, err := GenerateGrovePodCliqueSet(context.Background(), dynamoDeployment, controllerConfig, secretsRetriever, nil, nil, nil)
+			got, err := GenerateGrovePodCliqueSet(context.Background(), dynamoDeployment, controllerConfig, &controller_common.RuntimeConfig{}, secretsRetriever, nil, nil, nil)
 			if err != nil {
 				t.Errorf("GenerateGrovePodCliqueSet() error = %v", err)
 				return
@@ -4936,7 +4951,7 @@ func TestGenerateGrovePodCliqueSet_StartsAfterDependencies(t *testing.T) {
 
 func TestGenerateBasePodSpec_Frontend(t *testing.T) {
 	secretsRetriever := &mockSecretsRetriever{}
-	controllerConfig := controller_common.Config{}
+	controllerConfig := &configv1alpha1.OperatorConfiguration{}
 	dynamoDeployment := &v1alpha1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-deployment",
@@ -5032,7 +5047,7 @@ func TestGenerateBasePodSpec_Frontend(t *testing.T) {
 
 func TestGenerateBasePodSpec_PlannerServiceAccount(t *testing.T) {
 	secretsRetriever := &mockSecretsRetriever{}
-	controllerConfig := controller_common.Config{}
+	controllerConfig := &configv1alpha1.OperatorConfiguration{}
 
 	tests := []struct {
 		name               string
@@ -5178,7 +5193,7 @@ func TestGenerateBasePodSpec_DisableImagePullSecretDiscovery(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			controllerConfig := controller_common.Config{}
+			controllerConfig := &configv1alpha1.OperatorConfiguration{}
 
 			podSpec, err := GenerateBasePodSpec(
 				tt.component,
@@ -5211,7 +5226,7 @@ func TestGenerateBasePodSpec_DiscoverBackend(t *testing.T) {
 	tests := []struct {
 		name             string
 		component        *v1alpha1.DynamoComponentDeploymentSharedSpec
-		controllerConfig controller_common.Config
+		controllerConfig *configv1alpha1.OperatorConfiguration
 		wantEnvVar       string
 	}{
 		{
@@ -5221,15 +5236,18 @@ func TestGenerateBasePodSpec_DiscoverBackend(t *testing.T) {
 					commonconsts.KubeAnnotationDynamoDiscoveryBackend: "kubernetes",
 				},
 			},
-			wantEnvVar: "kubernetes",
+			controllerConfig: &configv1alpha1.OperatorConfiguration{},
+			wantEnvVar:       "kubernetes",
 		},
 		{
 			name: "Kubernetes discovery from controller config should set env var to kubernetes",
 			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
 				Annotations: map[string]string{},
 			},
-			controllerConfig: controller_common.Config{
-				DiscoveryBackend: "kubernetes",
+			controllerConfig: &configv1alpha1.OperatorConfiguration{
+				Discovery: configv1alpha1.DiscoveryConfiguration{
+					Backend: "kubernetes",
+				},
 			},
 			wantEnvVar: "kubernetes",
 		},
@@ -5240,8 +5258,10 @@ func TestGenerateBasePodSpec_DiscoverBackend(t *testing.T) {
 					commonconsts.KubeAnnotationDynamoDiscoveryBackend: "etcd",
 				},
 			},
-			controllerConfig: controller_common.Config{
-				DiscoveryBackend: "kubernetes",
+			controllerConfig: &configv1alpha1.OperatorConfiguration{
+				Discovery: configv1alpha1.DiscoveryConfiguration{
+					Backend: "kubernetes",
+				},
 			},
 			wantEnvVar: "", // etcd is the runtime default, no env var needed
 		},
@@ -5250,8 +5270,10 @@ func TestGenerateBasePodSpec_DiscoverBackend(t *testing.T) {
 			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
 				Annotations: map[string]string{},
 			},
-			controllerConfig: controller_common.Config{
-				DiscoveryBackend: "etcd",
+			controllerConfig: &configv1alpha1.OperatorConfiguration{
+				Discovery: configv1alpha1.DiscoveryConfiguration{
+					Backend: "etcd",
+				},
 			},
 			wantEnvVar: "", // etcd is the runtime default, no env var needed
 		},
@@ -5262,15 +5284,18 @@ func TestGenerateBasePodSpec_DiscoverBackend(t *testing.T) {
 					commonconsts.KubeAnnotationDynamoDiscoveryBackend: "",
 				},
 			},
-			controllerConfig: controller_common.Config{
-				DiscoveryBackend: "",
+			controllerConfig: &configv1alpha1.OperatorConfiguration{
+				Discovery: configv1alpha1.DiscoveryConfiguration{
+					Backend: "",
+				},
 			},
 			wantEnvVar: "kubernetes", // empty defaults to kubernetes
 		},
 		{
-			name:       "Discovery backend not set defaults to kubernetes",
-			component:  &v1alpha1.DynamoComponentDeploymentSharedSpec{},
-			wantEnvVar: "kubernetes", // not set defaults to kubernetes
+			name:             "Discovery backend not set defaults to kubernetes",
+			component:        &v1alpha1.DynamoComponentDeploymentSharedSpec{},
+			controllerConfig: &configv1alpha1.OperatorConfiguration{},
+			wantEnvVar:       "kubernetes", // not set defaults to kubernetes
 		},
 	}
 	secretsRetriever := &mockSecretsRetriever{}
@@ -5307,7 +5332,7 @@ func TestGenerateBasePodSpec_DiscoverBackend(t *testing.T) {
 
 func TestGenerateBasePodSpec_Worker(t *testing.T) {
 	secretsRetriever := &mockSecretsRetriever{}
-	controllerConfig := controller_common.Config{}
+	controllerConfig := &configv1alpha1.OperatorConfiguration{}
 
 	tests := []struct {
 		name            string
@@ -5474,7 +5499,7 @@ func TestGenerateBasePodSpec_Worker(t *testing.T) {
 
 func TestGenerateBasePodSpec_VolumeMounts(t *testing.T) {
 	secretsRetriever := &mockSecretsRetriever{}
-	controllerConfig := controller_common.Config{}
+	controllerConfig := &configv1alpha1.OperatorConfiguration{}
 
 	tests := []struct {
 		name           string
@@ -5609,7 +5634,7 @@ func TestGenerateBasePodSpec_VolumeMounts(t *testing.T) {
 
 func TestGenerateBasePodSpec_ResourceClaims(t *testing.T) {
 	secretsRetriever := &mockSecretsRetriever{}
-	controllerConfig := controller_common.Config{}
+	controllerConfig := &configv1alpha1.OperatorConfiguration{}
 
 	tests := []struct {
 		name                   string
@@ -5869,7 +5894,7 @@ func TestGenerateBasePodSpec_ResourceClaims(t *testing.T) {
 
 func TestGenerateBasePodSpec_UseAsCompilationCache_BackendSupport(t *testing.T) {
 	secretsRetriever := &mockSecretsRetriever{}
-	controllerConfig := controller_common.Config{}
+	controllerConfig := &configv1alpha1.OperatorConfiguration{}
 
 	tests := []struct {
 		name             string
@@ -6055,7 +6080,7 @@ func TestGenerateBasePodSpec_UseAsCompilationCache_BackendSupport(t *testing.T) 
 
 func TestGenerateBasePodSpec_SecurityContext(t *testing.T) {
 	secretsRetriever := &mockSecretsRetriever{}
-	controllerConfig := controller_common.Config{}
+	controllerConfig := &configv1alpha1.OperatorConfiguration{}
 
 	tests := []struct {
 		name                    string
@@ -6696,12 +6721,14 @@ func TestGenerateGrovePodCliqueSet_RestartAnnotations(t *testing.T) {
 				},
 			}
 
-			controllerConfig := controller_common.Config{
-				EtcdAddress: "etcd-address",
-				NatsAddress: "nats-address",
+			controllerConfig := &configv1alpha1.OperatorConfiguration{
+				Infrastructure: configv1alpha1.InfrastructureConfiguration{
+					ETCDAddress: "etcd-address",
+					NATSAddress: "nats-address",
+				},
 			}
 
-			got, err := GenerateGrovePodCliqueSet(context.Background(), dgd, controllerConfig, nil, tt.restartState, nil, nil)
+			got, err := GenerateGrovePodCliqueSet(context.Background(), dgd, controllerConfig, &controller_common.RuntimeConfig{}, nil, tt.restartState, nil, nil)
 			if err != nil {
 				t.Fatalf("GenerateGrovePodCliqueSet() error = %v", err)
 			}
@@ -6938,4 +6965,78 @@ func TestFrontendDefaults_NamespacePrefixEnvVar(t *testing.T) {
 		}
 	}
 	assert.True(t, found, "DYN_NAMESPACE_PREFIX should be set on frontend")
+}
+
+func TestPropagateDGDAnnotations(t *testing.T) {
+	tests := []struct {
+		name               string
+		dgdAnnotations     map[string]string
+		serviceAnnotations map[string]string
+		expectedAnnotation map[string]string
+	}{
+		{
+			name: "DGD annotation propagates to empty service annotations",
+			dgdAnnotations: map[string]string{
+				commonconsts.KubeAnnotationVLLMDistributedExecutorBackend: "ray",
+			},
+			serviceAnnotations: nil,
+			expectedAnnotation: map[string]string{
+				commonconsts.KubeAnnotationVLLMDistributedExecutorBackend: "ray",
+			},
+		},
+		{
+			name: "service-level annotation takes precedence over DGD",
+			dgdAnnotations: map[string]string{
+				commonconsts.KubeAnnotationVLLMDistributedExecutorBackend: "ray",
+			},
+			serviceAnnotations: map[string]string{
+				commonconsts.KubeAnnotationVLLMDistributedExecutorBackend: "mp",
+			},
+			expectedAnnotation: map[string]string{
+				commonconsts.KubeAnnotationVLLMDistributedExecutorBackend: "mp",
+			},
+		},
+		{
+			name:               "no DGD annotation, no service annotation",
+			dgdAnnotations:     nil,
+			serviceAnnotations: nil,
+			expectedAnnotation: nil,
+		},
+		{
+			name: "origin version also propagates",
+			dgdAnnotations: map[string]string{
+				commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.0.0",
+			},
+			serviceAnnotations: nil,
+			expectedAnnotation: map[string]string{
+				commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.0.0",
+			},
+		},
+		{
+			name: "unrelated DGD annotations are not propagated",
+			dgdAnnotations: map[string]string{
+				"some-other-annotation": "value",
+			},
+			serviceAnnotations: nil,
+			expectedAnnotation: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			component := &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				Annotations: tt.serviceAnnotations,
+			}
+			propagateDGDAnnotations(tt.dgdAnnotations, component)
+
+			if tt.expectedAnnotation == nil {
+				assert.True(t, len(component.Annotations) == 0 || component.Annotations == nil,
+					"expected no annotations, got %v", component.Annotations)
+			} else {
+				for k, v := range tt.expectedAnnotation {
+					assert.Equal(t, v, component.Annotations[k], "annotation %s mismatch", k)
+				}
+			}
+		})
+	}
 }

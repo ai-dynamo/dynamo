@@ -21,9 +21,9 @@ import (
 	"context"
 	"testing"
 
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
-	controller_common "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	batchv1 "k8s.io/api/batch/v1"
@@ -50,14 +50,14 @@ func checkpointTestScheme() *runtime.Scheme {
 	return s
 }
 
-func checkpointTestConfig() controller_common.Config {
-	return controller_common.Config{
-		Checkpoint: controller_common.CheckpointConfig{
+func checkpointTestConfig() *configv1alpha1.OperatorConfiguration {
+	return &configv1alpha1.OperatorConfiguration{
+		Checkpoint: configv1alpha1.CheckpointConfiguration{
 			Enabled:                    true,
 			ReadyForCheckpointFilePath: "/tmp/ready-for-checkpoint",
-			Storage: controller_common.CheckpointStorageConfig{
-				Type: controller_common.CheckpointStorageTypePVC,
-				PVC: controller_common.CheckpointPVCConfig{
+			Storage: configv1alpha1.CheckpointStorageConfiguration{
+				Type: configv1alpha1.CheckpointStorageTypePVC,
+				PVC: configv1alpha1.CheckpointPVCConfig{
 					PVCName:  "chrek-pvc",
 					BasePath: "/checkpoints",
 				},

@@ -5,7 +5,7 @@
 
 This module handles:
 - Connection: Represents an active client connection
-- GlobalLockFSM: Explicit state transitions with validated permissions
+- GMSLocalFSM: Explicit state transitions with validated permissions
 
 State Diagram:
 
@@ -174,7 +174,7 @@ class TransitionRecord:
     session_id: Optional[str] = None
 
 
-class GlobalLockFSM:
+class GMSLocalFSM:
     """Explicit state machine for GPU Memory Service.
 
     State is DERIVED from actual connection objects:
@@ -330,7 +330,12 @@ class GlobalLockFSM:
             )
 
         # Record transition
-        record = TransitionRecord(from_state, event, to_state, session_id)
+        record = TransitionRecord(
+            from_state,
+            event,
+            to_state,
+            session_id=session_id,
+        )
         self._transition_log.append(record)
 
         logger.info(

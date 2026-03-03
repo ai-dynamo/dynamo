@@ -15,7 +15,6 @@ from dynamo.common.memory.multimodal_embedding_cache_manager import (
 )
 from dynamo.vllm.multimodal_handlers import multimodal_pd_worker_handler as mod
 from dynamo.vllm.multimodal_utils.protocol import (
-    MyRequestOutput,
     PatchedTokensPrompt,
     vLLMMultimodalRequest,
 )
@@ -38,7 +37,7 @@ def _make_config(
     multimodal_embedding_cache_capacity_gb: float = 0,
 ) -> MagicMock:
     """Create a mock Config with the fields used by MultimodalPDWorkerHandler."""
-    from dynamo.vllm.constants import DisaggregationMode
+    from dynamo.vllm.constants import DisaggregationMode, EmbeddingTransferMode
 
     config = MagicMock()
     config.model = model
@@ -48,6 +47,9 @@ def _make_config(
         if is_prefill_worker
         else DisaggregationMode.AGGREGATED
     )
+    # NIXL_WRITE / NIXL_READ modes require GPU, the tests may run in CPU-only environments,
+    # so set to LOCAL mode.
+    config.embedding_transfer_mode = EmbeddingTransferMode.LOCAL
     config.enable_multimodal = enable_multimodal
     config.multimodal_embedding_cache_capacity_gb = (
         multimodal_embedding_cache_capacity_gb
@@ -105,7 +107,7 @@ def _make_vllm_request(request_id: str = "req-1") -> vLLMMultimodalRequest:
 
 
 def _make_engine_response(request_id: str = "req-1", finished: bool = True):
-    """Create a mock engine response with the fields _serialize_response needs."""
+    """Create a mock engine response with the fields _format_engine_output needs."""
     resp = MagicMock()
     resp.request_id = request_id
     resp.prompt = "test"
@@ -274,16 +276,28 @@ class TestGenerateDisagg:
 
         handler.engine_client.generate = fake_generate
 
-        decode_output = MyRequestOutput(
-            request_id="req-1",
-            prompt="test",
-            prompt_token_ids=[1, 2, 3],
-            outputs=[],
-            finished=True,
-            kv_transfer_params={"block_ids": [0, 1]},
+        decode_json = json.dumps(
+            {
+                "request_id": "req-1",
+                "prompt": "test",
+                "prompt_token_ids": [1, 2, 3],
+                "outputs": [
+                    {
+                        "index": 0,
+                        "text": "",
+                        "token_ids": [42],
+                        "cumulative_logprob": None,
+                        "logprobs": None,
+                        "finish_reason": "stop",
+                        "stop_reason": None,
+                    }
+                ],
+                "finished": True,
+                "kv_transfer_params": {"block_ids": [0, 1]},
+            }
         )
         decode_resp = MagicMock()
-        decode_resp.data.return_value = decode_output.model_dump_json()
+        decode_resp.data.return_value = decode_json
 
         async def fake_round_robin(payload):
             async def _stream():
@@ -299,6 +313,6 @@ class TestGenerateDisagg:
             chunks.append(chunk)
 
         assert len(chunks) == 1
-        parsed = json.loads(chunks[0])
-        assert parsed["request_id"] == "req-1"
-        assert parsed["finished"] is True
+        assert isinstance(chunks[0], dict)
+        assert chunks[0]["token_ids"] == [42]
+        assert chunks[0]["finish_reason"] == "stop"

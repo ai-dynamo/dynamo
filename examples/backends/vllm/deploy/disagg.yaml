@@ -55,3 +55,5 @@ spec:
             - Qwen/Qwen3-0.6B
             - --disaggregation-mode
             - prefill
+            - --kv-transfer-config
+            - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 pub mod hf;
+pub mod tiktoken;
 
 // TODO: Add tokenizer benchmarks
 // TODO: Enable README.md as a module doc
@@ -15,11 +16,13 @@ use crate::protocols::TokenIdType;
 pub use anyhow::{Error, Result};
 
 pub use hf::HuggingFaceTokenizer;
+pub use tiktoken::TikTokenTokenizer;
 
 /// Represents the type of tokenizer being used
 #[derive(Debug)]
 pub enum TokenizerType {
     HuggingFace(String),
+    TikToken(String),
 }
 
 /// character offsets in the original text
@@ -121,6 +124,8 @@ where
 /// The file extension is used to determine the tokenizer type.
 /// Supported file types are:
 /// - json: HuggingFace tokenizer
+/// - model, tiktoken: tiktoken BPE tokenizer (requires `config.json` with a supported
+///   `model_type` in the same directory; currently: kimi, kimi_k2, kimi_k25)
 pub fn create_tokenizer_from_file(file_path: &str) -> Result<Arc<dyn traits::Tokenizer>> {
     let path = Path::new(file_path);
     let extension = path
@@ -133,7 +138,13 @@ pub fn create_tokenizer_from_file(file_path: &str) -> Result<Arc<dyn traits::Tok
             let tokenizer = HuggingFaceTokenizer::from_file(file_path)?;
             Ok(Arc::new(tokenizer))
         }
-        _ => Err(Error::msg("Unsupported file type".to_string())),
+        "model" | "tiktoken" => {
+            let tokenizer = TikTokenTokenizer::from_file_auto(file_path)?;
+            Ok(Arc::new(tokenizer))
+        }
+        _ => Err(Error::msg(format!(
+            "Unsupported tokenizer file type: .{extension}"
+        ))),
     }
 }
 

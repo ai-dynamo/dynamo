@@ -21,9 +21,9 @@ import (
 	"context"
 	"fmt"
 
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
-	controller_common "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
@@ -47,7 +47,7 @@ func getCheckpointInfoFromCheckpoint(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) *
 
 // getPVCBasePath returns the PVC base path from storage config.
 // Only applicable for PVC storage type
-func getPVCBasePath(storageConfig *controller_common.CheckpointStorageConfig) string {
+func getPVCBasePath(storageConfig *configv1alpha1.CheckpointStorageConfiguration) string {
 	if storageConfig != nil && storageConfig.PVC.BasePath != "" {
 		return storageConfig.PVC.BasePath
 	}
@@ -57,7 +57,7 @@ func getPVCBasePath(storageConfig *controller_common.CheckpointStorageConfig) st
 // GetPVCBasePath returns the configured PVC base path from controller config.
 // This is used by both CheckpointReconciler and DynamoGraphDeploymentReconciler.
 // Only applicable for PVC storage type.
-func GetPVCBasePath(config *controller_common.CheckpointConfig) string {
+func GetPVCBasePath(config *configv1alpha1.CheckpointConfiguration) string {
 	if config != nil {
 		return getPVCBasePath(&config.Storage)
 	}
@@ -154,7 +154,7 @@ func ResolveCheckpointForService(
 // InjectCheckpointEnvVars adds checkpoint-related environment variables to a restored/DGD container.
 // Sets PATH and HASH so the restored process knows its checkpoint identity.
 // DYN_CHECKPOINT_LOCATION is reserved for future S3/OCI support.
-func InjectCheckpointEnvVars(container *corev1.Container, info *CheckpointInfo, checkpointConfig *controller_common.CheckpointConfig) {
+func InjectCheckpointEnvVars(container *corev1.Container, info *CheckpointInfo, checkpointConfig *configv1alpha1.CheckpointConfiguration) {
 	if !info.Enabled {
 		return
 	}
@@ -163,13 +163,13 @@ func InjectCheckpointEnvVars(container *corev1.Container, info *CheckpointInfo, 
 
 	// For PVC storage: inject base path so the restored process knows its checkpoint location.
 	// For S3/OCI (future): inject DYN_CHECKPOINT_LOCATION directly.
-	storageType := controller_common.CheckpointStorageTypePVC
+	storageType := configv1alpha1.CheckpointStorageTypePVC
 	if checkpointConfig != nil && checkpointConfig.Storage.Type != "" {
 		storageType = checkpointConfig.Storage.Type
 	}
 
 	switch storageType {
-	case controller_common.CheckpointStorageTypePVC:
+	case configv1alpha1.CheckpointStorageTypePVC:
 		basePath := ""
 		if checkpointConfig != nil {
 			basePath = getPVCBasePath(&checkpointConfig.Storage)
@@ -340,7 +340,7 @@ func InjectPodInfoVolumeMount(container *corev1.Container) {
 func InjectCheckpointIntoPodSpec(
 	podSpec *corev1.PodSpec,
 	checkpointInfo *CheckpointInfo,
-	checkpointConfig *controller_common.CheckpointConfig,
+	checkpointConfig *configv1alpha1.CheckpointConfiguration,
 ) error {
 	if checkpointInfo == nil || !checkpointInfo.Enabled {
 		return nil
@@ -392,8 +392,8 @@ func InjectCheckpointIntoPodSpec(
 	}
 
 	// Determine storage type and compute location/path
-	storageType := controller_common.CheckpointStorageTypePVC // default
-	var storageConfig *controller_common.CheckpointStorageConfig
+	storageType := configv1alpha1.CheckpointStorageTypePVC // default
+	var storageConfig *configv1alpha1.CheckpointStorageConfiguration
 	if checkpointConfig != nil {
 		storageConfig = &checkpointConfig.Storage
 		if storageConfig.Type != "" {
@@ -402,14 +402,14 @@ func InjectCheckpointIntoPodSpec(
 	}
 
 	switch storageType {
-	case controller_common.CheckpointStorageTypeS3:
+	case configv1alpha1.CheckpointStorageTypeS3:
 		info.StorageType = nvidiacomv1alpha1.DynamoCheckpointStorageType(storageType)
 		if storageConfig == nil || storageConfig.S3.URI == "" {
 			return fmt.Errorf("S3 storage type selected but no S3 URI configured (set checkpoint.storage.s3.uri)")
 		}
 		info.Location = fmt.Sprintf("%s/%s.tar", storageConfig.S3.URI, info.Hash)
 
-	case controller_common.CheckpointStorageTypeOCI:
+	case configv1alpha1.CheckpointStorageTypeOCI:
 		info.StorageType = nvidiacomv1alpha1.DynamoCheckpointStorageType(storageType)
 		if storageConfig == nil || storageConfig.OCI.URI == "" {
 			return fmt.Errorf("OCI storage type selected but no OCI URI configured (set checkpoint.storage.oci.uri)")
