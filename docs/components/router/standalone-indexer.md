@@ -98,25 +98,30 @@ curl -X POST http://localhost:8090/register \
 
 ### `POST /unregister` — Deregister an instance
 
-Remove all dp_ranks for an instance, or a specific dp_rank:
+Remove an instance. Omitting `tenant_id` removes the instance from **all** tenants for the given model; providing it targets only that tenant's indexer.
 
 ```bash
-# Remove all dp_ranks
+# Remove from all tenants
 curl -X POST http://localhost:8090/unregister \
   -H 'Content-Type: application/json' \
   -d '{"instance_id": 1, "model_name": "llama-3-8b"}'
 
+# Remove from a specific tenant
+curl -X POST http://localhost:8090/unregister \
+  -H 'Content-Type: application/json' \
+  -d '{"instance_id": 1, "model_name": "llama-3-8b", "tenant_id": "customer-a"}'
+
 # Remove a specific dp_rank
 curl -X POST http://localhost:8090/unregister \
   -H 'Content-Type: application/json' \
-  -d '{"instance_id": 1, "model_name": "llama-3-8b", "dp_rank": 0}'
+  -d '{"instance_id": 1, "model_name": "llama-3-8b", "tenant_id": "default", "dp_rank": 0}'
 ```
 
 | Field | Required | Default | Description |
 |-------|----------|---------|-------------|
 | `instance_id` | yes | — | Worker instance to remove |
 | `model_name` | yes | — | Model name (identifies the indexer) |
-| `tenant_id` | no | `"default"` | Tenant identifier |
+| `tenant_id` | no | — | Tenant identifier (omit to remove from all tenants) |
 | `dp_rank` | no | — | Specific dp_rank to remove (omit to remove all) |
 
 ### `GET /workers` — List registered instances

@@ -167,6 +167,27 @@ impl WorkerRegistry {
         Ok(())
     }
 
+    pub async fn deregister_all_tenants(
+        &self,
+        instance_id: WorkerId,
+        model_name: &str,
+    ) -> Result<()> {
+        let (_, entry) = self
+            .workers
+            .remove(&instance_id)
+            .ok_or_else(|| anyhow::anyhow!("instance {instance_id} not found"))?;
+
+        entry.cancel.cancel();
+
+        for ie in self.indexers.iter() {
+            if ie.key().model_name == model_name {
+                ie.indexer.remove_worker(instance_id).await;
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn list(&self) -> Vec<(WorkerId, HashMap<u32, String>)> {
         self.workers
             .iter()

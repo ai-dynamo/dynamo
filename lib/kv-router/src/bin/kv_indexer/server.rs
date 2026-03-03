@@ -41,8 +41,8 @@ pub struct RegisterRequest {
 pub struct UnregisterRequest {
     pub instance_id: WorkerId,
     pub model_name: String,
-    #[serde(default = "default_tenant")]
-    pub tenant_id: String,
+    #[serde(default)]
+    pub tenant_id: Option<String>,
     #[serde(default)]
     pub dp_rank: Option<u32>,
 }
@@ -106,17 +106,25 @@ async fn unregister(
     State(state): State<Arc<AppState>>,
     Json(req): Json<UnregisterRequest>,
 ) -> impl IntoResponse {
-    let result = match req.dp_rank {
-        Some(dp_rank) => {
-            state
-                .registry
-                .deregister_dp_rank(req.instance_id, dp_rank, &req.model_name, &req.tenant_id)
-                .await
-        }
+    let result = match req.tenant_id {
+        Some(tenant_id) => match req.dp_rank {
+            Some(dp_rank) => {
+                state
+                    .registry
+                    .deregister_dp_rank(req.instance_id, dp_rank, &req.model_name, &tenant_id)
+                    .await
+            }
+            None => {
+                state
+                    .registry
+                    .deregister(req.instance_id, &req.model_name, &tenant_id)
+                    .await
+            }
+        },
         None => {
             state
                 .registry
-                .deregister(req.instance_id, &req.model_name, &req.tenant_id)
+                .deregister_all_tenants(req.instance_id, &req.model_name)
                 .await
         }
     };
