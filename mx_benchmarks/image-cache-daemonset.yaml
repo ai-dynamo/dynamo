@@ -1,0 +1,40 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Pre-caches the dynamo runtime image on labeled nodes.
+# Label target nodes first:
+#   kubectl label node <node-name> dynamo/image-cache=true
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: dynamo-image-cache
+spec:
+  selector:
+    matchLabels:
+      app: dynamo-image-cache
+  template:
+    metadata:
+      labels:
+        app: dynamo-image-cache
+    spec:
+      imagePullSecrets:
+      - name: ngc-secret
+      nodeSelector:
+        dynamo/image-cache: "true"
+      tolerations:
+      - key: nvidia.com/gpu
+        operator: Equal
+        value: "true"
+        effect: NoSchedule
+      containers:
+      - name: cache
+        image: nvcr.io/nvidian/dynamo-dev/hwoo:vllm-runtime-ea86df298-mx_ref-64f9249
+        command: ["sleep", "infinity"]
+        resources:
+          requests:
+            cpu: "10m"
+            memory: "64Mi"
+          limits:
+            cpu: "100m"
+            memory: "128Mi"
+      terminationGracePeriodSeconds: 0

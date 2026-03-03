@@ -1,0 +1,159 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Disk-loading baseline for MX P2P comparison.
+#
+# Both mx-source and mx-target load weights from disk (--load-format auto).
+# ModelExpress server is still required (dynamo runtime connects to mxclient).
+#
+# Uses a distinct DGD name (vllm-agg-disk) to avoid confusion with the P2P variant.
+
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-agg-disk
+spec:
+  backendFramework: vllm
+  pvcs:
+    - create: false
+      name: model-cache-llama
+  services:
+    Frontend:
+      envFromSecret: hf-token-secret
+      componentType: frontend
+      replicas: 1
+      envs:
+        - name: MX_SERVER_ADDRESS
+          value: "modelexpress-server:8001"
+        - name: MODEL_EXPRESS_URL
+          value: "http://modelexpress-server:8001"
+        - name: HF_HUB_CACHE
+          value: "/models"
+      extraPodSpec:
+        nodeSelector:
+          dynamo/role: "source"
+        tolerations:
+          - key: "dynamo/reserved"
+            operator: "Equal"
+            value: "source"
+            effect: "NoSchedule"
+          - key: "nvidia.com/gpu"
+            operator: "Exists"
+            effect: "NoSchedule"
+        mainContainer:
+          image: nvcr.io/nvidian/dynamo-dev/hwoo:dynamo-mx-runtime
+      volumeMounts:
+        - name: model-cache-llama
+          mountPoint: /models
+
+    mx-source:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      replicas: 1
+      resources:
+        limits:
+          gpu: "8"
+      envs:
+        - name: DYN_HEALTH_CHECK_ENABLED
+          value: "false"
+        - name: VLLM_RPC_TIMEOUT
+          value: "7200000"
+        # DeepGEMM: full warmup to ephemeral dir (synced to PVC for target reuse)
+        - name: VLLM_DEEP_GEMM_WARMUP
+          value: "full"
+        - name: DG_JIT_CACHE_DIR
+          value: "/tmp/deepgemm"
+        - name: HF_HUB_CACHE
+          value: "/models"
+        - name: MODEL_NAME
+          value: "meta-llama/Llama-3.3-70B-Instruct"
+        - name: MX_SERVER_ADDRESS
+          value: "modelexpress-server:8001"
+        - name: MODEL_EXPRESS_URL
+          value: "http://modelexpress-server:8001"
+      extraPodSpec:
+        nodeSelector:
+          dynamo/role: "source"
+        tolerations:
+          - key: "dynamo/reserved"
+            operator: "Equal"
+            value: "source"
+            effect: "NoSchedule"
+          - key: "nvidia.com/gpu"
+            operator: "Exists"
+            effect: "NoSchedule"
+        mainContainer:
+          image: nvcr.io/nvidian/dynamo-dev/hwoo:dynamo-mx-runtime
+          command:
+            - python3
+            - -m
+            - dynamo.vllm
+          args:
+            - --model
+            - $(MODEL_NAME)
+            - --tensor-parallel-size
+            - "8"
+            - --trust-remote-code
+            - --load-format
+            - auto
+            - --compilation-config
+            - '{"cache_dir": "/models/.cache/vllm/compile_cache"}'
+      volumeMounts:
+        - name: model-cache-llama
+          mountPoint: /models
+
+    mx-target:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      replicas: 0
+      resources:
+        limits:
+          gpu: "8"
+      envs:
+        - name: DYN_HEALTH_CHECK_ENABLED
+          value: "false"
+        - name: VLLM_RPC_TIMEOUT
+          value: "7200000"
+        # DeepGEMM: skip warmup, reuse full cache synced from source via PVC
+        - name: VLLM_DEEP_GEMM_WARMUP
+          value: "skip"
+        - name: DG_JIT_CACHE_DIR
+          value: "/models/.cache/deepgemm"
+        - name: HF_HUB_CACHE
+          value: "/models"
+        - name: MODEL_NAME
+          value: "meta-llama/Llama-3.3-70B-Instruct"
+        - name: MX_SERVER_ADDRESS
+          value: "modelexpress-server:8001"
+        - name: MODEL_EXPRESS_URL
+          value: "http://modelexpress-server:8001"
+      extraPodSpec:
+        nodeSelector:
+          dynamo/role: "target"
+        tolerations:
+          - key: "dynamo/reserved"
+            operator: "Equal"
+            value: "target"
+            effect: "NoSchedule"
+          - key: "nvidia.com/gpu"
+            operator: "Exists"
+            effect: "NoSchedule"
+        mainContainer:
+          image: nvcr.io/nvidian/dynamo-dev/hwoo:dynamo-mx-runtime
+          command:
+            - python3
+            - -m
+            - dynamo.vllm
+          args:
+            - --model
+            - $(MODEL_NAME)
+            - --tensor-parallel-size
+            - "8"
+            - --trust-remote-code
+            - --load-format
+            - auto
+            - --compilation-config
+            - '{"cache_dir": "/models/.cache/vllm/compile_cache"}'
+      volumeMounts:
+        - name: model-cache-llama
+          mountPoint: /models

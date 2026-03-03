@@ -1,0 +1,242 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Aggregated DGD with ModelExpress P2P weight transfer + planner-driven scale-up.
+#
+# Same as agg_mx_p2p.yaml but includes a Planner service that automatically
+# scales mx-target based on SLA breaches (TTFT spikes).
+#
+# Planner args are sed-substitutable by run_planner.sh.
+
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-agg-mx-p2p-planner
+spec:
+  backendFramework: vllm
+  pvcs:
+    - create: false
+      name: model-cache-llama
+  services:
+    Frontend:
+      envFromSecret: hf-token-secret
+      componentType: frontend
+      replicas: 1
+      envs:
+        # Server address for metadata publishing
+        - name: MX_SERVER_ADDRESS
+          value: "modelexpress-server:8001"
+        - name: MODEL_EXPRESS_URL
+          value: "http://modelexpress-server:8001"
+        - name: HF_HUB_CACHE
+          value: "/models"
+      extraPodSpec:
+        nodeSelector:
+          dynamo/role: "source"
+        tolerations:
+          - key: "dynamo/reserved"
+            operator: "Equal"
+            value: "source"
+            effect: "NoSchedule"
+          - key: "nvidia.com/gpu"
+            operator: "Exists"
+            effect: "NoSchedule"
+        mainContainer:
+          image: nvcr.io/nvidian/dynamo-dev/hwoo:dynamo-mx-runtime
+      volumeMounts:
+        - name: model-cache-llama
+          mountPoint: /models
+
+    mx-source:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      replicas: 1
+      resources:
+        limits:
+          gpu: "8"
+          custom:
+            rdma/ib: "8"
+      envs:
+        - name: DYN_HEALTH_CHECK_ENABLED
+          value: "false"
+        # Increase startup timeout to allow DeepGemm warmup to complete (2 hours)
+        - name: VLLM_RPC_TIMEOUT
+          value: "7200000"
+        # DeepGEMM: full warmup to ephemeral dir (synced to PVC for target reuse)
+        - name: VLLM_DEEP_GEMM_WARMUP
+          value: "full"
+        - name: DG_JIT_CACHE_DIR
+          value: "/tmp/deepgemm"
+        - name: HF_HUB_CACHE
+          value: "/models"
+        - name: MODEL_NAME
+          value: "meta-llama/Llama-3.3-70B-Instruct"
+        # Register ModelExpress custom loaders for FP8 support
+        - name: MX_REGISTER_LOADERS
+          value: "1"
+        # Server address for metadata publishing
+        - name: MX_SERVER_ADDRESS
+          value: "modelexpress-server:8001"
+        - name: MODEL_EXPRESS_URL
+          value: "http://modelexpress-server:8001"
+        # OPTIMIZATION: Synchronized publish - wait for all workers before publishing
+        # This reduces the staggered window and allows targets to start simultaneously
+        - name: MX_SYNC_PUBLISH
+          value: "1"
+        # Baseline: individual tensor registration (stable and tested)
+        # Set to "1" for contiguous regions (experimental - see docs/CONTIGUOUS_CONTEXT.md)
+        - name: MX_CONTIGUOUS_REG
+          value: "0"
+        # UCX transport settings for GPUDirect RDMA
+        - name: UCX_TLS
+          value: "rc_x,rc,dc_x,dc,cuda_copy"
+        - name: UCX_RNDV_SCHEME
+          value: "get_zcopy"
+        - name: UCX_RNDV_THRESH
+          value: "0"
+      extraPodSpec:
+        nodeSelector:
+          dynamo/role: "source"
+        tolerations:
+          - key: "dynamo/reserved"
+            operator: "Equal"
+            value: "source"
+            effect: "NoSchedule"
+          - key: "nvidia.com/gpu"
+            operator: "Exists"
+            effect: "NoSchedule"
+        mainContainer:
+          image: nvcr.io/nvidian/dynamo-dev/hwoo:dynamo-mx-runtime
+          securityContext:
+            capabilities:
+              add:
+                - IPC_LOCK
+          command:
+            - python3
+            - -m
+            - dynamo.vllm
+          args:
+            - --model
+            - $(MODEL_NAME)
+            - --tensor-parallel-size
+            - "8"
+            - --trust-remote-code
+            - --load-format
+            - mx-source
+            - --model-express-url
+            - $(MODEL_EXPRESS_URL)
+            - --compilation-config
+            - '{"cache_dir": "/models/.cache/vllm/compile_cache"}'
+      volumeMounts:
+        - name: model-cache-llama
+          mountPoint: /models
+
+    mx-target:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      replicas: 0  # starts at 0; planner scales up on SLA breach
+      resources:
+        limits:
+          gpu: "8"
+          custom:
+            rdma/ib: "8"
+      envs:
+        - name: DYN_HEALTH_CHECK_ENABLED
+          value: "false"
+        # Increase startup timeout to allow DeepGemm warmup to complete (2 hours)
+        - name: VLLM_RPC_TIMEOUT
+          value: "7200000"
+        # DeepGEMM: skip warmup, reuse full cache synced from source via PVC
+        - name: VLLM_DEEP_GEMM_WARMUP
+          value: "skip"
+        - name: DG_JIT_CACHE_DIR
+          value: "/models/.cache/deepgemm"
+        - name: HF_HUB_CACHE
+          value: "/models"
+        - name: MODEL_NAME
+          value: "meta-llama/Llama-3.3-70B-Instruct"
+        # Register ModelExpress custom loaders for FP8 support
+        - name: MX_REGISTER_LOADERS
+          value: "1"
+        # Server address for metadata publishing
+        - name: MX_SERVER_ADDRESS
+          value: "modelexpress-server:8001"
+        - name: MODEL_EXPRESS_URL
+          value: "http://modelexpress-server:8001"
+        # OPTIMIZATION: Synchronized publish - wait for all workers before publishing
+        # This reduces the staggered window and allows targets to start simultaneously
+        - name: MX_SYNC_PUBLISH
+          value: "1"
+        # Baseline: individual tensor registration (stable and tested)
+        # Set to "1" for contiguous regions (experimental - see docs/CONTIGUOUS_CONTEXT.md)
+        - name: MX_CONTIGUOUS_REG
+          value: "0"
+        # UCX transport settings for GPUDirect RDMA
+        - name: UCX_TLS
+          value: "rc_x,rc,dc_x,dc,cuda_copy"
+        - name: UCX_RNDV_SCHEME
+          value: "get_zcopy"
+        - name: UCX_RNDV_THRESH
+          value: "0"
+      extraPodSpec:
+        nodeSelector:
+          dynamo/role: "target"
+        tolerations:
+          - key: "dynamo/reserved"
+            operator: "Equal"
+            value: "target"
+            effect: "NoSchedule"
+          - key: "nvidia.com/gpu"
+            operator: "Exists"
+            effect: "NoSchedule"
+        mainContainer:
+          image: nvcr.io/nvidian/dynamo-dev/hwoo:dynamo-mx-runtime
+          securityContext:
+            capabilities:
+              add:
+                - IPC_LOCK
+          command:
+            - python3
+            - -m
+            - dynamo.vllm
+          args:
+            - --model
+            - $(MODEL_NAME)
+            - --tensor-parallel-size
+            - "8"
+            - --trust-remote-code
+            - --load-format
+            - mx-target
+            - --model-express-url
+            - $(MODEL_EXPRESS_URL)
+            - --compilation-config
+            - '{"cache_dir": "/models/.cache/vllm/compile_cache"}'
+      volumeMounts:
+        - name: model-cache-llama
+          mountPoint: /models
+
+    # Planner: automatically scales mx-target based on load metrics.
+    # Config values are sed-substituted by run_planner.sh at deploy time.
+    Planner:
+      componentType: planner
+      replicas: 1
+      extraPodSpec:
+        nodeSelector:
+          dynamo/role: "source"
+        tolerations:
+          - key: "dynamo/reserved"
+            operator: "Equal"
+            value: "source"
+            effect: "NoSchedule"
+          - key: "nvidia.com/gpu"
+            operator: "Exists"
+            effect: "NoSchedule"
+        mainContainer:
+          image: nvcr.io/nvidian/dynamo-dev/hwoo:dynamo-mx-runtime
+          command:
+            - python3
+            - -m
+            - dynamo.planner
+          args:
+            - "--config"
+            - '{"mode":"agg","component_name":"mx-target","model_name":"meta-llama/Llama-3.3-70B-Instruct","enable_throughput_scaling":false,"enable_load_scaling":true,"ttft":2000,"min_endpoint":0,"max_endpoint":2,"decode_engine_num_gpu":8,"load_adjustment_interval":5,"plannerPreDeploymentSweeping":"none"}'
