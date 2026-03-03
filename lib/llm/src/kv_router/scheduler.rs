@@ -158,6 +158,7 @@ impl KvScheduler {
         update_states: bool,
         lora_name: Option<String>,
         priority_jump: f64,
+        expected_output_tokens: Option<u32>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
     ) -> Result<SchedulingResponse, KvSchedulerError> {
         #[cfg(feature = "bench")]
@@ -175,6 +176,7 @@ impl KvScheduler {
             update_states,
             lora_name,
             priority_jump,
+            expected_output_tokens,
             allowed_worker_ids,
             resp_tx: Some(resp_tx),
         };

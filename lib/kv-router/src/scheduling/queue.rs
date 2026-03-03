@@ -186,7 +186,7 @@ impl<P: SequencePublisher + 'static, C: WorkerConfigLike> SchedulerQueue<P, C> {
                 token_sequence: request.token_seq,
                 isl: request.isl_tokens,
                 overlap: selection.overlap_blocks,
-                expected_output_tokens: None,
+                expected_output_tokens: request.expected_output_tokens,
                 worker: selection.worker,
                 lora_name: request.lora_name.clone(),
             })
@@ -303,6 +303,7 @@ mod tests {
             update_states: true,
             lora_name: None,
             priority_jump: 0.0,
+            expected_output_tokens: None,
             allowed_worker_ids: None,
             resp_tx: Some(tx),
         };
