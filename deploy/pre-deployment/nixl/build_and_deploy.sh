@@ -205,7 +205,7 @@ update_deployment() {
     cp "${SCRIPT_DIR}/nixlbench-deployment.yaml" "$deployment_file"
 
     # Update the image field using sed
-    sed -i "s|my-registry/nixlbench:version-arch|${registry}/nixlbench:${NIXL_VERSION}-${arch}|g" "$deployment_file"
+    sed -i "s|nvcr.io/nvidia/ai-dynamo/nixlbench:version-arch|${registry}/nixlbench:${NIXL_VERSION}-${arch}|g" "$deployment_file"
 
     echo "Deployment file updated with image: ${registry}/nixlbench:${NIXL_VERSION}-${arch}"
 }

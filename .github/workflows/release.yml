@@ -158,6 +158,60 @@ jobs:
     secrets: inherit
 
   # ============================================================================
+  # EFA PIPELINES (Build only, amd64)
+  # ============================================================================
+
+  vllm-efa-pipeline:
+    name: vllm EFA builds
+    needs: [prepare-release, manual-approval]
+    if: |
+      always() &&
+      needs.prepare-release.result == 'success' &&
+      (github.event_name == 'push' || needs.manual-approval.result == 'success')
+    uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
+    with:
+      framework: vllm
+      target: runtime
+      platforms: '["amd64"]'
+      cuda_versions: '["12.9"]'
+      make_efa: true
+      extra_tags: |
+        ${{ needs.prepare-release.outputs.image_prefix }}-vllm-efa
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      build_timeout_minutes: 120
+      cpu_only_test_markers: '(pre_merge or post_merge) and vllm and gpu_0'
+      cpu_only_test_timeout_minutes: 60
+      run_single_gpu_tests: false
+      run_multi_gpu_tests: false
+      copy_to_acr: false
+    secrets: inherit
+
+  trtllm-efa-pipeline:
+    name: trtllm EFA builds
+    needs: [prepare-release, manual-approval]
+    if: |
+      always() &&
+      needs.prepare-release.result == 'success' &&
+      (github.event_name == 'push' || needs.manual-approval.result == 'success')
+    uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
+    with:
+      framework: trtllm
+      target: runtime
+      platforms: '["amd64"]'
+      cuda_versions: '["13.1"]'
+      make_efa: true
+      extra_tags: |
+        ${{ needs.prepare-release.outputs.image_prefix }}-trtllm-efa
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      build_timeout_minutes: 120
+      cpu_only_test_markers: '(pre_merge or post_merge) and trtllm and gpu_0'
+      cpu_only_test_timeout_minutes: 60
+      run_single_gpu_tests: false
+      run_multi_gpu_tests: false
+      copy_to_acr: false
+    secrets: inherit
+
+  # ============================================================================
   # RELEASE-SPECIFIC BUILDS
   # ============================================================================
 
@@ -238,7 +292,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [vllm-pipeline, sglang-pipeline, trtllm-pipeline]
+    needs: [vllm-pipeline, sglang-pipeline, trtllm-pipeline, vllm-efa-pipeline, trtllm-efa-pipeline]
     steps:
     - uses: actions/checkout@v4
     - name: Create K8s builders (skip bootstrap)
@@ -406,7 +460,7 @@ jobs:
 
   release-publish:
     name: Tag RC & Publish to NGC
-    needs: [prepare-release, vllm-pipeline, sglang-pipeline, trtllm-pipeline, operator-build, frontend-build]
+    needs: [prepare-release, vllm-pipeline, sglang-pipeline, trtllm-pipeline, vllm-efa-pipeline, trtllm-efa-pipeline, operator-build, frontend-build]
     if: |
       always() && !cancelled() &&
       needs.prepare-release.result == 'success' &&
@@ -590,6 +644,20 @@ jobs:
               "${NGC_NAME}:${NGC_VERSION_TAG}-cuda13"
           done
 
+          # ---- EFA runtime images (amd64 only, no multi-arch manifest needed) ----
+          echo ""
+          echo "=== EFA Runtime Images ==="
+
+          # vllm EFA (CUDA 12, amd64 only)
+          SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${IMAGE_PREFIX}-vllm-efa-cuda12-amd64"
+          TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/vllm-runtime:${NGC_VERSION_TAG}-efa"
+          copy_image "${SOURCE}" "${TARGET}" "vllm-runtime:${NGC_VERSION_TAG}-efa"
+
+          # trtllm EFA (CUDA 13, amd64 only)
+          SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${IMAGE_PREFIX}-trtllm-efa-cuda13-amd64"
+          TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/tensorrtllm-runtime:${NGC_VERSION_TAG}-efa"
+          copy_image "${SOURCE}" "${TARGET}" "tensorrtllm-runtime:${NGC_VERSION_TAG}-efa"
+
           # ---- Frontend images ----
           echo ""
           echo "=== Frontend Images ==="
@@ -712,6 +780,10 @@ jobs:
           echo "- \`vllm-runtime:${NGC_VERSION_TAG}-cuda13\` (multi-arch)" >> $GITHUB_STEP_SUMMARY
           echo "- \`sglang-runtime:${NGC_VERSION_TAG}-cuda13\` (multi-arch)" >> $GITHUB_STEP_SUMMARY
           echo "- \`tensorrtllm-runtime:${NGC_VERSION_TAG}-cuda13\` (multi-arch)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "EFA runtime images (amd64 only):" >> $GITHUB_STEP_SUMMARY
+          echo "- \`vllm-runtime:${NGC_VERSION_TAG}-efa\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`tensorrtllm-runtime:${NGC_VERSION_TAG}-efa\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "Operator image:" >> $GITHUB_STEP_SUMMARY
           echo "- \`kubernetes-operator:${NGC_VERSION_TAG}\`" >> $GITHUB_STEP_SUMMARY

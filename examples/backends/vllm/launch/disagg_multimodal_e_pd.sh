@@ -70,8 +70,11 @@ python -m dynamo.frontend &
 
 EXTRA_ARGS=""
 
-# Embedding transfer: 1 = local file (safetensors), 0 = NIXL RDMA
-export TRANSFER_LOCAL=${TRANSFER_LOCAL:-1}
+# Embedding transfer:
+#   "local" = local file (safetensors),
+#   "nixl-write" = NIXL WRITE transfer
+#   "nixl-read" = NIXL READ transfer (default: "local")
+export DYN_VLLM_EMBEDDING_TRANSFER_MODE=${DYN_VLLM_EMBEDDING_TRANSFER_MODE:-"local"}
 
 # GPU assignments (override via environment variables)
 if [[ "$SINGLE_GPU" == "true" ]]; then

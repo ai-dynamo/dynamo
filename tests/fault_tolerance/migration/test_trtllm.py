@@ -36,17 +36,7 @@ pytestmark = [
         "migration_limit", [3, 0], ids=["migration_enabled", "migration_disabled"]
     ),
     pytest.mark.parametrize(
-        "immediate_kill",
-        [
-            pytest.param(True, id="worker_failure"),
-            pytest.param(
-                False,
-                id="graceful_shutdown",
-                marks=pytest.mark.xfail(
-                    strict=False, reason="TRT-LLM graceful shutdown not yet implemented"
-                ),
-            ),
-        ],
+        "immediate_kill", [True, False], ids=["worker_failure", "graceful_shutdown"]
     ),
     pytest.mark.parametrize(
         "request_api",

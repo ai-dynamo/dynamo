@@ -747,13 +747,13 @@ impl<'de> Deserialize<'de> for KvEventBatch {
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy)]
 #[serde(untagged)]
-enum BlockHashValue {
+pub(crate) enum BlockHashValue {
     Signed(i64),
     Unsigned(u64),
 }
 
 impl BlockHashValue {
-    fn into_u64(self) -> u64 {
+    pub(crate) fn into_u64(self) -> u64 {
         match self {
             BlockHashValue::Signed(v) => v as u64,
             BlockHashValue::Unsigned(v) => v,
@@ -763,7 +763,7 @@ impl BlockHashValue {
 
 #[derive(Debug, Serialize, Clone)]
 #[serde(tag = "type")] // msgspec encodes variant tag as a string when `tag=True`
-enum RawKvEvent {
+pub(crate) enum RawKvEvent {
     BlockStored {
         /// Block hashes may be emitted as either signed or unsigned 64-bit values.
         /// We normalize them to `u64` while deserializing to support both producers.
