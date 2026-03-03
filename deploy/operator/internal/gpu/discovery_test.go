@@ -439,12 +439,6 @@ type GPUInfo struct {
 	Metrics string
 }
 
-// mock parseMetrics function for testing
-func parseMetrics(ctx context.Context, metricFamilies map[string]interface{}) (*GPUInfo, error) {
-	// Just return a dummy GPUInfo for testing
-	return &GPUInfo{Metrics: fmt.Sprintf("%v", metricFamilies)}, nil
-}
-
 func TestScrapeMetricsEndpoint(t *testing.T) {
 	ctx := context.TODO()
 
