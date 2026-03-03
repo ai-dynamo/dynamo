@@ -35,7 +35,8 @@ spec:
             - "1.0"
             - --planner-profile-data
             - /workspace/tests/planner/profiling_results/H200_TP1P_TP1D
-            - --is-prefill-worker
+            - --disaggregation-mode
+            - prefill
     decode:
       envFromSecret: hf-token-secret
       componentType: worker
@@ -58,4 +59,5 @@ spec:
             - "1.0"
             - --planner-profile-data
             - /workspace/tests/planner/profiling_results/H200_TP1P_TP1D
-            - --is-decode-worker
+            - --disaggregation-mode
+            - decode

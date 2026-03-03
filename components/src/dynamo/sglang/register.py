@@ -4,13 +4,14 @@
 import asyncio
 import logging
 import socket
-from typing import Any, Optional
+from typing import Any, List, Optional
 
 import sglang as sgl
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import get_local_ip_auto
 
 from dynamo._core import Endpoint
+from dynamo.common.utils.output_modalities import get_output_modalities
 from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_model
 from dynamo.sglang.args import DynamoConfig
 
@@ -278,6 +279,7 @@ async def register_image_diffusion_model(
     generator: Any,  # DiffGenerator
     endpoint: Endpoint,
     server_args: ServerArgs,
+    output_modalities: Optional[List[str]] = None,
     readiness_gate: Optional[asyncio.Event] = None,
 ) -> None:
     """Register diffusion model with Dynamo runtime.
@@ -286,18 +288,37 @@ async def register_image_diffusion_model(
         generator: The SGLang DiffGenerator instance.
         endpoint: The Dynamo endpoint for generation requests.
         server_args: SGLang server configuration.
+        output_modalities: Optional list of output modality names to override
+            the default ModelType.Images registration.
         readiness_gate: Optional event to signal when registration completes.
 
     Note:
-        Image diffusion models use ModelInput.Text (text prompts) and ModelType.Images.
+        Image diffusion models use ModelInput.Text (text prompts) and ModelType.Images
+        by default. When output_modalities is provided, the ModelType is derived
+        from the given modality names instead.
     """
     # Use model_path as the model name (diffusion workers don't have served_model_name)
     model_name = server_args.model_path
 
+    model_type = ModelType.Images
+    if output_modalities:
+        resolved = get_output_modalities(output_modalities, model_name)
+        if resolved is not None:
+            model_type = resolved
+            logging.info(
+                "Using output modalities %s for diffusion model registration",
+                output_modalities,
+            )
+        else:
+            logging.warning(
+                "No recognized output modalities from %s, defaulting to ModelType.Images",
+                output_modalities,
+            )
+
     try:
         await register_model(
             ModelInput.Text,
-            ModelType.Images,
+            model_type,
             endpoint,
             model_name,
             model_name,

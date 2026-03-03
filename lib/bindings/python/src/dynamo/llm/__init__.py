@@ -17,7 +17,6 @@ from dynamo._core import LoRADownloader as LoRADownloader
 from dynamo._core import MediaDecoder as MediaDecoder
 from dynamo._core import MediaFetcher as MediaFetcher
 from dynamo._core import ModelCardInstanceId as ModelCardInstanceId
-from dynamo._core import ModelDeploymentCard as ModelDeploymentCard
 from dynamo._core import ModelInput as ModelInput
 from dynamo._core import ModelRuntimeConfig as ModelRuntimeConfig
 from dynamo._core import ModelType as ModelType
@@ -27,7 +26,6 @@ from dynamo._core import RadixTree as RadixTree
 from dynamo._core import RouterConfig as RouterConfig
 from dynamo._core import RouterMode as RouterMode
 from dynamo._core import WorkerMetricsPublisher as WorkerMetricsPublisher
-from dynamo._core import ZmqKvEventListener as ZmqKvEventListener
 from dynamo._core import compute_block_hash_for_seq as compute_block_hash_for_seq
 from dynamo._core import fetch_model as fetch_model
 from dynamo._core import lora_name_to_id as lora_name_to_id

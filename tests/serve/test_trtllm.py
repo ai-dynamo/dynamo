@@ -119,7 +119,14 @@ trtllm_configs = {
         name="disaggregated_logprobs",
         directory=trtllm_dir,
         script_name="disagg.sh",
-        marks=[pytest.mark.gpu_2, pytest.mark.post_merge, pytest.mark.trtllm],
+        marks=[
+            pytest.mark.gpu_2,
+            pytest.mark.post_merge,
+            pytest.mark.trtllm,
+            pytest.mark.skip(
+                reason="DYN-2265 https://github.com/ai-dynamo/dynamo/pull/6704/changes#r2866554157 TODO enable this test when upgrading from trtllm 1.3.0rc5 to 1.3.0rc5.post1"
+            ),
+        ],
         model="Qwen/Qwen3-0.6B",
         frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
@@ -152,7 +159,7 @@ trtllm_configs = {
             )
         ],
         env={
-            "DYN_LOG": "dynamo_llm::kv_router::publisher=trace,dynamo_llm::kv_router::scheduler=info",
+            "DYN_LOG": "dynamo_llm::kv_router::publisher=trace,dynamo_kv_router::scheduling::selector=info",
         },
     ),
     "disaggregated_router": TRTLLMConfig(
@@ -199,21 +206,62 @@ trtllm_configs = {
         delayed_start=60,
         request_payloads=[multimodal_payload_default()],
     ),
-    "epd_multimodal_image_and_embeddings": TRTLLMConfig(
-        name="epd_multimodal_image_and_embeddings",
+    # TensorRT-LLM EPD (Encode-Prefill-Decode) multimodal test for pre-merge CI
+    # Uses Qwen3-VL-2B-Instruct model with 1 GPU (all workers share same GPU)
+    #
+    # TODO: Add Llama-4-Scout multimodal tests (agg_multimodal_llama, disagg_multimodal_llama)
+    #       once CI supports gpu_8 runners and launch scripts are available
+    "epd_multimodal": TRTLLMConfig(
+        name="epd_multimodal",
         directory=trtllm_dir,
         script_name="epd_multimodal_image_and_embeddings.sh",
         marks=[
-            pytest.mark.gpu_4,
+            pytest.mark.gpu_1,
+            pytest.mark.trtllm,
+            pytest.mark.multimodal,
+            pytest.mark.pre_merge,
+        ],
+        model="Qwen/Qwen3-VL-2B-Instruct",
+        frontend_port=DefaultPort.FRONTEND.value,
+        timeout=900,
+        delayed_start=120,
+        request_payloads=[
+            multimodal_payload_default(
+                text="Describe what you see in this image.",
+                expected_response=["mountain", "rock", "trees", "road"],
+            )
+        ],
+        env={
+            "PREFILL_CUDA_VISIBLE_DEVICES": "0",
+            "DECODE_CUDA_VISIBLE_DEVICES": "0",
+            "ENCODE_CUDA_VISIBLE_DEVICES": "0",
+        },
+    ),
+    # Test Encoder with Aggregated PD worker on same GPU
+    # Make this pre-merge after TRTLLM #5938603 is fixed
+    "e_pd_multimodal": TRTLLMConfig(
+        name="e_pd_multimodal",
+        directory=trtllm_dir,
+        script_name="disagg_e_pd.sh",
+        marks=[
+            pytest.mark.gpu_1,
             pytest.mark.trtllm,
             pytest.mark.multimodal,
             pytest.mark.nightly,
         ],
-        model="llava-hf/llava-v1.6-mistral-7b-hf",
+        model="Qwen/Qwen3-VL-2B-Instruct",
         frontend_port=DefaultPort.FRONTEND.value,
-        timeout=1200,
+        timeout=900,
         delayed_start=120,
-        request_payloads=[multimodal_payload_default()],
+        request_payloads=[
+            multimodal_payload_default(
+                text="Describe what you see in this image.",
+                expected_response=["mountain", "rock", "trees", "road"],
+            )
+        ],
+        env={
+            "ENCODE_CUDA_VISIBLE_DEVICES": "0",
+        },
     ),
     "completions_only": TRTLLMConfig(
         name="completions_only",

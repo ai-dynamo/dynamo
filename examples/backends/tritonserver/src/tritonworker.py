@@ -102,10 +102,7 @@ async def triton_worker(runtime: DistributedRuntime, args: argparse.Namespace):
         f"Environment: DYN_DISCOVERY_BACKEND={os.environ.get('DYN_DISCOVERY_BACKEND', 'NOT SET')}"
     )
 
-    component = runtime.namespace("triton").component("tritonserver")
-    logger.info("✓ Created component: triton/tritonserver")
-
-    endpoint = component.endpoint("generate")
+    endpoint = runtime.endpoint("triton.tritonserver.generate")
     logger.info("✓ Created endpoint: triton/tritonserver/generate")
 
     model_repository = args.model_repository

@@ -1,0 +1,57 @@
+#!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+set -e
+trap 'echo Cleaning up...; kill 0' EXIT
+
+MODEL="Qwen/Qwen-Image"
+
+# Parse command line arguments
+EXTRA_ARGS=()
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --model)
+            MODEL="$2"
+            shift 2
+            ;;
+        *)
+            EXTRA_ARGS+=("$1")
+            shift
+            ;;
+    esac
+done
+
+HTTP_PORT="${DYN_HTTP_PORT:-8000}"
+echo "=========================================="
+echo "Launching vLLM-Omni Image Generation (1 GPU)"
+echo "=========================================="
+echo "Model:       $MODEL"
+echo "Frontend:    http://localhost:$HTTP_PORT"
+echo "=========================================="
+echo ""
+echo "Example test command:"
+echo ""
+echo "  curl http://localhost:${HTTP_PORT}/v1/chat/completions \\"
+echo "    -H 'Content-Type: application/json' \\"
+echo "    -d '{"
+echo "      \"model\": \"${MODEL}\","
+echo "      \"messages\": [{\"role\": \"user\", \"content\": \"Generate an image of a sunset over mountains.\"}],"
+echo "      \"max_tokens\": 32"
+echo "    }'"
+echo ""
+echo "=========================================="
+
+python -m dynamo.frontend &
+FRONTEND_PID=$!
+
+sleep 2
+
+echo "Starting Omni worker..."
+DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
+    python -m dynamo.vllm \
+    --model "$MODEL" \
+    --omni \
+    --output-modalities image \
+    --media-output-fs-url file:///tmp/dynamo_media \
+    "${EXTRA_ARGS[@]}"

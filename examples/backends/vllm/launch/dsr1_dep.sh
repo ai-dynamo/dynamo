@@ -70,14 +70,35 @@ fi
 # Calculate data parallel size
 DATA_PARALLEL_SIZE=$((NUM_NODES * GPUS_PER_NODE))
 
-echo "Configuration:"
-echo "  Number of nodes: $NUM_NODES"
-echo "  Node rank: $NODE_RANK"
-echo "  GPUs per node: $GPUS_PER_NODE"
-echo "  Data parallel size: $DATA_PARALLEL_SIZE"
-echo "  Master address: $MASTER_ADDR"
-echo "  Log directory: $LOG_DIR"
-echo "  Model name: $MODEL"
+HTTP_PORT="${DYN_HTTP_PORT:-8000}"
+echo "=========================================="
+echo "Launching DeepSeek-R1 Data Parallel (Multi-Node)"
+echo "=========================================="
+echo "Model:       $MODEL"
+if [ "$NODE_RANK" -eq 0 ]; then
+echo "Frontend:    http://localhost:$HTTP_PORT"
+fi
+echo "Number of nodes: $NUM_NODES"
+echo "Node rank:       $NODE_RANK"
+echo "GPUs per node:   $GPUS_PER_NODE"
+echo "Data parallel:   $DATA_PARALLEL_SIZE"
+echo "Master address:  $MASTER_ADDR"
+echo "Log directory:   $LOG_DIR"
+echo "=========================================="
+if [ "$NODE_RANK" -eq 0 ]; then
+echo ""
+echo "Example test command:"
+echo ""
+echo "  curl http://localhost:${HTTP_PORT}/v1/chat/completions \\"
+echo "    -H 'Content-Type: application/json' \\"
+echo "    -d '{"
+echo "      \"model\": \"${MODEL}\","
+echo "      \"messages\": [{\"role\": \"user\", \"content\": \"Explain why Roger Federer is considered one of the greatest tennis players of all time\"}],"
+echo "      \"max_tokens\": 32"
+echo "    }'"
+echo ""
+echo "=========================================="
+fi
 
 trap 'echo Cleaning up...; kill 0' EXIT
 
@@ -98,7 +119,6 @@ mkdir -p $LOG_DIR
 for ((i=0; i<GPUS_PER_NODE; i++)); do
     dp_rank=$((i + NODE_RANK * GPUS_PER_NODE))
     CUDA_VISIBLE_DEVICES=$i \
-        DYN_VLLM_KV_EVENT_PORT=$((20080 + i)) \
         VLLM_NIXL_SIDE_CHANNEL_PORT=$((20096 + i)) \
         VLLM_ALL2ALL_BACKEND="deepep_low_latency" \
         VLLM_USE_DEEP_GEMM=1 \
@@ -112,7 +132,8 @@ for ((i=0; i<GPUS_PER_NODE; i++)); do
         --data-parallel-address $MASTER_ADDR \
         --data-parallel-rpc-port 13345 \
         --gpu-memory-utilization 0.91 \
-        --enforce-eager 2>&1 | tee $LOG_DIR/dsr1_dep_${dp_rank}.log &
+        --enforce-eager \
+        --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:$((20080 + i))\",\"enable_kv_cache_events\":true}" 2>&1 | tee $LOG_DIR/dsr1_dep_${dp_rank}.log &
 done
 
 echo "All workers starting. (press Ctrl+C to stop)..."

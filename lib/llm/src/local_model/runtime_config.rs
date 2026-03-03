@@ -80,6 +80,20 @@ impl Default for ModelRuntimeConfig {
     }
 }
 
+impl dynamo_kv_router::WorkerConfigLike for ModelRuntimeConfig {
+    fn data_parallel_size(&self) -> u32 {
+        self.data_parallel_size
+    }
+
+    fn max_num_batched_tokens(&self) -> Option<u64> {
+        self.max_num_batched_tokens
+    }
+
+    fn total_kv_blocks(&self) -> Option<u64> {
+        self.total_kv_blocks
+    }
+}
+
 impl ModelRuntimeConfig {
     pub fn new() -> Self {
         Self::default()

@@ -51,9 +51,11 @@ runs:
         ECR_HOSTNAME: ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com
       run: |
         set -euo pipefail
-        if [[ ${CONDITIONAL_TAG} != '' ]]; then
-            docker tag ${LOCAL_IMAGE} ${ECR_HOSTNAME}/${CONDITIONAL_TAG}
-            docker push ${ECR_HOSTNAME}/${CONDITIONAL_TAG}
+        source "${{ github.action_path }}/retry_push.sh"
+
+        if [[ -n "${CONDITIONAL_TAG}" ]]; then
+            docker tag "${LOCAL_IMAGE}" "${ECR_HOSTNAME}/${CONDITIONAL_TAG}"
+            retry_push "${ECR_HOSTNAME}/${CONDITIONAL_TAG}"
         fi
         while IFS= read -r TAG; do
           if [ -z "$TAG" ]; then
@@ -61,7 +63,7 @@ runs:
           fi
           echo "Tagging and pushing: ${ECR_HOSTNAME}/${TAG}"
           docker tag "${LOCAL_IMAGE}" "${ECR_HOSTNAME}/${TAG}"
-          docker push "${ECR_HOSTNAME}/${TAG}"
+          retry_push "${ECR_HOSTNAME}/${TAG}"
         done <<< "$PUSH_TAGS"
     - name: ACR Tag and Push
       shell: bash
@@ -72,11 +74,13 @@ runs:
         AZURE_ACR_HOSTNAME: ${{ inputs.azure_acr_hostname }}
       run: |
         set -euo pipefail
+        source "${{ github.action_path }}/retry_push.sh"
+
         while IFS= read -r TAG; do
           if [ -z "$TAG" ]; then
             continue
           fi
           echo "Tagging and pushing: ${AZURE_ACR_HOSTNAME}/${TAG}"
           docker tag "${LOCAL_IMAGE}" "${AZURE_ACR_HOSTNAME}/${TAG}"
-          docker push "${AZURE_ACR_HOSTNAME}/${TAG}"
+          retry_push "${AZURE_ACR_HOSTNAME}/${TAG}"
         done <<< "$PUSH_TAGS"

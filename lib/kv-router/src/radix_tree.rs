@@ -16,10 +16,12 @@
 
 use std::{
     cell::RefCell,
-    collections::{HashMap, HashSet, VecDeque},
+    collections::VecDeque,
     rc::Rc,
     time::{Duration, Instant},
 };
+
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::protocols::*;
 
@@ -30,9 +32,9 @@ pub(crate) type SharedRadixBlock = Rc<RefCell<RadixBlock>>;
 #[derive(Debug)]
 pub(crate) struct RadixBlock {
     /// A map of child blocks, keyed by their local block hash.
-    pub(crate) children: HashMap<LocalBlockHash, SharedRadixBlock>,
+    pub(crate) children: FxHashMap<LocalBlockHash, SharedRadixBlock>,
     /// The set of workers that have this block cached.
-    pub(crate) workers: HashSet<WorkerWithDpRank>,
+    pub(crate) workers: FxHashSet<WorkerWithDpRank>,
     /// The external sequence block hash for this block (None for root).
     /// This is the same for all workers under the simplifying assumption.
     pub(crate) block_hash: Option<ExternalSequenceBlockHash>,
@@ -48,8 +50,8 @@ impl RadixBlock {
     /// A new `RadixBlock` with no block_hash.
     pub fn new() -> Self {
         Self {
-            children: HashMap::new(),
-            workers: HashSet::new(),
+            children: FxHashMap::default(),
+            workers: FxHashSet::default(),
             block_hash: None,
             recent_uses: VecDeque::new(),
         }
@@ -62,8 +64,8 @@ impl RadixBlock {
     /// A new `RadixBlock` with the given block_hash.
     pub fn with_hash(block_hash: ExternalSequenceBlockHash) -> Self {
         Self {
-            children: HashMap::new(),
-            workers: HashSet::new(),
+            children: FxHashMap::default(),
+            workers: FxHashSet::default(),
             block_hash: Some(block_hash),
             recent_uses: VecDeque::new(),
         }
@@ -78,7 +80,7 @@ pub struct RadixTree {
     /// Per-worker lookup table for O(1) block access.
     /// Maps worker -> (block_hash -> block).
     pub(crate) lookup:
-        HashMap<WorkerWithDpRank, HashMap<ExternalSequenceBlockHash, SharedRadixBlock>>,
+        FxHashMap<WorkerWithDpRank, FxHashMap<ExternalSequenceBlockHash, SharedRadixBlock>>,
 
     /// The time buffer the radix tree should check when considering frequence of block accesses
     pub(crate) expiration_duration: Option<Duration>,
@@ -132,7 +134,7 @@ impl RadixTree {
     pub fn new_with_frequency(expiration_duration: Option<Duration>) -> Self {
         Self {
             root: Rc::new(RefCell::new(RadixBlock::new())),
-            lookup: HashMap::new(),
+            lookup: FxHashMap::default(),
             expiration_duration,
         }
     }
@@ -485,7 +487,7 @@ impl RadixTree {
 
                 if keep_worker {
                     // Re-insert worker with empty blocks map to keep it tracked
-                    self.lookup.insert(worker_key, HashMap::new());
+                    self.lookup.insert(worker_key, FxHashMap::default());
                 }
             }
         }

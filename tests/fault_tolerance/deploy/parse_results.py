@@ -370,11 +370,17 @@ def parse_aiperf_client_results(log_dir: str) -> Dict[str, Any]:
         profile_json = None
 
         # Check for attempt directories (attempt_0, attempt_1, etc.)
-        for attempt_dir in sorted(client_dir.glob("attempt_*")):
+        # Sort numerically by attempt number to handle attempt_10+ correctly
+        attempt_dirs = sorted(
+            client_dir.glob("attempt_*"),
+            key=lambda p: int(p.name.split("_")[1]),
+            reverse=True,
+        )
+        for attempt_dir in attempt_dirs:
             json_path = attempt_dir / "profile_export_aiperf.json"
             if json_path.exists():
                 profile_json = json_path
-                break  # Use the first successful attempt
+                break  # Use the most recent attempt
 
         if not profile_json:
             logging.warning(f"No AI-Perf results found for {item} in {client_dir}")
@@ -873,7 +879,7 @@ def main(
 
             if total_requests > 0:
                 summary_lines.append(
-                    f"Overall Success Rate: {(total_successful/total_requests)*100:.2f}%"
+                    f"Overall Success Rate: {(total_successful / total_requests) * 100:.2f}%"
                 )
 
             # Check if this is an overflow/recovery pair and show timing info

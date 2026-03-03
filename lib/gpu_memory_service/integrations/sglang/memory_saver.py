@@ -51,14 +51,15 @@ class GMSMemorySaverImpl:
         torch_impl: "_TorchMemorySaverImpl",
         socket_path: str,
         device_index: int,
+        mode=None,
     ):
         self._torch_impl = torch_impl
         self._socket_path = socket_path
         self._device_index = device_index
+        self._requested_mode = mode
         self._disabled = False
         self._imported_weights_bytes: int = 0
 
-        # Initialize allocator with auto mode
         self._allocator: Optional["GMSClientMemoryManager"]
         self._mem_pool: Optional["MemPool"]
         self._mode: str
@@ -74,19 +75,20 @@ class GMSMemorySaverImpl:
     def _init_allocator(
         self,
     ) -> tuple[Optional["GMSClientMemoryManager"], Optional["MemPool"], str]:
-        """Create allocator with automatic mode selection."""
+        """Create allocator with mode from config (default: RW_OR_RO)."""
         from gpu_memory_service import get_or_create_gms_client_memory_manager
         from gpu_memory_service.common.types import GrantedLockType, RequestedLockType
 
+        mode = self._requested_mode or RequestedLockType.RW_OR_RO
         allocator, mem_pool = get_or_create_gms_client_memory_manager(
             self._socket_path,
             self._device_index,
-            mode=RequestedLockType.RW_OR_RO,
+            mode=mode,
             tag="weights",
         )
-        granted_mode = allocator.mode
+        granted_mode = allocator.granted_lock_type
         if granted_mode == GrantedLockType.RW:
-            allocator.clear_all()
+            allocator.clear_all_handles()
             actual_mode = "write"
         else:
             actual_mode = "read"
@@ -136,8 +138,6 @@ class GMSMemorySaverImpl:
             self._pause_weights()
         if tag is None or not self._is_weights_tag(tag):
             self._torch_impl.pause(tag=tag)
-            # Ensure KV cache unmap operations complete before returning.
-            torch.cuda.synchronize()
 
     def resume(self, tag: Optional[str] = None) -> None:
         if self._disabled:
@@ -146,9 +146,6 @@ class GMSMemorySaverImpl:
             self._resume_weights()
         if tag is None or not self._is_weights_tag(tag):
             self._torch_impl.resume(tag=tag)
-            # Ensure KV cache mappings are complete before returning.
-            # Without this sync, inference may start before mappings are ready.
-            torch.cuda.synchronize()
 
     def _pause_weights(self) -> None:
         if self._allocator is None:
@@ -156,11 +153,8 @@ class GMSMemorySaverImpl:
         if self._allocator.is_unmapped:
             return
         logger.info("[GMS] Unmapping weights (VA-stable)")
-        self._allocator.unmap()
-        # Ensure all CUDA VMM unmap operations complete before returning.
-        # Without this sync, resume() may race with pending unmaps, causing OOM
-        # when it tries to allocate new memory while old memory is still mapped.
-        torch.cuda.synchronize()
+        self._allocator.unmap_all_vas()
+        self._allocator.disconnect()
 
     def _resume_weights(self) -> None:
         if self._allocator is None:
@@ -168,8 +162,10 @@ class GMSMemorySaverImpl:
         if not self._allocator.is_unmapped:
             return
         logger.info("[GMS] Remapping weights (VA-stable)")
-        self._allocator.remap()
-        torch.cuda.synchronize()
+        from gpu_memory_service.common.types import RequestedLockType
+
+        self._allocator.connect(RequestedLockType.RO)
+        self._allocator.remap_all_vas()
 
     def finalize_write_mode(self, model: torch.nn.Module) -> None:
         """Finalize write mode: register tensors, commit, and switch to read."""

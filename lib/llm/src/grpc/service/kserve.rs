@@ -177,6 +177,9 @@ pub struct KserveServiceConfig {
     #[builder(setter(into), default = "String::from(\"0.0.0.0\")")]
     http_metrics_host: String,
 
+    #[builder(default = "None")]
+    http_cancel_token: Option<CancellationToken>,
+
     /// gRPC server tuning configuration.
     /// Default: GrpcTuningConfig::from_env() - reads from environment variables with fallback to defaults.
     #[builder(default = "GrpcTuningConfig::from_env()")]
@@ -257,11 +260,13 @@ impl KserveServiceConfigBuilder {
         let http_service = http_service::HttpService::builder()
             .port(config.http_metrics_port)
             .host(config.http_metrics_host.clone())
+            .cancel_token(config.http_cancel_token)
             // Disable all inference endpoints - only use for metrics/health
             .enable_chat_endpoints(false)
             .enable_cmpl_endpoints(false)
             .enable_embeddings_endpoints(false)
             .enable_responses_endpoints(false)
+            .enable_anthropic_endpoints(false)
             .build()?;
 
         // Share the HTTP service's model manager and metrics object with gRPC state
@@ -372,10 +377,8 @@ impl GrpcInferenceService for KserveService {
             }
         }
 
-        let model = completion_request.inner.model.clone();
-        let parsing_options = self.state.manager.get_parsing_options(&model);
-
-        let stream = completion_response_stream(self.state_clone(), completion_request).await?;
+        let (stream, parsing_options) =
+            completion_response_stream(self.state_clone(), completion_request).await?;
 
         let completion_response =
             NvCreateCompletionResponse::from_annotated_stream(stream, parsing_options)
@@ -489,12 +492,9 @@ impl GrpcInferenceService for KserveService {
                     }
                 }
 
-                let model = completion_request.inner.model.clone();
-                let parsing_options = state.manager.get_parsing_options(&model);
-
                 let streaming = completion_request.inner.stream.unwrap_or(false);
 
-                let stream = completion_response_stream(state.clone(), completion_request).await?;
+                let (stream, parsing_options) = completion_response_stream(state.clone(), completion_request).await?;
 
                 if streaming {
                     pin_mut!(stream);

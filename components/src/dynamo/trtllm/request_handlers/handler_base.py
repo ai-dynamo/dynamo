@@ -17,6 +17,7 @@ import asyncio
 import dataclasses
 import logging
 import os
+import re
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
 from typing import Any, AsyncGenerator, Optional, Union
@@ -55,7 +56,6 @@ class RequestHandlerConfig:
     Configuration for the request handler
     """
 
-    component: object
     engine: TensorRTLLMEngine
     default_sampling_params: SamplingParams
     publisher: Publisher
@@ -72,6 +72,7 @@ class RequestHandlerConfig:
     kv_block_size: int = 32
     shutdown_event: Optional[asyncio.Event] = None
     encoder_cache_capacity_gb: float = 0  # Encoder cache capacity in GB
+    disable_request_abort: bool = True
 
 
 class HandlerBase(BaseGenerativeHandler):
@@ -88,7 +89,6 @@ class HandlerBase(BaseGenerativeHandler):
 
     def __init__(self, config: RequestHandlerConfig):
         self.engine = config.engine
-        self.component = config.component
         self.default_sampling_params = config.default_sampling_params
         self.publisher = config.publisher
         self.metrics_collector = config.metrics_collector
@@ -101,6 +101,7 @@ class HandlerBase(BaseGenerativeHandler):
         self.runtime = config.runtime
         self.kv_block_size: int = config.kv_block_size
         self.shutdown_event = config.shutdown_event
+        self.disable_request_abort = config.disable_request_abort
 
     def check_error(self, result: dict):
         """
@@ -208,13 +209,15 @@ class HandlerBase(BaseGenerativeHandler):
                 return_when=asyncio.FIRST_COMPLETED,
             )
 
-            # Abort the generation
-            # Temporary:
-            #   Disable calling abort() on the engine, which may get stuck if a
-            #   sufficiently large number of concurrent requests is cancelled.
-            # Note to restore:
-            #   call `generation_result.abort()`; and then
-            #   log `logging.debug(f"Aborted Request ID: {context.id()}")`
+            # Abort the generation unless disabled
+            if self.disable_request_abort:
+                logging.debug(
+                    f"Request ID {context.id()} cancelled but abort() skipped "
+                    "(DYN_TRTLLM_DISABLE_REQUEST_ABORT=true)"
+                )
+            else:
+                generation_result.abort()
+                logging.debug(f"Aborted Request ID: {context.id()}")
 
             # Clean up any remaining background task
             for task in pending:
@@ -411,7 +414,7 @@ class HandlerBase(BaseGenerativeHandler):
         ep_disaggregated_params: Optional[Any],
     ) -> tuple[Any, Any, dict]:
         """
-        Setup disaggregated_params based on PREFILL/DECODE mode.
+        Setup disaggregated_params based on disaggregation mode.
 
         For PREFILL mode:
         - Uses ep_disaggregated_params from encode worker if available
@@ -420,6 +423,11 @@ class HandlerBase(BaseGenerativeHandler):
         For DECODE mode:
         - Decodes disaggregated_params from prefill_result
         - Extracts EPD metadata for prompt optimization
+
+        For PREFILL_AND_DECODE (aggregated) mode:
+        - Uses ep_disaggregated_params from encode worker if available
+          (passes multimodal_embedding_handles to TRT-LLM and sets
+          request_type="context_and_generation" for full prefill + decode)
 
         Args:
             request: Request dictionary (may contain prefill_result)
@@ -440,6 +448,20 @@ class HandlerBase(BaseGenerativeHandler):
                 disaggregated_params = LlmDisaggregatedParams(
                     request_type="context_only"
                 )
+
+        # AGGREGATED (prefill_and_decode) mode with encoder disaggregation:
+        # Pass the encode worker's DisaggregatedParams (containing
+        # multimodal_embedding_handles) directly so TRT-LLM can import
+        # the vision embeddings.  Use "context_and_generation" so the
+        # engine runs a full prefill + decode cycle.
+        elif (
+            self.disaggregation_mode == DisaggregationMode.AGGREGATED
+            and ep_disaggregated_params is not None
+        ):
+            disaggregated_params = DisaggregatedParamsCodec.decode(
+                ep_disaggregated_params
+            )
+            disaggregated_params.request_type = "context_and_generation"
 
         # DECODE mode: decode params from prefill_result
         prefill_result = request.get("prefill_result")
@@ -520,7 +542,16 @@ class HandlerBase(BaseGenerativeHandler):
             if processed_input:
                 return processed_input
 
-        # Fallback: text-only flow
+            # If multimodal processing returned None but request has multimodal data,
+            # this is an error (not a text-only request). Raise instead of falling back.
+            if request.get("multi_modal_data"):
+                raise RuntimeError(
+                    "Failed to process multimodal request. Check server logs for details. "
+                    "Common issues: missing allowed_local_media_path configuration, "
+                    "file not found, or file outside allowed directory."
+                )
+
+        # Fallback: text-only flow (no multimodal processor or no multimodal data)
         return request.get("token_ids")
 
     def _normalize_request_format(self, request: dict) -> None:
@@ -791,13 +822,24 @@ class HandlerBase(BaseGenerativeHandler):
                         )
 
                     # Log metrics to TensorRT-LLM MetricsCollector when request finishes
+                    # NOTE: TRT-LLM 1.3.0rc5 (PR #11243) renamed log_metrics_dict → log_request_metrics_dict
                     if (
                         res.finished
                         and self.metrics_collector
                         and hasattr(res, "metrics_dict")
                     ):
                         try:
-                            self.metrics_collector.log_metrics_dict(res.metrics_dict)
+                            if hasattr(
+                                self.metrics_collector,
+                                "log_request_metrics_dict",
+                            ):
+                                self.metrics_collector.log_request_metrics_dict(
+                                    res.metrics_dict
+                                )
+                            else:
+                                self.metrics_collector.log_metrics_dict(
+                                    res.metrics_dict
+                                )
                         except Exception as e:
                             logging.warning(f"Failed to log TensorRT-LLM metrics: {e}")
 
@@ -854,9 +896,19 @@ class HandlerBase(BaseGenerativeHandler):
         # doesn't know about (e.g. Rust's "backend"/"choice" vs TRT-LLM's fields).
         guided_decoding = overrides.pop("guided_decoding", None)
         if guided_decoding is not None and isinstance(guided_decoding, dict):
+            # TRT-LLM's GuidedDecodingParams doesn't have a "choice" field.
+            # Convert choice list to a regex pattern: (choice1|choice2|...)
+            # This matches the approach used by vLLM's outlines backend.
+            regex = guided_decoding.get("regex")
+            choice = guided_decoding.get("choice")
+            if choice and not regex:
+                valid_choices = [c for c in choice if c is not None]
+                if valid_choices:
+                    regex = "(" + "|".join(re.escape(c) for c in valid_choices) + ")"
+
             overrides["guided_decoding"] = GuidedDecodingParams(
                 json=guided_decoding.get("json"),
-                regex=guided_decoding.get("regex"),
+                regex=regex,
                 grammar=guided_decoding.get("grammar"),
                 json_object=guided_decoding.get("json_object", False),
                 structural_tag=guided_decoding.get("structural_tag"),

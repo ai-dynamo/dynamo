@@ -26,7 +26,7 @@ async def worker(runtime: DistributedRuntime):
     Instantiate a `backend` client and call the `generate` endpoint
     """
     # get endpoint
-    endpoint = runtime.namespace("dynamo").component("backend").endpoint("generate")
+    endpoint = runtime.endpoint("dynamo.backend.generate")
 
     # create client
     client = await endpoint.client()

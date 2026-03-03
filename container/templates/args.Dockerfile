@@ -24,24 +24,13 @@ ARG PYTHON_VERSION={{ context.dynamo.python_version }}
 ARG CUDA_VERSION={{ cuda_version }}
 ARG CUDA_MAJOR=${CUDA_VERSION%%.*}
 
-{% if framework == "vllm" or framework == "sglang" -%}
+# Base and runtime images configuration
 {% set cuda_context_key = "cuda" + cuda_version %}
-# Base image configuration
 ARG BASE_IMAGE={{ context[framework].base_image }}
 ARG BASE_IMAGE_TAG={{ context[framework][cuda_context_key].base_image_tag }}
-{% elif framework != "vllm" and framework != "sglang" -%}
-ARG BASE_IMAGE={{ context[framework].base_image }}
-ARG BASE_IMAGE_TAG={{ context[framework].base_image_tag }}
-{%- endif %}
-
-{% if framework == "sglang" -%}
-{% set cuda_context_key = "cuda" + cuda_version %}
-# Base image configuration
+{% if framework in ["sglang", "trtllm", "vllm"] -%}
 ARG RUNTIME_IMAGE={{ context[framework].runtime_image }}
 ARG RUNTIME_IMAGE_TAG={{ context[framework][cuda_context_key].runtime_image_tag }}
-{% elif framework != "dynamo" -%}
-ARG RUNTIME_IMAGE={{ context[framework].runtime_image }}
-ARG RUNTIME_IMAGE_TAG={{ context[framework].runtime_image_tag }}
 {%- endif %}
 
 # Build configuration
@@ -82,6 +71,7 @@ ARG MAX_JOBS={{ context.vllm.max_jobs }}
 # FlashInfer only respected when building vLLM from source, ie when VLLM_REF does not start with 'v' or for arm64 builds
 ARG FLASHINF_REF={{ context.vllm.flashinf_ref }}
 ARG LMCACHE_REF={{ context.vllm.lmcache_ref }}
+ARG VLLM_OMNI_REF={{ context.vllm.vllm_omni_ref }}
 
 # If left blank, then we will fallback to vLLM defaults
 ARG DEEPGEMM_REF=""
