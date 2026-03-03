@@ -85,6 +85,18 @@ class DistributedRuntime:
         """
         ...
 
+    def set_health_status(self, ready: bool) -> None:
+        """Set the system-level health status (Ready / NotReady).
+
+        Controls the Branch 3 fallback in SystemHealth.get_health_status():
+        when no endpoint health targets are registered, the probe returns
+        this value.
+
+        Args:
+            ready: True for Ready, False for NotReady.
+        """
+        ...
+
     def register_engine_route(
         self,
         route_name: str,
