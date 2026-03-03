@@ -1669,8 +1669,13 @@ def _test_router_indexers_sync(
             async with aiohttp.ClientSession() as session:
                 async with session.get(f"{standalone_indexer_url}/dump") as resp:
                     assert resp.status == 200, f"GET /dump failed: {resp.status}"
-                    standalone_state = await resp.json()
+                    dump_by_key = await resp.json()
 
+            # /dump now returns {model:tenant -> events}, flatten all values
+            standalone_state = []
+            for events in dump_by_key.values():
+                if isinstance(events, list):
+                    standalone_state.extend(events)
             sorted_standalone = sorted(standalone_state, key=sort_key)
             logger.info(f"Standalone HTTP indexer has {len(sorted_standalone)} events")
 
@@ -2197,7 +2202,7 @@ def _test_router_decisions(
             async with aiohttp.ClientSession() as session:
                 async with session.post(
                     f"{standalone_indexer_url}/query",
-                    json={"token_ids": req4_tokens},
+                    json={"token_ids": req4_tokens, "model_name": model_name},
                 ) as resp:
                     assert resp.status == 200, f"POST /query failed: {resp.status}"
                     scores = (await resp.json())["scores"]

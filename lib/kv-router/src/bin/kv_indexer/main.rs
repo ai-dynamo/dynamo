@@ -11,16 +11,15 @@ mod listener;
 mod registry;
 mod server;
 
-use indexer::create_indexer;
 use registry::WorkerRegistry;
 use server::{AppState, create_router};
 
 #[derive(Parser)]
 #[command(name = "dynamo-kv-indexer", about = "Standalone KV cache indexer")]
 struct Cli {
-    /// KV cache block size (must match the vLLM engine's block size)
+    /// KV cache block size for initial workers registered via --workers
     #[arg(long)]
-    block_size: u32,
+    block_size: Option<u32>,
 
     /// HTTP server port
     #[arg(long, default_value_t = 8090)]
@@ -33,6 +32,14 @@ struct Cli {
     /// Initial workers as "worker_id=zmq_address,..." (e.g. "1=tcp://host:5557,2=tcp://host:5558")
     #[arg(long)]
     workers: Option<String>,
+
+    /// Model name for initial workers registered via --workers
+    #[arg(long, default_value = "default")]
+    model_name: String,
+
+    /// Tenant ID for initial workers registered via --workers
+    #[arg(long, default_value = "default")]
+    tenant_id: String,
 }
 
 fn parse_workers(s: &str) -> Vec<(u64, String)> {
@@ -58,26 +65,35 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     tracing::info!(
-        block_size = cli.block_size,
+        block_size = ?cli.block_size,
         port = cli.port,
         threads = cli.threads,
+        model_name = %cli.model_name,
+        tenant_id = %cli.tenant_id,
         "Starting standalone KV cache indexer"
     );
 
-    let indexer = create_indexer(cli.block_size, cli.threads);
-    let registry = WorkerRegistry::new(indexer, cli.block_size);
+    let registry = WorkerRegistry::new(cli.threads);
 
     if let Some(ref workers_str) = cli.workers {
+        let block_size = cli.block_size.ok_or_else(|| {
+            anyhow::anyhow!("--block-size is required when --workers is specified")
+        })?;
         for (instance_id, endpoint) in parse_workers(workers_str) {
             tracing::info!(instance_id, endpoint, "Registering initial worker");
-            registry.register(instance_id, endpoint, 0)?;
+            registry.register(
+                instance_id,
+                endpoint,
+                0,
+                cli.model_name.clone(),
+                cli.tenant_id.clone(),
+                block_size,
+                None,
+            )?;
         }
     }
 
-    let state = Arc::new(AppState {
-        registry,
-        block_size: cli.block_size,
-    });
+    let state = Arc::new(AppState { registry });
 
     let app = create_router(state);
     let listener = TcpListener::bind(("0.0.0.0", cli.port)).await?;
