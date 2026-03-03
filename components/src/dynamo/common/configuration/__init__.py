@@ -12,6 +12,7 @@ This module provides a modular, domain-driven configuration architecture where:
 
 from .arg_group import ArgGroup
 from .config_base import ConfigBase
+from .groups.runtime_args import get_reasoning_parser_names, get_tool_parser_names
 from .utils import add_argument, add_negatable_bool_argument, env_or_default
 
 __all__ = [
@@ -22,4 +23,7 @@ __all__ = [
     "add_argument",
     "env_or_default",
     "add_negatable_bool_argument",
+    # Parser name helpers (re-exported from dynamo._core via runtime_args)
+    "get_tool_parser_names",
+    "get_reasoning_parser_names",
 ]

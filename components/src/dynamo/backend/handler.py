@@ -12,9 +12,9 @@ for the Dynamo endpoint serving infrastructure.
 
 Example usage for implementing a new backend handler:
 
-    from dynamo.common.backend import BaseHandler
+    from dynamo.backend import Handler
 
-    class MyBackendHandler(BaseHandler):
+    class MyBackendHandler(Handler):
         def __init__(self, component, engine, config):
             super().__init__(component)
             self.engine = engine
@@ -36,15 +36,15 @@ import logging
 import tempfile
 from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
-from typing import Any, AsyncGenerator, Callable, Dict, List, Optional
+from typing import Any, AsyncGenerator, AsyncIterator, Callable, Dict, List, Optional, Tuple
 
-from dynamo._core import Context
+from dynamo.common import Context
 from dynamo.common.utils.logprobs import extract_logprobs
 
 logger = logging.getLogger(__name__)
 
 
-class BaseHandler(ABC):
+class Handler(ABC):
     """Abstract base class for all Dynamo LLM request handlers.
 
     This class defines the minimal interface that all backend-specific handlers
@@ -135,7 +135,7 @@ class BaseHandler(ABC):
     @staticmethod
     def process_generation_output(
         output, num_output_tokens_so_far: int
-    ) -> tuple[dict, int]:
+    ) -> Tuple[Dict[str, Any], int]:
         """Process a cumulative generation output into a response dict.
 
         Extracts token deltas, logprobs, finish_reason, and stop_reason from
@@ -182,7 +182,7 @@ class BaseHandler(ABC):
         - Cleans up temporary directories
 
         Cleanup contract for subclasses:
-        1. BaseHandler.cleanup() handles: kv_publishers, temp_dirs
+        1. Handler.cleanup() handles: kv_publishers, temp_dirs
         2. Subclasses MUST call super().cleanup() and handle their own engine shutdown
         3. Recommended cleanup order:
            a. Cancel pending tasks (e.g., consume tasks, background monitors)
@@ -289,7 +289,7 @@ class BaseHandler(ABC):
         self,
         context: Context,
         abort_callback: Optional[Callable] = None,
-    ):
+    ) -> AsyncIterator[asyncio.Task]:
         """Monitor for request cancellation or server shutdown.
 
         Context manager that creates and automatically cleans up a cancellation

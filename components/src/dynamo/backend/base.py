@@ -4,21 +4,21 @@
 """Base classes for Dynamo backend workers.
 
 This module provides the foundational classes for implementing LLM backend workers:
-- BackendConfig: Common configuration fields shared across all backends
-- BaseBackend: Abstract base class with common worker lifecycle management
+- Backend: Abstract base class with common worker lifecycle management
 """
 
 import asyncio
 import logging
-import os
 import time
 from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, AsyncIterator, Callable, Dict, List, Optional, Tuple
+
+if TYPE_CHECKING:
+    from dynamo.backend.handler import Handler
 
 from prometheus_client import CollectorRegistry
 
-from dynamo.common.configuration.config_base import ConfigBase
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.common.utils.prometheus import LLMBackendMetrics
 from dynamo.common.utils.runtime import create_runtime
@@ -31,92 +31,7 @@ logger = logging.getLogger(__name__)
 DYNAMO_COMPONENT_REGISTRY = CollectorRegistry()
 
 
-class BackendConfig(ConfigBase):
-    """Base configuration class with common fields shared across all backends.
-
-    This class provides the common configuration fields needed by all LLM backend
-    workers. Framework-specific backends should extend this class and add their
-    own fields.
-
-    Attributes:
-        namespace: Dynamo namespace for the worker.
-        component: Dynamo component name.
-        endpoint: Dynamo endpoint name.
-        model: Path or identifier for the model.
-        served_model_name: Name to serve the model under.
-        store_kv: Key-value backend type (etcd, file, mem).
-        request_plane: Request distribution mechanism (tcp, nats, http).
-        event_plane: Event publishing mechanism (nats, zmq).
-        use_kv_events: Whether NATS KV events are enabled.
-        enable_local_indexer: Whether local indexer is enabled for KV events.
-        custom_jinja_template: Path to custom Jinja template for chat.
-        endpoint_types: Comma-separated list of endpoint types to enable.
-        dump_config_to: Path to dump configuration for debugging.
-    """
-
-    # Dynamo hierarchy
-    namespace: str
-    component: str
-    endpoint: str
-
-    # Model identification
-    model: str
-    served_model_name: Optional[str] = None
-
-    # Runtime configuration
-    store_kv: str
-    request_plane: str
-    event_plane: str
-    use_kv_events: bool = False
-    enable_local_indexer: bool = True
-
-    # Template and endpoint configuration
-    custom_jinja_template: Optional[str] = None
-    endpoint_types: str = "chat,completions"
-
-    # Debugging
-    dump_config_to: Optional[str] = None
-
-    def get_model_name(self) -> str:
-        """Get the effective model name for display and metrics.
-
-        Returns:
-            served_model_name if set, otherwise model path/identifier.
-        """
-        return self.served_model_name or self.model
-
-    def validate(self) -> None:
-        """Validate the configuration.
-
-        Subclasses should call super().validate() and add their own validation.
-        """
-        # Validate custom Jinja template path if provided
-        if self.custom_jinja_template:
-            expanded_path = os.path.expandvars(
-                os.path.expanduser(self.custom_jinja_template)
-            )
-            if not os.path.isfile(expanded_path):
-                raise FileNotFoundError(
-                    f"Custom Jinja template file not found: {expanded_path}"
-                )
-            self.custom_jinja_template = expanded_path
-
-    def get_metrics_labels(self) -> List[Tuple[str, str]]:
-        """Get common metrics labels for Prometheus.
-
-        Returns:
-            List of (label_name, label_value) tuples.
-        """
-        from dynamo import prometheus_names
-
-        model_name = self.get_model_name()
-        return [
-            (prometheus_names.labels.MODEL, model_name),
-            (prometheus_names.labels.MODEL_NAME, model_name),
-        ]
-
-
-class BaseBackend(ABC):
+class Backend(ABC):
     """Abstract base class for LLM backend workers.
 
     This class provides the common lifecycle management for backend workers
@@ -181,7 +96,7 @@ class BaseBackend(ABC):
         pass
 
     @abstractmethod
-    def create_handler(self, engine: Any, component: Any, endpoint: Any) -> Any:
+    def create_handler(self, engine: Any, component: Any, endpoint: Any) -> "Handler":
         """Create the request handler for the backend.
 
         Args:
@@ -261,7 +176,7 @@ class BaseBackend(ABC):
         return self.component, self.endpoint
 
     @asynccontextmanager
-    async def engine_context(self):
+    async def engine_context(self) -> AsyncIterator[Any]:
         """Async context manager for engine lifecycle.
 
         Default: creates engine via _run_create_engine() and yields it.
@@ -344,7 +259,6 @@ class BaseBackend(ABC):
 
         Handles different config structures across backends.
         """
-        # Try BackendConfig-style
         if hasattr(self.config, "get_model_name"):
             return self.config.get_model_name()
         if hasattr(self.config, "served_model_name") and self.config.served_model_name:
@@ -352,7 +266,7 @@ class BaseBackend(ABC):
         if hasattr(self.config, "model"):
             return self.config.model
         if hasattr(self.config, "model_path"):
-            return self.config.served_model_name or self.config.model_path
+            return self.config.model_path
         return "unknown"
 
     def _get_endpoint_types(self) -> str:
@@ -364,14 +278,6 @@ class BaseBackend(ABC):
         return getattr(self.config, "custom_jinja_template", None)
 
     # ── Shared model-registration hooks ──────────────────────────
-
-    def _is_prefill(self) -> bool:
-        """Whether this worker is a prefill-only node. Default False."""
-        return False
-
-    def _is_decode(self) -> bool:
-        """Whether this worker is a decode-only node. Default False."""
-        return False
 
     def _get_model_path(self) -> str:
         """Get the model path from config."""
@@ -475,21 +381,17 @@ class BaseBackend(ABC):
         if runtime_config is None:
             return
 
-        # Post-process: disable local indexer for decode workers
-        runtime_config.enable_local_indexer = (
-            getattr(self.config, "enable_local_indexer", True) and not self._is_decode()
-        )
-
         # Determine input and model type
         input_type = self._get_input_type()
+        model_type = parse_endpoint_types(self._get_endpoint_types())
 
-        if self._is_prefill():
-            model_type = ModelType.Prefill
+        # Apply disaggregation mode
+        disagg_mode = getattr(self.config, "disaggregation_mode", "aggregated")
+        if disagg_mode == "prefill":
+            model_type = model_type | ModelType.Prefill
             # Prefill workers don't parse tool calls or reasoning
             runtime_config.tool_call_parser = None
             runtime_config.reasoning_parser = None
-        else:
-            model_type = parse_endpoint_types(self._get_endpoint_types())
 
         # When input is text (e.g. using framework tokenizer),
         # restrict to Chat for non-embedding models
@@ -637,7 +539,7 @@ class BaseBackend(ABC):
         # Step 3: Set up component and endpoint
         component, endpoint = self.setup_component()
 
-        # Step 4: Engine context (default: create engine; subclasses may override)
+        # Step 4–5: Engine context (create engine; subclasses may override)
         async with self.engine_context() as engine:
             self.engine = engine
 

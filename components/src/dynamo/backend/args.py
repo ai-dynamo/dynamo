@@ -7,16 +7,21 @@ This module provides argument groups and configuration helpers that are
 shared across all backend implementations.
 """
 
+import argparse
 import os
 from typing import Optional
 
-from dynamo._core import get_reasoning_parser_names, get_tool_parser_names
-from dynamo.common.configuration.arg_group import ArgGroup
-from dynamo.common.configuration.config_base import ConfigBase
-from dynamo.common.configuration.utils import add_argument, add_negatable_bool_argument
+from dynamo.common.configuration import (
+    ArgGroup,
+    ConfigBase,
+    add_argument,
+    add_negatable_bool_argument,
+    get_reasoning_parser_names,
+    get_tool_parser_names,
+)
 
 
-class BackendCommonConfig(ConfigBase):
+class DynamoRuntimeConfig(ConfigBase):
     """Common configuration fields for all backend workers.
 
     This provides the base configuration that all backends share. Backend-specific
@@ -46,6 +51,7 @@ class BackendCommonConfig(ConfigBase):
     dyn_reasoning_parser: Optional[str] = None
     custom_jinja_template: Optional[str] = None
     endpoint_types: str = "chat,completions"
+    disaggregation_mode: str = "aggregated"
 
     # Debugging
     dump_config_to: Optional[str] = None
@@ -73,7 +79,7 @@ class BackendCommonConfig(ConfigBase):
         return self.served_model_name or self.model
 
 
-class BackendCommonArgGroup(ArgGroup):
+class DynamoRuntimeArgGroup(ArgGroup):
     """Common argument group for backend workers.
 
     This adds the CLI arguments that are common to all backend implementations:
@@ -83,7 +89,7 @@ class BackendCommonArgGroup(ArgGroup):
     - Debugging configuration (dump-config-to)
     """
 
-    def add_arguments(self, parser) -> None:
+    def add_arguments(self, parser: "argparse.ArgumentParser") -> None:
         """Add common backend arguments to the parser."""
         # Dynamo runtime options
         runtime_group = parser.add_argument_group("Dynamo Runtime Options")
@@ -101,7 +107,7 @@ class BackendCommonArgGroup(ArgGroup):
         debug_group = parser.add_argument_group("Debug Options")
         self._add_debug_arguments(debug_group)
 
-    def _add_runtime_arguments(self, group) -> None:
+    def _add_runtime_arguments(self, group: "argparse._ArgumentGroup") -> None:
         """Add Dynamo runtime arguments."""
         add_argument(
             group,
@@ -154,7 +160,7 @@ class BackendCommonArgGroup(ArgGroup):
             "Default uses local indexer for lower latency.",
         )
 
-    def _add_model_arguments(self, group) -> None:
+    def _add_model_arguments(self, group: "argparse._ArgumentGroup") -> None:
         """Add model configuration arguments."""
         add_argument(
             group,
@@ -171,7 +177,7 @@ class BackendCommonArgGroup(ArgGroup):
             help="Name to serve the model under. Defaults to model path.",
         )
 
-    def _add_inference_arguments(self, group) -> None:
+    def _add_inference_arguments(self, group: "argparse._ArgumentGroup") -> None:
         """Add inference configuration arguments."""
         add_argument(
             group,
@@ -206,8 +212,17 @@ class BackendCommonArgGroup(ArgGroup):
             help="Comma-separated endpoint types to enable: chat, completions. "
             "Use 'completions' for models without chat templates.",
         )
+        add_argument(
+            group,
+            flag_name="--disaggregation-mode",
+            env_var="DYN_DISAGGREGATION_MODE",
+            default="aggregated",
+            choices=["prefill", "decode", "aggregated"],
+            help="Disaggregated serving mode: 'prefill' for prefill-only workers, "
+            "'decode' for decode-only workers, 'aggregated' for normal operation.",
+        )
 
-    def _add_debug_arguments(self, group) -> None:
+    def _add_debug_arguments(self, group: "argparse._ArgumentGroup") -> None:
         """Add debugging arguments."""
         add_argument(
             group,
@@ -215,97 +230,4 @@ class BackendCommonArgGroup(ArgGroup):
             env_var="DYN_DUMP_CONFIG_TO",
             default=None,
             help="Dump resolved configuration to the specified file path.",
-        )
-
-
-class WorkerModeConfig(ConfigBase):
-    """Configuration for worker mode selection.
-
-    These flags control which type of worker to run (prefill, decode,
-    multimodal, embedding, etc.).
-    """
-
-    # Disaggregation mode
-    is_prefill_worker: bool = False
-    is_decode_worker: bool = False
-
-    # Multimodal modes
-    multimodal_processor: bool = False
-    multimodal_worker: bool = False
-    multimodal_encode_worker: bool = False
-    multimodal_decode_worker: bool = False
-
-    # Embedding mode
-    embedding_worker: bool = False
-
-    # Framework-specific tokenizer usage
-    use_framework_tokenizer: bool = False
-
-
-class WorkerModeArgGroup(ArgGroup):
-    """Argument group for worker mode selection.
-
-    These arguments control which type of worker to run.
-    """
-
-    def add_arguments(self, parser) -> None:
-        """Add worker mode arguments."""
-        group = parser.add_argument_group("Worker Mode Options")
-
-        add_negatable_bool_argument(
-            group,
-            flag_name="--is-prefill-worker",
-            env_var="DYN_IS_PREFILL_WORKER",
-            default=False,
-            help="Run as a prefill-only worker for disaggregated serving.",
-        )
-        add_negatable_bool_argument(
-            group,
-            flag_name="--is-decode-worker",
-            env_var="DYN_IS_DECODE_WORKER",
-            default=False,
-            help="Run as a decode-only worker for disaggregated serving.",
-        )
-        add_negatable_bool_argument(
-            group,
-            flag_name="--multimodal-processor",
-            env_var="DYN_MULTIMODAL_PROCESSOR",
-            default=False,
-            help="Run as multimodal processor component.",
-        )
-        add_negatable_bool_argument(
-            group,
-            flag_name="--multimodal-worker",
-            env_var="DYN_MULTIMODAL_WORKER",
-            default=False,
-            help="Run as multimodal worker for LLM inference with multimodal inputs.",
-        )
-        add_negatable_bool_argument(
-            group,
-            flag_name="--multimodal-encode-worker",
-            env_var="DYN_MULTIMODAL_ENCODE_WORKER",
-            default=False,
-            help="Run as multimodal encode worker for processing images/videos.",
-        )
-        add_negatable_bool_argument(
-            group,
-            flag_name="--multimodal-decode-worker",
-            env_var="DYN_MULTIMODAL_DECODE_WORKER",
-            default=False,
-            help="Run as multimodal decode worker.",
-        )
-        add_negatable_bool_argument(
-            group,
-            flag_name="--embedding-worker",
-            env_var="DYN_EMBEDDING_WORKER",
-            default=False,
-            help="Run as embedding worker for generating embeddings.",
-        )
-        add_negatable_bool_argument(
-            group,
-            flag_name="--use-framework-tokenizer",
-            env_var="DYN_USE_FRAMEWORK_TOKENIZER",
-            default=False,
-            help="Use the framework's tokenizer instead of Dynamo's. "
-            "This bypasses Dynamo's preprocessor.",
         )
