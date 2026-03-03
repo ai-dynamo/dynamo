@@ -19,9 +19,8 @@ from typing import Optional
 import uvloop
 
 from dynamo.llm import KvRouter, KvRouterConfig
-from dynamo.router.args import build_kv_router_config
+from dynamo.router.args import DynamoRouterConfig, build_kv_router_config
 from dynamo.router.args import parse_args as parse_router_args
-from dynamo.router.backend_args import DynamoRouterConfig
 from dynamo.runtime import Client, DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 
