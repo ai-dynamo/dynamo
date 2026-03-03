@@ -18,11 +18,13 @@ import (
 const (
 	podResourcesSocket = "/var/lib/kubelet/pod-resources/kubelet.sock"
 	nvidiaGPUResource  = "nvidia.com/gpu"
+	nvidiaGPUDRADriver = "gpu.nvidia.com"
 )
 
 // GetPodGPUUUIDs resolves GPU UUIDs for a pod/container from the kubelet PodResources API.
-// All nvidia.com/gpu device entries are accumulated in case the kubelet splits them
-// across multiple entries (observed in some runtimes with multi-GPU pods).
+// It first checks device-plugin-allocated GPUs (nvidia.com/gpu entries in GetDevices()).
+// If none are found, it falls back to DRA-allocated GPUs (gpu.nvidia.com entries in
+// GetDynamicResources()), where the device name is the GPU UUID.
 func GetPodGPUUUIDs(ctx context.Context, podName, podNamespace, containerName string) ([]string, error) {
 	if podName == "" || podNamespace == "" {
 		return nil, nil
@@ -57,6 +59,15 @@ func GetPodGPUUUIDs(ctx context.Context, podName, podNamespace, containerName st
 			for _, device := range container.GetDevices() {
 				if device.GetResourceName() == nvidiaGPUResource {
 					uuids = append(uuids, device.GetDeviceIds()...)
+				}
+			}
+			if len(uuids) == 0 {
+				for _, dr := range container.GetDynamicResources() {
+					for _, cr := range dr.GetClaimResources() {
+						if cr.GetDriverName() == nvidiaGPUDRADriver {
+							uuids = append(uuids, cr.GetDeviceName())
+						}
+					}
 				}
 			}
 		}
