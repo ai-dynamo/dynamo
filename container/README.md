@@ -79,13 +79,13 @@ The scripts in this directory abstract away the complexity of Docker commands wh
 
 ### Convenience Scripts vs Direct Docker Commands
 
-The `run.sh` script and rendering scripts are convenience that simplify common Docker operations. They automatically handle:
+The `run.sh` script and rendering scripts are conveniences that simplify common Docker operations. They automatically handle:
 - GPU access configuration and runtime selection
 - Volume mount setup for development workflows
 - Environment variable management
 - Build argument construction for multi-stage builds
 
-**You can always use Docker commands directly** if you prefer more control or want to customize beyond what the scripts provide. The `run.sh` uses a `--dry-run` flag to show you the exact commands they would execute, making it easy to understand and modify the underlying operations.
+**You can always use Docker commands directly** if you prefer more control or want to customize beyond what the scripts provide. `run.sh` supports a `--dry-run` flag to show you the exact commands they would execute, making it easy to understand and modify the underlying operations.
 
 ## Development Targets Feature Matrix
 
@@ -115,7 +115,7 @@ The `run.sh` script and rendering scripts are convenience that simplify common D
 ### 1. runtime target (runs as non-root dynamo user):
 ```bash
 # Build runtime image
-python container/render.py --framework vllm --target runtime --output-short-filename
+container/render.py --framework vllm --target runtime --output-short-filename
 docker build -t dynamo:latest-vllm-runtime -f container/rendered.Dockerfile .
 
 # Run runtime container
@@ -225,18 +225,20 @@ Note: `uv` commands set `UV_CACHE_DIR` per `RUN` so `uv` always uses the same pa
 **Common Usage Examples:**
 
 ```bash
-# Build vLLM dev image called dynamo:latest-vllm (default). This runs as root and is for development.
-python container/render.py --framework=vllm --target=dev --output-short-filename
-docker build -t dynamo:latest-vllm-dev -f container/rendered.Dockerfile .
-
-# Build a local-dev image. The local-dev image will run as `dynamo` with UID/GID matched to your host user,
+# Build a vLLM local-dev image called dynamo:latest-vllm-local-dev. The local-dev image will run as `dynamo` with UID/GID matched to your host user,
 # which is useful when mounting partitions for development.
-python container/render.py --framework=vllm --target=local-dev --output-short-filename
+container/render.py --framework=vllm --target=local-dev --output-short-filename
 docker build --build-arg USER_UID=$(id -u) --build-arg USER_GID=$(id -g) -f container/rendered.Dockerfile -t dynamo:latest-vllm-local-dev .
 
-# Build TensorRT-LLM development image called dynamo:latest-trtllm
-python container/render.py --framework=trtllm --target=runtime --output-short-filename --cuda-version=13.1
+# Build TensorRT-LLM runtime image called dynamo:latest-trtllm-runtime
+container/render.py --framework=trtllm --target=runtime --output-short-filename --cuda-version=13.1
 docker build -t dynamo:latest-trtllm-runtime -f container/rendered.Dockerfile .
+```
+
+After building, use `run.sh` to launch the container (see [run.sh - Container Runtime Manager](#runsh---container-runtime-manager) below for full options):
+```bash
+# Launch local-dev container with workspace mounted for live editing
+container/run.sh --image dynamo:latest-vllm-local-dev --mount-workspace -it
 ```
 
 ### Building the Frontend Image
@@ -261,7 +263,7 @@ EPP_IMAGE="dynamo/dynamo-epp:${EPP_GIT_TAG}"
 **Build Frontend Image**
 ```bash
 # Build the frontend image (automatically builds EPP image as a dependency)
-python container/render.py --framework=dynamo --target=frontend --output-short-filename
+container/render.py --framework=dynamo --target=frontend --output-short-filename
 docker build -t dynamo:frontend --build-arg EPP_IMAGE=${EPP_IMAGE} -f container/rendered.Dockerfile .
 ```
 
@@ -421,14 +423,17 @@ See Docker documentation for custom network creation and management.
 ### Development Workflow
 ```bash
 # 1. Build local-dev image (builds runtime, then dev as intermediate, then local-dev as final image)
-python container/render.py --framework=vllm --target=local-dev --output-short-filename
+container/render.py --framework=vllm --target=local-dev --output-short-filename
 docker build --build-arg USER_UID=$(id -u) --build-arg USER_GID=$(id -g) -f container/rendered.Dockerfile -t dynamo:latest-vllm-local-dev .
 
 # 2. Run development container using the local-dev image
 # RECOMMENDED: --mount-workspace for live editing in dev and local-dev images
 container/run.sh --image dynamo:latest-vllm-local-dev --mount-workspace -v $HOME/.cache:/home/dynamo/.cache -it
 
-# 3. Inside container, run inference (requires both frontend and backend)
+# 3. Sanity check (optional but recommended)
+deploy/sanity_check.py
+
+# 4. Run inference (requires both frontend and backend)
 # Start frontend
 python -m dynamo.frontend &
 
@@ -439,7 +444,7 @@ python -m dynamo.vllm --model Qwen/Qwen3-0.6B --gpu-memory-utilization 0.20 &
 ### Production Workflow
 ```bash
 # 1. Build production runtime image (runs as non-root dynamo user)
-python container/render.py --framework=vllm --target=runtime --output-short-filename
+container/render.py --framework=vllm --target=runtime --output-short-filename
 docker build -t dynamo:latest-vllm-runtime -f container/rendered.Dockerfile .
 
 # 2. Run production container as non-root dynamo user
@@ -449,19 +454,22 @@ container/run.sh --image dynamo:latest-vllm-runtime --gpus all -v $HOME/.cache:/
 ### Testing Workflow
 ```bash
 # 1. Build dev image
-python container/render.py --framework=vllm --target=dev --output-short-filename
+container/render.py --framework=vllm --target=dev --output-short-filename
 docker build -t dynamo:latest-vllm-dev -f container/rendered.Dockerfile .
 
 # 2. Run tests with network isolation for reproducible results (no -it needed for CI)
 container/run.sh --image dynamo:latest-vllm --mount-workspace --network bridge -v $HOME/.cache:/home/dynamo/.cache -- python -m pytest tests/
 
-# 3. Inside the container with bridge networking, start services
+# 3. Sanity check (optional but recommended)
+deploy/sanity_check.py --runtime-check-only
+
+# 4. Inside the container with bridge networking, start services
 # Note: Services are only accessible from the same container - no port conflicts with host
 nats-server -js &
 etcd --listen-client-urls http://0.0.0.0:2379 --advertise-client-urls http://0.0.0.0:2379 --data-dir /tmp/etcd &
 python -m dynamo.frontend &
 
-# 4. Start worker backend (choose one framework):
+# 5. Start worker backend (choose one framework):
 # vLLM
 DYN_SYSTEM_PORT=8081 python -m dynamo.vllm --model Qwen/Qwen3-0.6B --gpu-memory-utilization 0.20 --enforce-eager --no-enable-prefix-caching --max-num-seqs 64 &
 

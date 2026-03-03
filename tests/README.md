@@ -13,7 +13,7 @@ All tests run inside containers. See the [Container Development Guide](../contai
 Each area can have one or more of the following types of tests:
 
 1. **Unit** -- Exercises a single function, class, or module in isolation. No external services, no GPU. Each test typically runs in milliseconds; all unit tests combined may take <5 minutes.
-2. **Integration** -- Wires multiple components together using **mock engines** (`dynamo.mocker`) and **real infrastructure** (ETCD for service discovery, NATS for messaging if enabled). Validates that the router, planner, frontend gRPC, and similar subsystems work together without launching a real inference engine. No GPU required. Each test typically runs in seconds; all integration tests combined may take <30 minutes.
+2. **Integration** -- Wires multiple components together using **mock engines** (`dynamo.mocker`) and **real infrastructure** (ETCD for service discovery, NATS for messaging, if enabled). Validates that the router, planner, frontend gRPC, and similar subsystems work together without launching a real inference engine. No GPU required. Each test typically runs in seconds; all integration tests combined may take <30 minutes.
 3. **End-to-End (E2E)** -- Starts a **real inference engine** (vLLM, SGLang, or TRT-LLM), sends requests through the frontend, and validates responses. Requires GPU. Each test typically runs in minutes; the full E2E suite may take several hours.
 
 It is absolutely important to be mindful of how long a test you write takes. Slow tests have a compounding cost: they burn GPU-hours in CI (GPUs are expensive and shared), they discourage engineers from running suites locally (so bugs slip through to CI), and they slow down the entire team's development velocity. A test suite that takes too long becomes a test suite that nobody runs. When adding or modifying tests, include a per-test time estimate in your PR description -- CI GPU resources are limited and these estimates help the team schedule tests across pre-merge, nightly, and weekly pipelines.
@@ -107,8 +107,8 @@ dynamo/
 Markers are required for all tests. They are used for test selection in CI and local runs.
 
 ### Marker Requirements
-- Every test must have at least one **Lifecycle** marker, and **test type** and **Hardware** markers.
-- **component** markers are required as applicable.
+- Every test must have at least one **Lifecycle** marker, and **Test Type** and **Hardware** markers.
+- **Component/Framework** markers are required as applicable.
 
 ### Marker Table
 | Category                | Marker(s)                                                        | Description                        |
@@ -179,7 +179,6 @@ cargo test --locked --all-targets
 # Integration tests (may require ETCD/NATS running; typically <10min)
 cargo test --features integration
 ```
-
 
 
 ### Additional Options
@@ -302,7 +301,7 @@ pytest -m "(pre_merge or post_merge) and vllm and gpu_1" -v --tb=short
 
 ### Running tests locally outside of a container
 
-To run tests outside of the development container, ensure that you have properly setup your environment and have installed the following dependencies in your `venv`:
+To run tests outside of the development container, ensure that you have properly set up your environment and have installed the following dependencies in your `venv`:
 
 ```bash
 uv pip install pytest-mypy
