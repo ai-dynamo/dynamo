@@ -240,7 +240,8 @@ class ServiceAPI:
                 modality=modality,
                 prompts=[prompt],
                 media=[image_urls],
-                image_data_format="pt",
+                # Align hash input type with backend multimodal processor path.
+                image_data_format="pil",
                 device="cuda",
             )
             mm_input = inputs[0]

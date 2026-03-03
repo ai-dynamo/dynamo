@@ -82,7 +82,9 @@ def process_multimodal(
             modality="multiple_image" if len(image_urls) > 1 else "image",
             prompts=[prompt],
             media=[image_urls],
-            image_data_format="pt",
+            # Align hash input type with backend multimodal processor, which hashes
+            # PIL images in the TRT-LLM request path.
+            image_data_format="pil",
             device="cuda",
         )
 
