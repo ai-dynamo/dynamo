@@ -14,14 +14,16 @@
 # limitations under the License.
 tensor_parallel_size: 1
 enable_attention_dp: false
-max_num_tokens: 1024
-max_batch_size: 4
+max_num_tokens: 2048
+max_batch_size: 8
+max_seq_len: 8192
 trust_remote_code: true
 backend: pytorch
 enable_chunked_prefill: true
-# Overlap scheduler not currently supported in prefill only workers.
-disable_overlap_scheduler: true
 
-# Note: Encode workers use MultimodalEncoder (vision encoder + projector only),
-# which ignores most engine_args. No kv_cache_config or cache_transceiver_config
-# is needed since MultimodalEncoder doesn't allocate KV cache or transfer buffers.
+kv_cache_config:
+  free_gpu_memory_fraction: 0.30
+  enable_block_reuse: false
+
+cache_transceiver_config:
+  backend: DEFAULT
