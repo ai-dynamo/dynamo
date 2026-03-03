@@ -248,7 +248,8 @@ mod tests {
         Arc<SchedulerQueue<NoopSequencePublisher, SimpleWorkerConfig>>,
         Arc<ActiveSequencesMultiWorker<NoopSequencePublisher>>,
     ) {
-        let dp_range: HashMap<u64, (u32, u32)> = (0..num_workers as u64).map(|id| (id, (0, 1))).collect();
+        let dp_range: HashMap<u64, (u32, u32)> =
+            (0..num_workers as u64).map(|id| (id, (0, 1))).collect();
         let slots = Arc::new(ActiveSequencesMultiWorker::new(
             NoopSequencePublisher,
             block_size as usize,
