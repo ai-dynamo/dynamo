@@ -233,6 +233,24 @@ python3 -m benchmarks.utils.benchmark \
     --endpoint-url http://localhost:8000
 ```
 
+### Request Count Configuration
+
+The number of requests sent per concurrency level is auto-computed as `max(concurrency * 3, 10)` by default. This ensures each concurrency slot runs enough requests for stable measurements. You can override this with the `REQUEST_COUNT` environment variable:
+
+```bash
+# Fixed request count for all concurrency levels
+REQUEST_COUNT=500 python3 -m benchmarks.utils.benchmark \
+    --benchmark-name my-test \
+    --endpoint-url http://localhost:8000
+
+# Combined with custom concurrency levels
+CONCURRENCIES="1,10,50,200" REQUEST_COUNT=1000 python3 -m benchmarks.utils.benchmark \
+    --benchmark-name high-load-test \
+    --endpoint-url http://localhost:8000
+```
+
+**Important**: The request count must be greater than or equal to the concurrency level. If the request count is too low, the actual in-flight concurrency will be capped at the request count, leading to inaccurate results at higher concurrency levels.
+
 ## Understanding Your Results
 
 After benchmarking completes, check `./benchmarks/results/` (or your custom output directory):
