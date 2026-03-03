@@ -20,7 +20,7 @@ import re
 import shutil
 import threading
 import time
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from io import BytesIO
 from typing import Any, Generator
 
@@ -726,8 +726,7 @@ def http_image_server() -> Generator[list[str], None, None]:
     thread.start()
 
     urls = [
-        f"http://127.0.0.1:{port}/image_{i}.png"
-        for i in range(len(_HTTP_IMAGE_COLORS))
+        f"http://127.0.0.1:{port}/image_{i}.png" for i in range(len(_HTTP_IMAGE_COLORS))
     ]
     yield urls
 

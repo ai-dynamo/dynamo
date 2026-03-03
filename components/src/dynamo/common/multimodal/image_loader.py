@@ -54,8 +54,7 @@ class ImageLoader:
     async def load_image_with_raw_bytes(
         self, image_url: str
     ) -> tuple[Image.Image, bytes]:
-        """Load image from URL, returning both PIL Image and original raw bytes.
-        """
+        """Load image from URL, returning both PIL Image and original raw bytes."""
         return await self._fetch_image(image_url)
 
     async def _fetch_image(self, image_url: str) -> tuple[Image.Image, bytes]:
