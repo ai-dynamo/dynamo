@@ -4,11 +4,12 @@
 pub mod stream_converter;
 
 use dynamo_async_openai::types::responses::{
-    AssistantRole, FunctionCallOutput, FunctionToolCall, InputContent, InputItem, InputParam,
-    InputRole, Instructions, Item, MessageItem, OutputItem, OutputMessage, OutputMessageContent,
-    OutputStatus, OutputTextContent, Response, ResponseTextParam, Role as ResponseRole,
-    ServiceTier, Status, TextResponseFormatConfiguration, Tool, ToolChoiceOptions, ToolChoiceParam,
-    Truncation,
+    AssistantRole, FunctionCallOutput, FunctionToolCall, IncludeEnum, InputContent, InputItem,
+    InputParam, InputRole, InputTokenDetails, Instructions, Item, MessageItem, OutputItem,
+    OutputMessage, OutputMessageContent, OutputStatus, OutputTextContent, OutputTokenDetails,
+    Reasoning, ReasoningItem, Response, ResponseTextParam, ResponseUsage, Role as ResponseRole,
+    ServiceTier, Status, Summary, SummaryPart, TextResponseFormatConfiguration, Tool,
+    ToolChoiceOptions, ToolChoiceParam, Truncation,
 };
 use dynamo_async_openai::types::{
     ChatCompletionMessageToolCall, ChatCompletionNamedToolChoice,
@@ -20,7 +21,8 @@ use dynamo_async_openai::types::{
     ChatCompletionRequestUserMessage, ChatCompletionRequestUserMessageContent,
     ChatCompletionRequestUserMessageContentPart, ChatCompletionTool,
     ChatCompletionToolChoiceOption, ChatCompletionToolType, CreateChatCompletionRequest,
-    FunctionName, FunctionObject, ImageDetail as ChatImageDetail, ImageUrl, VideoUrl,
+    FunctionName, FunctionObject, ImageDetail as ChatImageDetail, ImageUrl, ResponseFormat,
+    ServiceTier as ChatServiceTier, VideoUrl,
 };
 use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 use serde::{Deserialize, Serialize};
@@ -207,18 +209,33 @@ fn convert_input_content_to_user_content(
             InputContent::InputFile(_) => {
                 return Err(anyhow::anyhow!("File input content is not yet supported"));
             }
+            InputContent::OutputText(t) => {
+                chat_parts.push(ChatCompletionRequestUserMessageContentPart::Text(
+                    ChatCompletionRequestMessageContentPartText {
+                        text: t.text.clone(),
+                    },
+                ));
+            }
+            InputContent::Refusal(r) => {
+                chat_parts.push(ChatCompletionRequestUserMessageContentPart::Text(
+                    ChatCompletionRequestMessageContentPartText {
+                        text: r.refusal.clone(),
+                    },
+                ));
+            }
         }
     }
     Ok(ChatCompletionRequestUserMessageContent::Array(chat_parts))
 }
 
-/// Convert a slice of InputContent to a plain text string (for system/developer messages).
+/// Convert a slice of InputContent to a plain text string (for system/developer/assistant messages).
 fn convert_input_content_to_text(content: &[InputContent]) -> String {
-    // Concatenate all text parts; non-text parts are skipped.
     content
         .iter()
         .filter_map(|p| match p {
             InputContent::InputText(t) => Some(t.text.as_str()),
+            InputContent::OutputText(t) => Some(t.text.as_str()),
+            InputContent::Refusal(r) => Some(r.refusal.as_str()),
             _ => None,
         })
         .collect::<Vec<_>>()
@@ -424,6 +441,29 @@ fn convert_tool_choice(tc: &ToolChoiceParam) -> ChatCompletionToolChoiceOption {
     }
 }
 
+/// Convert Responses API `text.format` to Chat Completions `response_format`.
+fn convert_text_format(text: &ResponseTextParam) -> Option<ResponseFormat> {
+    match &text.format {
+        TextResponseFormatConfiguration::Text => None,
+        TextResponseFormatConfiguration::JsonObject => Some(ResponseFormat::JsonObject),
+        TextResponseFormatConfiguration::JsonSchema(s) => Some(ResponseFormat::JsonSchema {
+            json_schema: s.clone(),
+        }),
+    }
+}
+
+/// Convert Responses API `ServiceTier` to Chat Completions `ServiceTier`.
+/// These are structurally identical enums in different modules.
+fn convert_service_tier(tier: &ServiceTier) -> ChatServiceTier {
+    match tier {
+        ServiceTier::Auto => ChatServiceTier::Auto,
+        ServiceTier::Default => ChatServiceTier::Default,
+        ServiceTier::Flex => ChatServiceTier::Flex,
+        ServiceTier::Scale => ChatServiceTier::Scale,
+        ServiceTier::Priority => ChatServiceTier::Priority,
+    }
+}
+
 impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
     type Error = anyhow::Error;
 
@@ -472,6 +512,15 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
         // Determine stream setting: respect caller's preference, default to true for aggregation
         let stream = resp.inner.stream.or(Some(true));
 
+        // Map reasoning.effort to reasoning_effort
+        let reasoning_effort = resp.inner.reasoning.as_ref().and_then(|r| r.effort.clone());
+
+        // Map text.format to response_format
+        let response_format = resp.inner.text.as_ref().and_then(convert_text_format);
+
+        // Map service_tier
+        let service_tier = resp.inner.service_tier.as_ref().map(convert_service_tier);
+
         Ok(NvCreateChatCompletionRequest {
             inner: CreateChatCompletionRequest {
                 messages,
@@ -484,6 +533,9 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
                 stream,
                 tools,
                 tool_choice,
+                reasoning_effort,
+                response_format,
+                service_tier,
                 ..Default::default()
             },
             common: Default::default(),
@@ -578,6 +630,7 @@ fn strip_tool_call_text(text: &str) -> std::borrow::Cow<'_, str> {
 /// response objects reflect actual request values.
 #[derive(Clone, Debug, Default)]
 pub struct ResponseParams {
+    pub model: Option<String>,
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
     pub max_output_tokens: Option<u32>,
@@ -585,6 +638,11 @@ pub struct ResponseParams {
     pub tools: Option<Vec<Tool>>,
     pub tool_choice: Option<ToolChoiceParam>,
     pub instructions: Option<String>,
+    pub reasoning: Option<Reasoning>,
+    pub text: Option<ResponseTextParam>,
+    pub service_tier: Option<ServiceTier>,
+    pub include: Option<Vec<IncludeEnum>>,
+    pub truncation: Option<Truncation>,
 }
 
 /// Normalize tools so that `FunctionTool.strict` is always set.
@@ -660,6 +718,21 @@ pub fn chat_completion_to_response(
             }
         }
 
+        // Map reasoning_content to a Reasoning output item
+        if let Some(reasoning_text) = choice.message.reasoning_content
+            && !reasoning_text.is_empty()
+        {
+            output.push(OutputItem::Reasoning(ReasoningItem {
+                id: format!("rs_{}", Uuid::new_v4().simple()),
+                summary: vec![SummaryPart::SummaryText(Summary {
+                    text: reasoning_text,
+                })],
+                content: None,
+                encrypted_content: None,
+                status: Some(OutputStatus::Completed),
+            }));
+        }
+
         // Handle text content -- also parse <tool_call> blocks from models
         // that emit tool calls as text (e.g. Qwen3)
         let content_text = match choice.message.content {
@@ -702,13 +775,35 @@ pub fn chat_completion_to_response(
         output.push(make_text_message(message_id, String::new()));
     }
 
+    // Apply `include` filtering: strip logprobs from output text unless
+    // the caller explicitly requested them via `message.output_text.logprobs`.
+    let keep_logprobs = params
+        .include
+        .as_ref()
+        .is_some_and(|inc| inc.contains(&IncludeEnum::MessageOutputTextLogprobs));
+    if !keep_logprobs {
+        for item in &mut output {
+            if let OutputItem::Message(msg) = item {
+                for content in &mut msg.content {
+                    if let OutputMessageContent::OutputText(text) = content {
+                        text.logprobs = None;
+                    }
+                }
+            }
+        }
+    }
+
     let created_at = chat_resp.created as u64;
     let response = Response {
         id: response_id,
         object: "response".to_string(),
         created_at,
         completed_at: Some(created_at),
-        model: chat_resp.model,
+        model: if chat_resp.model == "unknown" {
+            params.model.clone().unwrap_or(chat_resp.model)
+        } else {
+            chat_resp.model
+        },
         status: Status::Completed,
         output,
         // Spec-required defaults (OpenResponses requires these as non-null)
@@ -721,10 +816,10 @@ pub fn chat_completion_to_response(
         // store: false because this branch does not persist responses.
         store: params.store.or(Some(false)),
         temperature: params.temperature.or(Some(1.0)),
-        text: Some(ResponseTextParam {
+        text: Some(params.text.clone().unwrap_or(ResponseTextParam {
             format: TextResponseFormatConfiguration::Text,
             verbosity: None,
-        }),
+        })),
         tool_choice: params
             .tool_choice
             .clone()
@@ -737,7 +832,7 @@ pub fn chat_completion_to_response(
                 .unwrap_or_default(),
         ),
         top_p: params.top_p.or(Some(1.0)),
-        truncation: Some(Truncation::Disabled),
+        truncation: Some(params.truncation.unwrap_or(Truncation::Disabled)),
         // Nullable but required to be present (null is valid)
         billing: None,
         conversation: None,
@@ -750,11 +845,27 @@ pub fn chat_completion_to_response(
         prompt: None,
         prompt_cache_key: None,
         prompt_cache_retention: None,
-        reasoning: None,
+        reasoning: params.reasoning.clone(),
         safety_identifier: None,
-        service_tier: Some(ServiceTier::Auto),
+        service_tier: Some(params.service_tier.unwrap_or(ServiceTier::Auto)),
         top_logprobs: Some(0),
-        usage: None,
+        usage: chat_resp.usage.map(|u| ResponseUsage {
+            input_tokens: u.prompt_tokens,
+            input_tokens_details: InputTokenDetails {
+                cached_tokens: u
+                    .prompt_tokens_details
+                    .map(|d| d.cached_tokens.unwrap_or(0))
+                    .unwrap_or(0),
+            },
+            output_tokens: u.completion_tokens,
+            output_tokens_details: OutputTokenDetails {
+                reasoning_tokens: u
+                    .completion_tokens_details
+                    .map(|d| d.reasoning_tokens.unwrap_or(0))
+                    .unwrap_or(0),
+            },
+            total_tokens: u.total_tokens,
+        }),
     };
 
     Ok(NvResponse {
@@ -1208,5 +1319,335 @@ thinking
         let stripped = strip_tool_call_text(text);
         assert!(!stripped.contains("<tool_call>"));
         assert!(!stripped.contains("<think>"));
+    }
+
+    // ── PR1: reasoning / text.format / service_tier pass-through tests ──
+
+    #[test]
+    fn test_reasoning_effort_mapped_to_chat_completion() {
+        use dynamo_async_openai::types::ReasoningEffort;
+        use dynamo_async_openai::types::responses::Reasoning;
+
+        let mut req = make_response_with_input("think hard");
+        req.inner.reasoning = Some(Reasoning {
+            effort: Some(ReasoningEffort::Medium),
+            ..Default::default()
+        });
+
+        let chat: NvCreateChatCompletionRequest = req.try_into().unwrap();
+        assert_eq!(chat.inner.reasoning_effort, Some(ReasoningEffort::Medium));
+    }
+
+    #[test]
+    fn test_reasoning_none_leaves_chat_field_none() {
+        let req = make_response_with_input("no reasoning");
+        let chat: NvCreateChatCompletionRequest = req.try_into().unwrap();
+        assert_eq!(chat.inner.reasoning_effort, None);
+    }
+
+    #[test]
+    fn test_text_format_json_object_mapped() {
+        use dynamo_async_openai::types::ResponseFormat;
+        use dynamo_async_openai::types::responses::{
+            ResponseTextParam, TextResponseFormatConfiguration,
+        };
+
+        let mut req = make_response_with_input("give json");
+        req.inner.text = Some(ResponseTextParam {
+            format: TextResponseFormatConfiguration::JsonObject,
+            verbosity: None,
+        });
+
+        let chat: NvCreateChatCompletionRequest = req.try_into().unwrap();
+        assert_eq!(chat.inner.response_format, Some(ResponseFormat::JsonObject));
+    }
+
+    #[test]
+    fn test_text_format_json_schema_mapped() {
+        use dynamo_async_openai::types::responses::{
+            ResponseTextParam, TextResponseFormatConfiguration,
+        };
+        use dynamo_async_openai::types::{ResponseFormat, ResponseFormatJsonSchema};
+
+        let schema = ResponseFormatJsonSchema {
+            name: "city".into(),
+            description: None,
+            schema: Some(serde_json::json!({"type": "object"})),
+            strict: Some(true),
+        };
+        let mut req = make_response_with_input("structured");
+        req.inner.text = Some(ResponseTextParam {
+            format: TextResponseFormatConfiguration::JsonSchema(schema.clone()),
+            verbosity: None,
+        });
+
+        let chat: NvCreateChatCompletionRequest = req.try_into().unwrap();
+        assert_eq!(
+            chat.inner.response_format,
+            Some(ResponseFormat::JsonSchema {
+                json_schema: schema
+            })
+        );
+    }
+
+    #[test]
+    fn test_text_format_plain_text_leaves_response_format_none() {
+        use dynamo_async_openai::types::responses::{
+            ResponseTextParam, TextResponseFormatConfiguration,
+        };
+
+        let mut req = make_response_with_input("plain");
+        req.inner.text = Some(ResponseTextParam {
+            format: TextResponseFormatConfiguration::Text,
+            verbosity: None,
+        });
+
+        let chat: NvCreateChatCompletionRequest = req.try_into().unwrap();
+        assert_eq!(chat.inner.response_format, None);
+    }
+
+    #[test]
+    fn test_service_tier_mapped_to_chat_completion() {
+        use dynamo_async_openai::types::ServiceTier as ChatServiceTier;
+        use dynamo_async_openai::types::responses::ServiceTier as RespServiceTier;
+
+        let mut req = make_response_with_input("priority");
+        req.inner.service_tier = Some(RespServiceTier::Priority);
+
+        let chat: NvCreateChatCompletionRequest = req.try_into().unwrap();
+        assert_eq!(chat.inner.service_tier, Some(ChatServiceTier::Priority));
+    }
+
+    #[test]
+    fn test_response_echoes_reasoning() {
+        use dynamo_async_openai::types::ReasoningEffort;
+        use dynamo_async_openai::types::responses::Reasoning;
+
+        let params = ResponseParams {
+            reasoning: Some(Reasoning {
+                effort: Some(ReasoningEffort::High),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let chat_resp = NvCreateChatCompletionResponse {
+            choices: vec![],
+            created: 0,
+            id: "test".into(),
+            model: "m".into(),
+            service_tier: None,
+            system_fingerprint: None,
+            object: "chat.completion".into(),
+            usage: None,
+            nvext: None,
+        };
+
+        let resp = chat_completion_to_response(chat_resp, &params).unwrap();
+        let reasoning = resp.inner.reasoning.unwrap();
+        assert_eq!(reasoning.effort, Some(ReasoningEffort::High));
+    }
+
+    #[test]
+    fn test_response_echoes_text_format() {
+        use dynamo_async_openai::types::responses::{
+            ResponseTextParam, TextResponseFormatConfiguration,
+        };
+
+        let params = ResponseParams {
+            text: Some(ResponseTextParam {
+                format: TextResponseFormatConfiguration::JsonObject,
+                verbosity: None,
+            }),
+            ..Default::default()
+        };
+
+        let chat_resp = NvCreateChatCompletionResponse {
+            choices: vec![],
+            created: 0,
+            id: "test".into(),
+            model: "m".into(),
+            service_tier: None,
+            system_fingerprint: None,
+            object: "chat.completion".into(),
+            usage: None,
+            nvext: None,
+        };
+
+        let resp = chat_completion_to_response(chat_resp, &params).unwrap();
+        let text = resp.inner.text.unwrap();
+        assert_eq!(text.format, TextResponseFormatConfiguration::JsonObject);
+    }
+
+    #[test]
+    fn test_response_echoes_service_tier() {
+        use dynamo_async_openai::types::responses::ServiceTier;
+
+        let params = ResponseParams {
+            service_tier: Some(ServiceTier::Flex),
+            ..Default::default()
+        };
+
+        let chat_resp = NvCreateChatCompletionResponse {
+            choices: vec![],
+            created: 0,
+            id: "test".into(),
+            model: "m".into(),
+            service_tier: None,
+            system_fingerprint: None,
+            object: "chat.completion".into(),
+            usage: None,
+            nvext: None,
+        };
+
+        let resp = chat_completion_to_response(chat_resp, &params).unwrap();
+        assert_eq!(resp.inner.service_tier, Some(ServiceTier::Flex));
+    }
+
+    #[test]
+    fn test_output_message_deserializes_without_id_and_status() {
+        use dynamo_async_openai::types::responses::{InputItem, Item, MessageItem};
+
+        let json = serde_json::json!({
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "Hello!", "annotations": []}],
+            "type": "message"
+        });
+
+        let item: InputItem = serde_json::from_value(json).unwrap();
+        match item {
+            InputItem::Item(Item::Message(MessageItem::Output(msg))) => {
+                assert_eq!(msg.role, AssistantRole::Assistant);
+                assert_eq!(msg.content.len(), 1);
+                assert!(msg.id.is_none());
+                assert_eq!(msg.status, None);
+            }
+            other => panic!("Expected Item::Message(Output), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_output_message_with_id_and_status_still_works() {
+        use dynamo_async_openai::types::responses::{InputItem, Item, MessageItem, OutputStatus};
+
+        let json = serde_json::json!({
+            "role": "assistant",
+            "id": "msg_abc123",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "Hello!", "annotations": []}],
+            "type": "message"
+        });
+
+        let item: InputItem = serde_json::from_value(json).unwrap();
+        match item {
+            InputItem::Item(Item::Message(MessageItem::Output(msg))) => {
+                assert_eq!(msg.id.as_deref(), Some("msg_abc123"));
+                assert_eq!(msg.status, Some(OutputStatus::Completed));
+            }
+            other => panic!("Expected Item::Message(Output), got {:?}", other),
+        }
+    }
+
+    // ── PR2: include filtering + truncation echo-back tests ──
+
+    fn make_chat_resp_with_text(text: &str) -> NvCreateChatCompletionResponse {
+        use dynamo_async_openai::types::{
+            ChatChoice, ChatCompletionMessageContent, ChatCompletionResponseMessage, FinishReason,
+        };
+        NvCreateChatCompletionResponse {
+            choices: vec![ChatChoice {
+                index: 0,
+                #[allow(deprecated)]
+                message: ChatCompletionResponseMessage {
+                    content: Some(ChatCompletionMessageContent::Text(text.into())),
+                    role: dynamo_async_openai::types::Role::Assistant,
+                    tool_calls: None,
+                    refusal: None,
+                    reasoning_content: None,
+                    function_call: None,
+                    audio: None,
+                },
+                finish_reason: Some(FinishReason::Stop),
+                stop_reason: None,
+                logprobs: None,
+            }],
+            created: 0,
+            id: "test".into(),
+            model: "m".into(),
+            service_tier: None,
+            system_fingerprint: None,
+            object: "chat.completion".into(),
+            usage: None,
+            nvext: None,
+        }
+    }
+
+    #[test]
+    fn test_include_logprobs_stripped_by_default() {
+        let chat_resp = make_chat_resp_with_text("hello");
+        let params = ResponseParams::default();
+        let resp = chat_completion_to_response(chat_resp, &params).unwrap();
+
+        for item in &resp.inner.output {
+            if let OutputItem::Message(msg) = item {
+                for content in &msg.content {
+                    if let OutputMessageContent::OutputText(t) = content {
+                        assert!(
+                            t.logprobs.is_none(),
+                            "logprobs should be stripped by default"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_include_logprobs_kept_when_requested() {
+        use dynamo_async_openai::types::responses::IncludeEnum;
+
+        let chat_resp = make_chat_resp_with_text("hello");
+        let params = ResponseParams {
+            include: Some(vec![IncludeEnum::MessageOutputTextLogprobs]),
+            ..Default::default()
+        };
+        let resp = chat_completion_to_response(chat_resp, &params).unwrap();
+
+        let mut found_text = false;
+        for item in &resp.inner.output {
+            if let OutputItem::Message(msg) = item {
+                for content in &msg.content {
+                    if let OutputMessageContent::OutputText(t) = content {
+                        found_text = true;
+                        assert!(
+                            t.logprobs.is_some(),
+                            "logprobs should be preserved when included"
+                        );
+                    }
+                }
+            }
+        }
+        assert!(found_text, "Expected text output");
+    }
+
+    #[test]
+    fn test_truncation_auto_echoed_back() {
+        use dynamo_async_openai::types::responses::Truncation;
+
+        let chat_resp = make_chat_resp_with_text("hello");
+        let params = ResponseParams {
+            truncation: Some(Truncation::Auto),
+            ..Default::default()
+        };
+        let resp = chat_completion_to_response(chat_resp, &params).unwrap();
+        assert_eq!(resp.inner.truncation, Some(Truncation::Auto));
+    }
+
+    #[test]
+    fn test_truncation_defaults_to_disabled() {
+        let chat_resp = make_chat_resp_with_text("hello");
+        let params = ResponseParams::default();
+        let resp = chat_completion_to_response(chat_resp, &params).unwrap();
+        assert_eq!(resp.inner.truncation, Some(Truncation::Disabled));
     }
 }
