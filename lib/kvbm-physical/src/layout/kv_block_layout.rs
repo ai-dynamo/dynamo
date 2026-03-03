@@ -36,7 +36,7 @@ pub enum BlockDim {
 ///
 /// - `UniversalTP`: `[nh, nl, no, nt, hd]` - heads outermost for TP resharding
 /// - `OperationalNHD`: `[nl, no, nt, nh, hd]` - inner is `[nt, nh, hd]`
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum KvBlockLayout {
     /// Universal format: `[nh, nl, no, nt, hd]`
     ///
@@ -71,14 +71,8 @@ pub enum KvBlockLayout {
     ///
     /// Operations involving Unknown layouts may fail or require explicit
     /// configuration.
+    #[default]
     Unknown,
-}
-
-impl Default for KvBlockLayout {
-    fn default() -> Self {
-        // Unknown until runtime detection determines the actual format
-        Self::Unknown
-    }
 }
 
 impl KvBlockLayout {

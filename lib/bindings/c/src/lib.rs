@@ -493,6 +493,7 @@ impl RouterHandles {
                 false,
                 None,
                 0.0,
+                None,
                 allowed_worker_ids,
             )
             .await
@@ -994,7 +995,7 @@ pub unsafe extern "C" fn free_routing_result(result: *mut CRoutingResult) {
     // Free token IDs
     if !res.token_ids.is_null() && res.token_count > 0 {
         drop(unsafe {
-            Box::from_raw(std::slice::from_raw_parts_mut(
+            Box::from_raw(std::ptr::slice_from_raw_parts_mut(
                 res.token_ids,
                 res.token_count,
             ))
