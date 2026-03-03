@@ -20,7 +20,10 @@ members = [
     "lib/bindings/c",
     "lib/bindings/python/codegen",
     "lib/config",
+    "lib/velo",
+    "lib/velo-discovery",
     "lib/velo-events",
+    "lib/velo-messenger",
 ]
 resolver = "3"
 
@@ -50,10 +53,13 @@ dynamo-parsers = { path = "lib/parsers", version = "1.0.0" }
 kvbm-common = { path = "lib/kvbm-common", version = "1.0.0" }
 kvbm-kernels = { path = "lib/kvbm-kernels", version = "1.0.0" }
 kvbm-logical = { path = "lib/kvbm-logical", version = "1.0.0" }
-kvbm-physical = { path = "lib/kvbm-physical", version = "1.0.0" }
 
-# velo
-velo-events = { path = "lib/velo-events", version = "1.0.0" }
+velo = { path = "lib/velo", version = "1.0.0" }
+velo-common = { git = "https://github.com/ai-dynamo/dynamo.git", branch = "ryan/velo-backend" }
+velo-backend = { git = "https://github.com/ai-dynamo/dynamo.git", branch = "ryan/velo-backend" }
+velo-discovery = { path = "lib/velo-discovery", version = "1.0.0" }
+velo-events = { git = "https://github.com/ai-dynamo/dynamo.git", branch = "ryan/velo-backend" }
+velo-messenger = { path = "lib/velo-messenger", version = "1.0.0" }
 
 # External dependencies
 anyhow = { version = "1" }
