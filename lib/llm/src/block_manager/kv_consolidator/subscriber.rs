@@ -14,7 +14,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use zeromq::{Socket, SocketRecv, SubSocket};
 
-use dynamo_kv_router::zmq_wire::RawKvEvent;
+use crate::kv_router::publisher::RawKvEvent;
 
 use super::tracker::{CacheStatusTracker, EventSource, StorageTier};
 
