@@ -25,12 +25,8 @@ pub struct IndexerEntry {
     pub lora_name: Option<String>,
 }
 
-pub struct EndpointEntry {
-    pub endpoint: String,
-}
-
 pub struct WorkerEntry {
-    pub endpoints: HashMap<u32, EndpointEntry>,
+    pub endpoints: HashMap<u32, String>,
     cancel: CancellationToken,
 }
 
@@ -115,7 +111,7 @@ impl WorkerRegistry {
             run_zmq_listener(instance_id, dp_rank, addr, bs, indexer, child_cancel).await;
         });
 
-        entry.endpoints.insert(dp_rank, EndpointEntry { endpoint });
+        entry.endpoints.insert(dp_rank, endpoint);
         Ok(())
     }
 
@@ -191,15 +187,7 @@ impl WorkerRegistry {
     pub fn list(&self) -> Vec<(WorkerId, HashMap<u32, String>)> {
         self.workers
             .iter()
-            .map(|entry| {
-                let endpoints: HashMap<u32, String> = entry
-                    .value()
-                    .endpoints
-                    .iter()
-                    .map(|(&dp_rank, e)| (dp_rank, e.endpoint.clone()))
-                    .collect();
-                (*entry.key(), endpoints)
-            })
+            .map(|entry| (*entry.key(), entry.value().endpoints.clone()))
             .collect()
     }
 

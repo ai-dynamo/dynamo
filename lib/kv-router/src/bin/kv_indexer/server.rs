@@ -181,7 +181,7 @@ async fn query(
 ) -> impl IntoResponse {
     let key = IndexerKey {
         model_name: req.model_name,
-        tenant_id: req.tenant_id.clone(),
+        tenant_id: req.tenant_id,
     };
     let Some(ie) = state.registry.get_indexer(&key) else {
         return (
@@ -216,7 +216,7 @@ async fn query_by_hash(
 ) -> impl IntoResponse {
     let key = IndexerKey {
         model_name: req.model_name,
-        tenant_id: req.tenant_id.clone(),
+        tenant_id: req.tenant_id,
     };
     let Some(ie) = state.registry.get_indexer(&key) else {
         return (
