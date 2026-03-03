@@ -76,6 +76,31 @@ func GetPodGPUUUIDs(ctx context.Context, podName, podNamespace, containerName st
 	return uuids, nil
 }
 
+// GetGPUUUIDsViaNvidiaSmi discovers GPU UUIDs by running nvidia-smi inside the
+// container's mount namespace. This is the fallback path when the kubelet
+// PodResources API does not report GPU devices (e.g. when GPUs are allocated
+// via DRA instead of the NVIDIA device plugin).
+func GetGPUUUIDsViaNvidiaSmi(pid int) ([]string, error) {
+	cmd := exec.Command(
+		"nsenter",
+		fmt.Sprintf("--mount=/host/proc/%d/ns/mnt", pid),
+		"--",
+		"nvidia-smi", "--query-gpu=gpu_uuid", "--format=csv,noheader",
+	)
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("nvidia-smi via nsenter (pid %d) failed: %w", pid, err)
+	}
+	var uuids []string
+	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			uuids = append(uuids, line)
+		}
+	}
+	return uuids, nil
+}
+
 // FilterProcesses returns the subset of candidate PIDs that hold actual CUDA contexts.
 // Uses --get-restore-tid (the same technique as the CRIU CUDA plugin) instead of
 // --get-state, because --get-state incorrectly matches coordinator processes like
