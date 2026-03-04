@@ -25,7 +25,9 @@ def get_socket_path(device: int) -> str:
     visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
     visible_token = None
     if visible_devices:
-        tokens = [token.strip() for token in visible_devices.split(",") if token.strip()]
+        tokens = [
+            token.strip() for token in visible_devices.split(",") if token.strip()
+        ]
         if 0 <= device < len(tokens):
             visible_token = tokens[device]
 
