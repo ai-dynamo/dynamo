@@ -118,7 +118,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     pub fn new(
         publisher: P,
         block_size: usize,
-        dp_sizes: HashMap<u64, u32>,
+        dp_range: &HashMap<u64, (u32, u32)>,
         replica_sync: bool,
         router_id: u64,
         worker_type: &'static str,
@@ -129,8 +129,8 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         let request_to_worker = Arc::new(DashMap::new());
         let request_to_lora = Arc::new(DashMap::new());
 
-        for (worker_id, dp_size) in dp_sizes {
-            for dp_rank in 0..dp_size {
+        for (&worker_id, &(dp_start, dp_size)) in dp_range {
+            for dp_rank in dp_start..dp_start + dp_size {
                 let worker = WorkerWithDpRank::new(worker_id, dp_rank);
                 workers.insert(worker, ActiveSequences::new(block_size));
             }
@@ -248,15 +248,15 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
 
     /// Update the set of workers, adding and removing as needed.
     ///
-    /// `new_dp_sizes` maps worker IDs to their data-parallel size.
-    pub fn update_workers(&self, new_dp_sizes: HashMap<u64, u32>) {
+    /// `new_dp_range` maps worker IDs to their data-parallel range (start, size).
+    pub fn update_workers(&self, new_dp_range: &HashMap<u64, (u32, u32)>) {
         let current_workers: HashSet<WorkerWithDpRank> =
             self.workers.iter().map(|entry| *entry.key()).collect();
 
         let mut new_workers: HashSet<WorkerWithDpRank> = HashSet::new();
-        for (worker_id, dp_size) in &new_dp_sizes {
-            for dp_rank in 0..*dp_size {
-                new_workers.insert(WorkerWithDpRank::new(*worker_id, dp_rank));
+        for (&worker_id, &(dp_start, dp_size)) in new_dp_range {
+            for dp_rank in dp_start..(dp_start + dp_size) {
+                new_workers.insert(WorkerWithDpRank::new(worker_id, dp_rank));
             }
         }
 

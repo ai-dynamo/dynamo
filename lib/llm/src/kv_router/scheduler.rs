@@ -141,11 +141,11 @@ impl KvScheduler {
                 let current_workers = monitor_rx.borrow_and_update().clone();
 
                 if current_workers != last_workers {
-                    let dp_sizes: HashMap<u64, u32> = current_workers
+                    let dp_range: HashMap<u64, (u32, u32)> = current_workers
                         .iter()
-                        .map(|(&id, c)| (id, c.data_parallel_size))
+                        .map(|(&id, c)| (id, (c.data_parallel_start_rank, c.data_parallel_size)))
                         .collect();
-                    slots_monitor.update_workers(dp_sizes);
+                    slots_monitor.update_workers(&dp_range);
                     last_workers = current_workers;
                 }
             }
@@ -441,8 +441,9 @@ impl WorkerSelector for DefaultWorkerSelector {
             .filter(|(wid, _)| allowed_ids.is_none_or(|ids| ids.contains(wid)))
         {
             let data_parallel_size = config.data_parallel_size;
+            let data_parallel_start_rank = config.data_parallel_start_rank;
 
-            for dp_rank in 0..data_parallel_size {
+            for dp_rank in data_parallel_start_rank..data_parallel_start_rank + data_parallel_size {
                 let worker = WorkerWithDpRank::new(*worker_id, dp_rank);
 
                 // Get overlap for this worker (defaults to 0 if not in overlaps)

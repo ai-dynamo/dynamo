@@ -197,11 +197,12 @@ impl SchedulerQueue {
 
         for (&worker_id, config) in configs.iter() {
             let dp_size = config.data_parallel_size;
+            let dp_start = config.data_parallel_start_rank;
             let max_batched = config
                 .max_num_batched_tokens
                 .unwrap_or(DEFAULT_MAX_BATCHED_TOKENS);
 
-            for dp_rank in 0..dp_size {
+            for dp_rank in dp_start..dp_start + dp_size {
                 let worker = WorkerWithDpRank::new(worker_id, dp_rank);
                 let tokens = active_tokens.get(&worker).copied().unwrap_or(0);
                 if (tokens as f64) <= threshold * (max_batched as f64) {
