@@ -144,8 +144,19 @@ navigation:
             path: backends/sglang/sglang-diffusion.md
           - page: Observability
             path: backends/sglang/sglang-observability.md
-      - page: TensorRT-LLM
+      - section: TensorRT-LLM
         path: backends/trtllm/README.md
+        contents:
+          - page: Reference Guide
+            path: backends/trtllm/trtllm-reference-guide.md
+          - page: Examples
+            path: backends/trtllm/trtllm-examples.md
+          - page: Prometheus Metrics
+            path: backends/trtllm/trtllm-prometheus.md
+          - page: Video Diffusion (Experimental)
+            path: backends/trtllm/trtllm-video-diffusion.md
+          - page: Known Issues and Mitigations
+            path: backends/trtllm/trtllm-known-issues.md
       - page: vLLM
         path: backends/vllm/README.md
 
@@ -303,18 +314,22 @@ navigation:
             path: backends/vllm/vllm-omni.md
       - section: TensorRT-LLM Details
         contents:
-          - page: Multinode Examples
-            path: backends/trtllm/multinode/multinode-examples.md
-          - page: Llama4 + Eagle
-            path: backends/trtllm/llama4-plus-eagle.md
+          - page: Building a Custom Container
+            path: backends/trtllm/trtllm-building-custom-container.md
           - page: KV Cache Transfer
-            path: backends/trtllm/kv-cache-transfer.md
+            path: backends/trtllm/trtllm-kv-cache-transfer.md
+          - page: Logits Processing
+            path: backends/trtllm/trtllm-logits-processing.md
+          - page: DP Rank Routing
+            path: backends/trtllm/trtllm-dp-rank-routing.md
+          - page: Multinode Examples
+            path: backends/trtllm/multinode/trtllm-multinode-examples.md
+          - page: Llama4 + Eagle
+            path: backends/trtllm/trtllm-llama4-plus-eagle.md
           - page: Gemma3 Sliding Window
-            path: backends/trtllm/gemma3-sliding-window-attention.md
+            path: backends/trtllm/trtllm-gemma3-sliding-window-attention.md
           - page: GPT-OSS
-            path: backends/trtllm/gpt-oss.md
-          - page: Prometheus
-            path: backends/trtllm/prometheus.md
+            path: backends/trtllm/trtllm-gpt-oss.md
       # -- Features (hidden sub-pages) --
       - section: Speculative Decoding
         path: features/speculative-decoding/README.md
