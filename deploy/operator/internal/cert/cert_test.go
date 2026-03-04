@@ -123,21 +123,6 @@ func TestCertManager_ManualModeClosesChannelImmediately(t *testing.T) {
 	}
 }
 
-func TestCertManager_IsReady(t *testing.T) {
-	cfg := &configv1alpha1.WebhookServer{}
-	cm := newTestCertManager(fake.NewClientBuilder().WithScheme(newScheme()), cfg)
-
-	if cm.IsReady() {
-		t.Error("should not be ready before Setup")
-	}
-
-	close(cm.ready)
-
-	if !cm.IsReady() {
-		t.Error("should be ready after channel is closed")
-	}
-}
-
 func TestInjectIntoValidatingWebhooks(t *testing.T) {
 	wc := &admissionregistrationv1.ValidatingWebhookConfiguration{
 		ObjectMeta: metav1.ObjectMeta{

@@ -532,11 +532,14 @@ func main() {
 		setupLog.Error(err, "unable to set up health check")
 		os.Exit(1)
 	}
+	webhooksReady := make(chan struct{})
 	if err := mgr.AddReadyzCheck("readyz", func(req *http.Request) error {
-		if certMgr.IsReady() {
+		select {
+		case <-webhooksReady:
 			return nil
+		default:
+			return fmt.Errorf("webhook handlers not yet registered")
 		}
-		return fmt.Errorf("webhook certificates not yet ready")
 	}); err != nil {
 		setupLog.Error(err, "unable to set up ready check")
 		os.Exit(1)
@@ -573,6 +576,7 @@ func main() {
 			setupLog.Error(err, "failed to register webhooks")
 			os.Exit(1)
 		}
+		close(webhooksReady)
 	}()
 
 	setupLog.Info("starting manager")

@@ -89,16 +89,6 @@ func (cm *CertManager) WaitReady() {
 	cm.logger.Info("Webhook certificates are ready")
 }
 
-// IsReady returns true if certificates are available (non-blocking).
-func (cm *CertManager) IsReady() bool {
-	select {
-	case <-cm.ready:
-		return true
-	default:
-		return false
-	}
-}
-
 func (cm *CertManager) setupAutoProvisioning(ctx context.Context, mgr ctrl.Manager) error {
 	if err := cm.createPlaceholderSecretIfNotExists(ctx); err != nil {
 		return fmt.Errorf("ensuring webhook TLS secret exists: %w", err)
