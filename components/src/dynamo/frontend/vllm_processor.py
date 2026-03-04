@@ -549,6 +549,7 @@ class VllmProcessor:
 
         try:
             request.setdefault("extra_args", {})["_t_frontend_send_ns"] = time.time_ns()
+            logger.info(f"[timing] frontend_send ts={time.time_ns()}")
             if self.is_kv_router:
                 dynamo_stream = await self.router.generate(
                     token_ids=tokens,
