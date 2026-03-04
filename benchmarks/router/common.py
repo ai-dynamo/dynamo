@@ -226,6 +226,7 @@ def prepare_trace_dataset(args, output_dir, logger):
         or args.prefix_len_multiplier != 1.0
         or args.prefix_root_multiplier != 1
         or args.prompt_len_multiplier != 1.0
+        or args.osl_multiplier != 1.0
         or args.max_isl is not None
         or args.min_isl is not None
         or args.min_osl is not None
