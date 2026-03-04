@@ -98,9 +98,13 @@ spec:
             value: /opt/dynamo/configs/config.yaml
           - name: HF_HOME
             value: /opt/models
-          # Adjust CPU cache size as needed
+          - name: DYN_KVBM_TRTLLM_ZMQ_PORT
+            value: "20081"
+          # Adjust below DYN_KVBM_* variables as needed. `DYN_KVBM_TRTLLM_ZMQ_PORT` is required.
           - name: DYN_KVBM_CPU_CACHE_GB
             value: "100"
+          - name: DYN_KVBM_LEADER_WORKER_INIT_TIMEOUT_SECS
+            value: "3600"
           volumeMounts:
           - mountPath: /opt/dynamo/configs
             name: llm-config-kimi-agg-kvbm
