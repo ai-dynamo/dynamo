@@ -26,8 +26,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::indexer::{SyncIndexer, WorkerTask};
 use crate::protocols::{
-    ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheEventError, KvCacheStoreData,
-    KvCacheStoredBlockData, LocalBlockHash, OverlapScores, RouterEvent, WorkerId, WorkerWithDpRank,
+    DpRank, ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheEventError,
+    KvCacheStoreData, KvCacheStoredBlockData, LocalBlockHash, OverlapScores, RouterEvent, WorkerId,
+    WorkerWithDpRank,
 };
 
 /// Entry for the innermost level of the index.
@@ -149,6 +150,9 @@ impl SyncIndexer for PositionalIndexer {
                 }
                 WorkerTask::RemoveWorker(worker_id) => {
                     self.remove_or_clear_worker_blocks_impl(&mut worker_blocks, worker_id, false);
+                }
+                WorkerTask::RemoveWorkerDpRank(worker_id, dp_rank) => {
+                    self.remove_worker_dp_rank_impl(&mut worker_blocks, worker_id, dp_rank);
                 }
                 WorkerTask::DumpEvents(sender) => {
                     let events = self.dump_events(&worker_blocks);
@@ -327,6 +331,23 @@ impl PositionalIndexer {
         worker_id: WorkerId,
     ) {
         self.remove_or_clear_worker_blocks_impl(worker_blocks, worker_id, true);
+    }
+
+    fn remove_worker_dp_rank_impl(
+        &self,
+        worker_blocks: &mut FxHashMap<WorkerWithDpRank, LevelIndex>,
+        worker_id: WorkerId,
+        dp_rank: DpRank,
+    ) {
+        let key = WorkerWithDpRank { worker_id, dp_rank };
+        if let Some(worker_map) = worker_blocks.remove(&key) {
+            for (seq_hash, (position, local_hash)) in worker_map.iter() {
+                if let Some(mut entry) = self.index.get_mut(&(*position, *local_hash)) {
+                    let _ = entry.remove(*seq_hash, key);
+                }
+            }
+            self.tree_sizes.remove(&key);
+        }
     }
 
     /// Helper function to remove or clear blocks for a worker.
