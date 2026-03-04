@@ -6,6 +6,7 @@
 *.so
 *.dylib
 bin/*
+tilt_bin/
 Dockerfile.cross
 
 #temp files
@@ -30,6 +31,9 @@ go.work
 *.swp
 *.swo
 *~
+
+# Tilt local settings (personal overrides)
+tilt-settings.local.yaml
 
 
 !env*
