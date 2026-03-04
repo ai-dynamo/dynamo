@@ -13,8 +13,6 @@ from typing import (
     Tuple,
 )
 
-from ._prometheus_names import prometheus_names
-
 # Import from specialized modules
 from .prometheus_metrics import RuntimeMetrics as PyRuntimeMetrics
 
@@ -1607,13 +1605,3 @@ class VirtualConnectorClient:
         """Blocks until there is a new decision to fetch using 'get'"""
         ...
 
-__all__ = [
-    "Client",
-    "Context",
-    "KserveGrpcService",
-    "ModelDeploymentCard",
-    "PythonAsyncEngine",
-    "prometheus_names",
-    "ModelCardInstanceId",
-
-]
