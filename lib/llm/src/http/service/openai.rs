@@ -42,7 +42,9 @@ use super::{
     service_v2,
 };
 use crate::engines::ValidateRequest;
-use crate::protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
+use crate::protocols::openai::chat_completions::aggregator::{
+    ChatCompletionAggregator, streaming_tool_call_adapter,
+};
 use crate::protocols::openai::nvext::apply_header_routing_overrides;
 use crate::protocols::openai::{
     chat_completions::{
@@ -1057,6 +1059,8 @@ async fn chat_completions(
         // must be delivered as SSE events with `event: error` in the stream (handled by
         // EventConverter and monitor_for_disconnects). This is standard SSE behavior.
         stream_handle.arm(); // allows the system to detect client disconnects and cancel the LLM generation
+
+        let stream = streaming_tool_call_adapter(stream);
 
         let mut http_queue_guard = Some(http_queue_guard);
         let stream = stream
