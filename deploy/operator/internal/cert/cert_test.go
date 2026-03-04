@@ -22,6 +22,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
+const (
+	testSecretName  = "webhook-cert"
+	testServiceName = "my-operator-webhook-service"
+	testNamespace   = "test-ns"
+)
+
 func newScheme() *runtime.Scheme {
 	s := runtime.NewScheme()
 	_ = corev1.AddToScheme(s)
@@ -34,7 +40,7 @@ func newTestCertManager(cl *fake.ClientBuilder, cfg *configv1alpha1.WebhookServe
 	return &CertManager{
 		client:    cl.Build(),
 		cfg:       cfg,
-		namespace: "test-ns",
+		namespace: testNamespace,
 		ready:     make(chan struct{}),
 		logger:    logr.Discard(),
 	}
@@ -44,13 +50,13 @@ func newTestInjector(cl *fake.ClientBuilder, cfg *configv1alpha1.OperatorConfigu
 	return &CABundleInjector{
 		client:    cl.Build(),
 		cfg:       cfg,
-		namespace: "test-ns",
+		namespace: testNamespace,
 		logger:    logr.Discard(),
 	}
 }
 
 func TestCreatePlaceholderSecretIfNotExists_CreatesWhenMissing(t *testing.T) {
-	cfg := &configv1alpha1.WebhookServer{SecretName: "webhook-cert"}
+	cfg := &configv1alpha1.WebhookServer{SecretName: testSecretName}
 	cm := newTestCertManager(fake.NewClientBuilder().WithScheme(newScheme()), cfg)
 	ctx := context.Background()
 
@@ -59,7 +65,7 @@ func TestCreatePlaceholderSecretIfNotExists_CreatesWhenMissing(t *testing.T) {
 	}
 
 	secret := &corev1.Secret{}
-	if err := cm.client.Get(ctx, types.NamespacedName{Namespace: "test-ns", Name: "webhook-cert"}, secret); err != nil {
+	if err := cm.client.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: testSecretName}, secret); err != nil {
 		t.Fatalf("secret should exist: %v", err)
 	}
 
@@ -77,8 +83,8 @@ func TestCreatePlaceholderSecretIfNotExists_CreatesWhenMissing(t *testing.T) {
 func TestCreatePlaceholderSecretIfNotExists_NoopWhenExists(t *testing.T) {
 	existing := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Namespace: "test-ns",
-			Name:      "webhook-cert",
+			Namespace: testNamespace,
+			Name:      testSecretName,
 		},
 		Type: corev1.SecretTypeTLS,
 		Data: map[string][]byte{
@@ -87,7 +93,7 @@ func TestCreatePlaceholderSecretIfNotExists_NoopWhenExists(t *testing.T) {
 			"ca.crt":  []byte("existing-ca"),
 		},
 	}
-	cfg := &configv1alpha1.WebhookServer{SecretName: "webhook-cert"}
+	cfg := &configv1alpha1.WebhookServer{SecretName: testSecretName}
 	cm := newTestCertManager(fake.NewClientBuilder().WithScheme(newScheme()).WithObjects(existing), cfg)
 	ctx := context.Background()
 
@@ -96,7 +102,7 @@ func TestCreatePlaceholderSecretIfNotExists_NoopWhenExists(t *testing.T) {
 	}
 
 	secret := &corev1.Secret{}
-	if err := cm.client.Get(ctx, types.NamespacedName{Namespace: "test-ns", Name: "webhook-cert"}, secret); err != nil {
+	if err := cm.client.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: testSecretName}, secret); err != nil {
 		t.Fatalf("secret should exist: %v", err)
 	}
 	if string(secret.Data["tls.crt"]) != "existing-cert" {
@@ -108,7 +114,7 @@ func TestCertManager_ManualModeClosesChannelImmediately(t *testing.T) {
 	cfg := &configv1alpha1.WebhookServer{
 		CertProvisionMode: configv1alpha1.CertProvisionModeManual,
 		CertDir:           "/tmp/certs",
-		SecretName:        "webhook-cert",
+		SecretName:        testSecretName,
 	}
 	cm := newTestCertManager(fake.NewClientBuilder().WithScheme(newScheme()), cfg)
 
@@ -127,7 +133,7 @@ func TestInjectIntoValidatingWebhooks(t *testing.T) {
 	wc := &admissionregistrationv1.ValidatingWebhookConfiguration{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:   "test-validating",
-			Labels: map[string]string{partOfLabel: partOfValue, operatorNamespaceLabel: "test-ns"},
+			Labels: map[string]string{partOfLabel: partOfValue, operatorNamespaceLabel: testNamespace},
 		},
 		Webhooks: []admissionregistrationv1.ValidatingWebhook{
 			{
@@ -140,7 +146,7 @@ func TestInjectIntoValidatingWebhooks(t *testing.T) {
 	}
 
 	cfg := &configv1alpha1.OperatorConfiguration{}
-	cfg.Server.Webhook.SecretName = "webhook-cert"
+	cfg.Server.Webhook.SecretName = testSecretName
 	injector := newTestInjector(fake.NewClientBuilder().WithScheme(newScheme()).WithObjects(wc), cfg)
 	ctx := context.Background()
 
@@ -238,7 +244,7 @@ func TestInjectIntoMutatingWebhooks(t *testing.T) {
 	wc := &admissionregistrationv1.MutatingWebhookConfiguration{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:   "test-mutating",
-			Labels: map[string]string{partOfLabel: partOfValue, operatorNamespaceLabel: "test-ns"},
+			Labels: map[string]string{partOfLabel: partOfValue, operatorNamespaceLabel: testNamespace},
 		},
 		Webhooks: []admissionregistrationv1.MutatingWebhook{
 			{
@@ -251,7 +257,7 @@ func TestInjectIntoMutatingWebhooks(t *testing.T) {
 	}
 
 	cfg := &configv1alpha1.OperatorConfiguration{}
-	cfg.Server.Webhook.SecretName = "webhook-cert"
+	cfg.Server.Webhook.SecretName = testSecretName
 	injector := newTestInjector(fake.NewClientBuilder().WithScheme(newScheme()).WithObjects(wc), cfg)
 	ctx := context.Background()
 
@@ -289,7 +295,7 @@ func TestEnsureCRDConversion(t *testing.T) {
 	}
 
 	cfg := &configv1alpha1.OperatorConfiguration{}
-	cfg.Server.Webhook.ServiceName = "my-operator-webhook-service"
+	cfg.Server.Webhook.ServiceName = testServiceName
 	injector := newTestInjector(fake.NewClientBuilder().WithScheme(newScheme()).WithObjects(crd), cfg)
 	ctx := context.Background()
 
@@ -308,7 +314,7 @@ func TestEnsureCRDConversion(t *testing.T) {
 	if updated.Spec.Conversion.Strategy != apiextensionsv1.WebhookConverter {
 		t.Errorf("expected Webhook strategy, got %s", updated.Spec.Conversion.Strategy)
 	}
-	if updated.Spec.Conversion.Webhook.ClientConfig.Service.Name != "my-operator-webhook-service" {
+	if updated.Spec.Conversion.Webhook.ClientConfig.Service.Name != testServiceName {
 		t.Errorf("expected service name my-operator-webhook-service, got %s",
 			updated.Spec.Conversion.Webhook.ClientConfig.Service.Name)
 	}
@@ -319,7 +325,7 @@ func TestEnsureCRDConversion(t *testing.T) {
 
 func TestEnsureCRDConversion_SkipsWhenCRDNotFound(t *testing.T) {
 	cfg := &configv1alpha1.OperatorConfiguration{}
-	cfg.Server.Webhook.ServiceName = "my-operator-webhook-service"
+	cfg.Server.Webhook.ServiceName = testServiceName
 	injector := newTestInjector(fake.NewClientBuilder().WithScheme(newScheme()), cfg)
 	ctx := context.Background()
 
@@ -331,8 +337,8 @@ func TestEnsureCRDConversion_SkipsWhenCRDNotFound(t *testing.T) {
 func TestReadCABundle(t *testing.T) {
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Namespace: "test-ns",
-			Name:      "webhook-cert",
+			Namespace: testNamespace,
+			Name:      testSecretName,
 		},
 		Data: map[string][]byte{
 			"tls.crt": []byte("cert-data"),
@@ -341,7 +347,7 @@ func TestReadCABundle(t *testing.T) {
 		},
 	}
 	cfg := &configv1alpha1.OperatorConfiguration{}
-	cfg.Server.Webhook.SecretName = "webhook-cert"
+	cfg.Server.Webhook.SecretName = testSecretName
 	injector := newTestInjector(fake.NewClientBuilder().WithScheme(newScheme()).WithObjects(secret), cfg)
 
 	ca, err := injector.readCABundle(context.Background())
@@ -356,8 +362,8 @@ func TestReadCABundle(t *testing.T) {
 func TestReadCABundle_ErrorOnMissingCA(t *testing.T) {
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Namespace: "test-ns",
-			Name:      "webhook-cert",
+			Namespace: testNamespace,
+			Name:      testSecretName,
 		},
 		Data: map[string][]byte{
 			"tls.crt": []byte("cert-data"),
@@ -365,7 +371,7 @@ func TestReadCABundle_ErrorOnMissingCA(t *testing.T) {
 		},
 	}
 	cfg := &configv1alpha1.OperatorConfiguration{}
-	cfg.Server.Webhook.SecretName = "webhook-cert"
+	cfg.Server.Webhook.SecretName = testSecretName
 	injector := newTestInjector(fake.NewClientBuilder().WithScheme(newScheme()).WithObjects(secret), cfg)
 
 	if _, err := injector.readCABundle(context.Background()); err == nil {
