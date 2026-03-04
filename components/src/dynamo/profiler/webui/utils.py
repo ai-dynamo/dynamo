@@ -9,6 +9,7 @@ import threading
 import time
 from enum import Enum
 from pathlib import Path
+from typing import Any, Callable
 
 import gradio as gr
 import numpy as np
@@ -81,10 +82,10 @@ def build_single_service_preview_header_lines(
     *,
     service_name: str,
     engine_type: str,
-    mapping,
+    mapping: Any,
     ttft_or_itl_ms: float | None,
     thpt_per_gpu: float | None,
-    args,
+    args: Any,
 ) -> list[str]:
     header_lines = [
         "# DynamoGraphDeployment Service Config Preview",
@@ -112,13 +113,13 @@ def build_two_service_preview_header_lines(
     *,
     prefill_service_name: str,
     decode_service_name: str,
-    prefill_mapping,
-    decode_mapping,
+    prefill_mapping: Any,
+    decode_mapping: Any,
     prefill_ttft_ms: float | None,
     prefill_thpt_per_gpu: float | None,
     decode_itl_ms: float | None,
     decode_thpt_per_gpu: float | None,
-    args,
+    args: Any,
 ) -> list[str]:
     header_lines = [
         "# DynamoGraphDeployment Services Config Preview",
@@ -170,11 +171,11 @@ WEB_UI_SELECTION_TIMEOUT = 3600
 
 
 def generate_config_data(
-    prefill_data,
-    decode_data,
-    args,
+    prefill_data: Any,
+    decode_data: Any,
+    args: Any,
     write_to_disk: bool = True,
-):
+) -> dict:
     """
     Generate JSON data file for WebUI from profiling results.
 
@@ -228,7 +229,7 @@ def generate_config_data(
     return data
 
 
-def populate_prefill_data(data, prefill_data, args):
+def populate_prefill_data(data: dict, prefill_data: Any, args: Any) -> None:
     """Populate prefill chart and table data."""
     if not prefill_data.num_gpus:
         return
@@ -289,7 +290,7 @@ def populate_prefill_data(data, prefill_data, args):
     data[PlotType.PREFILL]["table"]["data"] = table_data
 
 
-def populate_decode_data(data, decode_data, args):
+def populate_decode_data(data: dict, decode_data: Any, args: Any) -> None:
     """Populate decode chart and table data."""
     if not decode_data.num_gpus:
         return
@@ -354,11 +355,11 @@ def populate_decode_data(data, decode_data, args):
 
 
 def populate_cost_data(
-    data,
-    prefill_data,
-    decode_data,
-    args,
-):
+    data: dict,
+    prefill_data: Any,
+    decode_data: Any,
+    args: Any,
+) -> None:
     """Populate cost chart and table data with pareto-optimal configurations.
 
     Note: This function computes GPU hours (not cost). The frontend handles
@@ -487,8 +488,11 @@ def populate_cost_data(
 
 
 def create_selection_handler(
-    data_dict_ref, selection_queue, prefill_selection, decode_selection
-):
+    data_dict_ref: dict,
+    selection_queue: queue.Queue,
+    prefill_selection: dict,
+    decode_selection: dict,
+) -> Callable[[str], str]:
     """Create a selection handler closure for the WebUI.
 
     Args:
@@ -571,9 +575,9 @@ def create_selection_handler(
 
 
 def create_gradio_interface(
-    json_data_str,
-    handle_selection,
-):
+    json_data_str: str,
+    handle_selection: Callable[[str], str],
+) -> Any:
     """Create the Gradio interface for configuration selection.
 
     Args:
@@ -665,7 +669,9 @@ def create_gradio_interface(
     return demo
 
 
-def wait_for_selection(demo, selection_queue, port):
+def wait_for_selection(
+    demo: Any, selection_queue: queue.Queue, port: int
+) -> tuple[int, int]:
     """Launch the demo and wait for user selection.
 
     Args:

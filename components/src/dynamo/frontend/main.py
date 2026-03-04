@@ -22,7 +22,7 @@ import os
 import signal
 import sys
 from argparse import Namespace
-from typing import Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import uvloop
 
@@ -41,6 +41,9 @@ from dynamo.runtime.logging import configure_dynamo_logging
 
 from .frontend_args import FrontendArgGroup, FrontendConfig
 
+if TYPE_CHECKING:
+    from .vllm_processor import EngineFactory
+
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
@@ -50,7 +53,7 @@ def setup_engine_factory(
     router_config: RouterConfig,
     config: FrontendConfig,
     vllm_flags: Namespace,
-):
+) -> "EngineFactory":
     """
     When using vllm pre and post processor, create the EngineFactory that
     creates the engines that run requests.
@@ -177,24 +180,7 @@ async def async_main():
 
     if config.router_mode == "kv":
         router_mode = RouterMode.KV
-        kv_router_config = KvRouterConfig(
-            overlap_score_weight=config.kv_overlap_score_weight,
-            router_temperature=config.router_temperature,
-            use_kv_events=config.use_kv_events,
-            durable_kv_events=config.durable_kv_events,
-            router_replica_sync=config.router_replica_sync,
-            router_track_active_blocks=config.router_track_active_blocks,
-            router_track_output_blocks=config.router_track_output_blocks,
-            router_assume_kv_reuse=config.router_assume_kv_reuse,
-            router_snapshot_threshold=config.router_snapshot_threshold,
-            router_reset_states=config.router_reset_states,
-            router_ttl_secs=config.router_ttl,
-            router_max_tree_size=config.router_max_tree_size,
-            router_prune_target_ratio=config.router_prune_target_ratio,
-            router_queue_threshold=config.router_queue_threshold,
-            router_event_threads=config.router_event_threads,
-            router_enable_cache_control=config.router_enable_cache_control,
-        )
+        kv_router_config = KvRouterConfig(**config.kv_router_kwargs())
     elif config.router_mode == "random":
         router_mode = RouterMode.Random
         kv_router_config = None
@@ -213,7 +199,7 @@ async def async_main():
         active_prefill_tokens_threshold_frac=config.active_prefill_tokens_threshold_frac,
         decode_fallback=config.decode_fallback,
     )
-    kwargs = {
+    kwargs: dict[str, Any] = {
         "http_host": config.http_host,
         "http_port": config.http_port,
         "kv_cache_block_size": config.kv_cache_block_size,
@@ -262,7 +248,7 @@ async def async_main():
         pass
 
 
-async def graceful_shutdown(runtime):
+async def graceful_shutdown(runtime: DistributedRuntime) -> None:
     """Handle graceful shutdown of the distributed runtime.
 
     Args:
@@ -271,7 +257,7 @@ async def graceful_shutdown(runtime):
     runtime.shutdown()
 
 
-def main():
+def main() -> None:
     """Entry point for the Dynamo frontend CLI."""
     uvloop.run(async_main())
 

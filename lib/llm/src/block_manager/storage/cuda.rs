@@ -332,10 +332,13 @@ impl Default for PinnedAllocator {
 }
 
 impl PinnedAllocator {
-    /// Create a new pinned allocator
-    pub fn new() -> Result<Self, StorageError> {
+    /// Create a new pinned allocator for the specified device.
+    ///
+    /// The device_id determines which NUMA node pinned memory will be allocated
+    /// on when NUMA-aware allocation is enabled.
+    pub fn new(device_id: usize) -> Result<Self, StorageError> {
         Ok(Self {
-            ctx: Cuda::device_or_create(0)?,
+            ctx: Cuda::device_or_create(device_id)?,
         })
     }
 }
