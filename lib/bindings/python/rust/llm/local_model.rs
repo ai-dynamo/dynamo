@@ -46,6 +46,11 @@ impl ModelRuntimeConfig {
     }
 
     #[setter]
+    fn set_data_parallel_start_rank(&mut self, data_parallel_start_rank: u32) {
+        self.inner.data_parallel_start_rank = data_parallel_start_rank;
+    }
+
+    #[setter]
     fn set_data_parallel_size(&mut self, data_parallel_size: u32) {
         self.inner.data_parallel_size = data_parallel_size;
     }

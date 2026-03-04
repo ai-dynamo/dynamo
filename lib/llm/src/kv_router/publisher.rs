@@ -1,12 +1,12 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use async_trait::async_trait;
 use rmp_serde as rmps;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -289,7 +289,7 @@ impl KvEventPublisher {
                     };
 
                 start_event_processor(
-                    event_publisher,
+                    EventPlanePublisher(event_publisher),
                     worker_id,
                     cancellation_token_clone,
                     rx,
@@ -315,7 +315,7 @@ impl KvEventPublisher {
                     return;
                 }
                 start_event_processor_jetstream(
-                    nats_queue,
+                    JetStreamPublisher(nats_queue),
                     worker_id,
                     cancellation_token_clone,
                     rx,
@@ -366,22 +366,21 @@ impl Drop for KvEventPublisher {
     }
 }
 
-#[async_trait]
-trait EventSink: Send + Sync {
-    async fn publish_event(&self, event: &RouterEvent) -> Result<()>;
-}
+use dynamo_kv_router::EventSink;
 
-#[async_trait]
-impl EventSink for EventPublisher {
-    async fn publish_event(&self, event: &RouterEvent) -> Result<()> {
-        self.publish(event).await
+struct EventPlanePublisher(EventPublisher);
+
+impl EventSink for EventPlanePublisher {
+    fn publish_event(&self, event: &RouterEvent) -> impl Future<Output = Result<()>> + Send {
+        self.0.publish(event)
     }
 }
 
-#[async_trait]
-impl EventSink for NatsQueue {
-    async fn publish_event(&self, event: &RouterEvent) -> Result<()> {
-        NatsQueue::publish_event(self, KV_EVENT_SUBJECT, event).await
+struct JetStreamPublisher(NatsQueue);
+
+impl EventSink for JetStreamPublisher {
+    fn publish_event(&self, event: &RouterEvent) -> impl Future<Output = Result<()>> + Send {
+        NatsQueue::publish_event(&self.0, KV_EVENT_SUBJECT, event)
     }
 }
 
@@ -587,8 +586,8 @@ async fn start_event_processor<P: EventSink + Send + Sync + 'static>(
 }
 
 /// Batched event processor using JetStream (durable).
-async fn start_event_processor_jetstream(
-    publisher: NatsQueue,
+async fn start_event_processor_jetstream<P: EventSink + Send + Sync + 'static>(
+    publisher: P,
     worker_id: u64,
     cancellation_token: CancellationToken,
     rx: mpsc::UnboundedReceiver<KvCacheEvent>,
@@ -1278,15 +1277,17 @@ mod tests_startup_helpers {
         }
     }
 
-    #[async_trait::async_trait]
     impl EventSink for MockComponent {
-        async fn publish_event(&self, event: &RouterEvent) -> anyhow::Result<()> {
+        fn publish_event(
+            &self,
+            event: &RouterEvent,
+        ) -> impl Future<Output = anyhow::Result<()>> + Send {
             let bytes = rmp_serde::to_vec(event).unwrap();
             self.published
                 .lock()
                 .unwrap()
                 .push((KV_EVENT_SUBJECT.to_string(), bytes));
-            Ok(())
+            async { Ok(()) }
         }
     }
 
@@ -2253,11 +2254,10 @@ mod event_processor_tests {
         }
     }
 
-    #[async_trait]
     impl EventSink for MockPublisher {
-        async fn publish_event(&self, event: &RouterEvent) -> Result<()> {
+        fn publish_event(&self, event: &RouterEvent) -> impl Future<Output = Result<()>> + Send {
             self.events.lock().unwrap().push(event.clone());
-            Ok(())
+            async { Ok(()) }
         }
     }
 
