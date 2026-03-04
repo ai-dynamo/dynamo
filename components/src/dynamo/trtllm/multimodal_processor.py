@@ -221,22 +221,35 @@ class MultimodalRequestProcessor:
         # mm_processor_kwargs must be a dict (not None) for TRT-LLM's processor
         processed_inputs = {"prompt_token_ids": token_ids, "mm_processor_kwargs": {}}
 
-        # EPD Flow Case 2: Embeddings received via NIXL from encode worker
-        # The encode worker computed vision embeddings and transferred them via RDMA/NIXL
-        # We need to pass these embeddings directly to TRT-LLM's generate_async
-        if embeddings is not None:
-            # The aforementioned fallback to default_multimodal_input_loader:
-            messages = request.get("extra_args", {}).get(
-                "messages", request.get("messages", [])
-            )
-            text_prompt, _, _ = self.extract_prompt_and_media(messages)
-            loader_kwargs = {}
-            loader_kwargs["mm_embeddings"] = [embeddings]
+        # The aforementioned fallback to default_multimodal_input_loader:
+        messages = request.get("extra_args", {}).get(
+            "messages", request.get("messages", [])
+        )
+        text_prompt, _, embedding_paths = self.extract_prompt_and_media(messages)
+        loader_kwargs = {}
+
+        # Two cases, both for the default_multimodal_input_loader fallback:
+        # 1) EPD Flow Case 2: Embeddings received via NIXL from encode worker
+        #   The encode worker computed vision embeddings and transferred them via RDMA/NIXL
+        #   We need to pass these embeddings directly to TRT-LLM's generate_async
+        # 2) PD flow with no NIXL and no encoder
+        if embeddings is not None or embedding_paths:
+            if embeddings is not None:
+                logging.info(
+                    f"Using NIXL embeddings from encoder: shape={embeddings.shape if hasattr(embeddings, 'shape') else 'N/A'}"
+                )
+                loader_kwargs["mm_embeddings"] = [embeddings]
+            elif embedding_paths:
+                # PD flow with no NIXL and no encoder
+                loader_kwargs["mm_embeddings"] = [
+                    self.load_tensor_from_path_or_url(path) for path in embedding_paths
+                ]
+                logging.info(f"Using embedding paths: {embedding_paths}")
 
             # NOTE: default_multimodal_input_loader downloads images and preprocesses them
             # synchronously. Wrap in asyncio.to_thread to allow concurrent image loading
             # across multiple requests, improving throughput at high concurrency.
-            processed_inputs = await asyncio.to_thread(
+            fallback_processed_inputs = await asyncio.to_thread(
                 lambda: default_multimodal_input_loader(
                     tokenizer=self.tokenizer,
                     model_dir=self.model_dir,
@@ -249,8 +262,8 @@ class MultimodalRequestProcessor:
                 )
             )
             # Return the first processed input if available
-            if processed_inputs:
-                return processed_inputs[0]
+            if fallback_processed_inputs:
+                return fallback_processed_inputs[0]
             return None
 
         # PD Flow: Pre-tokenized by Rust frontend with direct media loading
@@ -266,7 +279,6 @@ class MultimodalRequestProcessor:
             if image_items and isinstance(image_items, list):
                 # Separate embedding paths from regular image URLs
                 # Items come from Rust in format: {"Url": "..."} or {"Decoded": ...}
-                embedding_paths = []
                 image_urls = []
 
                 for item in image_items:
@@ -287,9 +299,7 @@ class MultimodalRequestProcessor:
                         continue
 
                     # Check if this is an embedding file based on extension
-                    if url.endswith((".pt", ".pth", ".bin")):
-                        embedding_paths.append(url)
-                    else:
+                    if not url.endswith((".pt", ".pth", ".bin")):
                         # Keep original item format for load_image_batch
                         image_urls.append(
                             item if isinstance(item, dict) else {"Url": item}
@@ -309,23 +319,6 @@ class MultimodalRequestProcessor:
                             )
                     except Exception as e:
                         logging.error(f"Failed to load images: {e}")
-                        return None
-
-                # Load embedding files (.pt, .pth, .bin) for PD flow
-                # These are pre-computed vision encoder outputs
-                if embedding_paths:
-                    try:
-                        loaded_embeddings = [
-                            self.load_tensor_from_path_or_url(path)
-                            for path in embedding_paths
-                        ]
-                        if loaded_embeddings:
-                            processed_mm_data["embedding"] = loaded_embeddings
-                            logging.info(
-                                f"Loaded {len(loaded_embeddings)} embedding file(s) from paths: {embedding_paths}"
-                            )
-                    except Exception as e:
-                        logging.error(f"Failed to load embeddings: {e}")
                         return None
 
             # TODO: Add support for video_url, audio_url
