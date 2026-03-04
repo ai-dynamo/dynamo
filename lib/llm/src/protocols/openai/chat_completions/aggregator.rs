@@ -1342,12 +1342,13 @@ mod tests {
         #[test]
         fn feed_cross_fragment_escape_boundary() {
             // The `escape_next` flag must survive across fragment boundaries.
-            // Fragment 1 ends with `\` inside a string; fragment 2 starts with `"` which
-            // must be treated as an escaped char (not a string close), then `}` closes the object.
+            // Fragment 1 ends with `\` inside a string (escape_next=true at fragment boundary).
+            // Fragment 2: first `"` is consumed as the escaped char (in_string stays true),
+            // second `"` closes the string, then `}` closes the object.
             let mut state = StreamingToolCallState::new(0, "id1".into(), "fn1".into());
-            assert!(!state.feed("{\"k\": \"val\\")); // ends with `\` inside string
-            assert!(state.feed("\"}")); // `"` is escaped (consumed by escape_next), `}` closes object
-            assert_eq!(state.accumulated_args, "{\"k\": \"val\\\"}");
+            assert!(!state.feed("{\"k\": \"val\\")); // ends with `\` — escape_next=true
+            assert!(state.feed("\"\"}")); // `"` consumed by escape, `"` closes string, `}` closes object
+            assert_eq!(state.accumulated_args, "{\"k\": \"val\\\"\"}");
         }
 
         #[test]
@@ -1440,8 +1441,9 @@ mod tests {
             // 5 original + 1 synthetic = 6 total
             assert_eq!(output.len(), 6);
 
-            // Original chunks: no event
-            for i in [0, 1, 2, 3, 4] {
+            // Original chunks: no event (indices 0-3 are originals before the synthetic,
+            // index 5 is the trailing non-tool chunk after the synthetic at index 4).
+            for i in [0usize, 1, 2, 3, 5] {
                 assert!(output[i].event.is_none(), "chunk {i} should have no event");
             }
 
