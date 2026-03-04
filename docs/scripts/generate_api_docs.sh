@@ -25,16 +25,14 @@ python3 docs/scripts/generate_python_api.py &
 PID_PYTHON=$!
 
 # 2. K8s CRD API (fernify → docs/kubernetes/api-reference.md)
-# Note: git checkout restores the raw committed file before fernifying.
-# This is safe because the fernified version is never committed — only the
-# raw version is tracked. If you have local edits to api-reference.md,
-# stash them first.
-if ! git diff --quiet docs/kubernetes/api-reference.md 2>/dev/null; then
-    echo "[2/3] K8s CRD API (restoring raw source before formatting)..."
-    git checkout -- docs/kubernetes/api-reference.md
-else
-    echo "[2/3] K8s CRD API..."
+# Restore the raw committed file before fernifying (the fernified version is
+# never committed). Abort if the file has staged changes to avoid data loss.
+echo "[2/3] K8s CRD API..."
+if ! git diff --cached --quiet docs/kubernetes/api-reference.md 2>/dev/null; then
+    echo "ERROR: docs/kubernetes/api-reference.md has staged changes. Unstage or stash first." >&2
+    exit 1
 fi
+git checkout -- docs/kubernetes/api-reference.md 2>/dev/null || true
 python3 docs/scripts/fernify_k8s_api.py &
 PID_K8S=$!
 

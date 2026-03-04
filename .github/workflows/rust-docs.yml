@@ -55,8 +55,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust toolchains
+        run: |
+          rustup toolchain install stable
+          rustup toolchain install nightly --profile minimal
 
       - name: Cache cargo registry and build
         uses: actions/cache@v4
@@ -70,12 +72,13 @@ jobs:
             ${{ runner.os }}-cargo-doc-
 
       - name: Build documentation
-        env:
-          RUSTDOCFLAGS: >-
-            --enable-index-page
-            -Zunstable-options
-            -D warnings
-        run: cargo +nightly doc --no-deps --workspace 2>&1 || cargo doc --no-deps --workspace
+        run: |
+          if rustup run nightly rustc --version 2>/dev/null; then
+            RUSTDOCFLAGS="--enable-index-page -Zunstable-options -D warnings" \
+              cargo +nightly doc --no-deps --workspace
+          else
+            cargo doc --no-deps --workspace
+          fi
 
       - name: Add redirect index.html
         run: |

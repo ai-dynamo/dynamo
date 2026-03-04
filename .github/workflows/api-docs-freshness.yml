@@ -33,7 +33,6 @@ jobs:
       python: ${{ steps.filter.outputs.python }}
       rust: ${{ steps.filter.outputs.rust }}
     steps:
-      - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
         id: filter
         with:
@@ -93,8 +92,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Install dependencies
-        run: pip install -r docs/scripts/requirements-apidocs.txt
+        # No pip install needed — generate_rust_api.py uses tomllib (stdlib on 3.12)
       - name: Regenerate Rust API docs
         run: python3 docs/scripts/generate_rust_api.py
       - name: Check for uncommitted changes

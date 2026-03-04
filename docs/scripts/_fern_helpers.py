@@ -69,18 +69,27 @@ def render_card_group(cards: list[dict[str, str]], cols: int) -> str:
     """Render a Fern <CardGroup> with <Card> elements.
 
     Each card dict must have 'title', 'icon', 'description'.
-    Optional 'href' adds a link.
+    Optional 'href' adds a link. Values are escaped for JSX attributes.
     """
     parts = [f"<CardGroup cols={{{cols}}}>\n"]
     for card in cards:
-        href = f' href="{card["href"]}"' if card.get("href") else ""
+        title = escape_jsx_attr(card["title"])
+        icon = escape_jsx_attr(card["icon"])
+        href = f' href="{escape_jsx_attr(card["href"])}"' if card.get("href") else ""
         parts.append(
-            f'  <Card title="{card["title"]}" icon="{card["icon"]}"{href}>\n'
+            f'  <Card title="{title}" icon="{icon}"{href}>\n'
             f'    {card["description"]}\n'
             f"  </Card>\n"
         )
     parts.append("</CardGroup>\n")
     return "".join(parts)
+
+
+def details_title(name: str, description: str) -> str:
+    """Build an escaped title for a <details> summary."""
+    if description:
+        return escape_jsx_attr(f"{name} \u2014 {description}")
+    return name
 
 
 def render_details(summary: str, body: str) -> str:

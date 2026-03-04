@@ -14,7 +14,7 @@ from pathlib import Path
 try:
     import tomllib
 except ModuleNotFoundError:
-    import toml as tomllib  # type: ignore[no-redef]
+    import toml as tomllib  # type: ignore[no-redef]  -- fallback for Python <3.11
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _fern_helpers import (  # noqa: E402

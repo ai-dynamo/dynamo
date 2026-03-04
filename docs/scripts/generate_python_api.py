@@ -31,7 +31,7 @@ from _fern_helpers import (  # noqa: E402
     AUTOGEN_WARNING,
     REPO_ROOT,
     SPDX_HEADER,
-    escape_jsx_attr,
+    details_title,
     escape_mdx_prose,
     render_card_group,
     render_details,
@@ -69,8 +69,7 @@ class RenderContext:
 
     all_classes: dict[str, Any]
     all_functions: dict[str, Any]
-    nixl_classes: list[Any]
-    nixl_functions: list[Any]
+    modules_collection: Any  # griffe ModulesCollection for module-based sections
     placed_classes: set[str] = field(default_factory=set)
     placed_functions: set[str] = field(default_factory=set)
 
@@ -405,14 +404,20 @@ def _render_parameters_table(params: Any) -> str:
     return header + "\n" + "\n".join(rows) + "\n"
 
 
-def _build_signature(func: Any) -> str:
-    """Build the function signature string."""
-    sig_params: list[str] = []
+def _safe_parameters(func: Any) -> list:
+    """Safely get a function's parameters, returning [] on failure."""
     try:
-        params = func.parameters
+        return func.parameters
     except Exception as exc:
         print(f"  WARN: no parameters for {func}: {exc}", file=sys.stderr)
-        params = []
+        return []
+
+
+def _build_signature(func: Any, params: list | None = None) -> str:
+    """Build the function signature string."""
+    if params is None:
+        params = _safe_parameters(func)
+    sig_params: list[str] = []
     for p in params:
         if p.name in ("self", "cls"):
             continue
@@ -464,8 +469,9 @@ def _render_function(
     """Render a single function/method."""
     func = _resolve(func)
     parts: list[str] = []
+    params = _safe_parameters(func)
 
-    sig = _build_signature(func)
+    sig = _build_signature(func, params)
     is_async = getattr(func, "is_async", False)
     prefix = "async " if is_async else ""
     parts.append(f"{heading_level} `{prefix}{func.name}{sig}`\n")
@@ -479,11 +485,6 @@ def _render_function(
     if desc:
         parts.append(desc + "\n")
 
-    try:
-        params = func.parameters
-    except Exception as exc:
-        print(f"  WARN: no parameters for {func}: {exc}", file=sys.stderr)
-        params = []
     params_table = _render_parameters_table(params)
     if params_table:
         parts.append("**Parameters**\n")
@@ -580,10 +581,7 @@ def _append_methods(parts: list[str], members: Any) -> None:
 def _render_class_details(cls: Any) -> str:
     """Render a class wrapped in a <details>/<summary> block."""
     cls = _resolve(cls)
-    summary_text = _raw_first_line(cls)
-    title = (
-        escape_jsx_attr(f"{cls.name} — {summary_text}") if summary_text else cls.name
-    )
+    title = details_title(cls.name, _raw_first_line(cls))
     body = _render_class_body(cls, skip_first_line=True)
     return render_details(title, body)
 
@@ -591,12 +589,7 @@ def _render_class_details(cls: Any) -> str:
 def _render_function_details(func: Any) -> str:
     """Render a standalone function wrapped in a <details>/<summary> block."""
     func = _resolve(func)
-    summary_text = _raw_first_line(func)
-    title = (
-        escape_jsx_attr(f"{func.name}() — {summary_text}")
-        if summary_text
-        else f"{func.name}()"
-    )
+    title = details_title(f"{func.name}()", _raw_first_line(func))
     body = _render_function(func, heading_level="####", skip_first_line=True)
     return render_details(title, body)
 
@@ -666,19 +659,6 @@ def _load_all_members(
     return all_classes, all_functions
 
 
-def _extract_nixl_members(
-    loader: GriffeLoader,
-) -> tuple[list[Any], list[Any]]:
-    """Extract classes and functions from dynamo.nixl_connect."""
-    try:
-        mod = loader.modules_collection["dynamo.nixl_connect"]
-    except KeyError:
-        print("  WARN: dynamo.nixl_connect not in collection", file=sys.stderr)
-        return [], []
-    classes, functions = _classify_members(mod)
-    return list(classes.values()), list(functions.values())
-
-
 # ---------------------------------------------------------------------------
 # Page rendering
 # ---------------------------------------------------------------------------
@@ -714,18 +694,26 @@ def _render_section(section: SectionDef, ctx: RenderContext) -> list[str]:
         f"{section.description}\n",
     ]
     if section.module:
-        _render_module_members(parts, ctx)
+        _render_module_members(parts, section.module, ctx)
     else:
         _render_named_members(parts, section, ctx)
     return parts
 
 
-def _render_module_members(parts: list[str], ctx: RenderContext) -> None:
-    """Render all members from a whole-module section."""
-    for cls in ctx.nixl_classes:
+def _render_module_members(
+    parts: list[str], module_name: str, ctx: RenderContext
+) -> None:
+    """Render all public members from a module by name."""
+    try:
+        mod = ctx.modules_collection[module_name]
+    except KeyError:
+        print(f"  WARN: {module_name} not in collection", file=sys.stderr)
+        return
+    classes, functions = _classify_members(mod)
+    for cls in classes.values():
         parts.append(_render_class_details(cls))
         ctx.placed_classes.add(cls.name)
-    for func in ctx.nixl_functions:
+    for func in functions.values():
         parts.append(_render_function_details(func))
         ctx.placed_functions.add(func.name)
 
@@ -764,13 +752,11 @@ def render_consolidated_page() -> str:
     print(f"Loading modules ({len(modules)} discovered)...")
     loader = _create_loader()
     all_classes, all_functions = _load_all_members(loader, modules)
-    nixl_classes, nixl_functions = _extract_nixl_members(loader)
 
     ctx = RenderContext(
         all_classes=all_classes,
         all_functions=all_functions,
-        nixl_classes=nixl_classes,
-        nixl_functions=nixl_functions,
+        modules_collection=loader.modules_collection,
     )
 
     parts: list[str] = _render_header()

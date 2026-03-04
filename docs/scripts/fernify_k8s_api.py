@@ -29,7 +29,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _fern_helpers import (  # noqa: E402
     REPO_ROOT,
-    escape_jsx_attr,
+    details_title,
     render_card_group,
     render_details,
 )
@@ -85,22 +85,23 @@ _DEFAULT_DESC = "Custom resource for the Dynamo operator."
 # ---------------------------------------------------------------------------
 
 
-def _build_go_source_index() -> dict[str, Path]:
-    """Build a filename→Path index of Go type files under deploy/operator/api/."""
-    index: dict[str, Path] = {}
-    if not OPERATOR_DIR.exists():
-        return index
-    for f in OPERATOR_DIR.glob("api/*/*.go"):
-        index[f.name] = f
-    return index
+_GO_SOURCE_INDEX: dict[str, Path] | None = None
 
 
-# Cached once at import time to avoid repeated glob per resource
-_GO_SOURCE_INDEX = _build_go_source_index()
+def _get_go_source_index() -> dict[str, Path]:
+    """Lazily build a filename→Path index of Go type files."""
+    global _GO_SOURCE_INDEX  # noqa: PLW0603
+    if _GO_SOURCE_INDEX is None:
+        _GO_SOURCE_INDEX = {}
+        if OPERATOR_DIR.exists():
+            for f in OPERATOR_DIR.glob("api/*/*.go"):
+                _GO_SOURCE_INDEX[f.name] = f
+    return _GO_SOURCE_INDEX
 
 
 def _discover_go_source(resource_name: str) -> str:
     """Find the Go source file for a resource type by naming convention."""
+    index = _get_go_source_index()
     name_lower = resource_name.lower()
     base = name_lower.removeprefix("dynamo")
 
@@ -109,8 +110,8 @@ def _discover_go_source(resource_name: str) -> str:
         f"dynamo_{base}_types.go",
         f"{base}_types.go",
     ):
-        if pattern in _GO_SOURCE_INDEX:
-            return str(_GO_SOURCE_INDEX[pattern].relative_to(OPERATOR_DIR))
+        if pattern in index:
+            return str(index[pattern].relative_to(OPERATOR_DIR))
     return ""
 
 
@@ -224,8 +225,7 @@ def _wrap_types_in_details(
         next_line = headings[idx + 1][0] if idx + 1 < len(headings) else end
         body_lines = lines[line_num + 1 : next_line]
 
-        desc = _first_content_line(body_lines)
-        title = escape_jsx_attr(f"{type_name} — {desc}") if desc else type_name
+        title = details_title(type_name, _first_content_line(body_lines))
 
         body = "".join(body_lines)
         result.append(render_details(title, body))
@@ -279,12 +279,7 @@ def _resolve_resource_meta(
 ) -> dict[str, str]:
     """Resolve icon, description, and source path for a resource."""
     if name in RESOURCE_META:
-        meta = RESOURCE_META[name]
-        return {
-            "icon": meta.get("icon", "regular cube"),
-            "desc": meta.get("desc", "Custom resource for the Dynamo operator."),
-            "src": meta.get("src", ""),
-        }
+        return RESOURCE_META[name]
     desc = _extract_resource_description(md_lines, name, *v1a_range)
     if not desc:
         desc = _extract_resource_description(md_lines, name, *v1b_range)
