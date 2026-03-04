@@ -7,6 +7,8 @@ import os
 import signal
 from typing import Any, Iterable, Optional
 
+from dynamo._core import DistributedRuntime
+
 logger = logging.getLogger(__name__)
 
 # TODO: make this using cli flag
@@ -62,7 +64,7 @@ async def _unregister_endpoints(endpoints: Iterable) -> None:
 
 
 async def graceful_shutdown_with_discovery(
-    runtime: Any,
+    runtime: DistributedRuntime,
     endpoints: Iterable,
     shutdown_event: Optional[asyncio.Event] = None,
     grace_period_s: Optional[float] = None,

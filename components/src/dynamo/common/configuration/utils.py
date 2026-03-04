@@ -55,7 +55,7 @@ def env_or_default(
 
 
 def add_argument(
-    parser: Any,
+    parser: argparse.ArgumentParser | argparse._ArgumentGroup,
     *,
     flag_name: str,
     env_var: str,

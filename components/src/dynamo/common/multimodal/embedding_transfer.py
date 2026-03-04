@@ -914,8 +914,9 @@ class NixlReadEmbeddingReceiver(AbstractEmbeddingReceiver):
             original_descriptor_size = descriptor._data_size
             tensor_size_bytes = embeddings_dtype.itemsize * math.prod(embeddings_shape)
             descriptor._data_size = tensor_size_bytes
+            assert descriptor._data_ref is not None
             encodings_tensor = (
-                descriptor._data_ref[:tensor_size_bytes]  # type: ignore[index]
+                descriptor._data_ref[:tensor_size_bytes]
                 .view(dtype=embeddings_dtype)
                 .view(embeddings_shape)
             )
