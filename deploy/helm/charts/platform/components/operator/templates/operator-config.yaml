@@ -49,11 +49,14 @@ data:
       {{- end }}
       {{- end }}
     {{- end }}
-    {{- if and .Values.dynamo.groveTerminationDelay (ne (.Values.dynamo.groveTerminationDelay | toString) "15m") }}
     orchestrators:
+      kaiScheduler:
+        enabled: {{ or (and .Values.global (index .Values.global "kai-scheduler") (index .Values.global "kai-scheduler").enabled) (and .Values.global (index .Values.global "kai-scheduler") (index .Values.global "kai-scheduler").install) }}
       grove:
+        enabled: {{ or (and .Values.global .Values.global.grove .Values.global.grove.enabled) (and .Values.global .Values.global.grove .Values.global.grove.install) }}
+        {{- if and .Values.dynamo.groveTerminationDelay (ne (.Values.dynamo.groveTerminationDelay | toString) "15m") }}
         terminationDelay: {{ .Values.dynamo.groveTerminationDelay | quote }}
-    {{- end }}
+        {{- end }}
     {{- $natsAddr := "" }}
     {{- if .Values.natsAddr }}
       {{- $natsAddr = .Values.natsAddr }}
@@ -128,19 +131,13 @@ data:
       readyForCheckpointFilePath: {{ .Values.checkpoint.readyForCheckpointFilePath | quote }}
       {{- end }}
       storage:
-        {{- if ne (.Values.checkpoint.storage.type | toString) "pvc" }}
+        {{- if and .Values.checkpoint.storage.type (ne (.Values.checkpoint.storage.type | toString) "pvc") }}
         type: {{ .Values.checkpoint.storage.type | quote }}
         {{- end }}
-        {{- if eq .Values.checkpoint.storage.type "pvc" }}
-        {{- if or (ne (.Values.checkpoint.storage.pvc.pvcName | toString) "chrek-pvc") (ne (.Values.checkpoint.storage.pvc.basePath | toString) "/checkpoints") }}
+        {{- if or (eq (.Values.checkpoint.storage.type | toString) "pvc") (not .Values.checkpoint.storage.type) }}
         pvc:
-          {{- if ne (.Values.checkpoint.storage.pvc.pvcName | toString) "chrek-pvc" }}
-          pvcName: {{ .Values.checkpoint.storage.pvc.pvcName | quote }}
-          {{- end }}
-          {{- if ne (.Values.checkpoint.storage.pvc.basePath | toString) "/checkpoints" }}
-          basePath: {{ .Values.checkpoint.storage.pvc.basePath | quote }}
-          {{- end }}
-        {{- end }}
+          pvcName: {{ (.Values.checkpoint.storage.pvc.pvcName | default "chrek-pvc") | quote }}
+          basePath: {{ (.Values.checkpoint.storage.pvc.basePath | default "/checkpoints") | quote }}
         {{- end }}
         {{- if eq .Values.checkpoint.storage.type "s3" }}
         s3:

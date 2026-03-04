@@ -293,7 +293,7 @@ helm: manifests kustomize helmify
 	$(KUSTOMIZE) build config/default | $(HELMIFY) -image-pull-secrets charts/dynamo-kubernetes-operator
 
 ######################### CRD Reference Docs
-CRD_REF_DOCS_VERSION ?= latest
+CRD_REF_DOCS_VERSION ?= v0.3.0
 CRD_REF_DOCS ?= $(LOCALBIN)/crd-ref-docs
 
 .PHONY: crd-ref-docs
@@ -314,12 +314,12 @@ generate-api-docs: crd-ref-docs ## Generate API reference documentation from CRD
 		--output-path=./docs/api_reference.md
 	@echo "✅ Generated API reference at ./docs/api_reference.md"
 	# concatenate header.md, api_reference.md, and footer.md
-	cat docs/header.md ./docs/api_reference.md docs/footer.md > ../../docs/pages/kubernetes/api-reference.md
+	cat docs/header.md ./docs/api_reference.md docs/footer.md > ../../docs/kubernetes/api-reference.md
 	rm ./docs/api_reference.md
 	@echo "✅ Concatenated header.md, api_reference.md, and footer.md"
 	# Fix duplicate anchors: crd-ref-docs generates identical anchors for same-named types
 	# across API versions; prepend "v1beta1 " to affected v1beta1 headings and links.
-	python3 docs/fix-api-anchors.py ../../docs/pages/kubernetes/api-reference.md
+	python3 docs/fix-api-anchors.py ../../docs/kubernetes/api-reference.md
 
 HELM_CHART_DIR := ../helm/charts/platform
 
