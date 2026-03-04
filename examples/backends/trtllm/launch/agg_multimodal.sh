@@ -12,8 +12,8 @@ export MODALITY=${MODALITY:-"multimodal"}
 # Setup cleanup trap
 cleanup() {
     echo "Cleaning up background processes..."
-    kill $DYNAMO_PID 2>/dev/null || true
-    wait $DYNAMO_PID 2>/dev/null || true
+    kill $DYNAMO_PID $WORKER1_PID $WORKER2_PID 2>/dev/null || true
+    wait $DYNAMO_PID $WORKER1_PID $WORKER2_PID 2>/dev/null || true
     echo "Cleanup complete."
 }
 trap cleanup EXIT INT TERM
@@ -24,11 +24,22 @@ trap cleanup EXIT INT TERM
 python3 -m dynamo.frontend --router-mode kv &
 DYNAMO_PID=$!
 
-# run worker
-python3 -m dynamo.trtllm \
+# run worker 1
+CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.trtllm \
   --model-path "$MODEL_PATH" \
   --served-model-name "$SERVED_MODEL_NAME" \
   --extra-engine-args "$AGG_ENGINE_ARGS" \
   --modality "$MODALITY" \
-  --publish-events-and-metrics
+  --publish-events-and-metrics &
+WORKER1_PID=$!
 
+# run worker 2
+CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.trtllm \
+  --model-path "$MODEL_PATH" \
+  --served-model-name "$SERVED_MODEL_NAME" \
+  --extra-engine-args "$AGG_ENGINE_ARGS" \
+  --modality "$MODALITY" \
+  --publish-events-and-metrics &
+WORKER2_PID=$!
+
+wait $DYNAMO_PID
