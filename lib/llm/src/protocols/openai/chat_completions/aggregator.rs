@@ -67,6 +67,7 @@ impl StreamingToolCallState {
         }
 
         let was_positive = self.brace_depth > 0;
+        let mut saw_open_brace = false;
 
         for ch in fragment.chars() {
             if self.escape_next {
@@ -92,6 +93,7 @@ impl StreamingToolCallState {
                     }
                     '{' => {
                         self.brace_depth += 1;
+                        saw_open_brace = true;
                     }
                     '}' => {
                         self.brace_depth -= 1;
@@ -103,12 +105,11 @@ impl StreamingToolCallState {
 
         self.accumulated_args.push_str(fragment);
 
-        // Transition from positive depth to zero means the JSON object is complete.
-        // Also handle the case where we started at 0 and went to 0 on the very first
-        // fragment (e.g. the entire args are delivered in one chunk).
+        // Complete only when an opening brace was observed and depth returns to zero.
+        // Guards against whitespace/prefix fragments at depth 0 firing spuriously.
         let now_zero = self.brace_depth == 0;
-        let just_completed =
-            now_zero && (was_positive || !self.accumulated_args.is_empty()) && !self.emitted;
+        let started_object = was_positive || saw_open_brace;
+        let just_completed = now_zero && started_object && !self.emitted;
 
         if just_completed {
             self.emitted = true;
@@ -131,7 +132,8 @@ pub fn streaming_tool_call_adapter(
 ) -> impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> {
     // We use `scan` to carry mutable state across the stream and emit Vec<item>
     // per input (0 or more synthetic chunks after each original chunk).
-    let state: HashMap<u32, StreamingToolCallState> = HashMap::new();
+    // Key by (choice_index, tool_call_index) to avoid collisions in multi-choice streams.
+    let state: HashMap<(u32, u32), StreamingToolCallState> = HashMap::new();
 
     stream
         .scan(state, |tool_states, annotated| {
@@ -141,16 +143,16 @@ pub fn streaming_tool_call_adapter(
                 for choice in &data.choices {
                     if let Some(tool_calls) = &choice.delta.tool_calls {
                         for tc_chunk in tool_calls {
-                            let idx = tc_chunk.index;
+                            let key = (choice.index, tc_chunk.index);
 
                             // If this is the first chunk for a tool call (has id + name),
                             // initialize tracking state.
                             if let Some(id) = &tc_chunk.id {
                                 if let Some(func) = &tc_chunk.function {
                                     if let Some(name) = &func.name {
-                                        tool_states.entry(idx).or_insert_with(|| {
+                                        tool_states.entry(key).or_insert_with(|| {
                                             StreamingToolCallState::new(
-                                                idx,
+                                                tc_chunk.index,
                                                 id.clone(),
                                                 name.clone(),
                                             )
@@ -162,13 +164,13 @@ pub fn streaming_tool_call_adapter(
                             // Feed any argument fragment into the tracker.
                             if let Some(func) = &tc_chunk.function {
                                 if let Some(args_fragment) = &func.arguments {
-                                    if let Some(state) = tool_states.get_mut(&idx) {
+                                    if let Some(state) = tool_states.get_mut(&key) {
                                         let just_completed = state.feed(args_fragment);
 
                                         if just_completed {
                                             // Build a synthetic chunk with the complete tool call.
                                             let synthetic = build_complete_tool_call_chunk(
-                                                data, state,
+                                                data, choice.index, state,
                                             );
                                             extra_chunks.push(synthetic);
                                         }
@@ -194,6 +196,7 @@ pub fn streaming_tool_call_adapter(
 #[allow(deprecated)]
 fn build_complete_tool_call_chunk(
     template: &NvCreateChatCompletionStreamResponse,
+    choice_index: u32,
     tool_state: &StreamingToolCallState,
 ) -> Annotated<NvCreateChatCompletionStreamResponse> {
     use dynamo_async_openai::types::{
@@ -212,7 +215,7 @@ fn build_complete_tool_call_chunk(
     };
 
     let choice = ChatChoiceStream {
-        index: 0,
+        index: choice_index,
         delta: ChatCompletionStreamResponseDelta {
             content: None,
             function_call: None,
