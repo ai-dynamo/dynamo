@@ -384,11 +384,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 out["token_ids"] = output_ids
 
                 # Extract logprobs for new tokens if available
-                log_probs, top_logprobs, num_output_logprobs_so_far = (
-                    self._extract_logprobs(
-                        res["meta_info"], num_output_logprobs_so_far
-                    )
-                )
+                (
+                    log_probs,
+                    top_logprobs,
+                    num_output_logprobs_so_far,
+                ) = self._extract_logprobs(res["meta_info"], num_output_logprobs_so_far)
                 if log_probs is not None:
                     out["log_probs"] = log_probs
                 if top_logprobs is not None:
