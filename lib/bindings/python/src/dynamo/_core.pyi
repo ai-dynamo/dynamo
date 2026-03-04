@@ -1378,6 +1378,18 @@ class KvRouter:
         """
         ...
 
+    async def generate_from_request(
+        self,
+        request: JsonLike,
+    ) -> AsyncIterator[JsonLike]:
+        """
+        Generate from a preprocessed request dict (PreprocessedRequest format).
+
+        Accepts a full request dict with token_ids, model, stop_conditions, etc.
+        Returns an async iterator yielding generation responses.
+        """
+        ...
+
     async def best_worker(
         self,
         token_ids: List[int],
