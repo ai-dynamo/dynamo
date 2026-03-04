@@ -243,8 +243,8 @@ def get_prefill_ttft(
             request_count=total_concurrency,
             warmup_request_count=AIPERF_WARMUP_REQUEST_PER_DP_RANK * attention_dp_size,
         )
+        assert aiperf_result is not None
         try:
-            assert aiperf_result is not None
             max_ttft = float(aiperf_result["time_to_first_token"]["max"])
             # subtract the decoding time in-between prefill runs
             max_ttft -= (
@@ -267,8 +267,8 @@ def get_prefill_ttft(
         tokenizer,
         base_url=base_url,
     )
+    assert aiperf_result is not None
     try:
-        assert aiperf_result is not None
         return float(aiperf_result["time_to_first_token"]["avg"])
     except (KeyError, TypeError, ValueError):
         logger.warning("Failed to extract TTFT from AIPerf result")
