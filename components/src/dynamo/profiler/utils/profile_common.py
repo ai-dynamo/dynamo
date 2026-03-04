@@ -153,6 +153,30 @@ def is_planner_enabled(dgdr: DynamoGraphDeploymentRequestSpec) -> bool:
     )
 
 
+def is_mocker_enabled(dgdr: DynamoGraphDeploymentRequestSpec) -> bool:
+    """True when the DGDR spec has mocker explicitly enabled."""
+    return (
+        dgdr.features is not None
+        and dgdr.features.mocker is not None
+        and dgdr.features.mocker.enabled
+    )
+
+
+def needs_profile_data(dgdr: DynamoGraphDeploymentRequestSpec) -> bool:
+    """True when the DGDR requires profiling interpolation data.
+
+    Profile data is consumed by mocker workers (for latency simulation)
+    and by the planner when throughput-based scaling is enabled.
+    """
+    if is_mocker_enabled(dgdr):
+        return True
+    return (
+        dgdr.features is not None
+        and dgdr.features.planner is not None
+        and dgdr.features.planner.enable_throughput_scaling
+    )
+
+
 def determine_picking_mode(dgdr: DynamoGraphDeploymentRequestSpec) -> str:
     target_load_provided = dgdr.workload is not None and (
         dgdr.workload.requestRate is not None or dgdr.workload.concurrency is not None

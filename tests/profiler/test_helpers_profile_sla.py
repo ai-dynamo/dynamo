@@ -25,7 +25,6 @@ try:
         PlannerPreDeploymentSweepMode,
     )
     from dynamo.profiler.profile_sla import (
-        _assemble_final_config,
         _extract_profiler_params,
         _write_final_output,
     )
@@ -33,6 +32,7 @@ try:
         PickedParallelConfig,
     )
     from dynamo.profiler.utils.defaults import SearchStrategy
+    from dynamo.profiler.utils.dgd_generation import assemble_final_config
     from dynamo.profiler.utils.dgdr_v1beta1_types import (
         DynamoGraphDeploymentRequestSpec,
         FeaturesSpec,
@@ -336,8 +336,10 @@ class TestWriteFinalOutput:
 
 
 # ---------------------------------------------------------------------------
-# _assemble_final_config
+# assemble_final_config
 # ---------------------------------------------------------------------------
+
+_DGD_GEN = "dynamo.profiler.utils.dgd_generation"
 
 
 class TestAssembleFinalConfig:
@@ -348,7 +350,7 @@ class TestAssembleFinalConfig:
         ops = _make_ops(tmp_path)
         dgd_config = {"kind": "DynamoGraphDeployment"}
 
-        result = _assemble_final_config(
+        result = assemble_final_config(
             dgdr,
             ops,
             dgd_config,
@@ -364,7 +366,7 @@ class TestAssembleFinalConfig:
         dgdr = _make_dgdr()
         ops = _make_ops(tmp_path)
 
-        result = _assemble_final_config(
+        result = assemble_final_config(
             dgdr,
             ops,
             None,
@@ -376,19 +378,26 @@ class TestAssembleFinalConfig:
 
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
-    def test_planner_no_mocker_returns_real_config(self, tmp_path):
+    def test_planner_no_mocker_returns_config_with_planner_cm(self, tmp_path):
+        """Planner enabled, no mocker: result is [planner_cm, profile_cm, dgd_config]."""
         dgdr = _make_dgdr(features=FeaturesSpec(planner=_make_planner()))
         ops = _make_ops(tmp_path)
         os.makedirs(ops.output_dir, exist_ok=True)
-        dgd_config = {"kind": "DGD"}
-        real_cfg = {"kind": "real"}
-        mocker_cfg = {"kind": "mocker"}
+        dgd_config = {"kind": "DGD", "spec": {"services": {}}}
+        planner_cm = {"kind": "ConfigMap", "metadata": {"name": "planner-cm"}}
+        profile_cm = {"kind": "ConfigMap", "metadata": {"name": "profile-cm"}}
 
-        with patch(
-            "dynamo.profiler.profile_sla.generate_dgd_config_with_planner",
-            return_value=(real_cfg, mocker_cfg),
+        with (
+            patch(
+                f"{_DGD_GEN}.add_planner_to_config",
+                return_value=planner_cm,
+            ) as mock_planner,
+            patch(
+                f"{_DGD_GEN}.add_profile_data_to_config",
+                return_value=profile_cm,
+            ) as mock_profile,
         ):
-            result = _assemble_final_config(
+            result = assemble_final_config(
                 dgdr,
                 ops,
                 dgd_config,
@@ -396,11 +405,14 @@ class TestAssembleFinalConfig:
                 PickedParallelConfig(tp=1),
             )
 
-        assert result is real_cfg
+        mock_planner.assert_called_once()
+        mock_profile.assert_called_once()
+        assert result == [planner_cm, profile_cm, dgd_config]
 
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
-    def test_mocker_enabled_returns_mocker_config(self, tmp_path):
+    def test_mocker_plus_planner_uses_mocker_base(self, tmp_path):
+        """Mocker + planner: mocker base is created first, then planner layered."""
         dgdr = _make_dgdr(
             features=FeaturesSpec(
                 planner=_make_planner(),
@@ -410,14 +422,25 @@ class TestAssembleFinalConfig:
         ops = _make_ops(tmp_path)
         os.makedirs(ops.output_dir, exist_ok=True)
         dgd_config = {"kind": "DGD"}
-        real_cfg = {"kind": "real"}
-        mocker_cfg = {"kind": "mocker"}
+        mocker_base = {"kind": "MockerDGD", "spec": {"services": {}}}
+        planner_cm = {"kind": "ConfigMap", "metadata": {"name": "planner-cm"}}
+        profile_cm = {"kind": "ConfigMap", "metadata": {"name": "profile-cm"}}
 
-        with patch(
-            "dynamo.profiler.profile_sla.generate_dgd_config_with_planner",
-            return_value=(real_cfg, mocker_cfg),
+        with (
+            patch(
+                f"{_DGD_GEN}.generate_mocker_config",
+                return_value=mocker_base,
+            ) as mock_mocker,
+            patch(
+                f"{_DGD_GEN}.add_planner_to_config",
+                return_value=planner_cm,
+            ) as mock_planner,
+            patch(
+                f"{_DGD_GEN}.add_profile_data_to_config",
+                return_value=profile_cm,
+            ),
         ):
-            result = _assemble_final_config(
+            result = assemble_final_config(
                 dgdr,
                 ops,
                 dgd_config,
@@ -425,4 +448,45 @@ class TestAssembleFinalConfig:
                 PickedParallelConfig(tp=1),
             )
 
-        assert result is mocker_cfg
+        mock_mocker.assert_called_once()
+        mock_planner.assert_called_once()
+        assert mock_planner.call_args.args[1] is mocker_base
+        assert result == [planner_cm, profile_cm, mocker_base]
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_mocker_only_no_planner_returns_mocker_config(self, tmp_path):
+        """Mocker-only (no planner): generate_mocker_config is called,
+        add_planner_to_config is not, profile data is still attached."""
+        dgdr = _make_dgdr(features=FeaturesSpec(mocker=MockerSpec(enabled=True)))
+        ops = _make_ops(tmp_path)
+        os.makedirs(ops.output_dir, exist_ok=True)
+        dgd_config = {"kind": "DGD"}
+        mocker_base = {"kind": "MockerDGD", "spec": {"services": {}}}
+        profile_cm = {"kind": "ConfigMap", "metadata": {"name": "profile-cm"}}
+
+        with (
+            patch(
+                f"{_DGD_GEN}.generate_mocker_config",
+                return_value=mocker_base,
+            ) as mock_mocker,
+            patch(
+                f"{_DGD_GEN}.add_planner_to_config",
+            ) as mock_planner,
+            patch(
+                f"{_DGD_GEN}.add_profile_data_to_config",
+                return_value=profile_cm,
+            ) as mock_profile,
+        ):
+            result = assemble_final_config(
+                dgdr,
+                ops,
+                dgd_config,
+                PickedParallelConfig(tp=1),
+                PickedParallelConfig(tp=1),
+            )
+
+        mock_mocker.assert_called_once()
+        mock_planner.assert_not_called()
+        mock_profile.assert_called_once()
+        assert result == [profile_cm, mocker_base]
