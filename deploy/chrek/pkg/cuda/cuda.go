@@ -65,6 +65,7 @@ func GetPodGPUUUIDs(ctx context.Context, podName, podNamespace, containerName st
 				for _, dr := range container.GetDynamicResources() {
 					for _, cr := range dr.GetClaimResources() {
 						if cr.GetDriverName() == nvidiaGPUDRADriver {
+							fmt.Println("GetPodGPUUUIDs: found DRA GPU", "uuid", cr.GetDeviceName())
 							uuids = append(uuids, cr.GetDeviceName())
 						}
 					}
@@ -139,6 +140,8 @@ func BuildDeviceMap(sourceUUIDs, targetUUIDs []string) (string, error) {
 	if len(sourceUUIDs) == 0 {
 		return "", fmt.Errorf("GPU UUID list is empty")
 	}
+	fmt.Println("BuildDeviceMap: source UUIDs", "uuids", sourceUUIDs)
+	fmt.Println("BuildDeviceMap: target UUIDs", "uuids", targetUUIDs)
 
 	targetSet := make(map[string]bool, len(targetUUIDs))
 	for _, t := range targetUUIDs {
