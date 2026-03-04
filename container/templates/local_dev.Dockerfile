@@ -15,13 +15,10 @@ FROM aws AS local-dev
 ENV USERNAME=dynamo
 ARG USER_UID
 ARG USER_GID
+ARG DEVICE
 
-# Copy rustup home into a writable per-user location so sanity_check passes.
-# (dev target already has rustup/cargo/maturin from concatenated wheel_builder/dynamo_base)
-RUN cp -r /usr/local/rustup /home/dynamo/.rustup && \
-    chown -R dynamo:0 /home/dynamo/.rustup
-
-# Put rustup state under the user's home (writable) while still using /usr/local/cargo/bin shims.
+# rustup is already at /home/dynamo/.rustup from the dev stage (COPY --from=wheel_builder
+# with --chown=dynamo:0 --chmod=775), so no re-copy needed here.
 ENV RUSTUP_HOME=/home/${USERNAME}/.rustup
 ENV CARGO_HOME=/home/${USERNAME}/.cargo
 ENV PATH=/usr/local/cargo/bin:/usr/local/bin:${CARGO_HOME}/bin:${PATH}

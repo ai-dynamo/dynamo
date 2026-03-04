@@ -991,7 +991,7 @@ class KvRouterConfig:
         router_max_tree_size: int = 1048576,
         router_prune_target_ratio: float = 0.8,
         router_queue_threshold: Optional[float] = None,
-        router_event_threads: int = 1,
+        router_event_threads: int = 4,
     ) -> None:
         """
         Create a KV router configuration.
@@ -1020,16 +1020,10 @@ class KvRouterConfig:
                 When set, requests are queued if all workers exceed this fraction of
                 max_num_batched_tokens. Enables priority scheduling via latency_sensitivity hints.
                 If None, queueing is disabled and all requests go directly to the scheduler.
-            router_event_threads: Number of event processing threads (default: 1).
+            router_event_threads: Number of event processing threads (default: 4).
                 When > 1, uses a concurrent radix tree with a thread pool.
         """
         ...
-
-async def start_kv_block_indexer(
-    endpoint: Endpoint,
-    block_size: int,
-    kv_router_config: KvRouterConfig,
-) -> None: ...
 
 async def register_model(
     model_input: ModelInput,
@@ -1391,6 +1385,18 @@ class KvRouter:
             - dp_rank allows targeting a specific data parallel replica when workers have
               multiple replicas (data_parallel_size > 1).
             - This is different from query_instance_id which doesn't route the request.
+        """
+        ...
+
+    async def generate_from_request(
+        self,
+        request: JsonLike,
+    ) -> AsyncIterator[JsonLike]:
+        """
+        Generate from a preprocessed request dict (PreprocessedRequest format).
+
+        Accepts a full request dict with token_ids, model, stop_conditions, etc.
+        Returns an async iterator yielding generation responses.
         """
         ...
 

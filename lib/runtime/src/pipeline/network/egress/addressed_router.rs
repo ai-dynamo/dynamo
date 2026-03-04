@@ -229,7 +229,7 @@ where
                     .error_type(ErrorType::Disconnected)
                     .message("Stream ended before generation completed")
                     .build();
-                tracing::debug!("{}", err);
+                tracing::debug!("{err}");
                 Some(U::from_err(err))
             }
         });

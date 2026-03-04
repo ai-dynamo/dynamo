@@ -138,7 +138,9 @@ jobs:
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
       - name: Pull image
-        run: docker pull ${{ env.IMAGE_TAG }}
+        run: |
+          source ./.github/scripts/retry_docker.sh
+          retry_pull ${{ env.IMAGE_TAG }}
       - name: Run Rust checks (block-manager + media-ffmpeg + integration tests)
         run: |
           docker run --rm --runtime=nvidia --gpus all --user root -w /workspace/lib/llm \
@@ -154,6 +156,8 @@ jobs:
                       cargo fmt -- --check && \
                       cargo clippy --features block-manager,media-ffmpeg,testing-nixl,integration --no-deps --all-targets -- -D warnings && \
                       cargo test --locked --all-targets --features=block-manager,media-ffmpeg,testing-nixl,integration -- --nocapture && \
+                      cargo clippy -p kvbm-physical --no-deps --all-targets -- -D warnings && \
+                      cargo test --locked -p kvbm-physical --features testing-kvbm -- --nocapture --test-threads=4 && \
                       /workspace/container/use-sccache.sh show-stats "Rust Checks"'
 
   test-parallel:
@@ -173,7 +177,9 @@ jobs:
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
       - name: Pull image
-        run: docker pull ${{ env.IMAGE_TAG }}
+        run: |
+          source ./.github/scripts/retry_docker.sh
+          retry_pull ${{ env.IMAGE_TAG }}
       - name: Run pytest (parallel tests with xdist)
         uses: ./.github/actions/pytest
         with:
@@ -203,7 +209,9 @@ jobs:
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
       - name: Pull image
-        run: docker pull ${{ env.IMAGE_TAG }}
+        run: |
+          source ./.github/scripts/retry_docker.sh
+          retry_pull ${{ env.IMAGE_TAG }}
       - name: Run pytest (sequential tests)
         uses: ./.github/actions/pytest
         with:
