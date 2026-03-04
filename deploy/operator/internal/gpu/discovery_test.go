@@ -439,12 +439,14 @@ func TestScrapeMetricsEndpoint(t *testing.T) {
 
 	// Prepare a fake HTTP server to simulate Prometheus metrics
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintln(w, `# HELP gpu_usage GPU usage # TYPE gpu_usage gauge gpu_usage{gpu="0"} 42`)
+		fmt.Fprintln(w, `# HELP gpu_usage GPU usage`)
+		fmt.Fprintln(w, `# TYPE gpu_usage gauge`)
+		fmt.Fprintln(w, `gpu_usage{gpu="0"} 42`)
 	}))
 	defer server.Close()
 
 	t.Run("successful scrape", func(t *testing.T) {
-		info, err := scrapeMetricsEndpoint(ctx, server.URL)
+		info, err := ScrapeMetricsEndpoint(ctx, server.URL)
 		if err != nil {
 			t.Fatalf("expected no error, got %v", err)
 		}
@@ -457,9 +459,10 @@ func TestScrapeMetricsEndpoint(t *testing.T) {
 		badServer := httptest.NewServer(http.NotFoundHandler())
 		defer badServer.Close()
 
-		_, err := scrapeMetricsEndpoint(ctx, badServer.URL)
-		if err == nil || err.Error() != fmt.Sprintf("metrics endpoint %s returned status 404", badServer.URL) {
-			t.Fatalf("expected 404 error, got %v", err)
+		_, err := ScrapeMetricsEndpoint(ctx, badServer.URL)
+		expectedErr := fmt.Sprintf("metrics endpoint %s returned status 404", badServer.URL)
+		if err == nil || err.Error() != expectedErr {
+			t.Fatalf("expected %q, got %v", expectedErr, err)
 		}
 	})
 
@@ -469,7 +472,7 @@ func TestScrapeMetricsEndpoint(t *testing.T) {
 		}))
 		defer invalidServer.Close()
 
-		_, err := scrapeMetricsEndpoint(ctx, invalidServer.URL)
+		_, err := ScrapeMetricsEndpoint(ctx, invalidServer.URL)
 		if err == nil {
 			t.Fatal("expected parse error, got nil")
 		}

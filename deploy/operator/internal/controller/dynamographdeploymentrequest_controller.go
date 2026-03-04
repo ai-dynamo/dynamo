@@ -1226,7 +1226,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) enrichHardwareFromDiscovery(ctx
 	hasManualConfig := dgdr.Spec.Hardware != nil && (dgdr.Spec.Hardware.GPUSKU != "" ||
 		dgdr.Spec.Hardware.VRAMMB != nil ||
 		dgdr.Spec.Hardware.NumGPUsPerNode != nil)
-	if hasManualConfig == false {
+	if !hasManualConfig {
 
 		logger.Info("Attempting GPU discovery for profiling job")
 		discoveredInfo, err := r.GPUDiscovery.DiscoverGPUsFromDCGM(ctx, r.APIReader, r.GPUDiscoveryCache)

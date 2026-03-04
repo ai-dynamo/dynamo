@@ -158,7 +158,7 @@ func (c *GPUDiscoveryCache) Set(info *GPUInfo, ttl time.Duration) {
 // does not represent full cluster GPU inventory. Future improvements should
 // aggregate and return GPU information for all nodes instead of selecting
 // only one.
-func  (g *GPUDiscovery) DiscoverGPUsFromDCGM(ctx context.Context, k8sClient client.Reader, cache *GPUDiscoveryCache) (*GPUInfo, error) {
+func (g *GPUDiscovery) DiscoverGPUsFromDCGM(ctx context.Context, k8sClient client.Reader, cache *GPUDiscoveryCache) (*GPUInfo, error) {
 	if cache != nil {
 		// Return cached result if still valid
 		if cached, ok := cache.Get(); ok {
