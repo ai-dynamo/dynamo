@@ -8,6 +8,7 @@
 
 pub mod approx;
 pub mod concurrent_radix_tree;
+pub mod event_sink;
 pub mod indexer;
 #[cfg(feature = "bench")]
 pub mod naive_indexers;
@@ -16,6 +17,7 @@ pub mod protocols;
 pub mod radix_tree;
 pub mod scheduling;
 pub mod sequences;
+pub mod zmq_wire;
 
 // Backward-compat re-exports: preserve old module paths for external consumers
 pub use scheduling::config;
@@ -35,6 +37,7 @@ pub use self::multi_worker_sequence::{
 pub use self::sequence::{ActiveSequences, RequestId};
 pub use concurrent_radix_tree::ConcurrentRadixTree;
 pub use config::{KvRouterConfig, RouterConfigOverride};
+pub use event_sink::EventSink;
 pub use indexer::{MaybeError, SyncIndexer, ThreadPoolIndexer};
 #[cfg(feature = "bench")]
 pub use naive_indexers::{InvertedIndex, NaiveNestedMap};

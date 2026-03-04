@@ -26,8 +26,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::indexer::{SyncIndexer, WorkerTask};
 use crate::protocols::{
-    ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheEventError, KvCacheStoreData,
-    KvCacheStoredBlockData, LocalBlockHash, OverlapScores, RouterEvent, WorkerId, WorkerWithDpRank,
+    DpRank, ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheEventError,
+    KvCacheStoreData, KvCacheStoredBlockData, LocalBlockHash, OverlapScores, RouterEvent, WorkerId,
+    WorkerWithDpRank,
 };
 
 /// Entry for the innermost level of the index.
@@ -149,6 +150,9 @@ impl SyncIndexer for PositionalIndexer {
                 }
                 WorkerTask::RemoveWorker(worker_id) => {
                     self.remove_or_clear_worker_blocks_impl(&mut worker_blocks, worker_id, false);
+                }
+                WorkerTask::RemoveWorkerDpRank(worker_id, dp_rank) => {
+                    self.remove_worker_dp_rank_impl(&mut worker_blocks, worker_id, dp_rank);
                 }
                 WorkerTask::DumpEvents(sender) => {
                     let events = self.dump_events(&worker_blocks);
@@ -329,6 +333,23 @@ impl PositionalIndexer {
         self.remove_or_clear_worker_blocks_impl(worker_blocks, worker_id, true);
     }
 
+    fn remove_worker_dp_rank_impl(
+        &self,
+        worker_blocks: &mut FxHashMap<WorkerWithDpRank, LevelIndex>,
+        worker_id: WorkerId,
+        dp_rank: DpRank,
+    ) {
+        let key = WorkerWithDpRank { worker_id, dp_rank };
+        if let Some(worker_map) = worker_blocks.remove(&key) {
+            for (seq_hash, (position, local_hash)) in worker_map.iter() {
+                if let Some(mut entry) = self.index.get_mut(&(*position, *local_hash)) {
+                    let _ = entry.remove(*seq_hash, key);
+                }
+            }
+            self.tree_sizes.remove(&key);
+        }
+    }
+
     /// Helper function to remove or clear blocks for a worker.
     /// If `keep_worker` is true, the worker remains tracked with empty blocks.
     /// If `keep_worker` is false, the worker is completely removed.
@@ -438,6 +459,18 @@ impl PositionalIndexer {
 // -----------------------------------------------------------------------------
 
 impl PositionalIndexer {
+    /// Score all active workers at the given position and clear the active set.
+    #[inline]
+    fn drain_active(
+        active: &mut FxHashSet<WorkerWithDpRank>,
+        scores: &mut OverlapScores,
+        pos: usize,
+    ) {
+        for worker in active.drain() {
+            scores.scores.insert(worker, pos as u32);
+        }
+    }
+
     /// Compute sequence hash incrementally from previous hash and current local hash.
     #[inline]
     fn compute_next_seq_hash(prev_seq_hash: u64, current_local_hash: u64) -> u64 {
@@ -516,9 +549,6 @@ impl PositionalIndexer {
     }
 
     /// Scan positions sequentially, updating active set and recording drain scores.
-    ///
-    /// Inlines the DashMap lookup so the guard lives for each iteration,
-    /// avoiding a per-position `FxHashSet` clone.
     #[allow(clippy::too_many_arguments)]
     fn linear_scan_drain(
         &self,
@@ -534,38 +564,34 @@ impl PositionalIndexer {
             return;
         }
         for pos in lo..hi {
+            if active.is_empty() {
+                break;
+            }
+
             let Some(entry) = self.index.get(&(pos, sequence[pos])) else {
-                for worker in active.iter() {
-                    scores.scores.insert(*worker, pos as u32);
-                }
-                active.clear();
+                Self::drain_active(active, scores, pos);
                 break;
             };
 
             Self::ensure_seq_hash_computed(seq_hashes, pos, sequence);
-            let seq_hash = seq_hashes[pos];
+            let Some(workers) = entry.get(seq_hashes[pos]) else {
+                Self::drain_active(active, scores, pos);
+                break;
+            };
 
-            match entry.get(seq_hash) {
-                Some(workers) => {
-                    active.retain(|w| {
-                        if workers.contains(w) {
-                            true
-                        } else {
-                            scores.scores.insert(*w, pos as u32);
-                            false
-                        }
-                    });
-                    if early_exit && !active.is_empty() {
-                        break;
+            if workers.len() < active.len() {
+                active.retain(|w| {
+                    if workers.contains(w) {
+                        true
+                    } else {
+                        scores.scores.insert(*w, pos as u32);
+                        false
                     }
-                }
-                None => {
-                    for worker in active.iter() {
-                        scores.scores.insert(*worker, pos as u32);
-                    }
-                    active.clear();
-                    break;
-                }
+                });
+            }
+
+            if early_exit && !active.is_empty() {
+                break;
             }
         }
     }
@@ -602,7 +628,7 @@ impl PositionalIndexer {
         }
 
         // Lazily computed sequence hashes
-        let mut seq_hashes: Vec<ExternalSequenceBlockHash> = Vec::new();
+        let mut seq_hashes: Vec<ExternalSequenceBlockHash> = Vec::with_capacity(local_hashes.len());
 
         // Check first position to initialize active set
         let Some(initial_workers) =
@@ -623,7 +649,6 @@ impl PositionalIndexer {
                 scores.scores.insert(*worker, 1);
             }
             // Populate tree_sizes
-
             for worker in scores.scores.keys() {
                 if let Some(worker_tree_size) = self.tree_sizes.get(worker) {
                     scores
