@@ -215,7 +215,9 @@ This section assumes you are already inside a running **runtime**, **local-dev**
 
 1. Build a development container (`render.py ...` + `docker build ...`)
 2. Launch it (`run.sh ...`)
-3. Inside the container, compile code and run tests (see below)
+3. Inside the container, compile code and run tests
+
+All commands below are meant to be run **inside the container**.
 
 **Local-dev / dev containers** -- you must compile the Rust bindings before running pytest. Without this step, tests that import `dynamo._internal` will fail with `ImportError`:
 ```bash

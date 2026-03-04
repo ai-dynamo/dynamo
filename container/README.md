@@ -430,6 +430,8 @@ docker build --build-arg USER_UID=$(id -u) --build-arg USER_GID=$(id -g) -f cont
 # RECOMMENDED: --mount-workspace for live editing in dev and local-dev images
 container/run.sh --image dynamo:latest-vllm-local-dev --mount-workspace -v $HOME/.cache:/home/dynamo/.cache -it
 
+# From this point forward, commands run inside the container started in step 2.
+
 # 3. Sanity check (optional but recommended)
 deploy/sanity_check.py
 
@@ -457,19 +459,32 @@ container/run.sh --image dynamo:latest-vllm-runtime --gpus all -v $HOME/.cache:/
 container/render.py --framework=vllm --target=dev --output-short-filename
 docker build -t dynamo:latest-vllm-dev -f container/rendered.Dockerfile .
 
-# 2. Run tests with network isolation for reproducible results (no -it needed for CI)
-container/run.sh --image dynamo:latest-vllm --mount-workspace --network bridge -v $HOME/.cache:/home/dynamo/.cache -- python -m pytest tests/
+# 2. Launch the container
+# Without --network (default: host networking, ports shared with host -- simplest for development)
+container/run.sh --image dynamo:latest-vllm-dev --mount-workspace -v $HOME/.cache:/home/dynamo/.cache -it
+# Or with --network bridge (isolated networking, no port conflicts with host)
+container/run.sh --image dynamo:latest-vllm-dev --mount-workspace --network bridge -v $HOME/.cache:/home/dynamo/.cache -it
 
-# 3. Sanity check (optional but recommended)
-deploy/sanity_check.py --runtime-check-only
+# From this point forward, commands run inside the container started in step 2.
 
-# 4. Inside the container with bridge networking, start services
-# Note: Services are only accessible from the same container - no port conflicts with host
+# 3. Start infrastructure services
 nats-server -js &
 etcd --listen-client-urls http://0.0.0.0:2379 --advertise-client-urls http://0.0.0.0:2379 --data-dir /tmp/etcd &
+
+# 4. Compile code
+cargo build --locked --features dynamo-llm/block-manager --workspace
+cd lib/bindings/python && maturin develop --uv && cd -
+
+# 5. Sanity check (optional but recommended)
+deploy/sanity_check.py --runtime-check-only
+
+# 6. Run tests
+python -m pytest tests/
+
+# 7. (Optional) Start frontend and backend for interactive testing
 python -m dynamo.frontend &
 
-# 5. Start worker backend (choose one framework):
+# Start worker backend (choose one framework):
 # vLLM
 DYN_SYSTEM_PORT=8081 python -m dynamo.vllm --model Qwen/Qwen3-0.6B --gpu-memory-utilization 0.20 --enforce-eager --no-enable-prefix-caching --max-num-seqs 64 &
 
