@@ -91,7 +91,7 @@ Grove represents a significant advancement in Kubernetes-based orchestration for
 
 ## Getting Started
 
-Grove relies on KAI Scheduler for resource allocation and scheduling.
+Grove can run without KAI Scheduler. KAI Scheduler is recommended when you need advanced queue management, topology-aware placement, and gang scheduling at scale.
 
 For KAI Scheduler, see the [KAI Scheduler Deployment Guide](https://github.com/NVIDIA/KAI-Scheduler).
 

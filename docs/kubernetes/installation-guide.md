@@ -40,6 +40,39 @@ kubectl get clusterrolebinding -o json | \
 # Only install namespace-restricted mode if you specifically need namespace isolation
 ```
 
+## Responsibility Split (Admin vs User vs Operator)
+
+This section clarifies ownership for Dynamo deployments that may use Grove and KAI Scheduler.
+
+### Who is responsible for what?
+
+- **Cluster admin**:
+  - Installs and operates cluster-level dependencies (Dynamo platform/operator, Grove, KAI Scheduler, or LWS/Volcano)
+  - Chooses whether Grove/KAI are externally managed (production) or bundled (development/testing)
+  - Configures platform-level Helm values for orchestrator integration
+- **Application user**:
+  - Creates and updates `DynamoGraphDeployment` resources
+  - Can influence orchestrator selection using annotations (for example, forcing LWS via `nvidia.com/enable-grove: "false"`)
+  - Is expected to understand whether the cluster is configured for Grove or LWS pathway for multinode deployments
+- **Dynamo operator**:
+  - Detects available orchestrator APIs and applies configured overrides
+  - Reconciles DGD resources into the underlying orchestrator resources (for example, Grove `PodCliqueSet` objects)
+  - Performs queue validation for KAI-scheduler integration and fails early on invalid configuration
+
+### Deployment modes for Grove and KAI Scheduler
+
+| Mode | Who installs Grove/KAI | Dynamo Helm settings | Notes |
+|------|-------------------------|----------------------|-------|
+| Development/POC (bundled) | `dynamo-platform` chart | `--set "global.grove.install=true"` and `--set "global.kai-scheduler.install=true"` | Installs bundled subcharts. Integration is auto-enabled. |
+| Production (externally managed) | Cluster admin (prerequisite) | `--set "global.grove.enabled=true"` and `--set "global.kai-scheduler.enabled=true"` | Recommended for independent lifecycle management, version pinning, and upgrades. |
+| Force non-Grove pathway | Cluster admin installs LWS + Volcano | Add DGD annotation `nvidia.com/enable-grove: "false"` | Useful when both Grove and LWS are available and you want LWS for a deployment. |
+
+### Common misconfiguration failures
+
+- Grove integration explicitly enabled but Grove API not installed: operator exits at startup with a Grove API detection error.
+- Multinode workload with neither Grove nor LWS available: reconciliation fails with `no multinode orchestrator available`.
+- Custom KAI queue name not present in cluster: queue validation fails during reconciliation.
+
 ## Installation Paths
 
 Platform is installed using Dynamo Kubernetes Platform [helm chart](https://github.com/ai-dynamo/dynamo/tree/main/deploy/helm/charts/platform/README.md).
