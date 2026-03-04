@@ -1,0 +1,2 @@
+griffe>=1.0
+toml; python_version < "3.11"
