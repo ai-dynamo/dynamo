@@ -46,6 +46,11 @@ pub enum PrefillError {
     /// Disaggregated params not found in prefill response
     #[error("No disaggregated params in prefill response: {0}")]
     NoDisaggregatedParams(String),
+
+    /// Required worker ID not found in request headers (Direct routing mode)
+    #[error("Worker ID required in Direct routing mode but not found in request headers. \
+             Expected x-prefill-instance-id to be set by external router (e.g., EPP).")]
+    MissingWorkerIdForDirectRouting,
 }
 
 /// Result of the prefill phase in `generate()`.
@@ -545,6 +550,9 @@ impl PrefillRouter {
                 Ok((worker.worker_id, worker.dp_rank))
             }
             InnerPrefillRouter::SimpleRouter(r) => {
+                if self.router_mode.is_direct_routing() {
+                    anyhow::bail!(PrefillError::MissingWorkerIdForDirectRouting);
+                }
                 let worker_id = if update_states {
                     r.select_next_worker()
                 } else {
@@ -616,6 +624,14 @@ impl
             .as_ref()
             .and_then(|r| r.prefill_worker_id);
 
+        // In Direct routing mode, the prefill_worker_id must come from the request
+        // headers (x-prefill-instance-id), set by the external router (e.g., EPP).
+        if self.router_mode.is_direct_routing() && preselected_worker.is_none() {
+            return Err(anyhow::anyhow!(
+                PrefillError::MissingWorkerIdForDirectRouting
+            ));
+        }
+
         let prefill_result = async {
             if let Some((worker_id, dp_rank, bootstrap_info)) = self
                 .resolve_prefill_worker(&prefill_req, preselected_worker)
@@ -624,7 +640,7 @@ impl
                 // Bootstrap optimization path: spawn prefill in background
                 // We successfully used the peeked worker, so we must now advance the router state
                 // to ensure the next request gets a different worker.
-                if !self.router_mode.is_kv_routing()
+                if !self.router_mode.is_kv_routing() && !self.router_mode.is_direct_routing()
                     && let Some(router) = self.prefill_router.get()
                 {
                     router.select_next_worker();
