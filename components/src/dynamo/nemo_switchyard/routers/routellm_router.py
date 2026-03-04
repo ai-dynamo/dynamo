@@ -23,7 +23,6 @@ import asyncio
 import logging
 
 from ..base import BaseModelRouter, RouterConfig
-from ..registry import register_router
 
 logger = logging.getLogger(__name__)
 
@@ -147,6 +146,3 @@ class RouteLLMRouter(BaseModelRouter):
 
     def get_stats(self) -> dict:
         return dict(self._stats)
-
-
-register_router("routellm", RouteLLMRouter)

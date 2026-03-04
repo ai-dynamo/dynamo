@@ -14,12 +14,10 @@ except Exception:
 from .base import BaseModelRouter, RouterConfig
 from .handler import ModelRouterHandler
 from .pool import PoolManager
-from .registry import register_router
 
 __all__ = [
     "BaseModelRouter",
     "RouterConfig",
     "ModelRouterHandler",
     "PoolManager",
-    "register_router",
 ]

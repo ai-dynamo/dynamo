@@ -2,15 +2,33 @@
 #  SPDX-License-Identifier: Apache-2.0
 
 """
-Auto-import concrete router modules to trigger registration.
+Built-in router implementations.
 
 RouteLLM is optional — if ``routellm`` / ``transformers`` are not
 installed, the RouteLLM router simply won't be available.
 """
 
-from . import random_router, round_robin_router  # noqa: F401
+_ROUTERS = {}
 
 try:
-    from . import routellm_router  # noqa: F401
+    from .routellm_router import RouteLLMRouter
+
+    _ROUTERS["routellm"] = RouteLLMRouter
 except ImportError:
     pass
+
+
+def get_router_class(name: str):
+    """Return the router class for *name*, or raise KeyError."""
+    try:
+        return _ROUTERS[name]
+    except KeyError:
+        available = ", ".join(sorted(_ROUTERS)) or "(none)"
+        raise KeyError(
+            f"Unknown router type: {name!r}. Available routers: {available}"
+        ) from None
+
+
+def list_routers():
+    """Return sorted list of available router names."""
+    return sorted(_ROUTERS)

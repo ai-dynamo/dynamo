@@ -27,7 +27,6 @@ Architecture:
 import argparse
 import logging
 import os
-import sys
 import warnings
 
 import uvloop
@@ -222,12 +221,10 @@ async def worker(runtime: DistributedRuntime):
     """Main worker function for the Model Router."""
     args = parse_args()
 
-    # Import routers package to trigger auto-registration
-    from . import routers as _routers  # noqa: F401
     from .base import RouterConfig
     from .handler import ModelRouterHandler
     from .pool import PoolManager
-    from .registry import create_router, list_routers
+    from .routers import get_router_class, list_routers
 
     # ── --list-routers ──
     if args.list_routers:
@@ -261,7 +258,8 @@ async def worker(runtime: DistributedRuntime):
         extra=extra,
     )
 
-    router = create_router(args.router_type, config)
+    router_cls = get_router_class(args.router_type)
+    router = router_cls(config)
     pool_manager = PoolManager(runtime, pool_endpoints)
     handler = ModelRouterHandler(router, pool_manager)
 
