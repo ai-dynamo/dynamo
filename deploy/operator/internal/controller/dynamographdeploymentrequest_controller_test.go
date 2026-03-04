@@ -2111,26 +2111,26 @@ var _ = Describe("DGDR Profiling Phase Derivation Functions", func() {
 	})
 })
 
-var _ = Describe("DGDR Progress ConfigMap Naming", func() {
-	Context("getProgressConfigMapName", func() {
+var _ = Describe("DGDR Output ConfigMap Naming", func() {
+	Context("getOutputConfigMapName", func() {
 		It("Should return correct ConfigMap name", func() {
 			dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "test-dgdr",
 				},
 			}
-			Expect(getProgressConfigMapName(dgdr)).Should(Equal("dgdr-progress-test-dgdr"))
+			Expect(getOutputConfigMapName(dgdr)).Should(Equal("dgdr-output-test-dgdr"))
 		})
 
-		It("Should use ProgressConfigMapPrefix", func() {
+		It("Should use ConfigMapOutputPrefix", func() {
 			dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "my-deploy",
 				},
 			}
-			name := getProgressConfigMapName(dgdr)
-			Expect(name).Should(HavePrefix(ProgressConfigMapPrefix))
-			Expect(name).Should(Equal("dgdr-progress-my-deploy"))
+			name := getOutputConfigMapName(dgdr)
+			Expect(name).Should(HavePrefix(ConfigMapOutputPrefix))
+			Expect(name).Should(Equal("dgdr-output-my-deploy"))
 		})
 	})
 })
@@ -2389,7 +2389,7 @@ var _ = Describe("DGDR Profiling Failure Attribution", func() {
 	})
 
 	Context("updateProfilingSubPhase", func() {
-		It("Should update profilingPhase from progress ConfigMap", func() {
+		It("Should update profilingPhase from output ConfigMap", func() {
 			ctx := context.Background()
 			dgdrName := "test-dgdr-subphase-update"
 			namespace := defaultNamespace
@@ -2424,10 +2424,10 @@ var _ = Describe("DGDR Profiling Failure Attribution", func() {
 			dgdr.Status.ProfilingPhase = nvidiacomv1beta1.ProfilingPhaseInitializing
 			Expect(k8sClient.Status().Update(ctx, dgdr)).Should(Succeed())
 
-			// Create progress ConfigMap with updated phase and message from profiler
+			// Create output ConfigMap with updated phase and message from profiler
 			cm := &corev1.ConfigMap{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      getProgressConfigMapName(dgdr),
+					Name:      getOutputConfigMapName(dgdr),
 					Namespace: namespace,
 				},
 				Data: map[string]string{
@@ -2532,10 +2532,10 @@ var _ = Describe("DGDR Profiling Failure Attribution", func() {
 			dgdr.Status.ProfilingPhase = nvidiacomv1beta1.ProfilingPhaseSweepingPrefill
 			Expect(k8sClient.Status().Update(ctx, dgdr)).Should(Succeed())
 
-			// Create progress ConfigMap with same phase as status
+			// Create output ConfigMap with same phase as status
 			cm := &corev1.ConfigMap{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      getProgressConfigMapName(dgdr),
+					Name:      getOutputConfigMapName(dgdr),
 					Namespace: namespace,
 				},
 				Data: map[string]string{
