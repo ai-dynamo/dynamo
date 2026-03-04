@@ -898,7 +898,7 @@ mod test_event_processing {
         let blk_hash = 0xdead_beef;
 
         let stored =
-            create_stored_block_from_parts(kv_block_size, blk_hash, &token_ids, None, None);
+            create_stored_block_from_parts(kv_block_size, blk_hash, &token_ids, None, None, None);
 
         assert_eq!(stored.block_hash.0, blk_hash);
         let expected_hash = compute_block_hash_for_seq(&token_ids, 4, None, None)[0];

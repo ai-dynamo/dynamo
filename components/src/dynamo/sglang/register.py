@@ -182,6 +182,7 @@ async def _get_runtime_config(
             f"Publishing disaggregated endpoint to discovery: "
             f"{bootstrap_host}:{bootstrap_port}"
         )
+
     # In SGLang, these are server_args, not scheduler_info (unlike vLLM)
     # Note: If --max-running-requests is not specified, SGLang uses an internal default
     # undocumented value. The value here will be None if not explicitly set by user.
@@ -192,6 +193,9 @@ async def _get_runtime_config(
     max_prefill_tokens = getattr(server_args, "max_prefill_tokens", None)
     if max_prefill_tokens:
         runtime_config.max_num_batched_tokens = max_prefill_tokens
+
+    if server_args.speculative_algorithm == "EAGLE":
+        runtime_config.enable_eagle = True
 
     try:
         # Try to check if the engine has a scheduler attribute with the computed values

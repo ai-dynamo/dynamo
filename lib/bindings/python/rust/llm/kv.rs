@@ -27,13 +27,14 @@ fn depythonize_block_mm_infos(obj: &Bound<'_, PyAny>) -> PyResult<Vec<Option<Blo
 }
 
 #[pyfunction]
-#[pyo3(name = "compute_block_hash_for_seq", signature = (tokens, kv_block_size, block_mm_infos=None, lora_name=None))]
+#[pyo3(name = "compute_block_hash_for_seq", signature = (tokens, kv_block_size, block_mm_infos=None, lora_name=None, is_eagle=None))]
 pub fn compute_block_hash_for_seq_py(
     _py: Python,
     tokens: Vec<u32>,
     kv_block_size: usize,
     block_mm_infos: Option<Bound<PyAny>>,
     lora_name: Option<String>,
+    is_eagle: Option<bool>,
 ) -> PyResult<Vec<u64>> {
     if kv_block_size == 0 {
         return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
@@ -51,6 +52,7 @@ pub fn compute_block_hash_for_seq_py(
         kv_block_size as u32,
         mm_infos.as_deref(),
         lora_name.as_deref(),
+        is_eagle,
     );
 
     Ok(hashes.into_iter().map(|h| h.0).collect())
@@ -174,7 +176,7 @@ impl KvEventPublisher {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (token_ids, num_block_tokens, block_hashes, parent_hash=None, block_mm_infos=None, lora_name=None))]
+    #[pyo3(signature = (token_ids, num_block_tokens, block_hashes, parent_hash=None, block_mm_infos=None, lora_name=None, is_eagle=None))]
     fn publish_stored(
         &self,
         py: Python,
@@ -184,6 +186,7 @@ impl KvEventPublisher {
         parent_hash: Option<i64>,
         block_mm_infos: Option<Bound<PyAny>>,
         lora_name: Option<String>,
+        is_eagle: Option<bool>,
     ) -> PyResult<()> {
         let kv_block_size = self.kv_block_size as u32;
         let dp_rank = self.dp_rank;
@@ -211,6 +214,7 @@ impl KvEventPublisher {
                         lora_name.as_deref(),
                         &warning_count,
                         mm_infos.as_deref(),
+                        is_eagle,
                     ),
                 }),
                 dp_rank,
@@ -595,6 +599,7 @@ async fn create_kv_router_from_endpoint(
             block_size as u32,
             kv_router_config,
             worker_type,
+            false,
         )
         .await
         .map_err(to_pyerr)?;

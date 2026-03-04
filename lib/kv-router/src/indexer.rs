@@ -311,6 +311,7 @@ pub trait KvIndexerInterface {
         &self,
         tokens: &[u32],
         lora_name: Option<&str>,
+        is_eagle: Option<bool>,
     ) -> Result<OverlapScores, KvRouterError>;
 
     /// Apply a `RouterEvent` to the KV store.
@@ -527,8 +528,9 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
         &self,
         tokens: &[u32],
         lora_name: Option<&str>,
+        is_eagle: Option<bool>,
     ) -> Result<OverlapScores, KvRouterError> {
-        let sequence = compute_block_hash_for_seq(tokens, self.kv_block_size, None, lora_name);
+        let sequence = compute_block_hash_for_seq(tokens, self.kv_block_size, None, lora_name, is_eagle);
         Ok(self.backend.find_matches(&sequence, false))
     }
 
@@ -1061,13 +1063,14 @@ impl KvIndexerInterface for KvIndexer {
         &self,
         tokens: &[u32],
         lora_name: Option<&str>,
+        is_eagle: Option<bool>,
     ) -> Result<OverlapScores, KvRouterError> {
         tracing::debug!(
             "Finding matches for request tokens: {:?} / len: {}",
             tokens,
             tokens.len()
         );
-        let sequence = compute_block_hash_for_seq(tokens, self.kv_block_size, None, lora_name);
+        let sequence = compute_block_hash_for_seq(tokens, self.kv_block_size, None, lora_name, is_eagle);
         tracing::debug!("Computed sequence: {:?}", sequence);
         self.find_matches(sequence).await
     }
@@ -1404,9 +1407,10 @@ impl KvIndexerInterface for LocalKvIndexer {
         &self,
         tokens: &[u32],
         lora_name: Option<&str>,
+        is_eagle: Option<bool>,
     ) -> Result<OverlapScores, KvRouterError> {
         self.indexer
-            .find_matches_for_request(tokens, lora_name)
+            .find_matches_for_request(tokens, lora_name, is_eagle)
             .await
     }
 
@@ -1870,8 +1874,9 @@ impl KvIndexerInterface for KvIndexerSharded {
         &self,
         tokens: &[u32],
         lora_name: Option<&str>,
+        is_eagle: Option<bool>,
     ) -> Result<OverlapScores, KvRouterError> {
-        let sequence = compute_block_hash_for_seq(tokens, self.kv_block_size, None, lora_name);
+        let sequence = compute_block_hash_for_seq(tokens, self.kv_block_size, None, lora_name, is_eagle);
         self.find_matches(sequence).await
     }
 
@@ -2484,7 +2489,7 @@ mod tests {
 
         // Empty index should return no matches
         let tokens = vec![1, 2, 3, 4];
-        let scores = index.find_matches_for_request(&tokens, None).await.unwrap();
+        let scores = index.find_matches_for_request(&tokens, None, None).await.unwrap();
         assert!(scores.scores.is_empty());
 
         // Store some data and verify we can find it via tokens
@@ -2496,7 +2501,7 @@ mod tests {
         // Note: find_matches_for_request computes block hashes from tokens,
         // so we need tokens that hash to the same LocalBlockHash values.
         // For this test, we just verify the method works without error.
-        let scores = index.find_matches_for_request(&tokens, None).await.unwrap();
+        let scores = index.find_matches_for_request(&tokens, None, None).await.unwrap();
         // The tokens [1,2,3,4] won't match our stored [1,2,3] local hashes
         // because find_matches_for_request computes different hashes from raw tokens
         assert!(scores.scores.is_empty() || !scores.scores.is_empty());
