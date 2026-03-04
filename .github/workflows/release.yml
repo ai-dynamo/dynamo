@@ -543,7 +543,7 @@ jobs:
           source "$GITHUB_WORKSPACE/.github/scripts/retry.sh"
           ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
           ECR_HOSTNAME="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
-          retry bash -c "aws ecr get-login-password --region ${AWS_DEFAULT_REGION} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}"
+          retry bash -c 'aws ecr get-login-password --region ${AWS_DEFAULT_REGION} | docker login --username AWS --password-stdin "${ECR_HOSTNAME}"'
 
       - name: Login to NGC
         env:
