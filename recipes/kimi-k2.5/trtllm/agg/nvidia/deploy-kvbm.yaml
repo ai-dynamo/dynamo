@@ -107,6 +107,8 @@ spec:
             value: "3600"
           - name: DYN_KVBM_METRICS
             value: "true"
+          - name: DYN_SYSTEM_PORT
+            value: "9090"
           volumeMounts:
           - mountPath: /opt/dynamo/configs
             name: llm-config-kimi-agg-kvbm
