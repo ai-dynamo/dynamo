@@ -167,11 +167,8 @@ pub fn streaming_tool_call_adapter(
 
                                 if just_completed {
                                     // Build a synthetic chunk with the complete tool call.
-                                    let synthetic = build_complete_tool_call_chunk(
-                                        data,
-                                        choice.index,
-                                        state,
-                                    );
+                                    let synthetic =
+                                        build_complete_tool_call_chunk(data, choice.index, state);
                                     extra_chunks.push(synthetic);
                                 }
                             }
