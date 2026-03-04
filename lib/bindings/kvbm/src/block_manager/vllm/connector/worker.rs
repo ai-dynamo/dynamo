@@ -386,15 +386,16 @@ impl Worker for KvConnectorWorker {
                     );
                 } else {
                     // No slot and not tracked — the request was never started or
-                    // was already fully cleaned up. Signal immediate completion
-                    // so vLLM can free the request from its hash table (since the
-                    // leader now always returns `true` from request_finished).
+                    // was already fully cleaned up. Do NOT add to
+                    // is_finished_offloading: vLLM has already removed this
+                    // request from its `self.requests` table, so signaling
+                    // finished_sending would hit `assert req_id in self.requests`
+                    // in the Python scheduler and crash the engine.
                     tracing::warn!(
                         request_id,
                         "finished request received for unknown request_id; \
-                         signaling immediate completion"
+                         dropping silently (request already cleaned up)"
                     );
-                    is_finished_offloading.insert(request_id.clone());
                 }
                 continue;
             }
