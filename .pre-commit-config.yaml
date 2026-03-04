@@ -93,7 +93,6 @@ repos:
       language: python
       pass_filenames: false
       additional_dependencies:
-        - mistral-common
         - pytest
         - tomli
         - pydantic

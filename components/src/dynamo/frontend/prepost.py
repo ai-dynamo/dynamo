@@ -371,7 +371,7 @@ class StreamingPostProcessor:
     def _dump_in_progress_tool_calls(self) -> list[dict[str, Any]]:
         return [
             tool_call.model_dump(exclude_none=True)
-            for _, tool_call in sorted(self.in_progress_tool_calls.items())
+            for _, tool_call in self.in_progress_tool_calls.items()
         ]
 
     def _emit_tool_calls_choice(self, output: Any) -> dict[str, Any]:

@@ -1782,6 +1782,71 @@ def test_stream_interval_20_reasoning_and_tool_finish_same_chunk(
 
 
 @pytest.mark.vllm
+def test_stream_terminal_single_chunk(tokenizer, request_for_sampling, sampling_params):
+    """Regression: everything arrives in a single CompletionOutput.
+
+    The closing </think>, the full <tool_call>…</tool_call>, and
+    finish_reason="stop" are all packed into one chunk.  This exercises
+    the terminal single-chunk buffer-drain path in the post-processor.
+    """
+    tool_parser = Hermes2ProToolParser(tokenizer)
+    proc = StreamingPostProcessor(
+        tokenizer=tokenizer,
+        request_for_sampling=request_for_sampling,
+        sampling_params=sampling_params,
+        prompt_token_ids=PROMPT_TOKEN_IDS,
+        tool_parser=tool_parser,
+        reasoning_parser_class=Qwen3ReasoningParser,
+        chat_template_kwargs={"reasoning_effort": None},
+    )
+
+    # Build a single chunk that contains *all* text and token IDs from the
+    # OUTPUTS_INTERVAL_20 sequence, with finish_reason="stop".
+    all_text = "".join(o.text or "" for o in OUTPUTS_INTERVAL_20)
+    all_token_ids = [tid for o in OUTPUTS_INTERVAL_20 for tid in o.token_ids]
+    single_chunk = CompletionOutput(
+        index=0,
+        text=all_text,
+        token_ids=all_token_ids,
+        routed_experts=None,
+        cumulative_logprob=None,
+        logprobs=None,
+        finish_reason="stop",
+        stop_reason=None,
+    )
+
+    results = _collect_results(proc, [single_chunk])
+    reasoning = _collect_reasoning(results)
+    tool_calls = _collect_tool_calls(results)
+
+    # -- reasoning_content should contain the full think block ---------------
+    assert "the user is asking for the titles of some James Joyce books" in reasoning
+    assert "the user's request.\n" in reasoning
+
+    # -- tool calls must be parsed, not leaked as content -------------------
+    assert len(tool_calls) == 1, (
+        f"Expected 1 tool call but got {len(tool_calls)}. "
+        "Tool-call markup was likely emitted as plain content instead."
+    )
+    tc = tool_calls[0]
+    assert tc["function"]["name"] == "search_gutenberg_books"
+    assert json.loads(tc["function"]["arguments"]) == {
+        "search_terms": ["James Joyce", "Project Gutenberg"],
+    }
+
+    # -- no <tool_call> markup should appear in content ---------------------
+    all_content = "".join(r.get("delta", {}).get("content", "") for r in results)
+    assert (
+        "<tool_call>" not in all_content
+    ), f"Raw <tool_call> markup leaked into content: {all_content!r}"
+    assert "</tool_call>" not in all_content
+
+    # -- finish reason ------------------------------------------------------
+    finish_reasons = [r["finish_reason"] for r in results if r.get("finish_reason")]
+    assert "stop" in finish_reasons
+
+
+@pytest.mark.vllm
 def test_no_tool_call(tokenizer, request_for_sampling, sampling_params):
     """Reasoning + plain content, no tool calls.
 
