@@ -174,6 +174,8 @@ SECTION_DEFS: list[SectionDef] = [
 # Docstring parsing (Google-style)
 # ---------------------------------------------------------------------------
 
+_PARAM_EMPTY_SENTINEL = "inspect.Parameter.empty"
+
 _SECTION_KW_RE = re.compile(
     r"^(Args|Arguments|Parameters|Returns?|Raises?|Throws"
     r"|Examples?|Notes?|Attributes|Yields|See Also|Warnings?):\s*$",
@@ -381,7 +383,7 @@ def _render_parameters_table(params: Any) -> str:
             continue
         annotation = _format_annotation(param.annotation)
         default = str(param.default) if param.default is not None else ""
-        if default == "inspect.Parameter.empty":
+        if default == _PARAM_EMPTY_SENTINEL:
             default = ""
         rows.append(f"| `{param.name}` | `{annotation}` | {_escape_table(default)} |")
     if not rows:
@@ -395,14 +397,15 @@ def _build_signature(func: Any) -> str:
     sig_params: list[str] = []
     try:
         params = func.parameters
-    except Exception:
+    except Exception as exc:
+        print(f"  WARN: no parameters for {func}: {exc}", file=sys.stderr)
         params = []
     for p in params:
         if p.name in ("self", "cls"):
             continue
         ann = _format_annotation(p.annotation)
         entry = f"{p.name}: {ann}" if ann else p.name
-        if p.default is not None and str(p.default) != "inspect.Parameter.empty":
+        if p.default is not None and str(p.default) != _PARAM_EMPTY_SENTINEL:
             entry += f" = {p.default}"
         sig_params.append(entry)
     ret = _format_annotation(getattr(func, "returns", None))
@@ -465,7 +468,8 @@ def _render_function(
 
     try:
         params = func.parameters
-    except Exception:
+    except Exception as exc:
+        print(f"  WARN: no parameters for {func}: {exc}", file=sys.stderr)
         params = []
     params_table = _render_parameters_table(params)
     if params_table:
@@ -511,7 +515,8 @@ def _render_class_body(cls: Any, *, skip_first_line: bool = False) -> str:
 
     try:
         members = cls.members
-    except Exception:
+    except Exception as exc:
+        print(f"  WARN: no members for {cls}: {exc}", file=sys.stderr)
         return "\n".join(parts)
 
     _append_attributes(parts, members)
@@ -665,7 +670,7 @@ def _extract_nixl_members(
 # ---------------------------------------------------------------------------
 
 
-def _render_header(modules: list[str]) -> list[str]:
+def _render_header() -> list[str]:
     """Render the page header with SPDX, title, and card navigation."""
     parts: list[str] = [
         SPDX_HEADER.format(sidebar_title="Python API"),
@@ -798,7 +803,7 @@ def render_consolidated_page() -> str:
     placed_classes: set[str] = set()
     placed_functions: set[str] = set()
 
-    parts: list[str] = _render_header(modules)
+    parts: list[str] = _render_header()
 
     for section in SECTION_DEFS:
         parts.extend(

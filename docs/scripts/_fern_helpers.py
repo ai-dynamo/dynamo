@@ -34,6 +34,11 @@ def escape_jsx_attr(text: str) -> str:
     )
 
 
+_CODE_SPAN_RE = re.compile(r"`[^`]+`")
+_BRACE_EXPR_RE = re.compile(r"\{[^{}]*\}")
+_PLACEHOLDER_RE = re.compile(r"\x01(\d+)\x01")
+
+
 def escape_mdx_prose(text: str) -> str:
     """Escape MDX-sensitive characters in prose text.
 
@@ -46,17 +51,12 @@ def escape_mdx_prose(text: str) -> str:
         spans.append(m.group(0))
         return f"\x01{len(spans) - 1}\x01"
 
-    # Protect existing code spans
-    text = re.sub(r"`[^`]+`", _protect, text)
-    # Wrap brace expressions in code spans
-    text = re.sub(r"\{[^{}]*\}", lambda m: f"`{m.group(0)}`", text)
-    # Protect newly created code spans
-    text = re.sub(r"`[^`]+`", _protect, text)
-    # Escape remaining braces and angle brackets
+    text = _CODE_SPAN_RE.sub(_protect, text)
+    text = _BRACE_EXPR_RE.sub(lambda m: f"`{m.group(0)}`", text)
+    text = _CODE_SPAN_RE.sub(_protect, text)
     text = text.replace("{", "\\{").replace("}", "\\}")
     text = text.replace("<", "&lt;")
-    # Restore protected spans via re.sub callback (O(n) instead of O(n*m))
-    text = re.sub(r"\x01(\d+)\x01", lambda m: spans[int(m.group(1))], text)
+    text = _PLACEHOLDER_RE.sub(lambda m: spans[int(m.group(1))], text)
     return text
 
 

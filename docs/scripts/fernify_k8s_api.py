@@ -67,6 +67,10 @@ RESOURCE_META: dict[str, dict[str, str]] = {
 OPERATOR_SRC = "https://github.com/ai-dynamo/dynamo/tree/main/deploy/operator"
 OPERATOR_DIR = REPO_ROOT / "deploy" / "operator"
 
+_TYPE_HEADING_RE = re.compile(r"^####\s+(\S+)\s*$")
+_RESOURCE_LINK_RE = re.compile(r"^-\s+\[(\w+)\]")
+_DEFAULT_DESC = "Custom resource for the Dynamo operator."
+
 
 # ---------------------------------------------------------------------------
 # Source discovery and extraction
@@ -103,11 +107,15 @@ def _extract_resource_description(
     start: int,
     end: int,
 ) -> str:
-    """Extract the first-line description for a resource type."""
+    """Extract the first-line description for a resource type.
+
+    Returns empty string if not found.
+    """
+    heading_re = re.compile(rf"^####\s+{re.escape(resource_name)}\s*$")
     in_resource = False
     for i in range(start, end):
         line = lines[i]
-        if re.match(rf"^####\s+{re.escape(resource_name)}\s*$", line):
+        if heading_re.match(line):
             in_resource = True
             continue
         if not in_resource:
@@ -117,7 +125,7 @@ def _extract_resource_description(
             return stripped[:77] + "..." if len(stripped) > 80 else stripped
         if stripped.startswith("#"):
             break
-    return "Custom resource for the Dynamo operator."
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -157,7 +165,7 @@ def _find_type_headings(
     """Find all #### TypeName headings in a line range."""
     headings: list[tuple[int, str]] = []
     for i in range(start, end):
-        m = re.match(r"^####\s+(\S+)\s*$", lines[i])
+        m = _TYPE_HEADING_RE.match(lines[i])
         if m:
             headings.append((i, m.group(1)))
     return headings
@@ -174,7 +182,7 @@ def _find_resource_types(lines: list[str], start: int, end: int) -> list[str]:
             continue
         if not in_list:
             continue
-        m = re.match(r"^-\s+\[(\w+)\]", stripped)
+        m = _RESOURCE_LINK_RE.match(stripped)
         if m:
             resources.append(m.group(1))
         elif stripped and not stripped.startswith("-"):
@@ -191,7 +199,6 @@ def _wrap_types_in_details(
     lines: list[str],
     start: int,
     end: int,
-    resources: list[str],
 ) -> list[str]:
     """Wrap each #### type in a <details>/<summary> block."""
     headings = _find_type_headings(lines, start, end)
@@ -267,8 +274,10 @@ def _resolve_resource_meta(
             "src": meta.get("src", ""),
         }
     desc = _extract_resource_description(md_lines, name, *v1a_range)
-    if desc == "Custom resource for the Dynamo operator.":
+    if not desc:
         desc = _extract_resource_description(md_lines, name, *v1b_range)
+    if not desc:
+        desc = _DEFAULT_DESC
     return {"icon": "regular cube", "desc": desc, "src": _discover_go_source(name)}
 
 
@@ -288,11 +297,11 @@ def _build_tabbed_content(
     result: list[str] = ["<Tabs>\n\n"]
 
     result.append('<Tab title="v1alpha1">\n\n')
-    result.extend(_wrap_types_in_details(lines, *v1a_range, v1alpha1_resources))
+    result.extend(_wrap_types_in_details(lines, *v1a_range))
     result.append("\n</Tab>\n\n")
 
     result.append('<Tab title="v1beta1">\n\n')
-    result.extend(_wrap_types_in_details(lines, *v1b_range, v1beta1_resources))
+    result.extend(_wrap_types_in_details(lines, *v1b_range))
     result.append("\n</Tab>\n\n")
 
     result.append("</Tabs>\n\n")
