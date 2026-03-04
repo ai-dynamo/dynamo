@@ -146,6 +146,16 @@ class GMSWorker(Worker):
             manager = get_gms_client_memory_manager()
             assert manager is not None, "GMS client is not initialized"
             assert manager.is_unmapped, "GMS weights are not unmapped"
+            # After CRIU restore the process may be on a different GPU whose
+            # UUID (and therefore GMS socket path) differs from the original.
+            new_socket = get_socket_path(manager.device)
+            if new_socket != manager.socket_path:
+                logger.info(
+                    "[GMS] GPU socket changed after restore: %s -> %s",
+                    manager.socket_path,
+                    new_socket,
+                )
+                manager.socket_path = new_socket
             manager.connect(RequestedLockType.RO)
             manager.remap_all_vas()
 

@@ -164,3 +164,17 @@ def set_current_device(device: int) -> None:
     check_cuda_result(result, "cuDevicePrimaryCtxRetain")
     (result,) = cuda.cuCtxSetCurrent(ctx)
     check_cuda_result(result, "cuCtxSetCurrent")
+
+
+def get_context_device() -> int:
+    """Return the device ordinal bound to the current CUDA context.
+
+    After CRIU restore with cuda-checkpoint device remapping,
+    cuDevicePrimaryCtxRetain may succeed for the old ordinal (the context
+    was preserved), but the context is now bound to a different physical
+    device.  This function queries the actual ordinal so that VMM calls
+    like cuMemSetAccess use the correct location.id.
+    """
+    result, dev = cuda.cuCtxGetDevice()
+    check_cuda_result(result, "cuCtxGetDevice")
+    return int(dev)

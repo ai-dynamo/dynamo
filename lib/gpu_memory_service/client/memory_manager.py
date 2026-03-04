@@ -36,6 +36,7 @@ from typing import Dict, List, Optional
 
 from gpu_memory_service.client.cuda_vmm_utils import free_va as _cuda_free_va
 from gpu_memory_service.client.cuda_vmm_utils import (
+    get_context_device,
     import_handle_from_fd,
     map_to_va,
     release_handle,
@@ -452,6 +453,20 @@ class GMSClientMemoryManager:
         exists and size matches before remapping.
         """
         set_current_device(self.device)
+
+        # After CRIU restore with cuda-checkpoint device remapping,
+        # cuDevicePrimaryCtxRetain succeeds for the old ordinal (the context
+        # was preserved), but the context is now bound to a different physical
+        # device.  cuMemSetAccess needs the real ordinal for location.id.
+        actual_device = get_context_device()
+        if actual_device != self.device:
+            logger.info(
+                "[GPU Memory Service] Device ordinal corrected after restore: "
+                "%d -> %d",
+                self.device,
+                actual_device,
+            )
+            self.device = actual_device
 
         # Stale layout check
         current_hash = self.get_memory_layout_hash()
