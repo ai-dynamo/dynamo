@@ -71,7 +71,7 @@ class MMRouterHandler:
         t0_ns = time.time_ns()
 
         # Hop 1: frontend → MM router TCP transfer
-        t_frontend_send_ns = request.get("_t_frontend_send_ns")
+        t_frontend_send_ns = request.get("extra_args", {}).get("_t_frontend_send_ns")
         if t_frontend_send_ns:
             hop1_ms = (t0_ns - t_frontend_send_ns) / 1e6
             logger.info(f"[timing] hop1_frontend_to_router={hop1_ms:.1f}ms")
