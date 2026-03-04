@@ -154,6 +154,7 @@ jobs:
     runs-on: prod-builder-v3
     outputs:
       target_tag_plain: ${{ steps.calculate-target-tag.outputs.target_tag_plain }}
+      test_tag_plain: ${{ steps.calculate-target-tag.outputs.test_tag_plain }}
     env:
       FRAMEWORK: ${{ inputs.framework }}
     steps:
@@ -201,9 +202,13 @@ jobs:
             EFA_SUFFIX="-efa"
           fi
           TARGET_TAG_PLAIN="${{ github.sha }}-${{ inputs.framework }}${EFA_SUFFIX}"
+          TEST_TAG_PLAIN="${{ github.sha }}-${{ inputs.framework }}${EFA_SUFFIX}-test"
           DEFAULT_TARGET_IMAGE_URI="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${TARGET_TAG_PLAIN}-cuda${CUDA_VERSION}-${{ inputs.platform }}"
+          TEST_IMAGE_URI="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${TEST_TAG_PLAIN}-cuda${CUDA_VERSION}-${{ inputs.platform }}"
           echo "default_target_image_uri=${DEFAULT_TARGET_IMAGE_URI}" >> $GITHUB_OUTPUT
+          echo "test_image_uri=${TEST_IMAGE_URI}" >> $GITHUB_OUTPUT
           echo "target_tag_plain=${TARGET_TAG_PLAIN}" >> $GITHUB_OUTPUT
+          echo "test_tag_plain=${TEST_TAG_PLAIN}" >> $GITHUB_OUTPUT
           echo "cuda_version_plain=${CUDA_VERSION}" >> $GITHUB_OUTPUT
       - name: Initialize Dynamo Builder
         uses: ./.github/actions/init-dynamo-builder
@@ -289,7 +294,7 @@ jobs:
             -f container/Dockerfile.test \
             --build-arg BASE_IMAGE=${{ steps.calculate-target-tag.outputs.default_target_image_uri }} \
             ${CACHE_ARGS} \
-            -t ${{ steps.calculate-target-tag.outputs.default_target_image_uri }}-test .
+            -t ${{ steps.calculate-target-tag.outputs.test_image_uri }} .
       - name: Show summary
         shell: bash
         if: ${{ inputs.push_image && inputs.show_summary }}
@@ -323,7 +328,8 @@ jobs:
           echo "cuda_version_plain=${CUDA_VERSION}" >> $GITHUB_OUTPUT
           RUNTIME_IMAGE=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build.outputs.target_tag_plain }}-cuda${CUDA_VERSION}-${{ inputs.platform }}
           echo "runtime_image=${RUNTIME_IMAGE}" >> $GITHUB_OUTPUT
-          echo "test_image=${RUNTIME_IMAGE}-test" >> $GITHUB_OUTPUT
+          TEST_IMAGE=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build.outputs.test_tag_plain }}-cuda${CUDA_VERSION}-${{ inputs.platform }}
+          echo "test_image=${TEST_IMAGE}" >> $GITHUB_OUTPUT
       - name: Docker Login
         uses: ./.github/actions/docker-login
         with:
@@ -424,7 +430,8 @@ jobs:
           echo "cuda_version_plain=${CUDA_VERSION}" >> $GITHUB_OUTPUT
           RUNTIME_IMAGE=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build.outputs.target_tag_plain }}-cuda${CUDA_VERSION}-${{ inputs.platform }}
           echo "runtime_image=${RUNTIME_IMAGE}" >> $GITHUB_OUTPUT
-          echo "test_image=${RUNTIME_IMAGE}-test" >> $GITHUB_OUTPUT
+          TEST_IMAGE=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build.outputs.test_tag_plain }}-cuda${CUDA_VERSION}-${{ inputs.platform }}
+          echo "test_image=${TEST_IMAGE}" >> $GITHUB_OUTPUT
       - name: Docker Login
         uses: ./.github/actions/docker-login
         with:

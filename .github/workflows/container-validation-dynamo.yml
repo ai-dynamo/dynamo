@@ -62,7 +62,8 @@ jobs:
     timeout-minutes: 60
     outputs:
       # Only pass the non-secret tag suffix between jobs (GitHub blanks outputs containing secrets)
-      image_tag_suffix: ${{ steps.define_image_tag.outputs.image_tag_suffix }}
+      runtime_tag_suffix: ${{ steps.define_image_tag.outputs.runtime_tag_suffix }}
+      test_tag_suffix: ${{ steps.define_image_tag.outputs.test_tag_suffix }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
@@ -90,9 +91,12 @@ jobs:
           ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
         run: |
           CUDA_MAJOR=${CUDA_VERSION%%.*}
-          IMAGE_TAG_SUFFIX="${{ github.sha }}-dynamo-runtime-cuda${CUDA_MAJOR}-amd64"
-          echo "image_tag_suffix=${IMAGE_TAG_SUFFIX}" >> $GITHUB_OUTPUT
-          echo "remote_tag=${ECR_HOSTNAME}/ai-dynamo/dynamo:${IMAGE_TAG_SUFFIX}" >> $GITHUB_OUTPUT
+          RUNTIME_TAG_SUFFIX="${{ github.sha }}-dynamo-runtime-cuda${CUDA_MAJOR}-amd64"
+          TEST_TAG_SUFFIX="${{ github.sha }}-dynamo-test-cuda${CUDA_MAJOR}-amd64"
+          echo "runtime_tag_suffix=${RUNTIME_TAG_SUFFIX}" >> $GITHUB_OUTPUT
+          echo "test_tag_suffix=${TEST_TAG_SUFFIX}" >> $GITHUB_OUTPUT
+          echo "runtime_remote_tag=${ECR_HOSTNAME}/ai-dynamo/dynamo:${RUNTIME_TAG_SUFFIX}" >> $GITHUB_OUTPUT
+          echo "test_remote_tag=${ECR_HOSTNAME}/ai-dynamo/dynamo:${TEST_TAG_SUFFIX}" >> $GITHUB_OUTPUT
       - name: Generate Dockerfile
         shell: bash
         run: |
@@ -107,7 +111,7 @@ jobs:
       - name: Build and Push Runtime Image
         uses: ./.github/actions/docker-remote-build
         with:
-          image_tag: ${{ steps.define_image_tag.outputs.remote_tag }}
+          image_tag: ${{ steps.define_image_tag.outputs.runtime_remote_tag }}
           framework: dynamo
           target: runtime
           platform: amd64
@@ -138,9 +142,9 @@ jobs:
             --push \
             --platform linux/amd64 \
             -f container/Dockerfile.test \
-            --build-arg BASE_IMAGE=${{ steps.define_image_tag.outputs.remote_tag }} \
+            --build-arg BASE_IMAGE=${{ steps.define_image_tag.outputs.runtime_remote_tag }} \
             ${CACHE_ARGS} \
-            -t ${{ steps.define_image_tag.outputs.remote_tag }}-test .
+            -t ${{ steps.define_image_tag.outputs.test_remote_tag }} .
 
   rust-checks:
     needs: [changed-files, build]
@@ -150,7 +154,7 @@ jobs:
     timeout-minutes: 30
     env:
       CONTAINER_ID: test_${{ github.run_id }}_${{ github.run_attempt }}_rust_dynamo
-      IMAGE_TAG: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build.outputs.image_tag_suffix }}
+      IMAGE_TAG: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build.outputs.runtime_tag_suffix }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
@@ -189,7 +193,7 @@ jobs:
     name: Pytest (parallel)
     timeout-minutes: 30
     env:
-      IMAGE_TAG: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build.outputs.image_tag_suffix }}-test
+      IMAGE_TAG: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build.outputs.test_tag_suffix }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
@@ -221,7 +225,7 @@ jobs:
     name: Pytest (sequential)
     timeout-minutes: 30
     env:
-      IMAGE_TAG: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build.outputs.image_tag_suffix }}-test
+      IMAGE_TAG: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build.outputs.test_tag_suffix }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
