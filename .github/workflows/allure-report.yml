@@ -11,6 +11,18 @@ on:
       - 'Nightly CI Pipeline'
     types: [completed]
 
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: 'Workflow run ID to download allure-results artifacts from'
+        required: true
+        type: string
+      report_subdir:
+        description: 'Subdirectory on gh-pages for the report'
+        required: false
+        type: string
+        default: 'dev'
+
 permissions:
   contents: write
   actions: read
@@ -18,32 +30,53 @@ permissions:
 jobs:
   allure-report:
     runs-on: ubuntu-latest
-    if: github.event.workflow_run.conclusion != 'skipped'
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion != 'skipped'
     steps:
       - uses: actions/checkout@v4
 
-      - name: Determine report subdirectory
-        id: report-path
+      - name: Determine report parameters
+        id: params
         run: |
-          WORKFLOW_NAME="${{ github.event.workflow_run.name }}"
-          case "$WORKFLOW_NAME" in
-            *"Dynamo Github Validation"*) echo "subdir=pre-merge" >> $GITHUB_OUTPUT ;;
-            *"Post-Merge"*) echo "subdir=post-merge" >> $GITHUB_OUTPUT ;;
-            *"Nightly"*) echo "subdir=nightly" >> $GITHUB_OUTPUT ;;
-            *) echo "subdir=other" >> $GITHUB_OUTPUT ;;
-          esac
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "run_id=${{ inputs.run_id }}" >> $GITHUB_OUTPUT
+            echo "subdir=${{ inputs.report_subdir }}" >> $GITHUB_OUTPUT
+          else
+            echo "run_id=${{ github.event.workflow_run.id }}" >> $GITHUB_OUTPUT
+            WORKFLOW_NAME="${{ github.event.workflow_run.name }}"
+            case "$WORKFLOW_NAME" in
+              *"Dynamo Github Validation"*) echo "subdir=pre-merge" >> $GITHUB_OUTPUT ;;
+              *"Post-Merge"*) echo "subdir=post-merge" >> $GITHUB_OUTPUT ;;
+              *"Nightly"*) echo "subdir=nightly" >> $GITHUB_OUTPUT ;;
+              *) echo "subdir=other" >> $GITHUB_OUTPUT ;;
+            esac
+          fi
 
       - name: Download Allure Results
         uses: dawidd6/action-download-artifact@v6
         with:
-          run_id: ${{ github.event.workflow_run.id }}
+          run_id: ${{ steps.params.outputs.run_id }}
           name: allure-results-.*
           name_is_regexp: true
           path: allure-results
           merge_multiple: true
           if_no_artifact_found: warn
 
+      - name: Check for Allure results
+        id: check-results
+        run: |
+          if [ -d allure-results ] && [ "$(ls -A allure-results 2>/dev/null)" ]; then
+            echo "has_results=true" >> $GITHUB_OUTPUT
+            echo "Found allure results:"
+            ls -la allure-results/
+          else
+            echo "has_results=false" >> $GITHUB_OUTPUT
+            echo "No allure results found. Skipping report generation."
+          fi
+
       - name: Get Allure history
+        if: steps.check-results.outputs.has_results == 'true'
         uses: actions/checkout@v4
         continue-on-error: true
         with:
@@ -51,18 +84,26 @@ jobs:
           path: gh-pages
 
       - name: Build Allure Report
+        if: steps.check-results.outputs.has_results == 'true'
         uses: simple-elf/allure-report-action@v1.13
-        if: always()
         with:
           allure_results: allure-results
-          allure_history: allure-history/${{ steps.report-path.outputs.subdir }}
+          allure_history: allure-history/${{ steps.params.outputs.subdir }}
           keep_reports: 30
-          gh_pages: gh-pages/${{ steps.report-path.outputs.subdir }}
+          gh_pages: gh-pages/${{ steps.params.outputs.subdir }}
 
       - name: Deploy to GitHub Pages
-        if: always()
+        if: steps.check-results.outputs.has_results == 'true'
         uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_branch: gh-pages
           publish_dir: allure-history
+          keep_files: true
+
+      - name: Print report URL
+        if: steps.check-results.outputs.has_results == 'true'
+        run: |
+          echo "## Allure Report" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Report: https://ai-dynamo.github.io/dynamo/${{ steps.params.outputs.subdir }}/" >> $GITHUB_STEP_SUMMARY
