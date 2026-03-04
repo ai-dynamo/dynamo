@@ -186,9 +186,7 @@ class TestRapidUnsupported:
             CONFIGS_DIR / "5b_rapid_unsupported_planner_throughput_error.yaml"
         )
         ops = _make_ops(tmp_path)
-        with pytest.raises(
-            ValueError, match="Throughput-based planner scaling requires AIC support"
-        ):
+        with pytest.raises(ValueError, match="AIC does not support"):
             asyncio.run(run_profile(dgdr, ops))
 
 

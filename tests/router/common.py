@@ -1669,8 +1669,17 @@ def _test_router_indexers_sync(
             async with aiohttp.ClientSession() as session:
                 async with session.get(f"{standalone_indexer_url}/dump") as resp:
                     assert resp.status == 200, f"GET /dump failed: {resp.status}"
-                    standalone_state = await resp.json()
+                    dump_by_key = await resp.json()
 
+            # /dump returns {model:tenant -> events}, extract the expected key
+            expected_key = f"{model_name}:default"
+            assert expected_key in dump_by_key, (
+                f"Expected dump key '{expected_key}', "
+                f"got keys={list(dump_by_key.keys())}"
+            )
+            for k, v in dump_by_key.items():
+                assert isinstance(v, list), f"Dump key '{k}' returned error: {v}"
+            standalone_state = dump_by_key[expected_key]
             sorted_standalone = sorted(standalone_state, key=sort_key)
             logger.info(f"Standalone HTTP indexer has {len(sorted_standalone)} events")
 
@@ -2197,7 +2206,7 @@ def _test_router_decisions(
             async with aiohttp.ClientSession() as session:
                 async with session.post(
                     f"{standalone_indexer_url}/query",
-                    json={"token_ids": req4_tokens},
+                    json={"token_ids": req4_tokens, "model_name": model_name},
                 ) as resp:
                     assert resp.status == 200, f"POST /query failed: {resp.status}"
                     scores = (await resp.json())["scores"]
