@@ -150,6 +150,7 @@ for i in $(seq 1 "${NUM_WORKERS}"); do
 
     echo "=== Starting vLLM backend worker #${i} (GPU ${gpu_id}) ==="
     env "${COMMON_ENV[@]}" \
+        "PYTHONPATH=${DYNAMO_ROOT}/components/src" \
         "CUDA_VISIBLE_DEVICES=${gpu_id}" \
         "DYN_SYSTEM_PORT=${system_port}" \
         "DYN_VLLM_KV_EVENT_PORT=${kv_port}" \
@@ -192,6 +193,7 @@ wait_ready "http://127.0.0.1:${MM_ROUTER_SYSTEM_PORT}/health" "MM router" 300
 echo
 echo "=== Starting frontend ==="
 env "${COMMON_ENV[@]}" \
+    "PYTHONPATH=${DYNAMO_ROOT}/components/src" \
     "${PYTHON_BIN}" -m dynamo.frontend \
         --http-port "${HTTP_PORT}" \
         --router-mode round-robin \
