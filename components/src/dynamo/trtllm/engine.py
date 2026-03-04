@@ -157,9 +157,7 @@ class TensorRTLLMEngine:
         """Return True if *model_path*'s architecture is not supported by
         TRT-LLM's standalone MultimodalEncoder."""
         try:
-            config = AutoConfig.from_pretrained(
-                model_path, trust_remote_code=True
-            )
+            config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
             archs = getattr(config, "architectures", None) or []
             return any(a in _UNSUPPORTED_STANDALONE_ENCODER_ARCHS for a in archs)
         except Exception:
