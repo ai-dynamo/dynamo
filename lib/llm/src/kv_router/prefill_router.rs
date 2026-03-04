@@ -48,8 +48,10 @@ pub enum PrefillError {
     NoDisaggregatedParams(String),
 
     /// Required worker ID not found in request headers (Direct routing mode)
-    #[error("Worker ID required in Direct routing mode but not found in request headers. \
-             Expected x-prefill-instance-id to be set by external router (e.g., EPP).")]
+    #[error(
+        "Worker ID required in Direct routing mode but not found in request headers. \
+             Expected x-prefill-instance-id to be set by external router (e.g., EPP)."
+    )]
     MissingWorkerIdForDirectRouting,
 }
 
@@ -637,7 +639,8 @@ impl
                 // Bootstrap optimization path: spawn prefill in background
                 // We successfully used the peeked worker, so we must now advance the router state
                 // to ensure the next request gets a different worker.
-                if !self.router_mode.is_kv_routing() && !self.router_mode.is_direct_routing()
+                if !self.router_mode.is_kv_routing()
+                    && !self.router_mode.is_direct_routing()
                     && let Some(router) = self.prefill_router.get()
                 {
                     router.select_next_worker();
