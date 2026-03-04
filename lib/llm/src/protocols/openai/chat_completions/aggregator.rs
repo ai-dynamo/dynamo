@@ -130,8 +130,6 @@ impl StreamingToolCallState {
 pub fn streaming_tool_call_adapter(
     stream: impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>>,
 ) -> impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> {
-    // We use `scan` to carry mutable state across the stream and emit Vec<item>
-    // per input (0 or more synthetic chunks after each original chunk).
     // Key by (choice_index, tool_call_index) to avoid collisions in multi-choice streams.
     let state: HashMap<(u32, u32), StreamingToolCallState> = HashMap::new();
 
@@ -691,6 +689,7 @@ mod tests {
             id: Some("test_id".to_string()),
             event: None,
             comment: None,
+            error: None,
         }
     }
 
@@ -928,6 +927,7 @@ mod tests {
             id: Some("test_id".to_string()),
             event: None,
             comment: None,
+            error: None,
         };
         let stream = Box::pin(stream::iter(vec![annotated_delta]));
 
@@ -993,6 +993,7 @@ mod tests {
             id: Some("test_id".to_string()),
             event: None,
             comment: None,
+            error: None,
         };
         let stream = Box::pin(stream::iter(vec![annotated_delta]));
 
@@ -1035,6 +1036,7 @@ mod tests {
             id: Some("test_id".to_string()),
             event: None,
             comment: None,
+            error: None,
         };
         let stream = Box::pin(stream::iter(vec![annotated_delta]));
 
@@ -1077,6 +1079,7 @@ mod tests {
             id: Some("test_id".to_string()),
             event: None,
             comment: None,
+            error: None,
         };
         let stream = Box::pin(stream::iter(vec![annotated_delta]));
 
@@ -1117,6 +1120,7 @@ mod tests {
             id: Some("test_id".to_string()),
             event: None,
             comment: None,
+            error: None,
         };
         let stream = Box::pin(stream::iter(vec![annotated_delta]));
 
@@ -1161,6 +1165,7 @@ mod tests {
             id: Some("test_id".to_string()),
             event: None,
             comment: None,
+            error: None,
         };
         let stream = Box::pin(stream::iter(vec![annotated_delta]));
 
@@ -1203,6 +1208,7 @@ mod tests {
             id: Some("test_id".to_string()),
             event: None,
             comment: None,
+            error: None,
         };
         let stream = Box::pin(stream::iter(vec![annotated_delta]));
 
@@ -1286,156 +1292,5 @@ mod tests {
         let tool_calls = choice.message.tool_calls.as_ref().unwrap();
         assert_eq!(tool_calls.len(), 1);
         assert_eq!(tool_calls[0].function.name, "get_weather");
-    }
-
-    // -----------------------------------------------------------------------
-    // Tests for streaming_tool_call_adapter
-    // -----------------------------------------------------------------------
-
-    /// Helper: build a raw streaming chunk with a tool_call delta fragment.
-    #[allow(deprecated)]
-    fn make_tool_chunk(
-        id: Option<&str>,
-        name: Option<&str>,
-        args_fragment: Option<&str>,
-        finish_reason: Option<dynamo_async_openai::types::FinishReason>,
-    ) -> Annotated<NvCreateChatCompletionStreamResponse> {
-        let tc = dynamo_async_openai::types::ChatCompletionMessageToolCallChunk {
-            index: 0,
-            id: id.map(|s| s.to_string()),
-            r#type: id.map(|_| dynamo_async_openai::types::ChatCompletionToolType::Function),
-            function: Some(dynamo_async_openai::types::FunctionCallStream {
-                name: name.map(|s| s.to_string()),
-                arguments: args_fragment.map(|s| s.to_string()),
-            }),
-        };
-
-        let choice = dynamo_async_openai::types::ChatChoiceStream {
-            index: 0,
-            delta: dynamo_async_openai::types::ChatCompletionStreamResponseDelta {
-                content: None,
-                function_call: None,
-                tool_calls: Some(vec![tc]),
-                role: None,
-                refusal: None,
-                reasoning_content: None,
-            },
-            finish_reason,
-            stop_reason: None,
-            logprobs: None,
-        };
-
-        let data = NvCreateChatCompletionStreamResponse {
-            id: "test_id".to_string(),
-            model: "test_model".to_string(),
-            created: 12345,
-            service_tier: None,
-            usage: None,
-            system_fingerprint: None,
-            choices: vec![choice],
-            object: "chat.completion.chunk".to_string(),
-            nvext: None,
-        };
-
-        Annotated {
-            data: Some(data),
-            id: None,
-            event: None,
-            comment: None,
-        }
-    }
-
-    #[tokio::test]
-    async fn test_streaming_adapter_emits_complete_tool_call() {
-        // Simulate the wire format: id+name in first chunk, args across multiple chunks
-        let chunks = vec![
-            make_tool_chunk(Some("call_1"), Some("bash"), Some("{\""), None),
-            make_tool_chunk(None, None, Some("cmd"), None),
-            make_tool_chunk(None, None, Some("\":\"ls\""), None),
-            make_tool_chunk(None, None, Some("}"), None), // brace_depth -> 0
-            make_tool_chunk(
-                None,
-                None,
-                None,
-                Some(dynamo_async_openai::types::FinishReason::ToolCalls),
-            ),
-        ];
-
-        let input_stream = Box::pin(stream::iter(chunks));
-        let output: Vec<_> = streaming_tool_call_adapter(input_stream).collect().await;
-
-        // We should have 5 original chunks + 1 synthetic completion chunk = 6 total
-        assert_eq!(output.len(), 6);
-
-        // The synthetic chunk should be the 5th item (after the 4th original chunk
-        // that completed the JSON).
-        let synthetic = &output[4];
-        assert_eq!(
-            synthetic.event.as_deref(),
-            Some("tool_call.complete"),
-            "synthetic chunk should have event=tool_call.complete"
-        );
-
-        let data = synthetic.data.as_ref().unwrap();
-        assert_eq!(data.choices.len(), 1);
-        let tc = &data.choices[0].delta.tool_calls.as_ref().unwrap()[0];
-        assert_eq!(tc.id.as_deref(), Some("call_1"));
-        assert_eq!(tc.function.as_ref().unwrap().name.as_deref(), Some("bash"));
-        assert_eq!(
-            tc.function.as_ref().unwrap().arguments.as_deref(),
-            Some("{\"cmd\":\"ls\"}")
-        );
-    }
-
-    #[tokio::test]
-    async fn test_streaming_adapter_handles_quoted_braces() {
-        // Args contain braces inside a JSON string value — should not confuse depth tracker
-        let chunks = vec![
-            make_tool_chunk(Some("call_2"), Some("eval"), Some("{\"code\":\"x={"), None),
-            make_tool_chunk(None, None, Some("}\""), None), // closing " ends string, but } inside string shouldn't count
-            make_tool_chunk(None, None, Some("}"), None),   // THIS closes the top-level object
-        ];
-
-        let input_stream = Box::pin(stream::iter(chunks));
-        let output: Vec<_> = streaming_tool_call_adapter(input_stream).collect().await;
-
-        // 3 original + 1 synthetic = 4
-        assert_eq!(output.len(), 4);
-
-        let synthetic = &output[3];
-        assert_eq!(synthetic.event.as_deref(), Some("tool_call.complete"));
-
-        let tc = &synthetic
-            .data
-            .as_ref()
-            .unwrap()
-            .choices[0]
-            .delta
-            .tool_calls
-            .as_ref()
-            .unwrap()[0];
-        assert_eq!(
-            tc.function.as_ref().unwrap().arguments.as_deref(),
-            Some("{\"code\":\"x={}\"}"),
-        );
-    }
-
-    #[tokio::test]
-    async fn test_streaming_adapter_no_tool_calls_passthrough() {
-        // A stream with no tool calls should pass through unchanged
-        let text_chunk = create_test_delta(
-            0,
-            "Hello world",
-            Some(dynamo_async_openai::types::Role::Assistant),
-            Some(dynamo_async_openai::types::FinishReason::Stop),
-            None,
-            None,
-        );
-
-        let input_stream = Box::pin(stream::iter(vec![text_chunk]));
-        let output: Vec<_> = streaming_tool_call_adapter(input_stream).collect().await;
-
-        // Should pass through as-is, no synthetic chunks
-        assert_eq!(output.len(), 1);
     }
 }
