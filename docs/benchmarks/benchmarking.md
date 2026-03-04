@@ -1,19 +1,9 @@
-<!-- # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License. -->
-
-# Dynamo Benchmarking Guide
+title: Dynamo Benchmarking
+subtitle: Benchmark and compare performance across Dynamo deployment configurations
+---
 
 This benchmarking framework lets you compare performance across any combination of:
 - **DynamoGraphDeployments**
@@ -97,7 +87,7 @@ Client-side benchmarking runs on your local machine and connects to Kubernetes d
 Follow these steps to benchmark Dynamo deployments using client-side benchmarking:
 
 ### Step 1: Establish Kubernetes Cluster and Install Dynamo
-Set up your Kubernetes cluster with NVIDIA GPUs and install the Dynamo Kubernetes Platform. First follow the [installation guide](/docs/kubernetes/installation_guide.md) to install Dynamo Kubernetes Platform, then use [deploy/utils/README](https://github.com/ai-dynamo/dynamo/blob/main/deploy/utils/README.md) to set up benchmarking resources.
+Set up your Kubernetes cluster with NVIDIA GPUs and install the Dynamo Kubernetes Platform. First follow the [installation guide](../kubernetes/installation-guide.md) to install Dynamo Kubernetes Platform, then use [deploy/utils/README](https://github.com/ai-dynamo/dynamo/blob/main/deploy/utils/README.md) to set up benchmarking resources.
 
 ### Step 2: Deploy DynamoGraphDeployments
 Deploy your DynamoGraphDeployments separately using the [deployment documentation](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends). Each deployment should have a frontend service exposed.
@@ -146,7 +136,7 @@ python3 -m benchmarks.utils.plot --data-dir ./benchmarks/results --benchmark-nam
 The benchmarking framework supports various comparative analysis scenarios:
 
 - **Compare multiple DynamoGraphDeployments of a single backend** (e.g., aggregated vs disaggregated configurations)
-- **Compare different backends** (e.g., vLLM vs TensorRT-LLM vs SGLang)
+- **Compare different backends** (e.g., SGLang vs TensorRT-LLM vs vLLM)
 - **Compare Dynamo vs other platforms** (e.g., Dynamo vs llm-d vs AIBrix)
 - **Compare different models** (e.g., Llama-3-8B vs Llama-3-70B vs Qwen-3-0.6B)
 - **Compare different hardware configurations** (e.g., H100 vs A100 vs H200)
@@ -243,6 +233,24 @@ python3 -m benchmarks.utils.benchmark \
     --endpoint-url http://localhost:8000
 ```
 
+### Request Count Configuration
+
+The number of requests sent per concurrency level is auto-computed as `max(concurrency * 3, 10)` by default. This ensures each concurrency slot runs enough requests for stable measurements. You can override this with the `REQUEST_COUNT` environment variable:
+
+```bash
+# Fixed request count for all concurrency levels
+REQUEST_COUNT=500 python3 -m benchmarks.utils.benchmark \
+    --benchmark-name my-test \
+    --endpoint-url http://localhost:8000
+
+# Combined with custom concurrency levels
+CONCURRENCIES="1,10,50,200" REQUEST_COUNT=1000 python3 -m benchmarks.utils.benchmark \
+    --benchmark-name high-load-test \
+    --endpoint-url http://localhost:8000
+```
+
+**Important**: The request count must be greater than or equal to the concurrency level. If the request count is too low, the actual in-flight concurrency will be capped at the request count, leading to inaccurate results at higher concurrency levels.
+
 ## Understanding Your Results
 
 After benchmarking completes, check `./benchmarks/results/` (or your custom output directory):
@@ -325,7 +333,7 @@ The server-side benchmarking solution:
 
 ## Prerequisites
 
-1. **Kubernetes cluster** with NVIDIA GPUs and Dynamo namespace setup (see [Dynamo Kubernetes Platform docs](/docs/kubernetes/README.md))
+1. **Kubernetes cluster** with NVIDIA GPUs and Dynamo namespace setup (see [Dynamo Kubernetes Platform docs](../kubernetes/README.md))
 2. **Storage** PersistentVolumeClaim configured with appropriate permissions (see [deploy/utils README](https://github.com/ai-dynamo/dynamo/blob/main/deploy/utils/README.md))
 3. **Docker image** containing the Dynamo benchmarking tools
 
@@ -536,6 +544,6 @@ For development and testing purposes, Dynamo provides a [mocker backend](https:/
 - **CI/CD pipelines** that need to validate infrastructure without model execution
 - **Benchmarking framework validation** to ensure your setup works before using real backends
 
-The mocker backend mimics the API and behavior of real backends (vLLM, SGLang, TensorRT-LLM) but generates mock responses instead of running actual inference.
+The mocker backend mimics the API and behavior of real backends (SGLang, TensorRT-LLM, vLLM) but generates mock responses instead of running actual inference.
 
 See the [mocker directory](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker) for usage examples and configuration options.

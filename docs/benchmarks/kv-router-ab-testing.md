@@ -1,4 +1,8 @@
-# Dynamo KV Smart Router A/B Benchmarking Guide
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: KV Router A/B Testing
+---
 
 This guide walks you through setting up and running A/B benchmarks to compare Dynamo's KV Smart Router against standard round-robin routing on a Kubernetes cluster.
 
@@ -94,7 +98,7 @@ kubectl create secret generic hf-token-secret \
 
 ### Step 1.3: Install Dynamo Platform (Per-Namespace)
 
-If your cluster uses namespace-restricted Dynamo operators, you'll need to install the Dynamo platform in each namespace. Follow the [Dynamo Kubernetes Installation Guide](https://github.com/ai-dynamo/dynamo/blob/main/docs/kubernetes/installation_guide.md) to install the platform in both namespaces:
+If your cluster uses namespace-restricted Dynamo operators, you'll need to install the Dynamo platform in each namespace. Follow the [Dynamo Kubernetes Installation Guide](https://github.com/ai-dynamo/dynamo/blob/main/docs/kubernetes/installation-guide.md) to install the platform in both namespaces:
 
 - `router-off-test`
 - `router-on-test`
@@ -571,14 +575,14 @@ kubectl -n benchmark cp ${POD_NAME}:/tmp/router_on_results/profile_export_aiperf
 
 **Factors that reduce KV router benefit:**
 - **Unique prompts** with no prefix reuse
-- **Short prompts** (<1000 tokens) where routing overhead exceeds benefit
+- **Short prompts** (\<1000 tokens) where routing overhead exceeds benefit
 - **Evenly distributed load** where round-robin is already optimal
 - **Low request rate** where cache eviction negates benefits
 
 **Expected Performance:**
 - **High prefix overlap workloads**: 20-50% TTFT improvement
 - **Moderate prefix overlap**: 10-20% improvement
-- **Low prefix overlap**: <5% improvement (may not be worth enabling)
+- **Low prefix overlap**: \<5% improvement (may not be worth enabling)
 
 **KV Smart Router is beneficial when:**
 - TTFT improvements > 20%
@@ -586,7 +590,7 @@ kubectl -n benchmark cp ${POD_NAME}:/tmp/router_on_results/profile_export_aiperf
 - Workload demonstrates measurable prefix reuse patterns
 
 **Standard routing is better when:**
-- KV router shows <10% improvement
+- KV router shows \<10% improvement
 - Increased latency variance is observed
 - Load distribution across workers is more important than cache affinity
 
@@ -779,7 +783,7 @@ VllmPrefillWorker:
 
 ## Conclusion
 
-This guide provides a complete methodology for A/B testing Dynamo's KV Smart Router. The KV router's effectiveness depends heavily on workload characteristics—datasets with high prefix overlap will show the most benefit.
+This guide provides a complete methodology for A/B testing Dynamo's KV Smart Router. The KV router's effectiveness depends heavily on workload characteristics—datasets with high prefix overlap will show the most benefit. For further details on tuning the KV router, see the [Tuning Guidelines](../components/router/router-guide.md#tuning-guidelines).
 
 For questions or issues, consult the [Dynamo documentation](https://github.com/ai-dynamo/dynamo) or open an issue on GitHub.
 

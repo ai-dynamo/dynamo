@@ -1,10 +1,8 @@
-<!--
-SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES.
-All rights reserved.
-SPDX-License-Identifier: Apache-2.0
--->
-
-# Mocker: LLM Engine Simulation in Rust
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Mocker
+---
 
 The Mocker is a lightweight, high-fidelity simulation of an LLM inference engine, implemented entirely in Rust. It replicates the core scheduling, memory management, and timing behaviors of production engines without requiring a GPU, making it invaluable for testing Dynamo's routing, KV cache events, disaggregated serving, and planner components.
 
@@ -50,13 +48,13 @@ python -m dynamo.mocker \
 # Launch prefill worker
 python -m dynamo.mocker \
     --model-path Qwen/Qwen3-0.6B \
-    --is-prefill-worker \
+    --disaggregation-mode prefill \
     --bootstrap-ports 50100
 
 # Launch decode worker (in another terminal)
 python -m dynamo.mocker \
     --model-path Qwen/Qwen3-0.6B \
-    --is-decode-worker
+    --disaggregation-mode decode
 ```
 
 ### Multiple Workers in One Process
@@ -88,10 +86,12 @@ python -m dynamo.mocker \
 | `--planner-profile-data` | None | Path to NPZ file with timing data |
 | `--num-workers` | 1 | Workers per process |
 | `--stagger-delay` | -1 (auto) | Delay between worker launches (seconds). 0 disables, -1 enables auto mode |
-| `--is-prefill-worker` | False | Prefill-only mode |
-| `--is-decode-worker` | False | Decode-only mode |
-| `--enable-local-indexer` | False | Enable local KV indexer |
+| `--disaggregation-mode` | `agg` | Worker mode: `agg` (aggregated), `prefill`, or `decode` |
+| `--durable-kv-events` | False | Enable durable KV events via JetStream (disables local indexer) |
 | `--bootstrap-ports` | None | Ports for P/D rendezvous |
+| `--kv-transfer-bandwidth` | 64.0 | KV cache transfer bandwidth in GB/s. Set to 0 to disable |
+| `--kv-cache-dtype` | auto | KV cache dtype for bytes-per-token computation |
+| `--kv-bytes-per-token` | Auto-computed | KV cache bytes per token (override auto-computation) |
 
 ## Architecture
 
@@ -139,7 +139,11 @@ The following diagram illustrates the block lifecycle, based on vLLM's block man
 
 ### Evictor
 
-The LRU evictor maintains blocks ordered by their last access time, enabling O(1) eviction of the oldest unused block. It supports both normal insertion (for completed sequences) and front-insertion (for preempted sequences that should be evicted first if memory pressure continues).
+The LRU evictor maintains blocks ordered by a monotonic counter, enabling O(log n) eviction of the lowest-priority block. Each `insert` assigns the next counter value, so blocks inserted later have higher counters and survive longer.
+
+This produces a **depth-aware eviction policy**: when a sequence completes, `free_signal` releases its blocks in reverse order (tail first). Deeper suffix blocks therefore receive lower counters and are evicted before shallower prefix blocks. This keeps shared prefixes cached longer, improving cache hit rates across requests with common prefixes.
+
+The evictor also supports front-insertion (negative counters) for marking blocks for immediate eviction, though this is not currently used in the scheduler.
 
 ### Sequence Tracking
 
@@ -156,6 +160,16 @@ The mocker supports two timing prediction modes:
 ### Bootstrap Rendezvous (Disaggregated Serving)
 
 For disaggregated prefill/decode deployments, prefill and decode workers coordinate via a simple TCP-based rendezvous protocol. The decode worker connects to the prefill worker's bootstrap port and waits until the prefill phase completes and KV cache is ready. Either side can arrive first—the rendezvous completes when both are ready.
+
+### KV Transfer Latency Simulation
+
+The mocker simulates KV cache transfer time between prefill and decode workers. Before the prefill worker emits its first (and only) token, it sleeps for a duration based on:
+
+- **kv_bytes_per_token** (auto-computed from model config): `num_layers * 2 * num_kv_heads * head_dim * dtype_bytes`. The `dtype_bytes` is determined by `--kv-cache-dtype`: when set to `auto` (default), it uses the model's `dtype` from config; when explicitly set (e.g., `fp8`), it uses the specified dtype instead. It can also be overridden directly with `--kv-bytes-per-token`.
+- **kv_transfer_bandwidth** (default: 64.0 GB/s, inter-node InfiniBand)
+- **Transfer time**: `num_input_tokens * kv_bytes_per_token / bandwidth`
+
+This delay is injected after the scheduler's prefill compute simulation completes, modeling the sequential flow: prefill computation → KV transfer → decode begins. Set `--kv-transfer-bandwidth 0` to disable.
 
 ## Integration with Dynamo
 
@@ -196,7 +210,6 @@ The mocker is particularly useful for:
 
 The following features are not yet supported by the mocker:
 
-- **KV transfer latency simulation** - Disaggregated serving simulates the rendezvous handshake but does not model the actual KV cache transfer time between prefill and decode workers
 - **Multi-tier memory** - No support for offloading KV cache to CPU/disk or onboarding back to GPU; potential future integration with KVBM
 - **Multimodal support** - Currently only simulates text token processing; no vision encoder or cross-attention simulation
 - **Native Rust reference counting** - Work in progress to use native Rc/Arc for block reference counting, enabling natural RAII patterns for simpler tracking

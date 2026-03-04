@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-{{- if and .Values.webhook.enabled .Values.webhook.certManager.enabled }}
+{{- if .Values.webhook.certManager.enabled }}
 ---
 # Self-signed issuer to bootstrap the CA
 apiVersion: cert-manager.io/v1

@@ -13,6 +13,7 @@ import asyncio
 import json
 import logging
 import os
+import signal
 import tempfile
 import time
 from typing import Any, Dict, List, Optional
@@ -134,33 +135,37 @@ class LoadGenerator:
         start_time = time.time()
         # More generous timeout for high-load tests - allow 2x duration + 2 minutes buffer
         timeout = max(duration_sec * 2 + 120, int(duration_sec * 2.5))
+
+        # Write stdout/stderr to files instead of using PIPE. aiperf may fork
+        # child processes that inherit pipe FDs; if those children outlive aiperf,
+        # communicate() blocks forever waiting for EOF. File-based output avoids
+        # this entirely. We also run aiperf in its own process group so that
+        # os.killpg() can clean up the entire tree on timeout.
+        stdout_path = os.path.join(artifact_dir, "aiperf.stdout.log")
+        stderr_path = os.path.join(artifact_dir, "aiperf.stderr.log")
         try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            try:
-                stdout, stderr = await asyncio.wait_for(
-                    proc.communicate(), timeout=timeout
+            with open(stdout_path, "wb") as stdout_f, open(
+                stderr_path, "wb"
+            ) as stderr_f:
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=stdout_f,
+                    stderr=stderr_f,
+                    start_new_session=True,
                 )
-            except asyncio.TimeoutError:
-                proc.kill()
-                await proc.communicate()
-                logger.error("aiperf timed out")
-                raise RuntimeError("Load generation timed out")
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=timeout)
+                except asyncio.TimeoutError:
+                    try:
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    await proc.wait()
+                    logger.error("aiperf timed out")
+                    raise RuntimeError("Load generation timed out")
 
             end_time = time.time()
             actual_duration = end_time - start_time
-
-            # Persist logs for debugging
-            try:
-                with open(os.path.join(artifact_dir, "aiperf.stdout.log"), "wb") as f:
-                    f.write(stdout or b"")
-                with open(os.path.join(artifact_dir, "aiperf.stderr.log"), "wb") as f:
-                    f.write(stderr or b"")
-            except Exception:
-                pass
 
             if proc.returncode == 0:
                 logger.info("Load generation completed successfully")
@@ -225,7 +230,7 @@ class LoadGenerator:
             logger.warning(f"Failed to parse aiperf results: {e}")
             return {}
 
-    async def run_scaling_test(self) -> Dict[str, Any]:
+    async def run_scaling_test(self, mode: str = "throughput") -> Dict[str, Any]:
         """
         Run a graduated scaling test for prefill scaling.
 
@@ -233,17 +238,23 @@ class LoadGenerator:
         - Phase 1: 8 req/s (baseline, should maintain 1P1D)
         - Phase 2: 18 req/s (should trigger prefill scaling to 2P1D)
 
+        Args:
+            mode: Scaling mode - "throughput" or "load".
+                  "load" uses a longer baseline for regression warmup.
+
         Returns:
             Dictionary with complete test results
         """
         logger.info(
-            "Starting graduated prefill scaling test scenario (targeting 1P1D -> 2P1D)"
+            f"Starting graduated prefill scaling test scenario (targeting 1P1D -> 2P1D, mode={mode})"
         )
         logger.info("Using conservative graduated approach with metric generation")
 
         # Graduated test parameters (optimized for prefill scaling)
+        # Load-based scaling needs longer baseline for regression warmup
+        baseline_duration = 120 if mode == "load" else 90
         phases: List[Dict[str, Any]] = [
-            {"rate": 8.0, "duration": 90, "name": "baseline"},
+            {"rate": 8.0, "duration": baseline_duration, "name": "baseline"},
             {"rate": 18.0, "duration": 120, "name": "prefill_scaling_trigger"},
         ]
         transition_delay = 30

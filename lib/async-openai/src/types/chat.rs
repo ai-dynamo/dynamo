@@ -375,6 +375,77 @@ pub enum ChatCompletionRequestToolMessageContent {
     Array(Vec<ChatCompletionRequestToolMessageContentPart>),
 }
 
+// Omni Specific Multimodal Content Types
+// These types are used for assistant message responses that contain multimodal content
+
+/// Response content part for text in assistant messages
+#[derive(ToSchema, Clone, Serialize, Debug, Deserialize, PartialEq)]
+pub struct ChatCompletionResponseContentPartText {
+    pub text: String,
+}
+
+/// Response content part for image URLs in assistant messages
+#[derive(ToSchema, Clone, Serialize, Debug, Deserialize, PartialEq)]
+pub struct ChatCompletionResponseContentPartImageUrl {
+    pub image_url: ImageUrlResponse,
+}
+
+/// Response content part for video URLs in assistant messages
+#[derive(ToSchema, Clone, Serialize, Debug, Deserialize, PartialEq)]
+pub struct ChatCompletionResponseContentPartVideoUrl {
+    pub video_url: VideoUrlResponse,
+}
+
+/// Response content part for audio URLs in assistant messages
+#[derive(ToSchema, Clone, Serialize, Debug, Deserialize, PartialEq)]
+pub struct ChatCompletionResponseContentPartAudioUrl {
+    pub audio_url: AudioUrlResponse,
+}
+
+/// Image URL in response messages (supports data URLs with base64)
+#[derive(ToSchema, Clone, Serialize, Debug, Deserialize, PartialEq)]
+pub struct ImageUrlResponse {
+    /// The URL of the image, either a URL or a data URL (data:image/png;base64,...)
+    pub url: String,
+    /// Optional detail level (for compatibility with OpenAI)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+/// Video URL in response messages
+#[derive(ToSchema, Clone, Serialize, Debug, Deserialize, PartialEq)]
+pub struct VideoUrlResponse {
+    /// The URL of the video, either a URL or a data URL
+    pub url: String,
+}
+
+/// Audio URL in response messages
+#[derive(ToSchema, Clone, Serialize, Debug, Deserialize, PartialEq)]
+pub struct AudioUrlResponse {
+    /// The URL of the audio, either a URL or a data URL
+    pub url: String,
+}
+
+/// Content parts for assistant responses supporting multiple modalities (text, images, videos, audio)
+#[derive(ToSchema, Clone, Serialize, Debug, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ChatCompletionResponseContentPart {
+    Text(ChatCompletionResponseContentPartText),
+    ImageUrl(ChatCompletionResponseContentPartImageUrl),
+    VideoUrl(ChatCompletionResponseContentPartVideoUrl),
+    AudioUrl(ChatCompletionResponseContentPartAudioUrl),
+}
+
+/// Assistant message content - can be a simple string or an array of content parts
+#[derive(ToSchema, Clone, Serialize, Debug, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum ChatCompletionMessageContent {
+    /// Simple text content (backward compatible)
+    Text(String),
+    /// Array of content parts (for multimodal responses)
+    Parts(Vec<ChatCompletionResponseContentPart>),
+}
+
 #[derive(ToSchema, Debug, Serialize, Deserialize, Default, Clone, Builder, PartialEq)]
 #[builder(name = "ChatCompletionRequestUserMessageArgs")]
 #[builder(pattern = "mutable")]
@@ -395,6 +466,50 @@ pub struct ChatCompletionRequestAssistantMessageAudio {
     pub id: String,
 }
 
+/// Reasoning content from a previous assistant turn.
+///
+/// This is an untagged enum that deserializes from either:
+/// - A plain string: `"reasoning_content": "thinking..."` -> `Text("thinking...")`
+/// - An array of strings: `"reasoning_content": ["seg1", "seg2"]` -> `Segments(["seg1", "seg2"])`
+///
+/// The `Segments` variant preserves interleaved reasoning order needed for KV cache–correct
+/// context reconstruction. `segments[i]` is the reasoning that preceded `tool_calls[i]`;
+/// `segments[tool_calls.len()]` is any trailing reasoning after the last tool call.
+/// `segments.len() == tool_calls.len() + 1` always when set.
+#[derive(ToSchema, Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(untagged)]
+pub enum ReasoningContent {
+    /// Flat string — single reasoning block or legacy backward-compat form.
+    Text(String),
+    /// Interleaved segments. segments[i] precedes tool_calls[i];
+    /// segments[N] is trailing reasoning after the last tool call.
+    /// segments.len() == tool_calls.len() + 1.
+    Segments(Vec<String>),
+}
+
+impl ReasoningContent {
+    /// Join all segments (or return text as-is) into a single flat string.
+    pub fn to_flat_string(&self) -> String {
+        match self {
+            ReasoningContent::Text(s) => s.clone(),
+            ReasoningContent::Segments(segs) => segs
+                .iter()
+                .filter(|s| !s.is_empty())
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("\n"),
+        }
+    }
+
+    /// Returns the segments if this is the `Segments` variant, `None` for `Text`.
+    pub fn segments(&self) -> Option<&[String]> {
+        match self {
+            ReasoningContent::Segments(segs) => Some(segs),
+            ReasoningContent::Text(_) => None,
+        }
+    }
+}
+
 #[derive(ToSchema, Debug, Serialize, Deserialize, Default, Clone, Builder, PartialEq)]
 #[builder(name = "ChatCompletionRequestAssistantMessageArgs")]
 #[builder(pattern = "mutable")]
@@ -405,6 +520,13 @@ pub struct ChatCompletionRequestAssistantMessage {
     /// The contents of the assistant message. Required unless `tool_calls` or `function_call` is specified.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<ChatCompletionRequestAssistantMessageContent>,
+    /// Reasoning content from a previous assistant turn.
+    ///
+    /// When serialized as a plain string, represents a flat reasoning block (backward-compatible
+    /// with Jinja chat templates). When serialized as an array of strings, represents
+    /// interleaved reasoning segments preserving per-position order for KV cache correctness.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<ReasoningContent>,
     /// The refusal message by the assistant.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub refusal: Option<String>,
@@ -486,9 +608,9 @@ pub struct ChatCompletionResponseMessageAudio {
 /// A chat completion message generated by the model.
 #[derive(ToSchema, Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub struct ChatCompletionResponseMessage {
-    /// The contents of the message.
+    /// The contents of the message - can be a string or array of content parts
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub content: Option<String>,
+    pub content: Option<ChatCompletionMessageContent>,
     /// The refusal message generated by the model.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub refusal: Option<String>,
@@ -892,7 +1014,7 @@ pub struct CreateChatCompletionRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub service_tier: Option<ServiceTier>,
 
-    /// Up to 4 sequences where the API will stop generating further tokens.
+    /// Up to 32 sequences where the API will stop generating further tokens.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stop: Option<Stop>,
 
@@ -1094,8 +1216,8 @@ pub struct ChatCompletionMessageToolCallChunk {
 /// A chat completion delta generated by streamed model responses.
 #[derive(ToSchema, Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub struct ChatCompletionStreamResponseDelta {
-    /// The contents of the chunk message.
-    pub content: Option<String>,
+    /// The contents of the chunk message - can be a string or array of content parts
+    pub content: Option<ChatCompletionMessageContent>,
     /// Deprecated and replaced by `tool_calls`. The name and arguments of a function that should be called, as generated by the model.
     #[deprecated]
     pub function_call: Option<FunctionCallStream>,
@@ -1202,5 +1324,119 @@ mod tests {
 
         let json = serde_json::to_string(&request).unwrap();
         assert!(json.contains("mm_processor_kwargs"));
+    }
+
+    #[test]
+    fn test_assistant_request_reasoning_content_text_roundtrip() {
+        let json = r#"{
+            "model": "deepseek-v3.2",
+            "messages": [
+                {"role": "user", "content": "test"},
+                {
+                    "role": "assistant",
+                    "reasoning_content": "thinking...",
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "f",
+                            "arguments": "{}"
+                        }
+                    }]
+                }
+            ]
+        }"#;
+
+        let request: CreateChatCompletionRequest = serde_json::from_str(json).unwrap();
+        let assistant = match &request.messages[1] {
+            ChatCompletionRequestMessage::Assistant(msg) => msg,
+            _ => panic!("expected assistant message"),
+        };
+
+        assert_eq!(
+            assistant.reasoning_content,
+            Some(ReasoningContent::Text("thinking...".into()))
+        );
+        assert_eq!(
+            assistant
+                .reasoning_content
+                .as_ref()
+                .unwrap()
+                .to_flat_string(),
+            "thinking..."
+        );
+        assert!(
+            assistant
+                .reasoning_content
+                .as_ref()
+                .unwrap()
+                .segments()
+                .is_none()
+        );
+
+        let serialized = serde_json::to_value(&request).unwrap();
+        assert_eq!(
+            serialized["messages"][1]["reasoning_content"],
+            serde_json::Value::String("thinking...".to_string())
+        );
+    }
+
+    #[test]
+    fn test_assistant_request_reasoning_content_segments_roundtrip() {
+        let json = r#"{
+            "model": "deepseek-v3.2",
+            "messages": [
+                {"role": "user", "content": "test"},
+                {
+                    "role": "assistant",
+                    "reasoning_content": ["seg1", "seg2", ""],
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "f1", "arguments": "{}"}
+                    }, {
+                        "id": "call_2",
+                        "type": "function",
+                        "function": {"name": "f2", "arguments": "{}"}
+                    }]
+                }
+            ]
+        }"#;
+
+        let request: CreateChatCompletionRequest = serde_json::from_str(json).unwrap();
+        let assistant = match &request.messages[1] {
+            ChatCompletionRequestMessage::Assistant(msg) => msg,
+            _ => panic!("expected assistant message"),
+        };
+
+        assert_eq!(
+            assistant.reasoning_content,
+            Some(ReasoningContent::Segments(vec![
+                "seg1".into(),
+                "seg2".into(),
+                "".into()
+            ]))
+        );
+        assert_eq!(
+            assistant
+                .reasoning_content
+                .as_ref()
+                .unwrap()
+                .to_flat_string(),
+            "seg1\nseg2"
+        );
+        let segs = assistant
+            .reasoning_content
+            .as_ref()
+            .unwrap()
+            .segments()
+            .expect("should be Segments");
+        assert_eq!(segs.len(), 3);
+
+        let serialized = serde_json::to_value(&request).unwrap();
+        assert_eq!(
+            serialized["messages"][1]["reasoning_content"],
+            serde_json::json!(["seg1", "seg2", ""])
+        );
     }
 }

@@ -1,0 +1,46 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "chrek.fullname" . }}-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "chrek.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    basePath: {{ .Values.storage.pvc.basePath | quote }}
+
+    overlay:
+      systemDirs: {{ toYaml .Values.config.overlay.systemDirs | nindent 8 }}
+      cacheDirs: {{ toYaml .Values.config.overlay.cacheDirs | nindent 8 }}
+      additionalExclusions: {{ toYaml .Values.config.overlay.additionalExclusions | nindent 8 }}
+
+    restore:
+      nsRestorePath: {{ .Values.config.restore.nsRestorePath | quote }}
+      restoreReadyTimeoutSeconds: {{ .Values.config.restore.restoreReadyTimeoutSeconds }}
+
+    criu:
+      binaryPath: {{ .Values.config.criu.binaryPath | quote }}
+      ghostLimit: {{ .Values.config.criu.ghostLimit }}
+      logLevel: {{ .Values.config.criu.logLevel }}
+      workDir: {{ .Values.config.criu.workDir | quote }}
+      leaveRunning: {{ .Values.config.criu.leaveRunning }}
+      shellJob: {{ .Values.config.criu.shellJob }}
+      tcpClose: {{ .Values.config.criu.tcpClose }}
+      fileLocks: {{ .Values.config.criu.fileLocks }}
+      orphanPtsMaster: {{ .Values.config.criu.orphanPtsMaster }}
+      extUnixSk: {{ .Values.config.criu.extUnixSk }}
+      linkRemap: {{ .Values.config.criu.linkRemap }}
+      extMasters: {{ .Values.config.criu.extMasters }}
+      manageCgroupsMode: {{ .Values.config.criu.manageCgroupsMode | quote }}
+      rstSibling: {{ .Values.config.criu.rstSibling }}
+      mntnsCompatMode: {{ .Values.config.criu.mntnsCompatMode }}
+      evasiveDevices: {{ .Values.config.criu.evasiveDevices }}
+      forceIrmap: {{ .Values.config.criu.forceIrmap }}
+      autoDedup: {{ .Values.config.criu.autoDedup }}
+      lazyPages: {{ .Values.config.criu.lazyPages }}
+      libDir: {{ .Values.config.criu.libDir | quote }}
+      allowUprobes: {{ .Values.config.criu.allowUprobes }}
+      skipInFlight: {{ .Values.config.criu.skipInFlight }}

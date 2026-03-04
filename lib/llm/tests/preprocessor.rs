@@ -15,14 +15,11 @@ use rstest::rstest;
 
 use std::path::PathBuf;
 
-/// ----------------- NOTE ---------------
-/// Currently ModelDeploymentCard does support downloading models using nim-hub.
-/// As a temporary workaround, we will download the models from Hugging Face to a local cache
-/// directory in `tests/data/sample-models`. These tests require a Hugging Face token to be
-/// set in the environment variable `HF_TOKEN`.
-/// The model is downloaded and cached in `tests/data/sample-models` directory.
-/// make sure the token has access to `meta-llama/Llama-3.1-70B-Instruct` model
 /// Gets the HF_TOKEN environment variable if it exists and is not empty.
+///
+/// These tests require a Hugging Face token to be set in the environment variable `HF_TOKEN`.
+/// The model is downloaded and cached in `tests/data/sample-models` directory.
+/// Make sure the token has access to `meta-llama/Llama-3.1-70B-Instruct` model.
 ///
 /// This function checks for the presence of the `HF_TOKEN` environment variable
 /// and validates that it's not empty or whitespace-only. The token is used for
@@ -57,7 +54,6 @@ async fn make_mdc_from_repo(
     hf_revision: &str,
     mixins: Option<Vec<PromptContextMixin>>,
 ) -> ModelDeploymentCard {
-    //TODO: remove this once we have nim-hub support. See the NOTE above.
     let downloaded_path = maybe_download_model(local_path, hf_repo, hf_revision).await;
     let display_name = format!("{}--{}", hf_repo, hf_revision);
     let mut mdc = ModelDeploymentCard::load_from_disk(downloaded_path, None).unwrap();
@@ -109,30 +105,6 @@ async fn make_mdcs() -> Vec<ModelDeploymentCard> {
         .await,
     ]
 }
-
-// fn load_nim_mdcs() -> Vec<ModelDeploymentCard> {
-//     // get all .json files from test/data/model_deployment_cards/nim
-//     std::fs::read_dir("tests/data/model_deployment_cards/nim")
-//         .unwrap()
-//         .map(|res| res.map(|e| e.path()).unwrap().clone())
-//         .filter(|path| path.extension().unwrap() == "json")
-//         .map(|path| ModelDeploymentCard::load_from_json_file(path).unwrap())
-//         .collect::<Vec<_>>()
-// }
-
-// #[ignore]
-// #[tokio::test]
-// async fn create_mdc_from_repo() {
-//     for repo in NGC_MODEL_REPOS.iter() {
-//         println!("Creating MDC for {}", repo);
-//         let mdc = make_mdc_from_repo(repo).await;
-//         mdc.save_to_json_file(&format!(
-//             "tests/data/model_deployment_cards/nim/{}.json",
-//             Slug::slugify(repo)
-//         ))
-//         .unwrap();
-//     }
-// }
 
 const SINGLE_CHAT_MESSAGE: &str = r#"
 [
@@ -529,7 +501,7 @@ pub mod openai_preprocessor_tests {
         let oai_preprocessor = OpenAIPreprocessor::new(mdc.clone()).unwrap();
         let request = Request::from(SINGLE_CHAT_MESSAGE, None, None, mdc.slug().to_string());
         let preprocessed_request = oai_preprocessor
-            .preprocess_request(&request)
+            .preprocess_request(&request, None)
             .await
             .unwrap()
             .0;
@@ -611,7 +583,10 @@ async fn test_media_url_passthrough(#[case] media_chunks: &[(&str, usize)]) {
         let message = build_message("Test multimodal content", media_chunks);
         let request = Request::from(&message, None, None, mdc.slug().to_string());
 
-        let (preprocessed, _annotations) = preprocessor.preprocess_request(&request).await.unwrap();
+        let (preprocessed, _annotations) = preprocessor
+            .preprocess_request(&request, None)
+            .await
+            .unwrap();
 
         // Verify multimodal data handling
         if media_chunks.is_empty() {

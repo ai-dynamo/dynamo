@@ -3,13 +3,12 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::RwLock;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::{LazyLock, RwLock};
 
 use tokio::sync::Notify;
 
 use dashmap::DashMap;
-use prometheus::{IntGaugeVec, Opts, Registry};
 use serde::{Deserialize, Serialize};
 
 use crate::http::service::metrics::{
@@ -17,11 +16,11 @@ use crate::http::service::metrics::{
     WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE,
 };
 use crate::kv_router::KV_METRICS_SUBJECT;
+use crate::kv_router::metrics::WORKER_LOAD_METRICS;
 use crate::kv_router::protocols::ActiveLoad;
 use crate::model_card::ModelDeploymentCard;
 use dynamo_runtime::component::Client;
 use dynamo_runtime::discovery::{DiscoveryQuery, watch_and_extract_field};
-use dynamo_runtime::metrics::prometheus_names::frontend_service;
 use dynamo_runtime::pipeline::{WorkerLoadMonitor, async_trait};
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::transports::event_plane::EventSubscriber;
@@ -29,62 +28,18 @@ use dynamo_runtime::transports::event_plane::EventSubscriber;
 // Re-export worker type constants from timing.rs (single source of truth)
 pub use crate::protocols::common::timing::{WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL};
 
-/// Global Prometheus gauge for active decode blocks per worker (labels: worker_id, dp_rank, worker_type)
-/// This is shared across all KvWorkerMonitor instances.
-pub static WORKER_ACTIVE_DECODE_BLOCKS_GAUGE: LazyLock<IntGaugeVec> = LazyLock::new(|| {
-    IntGaugeVec::new(
-        Opts::new(
-            format!(
-                "dynamo_frontend_{}",
-                frontend_service::WORKER_ACTIVE_DECODE_BLOCKS
-            ),
-            "Active KV cache decode blocks per worker",
-        ),
-        &["worker_id", "dp_rank", "worker_type"],
-    )
-    .expect("Failed to create worker_active_decode_blocks gauge")
-});
-
-/// Global Prometheus gauge for active prefill tokens per worker (labels: worker_id, dp_rank, worker_type)
-/// This is shared across all KvWorkerMonitor instances.
-pub static WORKER_ACTIVE_PREFILL_TOKENS_GAUGE: LazyLock<IntGaugeVec> = LazyLock::new(|| {
-    IntGaugeVec::new(
-        Opts::new(
-            format!(
-                "dynamo_frontend_{}",
-                frontend_service::WORKER_ACTIVE_PREFILL_TOKENS
-            ),
-            "Active prefill tokens queued per worker",
-        ),
-        &["worker_id", "dp_rank", "worker_type"],
-    )
-    .expect("Failed to create worker_active_prefill_tokens gauge")
-});
-
-/// Register the global worker load Prometheus metrics with the given registry.
-///
-/// This should be called once during HTTP service setup to expose the worker load
-/// metrics via the `/metrics` endpoint.
-///
-/// # Errors
-/// Returns an error if the metrics are already registered with the registry.
-pub fn register_worker_load_metrics(registry: &Registry) -> Result<(), prometheus::Error> {
-    registry.register(Box::new(WORKER_ACTIVE_DECODE_BLOCKS_GAUGE.clone()))?;
-    registry.register(Box::new(WORKER_ACTIVE_PREFILL_TOKENS_GAUGE.clone()))?;
-    Ok(())
-}
-
 /// Clean up all Prometheus metrics for a worker across the specified dp_ranks.
 ///
 /// This removes metrics with the given worker_id, dp_rank, and worker_type label combination.
 /// Called when workers are removed to prevent stale metrics from accumulating.
 fn cleanup_worker_metrics(worker_id: u64, dp_ranks: &[u32], worker_type: &str) {
     let worker_id_str = worker_id.to_string();
+    let m = &*WORKER_LOAD_METRICS;
     for dp_rank in dp_ranks {
         let dp_rank_str = dp_rank.to_string();
         let labels = &[worker_id_str.as_str(), dp_rank_str.as_str(), worker_type];
-        let _ = WORKER_ACTIVE_DECODE_BLOCKS_GAUGE.remove_label_values(labels);
-        let _ = WORKER_ACTIVE_PREFILL_TOKENS_GAUGE.remove_label_values(labels);
+        let _ = m.active_decode_blocks.remove_label_values(labels);
+        let _ = m.active_prefill_tokens.remove_label_values(labels);
         let _ = WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE.remove_label_values(labels);
         let _ = WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE.remove_label_values(labels);
         let _ = WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE.remove_label_values(labels);
@@ -215,9 +170,9 @@ impl WorkerLoadState {
 /// Cloning shares state via internal Arc-wrapped fields. This allows multiple pipelines
 /// (e.g., chat and completions) to share the same monitor instance.
 ///
-/// Prometheus metrics are exposed via the global gauges [`WORKER_ACTIVE_DECODE_BLOCKS_GAUGE`]
-/// and [`WORKER_ACTIVE_PREFILL_TOKENS_GAUGE`], which should be registered with the HTTP
-/// service's Prometheus registry using [`register_worker_load_metrics`].
+/// Prometheus metrics are exposed via [`WORKER_LOAD_METRICS`] (defined in `kv_router::sequence`),
+/// which should be registered with the HTTP service's Prometheus registry using
+/// [`register_worker_load_metrics`](crate::kv_router::metrics::register_worker_load_metrics).
 ///
 /// In disaggregated mode, use `set_prefill_client` to register the prefill endpoint for
 /// proper TTFT metric cleanup when prefill workers are removed.
@@ -251,8 +206,9 @@ impl KvWorkerMonitor {
     /// - `active_prefill_tokens_threshold`: DEFAULT_MAX_TOKENS (effectively disabled)
     /// - `active_prefill_tokens_threshold_frac`: 1.5 (effectively disabled)
     ///
-    /// Prometheus metrics are exposed via the global gauges and should be registered
-    /// using [`register_worker_load_metrics`] during HTTP service setup.
+    /// Prometheus metrics are exposed via [`WORKER_LOAD_METRICS`] and should be registered
+    /// using [`register_worker_load_metrics`](crate::kv_router::metrics::register_worker_load_metrics)
+    /// during HTTP service setup.
     ///
     /// For disaggregated mode, call `set_prefill_client` after creation to enable
     /// proper TTFT metric cleanup when prefill workers are removed.
@@ -500,22 +456,25 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                         for (lease_id, runtime_config) in runtime_configs.iter() {
                             let mut state = worker_load_states.entry(*lease_id).or_default();
 
+                            let dp_start = runtime_config.data_parallel_start_rank;
+                            let dp_end = dp_start + runtime_config.data_parallel_size;
+
                             // Track dp_ranks for this worker (for cleanup when worker disappears)
                             let dp_ranks_set = known_worker_dp_ranks.entry(*lease_id).or_default();
-                            for dp_rank in 0..runtime_config.data_parallel_size {
+                            for dp_rank in dp_start..dp_end {
                                 dp_ranks_set.insert(dp_rank);
                             }
 
                             // Populate total_blocks for all dp_ranks (they share the same total)
                             if let Some(total_blocks) = runtime_config.total_kv_blocks {
-                                for dp_rank in 0..runtime_config.data_parallel_size {
+                                for dp_rank in dp_start..dp_end {
                                     state.kv_total_blocks.insert(dp_rank, total_blocks);
                                 }
                             }
 
                             // Populate max_num_batched_tokens for all dp_ranks
                             if let Some(max_batched) = runtime_config.max_num_batched_tokens {
-                                for dp_rank in 0..runtime_config.data_parallel_size {
+                                for dp_rank in dp_start..dp_end {
                                     state.max_num_batched_tokens.insert(dp_rank, max_batched);
                                 }
                             }

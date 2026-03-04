@@ -825,11 +825,6 @@ class WorkflowMetricsUploader:
         job_name = job_data.get("name", "")
         job_id = str(job_data["id"])
 
-        # Skip deployment test jobs (No pytest metadata files are created)
-        if job_name.lower().startswith("deploy"):
-            print(f"⏭️  Skipping test metrics for deployment job '{job_name}'")
-            return
-
         print(f"🧪 Looking for test results for job '{job_name}'")
 
         # Determine framework from job name to filter metadata files

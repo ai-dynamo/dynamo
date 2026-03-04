@@ -41,7 +41,7 @@ class DistributedRuntime:
     def __new__(
         cls,
         event_loop: Any,
-        store_kv: str,
+        discovery_backend: str,
         request_plane: str,
         enable_nats: Optional[bool] = None,
     ) -> "DistributedRuntime":
@@ -50,7 +50,7 @@ class DistributedRuntime:
 
         Args:
             event_loop: The asyncio event loop
-            store_kv: Key-value store backend ("etcd", "file", or "mem")
+            discovery_backend: Discovery backend ("kubernetes", "etcd", "file", or "mem")
             request_plane: Request plane transport ("tcp", "http", or "nats")
             enable_nats: Whether to enable NATS for KV events. Defaults to True.
                         If request_plane is "nats", NATS is always enabled.
@@ -58,21 +58,30 @@ class DistributedRuntime:
         """
         ...
 
-    def namespace(self, name: str) -> Namespace:
+    def endpoint(self, path: str) -> Endpoint:
         """
-        Create a `Namespace` object
+        Get an endpoint directly by path.
+
+        Args:
+            path: Endpoint path in format 'namespace.component.endpoint'
+                  or 'dyn://namespace.component.endpoint'
+
+        Returns:
+            Endpoint: The requested endpoint
+
+        Raises:
+            ValueError: If path format is invalid (not 3 parts separated by dots)
+            Exception: If namespace or component creation fails
+
+        Example:
+            endpoint = runtime.endpoint("demo.backend.generate")
+            endpoint = runtime.endpoint("dyn://demo.backend.generate")
         """
         ...
 
     def shutdown(self) -> None:
         """
         Shutdown the runtime by triggering the cancellation token
-        """
-        ...
-
-    def child_token(self) -> CancellationToken:
-        """
-        Get a child cancellation token that can be passed to async tasks
         """
         ...
 
@@ -102,46 +111,6 @@ class DistributedRuntime:
         """
         ...
 
-class CancellationToken:
-    def cancel(self) -> None:
-        """
-        Cancel the token and all its children
-        """
-        ...
-
-    async def cancelled(self) -> None:
-        """
-        Await until the token is cancelled
-        """
-        ...
-
-
-class Namespace:
-    """
-    A namespace is a collection of components
-    """
-
-    ...
-
-    def component(self, name: str) -> Component:
-        """
-        Create a `Component` object
-        """
-        ...
-
-class Component:
-    """
-    A component is a collection of endpoints
-    """
-
-    ...
-
-    def endpoint(self, name: str) -> Endpoint:
-        """
-        Create an endpoint
-        """
-        ...
-
 
 class Endpoint:
     """
@@ -164,9 +133,11 @@ class Endpoint:
         """
         ...
 
-    async def client(self) -> Client:
+    async def client(self, router_mode: Optional[RouterMode] = None) -> Client:
         """
-        Create a `Client` capable of calling served instances of this endpoint
+        Create a `Client` capable of calling served instances of this endpoint.
+
+        By default this uses round-robin routing when `router_mode` is not provided.
         """
         ...
 
@@ -205,7 +176,6 @@ class Endpoint:
         and should start receiving requests.
         """
         ...
-
 
 class Client:
     """
@@ -251,10 +221,23 @@ class Client:
         ...
 
 
-def compute_block_hash_for_seq_py(
+class ModelCardInstanceId:
+    """
+    Unique identifier for a worker instance: namespace, component, endpoint and instance_id.
+    The instance_id is not currently exposed in the Python bindings.
+    """
+    def triple(self) -> Tuple[str, str, str]:
+        """
+        Triple of namespace, component and endpoint this worker is serving.
+        """
+        ...
+
+
+def compute_block_hash_for_seq(
     tokens: List[int],
     kv_block_size: int,
-    block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None
+    block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
+    lora_name: Optional[str] = None,
 ) -> List[int]:
     """
     Compute block hashes for a sequence of tokens, optionally including multimodal metadata.
@@ -286,7 +269,7 @@ def compute_block_hash_for_seq_py(
         ...         "mm_hash": 0xDEADBEEF,
         ...     }]
         ... }
-        >>> hashes = compute_block_hash_for_seq_py(tokens, 32, [mm_info])
+        >>> hashes = compute_block_hash_for_seq(tokens, 32, [mm_info])
     """
 
     ...
@@ -390,14 +373,15 @@ class WorkerMetricsPublisher:
         Create a `WorkerMetricsPublisher` object
         """
 
-    async def create_endpoint(self, component: Component) -> None:
+    async def create_endpoint(self, endpoint: Endpoint) -> None:
         """
-        Create the NATS endpoint for metrics publishing. Must be awaited.
+        Initialize the NATS endpoint for publishing worker metrics. Must be awaited.
 
-        Only service created through this method will interact with KV router of the same component.
+        Extracts component information from the endpoint to set up metrics publishing
+        on the correct NATS subject for routing decisions.
 
         Args:
-            component: The component to create the endpoint for
+            endpoint: The endpoint to extract component information from for metrics publishing
         """
 
     def publish(
@@ -418,6 +402,15 @@ class ModelDeploymentCard:
     """
     A model deployment card is a collection of model information
     """
+
+    def to_json_str(self) -> str:
+        """Serialize the model deployment card to a JSON string."""
+        ...
+
+    @staticmethod
+    def from_json_str(json: str) -> "ModelDeploymentCard":
+        """Deserialize a model deployment card from a JSON string."""
+        ...
 
     ...
 
@@ -552,7 +545,7 @@ class KvIndexer:
 
     ...
 
-    def __init__(self, component: Component, block_size: int) -> None:
+    def __init__(self, endpoint: Endpoint, block_size: int) -> None:
         """
         Create a `KvIndexer` object
         """
@@ -570,7 +563,7 @@ class KvIndexer:
         ...
 
     def find_matches_for_request(
-        self, token_ids: List[int], lora_id: int
+        self, token_ids: List[int], lora_name: Optional[str] = None
     ) -> OverlapScores:
         """
         Return the overlapping scores of workers for the given token ids.
@@ -599,7 +592,7 @@ class ApproxKvIndexer:
 
     def __init__(
         self,
-        component: Component,
+        endpoint: Endpoint,
         kv_block_size: int,
         router_ttl_secs: float = 120.0,
         router_max_tree_size: int = 1048576,
@@ -618,13 +611,14 @@ class ApproxKvIndexer:
         ...
 
     def find_matches_for_request(
-        self, token_ids: List[int]
+        self, token_ids: List[int], lora_name: Optional[str] = None
     ) -> OverlapScores:
         """
         Return the overlapping scores of workers for the given token ids.
 
         Args:
             token_ids: List of token IDs to find matches for
+            lora_name: Optional LoRA adapter name for adapter-aware matching
 
         Returns:
             OverlapScores containing worker matching scores and frequencies
@@ -657,79 +651,6 @@ class ApproxKvIndexer:
         ...
 
 
-class KvRecorder:
-    """
-    A recorder for KV Router events.
-    """
-
-    ...
-
-    def __init__(
-        self,
-        component: Component,
-        output_path: Optional[str] = None,
-        max_lines_per_file: Optional[int] = None,
-        max_count: Optional[int] = None,
-        max_time: Optional[float] = None,
-    ) -> None:
-        """
-        Create a new KvRecorder instance.
-
-        Args:
-            component: The component to associate with this recorder
-            output_path: Path to the JSONL file to write events to
-            max_lines_per_file: Maximum number of lines per file before rotating to a new file
-            max_count: Maximum number of events to record before shutting down
-            max_time: Maximum duration in seconds to record before shutting down
-        """
-        ...
-
-    def event_count(self) -> int:
-        """
-        Get the count of recorded events.
-
-        Returns:
-            The number of events recorded
-        """
-        ...
-
-    def elapsed_time(self) -> float:
-        """
-        Get the elapsed time since the recorder was started.
-
-        Returns:
-            The elapsed time in seconds as a float
-        """
-        ...
-
-    def replay_events(
-        self,
-        indexer: KvIndexer,
-        timed: bool = False,
-        max_count: Optional[int] = None,
-        max_time: Optional[float] = None,
-    ) -> int:
-        """
-        Populate an indexer with the recorded events.
-
-        Args:
-            indexer: The KvIndexer to populate with events
-            timed: If true, events will be sent according to their recorded timestamps.
-                If false, events will be sent without any delay in between.
-            max_count: Maximum number of events to send before stopping
-            max_time: Maximum duration in seconds to send events before stopping
-
-        Returns:
-            The number of events sent to the indexer
-        """
-        ...
-
-    def shutdown(self) -> None:
-        """
-        Shutdown the recorder.
-        """
-        ...
-
 class KvEventPublisher:
     """
     A KV event publisher will publish KV events corresponding to the component.
@@ -738,17 +659,31 @@ class KvEventPublisher:
     ...
 
     def __init__(
-        self, component: Component, worker_id: int, kv_block_size: int, dp_rank: int = 0, enable_local_indexer: bool = False
+        self,
+        endpoint: Endpoint,
+        worker_id: int = 0,
+        kv_block_size: int = 0,
+        dp_rank: int = 0,
+        enable_local_indexer: bool = False,
+        zmq_endpoint: Optional[str] = None,
+        zmq_topic: Optional[str] = None,
     ) -> None:
         """
-        Create a `KvEventPublisher` object
+        Create a `KvEventPublisher` object.
+
+        When zmq_endpoint is provided, the publisher subscribes to a ZMQ socket for
+        incoming engine events (e.g. from SGLang/vLLM) and relays them to NATS.
+
+        When zmq_endpoint is None, events are pushed manually via publish_stored/publish_removed.
 
         Args:
-            component: The component to publish events for
-            worker_id: The worker ID
+            endpoint: The endpoint to extract component information from for event publishing
+            worker_id: The worker ID (unused, inferred from endpoint)
             kv_block_size: The KV block size (must be > 0)
             dp_rank: The data parallel rank (defaults to 0)
-            enable_local_indexer: Enable worker-local KV indexer (defaults to False)
+            enable_local_indexer: Enable worker-local KV indexer
+            zmq_endpoint: Optional ZMQ endpoint for relay mode (e.g. "tcp://127.0.0.1:5557")
+            zmq_topic: ZMQ topic to subscribe to (defaults to "" when zmq_endpoint is set)
         """
 
     def publish_stored(
@@ -756,8 +691,9 @@ class KvEventPublisher:
         token_ids: List[int],
         num_block_tokens: List[int],
         block_hashes: List[int],
-        lora_id: int,
         parent_hash: Optional[int] = None,
+        block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
+        lora_name: Optional[str] = None,
     ) -> None:
         """
         Publish a KV stored event.
@@ -768,8 +704,11 @@ class KvEventPublisher:
             token_ids: List of token IDs
             num_block_tokens: Number of tokens per block
             block_hashes: List of block hashes (signed 64-bit integers)
-            lora_id: The LoRA ID
             parent_hash: Optional parent hash (signed 64-bit integer)
+            block_mm_infos: Optional list of multimodal info for each block.
+                Each item is either None or a dict with "mm_objects" key containing
+                a list of {"mm_hash": int, "offsets": [[start, end], ...]} dicts.
+            lora_name: Optional LoRA adapter name for adapter-aware block hashing.
         """
         ...
 
@@ -781,38 +720,6 @@ class KvEventPublisher:
 
         Args:
             block_hashes: List of block hashes to remove (signed 64-bit integers)
-        """
-        ...
-
-class ZmqKvEventPublisherConfig:
-    def __init__(
-        self,
-        worker_id: int,
-        kv_block_size: int,
-        zmq_endpoint: str = "tcp://127.0.0.1:5557",
-        zmq_topic: str = "",
-        enable_local_indexer: bool = False,
-        dp_rank: int = 0
-    ) -> None:
-        """
-        Configuration for the ZmqKvEventPublisher.
-
-        :param worker_id: The worker ID.
-        :param kv_block_size: The block size for the key-value store.
-        :param zmq_endpoint: The ZeroMQ endpoint. Defaults to "tcp://127.0.0.1:5557".
-        :param zmq_topic: The ZeroMQ topic to subscribe to. Defaults to an empty string.
-        :param enable_local_indexer: Whether to enable the worker-local KV indexer. Defaults to False.
-        :param dp_rank: The data parallel rank for this publisher. Defaults to 0.
-        """
-        ...
-
-class ZmqKvEventPublisher:
-    def __init__(self, component: Component, config: ZmqKvEventPublisherConfig) -> None:
-        """
-        Initializes a new ZmqKvEventPublisher instance.
-
-        :param component: The component to be used.
-        :param config: Configuration for the event publisher.
         """
         ...
 
@@ -828,7 +735,29 @@ class HttpService:
     It is a OpenAI compatible http ingress into the Dynamo Distributed Runtime.
     """
 
-    ...
+    def __init__(self, port: Optional[int] = None) -> None:
+        """
+        Create a new HTTP service.
+
+        Args:
+            port: Optional port number to bind the service to (default: 8080)
+        """
+        ...
+
+    async def run(self, runtime: DistributedRuntime) -> None:
+        """
+        Run the HTTP service.
+
+        Args:
+            runtime: DistributedRuntime instance for token management
+        """
+        ...
+
+    def shutdown(self) -> None:
+        """
+        Shutdown the HTTP service by cancelling its internal token.
+        """
+        ...
 
 class PythonAsyncEngine:
     """
@@ -969,12 +898,18 @@ class KserveGrpcService:
         """
         ...
 
-    async def run(self, token: CancellationToken) -> None:
+    async def run(self, runtime: DistributedRuntime) -> None:
         """
         Run the KServe gRPC service.
 
         Args:
-            token: Cancellation token to stop the service
+            runtime: DistributedRuntime instance for token management
+        """
+        ...
+
+    def shutdown(self) -> None:
+        """
+        Shutdown the KServe gRPC service by cancelling its internal token.
         """
         ...
 
@@ -983,22 +918,49 @@ class ModelInput:
     ...
 
 class ModelType:
-    """What type of request this model needs: Chat, Completions, Embedding, Tensor, Images or Prefill"""
+    """What type of request this model needs: Chat, Completions, Embedding, Tensor, Images, Videos or Prefill"""
     Chat: ModelType
     Completions: ModelType
     Embedding: ModelType
     TensorBased: ModelType
     Prefill: ModelType
     Images: ModelType
+    Audios: ModelType
+    Videos: ModelType
     ...
 
 class RouterMode:
     """Router mode for load balancing requests across workers"""
+    RoundRobin: "RouterMode"
+    Random: "RouterMode"
+    KV: "RouterMode"
+    Direct: "RouterMode"
     ...
 
 class RouterConfig:
     """How to route the request"""
-    ...
+
+    def __init__(
+        self,
+        mode: RouterMode,
+        config: Optional[KvRouterConfig] = None,
+        active_decode_blocks_threshold: Optional[float] = None,
+        active_prefill_tokens_threshold: Optional[int] = None,
+        active_prefill_tokens_threshold_frac: Optional[float] = None,
+        decode_fallback: bool = False,
+    ) -> None:
+        """
+        Create a RouterConfig.
+
+        Args:
+            mode: The router mode (RoundRobin, Random, KV, or Direct)
+            config: Optional KV router configuration (used when mode is KV)
+            active_decode_blocks_threshold: Threshold percentage (0.0-1.0) for decode blocks busy detection
+            active_prefill_tokens_threshold: Literal token count threshold for prefill busy detection
+            active_prefill_tokens_threshold_frac: Fraction of max_num_batched_tokens for busy detection
+            decode_fallback: Allow falling back to decode-only mode when prefill workers are unavailable
+        """
+        ...
 
 class KvRouterConfig:
     """Values for KV router"""
@@ -1008,6 +970,7 @@ class KvRouterConfig:
         overlap_score_weight: float = 1.0,
         router_temperature: float = 0.0,
         use_kv_events: bool = True,
+        durable_kv_events: bool = False,
         router_replica_sync: bool = False,
         router_track_active_blocks: bool = True,
         router_track_output_blocks: bool = False,
@@ -1017,6 +980,8 @@ class KvRouterConfig:
         router_ttl_secs: float = 120.0,
         router_max_tree_size: int = 1048576,
         router_prune_target_ratio: float = 0.8,
+        router_queue_threshold: Optional[float] = None,
+        router_event_threads: int = 4,
     ) -> None:
         """
         Create a KV router configuration.
@@ -1025,11 +990,15 @@ class KvRouterConfig:
             overlap_score_weight: Weight for overlap score in worker selection (default: 1.0)
             router_temperature: Temperature for worker sampling via softmax (default: 0.0)
             use_kv_events: Whether to use KV events from workers (default: True)
+            durable_kv_events: **Deprecated.** Enable durable KV events using NATS JetStream (default: False).
+                This option will be removed in a future release. The event-plane subscriber
+                (local_indexer mode) is now the recommended path.
             router_replica_sync: Enable replica synchronization (default: False)
             router_track_active_blocks: Track active blocks for load balancing (default: True)
             router_track_output_blocks: Track output blocks during generation (default: False).
                 When enabled, the router adds placeholder blocks as tokens are generated
-                and applies fractional decay based on progress toward expected_output_tokens.
+                and applies fractional decay based on progress toward expected output
+                sequence length (agent_hints.osl in nvext).
             router_assume_kv_reuse: Assume KV cache reuse when tracking active blocks (default: True).
                 When True, computes actual block hashes. When False, generates random hashes.
             router_snapshot_threshold: Number of messages before snapshot (default: 1000000)
@@ -1037,10 +1006,16 @@ class KvRouterConfig:
             router_ttl_secs: TTL for blocks in seconds when not using KV events (default: 120.0)
             router_max_tree_size: Maximum tree size before pruning (default: 1048576, which is 2^20)
             router_prune_target_ratio: Target size ratio after pruning (default: 0.8)
+            router_queue_threshold: Queue threshold fraction for prefill token capacity (default: None).
+                When set, requests are queued if all workers exceed this fraction of
+                max_num_batched_tokens. Enables priority scheduling via latency_sensitivity hints.
+                If None, queueing is disabled and all requests go directly to the scheduler.
+            router_event_threads: Number of event processing threads (default: 4).
+                When > 1, uses a concurrent radix tree with a thread pool.
         """
         ...
 
-async def register_llm(
+async def register_model(
     model_input: ModelInput,
     model_type: ModelType,
     endpoint: Endpoint,
@@ -1049,7 +1024,6 @@ async def register_llm(
     context_length: Optional[int] = None,
     kv_cache_block_size: Optional[int] = None,
     router_mode: Optional[RouterMode] = None,
-    migration_limit: int = 0,
     runtime_config: Optional[ModelRuntimeConfig] = None,
     user_data: Optional[Dict[str, Any]] = None,
     custom_template_path: Optional[str] = None,
@@ -1070,7 +1044,7 @@ async def register_llm(
     """
     ...
 
-async def unregister_llm(
+async def unregister_model(
     endpoint: Endpoint,
     lora_name: Optional[str] = None,
 ) -> None:
@@ -1085,19 +1059,24 @@ def lora_name_to_id(lora_name: str) -> int:
     """Generate a deterministic integer ID from a LoRA name using blake3 hash."""
     ...
 
-async def fetch_llm(remote_name: str, ignore_weights: bool = False) -> str:
+async def fetch_model(remote_name: str, ignore_weights: bool = False) -> str:
     """
-    Download a model from Hugging Face, returning it's local path.
+    Download a model from Hugging Face, returning its local path.
     If `ignore_weights` is True, only fetches tokenizer and config files.
-    Example: `model_path = await fetch_llm("Qwen/Qwen3-0.6B")`
+    Example: `model_path = await fetch_model("Qwen/Qwen3-0.6B")`
     """
     ...
+
+# Backward-compatible aliases (deprecated, use new names)
+fetch_llm = fetch_model
+register_llm = register_model
+unregister_llm = unregister_model
 
 class EngineConfig:
     """Holds internal configuration for a Dynamo engine."""
     ...
 
-async def make_engine(args: EntrypointArgs) -> EngineConfig:
+async def make_engine(distributed_runtime: DistributedRuntime, args: EntrypointArgs) -> EngineConfig:
     """Make an engine matching the args"""
     ...
 
@@ -1323,40 +1302,9 @@ class KvbmRequest:
     def __init__(self, request_id: int, tokens: List[int], block_size: int) -> None:
         ...
 
-class ZmqKvEventListener:
+class KvRouter:
     """
-    A ZMQ-based key-value cache event listener that operates independently
-    of the dynamo runtime or event plane infrastructure.
-    """
-
-    def __init__(
-        self, zmq_endpoint: str, zmq_topic: str, kv_block_size: int
-    ) -> None:
-        """
-        Create a new ZmqKvEventListener instance.
-
-        Args:
-            zmq_endpoint: ZeroMQ endpoint to connect to (e.g., "tcp://127.0.0.1:5557")
-            zmq_topic: ZeroMQ topic to subscribe to
-            kv_block_size: Size of KV cache blocks
-        """
-        ...
-
-    async def get_events(self) -> List[str]:
-        """
-        Get all available KV cache events from the ZMQ listener.
-
-        Returns:
-            List of JSON-serialized KV cache events as strings
-
-        Raises:
-            ValueError: If events cannot be serialized to JSON
-        """
-        ...
-
-class KvPushRouter:
-    """
-    A KV-aware push router that performs intelligent routing based on KV cache overlap.
+    A KV-aware router that performs intelligent routing based on KV cache overlap.
     """
 
     def __init__(
@@ -1366,7 +1314,7 @@ class KvPushRouter:
         kv_router_config: KvRouterConfig,
     ) -> None:
         """
-        Create a new KvPushRouter instance.
+        Create a new KvRouter instance.
 
         Args:
             endpoint: The endpoint to connect to for routing requests
@@ -1385,6 +1333,10 @@ class KvPushRouter:
         router_config_override: Optional[JsonLike] = None,
         worker_id: Optional[int] = None,
         dp_rank: Optional[int] = None,
+        extra_args: Optional[JsonLike] = None,
+        block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
+        multi_modal_data: Optional[JsonLike] = None,
+        mm_routing_info: Optional[JsonLike] = None,
     ) -> AsyncIterator[JsonLike]:
         """
         Generate text using the KV-aware router.
@@ -1403,6 +1355,16 @@ class KvPushRouter:
                     the request will be routed to the specific (worker_id, dp_rank) pair.
                     If only dp_rank is set, the router will select the best worker but
                     force routing to the specified dp_rank.
+            extra_args: Optional extra request arguments to include in the
+                       PreprocessedRequest.
+            block_mm_infos: Optional block-level multimodal metadata aligned to
+                           request blocks. Backward-compatible shortcut; this is
+                           converted to mm_routing_info with routing_token_ids=token_ids.
+            multi_modal_data: Optional multimodal payload map to preserve image/video
+                             data for downstream model execution.
+            mm_routing_info: Optional structured routing-only multimodal payload
+                            (e.g., {"routing_token_ids": [...], "block_mm_infos": [...]})
+                            used by router selection without changing execution token_ids.
 
         Returns:
             An async iterator yielding generation responses
@@ -1421,6 +1383,8 @@ class KvPushRouter:
         token_ids: List[int],
         router_config_override: Optional[JsonLike] = None,
         request_id: Optional[str] = None,
+        block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
+        lora_name: Optional[str] = None,
     ) -> Tuple[int, int, int]:
         """
         Find the best matching worker for the given tokens.
@@ -1431,6 +1395,9 @@ class KvPushRouter:
             request_id: Optional request ID. If provided, router states will be updated
                        to track this request (active blocks, lifecycle events). If not
                        provided, this is a query-only operation that doesn't affect state.
+            block_mm_infos: Optional block-level multimodal metadata aligned to request
+                           blocks. When provided, this is used in block hash computation
+                           to enable MM-aware worker selection.
 
         Returns:
             A tuple of (worker_id, dp_rank, overlap_blocks) where:
@@ -1443,6 +1410,7 @@ class KvPushRouter:
     async def get_potential_loads(
         self,
         token_ids: List[int],
+        lora_name: Optional[str] = None,
     ) -> List[Dict[str, int]]:
         """
         Get potential prefill and decode loads for all workers.
@@ -1506,13 +1474,64 @@ class KvPushRouter:
         """
         ...
 
+class EngineType:
+    """Engine type for Dynamo workers"""
+    Echo: "EngineType"
+    Dynamic: "EngineType"
+    Mocker: "EngineType"
+    ...
+
 class EntrypointArgs:
     """
     Settings to connect an input to a worker and run them.
     Use by `dynamo run`.
     """
 
-    ...
+    def __init__(
+        self,
+        engine_type: "EngineType",
+        model_path: Optional[str] = None,
+        model_name: Optional[str] = None,
+        endpoint_id: Optional[str] = None,
+        context_length: Optional[int] = None,
+        template_file: Optional[str] = None,
+        router_config: Optional[RouterConfig] = None,
+        kv_cache_block_size: Optional[int] = None,
+        http_host: Optional[str] = None,
+        http_port: Optional[int] = None,
+        http_metrics_port: Optional[int] = None,
+        tls_cert_path: Optional[str] = None,
+        tls_key_path: Optional[str] = None,
+        extra_engine_args: Optional[str] = None,
+        namespace: Optional[str] = None,
+        is_prefill: bool = False,
+        migration_limit: int = 0,
+        chat_engine_factory: Optional[Callable] = None,
+    ) -> None:
+        """
+        Create EntrypointArgs.
+
+        Args:
+            engine_type: The type of engine to use
+            model_path: Path to the model directory on disk
+            model_name: Model name or dynamo endpoint (e.g. 'dyn://namespace.component.endpoint')
+            endpoint_id: Optional endpoint ID
+            context_length: Optional context length override
+            template_file: Optional path to a prompt template file
+            router_config: Optional router configuration
+            kv_cache_block_size: Optional KV cache block size
+            http_host: HTTP host to bind to
+            http_port: HTTP port to bind to
+            http_metrics_port: HTTP metrics port (for gRPC service)
+            tls_cert_path: TLS certificate path (PEM format)
+            tls_key_path: TLS key path (PEM format)
+            extra_engine_args: Path to extra engine arguments file
+            namespace: Dynamo namespace for model discovery scoping
+            is_prefill: Whether this is a prefill worker
+            migration_limit: Maximum number of request migrations (0=disabled)
+            chat_engine_factory: Optional Python chat completions engine factory callback
+        """
+        ...
 
 class PlannerDecision:
     """A request from planner to client to perform a scaling action.
@@ -1560,10 +1579,10 @@ class VirtualConnectorClient:
 
 __all__ = [
     "Client",
-    "Component",
     "Context",
     "KserveGrpcService",
     "ModelDeploymentCard",
     "PythonAsyncEngine",
     "prometheus_names",
+    "ModelCardInstanceId",
 ]

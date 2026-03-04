@@ -1,4 +1,9 @@
-# Tool Calling with Dynamo
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Tool Calling
+subtitle: Connect Dynamo to external tools and services using function calling
+---
 
 You can connect Dynamo to external tools and services using function calling (also known as tool calling). By providing a list of available functions, Dynamo can choose
 to output function arguments for the relevant function(s) which you can execute to augment the prompt with relevant external information.
@@ -13,7 +18,7 @@ To enable this feature, you should set the following flag while launching the ba
 - `--dyn-tool-call-parser` : select the parser from the available parsers list using the below command
 
 ```bash
-# <backend> can be vllm, sglang, trtllm, etc. based on your installation
+# <backend> can be sglang, trtllm, vllm, etc. based on your installation
 python -m dynamo.<backend> --help"
 ```
 
@@ -34,12 +39,21 @@ Parser to Model Mapping
 | llama3_json | meta-llama/Llama-3.1-*, meta-llama/Llama-3.2-* |
 | harmony | openai/gpt-oss-* |
 | nemotron_deci | nvidia/nemotron-* |
+| nemotron_nano | nvidia/NVIDIA-Nemotron-3-Nano-* |
 | phi4 | Phi-4-* |
 | deepseek_v3 | deepseek-ai/DeepSeek-V3, deepseek-ai/DeepSeek-R1, deepseek-ai/DeepSeek-R1-0528 |
 | deepseek_v3_1 | deepseek-ai/DeepSeek-V3.1 |
 | pythonic |  meta-llama/Llama-4-* |
 | jamba |  ai21labs/AI21-Jamba-*-1.5, ai21labs/AI21-Jamba-*-1.6, ai21labs/AI21-Jamba-*-1.7, |
+| glm47 | zai-org/GLM-4.7 |
+| kimi_k2 | moonshotai/Kimi-K2-Thinking*, moonshotai/Kimi-K2-Instruct*, moonshotai/Kimi-K2.5* |
 
+\* Currently requires converting `tiktoken.model` to `tokenizers.json`.
+
+> [!TIP]
+> For Kimi K2.5 thinking models, pair `--dyn-tool-call-parser kimi_k2` with
+> `--dyn-reasoning-parser kimi_k25` so that both `<think>` blocks and tool calls
+> are parsed correctly from the same response.
 
 ## Examples
 

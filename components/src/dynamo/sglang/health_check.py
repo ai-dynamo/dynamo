@@ -144,3 +144,33 @@ class ImageDiffusionHealthCheckPayload(HealthCheckPayload):
         }
 
         super().__init__()
+
+
+class VideoGenerationHealthCheckPayload(HealthCheckPayload):
+    """Video generation-specific health check payload for video generation workers.
+
+    Sends a minimal video generation request to verify the video worker
+    is responding and the model is loaded. Uses minimal resources for fast checks.
+    """
+
+    def __init__(self, model_path: str):
+        """Initialize video health check payload with minimal generation request.
+
+        Args:
+            model_path: The video generation model being served.
+        """
+        self.default_payload = {
+            "prompt": "test",  # Minimal prompt
+            "model": model_path,
+            "seconds": 1,
+            "size": "256x256",  # Small size for fast health check
+            "response_format": "b64_json",  # Don't require filesystem for health check
+            "nvext": {
+                "fps": 8,
+                "num_frames": 8,  # Minimal frames for fast health check
+                "num_inference_steps": 1,  # Just 1 step (fast but low quality)
+                "guidance_scale": 5.0,  # Standard guidance scale for video
+            },
+        }
+
+        super().__init__()

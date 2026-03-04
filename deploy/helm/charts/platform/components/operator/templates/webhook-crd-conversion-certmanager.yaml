@@ -1,0 +1,162 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+{{- if .Values.webhook.certManager.enabled }}
+---
+# ServiceAccount for the CRD conversion patch job
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "dynamo-operator.fullname" . }}-crd-conversion-patch
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/component: webhook
+    app.kubernetes.io/created-by: dynamo-operator
+    app.kubernetes.io/part-of: dynamo-operator
+  {{- include "dynamo-operator.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "1"
+    "helm.sh/hook-delete-policy": before-hook-creation
+---
+# ClusterRole to patch the DGDR CRD
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "dynamo-operator.fullname" . }}-{{ .Release.Namespace }}-crd-conversion-patch
+  labels:
+    app.kubernetes.io/component: webhook
+    app.kubernetes.io/created-by: dynamo-operator
+    app.kubernetes.io/part-of: dynamo-operator
+  {{- include "dynamo-operator.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "1"
+    "helm.sh/hook-delete-policy": before-hook-creation
+rules:
+- apiGroups: ["apiextensions.k8s.io"]
+  resources: ["customresourcedefinitions"]
+  resourceNames: ["dynamographdeploymentrequests.nvidia.com"]
+  verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "dynamo-operator.fullname" . }}-{{ .Release.Namespace }}-crd-conversion-patch
+  labels:
+    app.kubernetes.io/component: webhook
+    app.kubernetes.io/created-by: dynamo-operator
+    app.kubernetes.io/part-of: dynamo-operator
+  {{- include "dynamo-operator.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "1"
+    "helm.sh/hook-delete-policy": before-hook-creation
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "dynamo-operator.fullname" . }}-{{ .Release.Namespace }}-crd-conversion-patch
+subjects:
+- kind: ServiceAccount
+  name: {{ include "dynamo-operator.fullname" . }}-crd-conversion-patch
+  namespace: {{ .Release.Namespace }}
+---
+# Job to patch the DGDR CRD with spec.conversion and cert-manager CA injection annotation.
+# The cert-manager ca-injector then watches the CRD annotation and keeps the caBundle
+# in spec.conversion.webhook.clientConfig.caBundle up to date automatically.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "dynamo-operator.fullname" . }}-crd-conversion-patch-{{ .Release.Revision }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/component: webhook
+    app.kubernetes.io/created-by: dynamo-operator
+    app.kubernetes.io/part-of: dynamo-operator
+  {{- include "dynamo-operator.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "2"
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  backoffLimit: 5
+  template:
+    metadata:
+      name: {{ include "dynamo-operator.fullname" . }}-crd-conversion-patch
+      labels:
+        app.kubernetes.io/component: webhook
+        app.kubernetes.io/created-by: dynamo-operator
+        app.kubernetes.io/part-of: dynamo-operator
+      {{- include "dynamo-operator.labels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "dynamo-operator.fullname" . }}-crd-conversion-patch
+      restartPolicy: OnFailure
+      {{- with .Values.controllerManager.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.controllerManager.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+      - name: crd-conversion-patch
+        image: {{ .Values.webhook.certGenerator.image.repository }}:{{ .Values.webhook.certGenerator.image.tag }}
+        imagePullPolicy: {{ .Values.webhook.certGenerator.image.pullPolicy }}
+        command:
+        - /bin/bash
+        - -c
+        - |
+          set -e
+
+          echo "📝 Patching DGDR CRD with spec.conversion and cert-manager CA injection annotation..."
+
+          # Set spec.conversion (caBundle left empty — cert-manager ca-injector fills it in
+          # automatically once it sees the cert-manager.io/inject-ca-from annotation below).
+          kubectl patch crd dynamographdeploymentrequests.nvidia.com \
+            --type merge --patch '{
+              "spec": {
+                "conversion": {
+                  "strategy": "Webhook",
+                  "webhook": {
+                    "clientConfig": {
+                      "service": {
+                        "name": "{{ include "dynamo-operator.fullname" . }}-webhook-service",
+                        "namespace": "{{ .Release.Namespace }}",
+                        "path": "/convert"
+                      }
+                    },
+                    "conversionReviewVersions": ["v1"]
+                  }
+                }
+              }
+            }'
+
+          # Add the cert-manager annotation so the ca-injector keeps the caBundle current.
+          kubectl annotate crd dynamographdeploymentrequests.nvidia.com \
+            --overwrite \
+            cert-manager.io/inject-ca-from="{{ .Release.Namespace }}/{{ include "dynamo-operator.fullname" . }}-serving-cert"
+
+          echo "✅ DGDR CRD conversion webhook configured."
+          echo "   cert-manager ca-injector will populate the caBundle automatically."
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 1001
+{{- end }}

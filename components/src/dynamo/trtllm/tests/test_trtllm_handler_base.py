@@ -1,11 +1,21 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
+import re as re_mod
 from dataclasses import dataclass
 from unittest import mock
+from unittest.mock import MagicMock
 
 import pytest
+import torch
 
+if not torch.cuda.is_available():
+    pytest.skip(
+        "Skipping to avoid errors during collection with '-m gpu_0'. "
+        "CUDA/GPU not available, but tensorrt_llm import and the test require GPU.",
+        allow_module_level=True,
+    )
 from dynamo.trtllm.request_handlers.handler_base import HandlerBase
 
 pytestmark = [
@@ -26,6 +36,7 @@ class MockSamplingParams:
     repetition_penalty: float = 1.0
     seed: int | None = None
     ignore_eos: bool = False
+    guided_decoding: object | None = None
 
     def __post_init__(self):
         """Called after dataclass initialization (including via replace())."""
@@ -150,3 +161,216 @@ class TestOverrideSamplingParams:
             HandlerBase._override_sampling_params(sampling_params, request)
 
         mock_post_init.assert_called_once()
+
+
+class TestGuidedDecodingFromToolChoice:
+    """Tests that guided_decoding dicts from Rust are converted to GuidedDecodingParams.
+
+    The Rust frontend serializes guided_decoding as a plain dict over TCP.
+    _override_sampling_params must convert it to a GuidedDecodingParams
+    object before passing to TRT-LLM, which expects attribute access
+    (e.g. .json_object, .json) on the guided_decoding field.
+    """
+
+    # Matches what the Rust frontend serializes when
+    # tool_choice="required" with a single tool definition.
+    GUIDED_DECODING_DICT = {
+        "json": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+                "type": "object",
+                "anyOf": [
+                    {
+                        "properties": {
+                            "name": {"type": "string", "enum": ["get_weather"]},
+                            "parameters": {
+                                "type": "object",
+                                "properties": {"location": {"type": "string"}},
+                                "required": ["location"],
+                            },
+                        },
+                        "required": ["name", "parameters"],
+                    }
+                ],
+            },
+        }
+    }
+
+    def test_guided_decoding_dict_is_converted(self):
+        """guided_decoding dict from Rust must be converted to GuidedDecodingParams.
+
+        The Rust frontend serializes GuidedDecodingOptions as a JSON dict.
+        _override_sampling_params must convert it to TRT-LLM's
+        GuidedDecodingParams so that downstream attribute access like
+        .json_object works without AttributeError.
+        """
+        sampling_params = MockSamplingParams()
+        request = {
+            "sampling_options": {
+                "temperature": 0.7,
+                "guided_decoding": self.GUIDED_DECODING_DICT,
+            }
+        }
+
+        result = HandlerBase._override_sampling_params(sampling_params, request)
+
+        assert not isinstance(
+            result.guided_decoding, dict
+        ), "guided_decoding should be converted from dict to GuidedDecodingParams"
+        # Downstream code (TRT-LLM sampling_params.py) accesses these attributes:
+        assert result.guided_decoding.json_object is False
+        assert result.guided_decoding.json == self.GUIDED_DECODING_DICT["json"]
+
+    def test_choice_converted_to_regex(self):
+        """guided_decoding with 'choice' must be converted to a regex pattern.
+
+        TRT-LLM's GuidedDecodingParams doesn't have a 'choice' field.
+        The handler should convert choice=["yes", "no", "maybe"] to
+        regex="(yes|no|maybe)" so that GuidedDecodingParams can enforce it.
+        """
+        sampling_params = MockSamplingParams()
+        request = {
+            "sampling_options": {
+                "guided_decoding": {
+                    "choice": ["yes", "no", "maybe"],
+                },
+            }
+        }
+
+        result = HandlerBase._override_sampling_params(sampling_params, request)
+
+        assert not isinstance(result.guided_decoding, dict)
+        assert result.guided_decoding.regex == "(yes|no|maybe)"
+        assert result.guided_decoding.json is None
+
+    def test_choice_with_special_chars_escaped(self):
+        """Choice values with regex special characters must be escaped."""
+        sampling_params = MockSamplingParams()
+        request = {
+            "sampling_options": {
+                "guided_decoding": {
+                    "choice": ["yes (confirmed)", "no [rejected]"],
+                },
+            }
+        }
+
+        result = HandlerBase._override_sampling_params(sampling_params, request)
+
+        assert not isinstance(result.guided_decoding, dict)
+        expected = (
+            "("
+            + "|".join(re_mod.escape(c) for c in ["yes (confirmed)", "no [rejected]"])
+            + ")"
+        )
+        assert result.guided_decoding.regex == expected
+
+    def test_choice_not_used_when_regex_present(self):
+        """If both choice and regex are specified, regex takes priority."""
+        sampling_params = MockSamplingParams()
+        request = {
+            "sampling_options": {
+                "guided_decoding": {
+                    "choice": ["yes", "no"],
+                    "regex": "[0-9]+",
+                },
+            }
+        }
+
+        result = HandlerBase._override_sampling_params(sampling_params, request)
+
+        assert result.guided_decoding.regex == "[0-9]+"
+
+    def test_empty_choice_ignored(self):
+        """Empty choice list should not produce a regex."""
+        sampling_params = MockSamplingParams()
+        request = {
+            "sampling_options": {
+                "guided_decoding": {
+                    "choice": [],
+                },
+            }
+        }
+
+        result = HandlerBase._override_sampling_params(sampling_params, request)
+
+        assert result.guided_decoding.regex is None
+
+    def test_choice_with_none_items_filtered(self):
+        """Choice list with None items should filter them out."""
+        sampling_params = MockSamplingParams()
+        request = {
+            "sampling_options": {
+                "guided_decoding": {
+                    "choice": [None, "yes", None, "no"],
+                },
+            }
+        }
+
+        result = HandlerBase._override_sampling_params(sampling_params, request)
+
+        assert not isinstance(result.guided_decoding, dict)
+        assert result.guided_decoding.regex == "(yes|no)"
+
+    def test_choice_all_none_items_no_regex(self):
+        """Choice list with all None items should not produce a regex."""
+        sampling_params = MockSamplingParams()
+        request = {
+            "sampling_options": {
+                "guided_decoding": {
+                    "choice": [None, None],
+                },
+            }
+        }
+
+        result = HandlerBase._override_sampling_params(sampling_params, request)
+
+        assert result.guided_decoding.regex is None
+
+
+class _ConcreteHandler(HandlerBase):
+    """Concrete subclass of HandlerBase for testing (satisfies abstract method)."""
+
+    async def generate(self, *args, **kwargs):
+        raise NotImplementedError
+
+
+class TestHandleCancellationAbortToggle:
+    """Tests for the disable_request_abort toggle in _handle_cancellation."""
+
+    def _make_handler(self, disable_request_abort: bool) -> HandlerBase:
+        """Create a HandlerBase with mocked config."""
+        config = MagicMock()
+        config.disable_request_abort = disable_request_abort
+        config.shutdown_event = None
+        return _ConcreteHandler(config)
+
+    @pytest.mark.asyncio
+    async def test_abort_called_by_default(self):
+        handler = self._make_handler(disable_request_abort=False)
+        generation_result = MagicMock()
+        context = MagicMock()
+        # async_killed_or_stopped returns an awaitable that resolves immediately
+        # (simulating the client cancelling the request)
+        killed_future = asyncio.get_event_loop().create_future()
+        killed_future.set_result(None)
+        context.async_killed_or_stopped.return_value = killed_future
+        context.id.return_value = "test-id-1"
+
+        await handler._handle_cancellation(generation_result, context)
+
+        generation_result.abort.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_abort_not_called_when_disabled(self):
+        handler = self._make_handler(disable_request_abort=True)
+        generation_result = MagicMock()
+        context = MagicMock()
+        killed_future = asyncio.get_event_loop().create_future()
+        killed_future.set_result(None)
+        context.async_killed_or_stopped.return_value = killed_future
+        context.id.return_value = "test-id-2"
+
+        await handler._handle_cancellation(generation_result, context)
+
+        generation_result.abort.assert_not_called()

@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+import asyncio
 import logging
-from typing import Any, AsyncGenerator, Dict
+from typing import Any, AsyncGenerator, Dict, Optional
 
 import sglang as sgl
 
-from dynamo._core import Component, Context
+from dynamo._core import Context
 from dynamo.sglang.args import Config
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.llm.decode_handler import DecodeWorkerHandler
@@ -18,22 +19,22 @@ class DiffusionWorkerHandler(DecodeWorkerHandler):
 
     def __init__(
         self,
-        component: Component,
         engine: sgl.Engine,
         config: Config,
         publisher: DynamoSglangPublisher = None,
         generate_endpoint=None,
+        shutdown_event: Optional[asyncio.Event] = None,
     ) -> None:
         """Initialize diffusion worker handler.
 
         Args:
-            component: The Dynamo runtime component.
             engine: SGLang engine with diffusion algorithm configured.
             config: SGLang and Dynamo configuration.
             publisher: Optional metrics publisher.
             generate_endpoint: The endpoint handle for discovery.
+            shutdown_event: Optional event to signal shutdown.
         """
-        super().__init__(component, engine, config, publisher, generate_endpoint)
+        super().__init__(engine, config, publisher, generate_endpoint, shutdown_event)
 
         # Validate that diffusion algorithm is configured
         if (

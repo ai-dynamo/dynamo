@@ -7,13 +7,13 @@ use super::*;
 
 /// Helper function to validate NIXL descriptor consistency.
 ///
-/// For any MemoryDescription that returns Some from nixl_descriptor(),
+/// For any MemoryDescriptor that returns Some from nixl_descriptor(),
 /// this validates that the descriptor's addr and size match the memory region's addr and size.
 ///
 /// # Panics
 /// Panics if descriptor values don't match memory region values.
 #[allow(dead_code)]
-fn validate_nixl_descriptor<M: MemoryDescription>(memory: &M) {
+fn validate_nixl_descriptor<M: MemoryDescriptor>(memory: &M) {
     if let Some(desc) = memory.nixl_descriptor() {
         assert_eq!(
             desc.addr as usize,
@@ -31,6 +31,186 @@ fn validate_nixl_descriptor<M: MemoryDescription>(memory: &M) {
         );
     }
 }
+
+// ========== StorageKind tests ==========
+
+#[test]
+fn test_storage_kind_cuda_device_index_device() {
+    let kind = StorageKind::Device(3);
+    assert_eq!(kind.cuda_device_index(), Some(3));
+}
+
+#[test]
+fn test_storage_kind_cuda_device_index_system() {
+    let kind = StorageKind::System;
+    assert_eq!(kind.cuda_device_index(), None);
+}
+
+#[test]
+fn test_storage_kind_cuda_device_index_pinned() {
+    let kind = StorageKind::Pinned;
+    assert_eq!(kind.cuda_device_index(), None);
+}
+
+#[test]
+fn test_storage_kind_cuda_device_index_disk() {
+    let kind = StorageKind::Disk(123);
+    assert_eq!(kind.cuda_device_index(), None);
+}
+
+#[test]
+fn test_storage_kind_is_cuda() {
+    assert!(StorageKind::Device(0).is_cuda());
+    assert!(!StorageKind::System.is_cuda());
+    assert!(!StorageKind::Pinned.is_cuda());
+    assert!(!StorageKind::Disk(1).is_cuda());
+}
+
+#[test]
+fn test_storage_kind_is_system() {
+    assert!(StorageKind::System.is_system());
+    assert!(!StorageKind::Device(0).is_system());
+    assert!(!StorageKind::Pinned.is_system());
+    assert!(!StorageKind::Disk(1).is_system());
+}
+
+#[test]
+fn test_storage_kind_is_pinned() {
+    assert!(StorageKind::Pinned.is_pinned());
+    assert!(!StorageKind::System.is_pinned());
+    assert!(!StorageKind::Device(0).is_pinned());
+    assert!(!StorageKind::Disk(1).is_pinned());
+}
+
+#[test]
+fn test_storage_kind_is_disk() {
+    assert!(StorageKind::Disk(1).is_disk());
+    assert!(!StorageKind::System.is_disk());
+    assert!(!StorageKind::Pinned.is_disk());
+    assert!(!StorageKind::Device(0).is_disk());
+}
+
+// ========== Buffer tests ==========
+
+#[test]
+fn test_buffer_new() {
+    let storage = SystemStorage::new(1024).unwrap();
+    let buffer = Buffer::new(storage);
+    assert_eq!(buffer.size(), 1024);
+    assert_eq!(buffer.storage_kind(), StorageKind::System);
+}
+
+#[test]
+fn test_buffer_from_arc() {
+    use std::sync::Arc;
+    let storage = SystemStorage::new(2048).unwrap();
+    let arc: Arc<dyn MemoryDescriptor> = Arc::new(storage);
+    let buffer = Buffer::from_arc(arc);
+    assert_eq!(buffer.size(), 2048);
+}
+
+#[test]
+fn test_buffer_from_impl() {
+    use std::sync::Arc;
+    let storage = SystemStorage::new(512).unwrap();
+    let arc: Arc<dyn MemoryDescriptor> = Arc::new(storage);
+    let buffer: Buffer = arc.into();
+    assert_eq!(buffer.size(), 512);
+}
+
+#[test]
+fn test_buffer_deref() {
+    let storage = SystemStorage::new(1024).unwrap();
+    let buffer = Buffer::new(storage);
+    // Deref allows calling MemoryDescriptor methods directly
+    let size = buffer.size();
+    assert_eq!(size, 1024);
+}
+
+#[test]
+fn test_buffer_debug() {
+    let storage = SystemStorage::new(1024).unwrap();
+    let buffer = Buffer::new(storage);
+    let debug_str = format!("{:?}", buffer);
+    assert!(debug_str.contains("Buffer"));
+    assert!(debug_str.contains("size"));
+    assert!(debug_str.contains("addr"));
+}
+
+#[test]
+fn test_buffer_clone() {
+    let storage = SystemStorage::new(1024).unwrap();
+    let buffer = Buffer::new(storage);
+    let cloned = buffer.clone();
+    assert_eq!(buffer.addr(), cloned.addr());
+    assert_eq!(buffer.size(), cloned.size());
+}
+
+// ========== MemoryRegion tests ==========
+
+#[test]
+fn test_memory_region_new() {
+    let region = MemoryRegion::new(0x1000, 4096);
+    assert_eq!(region.addr, 0x1000);
+    assert_eq!(region.size, 4096);
+}
+
+#[test]
+fn test_memory_region_accessors() {
+    let region = MemoryRegion::new(0x2000, 8192);
+    assert_eq!(region.addr(), 0x2000);
+    assert_eq!(region.size(), 8192);
+}
+
+#[test]
+fn test_memory_region_zero_address() {
+    let region = MemoryRegion::new(0, 1024);
+    assert_eq!(region.addr(), 0);
+    assert_eq!(region.size(), 1024);
+}
+
+#[test]
+fn test_memory_region_zero_size() {
+    let region = MemoryRegion::new(0x1000, 0);
+    assert_eq!(region.addr(), 0x1000);
+    assert_eq!(region.size(), 0);
+}
+
+#[test]
+fn test_memory_region_clone() {
+    let region = MemoryRegion::new(0x3000, 2048);
+    let cloned = region;
+    assert_eq!(region.addr(), cloned.addr());
+    assert_eq!(region.size(), cloned.size());
+}
+
+#[test]
+fn test_memory_region_eq() {
+    let region1 = MemoryRegion::new(0x1000, 4096);
+    let region2 = MemoryRegion::new(0x1000, 4096);
+    let region3 = MemoryRegion::new(0x2000, 4096);
+    assert_eq!(region1, region2);
+    assert_ne!(region1, region3);
+}
+
+#[test]
+fn test_memory_region_debug() {
+    let region = MemoryRegion::new(0x1000, 4096);
+    let debug_str = format!("{:?}", region);
+    assert!(debug_str.contains("MemoryRegion"));
+}
+
+// ========== create_buffer helper tests ==========
+
+#[test]
+fn test_create_buffer_helper() {
+    let storage = SystemStorage::new(1024).unwrap();
+    let buffer = create_buffer(storage);
+    assert_eq!(buffer.size(), 1024);
+    assert_eq!(buffer.storage_kind(), StorageKind::System);
+}
+
+// ========== Original tests ==========
 
 #[test]
 fn test_system_storage() {

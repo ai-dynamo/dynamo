@@ -24,9 +24,9 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-import requests
 from kr8s.objects import Pod
 
+from tests.utils.client import wait_for_model_availability
 from tests.utils.managed_deployment import ManagedDeployment
 
 LOG_FORMAT = "[TEST] %(asctime)s %(levelname)s %(name)s: %(message)s"
@@ -110,80 +110,7 @@ def get_frontend_port(
     return pod_name, port, selected_pod
 
 
-def wait_for_model_availability(
-    url: str,
-    endpoint: str,
-    model: str,
-    logger: logging.Logger,
-    max_attempts: int = 15,
-    attempt_timeouts: Optional[List[float]] = None,
-) -> bool:
-    """
-    Wait for model to be available before running AI-Perf.
-
-    Args:
-        url: Base URL for the service
-        endpoint: API endpoint path
-        model: Model name to test
-        logger: Logger instance
-        max_attempts: Maximum number of attempts to check availability
-        attempt_timeouts: List of timeout values for each attempt
-
-    Returns:
-        True if model is available, False otherwise
-    """
-    if attempt_timeouts is None:
-        # Default: Start with 60s timeout, then gradually decrease
-        attempt_timeouts = [60, 60, 45, 30, 30, 20, 20, 15, 15, 15, 10, 10, 10, 10, 10]
-
-    test_url = f"{url}{endpoint}"
-
-    for attempt in range(max_attempts):
-        try:
-            test_payload = {
-                "model": model,
-                "messages": [{"role": "user", "content": "test"}],
-                "max_tokens": 1,
-                "stream": False,
-            }
-
-            timeout_val = attempt_timeouts[min(attempt, len(attempt_timeouts) - 1)]
-            logger.info(
-                f"Testing model availability at {test_url} (attempt {attempt+1}/{max_attempts}, timeout={timeout_val}s)"
-            )
-            response = requests.post(test_url, json=test_payload, timeout=timeout_val)
-
-            if response.status_code == 200:
-                logger.info(f"Model '{model}' is available and responding")
-                # Give a bit more time for stabilization
-                logger.info("Model ready, waiting 5s for stabilization...")
-                time.sleep(5)
-                return True
-            elif response.status_code == 404:
-                logger.warning(
-                    f"Model '{model}' not found (404). Response: {response.text[:200]}"
-                )
-            elif response.status_code == 400:
-                logger.warning(f"Bad request (400). Response: {response.text[:200]}")
-            else:
-                logger.warning(
-                    f"Unexpected status code {response.status_code}: {response.text[:200]}"
-                )
-
-        except requests.Timeout as e:
-            logger.warning(
-                f"Model availability test timed out (attempt {attempt+1}): {e}"
-            )
-        except Exception as e:
-            logger.warning(f"Model availability test failed (attempt {attempt+1}): {e}")
-
-        if attempt < max_attempts - 1:
-            wait_time = 10 if attempt < 5 else 5
-            logger.info(f"Waiting {wait_time}s before retry...")
-            time.sleep(wait_time)
-
-    logger.warning("Could not confirm model availability after all attempts")
-    return False
+# wait_for_model_availability has been moved to tests.utils.client
 
 
 def validate_aiperf_results(
@@ -271,7 +198,7 @@ def run_aiperf(
     output_dir: Path,
     logger: logging.Logger,
     max_retries: int = 1,
-    retry_delay: float = 1,
+    max_request_rate: float = 1.0,
     continuous_load: bool = False,
 ) -> bool:
     """
@@ -289,7 +216,7 @@ def run_aiperf(
         output_dir: Directory for AI-Perf artifacts
         logger: Logger instance
         max_retries: Maximum number of retry attempts (default: 1)
-        retry_delay: Delay in seconds between retries (default: 1)
+        max_request_rate: Maximum requests per second for rate limiting (default: 1.0)
         continuous_load: If True, use continuous load instead of fixed request count
 
     Returns:
@@ -321,6 +248,10 @@ def run_aiperf(
         # Request parameters
         "--concurrency",
         "1",  # Optional: we set to 1 for sequential
+        "--request-rate",
+        str(max_request_rate),  # Rate limiting (requests/sec)
+        "--request-rate-mode",
+        "constant",  # Use constant arrival pattern for predictable rate
         # Token configuration
         "--synthetic-input-tokens-mean",
         str(input_token_length),
@@ -352,11 +283,14 @@ def run_aiperf(
     logger.info(f"Starting AI-Perf for Pod {pod_name} Local Port {port}")
     logger.info(f"Using model name: {model}")
 
-    # Wait for model to be available
+    # Wait for model to be available initially
+    # Note: We only check once at start, then clients continue sending requests
+    # regardless of service health. This mimics real-world scenarios where clients
+    # don't know the server is down and continue retrying.
     model_ready = wait_for_model_availability(url, endpoint, model, logger)
     if not model_ready:
         logger.warning("Model not ready, but proceeding with AI-Perf test anyway")
-        # This might result in all requests failing, but the retry logic will handle it
+        # Clients will continue attempting - measuring failure/recovery is the point
 
     logger.info(f"Command: {' '.join(cmd)}")
 
@@ -433,6 +367,7 @@ def run_aiperf(
 
         # Sleep before next attempt (if not the last attempt and not continuous load)
         if not success and attempt < max_attempts - 1 and not continuous_load:
+            retry_delay = 5  # Hardcoded delay between retry attempts
             time.sleep(retry_delay)
 
     if success and not continuous_load:
@@ -583,7 +518,7 @@ def client(
     input_token_length: int,
     output_token_length: int,
     max_retries: int,
-    retry_delay: float = 1,
+    max_request_rate: float = 1.0,
     continuous_load: bool = False,
 ):
     """
@@ -603,7 +538,7 @@ def client(
         input_token_length: Number of input tokens per request
         output_token_length: Number of output tokens per request
         max_retries: Maximum retry attempts for AI-Perf execution
-        retry_delay: Delay in seconds between retry attempts
+        max_request_rate: Maximum requests per second for rate limiting (default: 1.0)
         continuous_load: If True, use continuous load instead of fixed request count
     """
     logger = logging.getLogger(f"CLIENT: {index}")
@@ -650,7 +585,7 @@ def client(
             output_dir=client_output_dir,
             logger=logger,
             max_retries=max_retries,
-            retry_delay=retry_delay,
+            max_request_rate=max_request_rate,
             continuous_load=continuous_load,
         )
 

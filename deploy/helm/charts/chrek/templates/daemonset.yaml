@@ -8,17 +8,14 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "chrek.labels" . | nindent 4 }}
-    app.kubernetes.io/component: checkpoint-agent
 spec:
   selector:
     matchLabels:
-      app.kubernetes.io/name: checkpoint-agent
-      app.kubernetes.io/instance: {{ .Release.Name }}
+      {{- include "chrek.selectorLabels" . | nindent 6 }}
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: checkpoint-agent
-        app.kubernetes.io/instance: {{ .Release.Name }}
+        {{- include "chrek.selectorLabels" . | nindent 8 }}
         {{- with .Values.daemonset.podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -45,10 +42,8 @@ spec:
       affinity:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- if .Values.daemonset.runtimeClassName }}
-      # Use specified runtime class for GPU access (e.g., nvidia for CUDA checkpointing)
-      runtimeClassName: {{ .Values.daemonset.runtimeClassName }}
-      {{- end }}
+      # CUDA checkpoint/restore requires the nvidia container runtime
+      runtimeClassName: nvidia
       {{- if .Values.seccomp.deploy }}
       initContainers:
         # Deploy seccomp profile to host before starting the agent
@@ -76,13 +71,11 @@ spec:
           securityContext:
             privileged: true
           env:
+            # Dynamic values from Kubernetes downward API
             - name: NODE_NAME
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
-            # Agent mode: use "watcher" to watch for labeled pods
-            - name: CHECKPOINT_SIGNAL_FROM
-              value: "watcher"
             {{- if .Values.rbac.namespaceRestricted }}
             # Restrict pod watching to this namespace (namespace-scoped RBAC)
             - name: RESTRICTED_NAMESPACE
@@ -90,34 +83,11 @@ spec:
                 fieldRef:
                   fieldPath: metadata.namespace
             {{- end }}
-            # Checkpoint storage directory
-            - name: CHECKPOINT_DIR
-              value: {{ .Values.storage.pvc.basePath | quote }}
-            # Host proc mount point for CRIU operations
-            - name: HOST_PROC
-              value: "/host/proc"
-            # Containerd socket path
-            - name: CONTAINERD_SOCKET
-              value: {{ .Values.daemonset.containerRuntimeSocket }}
-            {{- if .Values.daemonset.criu.cudaPluginDir }}
-            # CUDA plugin directory for GPU checkpoint support
-            - name: CUDA_PLUGIN_DIR
-              value: {{ .Values.daemonset.criu.cudaPluginDir | quote }}
-            {{- end }}
-            {{- if .Values.daemonset.criu.ghostLimit }}
-            # CRIU ghost file size limit in bytes
-            - name: CRIU_GHOST_LIMIT
-              value: {{ .Values.daemonset.criu.ghostLimit | quote }}
-            {{- end }}
-            {{- if .Values.daemonset.criu.timeout }}
-            # CRIU timeout in seconds
-            - name: CRIU_TIMEOUT
-              value: {{ .Values.daemonset.criu.timeout | quote }}
-            {{- end }}
-            # Storage type (for future S3/OCI support)
-            - name: DYN_CHECKPOINT_STORAGE_TYPE
-              value: {{ .Values.storage.type | quote }}
           volumeMounts:
+            # Mount configuration ConfigMap
+            - name: config
+              mountPath: /etc/chrek
+              readOnly: true
             {{- if eq .Values.storage.type "pvc" }}
             # Mount the checkpoint PVC (only for PVC storage type)
             - name: checkpoints
@@ -134,12 +104,15 @@ spec:
             - name: containerd-storage
               mountPath: /var/lib/containerd
               readOnly: true
-            # Mount host proc for CRIU and signal file writing
+            # Mount host proc for CRIU and runtime PID signaling
             - name: host-proc
               mountPath: /host/proc
-            # Mount host cgroup for CRIU
+            # Mount host cgroup for CRIU (write access needed for cgroup freezer)
             - name: host-cgroup
               mountPath: /sys/fs/cgroup
+            # Kubelet PodResources API socket (for GPU UUID discovery)
+            - name: kubelet-pod-resources
+              mountPath: /var/lib/kubelet/pod-resources
               readOnly: true
             {{- if and (eq .Values.storage.type "oci") .Values.storage.oci.credentialsSecretRef }}
             # Mount docker config for OCI registry auth
@@ -155,6 +128,10 @@ spec:
           resources:
             {{- toYaml .Values.daemonset.resources | nindent 12 }}
       volumes:
+        # Configuration ConfigMap
+        - name: config
+          configMap:
+            name: {{ include "chrek.fullname" . }}-config
         {{- if .Values.seccomp.deploy }}
         # Seccomp profile ConfigMap (used by initContainer)
         - name: seccomp-profiles
@@ -186,7 +163,7 @@ spec:
           hostPath:
             path: /var/lib/containerd
             type: Directory
-        # Host proc (for CRIU and signal files - needs write access)
+        # Host proc (for CRIU and runtime signaling - needs write access)
         - name: host-proc
           hostPath:
             path: /proc
@@ -195,6 +172,11 @@ spec:
         - name: host-cgroup
           hostPath:
             path: /sys/fs/cgroup
+            type: Directory
+        # Kubelet PodResources API socket directory
+        - name: kubelet-pod-resources
+          hostPath:
+            path: /var/lib/kubelet/pod-resources
             type: Directory
         {{- if and (eq .Values.storage.type "oci") .Values.storage.oci.credentialsSecretRef }}
         - name: docker-config
@@ -205,4 +187,3 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-

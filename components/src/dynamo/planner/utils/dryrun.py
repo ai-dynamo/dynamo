@@ -1,53 +1,66 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import argparse
 from typing import Optional
 
+from dynamo.planner.utils.decode_planner import DecodePlanner
 from dynamo.planner.utils.dryrun_plot_utils import create_dryrun_plot
+from dynamo.planner.utils.planner_config import PlannerConfig
 from dynamo.planner.utils.planner_core import (
-    DecodePlanner,
     PlannerSharedState,
-    PrefillPlanner,
     _apply_component_gpu_budget,
     _apply_global_gpu_budget,
 )
+from dynamo.planner.utils.prefill_planner import PrefillPlanner
 from dynamo.planner.utils.trace_data_extractor import extract_metrics_from_mooncake
 
 
-def run_sla_planner_dryrun(args: argparse.Namespace) -> None:
-    # Dryrun mode: use defaults if GPU counts not provided (no DGD available)
-    if args.prefill_engine_num_gpu is None:
-        args.prefill_engine_num_gpu = 1
-    if args.decode_engine_num_gpu is None:
-        args.decode_engine_num_gpu = 1
-
-    warmup_metrics = None
-    if getattr(args, "load_predictor_warmup_trace", None):
-        warmup_metrics = extract_metrics_from_mooncake(
-            args.load_predictor_warmup_trace,
-            args.adjustment_interval,
+def run_sla_planner_dryrun(
+    config: PlannerConfig,
+    dataset: str,
+    start_num_p: int = 1,
+    start_num_d: int = 1,
+    output_plot: str = "dryrun_plot.png",
+) -> None:
+    if config.enable_load_scaling:
+        raise ValueError(
+            "Load-based scaling is not supported in dryrun mode. "
+            "Set enable_load_scaling to false in the config."
         )
 
-    metrics = extract_metrics_from_mooncake(args.dataset, args.adjustment_interval)
+    if config.prefill_engine_num_gpu is None:
+        config.prefill_engine_num_gpu = 1
+    if config.decode_engine_num_gpu is None:
+        config.decode_engine_num_gpu = 1
+
+    warmup_metrics = None
+    if config.load_predictor_warmup_trace is not None:
+        warmup_metrics = extract_metrics_from_mooncake(
+            config.load_predictor_warmup_trace,
+            config.throughput_adjustment_interval,
+        )
+
+    metrics = extract_metrics_from_mooncake(
+        dataset, config.throughput_adjustment_interval
+    )
     if not metrics:
         raise ValueError("Empty metrics dataset: cannot run dryrun")
 
-    mode = getattr(args, "mode", "disagg")
+    mode = config.mode
     prefill_planner: Optional[PrefillPlanner] = None
     decode_planner: Optional[DecodePlanner] = None
     if mode == "disagg":
         shared_state = PlannerSharedState()
         prefill_planner = PrefillPlanner(
-            None, args, dryrun=True, shared_state=shared_state
+            None, config, dryrun=True, shared_state=shared_state
         )
         decode_planner = DecodePlanner(
-            None, args, dryrun=True, shared_state=shared_state
+            None, config, dryrun=True, shared_state=shared_state
         )
     elif mode == "prefill":
-        prefill_planner = PrefillPlanner(None, args, dryrun=True)
+        prefill_planner = PrefillPlanner(None, config, dryrun=True)
     elif mode == "decode":
-        decode_planner = DecodePlanner(None, args, dryrun=True)
+        decode_planner = DecodePlanner(None, config, dryrun=True)
     else:
         raise ValueError(f"Invalid planner mode: {mode}")
 
@@ -83,27 +96,25 @@ def run_sla_planner_dryrun(args: argparse.Namespace) -> None:
     osl = [metrics[0]["avg_osl"]]
     est_osl = [metrics[0]["avg_osl"]]
 
+    interval = config.throughput_adjustment_interval
+
     if prefill_planner is not None:
-        num_p = [args.start_num_p]
+        num_p = [start_num_p]
         p_thpt = [rr[0] * isl[0]]
-        safe_p_thpt = [
-            compute_safe_p_thpt(args.start_num_p, isl[0], args.ttft)
-            * args.adjustment_interval
-        ]
-        prefill_planner.dryrun_observe_metrics(rr[0], isl[0], osl[0])
+        safe_p_thpt = [compute_safe_p_thpt(start_num_p, isl[0], config.ttft) * interval]
+        prefill_planner.dryrun_observe_traffic_stats(rr[0], isl[0], osl[0])
     else:
         num_p = [0]
         p_thpt = [0]
         safe_p_thpt = [0]
 
     if decode_planner is not None:
-        num_d = [args.start_num_d]
+        num_d = [start_num_d]
         d_thpt = [rr[0] * osl[0]]
         safe_d_thpt = [
-            compute_safe_d_thpt(args.start_num_d, isl[0], osl[0], args.itl)
-            * args.adjustment_interval
+            compute_safe_d_thpt(start_num_d, isl[0], osl[0], config.itl) * interval
         ]
-        decode_planner.dryrun_observe_metrics(rr[0], isl[0], osl[0])
+        decode_planner.dryrun_observe_traffic_stats(rr[0], isl[0], osl[0])
     else:
         num_d = [0]
         d_thpt = [0]
@@ -113,16 +124,13 @@ def run_sla_planner_dryrun(args: argparse.Namespace) -> None:
     assert predictor_planner is not None
 
     for metric in metrics[1:]:
-        # update time
-        time_series.append(time_series[-1] + args.adjustment_interval)
+        time_series.append(time_series[-1] + interval)
 
-        # load prediction
         _est_rr, _est_isl, _est_osl = predictor_planner.predict_load()
         est_rr.append(_est_rr)
         est_isl.append(_est_isl)
         est_osl.append(_est_osl)
 
-        # compute num_p and num_d
         _num_p = (
             prefill_planner._compute_replica_requirements(_est_rr, _est_isl, _est_osl)
             if prefill_planner is not None
@@ -134,29 +142,26 @@ def run_sla_planner_dryrun(args: argparse.Namespace) -> None:
             else 0
         )
 
-        # apply GPU budget
         if prefill_planner is not None and decode_planner is not None:
-            _num_p, _num_d = _apply_global_gpu_budget(_num_p, _num_d, args)
+            _num_p, _num_d = _apply_global_gpu_budget(_num_p, _num_d, config)
         elif prefill_planner is not None:
             _num_p = _apply_component_gpu_budget(
-                _num_p, args.prefill_engine_num_gpu, args
+                _num_p, config.prefill_engine_num_gpu, config
             )
         elif decode_planner is not None:
             _num_d = _apply_component_gpu_budget(
-                _num_d, args.decode_engine_num_gpu, args
+                _num_d, config.decode_engine_num_gpu, config
             )
 
         num_p.append(_num_p)
         num_d.append(_num_d)
 
-        # update load predictor
         for planner in [prefill_planner, decode_planner]:
             if planner is not None:
-                planner.dryrun_observe_metrics(
+                planner.dryrun_observe_traffic_stats(
                     metric["request_count"], metric["avg_isl"], metric["avg_osl"]
                 )
 
-        # fill in ground truth
         rr.append(metric["request_count"])
         isl.append(metric["avg_isl"])
         osl.append(metric["avg_osl"])
@@ -165,14 +170,12 @@ def run_sla_planner_dryrun(args: argparse.Namespace) -> None:
         d_thpt.append(rr[-1] * osl[-1] if decode_planner is not None else 0)
 
         safe_p_thpt.append(
-            compute_safe_p_thpt(num_p[-1], isl[-1], args.ttft)
-            * args.adjustment_interval
+            compute_safe_p_thpt(num_p[-1], isl[-1], config.ttft) * interval
             if prefill_planner is not None
             else 0
         )
         safe_d_thpt.append(
-            compute_safe_d_thpt(num_d[-1], isl[-1], osl[-1], args.itl)
-            * args.adjustment_interval
+            compute_safe_d_thpt(num_d[-1], isl[-1], osl[-1], config.itl) * interval
             if decode_planner is not None
             else 0
         )
@@ -182,7 +185,6 @@ def run_sla_planner_dryrun(args: argparse.Namespace) -> None:
     warmup_isl = None
     warmup_osl = None
     if warmup_metrics:
-        interval = args.adjustment_interval
         n = len(warmup_metrics)
         warmup_time = [-(n - i) * interval for i in range(n)]
         warmup_rr = [m["request_count"] for m in warmup_metrics]
@@ -203,7 +205,7 @@ def run_sla_planner_dryrun(args: argparse.Namespace) -> None:
         num_d=num_d,
         d_thpt=d_thpt,
         safe_d_thpt=safe_d_thpt,
-        output_path=args.output_plot,
+        output_path=output_plot,
         warmup_time=warmup_time,
         warmup_rr=warmup_rr,
         warmup_isl=warmup_isl,

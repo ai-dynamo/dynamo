@@ -70,13 +70,12 @@ impl DeltaAggregator {
                     }
                 };
 
-                if aggregator.error.is_none() && delta.data.is_some() {
-                    // note: we could extract annotations here and add them to the aggregator
-                    // to be return as part of the NIM Response Extension
+                if aggregator.error.is_none()
+                    && let Some(delta) = delta.data
+                {
                     // TODO(#14) - Aggregate Annotation
 
                     // these are cheap to move so we do it every time since we are consuming the delta
-                    let delta = delta.data.unwrap();
                     aggregator.id = delta.inner.id;
                     aggregator.model = delta.inner.model;
                     aggregator.created = delta.inner.created;
@@ -267,6 +266,7 @@ mod tests {
             id: Some("test_id".to_string()),
             event: None,
             comment: None,
+            error: None,
         }
     }
 
@@ -397,6 +397,7 @@ mod tests {
             id: Some("test_id".to_string()),
             event: None,
             comment: None,
+            error: None,
         };
 
         // Create a stream

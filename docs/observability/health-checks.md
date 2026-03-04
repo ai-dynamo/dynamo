@@ -1,9 +1,8 @@
-<!--
-SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-SPDX-License-Identifier: Apache-2.0
--->
-
-# Dynamo Health Checks
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Health Checks
+---
 
 ## Overview
 
@@ -51,7 +50,9 @@ curl -s localhost:8081/health | jq
 The frontend liveness endpoint reports a status of `live` as long as
 the service is running.
 
-> **Note**: Frontend liveness doesn't depend on worker health or liveness only on the Frontend service itself.
+<Note>
+Frontend liveness doesn't depend on worker health or liveness only on the Frontend service itself.
+</Note>
 
 ### Example Request
 
@@ -74,7 +75,9 @@ The frontend health endpoint reports a status of `healthy` as long as
 the service is running.  Once workers have been registered, the
 `health` endpoint will also list registered endpoints and instances.
 
-> **Note**: Frontend liveness doesn't depend on worker health or liveness only on the Frontend service itself.
+<Note>
+Frontend liveness doesn't depend on worker health or liveness only on the Frontend service itself.
+</Note>
 
 ### Example Request
 
@@ -157,7 +160,9 @@ are served the component transitions to a `ready` state until the
 component is shutdown. The endpoints return HTTP status code of `HTTP/1.1 503 Service Unavailable`
 when initializing and HTTP status code `HTTP/1.1 200 OK` once ready.
 
-> **Note**: Both /live and /ready return the same information
+<Note>
+Both /live and /ready return the same information
+</Note>
 
 ### Example Environment Setting
 
@@ -287,7 +292,7 @@ Each backend defines its own minimal health check payload:
 - **SGLang**: Single token generation request
 
 These payloads are designed to:
-- Complete quickly (< 100ms typically)
+- Complete quickly (\< 100ms typically)
 - Minimize GPU overhead
 - Verify the full inference stack is working
 
@@ -339,6 +344,6 @@ ERROR Health check request failed for generate: connection refused
 
 ## Related Documentation
 
-- [Distributed Runtime Architecture](../design_docs/distributed_runtime.md)
-- [Dynamo Architecture Overview](../design_docs/architecture.md)
+- [Distributed Runtime Architecture](../design-docs/distributed-runtime.md)
+- [Dynamo Architecture Overview](../design-docs/architecture.md)
 - [Backend Guide](../development/backend-guide.md)

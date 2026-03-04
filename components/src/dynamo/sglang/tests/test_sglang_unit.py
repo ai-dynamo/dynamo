@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 from dynamo.sglang.args import parse_args
 from dynamo.sglang.tests.conftest import make_cli_args_fixture
@@ -92,7 +93,7 @@ async def test_tool_call_parser_valid_with_dynamo_tokenizer(mock_sglang_cli):
 
     config = await parse_args(sys.argv[1:])
 
-    assert config.dynamo_args.tool_call_parser == "hermes"
+    assert config.dynamo_args.dyn_tool_call_parser == "hermes"
 
 
 @pytest.mark.asyncio
@@ -120,3 +121,147 @@ async def test_tool_call_parser_both_flags_error(mock_sglang_cli):
 
     with pytest.raises(SystemExit):
         await parse_args(sys.argv[1:])
+
+
+@pytest.mark.asyncio
+async def test_namespace_flag_drives_default_endpoint_namespace(mock_sglang_cli):
+    """CLI namespace should be used for auto-derived endpoint."""
+    mock_sglang_cli(
+        "--model",
+        "Qwen/Qwen3-0.6B",
+        "--namespace",
+        "custom-ns",
+    )
+
+    config = await parse_args(sys.argv[1:])
+    assert config.dynamo_args.namespace == "custom-ns"
+
+
+@pytest.mark.asyncio
+async def test_obsolete_dyn_endpoint_types_flag_is_supported(mock_sglang_cli):
+    """Obsolete --dyn-endpoint-types alias should map to endpoint_types."""
+    mock_sglang_cli(
+        "--model",
+        "Qwen/Qwen3-0.6B",
+        "--dyn-endpoint-types",
+        "completions",
+    )
+
+    config = await parse_args(sys.argv[1:])
+    assert config.dynamo_args.endpoint_types == "completions"
+
+
+@pytest.mark.asyncio
+async def test_disagg_config_requires_disagg_config_key(mock_sglang_cli):
+    """--disagg-config and --disagg-config-key must be provided together."""
+    mock_sglang_cli(
+        "--model",
+        "Qwen/Qwen3-0.6B",
+        "--disagg-config",
+        "/tmp/nonexistent.yaml",
+    )
+
+    with pytest.raises(ValueError, match="disagg_config.*disagg_config_key.*together"):
+        await parse_args(sys.argv[1:])
+
+
+@pytest.mark.asyncio
+async def test_disagg_config_key_requires_disagg_config(mock_sglang_cli):
+    """--disagg-config-key alone should fail."""
+    mock_sglang_cli(
+        "--model",
+        "Qwen/Qwen3-0.6B",
+        "--disagg-config-key",
+        "prefill",
+    )
+
+    with pytest.raises(ValueError, match="disagg_config.*disagg_config_key.*together"):
+        await parse_args(sys.argv[1:])
+
+
+@pytest.mark.asyncio
+async def test_disagg_config_key_not_found_error(tmp_path, mock_sglang_cli):
+    """Missing disagg section key should raise a clear ValueError."""
+    config_path = tmp_path / "disagg.yaml"
+    config_path.write_text(
+        yaml.safe_dump({"prefill": {"tensor_parallel_size": 1}}), encoding="utf-8"
+    )
+
+    mock_sglang_cli(
+        "--model",
+        "Qwen/Qwen3-0.6B",
+        "--disagg-config",
+        str(config_path),
+        "--disagg-config-key",
+        "decode",
+    )
+
+    with pytest.raises(ValueError, match="Disagg config key 'decode' not found"):
+        await parse_args(sys.argv[1:])
+
+
+@pytest.mark.asyncio
+async def test_disagg_config_section_must_be_dict(tmp_path, mock_sglang_cli):
+    """Selected disagg section must be a dictionary."""
+    config_path = tmp_path / "disagg.yaml"
+    config_path.write_text(yaml.safe_dump({"prefill": "not-a-dict"}), encoding="utf-8")
+
+    mock_sglang_cli(
+        "--model",
+        "Qwen/Qwen3-0.6B",
+        "--disagg-config",
+        str(config_path),
+        "--disagg-config-key",
+        "prefill",
+    )
+
+    with pytest.raises(
+        ValueError, match="Disagg config section 'prefill' must be a dictionary"
+    ):
+        await parse_args(sys.argv[1:])
+
+
+@pytest.mark.asyncio
+async def test_disagg_config_preserves_bootstrap_port(tmp_path, mock_sglang_cli):
+    """Bootstrap port from disagg section should not be overridden by auto-port logic."""
+    config_path = tmp_path / "disagg.yaml"
+    config_path.write_text(
+        yaml.safe_dump({"prefill": {"disaggregation-bootstrap-port": 42345}}),
+        encoding="utf-8",
+    )
+
+    mock_sglang_cli(
+        "--model",
+        "Qwen/Qwen3-0.6B",
+        "--disagg-config",
+        str(config_path),
+        "--disagg-config-key",
+        "prefill",
+    )
+
+    config = await parse_args(sys.argv[1:])
+    assert config.server_args.disaggregation_bootstrap_port == 42345
+
+
+@pytest.mark.asyncio
+async def test_disagg_config_rejects_dynamo_keys(tmp_path, mock_sglang_cli, capfd):
+    """Disagg config should only accept SGLang-native keys."""
+    config_path = tmp_path / "disagg.yaml"
+    config_path.write_text(
+        yaml.safe_dump({"prefill": {"store-kv": "mem"}}), encoding="utf-8"
+    )
+
+    mock_sglang_cli(
+        "--model",
+        "Qwen/Qwen3-0.6B",
+        "--disagg-config",
+        str(config_path),
+        "--disagg-config-key",
+        "prefill",
+    )
+
+    with pytest.raises(SystemExit):
+        await parse_args(sys.argv[1:])
+
+    out, err = capfd.readouterr()
+    assert "unrecognized arguments: --store-kv mem" in err

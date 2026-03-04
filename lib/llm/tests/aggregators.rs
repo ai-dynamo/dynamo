@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use dynamo_async_openai::types::ChatCompletionMessageContent;
 use dynamo_llm::protocols::{
     ContentProvider, DataStream,
     codec::{Message, SseCodecError, create_message_stream},
@@ -11,6 +12,13 @@ use dynamo_llm::protocols::{
     },
 };
 use futures::StreamExt;
+
+fn get_text(content: &ChatCompletionMessageContent) -> &str {
+    match content {
+        ChatCompletionMessageContent::Text(text) => text.as_str(),
+        ChatCompletionMessageContent::Parts(_) => "",
+    }
+}
 
 const CMPL_ROOT_PATH: &str = "tests/data/replays/meta/llama-3.1-8b-instruct/completions";
 const CHAT_ROOT_PATH: &str = "tests/data/replays/meta/llama-3.1-8b-instruct/chat_completions";
@@ -35,16 +43,17 @@ async fn test_openai_chat_stream() {
 
     // todo: provide a cleaner way to extract the content from choices
     assert_eq!(
-        result
-            .choices
-            .first()
-            .unwrap()
-            .message
-            .content
-            .clone()
-            .expect("there to be content"),
+        get_text(
+            result
+                .choices
+                .first()
+                .unwrap()
+                .message
+                .content
+                .as_ref()
+                .expect("there to be content")
+        ),
         "Deep learning is a subfield of machine learning that involves the use of artificial"
-            .to_string()
     );
 }
 
@@ -59,15 +68,17 @@ async fn test_openai_chat_edge_case_multi_line_data() {
     .unwrap();
 
     assert_eq!(
-        result
-            .choices
-            .first()
-            .unwrap()
-            .message
-            .content
-            .clone()
-            .expect("there to be content"),
-        "Deep learning".to_string()
+        get_text(
+            result
+                .choices
+                .first()
+                .unwrap()
+                .message
+                .content
+                .as_ref()
+                .expect("there to be content")
+        ),
+        "Deep learning"
     );
 }
 
@@ -82,15 +93,17 @@ async fn test_openai_chat_edge_case_comments_per_response() {
     .unwrap();
 
     assert_eq!(
-        result
-            .choices
-            .first()
-            .unwrap()
-            .message
-            .content
-            .clone()
-            .expect("there to be content"),
-        "Deep learning".to_string()
+        get_text(
+            result
+                .choices
+                .first()
+                .unwrap()
+                .message
+                .content
+                .as_ref()
+                .expect("there to be content")
+        ),
+        "Deep learning"
     );
 }
 

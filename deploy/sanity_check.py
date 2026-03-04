@@ -75,6 +75,7 @@ System info (hostname=jensen-linux, IP=10.111.122.133)
 ├─ ✅ Maturin: /opt/dynamo/venv/bin/maturin, maturin 1.9.3
 ├─ ✅ Python: 3.12.3, /opt/dynamo/venv/bin/python
 │  ├─ ✅ PyTorch: 2.7.1+cu128, ✅torch.cuda.is_available
+│  ├─ ✅ NIXL: 0.9.0
 │  └─ PYTHONPATH: not set
 └─ Dynamo: $HOME/dynamo
    ├─ Git HEAD: a03d29066, branch=main, Date: 2025-08-30 16:22:29 PDT
@@ -2299,6 +2300,104 @@ class MaturinInfo(NodeInfo):
         super().__init__(label="Maturin", desc="not found", status=NodeStatus.ERROR)
 
 
+class NixlInfo(NodeInfo):
+    """NIXL installation information (Python wheel + native shared library).
+
+    Why: NIXL is optional for many deployments, but when enabled it is a common
+    source of runtime failures (missing wheel, missing libnixl.so, or wrong
+    library search path). This check reports "not installed" vs "installed +
+    version" without importing any Dynamo code.
+    """
+
+    def __init__(self):
+        # Prefer package metadata over importing nixl, since imports can fail if
+        # native libs are missing from the dynamic linker path.
+        dist_versions: Dict[str, str] = {}
+        try:
+            import importlib.metadata
+            import re
+
+            # Extensible: discover any installed distribution whose name is:
+            # - exactly "nixl", or
+            # - starts with "nixl-" / "nixl_" (e.g. nixl-cu12, nixl-cu13, future nixl-cu14)
+            #
+            # Avoids hard-coding CUDA majors here.
+            nixl_name_re = re.compile(r"^nixl($|[-_].+)", re.IGNORECASE)
+            for dist in importlib.metadata.distributions():
+                name = (dist.metadata.get("Name") or "").strip()
+                if not name or not nixl_name_re.match(name):
+                    continue
+                dist_versions[name] = dist.version
+        except ModuleNotFoundError:
+            # Extremely old Python only. This script targets Python 3.8+ anyway.
+            dist_versions = {}
+
+        # Check whether the native shared library is loadable.
+        libnixl_ok = False
+        libnixl_err: Optional[str] = None
+        try:
+            import ctypes
+
+            ctypes.CDLL("libnixl.so")
+            libnixl_ok = True
+        except OSError as e:
+            libnixl_err = str(e) if str(e) else "unable to load libnixl.so"
+
+        nixl_prefix = os.environ.get("NIXL_PREFIX") or "/opt/nvidia/nvda_nixl"
+        prefix_exists = os.path.isdir(nixl_prefix)
+
+        # Derive a concise version string to show at the node level.
+        # Prefer the base "nixl" dist if present; otherwise fall back to any
+        # discovered nixl* distribution (e.g. nixl-cu12, nixl-cu13, ...).
+        version = dist_versions.get("nixl") or dist_versions.get("NIXL")
+        if not version:
+            for k in sorted(dist_versions.keys()):
+                version = dist_versions.get(k)
+                if version:
+                    break
+
+        if version:
+            status = NodeStatus.OK if libnixl_ok else NodeStatus.WARNING
+            desc = version
+        elif libnixl_ok or prefix_exists:
+            # Native bits appear present, but Python package isn't installed.
+            status = NodeStatus.WARNING
+            desc = "native library present, Python wheel not installed"
+        else:
+            status = NodeStatus.UNKNOWN
+            desc = "not installed"
+
+        super().__init__(label="NIXL", desc=desc, status=status)
+
+        # Add a few high-signal details as children.
+        if dist_versions:
+            dists = NodeInfo(label="Python distributions", status=NodeStatus.INFO)
+            for name in sorted(dist_versions.keys()):
+                dists.add_child(
+                    NodeInfo(
+                        label=name,
+                        desc=dist_versions[name],
+                        status=NodeStatus.INFO,
+                    )
+                )
+            self.add_child(dists)
+
+        self.add_child(
+            NodeInfo(
+                label="libnixl.so",
+                desc="loadable" if libnixl_ok else (libnixl_err or "not loadable"),
+                status=NodeStatus.OK if libnixl_ok else NodeStatus.WARNING,
+            )
+        )
+        self.add_child(
+            NodeInfo(
+                label="NIXL_PREFIX",
+                desc=self._replace_home_with_var(nixl_prefix),
+                status=NodeStatus.OK if prefix_exists else NodeStatus.INFO,
+            )
+        )
+
+
 class PythonInfo(NodeInfo):
     """Python installation information.
 
@@ -2367,6 +2466,9 @@ class PythonInfo(NodeInfo):
             self.add_child(package_info)
         except ImportError:
             pass  # PyTorch is optional, don't show if not installed
+
+        # Check NIXL (optional, but useful to report when present/missing)
+        self.add_child(NixlInfo())
 
         # Add PYTHONPATH
         pythonpath = os.environ.get("PYTHONPATH", "")

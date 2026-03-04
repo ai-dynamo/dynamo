@@ -35,7 +35,7 @@ spec:
             export LD_LIBRARY_PATH=/usr/local/nvidia/lib64:$LD_LIBRARY_PATH
             export PATH=$PATH:/usr/local/nvidia/bin:/usr/local/nvidia/lib64
             /sbin/ldconfig
-            python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B
+            python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --disaggregation-mode decode
     VllmPrefillWorker:
       envFromSecret: hf-token-secret
       componentType: worker
@@ -56,4 +56,4 @@ spec:
             export LD_LIBRARY_PATH=/usr/local/nvidia/lib64:$LD_LIBRARY_PATH
             export PATH=$PATH:/usr/local/nvidia/bin:/usr/local/nvidia/lib64
             /sbin/ldconfig
-            python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --is-prefill-worker
+            python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --disaggregation-mode prefill
