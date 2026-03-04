@@ -327,6 +327,14 @@ pub trait KvIndexerInterface {
     /// * `worker` - The worker to remove from the trie.
     async fn remove_worker(&self, worker: WorkerId);
 
+    /// Remove a single dp_rank for a worker from the trie.
+    ///
+    /// Default implementation falls back to removing the entire worker.
+    /// Indexers that track dp_rank-level granularity should override this.
+    async fn remove_worker_dp_rank(&self, worker: WorkerId, _dp_rank: DpRank) {
+        self.remove_worker(worker).await;
+    }
+
     /// Shutdown the KV Indexer.
     fn shutdown(&self);
 
@@ -363,6 +371,8 @@ pub enum WorkerTask {
     Event(RouterEvent),
     /// Permanently remove a worker from tracking (keep_worker: false).
     RemoveWorker(WorkerId),
+    /// Remove a single dp_rank for a worker.
+    RemoveWorkerDpRank(WorkerId, DpRank),
     DumpEvents(oneshot::Sender<anyhow::Result<Vec<RouterEvent>>>),
     Terminate,
 }
@@ -568,6 +578,14 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
         }
     }
 
+    async fn remove_worker_dp_rank(&self, worker_id: WorkerId, dp_rank: DpRank) {
+        // Broadcast to all threads — the dp_rank may be on any thread.
+        // Don't remove from worker_assignments since other dp_ranks may still exist.
+        for channel in &self.worker_event_channels {
+            let _ = channel.send(WorkerTask::RemoveWorkerDpRank(worker_id, dp_rank));
+        }
+    }
+
     fn shutdown(&self) {
         // Send shutdown signal to all worker threads
         for channel in self.worker_event_channels.iter() {
@@ -668,6 +686,8 @@ pub struct KvIndexer {
     match_tx: mpsc::Sender<MatchRequest>,
     /// A sender for remove worker requests.
     remove_worker_tx: mpsc::Sender<WorkerId>,
+    /// A sender for remove worker dp_rank requests.
+    remove_worker_dp_rank_tx: mpsc::Sender<(WorkerId, DpRank)>,
     /// A sender for get workers requests.
     get_workers_tx: mpsc::Sender<GetWorkersRequest>,
     /// A sender for dump requests.
@@ -704,6 +724,8 @@ impl KvIndexer {
         let (event_tx, event_rx) = mpsc::channel::<RouterEvent>(2048);
         let (match_tx, match_rx) = mpsc::channel::<MatchRequest>(128);
         let (remove_worker_tx, remove_worker_rx) = mpsc::channel::<WorkerId>(16);
+        let (remove_worker_dp_rank_tx, remove_worker_dp_rank_rx) =
+            mpsc::channel::<(WorkerId, DpRank)>(16);
         let (get_workers_tx, get_workers_rx) = mpsc::channel::<GetWorkersRequest>(16);
         let (dump_tx, dump_rx) = mpsc::channel::<DumpRequest>(16);
         let (routing_tx, mut routing_rx) = mpsc::channel::<RoutingDecisionRequest>(2048);
@@ -723,6 +745,7 @@ impl KvIndexer {
                 let mut match_rx = match_rx;
                 let mut event_rx = event_rx;
                 let mut remove_worker_rx = remove_worker_rx;
+                let mut remove_worker_dp_rank_rx = remove_worker_dp_rank_rx;
                 let mut get_workers_rx = get_workers_rx;
                 let mut dump_rx = dump_rx;
                 let mut trie = RadixTree::new_with_frequency(expiration_duration);
@@ -752,6 +775,10 @@ impl KvIndexer {
 
                         Some(worker) = remove_worker_rx.recv() => {
                             trie.remove_worker(worker);
+                        }
+
+                        Some((worker_id, dp_rank)) = remove_worker_dp_rank_rx.recv() => {
+                            trie.remove_worker_dp_rank(worker_id, dp_rank);
                         }
 
                         Some(get_workers_req) = get_workers_rx.recv() => {
@@ -933,6 +960,7 @@ impl KvIndexer {
             event_tx,
             match_tx,
             remove_worker_tx,
+            remove_worker_dp_rank_tx,
             get_workers_tx,
             dump_tx,
             routing_tx,
@@ -1050,6 +1078,13 @@ impl KvIndexerInterface for KvIndexer {
 
     async fn remove_worker(&self, worker: WorkerId) {
         self.remove_worker_tx.send(worker).await.unwrap();
+    }
+
+    async fn remove_worker_dp_rank(&self, worker: WorkerId, dp_rank: DpRank) {
+        self.remove_worker_dp_rank_tx
+            .send((worker, dp_rank))
+            .await
+            .unwrap();
     }
 
     fn shutdown(&self) {
@@ -1461,6 +1496,7 @@ pub struct KvIndexerSharded {
     event_tx: Vec<mpsc::Sender<RouterEvent>>,
     request_broadcast_tx: broadcast::Sender<ShardedMatchRequest>,
     remove_worker_tx: Vec<mpsc::Sender<WorkerId>>,
+    remove_worker_dp_rank_tx: Vec<mpsc::Sender<(WorkerId, DpRank)>>,
     dump_tx: Vec<mpsc::Sender<DumpRequest>>,
     routing_tx: Vec<mpsc::Sender<RoutingDecisionRequest>>,
     tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
@@ -1493,6 +1529,7 @@ impl KvIndexerSharded {
 
         let mut event_tx = Vec::new();
         let mut remove_worker_tx = Vec::new();
+        let mut remove_worker_dp_rank_tx = Vec::new();
         let mut get_workers_tx = Vec::new();
         let mut dump_tx = Vec::new();
         let mut routing_tx = Vec::new();
@@ -1504,6 +1541,8 @@ impl KvIndexerSharded {
             let (shard_event_tx, mut shard_event_rx) = mpsc::channel::<RouterEvent>(2048);
             let (shard_remove_worker_tx, mut shard_remove_worker_rx) =
                 mpsc::channel::<WorkerId>(16);
+            let (shard_remove_worker_dp_rank_tx, mut shard_remove_worker_dp_rank_rx) =
+                mpsc::channel::<(WorkerId, DpRank)>(16);
             let (shard_get_workers_tx, mut shard_get_workers_rx) =
                 mpsc::channel::<GetWorkersRequest>(16);
             let (shard_dump_tx, mut shard_dump_rx) = mpsc::channel::<DumpRequest>(16);
@@ -1517,6 +1556,7 @@ impl KvIndexerSharded {
 
             event_tx.push(shard_event_tx);
             remove_worker_tx.push(shard_remove_worker_tx);
+            remove_worker_dp_rank_tx.push(shard_remove_worker_dp_rank_tx);
             get_workers_tx.push(shard_get_workers_tx);
             dump_tx.push(shard_dump_tx);
             routing_tx.push(shard_routing_tx);
@@ -1555,6 +1595,10 @@ impl KvIndexerSharded {
 
                             Some(worker) = shard_remove_worker_rx.recv() => {
                                 trie.remove_worker(worker);
+                            }
+
+                            Some((worker_id, dp_rank)) = shard_remove_worker_dp_rank_rx.recv() => {
+                                trie.remove_worker_dp_rank(worker_id, dp_rank);
                             }
 
                             Some(get_workers_req) = shard_get_workers_rx.recv() => {
@@ -1736,6 +1780,7 @@ impl KvIndexerSharded {
             event_tx,
             request_broadcast_tx,
             remove_worker_tx,
+            remove_worker_dp_rank_tx,
             dump_tx,
             routing_tx,
             tasks,
@@ -1857,6 +1902,17 @@ impl KvIndexerInterface for KvIndexerSharded {
         if let Some((_, shard)) = self.worker_assignments.remove(&worker) {
             self.worker_counts.lock().unwrap()[shard] -= 1;
             self.remove_worker_tx[shard].send(worker).await.unwrap();
+        }
+    }
+
+    async fn remove_worker_dp_rank(&self, worker: WorkerId, dp_rank: DpRank) {
+        // Worker is assigned to a single shard, so route there directly.
+        // Don't remove from worker_assignments since other dp_ranks may still exist.
+        if let Some(shard) = self.worker_assignments.get(&worker) {
+            self.remove_worker_dp_rank_tx[*shard]
+                .send((worker, dp_rank))
+                .await
+                .unwrap();
         }
     }
 

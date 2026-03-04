@@ -24,7 +24,7 @@ spec:
     - group: gateway.networking.k8s.io
       kind: Gateway
       name: inference-gateway
-      namespace: my-model
+      namespace: my-model # the namespace where your gateway is deployed.
   rules:
     - backendRefs:
         - group: inference.networking.k8s.io

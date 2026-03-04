@@ -114,6 +114,7 @@ def _init_worker(
 ) -> None:
     """Initialize a worker process with its own VllmConfig and InputProcessor."""
     global _w_input_processor, _w_tokenizer, _w_tool_parser_class
+    global _w_reasoning_parser_class
 
     model_config = ModelConfig(
         model=model_path,
