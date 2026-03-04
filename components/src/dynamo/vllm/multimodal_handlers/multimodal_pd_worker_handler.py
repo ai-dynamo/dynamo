@@ -201,8 +201,18 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
                 )
             if image_embeds is not None:
                 request.embeddings_shape = list(image_embeds.shape)
+        # prune empty multimodal data, vLLM will expect multi_modal_uuids if the mm items are empty
+        # i.e. ValueError: multi_modal_data['image'] is empty but multi_modal_uuids['image'] is missing.
+        for key in list(multi_modal_data.keys()):
+            if not multi_modal_data[key]:
+                del multi_modal_data[key]
+            else:
+                # [gluo FIXME] should be mindful to default dict, move this evaluation logic to here
+                # so that we don't accidentally add empty keys to the dict which causes vLLM misbehavior
+                logger.debug(
+                    f"Prepared multimodal data size: {len(multi_modal_data[key])}"
+                )
 
-        logger.debug(f"Prepared multimodal data size: {len(multi_modal_data['image'])}")
         logger.debug("Multimodal data keys: %s", list(multi_modal_data.keys()))
 
     @staticmethod
