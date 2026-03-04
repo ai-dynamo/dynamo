@@ -58,6 +58,17 @@ spec:
       affinity:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- if .Values.upgradeCRD }}
+      initContainers:
+      - name: crd-apply
+        image: {{ .Values.controllerManager.manager.image.repository }}:{{ .Values.controllerManager.manager.image.tag | default .Chart.AppVersion }}
+        imagePullPolicy: {{ .Values.controllerManager.manager.image.pullPolicy | default "IfNotPresent" }}
+        securityContext: {{- toYaml .Values.controllerManager.manager.containerSecurityContext | nindent 10 }}
+        command: ["/crd-apply"]
+        args:
+          - "--crds-dir=/opt/dynamo-operator/crds/"
+          - "--version={{ .Chart.AppVersion }}"
+      {{- end }}
       containers:
       - args: {{- toYaml .Values.controllerManager.kubeRbacProxy.args | nindent
           8 }}
