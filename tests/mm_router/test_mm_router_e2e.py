@@ -67,6 +67,7 @@ _ROUTING_RECORD_PATTERN = re.compile(
     r"\[ROUTING\].*with\s*(\d+)/(\d+)\s*blocks overlap"
 )
 
+
 def _check_ready(response) -> bool:
     try:
         return (response.json() or {}).get("status") == "ready"
