@@ -5,7 +5,6 @@
 MM Router Handler - Routes requests to best vLLM worker based on KV cache overlap.
 """
 
-import asyncio
 import logging
 import time
 from typing import Any, AsyncGenerator
@@ -86,8 +85,7 @@ class MMRouterHandler:
             # tokens from frontend. We need processor-expanded tokens to build block_mm_infos.
             # Request payload does not include a rendered template string; extra_args carries
             # original messages, so mm_processor reapplies chat template locally.
-            processed = await asyncio.to_thread(
-                process_multimodal,
+            processed = process_multimodal(
                 messages=messages,
                 image_urls=image_urls,
                 tokenizer=self.tokenizer,
