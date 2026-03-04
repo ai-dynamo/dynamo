@@ -95,6 +95,8 @@ rules:
   - customresourcedefinitions
   verbs:
   - get
+  - list
+  - watch
   - update
   - patch
 ---
