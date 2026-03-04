@@ -36,6 +36,7 @@ from dynamo.profiler.utils.dgd_generation import generate_dgd_config_with_planne
 from dynamo.profiler.utils.dgdr_v1beta1_types import (
     BackendType,
     DynamoGraphDeploymentRequestSpec,
+    ProfilingPhase,
 )
 from dynamo.profiler.utils.dgdr_validate import (
     run_gate_checks,
@@ -170,6 +171,13 @@ async def _execute_strategy(
                 deployment_clients,
             )
 
+        write_profiler_status(
+            ops.output_dir,
+            status=ProfilerStatus.RUNNING,
+            message="Filtering results and selecting cost-efficient configuration",
+            phase=ProfilingPhase.SelectingConfig,
+        )
+
         best_config_df = pick_result["best_config_df"]
         best_latencies = pick_result["best_latencies"]
 
@@ -265,6 +273,7 @@ def _write_final_output(ops: ProfilerOperationalConfig, final_config: Any) -> bo
                 status=ProfilerStatus.FAILED,
                 error=error_msg,
                 message=error_msg,
+                phase=ProfilingPhase.GeneratingDGD,
             )
             return False
     else:
@@ -282,6 +291,7 @@ def _write_final_output(ops: ProfilerOperationalConfig, final_config: Any) -> bo
         outputs={
             "final_config": "final_config.yaml",
         },
+        phase=ProfilingPhase.Done,
     )
     return True
 
@@ -302,12 +312,14 @@ async def run_profile(
         ops = ProfilerOperationalConfig()
 
     deployment_clients: list = []
+    current_phase = ProfilingPhase.Initializing
 
     os.makedirs(ops.output_dir, exist_ok=True)
     write_profiler_status(
         ops.output_dir,
         status=ProfilerStatus.RUNNING,
         message="Profiler job started",
+        phase=ProfilingPhase.Initializing,
     )
 
     try:
@@ -333,6 +345,14 @@ async def run_profile(
         else:
             aic_supported = check_model_hardware_support(model, system, backend)
         run_gate_checks(dgdr, aic_supported, search_strategy, backend)
+
+        current_phase = ProfilingPhase.SweepingPrefill
+        write_profiler_status(
+            ops.output_dir,
+            status=ProfilerStatus.RUNNING,
+            message="Sweeping parallelization strategies",
+            phase=current_phase,
+        )
 
         (
             pick_result,
@@ -364,6 +384,13 @@ async def run_profile(
         # Interpolation curves
         # ---------------------------------------------------------------
         if not ops.dry_run and is_planner_enabled(dgdr) and dgd_config:
+            current_phase = ProfilingPhase.BuildingCurves
+            write_profiler_status(
+                ops.output_dir,
+                status=ProfilerStatus.RUNNING,
+                message="Building interpolation curves for planner integration",
+                phase=current_phase,
+            )
             try:
                 model_cfg = get_model_config_from_model_path(resolve_model_path(dgdr))
                 sweep_max_context_length = model_cfg.get("max_position_embeddings", 0)
@@ -391,6 +418,13 @@ async def run_profile(
         # ---------------------------------------------------------------
         # Final DGD assembly
         # ---------------------------------------------------------------
+        current_phase = ProfilingPhase.GeneratingDGD
+        write_profiler_status(
+            ops.output_dir,
+            status=ProfilerStatus.RUNNING,
+            message="Packaging data and generating final DGD YAML",
+            phase=current_phase,
+        )
         final_config = _assemble_final_config(
             dgdr, ops, dgd_config, best_prefill_config, best_decode_config
         )
@@ -414,6 +448,7 @@ async def run_profile(
             status=ProfilerStatus.FAILED,
             error=str(e),
             message=f"Profiler failed with exception: {type(e).__name__}",
+            phase=current_phase,
         )
         raise
     finally:

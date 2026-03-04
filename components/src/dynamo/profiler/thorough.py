@@ -43,12 +43,14 @@ from dynamo.profiler.utils.config_modifiers.protocol import apply_dgd_overrides
 from dynamo.profiler.utils.dgdr_v1beta1_types import (
     DynamoGraphDeploymentRequestSpec,
     ModelCacheSpec,
+    ProfilingPhase,
 )
 from dynamo.profiler.utils.profile_common import (
     ProfilerOperationalConfig,
     derive_backend_image,
 )
 from dynamo.profiler.utils.profile_decode import get_num_request_range
+from dynamo.profiler.utils.profiler_status import ProfilerStatus, write_profiler_status
 
 logger = logging.getLogger(__name__)
 
@@ -367,6 +369,12 @@ async def run_thorough(
         backend,
         deployment_clients,
         config_modifier,
+    )
+    write_profiler_status(
+        ops.output_dir,
+        status=ProfilerStatus.RUNNING,
+        message="Sweeping parallelization strategies for decode, measuring ITL",
+        phase=ProfilingPhase.SweepingDecode,
     )
     decode_df = await _benchmark_decode_candidates(
         decode_candidates,
