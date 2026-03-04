@@ -155,8 +155,9 @@ impl KvbmLeader {
                 cancel.clone(),
                 move |workers: &[WorkerMetadata]| -> LeaderMetadata {
                     // Record device blocks: min across workers
-                    if let Some(min_dev) = workers.iter().map(|w| w.num_device_blocks).min() {
-                        num_device_blocks_cell.store(min_dev, Ordering::Release);
+                    let num_device_blocks = workers.iter().map(|w| w.num_device_blocks).min();
+                    if let Some(n) = num_device_blocks {
+                        num_device_blocks_cell.store(n, Ordering::Release);
                     }
 
                     // For TP, sum bytes_per_block; adjust policy for DP/PP if needed.
@@ -167,6 +168,14 @@ impl KvbmLeader {
                     // store into leader state
                     num_host_blocks_cell.store(num_host_blocks, Ordering::Release);
                     num_disk_blocks_cell.store(num_disk_blocks, Ordering::Release);
+
+                    tracing::info!(
+                        "KVBM Leader block allocation: G1 (GPU)={} blocks, G2 (Host)={} blocks, G3 (Disk)={} blocks, bytes_per_block={}",
+                        num_device_blocks.unwrap_or(0),
+                        num_host_blocks,
+                        num_disk_blocks,
+                        bytes_per_block
+                    );
 
                     LeaderMetadata {
                         num_host_blocks,
