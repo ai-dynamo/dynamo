@@ -1,0 +1,68 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Allure Test Report
+
+on:
+  workflow_run:
+    workflows:
+      - 'NVIDIA Dynamo Github Validation'
+      - 'Post-Merge CI Pipeline'
+      - 'Nightly CI Pipeline'
+    types: [completed]
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  allure-report:
+    runs-on: ubuntu-latest
+    if: github.event.workflow_run.conclusion != 'skipped'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine report subdirectory
+        id: report-path
+        run: |
+          WORKFLOW_NAME="${{ github.event.workflow_run.name }}"
+          case "$WORKFLOW_NAME" in
+            *"Dynamo Github Validation"*) echo "subdir=pre-merge" >> $GITHUB_OUTPUT ;;
+            *"Post-Merge"*) echo "subdir=post-merge" >> $GITHUB_OUTPUT ;;
+            *"Nightly"*) echo "subdir=nightly" >> $GITHUB_OUTPUT ;;
+            *) echo "subdir=other" >> $GITHUB_OUTPUT ;;
+          esac
+
+      - name: Download Allure Results
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          run_id: ${{ github.event.workflow_run.id }}
+          name: allure-results-.*
+          name_is_regexp: true
+          path: allure-results
+          merge_multiple: true
+          if_no_artifact_found: warn
+
+      - name: Get Allure history
+        uses: actions/checkout@v4
+        continue-on-error: true
+        with:
+          ref: gh-pages
+          path: gh-pages
+
+      - name: Build Allure Report
+        uses: simple-elf/allure-report-action@v1.13
+        if: always()
+        with:
+          allure_results: allure-results
+          allure_history: allure-history/${{ steps.report-path.outputs.subdir }}
+          keep_reports: 30
+          gh_pages: gh-pages/${{ steps.report-path.outputs.subdir }}
+
+      - name: Deploy to GitHub Pages
+        if: always()
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_branch: gh-pages
+          publish_dir: allure-history
