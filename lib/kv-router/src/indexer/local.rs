@@ -27,7 +27,7 @@ pub struct LocalKvIndexer {
     /// The underlying indexer
     indexer: KvIndexer,
     /// Circular buffer of recent events
-    event_buffer: Mutex<VecDeque<RouterEvent>>,
+    pub(super) event_buffer: Mutex<VecDeque<RouterEvent>>,
     /// Maximum number of events to keep in buffer
     max_buffer_size: usize, // Router sets this to WORKER_KV_INDEXER_BUFFER_SIZE
 }
