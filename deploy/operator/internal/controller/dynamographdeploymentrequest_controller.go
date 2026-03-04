@@ -234,6 +234,37 @@ kubectl apply -f /tmp/cm.yaml
 echo "Saved profiling output to ConfigMap {{.ConfigMapName}}"
 `
 
+// profilingPhaseReason returns the condition Reason for a profiling sub-phase.
+// By design, the ProfilingPhase string values are identical to the Reason values
+// (e.g., ProfilingPhaseSweepingDecode = "SweepingDecode" = ProfilingReasonSweepingDecode).
+func profilingPhaseReason(phase nvidiacomv1beta1.ProfilingPhase) string {
+	if phase == nvidiacomv1beta1.ProfilingPhaseDone {
+		return nvidiacomv1beta1.ProfilingReasonCompleted
+	}
+	if phase == "" {
+		return "Unknown"
+	}
+	return string(phase)
+}
+
+// profilingPhaseFailureReason returns the condition Reason for a failed profiling sub-phase.
+// By convention, failure reasons are "<Phase>Failed" (e.g., "SweepingDecodeFailed").
+func profilingPhaseFailureReason(phase nvidiacomv1beta1.ProfilingPhase) string {
+	if phase == "" {
+		return "ProfilingFailed"
+	}
+	return string(phase) + "Failed"
+}
+
+// ProgressConfigMapPrefix is the name prefix for ConfigMaps used to relay
+// profiling sub-phase updates from the sidecar to the controller.
+const ProgressConfigMapPrefix = "dgdr-progress-"
+
+// getProgressConfigMapName returns the ConfigMap name for profiling progress tracking.
+func getProgressConfigMapName(dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest) string {
+	return fmt.Sprintf("%s%s", ProgressConfigMapPrefix, dgdr.Name)
+}
+
 // DynamoGraphDeploymentRequestReconciler reconciles a DynamoGraphDeploymentRequest object
 type DynamoGraphDeploymentRequestReconciler struct {
 	client.Client
@@ -262,6 +293,29 @@ func (r *DynamoGraphDeploymentRequestReconciler) FinalizeResource(ctx context.Co
 
 	logger.Info("DGDR finalized successfully", "name", dgdr.Name)
 	return nil
+}
+
+// getFailedProfilingPhase returns the last known profiling sub-phase.
+// It first checks status.profilingPhase, then falls back to reading
+// the progress ConfigMap (available once Layer 2 sidecar pipeline is deployed).
+func (r *DynamoGraphDeploymentRequestReconciler) getFailedProfilingPhase(
+	ctx context.Context,
+	dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest,
+) nvidiacomv1beta1.ProfilingPhase {
+	if dgdr.Status.ProfilingPhase != "" {
+		return dgdr.Status.ProfilingPhase
+	}
+	// Fallback: read progress ConfigMap (available after Layer 2)
+	progressCMName := getProgressConfigMapName(dgdr)
+	cm := &corev1.ConfigMap{}
+	if err := r.Get(ctx, types.NamespacedName{
+		Name: progressCMName, Namespace: dgdr.Namespace,
+	}, cm); err == nil {
+		if phase, exists := cm.Data["phase"]; exists {
+			return nvidiacomv1beta1.ProfilingPhase(phase)
+		}
+	}
+	return ""
 }
 
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeploymentrequests,verbs=get;list;watch;create;update;patch;delete
@@ -378,9 +432,64 @@ func (r *DynamoGraphDeploymentRequestReconciler) handlePendingPhase(ctx context.
 		r.Recorder.Event(dgdr, corev1.EventTypeNormal, nvidiacomv1beta1.EventReasonProfilingJobCreated, MessageAICProfilingJobCreated)
 	}
 
-	// Update to Profiling phase with Running status
+	// Update to Profiling phase with Initializing sub-phase
 	dgdr.SetProfilingPhase(nvidiacomv1beta1.ProfilingPhaseInitializing)
-	return r.updatePhaseWithCondition(ctx, dgdr, nvidiacomv1beta1.DGDRPhaseProfiling, nvidiacomv1beta1.ConditionTypeProfiling, metav1.ConditionFalse, "ProfilingRunning", MessageProfilingInProgress)
+	return r.updatePhaseWithCondition(ctx, dgdr, nvidiacomv1beta1.DGDRPhaseProfiling, nvidiacomv1beta1.ConditionTypeProfiling, metav1.ConditionFalse, nvidiacomv1beta1.ProfilingReasonInitializing, "Profiling job created, entering initialization phase")
+}
+
+// updateProfilingSubPhase reads the progress ConfigMap and updates status.profilingPhase
+// and the Profiling/Succeeded conditions. The ConfigMap is written by the sidecar (Layer 2)
+// which relays phase and message from profiler_status.yaml. Until the sidecar exists,
+// this is a no-op because no progress ConfigMap will be found.
+func (r *DynamoGraphDeploymentRequestReconciler) updateProfilingSubPhase(
+	ctx context.Context,
+	dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest,
+) {
+	logger := log.FromContext(ctx)
+	progressCMName := getProgressConfigMapName(dgdr)
+
+	cm := &corev1.ConfigMap{}
+	if err := r.Get(ctx, types.NamespacedName{
+		Name: progressCMName, Namespace: dgdr.Namespace,
+	}, cm); err != nil {
+		return // No progress ConfigMap yet — skip
+	}
+
+	phase, exists := cm.Data["phase"]
+	if !exists || phase == "" {
+		return
+	}
+
+	profilingPhase := nvidiacomv1beta1.ProfilingPhase(phase)
+	if dgdr.Status.ProfilingPhase == profilingPhase {
+		return // No change
+	}
+
+	logger.Info("Profiling sub-phase updated", "phase", phase)
+	dgdr.SetProfilingPhase(profilingPhase)
+
+	// Reason is derived from phase; message comes from the profiler via ConfigMap.
+	reason := profilingPhaseReason(profilingPhase)
+	message := cm.Data["message"] // written by profiler, relayed by sidecar
+
+	meta.SetStatusCondition(&dgdr.Status.Conditions, metav1.Condition{
+		Type:               nvidiacomv1beta1.ConditionTypeProfiling,
+		Status:             metav1.ConditionFalse,
+		ObservedGeneration: dgdr.Generation,
+		Reason:             reason,
+		Message:            message,
+	})
+	meta.SetStatusCondition(&dgdr.Status.Conditions, metav1.Condition{
+		Type:               nvidiacomv1beta1.ConditionTypeSucceeded,
+		Status:             metav1.ConditionFalse,
+		ObservedGeneration: dgdr.Generation,
+		Reason:             reason,
+		Message:            message,
+	})
+
+	if err := r.Status().Update(ctx, dgdr); err != nil {
+		logger.Error(err, "Failed to update profiling sub-phase in status")
+	}
 }
 
 // handleProfilingPhase monitors profiling progress and generates spec when complete
@@ -388,14 +497,39 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleProfilingPhase(ctx contex
 	logger := log.FromContext(ctx)
 	logger.Info("Handling profiling phase", "name", dgdr.Name)
 
+	// Check for sub-phase updates from progress ConfigMap (populated by sidecar in Layer 2)
+	r.updateProfilingSubPhase(ctx, dgdr)
+
 	// Check profiling job status (both online and offline/AIC run as Jobs)
 	// Note: We watch the Job via Owns(), so we'll be triggered automatically on Job changes
 	completed, err := r.checkProfilingJobStatus(ctx, dgdr)
 	if err != nil {
 		r.Recorder.Event(dgdr, corev1.EventTypeWarning, MessageProfilingCheckFailed, err.Error())
-		// Job failed - clear profiling sub-phase and transition to Failed
-		dgdr.ClearProfilingPhase()
-		return r.updatePhaseWithCondition(ctx, dgdr, nvidiacomv1beta1.DGDRPhaseFailed, nvidiacomv1beta1.ConditionTypeProfiling, metav1.ConditionFalse, "ProfilingFailed", err.Error())
+		// Job failed - keep profilingPhase set so users can see where it died
+		failedPhase := r.getFailedProfilingPhase(ctx, dgdr)
+		failureReason := "ProfilingFailed"
+		failureMessage := err.Error()
+		if failedPhase != "" {
+			failureReason = profilingPhaseFailureReason(failedPhase)
+		}
+
+		// Set phase and conditions directly to use sub-phase-specific failure reason
+		// for both the Profiling and Succeeded conditions (updatePhaseWithCondition
+		// would use generic "Failed" for the Succeeded condition).
+		dgdr.Status.Phase = nvidiacomv1beta1.DGDRPhaseFailed
+		setSucceededConditionWithDetails(dgdr, nvidiacomv1beta1.DGDRPhaseFailed, failureReason, failureMessage)
+		dgdr.AddStatusCondition(metav1.Condition{
+			Type:               nvidiacomv1beta1.ConditionTypeProfiling,
+			Status:             metav1.ConditionFalse,
+			ObservedGeneration: dgdr.Generation,
+			LastTransitionTime: metav1.Now(),
+			Reason:             failureReason,
+			Message:            failureMessage,
+		})
+		if err := r.Status().Update(ctx, dgdr); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{Requeue: true}, nil
 	}
 
 	if !completed {
@@ -1544,6 +1678,30 @@ func setSucceededCondition(dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest, 
 		status, reason, message = metav1.ConditionFalse, "Unknown", "Unknown phase"
 	}
 
+	meta.SetStatusCondition(&dgdr.Status.Conditions, metav1.Condition{
+		Type:               nvidiacomv1beta1.ConditionTypeSucceeded,
+		Status:             status,
+		ObservedGeneration: dgdr.Generation,
+		Reason:             reason,
+		Message:            message,
+	})
+}
+
+// setSucceededConditionWithDetails sets the Succeeded condition with explicit reason and message,
+// allowing failure paths to surface sub-phase-specific details (e.g., "SweepingDecodeFailed")
+// instead of the generic "Failed" reason.
+func setSucceededConditionWithDetails(
+	dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest,
+	phase nvidiacomv1beta1.DGDRPhase,
+	reason, message string,
+) {
+	var status metav1.ConditionStatus
+	switch phase {
+	case nvidiacomv1beta1.DGDRPhaseReady, nvidiacomv1beta1.DGDRPhaseDeployed:
+		status = metav1.ConditionTrue
+	default:
+		status = metav1.ConditionFalse
+	}
 	meta.SetStatusCondition(&dgdr.Status.Conditions, metav1.Condition{
 		Type:               nvidiacomv1beta1.ConditionTypeSucceeded,
 		Status:             status,
