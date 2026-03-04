@@ -493,6 +493,7 @@ impl RouterHandles {
                 false,
                 None,
                 0.0,
+                None,
                 allowed_worker_ids,
             )
             .await
