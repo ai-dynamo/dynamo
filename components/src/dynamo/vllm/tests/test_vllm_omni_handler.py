@@ -151,7 +151,6 @@ class TestFormatTextChunk:
     def test_finish_reason_included(self):
         """Final chunk includes finish_reason and usage stats."""
         handler = _make_handler()
-        handler._normalize_finish_reason = lambda r: r
         handler._build_completion_usage = lambda ro: {
             "prompt_tokens": 3,
             "completion_tokens": 1,
@@ -160,6 +159,24 @@ class TestFormatTextChunk:
         chunk = handler._format_text_chunk(ro, "req-1", "")
         assert chunk["choices"][0]["finish_reason"] == "stop"
         assert "usage" in chunk
+
+    def test_finish_reason_abort_normalized(self):
+        """Abort finish reason is normalized to 'cancelled'."""
+        handler = _make_handler()
+        handler._build_completion_usage = lambda ro: {
+            "prompt_tokens": 3,
+            "completion_tokens": 1,
+        }
+        ro = self._make_output("done", finish_reason="abort")
+        chunk = handler._format_text_chunk(ro, "req-1", "")
+        assert chunk["choices"][0]["finish_reason"] == "cancelled"
+
+    def test_finish_reason_none_when_not_finished(self):
+        """finish_reason is None when output has no finish_reason."""
+        handler = _make_handler()
+        ro = self._make_output("partial")
+        chunk = handler._format_text_chunk(ro, "req-1", "")
+        assert chunk["choices"][0]["finish_reason"] is None
 
 
 class TestFormatImageChunk:
