@@ -78,4 +78,10 @@ def parse_args(description: str = "") -> argparse.Namespace:
         metavar=("WIDTH", "HEIGHT"),
         help="Size of generated PNG images in pixels (default: 512 512)",
     )
+    parser.add_argument(
+        "--text-only-request-ratio",
+        type=float,
+        default=0.0,
+        help="Ratio of text-only requests (default: 0.0, meaning all requests include images)",
+    )
     return parser.parse_args()

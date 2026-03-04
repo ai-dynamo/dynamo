@@ -34,6 +34,9 @@ def main() -> None:
     num_requests: int = args.num_requests
     images_per_request: int = args.images_per_request
     image_pool: int = args.images_pool or (num_requests * images_per_request)
+    text_only_request_ratio: float = args.text_only_request_ratio
+    num_img_requests = int(num_requests * (1 - text_only_request_ratio))
+    num_text_only_requests = num_requests - num_img_requests
 
     np_rng = np.random.default_rng(SEED)
     py_rng = random.Random(SEED)
@@ -44,21 +47,25 @@ def main() -> None:
         pool = generate_image_pool_base64(
             np_rng, image_pool, args.image_dir, tuple(args.image_size)
         )
-    slot_refs = sample_slots(py_rng, pool, num_requests, images_per_request)
+    slot_refs = sample_slots(py_rng, pool, num_img_requests, images_per_request)
 
     unique_images = len(set(slot_refs))
     output_path = args.output
     if output_path is None:
         output_path = (
             Path(__file__).parent
-            / f"{num_requests}req_{images_per_request}img_{unique_images}pool_{args.user_text_tokens}word_{args.image_mode}.jsonl"
+            / f"{num_requests}req_{num_text_only_requests}text_only_{images_per_request}img_{unique_images}pool_{args.user_text_tokens}word_{args.image_mode}.jsonl"
         )
 
     with open(output_path, "w") as f:
         for i in range(num_requests):
             user_text = generate_filler(py_rng, args.user_text_tokens)
             start = i * images_per_request
-            images = slot_refs[start : start + images_per_request]
+            images = (
+                slot_refs[start : start + images_per_request]
+                if i < num_img_requests
+                else []
+            )
             line = json.dumps(
                 {"text": user_text, "images": images}, separators=(",", ":")
             )
