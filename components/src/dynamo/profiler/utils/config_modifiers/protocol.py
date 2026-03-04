@@ -135,6 +135,12 @@ class BaseConfigModifier:
 
     # Subclasses should override, e.g. "vllm" / "sglang" / "trtllm"
     BACKEND: str = ""
+
+    @classmethod
+    def load_default_config(cls, mode: str = "disagg") -> dict:
+        """Load default DGD config for the given mode. Subclasses must implement."""
+        raise NotImplementedError("Subclasses must implement load_default_config")
+
     # Worker CLI arg name for model path / name. vLLM uses "--model"; others use "--model-path".
     WORKER_MODEL_PATH_ARG: str = "--model-path"
     WORKER_SERVED_MODEL_NAME_ARG: str = "--served-model-name"
