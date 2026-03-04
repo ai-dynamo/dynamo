@@ -1,0 +1,44 @@
+# Tilt development settings for the Dynamo Kubernetes operator.
+#
+# Edit this file as needed. The Tiltfile reads these values at startup.
+# All keys are optional — sensible defaults are used when omitted.
+
+# Kubernetes contexts Tilt is allowed to connect to.
+# Safety guard: prevents accidental deployments to production clusters.
+allowed_contexts:
+  - a100
+
+# Container registry to push the operator image to.
+# Can also be set via the REGISTRY env var (env var takes precedence).
+# Examples: docker.io/jont828, ghcr.io/myorg, myregistry.azurecr.io
+registry: docker.io/jont828
+
+# Skip running `make generate && make manifests` before applying CRDs.
+# Set to true when you haven't changed API types and want faster iteration.
+skip_codegen: true
+
+# Target namespace for the operator Deployment and related resources.
+# Defaults to "dynamo-system".
+# namespace: dynamo-system
+
+# ---------------------------------------------------------------------------
+# Subchart toggles
+# ---------------------------------------------------------------------------
+# NATS is required for DGD/DGDR workloads (workers use it for communication).
+# enable_nats: true  (default: true)
+
+# etcd is only needed when discoveryBackend is "etcd" (default is "kubernetes").
+# enable_etcd: false
+
+# kai-scheduler provides GPU-aware scheduling. Only needed if testing multi-node.
+# enable_kai_scheduler: false
+
+# grove provides PodCliqueSet-based multi-node orchestration.
+# enable_grove: false
+
+# ---------------------------------------------------------------------------
+# Extra Helm value overrides (applied on top of subchart toggles above)
+# ---------------------------------------------------------------------------
+# helm_values:
+#   dynamo-operator.natsAddr: "nats://external-nats:4222"
+#   dynamo-operator.discoveryBackend: kubernetes
