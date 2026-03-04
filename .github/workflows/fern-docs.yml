@@ -464,14 +464,6 @@ jobs:
           echo "Created fern/pages-$TAG/"
           ls -la "fern/pages-$TAG/" | head -20
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      - name: Install API doc dependencies
-        run: pip install -r docs/scripts/requirements-apidocs.txt
-
       - name: Update Rust API docs.rs links to release version
         run: |
           TAG="${{ steps.version.outputs.tag }}"

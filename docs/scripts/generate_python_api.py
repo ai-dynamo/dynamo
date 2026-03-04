@@ -26,7 +26,8 @@ try:
 except ImportError:
     sys.exit("griffe is required: pip install griffe")
 
-from _fern_helpers import (
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _fern_helpers import (  # noqa: E402
     AUTOGEN_WARNING,
     REPO_ROOT,
     SPDX_HEADER,

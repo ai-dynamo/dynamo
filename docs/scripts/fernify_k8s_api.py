@@ -26,7 +26,8 @@ import re
 import sys
 from pathlib import Path
 
-from _fern_helpers import REPO_ROOT, escape_jsx_attr, render_details
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _fern_helpers import REPO_ROOT, escape_jsx_attr, render_details  # noqa: E402
 
 DEFAULT_INPUT = REPO_ROOT / "docs" / "kubernetes" / "api-reference.md"
 
