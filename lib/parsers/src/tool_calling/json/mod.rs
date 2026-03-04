@@ -15,19 +15,14 @@ pub use deepseek_v3_parser::{detect_tool_call_start_deepseek_v3, parse_tool_call
 pub use super::config::JsonParserConfig;
 pub use super::response::ToolCallResponse;
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Default)]
 pub enum JsonParserType {
     // Basic is generic json parser which can handle most of the cases
+    #[default]
     Basic,
     // Model Specific JSON Parsers
     DeepseekV3,
     DeepseekV31,
-}
-
-impl Default for JsonParserType {
-    fn default() -> Self {
-        Self::Basic
-    }
 }
 
 pub fn try_tool_call_parse_json(

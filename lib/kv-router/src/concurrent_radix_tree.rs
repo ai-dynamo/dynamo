@@ -8,7 +8,7 @@
 //!
 //! Unlike `RadixTree` which uses `Rc<RefCell<>>` and requires single-threaded access,
 //! `ConcurrentRadixTree` uses `Arc<RwLock<>>` per node and a
-//! `RwLock<FxHashMap<..., RwLock<FxHashMap<...>>>>` for the lookup table.
+//! `DashMap<..., RwLock<FxHashMap<...>>>` for the lookup table.
 //!
 //! # Limitations vs RadixTree
 //!
@@ -20,9 +20,8 @@
 //!
 //! - Multiple `find_matches` can run in parallel (read locks only)
 //! - Write operations (`apply_event`, `remove_worker`) acquire write locks
-//! - Outer `RwLock` is read-locked on the hot path; structural mutations
-//!   (adding/removing workers) are rare. Inner `RwLock` per worker allows
-//!   per-worker write concurrency.
+//! - Outer `DashMap` provides shard-level locking for per-worker access.
+//!   Inner `RwLock` per worker allows per-worker write concurrency.
 //! - Deadlock prevention: always lock parent before child, hand-over-hand locking
 
 use std::sync::Arc;
@@ -79,7 +78,7 @@ impl Block {
 ///
 /// Unlike `RadixTree` which uses `Rc<RefCell<>>` and requires single-threaded access,
 /// `ConcurrentRadixTree` uses `Arc<RwLock<>>` per node and a
-/// `RwLock<FxHashMap<..., RwLock<FxHashMap<...>>>>` for the lookup table,
+/// `DashMap<..., RwLock<FxHashMap<...>>>` for the lookup table,
 /// enabling concurrent `find_matches` operations.
 ///
 /// # Limitations vs RadixTree
@@ -92,8 +91,7 @@ impl Block {
 ///
 /// - Multiple `find_matches` can run in parallel (read locks only)
 /// - Write operations (`apply_event`, `remove_worker`) acquire write locks
-/// - Outer RwLock is read-locked on the hot path; structural mutations
-///   (adding/removing workers) are rare and take a write lock.
+/// - Outer `DashMap` provides shard-level locking for per-worker access.
 /// - Inner `RwLock` per worker allows per-worker write concurrency.
 /// - Deadlock prevention: always lock parent before child, hand-over-hand locking
 pub struct ConcurrentRadixTree {
@@ -517,6 +515,25 @@ impl ConcurrentRadixTree {
         }
     }
 
+    fn remove_worker_dp_rank(
+        &self,
+        lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
+        worker_id: WorkerId,
+        dp_rank: DpRank,
+    ) {
+        let key = WorkerWithDpRank { worker_id, dp_rank };
+        if let Some(worker_lookup) = lookup.remove(&key) {
+            for (_, block) in worker_lookup.into_iter() {
+                let mut guard = block.write();
+                guard.workers.remove(&key);
+                if guard.workers.is_empty() {
+                    guard.children.clear();
+                }
+            }
+            self.tree_sizes.remove(&key);
+        }
+    }
+
     /// Clear all blocks for a worker but keep the worker tracked.
     fn clear_all_blocks(
         &self,
@@ -617,6 +634,9 @@ impl SyncIndexer for ConcurrentRadixTree {
                 }
                 WorkerTask::RemoveWorker(worker_id) => {
                     self.remove_or_clear_worker_blocks(&mut lookup, worker_id, false);
+                }
+                WorkerTask::RemoveWorkerDpRank(worker_id, dp_rank) => {
+                    self.remove_worker_dp_rank(&mut lookup, worker_id, dp_rank);
                 }
                 WorkerTask::DumpEvents(_sender) => {
                     // Handled directly via dump_events() on the shared tree.
