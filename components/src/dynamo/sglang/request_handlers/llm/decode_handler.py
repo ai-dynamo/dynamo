@@ -146,7 +146,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     )
                 else:
                     kwargs["return_logprob"] = True
-                    kwargs.setdefault("top_logprobs_num", 0)
+                    # SGLang has a single top_logprobs_num for both prompt
+                    # and output tokens, so take the max of the two.
+                    kwargs["top_logprobs_num"] = max(
+                        kwargs.get("top_logprobs_num", 0), parsed
+                    )
                     # logprob_start_len=0 computes from prompt start;
                     # omitting it (or -1) computes output tokens only.
                     kwargs["logprob_start_len"] = 0
