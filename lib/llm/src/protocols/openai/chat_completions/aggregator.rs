@@ -246,6 +246,7 @@ fn build_complete_tool_call_chunk(
         id: None,
         event: Some("tool_call.complete".to_string()),
         comment: None,
+        error: None,
     }
 }
 
