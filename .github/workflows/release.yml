@@ -539,16 +539,21 @@ jobs:
 
       - name: Login to ECR
         run: |
+          set -euo pipefail
+          source "$GITHUB_WORKSPACE/.github/scripts/retry.sh"
           ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
           ECR_HOSTNAME="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
-          aws ecr get-login-password --region ${AWS_DEFAULT_REGION} | docker login --username AWS --password-stdin "${ECR_HOSTNAME}"
+          retry bash -c "aws ecr get-login-password --region ${AWS_DEFAULT_REGION} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}"
 
       - name: Login to NGC
         env:
           NGC_TOKEN: ${{ secrets.NGC_PUBLISH_TOKEN }}
+          NGC_USER: $oauthtoken
         run: |
-          echo "${NGC_TOKEN}" | docker login nvcr.io -u '$oauthtoken' --password-stdin
-          echo "${NGC_TOKEN}" | crane auth login nvcr.io -u '$oauthtoken' --password-stdin
+          set -euo pipefail
+          source "$GITHUB_WORKSPACE/.github/scripts/retry.sh"
+          retry bash -c 'echo "${NGC_TOKEN}" | docker login --username "${NGC_USER}" --password-stdin nvcr.io'
+          retry bash -c 'echo "${NGC_TOKEN}" | crane auth login --username "${NGC_USER}" --password-stdin nvcr.io'
 
       - name: Copy images to NGC
         id: copy_images
