@@ -28,7 +28,7 @@ jobs:
       - name: Check documentation links with lychee
         uses: lycheeverse/lychee-action@v2
         with:
-          # TODO: once DYN-2259 is fixed remove exclusion of ./docs/components/profiler/profiler_guide.md
+          # TODO(DYN-2310): remove exclusion of ./lib/velo-events/README.md (dead Google Drive link)
           args: >-
             --cache
             --no-progress
@@ -38,15 +38,15 @@ jobs:
             --root-dir ${{ github.workspace }}
             --exclude-path ".*ATTRIBUTIONS.*"
             --exclude-path "./lib/llm/tests/data/.*"
-            --exclude-path "./docs/components/profiler/profiler_guide.md"
+            --exclude-path "./lib/velo-events/README.md"
             --accept "200..=299, 403, 429"
             --exclude-all-private
             --exclude 0.0.0.0
-            -v
+            --verbose
             --host-concurrency 10
             --host-request-interval 1s
             --host-stats
-             ${{ github.event_name == 'pull_request' && '--offline' || '' }}
+             ${{ github.event_name == 'pull_request' && '' || '' }}
             .
           fail: true
         env:
