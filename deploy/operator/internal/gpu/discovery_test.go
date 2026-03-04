@@ -763,8 +763,7 @@ func TestGetCloudProviderInfo(t *testing.T) {
 		{
 			name: "AKS via label",
 			node: corev1.Node{
-				Spec: corev1.NodeSpec{},
-				ObjectMeta: corev1.ObjectMeta{
+				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{
 						"kubernetes.azure.com/cluster": "mycluster",
 					},
@@ -776,8 +775,7 @@ func TestGetCloudProviderInfo(t *testing.T) {
 		{
 			name: "AWS via label",
 			node: corev1.Node{
-				Spec: corev1.NodeSpec{},
-				ObjectMeta: corev1.ObjectMeta{
+				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{
 						"eks.amazonaws.com/nodegroup": "ng-1",
 					},
@@ -789,8 +787,7 @@ func TestGetCloudProviderInfo(t *testing.T) {
 		{
 			name: "GCP via label",
 			node: corev1.Node{
-				Spec: corev1.NodeSpec{},
-				ObjectMeta: corev1.ObjectMeta{
+				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{
 						"cloud.google.com/gke-nodepool": "np-1",
 					},
@@ -802,8 +799,7 @@ func TestGetCloudProviderInfo(t *testing.T) {
 		{
 			name: "Other node",
 			node: corev1.Node{
-				Spec: corev1.NodeSpec{},
-				ObjectMeta: corev1.ObjectMeta{
+				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{
 						"custom-label": "foo",
 					},
@@ -826,13 +822,11 @@ func TestGetCloudProviderInfo(t *testing.T) {
 			var k8sClient client.Reader
 
 			if tt.name != "No nodes" {
-				// Create fake client with the node
 				k8sClient = fake.NewClientBuilder().
 					WithScheme(scheme).
 					WithObjects(&tt.node).
 					Build()
 			} else {
-				// Empty client simulates no nodes
 				k8sClient = fake.NewClientBuilder().
 					WithScheme(scheme).
 					Build()
