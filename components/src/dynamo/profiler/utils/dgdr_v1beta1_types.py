@@ -223,7 +223,7 @@ class DynamoGraphDeploymentRequestSpec(BaseModel):
         description='Model specifies the model to deploy (e.g., "Qwen/Qwen3-0.6B", "meta-llama/Llama-3-70b"). Can be a HuggingFace ID or a private model name.'
     )
     backend: BackendType = Field(
-        default="auto",
+        default=BackendType.Auto,
         description="Backend specifies the inference backend to use for profiling and deployment.",
     )
     image: Optional[str] = Field(
@@ -255,7 +255,7 @@ class DynamoGraphDeploymentRequestSpec(BaseModel):
         description="Features controls optional Dynamo platform features in the generated deployment.",
     )
     searchStrategy: SearchStrategy = Field(
-        default="rapid",
+        default=SearchStrategy.Rapid,
         description='SearchStrategy controls the profiling search depth. "rapid" performs a fast sweep; "thorough" explores more configurations.',
     )
     autoApply: Optional[bool] = Field(
