@@ -16,13 +16,32 @@ PT_HPU_LAZY_MODE=0
 NIXL_BUFFER_DEVICE=cpu
 VLLM_NIXL_BACKEND=UCX
 
+HTTP_PORT="${DYN_HTTP_PORT:-8000}"
+echo "=========================================="
+echo "Launching Disaggregated + KV Routing on Gaudi (4 HPUs)"
+echo "=========================================="
+echo "Model:       $MODEL"
+echo "Frontend:    http://localhost:$HTTP_PORT"
+echo "=========================================="
+echo ""
+echo "Example test command:"
+echo ""
+echo "  curl http://localhost:${HTTP_PORT}/v1/chat/completions \\"
+echo "    -H 'Content-Type: application/json' \\"
+echo "    -d '{"
+echo "      \"model\": \"${MODEL}\","
+echo "      \"messages\": [{\"role\": \"user\", \"content\": \"Explain why Roger Federer is considered one of the greatest tennis players of all time\"}],"
+echo "      \"max_tokens\": 32"
+echo "    }'"
+echo ""
+echo "=========================================="
 
 # Start frontend with KV routing
 # The frontend will automatically detect prefill workers and activate an internal prefill router
 # edit --router-mode to random / round-robin / kv
 python -m dynamo.frontend \
     --router-mode kv \
-    --http-port 8000 \
+    --http-port "$HTTP_PORT" \
     --router-reset-states &
 
 # two decode workers

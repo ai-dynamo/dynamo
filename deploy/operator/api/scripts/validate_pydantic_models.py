@@ -187,6 +187,13 @@ def test_sla_defaults_and_validation():
     # optimizationType mode: OK (null out ttft/itl)
     SLASpec(ttft=None, itl=None, optimizationType=OptimizationType.Throughput)
 
+    # optimizationType mode: OK without explicitly nulling defaults (TC-2.5 / TC-2.6)
+    SLASpec(optimizationType=OptimizationType.Throughput)
+    SLASpec(optimizationType=OptimizationType.Latency)
+
+    # e2eLatency mode: OK without explicitly nulling defaults
+    SLASpec(e2eLatency=500.0)
+
     # mixing modes should raise
     try:
         SLASpec(ttft=100.0, itl=10.0, e2eLatency=500.0)

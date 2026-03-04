@@ -13,8 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import copy
 import json
+import logging
 import os
 import uuid
 from typing import Any, Optional
@@ -25,15 +25,15 @@ import yaml
 from dynamo.common.utils.paths import get_workspace_dir
 from dynamo.planner.defaults import MockerComponentName
 from dynamo.planner.utils.planner_config import PlannerConfig
-from dynamo.profiler.utils.config import (
-    Config,
-    DgdPlannerServiceConfig,
-    set_argument_value,
+from dynamo.profiler.utils.config import DgdPlannerServiceConfig, set_argument_value
+from dynamo.profiler.utils.profile_common import (
+    ProfilerOperationalConfig,
+    is_mocker_enabled,
+    is_planner_enabled,
+    needs_profile_data,
 )
-from dynamo.profiler.utils.config_modifiers.parallelization_mapping import (
-    PickedParallelConfig,
-)
-from dynamo.profiler.utils.dgdr_v1beta1_types import DynamoGraphDeploymentRequestSpec
+
+logger = logging.getLogger(__name__)
 
 # Path to mocker disagg config relative to workspace
 MOCKER_DISAGG_CONFIG_PATH = "examples/backends/mocker/deploy/disagg.yaml"
@@ -43,90 +43,151 @@ MOCKER_DISAGG_CONFIG_PATH = "examples/backends/mocker/deploy/disagg.yaml"
 PLANNER_CONFIG_PREFIX = "planner-config"
 PLANNER_PROFILE_DATA_PREFIX = "planner-profile-data"
 
+# Well-known mount paths inside pods
+PROFILE_DATA_MOUNT = f"{get_workspace_dir()}/profiling_results"
+PLANNER_CONFIG_MOUNT = f"{get_workspace_dir()}/planner_config"
+
 
 def _make_cm_name(prefix: str) -> str:
     return f"{prefix}-{uuid.uuid4().hex[:4]}"
 
 
-def generate_dgd_config_with_planner(
-    dgdr: DynamoGraphDeploymentRequestSpec,
-    config_path: str,
-    output_dir: str | None,
-    best_prefill_mapping: Optional[PickedParallelConfig] = None,
-    best_decode_mapping: Optional[PickedParallelConfig] = None,
-) -> tuple[list[dict] | dict, list[dict] | dict]:
-    """Generate DGD config with planner based on profiling results.
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
 
-    The ``config_path`` should point to a DGD YAML that already has the
-    correct parallelization and image applied (produced by AIC's generator
-    pipeline).  This function loads it, adds the planner service (with
-    profiling data ConfigMap if available), and produces the final
-    deployable DGD.
+
+def assemble_final_config(
+    dgdr,
+    ops: ProfilerOperationalConfig,
+    dgd_config: dict | None,
+    best_prefill_config=None,
+    best_decode_config=None,
+) -> Any:
+    """Apply Dynamo features to the picked DGD config via composable layers.
+
+    1. **Mocker** — swap the base to the mocker DGD template if enabled.
+    2. **Planner** — inject the Planner service + planner-config ConfigMap.
+    3. **Profile data** — attach interpolation-data ConfigMap when mocker
+       or planner-throughput is enabled.
+    """
+    if not dgd_config:
+        return dgd_config
+
+    mocker = is_mocker_enabled(dgdr)
+    planner = is_planner_enabled(dgdr)
+    profile = needs_profile_data(dgdr)
+
+    if not mocker and not planner:
+        return dgd_config
+
+    # Save picked config for auditing
+    dgd_config_path = f"{ops.output_dir}/picked_dgd_config.yaml"
+    with open(dgd_config_path, "w") as f:
+        yaml.safe_dump(dgd_config, f, sort_keys=False)
+
+    # Step 1: choose base config
+    if mocker:
+        logger.info("Mocker enabled — using mocker DGD as base.")
+        base = generate_mocker_config(dgdr)
+    else:
+        base = dgd_config
+
+    # Steps 2-3: layer features, collecting ConfigMaps
+    config_maps: list[dict] = []
+
+    if planner:
+        planner_cm = add_planner_to_config(
+            dgdr,
+            base,
+            best_prefill_mapping=best_prefill_config,
+            best_decode_mapping=best_decode_config,
+        )
+        config_maps.append(planner_cm)
+
+    if profile:
+        output_dir = ops.output_dir if not ops.dry_run else None
+        profile_cm = add_profile_data_to_config(base, output_dir)
+        if profile_cm:
+            config_maps.append(profile_cm)
+
+    if config_maps:
+        return config_maps + [base]
+    return base
+
+
+def generate_mocker_config(dgdr) -> dict:
+    """Load the mocker DGD template and apply DGDR images and model paths.
+
+    Returns:
+        The mocker DGD config dict (no planner, no ConfigMaps).
+    """
+    workspace_dir = get_workspace_dir()
+    mocker_config_path = os.path.join(workspace_dir, MOCKER_DISAGG_CONFIG_PATH)
+
+    with open(mocker_config_path, "r") as f:
+        mocker_config = yaml.safe_load(f)
+
+    image = dgdr.image
+    if image:
+        for service_config in (
+            mocker_config.get("spec", {}).get("services", {}).values()
+        ):
+            if service_config.get("extraPodSpec") and service_config[
+                "extraPodSpec"
+            ].get("mainContainer"):
+                service_config["extraPodSpec"]["mainContainer"]["image"] = image
+
+    model = dgdr.model
+    for worker_name in _mocker_worker_names():
+        service_config = (
+            mocker_config.get("spec", {}).get("services", {}).get(worker_name)
+        )
+        if service_config:
+            main_container = service_config.get("extraPodSpec", {}).get(
+                "mainContainer", {}
+            )
+            args_list = main_container.get("args", [])
+            args_list = set_argument_value(args_list, "--model-path", model)
+            args_list = set_argument_value(args_list, "--model-name", model)
+            main_container["args"] = args_list
+
+    return mocker_config
+
+
+def add_planner_to_config(
+    dgdr,
+    config_dict: dict,
+    best_prefill_mapping=None,
+    best_decode_mapping=None,
+) -> dict:
+    """Add a Planner service and its planner-config ConfigMap to *config_dict*.
+
+    The planner's ``profile_results_dir`` is always set to the well-known
+    mount path so the pod knows where to look when profile data is
+    mounted separately by :func:`add_profile_data_to_config`.
 
     Args:
         dgdr: DynamoGraphDeploymentRequestSpec.
-        config_path: Path to the picked DGD YAML config file (already has
-            correct parallelization, replicas, and image).
-        output_dir: Output directory containing profiling interpolation data.
-        best_prefill_mapping: Picked prefill parallel config (PickedParallelConfig).
-            Used only for ``prefill_engine_num_gpu`` in PlannerConfig.
-        best_decode_mapping: Picked decode parallel config (PickedParallelConfig).
-            Used only for ``decode_engine_num_gpu`` in PlannerConfig.
+        config_dict: The base DGD config (real or mocker) — mutated in place.
+        best_prefill_mapping: Picked prefill parallel config.
+        best_decode_mapping: Picked decode parallel config.
 
     Returns:
-        tuple: (dgd_config, mocker_config)
+        The ``planner_config_cm`` ConfigMap dict.
     """
-    with open(config_path, "r") as f:
-        raw = yaml.safe_load(f)
+    planner_cfg = _build_planner_config(dgdr, best_prefill_mapping, best_decode_mapping)
+    planner_cfg.profile_results_dir = PROFILE_DATA_MOUNT
 
-    config = Config.model_validate(raw)
-
-    # --- Build PlannerConfig ---
-    planner_cfg = _build_planner_config(
-        dgdr,
-        best_prefill_mapping,
-        best_decode_mapping,
-    )
-
-    # --- Add planner service to DGD ---
     planner_service = DgdPlannerServiceConfig()
     if planner_service.extraPodSpec.mainContainer:
         planner_service.extraPodSpec.mainContainer.image = dgdr.image
 
     planner_dict = planner_service.model_dump(exclude_unset=False)
-    config_dict = config.model_dump(exclude_unset=False)
 
     planner_config_cm_name = _make_cm_name(PLANNER_CONFIG_PREFIX)
-    profile_data_cm_name = _make_cm_name(PLANNER_PROFILE_DATA_PREFIX)
 
-    profile_data_mount = f"{get_workspace_dir()}/profiling_results"
-    planner_config_mount = f"{get_workspace_dir()}/planner_config"
-
-    # --- ConfigMap 1: profiling interpolation data ---
-    profile_data_cm: Optional[dict] = None
-    profiling_data = _load_profiling_data(output_dir) if output_dir else {}
-    if profiling_data:
-        planner_cfg.profile_results_dir = profile_data_mount
-
-        profile_cm_data: dict[str, str] = {}
-        # TODO: use enums
-        if profiling_data.get("prefill"):
-            profile_cm_data["prefill_raw_data.json"] = json.dumps(
-                profiling_data["prefill"]
-            )
-        if profiling_data.get("decode"):
-            profile_cm_data["decode_raw_data.json"] = json.dumps(
-                profiling_data["decode"]
-            )
-
-        profile_data_cm = {
-            "apiVersion": "v1",
-            "kind": "ConfigMap",
-            "metadata": {"name": profile_data_cm_name},
-            "data": profile_cm_data,
-        }
-
-    # --- ConfigMap 2: planner config ---
+    # --- ConfigMap: planner config ---
     planner_config_cm = {
         "apiVersion": "v1",
         "kind": "ConfigMap",
@@ -136,7 +197,7 @@ def generate_dgd_config_with_planner(
         },
     }
 
-    # --- Mount both ConfigMaps into the planner service ---
+    # --- Mount planner-config ConfigMap into the planner service ---
     planner_volumes = planner_dict.setdefault("extraPodSpec", {}).setdefault(
         "volumes", []
     )
@@ -145,7 +206,6 @@ def generate_dgd_config_with_planner(
     )
     mc_mounts = mc_dict.setdefault("volumeMounts", [])
 
-    # Planner config volume
     planner_volumes.append(
         {
             "name": planner_config_cm_name,
@@ -155,51 +215,116 @@ def generate_dgd_config_with_planner(
     mc_mounts.append(
         {
             "name": planner_config_cm_name,
-            "mountPath": planner_config_mount,
+            "mountPath": PLANNER_CONFIG_MOUNT,
             "readOnly": True,
         }
     )
 
-    # Profiling data volume (only if data exists)
-    if profile_data_cm is not None:
-        planner_volumes.append(
-            {
-                "name": profile_data_cm_name,
-                "configMap": {"name": profile_data_cm_name},
-            }
-        )
-        mc_mounts.append(
-            {
-                "name": profile_data_cm_name,
-                "mountPath": profile_data_mount,
-                "readOnly": True,
-            }
-        )
-
-    # Planner reads its config from the mounted planner-config ConfigMap
     mc_args = mc_dict.setdefault("args", [])
-    mc_args.extend(["--config", f"{planner_config_mount}/planner_config.json"])
+    mc_args.extend(["--config", f"{PLANNER_CONFIG_MOUNT}/planner_config.json"])
 
     config_dict["spec"]["services"]["Planner"] = planner_dict
 
-    # --- Generate mocker config ---
-    mocker_config = _generate_mocker_config_with_planner(
-        dgdr=dgdr,
-        profile_data_mount=profile_data_mount,
-        planner_config_mount=planner_config_mount,
-        profile_data_cm=profile_data_cm,
-        planner_config_cm=planner_config_cm,
-        planner_dict=planner_dict,
+    return planner_config_cm
+
+
+def add_profile_data_to_config(
+    config_dict: dict,
+    output_dir: str | None,
+) -> Optional[dict]:
+    """Create a profile-data ConfigMap and mount it into consumers in *config_dict*.
+
+    Consumers are auto-detected:
+    - The **Planner** service (if present) gets the volume mounted.
+    - **Mocker workers** (if present) get the volume mounted and
+      ``--planner-profile-data`` set.
+
+    Args:
+        config_dict: The DGD config dict — mutated in place.
+        output_dir: Directory containing profiling interpolation NPZ files.
+
+    Returns:
+        The ``profile_data_cm`` ConfigMap dict, or ``None`` if no profiling
+        data was found.
+    """
+    profiling_data = _load_profiling_data(output_dir) if output_dir else {}
+    if not profiling_data:
+        return None
+
+    profile_data_cm_name = _make_cm_name(PLANNER_PROFILE_DATA_PREFIX)
+
+    profile_cm_data: dict[str, str] = {}
+    # TODO: use enums
+    if profiling_data.get("prefill"):
+        profile_cm_data["prefill_raw_data.json"] = json.dumps(profiling_data["prefill"])
+    if profiling_data.get("decode"):
+        profile_cm_data["decode_raw_data.json"] = json.dumps(profiling_data["decode"])
+
+    profile_data_cm = {
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "metadata": {"name": profile_data_cm_name},
+        "data": profile_cm_data,
+    }
+
+    # Mount into Planner service if it exists
+    planner_svc = config_dict.get("spec", {}).get("services", {}).get("Planner")
+    if planner_svc is not None:
+        _mount_volume_into_service(
+            planner_svc, profile_data_cm_name, PROFILE_DATA_MOUNT
+        )
+
+    # Mount into mocker workers if they exist
+    services = config_dict.get("spec", {}).get("services", {})
+    for worker_name in _mocker_worker_names():
+        worker_svc = services.get(worker_name)
+        if worker_svc is not None:
+            main_container = worker_svc.get("extraPodSpec", {}).get("mainContainer", {})
+            args_list = main_container.get("args", [])
+            args_list = set_argument_value(
+                args_list, "--planner-profile-data", PROFILE_DATA_MOUNT
+            )
+            main_container["args"] = args_list
+            _mount_volume_into_service(
+                worker_svc, profile_data_cm_name, PROFILE_DATA_MOUNT
+            )
+
+    return profile_data_cm
+
+
+# ---------------------------------------------------------------------------
+# Private helpers
+# ---------------------------------------------------------------------------
+
+
+def _mocker_worker_names() -> list[str]:
+    return [
+        MockerComponentName.prefill_worker_k8s_name,
+        MockerComponentName.decode_worker_k8s_name,
+    ]
+
+
+def _mount_volume_into_service(
+    service_dict: dict, cm_name: str, mount_path: str
+) -> None:
+    """Add a ConfigMap volume + volumeMount to a service's extraPodSpec."""
+    extra_pod_spec = service_dict.setdefault("extraPodSpec", {})
+    volumes = extra_pod_spec.setdefault("volumes", [])
+    volumes.append(
+        {
+            "name": cm_name,
+            "configMap": {"name": cm_name},
+        }
     )
-
-    # Collect all ConfigMaps + DGD into multi-doc output
-    config_maps = [cm for cm in [profile_data_cm, planner_config_cm] if cm is not None]
-    if config_maps:
-        dgd_config: list[dict[str, Any]] = config_maps + [config_dict]
-    else:
-        dgd_config = config_dict
-
-    return dgd_config, mocker_config
+    main_container = extra_pod_spec.setdefault("mainContainer", {})
+    volume_mounts = main_container.setdefault("volumeMounts", [])
+    volume_mounts.append(
+        {
+            "name": cm_name,
+            "mountPath": mount_path,
+            "readOnly": True,
+        }
+    )
 
 
 def _build_planner_config(
@@ -263,86 +388,3 @@ def _load_profiling_data(output_dir: str) -> dict:
         pass
 
     return result
-
-
-def _generate_mocker_config_with_planner(
-    dgdr,
-    profile_data_mount: str,
-    planner_config_mount: str,
-    profile_data_cm: Optional[dict],
-    planner_config_cm: dict,
-    planner_dict: dict,
-) -> list[dict] | dict:
-    """Generate mocker DGD config with planner for testing purposes."""
-    workspace_dir = get_workspace_dir()
-    mocker_config_path = os.path.join(workspace_dir, MOCKER_DISAGG_CONFIG_PATH)
-
-    with open(mocker_config_path, "r") as f:
-        mocker_config = yaml.safe_load(f)
-
-    image = dgdr.image
-    if image:
-        for service_config in (
-            mocker_config.get("spec", {}).get("services", {}).values()
-        ):
-            if service_config.get("extraPodSpec") and service_config[
-                "extraPodSpec"
-            ].get("mainContainer"):
-                service_config["extraPodSpec"]["mainContainer"]["image"] = image
-
-    model = dgdr.model
-    mocker_worker_names = [
-        MockerComponentName.prefill_worker_k8s_name,
-        MockerComponentName.decode_worker_k8s_name,
-    ]
-    for worker_name in mocker_worker_names:
-        service_config = (
-            mocker_config.get("spec", {}).get("services", {}).get(worker_name)
-        )
-        if service_config:
-            main_container = service_config.get("extraPodSpec", {}).get(
-                "mainContainer", {}
-            )
-            args_list = main_container.get("args", [])
-            if profile_data_cm is not None:
-                args_list = set_argument_value(
-                    args_list, "--planner-profile-data", profile_data_mount
-                )
-            args_list = set_argument_value(args_list, "--model-path", model)
-            args_list = set_argument_value(args_list, "--model-name", model)
-            main_container["args"] = args_list
-
-    # Mount profiling data ConfigMap into mocker workers
-    if profile_data_cm is not None:
-        pd_cm_name = profile_data_cm["metadata"]["name"]
-        for worker_name in mocker_worker_names:
-            service_config = (
-                mocker_config.get("spec", {}).get("services", {}).get(worker_name)
-            )
-            if service_config:
-                extra_pod_spec = service_config.setdefault("extraPodSpec", {})
-                volumes = extra_pod_spec.setdefault("volumes", [])
-                volumes.append(
-                    {
-                        "name": pd_cm_name,
-                        "configMap": {"name": pd_cm_name},
-                    }
-                )
-                main_container = extra_pod_spec.setdefault("mainContainer", {})
-                volume_mounts = main_container.setdefault("volumeMounts", [])
-                volume_mounts.append(
-                    {
-                        "name": pd_cm_name,
-                        "mountPath": profile_data_mount,
-                        "readOnly": True,
-                    }
-                )
-
-    # Reuse planner service dict (already has both ConfigMaps mounted + --config arg)
-    mocker_planner_dict = copy.deepcopy(planner_dict)
-    mocker_config["spec"]["services"]["Planner"] = mocker_planner_dict
-
-    config_maps = [cm for cm in [profile_data_cm, planner_config_cm] if cm is not None]
-    if config_maps:
-        return config_maps + [mocker_config]
-    return mocker_config

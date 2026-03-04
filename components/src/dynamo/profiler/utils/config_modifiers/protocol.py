@@ -27,6 +27,7 @@ from dynamo.profiler.utils.config import (
     ServiceResources,
     break_arguments,
     get_service_name_by_type,
+    sanitize_cli_args,
     set_argument_value,
     update_image,
 )
@@ -568,7 +569,7 @@ class BaseConfigModifier:
         service.resources.limits["gpu"] = str(gpus)
 
         if service.extraPodSpec and service.extraPodSpec.mainContainer:
-            service.extraPodSpec.mainContainer.args = list(cli_args)
+            service.extraPodSpec.mainContainer.args = sanitize_cli_args(list(cli_args))
 
     @classmethod
     def _apply_disagg_workers(

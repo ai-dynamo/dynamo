@@ -144,6 +144,29 @@ def remove_valued_arguments(args: list[str], key: str) -> list[str]:
     return args
 
 
+def sanitize_cli_args(args: list[str]) -> list[str]:
+    """Strip valued arguments whose value is the literal string ``"None"``.
+
+    AIC's rule engine uses Jinja2 ``compile_expression`` which converts
+    undefined variables to Python ``None``.  When that ``None`` is
+    serialized into CLI args it becomes the four-character string
+    ``"None"``, which is never a valid CLI value and causes backends
+    (e.g. sglang ``--kv-cache-dtype None``) to reject the argument.
+    """
+    result = list(args)
+    i = 0
+    while i < len(result) - 1:
+        if result[i].startswith("--") and result[i + 1] == "None":
+            logger.warning(
+                "Stripping CLI arg %s with invalid value 'None'",
+                result[i],
+            )
+            del result[i : i + 2]
+        else:
+            i += 1
+    return result
+
+
 def append_argument(args: list[str], to_append: str | list[str]) -> list[str]:
     idx = find_arg_index(args)
     if isinstance(to_append, list):
