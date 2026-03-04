@@ -293,7 +293,7 @@ helm: manifests kustomize helmify
 	$(KUSTOMIZE) build config/default | $(HELMIFY) -image-pull-secrets charts/dynamo-kubernetes-operator
 
 ######################### CRD Reference Docs
-CRD_REF_DOCS_VERSION ?= latest
+CRD_REF_DOCS_VERSION ?= v0.3.0
 CRD_REF_DOCS ?= $(LOCALBIN)/crd-ref-docs
 
 .PHONY: crd-ref-docs

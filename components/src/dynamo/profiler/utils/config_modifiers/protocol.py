@@ -27,6 +27,7 @@ from dynamo.profiler.utils.config import (
     ServiceResources,
     break_arguments,
     get_service_name_by_type,
+    sanitize_cli_args,
     set_argument_value,
     update_image,
 )
@@ -134,6 +135,12 @@ class BaseConfigModifier:
 
     # Subclasses should override, e.g. "vllm" / "sglang" / "trtllm"
     BACKEND: str = ""
+
+    @classmethod
+    def load_default_config(cls, mode: str = "disagg") -> dict:
+        """Load default DGD config for the given mode. Subclasses must implement."""
+        raise NotImplementedError("Subclasses must implement load_default_config")
+
     # Worker CLI arg name for model path / name. vLLM uses "--model"; others use "--model-path".
     WORKER_MODEL_PATH_ARG: str = "--model-path"
     WORKER_SERVED_MODEL_NAME_ARG: str = "--served-model-name"
@@ -562,7 +569,7 @@ class BaseConfigModifier:
         service.resources.limits["gpu"] = str(gpus)
 
         if service.extraPodSpec and service.extraPodSpec.mainContainer:
-            service.extraPodSpec.mainContainer.args = list(cli_args)
+            service.extraPodSpec.mainContainer.args = sanitize_cli_args(list(cli_args))
 
     @classmethod
     def _apply_disagg_workers(

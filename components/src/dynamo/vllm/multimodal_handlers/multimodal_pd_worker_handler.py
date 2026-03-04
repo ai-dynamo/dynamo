@@ -3,7 +3,6 @@
 
 import copy
 import logging
-import os
 import uuid
 from collections import defaultdict
 from typing import Any
@@ -18,12 +17,13 @@ from dynamo.common.memory.multimodal_embedding_cache_manager import (
 )
 from dynamo.common.multimodal.embedding_transfer import (
     LocalEmbeddingReceiver,
-    NixlPersistentEmbeddingReceiver,
+    NixlReadEmbeddingReceiver,
+    NixlWriteEmbeddingReceiver,
 )
 from dynamo.runtime import Client, DistributedRuntime
 
 from ..args import Config
-from ..constants import DisaggregationMode
+from ..constants import DisaggregationMode, EmbeddingTransferMode
 from ..handlers import BaseWorkerHandler, build_sampling_params
 from ..multimodal_utils import (
     MyRequestOutput,
@@ -36,7 +36,6 @@ from ..multimodal_utils.prefill_worker_utils import load_multimodal_embeddings
 logger = logging.getLogger(__name__)
 
 IMAGE_URL_KEY = "image_url"
-TRANSFER_LOCAL = int(os.getenv("TRANSFER_LOCAL", 1))
 
 
 class MultimodalPDWorkerHandler(BaseWorkerHandler):
@@ -95,13 +94,18 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
         self._connector: connect.Connector | None = (
             None  # Will be initialized in async_init
         )
-        # [gluo FIXME] can't use pre-registered tensor as NIXL requires descriptors
-        # to be at matching size, need to overwrite nixl connect library
-        self.embedding_receiver = (
-            LocalEmbeddingReceiver()
-            if TRANSFER_LOCAL
-            else NixlPersistentEmbeddingReceiver(max_items=0)
-        )
+        if config.embedding_transfer_mode == EmbeddingTransferMode.LOCAL:
+            self.embedding_receiver = LocalEmbeddingReceiver()
+        elif config.embedding_transfer_mode == EmbeddingTransferMode.NIXL_WRITE:
+            self.embedding_receiver = NixlWriteEmbeddingReceiver()
+        elif config.embedding_transfer_mode == EmbeddingTransferMode.NIXL_READ:
+            # [gluo FIXME] can't use pre-registered tensor as NIXL requires descriptors
+            # to be at matching size, need to overwrite nixl connect library
+            self.embedding_receiver = NixlReadEmbeddingReceiver(max_items=0)
+        else:
+            raise ValueError(
+                f"Invalid embedding transfer mode: {config.embedding_transfer_mode}"
+            )
 
         logger.info("Multimodal PD Worker has been initialized")
 
@@ -197,8 +201,19 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
                 )
             if image_embeds is not None:
                 request.embeddings_shape = list(image_embeds.shape)
+        # prune empty multimodal data, vLLM will expect multi_modal_uuids if the mm items are empty
+        # i.e. ValueError: multi_modal_data['image'] is empty but multi_modal_uuids['image'] is missing.
+        for key, value in multi_modal_data.items():
+            if not isinstance(value, torch.Tensor):
+                if not value:
+                    del multi_modal_data[key]
+                else:
+                    # [gluo FIXME] should be mindful to default dict, move this evaluation logic to here
+                    # so that we don't accidentally add empty keys to the dict which causes vLLM misbehavior
+                    logger.debug(
+                        f"Prepared multimodal data size: {len(multi_modal_data[key])}"
+                    )
 
-        logger.debug(f"Prepared multimodal data size: {len(multi_modal_data['image'])}")
         logger.debug("Multimodal data keys: %s", list(multi_modal_data.keys()))
 
     @staticmethod

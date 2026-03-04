@@ -819,7 +819,7 @@ async fn run_microbench_mode(args: MicrobenchArgs) {
 // ============================================================================
 
 /// Result of a single request during stress test
-#[allow(dead_code)]
+#[expect(dead_code)]
 struct RequestResult {
     request_id: u64,
     submit_time: Instant,
