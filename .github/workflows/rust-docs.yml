@@ -1,0 +1,100 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Rust API Documentation
+#
+# Builds workspace docs via `cargo doc` and deploys to GitHub Pages.
+# Hosted at: https://ai-dynamo.github.io/dynamo/
+#
+# Triggers:
+#   - Push to main when Rust source files change
+#   - Manual dispatch
+#
+# The workflow uses GitHub's built-in Pages deployment action,
+# which requires Pages to be configured for "GitHub Actions" source
+# in repo Settings > Pages.
+
+name: Rust API Docs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'lib/**/*.rs'
+      - 'lib/**/Cargo.toml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: rust-docs
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build Rust docs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-doc-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-doc-
+
+      - name: Build documentation
+        env:
+          RUSTDOCFLAGS: >-
+            --enable-index-page
+            -Zunstable-options
+            -D warnings
+        run: cargo +nightly doc --no-deps --workspace 2>&1 || cargo doc --no-deps --workspace
+
+      - name: Add redirect index.html
+        run: |
+          echo '<meta http-equiv="refresh" content="0; url=dynamo_runtime/index.html">' \
+            > target/doc/index.html
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: target/doc
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
