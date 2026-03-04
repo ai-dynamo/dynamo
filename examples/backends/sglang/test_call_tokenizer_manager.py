@@ -14,7 +14,6 @@ Requires a GPU with enough VRAM for the model (~2 GB for Qwen3-0.6B).
 """
 
 import argparse
-import json
 import os
 import signal
 import subprocess
@@ -73,10 +72,15 @@ def start_backend(model):
     env["DYN_SYSTEM_PORT"] = str(SYSTEM_PORT)
     proc = subprocess.Popen(
         [
-            sys.executable, "-m", "dynamo.sglang",
-            "--model-path", model,
-            "--tp", "1",
-            "--mem-fraction-static", "0.8",
+            sys.executable,
+            "-m",
+            "dynamo.sglang",
+            "--model-path",
+            model,
+            "--tp",
+            "1",
+            "--mem-fraction-static",
+            "0.8",
         ],
         env=env,
     )
@@ -110,6 +114,7 @@ def call_tm(method, args=None, kwargs=None):
 
 
 # ── individual tests ────────────────────────────────────────────────────
+
 
 def test_get_weight_version():
     """Dedicated route — should always work."""
@@ -147,7 +152,7 @@ def test_nonexistent_route():
     """Unknown engine route should 404."""
     code, data = engine_post("does_not_exist")
     assert code == 404, f"expected 404 for unknown route, got {code} {data}"
-    print(f"  unknown route -> 404 (correct)")
+    print("  unknown route -> 404 (correct)")
 
 
 def test_bad_method():
@@ -159,6 +164,7 @@ def test_bad_method():
 
 
 # ── main ────────────────────────────────────────────────────────────────
+
 
 def run_tests():
     tests = [
@@ -190,7 +196,9 @@ def main():
     global SYSTEM_PORT
 
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--model", default=MODEL, help=f"Model to load (default: {MODEL})")
+    parser.add_argument(
+        "--model", default=MODEL, help=f"Model to load (default: {MODEL})"
+    )
     parser.add_argument("--system-port", type=int, default=SYSTEM_PORT)
     args = parser.parse_args()
 
@@ -214,6 +222,7 @@ def main():
     except Exception as e:
         print(f"\nFatal: {e}")
         import traceback
+
         traceback.print_exc()
         sys.exit(1)
     finally:
