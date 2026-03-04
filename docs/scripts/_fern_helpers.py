@@ -65,6 +65,24 @@ def slugify(text: str) -> str:
     return text.lower().replace(" ", "-").replace(",", "")
 
 
+def render_card_group(cards: list[dict[str, str]], cols: int) -> str:
+    """Render a Fern <CardGroup> with <Card> elements.
+
+    Each card dict must have 'title', 'icon', 'description'.
+    Optional 'href' adds a link.
+    """
+    parts = [f"<CardGroup cols={{{cols}}}>\n"]
+    for card in cards:
+        href = f' href="{card["href"]}"' if card.get("href") else ""
+        parts.append(
+            f'  <Card title="{card["title"]}" icon="{card["icon"]}"{href}>\n'
+            f'    {card["description"]}\n'
+            f"  </Card>\n"
+        )
+    parts.append("</CardGroup>\n")
+    return "".join(parts)
+
+
 def render_details(summary: str, body: str) -> str:
     """Render a <details>/<summary> block (GitHub + Fern compatible).
 

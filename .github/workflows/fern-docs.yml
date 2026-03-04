@@ -110,6 +110,9 @@ jobs:
           python-version: '3.12'
 
       - name: Check API docs freshness
+        # Advisory only — emits ::warning annotations but does not fail the job.
+        # This lets contributors know their PR needs a docs regeneration without
+        # blocking merges for unrelated changes.
         run: |
           pip install -r docs/scripts/requirements-apidocs.txt
           python3 docs/scripts/generate_python_api.py --output-dir /tmp/api-check/python

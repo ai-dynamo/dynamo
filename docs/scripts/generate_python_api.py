@@ -33,6 +33,7 @@ from _fern_helpers import (  # noqa: E402
     SPDX_HEADER,
     escape_jsx_attr,
     escape_mdx_prose,
+    render_card_group,
     render_details,
     slugify,
 )
@@ -60,6 +61,18 @@ class SectionDef:
     classes: list[str] = field(default_factory=list)
     functions: list[str] = field(default_factory=list)
     module: str | None = None  # render all public members from this module
+
+
+@dataclass
+class RenderContext:
+    """Mutable state passed through the rendering pipeline."""
+
+    all_classes: dict[str, Any]
+    all_functions: dict[str, Any]
+    nixl_classes: list[Any]
+    nixl_functions: list[Any]
+    placed_classes: set[str] = field(default_factory=set)
+    placed_functions: set[str] = field(default_factory=set)
 
 
 SECTION_DEFS: list[SectionDef] = [
@@ -613,6 +626,23 @@ def _create_loader() -> GriffeLoader:
     return GriffeLoader(search_paths=SEARCH_PATHS)
 
 
+def _classify_members(
+    mod: Any,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Classify a module's public members into classes and functions."""
+    classes: dict[str, Any] = {}
+    functions: dict[str, Any] = {}
+    for member in mod.members.values():
+        if member.name.startswith("_"):
+            continue
+        kind = _safe_kind(member)
+        if kind == "CLASS":
+            classes[member.name] = member
+        elif kind == "FUNCTION":
+            functions[member.name] = member
+    return classes, functions
+
+
 def _load_all_members(
     loader: GriffeLoader,
     modules: list[str],
@@ -628,15 +658,9 @@ def _load_all_members(
             print(f"  SKIP {module_name}: {exc}", file=sys.stderr)
             continue
         print(f"  Loaded: {module_name}")
-
-        for member in mod.members.values():
-            kind = _safe_kind(member)
-            if member.name.startswith("_"):
-                continue
-            if kind == "CLASS":
-                all_classes[member.name] = member
-            elif kind == "FUNCTION":
-                all_functions[member.name] = member
+        classes, functions = _classify_members(mod)
+        all_classes.update(classes)
+        all_functions.update(functions)
 
     loader.resolve_aliases()
     return all_classes, all_functions
@@ -646,23 +670,13 @@ def _extract_nixl_members(
     loader: GriffeLoader,
 ) -> tuple[list[Any], list[Any]]:
     """Extract classes and functions from dynamo.nixl_connect."""
-    classes: list[Any] = []
-    functions: list[Any] = []
     try:
         mod = loader.modules_collection["dynamo.nixl_connect"]
     except KeyError:
         print("  WARN: dynamo.nixl_connect not in collection", file=sys.stderr)
-        return classes, functions
-
-    for member in mod.members.values():
-        kind = _safe_kind(member)
-        if member.name.startswith("_"):
-            continue
-        if kind == "CLASS":
-            classes.append(member)
-        elif kind == "FUNCTION":
-            functions.append(member)
-    return classes, functions
+        return [], []
+    classes, functions = _classify_members(mod)
+    return list(classes.values()), list(functions.values())
 
 
 # ---------------------------------------------------------------------------
@@ -672,122 +686,74 @@ def _extract_nixl_members(
 
 def _render_header() -> list[str]:
     """Render the page header with SPDX, title, and card navigation."""
-    parts: list[str] = [
+    cards = [
+        {
+            "title": s.title,
+            "icon": s.icon,
+            "href": f"#{slugify(s.title)}",
+            "description": s.description,
+        }
+        for s in SECTION_DEFS
+    ]
+    return [
         SPDX_HEADER.format(sidebar_title="Python API"),
         AUTOGEN_WARNING,
         "# Python API Reference\n",
         "This page documents the public Python API for NVIDIA Dynamo. "
         "Classes and functions are organized by functional area. "
         "Expand any item to see its full API.\n",
+        render_card_group(cards, 3),
     ]
 
-    parts.append("<CardGroup cols={3}>\n")
-    for section in SECTION_DEFS:
-        anchor = slugify(section.title)
-        parts.append(
-            f'  <Card title="{section.title}" icon="{section.icon}" href="#{anchor}">\n'
-            f"    {section.description}\n"
-            f"  </Card>\n"
-        )
-    parts.append("</CardGroup>\n")
-    return parts
 
-
-def _render_section(
-    section: SectionDef,
-    all_classes: dict[str, Any],
-    all_functions: dict[str, Any],
-    nixl_classes: list[Any],
-    nixl_functions: list[Any],
-    placed_classes: set[str],
-    placed_functions: set[str],
-) -> list[str]:
+def _render_section(section: SectionDef, ctx: RenderContext) -> list[str]:
     """Render a single section of the API reference."""
     parts: list[str] = [
         "---\n",
         f"## {section.title}\n",
         f"{section.description}\n",
     ]
-
     if section.module:
-        _render_module_section(
-            parts,
-            nixl_classes,
-            nixl_functions,
-            placed_classes,
-            placed_functions,
-        )
-        return parts
-
-    items = _collect_section_items(
-        section,
-        all_classes,
-        all_functions,
-        placed_classes,
-        placed_functions,
-    )
-    parts.extend(items)
+        _render_module_members(parts, ctx)
+    else:
+        _render_named_members(parts, section, ctx)
     return parts
 
 
-def _render_module_section(
-    parts: list[str],
-    nixl_classes: list[Any],
-    nixl_functions: list[Any],
-    placed_classes: set[str],
-    placed_functions: set[str],
-) -> None:
-    """Render all members from a whole-module section (e.g., NIXL Connect)."""
-    for cls in nixl_classes:
+def _render_module_members(parts: list[str], ctx: RenderContext) -> None:
+    """Render all members from a whole-module section."""
+    for cls in ctx.nixl_classes:
         parts.append(_render_class_details(cls))
-        placed_classes.add(cls.name)
-    for func in nixl_functions:
+        ctx.placed_classes.add(cls.name)
+    for func in ctx.nixl_functions:
         parts.append(_render_function_details(func))
-        placed_functions.add(func.name)
+        ctx.placed_functions.add(func.name)
 
 
-def _collect_section_items(
-    section: SectionDef,
-    all_classes: dict[str, Any],
-    all_functions: dict[str, Any],
-    placed_classes: set[str],
-    placed_functions: set[str],
-) -> list[str]:
-    """Collect rendered items for a class+function section."""
-    items: list[str] = []
-    for class_name in section.classes:
-        if class_name in all_classes:
-            items.append(_render_class_details(all_classes[class_name]))
-            placed_classes.add(class_name)
-
-    for func_name in section.functions:
-        if func_name in all_functions:
-            items.append(_render_function_details(all_functions[func_name]))
-            placed_functions.add(func_name)
-
-    return items
+def _render_named_members(
+    parts: list[str], section: SectionDef, ctx: RenderContext
+) -> None:
+    """Render explicitly named classes and functions for a section."""
+    for name in section.classes:
+        if name in ctx.all_classes:
+            parts.append(_render_class_details(ctx.all_classes[name]))
+            ctx.placed_classes.add(name)
+    for name in section.functions:
+        if name in ctx.all_functions:
+            parts.append(_render_function_details(ctx.all_functions[name]))
+            ctx.placed_functions.add(name)
 
 
-def _render_remaining(
-    all_classes: dict[str, Any],
-    all_functions: dict[str, Any],
-    placed_classes: set[str],
-    placed_functions: set[str],
-) -> list[str]:
+def _render_remaining(ctx: RenderContext) -> list[str]:
     """Render any classes/functions not assigned to a section."""
-    remaining_classes = {
-        n: o for n, o in all_classes.items() if n not in placed_classes
-    }
-    remaining_functions = {
-        n: o for n, o in all_functions.items() if n not in placed_functions
-    }
-    if not remaining_classes and not remaining_functions:
+    rem_cls = [o for n, o in ctx.all_classes.items() if n not in ctx.placed_classes]
+    rem_fn = [o for n, o in ctx.all_functions.items() if n not in ctx.placed_functions]
+    if not rem_cls and not rem_fn:
         return []
-
     parts: list[str] = ["---\n", "## Other\n"]
-    for cls in remaining_classes.values():
+    for cls in rem_cls:
         parts.append(_render_class_details(cls))
-    for func in remaining_functions.values():
+    for func in rem_fn:
         parts.append(_render_function_details(func))
     return parts
 
@@ -800,36 +766,19 @@ def render_consolidated_page() -> str:
     all_classes, all_functions = _load_all_members(loader, modules)
     nixl_classes, nixl_functions = _extract_nixl_members(loader)
 
-    placed_classes: set[str] = set()
-    placed_functions: set[str] = set()
-
-    parts: list[str] = _render_header()
-
-    for section in SECTION_DEFS:
-        parts.extend(
-            _render_section(
-                section,
-                all_classes,
-                all_functions,
-                nixl_classes,
-                nixl_functions,
-                placed_classes,
-                placed_functions,
-            )
-        )
-
-    parts.extend(
-        _render_remaining(
-            all_classes,
-            all_functions,
-            placed_classes,
-            placed_functions,
-        )
+    ctx = RenderContext(
+        all_classes=all_classes,
+        all_functions=all_functions,
+        nixl_classes=nixl_classes,
+        nixl_functions=nixl_functions,
     )
 
+    parts: list[str] = _render_header()
+    for section in SECTION_DEFS:
+        parts.extend(_render_section(section, ctx))
+    parts.extend(_render_remaining(ctx))
     parts.append("---\n")
     parts.append("*Source packages: " + ", ".join(f"`{m}`" for m in modules) + "*\n")
-
     return "\n".join(parts)
 
 

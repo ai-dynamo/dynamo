@@ -17,7 +17,18 @@ except ModuleNotFoundError:
     import toml as tomllib  # type: ignore[no-redef]
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _fern_helpers import AUTOGEN_WARNING, REPO_ROOT, SPDX_HEADER
+from _fern_helpers import (  # noqa: E402
+    AUTOGEN_WARNING,
+    REPO_ROOT,
+    SPDX_HEADER,
+    render_card_group,
+)
+
+# Group classification constants
+GROUP_CORE = "core"
+GROUP_SUPPORTING = "supporting"
+GROUP_DEV = "dev"
+GROUP_BINDINGS = "bindings"
 
 CORE_CRATES: set[str] = {
     "dynamo-runtime",
@@ -59,92 +70,100 @@ GITHUB_BASE = "https://github.com/ai-dynamo/dynamo/tree/main"
 
 @dataclass
 class CrateInfo:
+    """Metadata for a single Rust workspace crate."""
+
     name: str
     member_path: str
     description: str
     publish: bool
-    icon: str = ""
-    group: str = ""
+    icon: str
+    group: str
 
 
 def _load_toml(path: Path) -> dict:
-    return tomllib.loads(path.read_text())
+    """Load and parse a TOML file."""
+    try:
+        return tomllib.loads(path.read_text())
+    except Exception as exc:
+        raise RuntimeError(f"Failed to parse {path}: {exc}") from exc
 
 
-def parse_crates(root: Path) -> list[CrateInfo]:
+def _classify_crate(name: str, member_path: str, desc: str) -> str:
+    """Determine which group a crate belongs to."""
+    if "bindings/" in member_path:
+        return GROUP_BINDINGS
+    if name in CORE_CRATES:
+        return GROUP_CORE
+    if any(kw in desc.lower() for kw in ("mock", "test", "bench")):
+        return GROUP_DEV
+    return GROUP_SUPPORTING
+
+
+def parse_and_classify(root: Path) -> dict[str, list[CrateInfo]]:
+    """Parse workspace Cargo.toml and classify crates into groups."""
     ws = _load_toml(root / "Cargo.toml")
     ws_desc = ws.get("workspace", {}).get("package", {}).get("description", "")
     members = list(dict.fromkeys(ws["workspace"]["members"]))
-    crates = []
+
+    groups: dict[str, list[CrateInfo]] = {
+        GROUP_CORE: [],
+        GROUP_SUPPORTING: [],
+        GROUP_DEV: [],
+        GROUP_BINDINGS: [],
+    }
     for m in members:
         pkg = _load_toml(root / m / "Cargo.toml").get("package", {})
         desc = pkg.get("description", ws_desc)
         if isinstance(desc, dict):
             desc = ws_desc
-        crates.append(
-            CrateInfo(
-                name=pkg.get("name", m.split("/")[-1]),
-                member_path=m,
-                description=desc,
-                publish=pkg.get("publish") is not False,
-            )
+        name = pkg.get("name", m.split("/")[-1])
+        group = _classify_crate(name, m, desc)
+        crate = CrateInfo(
+            name=name,
+            member_path=m,
+            description=desc,
+            publish=pkg.get("publish") is not False,
+            icon=CRATE_ICONS.get(name, "regular box"),
+            group=group,
         )
-    return crates
-
-
-def _is_dev(desc: str) -> bool:
-    low = desc.lower()
-    return any(kw in low for kw in ("mock", "test", "bench"))
-
-
-def classify(crates: list[CrateInfo]) -> dict[str, list[CrateInfo]]:
-    groups: dict[str, list[CrateInfo]] = {
-        "core": [],
-        "supporting": [],
-        "dev": [],
-        "bindings": [],
-    }
-    for c in crates:
-        c.icon = CRATE_ICONS.get(c.name, "regular box")
-        if "bindings/" in c.member_path:
-            c.group = "bindings"
-        elif c.name in CORE_CRATES:
-            c.group = "core"
-        elif _is_dev(c.description):
-            c.group = "dev"
-        else:
-            c.group = "supporting"
-        groups[c.group].append(c)
+        groups[group].append(crate)
     return groups
 
 
 def _crate_url(c: CrateInfo, version: str) -> str:
+    """Build the URL for a crate (docs.rs or GitHub source)."""
     if not c.publish:
         return f"{GITHUB_BASE}/{c.member_path}"
     return f"https://docs.rs/{c.name}/{version}"
 
 
-def _render_card(c: CrateInfo, version: str) -> str:
-    url = _crate_url(c, version)
-    return f'  <Card title="{c.name}" icon="{c.icon}" href="{url}">\n    {c.description}\n  </Card>'
-
-
-def _render_card_group(crates: list[CrateInfo], cols: int, version: str) -> str:
-    cards = "\n\n".join(_render_card(c, version) for c in crates)
-    return f"<CardGroup cols={{{cols}}}>\n\n{cards}\n\n</CardGroup>"
+def _crates_to_cards(crates: list[CrateInfo], version: str) -> list[dict[str, str]]:
+    """Convert CrateInfo list to card dicts for render_card_group."""
+    return [
+        {
+            "title": c.name,
+            "icon": c.icon,
+            "href": _crate_url(c, version),
+            "description": c.description,
+        }
+        for c in crates
+    ]
 
 
 def _render_bindings_table() -> str:
-    lines = ["| Crate | Language | Source | Description |", "| --- | --- | --- | --- |"]
+    """Render the bindings section as a Markdown table."""
+    rows = [
+        "| Crate | Language | Source | Description |",
+        "| --- | --- | --- | --- |",
+    ]
     for b in BINDINGS_INFO:
         src = f"[{b['member']}]({GITHUB_BASE}/{b['member']})"
-        lines.append(
-            f"| `{b['name']}` | {b['language']} | {src} | {b['description']} |"
-        )
-    return "\n".join(lines)
+        rows.append(f"| `{b['name']}` | {b['language']} | {src} | {b['description']} |")
+    return "\n".join(rows)
 
 
 def render_page(groups: dict[str, list[CrateInfo]], version: str) -> str:
+    """Render the full Rust API reference page."""
     parts = [
         SPDX_HEADER.format(sidebar_title="Rust API"),
         AUTOGEN_WARNING,
@@ -152,14 +171,14 @@ def render_page(groups: dict[str, list[CrateInfo]], version: str) -> str:
         "NVIDIA Dynamo's core infrastructure is implemented in Rust across multiple workspace crates.",
         "API documentation is hosted on [docs.rs](https://docs.rs) for published crates.\n",
         "## Core Crates\n",
-        _render_card_group(groups["core"], 2, version) + "\n",
+        render_card_group(_crates_to_cards(groups[GROUP_CORE], version), 2),
         "## Supporting Crates\n",
-        _render_card_group(groups["supporting"], 3, version) + "\n",
+        render_card_group(_crates_to_cards(groups[GROUP_SUPPORTING], version), 3),
     ]
-    if groups["dev"]:
+    if groups[GROUP_DEV]:
         parts += [
             "## Development & Testing\n",
-            _render_card_group(groups["dev"], 3, version) + "\n",
+            render_card_group(_crates_to_cards(groups[GROUP_DEV], version), 3),
         ]
     parts += [
         "## Bindings\n",
@@ -173,6 +192,7 @@ def render_page(groups: dict[str, list[CrateInfo]], version: str) -> str:
 
 
 def main() -> None:
+    """Entry point: parse args and generate the Rust API reference page."""
     parser = argparse.ArgumentParser(description="Generate Rust API reference page")
     parser.add_argument("--version", default="latest")
     parser.add_argument(
@@ -180,8 +200,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    crates = parse_crates(REPO_ROOT)
-    groups = classify(crates)
+    groups = parse_and_classify(REPO_ROOT)
     content = render_page(groups, args.version)
 
     args.output_dir.mkdir(parents=True, exist_ok=True)

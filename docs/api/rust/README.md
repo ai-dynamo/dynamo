@@ -15,79 +15,61 @@ API documentation is hosted on [docs.rs](https://docs.rs) for published crates.
 ## Core Crates
 
 <CardGroup cols={2}>
-
   <Card title="dynamo-llm" icon="regular brain" href="https://docs.rs/dynamo-llm/latest">
     Dynamo LLM Library
   </Card>
-
   <Card title="dynamo-runtime" icon="regular microchip" href="https://docs.rs/dynamo-runtime/latest">
     Dynamo Runtime Library
   </Card>
-
   <Card title="dynamo-kv-router" icon="regular route" href="https://docs.rs/dynamo-kv-router/latest">
     KV Router - Radix tree for LLM KV cache routing
   </Card>
-
   <Card title="dynamo-memory" icon="regular memory" href="https://docs.rs/dynamo-memory/latest">
     Memory management library for Dynamo
   </Card>
-
   <Card title="kvbm-logical" icon="regular cubes" href="https://docs.rs/kvbm-logical/latest">
     Dynamo Inference Framework
   </Card>
-
 </CardGroup>
 
 ## Supporting Crates
 
 <CardGroup cols={3}>
-
   <Card title="dynamo-config" icon="regular gear" href="https://docs.rs/dynamo-config/latest">
     Dynamo Inference Framework
   </Card>
-
   <Card title="dynamo-tokens" icon="regular key" href="https://docs.rs/dynamo-tokens/latest">
     Token management tools
   </Card>
-
   <Card title="kvbm-common" icon="regular box" href="https://docs.rs/kvbm-common/latest">
     Dynamo Inference Framework
   </Card>
-
   <Card title="kvbm-kernels" icon="regular microchip" href="https://docs.rs/kvbm-kernels/latest">
     Dynamo Inference Framework
   </Card>
-
   <Card title="kvbm-physical" icon="regular box" href="https://docs.rs/kvbm-physical/latest">
     Dynamo Inference Framework
   </Card>
-
   <Card title="dynamo-async-openai" icon="regular globe" href="https://docs.rs/dynamo-async-openai/latest">
     Fork of async-openai customized for Dynamo.
   </Card>
-
   <Card title="dynamo-parsers" icon="regular code" href="https://docs.rs/dynamo-parsers/latest">
     Dynamo Parser Library for Tool Calling and Reasoning
   </Card>
-
   <Card title="velo-events" icon="regular box" href="https://docs.rs/velo-events/latest">
     Dynamo Inference Framework
   </Card>
-
 </CardGroup>
 
 ## Development & Testing
 
 <CardGroup cols={3}>
-
   <Card title="dynamo-mocker" icon="regular vial" href="https://docs.rs/dynamo-mocker/latest">
     Mock LLM scheduler and KV manager for testing
   </Card>
-
   <Card title="dynamo-bench" icon="regular gauge-high" href="https://docs.rs/dynamo-bench/latest">
     Lightweight HTTP benchmarks for Dynamo endpoints
   </Card>
-
 </CardGroup>
 
 ## Bindings

@@ -27,10 +27,18 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _fern_helpers import REPO_ROOT, escape_jsx_attr, render_details  # noqa: E402
+from _fern_helpers import (  # noqa: E402
+    REPO_ROOT,
+    escape_jsx_attr,
+    render_card_group,
+    render_details,
+)
 
 DEFAULT_INPUT = REPO_ROOT / "docs" / "kubernetes" / "api-reference.md"
 
+# Hardcoded metadata for known CRD resources. The 'src' paths are cached here
+# to avoid filesystem discovery for the common case. Unknown resources fall back
+# to _discover_go_source() for auto-discovery.
 RESOURCE_META: dict[str, dict[str, str]] = {
     "DynamoCheckpoint": {
         "icon": "regular database",
@@ -77,27 +85,32 @@ _DEFAULT_DESC = "Custom resource for the Dynamo operator."
 # ---------------------------------------------------------------------------
 
 
+def _build_go_source_index() -> dict[str, Path]:
+    """Build a filename→Path index of Go type files under deploy/operator/api/."""
+    index: dict[str, Path] = {}
+    if not OPERATOR_DIR.exists():
+        return index
+    for f in OPERATOR_DIR.glob("api/*/*.go"):
+        index[f.name] = f
+    return index
+
+
+# Cached once at import time to avoid repeated glob per resource
+_GO_SOURCE_INDEX = _build_go_source_index()
+
+
 def _discover_go_source(resource_name: str) -> str:
     """Find the Go source file for a resource type by naming convention."""
-    if not OPERATOR_DIR.exists():
-        return ""
-
     name_lower = resource_name.lower()
     base = name_lower.removeprefix("dynamo")
 
-    patterns = [
+    for pattern in (
         f"{name_lower}_types.go",
         f"dynamo_{base}_types.go",
         f"{base}_types.go",
-    ]
-
-    for api_dir in sorted(OPERATOR_DIR.glob("api/*")):
-        if not api_dir.is_dir():
-            continue
-        for pattern in patterns:
-            candidate = api_dir / pattern
-            if candidate.exists():
-                return str(candidate.relative_to(OPERATOR_DIR))
+    ):
+        if pattern in _GO_SOURCE_INDEX:
+            return str(_GO_SOURCE_INDEX[pattern].relative_to(OPERATOR_DIR))
     return ""
 
 
@@ -114,16 +127,15 @@ def _extract_resource_description(
     heading_re = re.compile(rf"^####\s+{re.escape(resource_name)}\s*$")
     in_resource = False
     for i in range(start, end):
-        line = lines[i]
-        if heading_re.match(line):
+        if heading_re.match(lines[i]):
             in_resource = True
             continue
         if not in_resource:
             continue
-        stripped = line.strip()
-        if stripped and not stripped.startswith("_") and not stripped.startswith("|"):
-            return stripped[:77] + "..." if len(stripped) > 80 else stripped
-        if stripped.startswith("#"):
+        desc = _first_content_line(lines[i : i + 1])
+        if desc:
+            return desc[:77] + "..." if len(desc) > 80 else desc
+        if lines[i].strip().startswith("#"):
             break
     return ""
 
@@ -243,20 +255,20 @@ def _build_resource_card_group(
     if not all_resources:
         return []
 
-    output: list[str] = []
-    cols = min(len(all_resources), 3)
-    output.append(f"<CardGroup cols={{{cols}}}>\n\n")
-
+    cards = []
     for name in all_resources:
         meta = _resolve_resource_meta(name, md_lines, v1a_range, v1b_range)
-        href = f' href="{OPERATOR_SRC}/{meta["src"]}"' if meta["src"] else ""
-        output.append(
-            f'  <Card title="{name}" icon="{meta["icon"]}"{href}>\n'
-            f'    {meta["desc"]}\n'
-            f"  </Card>\n\n"
+        href = f"{OPERATOR_SRC}/{meta['src']}" if meta["src"] else ""
+        cards.append(
+            {
+                "title": name,
+                "icon": meta["icon"],
+                "description": meta["desc"],
+                "href": href,
+            }
         )
-    output.append("</CardGroup>\n\n")
-    return output
+    cols = min(len(all_resources), 3)
+    return [render_card_group(cards, cols), "\n"]
 
 
 def _resolve_resource_meta(
@@ -330,41 +342,22 @@ def _assemble_document(
 def fernify(input_path: Path) -> str:
     """Reformat the K8s API reference with Fern components."""
     lines = input_path.read_text().splitlines(keepends=True)
-    # Ensure last line has a newline
     if lines and not lines[-1].endswith("\n"):
         lines[-1] += "\n"
 
     sections = _parse_sections(lines)
-    v1a_range = sections["v1alpha1"]
-    v1b_range = sections["v1beta1"]
+    v1a_range, v1b_range = sections["v1alpha1"], sections["v1beta1"]
+    v1a_res = _find_resource_types(lines, *v1a_range)
+    v1b_res = _find_resource_types(lines, *v1b_range)
 
-    v1alpha1_resources = _find_resource_types(lines, *v1a_range)
-    v1beta1_resources = _find_resource_types(lines, *v1b_range)
-
-    print(
-        f"  v1alpha1: {len(v1alpha1_resources)} resources, types {v1a_range[0]}-{v1a_range[1]}"
-    )
-    print(
-        f"  v1beta1: {len(v1beta1_resources)} resources, types {v1b_range[0]}-{v1b_range[1]}"
-    )
+    print(f"  v1alpha1: {len(v1a_res)} resources, types {v1a_range[0]}-{v1a_range[1]}")
+    print(f"  v1beta1: {len(v1b_res)} resources, types {v1b_range[0]}-{v1b_range[1]}")
 
     card_group = _build_resource_card_group(
-        v1alpha1_resources,
-        v1beta1_resources,
-        lines,
-        v1a_range,
-        v1b_range,
+        v1a_res, v1b_res, lines, v1a_range, v1b_range
     )
-
-    tabbed_content = _build_tabbed_content(
-        lines,
-        v1a_range,
-        v1b_range,
-        v1alpha1_resources,
-        v1beta1_resources,
-    )
-
-    return _assemble_document(lines, sections, card_group, tabbed_content)
+    tabbed = _build_tabbed_content(lines, v1a_range, v1b_range, v1a_res, v1b_res)
+    return _assemble_document(lines, sections, card_group, tabbed)
 
 
 # ---------------------------------------------------------------------------

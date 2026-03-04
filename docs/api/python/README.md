@@ -12,43 +12,33 @@ sidebar-title: Python API
 This page documents the public Python API for NVIDIA Dynamo. Classes and functions are organized by functional area. Expand any item to see its full API.
 
 <CardGroup cols={3}>
-
   <Card title="Runtime Core" icon="regular microchip" href="#runtime-core">
     Core runtime primitives for building distributed Dynamo applications.
   </Card>
-
   <Card title="HTTP and gRPC Services" icon="regular globe" href="#http-and-grpc-services">
     Network service wrappers for exposing models via HTTP (OpenAI-compatible) and gRPC (KServe).
   </Card>
-
   <Card title="Model Management" icon="regular cube" href="#model-management">
     Register, unregister, and fetch models from the distributed runtime.
   </Card>
-
   <Card title="KV Cache Routing" icon="regular route" href="#kv-cache-routing">
     KV-aware routing for prefix-optimized request placement across workers.
   </Card>
-
   <Card title="KV Cache Memory" icon="regular memory" href="#kv-cache-memory">
     Block-level KV cache memory management.
   </Card>
-
   <Card title="KV Events and Metrics" icon="regular chart-line" href="#kv-events-and-metrics">
     Publish KV cache events and worker load metrics for routing decisions.
   </Card>
-
   <Card title="Planner" icon="regular arrows-split-up-and-left" href="#planner">
     Scaling connectors and decision types for the Dynamo Planner.
   </Card>
-
   <Card title="NIXL Connect" icon="regular network-wired" href="#nixl-connect">
     RDMA-based data transfer operations via the NIXL library.
   </Card>
-
   <Card title="Configuration and Utilities" icon="regular gear" href="#configuration-and-utilities">
     Engine configuration, entrypoint arguments, and shared enums.
   </Card>
-
 </CardGroup>
 
 ---
