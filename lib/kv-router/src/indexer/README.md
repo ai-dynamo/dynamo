@@ -2,6 +2,101 @@
 
 This document explains the KV cache index implementations: `RadixTree` (and its concurrent variant `ConcurrentRadixTree`) and `PositionalIndexer` (NestedMap).
 
+## Module Map
+
+```
+indexer/
+├── mod.rs                 Re-exports, module declarations
+├── traits.rs              KvIndexerInterface (async) + SyncIndexer (sync) traits
+├── types.rs               KvRouterError, MatchRequest, WorkerTask, etc.
+├── metrics.rs             KvIndexerMetrics (Prometheus counters/histograms)
+│
+│   ╔══════════════════════════════════════════════════════════════════╗
+│   ║                    Indexer Implementations                      ║
+│   ╠══════════════════════════════════════════════════════════════════╣
+│   ║                                                                 ║
+│   ║  ┌─────────────────────────────────────────────────────────┐    ║
+│   ║  │ kv_indexer.rs  (KvIndexer)                              │    ║
+│   ║  │   Single-threaded async wrapper around RadixTree.       │    ║
+│   ║  │   Uses tokio mpsc channels for events + match requests. │    ║
+│   ║  │   Owns: RadixTree, PruneManager                        │    ║
+│   ║  └───────────────────────┬─────────────────────────────────┘    ║
+│   ║                          │ wraps                                ║
+│   ║  ┌───────────────────────▼─────────────────────────────────┐    ║
+│   ║  │ radix_tree.rs  (RadixTree)                              │    ║
+│   ║  │   Single-threaded tree: Rc<RefCell<RadixBlock>> nodes.  │    ║
+│   ║  │   Tracks per-block frequency via recent_uses.           │    ║
+│   ║  └─────────────────────────────────────────────────────────┘    ║
+│   ║                                                                 ║
+│   ║  ┌─────────────────────────────────────────────────────────┐    ║
+│   ║  │ sharded.rs  (KvIndexerSharded)                          │    ║
+│   ║  │   N independent RadixTree shards, each in its own       │    ║
+│   ║  │   OS thread. Workers sticky-assigned to shards.         │    ║
+│   ║  │   Match requests scatter-gather across all shards.      │    ║
+│   ║  │   Owns: N × (RadixTree + PruneManager)                 │    ║
+│   ║  └─────────────────────────────────────────────────────────┘    ║
+│   ║                                                                 ║
+│   ║  ┌─────────────────────────────────────────────────────────┐    ║
+│   ║  │ thread_pool.rs  (ThreadPoolIndexer<T: SyncIndexer>)     │    ║
+│   ║  │   Generic wrapper: N OS threads for sticky-routed       │    ║
+│   ║  │   writes, inline reads on caller thread.                │    ║
+│   ║  │   Wraps any SyncIndexer backend:                        │    ║
+│   ║  │     • ConcurrentRadixTree                               │    ║
+│   ║  │     • PositionalIndexer                                 │    ║
+│   ║  └───────────────────────┬─────────────────────────────────┘    ║
+│   ║                          │ wraps (via SyncIndexer trait)        ║
+│   ║          ┌───────────────┴───────────────┐                      ║
+│   ║          ▼                               ▼                      ║
+│   ║  ┌───────────────────┐   ┌──────────────────────────────┐      ║
+│   ║  │ concurrent_       │   │ positional.rs                │      ║
+│   ║  │ radix_tree.rs     │   │ (PositionalIndexer)          │      ║
+│   ║  │                   │   │                              │      ║
+│   ║  │ Arc<RwLock<Block>> │   │ DashMap<(pos, hash), entry> │      ║
+│   ║  │ + DashMap lookup  │   │ Jump optimization (skip J)   │      ║
+│   ║  │ No frequency      │   │ Lazy hash optimization       │      ║
+│   ║  │ tracking (reads   │   │                              │      ║
+│   ║  │ are pure reads)   │   │                              │      ║
+│   ║  └───────────────────┘   └──────────────────────────────┘      ║
+│   ║                                                                 ║
+│   ╚══════════════════════════════════════════════════════════════════╝
+│
+├── local.rs               LocalKvIndexer: thin wrapper around KvIndexer
+│                            with a circular event buffer (for worker-side
+│                            decentralized routing)
+│
+├── pruning.rs             PruneManager: TTL-based expiration + size-based
+│                            pruning via BinaryHeap<BlockEntry>
+│
+├── naive.rs               NaiveIndexers (bench-only): brute-force baselines
+│
+└── tests.rs               Integration tests for all indexer variants
+```
+
+### Data Flow
+
+```
+ Engine (vLLM/TRT-LLM/SGLang)
+     │
+     │ KV cache events (store/remove blocks)
+     ▼
+ publisher.rs ──ZMQ/NATS──▶ KvIndexer / ThreadPoolIndexer
+                                │
+                                │  apply_event() → updates tree
+                                │
+ Incoming request               │
+     │                          │
+     ▼                          ▼
+ scheduler.rs ──find_matches()──▶ RadixTree / ConcurrentRadixTree / PositionalIndexer
+     │                                    │
+     │◀── OverlapScores {worker → depth} ─┘
+     │
+     ▼
+ selector.rs ── picks best worker (overlap + load + capacity)
+     │
+     ▼
+ Routed request → chosen worker
+```
+
 The concurrent indexers achieve a combined throughput of over **10 million events + requests per second** with **p99 latency under 10 microseconds**.
 
 ## Motivation: The Four Block Identifiers
