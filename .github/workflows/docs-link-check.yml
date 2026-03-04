@@ -28,7 +28,6 @@ jobs:
       - name: Check documentation links with lychee
         uses: lycheeverse/lychee-action@v2
         with:
-          # TODO(DYN-2310): remove exclusion of ./lib/velo-events/README.md (dead Google Drive link)
           args: >-
             --cache
             --no-progress
@@ -38,7 +37,6 @@ jobs:
             --root-dir ${{ github.workspace }}
             --exclude-path ".*ATTRIBUTIONS.*"
             --exclude-path "./lib/llm/tests/data/.*"
-            --exclude-path "./lib/velo-events/README.md"
             --accept "200..=299, 403, 429"
             --exclude-all-private
             --exclude 0.0.0.0
