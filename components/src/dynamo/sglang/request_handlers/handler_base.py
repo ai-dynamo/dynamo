@@ -375,7 +375,9 @@ class BaseWorkerHandler(BaseGenerativeHandler):
             return dataclasses.asdict(result)
         if isinstance(result, dict):
             return result
-        return {"result": result}
+        if isinstance(result, (str, int, float, bool)):
+            return {"result": result}
+        return {"result": str(result)}
 
     async def call_tokenizer_manager(self, body: dict) -> dict:
         """Generic passthrough to any tokenizer_manager method.
@@ -409,7 +411,7 @@ class BaseWorkerHandler(BaseGenerativeHandler):
         result = await method(*args, **kwargs)
         return self._normalize_result(result)
 
-    async def get_weight_version(self, body: dict) -> dict:
+    async def get_weight_version(self, _body: dict) -> dict:
         """Get the current weight version."""
         return {
             "weight_version": self.engine.tokenizer_manager.server_args.weight_version,

@@ -29,6 +29,7 @@ pytestmark = [
 # Stub out native / heavy imports, then load handler_base directly from file
 # ---------------------------------------------------------------------------
 
+
 class _StubModule(ModuleType):
     """Module stub that returns MagicMock for any unknown attribute."""
 
@@ -67,7 +68,13 @@ for _mod in [
 # which re-exports every handler and triggers a huge import chain.
 _REPO = Path(__file__).resolve().parent.parent
 _handler_base_path = (
-    _REPO / "components" / "src" / "dynamo" / "sglang" / "request_handlers" / "handler_base.py"
+    _REPO
+    / "components"
+    / "src"
+    / "dynamo"
+    / "sglang"
+    / "request_handlers"
+    / "handler_base.py"
 )
 _spec = importlib.util.spec_from_file_location(
     "dynamo.sglang.request_handlers.handler_base", _handler_base_path
@@ -243,6 +250,11 @@ class TestNormalizeResult:
         assert self.handler._normalize_result(42) == {"result": 42}
         assert self.handler._normalize_result("text") == {"result": "text"}
 
+    def test_non_serializable_falls_back_to_str(self):
+        obj = object()
+        result = self.handler._normalize_result(obj)
+        assert result == {"result": str(obj)}
+
 
 # ---------------------------------------------------------------------------
 # call_tokenizer_manager
@@ -256,9 +268,7 @@ class TestCallTokenizerManager:
     @pytest.mark.asyncio
     async def test_method_only(self):
         """Calling with just 'method', no args/kwargs."""
-        self.handler.engine.tokenizer_manager.flush_cache = AsyncMock(
-            return_value=None
-        )
+        self.handler.engine.tokenizer_manager.flush_cache = AsyncMock(return_value=None)
 
         result = await self.handler.call_tokenizer_manager({"method": "flush_cache"})
 
