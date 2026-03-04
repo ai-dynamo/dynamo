@@ -158,7 +158,7 @@ def is_mocker_enabled(dgdr: DynamoGraphDeploymentRequestSpec) -> bool:
     return (
         dgdr.features is not None
         and dgdr.features.mocker is not None
-        and dgdr.features.mocker.enabled
+        and dgdr.features.mocker.enabled is True
     )
 
 

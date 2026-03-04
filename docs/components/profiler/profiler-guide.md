@@ -64,7 +64,7 @@ flowchart TD
 
 4. **DGD Generation**: The picked configuration is rendered into a complete DGD YAML via AIC's generator pipeline, including correct parallelization, replica counts, container image, and PVC mounts.
 
-5. **Interpolation** (throughput planenr/mocker): When the planner is enabled, the profiler generates detailed performance interpolation curves — TTFT vs ISL for prefill, ITL vs KV-cache utilization for decode. These are stored as NPZ files and later packaged into a ConfigMap during final assembly.
+5. **Interpolation** (throughput planner/mocker): When the planner is enabled, the profiler generates detailed performance interpolation curves — TTFT vs ISL for prefill, ITL vs KV-cache utilization for decode. These are stored as NPZ files and later packaged into a ConfigMap during final assembly.
 
 6. **Final Assembly** (3 composable layers):
    1. **Mocker base**: If mocker is enabled, the base DGD is swapped for the mocker DGD template (`generate_mocker_config`). Otherwise the AIC-picked DGD is kept.

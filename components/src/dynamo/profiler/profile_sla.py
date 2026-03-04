@@ -45,6 +45,7 @@ from dynamo.profiler.utils.profile_common import (
     ProfilerOperationalConfig,
     determine_picking_mode,
     is_planner_enabled,
+    needs_profile_data,
     picked_config_from_row,
     resolve_model_path,
     warn_and_update_sla,
@@ -65,27 +66,6 @@ def _check_auto_backend_support(model: str, system: str) -> bool:
     return any(
         check_model_hardware_support(model, system, b) for b in _CONCRETE_BACKENDS
     )
-
-
-def _needs_interpolation(dgdr: DynamoGraphDeploymentRequestSpec) -> bool:
-    """True when interpolation data will actually be consumed.
-
-    Only throughput-based scaling and the mocker backend use the
-    per-engine performance curves produced by ``run_interpolation``.
-    Load-based scaling does not require them.
-    """
-    if dgdr.features is None:
-        return False
-
-    planner = dgdr.features.planner
-    if planner and planner.enable_throughput_scaling:
-        return True
-
-    mocker = dgdr.features.mocker
-    if mocker and mocker.enabled:
-        return True
-
-    return False
 
 
 def _extract_profiler_params(dgdr: DynamoGraphDeploymentRequestSpec) -> tuple:
@@ -350,7 +330,7 @@ async def run_profile(
         # Interpolation curves — only needed when something consumes
         # the per-engine performance data (throughput scaling or mocker).
         # ---------------------------------------------------------------
-        if not ops.dry_run and dgd_config and _needs_interpolation(dgdr):
+        if not ops.dry_run and dgd_config and needs_profile_data(dgdr):
             try:
                 model_cfg = get_model_config_from_model_path(resolve_model_path(dgdr))
                 sweep_max_context_length = model_cfg.get("max_position_embeddings", 0)
