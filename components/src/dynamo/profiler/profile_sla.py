@@ -44,7 +44,6 @@ from dynamo.profiler.utils.dgdr_validate import (
 from dynamo.profiler.utils.profile_common import (
     ProfilerOperationalConfig,
     determine_picking_mode,
-    is_planner_enabled,
     needs_profile_data,
     picked_config_from_row,
     resolve_model_path,
