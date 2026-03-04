@@ -1,0 +1,122 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# API Docs Freshness Check
+#
+# Ensures committed API reference pages stay in sync with source code.
+# Follows the same pattern as deploy/operator/Makefile `make check`:
+# regenerate in-place, check git status, fail if dirty.
+#
+# Default: advisory (::warning). Set repository variable
+# API_DOCS_FRESHNESS_STRICT=true to make it a hard failure.
+
+name: API Docs Freshness
+
+on:
+  pull_request:
+    paths:
+      # Python API sources
+      - 'components/src/dynamo/**/*.py'
+      - 'lib/bindings/python/src/dynamo/**/*.py'
+      # Rust API sources
+      - 'lib/**/Cargo.toml'
+      - 'Cargo.toml'
+
+permissions:
+  contents: read
+
+jobs:
+  detect-changes:
+    name: Detect source changes
+    runs-on: ubuntu-latest
+    outputs:
+      python: ${{ steps.filter.outputs.python }}
+      rust: ${{ steps.filter.outputs.rust }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            python:
+              - 'components/src/dynamo/**/*.py'
+              - 'lib/bindings/python/src/dynamo/**/*.py'
+            rust:
+              - 'lib/**/Cargo.toml'
+              - 'Cargo.toml'
+
+  check-python-api:
+    name: Python API Docs Freshness
+    needs: detect-changes
+    if: needs.detect-changes.outputs.python == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: pip install -r docs/scripts/requirements-apidocs.txt
+      - name: Regenerate Python API docs
+        run: python3 docs/scripts/generate_python_api.py
+      - name: Check for uncommitted changes
+        env:
+          STRICT: ${{ vars.API_DOCS_FRESHNESS_STRICT }}
+        run: |
+          if [ -n "$(git status --porcelain docs/api/python/)" ]; then
+            echo "Python API docs are stale after regeneration."
+            echo ""
+            git --no-pager status docs/api/python/
+            git --no-pager diff docs/api/python/
+            echo ""
+            echo "To fix:"
+            echo "  pip install -r docs/scripts/requirements-apidocs.txt"
+            echo "  python3 docs/scripts/generate_python_api.py"
+            echo "  git add docs/api/python/README.md && git commit -s -m 'docs: regenerate Python API reference'"
+            if [ "$STRICT" = "true" ]; then
+              echo "::error::Python API docs are stale. Run: python3 docs/scripts/generate_python_api.py"
+              exit 1
+            else
+              echo "::warning::Python API docs are stale. Run: python3 docs/scripts/generate_python_api.py"
+            fi
+          else
+            echo "Python API docs are up to date."
+          fi
+
+  check-rust-api:
+    name: Rust API Docs Freshness
+    needs: detect-changes
+    if: needs.detect-changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: pip install -r docs/scripts/requirements-apidocs.txt
+      - name: Regenerate Rust API docs
+        run: python3 docs/scripts/generate_rust_api.py
+      - name: Check for uncommitted changes
+        env:
+          STRICT: ${{ vars.API_DOCS_FRESHNESS_STRICT }}
+        run: |
+          if [ -n "$(git status --porcelain docs/api/rust/)" ]; then
+            echo "Rust API docs are stale after regeneration."
+            echo ""
+            git --no-pager status docs/api/rust/
+            git --no-pager diff docs/api/rust/
+            echo ""
+            echo "To fix:"
+            echo "  pip install -r docs/scripts/requirements-apidocs.txt"
+            echo "  python3 docs/scripts/generate_rust_api.py"
+            echo "  git add docs/api/rust/README.md && git commit -s -m 'docs: regenerate Rust API reference'"
+            if [ "$STRICT" = "true" ]; then
+              echo "::error::Rust API docs are stale. Run: python3 docs/scripts/generate_rust_api.py"
+              exit 1
+            else
+              echo "::warning::Rust API docs are stale. Run: python3 docs/scripts/generate_rust_api.py"
+            fi
+          else
+            echo "Rust API docs are up to date."
+          fi

@@ -104,22 +104,6 @@ jobs:
       - name: Validate Fern configuration
         run: fern check
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      - name: Check API docs freshness
-        # Advisory only — emits ::warning annotations but does not fail the job.
-        # This lets contributors know their PR needs a docs regeneration without
-        # blocking merges for unrelated changes.
-        run: |
-          pip install -r docs/scripts/requirements-apidocs.txt
-          python3 docs/scripts/generate_python_api.py --output-dir /tmp/api-check/python
-          python3 docs/scripts/generate_rust_api.py --output-dir /tmp/api-check/rust
-          diff docs/api/python/README.md /tmp/api-check/python/README.md || echo "::warning::Python API docs are stale. Run: python3 docs/scripts/generate_python_api.py"
-          diff docs/api/rust/README.md /tmp/api-check/rust/README.md || echo "::warning::Rust API docs are stale. Run: python3 docs/scripts/generate_rust_api.py"
-
   fern-broken-links:
     name: Fern Broken Links Check
     needs: changed-files
