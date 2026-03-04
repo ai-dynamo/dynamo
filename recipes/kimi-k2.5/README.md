@@ -2,13 +2,18 @@
 
 Deployment recipe for **Kimi-K2.5** using TensorRT-LLM with Dynamo's KV-aware routing.
 
-> **Note:** Support for the official **`nvidia/Kimi-K2.5-NVFP4`** checkpoint is in progress and will be added soon. The current recipe uses **`baseten-admin/Kimi-2.5-text-nvfp4-v3`**, a text-only variant where users can experience Kimi-K2.5 and its tool calling and reasoning capabilities.
-
 ## Available Configurations
 
-| Configuration | GPUs | Mode | Description |
-|--------------|------|------|-------------|
-| [**trtllm/agg**](trtllm/agg/) | 8x GPU | Aggregated | TP8, EP8, KV-aware routing |
+There are two model weight variants, each with its own model download and deploy manifests:
+
+| Variant | Model | Deploy Configs | Notes |
+|---------|-------|---------------|-------|
+| **nvidia** 🚧 | `nvidia/Kimi-K2.5-NVFP4` | [`deploy.yaml`](trtllm/agg/nvidia/deploy.yaml), [`deploy-kvbm.yaml`](trtllm/agg/nvidia/deploy-kvbm.yaml) | Requires a [patched image](trtllm/agg/nvidia/patch/) |
+| **baseten** | `baseten-admin/Kimi-2.5-text-nvfp4-v3` | [`deploy.yaml`](trtllm/agg/baseten/deploy.yaml) | Works with the stock image |
+
+All configurations use TP8, EP8, aggregated mode with KV-aware routing.
+
+The **nvidia** variant also has a KVBM (KV Block Manager) deploy that enables CPU-offloaded KV cache via `deploy-kvbm.yaml`.
 
 ## Prerequisites
 
@@ -16,7 +21,7 @@ Deployment recipe for **Kimi-K2.5** using TensorRT-LLM with Dynamo's KV-aware ro
 2. **GPU cluster** with B200 GPUs (8x per worker)
 3. **HuggingFace token** with access to the model
 
-## Quick Start
+## Quick Start (nvidia variant)
 
 ```bash
 # Set namespace
@@ -29,12 +34,19 @@ kubectl create secret generic hf-token-secret \
   -n ${NAMESPACE}
 
 # Download model (update storageClassName in model-cache/model-cache.yaml first!)
-kubectl apply -f model-cache/ -n ${NAMESPACE}
+kubectl apply -f model-cache/nvidia/ -n ${NAMESPACE}
 kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=3600s
 
+# Patch the container image (required for nvidia weights)
+cd trtllm/agg/nvidia/patch
+./patch-container.sh nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag
+cd -
+
 # Deploy
-kubectl apply -f trtllm/agg/deploy.yaml -n ${NAMESPACE}
+kubectl apply -f trtllm/agg/nvidia/deploy.yaml -n ${NAMESPACE}
 ```
+
+For baseten weights, use `model-cache/baseten/` and `trtllm/agg/baseten/deploy.yaml` instead — no image patch needed.
 
 ## Test the Deployment
 
@@ -46,7 +58,7 @@ kubectl port-forward svc/kimi-k25-agg-frontend 8000:8000 -n ${NAMESPACE}
 curl http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "baseten-admin/Kimi-2.5-text-nvfp4-v3",
+    "model": "nvidia/Kimi-K2.5-NVFP4",
     "messages": [{"role": "user", "content": "Hello!"}],
     "max_tokens": 100
   }'
@@ -54,11 +66,11 @@ curl http://localhost:8000/v1/chat/completions \
 
 ## Model Details
 
-- **Model**: `baseten-admin/Kimi-2.5-text-nvfp4-v3` (NV FP4 quantized, text-only)
+- **Model**: `nvidia/Kimi-K2.5-NVFP4` (NV FP4 quantized, text-only)
 - **Architecture**: MoE (Mixture-of-Experts), based on DeepSeek-V3 architecture
 - **Backend**: TensorRT-LLM (PyTorch backend)
 - **Parallelism**: TP8, EP8 (Expert Parallel)
-- **Features**: Reasoning (chain-of-thought), tool calling (function calling)
+
 
 ## Hardware Requirements
 
@@ -74,7 +86,7 @@ The deployment uses `--dyn-reasoning-parser kimi_k25` to extract the model's cha
 curl -s http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "baseten-admin/Kimi-2.5-text-nvfp4-v3",
+    "model": "nvidia/Kimi-K2.5-NVFP4",
     "messages": [{"role": "user", "content": "What is 2+2? Answer briefly."}],
     "max_tokens": 200
   }' | python3 -m json.tool
@@ -111,7 +123,7 @@ The deployment uses `--dyn-tool-call-parser kimi_k2` to extract function calls i
 curl -s http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "baseten-admin/Kimi-2.5-text-nvfp4-v3",
+    "model": "nvidia/Kimi-K2.5-NVFP4",
     "messages": [{"role": "user", "content": "What is the weather in San Francisco?"}],
     "tools": [{
       "type": "function",
@@ -167,3 +179,4 @@ If `tool_calls` is missing with raw `<|tool_calls_section_begin|>` tokens in `co
 ## Notes
 
 - Update `storageClassName` in `model-cache/model-cache.yaml` before deploying
+- The nvidia variant requires a [patched TensorRT-LLM image](trtllm/agg/nvidia/patch/) until Kimi K2.5 support lands upstream

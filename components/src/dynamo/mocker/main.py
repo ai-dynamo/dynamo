@@ -4,6 +4,7 @@
 # Usage: `python -m dynamo.mocker --model-path /data/models/Qwen3-0.6B`
 # Now supports vLLM-style individual arguments for MockEngineArgs
 
+import argparse
 import asyncio
 import json
 import logging
@@ -135,7 +136,7 @@ def compute_stagger_delay(num_workers: int, stagger_delay: float) -> float:
         return 0.2
 
 
-async def launch_workers(args, extra_engine_args_path):
+async def launch_workers(args: argparse.Namespace, extra_engine_args_path: Path):
     """Launch mocker worker(s) with isolated DistributedRuntime instances.
 
     Each worker gets its own DistributedRuntime, which means:
@@ -185,7 +186,9 @@ async def launch_workers(args, extra_engine_args_path):
         runtimes.append(runtime)
 
         # Determine which engine args file to use
+        worker_engine_args_path: Path | str
         if needs_per_worker_args:
+            assert base_engine_args is not None
             worker_args = base_engine_args.copy()
             if args.bootstrap_ports_list:
                 worker_args["bootstrap_port"] = args.bootstrap_ports_list[worker_id]
@@ -195,9 +198,9 @@ async def launch_workers(args, extra_engine_args_path):
                 ]
             with tempfile.NamedTemporaryFile(
                 mode="w", suffix=".json", delete=False
-            ) as f:
-                json.dump(worker_args, f)
-                worker_engine_args_path = Path(f.name)
+            ) as tmp:
+                json.dump(worker_args, tmp)
+                worker_engine_args_path = Path(tmp.name)
             per_worker_temp_files.append(worker_engine_args_path)
             logger.debug(f"Worker {worker_id}: per-worker args {worker_args}")
         else:
@@ -209,7 +212,7 @@ async def launch_workers(args, extra_engine_args_path):
             model_path=args.model_path,
             model_name=args.model_name,
             endpoint_id=args.endpoint,
-            extra_engine_args=worker_engine_args_path,
+            extra_engine_args=str(worker_engine_args_path),
             is_prefill=args.is_prefill_worker,
         )
 

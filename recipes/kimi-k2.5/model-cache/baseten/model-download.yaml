@@ -23,7 +23,7 @@ spec:
                 name: hf-token-secret
           env:
             - name: MODEL_NAME
-              value: baseten-admin/Kimi-2.5-text-nvfp4-v3  #  text-only variant
+              value: baseten-admin/Kimi-2.5-text-nvfp4-v3
             - name: HF_HOME
               value: /model-store
             - name: HF_HUB_ENABLE_HF_TRANSFER

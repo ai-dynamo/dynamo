@@ -15,6 +15,7 @@ FROM aws AS local-dev
 ENV USERNAME=dynamo
 ARG USER_UID
 ARG USER_GID
+ARG DEVICE
 
 # rustup is already at /home/dynamo/.rustup from the dev stage (COPY --from=wheel_builder
 # with --chown=dynamo:0 --chmod=775), so no re-copy needed here.

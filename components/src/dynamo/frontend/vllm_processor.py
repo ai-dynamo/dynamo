@@ -37,7 +37,7 @@ from dynamo.llm import (
     RouterMode,
     fetch_model,
 )
-from dynamo.runtime import DistributedRuntime
+from dynamo.runtime import Client, DistributedRuntime
 
 from .prepost import (
     StreamingPostProcessor,
@@ -114,6 +114,7 @@ def _init_worker(
 ) -> None:
     """Initialize a worker process with its own VllmConfig and InputProcessor."""
     global _w_input_processor, _w_tokenizer, _w_tool_parser_class
+    global _w_reasoning_parser_class
 
     model_config = ModelConfig(
         model=model_path,
@@ -146,6 +147,7 @@ def _preprocess_worker(
     model_name: str,
 ) -> PreprocessWorkerResult:
     """Preprocess a request in a worker process and return a picklable result."""
+    assert _w_input_processor is not None
     pre = preprocess_chat_request_sync(
         request,
         tokenizer=_w_tokenizer,
@@ -270,7 +272,7 @@ class VllmProcessor:
         self,
         tokenizer: TokenizerLike,
         input_processor: InputProcessor,
-        router,  # Client or KvRouter
+        router: Any,  # Client or KvRouter
         output_processor: OutputProcessor,
         tool_parser_class: type[ToolParser] | None,
         reasoning_parser_class: type[ReasoningParser] | None,
@@ -643,7 +645,9 @@ class VllmProcessor:
 
         # --- Phase 1: Preprocess (semaphore held) ---
         try:
+            assert self._worker_semaphore is not None
             async with self._worker_semaphore:
+                assert self.preprocess_pool is not None
                 future = self.preprocess_pool.submit(
                     _preprocess_worker, request, request_id, request["model"]
                 )
@@ -792,7 +796,7 @@ class EngineFactory:
         generate_endpoint = self.runtime.endpoint(
             f"{namespace_name}.{component_name}.{endpoint_name}"
         )
-
+        router: Client | KvRouter
         if self.router_config.router_mode == RouterMode.KV:
             router = KvRouter(
                 endpoint=generate_endpoint,
