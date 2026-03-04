@@ -6,6 +6,7 @@
 //! This crate provides the core radix tree implementation and protocols for
 //! efficient KV cache lookup and routing in distributed LLM inference systems.
 
+pub mod event_sink;
 pub mod indexer;
 pub mod protocols;
 pub mod scheduling;
@@ -37,6 +38,7 @@ pub use self::multi_worker_sequence::{
 pub use self::sequence::{ActiveSequences, RequestId};
 pub use concurrent_radix_tree::ConcurrentRadixTree;
 pub use config::{KvRouterConfig, RouterConfigOverride};
+pub use event_sink::EventSink;
 pub use indexer::{MaybeError, SyncIndexer, ThreadPoolIndexer};
 #[cfg(feature = "bench")]
 pub use naive_indexers::{InvertedIndex, NaiveNestedMap};
