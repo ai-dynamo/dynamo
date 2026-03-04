@@ -464,6 +464,7 @@ impl ModelWatcher {
                             card.kv_cache_block_size,
                             Some(self.router_config.kv_router_config),
                             WORKER_TYPE_DECODE, // This is the decode router
+                            card.runtime_config.enable_eagle,
                         )
                         .await?,
                 )
@@ -494,6 +495,7 @@ impl ModelWatcher {
                         self.router_config.decode_fallback,
                         model_name.clone(),
                         namespace.clone(),
+                        card.runtime_config.enable_eagle,
                     )
                 });
 

@@ -36,35 +36,47 @@ pub fn compute_block_hash_for_seq(
     kv_block_size: u32,
     block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
     lora_name: Option<&str>,
+    is_eagle: Option<bool>,
 ) -> Vec<LocalBlockHash> {
     let seed = match lora_name.filter(|n| !n.is_empty()) {
         Some(name) => XXH3_SEED.wrapping_add(xxh3::xxh3_64(name.as_bytes())),
         None => XXH3_SEED,
     };
-    tokens
-        .chunks_exact(kv_block_size as usize)
-        .enumerate()
-        .map(|(block_idx, chunk)| {
-            let mut bytes: Vec<u8> = chunk.iter().flat_map(|&num| num.to_le_bytes()).collect();
 
-            if let Some(mm_infos) = block_mm_infos
-                && let Some(Some(block_mm_info)) = mm_infos.get(block_idx)
-            {
-                let mut mm_hashes: Vec<u64> = block_mm_info
-                    .mm_objects
-                    .iter()
-                    .map(|obj| obj.mm_hash)
-                    .collect();
-                mm_hashes.sort_unstable();
+    let is_eagle_flag = is_eagle.unwrap_or(false);
+    let stride = kv_block_size as usize;
+    let window_size = if is_eagle_flag { stride + 1 } else { stride };
 
-                for mm_hash in mm_hashes {
-                    bytes.extend_from_slice(&mm_hash.to_le_bytes());
-                }
+    let mut hashes = Vec::new();
+    let mut block_idx = 0;
+    let mut start = 0;
+
+    while start + window_size <= tokens.len() {
+        let chunk = &tokens[start..start + window_size];
+        let mut bytes: Vec<u8> = chunk.iter().flat_map(|&num| num.to_le_bytes()).collect();
+
+        if let Some(mm_infos) = block_mm_infos
+            && let Some(Some(block_mm_info)) = mm_infos.get(block_idx)
+        {
+            let mut mm_hashes: Vec<u64> = block_mm_info
+                .mm_objects
+                .iter()
+                .map(|obj| obj.mm_hash)
+                .collect();
+            mm_hashes.sort_unstable();
+
+            for mm_hash in mm_hashes {
+                bytes.extend_from_slice(&mm_hash.to_le_bytes());
             }
+        }
 
-            LocalBlockHash(xxh3::xxh3_64_with_seed(&bytes, seed))
-        })
-        .collect()
+        hashes.push(LocalBlockHash(xxh3::xxh3_64_with_seed(&bytes, seed)));
+
+        start += stride;
+        block_idx += 1;
+    }
+
+    hashes
 }
 
 /// Compute rolling sequence hashes for a vector of block hashes.
@@ -599,6 +611,7 @@ pub struct TokensWithHashes {
     lora_name: Option<String>,
     block_hashes: Option<Vec<LocalBlockHash>>,
     seq_hashes: Option<Vec<SequenceHash>>,
+    is_eagle: Option<bool>,
 }
 
 impl TokensWithHashes {
@@ -611,6 +624,7 @@ impl TokensWithHashes {
             lora_name: None,
             block_hashes: None,
             seq_hashes: None,
+            is_eagle: None,
         }
     }
 
@@ -659,6 +673,7 @@ impl TokensWithHashes {
                 self.block_size,
                 self.block_mm_infos.as_deref(),
                 self.lora_name.as_deref(),
+                self.is_eagle,
             ));
         }
         self.block_hashes.as_ref().unwrap()

@@ -149,6 +149,7 @@ impl KvRouterConfig {
         block_size: u32,
         config_override: Option<&RouterConfigOverride>,
         lora_name: Option<&str>,
+        is_eagle: Option<bool>,
     ) -> Option<Vec<u64>> {
         if !self.router_track_active_blocks {
             return None;
@@ -164,7 +165,7 @@ impl KvRouterConfig {
             .unwrap_or(self.router_assume_kv_reuse);
 
         if assume_kv_reuse {
-            let block_hashes = compute_block_hash_for_seq(tokens, block_size, None, lora_name);
+            let block_hashes = compute_block_hash_for_seq(tokens, block_size, None, lora_name, is_eagle);
             Some(compute_seq_hash_for_block(&block_hashes))
         } else {
             let mut rng = rand::rng();

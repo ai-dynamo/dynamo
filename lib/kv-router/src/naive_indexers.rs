@@ -175,6 +175,7 @@ impl KvIndexerInterface for NaiveNestedMap {
         &self,
         _tokens: &[u32],
         _lora_name: Option<&str>,
+        _is_bigram: Option<bool>,
     ) -> Result<OverlapScores, KvRouterError> {
         unimplemented!("not used in bench")
     }
@@ -386,6 +387,7 @@ impl KvIndexerInterface for InvertedIndex {
         &self,
         _tokens: &[u32],
         _lora_name: Option<&str>,
+        _is_bigram: Option<bool>,
     ) -> Result<OverlapScores, KvRouterError> {
         unimplemented!("not used in bench")
     }

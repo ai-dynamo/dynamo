@@ -349,7 +349,7 @@ mod tests {
 
         // 1. Before routing decision there should be no matches
         let pre_scores = indexer
-            .find_matches_for_request(&tokens, None)
+            .find_matches_for_request(&tokens, None, None)
             .await
             .expect("indexer offline");
         assert!(pre_scores.scores.is_empty());
@@ -367,7 +367,7 @@ mod tests {
         // Poll until we observe the match being registered
         spin_until(Duration::from_millis(100), || async {
             let s = indexer
-                .find_matches_for_request(&tokens, None)
+                .find_matches_for_request(&tokens, None, None)
                 .await
                 .unwrap();
             s.scores
@@ -380,7 +380,7 @@ mod tests {
         // 3. After the TTL has passed the entry should expire automatically
         time::sleep(TTL + Duration::from_millis(50)).await;
         let post_scores = indexer
-            .find_matches_for_request(&tokens, None)
+            .find_matches_for_request(&tokens, None, None)
             .await
             .unwrap();
         assert!(post_scores.scores.is_empty());
@@ -420,7 +420,7 @@ mod tests {
         // Wait until the worker is registered
         spin_until(Duration::from_millis(100), || async {
             let s = indexer
-                .find_matches_for_request(&tokens, None)
+                .find_matches_for_request(&tokens, None, None)
                 .await
                 .unwrap();
             s.scores
@@ -434,7 +434,7 @@ mod tests {
         // Ensure the worker's entries are gone
         spin_until(Duration::from_millis(100), || async {
             let s = indexer
-                .find_matches_for_request(&tokens, None)
+                .find_matches_for_request(&tokens, None, None)
                 .await
                 .unwrap();
             !s.scores
@@ -488,7 +488,7 @@ mod tests {
         // Ensure both workers are registered
         spin_until(Duration::from_millis(100), || async {
             let s = indexer
-                .find_matches_for_request(&tokens, None)
+                .find_matches_for_request(&tokens, None, None)
                 .await
                 .unwrap();
             s.scores
@@ -508,7 +508,7 @@ mod tests {
         // Confirm the removed worker is gone, and the other remains.
         spin_until(Duration::from_millis(100), || async {
             let s = indexer
-                .find_matches_for_request(&tokens, None)
+                .find_matches_for_request(&tokens, None, None)
                 .await
                 .unwrap();
             !s.scores
@@ -558,7 +558,7 @@ mod tests {
         // Ensure the indexer has registered the block
         spin_until(Duration::from_millis(100), || async {
             let s = indexer
-                .find_matches_for_request(&seq_a, None)
+                .find_matches_for_request(&seq_a, None, None)
                 .await
                 .unwrap();
             s.scores
@@ -573,7 +573,7 @@ mod tests {
 
         // Query the indexer for overlaps of Sequence B (before it has been routed anywhere)
         let overlap = indexer
-            .find_matches_for_request(&seq_b, None)
+            .find_matches_for_request(&seq_b, None, None)
             .await
             .unwrap();
 
@@ -631,7 +631,7 @@ mod tests {
         // Wait until both workers are reflected in overlap scores
         spin_until(Duration::from_millis(100), || async {
             let s = indexer
-                .find_matches_for_request(&tokens, None)
+                .find_matches_for_request(&tokens, None, None)
                 .await
                 .unwrap();
             s.scores
@@ -646,7 +646,7 @@ mod tests {
         .await;
 
         let scores = indexer
-            .find_matches_for_request(&tokens, None)
+            .find_matches_for_request(&tokens, None, None)
             .await
             .unwrap();
 
@@ -808,7 +808,7 @@ mod tests {
         for i in 0..5 {
             let tokens: Vec<u32> = vec![i * 10, i * 10 + 1, i * 10 + 2, i * 10 + 3];
             let scores = indexer
-                .find_matches_for_request(&tokens, None)
+                .find_matches_for_request(&tokens, None, None)
                 .await
                 .unwrap();
             assert_eq!(
@@ -837,7 +837,7 @@ mod tests {
         for i in 0..4 {
             let tokens: Vec<u32> = vec![i * 10, i * 10 + 1, i * 10 + 2, i * 10 + 3];
             let scores = indexer
-                .find_matches_for_request(&tokens, None)
+                .find_matches_for_request(&tokens, None, None)
                 .await
                 .unwrap();
             assert!(
@@ -851,7 +851,7 @@ mod tests {
         for i in 4..6 {
             let tokens: Vec<u32> = vec![i * 10, i * 10 + 1, i * 10 + 2, i * 10 + 3];
             let scores = indexer
-                .find_matches_for_request(&tokens, None)
+                .find_matches_for_request(&tokens, None, None)
                 .await
                 .unwrap();
             assert_eq!(

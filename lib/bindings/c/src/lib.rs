@@ -221,6 +221,7 @@ fn kv_event_create_stored_block_from_parts(
         kv_block_size,
         None,
         lora_name,
+        None,
     )[0];
     KvCacheStoredBlockData {
         block_hash: ExternalSequenceBlockHash(block_hash),
@@ -689,6 +690,7 @@ pub unsafe extern "C" fn create_routers(
                 block_size,
                 Some(kv_router_config),
                 WORKER_TYPE_DECODE,
+                false,
             )
             .await
         {
@@ -722,6 +724,7 @@ pub unsafe extern "C" fn create_routers(
                     decode_fallback,
                     model_name.clone(),
                     namespace_str.clone(),
+                    false,
                 )
             }
             None if !decode_fallback => {

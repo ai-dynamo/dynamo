@@ -573,6 +573,7 @@ impl ModelManager {
         kv_cache_block_size: u32,
         kv_router_config: Option<KvRouterConfig>,
         worker_type: &'static str,
+        is_eagle: bool,
     ) -> anyhow::Result<Arc<KvRouter>> {
         let client = endpoint.client().await?;
 
@@ -607,6 +608,7 @@ impl ModelManager {
             Some(selector),
             kv_router_config,
             worker_type,
+            is_eagle,
         )
         .await?;
         Ok(Arc::new(chooser))

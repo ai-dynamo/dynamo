@@ -64,6 +64,13 @@ impl BlockHashValue {
     }
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(untagged)]
+pub enum KvTokenIds {
+    Single(Vec<u32>),
+    Bigram(Vec<(u32, u32)>),
+}
+
 #[derive(Debug, Serialize, Clone)]
 #[serde(tag = "type")] // msgspec encodes variant tag as a string when `tag=True`
 pub enum RawKvEvent {
@@ -82,6 +89,8 @@ pub enum RawKvEvent {
         /// Multimodal extra info for each block (length should match block_hashes)
         #[serde(default, skip_serializing_if = "Option::is_none")]
         block_mm_infos: Option<Vec<Option<BlockExtraInfo>>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        is_eagle: Option<bool>,
     },
     BlockRemoved {
         block_hashes: Vec<BlockHashValue>,
@@ -179,7 +188,7 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
         let mut event_type: Option<String> = None;
         let mut block_hashes: Option<Vec<BlockHashValue>> = None;
         let mut parent_block_hash: Option<Option<BlockHashValue>> = None;
-        let mut token_ids: Option<Vec<u32>> = None;
+        let mut token_ids: Option<KvTokenIds> = None;
         let mut block_size: Option<usize> = None;
         let mut medium: Option<Option<String>> = None;
         let mut lora_name: Option<Option<String>> = None;
@@ -226,6 +235,17 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                 let block_hashes =
                     block_hashes.ok_or_else(|| de::Error::missing_field("block_hashes"))?;
                 let token_ids = token_ids.ok_or_else(|| de::Error::missing_field("token_ids"))?;
+                let (raw_token_ids, is_eagle) = match token_ids {
+                    KvTokenIds::Single(tids) => {
+                        (tids, false)
+                    }
+                    KvTokenIds::Bigram(tids) => {
+                        let mut new_tids: Vec<u32> = tids.iter().map(|&(first, _)| first).collect();
+                        let last_token = tids.last().map(|&(_, second)| second).unwrap_or(0);
+                        new_tids.push(last_token);
+                        (new_tids, true)
+                    }
+                };
                 let block_size =
                     block_size.ok_or_else(|| de::Error::missing_field("block_size"))?;
                 let block_mm_infos = block_mm_infos
@@ -234,11 +254,12 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                 Ok(RawKvEvent::BlockStored {
                     block_hashes,
                     parent_block_hash: parent_block_hash.unwrap_or(None),
-                    token_ids,
+                    token_ids: raw_token_ids,
                     block_size,
                     medium: medium.unwrap_or(None),
                     lora_name: lora_name.unwrap_or(None),
                     block_mm_infos,
+                    is_eagle: Some(is_eagle),
                 })
             }
             Some("BlockRemoved") => {
@@ -276,7 +297,7 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                     .next_element()?
                     .ok_or_else(|| de::Error::invalid_length(1, &"missing block_hashes"))?;
                 let parent_block_hash: Option<BlockHashValue> = seq.next_element()?.unwrap_or(None);
-                let token_ids: Vec<u32> = seq
+                let token_ids: KvTokenIds = seq
                     .next_element()?
                     .ok_or_else(|| de::Error::invalid_length(3, &"missing token_ids"))?;
                 let block_size: usize = seq
@@ -296,14 +317,27 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                 let block_mm_infos =
                     block_mm_infos.or_else(|| extra_keys_to_block_mm_infos(extra_keys));
 
+                let (raw_token_ids, is_eagle) = match token_ids {
+                    KvTokenIds::Single(tids) => {
+                        (tids, false)
+                    }
+                    KvTokenIds::Bigram(tids) => {
+                        let mut new_tids: Vec<u32> = tids.iter().map(|&(first, _)| first).collect();
+                        let last_token = tids.last().map(|&(_, second)| second).unwrap_or(0);
+                        new_tids.push(last_token);
+                        (new_tids, true)
+                    }
+                };
+
                 Ok(RawKvEvent::BlockStored {
                     block_hashes,
                     parent_block_hash,
-                    token_ids,
+                    token_ids: raw_token_ids,
                     block_size,
                     medium,
                     lora_name,
                     block_mm_infos,
+                    is_eagle: Some(is_eagle),
                 })
             }
             "BlockRemoved" => {
@@ -353,6 +387,7 @@ pub fn convert_event(
             lora_name,
             block_mm_infos,
             medium: _,
+            is_eagle,
         } => {
             // Reject self-referencing blocks: all block hashes (including parent) must be unique.
             {
@@ -393,6 +428,7 @@ pub fn convert_event(
                         lora_name.as_deref(),
                         warning_count,
                         block_mm_infos.as_deref(),
+                        is_eagle,
                     ),
                 }),
                 dp_rank,
@@ -426,6 +462,7 @@ pub fn create_stored_block_from_parts(
     token_ids: &[u32],
     lora_name: Option<&str>,
     mm_extra_info: Option<BlockExtraInfo>,
+    is_eagle: Option<bool>,
 ) -> KvCacheStoredBlockData {
     let block_mm_infos = mm_extra_info.as_ref().map(|info| vec![Some(info.clone())]);
     let tokens_hash = compute_block_hash_for_seq(
@@ -433,6 +470,7 @@ pub fn create_stored_block_from_parts(
         kv_block_size,
         block_mm_infos.as_deref(),
         lora_name,
+        is_eagle,
     )[0];
 
     tracing::trace!(
@@ -458,6 +496,7 @@ pub fn create_stored_blocks(
     lora_name: Option<&str>,
     warning_count: &Arc<AtomicU32>,
     block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
+    is_eagle: Option<bool>,
 ) -> Vec<KvCacheStoredBlockData> {
     let mut blocks: Vec<KvCacheStoredBlockData> = Vec::new();
 
@@ -476,7 +515,8 @@ pub fn create_stored_blocks(
             break;
         }
 
-        let tokens = &token_ids[token_offset..(token_offset + *num_tokens_it as usize)];
+        let append = is_eagle.unwrap_or(false) as usize;
+        let tokens = &token_ids[token_offset..(token_offset + append + *num_tokens_it as usize)];
         let mm_extra_info = block_mm_infos
             .and_then(|infos| infos.get(block_idx))
             .and_then(|opt| opt.clone());
@@ -487,6 +527,7 @@ pub fn create_stored_blocks(
             tokens,
             lora_name,
             mm_extra_info,
+            is_eagle,
         ));
         token_offset += *num_tokens_it as usize;
     }
