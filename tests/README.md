@@ -113,10 +113,10 @@ Markers are required for all tests. They are used for test selection in CI and l
 ### Marker Table
 | Category                | Marker(s)                                                        | Description                        |
 |-------------------------|------------------------------------------------------------------|------------------------------------|
-| Lifecycle [required]    | pre_merge, post_merge, nightly, weekly, release                  | When the test should run           |
+| Test Cadence [required] | pre_merge, post_merge, nightly, weekly, release                  | When the test should run           |
 | Test Type [required]    | unit, integration, e2e, benchmark, performance, stress, multimodal | Nature of the test               |
 | Hardware [required]     | gpu_0, gpu_1, gpu_2, gpu_4, gpu_8, h100                         | Number/type of GPUs required       |
-| Component/Framework     | vllm, trtllm, sglang, kvbm, kvbm_concurrency, planner, router   | Backend or component specificity   |
+| Component/Framework [required] | vllm, trtllm, sglang, kvbm, kvbm_concurrency, planner, router   | Backend or component specificity   |
 | Infrastructure          | k8s, deploy, fault_tolerance                                     | Infrastructure/environment needs   |
 | Execution               | parallel                                                         | Test can run in parallel with pytest-xdist. Must use dynamic port allocation (`alloc_ports`) and not share resources (e.g. filesystem) |
 | Other                   | slow, skip, xfail, custom_build, model, aiconfigurator           | Special handling                   |
@@ -131,7 +131,7 @@ def test_kv_cache_behavior():
     ...
 ```
 
-### Lifecycle Marker Note
+### Test Cadence Marker Note
 Use the marker for the earliest pipeline stage where the test must run (e.g., `@pytest.mark.pre_merge`). This ensures the test is included in that stage and all subsequent ones (e.g., nightly, release), as CI pipelines select tests marked for earlier stages.
 
 **Example:**

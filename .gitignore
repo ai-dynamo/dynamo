@@ -121,6 +121,9 @@ core
 # AI generated worklogs
 worklogs/
 
+# pytest report artifacts
+artifacts/
+
 # Benchmarks
 benchmarks/results
 profiling_results*
