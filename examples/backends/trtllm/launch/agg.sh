@@ -21,6 +21,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 ENABLE_OTEL=false
+EXTRA_ARGS=()
 while [[ $# -gt 0 ]]; do
     case $1 in
         --enable-otel)
@@ -33,12 +34,12 @@ while [[ $# -gt 0 ]]; do
             echo "  --enable-otel        Enable OpenTelemetry tracing"
             echo "  -h, --help           Show this help message"
             echo ""
+            echo "Any additional options are passed through to dynamo.trtllm."
             exit 0
             ;;
         *)
-            echo "Unknown option: $1"
-            echo "Use --help for usage information"
-            exit 1
+            EXTRA_ARGS+=("$1")
+            shift
             ;;
     esac
 done
@@ -67,4 +68,4 @@ python3 -m dynamo.trtllm \
   --modality "$MODALITY" \
   --extra-engine-args "$AGG_ENGINE_ARGS" \
   "${TRACE_ARGS[@]}" \
-  "$@"
+  "${EXTRA_ARGS[@]}"

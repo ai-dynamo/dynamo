@@ -11,6 +11,7 @@ from typing import Any
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.engine.protocol import DeltaMessage, DeltaToolCall
 from vllm.reasoning import ReasoningParser
+from vllm.renderers import ChatParams
 from vllm.sampling_params import SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser
@@ -73,9 +74,7 @@ def _prepare_request(
     *,
     tokenizer: TokenizerLike,
     tool_parser_class: type[ToolParser] | None,
-) -> tuple[
-    ChatCompletionRequest, ToolParser | None, dict[str, Any], Any, dict[str, Any]
-]:
+) -> tuple[ChatCompletionRequest, ToolParser | None, dict[str, Any], Any, ChatParams]:
     """Validate request and build arguments for template rendering.
 
     Returns:
@@ -83,7 +82,7 @@ def _prepare_request(
         tool_parser: Instantiated tool parser, or None.
         chat_template_kwargs: Template kwargs (for PreprocessResult).
         messages_for_render: Messages to pass as first arg to render_messages.
-        render_kwargs: Keyword arguments for render_messages / render_messages_async.
+        chat_params: ChatParams for render_messages / render_messages_async.
     """
     if isinstance(request, ChatCompletionRequest):
         request_for_sampling = request
@@ -123,15 +122,17 @@ def _prepare_request(
         else request_for_sampling.messages
     )
 
-    render_kwargs = dict(
+    chat_params = ChatParams(
         chat_template=request_for_sampling.chat_template,
         chat_template_content_format="auto",
-        add_generation_prompt=request_for_sampling.add_generation_prompt,
-        continue_final_message=request_for_sampling.continue_final_message,
-        tools=tool_dicts,
-        documents=request_for_sampling.documents,
-        tokenize=tokenize_in_template,
-        **chat_template_kwargs,
+        chat_template_kwargs=dict(
+            add_generation_prompt=request_for_sampling.add_generation_prompt,
+            continue_final_message=request_for_sampling.continue_final_message,
+            tools=tool_dicts,
+            documents=request_for_sampling.documents,
+            tokenize=tokenize_in_template,
+            **chat_template_kwargs,
+        ),
     )
 
     return (
@@ -139,7 +140,7 @@ def _prepare_request(
         tool_parser,
         chat_template_kwargs,
         messages_for_render,
-        render_kwargs,
+        chat_params,
     )
 
 
@@ -155,12 +156,12 @@ async def preprocess_chat_request(
         tool_parser,
         chat_template_kwargs,
         messages,
-        render_kwargs,
+        chat_params,
     ) = _prepare_request(
         request, tokenizer=tokenizer, tool_parser_class=tool_parser_class
     )
 
-    _, engine_prompt = await renderer.render_messages_async(messages, **render_kwargs)
+    _, engine_prompt = await renderer.render_messages_async(messages, chat_params)
 
     if "prompt_token_ids" in engine_prompt:
         tokens = list(engine_prompt["prompt_token_ids"])
@@ -194,12 +195,12 @@ def preprocess_chat_request_sync(
         tool_parser,
         chat_template_kwargs,
         messages,
-        render_kwargs,
+        chat_params,
     ) = _prepare_request(
         request, tokenizer=tokenizer, tool_parser_class=tool_parser_class
     )
 
-    _, engine_prompt = renderer.render_messages(messages, **render_kwargs)
+    _, engine_prompt = renderer.render_messages(messages, chat_params)
 
     if "prompt_token_ids" in engine_prompt:
         tokens = list(engine_prompt["prompt_token_ids"])
