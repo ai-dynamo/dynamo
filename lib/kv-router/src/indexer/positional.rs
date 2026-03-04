@@ -549,7 +549,7 @@ impl PositionalIndexer {
     }
 
     /// Scan positions sequentially, updating active set and recording drain scores.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     fn linear_scan_drain(
         &self,
         sequence: &[LocalBlockHash],

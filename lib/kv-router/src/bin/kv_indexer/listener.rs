@@ -51,7 +51,7 @@ pub async fn run_zmq_listener(
     let mut next_event_id = 0u64;
     let warning_count = Arc::new(AtomicU32::new(0));
     let mut consecutive_errors = 0u32;
-    #[allow(unused_assignments)]
+    #[expect(unused_assignments)]
     let mut exit_reason = "unknown";
     let mut messages_processed = 0u64;
 
@@ -112,7 +112,7 @@ pub async fn run_zmq_listener(
                     continue;
                 };
 
-                let effective_dp_rank = batch.data_parallel_rank.map_or(dp_rank, |r| r as u32);
+                let effective_dp_rank = batch.data_parallel_rank.map_or(dp_rank, |r| r.cast_unsigned());
                 for raw_event in batch.events {
                     let event_id = next_event_id;
                     next_event_id += 1;
