@@ -61,6 +61,11 @@ pub struct QueryRequest {
     pub lora_name: Option<String>,
 }
 
+/// Query using pre-computed block hashes.
+///
+/// Callers must include the LoRA salt in their hashes when applicable — use
+/// [`compute_block_hash_for_seq`] with the appropriate `lora_name`. The indexer
+/// cannot retroactively apply a LoRA salt to pre-computed hashes.
 #[derive(Deserialize)]
 pub struct QueryByHashRequest {
     pub block_hashes: Vec<i64>,
@@ -266,10 +271,7 @@ async fn dump_events(State(state): State<Arc<AppState>>) -> impl IntoResponse {
                 result.insert(map_key, serde_json::json!({"error": e.to_string()}));
             }
             Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({"error": format!("task join error: {e}")})),
-                );
+                tracing::warn!("dump task join error: {e}");
             }
         }
     }

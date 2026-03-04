@@ -26,7 +26,7 @@ pub struct IndexerEntry {
 
 pub struct WorkerEntry {
     pub endpoints: HashMap<u32, String>,
-    cancel: CancellationToken,
+    cancels: HashMap<u32, CancellationToken>,
 }
 
 pub struct WorkerRegistry {
@@ -92,14 +92,15 @@ impl WorkerRegistry {
             .entry(instance_id)
             .or_insert_with(|| WorkerEntry {
                 endpoints: HashMap::new(),
-                cancel: CancellationToken::new(),
+                cancels: HashMap::new(),
             });
 
         if entry.endpoints.contains_key(&dp_rank) {
             bail!("instance {instance_id} dp_rank {dp_rank} already registered");
         }
 
-        let child_cancel = entry.cancel.child_token();
+        let cancel = CancellationToken::new();
+        let child_cancel = cancel.child_token();
         let addr = endpoint.clone();
 
         tokio::spawn(async move {
@@ -107,6 +108,7 @@ impl WorkerRegistry {
         });
 
         entry.endpoints.insert(dp_rank, endpoint);
+        entry.cancels.insert(dp_rank, cancel);
         Ok(())
     }
 
@@ -121,7 +123,9 @@ impl WorkerRegistry {
             .remove(&instance_id)
             .ok_or_else(|| anyhow::anyhow!("instance {instance_id} not found"))?;
 
-        entry.cancel.cancel();
+        for cancel in entry.cancels.values() {
+            cancel.cancel();
+        }
 
         let key = IndexerKey {
             model_name: model_name.to_string(),
@@ -129,6 +133,13 @@ impl WorkerRegistry {
         };
         if let Some(ie) = self.indexers.get(&key) {
             ie.indexer.remove_worker(instance_id).await;
+        } else {
+            tracing::warn!(
+                instance_id,
+                model_name,
+                tenant_id,
+                "indexer key not found on deregister; tree will not be cleaned up"
+            );
         }
 
         Ok(())
@@ -150,9 +161,30 @@ impl WorkerRegistry {
             bail!("instance {instance_id} dp_rank {dp_rank} not found");
         }
 
+        if let Some(cancel) = entry.cancels.remove(&dp_rank) {
+            cancel.cancel();
+        }
+
         if entry.endpoints.is_empty() {
             drop(entry);
             return self.deregister(instance_id, model_name, tenant_id).await;
+        }
+        drop(entry);
+
+        let key = IndexerKey {
+            model_name: model_name.to_string(),
+            tenant_id: tenant_id.to_string(),
+        };
+        if let Some(ie) = self.indexers.get(&key) {
+            ie.indexer.remove_worker_dp_rank(instance_id, dp_rank).await;
+        } else {
+            tracing::warn!(
+                instance_id,
+                dp_rank,
+                model_name,
+                tenant_id,
+                "indexer key not found on deregister_dp_rank; tree will not be cleaned up"
+            );
         }
 
         Ok(())
@@ -168,12 +200,23 @@ impl WorkerRegistry {
             .remove(&instance_id)
             .ok_or_else(|| anyhow::anyhow!("instance {instance_id} not found"))?;
 
-        entry.cancel.cancel();
+        for cancel in entry.cancels.values() {
+            cancel.cancel();
+        }
 
+        let mut found = false;
         for ie in self.indexers.iter() {
             if ie.key().model_name == model_name {
                 ie.indexer.remove_worker(instance_id).await;
+                found = true;
             }
+        }
+        if !found {
+            tracing::warn!(
+                instance_id,
+                model_name,
+                "no indexers found for model on deregister_all_tenants; tree will not be cleaned up"
+            );
         }
 
         Ok(())
