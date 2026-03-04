@@ -7,9 +7,6 @@
 ##### Wheel Build Image ##########
 ##################################
 
-# Redeclare ARCH_ALT ARG so it's available for interpolation in the FROM instruction
-ARG ARCH_ALT
-
 ##################################
 ##### wheel_builder_base #########
 ##################################
