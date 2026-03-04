@@ -61,7 +61,7 @@ def write_profiler_status(
     if outputs:
         status_data["outputs"] = outputs
     if phase:
-        status_data["phase"] = phase
+        status_data["phase"] = phase.value if isinstance(phase, Enum) else phase
 
     try:
         with open(status_file, "w") as f:
