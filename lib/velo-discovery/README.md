@@ -1,13 +1,33 @@
 # velo-discovery
 
-Filesystem-based peer discovery for Velo distributed systems.
+Peer discovery abstraction and a file-based implementation for Velo distributed systems.
 
-Provides `FilesystemPeerDiscovery`, an implementation of the
-`velo_messenger::PeerDiscovery` trait that stores peer information in a JSON
-file on disk. Suitable for development, testing, and single-host deployments
-where an external service (etcd, consul) is not desired.
+## PeerDiscovery trait
 
-## Usage
+`velo_messenger::PeerDiscovery` provides a lookup interface over cluster membership:
+
+| Input | Output |
+|---|---|
+| `WorkerId` | `PeerInfo` (contains `WorkerAddress`) |
+| `InstanceId` | `PeerInfo` (contains `WorkerAddress`) |
+
+Implement this trait to integrate with any backend (etcd, consul, a database, etc.).
+
+```rust
+pub trait PeerDiscovery: Send + Sync {
+    fn discover_by_worker_id(&self, worker_id: WorkerId) -> BoxFuture<'_, Result<PeerInfo>>;
+    fn discover_by_instance_id(&self, instance_id: InstanceId) -> BoxFuture<'_, Result<PeerInfo>>;
+}
+```
+
+## FilesystemPeerDiscovery
+
+A bundled implementation that stores peer records in a JSON file on disk.
+**Suitable for development, testing, and single-host deployments.
+Not recommended for production or multi-host deployments** — use an external
+service (etcd, consul) and a matching `PeerDiscovery` implementation instead.
+
+### Usage
 
 ```rust,no_run
 use velo_discovery::FilesystemPeerDiscovery;
@@ -34,9 +54,7 @@ For tests that need throwaway storage, use `new_temp()`:
 let discovery = FilesystemPeerDiscovery::new_temp()?;
 ```
 
-## File format
-
-The discovery file is a JSON object with a `peers` array:
+### File format
 
 ```json
 {
@@ -51,18 +69,13 @@ The discovery file is a JSON object with a `peers` array:
 }
 ```
 
-## Concurrency
+### Concurrency
 
-- **Cross-process**: uses `fs4` file locking (shared for reads, exclusive for
-  writes) with atomic rename on write.
-- **Within-process**: `RwLock` protects the in-memory cache; an `AsyncMutex`
-  serializes write operations (register/unregister) to prevent interleaving.
+- **Cross-process**: `fs4` file locking (shared for reads, exclusive for writes) with atomic rename on write.
+- **Within-process**: `RwLock` protects the in-memory cache; an `AsyncMutex` serializes write operations.
 - Cache is invalidated on writes and lazily reloaded on the next read.
 
-## Manual peer management
-
-Peers can be registered and unregistered directly without going through the
-`PeerDiscovery` trait:
+### Manual peer management
 
 ```rust,no_run
 use velo_discovery::FilesystemPeerDiscovery;
