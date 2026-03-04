@@ -105,6 +105,8 @@ spec:
             value: "100"
           - name: DYN_KVBM_LEADER_WORKER_INIT_TIMEOUT_SECS
             value: "3600"
+          - name: DYN_KVBM_METRICS
+            value: "true"
           volumeMounts:
           - mountPath: /opt/dynamo/configs
             name: llm-config-kimi-agg-kvbm
