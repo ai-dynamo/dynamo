@@ -6,9 +6,10 @@ name: Allure Test Report
 on:
   workflow_run:
     workflows:
-      - 'NVIDIA Dynamo Github Validation'
+      - 'PR'
       - 'Post-Merge CI Pipeline'
       - 'Nightly CI Pipeline'
+      - 'Release Pipeline'
     types: [completed]
 
   workflow_dispatch:
@@ -46,9 +47,10 @@ jobs:
             echo "run_id=${{ github.event.workflow_run.id }}" >> $GITHUB_OUTPUT
             WORKFLOW_NAME="${{ github.event.workflow_run.name }}"
             case "$WORKFLOW_NAME" in
-              *"Dynamo Github Validation"*) echo "subdir=pre-merge" >> $GITHUB_OUTPUT ;;
+              "PR") echo "subdir=pre-merge" >> $GITHUB_OUTPUT ;;
               *"Post-Merge"*) echo "subdir=post-merge" >> $GITHUB_OUTPUT ;;
               *"Nightly"*) echo "subdir=nightly" >> $GITHUB_OUTPUT ;;
+              *"Release"*) echo "subdir=release" >> $GITHUB_OUTPUT ;;
               *) echo "subdir=other" >> $GITHUB_OUTPUT ;;
             esac
           fi
