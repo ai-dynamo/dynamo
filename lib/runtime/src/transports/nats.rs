@@ -325,6 +325,7 @@ impl ClientOptions {
         let (client, _) = build_in_runtime(
             async move {
                 client
+                    .request_timeout(Some(std::time::Duration::from_secs(60)))
                     .connect(self.server)
                     .await
                     .map_err(|e| anyhow::anyhow!("Failed to connect to NATS: {e}. Verify NATS server is running and accessible."))

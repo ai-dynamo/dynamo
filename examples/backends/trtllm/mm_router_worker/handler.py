@@ -7,7 +7,9 @@ MM Router Handler - Routes requests to best TRT-LLM worker based on KV cache ove
 
 import logging
 from typing import Any, AsyncGenerator
+from urllib.parse import urlparse
 
+from dynamo.common.multimodal.image_loader import ImageLoader
 from dynamo.llm import KvRouter
 from dynamo.runtime.logging import configure_dynamo_logging
 
@@ -15,6 +17,9 @@ from .mm_processor import build_block_mm_infos, extract_image_urls, process_mult
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
+
+# Skip data URI replacement for images larger than 5MB base64-encoded
+MAX_DATA_URI_SIZE = 5 * 1024 * 1024
 
 
 class MMRouterHandler:
@@ -49,6 +54,7 @@ class MMRouterHandler:
         self.model = model
         self.model_type = model_type
         self.block_size = block_size
+        self.image_loader = ImageLoader()
 
     async def generate(self, request: dict) -> AsyncGenerator[dict, None]:
         """
@@ -76,13 +82,14 @@ class MMRouterHandler:
             # Process multimodal: download images, compute mm_hash
             # Do not reuse request["token_ids"] for MM routing: those are placeholder-level
             # tokens from frontend. We need processor-expanded tokens to build block_mm_infos.
-            processed = process_multimodal(
+            processed = await process_multimodal(
                 messages=messages,
                 image_urls=image_urls,
                 tokenizer=self.tokenizer,
                 processor=self.processor,
                 model=self.model,
                 model_type=self.model_type,
+                image_loader=self.image_loader,
             )
 
             # Build block_mm_infos for MM-aware hash computation
@@ -133,6 +140,18 @@ class MMRouterHandler:
         if not token_ids:
             raise ValueError("Missing or empty token_ids in preprocessed request")
 
+        # Replace HTTP URLs with base64 data URIs so backend doesn't re-download
+        multi_modal_data = request.get("multi_modal_data")
+        if image_urls and multi_modal_data and processed.data_uris:
+            image_url_items = multi_modal_data.get("image_url", [])
+            for i, data_uri in enumerate(processed.data_uris):
+                if i < len(image_url_items):
+                    item = image_url_items[i]
+                    if isinstance(item, dict) and "Url" in item:
+                        if urlparse(item["Url"]).scheme in ("http", "https"):
+                            if len(data_uri) <= MAX_DATA_URI_SIZE:
+                                item["Url"] = data_uri
+
         mm_routing_info: dict[str, Any] = {
             "routing_token_ids": routing_tokens,
             "block_mm_infos": block_mm_infos,
@@ -146,7 +165,7 @@ class MMRouterHandler:
             output_options=request.get("output_options"),
             router_config_override=request.get("router_config_override"),
             extra_args=request.get("extra_args"),
-            multi_modal_data=request.get("multi_modal_data"),
+            multi_modal_data=multi_modal_data,
             mm_routing_info=mm_routing_info,
         )
 

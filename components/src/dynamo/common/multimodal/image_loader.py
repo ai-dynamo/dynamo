@@ -43,10 +43,22 @@ class ImageLoader:
         self, cache_size: int = CACHE_SIZE_MAXIMUM, http_timeout: float = 30.0
     ):
         self._http_timeout = http_timeout
-        self._image_cache: dict[str, Image.Image] = {}
+        self._image_cache: dict[str, tuple[Image.Image, bytes]] = {}
         self._cache_queue: asyncio.Queue[str] = asyncio.Queue(maxsize=cache_size)
 
     async def load_image(self, image_url: str) -> Image.Image:
+        """Load image from URL, returning PIL Image only (backward compatible)."""
+        image, _ = await self._fetch_image(image_url)
+        return image
+
+    async def load_image_with_raw_bytes(
+        self, image_url: str
+    ) -> tuple[Image.Image, bytes]:
+        """Load image from URL, returning both PIL Image and original raw bytes."""
+        return await self._fetch_image(image_url)
+
+    async def _fetch_image(self, image_url: str) -> tuple[Image.Image, bytes]:
+        """Internal: fetch image and return (PIL Image, raw bytes)."""
         parsed_url = urlparse(image_url)
 
         # For HTTP(S) URLs, check cache first
@@ -68,8 +80,7 @@ class ImageLoader:
                     raise ValueError("Data URL must be base64 encoded")
 
                 try:
-                    image_bytes = base64.b64decode(data)
-                    image_data = BytesIO(image_bytes)
+                    raw_bytes = base64.b64decode(data)
                 except binascii.Error as e:
                     raise ValueError(f"Invalid base64 encoding: {e}")
             elif parsed_url.scheme in ("http", "https"):
@@ -81,9 +92,11 @@ class ImageLoader:
                 if not response.content:
                     raise ValueError("Empty response content from image URL")
 
-                image_data = BytesIO(response.content)
+                raw_bytes = response.content
             else:
                 raise ValueError(f"Invalid image source scheme: {parsed_url.scheme}")
+
+            image_data = BytesIO(raw_bytes)
 
             # PIL is sync, so offload to a thread to avoid blocking the event loop
             # Restrict to supported formats to prevent PSD parsing (GHSA-cfh3-3jmp-rvhc)
@@ -105,10 +118,10 @@ class ImageLoader:
                     oldest_image_url = await self._cache_queue.get()
                     del self._image_cache[oldest_image_url]
 
-                self._image_cache[image_url_lower] = image_converted
+                self._image_cache[image_url_lower] = (image_converted, raw_bytes)
                 await self._cache_queue.put(image_url_lower)
 
-            return image_converted
+            return (image_converted, raw_bytes)
 
         except httpx.HTTPError as e:
             logger.error(f"HTTP error loading image: {e}")

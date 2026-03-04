@@ -6,13 +6,13 @@ from typing import Any, Sequence
 
 import blake3
 import numpy as np
+from PIL import Image
 
 logger = logging.getLogger(__name__)
 
 
 def image_to_bytes(img: Any) -> bytes:
     """Convert a supported image object to PNG bytes for hashing."""
-    from PIL import Image
 
     if isinstance(img, bytes):
         return img

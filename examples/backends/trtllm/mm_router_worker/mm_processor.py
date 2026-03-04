@@ -3,6 +3,8 @@
 
 """Multimodal processing utilities for MM Router Worker."""
 
+import asyncio
+import base64
 import logging
 from dataclasses import dataclass
 from typing import Any
@@ -10,6 +12,8 @@ from typing import Any
 from tensorrt_llm.inputs.multimodal import apply_mm_hashes
 from tensorrt_llm.inputs.utils import default_multimodal_input_loader, load_image
 from transformers import AutoConfig
+
+from dynamo.common.multimodal.image_loader import ImageLoader
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +30,7 @@ class ProcessedInput:
     tokens: list[int]
     mm_hashes: list[int] | None
     image_ranges: list[tuple[int, int]] | None  # [(start, end), ...] per image
+    data_uris: list[str] | None  # base64 data URIs for forwarding to backend
 
 
 # =============================================================================
@@ -62,26 +67,40 @@ def build_prompt_from_messages(messages: list[dict]) -> str:
     return "\n".join(parts)
 
 
-def process_multimodal(
+async def process_multimodal(
     messages: list[dict],
     image_urls: list[str],
     tokenizer: Any,
     processor: Any,
     model: str,
     model_type: str,
+    image_loader: ImageLoader,
 ) -> ProcessedInput:
-    """Process multimodal request: load images, get expanded tokens and mm_hashes."""
+    """Process multimodal request: load images, get expanded tokens and mm_hashes.
+
+    Uses async ImageLoader to pre-download images, then passes data URIs to
+    TRT-LLM loaders so they don't make redundant HTTP requests.
+    """
     try:
         prompt = build_prompt_from_messages(messages)
 
-        # Use TRT-LLM loader to process images and get mm data
+        # Pre-download all images asynchronously via ImageLoader (parallel + cached)
+        results = await asyncio.gather(
+            *[image_loader.load_image_with_raw_bytes(url) for url in image_urls]
+        )
+        raw_bytes_list = [r[1] for r in results]
+
+        # Build data URIs from raw bytes (no PIL re-encode)
+        data_uris = _raw_bytes_to_data_uris(raw_bytes_list)
+
+        # Use TRT-LLM loader to process images and get mm data (using data URIs)
         inputs = default_multimodal_input_loader(
             tokenizer=tokenizer,
             model_dir=model,
             model_type=model_type,
             modality="multiple_image" if len(image_urls) > 1 else "image",
             prompts=[prompt],
-            media=[image_urls],
+            media=[data_uris],
             image_data_format="pt",
             device="cuda",
         )
@@ -92,14 +111,17 @@ def process_multimodal(
 
         # Get expanded tokens and image ranges
         tokens, image_ranges = _get_expanded_tokens(
-            processed_prompt, image_urls, tokenizer, processor, model, model_type
+            processed_prompt, data_uris, tokenizer, processor, model, model_type
         )
 
         # Compute mm_hash for each image
         mm_hashes = _compute_mm_hashes(multi_modal_data)
 
         return ProcessedInput(
-            tokens=tokens, mm_hashes=mm_hashes, image_ranges=image_ranges
+            tokens=tokens,
+            mm_hashes=mm_hashes,
+            image_ranges=image_ranges,
+            data_uris=data_uris,
         )
     except Exception as e:
         logger.error(f"MM processing failed: {e}", exc_info=True)
@@ -147,6 +169,27 @@ def build_block_mm_infos(
 # =============================================================================
 
 
+def _detect_mime_type(raw_bytes: bytes) -> str:
+    """Detect image MIME type from magic bytes."""
+    if raw_bytes[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if raw_bytes[:4] == b"\x89PNG":
+        return "image/png"
+    if len(raw_bytes) >= 12 and raw_bytes[:4] == b"RIFF" and raw_bytes[8:12] == b"WEBP":
+        return "image/webp"
+    return "application/octet-stream"
+
+
+def _raw_bytes_to_data_uris(raw_bytes_list: list[bytes]) -> list[str]:
+    """Convert raw image bytes to base64 data URIs (no PIL re-encode)."""
+    data_uris = []
+    for raw_bytes in raw_bytes_list:
+        mime = _detect_mime_type(raw_bytes)
+        b64 = base64.b64encode(raw_bytes).decode("ascii")
+        data_uris.append(f"data:{mime};base64,{b64}")
+    return data_uris
+
+
 def _get_expanded_tokens(
     prompt: str,
     image_urls: list[str],
@@ -160,7 +203,7 @@ def _get_expanded_tokens(
         return tokenizer.encode(prompt), None
 
     try:
-        # TODO @zdren: use async_load_image or batch load
+        # image_urls here are data URIs (pre-downloaded by ImageLoader), no HTTP fetch
         pil_images = [load_image(url, format="pil") for url in image_urls]
         output = processor(
             text=[prompt], images=pil_images, return_tensors="pt", padding=True
