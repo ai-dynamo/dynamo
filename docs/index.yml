@@ -209,6 +209,39 @@ navigation:
       - page: KV Events for Custom Engines
         path: integrations/kv-events-custom-engines.md
 
+  # ==================== API Reference ====================
+  - section: API Reference
+    contents:
+      - page: Python API
+        path: api/python/README.md
+      - page: Rust API
+        path: api/rust/README.md
+      - section: NIXL Connect API
+        path: api/nixl-connect/README.md
+        contents:
+          - page: Connector
+            path: api/nixl-connect/connector.md
+          - page: Device
+            path: api/nixl-connect/device.md
+          - page: Device Kind
+            path: api/nixl-connect/device-kind.md
+          - page: Descriptor
+            path: api/nixl-connect/descriptor.md
+          - page: Read Operation
+            path: api/nixl-connect/read-operation.md
+          - page: Write Operation
+            path: api/nixl-connect/write-operation.md
+          - page: Readable Operation
+            path: api/nixl-connect/readable-operation.md
+          - page: Writable Operation
+            path: api/nixl-connect/writable-operation.md
+          - page: Operation Status
+            path: api/nixl-connect/operation-status.md
+          - page: RDMA Metadata
+            path: api/nixl-connect/rdma-metadata.md
+      - page: Kubernetes CRD API
+        path: kubernetes/api-reference.md
+
   # ==================== Design Docs ====================
   - section: Design Docs
     contents:
@@ -261,33 +294,7 @@ navigation:
         path: development/runtime-guide.md
       - page: Jail Stream
         path: development/jail-stream.md
-      # -- API Reference --
-      - section: NIXL Connect API
-        path: api/nixl-connect/README.md
-        contents:
-          - page: Connector
-            path: api/nixl-connect/connector.md
-          - page: Device
-            path: api/nixl-connect/device.md
-          - page: Device Kind
-            path: api/nixl-connect/device-kind.md
-          - page: Descriptor
-            path: api/nixl-connect/descriptor.md
-          - page: Read Operation
-            path: api/nixl-connect/read-operation.md
-          - page: Write Operation
-            path: api/nixl-connect/write-operation.md
-          - page: Readable Operation
-            path: api/nixl-connect/readable-operation.md
-          - page: Writable Operation
-            path: api/nixl-connect/writable-operation.md
-          - page: Operation Status
-            path: api/nixl-connect/operation-status.md
-          - page: RDMA Metadata
-            path: api/nixl-connect/rdma-metadata.md
       # -- Kubernetes (hidden sub-pages) --
-      - page: API Reference (K8s)
-        path: kubernetes/api-reference.md
       - page: Creating Deployments
         path: kubernetes/deployment/create-deployment.md
       - page: FluxCD

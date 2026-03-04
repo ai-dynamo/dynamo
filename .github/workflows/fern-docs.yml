@@ -104,6 +104,19 @@ jobs:
       - name: Validate Fern configuration
         run: fern check
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Check API docs freshness
+        run: |
+          pip install -r docs/scripts/requirements-apidocs.txt
+          python3 docs/scripts/generate_python_api.py --output-dir /tmp/api-check/python
+          python3 docs/scripts/generate_rust_api.py --output-dir /tmp/api-check/rust
+          diff docs/api/python/README.md /tmp/api-check/python/README.md || echo "::warning::Python API docs are stale. Run: python3 docs/scripts/generate_python_api.py"
+          diff docs/api/rust/README.md /tmp/api-check/rust/README.md || echo "::warning::Rust API docs are stale. Run: python3 docs/scripts/generate_rust_api.py"
+
   fern-broken-links:
     name: Fern Broken Links Check
     needs: changed-files
@@ -156,6 +169,20 @@ jobs:
         with:
           path: source-checkout
           fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install API doc dependencies
+        run: pip install -r source-checkout/docs/scripts/requirements-apidocs.txt
+
+      - name: Generate API reference docs
+        working-directory: source-checkout
+        run: |
+          # K8s CRD API: add Fern MDX components to the committed raw markdown
+          python3 docs/scripts/fernify_k8s_api.py
 
       - name: Checkout docs-website branch
         uses: actions/checkout@v4
@@ -436,6 +463,23 @@ jobs:
 
           echo "Created fern/pages-$TAG/"
           ls -la "fern/pages-$TAG/" | head -20
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install API doc dependencies
+        run: pip install -r docs/scripts/requirements-apidocs.txt
+
+      - name: Update Rust API docs.rs links to release version
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          VERSION="${{ steps.version.outputs.version }}"
+          # Update docs.rs links from /latest to version-pinned URLs
+          # The Rust page was synced from pages-dev, just sed-replace the version
+          find "fern/pages-$TAG/api/rust" -name "*.md" -exec \
+            sed -i "s|docs.rs/\([^/]*\)/latest|docs.rs/\1/$VERSION|g" {} +
 
       - name: Update GitHub links to 'main' to version tag
         run: |
