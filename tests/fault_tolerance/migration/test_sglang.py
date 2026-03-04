@@ -38,13 +38,7 @@ pytestmark = [
         "immediate_kill",
         [
             pytest.param(True, id="worker_failure"),
-            pytest.param(
-                False,
-                id="graceful_shutdown",
-                marks=pytest.mark.xfail(
-                    strict=False, reason="SGLang graceful shutdown not yet implemented"
-                ),
-            ),
+            pytest.param(False, id="graceful_shutdown"),
         ],
     ),
     pytest.mark.parametrize(
