@@ -291,7 +291,7 @@ class BaseWorkerHandler(ABC):
         self.enable_multimodal = enable_multimodal
         self.enable_frontend_decoding = enable_frontend_decoding
         # NIXL connector for frontend decoding - lazy initialized
-        self._nixl_connector = None
+        self._nixl_connector: nixl_connect.Connector | None = None
         self._nixl_connector_lock = asyncio.Lock()
         # LoRA tracking: name -> LoRAInfo(id, path)
         self.loaded_loras: dict[str, LoRAInfo] = {}

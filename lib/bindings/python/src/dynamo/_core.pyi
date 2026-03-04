@@ -13,6 +13,8 @@ from typing import (
     Tuple,
 )
 
+from dynamo.llm import MediaDecoder, MediaFetcher
+
 from ._prometheus_names import prometheus_names
 
 # Import from specialized modules
@@ -217,6 +219,12 @@ class Client:
     async def direct(self, request: JsonLike, instance: str) -> AsyncIterator[JsonLike]:
         """
         Pick a specific instance of the endpoint
+        """
+        ...
+
+    async def generate(self, request: JsonLike) -> AsyncIterator[JsonLike]:
+        """
+        Generate a response from the endpoint
         """
         ...
 
@@ -425,6 +433,7 @@ class ModelRuntimeConfig:
     tool_call_parser: str | None
     reasoning_parser: str | None
     enable_local_indexer: bool
+    data_parallel_size: int
     runtime_data: dict[str, Any]
     tensor_model_config: Any | None
 
@@ -436,6 +445,14 @@ class ModelRuntimeConfig:
 
     def get_engine_specific(self, key: str) -> Any | None:
         """Get an engine-specific runtime configuration value"""
+        ...
+
+    def set_disaggregated_endpoint(
+        self,
+        bootstrap_host: str | None,
+        bootstrap_port: int | None,
+    ) -> None:
+        """Set the bootstrap endpoint for disaggregated serving (prefill workers)."""
         ...
 
 class OverlapScores:
@@ -915,6 +932,10 @@ class KserveGrpcService:
 
 class ModelInput:
     """What type of request this model needs: Text, Tokens or Tensor"""
+
+    Text: ModelInput
+    Tokens: ModelInput
+    Tensor: ModelInput
     ...
 
 class ModelType:
@@ -927,7 +948,10 @@ class ModelType:
     Images: ModelType
     Audios: ModelType
     Videos: ModelType
-    ...
+
+    def __or__(self, other: ModelType) -> ModelType:
+        """Combine model types (e.g., ModelType.Chat | ModelType.Completions)."""
+        ...
 
 class RouterMode:
     """Router mode for load balancing requests across workers"""
@@ -1027,6 +1051,8 @@ async def register_model(
     runtime_config: Optional[ModelRuntimeConfig] = None,
     user_data: Optional[Dict[str, Any]] = None,
     custom_template_path: Optional[str] = None,
+    media_decoder: Optional[MediaDecoder] = None,
+    media_fetcher: Optional[MediaFetcher] = None,
     lora_name: Optional[str] = None,
     base_model_path: Optional[str] = None,
 ) -> None:
@@ -1378,6 +1404,12 @@ class KvRouter:
         """
         ...
 
+    async def generate_from_request(self, request: JsonLike) -> AsyncIterator[JsonLike]:
+        """
+        Generate a response from the endpoint using a request object
+        """
+        ...
+
     async def best_worker(
         self,
         token_ids: List[int],
@@ -1539,6 +1571,8 @@ class PlannerDecision:
             -1 in any of those fields mean not set, usually because planner hasn't decided anything yet.
     Call VirtualConnectorClient.complete(event) when action is completed.
     """
+    num_prefill_workers: int
+    num_decode_workers: int
     ...
 
 class VirtualConnectorCoordinator:

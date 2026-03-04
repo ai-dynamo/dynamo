@@ -7,7 +7,7 @@ import logging
 import os
 import tempfile
 import time
-from typing import Optional
+from typing import Any, Optional
 
 import uvloop
 from prometheus_client import REGISTRY, CollectorRegistry, multiprocess
@@ -106,7 +106,7 @@ def run_dynamo_headless(config: Config) -> None:
     run_headless(args)
 
 
-async def worker():
+async def worker() -> None:
     config = parse_args()
 
     dump_config(config.dump_config_to, config)
@@ -211,7 +211,9 @@ async def worker():
     logger.debug("Worker function completed, exiting...")
 
 
-def setup_metrics_collection(config: Config, generate_endpoint, logger):
+def setup_metrics_collection(
+    config: Config, generate_endpoint: Endpoint, logger: logging.Logger
+) -> None:
     """Set up metrics collection for vLLM and LMCache metrics.
 
     In multiprocess mode (PROMETHEUS_MULTIPROC_DIR set), metrics are stored:
@@ -307,8 +309,9 @@ def setup_kv_event_publisher(
     vllm_config: VllmConfig,
     consolidator_enabled: bool = False,
     consolidator_port: Optional[int] = 5558,
-) -> Optional[KvEventPublisher]:
+) -> Optional[list[KvEventPublisher]]:
     """
+    list[KvEventPublisher] | None
     Set up KV event publishers for prefix caching if enabled.
     Creates one publisher per dp_rank since each dp_rank publishes to a different port.
     Args:
@@ -377,7 +380,9 @@ def setup_kv_event_publisher(
     return kv_publishers if kv_publishers else None
 
 
-def setup_vllm_engine(config, stat_logger=None):
+def setup_vllm_engine(
+    config: Config, stat_logger: Optional[StatLoggerFactory] = None
+) -> tuple[AsyncLLM, VllmConfig, Any, Any, LLMBackendMetrics]:
     # vLLM v0.11.0 bug: vllm/v1.metrics/prometheus.py:79 passes TemporaryDirectory object
     # instead of .name string, causing false error on exit. Set PROMETHEUS_MULTIPROC_DIR
     # ourselves to avoid this and handle cleanup properly.
@@ -523,11 +528,11 @@ def setup_vllm_engine(config, stat_logger=None):
 async def register_vllm_model(
     model_input: ModelInput,
     model_type: ModelType,
-    generate_endpoint,
+    generate_endpoint: Endpoint,
     config: Config,
     engine_client: AsyncLLM,
-    vllm_config,
-):
+    vllm_config: VllmConfig,
+) -> None:
     """
     Helper function to register a vLLM model with runtime configuration.
 
@@ -600,8 +605,10 @@ async def init_prefill(
     runtime: DistributedRuntime,
     config: Config,
     shutdown_event: asyncio.Event,
-    checkpoint_restore_engine=None,
-):
+    checkpoint_restore_engine: Optional[
+        tuple[AsyncLLM, VllmConfig, Any, Any, LLMBackendMetrics]
+    ] = None,
+) -> None:
     """
     Instantiate and serve
     """
@@ -704,7 +711,7 @@ async def init_prefill(
             #     (long-term reason): prefill engine should pull from a global queue so there is
             #                         only a few in-flight requests that can be quickly finished
             generate_endpoint.serve_endpoint(
-                handler.generate,
+                handler.generate,  # type: ignore
                 graceful_shutdown=True,
                 # In practice config.served_model_name is always set, but mypy needs the "or" here.
                 metrics_labels=[
@@ -720,10 +727,16 @@ async def init_prefill(
                 health_check_payload=health_check_payload,
             ),
             clear_endpoint.serve_endpoint(
-                handler.clear_kv_blocks,
+                handler.clear_kv_blocks,  # type: ignore
                 metrics_labels=[
-                    (prometheus_names.labels.MODEL, config.served_model_name),
-                    (prometheus_names.labels.MODEL_NAME, config.served_model_name),
+                    (
+                        prometheus_names.labels.MODEL,
+                        config.served_model_name or config.model,
+                    ),
+                    (
+                        prometheus_names.labels.MODEL_NAME,
+                        config.served_model_name or config.model,
+                    ),
                 ],
             ),
         )
@@ -740,8 +753,10 @@ async def init(
     runtime: DistributedRuntime,
     config: Config,
     shutdown_event: asyncio.Event,
-    checkpoint_restore_engine=None,
-):
+    checkpoint_restore_engine: Optional[
+        tuple[AsyncLLM, VllmConfig, Any, Any, LLMBackendMetrics]
+    ] = None,
+) -> None:
     """
     Instantiate and serve
     """
@@ -907,7 +922,7 @@ async def init(
             # for decode, we want to transfer the in-flight requests to other decode engines,
             # because waiting them to finish can take a long time for long OSLs
             generate_endpoint.serve_endpoint(
-                handler.generate,
+                handler.generate,  # type: ignore
                 graceful_shutdown=True,
                 metrics_labels=model_metrics_labels,
                 health_check_payload=health_check_payload,
@@ -947,7 +962,7 @@ async def init(
         handler.cleanup()
 
 
-def get_engine_cache_info(engine: AsyncLLM):
+def get_engine_cache_info(engine: AsyncLLM) -> dict[str, Any]:
     """Retrieve cache configuration information from [`AsyncLLM`] engine."""
 
     try:
@@ -977,7 +992,7 @@ def get_engine_cache_info(engine: AsyncLLM):
 
 async def init_omni(
     runtime: DistributedRuntime, config: Config, shutdown_event: asyncio.Event
-):
+) -> None:
     """Initialize Omni worker for multi-stage pipeline generation using vLLM-Omni.
 
     Supports text-to-text, text-to-image, and text-to-video generation
@@ -1060,7 +1075,7 @@ async def init_omni(
         handler.cleanup()
 
 
-def main():
+def main() -> None:
     uvloop.run(worker())
 
 

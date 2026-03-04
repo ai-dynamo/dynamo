@@ -20,7 +20,7 @@ DYNAMO_COMPONENT_REGISTRY = CollectorRegistry()
 
 
 class NullStatLogger(StatLoggerBase):
-    def __init__(self):
+    def __init__(self) -> None:
         pass
 
     def record(
@@ -28,12 +28,12 @@ class NullStatLogger(StatLoggerBase):
         scheduler_stats: Optional[SchedulerStats],
         iteration_stats: Optional[IterationStats],
         engine_idx: int = 0,
-        *args,
-        **kwargs,
-    ):
+        *args: object,
+        **kwargs: object,
+    ) -> None:
         pass
 
-    def log_engine_initialized(self):
+    def log_engine_initialized(self) -> None:
         pass
 
 
@@ -64,7 +64,7 @@ class DynamoStatLoggerPublisher(StatLoggerBase):
             raise
 
     # TODO: Remove this and pass as metadata through shared storage
-    def set_num_gpu_block(self, num_blocks):
+    def set_num_gpu_block(self, num_blocks: int) -> None:
         self.num_gpu_block = num_blocks
 
     def record(
@@ -72,9 +72,9 @@ class DynamoStatLoggerPublisher(StatLoggerBase):
         scheduler_stats: SchedulerStats,
         iteration_stats: Optional[IterationStats],
         engine_idx: int = 0,
-        *args,
-        **kwargs,
-    ):
+        *args: object,
+        **kwargs: object,
+    ) -> None:
         active_decode_blocks = int(self.num_gpu_block * scheduler_stats.kv_cache_usage)
         self.inner.publish(self.dp_rank, active_decode_blocks)
 
@@ -89,7 +89,7 @@ class DynamoStatLoggerPublisher(StatLoggerBase):
             dp_rank_str, scheduler_stats.kv_cache_usage
         )
 
-    def init_publish(self):
+    def init_publish(self) -> None:
         self.inner.publish(self.dp_rank, 0)
         dp_rank_str = str(self.dp_rank)
         self.component_gauges.set_total_blocks(dp_rank_str, 0)
@@ -135,10 +135,10 @@ class StatLoggerFactory:
         return self.create_stat_logger(dp_rank=dp_rank)
 
     # TODO Remove once we publish metadata to shared storage
-    def set_num_gpu_blocks_all(self, num_blocks):
+    def set_num_gpu_blocks_all(self, num_blocks: int) -> None:
         if self.created_logger:
             self.created_logger.set_num_gpu_block(num_blocks)
 
-    def init_publish(self):
+    def init_publish(self) -> None:
         if self.created_logger:
             self.created_logger.init_publish()
