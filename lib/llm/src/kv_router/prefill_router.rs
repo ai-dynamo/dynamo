@@ -550,9 +550,6 @@ impl PrefillRouter {
                 Ok((worker.worker_id, worker.dp_rank))
             }
             InnerPrefillRouter::SimpleRouter(r) => {
-                if self.router_mode.is_direct_routing() {
-                    anyhow::bail!(PrefillError::MissingWorkerIdForDirectRouting);
-                }
                 let worker_id = if update_states {
                     r.select_next_worker()
                 } else {
