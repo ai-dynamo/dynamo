@@ -24,7 +24,7 @@ use dashmap::DashMap;
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::indexer::{SyncIndexer, WorkerTask};
+use super::{SyncIndexer, WorkerTask};
 use crate::protocols::{
     DpRank, ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheEventError,
     KvCacheStoreData, KvCacheStoredBlockData, LocalBlockHash, OverlapScores, RouterEvent, WorkerId,

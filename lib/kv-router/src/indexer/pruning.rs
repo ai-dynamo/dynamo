@@ -12,7 +12,7 @@ use std::collections::{BinaryHeap, HashMap};
 use std::hash::Hash;
 use tokio::time::{Duration, Instant};
 
-use crate::indexer::KvRouterError;
+use super::KvRouterError;
 use crate::protocols::{ExternalSequenceBlockHash, WorkerWithDpRank};
 
 /// Block entry to be inserted in the [`PruneManager::expirations`] heap.
@@ -222,7 +222,7 @@ impl<K: Clone + Hash + Eq + Ord> PruneManager<K> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::indexer::{KvIndexer, KvIndexerInterface, KvIndexerMetrics};
+    use super::{KvIndexer, KvIndexerInterface, KvIndexerMetrics};
     use crate::protocols::{TokensWithHashes, WorkerId, WorkerWithDpRank};
     use std::sync::Arc;
     use tokio::time::{self, Duration, Instant};

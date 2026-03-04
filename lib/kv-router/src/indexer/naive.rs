@@ -18,7 +18,7 @@ use async_trait::async_trait;
 use std::collections::{HashMap, HashSet};
 use tokio::sync::{mpsc, oneshot};
 
-use crate::indexer::{KvIndexerInterface, KvRouterError};
+use super::{KvIndexerInterface, KvRouterError};
 use crate::protocols::{
     KvCacheEventData, LocalBlockHash, OverlapScores, RouterEvent, TokensWithHashes, WorkerId,
     WorkerWithDpRank,
