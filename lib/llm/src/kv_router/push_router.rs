@@ -353,6 +353,8 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         &self,
         request: SingleIn<PreprocessedRequest>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+        let generate_start = std::time::Instant::now();
+
         // Extract context ID for request tracking
         let context_id = request.context().id().to_string();
 
@@ -371,6 +373,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             .select_worker(&context_id, &request, phase, is_query_only)
             .instrument(tracing::info_span!("kv_router.select_worker"))
             .await?;
+        let select_worker_ms = generate_start.elapsed().as_secs_f64() * 1000.0;
         let WorkerSelection {
             instance_id,
             dp_rank,
@@ -483,6 +486,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         }
 
         let chooser = self.chooser.clone();
+        let pre_direct_ms = generate_start.elapsed().as_secs_f64() * 1000.0;
         let mut response_stream = self
             .inner
             .direct(updated_request, instance_id)
@@ -495,6 +499,14 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 phase = ?phase,
             ))
             .await?;
+        let direct_ms = generate_start.elapsed().as_secs_f64() * 1000.0 - pre_direct_ms;
+        let total_ms = generate_start.elapsed().as_secs_f64() * 1000.0;
+        tracing::debug!(
+            request_id = %context_id,
+            "[perf][kv_push_router] generate: total={:.3}ms select_worker={:.3}ms \
+             pre_direct={:.3}ms direct={:.3}ms",
+            total_ms, select_worker_ms, pre_direct_ms, direct_ms,
+        );
         let stream_context = response_stream.context();
         let context_for_monitoring = stream_context.clone();
 

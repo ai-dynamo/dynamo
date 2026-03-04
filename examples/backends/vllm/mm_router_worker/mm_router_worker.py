@@ -30,6 +30,7 @@ from dynamo.llm import KvRouter, KvRouterConfig, ModelInput, ModelType, register
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 
 from .handler import MMRouterHandler
+from .image_cache_server import ImageCacheServer
 
 logger = logging.getLogger(__name__)
 
@@ -150,6 +151,11 @@ async def worker(runtime: DistributedRuntime) -> None:
     # TODO: hf AutoProcessor may be slow than the vllm equivalent @zhongdaor
     processor = AutoProcessor.from_pretrained(args.model, trust_remote_code=True)
 
+    # Start image cache server for payload optimization
+    image_cache = ImageCacheServer()
+    cache_port = await image_cache.start()
+    logger.info(f"Image cache server started on port {cache_port}")
+
     # Create handler
     handler = MMRouterHandler(
         kv_router=kv_router,
@@ -157,6 +163,7 @@ async def worker(runtime: DistributedRuntime) -> None:
         processor=processor,
         model=args.model,
         block_size=args.block_size,
+        image_cache=image_cache,
     )
 
     # Register this worker's endpoint

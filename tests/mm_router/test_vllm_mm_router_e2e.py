@@ -320,9 +320,11 @@ def test_vllm_text_only_overlap_repeated_prompt(
     overlap_1, total_1, _ = _send_request_get_overlap(
         frontend_port, router_proc, payload, "text_only_req1"
     )
+    time.sleep(1)
     overlap_2, total_2, _ = _send_request_get_overlap(
         frontend_port, router_proc, payload, "text_only_req2"
     )
+    time.sleep(1)
     overlap_3, total_3, segment_3 = _send_request_get_overlap(
         frontend_port, router_proc, payload, "text_only_req3"
     )
@@ -364,9 +366,11 @@ def test_vllm_mm_overlap_repeated_three_images(
     overlap_1, total_1, _ = _send_request_get_overlap(
         frontend_port, router_proc, payload, "same_3_images_req1"
     )
+    time.sleep(1)
     overlap_2, total_2, _ = _send_request_get_overlap(
         frontend_port, router_proc, payload, "same_3_images_req2"
     )
+    time.sleep(1)
     overlap_3, total_3, segment_3 = _send_request_get_overlap(
         frontend_port, router_proc, payload, "same_3_images_req3"
     )
@@ -405,9 +409,11 @@ def test_vllm_mm_overlap_repeated_single_image(
     overlap_1, total_1, _ = _send_request_get_overlap(
         frontend_port, router_proc, payload, "same_single_image_req1"
     )
+    time.sleep(1)
     overlap_2, total_2, _ = _send_request_get_overlap(
         frontend_port, router_proc, payload, "same_single_image_req2"
     )
+    time.sleep(1)
     overlap_3, total_3, segment_3 = _send_request_get_overlap(
         frontend_port, router_proc, payload, "same_single_image_req3"
     )
@@ -447,9 +453,11 @@ def test_vllm_mm_overlap_repeated_two_identical_images(
     overlap_1, total_1, _ = _send_request_get_overlap(
         frontend_port, router_proc, payload, "same_two_identical_images_req1"
     )
+    time.sleep(1)
     overlap_2, total_2, _ = _send_request_get_overlap(
         frontend_port, router_proc, payload, "same_two_identical_images_req2"
     )
+    time.sleep(1)
     overlap_3, total_3, segment_3 = _send_request_get_overlap(
         frontend_port, router_proc, payload, "same_two_identical_images_req3"
     )
@@ -538,6 +546,7 @@ def test_vllm_mm_overlap_diff_images_less_than_same(
     overlap_baseline_1, total_baseline_1, _ = _send_request_get_overlap(
         frontend_port, router_proc, baseline_payload, "baseline_same_images_req1"
     )
+    time.sleep(1)
     overlap_baseline_2, total_baseline_2, segment_baseline = _send_request_get_overlap(
         frontend_port, router_proc, baseline_payload, "baseline_same_images_req2"
     )
@@ -557,6 +566,7 @@ def test_vllm_mm_overlap_diff_images_less_than_same(
         f"got {total_baseline}, expected in [{low}, {high}]"
     )
 
+    time.sleep(1)
     probe_payload = _build_payload(
         [_make_data_uri(c) for c in _ALT_COLORS],
         prompt="MM routing e2e: baseline same-images overlap.",
@@ -596,6 +606,7 @@ def test_vllm_mm_overlap_same_images_different_prompt_less_than_same_prompt(
         baseline_payload,
         "baseline_same_images_prompt_a_req1",
     )
+    time.sleep(1)
     overlap_baseline_2, total_baseline_2, segment_baseline = _send_request_get_overlap(
         frontend_port,
         router_proc,
@@ -618,6 +629,7 @@ def test_vllm_mm_overlap_same_images_different_prompt_less_than_same_prompt(
         f"got {total_baseline}, expected in [{low}, {high}]"
     )
 
+    time.sleep(1)
     probe_payload = _build_payload(
         [_make_data_uri(c) for c in _COLORS],
         prompt="MM routing e2e: prompt-sensitive baseline omega.",
@@ -662,12 +674,14 @@ def test_vllm_mm_overlap_swapped_order_less_than_same_order(
         ordered_payload,
         "ordered_distinct_images_req1",
     )
+    time.sleep(1)
     overlap_ordered_2, total_ordered_2, segment_ordered_2 = _send_request_get_overlap(
         frontend_port,
         router_proc,
         ordered_payload,
         "ordered_distinct_images_req2",
     )
+    time.sleep(1)
     overlap_swapped, total_swapped, segment_swapped = _send_request_get_overlap(
         frontend_port,
         router_proc,
@@ -749,9 +763,11 @@ def test_vllm_mm_overlap_repeated_http_images(
     overlap_1, total_1, _ = _send_request_get_overlap(
         frontend_port, router_proc, payload, "http_3_images_req1"
     )
+    time.sleep(1)
     overlap_2, total_2, _ = _send_request_get_overlap(
         frontend_port, router_proc, payload, "http_3_images_req2"
     )
+    time.sleep(1)
     overlap_3, total_3, segment_3 = _send_request_get_overlap(
         frontend_port, router_proc, payload, "http_3_images_req3"
     )
@@ -795,6 +811,8 @@ def test_vllm_mm_overlap_http_vs_data_uri_same_image(
     overlap_data, total_data, _ = _send_request_get_overlap(
         frontend_port, router_proc, data_uri_payload, "data_uri_seed"
     )
+
+    time.sleep(1)
 
     # Now send HTTP URL request for the identical image
     http_payload = _build_payload(
