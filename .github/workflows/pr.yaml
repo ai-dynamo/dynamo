@@ -407,6 +407,73 @@ jobs:
           platform_arch: amd64
 
   # ============================================================================
+  # ALLURE REPORT
+  # Generate Allure test report and deploy to GitHub Pages
+  # ============================================================================
+
+  allure-report:
+    runs-on: ubuntu-latest
+    needs: [vllm-pipeline, sglang-pipeline, trtllm-pipeline]
+    if: always()
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Allure Results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: allure-results-*
+          path: allure-results
+          merge-multiple: true
+
+      - name: Check for Allure results
+        id: check-results
+        run: |
+          if [ -d allure-results ] && [ "$(ls -A allure-results 2>/dev/null)" ]; then
+            echo "has_results=true" >> $GITHUB_OUTPUT
+            echo "Found allure results:"
+            ls -la allure-results/
+          else
+            echo "has_results=false" >> $GITHUB_OUTPUT
+            echo "No allure results found. Skipping report generation."
+          fi
+
+      - name: Get Allure history
+        if: steps.check-results.outputs.has_results == 'true'
+        uses: actions/checkout@v4
+        continue-on-error: true
+        with:
+          ref: gh-pages
+          path: gh-pages
+
+      - name: Build Allure Report
+        if: steps.check-results.outputs.has_results == 'true'
+        uses: simple-elf/allure-report-action@v1.13
+        with:
+          allure_results: allure-results
+          allure_history: allure-history/pre-merge
+          keep_reports: 30
+          gh_pages: gh-pages/pre-merge
+
+      - name: Deploy to GitHub Pages
+        if: steps.check-results.outputs.has_results == 'true'
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_branch: gh-pages
+          publish_dir: allure-history
+          keep_files: true
+
+      - name: Print report URL
+        if: steps.check-results.outputs.has_results == 'true'
+        run: |
+          echo "## Allure Report" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Report: https://ai-dynamo.github.io/dynamo/pre-merge/" >> $GITHUB_STEP_SUMMARY
+
+  # ============================================================================
   # CLEANUP JOBS
   # Clean up ephemeral Kubernetes namespace and resources
   # ============================================================================
