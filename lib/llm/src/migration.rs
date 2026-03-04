@@ -5,7 +5,7 @@ use std::error::Error as StdError;
 use std::sync::Arc;
 
 use anyhow::{Error, Result};
-use futures::{stream, stream::StreamExt};
+use futures::stream::StreamExt;
 
 use crate::{
     http::service::metrics::Metrics, model_card::ModelDeploymentCard, preprocessor::BackendOutput,
@@ -84,13 +84,12 @@ impl
             self.metrics.clone(),
         )
         .await?;
-        let response_stream = stream::unfold(retry_manager, move |mut retry_manager| async move {
-            retry_manager
-                .next()
-                .await
-                .map(|response| (response, retry_manager))
-        })
-        .fuse();
+        let response_stream = async_stream::stream! {
+            let mut retry_manager = retry_manager;
+            while let Some(response) = retry_manager.next().await {
+                yield response;
+            }
+        };
         Ok(ResponseStream::new(Box::pin(response_stream), engine_ctx_))
     }
 }

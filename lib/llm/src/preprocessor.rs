@@ -130,11 +130,6 @@ impl LLMMetricAnnotation {
     }
 }
 
-// Reasoning State for reasoning parsing transformation step
-struct ReasoningState {
-    stream: Pin<Box<dyn Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>>,
-    reasoning_parser: Option<Box<dyn ReasoningParser>>,
-}
 
 pub struct OpenAIPreprocessor {
     mdcsum: String,
@@ -617,224 +612,189 @@ impl OpenAIPreprocessor {
         S: Stream<Item = Annotated<BackendOutput>> + Send + 'static,
         Resp: Send + Sync + 'static + std::fmt::Debug,
     {
-        struct State<Resp>
-        where
-            Resp: Send + Sync + 'static + std::fmt::Debug,
-        {
-            response_stream: Pin<Box<dyn Stream<Item = Annotated<BackendOutput>> + Send>>,
-            response_generator: Box<dyn DeltaGeneratorExt<Resp>>,
-            context: Arc<dyn AsyncEngineContext>,
-            cancelled: bool,
-            cumulative_output_tokens: usize,
-            finish_reason_sent: bool,
-            usage_chunk_sent: bool,
-            finished: bool,
-        }
-
-        let state = State {
-            response_stream: Box::pin(stream),
-            response_generator: generator,
-            context: context.clone(),
-            cancelled: false,
-            cumulative_output_tokens: 0,
-            finish_reason_sent: false,
-            usage_chunk_sent: false,
-            finished: false,
-        };
+        let mut response_stream: Pin<Box<dyn Stream<Item = Annotated<BackendOutput>> + Send>> = Box::pin(stream);
+        let mut response_generator = generator;
+        let context = context.clone();
 
         // transform the common response stream into a chat response stream
 
-        stream::unfold(state, |mut inner| {
-            async move {
-                // If already finished, return None immediately
-                if inner.finished {
-                    return None;
+        async_stream::stream! {
+            let mut cancelled = false;
+            let mut cumulative_output_tokens: usize = 0;
+            let mut finish_reason_sent = false;
+
+            while let Some(response) = response_stream.next().await {
+                if cancelled {
+                    tracing::debug!(
+                        request_id = context.id(),
+                        "Cancellation issued last message; closing stream"
+                    );
+                    break;
                 }
 
-                if let Some(response) = inner.response_stream.next().await {
-                    if inner.cancelled {
-                        tracing::debug!(
-                            request_id = inner.context.id(),
-                            "Cancellation issued last message; closing stream"
-                        );
-                        // inner.finished = true; // Mark as finished
-                        return None;
-                    }
+                tracing::trace!(
+                    request_id = context.id(),
+                    "Processing common response: {:?}",
+                    response
+                );
 
-                    tracing::trace!(
-                        request_id = inner.context.id(),
-                        "Processing common response: {:?}",
-                        response
-                    );
+                // Check if this response has a finish_reason
+                let has_finish_reason = response
+                    .data
+                    .as_ref()
+                    .map(|d| d.finish_reason.is_some())
+                    .unwrap_or(false);
 
-                    // Check if this response has a finish_reason
-                    let has_finish_reason = response
-                        .data
-                        .as_ref()
-                        .map(|d| d.finish_reason.is_some())
-                        .unwrap_or(false);
+                let (chunk_tokens, isl) = if let Some(ref backend_output) = response.data {
+                    let chunk_tokens = backend_output.token_ids.len();
+                    cumulative_output_tokens += chunk_tokens;
 
-                    let (chunk_tokens, isl) = if let Some(ref backend_output) = response.data {
-                        let chunk_tokens = backend_output.token_ids.len();
-                        inner.cumulative_output_tokens += chunk_tokens;
+                    let isl = response_generator.get_isl().unwrap_or(0) as usize;
 
-                        let isl = inner.response_generator.get_isl().unwrap_or(0) as usize;
-
-                        (chunk_tokens, isl)
-                    } else {
-                        (0, 0)
-                    };
-
-                    let current_osl = inner.cumulative_output_tokens;
-
-                    let mut response = response.map_data(|data| {
-                        inner
-                            .response_generator
-                            .choice_from_postprocessor(data)
-                            .inspect_err(|e| {
-                                tracing::error!(
-                                    request_id = inner.context.id(),
-                                    "Error processing common response: {:?}",
-                                    e
-                                );
-                                inner.cancelled = true;
-                                inner.context.stop_generating();
-                            })
-                            .map_err(|e| e.to_string())
-                    });
-
-                    // Create LLM metrics annotation with prefill/decode worker info from tracker.
-                    // Worker types are stored at routing time to avoid expensive MDC lookup.
-                    let tracker = inner.response_generator.tracker();
-                    let prefill_worker_id = tracker.as_ref().and_then(|t| t.prefill_worker_id());
-                    let prefill_dp_rank = tracker.as_ref().and_then(|t| t.prefill_dp_rank());
-                    let prefill_worker_type = tracker
-                        .as_ref()
-                        .and_then(|t| t.prefill_worker_type())
-                        .map(String::from);
-                    let decode_worker_id = tracker.as_ref().and_then(|t| t.decode_worker_id());
-                    let decode_dp_rank = tracker.as_ref().and_then(|t| t.decode_dp_rank());
-                    let decode_worker_type = tracker
-                        .as_ref()
-                        .and_then(|t| t.decode_worker_type())
-                        .map(String::from);
-                    let llm_metrics = LLMMetricAnnotation {
-                        input_tokens: isl,
-                        output_tokens: current_osl,
-                        chunk_tokens,
-                        cached_tokens: None,
-                        prefill_worker_id,
-                        prefill_dp_rank,
-                        prefill_worker_type,
-                        decode_worker_id,
-                        decode_dp_rank,
-                        decode_worker_type,
-                        tokenize_latency: tracker.as_ref().and_then(|t| t.tokenize_latency()),
-                        detokenize_total_latency: tracker.as_ref().and_then(|t| t.detokenize_total_latency()),
-                        detokenize_count: tracker.as_ref().map(|t| t.detokenize_count()),
-                    };
-
-                    if let Ok(metrics_annotated) = llm_metrics.to_annotation::<()>() {
-                        // Only set event if not already set to avoid overriding existing events (like errors)
-                        if response.event.is_none() {
-                            response.event = metrics_annotated.event;
-                            response.comment = metrics_annotated.comment;
-                        }
-                    }
-
-                    // Mark if we've seen a finish_reason
-                    if has_finish_reason {
-                        inner.finish_reason_sent = true;
-                    }
-
-                    tracing::trace!(
-                        request_id = inner.context.id(),
-                        "OpenAI NvCreateChatCompletionStreamResponse: {:?}",
-                        response
-                    );
-
-                    Some((response, inner))
+                    (chunk_tokens, isl)
                 } else {
-                    // Stream has ended - must set finished to true to prevent unfold from polling
-                    // again. The stream is exhausted and will panic if polled after None.
-                    inner.finished = true;
+                    (0, 0)
+                };
 
-                    if inner.finish_reason_sent && !inner.usage_chunk_sent {
-                        inner.usage_chunk_sent = true;
+                let current_osl = cumulative_output_tokens;
 
-                        let usage_chunk = inner.response_generator.create_usage_chunk();
-                        let usage = inner.response_generator.get_usage();
-                        let tracker = inner.response_generator.tracker();
-                        let prefill_worker_id =
-                            tracker.as_ref().and_then(|t| t.prefill_worker_id());
-                        let prefill_dp_rank = tracker.as_ref().and_then(|t| t.prefill_dp_rank());
-                        let prefill_worker_type = tracker
-                            .as_ref()
-                            .and_then(|t| t.prefill_worker_type())
-                            .map(String::from);
-                        let decode_worker_id = tracker.as_ref().and_then(|t| t.decode_worker_id());
-                        let decode_dp_rank = tracker.as_ref().and_then(|t| t.decode_dp_rank());
-                        let decode_worker_type = tracker
-                            .as_ref()
-                            .and_then(|t| t.decode_worker_type())
-                            .map(String::from);
-                        let llm_metrics = LLMMetricAnnotation {
-                            input_tokens: usage.prompt_tokens as usize,
-                            output_tokens: usage.completion_tokens as usize,
-                            chunk_tokens: 0,
-                            cached_tokens: usage
-                                .prompt_tokens_details
-                                .as_ref()
-                                .and_then(|d| d.cached_tokens.map(|c| c as usize)),
-                            prefill_worker_id,
-                            prefill_dp_rank,
-                            prefill_worker_type,
-                            decode_worker_id,
-                            decode_dp_rank,
-                            decode_worker_type,
-                            tokenize_latency: tracker.as_ref().and_then(|t| t.tokenize_latency()),
-                            detokenize_total_latency: tracker
-                                .as_ref()
-                                .and_then(|t| t.detokenize_total_latency()),
-                            detokenize_count: tracker.as_ref().map(|t| t.detokenize_count()),
-                        };
+                let mut response = response.map_data(|data| {
+                    response_generator
+                        .choice_from_postprocessor(data)
+                        .inspect_err(|e| {
+                            tracing::error!(
+                                request_id = context.id(),
+                                "Error processing common response: {:?}",
+                                e
+                            );
+                            cancelled = true;
+                            context.stop_generating();
+                        })
+                        .map_err(|e| e.to_string())
+                });
 
-                        // Create annotation string
-                        let annotation = llm_metrics.to_annotation::<()>().unwrap_or_else(|e| {
-                            tracing::warn!("Failed to serialize metrics: {}", e);
-                            Annotated::<()>::from_data(())
-                        });
+                // Create LLM metrics annotation with prefill/decode worker info from tracker.
+                // Worker types are stored at routing time to avoid expensive MDC lookup.
+                let tracker = response_generator.tracker();
+                let prefill_worker_id = tracker.as_ref().and_then(|t| t.prefill_worker_id());
+                let prefill_dp_rank = tracker.as_ref().and_then(|t| t.prefill_dp_rank());
+                let prefill_worker_type = tracker
+                    .as_ref()
+                    .and_then(|t| t.prefill_worker_type())
+                    .map(String::from);
+                let decode_worker_id = tracker.as_ref().and_then(|t| t.decode_worker_id());
+                let decode_dp_rank = tracker.as_ref().and_then(|t| t.decode_dp_rank());
+                let decode_worker_type = tracker
+                    .as_ref()
+                    .and_then(|t| t.decode_worker_type())
+                    .map(String::from);
+                let llm_metrics = LLMMetricAnnotation {
+                    input_tokens: isl,
+                    output_tokens: current_osl,
+                    chunk_tokens,
+                    cached_tokens: None,
+                    prefill_worker_id,
+                    prefill_dp_rank,
+                    prefill_worker_type,
+                    decode_worker_id,
+                    decode_dp_rank,
+                    decode_worker_type,
+                    tokenize_latency: tracker.as_ref().and_then(|t| t.tokenize_latency()),
+                    detokenize_total_latency: tracker.as_ref().and_then(|t| t.detokenize_total_latency()),
+                    detokenize_count: tracker.as_ref().map(|t| t.detokenize_count()),
+                };
 
-                        // Send the usage chunk if needed
-                        let data = if inner.response_generator.is_usage_enabled() {
-                            Some(usage_chunk)
-                        } else {
-                            None
-                        };
-
-                        let annotated_usage = Annotated::<Resp> {
-                            id: None,
-                            data,
-                            event: Some(ANNOTATION_LLM_METRICS.to_string()),
-                            comment: annotation.comment,
-                            error: None,
-                        };
-
-                        tracing::trace!(
-                            request_id = inner.context.id(),
-                            "Sending final usage chunk for OpenAI compliance, annotated_usage: {:?}",
-                            annotated_usage
-                        );
-
-                        Some((annotated_usage, inner))
-                    } else {
-                        // stream closed
-                        None
+                if let Ok(metrics_annotated) = llm_metrics.to_annotation::<()>() {
+                    // Only set event if not already set to avoid overriding existing events (like errors)
+                    if response.event.is_none() {
+                        response.event = metrics_annotated.event;
+                        response.comment = metrics_annotated.comment;
                     }
                 }
+
+                // Mark if we've seen a finish_reason
+                if has_finish_reason {
+                    finish_reason_sent = true;
+                }
+
+                tracing::trace!(
+                    request_id = context.id(),
+                    "OpenAI NvCreateChatCompletionStreamResponse: {:?}",
+                    response
+                );
+
+                yield response;
             }
-        })
-        .fuse()
+
+            // Stream has ended — optionally yield a final usage chunk
+            if finish_reason_sent {
+                let usage_chunk = response_generator.create_usage_chunk();
+                let usage = response_generator.get_usage();
+                let tracker = response_generator.tracker();
+                let prefill_worker_id =
+                    tracker.as_ref().and_then(|t| t.prefill_worker_id());
+                let prefill_dp_rank = tracker.as_ref().and_then(|t| t.prefill_dp_rank());
+                let prefill_worker_type = tracker
+                    .as_ref()
+                    .and_then(|t| t.prefill_worker_type())
+                    .map(String::from);
+                let decode_worker_id = tracker.as_ref().and_then(|t| t.decode_worker_id());
+                let decode_dp_rank = tracker.as_ref().and_then(|t| t.decode_dp_rank());
+                let decode_worker_type = tracker
+                    .as_ref()
+                    .and_then(|t| t.decode_worker_type())
+                    .map(String::from);
+                let llm_metrics = LLMMetricAnnotation {
+                    input_tokens: usage.prompt_tokens as usize,
+                    output_tokens: usage.completion_tokens as usize,
+                    chunk_tokens: 0,
+                    cached_tokens: usage
+                        .prompt_tokens_details
+                        .as_ref()
+                        .and_then(|d| d.cached_tokens.map(|c| c as usize)),
+                    prefill_worker_id,
+                    prefill_dp_rank,
+                    prefill_worker_type,
+                    decode_worker_id,
+                    decode_dp_rank,
+                    decode_worker_type,
+                    tokenize_latency: tracker.as_ref().and_then(|t| t.tokenize_latency()),
+                    detokenize_total_latency: tracker
+                        .as_ref()
+                        .and_then(|t| t.detokenize_total_latency()),
+                    detokenize_count: tracker.as_ref().map(|t| t.detokenize_count()),
+                };
+
+                // Create annotation string
+                let annotation = llm_metrics.to_annotation::<()>().unwrap_or_else(|e| {
+                    tracing::warn!("Failed to serialize metrics: {}", e);
+                    Annotated::<()>::from_data(())
+                });
+
+                // Send the usage chunk if needed
+                let data = if response_generator.is_usage_enabled() {
+                    Some(usage_chunk)
+                } else {
+                    None
+                };
+
+                let annotated_usage = Annotated::<Resp> {
+                    id: None,
+                    data,
+                    event: Some(ANNOTATION_LLM_METRICS.to_string()),
+                    comment: annotation.comment,
+                    error: None,
+                };
+
+                tracing::trace!(
+                    request_id = context.id(),
+                    "Sending final usage chunk for OpenAI compliance, annotated_usage: {:?}",
+                    annotated_usage
+                );
+
+                yield annotated_usage;
+            }
+        }
     }
 
     /// Transform engine embedding output stream to OpenAI embedding response stream
@@ -996,15 +956,13 @@ impl OpenAIPreprocessor {
             parser_name.as_ref(),
         )) as Box<dyn ReasoningParser>;
 
-        let state = ReasoningState {
-            stream: Box::pin(stream),
-            reasoning_parser: Some(reasoning_parser),
-        };
+        async_stream::stream! {
+            let mut stream = std::pin::pin!(stream);
+            let mut reasoning_parser = Some(reasoning_parser);
 
-        stream::unfold(state, |mut state| async move {
-            if let Some(response) = state.stream.next().await {
+            while let Some(response) = stream.next().await {
                 // Process the response through reasoning parser if available
-                let processed_response = if let Some(ref mut parser) = state.reasoning_parser {
+                let processed_response = if let Some(ref mut parser) = reasoning_parser {
                     response.map_data(|mut data| {
                         // Process all choices, not just the first one
                         for choice in data.choices.iter_mut() {
@@ -1033,12 +991,9 @@ impl OpenAIPreprocessor {
                     response
                 };
 
-                Some((processed_response, state))
-            } else {
-                None
+                yield processed_response;
             }
-        })
-        .fuse()
+        }
     }
 }
 

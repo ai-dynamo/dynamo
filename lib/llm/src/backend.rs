@@ -18,7 +18,7 @@
 use std::{collections::HashSet, sync::Arc, time::Instant};
 
 use anyhow::Result;
-use futures::stream::{self, StreamExt};
+use futures::stream::StreamExt;
 
 use crate::model_card::ModelDeploymentCard;
 use dynamo_runtime::{
@@ -57,16 +57,6 @@ pub struct Backend {
     validate_engine_decode: bool,     // Enable validation of engine decoding
 }
 
-/// Internal state for managing token decoding and stream processing
-#[allow(dead_code)]
-struct DecoderUnfoldState {
-    stream: ManyOut<ExecutionOutputStream>,
-    decoder: Decoder,
-    validate_engine_decode: bool,
-    /// Set to true when a local stop condition is detected, causing the stream to end
-    finished: bool,
-}
-
 impl Backend {
     pub fn from_tokenizer(tokenizer: Tokenizer) -> Arc<Self> {
         Arc::new(Self {
@@ -90,29 +80,21 @@ impl Backend {
 
     fn decoder(
         &self,
-        stream: ManyOut<ExecutionOutputStream>,
         prompt_token_ids: &[TokenIdType],
         stop_conditions: StopConditions,
         skip_special_tokens: bool,
         include_stop_str_in_output: bool,
         tracker: Option<Arc<RequestTracker>>,
-    ) -> anyhow::Result<DecoderUnfoldState> {
+    ) -> anyhow::Result<Decoder> {
         let Some(tokenizer) = self.tokenizer.as_ref() else {
             anyhow::bail!("Backend built from blank ModelDeploymentCard, no tokenizer");
         };
-        let decoder = Decoder::new(
+        Ok(Decoder::new(
             tokenizer.decode_stream(prompt_token_ids, skip_special_tokens),
             stop_conditions,
             include_stop_str_in_output,
             tracker,
-        );
-
-        Ok(DecoderUnfoldState {
-            stream,
-            decoder,
-            validate_engine_decode: self.validate_engine_decode,
-            finished: false,
-        })
+        ))
     }
 }
 
@@ -147,127 +129,123 @@ impl
         let next_stream = next.generate(request).await?;
 
         let context = next_stream.context();
-        let state = self.decoder(
-            next_stream,
+        let mut decoder = self.decoder(
             &prompt_token_ids,
             stop_conditions,
             skip_special_tokens,
             include_stop_str_in_output,
             tracker,
         )?;
+        let validate_engine_decode = self.validate_engine_decode;
 
-        let processed_stream = stream::unfold(state, |mut state| async move {
-            // If we've already detected a local stop condition, end the stream
-            if state.finished {
-                return None;
-            }
+        let processed_stream = async_stream::stream! {
+            let mut stream = next_stream;
+            let mut finished = false;
 
-            match state.stream.next().await {
-                Some(output) => {
-                    // move to state.process_output
-                    // handle any error conditions / unwraps here
-
-                    // events are pass thru
-                    if output.is_event() || output.data.is_none() {
-                        return Some((output, state));
-                    }
-
-                    // if we have a data field without an event, then we might need to update the data
-                    if let Some(data) = &output.data
-                        && data.text.is_some()
-                        && !state.validate_engine_decode
-                    {
-                        return Some((output, state));
-                    }
-
-                    let data = output.data.as_ref().unwrap();
-
-                    let result = state.decoder.process_token_ids(&data.token_ids).unwrap();
-
-                    // NOTE: the `finish_reason` is computed from the generated `token_ids` alone.
-                    // The `data` field can have a `finish_reason` set, coming from the underlying
-                    // LLM inference `Engine`, and empty `token_ids`. See comment below for more details.
-                    //
-                    // stop_reason is only set for user-provided stop sequences, not for system
-                    // EOS tokens (HiddenStopTokenDetected). This matches OpenAI API behavior where
-                    // stop_reason is only present when a user-specified stop sequence is matched.
-                    let (finish_reason, stop_reason) = match &result.stop_trigger {
-                        Some(StopTrigger::MaxTokensLimit) => (Some(FinishReason::Length), None),
-                        Some(StopTrigger::HiddenStopTokenDetected(_)) => {
-                            // System EOS token - no stop_reason (user didn't request this stop)
-                            (Some(FinishReason::Stop), None)
-                        }
-                        Some(StopTrigger::HiddenStopSequenceDetected(seq)) => {
-                            // User-provided stop sequence (hidden from output)
-                            (
-                                Some(FinishReason::Stop),
-                                Some(StopReason::String(seq.clone())),
-                            )
-                        }
-                        Some(StopTrigger::VisibleStopSequenceDetected(seq)) => {
-                            // User-provided stop sequence (included in output)
-                            (
-                                Some(FinishReason::Stop),
-                                Some(StopReason::String(seq.clone())),
-                            )
-                        }
-                        None => (None, None),
-                    };
-
-                    // If we detected a local stop condition, mark stream as finished
-                    // so we stop iterating (upstream may keep generating, but we ignore it)
-                    if finish_reason.is_some() && data.finish_reason.is_none() {
-                        state.stream.context().stop_generating();
-                        state.finished = true;
-                    }
-
-                    let text = result.text;
-                    let tokens = result.tokens;
-
-                    if state.validate_engine_decode {
-                        if data.finish_reason != finish_reason {
-                            tracing::warn!(
-                                "finish reason mismatch: expected {:?}, got {:?}",
-                                data.finish_reason,
-                                finish_reason
-                            );
-                        }
-
-                        if data.text.is_some() && data.text != text {
-                            tracing::warn!(
-                                "text mismatch: expected {:?}, got {:?}",
-                                data.text,
-                                text
-                            );
-                        }
-                    }
-
-                    // update output in-place
-                    let mut output = output;
-                    let mut data = output.data.take().unwrap();
-
-                    // NOTE: If `finish_reason.is_some()`, then one of the stop conditions was triggered
-                    // by the token generation. We should update the `data.finish_reason` in that case.
-                    // However, if `finish_reason.is_none()`, it is possible that we are in the case where
-                    // `data.token_ids` is empty, and `data.finish_reason` is already correctly set.
-                    // In that case, `process_token_ids` above will rewrite `finish_reason` to `None`,
-                    // which we don't want to propagate to `data.finish_reason`.
-                    if finish_reason.is_some() {
-                        data.finish_reason = finish_reason;
-                        data.stop_reason = stop_reason;
-                    }
-                    data.text = text;
-                    data.tokens = Some(tokens);
-
-                    output.data = Some(data);
-
-                    Some((output, state))
+            while let Some(output) = stream.next().await {
+                if finished {
+                    break;
                 }
 
-                None => None,
+                // events are pass thru
+                if output.is_event() || output.data.is_none() {
+                    yield output;
+                    continue;
+                }
+
+                // if we have a data field without an event, then we might need to update the data
+                if let Some(data) = &output.data
+                    && data.text.is_some()
+                    && !validate_engine_decode
+                {
+                    yield output;
+                    continue;
+                }
+
+                let data = output.data.as_ref().unwrap();
+
+                let result = decoder.process_token_ids(&data.token_ids).unwrap();
+
+                // NOTE: the `finish_reason` is computed from the generated `token_ids` alone.
+                // The `data` field can have a `finish_reason` set, coming from the underlying
+                // LLM inference `Engine`, and empty `token_ids`. See comment below for more details.
+                //
+                // stop_reason is only set for user-provided stop sequences, not for system
+                // EOS tokens (HiddenStopTokenDetected). This matches OpenAI API behavior where
+                // stop_reason is only present when a user-specified stop sequence is matched.
+                let (finish_reason, stop_reason) = match &result.stop_trigger {
+                    Some(StopTrigger::MaxTokensLimit) => (Some(FinishReason::Length), None),
+                    Some(StopTrigger::HiddenStopTokenDetected(_)) => {
+                        // System EOS token - no stop_reason (user didn't request this stop)
+                        (Some(FinishReason::Stop), None)
+                    }
+                    Some(StopTrigger::HiddenStopSequenceDetected(seq)) => {
+                        // User-provided stop sequence (hidden from output)
+                        (
+                            Some(FinishReason::Stop),
+                            Some(StopReason::String(seq.clone())),
+                        )
+                    }
+                    Some(StopTrigger::VisibleStopSequenceDetected(seq)) => {
+                        // User-provided stop sequence (included in output)
+                        (
+                            Some(FinishReason::Stop),
+                            Some(StopReason::String(seq.clone())),
+                        )
+                    }
+                    None => (None, None),
+                };
+
+                // If we detected a local stop condition, mark stream as finished
+                // so we stop iterating (upstream may keep generating, but we ignore it)
+                if finish_reason.is_some() && data.finish_reason.is_none() {
+                    stream.context().stop_generating();
+                    finished = true;
+                }
+
+                let text = result.text;
+                let tokens = result.tokens;
+
+                if validate_engine_decode {
+                    if data.finish_reason != finish_reason {
+                        tracing::warn!(
+                            "finish reason mismatch: expected {:?}, got {:?}",
+                            data.finish_reason,
+                            finish_reason
+                        );
+                    }
+
+                    if data.text.is_some() && data.text != text {
+                        tracing::warn!(
+                            "text mismatch: expected {:?}, got {:?}",
+                            data.text,
+                            text
+                        );
+                    }
+                }
+
+                // update output in-place
+                let mut output = output;
+                let mut data = output.data.take().unwrap();
+
+                // NOTE: If `finish_reason.is_some()`, then one of the stop conditions was triggered
+                // by the token generation. We should update the `data.finish_reason` in that case.
+                // However, if `finish_reason.is_none()`, it is possible that we are in the case where
+                // `data.token_ids` is empty, and `data.finish_reason` is already correctly set.
+                // In that case, `process_token_ids` above will rewrite `finish_reason` to `None`,
+                // which we don't want to propagate to `data.finish_reason`.
+                if finish_reason.is_some() {
+                    data.finish_reason = finish_reason;
+                    data.stop_reason = stop_reason;
+                }
+                data.text = text;
+                data.tokens = Some(tokens);
+
+                output.data = Some(data);
+
+                yield output;
             }
-        })
-        .fuse();
+        };
 
         // convert stream of processed Annotated<LLMEngineOutput> to Annotated<BackendOutput>
         //let mdcsum = self.mdcsum.clone();
