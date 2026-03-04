@@ -46,7 +46,7 @@ jobs:
             --host-concurrency 10
             --host-request-interval 1s
             --host-stats
-             ${{ github.event_name == 'pull_request' && '' || '' }}
+             ${{ github.event_name == 'pull_request' && '--offline' || '' }}
             .
           fail: true
         env:
