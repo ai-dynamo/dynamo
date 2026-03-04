@@ -8,14 +8,12 @@ metadata:
 spec:
   services:
     Frontend:
-      envFromSecret: hf-token-secret
       componentType: frontend
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.9.0
     VllmDecodeWorker:
-      envFromSecret: hf-token-secret
       componentType: worker
       replicas: 1
       resources:
@@ -23,7 +21,7 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.9.0
           workingDir: /workspace/examples/backends/vllm
           command:
             - python3
