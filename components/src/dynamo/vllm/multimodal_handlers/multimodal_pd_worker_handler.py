@@ -202,7 +202,9 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
             if image_embeds is not None:
                 request.embeddings_shape = list(image_embeds.shape)
 
-        logger.debug(f"Prepared multimodal data size: {len(multi_modal_data['image'])}")
+        logger.debug(
+            "Prepared multimodal data size: %s", len(multi_modal_data.get("image", []))
+        )
         logger.debug("Multimodal data keys: %s", list(multi_modal_data.keys()))
 
     @staticmethod
