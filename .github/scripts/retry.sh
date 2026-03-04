@@ -26,3 +26,11 @@ retry() {
     wait_seconds=$(( wait_seconds * 2 > 120 ? 120 : wait_seconds * 2 ))
   done
 }
+
+retry_push() {
+  retry docker push "$1"
+}
+
+retry_pull() {
+  retry docker pull "$1"
+}
