@@ -16,8 +16,9 @@
 # This is a YAML-formatted file.
 # Declare variables to be passed into your templates.
 
-# Whether to manage CRDs via a pre-install/pre-upgrade hook Job.
-# The Job runs the operator image with the crd-apply tool to apply CRDs via server-side apply.
+# Whether to apply CRDs via an init container on the operator Deployment.
+# Uses server-side apply with the bundled /crd-apply binary.
+# Set to false if CRDs are managed externally (e.g., via GitOps or a separate pipeline).
 upgradeCRD: true
 
 # Namespace restriction configuration for the operator
@@ -120,6 +121,12 @@ dynamo:
 
   metrics:
     prometheusEndpoint: ""
+    podMonitors:
+      # -- Whether to create PodMonitor resources for Prometheus scraping of dynamo components.
+      # null=auto-detect (creates PodMonitors if prometheus-operator CRDs exist in cluster),
+      # true=always create (use for helm template / GitOps workflows),
+      # false=never create
+      enabled: null
 
   mpiRun:
     secretName: "mpi-run-ssh-secret"
@@ -129,8 +136,13 @@ dynamo:
 
 #imagePullSecrets: []
 kubernetesClusterDomain: cluster.local
+
 metricsService:
-  enabled: true
+  # -- Whether to create the operator metrics Service and ServiceMonitor.
+  # null=auto-detect (Service always created; ServiceMonitor created if prometheus-operator CRDs exist),
+  # true=always create both (use for helm template / GitOps workflows),
+  # false=never create either
+  enabled: null
   ports:
   - name: https
     port: 8443

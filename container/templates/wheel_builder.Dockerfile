@@ -310,6 +310,7 @@ RUN echo "$NIXL_LIB_DIR" > /etc/ld.so.conf.d/nixl.conf && \
     echo "$NIXL_PLUGIN_DIR" >> /etc/ld.so.conf.d/nixl.conf && \
     ldconfig
 
+# Build NIXL wheel → /opt/dynamo/dist/nixl/nixl*.whl (C++ transport library, all targets)
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
     --mount=type=cache,target=/root/.cache/uv \
@@ -321,12 +322,17 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     cd /workspace/nixl && \
     uv build . --wheel --out-dir /opt/dynamo/dist/nixl --python $PYTHON_VERSION
 
+{% if target not in ("dev", "local-dev") %}
 # Copy source code (order matters for layer caching)
 COPY pyproject.toml README.md LICENSE Cargo.toml Cargo.lock rust-toolchain.toml hatch_build.py /opt/dynamo/
 COPY lib/ /opt/dynamo/lib/
 COPY components/ /opt/dynamo/components/
 
-# Build dynamo wheels. The caches do not need the "shared" lock because Cargo has its own locking mechanism.
+# Build dynamo wheels → /opt/dynamo/dist/:
+#   uv build        → ai_dynamo*any.whl          (main Python package)
+#   maturin build   → ai_dynamo_runtime*.whl     (Rust bindings)
+#   maturin build   → kvbm*.whl                  (KV block manager, conditional on ENABLE_KVBM)
+# The caches do not need the "shared" lock because Cargo has its own locking mechanism.
 ARG ENABLE_KVBM
 ARG ENABLE_MEDIA_FFMPEG
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
@@ -364,7 +370,23 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     /tmp/use-sccache.sh show-stats "Dynamo"
 
 
-# Build gpu_memory_service wheel (C++ extension only needs Python headers, no CUDA/torch)
+{% else %}
+# Dev/local-dev targets do not have pre-built wheels or /workspace source code.
+# After you start the local-dev/dev container, you will need to build from source:
+#   cargo build --features dynamo-llm/block-manager
+#   cd /workspace/lib/bindings/python && maturin develop --uv && cd /workspace
+#   uv pip install --no-deps -e /workspace
+# See container/launch_message/dev.txt for the full setup steps.
+
+# Create dist dir with a placeholder so downstream COPY --from=wheel_builder /opt/dynamo/dist/*.whl always has a match.
+RUN mkdir -p /opt/dynamo/dist ${CARGO_TARGET_DIR} && \
+    touch /opt/dynamo/dist/.placeholder.whl
+
+# Dev/local-dev skip the full COPY lib/ above, so copy gpu_memory_service source explicitly for the wheel build below
+COPY lib/gpu_memory_service/ /opt/dynamo/lib/gpu_memory_service/
+{% endif %}
+
+# Build gpu-memory-service wheel → /opt/dynamo/dist/gpu_memory_service*.whl (small C++ extension, fast build -- all targets, all frameworks)
 ARG ENABLE_GPU_MEMORY_SERVICE
 RUN --mount=type=cache,target=/root/.cache/uv \
     if [ "$ENABLE_GPU_MEMORY_SERVICE" = "true" ]; then \
