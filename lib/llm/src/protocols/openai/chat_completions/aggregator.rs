@@ -147,34 +147,32 @@ pub fn streaming_tool_call_adapter(
                             // initialize tracking state.
                             if let Some(id) = &tc_chunk.id
                                 && let Some(func) = &tc_chunk.function
+                                && let Some(name) = &func.name
                             {
-                                if let Some(name) = &func.name {
-                                    tool_states.entry(key).or_insert_with(|| {
-                                        StreamingToolCallState::new(
-                                            tc_chunk.index,
-                                            id.clone(),
-                                            name.clone(),
-                                        )
-                                    });
-                                }
+                                tool_states.entry(key).or_insert_with(|| {
+                                    StreamingToolCallState::new(
+                                        tc_chunk.index,
+                                        id.clone(),
+                                        name.clone(),
+                                    )
+                                });
                             }
 
                             // Feed any argument fragment into the tracker.
                             if let Some(func) = &tc_chunk.function
                                 && let Some(args_fragment) = &func.arguments
+                                && let Some(state) = tool_states.get_mut(&key)
                             {
-                                if let Some(state) = tool_states.get_mut(&key) {
-                                    let just_completed = state.feed(args_fragment);
+                                let just_completed = state.feed(args_fragment);
 
-                                    if just_completed {
-                                        // Build a synthetic chunk with the complete tool call.
-                                        let synthetic = build_complete_tool_call_chunk(
-                                            data,
-                                            choice.index,
-                                            state,
-                                        );
-                                        extra_chunks.push(synthetic);
-                                    }
+                                if just_completed {
+                                    // Build a synthetic chunk with the complete tool call.
+                                    let synthetic = build_complete_tool_call_chunk(
+                                        data,
+                                        choice.index,
+                                        state,
+                                    );
+                                    extra_chunks.push(synthetic);
                                 }
                             }
                         }
