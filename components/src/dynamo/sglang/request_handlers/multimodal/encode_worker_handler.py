@@ -20,7 +20,7 @@ from dynamo._core import Client, Context
 from dynamo.runtime import DistributedRuntime
 from dynamo.sglang.args import Config
 from dynamo.sglang.protocol import SglangMultimodalRequest
-from dynamo.sglang.request_handlers.handler_base import BaseGenerativeHandler
+from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +38,7 @@ except ImportError as e:
     DEVICE = "cpu"
 
 
-class MultimodalEncodeWorkerHandler(BaseGenerativeHandler):
+class MultimodalEncodeWorkerHandler(BaseWorkerHandler):
     """
     Handler for multimodal encode worker component that processes images/videos
     and forwards them to the downstream worker.
@@ -50,10 +50,9 @@ class MultimodalEncodeWorkerHandler(BaseGenerativeHandler):
         pd_worker_client: Client,
         shutdown_event: Optional[asyncio.Event] = None,
     ) -> None:
-        super().__init__(config)
+        super().__init__(engine=None, config=config, shutdown_event=shutdown_event)
         self.pd_worker_client = pd_worker_client
         self.model = config.server_args.model_path
-        self.shutdown_event = shutdown_event
 
         if MMEncoder is None:
             raise RuntimeError(

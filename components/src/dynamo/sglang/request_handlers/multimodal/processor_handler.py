@@ -22,12 +22,12 @@ from dynamo.sglang.protocol import (
     MultiModalRequest,
     SglangMultimodalRequest,
 )
-from dynamo.sglang.request_handlers.handler_base import BaseGenerativeHandler
+from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 
 logger = logging.getLogger(__name__)
 
 
-class MultimodalProcessorHandler(BaseGenerativeHandler):
+class MultimodalProcessorHandler(BaseWorkerHandler):
     """
     Handler for multimodal processor component that processes multimodal requests
     and forwards them to the encode worker.
@@ -39,11 +39,10 @@ class MultimodalProcessorHandler(BaseGenerativeHandler):
         encode_worker_client: Client,
         shutdown_event: Optional[asyncio.Event] = None,
     ):
-        super().__init__(config)
+        super().__init__(engine=None, config=config, shutdown_event=shutdown_event)
         self.encode_worker_client = encode_worker_client
         self.chat_template = getattr(config.server_args, "chat_template", "qwen2-vl")
         self.model = config.server_args.model_path
-        self.shutdown_event = shutdown_event
 
         # Initialize tokenizer for the model
         self.tokenizer = AutoTokenizer.from_pretrained(
