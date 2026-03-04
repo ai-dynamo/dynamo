@@ -67,7 +67,6 @@ _ROUTING_RECORD_PATTERN = re.compile(
     r"\[ROUTING\].*with\s*(\d+)/(\d+)\s*blocks overlap"
 )
 
-
 def _check_ready(response) -> bool:
     try:
         return (response.json() or {}).get("status") == "ready"
@@ -302,6 +301,13 @@ def _send_request_get_overlap(
         timeout_s=120,
     )
     print(f"[MM_ROUTER_E2E] {label}: current={overlap}/{total}")
+
+    # Allow time for KV cache events to propagate from the TRT-LLM worker
+    # through the publisher to the router's indexer and radix tree.  Without
+    # this, the next request may be routed before newly cached blocks are
+    # visible, causing spurious 0-overlap results.
+    time.sleep(2)
+
     return overlap, total, segment
 
 
