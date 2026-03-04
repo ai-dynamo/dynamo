@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 use super::concurrent_radix_tree::ConcurrentRadixTree;
 use super::positional::PositionalIndexer;
 use super::*;
