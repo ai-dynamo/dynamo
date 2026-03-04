@@ -7,11 +7,14 @@ package cert
 
 import (
 	"context"
+	"fmt"
+	"reflect"
 	"testing"
 	"time"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"github.com/go-logr/logr"
+	certrotator "github.com/open-policy-agent/cert-controller/pkg/rotator"
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
@@ -19,8 +22,27 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
+
+// fakeCertProvisioner captures the rotator config passed to AddRotator and
+// optionally simulates readiness by closing the IsReady channel.
+type fakeCertProvisioner struct {
+	called        bool
+	capturedArgs  *certrotator.CertRotator
+	simulateReady bool
+	err           error
+}
+
+func (f *fakeCertProvisioner) AddRotator(_ ctrl.Manager, rotator *certrotator.CertRotator) error {
+	f.called = true
+	f.capturedArgs = rotator
+	if f.simulateReady && rotator.IsReady != nil {
+		close(rotator.IsReady)
+	}
+	return f.err
+}
 
 const (
 	testSecretName  = "webhook-cert"
@@ -126,6 +148,74 @@ func TestCertManager_ManualModeClosesChannelImmediately(t *testing.T) {
 	case <-cm.ready:
 	case <-time.After(time.Second):
 		t.Fatal("ready channel should be closed immediately in manual mode")
+	}
+}
+
+func TestCertManager_AutoModeConfiguresRotator(t *testing.T) {
+	cfg := &configv1alpha1.WebhookServer{
+		CertProvisionMode: configv1alpha1.CertProvisionModeAuto,
+		CertDir:           "/tmp/certs",
+		SecretName:        testSecretName,
+		ServiceName:       testServiceName,
+	}
+	prov := &fakeCertProvisioner{simulateReady: true}
+	cm := newTestCertManager(fake.NewClientBuilder().WithScheme(newScheme()), cfg)
+	cm.provisioner = prov
+
+	if err := cm.Setup(context.Background(), nil); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !prov.called {
+		t.Fatal("expected provisioner.AddRotator to be called")
+	}
+
+	expected := &certrotator.CertRotator{
+		SecretKey: types.NamespacedName{
+			Namespace: testNamespace,
+			Name:      testSecretName,
+		},
+		CertDir:        "/tmp/certs",
+		CAName:         certificateAuthorityName,
+		CAOrganization: certificateAuthorityOrganization,
+		IsReady:        cm.ready,
+		DNSName:        fmt.Sprintf("%s.%s.svc", testServiceName, testNamespace),
+		ExtraDNSNames: []string{
+			testServiceName,
+			fmt.Sprintf("%s.%s", testServiceName, testNamespace),
+			fmt.Sprintf("%s.%s.svc.cluster.local", testServiceName, testNamespace),
+		},
+		EnableReadinessCheck:   true,
+		RestartOnSecretRefresh: true,
+	}
+
+	if !reflect.DeepEqual(prov.capturedArgs, expected) {
+		t.Errorf("rotator config mismatch\ngot:  %+v\nwant: %+v", prov.capturedArgs, expected)
+	}
+
+	// Verify placeholder secret was created
+	secret := &corev1.Secret{}
+	if err := cm.client.Get(context.Background(), types.NamespacedName{Namespace: testNamespace, Name: testSecretName}, secret); err != nil {
+		t.Fatalf("placeholder secret should exist: %v", err)
+	}
+}
+
+func TestCertManager_AutoModeProvisionerError(t *testing.T) {
+	cfg := &configv1alpha1.WebhookServer{
+		CertProvisionMode: configv1alpha1.CertProvisionModeAuto,
+		SecretName:        testSecretName,
+		ServiceName:       testServiceName,
+	}
+	prov := &fakeCertProvisioner{err: fmt.Errorf("rotator setup failed")}
+	cm := newTestCertManager(fake.NewClientBuilder().WithScheme(newScheme()), cfg)
+	cm.provisioner = prov
+
+	err := cm.Setup(context.Background(), nil)
+	if err == nil {
+		t.Fatal("expected error from provisioner")
+	}
+	if !prov.called {
+		t.Fatal("expected provisioner.AddRotator to be called")
 	}
 }
 

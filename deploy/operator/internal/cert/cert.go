@@ -34,16 +34,32 @@ const (
 	operatorNamespaceLabel           = "nvidia.com/dynamo-operator-namespace"
 )
 
+// CertProvisioner abstracts the mechanism that adds a certificate rotator to
+// the controller-runtime manager. The default implementation delegates to the
+// OPA cert-controller; tests can substitute a stub.
+type CertProvisioner interface {
+	AddRotator(mgr ctrl.Manager, rotator *certrotator.CertRotator) error
+}
+
+// opaCertProvisioner is the production implementation backed by the OPA
+// cert-controller library.
+type opaCertProvisioner struct{}
+
+func (opaCertProvisioner) AddRotator(mgr ctrl.Manager, rotator *certrotator.CertRotator) error {
+	return certrotator.AddRotator(mgr, rotator)
+}
+
 // CertManager manages webhook TLS certificate lifecycle.
-// In auto mode it uses the OPA cert-controller for generation and rotation.
+// In auto mode it uses a CertProvisioner for generation and rotation.
 // In manual mode it expects externally provided certificates and signals
 // readiness immediately.
 type CertManager struct {
-	client    client.Client
-	cfg       *configv1alpha1.WebhookServer
-	namespace string
-	ready     chan struct{}
-	logger    logr.Logger
+	client      client.Client
+	cfg         *configv1alpha1.WebhookServer
+	namespace   string
+	ready       chan struct{}
+	logger      logr.Logger
+	provisioner CertProvisioner
 }
 
 // NewCertManager creates a CertManager. The client should be a direct
@@ -56,11 +72,12 @@ func NewCertManager(cl client.Client, cfg *configv1alpha1.WebhookServer) (*CertM
 		return nil, fmt.Errorf("reading operator namespace: %w", err)
 	}
 	return &CertManager{
-		client:    cl,
-		cfg:       cfg,
-		namespace: ns,
-		ready:     make(chan struct{}),
-		logger:    ctrl.Log.WithName("cert-manager"),
+		client:      cl,
+		cfg:         cfg,
+		namespace:   ns,
+		ready:       make(chan struct{}),
+		logger:      ctrl.Log.WithName("cert-manager"),
+		provisioner: opaCertProvisioner{},
 	}, nil
 }
 
@@ -117,7 +134,7 @@ func (cm *CertManager) setupAutoProvisioning(ctx context.Context, mgr ctrl.Manag
 		EnableReadinessCheck:   true,
 		RestartOnSecretRefresh: true,
 	}
-	return certrotator.AddRotator(mgr, rotator)
+	return cm.provisioner.AddRotator(mgr, rotator)
 }
 
 // createPlaceholderSecretIfNotExists creates the webhook TLS secret if it does
@@ -230,10 +247,11 @@ func (i *CABundleInjector) injectIntoValidatingWebhooks(ctx context.Context, caB
 	}
 	for idx := range list.Items {
 		wc := &list.Items[idx]
+		original := wc.DeepCopy()
 		for j := range wc.Webhooks {
 			wc.Webhooks[j].ClientConfig.CABundle = caBundle
 		}
-		if err := i.client.Update(ctx, wc); err != nil {
+		if err := i.client.Patch(ctx, wc, client.MergeFrom(original)); err != nil {
 			return fmt.Errorf("patching validating webhook config %s: %w", wc.Name, err)
 		}
 		i.logger.Info("Injected CA bundle into ValidatingWebhookConfiguration", "name", wc.Name)
@@ -248,10 +266,11 @@ func (i *CABundleInjector) injectIntoMutatingWebhooks(ctx context.Context, caBun
 	}
 	for idx := range list.Items {
 		wc := &list.Items[idx]
+		original := wc.DeepCopy()
 		for j := range wc.Webhooks {
 			wc.Webhooks[j].ClientConfig.CABundle = caBundle
 		}
-		if err := i.client.Update(ctx, wc); err != nil {
+		if err := i.client.Patch(ctx, wc, client.MergeFrom(original)); err != nil {
 			return fmt.Errorf("patching mutating webhook config %s: %w", wc.Name, err)
 		}
 		i.logger.Info("Injected CA bundle into MutatingWebhookConfiguration", "name", wc.Name)
@@ -271,6 +290,7 @@ func (i *CABundleInjector) ensureCRDConversion(ctx context.Context, caBundle []b
 		return fmt.Errorf("getting CRD %s: %w", dgdrCRDName, err)
 	}
 
+	original := crd.DeepCopy()
 	path := "/convert"
 	crd.Spec.Conversion = &apiextensionsv1.CustomResourceConversion{
 		Strategy: apiextensionsv1.WebhookConverter,
@@ -287,7 +307,7 @@ func (i *CABundleInjector) ensureCRDConversion(ctx context.Context, caBundle []b
 		},
 	}
 
-	if err := i.client.Update(ctx, crd); err != nil {
+	if err := i.client.Patch(ctx, crd, client.MergeFrom(original)); err != nil {
 		return fmt.Errorf("patching CRD %s conversion config: %w", dgdrCRDName, err)
 	}
 	i.logger.Info("Configured CRD conversion webhook", "crd", dgdrCRDName)
