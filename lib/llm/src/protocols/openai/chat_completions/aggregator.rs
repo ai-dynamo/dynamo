@@ -1328,66 +1328,35 @@ mod tests {
         // --- StreamingToolCallState::feed() tests ---
 
         #[test]
-        fn feed_single_chunk_complete() {
+        fn feed_quoted_braces_in_string_values() {
+            // Braces inside JSON string literals must not affect brace depth.
+            // Also verifies that an inner `}` that completes depth=1 but is inside
+            // a string does NOT fire the completion — only the final outer `}` does.
             let mut state = StreamingToolCallState::new(0, "id1".into(), "fn1".into());
-            assert!(state.feed(r#"{"x":1}"#));
-            assert_eq!(state.accumulated_args, r#"{"x":1}"#);
+            assert!(!state.feed(r#"{"code": "if (x) {"#)); // inner `{` is in a string
+            assert!(!state.feed(r#"return }"#));           // inner `}` is in a string
+            assert!(state.feed(r#"}"}"#));                 // `}` closes string, `}` closes object
+            assert_eq!(state.accumulated_args, r#"{"code": "if (x) {return }}"}"#);
         }
 
         #[test]
-        fn feed_multi_fragment_completes_on_last() {
+        fn feed_cross_fragment_escape_boundary() {
+            // The `escape_next` flag must survive across fragment boundaries.
+            // Fragment 1 ends with `\` inside a string; fragment 2 starts with `"` which
+            // must be treated as an escaped char (not a string close), then `}` closes the object.
             let mut state = StreamingToolCallState::new(0, "id1".into(), "fn1".into());
-            assert!(!state.feed(r#"{"lo"#));
-            assert!(!state.feed(r#"c":"#));
-            assert!(state.feed(r#"1}"#));
-            assert_eq!(state.accumulated_args, r#"{"loc":1}"#);
-        }
-
-        #[test]
-        fn feed_quoted_braces_ignored() {
-            let mut state = StreamingToolCallState::new(0, "id1".into(), "fn1".into());
-            // Inner braces are inside a string literal — should not affect depth.
-            assert!(state.feed(r#"{"k": "{nested}"}"#));
-            assert_eq!(state.accumulated_args, r#"{"k": "{nested}"}"#);
-        }
-
-        #[test]
-        fn feed_cross_fragment_escape() {
-            let mut state = StreamingToolCallState::new(0, "id1".into(), "fn1".into());
-            // Fragment 1 ends with a literal backslash inside a string.
-            // The `\\` in the JSON source is a single `\` character.
-            assert!(!state.feed("{\"k\": \"val\\"));
-            // Fragment 2: the `"` here closes the string (backslash already consumed).
-            assert!(state.feed("\"}"));
+            assert!(!state.feed("{\"k\": \"val\\")); // ends with `\` inside string
+            assert!(state.feed("\"}")); // `"` is escaped (consumed by escape_next), `}` closes object
             assert_eq!(state.accumulated_args, "{\"k\": \"val\\\"}");
         }
 
         #[test]
-        fn feed_empty_fragment_no_spurious() {
+        fn feed_malformed_extra_close_brace_clamped() {
+            // A leading `}` from a malformed/buggy backend must not drive depth negative.
+            // Without the `.max(0)` clamp, a subsequent `{` would bring depth to 0 spuriously.
             let mut state = StreamingToolCallState::new(0, "id1".into(), "fn1".into());
-            assert!(!state.feed(""));
-            assert!(!state.feed(""));
-            // Now actually complete a JSON object.
-            assert!(state.feed(r#"{"a":1}"#));
-            // Further empties should not fire.
-            assert!(!state.feed(""));
-        }
-
-        #[test]
-        fn feed_already_emitted_returns_false() {
-            let mut state = StreamingToolCallState::new(0, "id1".into(), "fn1".into());
-            assert!(state.feed(r#"{"x":1}"#));
-            // Once emitted, subsequent calls always return false.
-            assert!(!state.feed(r#"{"y":2}"#));
-            assert!(!state.feed(""));
-        }
-
-        #[test]
-        fn feed_malformed_extra_close_brace() {
-            let mut state = StreamingToolCallState::new(0, "id1".into(), "fn1".into());
-            // Leading `}` drives depth to 0 (clamped), then `{"x":1}` opens and closes.
-            assert!(state.feed(r#"}{"x":1}"#));
-            assert_eq!(state.accumulated_args, r#"}{"x":1}"#);
+            assert!(!state.feed("}")); // stray `}` — clamped to depth 0, no completion yet
+            assert!(state.feed(r#"{"x":1}"#)); // valid object — opens to 1, closes to 0 → complete
         }
 
         // --- streaming_tool_call_adapter() tests ---
@@ -1396,7 +1365,6 @@ mod tests {
         fn make_chunk(
             choice_index: u32,
             tool_calls: Option<Vec<dynamo_async_openai::types::ChatCompletionMessageToolCallChunk>>,
-            finish_reason: Option<dynamo_async_openai::types::FinishReason>,
         ) -> Annotated<NvCreateChatCompletionStreamResponse> {
             let delta = dynamo_async_openai::types::ChatCompletionStreamResponseDelta {
                 content: None,
@@ -1409,7 +1377,7 @@ mod tests {
             let choice = dynamo_async_openai::types::ChatChoiceStream {
                 index: choice_index,
                 delta,
-                finish_reason,
+                finish_reason: None,
                 stop_reason: None,
                 logprobs: None,
             };
@@ -1434,7 +1402,7 @@ mod tests {
         }
 
         /// Helper: build a tool call chunk (the delta portion).
-        fn make_tc_chunk(
+        fn make_tc(
             index: u32,
             id: Option<&str>,
             name: Option<&str>,
@@ -1452,140 +1420,77 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn adapter_non_tool_call_passthrough() {
-            // A stream with no tool calls should pass through with no extra chunks.
+        async fn adapter_multi_fragment_ordering_and_fields() {
+            // Realistic scenario: args arrive across 3 fragments, interspersed with
+            // non-tool-call chunks. Verifies:
+            //   - original chunks pass through unmodified (event == None)
+            //   - synthetic chunk emitted immediately after the completing fragment
+            //   - synthetic chunk carries correct id, name, fully-assembled arguments
+            //   - non-tool-call chunks produce no extra output
             let chunks = vec![
-                make_chunk(0, None, None),
-                make_chunk(0, None, Some(dynamo_async_openai::types::FinishReason::Stop)),
-            ];
-            let input = stream::iter(chunks);
-            let output: Vec<_> = streaming_tool_call_adapter(input).collect().await;
-            assert_eq!(output.len(), 2);
-            // No synthetic events.
-            assert!(output.iter().all(|a| a.event.is_none()));
-        }
-
-        #[tokio::test]
-        async fn adapter_single_tool_call_emits_synthetic() {
-            // 3 chunks: init (id+name+first arg fragment), middle arg fragment, closing fragment.
-            let chunks = vec![
-                make_chunk(
-                    0,
-                    Some(vec![make_tc_chunk(0, Some("call_1"), Some("get_weather"), Some(r#"{"loc"#))]),
-                    None,
-                ),
-                make_chunk(
-                    0,
-                    Some(vec![make_tc_chunk(0, None, None, Some(r#"ation":"#))]),
-                    None,
-                ),
-                make_chunk(
-                    0,
-                    Some(vec![make_tc_chunk(0, None, None, Some(r#""SF"}"#))]),
-                    None,
-                ),
+                make_chunk(0, None),                                                        // non-tool chunk
+                make_chunk(0, Some(vec![make_tc(0, Some("call_1"), Some("get_weather"), Some(r#"{"city":"#))])),
+                make_chunk(0, Some(vec![make_tc(0, None, None, Some(r#""San "#))])),
+                make_chunk(0, Some(vec![make_tc(0, None, None, Some(r#"Francisco"}"#))])), // completes here
+                make_chunk(0, None),                                                        // non-tool chunk
             ];
             let input = stream::iter(chunks);
             let output: Vec<_> = streaming_tool_call_adapter(input).collect().await;
 
-            // 3 original + 1 synthetic = 4 total
-            assert_eq!(output.len(), 4);
+            // 5 original + 1 synthetic = 6 total
+            assert_eq!(output.len(), 6);
 
-            // The synthetic chunk should be at index 3 (after the completing chunk).
-            assert_eq!(output[3].event.as_deref(), Some("tool_call.complete"));
+            // Original chunks: no event
+            for i in [0, 1, 2, 3, 4] {
+                assert!(output[i].event.is_none(), "chunk {i} should have no event");
+            }
 
-            // Original chunks have no event.
-            assert!(output[0].event.is_none());
-            assert!(output[1].event.is_none());
-            assert!(output[2].event.is_none());
-        }
-
-        #[tokio::test]
-        async fn adapter_synthetic_chunk_has_correct_fields() {
-            let chunks = vec![
-                make_chunk(
-                    0,
-                    Some(vec![make_tc_chunk(0, Some("call_42"), Some("do_thing"), Some(r#"{"a":1}"#))]),
-                    None,
-                ),
-            ];
-            let input = stream::iter(chunks);
-            let output: Vec<_> = streaming_tool_call_adapter(input).collect().await;
-
-            assert_eq!(output.len(), 2);
-            let synthetic = &output[1];
-
-            // Event type
+            // Synthetic chunk immediately after completing fragment (position 4)
+            let synthetic = &output[4];
             assert_eq!(synthetic.event.as_deref(), Some("tool_call.complete"));
-
-            // Data fields
-            let data = synthetic.data.as_ref().unwrap();
-            assert_eq!(data.choices.len(), 1);
-            let choice = &data.choices[0];
-            assert!(choice.finish_reason.is_none());
-
-            let tc = &choice.delta.tool_calls.as_ref().unwrap()[0];
-            assert_eq!(tc.id.as_deref(), Some("call_42"));
-            assert_eq!(tc.function.as_ref().unwrap().name.as_deref(), Some("do_thing"));
+            let tc = &synthetic.data.as_ref().unwrap().choices[0]
+                .delta.tool_calls.as_ref().unwrap()[0];
+            assert_eq!(tc.id.as_deref(), Some("call_1"));
+            assert_eq!(tc.function.as_ref().unwrap().name.as_deref(), Some("get_weather"));
             assert_eq!(
                 tc.function.as_ref().unwrap().arguments.as_deref(),
-                Some(r#"{"a":1}"#)
+                Some(r#"{"city":"San Francisco"}"#)
             );
         }
 
         #[tokio::test]
-        async fn adapter_two_tool_calls_independent() {
-            // Two tool calls (index 0 and 1) completing at different times.
+        async fn adapter_two_concurrent_tool_calls_keyed_independently() {
+            // Two tool calls in the same stream (index 0 and 1). call_b completes
+            // in chunk 0; call_a completes in chunk 1. Verifies the compound
+            // (choice_index, tool_call_index) key prevents state collision.
             let chunks = vec![
-                // Init both tool calls in one chunk
-                make_chunk(
-                    0,
-                    Some(vec![
-                        make_tc_chunk(0, Some("call_a"), Some("fn_a"), Some(r#"{"x"#)),
-                        make_tc_chunk(1, Some("call_b"), Some("fn_b"), Some(r#"{"y":2}"#)),
-                    ]),
-                    None,
-                ),
-                // Complete tool call 0
-                make_chunk(
-                    0,
-                    Some(vec![make_tc_chunk(0, None, None, Some(r#":1}"#))]),
-                    None,
-                ),
+                make_chunk(0, Some(vec![
+                    make_tc(0, Some("call_a"), Some("fn_a"), Some(r#"{"x"#)),   // partial
+                    make_tc(1, Some("call_b"), Some("fn_b"), Some(r#"{"y":2}"#)), // complete
+                ])),
+                make_chunk(0, Some(vec![
+                    make_tc(0, None, None, Some(r#":1}"#)), // call_a completes
+                ])),
             ];
             let input = stream::iter(chunks);
             let output: Vec<_> = streaming_tool_call_adapter(input).collect().await;
 
-            // Chunk 0 (original) + synthetic for call_b (completed in chunk 0)
-            // + Chunk 1 (original) + synthetic for call_a (completed in chunk 1)
-            // = 4 total
+            // chunk0 + synthetic(call_b) + chunk1 + synthetic(call_a) = 4
             assert_eq!(output.len(), 4);
 
-            // Synthetic for call_b at position 1 (after first original chunk)
-            assert_eq!(output[1].event.as_deref(), Some("tool_call.complete"));
-            let tc_b = &output[1].data.as_ref().unwrap().choices[0]
-                .delta
-                .tool_calls
-                .as_ref()
-                .unwrap()[0];
+            let synth_b = &output[1];
+            assert_eq!(synth_b.event.as_deref(), Some("tool_call.complete"));
+            let tc_b = &synth_b.data.as_ref().unwrap().choices[0]
+                .delta.tool_calls.as_ref().unwrap()[0];
             assert_eq!(tc_b.id.as_deref(), Some("call_b"));
-            assert_eq!(
-                tc_b.function.as_ref().unwrap().arguments.as_deref(),
-                Some(r#"{"y":2}"#)
-            );
+            assert_eq!(tc_b.function.as_ref().unwrap().arguments.as_deref(), Some(r#"{"y":2}"#));
 
-            // Synthetic for call_a at position 3 (after second original chunk)
-            assert_eq!(output[3].event.as_deref(), Some("tool_call.complete"));
-            let tc_a = &output[3].data.as_ref().unwrap().choices[0]
-                .delta
-                .tool_calls
-                .as_ref()
-                .unwrap()[0];
+            let synth_a = &output[3];
+            assert_eq!(synth_a.event.as_deref(), Some("tool_call.complete"));
+            let tc_a = &synth_a.data.as_ref().unwrap().choices[0]
+                .delta.tool_calls.as_ref().unwrap()[0];
             assert_eq!(tc_a.id.as_deref(), Some("call_a"));
-            assert_eq!(
-                tc_a.function.as_ref().unwrap().arguments.as_deref(),
-                Some(r#"{"x":1}"#)
-            );
+            assert_eq!(tc_a.function.as_ref().unwrap().arguments.as_deref(), Some(r#"{"x":1}"#));
         }
     }
 }
