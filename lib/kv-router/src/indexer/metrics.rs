@@ -5,7 +5,10 @@
 use std::sync::{Arc, OnceLock};
 
 #[cfg(feature = "metrics")]
-use dynamo_runtime::{component::Component, metrics::MetricsHierarchy, prometheus_names::kvrouter};
+use dynamo_runtime::{
+    component::Component,
+    metrics::{MetricsHierarchy, prometheus_names::kvrouter},
+};
 use prometheus::{IntCounterVec, Opts};
 
 use crate::protocols::{KvCacheEventData, KvCacheEventError};

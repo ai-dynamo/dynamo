@@ -33,7 +33,7 @@ pub enum KvRouterError {
     #[error("Indexer is offline")]
     IndexerOffline,
 
-    #[error("Indexer is dropped request")]
+    #[error("Indexer dropped the request")]
     IndexerDroppedRequest,
 
     #[error("Prune operation failed: {0}")]

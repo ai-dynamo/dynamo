@@ -222,7 +222,7 @@ impl<K: Clone + Hash + Eq + Ord> PruneManager<K> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::{KvIndexer, KvIndexerInterface, KvIndexerMetrics};
+    use crate::indexer::{KvIndexer, KvIndexerInterface, KvIndexerMetrics};
     use crate::protocols::{TokensWithHashes, WorkerId, WorkerWithDpRank};
     use std::sync::Arc;
     use tokio::time::{self, Duration, Instant};

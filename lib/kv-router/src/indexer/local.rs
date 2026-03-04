@@ -278,9 +278,7 @@ impl KvIndexerInterface for LocalKvIndexer {
     }
 
     fn shutdown(&self) {
-        // Note: Since indexer is Arc<KvIndexer>, we can't call mutable methods directly.
-        // The indexer will be shut down when the CancellationToken is cancelled
-        // or when the last Arc reference is dropped.
+        self.indexer.shutdown();
     }
 
     async fn dump_events(&self) -> Result<Vec<RouterEvent>, KvRouterError> {
