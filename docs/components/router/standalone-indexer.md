@@ -284,43 +284,48 @@ graph TD
         W2[Worker 2<br/>ZMQ PUB]
     end
 
-    subgraph "Replica A"
-        REG_A[Worker Registry]
-        ZMQ_A[ZMQ SUB Listeners]
-        IDX_A["Indexer Map<br/>(model, tenant) → Radix Tree"]
-        HTTP_A[HTTP API<br/>/query /dump /register]
-    end
-
-    subgraph "Replica B"
-        REG_B[Worker Registry]
-        ZMQ_B[ZMQ SUB Listeners]
-        IDX_B["Indexer Map<br/>(model, tenant) → Radix Tree"]
-        HTTP_B[HTTP API<br/>/query /dump /register]
+    subgraph "Standalone Indexer (HTTP)"
+        REG[Worker Registry]
+        ZMQ[ZMQ SUB Listeners]
+        IDX["Indexer Map<br/>(model, tenant) → Radix Tree"]
+        HTTP[HTTP API<br/>/query /dump /register]
     end
 
     CLIENT[External Client]
 
-    W1 -->|ZMQ events| ZMQ_A
-    W2 -->|ZMQ events| ZMQ_A
-    W1 -->|ZMQ events| ZMQ_B
-    W2 -->|ZMQ events| ZMQ_B
-    ZMQ_A -->|apply events| IDX_A
-    ZMQ_B -->|apply events| IDX_B
-    HTTP_A -->|"GET /dump (recovery)"| HTTP_B
-    CLIENT -->|POST /query| HTTP_A
-    CLIENT -->|POST /query| HTTP_B
+    W1 -->|ZMQ events| ZMQ
+    W2 -->|ZMQ events| ZMQ
+    CLIENT -->|POST /register| REG
+    REG -->|spawn listeners| ZMQ
+    ZMQ -->|apply events| IDX
+    CLIENT -->|POST /query, GET /dump| HTTP
+    HTTP -->|query| IDX
 
     style W1 fill:#f3e5f5,stroke:#333,color:#333
     style W2 fill:#f3e5f5,stroke:#333,color:#333
-    style IDX_A fill:#2e8b57,stroke:#333,color:#fff
-    style ZMQ_A fill:#2e8b57,stroke:#333,color:#fff
-    style REG_A fill:#2e8b57,stroke:#333,color:#fff
-    style HTTP_A fill:#2e8b57,stroke:#333,color:#fff
-    style IDX_B fill:#2e8b57,stroke:#333,color:#fff
-    style ZMQ_B fill:#2e8b57,stroke:#333,color:#fff
-    style REG_B fill:#2e8b57,stroke:#333,color:#fff
-    style HTTP_B fill:#2e8b57,stroke:#333,color:#fff
+    style IDX fill:#2e8b57,stroke:#333,color:#fff
+    style ZMQ fill:#2e8b57,stroke:#333,color:#fff
+    style REG fill:#2e8b57,stroke:#333,color:#fff
+    style HTTP fill:#2e8b57,stroke:#333,color:#fff
     style CLIENT fill:#fff3e0,stroke:#333,color:#333
+```
+
+### P2P Recovery Flow
+
+```mermaid
+sequenceDiagram
+    participant B as Replica B (new)
+    participant A as Replica A (healthy)
+    participant W as Workers (ZMQ PUB)
+
+    B->>W: Connect ZMQ SUB sockets
+    Note over B,W: 1s delay for subscription handshake
+    B->>A: GET /dump
+    A-->>B: Radix tree snapshot + block sizes
+    Note over B: Apply dump events
+    Note over B: Unblock ZMQ listeners
+    B->>W: Start draining buffered events
+    Note over B: Ready to serve queries
 ```
 
 ## See Also
