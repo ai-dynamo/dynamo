@@ -1,0 +1,124 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: qwen3-vl-30b-disagg-e-pd-cache-on
+spec:
+  pvcs:
+    - create: false
+      name: model-cache
+    - create: false
+      name: compilation-cache
+  services:
+    Frontend:
+      componentType: frontend
+      envs:
+        - name: HF_HOME
+          value: /home/dynamo/.cache/huggingface
+        - name: DYN_REQUEST_PLANE
+          value: tcp
+      extraPodSpec:
+        mainContainer:
+          image: dynamo:latest-vllm-runtime
+          imagePullPolicy: IfNotPresent
+          workingDir: /workspace
+      replicas: 1
+      resources:
+        requests:
+          cpu: "8"
+        limits:
+          cpu: "8"
+      subComponentType: null
+
+    VllmEncodeWorker:
+      componentType: worker
+      envFromSecret: hf-token-secret
+      extraPodSpec:
+        mainContainer:
+          args:
+            - --multimodal-encode-worker
+            - --enable-multimodal
+            - --model
+            - Qwen/Qwen3-VL-30B-A3B-Instruct
+            - --tensor-parallel-size
+            - "1"
+            - --gpu-memory-utilization
+            - "0.85"
+            - --disable-log-requests
+          command:
+            - python3
+            - -m
+            - dynamo.vllm
+          image: dynamo:latest-vllm-runtime
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: HF_HOME
+              value: /home/dynamo/.cache/huggingface
+            - name: DYN_REQUEST_PLANE
+              value: tcp
+            - name: DYN_VLLM_EMBEDDING_TRANSFER_MODE
+              value: nixl-write
+          workingDir: /workspace
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+        requests:
+          gpu: "1"
+      subComponentType: null
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /home/dynamo/.cache/huggingface
+        - name: compilation-cache
+          mountPoint: /home/dynamo/.cache/vllm
+          useAsCompilationCache: true
+
+    VllmPdWorker:
+      componentType: worker
+      envFromSecret: hf-token-secret
+      extraPodSpec:
+        mainContainer:
+          command:
+            - /bin/bash
+            - -lc
+          args:
+            - |
+              python3 -m dynamo.vllm \
+                --route-to-encoder \
+                --multimodal-worker \
+                --enable-multimodal \
+                --enable-mm-embeds \
+                --model Qwen/Qwen3-VL-30B-A3B-Instruct \
+                --max-model-len 16384 \
+                --tensor-parallel-size 1 \
+                --gpu-memory-utilization 0.85 \
+                --disable-log-requests \
+                --enable-prefix-caching \
+                --multimodal-embedding-cache-capacity-gb "${MM_EMBEDDING_CACHE_GB}" \
+                --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'
+          image: dynamo:latest-vllm-runtime
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: HF_HOME
+              value: /home/dynamo/.cache/huggingface
+            - name: DYN_REQUEST_PLANE
+              value: tcp
+            - name: DYN_VLLM_EMBEDDING_TRANSFER_MODE
+              value: nixl-write
+            - name: MM_EMBEDDING_CACHE_GB
+              value: "10"
+          workingDir: /workspace
+      replicas: 7
+      resources:
+        limits:
+          gpu: "1"
+        requests:
+          gpu: "1"
+      subComponentType: null
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /home/dynamo/.cache/huggingface
+        - name: compilation-cache
+          mountPoint: /home/dynamo/.cache/vllm
+          useAsCompilationCache: true

@@ -127,11 +127,11 @@ kubectl apply -f vllm/disagg-ep-d/perf-cache-on.yaml -n ${NAMESPACE}
 
 ```bash
 # Cache OFF
-kubectl apply -f vllm/disagg-e-pd/deploy.yaml -n ${NAMESPACE}
+kubectl apply -f vllm/disagg-e-pd/deploy-cache-off.yaml -n ${NAMESPACE}
 kubectl apply -f vllm/disagg-e-pd/perf-cache-off.yaml -n ${NAMESPACE}
 
 # Cache ON
-kubectl apply -f vllm/disagg-e-pd/deploy.yaml -n ${NAMESPACE}
+kubectl apply -f vllm/disagg-e-pd/deploy-cache-on.yaml -n ${NAMESPACE}
 kubectl apply -f vllm/disagg-e-pd/perf-cache-on.yaml -n ${NAMESPACE}
 ```
 

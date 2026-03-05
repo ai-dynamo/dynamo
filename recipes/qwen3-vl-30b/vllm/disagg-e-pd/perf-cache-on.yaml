@@ -81,7 +81,7 @@ spec:
         - name: MODEL_NAME
           value: Qwen/Qwen3-VL-30B-A3B-Instruct
         - name: FRONTEND
-          value: qwen3-vl-30b-disagg-e-pd-1e-7pd-frontend
+          value: qwen3-vl-30b-disagg-e-pd-cache-on-frontend
         - name: CACHE_MODE
           value: cache_on
         - name: SYSTEM_PROMPT_TOKENS
