@@ -23,6 +23,10 @@ spec:
       resources:
         limits:
           gpu: "1"
+        requests:
+          custom:
+            # Increase this value for larger models
+            ephemeral-storage: "2Gi"
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
@@ -43,6 +47,10 @@ spec:
       resources:
         limits:
           gpu: "1"
+        requests:
+          custom:
+            # Increase this value for larger models
+            ephemeral-storage: "2Gi"
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
@@ -56,5 +64,7 @@ spec:
             - Qwen/Qwen3-0.6B
             - --disaggregation-mode
             - prefill
+            - --kv-transfer-config
+            - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
             - --kv-events-config
             - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'

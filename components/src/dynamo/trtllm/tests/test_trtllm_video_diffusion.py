@@ -13,10 +13,12 @@ import asyncio
 import threading
 import time
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Optional
 from unittest.mock import MagicMock, patch
 
 import pytest
+import torch
 
 from dynamo.common.protocols.video_protocol import (
     NvCreateVideoRequest,
@@ -104,8 +106,11 @@ class TestDiffusionConfig:
 
         # Optimization defaults
         assert config.enable_teacache is False
-        assert config.attn_type == "default"
-        assert config.linear_type == "default"
+        assert config.attn_backend == "VANILLA"
+        assert config.quant_algo is None
+        assert config.enable_cuda_graph is False
+        assert config.warmup_steps == 1
+        assert config.fuse_qkv is True
 
         # Parallelism defaults
         assert config.dit_dp_size == 1
@@ -532,10 +537,12 @@ class ConcurrencyTracker:
         with self._lock:
             self._active_count -= 1
 
-        # Return fake frames (shape: [num_frames, H, W, C])
-        import numpy as np
-
-        return np.zeros((4, 64, 64, 3), dtype=np.uint8)
+        # Return a mock MediaOutput with a video tensor
+        return SimpleNamespace(
+            video=torch.zeros((4, 64, 64, 3), dtype=torch.uint8),
+            image=None,
+            audio=None,
+        )
 
 
 class TestVideoHandlerConcurrency:
@@ -660,16 +667,17 @@ class TestVideoHandlerResponseFormats:
 
     def _make_handler(self):
         """Create a handler with mocked engine and fs."""
-        import numpy as np
-
         from dynamo.trtllm.request_handlers.video_diffusion.video_handler import (
             VideoGenerationHandler,
         )
 
-        mock_engine = MagicMock()
-        mock_engine.generate = MagicMock(
-            return_value=np.zeros((4, 64, 64, 3), dtype=np.uint8)
+        mock_output = SimpleNamespace(
+            video=torch.zeros((4, 64, 64, 3), dtype=torch.uint8),
+            image=None,
+            audio=None,
         )
+        mock_engine = MagicMock()
+        mock_engine.generate = MagicMock(return_value=mock_output)
 
         config = DiffusionConfig(
             media_output_fs_url="file:///tmp/test_media",

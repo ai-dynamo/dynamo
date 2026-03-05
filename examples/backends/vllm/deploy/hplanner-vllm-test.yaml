@@ -1,0 +1,386 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# vLLM-based GlobalPlanner test: 2 prefill pools + 1 decode pool.
+# Each pool SLA Planner reads router histogram metrics from cluster Prometheus
+# and delegates scaling decisions to the GlobalPlanner.
+#
+# Architecture:
+#   DGD gp-ctrl:      Frontend + GlobalRouter + GlobalPlanner
+#   DGD gp-prefill-0: LocalRouter + VllmPrefillWorker (TP1) + Planner
+#   DGD gp-prefill-1: LocalRouter + VllmPrefillWorker (TP2) + Planner
+#   DGD gp-decode-0:  LocalRouter + VllmDecodeWorker  (TP1) + Planner
+#
+# Prerequisites:
+#   - Cluster Prometheus deployed and scraping LocalRouter pods via PodMonitor
+#   - HuggingFace token secret: kubectl create secret generic hf-token-secret \
+#       --from-literal=HF_TOKEN=<your-token> -n ${K8S_NAMESPACE}
+#
+# Usage:
+#   export K8S_NAMESPACE=... DYNAMO_IMAGE=... DYNAMO_VLLM_IMAGE=... MODEL_NAME=... STORAGE_CLASS_NAME=...
+#   envsubst < hplanner-vllm-test.yaml | kubectl apply   -n ${K8S_NAMESPACE} -f -
+#   envsubst < hplanner-vllm-test.yaml | kubectl delete  -n ${K8S_NAMESPACE} -f -
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ${K8S_NAMESPACE}-planner
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: dynamo-platform-dynamo-operator-planner
+subjects:
+  - kind: ServiceAccount
+    name: default
+    namespace: ${K8S_NAMESPACE}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gp-global-router-config
+data:
+  global_router_config.json: |
+    {
+      "num_prefill_pools": 2,
+      "num_decode_pools": 1,
+      "prefill_pool_dynamo_namespaces": [
+        "${K8S_NAMESPACE}-gp-prefill-0",
+        "${K8S_NAMESPACE}-gp-prefill-1"
+      ],
+      "decode_pool_dynamo_namespaces": [
+        "${K8S_NAMESPACE}-gp-decode-0"
+      ],
+      "prefill_pool_selection_strategy": {
+        "ttft_min": 10, "ttft_max": 3000, "ttft_resolution": 2,
+        "isl_min": 0,   "isl_max": 32000, "isl_resolution": 2,
+        "prefill_pool_mapping": [[0,1],[0,1]]
+      },
+      "decode_pool_selection_strategy": {
+        "itl_min": 10,  "itl_max": 500,   "itl_resolution": 2,
+        "context_length_min": 0, "context_length_max": 32000, "context_length_resolution": 2,
+        "decode_pool_mapping": [[0,0],[0,0]]
+      }
+    }
+---
+# Shared model cache — ReadWriteMany PVC mounted into all vLLM worker pods.
+# The model is downloaded once and reused across pods and restarts.
+# Set storageClassName to a RWX-capable storage class available in your cluster
+# (e.g. azurefile-csi-premium on AKS, nfs-csi on Nebius, efs-sc on EKS).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: hf-model-cache
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: ${STORAGE_CLASS_NAME}
+  resources:
+    requests:
+      storage: 50Gi
+---
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: gp-ctrl
+spec:
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        imagePullSecrets:
+          - name: docker-imagepullsecret
+        mainContainer:
+          image: ${DYNAMO_IMAGE}
+          workingDir: /workspace
+          command:
+            - python3
+            - -m
+            - dynamo.frontend
+          args:
+            - --router-mode
+            - round-robin
+            - --namespace
+            - ${K8S_NAMESPACE}-gp-ctrl
+            - --model-name
+            - ${MODEL_NAME}
+
+    GlobalRouter:
+      componentType: default
+      replicas: 1
+      extraPodSpec:
+        imagePullSecrets:
+          - name: docker-imagepullsecret
+        tolerations:
+          - key: "karpenter.sh/disrupted"
+            operator: "Exists"
+            effect: "NoSchedule"
+        affinity:
+          nodeAffinity:
+            preferredDuringSchedulingIgnoredDuringExecution:
+              - weight: 100
+                preference:
+                  matchExpressions:
+                    - key: karpenter.sh/nodepool
+                      operator: In
+                      values:
+                        - general-medium-storage
+        volumes:
+          - name: global-router-config
+            configMap:
+              name: gp-global-router-config
+        mainContainer:
+          image: ${DYNAMO_IMAGE}
+          workingDir: /workspace
+          command:
+            - python3
+            - -m
+            - dynamo.global_router
+          args:
+            - --config
+            - /config/global_router_config.json
+            - --model-name
+            - ${MODEL_NAME}
+            - --namespace
+            - ${K8S_NAMESPACE}-gp-ctrl
+          volumeMounts:
+            - name: global-router-config
+              mountPath: /config
+              readOnly: true
+
+    GlobalPlanner:
+      componentType: default
+      replicas: 1
+      extraPodSpec:
+        imagePullSecrets:
+          - name: docker-imagepullsecret
+        mainContainer:
+          image: ${DYNAMO_IMAGE}
+          command:
+            - python3
+            - -m
+            - dynamo.global_planner
+---
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: gp-prefill-0
+spec:
+  services:
+    LocalRouter:
+      componentType: default
+      replicas: 1
+      extraPodSpec:
+        imagePullSecrets:
+          - name: docker-imagepullsecret
+        mainContainer:
+          image: ${DYNAMO_IMAGE}
+          workingDir: /workspace
+          env:
+            - name: DYN_SYSTEM_PORT
+              value: "9090"
+          command:
+            - python3
+            - -m
+            - dynamo.router
+          args:
+            - --endpoint
+            - ${K8S_NAMESPACE}-gp-prefill-0.prefill.generate
+            - --router-block-size
+            - "16"
+            - --no-router-track-active-blocks
+
+    VllmPrefillWorker:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      subComponentType: prefill
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+      extraPodSpec:
+        volumes:
+          - name: hf-model-cache
+            persistentVolumeClaim:
+              claimName: hf-model-cache
+        mainContainer:
+          image: ${DYNAMO_VLLM_IMAGE}
+          workingDir: /workspace/examples/backends/vllm
+          command:
+            - python3
+            - -m
+            - dynamo.vllm
+          args:
+            - --model
+            - ${MODEL_NAME}
+            - --tensor-parallel-size
+            - "1"
+            - --is-prefill-worker
+          volumeMounts:
+            - name: hf-model-cache
+              mountPath: /home/dynamo/.cache/huggingface/hub
+
+    Planner:
+      componentType: planner
+      replicas: 1
+      extraPodSpec:
+        imagePullSecrets:
+          - name: docker-imagepullsecret
+        mainContainer:
+          image: ${DYNAMO_IMAGE}
+          command:
+            - python3
+            - -m
+            - dynamo.planner
+          args:
+            - --config
+            - '{"environment":"global-planner","global_planner_namespace":"${K8S_NAMESPACE}-gp-ctrl","backend":"vllm","mode":"prefill","enable_load_scaling":false,"enable_throughput_scaling":true,"throughput_metrics_source":"router","ttft":2000,"max_gpu_budget":-1,"prefill_engine_num_gpu":1,"model_name":"${MODEL_NAME}","profile_results_dir":"/workspace/tests/planner/profiling_results/H200_TP1P_TP1D"}'
+---
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: gp-prefill-1
+spec:
+  services:
+    LocalRouter:
+      componentType: default
+      replicas: 1
+      extraPodSpec:
+        imagePullSecrets:
+          - name: docker-imagepullsecret
+        mainContainer:
+          image: ${DYNAMO_IMAGE}
+          workingDir: /workspace
+          env:
+            - name: DYN_SYSTEM_PORT
+              value: "9090"
+          command:
+            - python3
+            - -m
+            - dynamo.router
+          args:
+            - --endpoint
+            - ${K8S_NAMESPACE}-gp-prefill-1.prefill.generate
+            - --router-block-size
+            - "16"
+            - --no-router-track-active-blocks
+
+    VllmPrefillWorker:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      subComponentType: prefill
+      replicas: 1
+      resources:
+        limits:
+          gpu: "2"
+      extraPodSpec:
+        volumes:
+          - name: hf-model-cache
+            persistentVolumeClaim:
+              claimName: hf-model-cache
+        mainContainer:
+          image: ${DYNAMO_VLLM_IMAGE}
+          workingDir: /workspace/examples/backends/vllm
+          command:
+            - python3
+            - -m
+            - dynamo.vllm
+          args:
+            - --model
+            - ${MODEL_NAME}
+            - --tensor-parallel-size
+            - "2"
+            - --is-prefill-worker
+          volumeMounts:
+            - name: hf-model-cache
+              mountPath: /home/dynamo/.cache/huggingface/hub
+
+    Planner:
+      componentType: planner
+      replicas: 1
+      extraPodSpec:
+        imagePullSecrets:
+          - name: docker-imagepullsecret
+        mainContainer:
+          image: ${DYNAMO_IMAGE}
+          command:
+            - python3
+            - -m
+            - dynamo.planner
+          args:
+            - --config
+            - '{"environment":"global-planner","global_planner_namespace":"${K8S_NAMESPACE}-gp-ctrl","backend":"vllm","mode":"prefill","enable_load_scaling":false,"enable_throughput_scaling":true,"throughput_metrics_source":"router","ttft":2000,"max_gpu_budget":-1,"prefill_engine_num_gpu":2,"model_name":"${MODEL_NAME}","profile_results_dir":"/workspace/tests/planner/profiling_results/H200_TP1P_TP1D"}'
+---
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: gp-decode-0
+spec:
+  services:
+    LocalRouter:
+      componentType: default
+      replicas: 1
+      extraPodSpec:
+        imagePullSecrets:
+          - name: docker-imagepullsecret
+        mainContainer:
+          image: ${DYNAMO_IMAGE}
+          workingDir: /workspace
+          env:
+            - name: DYN_SYSTEM_PORT
+              value: "9090"
+          command:
+            - python3
+            - -m
+            - dynamo.router
+          args:
+            - --endpoint
+            - ${K8S_NAMESPACE}-gp-decode-0.backend.generate
+            - --router-block-size
+            - "16"
+            - --router-kv-overlap-score-weight
+            - "0"
+
+    VllmDecodeWorker:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      subComponentType: decode
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+      extraPodSpec:
+        volumes:
+          - name: hf-model-cache
+            persistentVolumeClaim:
+              claimName: hf-model-cache
+        mainContainer:
+          image: ${DYNAMO_VLLM_IMAGE}
+          workingDir: /workspace/examples/backends/vllm
+          command:
+            - python3
+            - -m
+            - dynamo.vllm
+          args:
+            - --model
+            - ${MODEL_NAME}
+            - --tensor-parallel-size
+            - "1"
+          volumeMounts:
+            - name: hf-model-cache
+              mountPath: /home/dynamo/.cache/huggingface/hub
+
+    Planner:
+      componentType: planner
+      replicas: 1
+      extraPodSpec:
+        imagePullSecrets:
+          - name: docker-imagepullsecret
+        mainContainer:
+          image: ${DYNAMO_IMAGE}
+          command:
+            - python3
+            - -m
+            - dynamo.planner
+          args:
+            - --config
+            - '{"environment":"global-planner","global_planner_namespace":"${K8S_NAMESPACE}-gp-ctrl","backend":"vllm","mode":"decode","enable_load_scaling":false,"enable_throughput_scaling":true,"throughput_metrics_source":"router","itl":200,"max_gpu_budget":-1,"decode_engine_num_gpu":1,"model_name":"${MODEL_NAME}","profile_results_dir":"/workspace/tests/planner/profiling_results/H200_TP1P_TP1D"}'

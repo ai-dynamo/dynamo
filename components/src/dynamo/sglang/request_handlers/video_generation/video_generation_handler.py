@@ -223,8 +223,12 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
                 sampling_params_kwargs=args,
             )
 
-        # Result contains 'frames' with list of frames
-        frames = result.get("frames", [])
+        # DiffGenerator.generate() returns GenerationResult | list[GenerationResult] | None
+        if result is None:
+            raise RuntimeError("DiffGenerator returned None")
+        if isinstance(result, list):
+            result = result[0]
+        frames = result.frames
         if not frames:
             raise RuntimeError("DiffGenerator returned no frames")
 

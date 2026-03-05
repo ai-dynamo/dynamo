@@ -45,6 +45,8 @@ spec:
           - Qwen/Qwen3-32B
           - --disaggregation-mode
           - decode
+          - --kv-transfer-config
+          - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
           - --tensor-parallel-size
           - '2'
           - --disable-log-requests
@@ -99,6 +101,8 @@ spec:
           - Qwen/Qwen3-32B
           - --disaggregation-mode
           - prefill
+          - --kv-transfer-config
+          - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
           - --tensor-parallel-size
           - '2'
           - --disable-log-requests

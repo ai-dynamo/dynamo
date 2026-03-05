@@ -36,6 +36,7 @@ use crate::common::protocols::{
 };
 use crate::common::running_mean::RunningMean;
 use crate::common::sequence::ActiveSequence;
+use crate::common::utils::sleep_until_precise;
 use crate::kv_manager::KvManager;
 use dynamo_kv_router::protocols::DpRank;
 use dynamo_tokens::blocks::UniqueBlock;
@@ -44,8 +45,6 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio::time::Duration;
-#[cfg(target_os = "linux")]
-use tokio_timerfd::Delay;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 use validator::Validate;
@@ -247,11 +246,22 @@ impl SchedulerState {
     }
 }
 
+/// Cancels its token when dropped. Shared via Arc so the background task is
+/// only cancelled when the last Scheduler clone is dropped.
+struct CancelGuard(CancellationToken);
+
+impl Drop for CancelGuard {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
+
 /// Manages scheduling of requests using KvManager resources
 #[derive(Clone)]
 pub struct Scheduler {
     request_tx: mpsc::UnboundedSender<DirectRequest>,
     metrics_rx: tokio::sync::watch::Receiver<MockerMetrics>,
+    _cancel_guard: Arc<CancelGuard>,
 }
 
 impl Scheduler {
@@ -274,7 +284,9 @@ impl Scheduler {
         let (metrics_tx, metrics_rx) =
             tokio::sync::watch::channel::<MockerMetrics>(initial_metrics);
 
-        let cancel_token_clone = cancellation_token.unwrap_or_default().clone();
+        let cancel_token = cancellation_token.unwrap_or_default();
+        let cancel_token_clone = cancel_token.clone();
+        let cancel_guard = Arc::new(CancelGuard(cancel_token));
 
         // Spawn main background task with cancellation token
         tokio::spawn(async move {
@@ -331,6 +343,7 @@ impl Scheduler {
         Self {
             request_tx,
             metrics_rx,
+            _cancel_guard: cancel_guard,
         }
     }
 
@@ -361,13 +374,16 @@ async fn receive_requests(
     }
 
     if state.is_empty() {
-        // Fully idle - block until new request arrives
+        // Fully idle - block until new request arrives or shutdown
         tokio::select! {
             biased;
             _ = cancel_token.cancelled() => {
                 return None;
             }
-            Some(request) = request_rx.recv() => {
+            result = request_rx.recv() => {
+                let Some(request) = result else {
+                    return None; // channel closed
+                };
                 state.receive(request);
                 return Some(());
             }
@@ -420,16 +436,7 @@ async fn simulate_prefill(
         let sleep_duration = Duration::from_secs_f64(total_time.as_secs_f64() / speedup_ratio);
         let deadline = start_time + sleep_duration;
 
-        #[cfg(target_os = "linux")]
-        {
-            if let Ok(delay) = Delay::new(deadline) {
-                let _ = delay.await;
-            }
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
-        }
+        sleep_until_precise(deadline).await;
     }
 
     total_time
@@ -514,16 +521,7 @@ async fn simulate_decode(
         let sleep_duration = Duration::from_secs_f64(total_time.as_secs_f64() / speedup_ratio);
         let deadline = start_time + sleep_duration;
 
-        #[cfg(target_os = "linux")]
-        {
-            if let Ok(delay) = Delay::new(deadline) {
-                let _ = delay.await;
-            }
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
-        }
+        sleep_until_precise(deadline).await;
     }
 
     total_time
@@ -551,6 +549,7 @@ fn try_schedule(
                 direct_request.max_output_tokens,
                 Some(args.block_size),
                 args.enable_prefix_caching,
+                args.zmq_kv_events_port.is_some(),
             ),
         };
 
@@ -614,7 +613,7 @@ fn process_signals(kv_manager: &mut KvManager, signals: &[MoveBlock]) -> bool {
         }
 
         // Check we have a Use signal with blocks
-        let MoveBlock::Use(blocks, _hashes) = signal else {
+        let MoveBlock::Use(blocks, _hashes, ..) = signal else {
             panic!(
                 "Failed signal is Invalid. Has to fail on generation signal, but failed on {signal:?}"
             );

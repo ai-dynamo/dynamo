@@ -24,12 +24,14 @@ import (
 	"crypto/tls"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
 
+	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/client-go/discovery/cached/memory"
@@ -42,6 +44,7 @@ import (
 	k8sCache "k8s.io/client-go/tools/cache"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
@@ -61,6 +64,7 @@ import (
 	configvalidation "github.com/ai-dynamo/dynamo/deploy/operator/api/config/validation"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	internalcert "github.com/ai-dynamo/dynamo/deploy/operator/internal/cert"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/modelendpoint"
@@ -148,6 +152,8 @@ func initCRDSchemes() {
 	utilruntime.Must(grovev1alpha1.AddToScheme(crdScheme))
 
 	utilruntime.Must(apiextensionsv1.AddToScheme(crdScheme))
+
+	utilruntime.Must(admissionregistrationv1.AddToScheme(crdScheme))
 
 	utilruntime.Must(istioclientsetscheme.AddToScheme(crdScheme))
 
@@ -262,6 +268,23 @@ func main() {
 	// Initialize observability metrics
 	setupLog.Info("Initializing observability metrics")
 	observability.InitMetrics()
+
+	// Set up webhook certificate management.
+	// A direct (non-cached) client is needed because the manager's cache isn't started yet.
+	directClient, err := client.New(mgr.GetConfig(), client.Options{Scheme: crdScheme})
+	if err != nil {
+		setupLog.Error(err, "unable to create direct client for cert management")
+		os.Exit(1)
+	}
+	certMgr, err := internalcert.NewCertManager(directClient, &operatorCfg.Server.Webhook)
+	if err != nil {
+		setupLog.Error(err, "unable to create cert manager")
+		os.Exit(1)
+	}
+	if err = certMgr.Setup(mainCtx, mgr); err != nil {
+		setupLog.Error(err, "failed to setup webhook certificate management")
+		os.Exit(1)
+	}
 
 	// Initialize namespace scope mechanism
 	var leaseManager *namespace_scope.LeaseManager
@@ -505,24 +528,86 @@ func main() {
 		operatorCfg.MPI.SSHSecretName,
 	)
 
-	if err = (&controller.DynamoComponentDeploymentReconciler{
+	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
+		setupLog.Error(err, "unable to set up health check")
+		os.Exit(1)
+	}
+	webhooksReady := make(chan struct{})
+	if err := mgr.AddReadyzCheck("readyz", func(req *http.Request) error {
+		select {
+		case <-webhooksReady:
+			return nil
+		default:
+			return fmt.Errorf("webhook handlers not yet registered")
+		}
+	}); err != nil {
+		setupLog.Error(err, "unable to set up ready check")
+		os.Exit(1)
+	}
+
+	// Register controllers synchronously before mgr.Start().
+	// Controllers don't depend on TLS certificates.
+	if err := registerControllers(
+		mgr, operatorCfg, runtimeConfig,
+		dockerSecretRetriever, mpiSecretReplicator,
+	); err != nil {
+		setupLog.Error(err, "failed to register controllers")
+		os.Exit(1)
+	}
+
+	// Webhooks require TLS certificates to serve HTTPS. Register them in a
+	// goroutine that blocks until the cert-controller has written the certs.
+	go func() {
+		certMgr.WaitReady()
+
+		if operatorCfg.Server.Webhook.CertProvisionMode == configv1alpha1.CertProvisionModeAuto {
+			injector, err := internalcert.NewCABundleInjector(mgr.GetClient(), operatorCfg)
+			if err != nil {
+				setupLog.Error(err, "unable to create CA bundle injector")
+				os.Exit(1)
+			}
+			if err := injector.InjectAll(mainCtx); err != nil {
+				setupLog.Error(err, "failed to inject CA bundles into webhook configurations")
+				os.Exit(1)
+			}
+		}
+
+		if err := registerWebhooks(mgr, operatorCfg, runtimeConfig, operatorVersion); err != nil {
+			setupLog.Error(err, "failed to register webhooks")
+			os.Exit(1)
+		}
+		close(webhooksReady)
+	}()
+
+	setupLog.Info("starting manager")
+	if err := mgr.Start(mainCtx); err != nil {
+		setupLog.Error(err, "problem running manager")
+		os.Exit(1)
+	}
+}
+
+func registerControllers(
+	mgr ctrl.Manager,
+	operatorCfg *configv1alpha1.OperatorConfiguration,
+	runtimeConfig *commonController.RuntimeConfig,
+	dockerSecretRetriever *secrets.DockerSecretIndexer,
+	mpiSecretReplicator *secret.SecretReplicator,
+) error {
+	if err := (&controller.DynamoComponentDeploymentReconciler{
 		Client:                mgr.GetClient(),
 		Recorder:              mgr.GetEventRecorderFor("dynamocomponentdeployment"),
 		Config:                operatorCfg,
 		RuntimeConfig:         runtimeConfig,
 		DockerSecretRetriever: dockerSecretRetriever,
 	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "DynamoComponentDeployment")
-		os.Exit(1)
-	}
-	// Create scale client for Grove resource scaling
-	scaleClient, err := createScalesGetter(mgr)
-	if err != nil {
-		setupLog.Error(err, "unable to create scale client")
-		os.Exit(1)
+		return fmt.Errorf("unable to create DynamoComponentDeployment controller: %w", err)
 	}
 
-	// Initialize RBAC manager for cross-namespace resource management
+	scaleClient, err := createScalesGetter(mgr)
+	if err != nil {
+		return fmt.Errorf("unable to create scale client: %w", err)
+	}
+
 	rbacManager := rbac.NewManager(mgr.GetClient())
 
 	if err = (&controller.DynamoGraphDeploymentReconciler{
@@ -535,8 +620,7 @@ func main() {
 		MPISecretReplicator:   mpiSecretReplicator,
 		RBACManager:           rbacManager,
 	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "DynamoGraphDeployment")
-		os.Exit(1)
+		return fmt.Errorf("unable to create DynamoGraphDeployment controller: %w", err)
 	}
 
 	if err = (&controller.DynamoGraphDeploymentScalingAdapterReconciler{
@@ -546,19 +630,18 @@ func main() {
 		Config:        operatorCfg,
 		RuntimeConfig: runtimeConfig,
 	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "DGDScalingAdapter")
-		os.Exit(1)
+		return fmt.Errorf("unable to create DGDScalingAdapter controller: %w", err)
 	}
 
 	if err = (&controller.DynamoGraphDeploymentRequestReconciler{
 		Client:        mgr.GetClient(),
+		APIReader:     mgr.GetAPIReader(),
 		Recorder:      mgr.GetEventRecorderFor("dynamographdeploymentrequest"),
 		Config:        operatorCfg,
 		RuntimeConfig: runtimeConfig,
 		RBACManager:   rbacManager,
 	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "DynamoGraphDeploymentRequest")
-		os.Exit(1)
+		return fmt.Errorf("unable to create DynamoGraphDeploymentRequest controller: %w", err)
 	}
 
 	if err = (&controller.DynamoModelReconciler{
@@ -568,8 +651,7 @@ func main() {
 		Config:         operatorCfg,
 		RuntimeConfig:  runtimeConfig,
 	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "DynamoModel")
-		os.Exit(1)
+		return fmt.Errorf("unable to create DynamoModel controller: %w", err)
 	}
 
 	if err = (&controller.CheckpointReconciler{
@@ -578,11 +660,19 @@ func main() {
 		RuntimeConfig: runtimeConfig,
 		Recorder:      mgr.GetEventRecorderFor("checkpoint"),
 	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "DynamoCheckpoint")
-		os.Exit(1)
+		return fmt.Errorf("unable to create DynamoCheckpoint controller: %w", err)
 	}
 
-	// Configure webhooks with lease-based namespace exclusion
+	setupLog.Info("Controllers registered successfully")
+	return nil
+}
+
+func registerWebhooks(
+	mgr ctrl.Manager,
+	operatorCfg *configv1alpha1.OperatorConfiguration,
+	runtimeConfig *commonController.RuntimeConfig,
+	operatorVersion string,
+) error {
 	isClusterWide := operatorCfg.Namespace.Restricted == ""
 	if isClusterWide {
 		setupLog.Info("Configuring webhooks with lease-based namespace exclusion for cluster-wide mode")
@@ -593,68 +683,48 @@ func main() {
 		internalwebhook.SetExcludedNamespaces(nil)
 	}
 
-	// Register validation webhook handlers
 	setupLog.Info("Registering validation webhooks")
 
 	dcdHandler := webhookvalidation.NewDynamoComponentDeploymentHandler()
-	if err = dcdHandler.RegisterWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to register webhook", "webhook", "DynamoComponentDeployment")
-		os.Exit(1)
+	if err := dcdHandler.RegisterWithManager(mgr); err != nil {
+		return fmt.Errorf("unable to register DynamoComponentDeployment webhook: %w", err)
 	}
 
 	dgdHandler := webhookvalidation.NewDynamoGraphDeploymentHandler(mgr)
-	if err = dgdHandler.RegisterWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to register webhook", "webhook", "DynamoGraphDeployment")
-		os.Exit(1)
+	if err := dgdHandler.RegisterWithManager(mgr); err != nil {
+		return fmt.Errorf("unable to register DynamoGraphDeployment webhook: %w", err)
 	}
 
 	dmHandler := webhookvalidation.NewDynamoModelHandler()
-	if err = dmHandler.RegisterWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to register webhook", "webhook", "DynamoModel")
-		os.Exit(1)
+	if err := dmHandler.RegisterWithManager(mgr); err != nil {
+		return fmt.Errorf("unable to register DynamoModel webhook: %w", err)
 	}
 
 	dgdrHandler := webhookvalidation.NewDynamoGraphDeploymentRequestHandler(
 		isClusterWide, ptr.Deref(operatorCfg.GPU.DiscoveryEnabled, true),
 	)
-	if err = dgdrHandler.RegisterWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to register webhook", "webhook", "DynamoGraphDeploymentRequest")
-		os.Exit(1)
+	if err := dgdrHandler.RegisterWithManager(mgr); err != nil {
+		return fmt.Errorf("unable to register DynamoGraphDeploymentRequest webhook: %w", err)
 	}
 
-	if err = ctrl.NewWebhookManagedBy(mgr).
-		For(&nvidiacomv1alpha1.DynamoGraphDeploymentRequest{}).
+	if err := ctrl.NewWebhookManagedBy(mgr).
+		For(&nvidiacomv1beta1.DynamoGraphDeploymentRequest{}).
 		Complete(); err != nil {
-		setupLog.Error(err, "unable to register conversion webhook", "webhook", "DynamoGraphDeploymentRequest-conversion")
-		os.Exit(1)
+		return fmt.Errorf("unable to register DynamoGraphDeploymentRequest conversion webhook: %w", err)
 	}
 
-	setupLog.Info("Validation webhooks registered successfully")
-
-	// Register defaulting (mutating) webhook handlers
 	setupLog.Info("Registering defaulting webhooks")
 
 	dgdDefaulter := webhookdefaulting.NewDGDDefaulter(operatorVersion)
-	if err = dgdDefaulter.RegisterWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to register webhook", "webhook", "DynamoGraphDeployment-defaulting")
-		os.Exit(1)
+	if err := dgdDefaulter.RegisterWithManager(mgr); err != nil {
+		return fmt.Errorf("unable to register DynamoGraphDeployment defaulting webhook: %w", err)
 	}
 
-	setupLog.Info("Defaulting webhooks registered successfully")
-	//+kubebuilder:scaffold:builder
-
-	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
-		setupLog.Error(err, "unable to set up health check")
-		os.Exit(1)
-	}
-	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
-		setupLog.Error(err, "unable to set up ready check")
-		os.Exit(1)
+	dgdrDefaulter := webhookdefaulting.NewDGDRDefaulter(operatorVersion)
+	if err := dgdrDefaulter.RegisterWithManager(mgr); err != nil {
+		return fmt.Errorf("unable to register DynamoGraphDeploymentRequest defaulting webhook: %w", err)
 	}
 
-	setupLog.Info("starting manager")
-	if err := mgr.Start(mainCtx); err != nil {
-		setupLog.Error(err, "problem running manager")
-		os.Exit(1)
-	}
+	setupLog.Info("Webhooks registered successfully")
+	return nil
 }

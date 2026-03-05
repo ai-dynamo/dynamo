@@ -55,7 +55,7 @@ from dynamo.vllm.worker_factory import WorkerFactory
 from .args import Config, _uses_dynamo_connector, parse_args
 from .checkpoint_restore import get_checkpoint_config
 from .constants import DisaggregationMode
-from .handlers import DecodeWorkerHandler, PrefillWorkerHandler
+from .handlers import DecodeWorkerHandler, PrefillWorkerHandler, get_dp_range_for_worker
 from .health_check import (
     VllmHealthCheckPayload,
     VllmOmniHealthCheckPayload,
@@ -67,19 +67,6 @@ configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 shutdown_endpoints: list = []
 CHECKPOINT_SLEEP_MODE_LEVEL = 1
-
-
-async def _handle_non_leader_node(dp_rank: int) -> None:
-    """
-    Handle non-leader node (data_parallel_rank >= 1) in multi-node deployments.
-    Non-leader nodes run vLLM workers but don't serve Dynamo endpoints.
-    """
-    logger.info(
-        f"Non-leader node detected (data_parallel_rank={dp_rank}). "
-        "Skipping endpoint serving."
-    )
-    # Wait indefinitely - process terminated via signal handlers
-    await asyncio.Event().wait()
 
 
 def build_headless_namespace(config: Config) -> argparse.Namespace:
@@ -147,15 +134,15 @@ async def worker():
 
     # CHECKPOINT MODE: Load engine BEFORE runtime creation
     # This allows checkpointing GPU state before runtime connections are established
-    pre_created_engine = None
+    checkpoint_restore_engine = None
     if checkpoint_cfg is not None:
         logger.info("Checkpoint mode enabled (watcher-driven signals)")
 
         # Checkpoint mode requires sleep mode — enable before engine init
         config.engine_args.enable_sleep_mode = True
 
-        pre_created_engine = setup_vllm_engine(config)
-        engine_client = pre_created_engine[0]
+        checkpoint_restore_engine = setup_vllm_engine(config)
+        engine_client = checkpoint_restore_engine[0]
 
         if not await checkpoint_cfg.run_lifecycle(
             engine_client, CHECKPOINT_SLEEP_MODE_LEVEL
@@ -185,7 +172,7 @@ async def worker():
             config,
             shutdown_event,
             shutdown_endpoints,
-            pre_created_engine=pre_created_engine,
+            checkpoint_restore_engine=checkpoint_restore_engine,
         )
         logger.debug("multimodal worker completed")
     elif config.omni:
@@ -193,12 +180,18 @@ async def worker():
         logger.debug("init_omni completed")
     elif config.disaggregation_mode == DisaggregationMode.PREFILL:
         await init_prefill(
-            runtime, config, shutdown_event, pre_created_engine=pre_created_engine
+            runtime,
+            config,
+            shutdown_event,
+            checkpoint_restore_engine=checkpoint_restore_engine,
         )
         logger.debug("init_prefill completed")
     else:
         await init(
-            runtime, config, shutdown_event, pre_created_engine=pre_created_engine
+            runtime,
+            config,
+            shutdown_event,
+            checkpoint_restore_engine=checkpoint_restore_engine,
         )
         logger.debug("init completed")
 
@@ -333,11 +326,12 @@ def setup_kv_event_publisher(
         )
         return None
 
-    # Get data_parallel_size to create publishers for all dp_ranks
-    data_parallel_size = getattr(vllm_config.parallel_config, "data_parallel_size", 1)
+    # Get DP rank range managed by this worker to create publishers for corresponding dp_ranks,
+    # all served workers should cover all ranks.
+    dp_start, dp_size = get_dp_range_for_worker(vllm_config)
     kv_publishers = []
 
-    for dp_rank in range(data_parallel_size):
+    for dp_rank in range(dp_start, dp_start + dp_size):
         if consolidator_enabled:
             # TODO: Use different port for each dp_rank once KVBM supports DP
             zmq_endpoint = f"tcp://127.0.0.1:{consolidator_port}"
@@ -481,7 +475,9 @@ def setup_vllm_engine(config, stat_logger=None):
                 "Continuing without KV event consolidation. "
                 "Ensure 'kvbm' package is installed if this feature is needed."
             )
-    vllm_config.consolidator_endpoints = consolidator_endpoints
+    # Store consolidator endpoints in additional_config (vLLM 0.16+ uses strict
+    # dataclass fields; monkey-patching attributes onto VllmConfig is no longer safe).
+    vllm_config.additional_config["consolidator_endpoints"] = consolidator_endpoints
 
     factory = []
     if stat_logger:
@@ -553,8 +549,9 @@ async def register_vllm_model(
         runtime_config.reasoning_parser = config.dyn_reasoning_parser
 
     # Get data_parallel_size from vllm_config (defaults to 1)
-    data_parallel_size = getattr(vllm_config.parallel_config, "data_parallel_size", 1)
-    runtime_config.data_parallel_size = data_parallel_size
+    dp_range = get_dp_range_for_worker(vllm_config)
+    runtime_config.data_parallel_start_rank = dp_range[0]
+    runtime_config.data_parallel_size = dp_range[1]
 
     # Configure media decoder for frontend image decoding when enabled
     # This enables frontend to decode images and transfer via NIXL RDMA
@@ -592,7 +589,7 @@ async def init_prefill(
     runtime: DistributedRuntime,
     config: Config,
     shutdown_event: asyncio.Event,
-    pre_created_engine=None,
+    checkpoint_restore_engine=None,
 ):
     """
     Instantiate and serve
@@ -605,14 +602,14 @@ async def init_prefill(
     )
 
     # Use pre-created engine if provided (checkpoint mode), otherwise create new
-    if pre_created_engine is not None:
+    if checkpoint_restore_engine is not None:
         (
             engine_client,
             vllm_config,
             default_sampling_params,
             prometheus_temp_dir,
             _component_gauges,
-        ) = pre_created_engine
+        ) = checkpoint_restore_engine
     else:
         (
             engine_client,
@@ -640,13 +637,11 @@ async def init_prefill(
     consolidator_enabled = False
     consolidator_port = None
 
-    if (
-        hasattr(vllm_config, "consolidator_endpoints")
-        and vllm_config.consolidator_endpoints
-    ):
+    _consolidator_eps = vllm_config.additional_config.get("consolidator_endpoints")
+    if _consolidator_eps:
         # Extract connect endpoint (third element) for clients to subscribe
         # consolidator_endpoints = (vllm_endpoint, bind_endpoint, connect_endpoint)
-        consolidator_output_endpoint = vllm_config.consolidator_endpoints[2]
+        consolidator_output_endpoint = _consolidator_eps[2]
         consolidator_port = int(consolidator_output_endpoint.split(":")[-1])
         consolidator_enabled = True
 
@@ -669,10 +664,6 @@ async def init_prefill(
     runtime.register_engine_route("wake_up", handler.wake_up)
     logger.info("Registered engine routes: /engine/sleep, /engine/wake_up")
 
-    # Handle non-leader nodes - don't serve endpoints
-    if config.engine_args.data_parallel_rank:
-        await _handle_non_leader_node(config.engine_args.data_parallel_rank)
-        return
     shutdown_endpoints[:] = [generate_endpoint, clear_endpoint]
 
     # Register prefill model with ModelType.Prefill
@@ -734,7 +725,7 @@ async def init(
     runtime: DistributedRuntime,
     config: Config,
     shutdown_event: asyncio.Event,
-    pre_created_engine=None,
+    checkpoint_restore_engine=None,
 ):
     """
     Instantiate and serve
@@ -773,19 +764,18 @@ async def init(
         )
 
     # Use pre-created engine if provided (checkpoint mode), otherwise create new
-    if pre_created_engine is not None:
+    if checkpoint_restore_engine is not None:
         (
             engine_client,
             vllm_config,
             default_sampling_params,
             prometheus_temp_dir,
             component_gauges,
-        ) = pre_created_engine
+        ) = checkpoint_restore_engine
         # Factory is created after unpack so component_gauges is available
         factory = StatLoggerFactory(
             endpoint=generate_endpoint,
             component_gauges=component_gauges,
-            dp_rank=config.engine_args.data_parallel_rank or 0,
         )
     else:
         # Factory is created without component_gauges; setup_vllm_engine() will
@@ -793,7 +783,6 @@ async def init(
         # on the factory before vLLM calls create_stat_logger().
         factory = StatLoggerFactory(
             endpoint=generate_endpoint,
-            dp_rank=config.engine_args.data_parallel_rank or 0,
         )
         (
             engine_client,
@@ -825,13 +814,11 @@ async def init(
     consolidator_enabled = False
     consolidator_port = None
 
-    if (
-        hasattr(vllm_config, "consolidator_endpoints")
-        and vllm_config.consolidator_endpoints
-    ):
+    _consolidator_eps = vllm_config.additional_config.get("consolidator_endpoints")
+    if _consolidator_eps:
         # Extract connect endpoint (third element) for clients to subscribe
         # consolidator_endpoints = (vllm_endpoint, bind_endpoint, connect_endpoint)
-        consolidator_output_endpoint = vllm_config.consolidator_endpoints[2]
+        consolidator_output_endpoint = _consolidator_eps[2]
         consolidator_port = int(consolidator_output_endpoint.split(":")[-1])
         consolidator_enabled = True
 
@@ -853,11 +840,6 @@ async def init(
     runtime.register_engine_route("sleep", handler.sleep)
     runtime.register_engine_route("wake_up", handler.wake_up)
     logger.info("Registered engine routes: /engine/sleep, /engine/wake_up")
-
-    # Handle non-leader nodes - don't serve endpoints
-    if config.engine_args.data_parallel_rank:
-        await _handle_non_leader_node(config.engine_args.data_parallel_rank)
-        return
 
     # Parse endpoint types from --endpoint-types flag
     model_type = parse_endpoint_types(config.endpoint_types)
@@ -1006,11 +988,6 @@ async def init_omni(
 
     # Set up metrics collection for vLLM and LMCache metrics
     setup_metrics_collection(config, generate_endpoint, logger)
-
-    # Handle non-leader nodes - don't serve endpoints
-    if config.engine_args.data_parallel_rank:
-        await _handle_non_leader_node(config.engine_args.data_parallel_rank)
-        return
 
     # TODO: extend for multi-stage pipelines
     model_type = get_output_modalities(config.output_modalities, config.model)

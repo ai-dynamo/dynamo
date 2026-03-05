@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from typing import Any, AsyncGenerator, Dict, Final
 
 import torch
+from vllm.config import VllmConfig
 from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
@@ -260,6 +261,32 @@ def build_sampling_params_openai(
     return sampling_params
 
 
+def get_dp_range_for_worker(vllm_config: VllmConfig) -> range:
+    """
+    Get the global DP rank range that this worker is responsible for based on vLLM config.
+    Note that the 'vllm_config' is normalized so the load balancing flags are set properly.
+    The return value is in the format of (start_dp_rank, managed_dp_size)."""
+    if vllm_config.parallel_config.data_parallel_external_lb:
+        # external load balancing, each worker is responsible for exactly 1 rank
+        return (vllm_config.parallel_config.data_parallel_rank, 1)
+    elif vllm_config.parallel_config.data_parallel_hybrid_lb:
+        # hybrid load balancing, each worker is responsible for a subset of local ranks
+        return (
+            vllm_config.parallel_config.data_parallel_rank,
+            vllm_config.parallel_config.data_parallel_size_local,
+        )
+    else:
+        # internal load balancing, the worker is responsible for all DP ranks
+        logger.warning(
+            "vLLM selects internal DP load balancing. If you are launching multiple workers for DP deployment,"
+            " hybrid or external load balancing is recommended."
+        )
+        return (
+            vllm_config.parallel_config.data_parallel_rank,
+            vllm_config.parallel_config.data_parallel_size,
+        )
+
+
 class BaseWorkerHandler(ABC):
     """
     Request handler for the generate and clear_kv_blocks endpoints.
@@ -301,6 +328,8 @@ class BaseWorkerHandler(ABC):
         self._lora_load_locks_guard = threading.Lock()
 
         self.use_vllm_tokenizer = use_vllm_tokenizer
+
+        self.dp_range = get_dp_range_for_worker(self.engine_client.vllm_config)
 
         # Initialize InputParamManager for text-in-text-out mode
         tokenizer = None
@@ -462,6 +491,21 @@ class BaseWorkerHandler(ABC):
         """Add a temporary directory to be cleaned up later."""
         if temp_dir is not None:
             self.temp_dirs.append(temp_dir)
+
+    def _to_local_dp_rank(self, dp_rank: int | None) -> int | None:
+        """Convert global DP rank to local DP rank based on engine config."""
+        if dp_rank is None:
+            return None
+        if dp_rank < self.dp_range[0] or dp_rank >= self.dp_range[0] + self.dp_range[1]:
+            logger.warning(
+                f"Received DP rank {dp_rank} is out of range [{self.dp_range[0]} - {self.dp_range[0] + self.dp_range[1]}), fallback to vLLM internal DP selection"
+            )
+            return None
+        local_dp_rank = (dp_rank - self.dp_range[0]) % self.dp_range[1]
+        logger.debug(
+            f"Converted global DP rank {dp_rank} to local DP rank {local_dp_rank}"
+        )
+        return local_dp_rank
 
     def _resolve_lora_request(self, model_name: str | None) -> LoRARequest | None:
         """Return a LoRARequest if model_name is a loaded adapter, else None."""
@@ -1041,8 +1085,8 @@ class BaseWorkerHandler(ABC):
                 prompt_tokens + completion_tokens if prompt_tokens is not None else None
             ),
             "prompt_tokens_details": (
-                {"cached_tokens": request_output.num_cached_tokens}
-                if request_output.num_cached_tokens
+                {"cached_tokens": num_cached}
+                if (num_cached := getattr(request_output, "num_cached_tokens", None))
                 else None
             ),
         }
@@ -1317,7 +1361,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 f"Decode request {request_id} has no LoRA specified (model: {model_name})"
             )
         routing = request.get("routing") or {}
-        dp_rank = routing.get("dp_rank")
+        dp_rank = self._to_local_dp_rank(routing.get("dp_rank"))
         priority = routing.get("priority", 0)
 
         trace_headers = build_trace_headers(context)
@@ -1364,7 +1408,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         )
 
         routing = request.get("routing") or {}
-        dp_rank = routing.get("dp_rank")
+        dp_rank = self._to_local_dp_rank(routing.get("dp_rank"))
         priority = routing.get("priority", 0)
         openai_request_id = request.get("id") or request.get("request_id", request_id)
         previous_text = ""
@@ -1525,7 +1569,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             )
 
         routing = request.get("routing") or {}
-        dp_rank = routing.get("dp_rank")
+        dp_rank = self._to_local_dp_rank(routing.get("dp_rank"))
         priority = routing.get("priority", 0)
 
         trace_headers = build_trace_headers(context)

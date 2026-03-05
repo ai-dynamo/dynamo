@@ -16,6 +16,7 @@ use crate::{
     },
 };
 use dynamo_runtime::DistributedRuntime;
+use dynamo_runtime::metrics::MetricsHierarchy;
 
 /// Build and run an HTTP service
 pub async fn run(
@@ -52,6 +53,16 @@ pub async fn run(
         http_service_builder.cancel_token(Some(distributed_runtime.primary_token()));
     http_service_builder =
         http_service_builder.with_request_template(engine_config.local_model().request_template());
+
+    // Inject the DRT's metrics registry so that component-scoped metrics
+    // (e.g. KvIndexerMetrics) are exposed (default port 8000 if not overridden).
+    http_service_builder =
+        http_service_builder.drt_metrics(Some(distributed_runtime.get_metrics_registry().clone()));
+
+    // Wire DRT discovery so that router metrics (dynamo_router_*) are registered
+    // with the instance_id as the router_id label.
+    http_service_builder =
+        http_service_builder.drt_discovery(Some(distributed_runtime.discovery()));
 
     let http_service = match engine_config {
         EngineConfig::Dynamic {
@@ -107,19 +118,18 @@ pub async fn run(
             let manager = http_service.model_manager();
             let checksum = model.card().mdcsum();
 
-            let tokenizer_hf = model.card().tokenizer_hf()?;
-            let chat_pipeline =
-                common::build_pipeline::<
-                    NvCreateChatCompletionRequest,
-                    NvCreateChatCompletionStreamResponse,
-                >(model.card(), inner_engine.clone(), tokenizer_hf.clone())
-                .await?;
+            let tokenizer = model.card().tokenizer()?;
+            let chat_pipeline = common::build_pipeline::<
+                NvCreateChatCompletionRequest,
+                NvCreateChatCompletionStreamResponse,
+            >(model.card(), inner_engine.clone(), tokenizer.clone())
+            .await?;
             manager.add_chat_completions_model(model.display_name(), checksum, chat_pipeline)?;
 
             let cmpl_pipeline = common::build_pipeline::<
                 NvCreateCompletionRequest,
                 NvCreateCompletionResponse,
-            >(model.card(), inner_engine, tokenizer_hf)
+            >(model.card(), inner_engine, tokenizer)
             .await?;
             manager.add_completions_model(model.display_name(), checksum, cmpl_pipeline)?;
             // Enable all endpoints

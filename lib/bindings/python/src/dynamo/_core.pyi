@@ -13,8 +13,6 @@ from typing import (
     Tuple,
 )
 
-from ._prometheus_names import prometheus_names
-
 # Import from specialized modules
 from .prometheus_metrics import RuntimeMetrics as PyRuntimeMetrics
 
@@ -22,6 +20,14 @@ def log_message(level: str, message: str, module: str, file: str, line: int) -> 
     """
     Log a message from Python with file and line info
     """
+    ...
+
+def get_tool_parser_names() -> list[str]:
+    """Get list of available tool parser names."""
+    ...
+
+def get_reasoning_parser_names() -> list[str]:
+    """Get list of available reasoning parser names."""
     ...
 
 class JsonLike:
@@ -412,7 +418,17 @@ class ModelDeploymentCard:
         """Deserialize a model deployment card from a JSON string."""
         ...
 
-    ...
+    def model_type(self) -> ModelType:
+        """Return the model type of this deployment card."""
+        ...
+
+    def source_path(self) -> str:
+        """Return the source path of this deployment card."""
+        ...
+
+    def runtime_config(self) -> Any:
+        """Return the runtime configuration as a dict."""
+        ...
 
 class ModelRuntimeConfig:
     """
@@ -927,7 +943,13 @@ class ModelType:
     Images: ModelType
     Audios: ModelType
     Videos: ModelType
-    ...
+
+    def __or__(self, other: "ModelType") -> "ModelType":
+        ...
+
+    def supports_chat(self) -> bool:
+        """Return True if this model type supports chat."""
+        ...
 
 class RouterMode:
     """Router mode for load balancing requests across workers"""
@@ -939,6 +961,8 @@ class RouterMode:
 
 class RouterConfig:
     """How to route the request"""
+    router_mode: RouterMode
+    kv_router_config: KvRouterConfig
 
     def __init__(
         self,
@@ -981,7 +1005,8 @@ class KvRouterConfig:
         router_max_tree_size: int = 1048576,
         router_prune_target_ratio: float = 0.8,
         router_queue_threshold: Optional[float] = None,
-        router_event_threads: int = 1,
+        router_event_threads: int = 4,
+        router_enable_cache_control: bool = False,
     ) -> None:
         """
         Create a KV router configuration.
@@ -1010,16 +1035,12 @@ class KvRouterConfig:
                 When set, requests are queued if all workers exceed this fraction of
                 max_num_batched_tokens. Enables priority scheduling via latency_sensitivity hints.
                 If None, queueing is disabled and all requests go directly to the scheduler.
-            router_event_threads: Number of event processing threads (default: 1).
+            router_event_threads: Number of event processing threads (default: 4).
                 When > 1, uses a concurrent radix tree with a thread pool.
+            router_enable_cache_control: Enable cache control (PIN with TTL) via the worker's
+                cache_control service mesh endpoint (default: False).
         """
         ...
-
-async def start_kv_block_indexer(
-    endpoint: Endpoint,
-    block_size: int,
-    kv_router_config: KvRouterConfig,
-) -> None: ...
 
 async def register_model(
     model_input: ModelInput,
@@ -1064,6 +1085,36 @@ async def unregister_model(
 def lora_name_to_id(lora_name: str) -> int:
     """Generate a deterministic integer ID from a LoRA name using blake3 hash."""
     ...
+
+class LoRADownloader:
+    """Unified interface for LoRA downloading and caching (local file:// and S3 s3:// URIs)."""
+
+    def __init__(self, cache_path: Optional[str] = None) -> None: ...
+    def download_if_needed(self, lora_uri: str) -> Awaitable[str]: ...
+    def get_cache_path(self, cache_key: str) -> str: ...
+    def is_cached(self, cache_key: str) -> bool: ...
+    def validate_cached(self, cache_key: str) -> bool: ...
+
+    @staticmethod
+    def uri_to_cache_key(uri: str) -> str: ...
+
+
+class MediaDecoder:
+    """Media decoder for image and video preprocessing."""
+
+    def __init__(self) -> None: ...
+    def enable_image(self, decoder_options: Dict[str, Any]) -> None: ...
+
+
+class MediaFetcher:
+    """Media fetcher for loading remote image/video URLs."""
+
+    def __init__(self) -> None: ...
+    def user_agent(self, user_agent: str) -> None: ...
+    def allow_direct_ip(self, allow: bool) -> None: ...
+    def allow_direct_port(self, allow: bool) -> None: ...
+    def allowed_media_domains(self, domains: List[str]) -> None: ...
+    def timeout_ms(self, timeout_ms: int) -> None: ...
 
 async def fetch_model(remote_name: str, ignore_weights: bool = False) -> str:
     """
@@ -1384,6 +1435,18 @@ class KvRouter:
         """
         ...
 
+    async def generate_from_request(
+        self,
+        request: JsonLike,
+    ) -> AsyncIterator[JsonLike]:
+        """
+        Generate from a preprocessed request dict (PreprocessedRequest format).
+
+        Accepts a full request dict with token_ids, model, stop_conditions, etc.
+        Returns an async iterator yielding generation responses.
+        """
+        ...
+
     async def best_worker(
         self,
         token_ids: List[int],
@@ -1583,12 +1646,3 @@ class VirtualConnectorClient:
         """Blocks until there is a new decision to fetch using 'get'"""
         ...
 
-__all__ = [
-    "Client",
-    "Context",
-    "KserveGrpcService",
-    "ModelDeploymentCard",
-    "PythonAsyncEngine",
-    "prometheus_names",
-    "ModelCardInstanceId",
-]

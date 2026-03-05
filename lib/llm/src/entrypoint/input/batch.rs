@@ -252,12 +252,8 @@ async fn evaluate(
                     }
                 }
                 entry.finish_reason = chat_comp.finish_reason;
-                if chat_comp.finish_reason.is_some() {
-                    tracing::trace!(
-                        request_id,
-                        "finish reason: {:?}",
-                        chat_comp.finish_reason.unwrap()
-                    );
+                if let Some(finish_reason) = chat_comp.finish_reason.as_ref() {
+                    tracing::trace!(request_id, "finish reason: {:?}", finish_reason);
                     break;
                 }
             }

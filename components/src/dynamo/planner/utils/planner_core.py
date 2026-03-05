@@ -248,7 +248,7 @@ class BasePlanner:
 
     def __init__(
         self,
-        runtime: Optional[DistributedRuntime],
+        runtime: DistributedRuntime,
         config: PlannerConfig,
         dryrun: bool = False,
         shared_state: Optional[PlannerSharedState] = None,
@@ -298,8 +298,11 @@ class BasePlanner:
                 or PrometheusAPIClient(
                     config.metric_pulling_prometheus_endpoint,
                     config.namespace,
+                    metrics_source=config.throughput_metrics_source,
                 )
             )
+            if config.throughput_metrics_source == "router":
+                self.prometheus_traffic_client.warn_if_router_not_scraped()
 
         predictor_cls = LOAD_PREDICTORS[config.load_predictor]
         self.num_req_predictor = predictor_cls(config)
@@ -386,6 +389,7 @@ class BasePlanner:
             self.config.backend
         ].decode_worker_k8s_name
 
+        self.prometheus_metrics: PlannerPrometheusMetrics | None = None
         if not self.dryrun:
             self.prefill_client = None
             self.workers_client = None
@@ -662,7 +666,7 @@ class BasePlanner:
         self.isl_predictor.add_data_point(metrics.isl)
         self.osl_predictor.add_data_point(metrics.osl)
 
-    def predict_load(self):
+    def predict_load(self) -> tuple[Optional[float], Optional[float], Optional[float]]:
         try:
             # predict the next load
             next_num_req = self.num_req_predictor.predict_next()
@@ -742,7 +746,9 @@ class BasePlanner:
 
     def apply_component_budget(self, desired_replicas: int) -> int:
         return _apply_component_gpu_budget(
-            desired_replicas, self._engine_num_gpu(), self.config
+            max(desired_replicas, self.config.min_endpoint),
+            self._engine_num_gpu(),
+            self.config,
         )
 
     async def _apply_scaling(self, desired_replicas: int) -> None:
@@ -945,7 +951,7 @@ class BasePlanner:
             logger.info(f"Detected model name from deployment: {model_name}")
             self.model_name = model_name.lower()
         else:
-            model_name = getattr(self.config, "model_name", None)
+            model_name = getattr(self.config, "model_name", "")
             if not model_name:
                 raise ValueError(
                     "Model name is required in no-operation mode. "
