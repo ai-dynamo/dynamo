@@ -25,6 +25,7 @@ RUN wget --tries=3 --waitretry=5 \
     rm -rf sccache*
 
 # Install uv package manager
+# TODO: Pin uv image to a specific version tag for reproducibility (e.g. ghcr.io/astral-sh/uv:0.10.7)
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
 # Install NATS server
