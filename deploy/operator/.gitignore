@@ -29,11 +29,12 @@ go.work
 .idea
 .vscode
 *.swp
-*.swo
-*~
 
 # Tilt local settings (personal overrides)
+tilt-settings.yaml
 tilt-settings.local.yaml
+*.swo
+*~
 
 
 !env*
