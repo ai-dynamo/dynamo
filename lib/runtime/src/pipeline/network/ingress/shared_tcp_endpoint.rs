@@ -294,6 +294,8 @@ impl SharedTcpServer {
         endpoint_name: String,
         system_health: Arc<Mutex<SystemHealth>>,
     ) -> Result<()> {
+        let endpoint_fqn = format!("{}.{}.{}", namespace, component_name, endpoint_name);
+
         let handler = Arc::new(EndpointHandler {
             service_handler,
             instance_id,
@@ -315,7 +317,7 @@ impl SharedTcpServer {
 
         tracing::info!(
             "Registered endpoint '{}' with shared TCP server on {}",
-            endpoint_name,
+            endpoint_fqn,
             self.actual_address().unwrap_or(self.bind_addr)
         );
 
