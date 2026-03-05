@@ -12,7 +12,7 @@ use std::collections::{BinaryHeap, HashMap};
 use std::hash::Hash;
 use tokio::time::{Duration, Instant};
 
-use crate::indexer::KvRouterError;
+use super::KvRouterError;
 use crate::protocols::{ExternalSequenceBlockHash, WorkerWithDpRank};
 
 /// Block entry to be inserted in the [`PruneManager::expirations`] heap.
@@ -365,7 +365,7 @@ mod tests {
             .unwrap();
 
         // Poll until we observe the match being registered
-        spin_until(Duration::from_millis(100), || async {
+        spin_until(Duration::from_millis(100), async || {
             let s = indexer
                 .find_matches_for_request(&tokens, None)
                 .await
@@ -418,7 +418,7 @@ mod tests {
             .unwrap();
 
         // Wait until the worker is registered
-        spin_until(Duration::from_millis(100), || async {
+        spin_until(Duration::from_millis(100), async || {
             let s = indexer
                 .find_matches_for_request(&tokens, None)
                 .await
@@ -432,7 +432,7 @@ mod tests {
         indexer.remove_worker(worker_id).await;
 
         // Ensure the worker's entries are gone
-        spin_until(Duration::from_millis(100), || async {
+        spin_until(Duration::from_millis(100), async || {
             let s = indexer
                 .find_matches_for_request(&tokens, None)
                 .await
@@ -486,7 +486,7 @@ mod tests {
             .unwrap();
 
         // Ensure both workers are registered
-        spin_until(Duration::from_millis(100), || async {
+        spin_until(Duration::from_millis(100), async || {
             let s = indexer
                 .find_matches_for_request(&tokens, None)
                 .await
@@ -506,7 +506,7 @@ mod tests {
         indexer.remove_worker(worker_0).await;
 
         // Confirm the removed worker is gone, and the other remains.
-        spin_until(Duration::from_millis(100), || async {
+        spin_until(Duration::from_millis(100), async || {
             let s = indexer
                 .find_matches_for_request(&tokens, None)
                 .await
@@ -556,7 +556,7 @@ mod tests {
             .unwrap();
 
         // Ensure the indexer has registered the block
-        spin_until(Duration::from_millis(100), || async {
+        spin_until(Duration::from_millis(100), async || {
             let s = indexer
                 .find_matches_for_request(&seq_a, None)
                 .await
@@ -629,7 +629,7 @@ mod tests {
             .unwrap();
 
         // Wait until both workers are reflected in overlap scores
-        spin_until(Duration::from_millis(100), || async {
+        spin_until(Duration::from_millis(100), async || {
             let s = indexer
                 .find_matches_for_request(&tokens, None)
                 .await
