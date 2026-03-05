@@ -181,7 +181,7 @@ class SglangStreamingPostProcessor:
         start = max(0, prev_count - self.LOOKBACK)
 
         # Trim to avoid unbounded growth -- only the tail matters for decoding
-        if len(self._all_token_ids) > self.LOOKBACK * 4:
+        if len(self._all_token_ids) > self.LOOKBACK * 16:
             self._all_token_ids = self._all_token_ids[
                 -(self.LOOKBACK + len(new_token_ids)) :
             ]
@@ -211,7 +211,8 @@ class SglangStreamingPostProcessor:
         Returns:
             OpenAI choice dict or ``None`` if nothing to emit yet.
         """
-        token_ids = list(engine_response.get("token_ids") or [])
+        raw_ids = engine_response.get("token_ids")
+        token_ids = raw_ids if isinstance(raw_ids, list) else list(raw_ids or [])
         finish_reason = engine_response.get("finish_reason")
 
         delta_text = self._incremental_decode(token_ids) if token_ids else ""

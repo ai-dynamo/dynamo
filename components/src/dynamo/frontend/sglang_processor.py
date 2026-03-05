@@ -38,6 +38,21 @@ from .utils import PreprocessError, random_uuid, worker_warmup
 
 logger = logging.getLogger(__name__)
 
+
+def _unsupported_n_error(n: int) -> dict[str, Any]:
+    return {
+        "error": {
+            "message": (
+                f"Unsupported value: 'n={n}'. "
+                "This endpoint currently supports only n=1."
+            ),
+            "type": "invalid_request_error",
+            "param": "n",
+            "code": "unsupported_value",
+        }
+    }
+
+
 _FINISH_REASON_MAP: dict[str, str] = {
     "eos": "stop",
     "stop": "stop",
@@ -103,19 +118,7 @@ def _preprocess_worker(
 
     n = request.get("n", 1)
     if n != 1:
-        raise PreprocessError(
-            {
-                "error": {
-                    "message": (
-                        f"Unsupported value: 'n={n}'. "
-                        "This endpoint currently supports only n=1."
-                    ),
-                    "type": "invalid_request_error",
-                    "param": "n",
-                    "code": "unsupported_value",
-                }
-            }
-        )
+        raise PreprocessError(_unsupported_n_error(n))
 
     dynamo_preproc = _build_dynamo_preproc(
         request, pre.prompt_token_ids, model_name, eos_token_id
@@ -274,17 +277,7 @@ class SglangProcessor:
         n = request.get("n", 1)
         if n != 1:
             logger.error("Unsupported n=%d, only n=1 is supported", n)
-            yield {
-                "error": {
-                    "message": (
-                        f"Unsupported value: 'n={n}'. "
-                        "This endpoint currently supports only n=1."
-                    ),
-                    "type": "invalid_request_error",
-                    "param": "n",
-                    "code": "unsupported_value",
-                }
-            }
+            yield _unsupported_n_error(n)
             return
 
         dynamo_preproc = _build_dynamo_preproc(
