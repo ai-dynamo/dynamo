@@ -190,6 +190,7 @@ pub async fn build_routed_pipeline<Req, Resp>(
     tokenizer: crate::tokenizers::Tokenizer,
     prefill_chooser: Option<Arc<PrefillRouter>>,
     decode_fallback: bool,
+    enforce_disagg: bool,
     migration_limit: u32,
     metrics: Arc<Metrics>,
 ) -> anyhow::Result<ServiceEngine<SingleIn<Req>, ManyOut<Annotated<Resp>>>>
@@ -219,6 +220,7 @@ where
         tokenizer,
         prefill_chooser,
         decode_fallback,
+        enforce_disagg,
         migration_limit,
         metrics,
     )
@@ -237,6 +239,7 @@ pub async fn build_routed_pipeline_with_preprocessor<Req, Resp>(
     tokenizer: crate::tokenizers::Tokenizer,
     prefill_chooser: Option<Arc<PrefillRouter>>,
     decode_fallback: bool,
+    enforce_disagg: bool,
     migration_limit: u32,
     metrics: Arc<Metrics>,
 ) -> anyhow::Result<ServiceEngine<SingleIn<Req>, ManyOut<Annotated<Resp>>>>
@@ -304,8 +307,9 @@ where
     };
 
     // Use the provided prefill chooser, or create a disabled one if not provided
-    let prefill_chooser = prefill_chooser
-        .unwrap_or_else(|| PrefillRouter::disabled(model_manager, router_mode, decode_fallback));
+    let prefill_chooser = prefill_chooser.unwrap_or_else(|| {
+        PrefillRouter::disabled(model_manager, router_mode, decode_fallback, enforce_disagg)
+    });
     let prefill_op = prefill_chooser.into_operator();
 
     // Link with prefill chooser including backward edge for response flow

@@ -720,6 +720,7 @@ pub unsafe extern "C" fn create_routers(
                     block_size,
                     Some(prefill_config),
                     decode_fallback,
+                    false,
                     model_name.clone(),
                     namespace_str.clone(),
                 )
@@ -732,7 +733,12 @@ pub unsafe extern "C" fn create_routers(
             }
             None => {
                 tracing::info!("No prefill workers found, running in aggregated mode");
-                PrefillRouter::disabled(model_manager.clone(), RouterMode::KV, decode_fallback)
+                PrefillRouter::disabled(
+                    model_manager.clone(),
+                    RouterMode::KV,
+                    decode_fallback,
+                    false,
+                )
             }
         };
 

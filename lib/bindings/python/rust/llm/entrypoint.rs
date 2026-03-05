@@ -111,12 +111,13 @@ pub struct RouterConfig {
     /// Threshold for active prefill tokens as fraction of max_num_batched_tokens
     active_prefill_tokens_threshold_frac: Option<f64>,
     decode_fallback: bool,
+    enforce_disagg: bool,
 }
 
 #[pymethods]
 impl RouterConfig {
     #[new]
-    #[pyo3(signature = (mode, config=None, active_decode_blocks_threshold=None, active_prefill_tokens_threshold=None, active_prefill_tokens_threshold_frac=None, decode_fallback=false))]
+    #[pyo3(signature = (mode, config=None, active_decode_blocks_threshold=None, active_prefill_tokens_threshold=None, active_prefill_tokens_threshold_frac=None, decode_fallback=false, enforce_disagg=false))]
     pub fn new(
         mode: RouterMode,
         config: Option<KvRouterConfig>,
@@ -124,6 +125,7 @@ impl RouterConfig {
         active_prefill_tokens_threshold: Option<u64>,
         active_prefill_tokens_threshold_frac: Option<f64>,
         decode_fallback: bool,
+        enforce_disagg: bool,
     ) -> Self {
         Self {
             router_mode: mode,
@@ -132,6 +134,7 @@ impl RouterConfig {
             active_prefill_tokens_threshold,
             active_prefill_tokens_threshold_frac,
             decode_fallback,
+            enforce_disagg,
         }
     }
 }
@@ -147,6 +150,7 @@ impl From<RouterConfig> for RsRouterConfig {
                 active_prefill_tokens_threshold_frac: rc.active_prefill_tokens_threshold_frac,
             },
             decode_fallback: rc.decode_fallback,
+            enforce_disagg: rc.enforce_disagg,
         }
     }
 }

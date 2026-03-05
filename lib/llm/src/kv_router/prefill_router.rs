@@ -110,6 +110,7 @@ pub struct PrefillRouter {
     cancel_token: CancellationToken,
     router_mode: RouterMode,
     decode_fallback: bool,
+    enforce_disagg: bool,
     /// Model name used to look up the worker monitor for prefill client registration
     model_name: String,
     /// Namespace used to look up the correct WorkerSet's worker monitor
@@ -122,6 +123,7 @@ impl PrefillRouter {
         model_manager: Arc<ModelManager>,
         router_mode: RouterMode,
         decode_fallback: bool,
+        enforce_disagg: bool,
     ) -> Arc<Self> {
         Arc::new(Self {
             prefill_router: OnceLock::new(),
@@ -130,6 +132,7 @@ impl PrefillRouter {
             cancel_token: CancellationToken::new(),
             router_mode,
             decode_fallback,
+            enforce_disagg,
             model_name: String::new(), // Not used for disabled router
             namespace: String::new(),  // Not used for disabled router
         })
@@ -143,6 +146,7 @@ impl PrefillRouter {
         kv_cache_block_size: u32,
         kv_router_config: Option<KvRouterConfig>,
         decode_fallback: bool,
+        enforce_disagg: bool,
         model_name: String,
         namespace: String,
     ) -> Arc<Self> {
@@ -156,6 +160,7 @@ impl PrefillRouter {
             cancel_token: cancel_token.clone(),
             router_mode,
             decode_fallback,
+            enforce_disagg,
             model_name,
             namespace,
         });
@@ -594,7 +599,11 @@ impl
 
         // If prefill router is not activated (no prefill workers discovered),
         // this is aggregated mode — route directly to decode.
+        // With --enforce-disagg, fail instead of falling back.
         if self.prefill_router.get().is_none() {
+            if self.enforce_disagg {
+                return Err(anyhow::anyhow!(PrefillError::NotActivated));
+            }
             return next.generate(context.map(|_| req)).await;
         }
 

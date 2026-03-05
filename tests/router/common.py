@@ -47,6 +47,7 @@ class KVRouterProcess(ManagedProcess):
         namespace: str,
         store_backend: str = "etcd",
         decode_fallback: bool = False,
+        enforce_disagg: bool = False,
         blocks_threshold: float | None = None,
         tokens_threshold: float | None = None,
         tokens_threshold_frac: float | None = None,
@@ -71,6 +72,9 @@ class KVRouterProcess(ManagedProcess):
 
         if decode_fallback:
             command.append("--decode-fallback")
+
+        if enforce_disagg:
+            command.append("--enforce-disagg")
 
         if blocks_threshold is not None:
             command.extend(["--active-decode-blocks-threshold", str(blocks_threshold)])
@@ -1774,6 +1778,7 @@ def _test_router_decisions_disagg(
         frontend_port,
         decode_workers.namespace,
         store_backend,
+        enforce_disagg=True,
         request_plane=request_plane,
         durable_kv_events=durable_kv_events,
     ):

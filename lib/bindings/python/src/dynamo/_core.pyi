@@ -997,6 +997,7 @@ class RouterConfig:
         active_prefill_tokens_threshold: Optional[int] = None,
         active_prefill_tokens_threshold_frac: Optional[float] = None,
         decode_fallback: bool = False,
+        enforce_disagg: bool = False,
     ) -> None:
         """
         Create a RouterConfig.
@@ -1008,6 +1009,7 @@ class RouterConfig:
             active_prefill_tokens_threshold: Literal token count threshold for prefill busy detection
             active_prefill_tokens_threshold_frac: Fraction of max_num_batched_tokens for busy detection
             decode_fallback: Allow falling back to decode-only mode when prefill workers are unavailable
+            enforce_disagg: Strictly enforce disaggregated mode, failing requests even if the prefill router has not activated yet
         """
         ...
 

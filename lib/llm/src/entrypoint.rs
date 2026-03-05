@@ -38,6 +38,7 @@ pub struct RouterConfig {
     /// Load threshold configuration for busy detection
     pub load_threshold_config: LoadThresholdConfig,
     pub decode_fallback: bool,
+    pub enforce_disagg: bool,
 }
 
 impl RouterConfig {
@@ -47,6 +48,7 @@ impl RouterConfig {
             kv_router_config,
             load_threshold_config: LoadThresholdConfig::default(),
             decode_fallback: false,
+            enforce_disagg: false,
         }
     }
 
@@ -57,6 +59,11 @@ impl RouterConfig {
 
     pub fn with_decode_fallback(mut self, decode_fallback: bool) -> Self {
         self.decode_fallback = decode_fallback;
+        self
+    }
+
+    pub fn with_enforce_disagg(mut self, enforce_disagg: bool) -> Self {
+        self.enforce_disagg = enforce_disagg;
         self
     }
 }
