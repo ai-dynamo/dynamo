@@ -56,14 +56,13 @@ jobs:
           fi
 
       - name: Download Allure Results
-        uses: dawidd6/action-download-artifact@v6
+        uses: actions/download-artifact@v4
         with:
-          run_id: ${{ steps.params.outputs.run_id }}
-          name: allure-results-.*
-          name_is_regexp: true
+          run-id: ${{ steps.params.outputs.run_id }}
+          pattern: allure-results-*
           path: allure-results
-          merge_multiple: true
-          if_no_artifact_found: warn
+          merge-multiple: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Check for Allure results
         id: check-results
@@ -77,31 +76,70 @@ jobs:
             echo "No allure results found. Skipping report generation."
           fi
 
-      - name: Get Allure history
+      - name: Install Allure CLI
         if: steps.check-results.outputs.has_results == 'true'
-        uses: actions/checkout@v4
-        continue-on-error: true
-        with:
-          ref: gh-pages
-          path: gh-pages
+        run: |
+          ALLURE_VERSION="2.32.0"
+          wget -q "https://github.com/allure-framework/allure2/releases/download/${ALLURE_VERSION}/allure-${ALLURE_VERSION}.tgz"
+          tar -xzf "allure-${ALLURE_VERSION}.tgz"
+          echo "${PWD}/allure-${ALLURE_VERSION}/bin" >> $GITHUB_PATH
 
-      - name: Build Allure Report
+      - name: Get Allure history from gh-pages
         if: steps.check-results.outputs.has_results == 'true'
-        uses: simple-elf/allure-report-action@v1.13
-        with:
-          allure_results: allure-results
-          allure_history: allure-history/${{ steps.params.outputs.subdir }}
-          keep_reports: 30
-          gh_pages: gh-pages/${{ steps.params.outputs.subdir }}
+        run: |
+          SUBDIR="${{ steps.params.outputs.subdir }}"
+          git fetch origin gh-pages:gh-pages 2>/dev/null || echo "No gh-pages branch yet"
+          if git show gh-pages:${SUBDIR}/history 2>/dev/null; then
+            mkdir -p allure-results/history
+            git show gh-pages:${SUBDIR}/history/history.json > allure-results/history/history.json 2>/dev/null || true
+            git show gh-pages:${SUBDIR}/history/history-trend.json > allure-results/history/history-trend.json 2>/dev/null || true
+            git show gh-pages:${SUBDIR}/history/duration-trend.json > allure-results/history/duration-trend.json 2>/dev/null || true
+            git show gh-pages:${SUBDIR}/history/categories-trend.json > allure-results/history/categories-trend.json 2>/dev/null || true
+            git show gh-pages:${SUBDIR}/history/retry-trend.json > allure-results/history/retry-trend.json 2>/dev/null || true
+            echo "Restored history from gh-pages/${SUBDIR}"
+          else
+            echo "No previous history found"
+          fi
+
+      - name: Generate Allure Report
+        if: steps.check-results.outputs.has_results == 'true'
+        run: |
+          allure generate allure-results -o allure-report --clean
 
       - name: Deploy to GitHub Pages
         if: steps.check-results.outputs.has_results == 'true'
-        uses: peaceiris/actions-gh-pages@v4
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_branch: gh-pages
-          publish_dir: allure-history
-          keep_files: true
+        run: |
+          SUBDIR="${{ steps.params.outputs.subdir }}"
+          git fetch origin gh-pages:gh-pages 2>/dev/null || true
+
+          # Set up a working tree for gh-pages
+          DEPLOY_DIR=$(mktemp -d)
+          if git show-ref --verify --quiet refs/heads/gh-pages; then
+            git worktree add "$DEPLOY_DIR" gh-pages
+          else
+            git worktree add --orphan "$DEPLOY_DIR" gh-pages
+          fi
+
+          # Copy report to subdirectory (preserve other subdirs)
+          mkdir -p "$DEPLOY_DIR/${SUBDIR}"
+          rm -rf "$DEPLOY_DIR/${SUBDIR}/"*
+          cp -r allure-report/* "$DEPLOY_DIR/${SUBDIR}/"
+
+          # Commit and push
+          cd "$DEPLOY_DIR"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No changes to deploy"
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git commit -m "Deploy Allure report for ${SUBDIR} (run ${{ github.run_id }})"
+            git push origin gh-pages
+          fi
+
+          # Cleanup worktree
+          cd -
+          git worktree remove "$DEPLOY_DIR" --force
 
       - name: Print report URL
         if: steps.check-results.outputs.has_results == 'true'
