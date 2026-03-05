@@ -439,9 +439,12 @@ func TestScrapeMetricsEndpoint(t *testing.T) {
 
 	// Prepare a fake HTTP server to simulate Prometheus metrics
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintln(w, `# HELP gpu_usage GPU usage`)
-		fmt.Fprintln(w, `# TYPE gpu_usage gauge`)
-		fmt.Fprintln(w, `gpu_usage{gpu="0"} 42`)
+		_, err := fmt.Fprintln(w, `# HELP gpu_usage GPU usage`)
+		require.NoError(t, err)
+		_, err = fmt.Fprintln(w, `# TYPE gpu_usage gauge`)
+		require.NoError(t, err)
+		_, err = fmt.Fprintln(w, `gpu_usage{gpu="0"} 42`)
+		require.NoError(t, err)
 	}))
 	defer server.Close()
 
@@ -468,7 +471,8 @@ func TestScrapeMetricsEndpoint(t *testing.T) {
 
 	t.Run("invalid metrics", func(t *testing.T) {
 		invalidServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			fmt.Fprintln(w, `not a prometheus format`)
+			_, err := fmt.Fprintln(w, `not a prometheus format`)
+			require.NoError(t, err)
 		}))
 		defer invalidServer.Close()
 

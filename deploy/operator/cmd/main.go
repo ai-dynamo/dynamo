@@ -552,14 +552,14 @@ func main() {
 	}
 
 	if err = (&controller.DynamoGraphDeploymentRequestReconciler{
-		Client:        mgr.GetClient(),
-		APIReader:     mgr.GetAPIReader(),
-		Recorder:      mgr.GetEventRecorderFor("dynamographdeploymentrequest"),
-		Config:        operatorCfg,
-		RuntimeConfig: runtimeConfig,
+		Client:            mgr.GetClient(),
+		APIReader:         mgr.GetAPIReader(),
+		Recorder:          mgr.GetEventRecorderFor("dynamographdeploymentrequest"),
+		Config:            operatorCfg,
+		RuntimeConfig:     runtimeConfig,
 		GPUDiscoveryCache: gpu.NewGPUDiscoveryCache(),
-		GPUDiscovery: gpu.NewGPUDiscovery(gpu.ScrapeMetricsEndpoint),
-		RBACManager:   rbacManager,
+		GPUDiscovery:      gpu.NewGPUDiscovery(gpu.ScrapeMetricsEndpoint),
+		RBACManager:       rbacManager,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "DynamoGraphDeploymentRequest")
 		os.Exit(1)

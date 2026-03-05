@@ -372,7 +372,12 @@ func ScrapeMetricsEndpoint(ctx context.Context, endpoint string) (*GPUInfo, erro
 	if err != nil {
 		return nil, fmt.Errorf("GET HTTP%s failed: %w", endpoint, err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if cerr := resp.Body.Close(); cerr != nil {
+			// best-effort: can't return an error from defer; log it
+			log.FromContext(ctx).V(1).Info("failed to close response body", "err", cerr)
+		}
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf(
