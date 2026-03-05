@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 from typing import (
     Any,
     AsyncGenerator,
@@ -226,6 +227,17 @@ class Client:
         """
         ...
 
+    async def generate(
+            self,
+            request: JsonLike,
+            annotated: bool | None = True,
+            context: Context | None = None,
+        ) -> AsyncIterator[JsonLike]:
+        """
+        Generate a response from the endpoint
+        """
+        ...
+
 
 class ModelCardInstanceId:
     """
@@ -328,7 +340,7 @@ class Context:
         """
         ...
 
-    async def async_killed_or_stopped(self) -> bool:
+    def async_killed_or_stopped(self) -> asyncio.Future[bool]:
         """
         Asynchronously wait until the context is killed or stopped.
 
@@ -444,6 +456,7 @@ class ModelRuntimeConfig:
     runtime_data: dict[str, Any]
     tensor_model_config: Any | None
     data_parallel_size: int
+    data_parallel_start_rank: int
 
     def __init__(self) -> None: ...
 
@@ -453,6 +466,14 @@ class ModelRuntimeConfig:
 
     def get_engine_specific(self, key: str) -> Any | None:
         """Get an engine-specific runtime configuration value"""
+        ...
+
+    def set_disaggregated_endpoint(
+            self,
+            bootstrap_host: str | None = None,
+            bootstrap_port: int | None = None,
+        ) -> None:
+        """Set the disaggregated endpoint for the model"""
         ...
 
 class OverlapScores:
