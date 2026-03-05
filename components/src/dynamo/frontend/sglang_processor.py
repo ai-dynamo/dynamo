@@ -219,6 +219,7 @@ class SglangProcessor:
         debug_perf: bool = False,
         preprocess_pool: ProcessPoolExecutor | None = None,
         preprocess_workers: int = 0,
+        stream_interval: int = 1,
     ):
         self.tokenizer = tokenizer
         self.router = router
@@ -227,6 +228,7 @@ class SglangProcessor:
         self.reasoning_parser_name = reasoning_parser_name
         self.eos_token_id = eos_token_id
         self.debug_perf = debug_perf
+        self.stream_interval = stream_interval
         self.preprocess_pool = preprocess_pool
         if preprocess_pool is not None:
             self._worker_semaphore: asyncio.Semaphore | None = asyncio.Semaphore(
@@ -387,6 +389,7 @@ class SglangProcessor:
         token_count = 0
         post_proc_total_ms = 0.0
         created_ts = int(time.time())
+        stream_interval = self.stream_interval
 
         try:
             if self.is_kv_router:
@@ -401,6 +404,13 @@ class SglangProcessor:
                 dynamo_stream = await self.router.generate(
                     dynamo_preproc, annotated=False
                 )
+
+            # Accumulate tokens for batched detokenization when
+            # stream_interval > 1.  Flush every N tokens or on
+            # finish_reason.
+            pending_token_ids: list[int] = []
+            pending_usage: dict[str, Any] | None = None
+            tokens_since_flush = 0
 
             async for dynamo_response in dynamo_stream:
                 if self.is_kv_router:
@@ -424,35 +434,49 @@ class SglangProcessor:
                     }
                     break
 
-                # Map finish reason and pass to post-processor
+                new_ids = engine_response["token_ids"]
                 raw_finish = engine_response.get("finish_reason")
-                mapped_response = {
-                    "token_ids": engine_response["token_ids"],
-                    "finish_reason": _map_finish_reason(raw_finish),
-                }
+                finish_reason = _map_finish_reason(raw_finish)
 
-                if self.debug_perf:
-                    t_pp0 = time.monotonic()
+                if usage := engine_response.get("completion_usage"):
+                    pending_usage = usage
 
-                choice = post.process_output(mapped_response)
+                pending_token_ids.extend(new_ids)
+                tokens_since_flush += len(new_ids)
 
-                if self.debug_perf:
-                    t_pp1 = time.monotonic()
-                    post_proc_total_ms += (t_pp1 - t_pp0) * 1000.0
-                    token_count += len(engine_response["token_ids"])
-
-                if choice:
-                    dynamo_out: dict[str, Any] = {
-                        "id": request_id,
-                        "choices": [choice],
-                        "created": created_ts,
-                        "model": request["model"],
-                        "object": "chat.completion.chunk",
+                # Flush on finish or when we've accumulated enough tokens
+                if finish_reason or tokens_since_flush >= stream_interval:
+                    mapped_response = {
+                        "token_ids": pending_token_ids,
+                        "finish_reason": finish_reason,
                     }
-                    if usage := engine_response.get("completion_usage"):
-                        dynamo_out["usage"] = usage
 
-                    yield dynamo_out
+                    if self.debug_perf:
+                        t_pp0 = time.monotonic()
+
+                    choice = post.process_output(mapped_response)
+
+                    if self.debug_perf:
+                        t_pp1 = time.monotonic()
+                        post_proc_total_ms += (t_pp1 - t_pp0) * 1000.0
+                        token_count += len(pending_token_ids)
+
+                    if choice:
+                        dynamo_out: dict[str, Any] = {
+                            "id": request_id,
+                            "choices": [choice],
+                            "created": created_ts,
+                            "model": request["model"],
+                            "object": "chat.completion.chunk",
+                        }
+                        if pending_usage:
+                            dynamo_out["usage"] = pending_usage
+
+                        yield dynamo_out
+
+                    pending_token_ids = []
+                    pending_usage = None
+                    tokens_since_flush = 0
         finally:
             if self.debug_perf and token_count > 0:
                 logger.info(
@@ -477,6 +501,18 @@ class SglangEngineFactory:
         self.router_config = router_config
         self.config = config
         self.debug_perf = debug_perf
+
+        self.stream_interval = 20
+        raw_stream_interval = os.getenv("DYN_SGLANG_STREAM_INTERVAL")
+        if raw_stream_interval:
+            try:
+                self.stream_interval = max(1, int(raw_stream_interval))
+            except ValueError:
+                logger.warning(
+                    "Invalid DYN_SGLANG_STREAM_INTERVAL=%r, using default=%d",
+                    raw_stream_interval,
+                    self.stream_interval,
+                )
 
     async def chat_engine_factory(
         self,
@@ -564,6 +600,10 @@ class SglangEngineFactory:
                 "SGLang preprocess worker pool ready (%d workers)", preprocess_workers
             )
 
+        logger.info(
+            "SGLang processor stream_interval=%d", self.stream_interval
+        )
+
         gen = SglangProcessor(
             tokenizer,
             router,
@@ -573,6 +613,7 @@ class SglangEngineFactory:
             debug_perf=self.debug_perf,
             preprocess_pool=preprocess_pool,
             preprocess_workers=preprocess_workers,
+            stream_interval=self.stream_interval,
         )
 
         return PythonAsyncEngine(gen.generator, loop)
