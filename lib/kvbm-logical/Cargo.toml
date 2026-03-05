@@ -16,7 +16,6 @@ anyhow = { workspace = true }
 async-stream = "0.3"
 bytes = "1.10"
 bincode = { version = "2.0.1", features = ["serde", "derive"] }
-dashmap = { workspace = true }
 derive_builder = { workspace = true }
 futures = { workspace = true }
 indexmap = { workspace = true }
@@ -29,7 +28,6 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true, features = ["sync"] }
-tokio-util = { workspace = true }
 tracing = { workspace = true }
 xxhash-rust = { workspace = true }
 

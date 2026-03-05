@@ -523,10 +523,11 @@ impl<T: BlockMetadata> SchedulableSequence<T> {
             num_tokens: num_draft_tokens,
             blocks_allocated: to_allocate,
         };
-        self.delegate.on_event(&SequenceEvent::SpeculativeScheduled {
-            num_tokens: num_draft_tokens,
-            blocks_allocated: to_allocate,
-        });
+        self.delegate
+            .on_event(&SequenceEvent::SpeculativeScheduled {
+                num_tokens: num_draft_tokens,
+                blocks_allocated: to_allocate,
+            });
 
         Ok(())
     }
@@ -1194,8 +1195,12 @@ mod tests {
         max_output: usize,
         manager: &BlockManager<TestMeta>,
     ) -> SchedulableSequence<TestMeta> {
-        let mut seq =
-            SchedulableSequence::new(make_tokens(num_input), max_output, BLOCK_SIZE, noop_delegate());
+        let mut seq = SchedulableSequence::new(
+            make_tokens(num_input),
+            max_output,
+            BLOCK_SIZE,
+            noop_delegate(),
+        );
         if num_input > 0 {
             seq.schedule_prefill(num_input, manager).unwrap();
             seq.apply_prefill(Some(1000), manager).unwrap();
@@ -1706,8 +1711,7 @@ mod tests {
             .collect();
         drop(registered);
 
-        let mut seq =
-            SchedulableSequence::<TestMeta>::new(tokens, 10, BLOCK_SIZE, noop_delegate());
+        let mut seq = SchedulableSequence::<TestMeta>::new(tokens, 10, BLOCK_SIZE, noop_delegate());
         let matched = seq.match_and_add_prefix(&manager).unwrap();
         assert_eq!(matched, 1);
         assert_eq!(seq.prefill_position(), 4); // 1 block * 4 tokens
@@ -1740,8 +1744,7 @@ mod tests {
     #[test]
     fn test_empty_tokens_prefill() {
         let manager = create_test_manager::<TestMeta>(20);
-        let mut seq =
-            SchedulableSequence::<TestMeta>::new(vec![], 10, BLOCK_SIZE, noop_delegate());
+        let mut seq = SchedulableSequence::<TestMeta>::new(vec![], 10, BLOCK_SIZE, noop_delegate());
 
         assert!(seq.is_prefill_complete());
 
@@ -1856,8 +1859,7 @@ mod tests {
         let manager = create_test_manager::<TestMeta>(20);
 
         // 0 dangling: empty sequence with no tokens
-        let mut seq =
-            SchedulableSequence::<TestMeta>::new(vec![], 10, BLOCK_SIZE, noop_delegate());
+        let mut seq = SchedulableSequence::<TestMeta>::new(vec![], 10, BLOCK_SIZE, noop_delegate());
         let err = seq.schedule_decode(&manager).unwrap_err();
         assert!(matches!(
             err,
@@ -1883,8 +1885,7 @@ mod tests {
     #[test]
     fn test_append_tokens_creates_dangling() {
         let manager = create_test_manager::<TestMeta>(20);
-        let mut seq =
-            SchedulableSequence::<TestMeta>::new(vec![], 10, BLOCK_SIZE, noop_delegate());
+        let mut seq = SchedulableSequence::<TestMeta>::new(vec![], 10, BLOCK_SIZE, noop_delegate());
 
         assert_eq!(seq.tail_tokens(), 0);
 
