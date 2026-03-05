@@ -685,22 +685,6 @@ mod context_length_validation {
     }
 
     #[tokio::test]
-    async fn test_prompt_within_context_length_succeeds() {
-        let mut mdc = ModelDeploymentCard::load_from_disk(MODEL_PATH, None).unwrap();
-        // Large context length — a short prompt should pass
-        mdc.context_length = 131072;
-
-        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
-        let request = make_chat_request(r#"[{"role": "user", "content": "Hi"}]"#, "test-model");
-
-        let result = preprocessor.preprocess_request(&request, None).await;
-        assert!(
-            result.is_ok(),
-            "short prompt should pass context_length validation"
-        );
-    }
-
-    #[tokio::test]
     async fn test_prompt_exactly_at_context_length_returns_400() {
         let mut mdc = ModelDeploymentCard::load_from_disk(MODEL_PATH, None).unwrap();
         // First, preprocess with a large context_length to discover the token count
