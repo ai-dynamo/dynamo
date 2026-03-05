@@ -59,24 +59,18 @@ func getGPUCount(component *v1alpha1.DynamoComponentDeploymentSharedSpec) (int, 
 // multi-container failover pod with two engine containers and a GMS weight sidecar.
 //
 // The transformation:
-//  1. Validates that etcd discovery is configured (required for shadow-mode register-on-wake)
-//  2. Clones the main container into engine-0 and engine-1 with staggered system ports
-//  3. Adds a GMS weight sidecar as an init container (restartPolicy: Always)
-//  4. Adds a shared emptyDir volume for GMS UDS sockets and the flock file
-//  5. Sets up DRA resource claims so all containers share GPU access
-//  6. Injects failover-specific env vars (ENGINE_ID, TMPDIR, FAILOVER_LOCK_PATH, etc.)
-//  7. Adds GPU toleration for DRA-scheduled pods on tainted nodes
+//  1. Clones the main container into engine-0 and engine-1 with staggered system ports
+//  2. Adds a GMS weight sidecar as an init container (restartPolicy: Always)
+//  3. Adds a shared emptyDir volume for GMS UDS sockets and the flock file
+//  4. Sets up DRA resource claims so all containers share GPU access
+//  5. Injects failover-specific env vars (ENGINE_ID, TMPDIR, FAILOVER_LOCK_PATH, etc.)
+//  6. Adds GPU toleration for DRA-scheduled pods on tainted nodes
 func buildFailoverPod(
 	podSpec *corev1.PodSpec,
 	component *v1alpha1.DynamoComponentDeploymentSharedSpec,
 	parentName string,
 	serviceName string,
-	etcdAddress string,
 ) error {
-	if etcdAddress == "" {
-		return fmt.Errorf("failover requires etcd discovery: operator must be configured with --etcdAddr")
-	}
-
 	if len(podSpec.Containers) == 0 {
 		return fmt.Errorf("pod spec must have at least one container for failover transformation")
 	}
@@ -134,13 +128,13 @@ func buildEngineContainer(base corev1.Container, engineID int, systemPort int) c
 
 	// Env vars to remove: replaced by failover-specific values or intentionally omitted.
 	// DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS is omitted to activate Branch 3 in SystemHealth.
-	// DYN_DISCOVERY_BACKEND is removed so we can force "etcd" for failover engines.
+	// DYN_DISCOVERY_BACKEND is preserved from the base container (supports both etcd and k8s discovery).
 	removeSet := map[string]bool{
 		"DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS": true,
 		"DYN_SYSTEM_PORT":                       true,
 		"DYN_SYSTEM_ENABLED":                    true,
 		"DYN_HEALTH_CHECK_ENABLED":              true,
-		commonconsts.DynamoDiscoveryBackendEnvVar: true,
+		"CONTAINER_NAME":                         true,
 	}
 
 	var filtered []corev1.EnvVar
@@ -150,8 +144,10 @@ func buildEngineContainer(base corev1.Container, engineID int, systemPort int) c
 		}
 	}
 
+	containerName := fmt.Sprintf("engine-%d", engineID)
 	failoverEnvs := []corev1.EnvVar{
 		{Name: "ENGINE_ID", Value: strconv.Itoa(engineID)},
+		{Name: "CONTAINER_NAME", Value: containerName},
 		{Name: "TMPDIR", Value: failoverSharedMountPath},
 		{Name: "FAILOVER_LOCK_PATH", Value: failoverLockFile},
 		{Name: "DYN_SYSTEM_STARTING_HEALTH_STATUS", Value: "notready"},
@@ -160,7 +156,6 @@ func buildEngineContainer(base corev1.Container, engineID int, systemPort int) c
 		{Name: "DYN_VLLM_GMS_MODE", Value: "shadow"},
 		{Name: "VLLM_NIXL_SIDE_CHANNEL_PORT", Value: strconv.Itoa(5600 + engineID)},
 		{Name: "DYN_VLLM_KV_EVENT_PORT", Value: strconv.Itoa(20080 + engineID)},
-		{Name: commonconsts.DynamoDiscoveryBackendEnvVar, Value: "etcd"},
 	}
 	engine.Env = append(filtered, failoverEnvs...)
 

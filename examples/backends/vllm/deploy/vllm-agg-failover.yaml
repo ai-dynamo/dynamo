@@ -10,7 +10,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: dynamoci.azurecr.io/ai-dynamo/dynamo:failover-m6-88fb83c-vllm-runtime
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo:failover-m6-discovery-0a5eace8c-vllm-runtime
     VllmDecodeWorker:
       envFromSecret: hf-token-secret
       componentType: worker
@@ -22,7 +22,7 @@ spec:
         enabled: true
       extraPodSpec:
         mainContainer:
-          image: dynamoci.azurecr.io/ai-dynamo/dynamo:failover-m6-88fb83c-vllm-runtime
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo:failover-m6-discovery-0a5eace8c-vllm-runtime
           workingDir: /workspace/examples/backends/vllm
           command:
             - python3

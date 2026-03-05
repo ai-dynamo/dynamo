@@ -1074,6 +1074,12 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 
 	podLabels[commonconsts.KubeLabelDynamoSelector] = kubeName
 
+	// Add discovery labels to pod template for Pod-based daemon filtering
+	if commonController.IsK8sDiscoveryEnabled(r.Config.Discovery.Backend, opt.dynamoComponentDeployment.Spec.Annotations) {
+		podLabels[commonconsts.KubeLabelDynamoDiscoveryBackend] = "kubernetes"
+		podLabels[commonconsts.KubeLabelDynamoDiscoveryEnabled] = commonconsts.KubeLabelValueTrue
+	}
+
 	extraPodMetadata := opt.dynamoComponentDeployment.Spec.ExtraPodMetadata
 
 	if extraPodMetadata != nil {

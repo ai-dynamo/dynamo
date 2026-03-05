@@ -1171,7 +1171,7 @@ func GenerateBasePodSpec(
 	}
 
 	if isFailoverEnabled(component) {
-		if err := buildFailoverPod(&podSpec, component, parentGraphDeploymentName, serviceName, controllerConfig.EtcdAddress); err != nil {
+		if err := buildFailoverPod(&podSpec, component, parentGraphDeploymentName, serviceName); err != nil {
 			return nil, fmt.Errorf("failed to build failover pod: %w", err)
 		}
 	}
@@ -1355,6 +1355,11 @@ func GenerateGrovePodCliqueSet(
 			labels, err := generateLabels(component, dynamoDeployment, serviceName, checkpointInfo)
 			if err != nil {
 				return nil, fmt.Errorf("failed to generate labels: %w", err)
+			}
+			// Add discovery labels to pod template so the daemon can filter by them
+			if controller_common.IsK8sDiscoveryEnabled(operatorConfig.Discovery.Backend, component.Annotations) {
+				labels[commonconsts.KubeLabelDynamoDiscoveryBackend] = "kubernetes"
+				labels[commonconsts.KubeLabelDynamoDiscoveryEnabled] = commonconsts.KubeLabelValueTrue
 			}
 			clique.Labels = labels
 			annotations, err := generateAnnotations(component)
