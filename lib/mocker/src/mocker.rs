@@ -12,6 +12,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::Result;
 use bytes::Bytes;
 use dashmap::DashMap;
+use dynamo_llm::backend::ExecutionContext;
 use futures::StreamExt;
 use rand::Rng;
 use serde::Serialize;
@@ -30,21 +31,18 @@ use dynamo_runtime::{
     traits::DistributedRuntimeProvider,
 };
 
-use crate::kv_router::publisher::{KvEventPublisher, KvEventSourceConfig, WorkerMetricsPublisher};
-use crate::protocols::TokenIdType;
-use crate::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
 use dynamo_kv_router::protocols::{KvCacheEvent, KvCacheEventData};
-
-// Re-export from dynamo-mocker for convenience
-use dynamo_mocker::common::bootstrap::{BootstrapServer, connect_to_prefill};
-use dynamo_mocker::common::protocols::OutputSignal;
-pub use dynamo_mocker::common::protocols::{
-    DirectRequest, KvCacheEventSink, MockEngineArgs, MockEngineArgsBuilder,
+use dynamo_llm::kv_router::publisher::{
+    KvEventPublisher, KvEventSourceConfig, WorkerMetricsPublisher,
 };
-use dynamo_mocker::common::utils::{compute_kv_transfer_delay, sleep_precise};
-pub use dynamo_mocker::common::{bootstrap, perf_model, protocols, running_mean, sequence};
-pub use dynamo_mocker::scheduler::Scheduler;
-pub use dynamo_mocker::{kv_manager, scheduler};
+use dynamo_llm::protocols::TokenIdType;
+use dynamo_llm::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
+
+use crate::common::bootstrap::{BootstrapServer, connect_to_prefill};
+use crate::common::protocols::OutputSignal;
+use crate::common::protocols::{DirectRequest, KvCacheEventSink, MockEngineArgs};
+use crate::common::utils::{compute_kv_transfer_delay, sleep_precise};
+use crate::scheduler::Scheduler;
 
 pub const MOCKER_COMPONENT: &str = "mocker";
 
@@ -706,7 +704,7 @@ pub async fn make_mocker_engine(
     distributed_runtime: DistributedRuntime,
     endpoint_id: dynamo_runtime::protocols::EndpointId,
     args: MockEngineArgs,
-) -> Result<crate::backend::ExecutionContext, Error> {
+) -> Result<ExecutionContext, Error> {
     // Create the mocker engine
     tracing::info!("Creating mocker engine with config: {args:?}");
     let annotated_engine =
