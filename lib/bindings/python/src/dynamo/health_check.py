@@ -30,6 +30,16 @@ def load_health_check_from_env(
 
     Args:
         env_var: Name of the environment variable to check (default: DYN_HEALTH_CHECK_PAYLOAD)
+    Examples:
+        >>> import os
+        >>> from dynamo.health_check import load_health_check_from_env
+        >>>
+        >>> os.environ["DYN_HEALTH_CHECK_PAYLOAD"] = (
+        ...     '{"prompt": "test", "max_tokens": 1}'
+        ... )
+        >>> payload = load_health_check_from_env()
+        >>> payload
+        {'prompt': 'test', 'max_tokens': 1}
 
     Returns:
         Dict containing the health check payload, or None if not set.
@@ -68,6 +78,20 @@ class HealthCheckPayload:
     in their __init__ method.
 
     Environment variable DYN_HEALTH_CHECK_PAYLOAD can override the default.
+    Examples:
+        >>> from dynamo.health_check import HealthCheckPayload
+        >>>
+        >>> class MyBackendHealthCheck(HealthCheckPayload):
+        ...     def __init__(self):
+        ...         self.default_payload = {
+        ...             "prompt": "health check",
+        ...             "max_tokens": 1,
+        ...         }
+        ...         super().__init__()
+        >>>
+        >>> hc = MyBackendHealthCheck()
+        >>> hc.to_dict()
+        {'prompt': 'health check', 'max_tokens': 1}
     """
 
     default_payload: Dict[str, Any]  # Type hint for mypy - set by subclasses

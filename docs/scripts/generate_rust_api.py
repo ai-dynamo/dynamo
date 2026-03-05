@@ -2,7 +2,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Generate Rust API reference page for Fern docs."""
+"""Generate Rust API reference page as GitHub-friendly Markdown.
+
+Produces docs/api/rust/README.md with YAML frontmatter for Fern
+compatibility but only standard Markdown constructs.
+"""
 
 from __future__ import annotations
 
@@ -17,18 +21,34 @@ except ModuleNotFoundError:
     import toml as tomllib  # type: ignore[no-redef]  -- fallback for Python <3.11
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _fern_helpers import (  # noqa: E402
-    AUTOGEN_WARNING,
-    REPO_ROOT,
-    SPDX_HEADER,
-    render_card_group,
-)
+from _fern_helpers import REPO_ROOT, render_markdown_table  # noqa: E402
+
+FRONTMATTER = """\
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+sidebar-title: Rust API
+max-toc-depth: 2
+---
+"""
 
 # Group classification constants
 GROUP_CORE = "core"
 GROUP_SUPPORTING = "supporting"
 GROUP_DEV = "dev"
 GROUP_BINDINGS = "bindings"
+
+DISPLAYED_CRATES: set[str] = {
+    "dynamo-runtime",
+    "dynamo-llm",
+    "dynamo-kv-router",
+    "dynamo-memory",
+    "kvbm-logical",
+    "dynamo-config",
+    "dynamo-async-openai",
+    "dynamo-parsers",
+    "dynamo-mocker",
+}
 
 CORE_CRATES: set[str] = {
     "dynamo-runtime",
@@ -37,18 +57,28 @@ CORE_CRATES: set[str] = {
     "dynamo-memory",
     "kvbm-logical",
 }
+
+DESCRIPTION_OVERRIDES: dict[str, str] = {
+    "dynamo-runtime": "Distributed runtime for service discovery and RPC",
+    "dynamo-llm": "LLM serving abstractions and pipeline orchestration",
+    "dynamo-kv-router": "KV cache-aware request routing",
+    "dynamo-memory": "Memory allocation and management for inference",
+    "kvbm-logical": "Block allocation and lifecycle for KV cache",
+    "dynamo-config": "Configuration parsing and environment utilities",
+    "dynamo-async-openai": "Async OpenAI-compatible client for inference endpoints",
+    "dynamo-parsers": "Output parsing for tool calling and reasoning",
+    "dynamo-mocker": "Mock LLM scheduler and KV manager for testing",
+}
+
 CRATE_ICONS: dict[str, str] = {
     "dynamo-runtime": "regular microchip",
     "dynamo-llm": "regular brain",
     "dynamo-kv-router": "regular route",
     "dynamo-memory": "regular memory",
     "kvbm-logical": "regular cubes",
-    "dynamo-tokens": "regular key",
     "dynamo-config": "regular gear",
     "dynamo-parsers": "regular code",
-    "dynamo-bench": "regular gauge-high",
     "dynamo-mocker": "regular vial",
-    "kvbm-kernels": "regular microchip",
     "dynamo-async-openai": "regular globe",
 }
 BINDINGS_INFO: list[dict[str, str]] = [
@@ -113,10 +143,12 @@ def parse_and_classify(root: Path) -> dict[str, list[CrateInfo]]:
     }
     for m in members:
         pkg = _load_toml(root / m / "Cargo.toml").get("package", {})
-        desc = pkg.get("description", ws_desc)
+        name = pkg.get("name", m.split("/")[-1])
+        if name not in DISPLAYED_CRATES:
+            continue
+        desc = DESCRIPTION_OVERRIDES.get(name, pkg.get("description", ws_desc))
         if isinstance(desc, dict):
             desc = ws_desc
-        name = pkg.get("name", m.split("/")[-1])
         group = _classify_crate(name, m, desc)
         crate = CrateInfo(
             name=name,
@@ -165,20 +197,19 @@ def _render_bindings_table() -> str:
 def render_page(groups: dict[str, list[CrateInfo]], version: str) -> str:
     """Render the full Rust API reference page."""
     parts = [
-        SPDX_HEADER.format(sidebar_title="Rust API"),
-        AUTOGEN_WARNING,
+        FRONTMATTER,
         "# Rust API Reference\n",
         "NVIDIA Dynamo's core infrastructure is implemented in Rust across multiple workspace crates.",
         "API documentation is hosted on [docs.rs](https://docs.rs) for published crates.\n",
         "## Core Crates\n",
-        render_card_group(_crates_to_cards(groups[GROUP_CORE], version), 2),
+        render_markdown_table(_crates_to_cards(groups[GROUP_CORE], version)),
         "## Supporting Crates\n",
-        render_card_group(_crates_to_cards(groups[GROUP_SUPPORTING], version), 3),
+        render_markdown_table(_crates_to_cards(groups[GROUP_SUPPORTING], version)),
     ]
     if groups[GROUP_DEV]:
         parts += [
             "## Development & Testing\n",
-            render_card_group(_crates_to_cards(groups[GROUP_DEV], version), 3),
+            render_markdown_table(_crates_to_cards(groups[GROUP_DEV], version)),
         ]
     parts += [
         "## Bindings\n",

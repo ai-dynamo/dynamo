@@ -20,7 +20,26 @@ class ScaleStatus(str, Enum):
 
 
 class ScaleRequest(BaseModel):
-    """Request to scale a deployment"""
+    """Request to scale a deployment.
+
+    # confidence: high
+    Examples:
+        >>> from dynamo.planner.scale_protocol import ScaleRequest
+        >>> from dynamo.planner.defaults import SubComponentType
+        >>> from dynamo.planner.kubernetes_connector import TargetReplica
+        >>>
+        >>> request = ScaleRequest(
+        ...     caller_namespace="dynamo",
+        ...     graph_deployment_name="my-dgd",
+        ...     k8s_namespace="default",
+        ...     target_replicas=[
+        ...         TargetReplica(sub_component_type=SubComponentType.PREFILL, desired_replicas=2),
+        ...         TargetReplica(sub_component_type=SubComponentType.DECODE, desired_replicas=4),
+        ...     ],
+        ... )
+        >>> request.caller_namespace
+        'dynamo'
+    """
 
     # Caller identification
     caller_namespace: str

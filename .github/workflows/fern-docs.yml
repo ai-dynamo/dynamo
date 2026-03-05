@@ -165,10 +165,11 @@ jobs:
       - name: Install API doc dependencies
         run: pip install -r source-checkout/docs/scripts/requirements-apidocs.txt
 
-      - name: Generate API reference docs
+      - name: Fernify API reference docs
         working-directory: source-checkout
         run: |
-          # K8s CRD API: add Fern MDX components to the committed raw markdown
+          python3 docs/scripts/fernify_python_api.py
+          python3 docs/scripts/fernify_rust_api.py
           python3 docs/scripts/fernify_k8s_api.py
 
       - name: Checkout docs-website branch

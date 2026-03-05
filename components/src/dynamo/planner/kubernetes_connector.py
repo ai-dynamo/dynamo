@@ -46,6 +46,26 @@ class TargetReplica(BaseModel):
 
 
 class KubernetesConnector(PlannerConnector):
+    """Connector that manages scaling via the Kubernetes DynamoGraphDeployment API.
+
+    Implements the PlannerConnector interface for Kubernetes-based deployments,
+    providing add/remove component operations, deployment validation, and
+    model name discovery from DGD service specs.
+
+    # confidence: high — adapted from real call site
+    Examples:
+        >>> from dynamo.planner.kubernetes_connector import KubernetesConnector
+        >>> from dynamo.planner.defaults import SubComponentType
+        >>>
+        >>> connector = KubernetesConnector(
+        ...     dynamo_namespace="dynamo",
+        ...     k8s_namespace="default",
+        ... )
+        >>> await connector.validate_deployment()
+        >>> model_name = connector.get_model_name()
+        >>> await connector.add_component(SubComponentType.PREFILL)
+    """
+
     def __init__(
         self,
         dynamo_namespace: str,

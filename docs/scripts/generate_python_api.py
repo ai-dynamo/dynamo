@@ -4,8 +4,10 @@
 
 """Generate a single consolidated Python API reference page using griffe.
 
-Produces a Fern-compatible Markdown file at docs/api/python/README.md
-with classes and functions organized into logical sections.
+Produces a GitHub-friendly Markdown file at docs/api/python/README.md
+with classes and functions organized by module. The output includes
+YAML frontmatter for Fern compatibility but uses only standard Markdown
+constructs (details/summary, tables).
 
 Usage (from repository root):
     python3 docs/scripts/generate_python_api.py
@@ -16,25 +18,22 @@ from __future__ import annotations
 import argparse
 import re
 import sys
-import textwrap
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 try:
-    from griffe import GriffeLoader
+    from griffe import DocstringSectionKind, GriffeLoader
 except ImportError:
-    sys.exit("griffe is required: pip install griffe")
+    sys.exit("griffe>=1.0 is required: pip install griffe")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _fern_helpers import (  # noqa: E402
-    AUTOGEN_WARNING,
     REPO_ROOT,
-    SPDX_HEADER,
     details_title,
     escape_mdx_prose,
-    render_card_group,
     render_details,
+    render_markdown_table,
     slugify,
 )
 
@@ -45,248 +44,133 @@ SEARCH_PATHS = [
     str(REPO_ROOT / "lib" / "bindings" / "python" / "src"),
 ]
 
+# ---------------------------------------------------------------------------
+# Module configuration
+# ---------------------------------------------------------------------------
+
+MODULE_ORDER: list[str] = [
+    "dynamo._core",
+    "dynamo.runtime",
+    "dynamo.llm",
+    "dynamo.frontend",
+    "dynamo.common",
+    "dynamo.health_check",
+    "dynamo.logits_processing",
+    "dynamo.planner",
+    "dynamo.router",
+    "dynamo.mocker",
+    "dynamo.nixl_connect",
+]
+
+MODULE_WHITELIST: set[str] = set(MODULE_ORDER)
+
+MODULE_ICONS: dict[str, str] = {
+    "dynamo._core": "regular microchip",
+    "dynamo.runtime": "regular play",
+    "dynamo.llm": "regular brain",
+    "dynamo.frontend": "regular globe",
+    "dynamo.common": "regular toolbox",
+    "dynamo.health_check": "regular heart-pulse",
+    "dynamo.logits_processing": "regular sliders",
+    "dynamo.planner": "regular chart-line",
+    "dynamo.router": "regular route",
+    "dynamo.mocker": "regular vial",
+    "dynamo.nixl_connect": "regular network-wired",
+}
+
+MODULE_DESCRIPTIONS: dict[str, str] = {
+    "dynamo._core": (
+        "Low-level Rust-backed runtime, routing, KV cache, memory, "
+        "and model management bindings."
+    ),
+    "dynamo.runtime": (
+        "Decorators and utilities for defining Dynamo workers and endpoints."
+    ),
+    "dynamo.llm": "LLM serving pipeline components and engine integration.",
+    "dynamo.frontend": (
+        "HTTP frontend configuration and OpenAI-compatible API gateway."
+    ),
+    "dynamo.common": (
+        "Shared configuration, constants, storage, and utility functions."
+    ),
+    "dynamo.health_check": (
+        "Health check payload and environment-based configuration."
+    ),
+    "dynamo.logits_processing": ("Custom logits processing for LLM token generation."),
+    "dynamo.planner": ("Scaling connectors and decision types for the Dynamo Planner."),
+    "dynamo.router": "Request routing configuration and argument groups.",
+    "dynamo.mocker": "Mock engine for testing without GPU resources.",
+    "dynamo.nixl_connect": (
+        "RDMA-based data transfer operations via the NIXL library."
+    ),
+}
+
 
 # ---------------------------------------------------------------------------
-# Section definitions (single source of truth)
+# Sub-grouping (Enhancement 4)
 # ---------------------------------------------------------------------------
 
+SUB_GROUP_ORDER = ["enums", "configuration", "classes", "data_models", "functions"]
 
-@dataclass
-class SectionDef:
-    """Defines a logical section of the API reference."""
+SUB_GROUP_TITLES: dict[str, str] = {
+    "enums": "Enums",
+    "configuration": "Configuration",
+    "classes": "Classes",
+    "data_models": "Data Models",
+    "functions": "Functions",
+}
 
-    title: str
-    description: str
-    icon: str = "regular code"
-    classes: list[str] = field(default_factory=list)
-    functions: list[str] = field(default_factory=list)
-    module: str | None = None  # render all public members from this module
+
+# ---------------------------------------------------------------------------
+# Bug fix 1: strip raw NumPy-style parameter blocks from text sections
+# ---------------------------------------------------------------------------
+
+_NUMPYDOC_SECTION_RE = re.compile(
+    r"(?:Parameters|Returns|Raises|Yields|Attributes|Notes|References|Examples)"
+    r"\s*:?\s*\n"
+    r"\s*-{3,}\s*\n"
+    r"[\s\S]*?(?=\n\n|\Z)",
+)
+
+
+# ---------------------------------------------------------------------------
+# Constants and context
+# ---------------------------------------------------------------------------
+
+_PARAM_EMPTY_SENTINEL = "inspect.Parameter.empty"
+
+FRONTMATTER = """\
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+sidebar-title: Python API
+max-toc-depth: 2
+---
+"""
 
 
 @dataclass
 class RenderContext:
     """Mutable state passed through the rendering pipeline."""
 
-    all_classes: dict[str, Any]
-    all_functions: dict[str, Any]
-    modules_collection: Any  # griffe ModulesCollection for module-based sections
-    placed_classes: set[str] = field(default_factory=set)
-    placed_functions: set[str] = field(default_factory=set)
-
-
-SECTION_DEFS: list[SectionDef] = [
-    SectionDef(
-        title="Runtime Core",
-        description="Core runtime primitives for building distributed Dynamo applications.",
-        icon="regular microchip",
-        classes=[
-            "DistributedRuntime",
-            "Component",
-            "Endpoint",
-            "Client",
-            "Context",
-            "JsonLike",
-            "ModelCardInstanceId",
-        ],
-    ),
-    SectionDef(
-        title="HTTP and gRPC Services",
-        description="Network service wrappers for exposing models via HTTP (OpenAI-compatible) and gRPC (KServe).",
-        icon="regular globe",
-        classes=[
-            "HttpService",
-            "KserveGrpcService",
-            "PythonAsyncEngine",
-            "HttpAsyncEngine",
-        ],
-    ),
-    SectionDef(
-        title="Model Management",
-        description="Register, unregister, and fetch models from the distributed runtime.",
-        icon="regular cube",
-        classes=[
-            "ModelDeploymentCard",
-            "ModelRuntimeConfig",
-            "ModelInput",
-            "ModelType",
-        ],
-        functions=[
-            "register_model",
-            "unregister_model",
-            "fetch_model",
-            "register_llm",
-            "unregister_llm",
-            "fetch_llm",
-            "lora_name_to_id",
-        ],
-    ),
-    SectionDef(
-        title="KV Cache Routing",
-        description="KV-aware routing for prefix-optimized request placement across workers.",
-        icon="regular route",
-        classes=[
-            "KvRouter",
-            "KvRouterConfig",
-            "RouterMode",
-            "RouterConfig",
-            "KvIndexer",
-            "ApproxKvIndexer",
-            "RadixTree",
-            "OverlapScores",
-        ],
-        functions=["compute_block_hash_for_seq"],
-    ),
-    SectionDef(
-        title="KV Cache Memory",
-        description="Block-level KV cache memory management.",
-        icon="regular memory",
-        classes=["BlockManager", "Block", "BlockList", "Layer", "KvbmRequest"],
-    ),
-    SectionDef(
-        title="KV Events and Metrics",
-        description="Publish KV cache events and worker load metrics for routing decisions.",
-        icon="regular chart-line",
-        classes=["KvEventPublisher", "WorkerMetricsPublisher"],
-    ),
-    SectionDef(
-        title="Planner",
-        description="Scaling connectors and decision types for the Dynamo Planner.",
-        icon="regular arrows-split-up-and-left",
-        classes=[
-            "PlannerDecision",
-            "VirtualConnectorCoordinator",
-            "VirtualConnectorClient",
-            "PlannerConnector",
-            "KubernetesConnector",
-            "VirtualConnector",
-            "GlobalPlannerConnector",
-            "SLAPlannerDefaults",
-            "TargetReplica",
-            "SubComponentType",
-            "ScaleRequestHandler",
-        ],
-    ),
-    SectionDef(
-        title="NIXL Connect",
-        description="RDMA-based data transfer operations via the NIXL library.",
-        icon="regular network-wired",
-        module="dynamo.nixl_connect",
-    ),
-    SectionDef(
-        title="Configuration and Utilities",
-        description="Engine configuration, entrypoint arguments, and shared enums.",
-        icon="regular gear",
-        classes=["EngineConfig", "EntrypointArgs", "EngineType", "RuntimeMetrics"],
-        functions=["make_engine", "run_input", "log_message"],
-    ),
-]
+    seen_names: set[str] = field(default_factory=set)
 
 
 # ---------------------------------------------------------------------------
-# Docstring parsing (Google-style)
+# Helpers
 # ---------------------------------------------------------------------------
 
-_PARAM_EMPTY_SENTINEL = "inspect.Parameter.empty"
 
-_SECTION_KW_RE = re.compile(
-    r"^(Args|Arguments|Parameters|Returns?|Raises?|Throws"
-    r"|Examples?|Notes?|Attributes|Yields|See Also|Warnings?):\s*$",
-    re.MULTILINE,
-)
-
-_SECTION_KEY_MAP: dict[str, str] = {
-    "args": "args",
-    "arguments": "args",
-    "parameters": "args",
-    "return": "returns",
-    "returns": "returns",
-    "raise": "raises",
-    "raises": "raises",
-    "throws": "raises",
-    "example": "example",
-    "examples": "example",
-    "note": "note",
-    "notes": "note",
-    "attributes": "attributes",
-    "yields": "yields",
-    "see also": "see_also",
-    "warning": "warning",
-    "warnings": "warning",
-}
+def _module_display_name(module_name: str) -> str:
+    """Convert module path to display name."""
+    if module_name == "dynamo._core":
+        return "Core Bindings"
+    return module_name
 
 
-def _parse_docstring(raw: str) -> dict[str, str]:
-    """Parse a Google-style docstring into named sections."""
-    if not raw:
-        return {}
-    raw = raw.strip()
-    matches = list(_SECTION_KW_RE.finditer(raw))
-    if not matches:
-        return {"description": raw}
-
-    sections: dict[str, str] = {}
-    desc = raw[: matches[0].start()].strip()
-    if desc:
-        sections["description"] = desc
-
-    for i, match in enumerate(matches):
-        keyword = match.group(1).lower()
-        key = _SECTION_KEY_MAP.get(keyword, keyword)
-        end = matches[i + 1].start() if i + 1 < len(matches) else len(raw)
-        body = _extract_section_body(raw[match.end() : end])
-        if key in sections and key != "description":
-            sections[key] += "\n\n" + body
-        else:
-            sections[key] = body
-
-    return sections
-
-
-def _extract_section_body(text: str) -> str:
-    """Extract only the indented portion of a section body."""
-    lines = text.split("\n")
-    body_lines: list[str] = []
-    found_indented = False
-    for line in lines:
-        stripped = line.rstrip()
-        if not stripped:
-            body_lines.append("")
-            continue
-        indent = len(line) - len(line.lstrip())
-        if indent > 0:
-            found_indented = True
-            body_lines.append(line)
-        elif found_indented:
-            break
-    return textwrap.dedent("\n".join(body_lines)).strip()
-
-
-def _parse_indented_items(text: str) -> list[str]:
-    """Parse indented items from a Google-style section body."""
-    items: list[str] = []
-    current: list[str] = []
-    base_indent: int | None = None
-
-    for line in text.split("\n"):
-        stripped = line.rstrip()
-        if not stripped:
-            continue
-        indent = len(line) - len(line.lstrip())
-        if base_indent is None:
-            base_indent = indent
-        if indent <= base_indent and current:
-            items.append(" ".join(current))
-            current = [stripped.strip()]
-        else:
-            current.append(stripped.strip())
-    if current:
-        items.append(" ".join(current))
-    return items
-
-
-# ---------------------------------------------------------------------------
-# Rendering helpers
-# ---------------------------------------------------------------------------
+def _strip_raw_param_blocks(text: str) -> str:
+    """Remove NumPy-style parameter/returns blocks that griffe didn't parse."""
+    return _NUMPYDOC_SECTION_RE.sub("", text).strip()
 
 
 def _escape_table(text: str) -> str:
@@ -302,10 +186,13 @@ def _raw_first_line(obj: Any) -> str:
 
 
 def _format_annotation(annotation: Any) -> str:
-    """Best-effort annotation to string (no escaping — used in code spans)."""
+    """Best-effort annotation to string (no escaping)."""
     if annotation is None:
         return ""
-    return str(annotation)
+    text = str(annotation)
+    if not text or text == "None":
+        return ""
+    return text
 
 
 def _resolve(obj: Any) -> Any:
@@ -313,7 +200,8 @@ def _resolve(obj: Any) -> Any:
     try:
         if hasattr(obj, "resolve_target"):
             obj.resolve_target()
-        return obj.target if hasattr(obj, "target") and obj.target is not None else obj
+        target = getattr(obj, "target", None)
+        return target if target is not None else obj
     except Exception as exc:
         print(f"  WARN: could not resolve {obj}: {exc}", file=sys.stderr)
         return obj
@@ -329,79 +217,272 @@ def _safe_kind(member: Any) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Structured docstring renderers
+# Enhancement 1: Source links
 # ---------------------------------------------------------------------------
 
 
-def _render_description(
-    parsed: dict[str, str], *, skip_first_line: bool = False
+def _source_link(obj: Any) -> str:
+    """Generate a source file reference."""
+    try:
+        filepath = obj.filepath
+        if filepath is None:
+            return ""
+        rel = str(filepath)
+        for prefix in SEARCH_PATHS:
+            try:
+                rel = str(filepath.relative_to(prefix))
+                break
+            except ValueError:
+                continue
+        lineno = getattr(obj, "lineno", None)
+        suffix = f"#L{lineno}" if lineno else ""
+        return (
+            f"*Source: [`{rel}{suffix}`]"
+            f"(https://github.com/ai-dynamo/dynamo/blob/main/{rel}{suffix})*\n"
+        )
+    except Exception:
+        return ""
+
+
+# ---------------------------------------------------------------------------
+# Enhancement 2: Inheritance display
+# ---------------------------------------------------------------------------
+
+
+def _get_bases(cls: Any) -> list[str]:
+    """Get base class names, filtering out object and ABC."""
+    try:
+        bases = cls.bases
+        if not bases:
+            return []
+        return [str(b) for b in bases if str(b) not in ("object", "ABC")]
+    except Exception:
+        return []
+
+
+# ---------------------------------------------------------------------------
+# Enhancement 4: Member classification for sub-grouping
+# ---------------------------------------------------------------------------
+
+
+def _classify_member(member: Any) -> str:
+    """Classify a member into a sub-group for display ordering."""
+    try:
+        if member.kind.name == "FUNCTION":
+            return "functions"
+        bases = [str(b) for b in (getattr(member, "bases", None) or [])]
+        base_names = [b.split(".")[-1] for b in bases]
+        if any(n in base_names for n in ("Enum", "IntEnum", "StrEnum")):
+            return "enums"
+        if any(n in base_names for n in ("ArgGroup", "ConfigBase", "BaseModel")):
+            return "configuration"
+        labels = getattr(member, "labels", None)
+        if labels and "dataclass" in labels:
+            return "data_models"
+        name = member.name
+        suffixes = (
+            "Request",
+            "Response",
+            "Result",
+            "Data",
+            "Info",
+            "Entry",
+            "Card",
+        )
+        if any(name.endswith(s) for s in suffixes):
+            return "data_models"
+        return "classes"
+    except Exception:
+        return "classes"
+
+
+# ---------------------------------------------------------------------------
+# Docstring rendering (griffe-native)
+# ---------------------------------------------------------------------------
+
+
+def _render_docstring_sections(
+    docstring: Any,
+    *,
+    skip_first_line: bool = False,
+    fallback_params: Any = None,
 ) -> str:
-    """Render the description section with MDX escaping."""
-    desc = parsed.get("description", "")
-    if not desc:
+    """Render griffe-parsed docstring sections to Markdown."""
+    if not docstring or not docstring.value:
         return ""
-    if skip_first_line:
-        lines = desc.split("\n", 1)
-        desc = lines[1].strip() if len(lines) > 1 else ""
-    if not desc:
-        return ""
-    return escape_mdx_prose(desc)
 
+    try:
+        sections = docstring.parsed
+    except Exception:
+        text = docstring.value.strip()
+        if skip_first_line:
+            lines = text.split("\n", 1)
+            text = lines[1].strip() if len(lines) > 1 else ""
+        return escape_mdx_prose(text) if text else ""
 
-def _render_raises(parsed: dict[str, str]) -> str:
-    """Render Raises section as a Markdown bullet list."""
-    raw = parsed.get("raises", "")
-    if not raw:
-        return ""
-    parts = ["**Raises**\n"]
-    for item in _parse_indented_items(raw):
-        name, sep, desc = item.partition(": ")
-        if sep and name.strip():
-            parts.append(f"- `{name.strip()}` -- {escape_mdx_prose(desc.strip())}")
-        else:
-            parts.append(f"- {escape_mdx_prose(item.strip())}")
-    parts.append("")
-    return "\n".join(parts)
+    # Pre-scan: check for params section, collect all returns (Bug 2)
+    has_params = any(s.kind == DocstringSectionKind.parameters for s in sections)
+    all_returns: list[tuple[str, str]] = []
+    for section in sections:
+        if section.kind == DocstringSectionKind.returns and section.value:
+            for r in section.value:
+                ann = str(r.annotation) if r.annotation else ""
+                desc = escape_mdx_prose(r.description or "")
+                all_returns.append((ann, desc))
 
-
-def _render_example(parsed: dict[str, str]) -> str:
-    """Render Example section inside a Python code fence."""
-    raw = parsed.get("example", "")
-    if not raw:
-        return ""
-    dedented = textwrap.dedent(raw)
-    return f"**Example**\n\n```python\n{dedented.strip()}\n```\n"
-
-
-def _render_notes(parsed: dict[str, str]) -> str:
-    """Render Note/Warning sections as GitHub callouts."""
     parts: list[str] = []
-    note = parsed.get("note", "")
-    if note:
-        escaped = escape_mdx_prose(textwrap.dedent(note).strip())
-        parts.append(f"> [!NOTE]\n> {escaped}\n")
-    warning = parsed.get("warning", "")
-    if warning:
-        escaped = escape_mdx_prose(textwrap.dedent(warning).strip())
-        parts.append(f"> [!WARNING]\n> {escaped}\n")
-    return "\n".join(parts)
+    returns_rendered = False
+    fallback_inserted = False
+    in_description = True
+
+    for section in sections:
+        # Inject fallback param table when leaving description zone
+        if (
+            section.kind != DocstringSectionKind.text
+            and in_description
+            and not has_params
+            and not fallback_inserted
+            and fallback_params is not None
+        ):
+            table = _render_parameters_table(fallback_params)
+            if table:
+                parts.append(table)
+            fallback_inserted = True
+
+        if section.kind != DocstringSectionKind.text:
+            in_description = False
+
+        match section.kind:
+            case DocstringSectionKind.text:
+                text = section.value
+                if skip_first_line and not parts:
+                    lines = text.split("\n", 1)
+                    text = lines[1].strip() if len(lines) > 1 else ""
+                text = _strip_raw_param_blocks(text)
+                if text:
+                    parts.append(escape_mdx_prose(text))
+
+            case DocstringSectionKind.parameters:
+                params = section.value
+                if params:
+                    rows: list[str] = []
+                    for p in params:
+                        ann = _format_annotation(p.annotation) or "Any"
+                        desc = escape_mdx_prose(p.description or "")
+                        rows.append(
+                            f"| `{p.name}` | `{ann}` " f"| {_escape_table(desc)} |"
+                        )
+                    if rows:
+                        header = (
+                            "| Parameter | Type | Description |\n" "| --- | --- | --- |"
+                        )
+                        parts.append(
+                            f"<b>Parameters</b>\n\n{header}\n" + "\n".join(rows)
+                        )
+
+            case DocstringSectionKind.returns:
+                if returns_rendered:
+                    continue
+                returns_rendered = True
+                if all_returns:
+                    ret_lines: list[str] = []
+                    for ann, desc in all_returns:
+                        if desc:
+                            ret_lines.append(f"`{ann}` -- {desc}" if ann else desc)
+                        elif ann:
+                            ret_lines.append(f"`{ann}`")
+                    if len(ret_lines) == 1:
+                        parts.append(f"<b>Returns:</b> {ret_lines[0]}")
+                    elif ret_lines:
+                        parts.append(
+                            "<b>Returns:</b>\n\n"
+                            + "\n".join(f"- {r}" for r in ret_lines)
+                        )
+
+            case DocstringSectionKind.raises:
+                raises = section.value
+                if raises:
+                    items: list[str] = []
+                    for r in raises:
+                        ann = str(r.annotation) if r.annotation else ""
+                        desc = escape_mdx_prose(r.description or "")
+                        if ann and desc:
+                            items.append(f"- `{ann}` -- {desc}")
+                        elif ann:
+                            items.append(f"- `{ann}`")
+                        elif desc:
+                            items.append(f"- {desc}")
+                    if items:
+                        parts.append("<b>Raises</b>\n\n" + "\n".join(items))
+
+            case DocstringSectionKind.examples:
+                examples = section.value
+                if examples:
+                    example_parts: list[str] = []
+                    for kind, content in examples:
+                        if kind == DocstringSectionKind.examples:
+                            example_parts.append(f"```python\n{content.strip()}\n```")
+                        elif kind == DocstringSectionKind.text:
+                            stripped = content.strip()
+                            if stripped:
+                                example_parts.append(escape_mdx_prose(stripped))
+                    if example_parts:
+                        parts.append("<b>Examples</b>\n\n" + "\n\n".join(example_parts))
+
+            case DocstringSectionKind.admonition:
+                adm = section.value
+                adm_kind = str(adm.annotation).lower() if adm.annotation else "note"
+                raw_desc = adm.description or ""
+                if adm_kind == "example":
+                    if ">>>" in raw_desc:
+                        parts.append(
+                            "<b>Example</b>\n\n" f"```python\n{raw_desc.strip()}\n```"
+                        )
+                    else:
+                        parts.append(
+                            "<b>Example</b>\n\n" f"{escape_mdx_prose(raw_desc)}"
+                        )
+                elif adm_kind == "deprecated":
+                    desc = escape_mdx_prose(raw_desc)
+                    parts.append(f"> [!WARNING]\n> **Deprecated:** {desc}")
+                elif adm_kind == "warning":
+                    desc = escape_mdx_prose(raw_desc)
+                    parts.append(f"> [!WARNING]\n> {desc}")
+                else:
+                    desc = escape_mdx_prose(raw_desc)
+                    parts.append(f"> [!NOTE]\n> {desc}")
+
+            case DocstringSectionKind.attributes:
+                attrs = section.value
+                if attrs:
+                    attr_items: list[str] = []
+                    for a in attrs:
+                        ann = _format_annotation(a.annotation)
+                        desc = escape_mdx_prose(a.description or "")
+                        line = f"- `{a.name}`"
+                        if ann:
+                            line += f": `{ann}`"
+                        if desc:
+                            line += f" -- {desc}"
+                        attr_items.append(line)
+                    if attr_items:
+                        parts.append("<b>Attributes</b>\n\n" + "\n".join(attr_items))
+
+            case _:
+                pass
+
+    # Insert fallback params at end if never inserted
+    if not has_params and not fallback_inserted and fallback_params is not None:
+        table = _render_parameters_table(fallback_params)
+        if table:
+            parts.append(table)
+
+    return "\n\n".join(parts)
 
 
-def _render_parameters_table(params: Any) -> str:
-    """Render a function's parameters as a Markdown table."""
-    rows: list[str] = []
-    for param in params:
-        if param.name in ("self", "cls"):
-            continue
-        annotation = _format_annotation(param.annotation)
-        default = str(param.default) if param.default is not None else ""
-        if default == _PARAM_EMPTY_SENTINEL:
-            default = ""
-        rows.append(f"| `{param.name}` | `{annotation}` | {_escape_table(default)} |")
-    if not rows:
-        return ""
-    header = "| Parameter | Type | Default |\n| --- | --- | --- |"
-    return header + "\n" + "\n".join(rows) + "\n"
+# ---------------------------------------------------------------------------
+# Signature and parameter helpers
+# ---------------------------------------------------------------------------
 
 
 def _safe_parameters(func: Any) -> list:
@@ -433,26 +514,25 @@ def _build_signature(func: Any, params: list | None = None) -> str:
     return sig
 
 
-def _render_returns(parsed: dict[str, str], func: Any) -> str:
-    """Render the Returns section, merging annotation with docstring."""
-    ret = _format_annotation(getattr(func, "returns", None))
-    if not ret:
+def _render_parameters_table(params: Any) -> str:
+    """Render a function's parameters as a 4-column table (from signature)."""
+    rows: list[str] = []
+    for param in params:
+        if param.name in ("self", "cls"):
+            continue
+        annotation = _format_annotation(param.annotation) or "Any"
+        default = str(param.default) if param.default is not None else ""
+        if default == _PARAM_EMPTY_SENTINEL:
+            default = ""
+        rows.append(
+            f"| `{param.name}` | `{annotation}` " f"| {_escape_table(default)} |  |"
+        )
+    if not rows:
         return ""
-    returns_body = parsed.get("returns", "")
-    desc_text = _extract_returns_desc(returns_body)
-    if desc_text and desc_text.lower() != ret.lower():
-        return f"**Returns:** `{ret}` -- {escape_mdx_prose(desc_text)}\n"
-    return f"**Returns:** `{ret}`\n"
-
-
-def _extract_returns_desc(returns_body: str) -> str:
-    """Extract description text from a Returns docstring section."""
-    if not returns_body:
-        return ""
-    first_line = returns_body.strip().split("\n")[0].strip()
-    if ": " in first_line:
-        return first_line.split(": ", 1)[1].strip()
-    return first_line
+    header = (
+        "| Parameter | Type | Default | Description |\n" "| --- | --- | --- | --- |"
+    )
+    return f"<b>Parameters</b>\n\n{header}\n" + "\n".join(rows) + "\n"
 
 
 # ---------------------------------------------------------------------------
@@ -476,28 +556,17 @@ def _render_function(
     prefix = "async " if is_async else ""
     parts.append(f"{heading_level} `{prefix}{func.name}{sig}`\n")
 
-    raw_doc = ""
-    if func.docstring and func.docstring.value:
-        raw_doc = func.docstring.value.strip()
-    parsed = _parse_docstring(raw_doc)
+    src = _source_link(func)
+    if src:
+        parts.append(src)
 
-    desc = _render_description(parsed, skip_first_line=skip_first_line)
-    if desc:
-        parts.append(desc + "\n")
-
-    params_table = _render_parameters_table(params)
-    if params_table:
-        parts.append("**Parameters**\n")
-        parts.append(params_table)
-
-    returns = _render_returns(parsed, func)
-    if returns:
-        parts.append(returns)
-
-    for renderer in (_render_raises, _render_example, _render_notes):
-        section = renderer(parsed)
-        if section:
-            parts.append(section)
+    doc_content = _render_docstring_sections(
+        func.docstring,
+        skip_first_line=skip_first_line,
+        fallback_params=params,
+    )
+    if doc_content:
+        parts.append(doc_content)
 
     return "\n".join(parts)
 
@@ -519,13 +588,19 @@ def _render_class_body(cls: Any, *, skip_first_line: bool = False) -> str:
     cls = _resolve(cls)
     parts: list[str] = []
 
-    raw_doc = ""
-    if cls.docstring and cls.docstring.value:
-        raw_doc = cls.docstring.value.strip()
-    parsed = _parse_docstring(raw_doc)
-    desc = _render_description(parsed, skip_first_line=skip_first_line)
-    if desc:
-        parts.append(desc + "\n")
+    src = _source_link(cls)
+    if src:
+        parts.append(src)
+
+    doc_content = _render_docstring_sections(
+        cls.docstring, skip_first_line=skip_first_line
+    )
+    if doc_content:
+        parts.append(doc_content)
+
+    bases = _get_bases(cls)
+    if bases:
+        parts.append(f"<b>Bases:</b> {', '.join(f'`{b}`' for b in bases)}\n")
 
     try:
         members = cls.members
@@ -549,7 +624,7 @@ def _append_attributes(parts: list[str], members: Any) -> None:
     ]
     if not attrs:
         return
-    parts.append("**Attributes**\n")
+    parts.append("<b>Attributes</b>\n")
     for attr in attrs:
         parts.append(_render_attribute(attr))
     parts.append("")
@@ -560,7 +635,7 @@ def _append_constructor(parts: list[str], members: Any) -> None:
     constructor = members.get("__init__") or members.get("__new__")
     if not constructor:
         return
-    parts.append("**Constructor**\n")
+    parts.append("<b>Constructor</b>\n")
     parts.append(_render_function(constructor, heading_level="####"))
 
 
@@ -573,90 +648,153 @@ def _append_methods(parts: list[str], members: Any) -> None:
     ]
     if not methods:
         return
-    parts.append("**Methods**\n")
+    parts.append("<b>Methods</b>\n")
     for method in methods:
         parts.append(_render_function(method, heading_level="####"))
 
 
 def _render_class_details(cls: Any) -> str:
-    """Render a class wrapped in a <details>/<summary> block."""
+    """Render a class wrapped in an expandable <details> block."""
     cls = _resolve(cls)
-    title = details_title(cls.name, _raw_first_line(cls))
+    first_line = _raw_first_line(cls)
+    title = details_title(cls.name, first_line)
     body = _render_class_body(cls, skip_first_line=True)
     return render_details(title, body)
 
 
 def _render_function_details(func: Any) -> str:
-    """Render a standalone function wrapped in a <details>/<summary> block."""
+    """Render a standalone function wrapped in an expandable <details> block."""
     func = _resolve(func)
-    title = details_title(f"{func.name}()", _raw_first_line(func))
+    first_line = _raw_first_line(func)
+    title = details_title(f"{func.name}()", first_line)
     body = _render_function(func, heading_level="####", skip_first_line=True)
     return render_details(title, body)
 
 
 # ---------------------------------------------------------------------------
-# Loading and classification
+# Loading and discovery
 # ---------------------------------------------------------------------------
 
 
 def _discover_modules() -> list[str]:
-    """Find all dynamo.* submodules across search paths."""
+    """Find all whitelisted dynamo.* submodules across search paths."""
     found: set[str] = set()
     for sp in SEARCH_PATHS:
         dynamo_dir = Path(sp) / "dynamo"
         if not dynamo_dir.is_dir():
             continue
+        # Directory-based packages
         for child in sorted(dynamo_dir.iterdir()):
             if child.is_dir() and (child / "__init__.py").exists():
-                if not child.name.startswith("_"):
-                    found.add(f"dynamo.{child.name}")
-    found.add("dynamo._core")
+                mod_name = f"dynamo.{child.name}"
+                if mod_name in MODULE_WHITELIST:
+                    found.add(mod_name)
+        # Single-file modules (.py)
+        for child in sorted(dynamo_dir.glob("*.py")):
+            if child.stem.startswith("__"):
+                continue
+            mod_name = f"dynamo.{child.stem}"
+            if mod_name in MODULE_WHITELIST:
+                found.add(mod_name)
+        # Type stubs (.pyi) for compiled extensions
+        for child in sorted(dynamo_dir.glob("*.pyi")):
+            if child.stem.startswith("__"):
+                continue
+            mod_name = f"dynamo.{child.stem}"
+            if mod_name in MODULE_WHITELIST:
+                found.add(mod_name)
     return sorted(found)
 
 
 def _create_loader() -> GriffeLoader:
     """Create a GriffeLoader with the correct search paths."""
-    return GriffeLoader(search_paths=SEARCH_PATHS)
+    return GriffeLoader(search_paths=SEARCH_PATHS, docstring_parser="google")
 
 
-def _classify_members(
+def _discover_module_members(
+    module_name: str,
+    loader: GriffeLoader,
+) -> list[tuple[str, Any]]:
+    """Discover public classes and functions in a loaded module."""
+    try:
+        mod = loader.modules_collection[module_name]
+    except KeyError:
+        return []
+    members: list[tuple[str, Any]] = []
+    _collect_members(mod, module_name, members)
+    return members
+
+
+def _collect_members(
     mod: Any,
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Classify a module's public members into classes and functions."""
-    classes: dict[str, Any] = {}
-    functions: dict[str, Any] = {}
+    prefix: str,
+    members: list[tuple[str, Any]],
+    *,
+    max_depth: int = 1,
+    depth: int = 0,
+) -> None:
+    """Recursively collect public, documented classes and functions."""
     for member in mod.members.values():
         if member.name.startswith("_"):
             continue
         kind = _safe_kind(member)
-        if kind == "CLASS":
-            classes[member.name] = member
-        elif kind == "FUNCTION":
-            functions[member.name] = member
-    return classes, functions
+        if kind in ("CLASS", "FUNCTION"):
+            if member.docstring and member.docstring.value:
+                members.append((f"{prefix}.{member.name}", member))
+        elif kind == "MODULE" and depth < max_depth:
+            if member.name == "tests":
+                continue
+            _collect_members(
+                member,
+                f"{prefix}.{member.name}",
+                members,
+                max_depth=max_depth,
+                depth=depth + 1,
+            )
 
 
-def _load_all_members(
-    loader: GriffeLoader,
-    modules: list[str],
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Load all modules and collect classes and functions by name."""
-    all_classes: dict[str, Any] = {}
-    all_functions: dict[str, Any] = {}
+# ---------------------------------------------------------------------------
+# Module section rendering
+# ---------------------------------------------------------------------------
 
-    for module_name in modules:
-        try:
-            mod = loader.load(module_name)
-        except Exception as exc:
-            print(f"  SKIP {module_name}: {exc}", file=sys.stderr)
+
+def _render_module_section(
+    module_name: str,
+    members: list[tuple[str, Any]],
+    ctx: RenderContext,
+) -> list[str]:
+    """Render a single module section with optional sub-grouping."""
+    desc = MODULE_DESCRIPTIONS.get(module_name, "")
+    title = _module_display_name(module_name)
+    parts: list[str] = ["---\n", f"## {title}\n", f"{desc}\n"]
+
+    # Group members by kind (Enhancement 4)
+    groups: dict[str, list[tuple[str, Any]]] = {k: [] for k in SUB_GROUP_ORDER}
+    for full_path, member in members:
+        name = full_path.split(".")[-1]
+        if name in ctx.seen_names:
             continue
-        print(f"  Loaded: {module_name}")
-        classes, functions = _classify_members(mod)
-        all_classes.update(classes)
-        all_functions.update(functions)
+        category = _classify_member(member)
+        groups[category].append((full_path, member))
 
-    loader.resolve_aliases()
-    return all_classes, all_functions
+    num_groups = sum(1 for g in SUB_GROUP_ORDER if groups[g])
+
+    for group_key in SUB_GROUP_ORDER:
+        group_members = groups[group_key]
+        if not group_members:
+            continue
+        if num_groups > 1:
+            parts.append(f"### {SUB_GROUP_TITLES[group_key]}\n")
+        for full_path, member in group_members:
+            name = full_path.split(".")[-1]
+            ctx.seen_names.add(name)
+            kind = _safe_kind(member)
+            if kind == "CLASS":
+                parts.append(_render_class_details(member))
+            elif kind == "FUNCTION":
+                parts.append(_render_function_details(member))
+
+    return parts
 
 
 # ---------------------------------------------------------------------------
@@ -665,106 +803,61 @@ def _load_all_members(
 
 
 def _render_header() -> list[str]:
-    """Render the page header with SPDX, title, and card navigation."""
+    """Render the page header with frontmatter, title, and navigation table."""
     cards = [
         {
-            "title": s.title,
-            "icon": s.icon,
-            "href": f"#{slugify(s.title)}",
-            "description": s.description,
+            "title": _module_display_name(m),
+            "icon": MODULE_ICONS.get(m, "regular code"),
+            "href": f"#{slugify(_module_display_name(m))}",
+            "description": MODULE_DESCRIPTIONS.get(m, ""),
         }
-        for s in SECTION_DEFS
+        for m in MODULE_ORDER
     ]
-    return [
-        SPDX_HEADER.format(sidebar_title="Python API"),
-        AUTOGEN_WARNING,
-        "# Python API Reference\n",
+    intro = (
         "This page documents the public Python API for NVIDIA Dynamo. "
-        "Classes and functions are organized by functional area. "
-        "Expand any item to see its full API.\n",
-        render_card_group(cards, 3),
+        "Classes and functions are organized by module. "
+        "Expand any item to see its full API.\n"
+    )
+    return [
+        FRONTMATTER,
+        "# Python API Reference\n",
+        intro,
+        render_markdown_table(cards),
     ]
-
-
-def _render_section(section: SectionDef, ctx: RenderContext) -> list[str]:
-    """Render a single section of the API reference."""
-    parts: list[str] = [
-        "---\n",
-        f"## {section.title}\n",
-        f"{section.description}\n",
-    ]
-    if section.module:
-        _render_module_members(parts, section.module, ctx)
-    else:
-        _render_named_members(parts, section, ctx)
-    return parts
-
-
-def _render_module_members(
-    parts: list[str], module_name: str, ctx: RenderContext
-) -> None:
-    """Render all public members from a module by name."""
-    try:
-        mod = ctx.modules_collection[module_name]
-    except KeyError:
-        print(f"  WARN: {module_name} not in collection", file=sys.stderr)
-        return
-    classes, functions = _classify_members(mod)
-    for cls in classes.values():
-        parts.append(_render_class_details(cls))
-        ctx.placed_classes.add(cls.name)
-    for func in functions.values():
-        parts.append(_render_function_details(func))
-        ctx.placed_functions.add(func.name)
-
-
-def _render_named_members(
-    parts: list[str], section: SectionDef, ctx: RenderContext
-) -> None:
-    """Render explicitly named classes and functions for a section."""
-    for name in section.classes:
-        if name in ctx.all_classes:
-            parts.append(_render_class_details(ctx.all_classes[name]))
-            ctx.placed_classes.add(name)
-    for name in section.functions:
-        if name in ctx.all_functions:
-            parts.append(_render_function_details(ctx.all_functions[name]))
-            ctx.placed_functions.add(name)
-
-
-def _render_remaining(ctx: RenderContext) -> list[str]:
-    """Render any classes/functions not assigned to a section."""
-    rem_cls = [o for n, o in ctx.all_classes.items() if n not in ctx.placed_classes]
-    rem_fn = [o for n, o in ctx.all_functions.items() if n not in ctx.placed_functions]
-    if not rem_cls and not rem_fn:
-        return []
-    parts: list[str] = ["---\n", "## Other\n"]
-    for cls in rem_cls:
-        parts.append(_render_class_details(cls))
-    for func in rem_fn:
-        parts.append(_render_function_details(func))
-    return parts
 
 
 def render_consolidated_page() -> str:
     """Render the single consolidated Python API reference page."""
     modules = _discover_modules()
     print(f"Loading modules ({len(modules)} discovered)...")
+
     loader = _create_loader()
-    all_classes, all_functions = _load_all_members(loader, modules)
+    for module_name in modules:
+        try:
+            loader.load(module_name)
+        except Exception as exc:
+            print(f"  SKIP {module_name}: {exc}", file=sys.stderr)
+            continue
+        print(f"  Loaded: {module_name}")
 
-    ctx = RenderContext(
-        all_classes=all_classes,
-        all_functions=all_functions,
-        modules_collection=loader.modules_collection,
-    )
+    loader.resolve_aliases()
 
+    ordered = [m for m in MODULE_ORDER if m in modules]
+    ordered.extend(m for m in modules if m not in ordered)
+
+    ctx = RenderContext()
     parts: list[str] = _render_header()
-    for section in SECTION_DEFS:
-        parts.extend(_render_section(section, ctx))
-    parts.extend(_render_remaining(ctx))
+
+    total_items = 0
+    for module_name in ordered:
+        members = _discover_module_members(module_name, loader)
+        if members:
+            total_items += len(members)
+            parts.extend(_render_module_section(module_name, members, ctx))
+
     parts.append("---\n")
-    parts.append("*Source packages: " + ", ".join(f"`{m}`" for m in modules) + "*\n")
+    parts.append("*Source packages: " + ", ".join(f"`{m}`" for m in ordered) + "*\n")
+    print(f"  Total items: {total_items}")
     return "\n".join(parts)
 
 

@@ -68,6 +68,24 @@ def add_argument(
     """
     Add a CLI argument with env var default, optional alias and dest, and help message construction.
 
+    # confidence: high — adapted from real call site
+    Examples:
+        >>> import argparse
+        >>> from dynamo.common.configuration.utils import add_argument
+        >>>
+        >>> parser = argparse.ArgumentParser()
+        >>> add_argument(
+        ...     parser,
+        ...     flag_name="--http-port",
+        ...     env_var="DYN_HTTP_PORT",
+        ...     default=8000,
+        ...     help="HTTP port for the engine.",
+        ...     arg_type=int,
+        ... )
+        >>> args = parser.parse_args([])
+        >>> args.http_port
+        8000
+
     Args:
         parser: ArgumentParser or argument group
         flag_name: Primary flag (must start with '--', e.g., "--foo")

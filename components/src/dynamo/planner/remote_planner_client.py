@@ -14,7 +14,21 @@ logger = logging.getLogger(__name__)
 
 
 class RemotePlannerClient:
-    """Client for delegating scaling requests to centralized planner"""
+    """Client for delegating scaling requests to centralized planner.
+
+    # confidence: medium
+    Examples:
+        >>> from dynamo.planner.remote_planner_client import RemotePlannerClient
+        >>> client = RemotePlannerClient(
+        ...     runtime=runtime,
+        ...     central_namespace="global-planner",
+        ...     central_component="GlobalPlanner",
+        ...     connection_timeout=30.0,
+        ... )
+        >>> response = await client.send_scale_request(scale_request)
+        >>> response.status
+        <ScaleStatus.SUCCESS: 'success'>
+    """
 
     def __init__(
         self,

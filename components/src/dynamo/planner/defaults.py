@@ -49,6 +49,24 @@ class BasePlannerDefaults:
 
 
 class SLAPlannerDefaults(BasePlannerDefaults):
+    """SLA-based planner defaults for throughput and latency targets.
+
+    Provides default values for SLA objectives (TTFT, ITL), load prediction,
+    and scaling parameters used by the planner.
+
+    # confidence: high
+    Examples:
+        >>> from dynamo.planner.defaults import SLAPlannerDefaults
+        >>> SLAPlannerDefaults.ttft
+        500.0
+        >>> SLAPlannerDefaults.itl
+        50.0
+        >>> SLAPlannerDefaults.mode
+        'disagg'
+        >>> SLAPlannerDefaults.max_gpu_budget
+        8
+    """
+
     # Prometheus endpoint URL for pulling/querying metrics
     metric_pulling_prometheus_endpoint = os.environ.get(
         "PROMETHEUS_ENDPOINT",
@@ -143,6 +161,17 @@ WORKER_COMPONENT_NAMES = {
 
 
 class SubComponentType(str, Enum):
+    """Type of sub-component in a disaggregated deployment.
+
+    # confidence: high
+    Examples:
+        >>> from dynamo.planner.defaults import SubComponentType
+        >>> SubComponentType.PREFILL.value
+        'prefill'
+        >>> SubComponentType("decode") == SubComponentType.DECODE
+        True
+    """
+
     PREFILL = "prefill"
     DECODE = "decode"
 

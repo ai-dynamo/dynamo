@@ -27,6 +27,10 @@ def log_message(level: str, message: str, module: str, file: str, line: int) -> 
 class JsonLike:
     """
     Any PyObject which can be serialized to JSON
+    Examples:
+        >>> request: JsonLike = {"prompt": "Hello", "max_tokens": 128}
+        >>> request_list: JsonLike = [1, 2, 3]
+        >>> request_str: JsonLike = "plain text input"
     """
 
     ...
@@ -36,6 +40,12 @@ RequestHandler = Callable[[JsonLike], AsyncGenerator[JsonLike, None]]
 class DistributedRuntime:
     """
     The runtime object for dynamo applications
+    Examples:
+        >>> import asyncio
+        >>> loop = asyncio.get_event_loop()
+        >>> runtime = DistributedRuntime(loop, "etcd", "nats")
+        >>> endpoint = runtime.endpoint("myns.backend.generate")
+        >>> client = await endpoint.client()
     """
 
     def __new__(
@@ -115,6 +125,12 @@ class DistributedRuntime:
 class Endpoint:
     """
     An Endpoint is a single API endpoint
+    Examples:
+        >>> endpoint = runtime.endpoint("dynamo.backend.generate")
+        >>> await endpoint.serve_endpoint(RequestHandler().generate)
+        >>> client = await endpoint.client()
+        >>> async for resp in await client.round_robin("hello"):
+        ...     print(resp)
     """
 
     ...
@@ -180,6 +196,12 @@ class Endpoint:
 class Client:
     """
     A client capable of calling served instances of an endpoint
+    Examples:
+        >>> client = await endpoint.client()
+        >>> async for chunk in await client.round_robin("hello world"):
+        ...     print(chunk.get("data"))
+        >>> async for resp in await client.random({"prompt": "hi"}):
+        ...     print(resp)
     """
 
     ...
@@ -261,15 +283,12 @@ def compute_block_hash_for_seq(
 
     Returns:
         List of block hashes (one per block)
-
-    Example:
+    Examples:
         >>> tokens = [1, 2, 3, 4] * 8  # 32 tokens = 1 block
-        >>> mm_info = {
-        ...     "mm_objects": [{
-        ...         "mm_hash": 0xDEADBEEF,
-        ...     }]
-        ... }
-        >>> hashes = compute_block_hash_for_seq(tokens, 32, [mm_info])
+        >>> hashes = compute_block_hash_for_seq(tokens, 32)
+        >>> mm_info = {"mm_objects": [{"mm_hash": 0xDEADBEEF}]}
+        >>> hashes_mm = compute_block_hash_for_seq(tokens, 32, [mm_info])
+        >>> hashes_lora = compute_block_hash_for_seq(tokens, 32, lora_name="my-adapter")
     """
 
     ...
@@ -278,6 +297,13 @@ class Context:
     """
     Context wrapper around AsyncEngineContext for Python bindings.
     Provides tracing and cancellation capabilities for request handling.
+    Examples:
+        >>> from dynamo._core import Context
+        >>> context = Context()
+        >>> context = Context(id="req-42")
+        >>> print(context.id())
+        >>> context.stop_generating()
+        >>> assert context.is_stopped()
     """
 
     def __init__(self, id: Optional[str] = None) -> None:
@@ -364,6 +390,10 @@ class Context:
 class WorkerMetricsPublisher:
     """
     A metrics publisher will provide metrics to the router for load monitoring.
+    Examples:
+        >>> publisher = WorkerMetricsPublisher()
+        >>> await publisher.create_endpoint(endpoint)
+        >>> publisher.publish(dp_rank=0, active_decode_blocks=128)
     """
 
     ...
@@ -401,6 +431,11 @@ class WorkerMetricsPublisher:
 class ModelDeploymentCard:
     """
     A model deployment card is a collection of model information
+    Examples:
+        >>> from dynamo._core import ModelDeploymentCard
+        >>> card = ModelDeploymentCard()
+        >>> json_str = card.to_json_str()
+        >>> restored = ModelDeploymentCard.from_json_str(json_str)
     """
 
     def to_json_str(self) -> str:
@@ -417,6 +452,15 @@ class ModelDeploymentCard:
 class ModelRuntimeConfig:
     """
     A model runtime configuration is a collection of runtime information
+    Examples:
+        >>> from dynamo._core import ModelRuntimeConfig
+        >>> config = ModelRuntimeConfig()
+        >>> config.total_kv_blocks = 2048
+        >>> config.max_num_seqs = 256
+        >>> config.max_num_batched_tokens = 8192
+        >>> config.enable_local_indexer = True
+        >>> config.tool_call_parser = "hermes"
+        >>> config.set_engine_specific("tp_size", 4)
     """
 
     total_kv_blocks: int | None
@@ -442,6 +486,12 @@ class OverlapScores:
     """
     A collection of prefix matching scores of workers for a given token ids.
     'scores' is a map of worker id to the score which is the number of matching blocks.
+    Examples:
+        >>> from dynamo._core import RadixTree
+        >>> tree = RadixTree()
+        >>> scores = tree.find_matches([42, 43])
+        >>> worker_scores = scores.scores  # Dict[int, int]
+        >>> freqs = scores.frequencies  # List[int]
     """
 
     @property
@@ -471,6 +521,16 @@ class RadixTree:
 
     Thread-safe: operations route to a dedicated background thread and long calls
     release the Python GIL.
+    Examples:
+        >>> import json
+        >>> from dynamo._core import RadixTree
+        >>> tree = RadixTree()
+        >>> tree_ttl = RadixTree(expiration_duration_secs=120.0)
+        >>> event = {"event_id": 1, "data": {"stored": {"parent_hash": None,
+        ...     "blocks": [{"block_hash": 42, "tokens_hash": 42}]}}}
+        >>> tree.apply_event(0, json.dumps(event).encode())
+        >>> scores = tree.find_matches([42])
+        >>> print(scores.scores)
     """
 
     def __init__(self, expiration_duration_secs: Optional[float] = None) -> None:
@@ -541,6 +601,12 @@ class RadixTree:
 class KvIndexer:
     """
     A KV Indexer that tracks KV Events emitted by workers. Events include add_block and remove_block.
+    Examples:
+        >>> from dynamo._core import KvIndexer
+        >>> indexer = KvIndexer(endpoint=endpoint, block_size=64)
+        >>> scores = indexer.find_matches_for_request(token_ids=[1, 2, 3])
+        >>> print(scores.scores)
+        >>> print(indexer.block_size())
     """
 
     ...
@@ -586,6 +652,14 @@ class ApproxKvIndexer:
     - Backend engines don't emit KV events
     - You want to reduce event processing overhead
     - Lower routing accuracy is acceptable
+    Examples:
+        >>> from dynamo._core import ApproxKvIndexer
+        >>> indexer = ApproxKvIndexer(
+        ...     endpoint=endpoint, kv_block_size=64,
+        ...     router_ttl_secs=120.0, router_max_tree_size=1048576,
+        ... )
+        >>> scores = indexer.find_matches_for_request(token_ids=[1, 2, 3])
+        >>> await indexer.process_routing_decision_for_request([1, 2, 3], worker_id=0)
     """
 
     ...
@@ -654,6 +728,16 @@ class ApproxKvIndexer:
 class KvEventPublisher:
     """
     A KV event publisher will publish KV events corresponding to the component.
+    Examples:
+        >>> publisher = KvEventPublisher(
+        ...     endpoint=endpoint, kv_block_size=64, dp_rank=0,
+        ...     zmq_endpoint="tcp://127.0.0.1:5557", zmq_topic="",
+        ... )
+        >>> publisher.publish_stored(
+        ...     token_ids=[1, 2, 3, 4], num_block_tokens=[4],
+        ...     block_hashes=[123456],
+        ... )
+        >>> publisher.publish_removed(block_hashes=[123456])
     """
 
     ...
@@ -733,6 +817,11 @@ class HttpService:
     """
     A HTTP service for dynamo applications.
     It is a OpenAI compatible http ingress into the Dynamo Distributed Runtime.
+    Examples:
+        >>> service = HttpService(port=8000)
+        >>> service.add_chat_completions_model("my-model", "checksum", engine)
+        >>> await service.run(runtime)
+        >>> service.shutdown()
     """
 
     def __init__(self, port: Optional[int] = None) -> None:
@@ -762,6 +851,13 @@ class HttpService:
 class PythonAsyncEngine:
     """
     Bridge a Python async generator onto Dynamo's AsyncEngine interface.
+    Examples:
+        >>> import asyncio
+        >>> from dynamo._core import PythonAsyncEngine
+        >>> async def my_generator(request):
+        ...     yield {"text": "hello"}
+        >>> loop = asyncio.get_running_loop()
+        >>> engine = PythonAsyncEngine(my_generator, loop)
     """
 
     def __init__(self, generator: Any, event_loop: Any) -> None:
@@ -783,6 +879,14 @@ class KserveGrpcService:
     """
     A gRPC service implementing the KServe protocol for dynamo applications.
     Provides model management for completions, chat completions, and tensor-based models.
+    Examples:
+        >>> from dynamo._core import KserveGrpcService, PythonAsyncEngine
+        >>> service = KserveGrpcService(port=8787, host="0.0.0.0")
+        >>> engine = PythonAsyncEngine(my_generator, loop)
+        >>> service.add_completions_model("my-model", "checksum", engine)
+        >>> shutdown_signal = service.run(runtime)
+        >>> print(service.list_completions_models())
+        >>> await shutdown_signal
     """
 
     def __init__(self, port: Optional[int] = None, host: Optional[str] = None) -> None:
@@ -914,11 +1018,26 @@ class KserveGrpcService:
         ...
 
 class ModelInput:
-    """What type of request this model needs: Text, Tokens or Tensor"""
+    """What type of request this model needs: Text, Tokens or Tensor
+    Examples:
+        >>> from dynamo._core import ModelInput
+        >>> input_type = ModelInput.Tokens
+        >>> input_type = ModelInput.Text
+        >>> input_type = ModelInput.Tensor
+    """
+    Text: "ModelInput"
+    Tokens: "ModelInput"
+    Tensor: "ModelInput"
     ...
 
 class ModelType:
-    """What type of request this model needs: Chat, Completions, Embedding, Tensor, Images, Videos or Prefill"""
+    """What type of request this model needs: Chat, Completions, Embedding, Tensor, Images, Videos or Prefill
+    Examples:
+        >>> from dynamo._core import ModelType
+        >>> model_type = ModelType.Chat | ModelType.Completions
+        >>> model_type = ModelType.TensorBased
+        >>> model_type = ModelType.Prefill
+    """
     Chat: ModelType
     Completions: ModelType
     Embedding: ModelType
@@ -930,7 +1049,13 @@ class ModelType:
     ...
 
 class RouterMode:
-    """Router mode for load balancing requests across workers"""
+    """Router mode for load balancing requests across workers
+    Examples:
+        >>> from dynamo._core import RouterMode
+        >>> mode = RouterMode.RoundRobin
+        >>> mode = RouterMode.KV
+        >>> mode = RouterMode.Direct
+    """
     RoundRobin: "RouterMode"
     Random: "RouterMode"
     KV: "RouterMode"
@@ -938,7 +1063,18 @@ class RouterMode:
     ...
 
 class RouterConfig:
-    """How to route the request"""
+    """How to route the request
+    Examples:
+        >>> from dynamo._core import RouterConfig, RouterMode, KvRouterConfig
+        >>> config = RouterConfig(mode=RouterMode.RoundRobin)
+        >>> kv_config = KvRouterConfig(overlap_score_weight=0.5)
+        >>> config = RouterConfig(
+        ...     mode=RouterMode.KV,
+        ...     config=kv_config,
+        ...     active_decode_blocks_threshold=0.9,
+        ...     decode_fallback=True,
+        ... )
+    """
 
     def __init__(
         self,
@@ -963,7 +1099,16 @@ class RouterConfig:
         ...
 
 class KvRouterConfig:
-    """Values for KV router"""
+    """
+    Values for KV router
+    Examples:
+        >>> config = KvRouterConfig()
+        >>> config_custom = KvRouterConfig(
+        ...     overlap_score_weight=0.5,
+        ...     router_temperature=0.5,
+        ...     router_track_active_blocks=True,
+        ... )
+    """
 
     def __init__(
         self,
@@ -1041,6 +1186,19 @@ async def register_model(
     For TensorBased models (using ModelInput.Tensor), HuggingFace downloads are skipped
     and a minimal model card is registered directly. Use model_path as the display name
     for these models.
+    Examples:
+        >>> from dynamo._core import ModelInput, ModelType, register_model
+        >>> await register_model(
+        ...     ModelInput.Tokens,
+        ...     ModelType.Chat | ModelType.Completions,
+        ...     endpoint,
+        ...     "Qwen/Qwen3-0.6B",
+        ... )
+        >>> await register_model(
+        ...     ModelInput.Tensor, ModelType.TensorBased,
+        ...     endpoint, "echo",
+        ...     runtime_config=runtime_config,
+        ... )
     """
     ...
 
@@ -1063,7 +1221,9 @@ async def fetch_model(remote_name: str, ignore_weights: bool = False) -> str:
     """
     Download a model from Hugging Face, returning its local path.
     If `ignore_weights` is True, only fetches tokenizer and config files.
-    Example: `model_path = await fetch_model("Qwen/Qwen3-0.6B")`
+    Examples:
+        >>> model_path = await fetch_model("Qwen/Qwen3-0.6B")
+        >>> tokenizer_path = await fetch_model("meta-llama/Llama-3-8B", ignore_weights=True)
     """
     ...
 
@@ -1073,15 +1233,32 @@ register_llm = register_model
 unregister_llm = unregister_model
 
 class EngineConfig:
-    """Holds internal configuration for a Dynamo engine."""
+    """
+    Holds internal configuration for a Dynamo engine.
+    Examples:
+        >>> args = EntrypointArgs(engine_type=EngineType.Dynamic, model_path="/models/llama")
+        >>> engine_config = await make_engine(runtime, args)
+        >>> await run_input(runtime, "http", engine_config)
+    """
     ...
 
 async def make_engine(distributed_runtime: DistributedRuntime, args: EntrypointArgs) -> EngineConfig:
-    """Make an engine matching the args"""
+    """Make an engine matching the args
+    Examples:
+        >>> from dynamo._core import EntrypointArgs, EngineType, make_engine
+        >>> args = EntrypointArgs(engine_type=EngineType.Dynamic, model_path="/models/llama")
+        >>> engine_config = await make_engine(runtime, args)
+    """
     ...
 
 async def run_input(runtime: DistributedRuntime, input: str, engine_config: EngineConfig) -> None:
-    """Start an engine, connect it to an input, and run until stopped."""
+    """Start an engine, connect it to an input, and run until stopped.
+    Examples:
+        >>> from dynamo._core import run_input
+        >>> await run_input(runtime, "http", engine_config)
+        >>> await run_input(runtime, "grpc", engine_config)
+        >>> await run_input(runtime, "text", engine_config)
+    """
     ...
 
 class Layer:
@@ -1106,6 +1283,11 @@ class Layer:
 class Block:
     """
     A KV cache block
+    Examples:
+        >>> block = blocks[0]  # get first block from a BlockList
+        >>> num_layers = len(block)
+        >>> layer = block[0]
+        >>> all_layers = block.to_list()
     """
 
     ...
@@ -1193,6 +1375,10 @@ class BlockList:
 class BlockManager:
     """
     A KV cache block manager
+    Examples:
+        >>> bm = BlockManager(worker_id=0, num_layer=32, page_size=16, inner_dim=128)
+        >>> blocks = await bm.allocate_device_blocks(4)
+        >>> layer = blocks[0][0]  # first block, first layer
     """
 
     def __init__(
@@ -1305,6 +1491,13 @@ class KvbmRequest:
 class KvRouter:
     """
     A KV-aware router that performs intelligent routing based on KV cache overlap.
+    Examples:
+        >>> config = KvRouterConfig()
+        >>> kv_router = KvRouter(endpoint=endpoint, block_size=64, kv_router_config=config)
+        >>> stream = await kv_router.generate(token_ids=[1, 2, 3], model="my-model")
+        >>> async for chunk in stream:
+        ...     print(chunk)
+        >>> worker_id, dp_rank, overlap = await kv_router.best_worker([1, 2, 3])
     """
 
     def __init__(
@@ -1475,7 +1668,13 @@ class KvRouter:
         ...
 
 class EngineType:
-    """Engine type for Dynamo workers"""
+    """Engine type for Dynamo workers
+    Examples:
+        >>> from dynamo._core import EngineType
+        >>> engine = EngineType.Dynamic
+        >>> engine = EngineType.Echo
+        >>> engine = EngineType.Mocker
+    """
     Echo: "EngineType"
     Dynamic: "EngineType"
     Mocker: "EngineType"
@@ -1485,6 +1684,20 @@ class EntrypointArgs:
     """
     Settings to connect an input to a worker and run them.
     Use by `dynamo run`.
+    Examples:
+        >>> from dynamo._core import EntrypointArgs, EngineType, RouterConfig, RouterMode
+        >>> args = EntrypointArgs(
+        ...     engine_type=EngineType.Dynamic,
+        ...     model_path="/models/llama-3-8b",
+        ...     model_name="dyn://dynamo.backend.generate",
+        ...     http_port=8000,
+        ...     router_config=RouterConfig(mode=RouterMode.KV),
+        ... )
+        >>> mocker_args = EntrypointArgs(
+        ...     engine_type=EngineType.Mocker,
+        ...     model_path="/models/llama-3-8b",
+        ...     is_prefill=True,
+        ... )
     """
 
     def __init__(
@@ -1538,6 +1751,11 @@ class PlannerDecision:
     Fields: num_prefill_workers, num_decode_workers, decision_id.
             -1 in any of those fields mean not set, usually because planner hasn't decided anything yet.
     Call VirtualConnectorClient.complete(event) when action is completed.
+    Examples:
+        >>> client = VirtualConnectorClient(runtime, "my-namespace")
+        >>> decision = await client.get()
+        >>> print(decision.num_prefill_workers, decision.num_decode_workers)
+        >>> await client.complete(decision)
     """
     ...
 

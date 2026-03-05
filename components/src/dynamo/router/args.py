@@ -15,7 +15,20 @@ from dynamo.llm import KvRouterConfig
 
 
 class DynamoRouterConfig(KvRouterConfigBase):
-    """Typed configuration for the standalone KV router (router-owned options only)."""
+    """Typed configuration for the standalone KV router (router-owned options only).
+
+    # confidence: high
+    Examples:
+        >>> from dynamo.router.args import parse_args, DynamoRouterConfig
+        >>> config = parse_args([
+        ...     "--endpoint", "dynamo.prefill.generate",
+        ...     "--router-mode", "kv",
+        ... ])
+        >>> config.endpoint
+        'dynamo.prefill.generate'
+        >>> config.namespace
+        'dynamo'
+    """
 
     namespace: str
     endpoint: str
@@ -38,7 +51,23 @@ class DynamoRouterConfig(KvRouterConfigBase):
 
 
 class DynamoRouterArgGroup(ArgGroup):
-    """CLI argument group for standalone router options."""
+    """CLI argument group for standalone router options.
+
+    # confidence: high — adapted from real call site
+    Examples:
+        >>> import argparse
+        >>> from dynamo.router.args import DynamoRouterArgGroup, DynamoRouterConfig
+        >>>
+        >>> parser = argparse.ArgumentParser()
+        >>> DynamoRouterArgGroup().add_arguments(parser)
+        >>> args = parser.parse_args([
+        ...     "--endpoint", "dynamo.prefill.generate",
+        ...     "--router-mode", "kv",
+        ... ])
+        >>> config = DynamoRouterConfig.from_cli_args(args)
+        >>> config.endpoint
+        'dynamo.prefill.generate'
+    """
 
     name = "dynamo-router"
 
@@ -70,7 +99,16 @@ class DynamoRouterArgGroup(ArgGroup):
 
 
 def build_kv_router_config(router_config: DynamoRouterConfig) -> KvRouterConfig:
-    """Build KvRouterConfig from DynamoRouterConfig."""
+    """Build KvRouterConfig from DynamoRouterConfig.
+
+    # confidence: high
+    Examples:
+        >>> from dynamo.router.args import parse_args, build_kv_router_config
+        >>> router_config = parse_args([
+        ...     "--endpoint", "dynamo.prefill.generate",
+        ... ])
+        >>> kv_config = build_kv_router_config(router_config)
+    """
     return KvRouterConfig(**router_config.kv_router_kwargs())
 
 
