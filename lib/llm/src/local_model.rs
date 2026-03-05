@@ -11,10 +11,10 @@ use dynamo_runtime::discovery::DiscoverySpec;
 use dynamo_runtime::protocols::EndpointId;
 use dynamo_runtime::slug::Slug;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
-use dynamo_runtime::utils::get_http_rpc_host_from_env;
+//use dynamo_runtime::utils::get_http_rpc_host_from_env;
 
 use crate::entrypoint::RouterConfig;
-use crate::mocker::protocols::{MockEngineArgs, WorkerType};
+//use crate::mocker::protocols::{MockEngineArgs, WorkerType};
 use crate::model_card::ModelDeploymentCard;
 use crate::model_type::{ModelInput, ModelType};
 use crate::preprocessor::media::{MediaDecoder, MediaFetcher};
@@ -235,6 +235,7 @@ impl LocalModelBuilder {
             .map(RequestTemplate::load)
             .transpose()?;
 
+        /*
         // Override runtime configs with mocker engine args (applies to both paths)
         if self.is_mocker
             && let Some(path) = &self.extra_engine_args
@@ -269,6 +270,7 @@ impl LocalModelBuilder {
                 );
             }
         }
+        */
 
         // frontend and echo engine don't need a path.
         if self.model_path.is_none() {
