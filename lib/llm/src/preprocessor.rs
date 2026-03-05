@@ -607,6 +607,79 @@ impl OpenAIPreprocessor {
         Ok((builder.build()?, annotations))
     }
 
+    pub fn postprocessor_parsing_stream<S>(
+        &self,
+        stream: S,
+        request: &NvCreateChatCompletionRequest,
+    ) -> anyhow::Result<
+        impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
+    >
+    where
+        S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
+    {
+        // Try to parse reasoning content only if parser is configured
+        let should_parse_reasoning = self.runtime_config.reasoning_parser.is_some()
+            && !Self::is_reasoning_disabled_by_request(
+                self.runtime_config.reasoning_parser.as_deref(),
+                request.chat_template_args.as_ref(),
+            );
+
+        // Reasoning Content Parsing Transformation Step
+        // Current Solution:
+        // This step operates on Deltas created by the transform_postprocessor_stream function
+        // Only access to text and not token_ids - so can not support parsing based on token_ids for now
+        // Future Solution:
+        // To address the limitation if needed in future: move this step before transform_postprocessor_stream and add new field of reasoning_content to the backend output
+        // Use backend_output.reasoning_content field to fill out the deltas.
+        let stream: Pin<Box<dyn Stream<Item = _> + Send>> = if should_parse_reasoning {
+            Box::pin(Self::parse_reasoning_content_from_stream(
+                stream,
+                self.runtime_config.reasoning_parser.clone().unwrap(), // Safety: We already checked that parser is some, so gtg
+            ))
+        } else {
+            Box::pin(stream)
+        };
+
+        // Check if tools are present and if we should apply jail
+        let has_tools = request
+            .inner
+            .tools
+            .as_ref()
+            .is_some_and(|tools| !tools.is_empty());
+
+        // Determine if we should apply jail (do this before moving request)
+        let should_jail = Self::should_apply_tool_jail(
+            self.tool_call_parser.as_ref(),
+            request.inner.tool_choice.as_ref(),
+            has_tools,
+        )?;
+
+        // Convert OpenAI tools to parser ToolDefinition format before applying jail
+        let tool_definitions = request.inner.tools.as_ref().map(|tools| {
+            tools
+                .iter()
+                .map(|tool| dynamo_parsers::tool_calling::ToolDefinition {
+                    name: tool.function.name.clone(),
+                    parameters: tool.function.parameters.clone(),
+                })
+                .collect()
+        });
+
+        // Apply jail conditionally
+        let transformed_stream: Pin<Box<dyn Stream<Item = _> + Send>> = if should_jail {
+            Box::pin(Self::apply_tool_calling_jail(
+                self.tool_call_parser.clone(),
+                request.inner.tool_choice.clone(),
+                tool_definitions,
+                stream,
+            ))
+        } else {
+            Box::pin(stream)
+        };
+
+        Ok(transformed_stream)
+    }
+
     pub fn transform_postprocessor_stream<S, Resp>(
         stream: S,
         generator: Box<dyn DeltaGeneratorExt<Resp>>,
@@ -1120,71 +1193,18 @@ impl
         // Extract context once
         let context = response_stream.context();
 
-        // transform the postprocessor stream (no boxing yet)
+        // transform the postprocessor stream (no boxing yet) - detokenize
         let stream = Self::transform_postprocessor_stream(
             response_stream,
             response_generator,
             context.clone(),
         );
 
-        // Try to parse reasoning content only if parser is configured
-        let should_parse_reasoning = self.runtime_config.reasoning_parser.is_some()
-            && !Self::is_reasoning_disabled_by_request(
-                self.runtime_config.reasoning_parser.as_deref(),
-                request.chat_template_args.as_ref(),
-            );
+        let transformed_stream = self.postprocessor_parsing_stream(stream, &request)?;
 
-        // Reasoning Content Parsing Transformation Step
-        // Current Solution:
-        // This step operates on Deltas created by the transform_postprocessor_stream function
-        // Only access to text and not token_ids - so can not support parsing based on token_ids for now
-        // Future Solution:
-        // To address the limitation if needed in future: move this step before transform_postprocessor_stream and add new field of reasoning_content to the backend output
-        // Use backend_output.reasoning_content field to fill out the deltas.
-        let stream: Pin<Box<dyn Stream<Item = _> + Send>> = if should_parse_reasoning {
-            Box::pin(Self::parse_reasoning_content_from_stream(
-                stream,
-                self.runtime_config.reasoning_parser.clone().unwrap(), // Safety: We already checked that parser is some, so gtg
-            ))
-        } else {
-            Box::pin(stream)
-        };
-
-        // Check if tools are present and if we should apply jail
-        let has_tools =
-            request.inner.tools.is_some() && !request.inner.tools.as_ref().unwrap().is_empty();
-
-        // Determine if we should apply jail (do this before moving request)
-        let should_jail = Self::should_apply_tool_jail(
-            self.tool_call_parser.as_ref(),
-            request.inner.tool_choice.as_ref(),
-            has_tools,
-        )?;
-
-        // Convert OpenAI tools to parser ToolDefinition format before applying jail
-        let tool_definitions = request.inner.tools.as_ref().map(|tools| {
-            tools
-                .iter()
-                .map(|tool| dynamo_parsers::tool_calling::ToolDefinition {
-                    name: tool.function.name.clone(),
-                    parameters: tool.function.parameters.clone(),
-                })
-                .collect()
-        });
-
-        // Apply jail conditionally
-        let transformed_stream: Pin<Box<dyn Stream<Item = _> + Send>> = if should_jail {
-            Box::pin(Self::apply_tool_calling_jail(
-                self.tool_call_parser.clone(),
-                request.inner.tool_choice.clone(),
-                tool_definitions,
-                stream,
-            ))
-        } else {
-            Box::pin(stream)
-        };
-
-        // Step 4: Apply audit aggregation strategy
+        // Apply audit aggregation strategy.
+        // The audit branch already returns Pin<Box<...>> from scan/fold_aggregate_with_future,
+        // while the non-audit branch boxes the impl Stream from postprocessor_parsing_stream.
         let final_stream = if let Some(mut audit) = audit_handle {
             let (stream, agg_fut) = if audit.streaming() {
                 // Streaming: apply scan (pass-through + parallel aggregation)
@@ -1201,9 +1221,9 @@ impl
                 audit.emit();
             });
 
-            Box::pin(stream)
+            stream
         } else {
-            transformed_stream
+            Box::pin(transformed_stream)
         };
 
         // Step 5: Speculative next-turn prefill
