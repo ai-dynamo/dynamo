@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import shutil
+from typing import Optional
 
 import pytest
 
@@ -31,7 +32,12 @@ pytestmark = [
 class DynamoWorkerProcess(ManagedProcess):
     """Process manager for Dynamo worker with vLLM backend and ETCD HA support"""
 
-    def __init__(self, request, etcd_endpoints: list, is_prefill: bool = False):
+    def __init__(
+        self,
+        request,
+        etcd_endpoints: list,
+        is_prefill: Optional[bool] = None,
+    ):
         command = [
             "python3",
             "-m",
@@ -48,14 +54,19 @@ class DynamoWorkerProcess(ManagedProcess):
         # Set port based on worker type
         port = "8082" if is_prefill else "8081"
 
-        # Configure health check based on worker type
-        if is_prefill:
-            # Prefill workers check their own status endpoint
+        # Configure disaggregation mode, KV transfer, and health checks per worker type
+        if is_prefill is True:
             command.extend(["--disaggregation-mode", "prefill"])
             health_check_urls = [(f"http://localhost:{port}/health", self.is_ready)]
+        elif is_prefill is False:
+            command.extend(["--disaggregation-mode", "decode"])
+            health_check_urls = [
+                (f"http://localhost:{port}/health", self.is_ready),
+                (f"http://localhost:{FRONTEND_PORT}/v1/models", check_models_api),
+                (f"http://localhost:{FRONTEND_PORT}/health", check_health_generate),
+            ]
         else:
-            # Decode workers should also check their own status endpoint first,
-            # then verify the frontend sees the model
+            # Aggregated mode: no disaggregation
             health_check_urls = [
                 (f"http://localhost:{port}/health", self.is_ready),
                 (f"http://localhost:{FRONTEND_PORT}/v1/models", check_models_api),
@@ -69,7 +80,22 @@ class DynamoWorkerProcess(ManagedProcess):
         env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
         env["DYN_SYSTEM_PORT"] = port
 
-        if is_prefill:
+        # Both prefill and decode workers need kv-transfer-config for disaggregated mode
+        if is_prefill is not None:
+            command.extend(
+                [
+                    "--kv-transfer-config",
+                    json.dumps(
+                        {
+                            "kv_connector": "NixlConnector",
+                            "kv_role": "kv_both",
+                        }
+                    ),
+                ]
+            )
+
+        # KV events config and NIXL side channel port only for prefill worker
+        if is_prefill is True:
             command.extend(
                 [
                     "--kv-events-config",
