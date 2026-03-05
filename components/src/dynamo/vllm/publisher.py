@@ -19,24 +19,6 @@ from dynamo.runtime import Endpoint
 DYNAMO_COMPONENT_REGISTRY = CollectorRegistry()
 
 
-class NullStatLogger(StatLoggerBase):
-    def __init__(self):
-        pass
-
-    def record(
-        self,
-        scheduler_stats: Optional[SchedulerStats],
-        iteration_stats: Optional[IterationStats],
-        engine_idx: int = 0,
-        *args,
-        **kwargs,
-    ):
-        pass
-
-    def log_engine_initialized(self):
-        pass
-
-
 class DynamoStatLoggerPublisher(StatLoggerBase):
     """Stat logger publisher. Wrapper for the WorkerMetricsPublisher to match the StatLoggerBase interface."""
 
@@ -106,22 +88,17 @@ class StatLoggerFactory:
         self,
         endpoint: Endpoint,
         component_gauges: Optional[LLMBackendMetrics] = None,
-        dp_rank: int = 0,
     ) -> None:
         self.endpoint = endpoint
         self.component_gauges = component_gauges
         self.created_logger: Optional[DynamoStatLoggerPublisher] = None
-        self.dp_rank = dp_rank
 
     def create_stat_logger(self, dp_rank: int) -> StatLoggerBase:
-        if self.dp_rank != dp_rank:
-            return NullStatLogger()
         # component_gauges must be set by setup_vllm_engine() before vLLM
         # calls create_stat_logger() during engine initialization.
         assert (
             self.component_gauges is not None
         ), "component_gauges must be set before creating stat loggers"
-
         logger = DynamoStatLoggerPublisher(
             endpoint=self.endpoint,
             dp_rank=dp_rank,

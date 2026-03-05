@@ -135,7 +135,7 @@ impl PrefillRouter {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub fn new(
         activation_rx: oneshot::Receiver<Endpoint>,
         model_manager: Arc<ModelManager>,
@@ -335,7 +335,7 @@ impl PrefillRouter {
         let host = endpoint.bootstrap_host?;
         let port = endpoint.bootstrap_port?;
 
-        let bootstrap_room: u64 = rand::random_range(0..=i64::MAX as u64);
+        let bootstrap_room: u64 = rand::random_range(0..=i64::MAX.cast_unsigned());
 
         tracing::debug!(
             worker_id = worker_id,
@@ -539,6 +539,7 @@ impl PrefillRouter {
                         update_states,
                         lora_name,
                         priority_jump,
+                        None,
                         allowed_worker_ids,
                     )
                     .await?;

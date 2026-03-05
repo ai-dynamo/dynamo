@@ -48,9 +48,13 @@ func injectFlagsIntoContainerCommand(container *corev1.Container, flags string, 
 		// Direct python command case
 		if needsShell {
 			// Transform to shell wrapper for env var interpretation.
-			// Quote each original arg individually so JSON and other special
+			// Quote each token individually so paths with spaces or special
 			// characters survive shell interpretation.
-			fullCommand := strings.Join(container.Command, " ")
+			quotedCmd := make([]string, len(container.Command))
+			for i, tok := range container.Command {
+				quotedCmd[i] = shellQuoteForBashC(tok)
+			}
+			fullCommand := strings.Join(quotedCmd, " ")
 			quotedArgs := make([]string, len(container.Args))
 			for i, arg := range container.Args {
 				quotedArgs[i] = shellQuoteForBashC(arg)
