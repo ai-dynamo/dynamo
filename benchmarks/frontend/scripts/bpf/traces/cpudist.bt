@@ -1,0 +1,33 @@
+#!/usr/bin/env bpftrace
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+//
+// On-CPU time distribution per thread.
+// Shows how long threads run before being preempted or yielding.
+//
+// Usage: sudo bpftrace cpudist.bt
+
+tracepoint:sched:sched_switch
+{
+    // Record when new thread starts running
+    @start[args.next_pid] = nsecs;
+
+    // Calculate how long prev thread was on-CPU
+    $prev_start = @start[args.prev_pid];
+    if ($prev_start) {
+        @usecs[comm] = hist((nsecs - $prev_start) / 1000);
+        delete(@start[args.prev_pid]);
+    }
+}
+
+interval:s:10
+{
+    printf("\n--- On-CPU Time Distribution (us) by thread ---\n");
+    print(@usecs);
+    clear(@usecs);
+}
+
+END
+{
+    clear(@start);
+}

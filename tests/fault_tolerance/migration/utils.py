@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 class DynamoFrontendProcess(BaseDynamoFrontendProcess):
     """Fault-tolerance frontend wrapper (keeps env settings from the historical helper)."""
 
-    def __init__(self, request, migration_limit: int, enforce_disagg: bool = False):
+    def __init__(self, request, migration_limit: int, decode_fallback: bool = False):
         extra_env = {
             "DYN_REQUEST_PLANE": request.getfixturevalue("request_plane"),
             # These tests expect full control over requests sent to workers. The canary
@@ -29,8 +29,8 @@ class DynamoFrontendProcess(BaseDynamoFrontendProcess):
             "DYN_HEALTH_CHECK_ENABLED": "false",
         }
         extra_args = []
-        if enforce_disagg:
-            extra_args.append("--enforce-disagg")
+        if decode_fallback:
+            extra_args.append("--decode-fallback")
         super().__init__(
             request,
             frontend_port=0,  # allocate a free port (xdist-safe)

@@ -9,13 +9,11 @@ from unittest.mock import Mock, patch
 
 import pytest
 
+from dynamo.planner.utils.decode_planner import DecodePlanner
 from dynamo.planner.utils.exceptions import DeploymentValidationError
-from dynamo.planner.utils.planner_core import (
-    DecodePlanner,
-    PlannerSharedState,
-    PrefillPlanner,
-    _initialize_gpu_counts,
-)
+from dynamo.planner.utils.planner_config import PlannerConfig
+from dynamo.planner.utils.planner_core import PlannerSharedState, _initialize_gpu_counts
+from dynamo.planner.utils.prefill_planner import PrefillPlanner
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -33,32 +31,35 @@ def mock_prometheus_metrics():
         yield
 
 
-def _build_args():
-    args = argparse.Namespace()
-    args.adjustment_interval = 60
-    args.prefill_engine_num_gpu = 1
-    args.decode_engine_num_gpu = 1
-    args.min_endpoint = 1
-    args.max_gpu_budget = -1
-    args.ttft = 500.0
-    args.itl = 50.0
-    args.backend = "vllm"
-    args.no_operation = True
-    args.no_correction = True
-    args.metric_pulling_prometheus_endpoint = "http://localhost:9090"
-    args.metric_reporting_prometheus_port = 0
-    args.load_predictor = "constant"
-    args.load_predictor_warmup_trace = None
-    args.profile_results_dir = os.path.join(
-        os.path.dirname(__file__),
-        "..",
-        "profiling_results",
-        "H200_TP1P_TP1D",
+def _build_config():
+    return PlannerConfig.model_construct(
+        throughput_adjustment_interval=60,
+        prefill_engine_num_gpu=1,
+        decode_engine_num_gpu=1,
+        min_endpoint=1,
+        max_gpu_budget=-1,
+        ttft=500.0,
+        itl=50.0,
+        backend="vllm",
+        no_operation=True,
+        no_correction=True,
+        metric_pulling_prometheus_endpoint="http://localhost:9090",
+        metric_reporting_prometheus_port=0,
+        load_predictor="constant",
+        load_predictor_warmup_trace=None,
+        load_predictor_log1p=False,
+        profile_results_dir=os.path.join(
+            os.path.dirname(__file__),
+            "..",
+            "profiling_results",
+            "H200_TP1P_TP1D",
+        ),
+        environment="kubernetes",
+        namespace="test-namespace",
+        mode="disagg",
+        enable_throughput_scaling=True,
+        enable_load_scaling=False,
     )
-    args.environment = "kubernetes"
-    args.namespace = "test-namespace"
-    args.mode = "disagg"
-    return args
 
 
 def _build_prometheus_client(samples):
@@ -78,12 +79,12 @@ def _build_prometheus_client(samples):
     return client
 
 
-def _build_planners(args, prometheus_client):
+def _build_planners(config, prometheus_client):
     shared_state = PlannerSharedState()
-    prefill_planner = PrefillPlanner(None, args, shared_state=shared_state)
-    decode_planner = DecodePlanner(None, args, shared_state=shared_state)
-    prefill_planner.prometheus_api_client = prometheus_client
-    decode_planner.prometheus_api_client = prometheus_client
+    prefill_planner = PrefillPlanner(None, config, shared_state=shared_state)
+    decode_planner = DecodePlanner(None, config, shared_state=shared_state)
+    prefill_planner.prometheus_traffic_client = prometheus_client
+    decode_planner.prometheus_traffic_client = prometheus_client
     prefill_planner.model_name = "test-model"
     decode_planner.model_name = "test-model"
 
@@ -99,39 +100,39 @@ def _build_planners(args, prometheus_client):
     return prefill_planner, decode_planner, shared_state
 
 
-def _expected_prefill(args, prefill_planner, sample):
+def _expected_prefill(config, prefill_planner, sample):
     pred_prefill_throughput = (
-        sample["num_req"] * sample["isl"] / args.adjustment_interval
+        sample["num_req"] * sample["isl"] / config.throughput_adjustment_interval
     )
     thpt_per_gpu = prefill_planner.prefill_interpolator.interpolate_thpt_per_gpu(
         sample["isl"]
     )
     expected = math.ceil(
-        pred_prefill_throughput / thpt_per_gpu / args.prefill_engine_num_gpu
+        pred_prefill_throughput / thpt_per_gpu / config.prefill_engine_num_gpu
     )
-    return max(expected, args.min_endpoint)
+    return max(expected, config.min_endpoint)
 
 
-def _expected_decode(args, decode_planner, sample):
+def _expected_decode(config, decode_planner, sample):
     (
         pred_decode_thpt_per_gpu,
         _,
         _,
     ) = decode_planner.decode_interpolator.find_best_throughput_per_gpu(
-        itl=args.itl, context_length=sample["isl"] + sample["osl"] / 2
+        itl=config.itl, context_length=sample["isl"] + sample["osl"] / 2
     )
     pred_decode_throughput = (
-        sample["num_req"] * sample["osl"] / args.adjustment_interval
+        sample["num_req"] * sample["osl"] / config.throughput_adjustment_interval
     )
     expected = math.ceil(
-        pred_decode_throughput / pred_decode_thpt_per_gpu / args.decode_engine_num_gpu
+        pred_decode_throughput / pred_decode_thpt_per_gpu / config.decode_engine_num_gpu
     )
-    return max(expected, args.min_endpoint)
+    return max(expected, config.min_endpoint)
 
 
 def _run_interval(prefill_planner, decode_planner, shared_state):
     asyncio.run(
-        prefill_planner.observe_metrics(require_prefill=True, require_decode=True)
+        prefill_planner.observe_traffic_stats(require_prefill=True, require_decode=True)
     )
     decode_planner.update_predictors_from_metrics(shared_state.last_metrics)
     next_num_p = prefill_planner.plan_adjustment()
@@ -140,7 +141,7 @@ def _run_interval(prefill_planner, decode_planner, shared_state):
 
 
 def test_disagg_scale_up():
-    args = _build_args()
+    config = _build_config()
     samples = [
         {
             "num_req": 10,
@@ -160,21 +161,21 @@ def test_disagg_scale_up():
         },
     ]
     client = _build_prometheus_client(samples)
-    prefill_planner, decode_planner, shared_state = _build_planners(args, client)
+    prefill_planner, decode_planner, shared_state = _build_planners(config, client)
 
     low_p, low_d = _run_interval(prefill_planner, decode_planner, shared_state)
     high_p, high_d = _run_interval(prefill_planner, decode_planner, shared_state)
 
-    assert low_p == _expected_prefill(args, prefill_planner, samples[0])
-    assert low_d == _expected_decode(args, decode_planner, samples[0])
-    assert high_p == _expected_prefill(args, prefill_planner, samples[1])
-    assert high_d == _expected_decode(args, decode_planner, samples[1])
+    assert low_p == _expected_prefill(config, prefill_planner, samples[0])
+    assert low_d == _expected_decode(config, decode_planner, samples[0])
+    assert high_p == _expected_prefill(config, prefill_planner, samples[1])
+    assert high_d == _expected_decode(config, decode_planner, samples[1])
     assert high_p > low_p
     assert high_d > low_d
 
 
 def test_disagg_scale_down():
-    args = _build_args()
+    config = _build_config()
     samples = [
         {
             "num_req": 5000,
@@ -194,15 +195,15 @@ def test_disagg_scale_down():
         },
     ]
     client = _build_prometheus_client(samples)
-    prefill_planner, decode_planner, shared_state = _build_planners(args, client)
+    prefill_planner, decode_planner, shared_state = _build_planners(config, client)
 
     high_p, high_d = _run_interval(prefill_planner, decode_planner, shared_state)
     low_p, low_d = _run_interval(prefill_planner, decode_planner, shared_state)
 
-    assert high_p == _expected_prefill(args, prefill_planner, samples[0])
-    assert high_d == _expected_decode(args, decode_planner, samples[0])
-    assert low_p == _expected_prefill(args, prefill_planner, samples[1])
-    assert low_d == _expected_decode(args, decode_planner, samples[1])
+    assert high_p == _expected_prefill(config, prefill_planner, samples[0])
+    assert high_d == _expected_decode(config, decode_planner, samples[0])
+    assert low_p == _expected_prefill(config, prefill_planner, samples[1])
+    assert low_d == _expected_decode(config, decode_planner, samples[1])
     assert low_p < high_p
     assert low_d < high_d
 
@@ -277,7 +278,7 @@ class TestInitializeGpuCounts:
                 args, connector, require_prefill=True, require_decode=True
             )
 
-        assert "prefill-engine-num-gpu" in str(exc_info.value)
+        assert "prefill_engine_num_gpu" in str(exc_info.value)
 
     def test_virtual_mode_missing_decode_raises_error(self):
         """Test that missing decode GPU flag raises error in virtual mode"""
@@ -292,7 +293,7 @@ class TestInitializeGpuCounts:
                 args, connector, require_prefill=True, require_decode=True
             )
 
-        assert "decode-engine-num-gpu" in str(exc_info.value)
+        assert "decode_engine_num_gpu" in str(exc_info.value)
 
     def test_virtual_mode_missing_both_raises_error_with_both_messages(self):
         """Test that missing both GPU flags shows both error messages"""
@@ -377,42 +378,72 @@ class TestInitializeGpuCounts:
                 args, connector, require_prefill=True, require_decode=True
             )
 
-        assert "decode-engine-num-gpu" in str(exc_info.value)
+        assert "decode_engine_num_gpu" in str(exc_info.value)
 
 
 # Tests for dryrun GPU defaults
 class TestDryrunGpuDefaults:
+    @staticmethod
+    def _build_dryrun_config(**overrides) -> PlannerConfig:
+        defaults = dict(
+            throughput_adjustment_interval=60,
+            prefill_engine_num_gpu=1,
+            decode_engine_num_gpu=1,
+            min_endpoint=1,
+            max_gpu_budget=-1,
+            ttft=500.0,
+            itl=50.0,
+            backend="vllm",
+            no_operation=True,
+            no_correction=True,
+            metric_pulling_prometheus_endpoint="http://localhost:9090",
+            metric_reporting_prometheus_port=0,
+            load_predictor="constant",
+            load_predictor_warmup_trace=None,
+            load_predictor_log1p=False,
+            profile_results_dir=os.path.join(
+                os.path.dirname(__file__),
+                "..",
+                "profiling_results",
+                "H200_TP1P_TP1D",
+            ),
+            environment="kubernetes",
+            namespace="test-namespace",
+            mode="disagg",
+            enable_throughput_scaling=True,
+            enable_load_scaling=False,
+        )
+        defaults.update(overrides)
+        return PlannerConfig.model_construct(**defaults)
+
     def test_dryrun_defaults_gpu_counts_when_none(self):
         """Test that dryrun sets default GPU counts of 1 when None"""
         from dynamo.planner.utils.dryrun import run_sla_planner_dryrun
 
-        args = _build_args()
-        args.prefill_engine_num_gpu = None
-        args.decode_engine_num_gpu = None
-        args.dataset = "nonexistent.jsonl"  # Will fail but we check args first
-
-        # The function will set defaults before trying to load dataset
-        try:
-            run_sla_planner_dryrun(args)
-        except (FileNotFoundError, ValueError):
-            pass  # Expected - dataset doesn't exist
-
-        assert args.prefill_engine_num_gpu == 1
-        assert args.decode_engine_num_gpu == 1
-
-    def test_dryrun_preserves_cli_gpu_counts(self):
-        """Test that dryrun preserves GPU counts provided via CLI"""
-        from dynamo.planner.utils.dryrun import run_sla_planner_dryrun
-
-        args = _build_args()
-        args.prefill_engine_num_gpu = 2
-        args.decode_engine_num_gpu = 4
-        args.dataset = "nonexistent.jsonl"
+        config = self._build_dryrun_config(
+            prefill_engine_num_gpu=None, decode_engine_num_gpu=None
+        )
 
         try:
-            run_sla_planner_dryrun(args)
+            run_sla_planner_dryrun(config, dataset="nonexistent.jsonl")
         except (FileNotFoundError, ValueError):
             pass
 
-        assert args.prefill_engine_num_gpu == 2
-        assert args.decode_engine_num_gpu == 4
+        assert config.prefill_engine_num_gpu == 1
+        assert config.decode_engine_num_gpu == 1
+
+    def test_dryrun_preserves_cli_gpu_counts(self):
+        """Test that dryrun preserves GPU counts provided via config"""
+        from dynamo.planner.utils.dryrun import run_sla_planner_dryrun
+
+        config = self._build_dryrun_config(
+            prefill_engine_num_gpu=2, decode_engine_num_gpu=4
+        )
+
+        try:
+            run_sla_planner_dryrun(config, dataset="nonexistent.jsonl")
+        except (FileNotFoundError, ValueError):
+            pass
+
+        assert config.prefill_engine_num_gpu == 2
+        assert config.decode_engine_num_gpu == 4

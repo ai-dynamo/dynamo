@@ -15,7 +15,7 @@ set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
 # Default values
-MODEL_NAME="Qwen/Qwen2.5-VL-7B-Instruct"
+MODEL_NAME="Qwen/Qwen3-VL-30B-A3B-Instruct-FP8"
 
 # Parse command line arguments
 # Extra arguments are passed through to the vLLM worker
@@ -43,6 +43,32 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+HTTP_PORT="${DYN_HTTP_PORT:-8000}"
+echo "=========================================="
+echo "Launching Aggregated Multimodal Serving"
+echo "=========================================="
+echo "Model:       $MODEL_NAME"
+echo "Frontend:    http://localhost:$HTTP_PORT"
+echo "=========================================="
+echo ""
+echo "Example test command:"
+echo ""
+echo "  curl http://localhost:${HTTP_PORT}/v1/chat/completions \\"
+echo "    -H 'Content-Type: application/json' \\"
+echo "    -d '{"
+echo "      \"model\": \"${MODEL_NAME}\","
+echo "      \"messages\": [{"
+echo "        \"role\": \"user\","
+echo "        \"content\": ["
+echo "          {\"type\": \"text\", \"text\": \"Describe the image.\"},"
+echo "          {\"type\": \"image_url\", \"image_url\": {\"url\": \"https://upload.wikimedia.org/wikipedia/commons/thumb/3/3a/Cat03.jpg/480px-Cat03.jpg\"}}"
+echo "        ]"
+echo "      }],"
+echo "      \"max_tokens\": 50"
+echo "    }'"
+echo ""
+echo "=========================================="
+
 # Use TCP transport (instead of default NATS)
 # TCP is preferred for multimodal workloads because it overcomes:
 # - NATS default 1MB max payload limit (multimodal base64 images can exceed this)
@@ -53,7 +79,7 @@ export DYN_REQUEST_PLANE=tcp
 python -m dynamo.frontend &
 
 # Configure GPU memory optimization for specific models (if no extra args override)
-MODEL_SPECIFIC_ARGS=""
+MODEL_SPECIFIC_ARGS="--gpu-memory-utilization 0.85 --max-model-len 16384"
 if [[ "$MODEL_NAME" == "Qwen/Qwen2.5-VL-7B-Instruct" ]]; then
     MODEL_SPECIFIC_ARGS="--gpu-memory-utilization 0.85 --max-model-len 4096"
 elif [[ "$MODEL_NAME" == "llava-hf/llava-1.5-7b-hf" ]]; then
@@ -65,10 +91,10 @@ fi
 # Start vLLM worker with vision model
 # Multimodal data (images) are decoded in the backend worker using ImageLoader
 # --enforce-eager: Quick deployment (remove for production)
-# --connector none: No KV transfer needed for aggregated serving
 # Extra args from command line come last to allow overrides
+CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0} \
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
-    python -m dynamo.vllm --enable-multimodal --model $MODEL_NAME --connector none $MODEL_SPECIFIC_ARGS "${EXTRA_ARGS[@]}"
+    python -m dynamo.vllm --enable-multimodal --model $MODEL_NAME $MODEL_SPECIFIC_ARGS "${EXTRA_ARGS[@]}"
 
 # Wait for all background processes to complete
 wait

@@ -4,22 +4,23 @@
 import asyncio
 import logging
 import socket
-from typing import Any, Optional
+from typing import Any, List, Optional
 
 import sglang as sgl
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import get_local_ip_auto
 
 from dynamo._core import Endpoint
-from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_llm
-from dynamo.sglang.args import DynamoArgs
+from dynamo.common.utils.output_modalities import get_output_modalities
+from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_model
+from dynamo.sglang.args import DynamoConfig
 
 
-async def _register_llm_with_runtime_config(
+async def _register_model_with_runtime_config(
     engine: sgl.Engine,
     endpoint: Endpoint,
     server_args: ServerArgs,
-    dynamo_args: DynamoArgs,
+    dynamo_args: DynamoConfig,
     input_type: Optional[ModelInput] = ModelInput.Tokens,
     output_type: Optional[ModelType] = ModelType.Chat | ModelType.Completions,
 ) -> bool:
@@ -49,7 +50,7 @@ async def _register_llm_with_runtime_config(
             output_type = ModelType.Chat
 
     try:
-        await register_llm(
+        await register_model(
             input_type,
             output_type,
             endpoint,
@@ -144,7 +145,7 @@ def _get_bootstrap_info_for_config(
 
 
 async def _get_runtime_config(
-    engine: sgl.Engine, server_args: ServerArgs, dynamo_args: DynamoArgs
+    engine: sgl.Engine, server_args: ServerArgs, dynamo_args: DynamoConfig
 ) -> Optional[ModelRuntimeConfig]:
     """Extract runtime configuration from SGLang engine and args.
 
@@ -158,8 +159,8 @@ async def _get_runtime_config(
     """
     runtime_config = ModelRuntimeConfig()
     # set reasoning parser and tool call parser
-    runtime_config.reasoning_parser = dynamo_args.reasoning_parser
-    runtime_config.tool_call_parser = dynamo_args.tool_call_parser
+    runtime_config.reasoning_parser = dynamo_args.dyn_reasoning_parser
+    runtime_config.tool_call_parser = dynamo_args.dyn_tool_call_parser
     # Decode workers don't create the WorkerKvQuery endpoint, so don't advertise local indexer
     is_decode_worker = server_args.disaggregation_mode == "decode"
     runtime_config.enable_local_indexer = (
@@ -231,11 +232,11 @@ async def _get_runtime_config(
         return runtime_config
 
 
-async def register_llm_with_readiness_gate(
+async def register_model_with_readiness_gate(
     engine: sgl.Engine,
     generate_endpoint: Endpoint,
     server_args: ServerArgs,
-    dynamo_args: DynamoArgs,
+    dynamo_args: DynamoConfig,
     input_type: Optional[ModelInput] = ModelInput.Tokens,
     output_type: Optional[ModelType] = ModelType.Chat | ModelType.Completions,
     readiness_gate: Optional[asyncio.Event] = None,
@@ -254,7 +255,7 @@ async def register_llm_with_readiness_gate(
     Raises:
         RuntimeError: If model registration fails.
     """
-    registration_success = await _register_llm_with_runtime_config(
+    registration_success = await _register_model_with_runtime_config(
         engine,
         generate_endpoint,
         server_args,
@@ -278,6 +279,7 @@ async def register_image_diffusion_model(
     generator: Any,  # DiffGenerator
     endpoint: Endpoint,
     server_args: ServerArgs,
+    output_modalities: Optional[List[str]] = None,
     readiness_gate: Optional[asyncio.Event] = None,
 ) -> None:
     """Register diffusion model with Dynamo runtime.
@@ -286,18 +288,37 @@ async def register_image_diffusion_model(
         generator: The SGLang DiffGenerator instance.
         endpoint: The Dynamo endpoint for generation requests.
         server_args: SGLang server configuration.
+        output_modalities: Optional list of output modality names to override
+            the default ModelType.Images registration.
         readiness_gate: Optional event to signal when registration completes.
 
     Note:
-        Image diffusion models use ModelInput.Text (text prompts) and ModelType.Images.
+        Image diffusion models use ModelInput.Text (text prompts) and ModelType.Images
+        by default. When output_modalities is provided, the ModelType is derived
+        from the given modality names instead.
     """
     # Use model_path as the model name (diffusion workers don't have served_model_name)
     model_name = server_args.model_path
 
+    model_type = ModelType.Images
+    if output_modalities:
+        resolved = get_output_modalities(output_modalities, model_name)
+        if resolved is not None:
+            model_type = resolved
+            logging.info(
+                "Using output modalities %s for diffusion model registration",
+                output_modalities,
+            )
+        else:
+            logging.warning(
+                "No recognized output modalities from %s, defaulting to ModelType.Images",
+                output_modalities,
+            )
+
     try:
-        await register_llm(
+        await register_model(
             ModelInput.Text,
-            ModelType.Images,
+            model_type,
             endpoint,
             model_name,
             model_name,
@@ -312,3 +333,43 @@ async def register_image_diffusion_model(
         readiness_gate.set()
 
     logging.info(f"Image diffusion model ready: {model_name}")
+
+
+async def register_video_generation_model(
+    generator: Any,  # DiffGenerator
+    endpoint: Endpoint,
+    server_args: ServerArgs,
+    readiness_gate: Optional[asyncio.Event] = None,
+) -> None:
+    """Register video generation model with Dynamo runtime.
+
+    Args:
+        generator: The SGLang DiffGenerator instance (used for video generation).
+        endpoint: The Dynamo endpoint for generation requests.
+        server_args: SGLang server configuration.
+        readiness_gate: Optional event to signal when registration completes.
+
+    Note:
+        Video generation models use ModelInput.Text (text prompts) and ModelType.Videos.
+    """
+    # Use model_path as the model name (video workers don't have served_model_name)
+    model_name = server_args.model_path
+
+    try:
+        await register_model(
+            ModelInput.Text,
+            ModelType.Videos,
+            endpoint,
+            model_name,
+            model_name,
+        )
+        logging.info(f"Successfully registered video generation model: {model_name}")
+    except Exception as e:
+        logging.error(f"Failed to register video generation model: {e}")
+        raise RuntimeError("Video generation model registration failed")
+
+    # Signal readiness
+    if readiness_gate:
+        readiness_gate.set()
+
+    logging.info(f"Video generation model ready: {model_name}")

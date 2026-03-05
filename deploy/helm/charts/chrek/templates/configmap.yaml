@@ -10,52 +10,37 @@ metadata:
     {{- include "chrek.labels" . | nindent 4 }}
 data:
   config.yaml: |
-    # Chrek Configuration
-    # This ConfigMap provides static configuration for the checkpoint agent.
-    # Dynamic values (NODE_NAME, RESTRICTED_NAMESPACE, etc.) come from environment variables.
+    basePath: {{ .Values.storage.pvc.basePath | quote }}
 
-    agent:
-      # How checkpoints are triggered: "http" for REST API, "watcher" for auto-checkpoint
-      signalSource: {{ .Values.config.agent.signalSource | quote }}
-      # Watcher/HTTP server address
-      listenAddr: {{ .Values.config.agent.listenAddr | quote }}
+    overlay:
+      systemDirs: {{ toYaml .Values.config.overlay.systemDirs | nindent 8 }}
+      cacheDirs: {{ toYaml .Values.config.overlay.cacheDirs | nindent 8 }}
+      additionalExclusions: {{ toYaml .Values.config.overlay.additionalExclusions | nindent 8 }}
 
-    checkpoint:
-      # Base path for checkpoint directories (shared PVC mount path)
-      basePath: {{ .Values.storage.pvc.basePath | quote }}
+    restore:
+      nsRestorePath: {{ .Values.config.restore.nsRestorePath | quote }}
+      restoreReadyTimeoutSeconds: {{ .Values.config.restore.restoreReadyTimeoutSeconds }}
 
-      criu:
-        # RPC options
-        ghostLimit: {{ .Values.config.checkpoint.criu.ghostLimit }}
-        timeout: {{ .Values.config.checkpoint.criu.timeout }}
-        logLevel: {{ .Values.config.checkpoint.criu.logLevel }}
-        workDir: {{ .Values.config.checkpoint.criu.workDir | quote }}
-        # K8s-specific options
-        leaveRunning: {{ .Values.config.checkpoint.criu.leaveRunning }}
-        shellJob: {{ .Values.config.checkpoint.criu.shellJob }}
-        tcpClose: {{ .Values.config.checkpoint.criu.tcpClose }}
-        fileLocks: {{ .Values.config.checkpoint.criu.fileLocks }}
-        orphanPtsMaster: {{ .Values.config.checkpoint.criu.orphanPtsMaster }}
-        extUnixSk: {{ .Values.config.checkpoint.criu.extUnixSk }}
-        linkRemap: {{ .Values.config.checkpoint.criu.linkRemap }}
-        extMasters: {{ .Values.config.checkpoint.criu.extMasters }}
-        manageCgroupsMode: {{ .Values.config.checkpoint.criu.manageCgroupsMode | quote }}
-        # Advanced options
-        autoDedup: {{ .Values.config.checkpoint.criu.autoDedup }}
-        lazyPages: {{ .Values.config.checkpoint.criu.lazyPages }}
-        # Config file options (NOT available via RPC)
-        libDir: {{ .Values.config.checkpoint.criu.libDir | quote }}
-        allowUprobes: {{ .Values.config.checkpoint.criu.allowUprobes }}
-        skipInFlight: {{ .Values.config.checkpoint.criu.skipInFlight }}
-
-      rootfsExclusions:
-        # System directories excluded from rootfs diff (NVIDIA GPU Operator injected)
-        systemDirs: {{ toYaml .Values.config.checkpoint.rootfsExclusions.systemDirs | nindent 10 }}
-        # Cache directories to exclude (reduces checkpoint size)
-        cacheDirs: {{ toYaml .Values.config.checkpoint.rootfsExclusions.cacheDirs | nindent 10 }}
-        # Additional custom exclusions
-        additionalExclusions: {{ toYaml .Values.config.checkpoint.rootfsExclusions.additionalExclusions | nindent 10 }}
-
-    # NOTE: Restore runtime configuration is NOT in this ConfigMap.
-    # Placeholder containers do not mount it. Restore uses hardcoded defaults
-    # + operator-injected env vars. CRIU options come from saved checkpoint manifest.
+    criu:
+      binaryPath: {{ .Values.config.criu.binaryPath | quote }}
+      ghostLimit: {{ .Values.config.criu.ghostLimit }}
+      logLevel: {{ .Values.config.criu.logLevel }}
+      workDir: {{ .Values.config.criu.workDir | quote }}
+      leaveRunning: {{ .Values.config.criu.leaveRunning }}
+      shellJob: {{ .Values.config.criu.shellJob }}
+      tcpClose: {{ .Values.config.criu.tcpClose }}
+      fileLocks: {{ .Values.config.criu.fileLocks }}
+      orphanPtsMaster: {{ .Values.config.criu.orphanPtsMaster }}
+      extUnixSk: {{ .Values.config.criu.extUnixSk }}
+      linkRemap: {{ .Values.config.criu.linkRemap }}
+      extMasters: {{ .Values.config.criu.extMasters }}
+      manageCgroupsMode: {{ .Values.config.criu.manageCgroupsMode | quote }}
+      rstSibling: {{ .Values.config.criu.rstSibling }}
+      mntnsCompatMode: {{ .Values.config.criu.mntnsCompatMode }}
+      evasiveDevices: {{ .Values.config.criu.evasiveDevices }}
+      forceIrmap: {{ .Values.config.criu.forceIrmap }}
+      autoDedup: {{ .Values.config.criu.autoDedup }}
+      lazyPages: {{ .Values.config.criu.lazyPages }}
+      libDir: {{ .Values.config.criu.libDir | quote }}
+      allowUprobes: {{ .Values.config.criu.allowUprobes }}
+      skipInFlight: {{ .Values.config.criu.skipInFlight }}

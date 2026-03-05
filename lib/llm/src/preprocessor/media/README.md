@@ -33,7 +33,7 @@ If `enable_image` or `enable_video` are not called, requests containing the corr
 Register the LLM as usual, adding the media configuration:
 
 ```python
-register_llm(
+register_model(
   ...,
   media_decoder=decoder,
   media_fetcher=fetcher,

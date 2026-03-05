@@ -11,16 +11,12 @@ pub use crate::protocols::common::timing::TimingInfo;
 
 pub const HEADER_WORKER_INSTANCE_ID: &str = "x-worker-instance-id";
 pub const HEADER_PREFILL_INSTANCE_ID: &str = "x-prefill-instance-id";
-/// Header to disable local bookkeeping updates (for GAIE Stage 2)
-/// When set to "false", the router skips add_request, mark_prefill_completed, and free calls.
-pub const HEADER_ENABLE_LOCAL_UPDATES: &str = "x-enable-local-updates";
 
 /// Apply routing overrides from HTTP headers to nvext.
 ///
 /// Header mappings:
 /// - `x-worker-instance-id` -> `backend_instance_id` and `decode_worker_id`
 /// - `x-prefill-instance-id` -> `prefill_worker_id`
-/// - `x-enable-local-updates` -> `enable_local_updates` (set to false to disable router bookkeeping)
 ///
 /// Headers take priority over existing nvext values when present.
 /// If no headers are present, returns the original nvext unchanged.
@@ -35,17 +31,7 @@ pub fn apply_header_routing_overrides(nvext: Option<NvExt>, headers: &HeaderMap)
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse::<u64>().ok());
 
-    // Parse enable_local_updates header: "true" or "false"
-    let enable_local_updates = headers
-        .get(HEADER_ENABLE_LOCAL_UPDATES)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| match s.to_lowercase().as_str() {
-            "true" | "1" => Some(true),
-            "false" | "0" => Some(false),
-            _ => None,
-        });
-
-    if worker_id.is_none() && prefill_id.is_none() && enable_local_updates.is_none() {
+    if worker_id.is_none() && prefill_id.is_none() {
         return nvext;
     }
 
@@ -57,15 +43,19 @@ pub fn apply_header_routing_overrides(nvext: Option<NvExt>, headers: &HeaderMap)
     if let Some(id) = prefill_id {
         ext.prefill_worker_id = Some(id);
     }
-    if let Some(enabled) = enable_local_updates {
-        ext.enable_local_updates = Some(enabled);
-    }
     Some(ext)
 }
 
 pub trait NvExtProvider {
     fn nvext(&self) -> Option<&NvExt>;
     fn raw_prompt(&self) -> Option<String>;
+
+    /// Return the effective cache control for this request.
+    /// Default: delegates to `nvext.cache_control`. Implementations may override
+    /// to also check a top-level `cache_control` field (see `NvCreateChatCompletionRequest`).
+    fn effective_cache_control(&self) -> Option<&CacheControl> {
+        self.nvext().and_then(|ext| ext.cache_control.as_ref())
+    }
 }
 
 /// Worker ID information for disaggregated serving
@@ -104,6 +94,10 @@ pub struct NvExtResponse {
     /// Contains the tokenized prompt for reuse in Stage 2
     #[serde(skip_serializing_if = "Option::is_none")]
     pub token_ids: Option<Vec<u32>>,
+
+    /// Routed expert capture payload (SGLang-specific)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub routed_experts: Option<serde_json::Value>,
 }
 
 /// NVIDIA LLM extensions to the OpenAI API
@@ -152,7 +146,8 @@ pub struct NvExt {
 
     /// Extra fields to be included in the response's nvext
     /// This is a list of field names that should be populated in the response
-    /// Supported fields: "worker_id", "timing", which has a 1:1 mapping with the NvExtResponse names
+    /// Supported fields include "worker_id", "timing", "routed_experts",
+    /// which map to fields in NvExtResponse.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[builder(default, setter(strip_option))]
     pub extra_fields: Option<Vec<String>>,
@@ -169,22 +164,93 @@ pub struct NvExt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decode_worker_id: Option<u64>,
 
-    /// Controls whether the router should manage local bookkeeping (add_request,
-    /// mark_prefill_completed, free) for this request.
-    ///
-    /// - `None` or `true`: Router handles bookkeeping locally (default behavior)
-    /// - `false`: External caller (e.g., GAIE sidecar) handles bookkeeping via C FFI
-    ///
-    /// Set to `false` for GAIE Stage 2 when the EPP/sidecar manages request lifecycle.
+    /// Agent-provided hints for request handling.
     #[builder(default, setter(strip_option))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub enable_local_updates: Option<bool>,
+    pub agent_hints: Option<AgentHints>,
 
-    /// Expected number of output tokens for this request.
-    /// Used as a hint for routing decisions to estimate resource requirements.
+    /// Cache control hint (Anthropic-style). When present, the router pins
+    /// the prefix on the selected worker with the given TTL.
     #[builder(default, setter(strip_option))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expected_output_tokens: Option<u32>,
+    pub cache_control: Option<CacheControl>,
+}
+
+/// Hints from the agent/caller about request characteristics.
+#[derive(ToSchema, Serialize, Deserialize, Builder, Debug, Clone, Default, PartialEq)]
+pub struct AgentHints {
+    /// Latency sensitivity in seconds for queue ordering.
+    /// Higher values cause the request to be scheduled sooner when the router queue is enabled.
+    #[builder(default, setter(strip_option))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency_sensitivity: Option<f64>,
+
+    /// Expected output sequence length (number of output tokens).
+    /// Used as a hint for routing decisions to estimate resource requirements
+    /// and for output block tracking decay.
+    #[builder(default, setter(strip_option))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub osl: Option<u32>,
+
+    /// When true, after the assistant turn completes, the system will speculatively
+    /// prefill the predicted next-turn prefix (conversation history with thinking
+    /// content stripped) on a worker to warm the KV cache for the next request.
+    #[builder(default, setter(strip_option))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speculative_prefill: Option<bool>,
+
+    /// Backend engine scheduling priority.
+    /// Forwarded to the engine's generate call for queue ordering, KV cache eviction,
+    /// and preemption decisions. Interpretation is backend-specific:
+    /// vLLM uses lower-is-higher, SGLang uses higher-is-higher (configurable).
+    #[builder(default, setter(strip_option))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i32>,
+}
+
+/// Anthropic-style cache control hint for prefix pinning with TTL.
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
+pub struct CacheControl {
+    #[serde(rename = "type")]
+    pub control_type: CacheControlType,
+    /// TTL as seconds (integer) or shorthand ("5m" = 300s, "1h" = 3600s). Clamped to [300, 3600].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl: Option<String>,
+}
+
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum CacheControlType {
+    #[default]
+    Ephemeral,
+    #[serde(other)]
+    Unknown,
+}
+
+const MIN_TTL_SECONDS: u64 = 300;
+const MAX_TTL_SECONDS: u64 = 3600;
+
+impl CacheControl {
+    /// Parse TTL string to seconds, clamped to [300, 3600].
+    ///
+    /// Accepts integer seconds ("120", "600") or shorthand ("5m", "1h").
+    /// Values below 300 are clamped to 300; values above 3600 are clamped to 3600.
+    /// Unrecognized strings default to 300s.
+    pub fn ttl_seconds(&self) -> u64 {
+        let raw = match self.ttl.as_deref() {
+            None => return MIN_TTL_SECONDS,
+            Some("5m") => 300,
+            Some("1h") => 3600,
+            Some(other) => match other.parse::<u64>() {
+                Ok(secs) => secs,
+                Err(_) => {
+                    tracing::warn!("Unrecognized TTL '{}', defaulting to 300s", other);
+                    return MIN_TTL_SECONDS;
+                }
+            },
+        };
+        raw.clamp(MIN_TTL_SECONDS, MAX_TTL_SECONDS)
+    }
 }
 
 impl Default for NvExt {
@@ -233,8 +299,75 @@ mod tests {
         assert_eq!(nv_ext.extra_fields, None);
         assert_eq!(nv_ext.prefill_worker_id, None);
         assert_eq!(nv_ext.decode_worker_id, None);
-        assert_eq!(nv_ext.enable_local_updates, None);
-        assert_eq!(nv_ext.expected_output_tokens, None);
+        assert_eq!(nv_ext.agent_hints, None);
+        assert_eq!(nv_ext.cache_control, None);
+    }
+
+    // Test CacheControl serde roundtrip and TTL parsing
+    #[test]
+    fn test_cache_control_serde_and_ttl() {
+        // Default (ephemeral, no TTL)
+        let cc = CacheControl::default();
+        assert_eq!(cc.control_type, CacheControlType::Ephemeral);
+        assert_eq!(cc.ttl, None);
+        assert_eq!(cc.ttl_seconds(), 300);
+
+        // Shorthand values
+        let cc_5m = CacheControl {
+            control_type: CacheControlType::Ephemeral,
+            ttl: Some("5m".to_string()),
+        };
+        assert_eq!(cc_5m.ttl_seconds(), 300);
+
+        let cc_1h = CacheControl {
+            control_type: CacheControlType::Ephemeral,
+            ttl: Some("1h".to_string()),
+        };
+        assert_eq!(cc_1h.ttl_seconds(), 3600);
+
+        // Integer seconds -- within range
+        let cc_600 = CacheControl {
+            control_type: CacheControlType::Ephemeral,
+            ttl: Some("600".to_string()),
+        };
+        assert_eq!(cc_600.ttl_seconds(), 600);
+
+        // Integer seconds -- clamped to min (300)
+        let cc_low = CacheControl {
+            control_type: CacheControlType::Ephemeral,
+            ttl: Some("10".to_string()),
+        };
+        assert_eq!(cc_low.ttl_seconds(), 300);
+
+        // Integer seconds -- clamped to max (3600)
+        let cc_high = CacheControl {
+            control_type: CacheControlType::Ephemeral,
+            ttl: Some("7200".to_string()),
+        };
+        assert_eq!(cc_high.ttl_seconds(), 3600);
+
+        // Unrecognized string defaults to 300
+        let cc_bad = CacheControl {
+            control_type: CacheControlType::Ephemeral,
+            ttl: Some("forever".to_string()),
+        };
+        assert_eq!(cc_bad.ttl_seconds(), 300);
+
+        // Serde roundtrip
+        let json = serde_json::to_string(&cc_5m).unwrap();
+        let deser: CacheControl = serde_json::from_str(&json).unwrap();
+        assert_eq!(deser, cc_5m);
+
+        // Deserialize from API-style JSON
+        let api_json = r#"{"type": "ephemeral", "ttl": "1h"}"#;
+        let from_api: CacheControl = serde_json::from_str(api_json).unwrap();
+        assert_eq!(from_api.ttl_seconds(), 3600);
+
+        // NvExt with cache_control
+        let nvext_json = r#"{"cache_control": {"type": "ephemeral", "ttl": "5m"}}"#;
+        let nvext: NvExt = serde_json::from_str(nvext_json).unwrap();
+        assert!(nvext.cache_control.is_some());
+        assert_eq!(nvext.cache_control.unwrap().ttl_seconds(), 300);
     }
 
     // Test valid builder configurations

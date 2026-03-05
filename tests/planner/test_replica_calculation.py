@@ -8,7 +8,6 @@ These tests focus specifically on the replica calculation formulas without
 testing load prediction, interpolation, or correction factors.
 """
 
-import argparse
 import asyncio
 import math
 import os
@@ -16,13 +15,14 @@ from unittest.mock import Mock, patch
 
 import pytest
 
+from dynamo.planner.utils.decode_planner import DecodePlanner
+from dynamo.planner.utils.planner_config import PlannerConfig
 from dynamo.planner.utils.planner_core import (
-    DecodePlanner,
-    Metrics,
     PlannerSharedState,
-    PrefillPlanner,
     _apply_global_gpu_budget,
 )
+from dynamo.planner.utils.prefill_planner import PrefillPlanner
+from dynamo.planner.utils.prometheus import Metrics
 
 pytestmark = [pytest.mark.pre_merge, pytest.mark.gpu_0]
 
@@ -48,7 +48,7 @@ class PlannerHarness:
             return
 
         next_num_p, next_num_d = _apply_global_gpu_budget(
-            next_num_p, next_num_d, self.prefill_planner.args
+            next_num_p, next_num_d, self.prefill_planner.config
         )
         self.prefill_planner.update_predicted_replicas_metric(next_num_p)
         self.decode_planner.update_predicted_replicas_metric(next_num_d)
@@ -67,7 +67,7 @@ class PlannerHarness:
         ]
         self.last_target_replicas = target_replicas
 
-        if not self.prefill_planner.args.no_operation:
+        if not self.prefill_planner.config.no_operation:
             await self.prefill_planner.connector.set_component_replicas(
                 target_replicas, blocking=False
             )
@@ -78,8 +78,8 @@ class PlannerHarness:
             "isl_predictor",
             "osl_predictor",
             "connector",
-            "prometheus_api_client",
-            "args",
+            "prometheus_traffic_client",
+            "config",
         }
         prefill_attrs = {
             "prefill_interpolator",
@@ -111,8 +111,8 @@ class PlannerHarness:
             "isl_predictor",
             "osl_predictor",
             "connector",
-            "prometheus_api_client",
-            "args",
+            "prometheus_traffic_client",
+            "config",
             "get_workers_info",
         }
         prefill_attrs = {"prefill_interpolator", "p_correction_factor"}
@@ -145,29 +145,31 @@ def _replica_count(target_replicas, component_name, default=1):
 @pytest.fixture
 def planner():
     """Set up test environment with mocked dependencies."""
-    # Create mock arguments
-    args = argparse.Namespace()
-    args.adjustment_interval = 60
-    args.prefill_engine_num_gpu = 1
-    args.decode_engine_num_gpu = 1
-    args.min_endpoint = 1
-    args.max_gpu_budget = 10
-    args.ttft = 80.0  # ms
-    args.itl = 10.0  # ms
-    args.backend = "vllm"
-    args.no_operation = True  # Don't actually scale
-    args.no_correction = False  # Allow correction factors
-    args.metric_pulling_prometheus_endpoint = "http://localhost:9090"  # dummy endpoint
-    args.metric_reporting_prometheus_port = 0  # 0 means disabled
-    args.load_predictor = "constant"
-    args.load_prediction_window_size = 10
-    args.profile_results_dir = os.path.join(
-        os.path.dirname(__file__),
-        "profiling_results/H200_TP1P_TP1D",
+    config = PlannerConfig.model_construct(
+        throughput_adjustment_interval=60,
+        prefill_engine_num_gpu=1,
+        decode_engine_num_gpu=1,
+        min_endpoint=1,
+        max_gpu_budget=10,
+        ttft=80.0,
+        itl=10.0,
+        backend="vllm",
+        no_operation=True,
+        no_correction=False,
+        metric_pulling_prometheus_endpoint="http://localhost:9090",
+        metric_reporting_prometheus_port=0,
+        load_predictor="constant",
+        profile_results_dir=os.path.join(
+            os.path.dirname(__file__),
+            "profiling_results/H200_TP1P_TP1D",
+        ),
+        environment="kubernetes",
+        namespace="test-namespace",
+        enable_throughput_scaling=True,
+        enable_load_scaling=False,
+        load_predictor_warmup_trace=None,
+        load_predictor_log1p=False,
     )
-    args.environment = "kubernetes"
-    args.namespace = "test-namespace"  # Required for Planner.__init__
-    args.no_correction = False  # Required for Planner.__init__
 
     # Mock the runtime
     mock_runtime = Mock()
@@ -177,8 +179,10 @@ def planner():
         mock_gauge.return_value = Mock()
 
         shared_state = PlannerSharedState()
-        prefill_planner = PrefillPlanner(mock_runtime, args, shared_state=shared_state)
-        decode_planner = DecodePlanner(mock_runtime, args, shared_state=shared_state)
+        prefill_planner = PrefillPlanner(
+            mock_runtime, config, shared_state=shared_state
+        )
+        decode_planner = DecodePlanner(mock_runtime, config, shared_state=shared_state)
         planner = PlannerHarness(prefill_planner, decode_planner, shared_state)
 
         # Mock the interpolators to return fixed values for testing
@@ -194,14 +198,13 @@ def planner():
         planner.connector = Mock()
 
         # Mock prometheus client
-        planner.prometheus_api_client = Mock()
+        planner.prometheus_traffic_client = Mock()
 
         # Set up some baseline correction factors
         planner.p_correction_factor = 1.0
         planner.d_correction_factor = 1.0
 
-        # Store args for easy access in tests
-        planner.args = args
+        planner.config = config
 
         yield planner
         # Cleanup is automatic with context manager
@@ -239,13 +242,13 @@ class TestReplicaCalculation:
         pred_prefill_load_per_gpu = (
             next_num_req
             * next_isl
-            / planner.args.adjustment_interval
+            / planner.config.throughput_adjustment_interval
             * min(1, planner.p_correction_factor)
         )
         expected_prefill_replicas = math.ceil(
             pred_prefill_load_per_gpu
             / prefill_thpt_per_gpu
-            / planner.args.prefill_engine_num_gpu
+            / planner.config.prefill_engine_num_gpu
         )
 
         # Set up valid metrics to trigger calculation
@@ -277,7 +280,7 @@ class TestReplicaCalculation:
 
         # Allow for small differences due to min_endpoint constraints
         assert (
-            max(expected_prefill_replicas, planner.args.min_endpoint)
+            max(expected_prefill_replicas, planner.config.min_endpoint)
             == calculated_prefill_replicas
         )
 
@@ -308,9 +311,9 @@ class TestReplicaCalculation:
         expected_decode_replicas = math.ceil(
             next_num_req
             * next_osl
-            / planner.args.adjustment_interval
+            / planner.config.throughput_adjustment_interval
             / decode_thpt_per_gpu
-            / planner.args.decode_engine_num_gpu
+            / planner.config.decode_engine_num_gpu
         )
 
         # Set up valid metrics
@@ -341,7 +344,7 @@ class TestReplicaCalculation:
 
         # Allow for small differences due to min_endpoint constraints
         assert (
-            max(expected_decode_replicas, planner.args.min_endpoint)
+            max(expected_decode_replicas, planner.config.min_endpoint)
             == calculated_decode_replicas
         )
 
@@ -426,7 +429,7 @@ class TestReplicaCalculation:
     def test_gpu_budget_constraint(self, planner):
         """Test that GPU budget constraints are properly applied."""
         # Set a low GPU budget
-        planner.args.max_gpu_budget = 3
+        planner.config.max_gpu_budget = 3
 
         # Mock predictor outputs that would normally require more GPUs
         planner.num_req_predictor.predict_next.return_value = 50  # High load
@@ -467,8 +470,8 @@ class TestReplicaCalculation:
             planner.last_target_replicas, "VllmDecodeWorker"
         )
         total_gpus = (
-            prefill_replicas * planner.args.prefill_engine_num_gpu
-            + decode_replicas * planner.args.decode_engine_num_gpu
+            prefill_replicas * planner.config.prefill_engine_num_gpu
+            + decode_replicas * planner.config.decode_engine_num_gpu
         )
 
         print(
@@ -476,7 +479,7 @@ class TestReplicaCalculation:
         )
 
         assert (
-            total_gpus <= planner.args.max_gpu_budget
+            total_gpus <= planner.config.max_gpu_budget
         ), "Total GPU usage exceeds budget"
 
     @pytest.mark.nightly
@@ -484,7 +487,7 @@ class TestReplicaCalculation:
     @pytest.mark.performance
     def test_min_endpoint_constraint(self, planner):
         """Test that minimum endpoint constraints are respected."""
-        planner.args.min_endpoint = 2
+        planner.config.min_endpoint = 2
 
         # Mock predictor outputs that would normally require fewer workers
         planner.num_req_predictor.predict_next.return_value = 1  # Very low load
@@ -527,10 +530,10 @@ class TestReplicaCalculation:
         print(f"Min endpoint test: P={prefill_replicas}, D={decode_replicas}")
 
         assert (
-            prefill_replicas >= planner.args.min_endpoint
+            prefill_replicas >= planner.config.min_endpoint
         ), "Prefill replicas below minimum"
         assert (
-            decode_replicas >= planner.args.min_endpoint
+            decode_replicas >= planner.config.min_endpoint
         ), "Decode replicas below minimum"
 
     @pytest.mark.nightly
@@ -573,10 +576,13 @@ class TestReplicaCalculation:
         # Calculate expected result manually with clamping
         # Should use min(1, 2.5) = 1
         pred_prefill_load_per_gpu = (
-            10 * 3000 / planner.args.adjustment_interval * min(1, 2.5)  # Should be * 1
+            10
+            * 3000
+            / planner.config.throughput_adjustment_interval
+            * min(1, 2.5)  # Should be * 1
         )
         expected_prefill_replicas = math.ceil(
-            pred_prefill_load_per_gpu / 40000 / planner.args.prefill_engine_num_gpu
+            pred_prefill_load_per_gpu / 40000 / planner.config.prefill_engine_num_gpu
         )
 
         # Run calculation
@@ -592,7 +598,7 @@ class TestReplicaCalculation:
         )
 
         assert prefill_replicas == max(
-            expected_prefill_replicas, planner.args.min_endpoint
+            expected_prefill_replicas, planner.config.min_endpoint
         ), "Prefill correction factor should be clamped to 1"
 
     @pytest.mark.nightly
@@ -662,8 +668,8 @@ class TestReplicaCalculation:
     def test_multi_gpu_engines(self, planner):
         """Test replica calculation with multi-GPU engines."""
         # Set multi-GPU configuration
-        planner.args.prefill_engine_num_gpu = 2
-        planner.args.decode_engine_num_gpu = 4
+        planner.config.prefill_engine_num_gpu = 2
+        planner.config.decode_engine_num_gpu = 4
 
         # Mock predictor outputs
         planner.num_req_predictor.predict_next.return_value = 20
@@ -694,13 +700,15 @@ class TestReplicaCalculation:
         planner.decode_interpolator.interpolate_itl.return_value = 10.0
 
         # Calculate expected results manually
-        pred_prefill_load_per_gpu = 20 * 3000 / planner.args.adjustment_interval * 1.0
+        pred_prefill_load_per_gpu = (
+            20 * 3000 / planner.config.throughput_adjustment_interval * 1.0
+        )
         expected_prefill_replicas = math.ceil(
             pred_prefill_load_per_gpu / 40000 / 2
         )  # 2 GPUs per engine
 
         expected_decode_replicas = math.ceil(
-            20 * 150 / planner.args.adjustment_interval / 5000 / 4
+            20 * 150 / planner.config.throughput_adjustment_interval / 5000 / 4
         )  # 4 GPUs per engine
 
         # Run calculation
@@ -718,10 +726,10 @@ class TestReplicaCalculation:
 
         # Verify calculations account for multiple GPUs per engine
         assert prefill_replicas == max(
-            expected_prefill_replicas, planner.args.min_endpoint
+            expected_prefill_replicas, planner.config.min_endpoint
         )
         assert decode_replicas == max(
-            expected_decode_replicas, planner.args.min_endpoint
+            expected_decode_replicas, planner.config.min_endpoint
         )
 
     @pytest.mark.weekly
@@ -730,10 +738,10 @@ class TestReplicaCalculation:
     def test_complex_gpu_budget_scaling(self, planner):
         """Test complex GPU budget scaling with proportional reduction and decode adjustment."""
         # Set tight GPU budget that will trigger complex scaling
-        planner.args.max_gpu_budget = 5
-        planner.args.prefill_engine_num_gpu = 2
-        planner.args.decode_engine_num_gpu = 2
-        planner.args.min_endpoint = 1
+        planner.config.max_gpu_budget = 5
+        planner.config.prefill_engine_num_gpu = 2
+        planner.config.decode_engine_num_gpu = 2
+        planner.config.min_endpoint = 1
 
         # High load that would normally require more GPUs
         planner.num_req_predictor.predict_next.return_value = 100
@@ -774,8 +782,8 @@ class TestReplicaCalculation:
         )
         # Verify total GPU usage doesn't exceed budget
         total_gpus = (
-            prefill_replicas * planner.args.prefill_engine_num_gpu
-            + decode_replicas * planner.args.decode_engine_num_gpu
+            prefill_replicas * planner.config.prefill_engine_num_gpu
+            + decode_replicas * planner.config.decode_engine_num_gpu
         )
 
         print(
@@ -783,13 +791,13 @@ class TestReplicaCalculation:
         )
 
         assert (
-            total_gpus <= planner.args.max_gpu_budget
+            total_gpus <= planner.config.max_gpu_budget
         ), "Total GPU usage should not exceed budget"
         assert (
-            prefill_replicas >= planner.args.min_endpoint
+            prefill_replicas >= planner.config.min_endpoint
         ), "Should respect min_endpoint for prefill"
         assert (
-            decode_replicas >= planner.args.min_endpoint
+            decode_replicas >= planner.config.min_endpoint
         ), "Should respect min_endpoint for decode"
 
 

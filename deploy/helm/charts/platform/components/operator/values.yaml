@@ -16,6 +16,11 @@
 # This is a YAML-formatted file.
 # Declare variables to be passed into your templates.
 
+# Whether to apply CRDs via an init container on the operator Deployment.
+# Uses server-side apply with the bundled /crd-apply binary.
+# Set to false if CRDs are managed externally (e.g., via GitOps or a separate pipeline).
+upgradeCRD: true
+
 # Namespace restriction configuration for the operator
 # If enabled: true and targetNamespace is empty, the operator will be restricted to the release namespace
 # If enabled: true and targetNamespace is set, the operator will be restricted to the specified namespace
@@ -31,6 +36,13 @@ namespaceRestriction:
     duration: 30s
     # Interval for renewing the namespace scope marker lease (namespace-restricted mode only). The namespace-restricted operator renews its lease at this interval to signal it's still running.
     renewInterval: 10s
+# -- GPU discovery configuration (only applies when namespaceRestriction.enabled=true)
+gpuDiscovery:
+  # -- Whether to provision a ClusterRole for the namespace-scoped operator to read GPU node labels.
+  # When true (default), Helm creates a ClusterRole/ClusterRoleBinding granting node read access.
+  # Set to false if your installer lacks ClusterRole creation permissions; you must then provide
+  # hardware config manually in each DynamoGraphDeploymentRequest.
+  enabled: true
 controllerManager:
   tolerations: []
   affinity: {}
@@ -70,11 +82,6 @@ controllerManager:
         cpu: 5m
         memory: 64Mi
   manager:
-    args:
-    - --health-probe-bind-address=:8081
-    - --metrics-bind-address=127.0.0.1:8080
-    - --leader-elect
-    - --leader-election-id=dynamo.nvidia.com
     containerSecurityContext:
       allowPrivilegeEscalation: false
       capabilities:
@@ -102,11 +109,6 @@ dynamo:
 
   groveTerminationDelay: 15m
 
-  internalImages:
-    debugger: python:3.12-slim
-
-  enableRestrictedSecurityContext: false
-
   dockerRegistry:
     server: ''
     # set to true if you want to use the kubernetes secret for the registry credentials
@@ -119,6 +121,12 @@ dynamo:
 
   metrics:
     prometheusEndpoint: ""
+    podMonitors:
+      # -- Whether to create PodMonitor resources for Prometheus scraping of dynamo components.
+      # null=auto-detect (creates PodMonitors if prometheus-operator CRDs exist in cluster),
+      # true=always create (use for helm template / GitOps workflows),
+      # false=never create
+      enabled: null
 
   mpiRun:
     secretName: "mpi-run-ssh-secret"
@@ -128,8 +136,13 @@ dynamo:
 
 #imagePullSecrets: []
 kubernetesClusterDomain: cluster.local
+
 metricsService:
-  enabled: true
+  # -- Whether to create the operator metrics Service and ServiceMonitor.
+  # null=auto-detect (Service always created; ServiceMonitor created if prometheus-operator CRDs exist),
+  # true=always create both (use for helm template / GitOps workflows),
+  # false=never create either
+  enabled: null
   ports:
   - name: https
     port: 8443
@@ -153,17 +166,9 @@ checkpoint:
   # Enable checkpoint/restore functionality
   enabled: false
 
-  # Image used for init containers in checkpoint jobs (e.g., signal file cleanup)
-  # Defaults to busybox:latest if not specified
-  initContainerImage: "busybox:latest"
-
   # Path written by worker when model is loaded and ready for checkpointing
   # Must match the path expected by checkpoint-enabled runtime images
   readyForCheckpointFilePath: "/tmp/ready-for-checkpoint"
-
-  # Path written by restore-entrypoint after successful CRIU restore
-  # Must match the path expected by checkpoint-enabled runtime images
-  restoreMarkerFilePath: "/tmp/dynamo-restored"
 
   # Storage configuration
   # These settings tell the operator where to find checkpoint storage
@@ -171,9 +176,6 @@ checkpoint:
   storage:
     # Storage backend type: pvc, s3, or oci
     type: pvc
-
-    # Host path for signal files (communication between checkpoint pod and DaemonSet)
-    signalHostPath: "/var/lib/chrek/signals"
 
     # PVC configuration (used when type=pvc)
     pvc:
@@ -206,35 +208,22 @@ checkpoint:
 
 # Webhook configuration
 webhook:
-  # Enable admission webhooks for validation
-  # Enabled by default for production-ready validation and better error reporting
-  enabled: true
-
   # Certificate configuration
   certificateSecret:
-    # Name of the secret containing webhook TLS certificates
-    # The secret must contain: tls.crt, tls.key, and ca.crt
+    # Name of the Kubernetes Secret holding webhook TLS certificates.
+    # In auto mode, the operator creates and manages this secret at runtime.
+    # In cert-manager mode, cert-manager provisions it.
+    # In external mode, you must create and populate it yourself.
     name: webhook-server-cert
 
     # Set to true if you're managing the certificate secret externally
-    # When false (default), certificates are auto-generated via Helm hooks
+    # (e.g., provisioned by an admin or another pipeline).
+    # When true, the operator operates in manual cert mode and expects
+    # the secret to exist with tls.crt, tls.key, and ca.crt.
     external: false
 
-  # Certificate validity duration (in days) for auto-generated certificates
-  # Only used when certManager.enabled=false and certificateSecret.external=false
-  certificateValidity: 365
-
-  # Container image for certificate generation and CA injection jobs
-  # Only used when certManager.enabled=false and certificateSecret.external=false
-  certGenerator:
-    image:
-      repository: bitnami/kubectl
-      tag: latest
-      pullPolicy: IfNotPresent
-
   # CA bundle for webhook (base64 encoded)
-  # Only used when certificateSecret.external=true
-  # For automatic mode or cert-manager, leave empty
+  # Only used when certificateSecret.external=true and cert-manager is not enabled.
   caBundle: ""
 
   # Webhook failure policy
@@ -258,11 +247,12 @@ webhook:
   # For NAMESPACE-RESTRICTED operators: Leave empty (auto-configured)
   namespaceSelector: {}
 
-  # cert-manager integration (optional)
+  # cert-manager integration (optional, alternative to built-in cert-controller)
+  # When enabled, the operator runs in manual cert mode and relies on
+  # cert-manager to provision and rotate the webhook TLS secret.
   certManager:
-    # Enable cert-manager for automatic certificate management
+    # Enable cert-manager for certificate management
     # Requires cert-manager to be installed in the cluster
-    # When enabled, disables automatic certificate generation
     enabled: false
 
     # Certificate configuration for cert-manager

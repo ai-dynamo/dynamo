@@ -46,7 +46,7 @@ spec:
             - /bin/sh
             - -c
           args:
-            - "python3 -m dynamo.frontend --http-port 8000 --kv-cache-block-size 128 --router-mode kv --kv-overlap-score-weight 0.0 --router-temperature 0.0 --no-kv-events"
+            - "python3 -m dynamo.frontend --http-port 8000 --kv-cache-block-size 128 --router-mode kv --router-kv-overlap-score-weight 0.0 --router-temperature 0.0 --no-router-kv-events"
     Planner:
       envFromSecret: hf-token-secret
       componentType: planner
@@ -196,7 +196,8 @@ spec:
             - dynamo.vllm
             - --model
             - nvidia/Llama-3.1-8B-Instruct-FP8
-            - --is-prefill-worker
+            - --disaggregation-mode
+            - prefill
             - --no-enable-prefix-caching
             - --block-size
             - "128"

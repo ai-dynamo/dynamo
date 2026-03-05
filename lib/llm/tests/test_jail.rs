@@ -64,6 +64,7 @@ mod tests {
                 id: None,
                 event: None,
                 comment: None,
+                error: None,
             }
         }
 
@@ -104,6 +105,7 @@ mod tests {
                 id: None,
                 event: None,
                 comment: None,
+                error: None,
             }
         }
 
@@ -148,6 +150,7 @@ mod tests {
                 id,
                 event,
                 comment,
+                error: None,
             }
         }
 
@@ -193,6 +196,7 @@ mod tests {
                 id: None,
                 event: None,
                 comment: None,
+                error: None,
             }
         }
 
@@ -238,6 +242,7 @@ mod tests {
                 id: None,
                 event: None,
                 comment: None,
+                error: None,
             }
         }
 
@@ -2395,6 +2400,7 @@ mod parallel_jail_tests {
             id: None,
             event: None,
             comment: None,
+            error: None,
         }
     }
 

@@ -236,6 +236,21 @@ impl CacheStatsTracker {
     }
 }
 
+#[cfg(test)]
+impl CacheStatsTracker {
+    fn new_with_capacity(max_recent_requests: usize) -> Self {
+        Self {
+            max_recent_requests,
+            entries: Mutex::new(VecDeque::new()),
+            aggregated: Mutex::new(AggregatedStats::default()),
+            last_log_time: Mutex::new(Instant::now()),
+            log_interval: Duration::from_secs(DEFAULT_LOG_INTERVAL_SECS),
+            identifier: None,
+            last_logged_values: Mutex::new(None),
+        }
+    }
+}
+
 impl Default for CacheStatsTracker {
     fn default() -> Self {
         Self::new(None)
@@ -248,14 +263,7 @@ mod tests {
 
     #[test]
     fn test_cache_stats_tracking() {
-        // Use a small window size for testing
-        unsafe {
-            std::env::set_var("DYN_KVBM_CACHE_STATS_MAX_REQUESTS", "10");
-        }
-        let tracker = CacheStatsTracker::new(None);
-        unsafe {
-            std::env::remove_var("DYN_KVBM_CACHE_STATS_MAX_REQUESTS");
-        }
+        let tracker = CacheStatsTracker::new_with_capacity(10);
 
         // Record some cache hits
         tracker.record(5, 3, 10); // 50% host, 30% disk
@@ -271,14 +279,7 @@ mod tests {
 
     #[test]
     fn test_sliding_window() {
-        // Use a small window size for testing
-        unsafe {
-            std::env::set_var("DYN_KVBM_CACHE_STATS_MAX_REQUESTS", "3");
-        }
-        let tracker = CacheStatsTracker::new(None);
-        unsafe {
-            std::env::remove_var("DYN_KVBM_CACHE_STATS_MAX_REQUESTS");
-        }
+        let tracker = CacheStatsTracker::new_with_capacity(3);
 
         // Add 5 entries, but max is 3
         tracker.record(10, 5, 10); // Entry 1: 100% host, 50% disk

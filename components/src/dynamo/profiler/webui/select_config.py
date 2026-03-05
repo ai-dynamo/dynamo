@@ -4,6 +4,7 @@
 import json
 import logging
 import queue
+from typing import Any
 
 from dynamo.profiler.webui.utils import (
     add_profiling_error,
@@ -28,7 +29,9 @@ console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 
 
-def pick_config_with_webui(prefill_data, decode_data, args):
+def pick_config_with_webui(
+    prefill_data: Any, decode_data: Any, args: Any
+) -> tuple[int, int]:
     """
     Launch WebUI for user to pick configurations.
 

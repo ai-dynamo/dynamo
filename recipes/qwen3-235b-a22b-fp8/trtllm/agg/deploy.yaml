@@ -57,7 +57,7 @@ spec:
             - /bin/sh
             - -c
     TrtllmWorker:
-      componentType: main
+      componentType: worker
       envFromSecret: hf-token-secret
       sharedMemory:
         size: 256Gi

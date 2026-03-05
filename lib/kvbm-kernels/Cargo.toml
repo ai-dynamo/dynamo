@@ -1,0 +1,54 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "kvbm-kernels"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository = "https://github.com/ai-dynamo/dynamo.git"
+build = "build.rs"
+
+[lib]
+name = "kvbm_kernels"
+crate-type = ["rlib", "cdylib"]
+
+[features]
+default = []
+# Build kernels as a static archive (.a) instead of shared library (.so).
+# When enabled, the kernel code is embedded directly into the consuming crate,
+# eliminating the runtime dependency on libkvbm_kernels.so.
+# Note: This only affects real CUDA builds; stubs always remain dynamic.
+static-kernels = []
+
+# Enable CUDA tests - only works when real CUDA kernels are built (not stubs)
+# Tests are gated with #[cfg(all(test, feature = "testing-cuda", not(stub_kernels)))]
+testing-cuda = []
+
+# Enable operational_copy, universal_from_block, block_from_universal kernels.
+# These kernels perform data layout permutation and are only needed for
+# non-standard transfer paths. The default vectorized_copy kernel handles
+# most FC↔LW transfers efficiently without permutation.
+permute_kernels = []
+
+# Enable kvbench example (pulls in clap for CLI)
+kvbench = ["dep:clap"]
+
+[[example]]
+name = "kvbench"
+required-features = ["kvbench"]
+
+[dependencies]
+cudarc = { workspace = true }
+
+# kvbench
+clap = { version = "4", features = ["derive"], optional = true }
+
+[dev-dependencies]
+ndarray = "0.17.2"
+half = "2"
+rand = { workspace = true }
+cudarc = { workspace = true, features = ["f16"] }
+
+[build-dependencies]

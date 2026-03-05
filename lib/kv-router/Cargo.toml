@@ -12,18 +12,21 @@ repository.workspace = true
 
 [features]
 default = []
-metrics = ["dep:dynamo-runtime"]
-bench = ["dep:clap", "dep:indicatif", "dep:serde_json", "dynamo-runtime/integration", "dep:uuid"]
+metrics = []
+bench = ["dep:clap", "dep:indicatif", "dep:serde_json", "dynamo-runtime/integration", "dep:plotters"]
+indexer-bin = ["metrics", "dep:axum", "dep:clap", "dep:zeromq", "dep:tracing-subscriber", "dep:serde_json"]
 
 [dependencies]
 # repo
-dynamo-runtime = { workspace = true, optional = true }
+dynamo-runtime = { workspace = true }
 dynamo-tokens = { workspace = true }
 
 # workspace
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 dashmap = { workspace = true }
+derive_builder = { workspace = true }
+derive-getters = { workspace = true }
 prometheus = { workspace = true }
 rand = { workspace = true }
 serde = { workspace = true }
@@ -32,31 +35,35 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
+uuid = { workspace = true }
+validator = { workspace = true }
 xxhash-rust = { workspace = true }
 
 # dependencies
 flume = "0.12.0"
 parking_lot = { workspace = true }
+rmp-serde = { workspace = true }
 
 # bench (optional)
 clap = { version = "4.5", features = ["derive"], optional = true }
 indicatif = { version = "0.18.0", optional = true }
-uuid = { workspace = true, optional = true }
+plotters = { version = "0.3", optional = true, default-features = false, features = ["svg_backend", "line_series", "point_series", "full_palette"] }
+rustc-hash = "2.1.1"
+
+# indexer-bin (optional)
+axum = { workspace = true, optional = true }
+zeromq = { version = "0.4.1", optional = true }
+tracing-subscriber = { workspace = true, optional = true }
 
 [dev-dependencies]
+dynamo-bench = { path = "../bench" }
 rstest = "0.18.2"
 rstest_reuse = "0.7.0"
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros", "time"] }
 dynamo-mocker = { workspace = true }
+dynamo-tokens = { workspace = true }
 minstant = "0.1.7"
-futures = "0.3"
-
-
-[[bench]]
-name = "radix_tree_microbench"
-harness = false
-required-features = ["bench"]
 
 [[bench]]
 name = "kv_indexer_bench"
@@ -67,3 +74,13 @@ required-features = ["bench"]
 name = "mooncake_bench"
 harness = false
 required-features = ["bench"]
+
+[[bench]]
+name = "active_sequences_bench"
+harness = false
+required-features = ["bench"]
+
+[[bin]]
+name = "dynamo-kv-indexer"
+path = "src/bin/kv_indexer/main.rs"
+required-features = ["indexer-bin"]

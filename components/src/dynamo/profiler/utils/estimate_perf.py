@@ -39,16 +39,14 @@ class AIConfiguratorPerfEstimator:
         hf_id: str,  # e.g. "Qwen/Qwen3-32B"
         system: str,  # e.g. "h200_sxm"
         backend: str,  # e.g. "trtllm"
-        version: str,  # e.g. "0.20.0"
     ):
         aiconfigurator = _try_import_aiconfigurator()
 
         logger.info("Loading aiconfigurator database. This might take a few seconds...")
-        if not version:
-            version = aiconfigurator.sdk.perf_database.get_latest_database_version(
-                system,
-                backend,
-            )
+        version = aiconfigurator.sdk.perf_database.get_latest_database_version(
+            system,
+            backend,
+        )
         self.database = aiconfigurator.sdk.perf_database.get_database(
             system=system,
             backend=backend,

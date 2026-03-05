@@ -35,6 +35,7 @@ import pytest
 import requests
 
 from tests.utils.port_utils import allocate_port, deallocate_port
+from tests.utils.test_output import resolve_test_output_path
 
 from .common import DeterminismTester, ServerType
 from .common import TestDeterminism as BaseTestDeterminism
@@ -122,7 +123,6 @@ class LLMServerManager:
                 "DYN_KVBM_METRICS_PORT": str(self.metrics_port),
                 # Enable vLLM batch invariant for deterministic batching
                 "VLLM_BATCH_INVARIANT": "1",
-                "VLLM_ATTENTION_BACKEND": "FLASH_ATTN",
             }
         )
 
@@ -153,6 +153,8 @@ class LLMServerManager:
             "--kv-transfer-config",
             '{"kv_connector":"DynamoConnector","kv_role":"kv_both", "kv_connector_module_path": "kvbm.vllm_integration.connector"}',
             os.environ.get("KVBM_MODEL_ID", "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"),
+            "--attention-config.backend",
+            "FLASH_ATTN",
             "--max-model-len",
             "8000",  # required to fit on L4 GPU when using 8b model
         ]
@@ -404,7 +406,7 @@ def llm_server(request, runtime_services):
     port = getattr(request, "param", {}).get("port", None)
 
     # Put logs in the per-test directory set up by tests/conftest.py
-    log_dir = Path(request.node.name)
+    log_dir = Path(resolve_test_output_path(request.node.name))
 
     if check_module_available("vllm"):
         server_type = ServerType.vllm

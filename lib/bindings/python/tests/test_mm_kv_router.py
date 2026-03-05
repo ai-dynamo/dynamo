@@ -23,7 +23,7 @@ from typing import Any
 
 import pytest
 
-from dynamo.llm import RadixTree, compute_block_hash_for_seq_py
+from dynamo.llm import RadixTree, compute_block_hash_for_seq
 
 pytestmark = pytest.mark.pre_merge
 
@@ -215,17 +215,17 @@ def test_mm_block_hash_computation_basic():
     tokens = [100] * DEFAULT_BLOCK_SIZE
 
     # Without MM info
-    hashes_no_mm = compute_block_hash_for_seq_py(tokens, DEFAULT_BLOCK_SIZE)
+    hashes_no_mm = compute_block_hash_for_seq(tokens, DEFAULT_BLOCK_SIZE)
     assert len(hashes_no_mm) == 1
 
     # With MM info 1
-    hashes_mm1 = compute_block_hash_for_seq_py(
+    hashes_mm1 = compute_block_hash_for_seq(
         tokens, DEFAULT_BLOCK_SIZE, [make_mm_info(MM_HASH_1)]
     )
     assert len(hashes_mm1) == 1
 
     # With MM info 2
-    hashes_mm2 = compute_block_hash_for_seq_py(
+    hashes_mm2 = compute_block_hash_for_seq(
         tokens, DEFAULT_BLOCK_SIZE, [make_mm_info(MM_HASH_2)]
     )
     assert len(hashes_mm2) == 1
@@ -242,8 +242,8 @@ def test_mm_block_hash_determinism():
     tokens = [100] * DEFAULT_BLOCK_SIZE
     mm_info = [make_mm_info(MM_HASH_1)]
 
-    hash1 = compute_block_hash_for_seq_py(tokens, DEFAULT_BLOCK_SIZE, mm_info)
-    hash2 = compute_block_hash_for_seq_py(tokens, DEFAULT_BLOCK_SIZE, mm_info)
+    hash1 = compute_block_hash_for_seq(tokens, DEFAULT_BLOCK_SIZE, mm_info)
+    hash2 = compute_block_hash_for_seq(tokens, DEFAULT_BLOCK_SIZE, mm_info)
 
     assert hash1 == hash2
 
@@ -261,7 +261,7 @@ def test_mm_block_hash_multiple_blocks(block_size: int):
     # One MM info per block
     mm_infos = [make_mm_info(MM_HASH_1) for _ in range(num_blocks)]
 
-    hashes = compute_block_hash_for_seq_py(tokens, block_size, mm_infos)
+    hashes = compute_block_hash_for_seq(tokens, block_size, mm_infos)
 
     assert len(hashes) == num_blocks
     # Each block should have a unique hash (due to different tokens)
@@ -277,7 +277,7 @@ def test_mm_block_hash_partial_block():
     # MM info for each block
     mm_infos = [make_mm_info(MM_HASH_1), make_mm_info(MM_HASH_2)]
 
-    hashes = compute_block_hash_for_seq_py(tokens, DEFAULT_BLOCK_SIZE, mm_infos)
+    hashes = compute_block_hash_for_seq(tokens, DEFAULT_BLOCK_SIZE, mm_infos)
 
     # Only complete blocks get hashes - partial blocks are not hashed
     assert len(hashes) == 1
@@ -291,10 +291,8 @@ def test_mm_block_hash_none_mm_info():
     # Pass None for some blocks' MM info
     mm_infos = [None]
 
-    hashes_with_none = compute_block_hash_for_seq_py(
-        tokens, DEFAULT_BLOCK_SIZE, mm_infos
-    )
-    hashes_without = compute_block_hash_for_seq_py(tokens, DEFAULT_BLOCK_SIZE)
+    hashes_with_none = compute_block_hash_for_seq(tokens, DEFAULT_BLOCK_SIZE, mm_infos)
+    hashes_without = compute_block_hash_for_seq(tokens, DEFAULT_BLOCK_SIZE)
 
     # Both should produce the same result
     assert hashes_with_none == hashes_without
@@ -309,8 +307,8 @@ def test_mm_block_hash_different_offsets():
     mm_info_1 = make_mm_info(MM_HASH_1, offsets=[[0, 10]])
     mm_info_2 = make_mm_info(MM_HASH_1, offsets=[[5, 15]])
 
-    hash1 = compute_block_hash_for_seq_py(tokens, DEFAULT_BLOCK_SIZE, [mm_info_1])
-    hash2 = compute_block_hash_for_seq_py(tokens, DEFAULT_BLOCK_SIZE, [mm_info_2])
+    hash1 = compute_block_hash_for_seq(tokens, DEFAULT_BLOCK_SIZE, [mm_info_1])
+    hash2 = compute_block_hash_for_seq(tokens, DEFAULT_BLOCK_SIZE, [mm_info_2])
 
     # Currently offsets are not included in hash computation - just mm_hash
     # This behavior may change - update test if needed
@@ -330,12 +328,12 @@ def test_mm_block_hash_multiple_mm_objects():
         ]
     }
 
-    hashes = compute_block_hash_for_seq_py(tokens, DEFAULT_BLOCK_SIZE, [mm_info])
+    hashes = compute_block_hash_for_seq(tokens, DEFAULT_BLOCK_SIZE, [mm_info])
 
     assert len(hashes) == 1
 
     # Compare with single MM object
-    single_mm_hashes = compute_block_hash_for_seq_py(
+    single_mm_hashes = compute_block_hash_for_seq(
         tokens, DEFAULT_BLOCK_SIZE, [make_mm_info(MM_HASH_1)]
     )
 
@@ -349,7 +347,7 @@ def test_mm_block_hash_error_zero_block_size():
     tokens = [100] * 32
 
     with pytest.raises(ValueError, match="kv_block_size cannot be 0"):
-        compute_block_hash_for_seq_py(tokens, 0)
+        compute_block_hash_for_seq(tokens, 0)
 
 
 # =============================================================================
@@ -364,10 +362,10 @@ def test_integration_mm_hash_to_routing():
     tokens = [100] * DEFAULT_BLOCK_SIZE
 
     # Compute hashes for two different MM contents
-    hash_mm1 = compute_block_hash_for_seq_py(
+    hash_mm1 = compute_block_hash_for_seq(
         tokens, DEFAULT_BLOCK_SIZE, [make_mm_info(MM_HASH_1)]
     )[0]
-    hash_mm2 = compute_block_hash_for_seq_py(
+    hash_mm2 = compute_block_hash_for_seq(
         tokens, DEFAULT_BLOCK_SIZE, [make_mm_info(MM_HASH_2)]
     )[0]
 
@@ -406,7 +404,7 @@ def test_integration_multiple_workers_same_tokens(num_workers: int):
 
     # Store blocks for each worker
     for worker_id, mm_hash in enumerate(mm_hashes):
-        block_hash = compute_block_hash_for_seq_py(
+        block_hash = compute_block_hash_for_seq(
             tokens, DEFAULT_BLOCK_SIZE, [make_mm_info(mm_hash)]
         )[0]
 
@@ -423,7 +421,7 @@ def test_integration_multiple_workers_same_tokens(num_workers: int):
 
     # Query for each worker's block should match only that worker
     for worker_id, mm_hash in enumerate(mm_hashes):
-        block_hash = compute_block_hash_for_seq_py(
+        block_hash = compute_block_hash_for_seq(
             tokens, DEFAULT_BLOCK_SIZE, [make_mm_info(mm_hash)]
         )[0]
 
