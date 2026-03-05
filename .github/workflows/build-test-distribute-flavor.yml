@@ -123,6 +123,11 @@ on:
         required: false
         type: boolean
         default: false
+      sanitized_ref_name:
+        description: 'Sanitized git ref name for branch-tagged images (used with build_only)'
+        required: false
+        type: string
+        default: ''
     secrets:
       AWS_DEFAULT_REGION:
         required: true
@@ -164,13 +169,6 @@ jobs:
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
         with:
           lfs: true
-      - name: Sanitize ref name for container tags
-        id: sanitize-ref
-        if: ${{ inputs.build_only }}
-        shell: bash
-        run: |
-          sanitized=$(echo "${{ github.ref_name }}" | sed 's/[^a-zA-Z0-9._-]/-/g' | sed 's/^-//;s/-$//' | cut -c1-128)
-          echo "sanitized_ref_name=${sanitized}" >> $GITHUB_OUTPUT
       - name: Docker Login
         uses: ./.github/actions/docker-login
         with:
@@ -220,7 +218,7 @@ jobs:
             done <<< "$EXTRA_TAGS"
           fi
           if [ "${{ inputs.build_only }}" == "true" ]; then
-            BRANCH_TAG="${{ steps.sanitize-ref.outputs.sanitized_ref_name }}-${{ inputs.framework }}"
+            BRANCH_TAG="${{ inputs.sanitized_ref_name }}-${{ inputs.framework }}"
             RESULT+="${ECR_REGISTRY}/ai-dynamo/dynamo:${BRANCH_TAG}-cuda${CUDA_VERSION_MAJOR}-${{ inputs.platform }}"$'\n'
             RESULT+="${ACR_REGISTRY}/ai-dynamo/dynamo:${BRANCH_TAG}-cuda${CUDA_VERSION_MAJOR}-${{ inputs.platform }}"$'\n'
             RESULT+="${ACR_REGISTRY}/ai-dynamo/dynamo:${{ steps.calculate-target-tag.outputs.target_tag_plain }}-${{ inputs.platform }}"$'\n'

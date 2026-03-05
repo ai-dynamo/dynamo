@@ -118,6 +118,11 @@ on:
         required: false
         type: boolean
         default: false
+      sanitized_ref_name:
+        description: 'Sanitized git ref name for branch-tagged images (used with build_only)'
+        required: false
+        type: string
+        default: ''
     secrets:
       AWS_DEFAULT_REGION:
         required: true
@@ -172,4 +177,5 @@ jobs:
       make_efa: ${{ inputs.make_efa }}
       show_summary: ${{ inputs.build_only || inputs.show_summary }}
       build_only: ${{ inputs.build_only }}
+      sanitized_ref_name: ${{ inputs.sanitized_ref_name }}
     secrets: inherit

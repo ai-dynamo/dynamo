@@ -15,21 +15,6 @@ on:
         required: false
         type: boolean
         default: false
-      build_vllm:
-        description: 'Build and push vllm image only (skip tests), tagged with branch name'
-        required: false
-        type: boolean
-        default: false
-      build_sglang:
-        description: 'Build and push sglang image only (skip tests), tagged with branch name'
-        required: false
-        type: boolean
-        default: false
-      build_trtllm:
-        description: 'Build and push trtllm image only (skip tests), tagged with branch name'
-        required: false
-        type: boolean
-        default: false
 
 concurrency:
   # The group name is the ref_name, so that workflows on the same PR/branch have the same group name for cancelling.
@@ -57,7 +42,6 @@ jobs:
       sglang: ${{ steps.changes.outputs.sglang }}
       trtllm: ${{ steps.changes.outputs.trtllm }}
       builder_name: ${{ steps.export-builder-name.outputs.builder_name }}
-      build_only: ${{ inputs.build_vllm || inputs.build_sglang || inputs.build_trtllm }}
     steps:
       - name: Checkout code
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
@@ -98,7 +82,7 @@ jobs:
 
   operator:
     needs: changed-files
-    if: ${{ needs.changed-files.outputs.build_only != 'true' && needs.changed-files.outputs.operator == 'true' }}
+    if: needs.changed-files.outputs.operator == 'true'
     name: Operator
     runs-on: prod-default-v2
     env:
@@ -197,7 +181,7 @@ jobs:
   # ============================================================================
   vllm-pipeline:
     needs: [changed-files]
-    if: inputs.build_vllm || (needs.changed-files.outputs.build_only != 'true' && (needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true'))
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true'
     uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
     with:
       framework: vllm
@@ -211,7 +195,6 @@ jobs:
       single_gpu_test_markers: 'pre_merge and vllm and gpu_1'
       single_gpu_test_timeout_minutes: 35
       run_multi_gpu_tests: false  # TODO: Dmitry is working on fixing markers for multi-GPU tests, can enable after that is resolved
-      build_only: ${{ inputs.build_vllm }}
     secrets: inherit
 
   # ============================================================================
@@ -219,7 +202,7 @@ jobs:
   # ============================================================================
   sglang-pipeline:
     needs: [changed-files]
-    if: inputs.build_sglang || (needs.changed-files.outputs.build_only != 'true' && (needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true'))
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true'
     uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
     with:
       framework: sglang
@@ -232,7 +215,6 @@ jobs:
       cpu_only_test_markers: 'pre_merge and sglang and gpu_0'
       single_gpu_test_markers: 'pre_merge and sglang and gpu_1'
       run_multi_gpu_tests: false  # TODO: Dmitry is working on fixing markers for multi-GPU tests, can enable after that is resolved
-      build_only: ${{ inputs.build_sglang }}
     secrets: inherit
 
   # ============================================================================
@@ -240,7 +222,7 @@ jobs:
   # ============================================================================
   trtllm-pipeline:
     needs: [changed-files]
-    if: inputs.build_trtllm || (needs.changed-files.outputs.build_only != 'true' && (needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true'))
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true'
     uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
     with:
       framework: trtllm
@@ -253,7 +235,6 @@ jobs:
       cpu_only_test_markers: 'pre_merge and trtllm and gpu_0'
       single_gpu_test_markers: 'pre_merge and trtllm and gpu_1'
       run_multi_gpu_tests: false  # TODO: Dmitry is working on fixing markers for multi-GPU tests, can enable after that is resolved
-      build_only: ${{ inputs.build_trtllm }}
     secrets: inherit
 
 
@@ -267,7 +248,6 @@ jobs:
     # Run when any deploy test will run: if core, any framework, or deploy files changed
     if: |
       always() &&
-      needs.changed-files.outputs.build_only != 'true' &&
       (needs.changed-files.outputs.core == 'true' ||
        needs.changed-files.outputs.vllm == 'true' ||
        needs.changed-files.outputs.sglang == 'true' ||
