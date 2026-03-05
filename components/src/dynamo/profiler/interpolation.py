@@ -56,8 +56,8 @@ async def run_interpolation(
     isl: int,
     osl: int,
     sweep_max_context_length: int,
-    deployment_clients: list,
-):
+    deployment_clients: list[DynamoDeploymentClient],
+) -> None:
     """Generate interpolation curves for the planner based on sweep mode.
 
     Takes the output disagg DGD config and uses ``convert_config`` to strip

@@ -783,7 +783,7 @@ VllmPrefillWorker:
 
 ## Conclusion
 
-This guide provides a complete methodology for A/B testing Dynamo's KV Smart Router. The KV router's effectiveness depends heavily on workload characteristics—datasets with high prefix overlap will show the most benefit.
+This guide provides a complete methodology for A/B testing Dynamo's KV Smart Router. The KV router's effectiveness depends heavily on workload characteristics—datasets with high prefix overlap will show the most benefit. For further details on tuning the KV router, see the [Tuning Guidelines](../components/router/router-guide.md#tuning-guidelines).
 
 For questions or issues, consult the [Dynamo documentation](https://github.com/ai-dynamo/dynamo) or open an issue on GitHub.
 

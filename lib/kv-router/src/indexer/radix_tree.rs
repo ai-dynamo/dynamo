@@ -497,6 +497,18 @@ impl RadixTree {
         self.remove_or_clear_worker_blocks(worker_id, false);
     }
 
+    pub fn remove_worker_dp_rank(&mut self, worker_id: WorkerId, dp_rank: DpRank) {
+        let key = WorkerWithDpRank { worker_id, dp_rank };
+        if let Some(blocks) = self.lookup.remove(&key) {
+            for (_, block) in blocks {
+                block.borrow_mut().workers.remove(&key);
+                if block.borrow().workers.is_empty() {
+                    block.borrow_mut().children.clear();
+                }
+            }
+        }
+    }
+
     pub fn clear_all_blocks(&mut self, worker_id: WorkerId) {
         self.remove_or_clear_worker_blocks(worker_id, true);
     }

@@ -123,11 +123,22 @@ make info # Check image tag
 ### 5. Deploy
 
 We recommend deploying Inference Gateway's Endpoint Picker as a Dynamo operator's managed component. Alternatively,
-you could deploy it as a standalone pod
+you could deploy it as a standalone pod.
+Note that when deploying Dynamo with the Inference Gateway Extension each worker must have the FrontEnd as a sidecar.
 
 #### 5.a. Deploy as a DGD component (recommended)
 
 We provide an example for the Qwen vLLM below.
+You have to deploy the Dynamo Graph and the HttpRoute service.
+For the HttpRoute service make sure to specify the namespace where your gateway (i.e. kGateway was deployed) as shown below.
+```bash
+  parentRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: inference-gateway
+      namespace: my-model # the namespace where your gateway is deployed.
+```
+
 ```bash
 cd <dynamo-source-root>
 kubectl apply -f examples/backends/vllm/deploy/gaie/agg.yaml -n my-model
@@ -158,18 +169,20 @@ kubectl apply -f recipes/llama-3-70b/vllm/disagg-single-node/gaie/http-route.yam
 ```
 
 - When using GAIE the FrontEnd does not choose the workers. The routing is determined in the EPP.
-- You must enable the flag in the FrontEnd cli as below.
-```bash
-    command:
-      - python3
-    args:
-      - -m
-      - dynamo.frontend
-      - --router-mode
-      - direct
+- The FrontEnd must run with `--router-mode direct` so that it respects the EPP's routing decisions passed via request headers.
+- Use the `frontendSidecar` field on a worker service to have the operator automatically inject a fully configured frontend sidecar container with all required Dynamo env vars, probes, and ports:
+
+```yaml
+frontendSidecar:
+  image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+  args:
+    - --router-mode
+    - direct
+  envFromSecret: hf-token-secret
 ```
+
 - The pre-selected worker (decode and prefill in case of the disaggregated serving) are passed in the request headers.
-- The flag assures the routing respects this selection.
+- The `--router-mode direct` flag ensures the routing respects this selection.
 
 **Startup Probe Timeout:** The EPP has a default startup probe timeout of 30 minutes (10s × 180 failures).
 If your model takes longer to load, increase the `failureThreshold` in the EPP's `startupProbe`. For example,

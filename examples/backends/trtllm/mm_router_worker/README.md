@@ -154,7 +154,7 @@ This is included in `mm_routing_info` so KvRouter can compute MM-aware overlap.
 
 ## Dependencies
 
-- `tensorrt_llm >= 1.2.0rc6` - For `apply_mm_hashes()` and `default_multimodal_input_loader()`. Earlier versions may not include multimodal hash support in KV events.
+- `tensorrt_llm >= 1.3.0rc5` - Required for the current `apply_mm_hashes()` tuple return contract (`(mm_hashes_by_modality, uuids)`), used by this worker's routing hash extraction path.
 - `transformers` - For `AutoProcessor`
 - `dynamo` - For runtime and KvRouter
 
