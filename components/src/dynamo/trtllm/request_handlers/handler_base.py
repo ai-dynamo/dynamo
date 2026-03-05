@@ -116,7 +116,7 @@ class HandlerBase(BaseGenerativeHandler):
 
     @staticmethod
     def _extract_logprobs(
-        output, num_output_tokens_so_far: int
+        output, num_output_tokens_so_far: int, tokenizer=None
     ) -> tuple[list[float] | None, list[list[dict]] | None]:
         """
         Extract logprobs from the TRTLLM output for new tokens.
@@ -124,6 +124,8 @@ class HandlerBase(BaseGenerativeHandler):
         Args:
             output: TRTLLM CompletionOutput object
             num_output_tokens_so_far: Number of tokens already processed
+            tokenizer: Optional tokenizer for decoding token IDs when
+                       decoded_token is not populated by the engine
         Returns:
             Tuple of (log_probs, top_logprobs) in Dynamo's expected format:
             - log_probs: List of log probabilities for each new token
@@ -162,22 +164,25 @@ class HandlerBase(BaseGenerativeHandler):
                 if first_logprob:
                     log_probs.append(float(first_logprob.logprob))
 
-            # Build top_logprobs list for this token position
-            # NOTE: TRTLLM LogProb API doesn't have decoded_token, will default to None
             token_top_logprobs = []
             for tok_id, logprob_info in token_logprobs_dict.items():
+                token_str = getattr(logprob_info, "decoded_token", None)
+                if token_str is None and tokenizer is not None:
+                    try:
+                        token_str = tokenizer.decode([tok_id])
+                    except Exception:
+                        token_str = None
                 token_top_logprobs.append(
                     {
                         "rank": logprob_info.rank
                         if hasattr(logprob_info, "rank")
                         else 0,
                         "token_id": tok_id,
-                        "token": (
-                            logprob_info.decoded_token
-                            if hasattr(logprob_info, "decoded_token")
-                            else None
-                        ),
+                        "token": token_str,
                         "logprob": float(logprob_info.logprob),
+                        "bytes": (
+                            list(token_str.encode("utf-8")) if token_str else None
+                        ),
                     }
                 )
             top_logprobs.append(token_top_logprobs)

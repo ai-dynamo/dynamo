@@ -421,16 +421,19 @@ mod tests {
             refusal: None,
             reasoning_content: None,
         };
-        let logprobs = logprob.map(|lp| dynamo_async_openai::types::ChatChoiceLogprobs {
-            content: Some(vec![
-                dynamo_async_openai::types::ChatCompletionTokenLogprob {
-                    token: text.to_string(),
-                    logprob: lp,
-                    bytes: None,
-                    top_logprobs: vec![],
-                },
-            ]),
-            refusal: None,
+        let logprobs = logprob.map(|lp| {
+            let token = text.to_string();
+            dynamo_async_openai::types::ChatChoiceLogprobs {
+                content: Some(vec![
+                    dynamo_async_openai::types::ChatCompletionTokenLogprob {
+                        token: token.clone(),
+                        logprob: lp,
+                        bytes: super::super::token_to_utf8_bytes(&token),
+                        top_logprobs: vec![],
+                    },
+                ]),
+                refusal: None,
+            }
         });
         let choice = dynamo_async_openai::types::ChatChoiceStream {
             index,
