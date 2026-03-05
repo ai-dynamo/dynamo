@@ -32,6 +32,13 @@ impl Indexer {
         }
     }
 
+    pub async fn remove_worker_dp_rank(&self, worker_id: WorkerId, dp_rank: u32) {
+        match self {
+            Indexer::Single(idx) => idx.remove_worker_dp_rank(worker_id, dp_rank).await,
+            Indexer::Concurrent(idx) => idx.remove_worker_dp_rank(worker_id, dp_rank).await,
+        }
+    }
+
     pub async fn find_matches(&self, hashes: Vec<LocalBlockHash>) -> Result<OverlapScores> {
         match self {
             Indexer::Single(idx) => idx.find_matches(hashes).await.map_err(Into::into),
