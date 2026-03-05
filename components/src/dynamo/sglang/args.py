@@ -380,7 +380,7 @@ async def parse_args(args: list[str]) -> Config:
             "release. Use '--dyn-chat-processor sglang' on the frontend instead, "
             "which provides the same SGLang-native pre/post processing with KV "
             "router support.",
-            DeprecationWarning,
+            FutureWarning,
             stacklevel=2,
         )
         logging.info(

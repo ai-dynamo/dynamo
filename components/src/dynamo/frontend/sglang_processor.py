@@ -254,35 +254,45 @@ class SglangProcessor:
         """Single-process path: preprocess, dispatch, stream post-process."""
         request_id = random_uuid()
 
-        if self.debug_perf:
-            t0 = time.monotonic()
+        try:
+            if self.debug_perf:
+                t0 = time.monotonic()
 
-        pre = preprocess_chat_request(
-            request,
-            tokenizer=self.tokenizer,
-            tool_call_parser_name=self.tool_call_parser_name,
-            reasoning_parser_name=self.reasoning_parser_name,
-        )
-
-        if self.debug_perf:
-            t1 = time.monotonic()
-            logger.info(
-                "[perf] sglang preprocess: %.2fms (request=%s)",
-                (t1 - t0) * 1000.0,
-                request_id,
+            pre = preprocess_chat_request(
+                request,
+                tokenizer=self.tokenizer,
+                tool_call_parser_name=self.tool_call_parser_name,
+                reasoning_parser_name=self.reasoning_parser_name,
             )
 
-        tokens = pre.prompt_token_ids
+            if self.debug_perf:
+                t1 = time.monotonic()
+                logger.info(
+                    "[perf] sglang preprocess: %.2fms (request=%s)",
+                    (t1 - t0) * 1000.0,
+                    request_id,
+                )
 
-        n = request.get("n", 1)
-        if n != 1:
-            logger.error("Unsupported n=%d, only n=1 is supported", n)
-            yield _unsupported_n_error(n)
+            tokens = pre.prompt_token_ids
+
+            n = request.get("n", 1)
+            if n != 1:
+                logger.error("Unsupported n=%d, only n=1 is supported", n)
+                yield _unsupported_n_error(n)
+                return
+
+            dynamo_preproc = _build_dynamo_preproc(
+                request, tokens, request["model"], self.eos_token_id
+            )
+        except Exception as exc:
+            logger.exception("SGLang preprocessing failed for request %s", request_id)
+            yield {
+                "error": {
+                    "message": f"Preprocessing error: {exc}",
+                    "type": "internal_error",
+                }
+            }
             return
-
-        dynamo_preproc = _build_dynamo_preproc(
-            request, tokens, request["model"], self.eos_token_id
-        )
 
         post = SglangStreamingPostProcessor(
             tokenizer=self.tokenizer,
