@@ -55,7 +55,7 @@ The publisher keeps a `deque` of the last `buffer_steps` (default 10,000) serial
 
 Dynamo's `LocalKvIndexer` (in `lib/kv-router/src/indexer/local.rs`) wraps a `KvIndexer` (backed by a `RadixTree`) with a circular event buffer:
 
-```
+```text
 LocalKvIndexer
 ├── indexer: KvIndexer          // Authoritative state (RadixTree)
 ├── event_buffer: VecDeque      // Circular buffer for fast replay
