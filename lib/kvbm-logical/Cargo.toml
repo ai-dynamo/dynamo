@@ -15,8 +15,11 @@ dynamo-tokens = { workspace = true }
 anyhow = { workspace = true }
 async-stream = "0.3"
 bytes = "1.10"
+bincode = { version = "2.0.1", features = ["serde", "derive"] }
+dashmap = { workspace = true }
 derive_builder = { workspace = true }
 futures = { workspace = true }
+indexmap = { workspace = true }
 lru = "0.16"
 parking_lot = { workspace = true }
 prometheus = { workspace = true }
@@ -26,6 +29,7 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true, features = ["sync"] }
+tokio-util = { workspace = true }
 tracing = { workspace = true }
 xxhash-rust = { workspace = true }
 
@@ -34,6 +38,9 @@ testing = []
 
 [dev-dependencies]
 proptest = "1.5.0"
+rand = { workspace = true }
+rand_chacha = "0.9"
 rstest = "0.26"
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
+tracing-subscriber = { workspace = true }
