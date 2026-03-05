@@ -396,6 +396,7 @@ _Appears in:_
 | `multinode` _[MultinodeSpec](#multinodespec)_ | Multinode is the configuration for multinode components. |  |  |
 | `scalingAdapter` _[ScalingAdapter](#scalingadapter)_ | ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter.<br />When enabled, replicas are managed via DGDSA and external autoscalers can scale<br />the service using the Scale subresource. When disabled, replicas can be modified directly. |  | Optional: \{\} <br /> |
 | `eppConfig` _[EPPConfig](#eppconfig)_ | EPPConfig defines EPP-specific configuration options for Endpoint Picker Plugin components.<br />Only applicable when ComponentType is "epp". |  | Optional: \{\} <br /> |
+| `frontendSidecar` _[FrontendSidecarSpec](#frontendsidecarspec)_ | FrontendSidecar configures an auto-generated frontend sidecar container.<br />When specified, the operator injects a fully configured frontend container<br />with all standard Dynamo environment variables, health probes, and ports.<br />This eliminates the need to manually specify these in extraPodSpec.containers. (GAIE) |  | Optional: \{\} <br /> |
 | `checkpoint` _[ServiceCheckpointConfig](#servicecheckpointconfig)_ | Checkpoint configures container checkpointing for this service.<br />When enabled, pods can be restored from a checkpoint files for faster cold start. |  | Optional: \{\} <br /> |
 
 
@@ -436,6 +437,7 @@ _Appears in:_
 | `multinode` _[MultinodeSpec](#multinodespec)_ | Multinode is the configuration for multinode components. |  |  |
 | `scalingAdapter` _[ScalingAdapter](#scalingadapter)_ | ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter.<br />When enabled, replicas are managed via DGDSA and external autoscalers can scale<br />the service using the Scale subresource. When disabled, replicas can be modified directly. |  | Optional: \{\} <br /> |
 | `eppConfig` _[EPPConfig](#eppconfig)_ | EPPConfig defines EPP-specific configuration options for Endpoint Picker Plugin components.<br />Only applicable when ComponentType is "epp". |  | Optional: \{\} <br /> |
+| `frontendSidecar` _[FrontendSidecarSpec](#frontendsidecarspec)_ | FrontendSidecar configures an auto-generated frontend sidecar container.<br />When specified, the operator injects a fully configured frontend container<br />with all standard Dynamo environment variables, health probes, and ports.<br />This eliminates the need to manually specify these in extraPodSpec.containers. (GAIE) |  | Optional: \{\} <br /> |
 | `checkpoint` _[ServiceCheckpointConfig](#servicecheckpointconfig)_ | Checkpoint configures container checkpointing for this service.<br />When enabled, pods can be restored from a checkpoint files for faster cold start. |  | Optional: \{\} <br /> |
 
 
@@ -510,7 +512,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `model` _string_ | Model specifies the model to deploy (e.g., "Qwen/Qwen3-0.6B", "meta-llama/Llama-3-70b").<br />This is a high-level identifier for easy reference in kubectl output and logs.<br />The controller automatically sets this value in profilingConfig.config.deployment.model. |  | Required: \{\} <br /> |
-| `backend` _string_ | Backend specifies the inference backend for profiling.<br />The controller automatically sets this value in profilingConfig.config.engine.backend.<br />Profiling runs on real GPUs or via AIC simulation to collect performance data. |  | Enum: [vllm sglang trtllm] <br />Required: \{\} <br /> |
+| `backend` _string_ | Backend specifies the inference backend for profiling.<br />The controller automatically sets this value in profilingConfig.config.engine.backend.<br />Profiling runs on real GPUs or via AIC simulation to collect performance data. |  | Enum: [auto vllm sglang trtllm] <br />Required: \{\} <br /> |
 | `useMocker` _boolean_ | UseMocker indicates whether to deploy a mocker DynamoGraphDeployment instead of<br />a real backend deployment. When true, the deployment uses simulated engines that<br />don't require GPUs, using the profiling data to simulate realistic timing behavior.<br />Mocker is available in all backend images and useful for large-scale experiments.<br />Profiling still runs against the real backend (specified above) to collect performance data. | false |  |
 | `profilingConfig` _[ProfilingConfigSpec](#profilingconfigspec)_ | ProfilingConfig provides the complete configuration for the profiling job.<br />Note: GPU discovery is automatically attempted to detect GPU resources from Kubernetes<br />cluster nodes. If the operator has node read permissions (cluster-wide or explicitly granted),<br />discovered GPU configuration is used as defaults when hardware configuration is not manually<br />specified (minNumGpusPerEngine, maxNumGpusPerEngine, numGpusPerNode). User-specified values<br />always take precedence over auto-discovered values. If GPU discovery fails (e.g.,<br />namespace-restricted operator without node permissions), manual hardware config is required.<br />This configuration is passed directly to the profiler.<br />The structure matches the profile_sla config format exactly (see ProfilingConfigSpec for schema).<br />Note: deployment.model and engine.backend are automatically set from the high-level<br />modelName and backend fields and should not be specified in this config. |  | Required: \{\} <br /> |
 | `enableGpuDiscovery` _boolean_ | EnableGPUDiscovery controls whether the operator attempts to discover GPU hardware from cluster nodes.<br />DEPRECATED: This field is deprecated and will be removed in v1beta1. GPU discovery is now always<br />attempted automatically. Setting this field has no effect - the operator will always try to discover<br />GPU hardware when node read permissions are available. If discovery is unavailable (e.g., namespace-scoped<br />operator without permissions), manual hardware configuration is required regardless of this setting. | true | Optional: \{\} <br /> |
@@ -787,6 +789,28 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `mainContainer` _[Container](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#container-v1-core)_ |  |  |  |
+
+
+#### FrontendSidecarSpec
+
+
+
+FrontendSidecarSpec configures the auto-generated frontend sidecar container.
+The operator uses these fields together with built-in frontend defaults (command, probes, ports,
+and Dynamo env vars) to produce a fully configured sidecar container.
+
+
+
+_Appears in:_
+- [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
+- [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `image` _string_ | Image is the container image for the frontend sidecar. |  | Required: \{\} <br /> |
+| `args` _string array_ | Args overrides the default frontend arguments. When specified, these replace<br />the default ["-m", "dynamo.frontend"] entirely.<br />For example, ["-m", "dynamo.frontend", "--router-mode", "direct"] for GAIE deployments. |  | Optional: \{\} <br /> |
+| `envFromSecret` _string_ | EnvFromSecret references a Secret whose key/value pairs will be exposed as<br />environment variables in the frontend sidecar container. |  | Optional: \{\} <br /> |
+| `envs` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core) array_ | Envs defines additional environment variables for the frontend sidecar.<br />These are merged with (and can override) the auto-generated Dynamo env vars. |  | Optional: \{\} <br /> |
 
 
 #### IngressSpec
@@ -1594,6 +1618,23 @@ _Appears in:_
 
 
 
+#### CertProvisionMode
+
+_Underlying type:_ _string_
+
+CertProvisionMode controls how webhook TLS certificates are managed.
+
+
+
+_Appears in:_
+- [WebhookServer](#webhookserver)
+
+| Field | Description |
+| --- | --- |
+| `auto` | CertProvisionModeAuto uses the built-in cert-controller to generate and rotate certificates.<br /> |
+| `manual` | CertProvisionModeManual expects certificates to be provided externally (e.g., cert-manager, admin).<br /> |
+
+
 #### CheckpointConfiguration
 
 
@@ -2057,6 +2098,9 @@ _Appears in:_
 | `port` _integer_ | Port is the port the server listens on |  |  |
 | `host` _string_ | Host is the address the webhook server binds to |  |  |
 | `certDir` _string_ | CertDir is the directory containing TLS certificates |  |  |
+| `certProvisionMode` _[CertProvisionMode](#certprovisionmode)_ | CertProvisionMode controls certificate management: "auto" (built-in cert-controller) or "manual" (external) | auto |  |
+| `secretName` _string_ | SecretName is the name of the Kubernetes Secret holding webhook TLS certificates | webhook-server-cert |  |
+| `serviceName` _string_ | ServiceName is the name of the Kubernetes Service fronting the webhook server.<br />Used to generate certificate SANs. Set by the Helm chart. |  |  |
 
 
 # Operator Default Values Injection

@@ -97,7 +97,7 @@ curl http://localhost:8000/v1/chat/completions \
         "content": [
           {
             "type": "text",
-            "text": "Describe the image."
+            "text": "Explain why Roger Federer is considered one of the greatest tennis players of all time"
           },
           {
             "type": "image_url",
@@ -160,7 +160,7 @@ curl http://localhost:8000/v1/chat/completions \
         "content": [
           {
             "type": "text",
-            "text": "Describe the image."
+            "text": "Explain why Roger Federer is considered one of the greatest tennis players of all time"
           },
           {
             "type": "image_url",
@@ -223,7 +223,7 @@ curl http://localhost:8000/v1/chat/completions \
         "content": [
           {
             "type": "text",
-            "text": "Describe the image."
+            "text": "Explain why Roger Federer is considered one of the greatest tennis players of all time"
           },
           {
             "type": "image_url",

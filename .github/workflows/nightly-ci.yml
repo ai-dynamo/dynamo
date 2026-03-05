@@ -34,6 +34,7 @@ jobs:
       single_gpu_test_markers: 'nightly and vllm and gpu_1'
       single_gpu_test_timeout_minutes: 35
       multi_gpu_test_markers: 'nightly and vllm and (gpu_2 or gpu_4)'
+      multi_gpu_test_timeout_minutes: 120
     secrets: inherit
 
   # ============================================================================
@@ -54,6 +55,7 @@ jobs:
       cpu_only_test_markers: 'nightly and sglang and gpu_0'
       single_gpu_test_markers: 'nightly and sglang and gpu_1'
       multi_gpu_test_markers: 'nightly and sglang and (gpu_2 or gpu_4)'
+      multi_gpu_test_timeout_minutes: 120
     secrets: inherit
 
   # ============================================================================
@@ -74,6 +76,7 @@ jobs:
       cpu_only_test_markers: 'nightly and trtllm and gpu_0'
       single_gpu_test_markers: 'nightly and trtllm and gpu_1'
       multi_gpu_test_markers: 'nightly and trtllm and (gpu_2 or gpu_4)'
+      multi_gpu_test_timeout_minutes: 120
     secrets: inherit
 
   ############################## SLACK NOTIFICATION ##############################
