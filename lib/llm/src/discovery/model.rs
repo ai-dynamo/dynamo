@@ -152,6 +152,33 @@ impl Model {
             .any(|entry| entry.value().has_videos_engine())
     }
 
+    /// Whether this model should be visible in /v1/models.
+    pub fn is_displayable(&self) -> bool {
+        let has_any_serving_engine = self.worker_sets.iter().any(|entry| {
+            let ws = entry.value();
+            ws.has_chat_engine()
+                || ws.has_completions_engine()
+                || ws.has_embeddings_engine()
+                || ws.has_images_engine()
+                || ws.has_tensor_engine()
+                || ws.has_videos_engine()
+        });
+
+        self.worker_sets.iter().any(|entry| {
+            let ws = entry.value();
+            if ws.worker_count() == 0 {
+                return false;
+            }
+            ws.has_chat_engine()
+                || ws.has_completions_engine()
+                || ws.has_embeddings_engine()
+                || ws.has_images_engine()
+                || ws.has_tensor_engine()
+                || ws.has_videos_engine()
+                || (!has_any_serving_engine && ws.is_prefill_set())
+        })
+    }
+
     /// Check if a candidate checksum is valid for this model.
     /// Returns `Some(true)` if it matches the canonical checksum, `Some(false)` if it
     /// doesn't match, or `None` if no canonical checksum has been set yet (no WorkerSets).
