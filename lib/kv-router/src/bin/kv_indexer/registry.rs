@@ -263,22 +263,28 @@ impl WorkerRegistry {
     }
 
     pub fn get_or_create_indexer(&self, key: IndexerKey, block_size: u32) -> Indexer {
-        self.indexers
-            .entry(key.clone())
-            .or_insert_with(|| {
-                tracing::info!(
-                    model_name = %key.model_name,
-                    tenant_id = %key.tenant_id,
-                    block_size,
-                    "Creating indexer from recovery dump"
-                );
-                IndexerEntry {
-                    indexer: create_indexer(block_size, self.num_threads),
-                    block_size,
-                }
-            })
-            .indexer
-            .clone()
+        let entry = self.indexers.entry(key.clone()).or_insert_with(|| {
+            tracing::info!(
+                model_name = %key.model_name,
+                tenant_id = %key.tenant_id,
+                block_size,
+                "Creating indexer from recovery dump"
+            );
+            IndexerEntry {
+                indexer: create_indexer(block_size, self.num_threads),
+                block_size,
+            }
+        });
+        if entry.block_size != block_size {
+            tracing::warn!(
+                model_name = %key.model_name,
+                tenant_id = %key.tenant_id,
+                existing_block_size = entry.block_size,
+                requested_block_size = block_size,
+                "Block size mismatch for existing indexer"
+            );
+        }
+        entry.indexer.clone()
     }
 
     pub fn all_indexers_with_block_size(&self) -> Vec<(IndexerKey, Indexer, u32)> {
