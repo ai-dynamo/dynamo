@@ -163,10 +163,13 @@ RUN --mount=type=bind,from=framework,source=/usr/lib,target=/mnt/usr_lib \
     ARCH_ALT=$([ "${TARGETARCH}" = "amd64" ] && echo "x86_64" || echo "aarch64") && \
     cp /mnt/usr_lib/${ARCH_ALT}-linux-gnu/libgomp.so* /usr/lib/${ARCH_ALT}-linux-gnu/
 
-# Create arch-independent symlinks so ENV paths work for both amd64 and arm64
+# Set arch-dependent TensorRT / nvshmem library paths via profile.d script.
+# Sourced by nvidia_entrypoint.sh (ENV=$shinit_v2) and bash login shells.
 RUN ARCH_ALT=$([ "${TARGETARCH}" = "amd64" ] && echo "x86_64" || echo "aarch64") && \
-    ln -snf /usr/local/tensorrt/targets/${ARCH_ALT}-linux-gnu /usr/local/tensorrt/targets/current && \
-    ln -snf /usr/lib/${ARCH_ALT}-linux-gnu/nvshmem /usr/lib/nvshmem-current
+    printf '%s\n' \
+      "export TENSORRT_LIB_DIR=/usr/local/tensorrt/targets/${ARCH_ALT}-linux-gnu/lib" \
+      "export LD_LIBRARY_PATH=\"/usr/lib/${ARCH_ALT}-linux-gnu/nvshmem/13/:\${TENSORRT_LIB_DIR}:\${LD_LIBRARY_PATH}\"" \
+      > /etc/profile.d/90-trtllm-paths.sh
 
 # Switch to dynamo user
 USER dynamo
@@ -191,7 +194,6 @@ COPY --chown=dynamo: --from=wheel_builder $NIXL_PREFIX $NIXL_PREFIX
 COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
 COPY --chown=dynamo: --from=wheel_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
 
-ENV TENSORRT_LIB_DIR=/usr/local/tensorrt/targets/current/lib
 ENV PATH="/usr/local/ucx/bin:${VIRTUAL_ENV}/bin:/opt/hpcx/ompi/bin:/usr/local/bin/etcd/:/usr/local/cuda/bin:/usr/local/cuda/nvvm/bin:$PATH"
 ENV LD_LIBRARY_PATH=\
 $NIXL_LIB_DIR:\
@@ -199,8 +201,6 @@ $NIXL_PLUGIN_DIR:\
 /usr/local/ucx/lib:\
 /usr/local/ucx/lib/ucx:\
 /opt/hpcx/ompi/lib:\
-/usr/lib/nvshmem-current/13/:\
-$TENSORRT_LIB_DIR:\
 /opt/dynamo/venv/lib/python${PYTHON_VERSION}/site-packages/torch/lib:\
 /opt/dynamo/venv/lib/python${PYTHON_VERSION}/site-packages/torch_tensorrt/lib:\
 /usr/local/cuda/lib:\
