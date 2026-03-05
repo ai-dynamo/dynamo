@@ -64,7 +64,9 @@ class EncodeWorkerHandler:
         self.image_processor = AutoImageProcessor.from_pretrained(
             self.model, trust_remote_code=True
         )
-        self.vision_model = load_vision_model(self.model)
+        self.vision_model = load_vision_model(
+            self.model, enforce_eager=self.engine_args.enforce_eager
+        )
         hidden_size = getattr(self.vision_model, "out_hidden_size", None)
         if hidden_size is None:
             hidden_size = getattr(
