@@ -62,6 +62,7 @@ spec:
               --shared-system-prompt-length "${SYSTEM_PROMPT_TOKENS}" \
               --url "http://${FRONTEND}:8000" \
               --streaming \
+              --ui-type none \
               --request-count "${REQUEST_COUNT}" \
               --concurrency "${CONCURRENCY}" \
               --request-rate "${REQUEST_RATE}" \
