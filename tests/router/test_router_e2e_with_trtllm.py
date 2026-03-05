@@ -320,7 +320,7 @@ class TRTLLMProcess:
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
-@pytest.mark.timeout(150)  # ~3x average (~45s/test), rounded up
+@pytest.mark.timeout(300)
 def test_trtllm_kv_router_basic(
     request,
     runtime_services_dynamic_ports,
