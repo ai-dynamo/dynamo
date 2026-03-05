@@ -106,6 +106,7 @@ const (
 
 	// Messages
 	MessageInitialized               = "DGDR initialized successfully"
+	MessageDiscoveringHardware       = "Discovering GPU hardware and preparing profiling job"
 	MessageProfilingJobCreated       = "Profiling job created"
 	MessageAICProfilingJobCreated    = "AIC profiling job created"
 	MessageProfilingInProgress       = "Profiling is in progress"
@@ -358,9 +359,11 @@ func (r *DynamoGraphDeploymentRequestReconciler) handlePendingPhase(ctx context.
 		// Set observedGeneration to track the spec we're processing
 		dgdr.Status.ObservedGeneration = dgdr.Generation
 
-		// Initialize status
+		// Initialize status — next reconcile will discover hardware and create the profiling job.
 		r.Recorder.Event(dgdr, corev1.EventTypeNormal, nvidiacomv1beta1.EventReasonInitialized, MessageInitialized)
-		return r.updatePhaseAndRequeue(ctx, dgdr, nvidiacomv1beta1.DGDRPhasePending, MessageInitialized)
+		return r.updatePhaseWithCondition(ctx, dgdr, nvidiacomv1beta1.DGDRPhasePending,
+			nvidiacomv1beta1.ConditionTypeProfiling, metav1.ConditionFalse,
+			"DiscoveringHardware", MessageDiscoveringHardware)
 	}
 
 	logger.Info("Handling pending phase", "name", dgdr.Name)
@@ -1103,6 +1106,15 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 				RunAsGroup:   ptr.To[int64](1000),
 				FSGroup:      ptr.To[int64](1000),
 			},
+			// Tolerate GPU node taints by default — profiling jobs always target GPU nodes.
+			// Users can override via spec.overrides.profilingJob.template.spec.tolerations.
+			Tolerations: []corev1.Toleration{
+				{
+					Key:      "nvidia.com/gpu",
+					Operator: corev1.TolerationOpExists,
+					Effect:   corev1.TaintEffectNoSchedule,
+				},
+			},
 			Containers: []corev1.Container{profilerContainer, sidecarContainer},
 			Volumes:    volumes,
 			ImagePullSecrets: []corev1.LocalObjectReference{
@@ -1197,7 +1209,13 @@ func (r *DynamoGraphDeploymentRequestReconciler) enrichHardwareFromDiscovery(ctx
 		hw.NumGPUsPerNode = &n
 	}
 	if hw.TotalGPUs == nil {
+		const defaultMaxAutoGPUs = int32(32)
 		total := int32(gpuInfo.GPUsPerNode * gpuInfo.NodesWithGPUs)
+		if total > defaultMaxAutoGPUs {
+			logger.Info("Capping auto-discovered TotalGPUs at default limit; set hardware.totalGpus to override",
+				"discovered", total, "cap", defaultMaxAutoGPUs)
+			total = defaultMaxAutoGPUs
+		}
 		hw.TotalGPUs = &total
 	}
 	return nil
