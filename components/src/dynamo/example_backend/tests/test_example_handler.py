@@ -1,6 +1,5 @@
 """Example tests for the ExampleHandler."""
 
-import asyncio
 import time
 from unittest.mock import MagicMock
 
