@@ -40,6 +40,7 @@ jobs:
       target_tag_plain: ${{ steps.calculate-target-tag.outputs.target_tag_plain }}
       # image: ${{ steps.build-and-push-image.outputs.image_uri }}
       image: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:main-operator
+      ecr_password: ${{ steps.ecr-token.outputs.password }}
     env:
       FRAMEWORK: ${{ inputs.framework }}
       IMAGE_REGISTRY: ai-dynamo
@@ -69,6 +70,13 @@ jobs:
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      - name: Generate ECR token
+        id: ecr-token
+        shell: bash
+        run: |
+          PASSWORD=$(aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }})
+          echo "::add-mask::${PASSWORD}"
+          echo "password=${PASSWORD}" >> $GITHUB_OUTPUT
       # - name: Build and push Container
       #   id: build-and-push-image
       #   shell: bash
@@ -109,7 +117,7 @@ jobs:
       image: ${{ needs.job-x.outputs.image }}
       credentials:
         username: AWS
-        password: ${{ secrets.AWS_ECR_PASSWORD }}
+        password: ${{ needs.job-x.outputs.ecr_password }}
     steps:
       - name: Say Hello World
         run: echo hello world
