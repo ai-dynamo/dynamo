@@ -480,14 +480,6 @@ class ModelRuntimeConfig:
         """Set the disaggregated endpoint for the model"""
         ...
 
-    def set_disaggregated_endpoint(
-        self,
-        bootstrap_host: Optional[str] = None,
-        bootstrap_port: Optional[int] = None,
-    ) -> None:
-        """Set the bootstrap endpoint for disaggregated serving."""
-        ...
-
     def set_tensor_model_config(self, tensor_model_config: Dict[str, Any]) -> None:
         """Set the tensor model configuration from a dictionary."""
         ...
