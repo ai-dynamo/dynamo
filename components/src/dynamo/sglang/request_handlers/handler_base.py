@@ -19,6 +19,10 @@ from dynamo.runtime import DistributedRuntime
 from dynamo.sglang.args import Config
 from dynamo.sglang.publisher import DynamoSglangPublisher
 
+# Keep default tags minimal and safe for general use.
+# "cuda_graph" can still be requested explicitly, but it requires LD_PRELOAD setup.
+DEFAULT_MEMORY_OCCUPATION_TAGS = ["kv_cache", "weights"]
+
 
 class BaseGenerativeHandler(ABC):
     """Minimal base class for all generative handlers (LLM, diffusion, etc.).
@@ -144,18 +148,41 @@ class BaseWorkerHandler(BaseGenerativeHandler):
             # have an sgl.Engine.
             self.input_param_manager = InputParamManager(None)
             self._engine_supports_priority = False
+        self._memory_occupation_lock = asyncio.Lock()
+        self._released_memory_tags: set[str] = set()
+        self._memory_serving_active = True
 
     def _priority_kwargs(self, priority: Any) -> Dict[str, Any]:
         if priority is not None and self._engine_supports_priority:
             return {"priority": priority}
         return {}
 
+    @staticmethod
+    def _normalize_memory_tags(raw_tags: Any) -> list[str]:
+        if raw_tags is None:
+            return list(DEFAULT_MEMORY_OCCUPATION_TAGS)
+
+        if isinstance(raw_tags, str):
+            candidates = [raw_tags]
+        else:
+            candidates = list(raw_tags)
+
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for tag in candidates:
+            tag_str = str(tag)
+            if tag_str in seen:
+                continue
+            seen.add(tag_str)
+            deduped.append(tag_str)
+        return deduped
+
     async def release_memory_occupation(self, body: dict) -> dict:
         """Release GPU memory occupation and unregister from discovery.
 
         Args:
             body: Dict with optional 'tags' key for which memory to release.
-                  Default: ["kv_cache", "weights", "cuda_graph"]
+                  Default: ["kv_cache", "weights"]
 
         Order of operations:
         1. Unregister from discovery - stop accepting new requests
@@ -167,43 +194,54 @@ class BaseWorkerHandler(BaseGenerativeHandler):
             ReleaseMemoryOccupationReqInput,
         )
 
-        tags = body.get("tags", body.get("tag", None))
-        if tags is None:
-            tags = ["kv_cache", "weights", "cuda_graph"]
+        body = body or {}
+        tags = self._normalize_memory_tags(body.get("tags", body.get("tag")))
 
-        try:
-            # Step 1: Unregister endpoint from discovery FIRST
+        async with self._memory_occupation_lock:
+            tags_to_release = [
+                tag for tag in tags if tag not in self._released_memory_tags
+            ]
+            if not tags_to_release:
+                return {
+                    "status": "ok",
+                    "message": f"Memory already released for tags: {tags}",
+                }
+
             try:
-                await self.generate_endpoint.unregister_endpoint_instance()
-            except Exception as unreg_err:
-                logging.warning(
-                    f"Failed to unregister endpoint from discovery: {unreg_err}"
+                # Stop new requests and drain in-flight work once when entering released state.
+                if not self._released_memory_tags:
+                    if self.generate_endpoint is not None:
+                        try:
+                            await self.generate_endpoint.unregister_endpoint_instance()
+                        except Exception as unreg_err:
+                            logging.warning(
+                                f"Failed to unregister endpoint from discovery: {unreg_err}"
+                            )
+
+                    pause_req = PauseGenerationReqInput()
+                    await self.engine.tokenizer_manager.pause_generation(pause_req)
+                    self._memory_serving_active = False
+
+                release_req = ReleaseMemoryOccupationReqInput(tags=tags_to_release)
+                await self.engine.tokenizer_manager.release_memory_occupation(
+                    release_req, None
                 )
+                self._released_memory_tags.update(tags_to_release)
 
-            # Step 2: Pause generation to drain in-flight requests
-            pause_req = PauseGenerationReqInput()
-            await self.engine.tokenizer_manager.pause_generation(pause_req)
-
-            # Step 3: Release memory now that it's safe
-            release_req = ReleaseMemoryOccupationReqInput(tags=tags)
-            await self.engine.tokenizer_manager.release_memory_occupation(
-                release_req, None
-            )
-
-            return {
-                "status": "ok",
-                "message": f"Memory released for tags: {tags}",
-            }
-        except Exception as e:
-            logging.error(f"Failed to release memory occupation: {e}")
-            return {"status": "error", "message": str(e)}
+                return {
+                    "status": "ok",
+                    "message": f"Memory released for tags: {tags_to_release}",
+                }
+            except Exception as e:
+                logging.error(f"Failed to release memory occupation: {e}")
+                return {"status": "error", "message": str(e)}
 
     async def resume_memory_occupation(self, body: dict) -> dict:
         """Resume GPU memory occupation and re-register to discovery.
 
         Args:
             body: Dict with optional 'tags' key for which memory to resume.
-                  Default: ["kv_cache", "weights", "cuda_graph"]
+                  Default: ["kv_cache", "weights"]
 
         Order of operations:
         1. Resume memory - restore GPU allocations
@@ -215,36 +253,65 @@ class BaseWorkerHandler(BaseGenerativeHandler):
             ResumeMemoryOccupationReqInput,
         )
 
-        tags = body.get("tags", body.get("tag", None))
-        if tags is None:
-            tags = ["kv_cache", "weights", "cuda_graph"]
+        body = body or {}
+        tags = self._normalize_memory_tags(body.get("tags", body.get("tag")))
 
-        try:
-            # Step 1: Resume memory first - must be ready before accepting requests
-            resume_req = ResumeMemoryOccupationReqInput(tags=tags)
-            await self.engine.tokenizer_manager.resume_memory_occupation(
-                resume_req, None
-            )
+        async with self._memory_occupation_lock:
+            tags_to_resume = [tag for tag in tags if tag in self._released_memory_tags]
+            if not tags_to_resume:
+                if not self._memory_serving_active:
+                    try:
+                        continue_req = ContinueGenerationReqInput()
+                        await self.engine.tokenizer_manager.continue_generation(
+                            continue_req
+                        )
+                        self._memory_serving_active = True
 
-            # Step 2: Continue generation
-            continue_req = ContinueGenerationReqInput()
-            await self.engine.tokenizer_manager.continue_generation(continue_req)
+                        if self.generate_endpoint is not None:
+                            try:
+                                await self.generate_endpoint.register_endpoint_instance()
+                            except Exception as reg_err:
+                                logging.warning(
+                                    f"Failed to re-register endpoint to discovery: {reg_err}"
+                                )
+                    except Exception as e:
+                        logging.error(f"Failed to resume memory occupation: {e}")
+                        return {"status": "error", "message": str(e)}
+                return {
+                    "status": "ok",
+                    "message": f"Memory already resumed for tags: {tags}",
+                }
 
-            # Step 3: Re-register to discovery so frontend can route to us
             try:
-                await self.generate_endpoint.register_endpoint_instance()
-            except Exception as reg_err:
-                logging.warning(
-                    f"Failed to re-register endpoint to discovery: {reg_err}"
+                resume_req = ResumeMemoryOccupationReqInput(tags=tags_to_resume)
+                await self.engine.tokenizer_manager.resume_memory_occupation(
+                    resume_req, None
                 )
+                self._released_memory_tags.difference_update(tags_to_resume)
 
-            return {
-                "status": "ok",
-                "message": f"Memory resumed for tags: {tags}",
-            }
-        except Exception as e:
-            logging.error(f"Failed to resume memory occupation: {e}")
-            return {"status": "error", "message": str(e)}
+                # Resume serving only after all released tags have been restored.
+                if not self._released_memory_tags:
+                    continue_req = ContinueGenerationReqInput()
+                    await self.engine.tokenizer_manager.continue_generation(
+                        continue_req
+                    )
+                    self._memory_serving_active = True
+
+                    if self.generate_endpoint is not None:
+                        try:
+                            await self.generate_endpoint.register_endpoint_instance()
+                        except Exception as reg_err:
+                            logging.warning(
+                                f"Failed to re-register endpoint to discovery: {reg_err}"
+                            )
+
+                return {
+                    "status": "ok",
+                    "message": f"Memory resumed for tags: {tags_to_resume}",
+                }
+            except Exception as e:
+                logging.error(f"Failed to resume memory occupation: {e}")
+                return {"status": "error", "message": str(e)}
 
     async def start_profile(self, body: dict) -> dict:
         """Start profiling on the engine.
