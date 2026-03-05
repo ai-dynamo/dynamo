@@ -10,6 +10,21 @@ import yaml
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
 
+def parse_platform(platform_str: str) -> str:
+    """Normalize a --platform value to the template variable used by Jinja2.
+
+    Accepts Docker-style values (linux/amd64, linux/arm64) or short form (amd64,
+    arm64), and comma-separated lists for multi-arch (linux/amd64,linux/arm64).
+
+    Returns one of: 'amd64', 'arm64', or 'multi'.
+    """
+    parts = [p.strip() for p in platform_str.split(",")]
+    if len(parts) > 1:
+        return "multi"
+    # Strip the OS prefix if present: linux/amd64 -> amd64
+    return parts[0].split("/")[-1]
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Renders dynamo Dockerfiles from templates"
@@ -39,8 +54,15 @@ def parse_args():
     parser.add_argument(
         "--platform",
         type=str,
-        default="amd64",
-        help="Dockerfile platform to use. [amd64, arm64]",
+        default="linux/amd64",
+        help=(
+            "Target platform(s), Docker-style. Examples:\n"
+            "  linux/amd64            single-arch amd64 build\n"
+            "  linux/arm64            single-arch arm64 build\n"
+            "  linux/amd64,linux/arm64  multi-arch build; the rendered Dockerfile uses\n"
+            "                         Docker BuildX TARGETARCH directly (set per platform\n"
+            "                         by: docker buildx build --platform linux/amd64,linux/arm64)"
+        ),
     )
     parser.add_argument(
         "--cuda-version",
@@ -145,7 +167,7 @@ def render(args, context, script_dir):
         framework=args.framework,
         device=args.device,
         target=args.target,
-        platform=args.platform,
+        platform=args.platform,  # normalized: 'amd64', 'arm64', or 'multi'
         cuda_version=args.cuda_version,
         make_efa=args.make_efa,
     )
@@ -174,6 +196,9 @@ def render(args, context, script_dir):
 
 def main():
     args = parse_args()
+    # Normalize platform to template variable ('amd64', 'arm64', or 'multi')
+    # and store it back so render() and validate_args() both see the normalized form.
+    args.platform = parse_platform(args.platform)
     validate_args(args)
     # Clear cuda version for non-cuda device
     if args.device != "cuda":
