@@ -168,7 +168,7 @@ The `/v1/videos` endpoint also accepts NVIDIA extensions via the `nvext` field f
 
 Image-to-video (I2V) uses the same `/v1/videos` endpoint as text-to-video, with an additional `input_reference` field that provides the source image. The image can be an HTTP URL, a base64 data URI, or a local file path.
 
-Launch with the provided script using `Wan-AI/Wan2.2-I2V-A14B-Diffusers`:
+Launch with the provided script using `Wan-AI/Wan2.2-TI2V-5B-Diffusers`:
 
 ```bash
 bash examples/backends/vllm/launch/agg_omni_i2v.sh
@@ -180,7 +180,7 @@ Generate a video from an image:
 curl -s http://localhost:8000/v1/videos \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "Wan-AI/Wan2.2-I2V-A14B-Diffusers",
+    "model": "Wan-AI/Wan2.2-TI2V-5B-Diffusers",
     "prompt": "A bear playing with yarn, smooth motion",
     "input_reference": "https://example.com/bear.png",
     "size": "832x480",

@@ -133,12 +133,8 @@ class OmniHandler(BaseOmniHandler):
             and parsed_request.input_reference
         ):
             try:
-                logger.info("Loading input_reference for I2V request")
                 image = await self._image_loader.load_image(
                     parsed_request.input_reference
-                )
-                logger.info(
-                    "I2V image loaded: size=%s, mode=%s", image.size, image.mode
                 )
             except Exception as e:
                 logger.warning("Failed to load I2V input_reference: %s", e)
