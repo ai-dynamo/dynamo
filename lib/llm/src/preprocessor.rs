@@ -548,6 +548,10 @@ impl OpenAIPreprocessor {
     /// Returns an error if the prompt leaves no room for output tokens.
     fn validate_token_count(token_count: usize, context_length: u32) -> Result<()> {
         let max_len = context_length as usize;
+        // max_len == 0 means context_length was not configured (model_card.rs defaults
+        // to 0 when max_position_embeddings is absent), so skip validation.
+        // Use >= because context_length is the total budget (input + output): if the
+        // prompt alone fills it, there is zero room for output tokens.
         if max_len > 0 && token_count >= max_len {
             return Err(DynamoError::builder()
                 .error_type(ErrorType::InvalidArgument)
