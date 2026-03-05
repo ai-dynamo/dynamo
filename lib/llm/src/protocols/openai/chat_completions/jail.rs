@@ -53,6 +53,16 @@ impl ChoiceEmission {
             ChoiceEmission::Trailing(choice) => choice.index,
         }
     }
+
+    /// Get mutable access to the underlying choice.
+    fn choice_mut(&mut self) -> &mut ChatChoiceStream {
+        match self {
+            ChoiceEmission::PassThrough(choice) => choice,
+            ChoiceEmission::ToolCall(choice) => choice,
+            ChoiceEmission::Content(choice) => choice,
+            ChoiceEmission::Trailing(choice) => choice,
+        }
+    }
 }
 
 /// Configuration for jail detection and parsing
@@ -96,6 +106,8 @@ struct ChoiceJailState {
     stream_finish_reason: Option<FinishReason>,
     /// Number of tool calls already emitted for this choice
     emitted_tool_calls_count: usize,
+    /// Reasoning content collected while waiting for a suitable emission.
+    pending_reasoning_content: Option<String>,
 }
 
 fn create_choice_stream(
@@ -136,6 +148,7 @@ impl ChoiceJailState {
             partial_match_buffer: String::new(),
             stream_finish_reason: None,
             emitted_tool_calls_count: 0,
+            pending_reasoning_content: None,
         }
     }
 
@@ -372,7 +385,7 @@ impl ChoiceJailState {
                 None,
             );
 
-            let final_choice = jail_stream
+            let mut final_choice = jail_stream
                 .create_tool_call_choice(
                     self.index,
                     &self.accumulated_content,
@@ -380,6 +393,15 @@ impl ChoiceJailState {
                     self.emitted_tool_calls_count,
                 )
                 .await;
+
+            // Preserve any pending reasoning content collected while jailed.
+            if let Some(pending_reasoning) = self.pending_reasoning_content.take() {
+                if let Some(existing_reasoning) = final_choice.delta.reasoning_content.as_mut() {
+                    existing_reasoning.push_str(&pending_reasoning);
+                } else {
+                    final_choice.delta.reasoning_content = Some(pending_reasoning);
+                }
+            }
 
             if let Some(ref tool_calls) = final_choice.delta.tool_calls {
                 self.emitted_tool_calls_count += tool_calls.len();
@@ -521,6 +543,13 @@ impl JailedStream {
                                 let starts_jailed = matches!(self.jail_mode, JailMode::Immediate { .. });
                                 let choice_state = choice_states.get_or_create_state(choice.index, starts_jailed);
 
+                                if let Some(reasoning_content) = &choice.delta.reasoning_content {
+                                    let pending = choice_state
+                                        .pending_reasoning_content
+                                        .get_or_insert_with(String::new);
+                                    pending.push_str(reasoning_content);
+                                }
+
                                 // Store metadata when any choice becomes jailed (first time only)
                                 if !choice_state.is_jailed && self.should_start_jail(text)
                                     && last_annotated_id.is_none() {
@@ -533,7 +562,13 @@ impl JailedStream {
                                 choice_state.stream_finish_reason = choice.finish_reason;
 
                                 // Process this choice and get emissions
-                                let emissions = choice_state.process_content(choice, text, &self).await;
+                                let mut emissions = choice_state.process_content(choice, text, &self).await;
+                                if !emissions.is_empty()
+                                    && let Some(reasoning) = choice_state.pending_reasoning_content.take()
+                                    && let Some(first) = emissions.first_mut()
+                                {
+                                    first.choice_mut().delta.reasoning_content = Some(reasoning);
+                                }
                                 all_emissions.extend(emissions);
                             }
                             // For multimodal content, pass through unchanged (no jailing)

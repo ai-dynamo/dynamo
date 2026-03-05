@@ -240,7 +240,8 @@ class ServiceAPI:
                 modality=modality,
                 prompts=[prompt],
                 media=[image_urls],
-                image_data_format="pt",
+                # Align hash input type with backend multimodal processor path.
+                image_data_format="pil",
                 device="cuda",
             )
             mm_input = inputs[0]
@@ -327,12 +328,22 @@ class ServiceAPI:
         if not multi_modal_data:
             return None
 
-        mm_hashes_dict = apply_mm_hashes(multi_modal_data)
-        if "image" in mm_hashes_dict and mm_hashes_dict["image"]:
-            # Convert each 256-bit hex digest to 64-bit int
-            mm_hashes = [
-                int(hex_digest[:16], 16) for hex_digest in mm_hashes_dict["image"]
+        # TRT-LLM 1.3 returns Tuple[Dict[str, List[str]], Optional[List[Optional[str]]]].
+        mm_hashes_dict = apply_mm_hashes(multi_modal_data)[0]
+        if not isinstance(mm_hashes_dict, dict) or not mm_hashes_dict:
+            return None
+
+        # Prefer image modality for stable behavior, but fall back to flattening
+        # all modality hashes to stay forward-compatible.
+        hash_hexes = mm_hashes_dict.get("image")
+        if not hash_hexes:
+            hash_hexes = [
+                h for hashes in mm_hashes_dict.values() for h in (hashes or [])
             ]
+
+        if hash_hexes:
+            # Convert each 256-bit hex digest to 64-bit int
+            mm_hashes = [int(hex_digest[:16], 16) for hex_digest in hash_hexes]
             logger.debug(f"Computed mm_hashes for {len(mm_hashes)} images: {mm_hashes}")
             return mm_hashes
         return None

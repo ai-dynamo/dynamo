@@ -151,7 +151,7 @@ type DynamoGraphDeploymentRequestSpec struct {
 	// The controller automatically sets this value in profilingConfig.config.engine.backend.
 	// Profiling runs on real GPUs or via AIC simulation to collect performance data.
 	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:Enum=vllm;sglang;trtllm
+	// +kubebuilder:validation:Enum=auto;vllm;sglang;trtllm
 	Backend string `json:"backend"`
 
 	// UseMocker indicates whether to deploy a mocker DynamoGraphDeployment instead of
@@ -279,7 +279,6 @@ type DynamoGraphDeploymentRequestStatus struct {
 //
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:storageversion
 // +kubebuilder:resource:shortName=dgdr
 // +kubebuilder:deprecatedversion:warning="nvidia.com/v1alpha1 DynamoGraphDeploymentRequest is deprecated; use nvidia.com/v1beta1 DynamoGraphDeploymentRequest"
 // +kubebuilder:printcolumn:name="Model",type=string,JSONPath=`.spec.model`
