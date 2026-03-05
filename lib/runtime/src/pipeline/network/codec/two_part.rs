@@ -55,7 +55,10 @@ impl Decoder for TwoPartCodec {
         let body_len = cursor.get_u64() as usize;
         let _checksum = cursor.get_u64();
 
-        let total_len = 24 + header_len + body_len;
+        let total_len = 24usize
+            .checked_add(header_len)
+            .and_then(|n| n.checked_add(body_len))
+            .ok_or(TwoPartCodecError::MessageTooLarge(usize::MAX, 0))?;
 
         // Check if total_len exceeds max_message_size
         if let Some(max_size) = self.max_message_size
@@ -109,7 +112,10 @@ impl Encoder<TwoPartMessage> for TwoPartCodec {
         let header_len = item.header.len();
         let body_len = item.data.len();
 
-        let total_len = 24 + header_len + body_len; // 24 bytes for lengths and checksum
+        let total_len = 24usize
+            .checked_add(header_len)
+            .and_then(|n| n.checked_add(body_len))
+            .ok_or(TwoPartCodecError::MessageTooLarge(usize::MAX, 0))?;
 
         // Check if total_len exceeds max_message_size
         if let Some(max_size) = self.max_message_size
