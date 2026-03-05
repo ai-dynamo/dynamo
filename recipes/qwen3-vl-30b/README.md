@@ -51,7 +51,7 @@ This recipe demonstrates throughput/latency improvements from enabling multimoda
 We compare the impact of encoder cache toggled on vs off for three deployment modes:
 - `agg TP=1 x8 replicas`
 - `disagg E/PD x1 encode worker, x7 pd workers`
-- `disagg EP/D x2 EP workers, x6 decode workers`
+- `disagg EP/D x4 EP workers, x4 decode workers`
 
 To test this, the `data-gen/generate-datastes-job.yaml` creates 5 datasets of synthetic text + image data each with varying levels of image per request overlap. They are tagged as `r_{##}` representing the ratio of total slots to image slots. For example, r_{50} refers to a dataset where the image pool is half the size of the total slots. In other words, you would need to traverse half of the entire dataset to have seen every image. Refer to jsonl [documention](https://github.com/ai-dynamo/dynamo/tree/main/benchmarks/multimodal/jsonl) for more details on data generation.
 
