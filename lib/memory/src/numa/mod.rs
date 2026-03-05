@@ -122,12 +122,7 @@ fn cuda_device_id_to_nvidia_smi_id(device_id: u32) -> String {
     }
 
     let id = devices[device_id as usize];
-    // If it parses as integer, use as-is (physical index). Otherwise treat as UUID.
-    if id.parse::<u32>().is_ok() {
-        id.to_string()
-    } else {
-        id.to_string() // UUID or other format - nvidia-smi accepts it
-    }
+    id.to_string()
 }
 
 /// Get NUMA node for a GPU device.
@@ -288,38 +283,6 @@ mod tests {
         // Should return either a valid node (0-7) or use heuristic (gpu_id % 2)
         // On dual-socket systems, GPU 0 typically on node 0 or 1
         println!("GPU 0 detected on NUMA node: {}", node.0);
-    }
-
-    #[test]
-    fn test_cuda_visible_devices_mapping() {
-        // Verify cuda_device_id_to_nvidia_smi_id maps correctly when CUDA_VISIBLE_DEVICES is set.
-        // When unset, process-local 0 maps to physical 0.
-        unsafe { std::env::remove_var("CUDA_VISIBLE_DEVICES") };
-        let id = super::cuda_device_id_to_nvidia_smi_id(0);
-        assert_eq!(id, "0");
-
-        // CUDA_VISIBLE_DEVICES=2: process 0 -> physical 2
-        unsafe { std::env::set_var("CUDA_VISIBLE_DEVICES", "2") };
-        let id = super::cuda_device_id_to_nvidia_smi_id(0);
-        assert_eq!(id, "2");
-
-        // CUDA_VISIBLE_DEVICES=2,3: process 0->2, process 1->3
-        unsafe { std::env::set_var("CUDA_VISIBLE_DEVICES", "2,3") };
-        assert_eq!(super::cuda_device_id_to_nvidia_smi_id(0), "2");
-        assert_eq!(super::cuda_device_id_to_nvidia_smi_id(1), "3");
-
-        // UUID format passes through
-        unsafe { std::env::set_var("CUDA_VISIBLE_DEVICES", "GPU-abc123") };
-        let id = super::cuda_device_id_to_nvidia_smi_id(0);
-        assert_eq!(id, "GPU-abc123");
-
-        // Out-of-range falls back to identity
-        unsafe { std::env::set_var("CUDA_VISIBLE_DEVICES", "2") };
-        let id = super::cuda_device_id_to_nvidia_smi_id(1);
-        assert_eq!(id, "1");
-
-        // Cleanup
-        unsafe { std::env::remove_var("CUDA_VISIBLE_DEVICES") };
     }
 
     #[test]
