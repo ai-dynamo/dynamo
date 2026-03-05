@@ -1,6 +1,0 @@
-[2m2026-03-05T17:54:09.850512Z[0m [31mERROR[0m [2mhandlers._decode_prompt_embeds[0m[2m:[0m Failed to decode prompt_embeds: Weights only load failed. In PyTorch 2.6, we changed the default value of the `weights_only` argument in `torch.load` from `False` to `True`. Re-running `torch.load` with `weights_only` set to `False` will likely succeed, but it can result in arbitrary code execution. Do it only if you got the file from a trusted source.
-Please file an issue with the following so that we can make `weights_only=True` compatible with your use case: WeightsUnpickler error: 
-
-Unsupported operand 147
-
-Check the documentation of torch.load to learn more about types accepted by default with weights_only https://pytorch.org/docs/stable/generated/torch.load.html.

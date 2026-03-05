@@ -1,0 +1,1 @@
+[2m2026-03-05T18:09:50.333716Z[0m [32m INFO[0m [2mimage_diffusion_handler.__init__[0m[2m:[0m Image diffusion worker handler initialized with fs_url=s3://my-bucket/images, url_base=http://localhost:8008/images

@@ -1,1 +1,0 @@
-[2m2026-03-05T17:54:07.330427Z[0m [32m INFO[0m [2mplanner_core._initialize_gpu_counts[0m[2m:[0m Detected GPU counts from DGD: prefill=2, decode=4

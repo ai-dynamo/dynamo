@@ -1,0 +1,276 @@
+INFO     NatsServer:managed_process.py:307 Running command: nats-server --trace -p 4255 in /workspace
+INFO     NatsServer:managed_process.py:473 Checking Port: 4255
+INFO     NatsServer:managed_process.py:481 SUCCESS: Check Port: 4255
+INFO     NatsServer:managed_process.py:586 Running custom health check '_nats_ready'
+DEBUG    asyncio:selector_events.py:64 Using selector: EpollSelector
+INFO     NatsServer:managed_process.py:606 SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+INFO     EtcdServer:managed_process.py:307 Running command: etcd --listen-client-urls http://0.0.0.0:2396 --advertise-client-urls http://0.0.0.0:2396 --listen-peer-urls http://0.0.0.0:2397 --initial-advertise-peer-urls http://localhost:2397 --initial-cluster default=http://localhost:2397 --data-dir /tmp/etcd_v5bfaenu in /workspace
+INFO     EtcdServer:managed_process.py:473 Checking Port: 2396
+INFO     EtcdServer:managed_process.py:481 SUCCESS: Check Port: 2396
+INFO     test_chat_only_aggregated_with_test_logits_processor:common.py:41 Starting aggregated_qwen_chatonly test_deployment
+INFO     test_chat_only_aggregated_with_test_logits_processor:common.py:47 Using model: Qwen/Qwen3-0.6B
+INFO     test_chat_only_aggregated_with_test_logits_processor:common.py:48 Script: agg_metrics.sh
+INFO     EngineProcess:managed_process.py:307 Running command: bash /workspace/examples/backends/trtllm/launch/agg_metrics.sh in /workspace/examples/backends/trtllm
+INFO     EngineProcess:managed_process.py:501 Checking URL http://localhost:8034/v1/models
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8034
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8034
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8034 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8034
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8034 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8034
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8034 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8034
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8034 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8034
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8034 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8034
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8034 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8034
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8034 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8034
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8034 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8034
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8034 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8034
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8034 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8034
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8034 "GET /v1/models HTTP/1.1" 200 27
+INFO     EngineProcess:managed_process.py:553 Still waiting for URL http://localhost:8034/v1/models (custom check failed) (attempt=12, elapsed=21.0s)
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8034
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8034 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8034
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8034 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8034
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8034 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8034
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8034 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8034
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8034 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8034
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8034 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8034
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8034 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8034
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8034 "GET /v1/models HTTP/1.1" 200 109
+INFO     EngineProcess:managed_process.py:521 SUCCESS: Check URL: http://localhost:8034/v1/models (attempt=20, elapsed=37.0s)
+Response:
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "Qwen/Qwen3-0.6B",
+      "object": "model",
+      "created": 1772735130,
+      "owned_by": "nvidia"
+    }
+  ]
+}
+INFO     EngineProcess:managed_process.py:501 Checking URL http://localhost:8034/health
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8034
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8034 "GET /health HTTP/1.1" 200 519
+INFO     EngineProcess:managed_process.py:521 SUCCESS: Check URL: http://localhost:8034/health (attempt=1, elapsed=0.0s)
+Response:
+{
+  "status": "healthy",
+  "endpoints": [
+    "dyn://dynamo.tensorrt_llm.generate",
+    "dyn://dynamo.tensorrt_llm.worker_kv_indexer_query_dp0"
+  ],
+  "instances": [
+    {
+      "component": "tensorrt_llm",
+      "endpoint": "generate",
+      "namespace": "dynamo",
+      "instance_id": 972949864719121673,
+      "transport": {
+        "tcp": "10.1.93.125:44367/d809cbf3ed8fd09/generate"
+      }
+    },
+    {
+      "component": "tensorrt_llm",
+      "endpoint": "worker_kv_indexer_query_dp0",
+      "namespace": "dynamo",
+      "instance_id": 972949864719121673,
+      "transport": {
+        "tcp": "10.1.93.125:44367/d809cbf3ed8fd09/worker_kv_indexer_query_dp0"
+      }
+    }
+  ]
+}
+INFO     test_chat_only_aggregated_with_test_logits_processor:common.py:100 TESTING: Payload: ChatPayload
+INFO     tests.utils.client:client.py:94 Sending request (curl equivalent):
+curl -X POST "http://localhost:8034/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Tell me a knock knock joke about AI."
+    }
+  ],
+  "max_tokens": 1000,
+  "temperature": 0.0,
+  "stream": false,
+  "model": "Qwen/Qwen3-0.6B"
+}'
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8034
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8034 "POST /v1/chat/completions HTTP/1.1" 200 409
+INFO     tests.utils.client:client.py:111 Received response: status=200, elapsed=0.98s
+DEBUG    tests.utils.client:client.py:118 Response headers: {'content-type': 'application/json', 'content-length': '409', 'date': 'Thu, 05 Mar 2026 18:25:33 GMT'}
+DEBUG    tests.utils.client:client.py:133 Response body: {
+  "id": "chatcmpl-ffcfb3c1-6b48-4ef0-83a3-48d7b3af1724",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "content": "Hello world!",
+        "role": "assistant",
+        "reasoning_content": null
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "created": 1772735132,
+  "model": "Qwen/Qwen3-0.6B",
+  "object": "chat.completion",
+  "usage": {
+    "prompt_tokens": 17,
+    "completion_tokens": 4,
+    "total_tokens": 21
+  },
+  "nvext": {
+    "timing": {
+      "request_received_ms": 1772735132122,
+      "total_time_ms": 975.963657
+    }
+  }
+}
+INFO     tests.utils.payloads:payloads.py:99 SUCCESS: Found 1/1 expected keywords: ['Hello world!']
+INFO     tests.utils.engine_process:engine_process.py:104 Extracted content: 
+Hello world!
+INFO     tests.utils.client:client.py:94 Sending request (curl equivalent):
+curl -X POST "http://localhost:8034/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Tell me a knock knock joke about AI."
+    }
+  ],
+  "max_tokens": 1000,
+  "temperature": 0.0,
+  "stream": false,
+  "model": "Qwen/Qwen3-0.6B"
+}'
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8034
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8034 "POST /v1/chat/completions HTTP/1.1" 200 474
+INFO     tests.utils.client:client.py:111 Received response: status=200, elapsed=0.74s
+DEBUG    tests.utils.client:client.py:118 Response headers: {'content-type': 'application/json', 'content-length': '474', 'date': 'Thu, 05 Mar 2026 18:25:33 GMT'}
+DEBUG    tests.utils.client:client.py:133 Response body: {
+  "id": "chatcmpl-3b0256e4-9707-4a13-8b75-79ea73d6bb7e",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "content": "Hello world!",
+        "role": "assistant",
+        "reasoning_content": null
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "created": 1772735133,
+  "model": "Qwen/Qwen3-0.6B",
+  "object": "chat.completion",
+  "usage": {
+    "prompt_tokens": 17,
+    "completion_tokens": 4,
+    "total_tokens": 21,
+    "prompt_tokens_details": {
+      "audio_tokens": null,
+      "cached_tokens": 17
+    }
+  },
+  "nvext": {
+    "timing": {
+      "request_received_ms": 1772735133101,
+      "total_time_ms": 736.774979
+    }
+  }
+}
+INFO     tests.utils.payloads:payloads.py:99 SUCCESS: Found 1/1 expected keywords: ['Hello world!']
+INFO     tests.utils.engine_process:engine_process.py:104 Extracted content: 
+Hello world!
+INFO     tests.utils.client:client.py:94 Sending request (curl equivalent):
+curl -X POST "http://localhost:8034/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Tell me a knock knock joke about AI."
+    }
+  ],
+  "max_tokens": 1000,
+  "temperature": 0.0,
+  "stream": false,
+  "model": "Qwen/Qwen3-0.6B"
+}'
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8034
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8034 "POST /v1/chat/completions HTTP/1.1" 200 474
+INFO     tests.utils.client:client.py:111 Received response: status=200, elapsed=0.91s
+DEBUG    tests.utils.client:client.py:118 Response headers: {'content-type': 'application/json', 'content-length': '474', 'date': 'Thu, 05 Mar 2026 18:25:34 GMT'}
+DEBUG    tests.utils.client:client.py:133 Response body: {
+  "id": "chatcmpl-fb27a2fd-405d-4755-9792-21a176019344",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "content": "Hello world!",
+        "role": "assistant",
+        "reasoning_content": null
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "created": 1772735133,
+  "model": "Qwen/Qwen3-0.6B",
+  "object": "chat.completion",
+  "usage": {
+    "prompt_tokens": 17,
+    "completion_tokens": 4,
+    "total_tokens": 21,
+    "prompt_tokens_details": {
+      "audio_tokens": null,
+      "cached_tokens": 17
+    }
+  },
+  "nvext": {
+    "timing": {
+      "request_received_ms": 1772735133840,
+      "total_time_ms": 911.387341
+    }
+  }
+}
+INFO     tests.utils.payloads:payloads.py:99 SUCCESS: Found 1/1 expected keywords: ['Hello world!']
+INFO     tests.utils.engine_process:engine_process.py:104 Extracted content: 
+Hello world!
+INFO     EngineProcess:managed_process.py:388 Terminating process group: 5100
+INFO     EngineProcess:managed_process.py:31 Terminating PID: 5100 name: bash
+INFO     EngineProcess:managed_process.py:36 Sending SIGTERM (kill): 5100 bash
+INFO     EngineProcess:managed_process.py:31 Terminating PID: 5102 name: tee
+INFO     EngineProcess:managed_process.py:36 Sending SIGTERM (kill): 5102 tee
+INFO     EngineProcess:managed_process.py:31 Terminating PID: 5101 name: sed
+INFO     EngineProcess:managed_process.py:36 Sending SIGTERM (kill): 5101 sed
+INFO     EngineProcess:managed_process.py:216 Checking for straggler processes: stragglers=['TRTLLM:EngineCore'], straggler_commands=[]
+INFO     EtcdServer:managed_process.py:388 Terminating process group: 5087
+INFO     EtcdServer:managed_process.py:31 Terminating PID: 5087 name: etcd
+INFO     EtcdServer:managed_process.py:36 Sending SIGTERM (kill): 5087 etcd
+INFO     EtcdServer:managed_process.py:31 Terminating PID: 5088 name: sed
+INFO     EtcdServer:managed_process.py:36 Sending SIGTERM (kill): 5088 sed
+INFO     NatsServer:managed_process.py:388 Terminating process group: 5075
+INFO     NatsServer:managed_process.py:31 Terminating PID: 5075 name: nats-server
+INFO     NatsServer:managed_process.py:36 Sending SIGTERM (kill): 5075 nats-server
+INFO     NatsServer:managed_process.py:31 Terminating PID: 5076 name: sed
+INFO     NatsServer:managed_process.py:36 Sending SIGTERM (kill): 5076 sed

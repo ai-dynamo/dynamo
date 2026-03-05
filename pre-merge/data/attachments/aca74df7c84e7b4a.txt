@@ -1,5 +1,0 @@
-DEBUG    asyncio:selector_events.py:64 Using selector: EpollSelector
-DEBUG    asyncio:selector_events.py:64 Using selector: EpollSelector
-INFO     dynamo.common.memory.multimodal_embedding_cache_manager:multimodal_embedding_cache_manager.py:63 MultimodalEmbeddingCacheManager initialized: capacity=0.00GB
-DEBUG    dynamo.common.memory.multimodal_embedding_cache_manager:multimodal_embedding_cache_manager.py:149 Cached key=bc1fa515fccb2d07, size=0.00MB, total=0.000GB
-DEBUG    dynamo.vllm.multimodal_utils.prefill_worker_utils:prefill_worker_utils.py:238 [req-1] Cache hit for URL index 0

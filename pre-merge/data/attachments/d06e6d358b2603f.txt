@@ -1,0 +1,222 @@
+INFO     NatsServer:managed_process.py:307 Running command: nats-server --trace -p 4279 in /workspace
+INFO     NatsServer:managed_process.py:473 Checking Port: 4279
+INFO     NatsServer:managed_process.py:481 SUCCESS: Check Port: 4279
+INFO     NatsServer:managed_process.py:586 Running custom health check '_nats_ready'
+DEBUG    asyncio:selector_events.py:64 Using selector: EpollSelector
+INFO     NatsServer:managed_process.py:606 SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+INFO     EtcdServer:managed_process.py:307 Running command: etcd --listen-client-urls http://0.0.0.0:2450 --advertise-client-urls http://0.0.0.0:2450 --listen-peer-urls http://0.0.0.0:2451 --initial-advertise-peer-urls http://localhost:2451 --initial-cluster default=http://localhost:2451 --data-dir /tmp/etcd__dm78qxh in /workspace
+INFO     EtcdServer:managed_process.py:473 Checking Port: 2450
+INFO     EtcdServer:managed_process.py:481 SUCCESS: Check Port: 2450
+INFO     test_serve_deployment[multimodal_agg_qwen]:common.py:41 Starting multimodal_agg_qwen test_deployment
+INFO     test_serve_deployment[multimodal_agg_qwen]:common.py:47 Using model: Qwen/Qwen2.5-VL-7B-Instruct
+INFO     test_serve_deployment[multimodal_agg_qwen]:common.py:48 Script: agg_multimodal.sh
+INFO     EngineProcess:managed_process.py:307 Running command: bash /workspace/examples/backends/vllm/launch/agg_multimodal.sh --model Qwen/Qwen2.5-VL-7B-Instruct in /workspace/examples/backends/vllm
+INFO     EngineProcess:managed_process.py:501 Checking URL http://localhost:8058/v1/models
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8058
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8058
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8058 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8058
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8058 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8058
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8058 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8058
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8058 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8058
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8058 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8058
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8058 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8058
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8058 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8058
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8058 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8058
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8058 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8058
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8058 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8058
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8058 "GET /v1/models HTTP/1.1" 200 27
+INFO     EngineProcess:managed_process.py:553 Still waiting for URL http://localhost:8058/v1/models (custom check failed) (attempt=12, elapsed=21.0s)
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8058
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8058 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8058
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8058 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8058
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8058 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8058
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8058 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8058
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8058 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8058
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8058 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8058
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8058 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8058
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8058 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8058
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8058 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8058
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8058 "GET /v1/models HTTP/1.1" 200 27
+INFO     EngineProcess:managed_process.py:553 Still waiting for URL http://localhost:8058/v1/models (custom check failed) (attempt=22, elapsed=41.0s)
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8058
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8058 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8058
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8058 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8058
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8058 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8058
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8058 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8058
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8058 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8058
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8058 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8058
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8058 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8058
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8058 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8058
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8058 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8058
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8058 "GET /v1/models HTTP/1.1" 200 27
+INFO     EngineProcess:managed_process.py:553 Still waiting for URL http://localhost:8058/v1/models (custom check failed) (attempt=32, elapsed=61.1s)
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8058
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8058 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8058
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8058 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8058
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8058 "GET /v1/models HTTP/1.1" 200 121
+INFO     EngineProcess:managed_process.py:521 SUCCESS: Check URL: http://localhost:8058/v1/models (attempt=35, elapsed=67.1s)
+Response:
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "Qwen/Qwen2.5-VL-7B-Instruct",
+      "object": "model",
+      "created": 1772735119,
+      "owned_by": "nvidia"
+    }
+  ]
+}
+INFO     EngineProcess:managed_process.py:501 Checking URL http://localhost:8058/health
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8058
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8058 "GET /health HTTP/1.1" 200 723
+INFO     EngineProcess:managed_process.py:521 SUCCESS: Check URL: http://localhost:8058/health (attempt=1, elapsed=0.0s)
+Response:
+{
+  "status": "healthy",
+  "endpoints": [
+    "dyn://dynamo.backend.clear_kv_blocks",
+    "dyn://dynamo.backend.generate",
+    "dyn://dynamo.backend.worker_kv_indexer_query_dp0"
+  ],
+  "instances": [
+    {
+      "component": "backend",
+      "endpoint": "clear_kv_blocks",
+      "namespace": "dynamo",
+      "instance_id": 1411769353400627721,
+      "transport": {
+        "tcp": "10.1.30.146:34271/13979cbf3e3a3209/clear_kv_blocks"
+      }
+    },
+    {
+      "component": "backend",
+      "endpoint": "generate",
+      "namespace": "dynamo",
+      "instance_id": 1411769353400627721,
+      "transport": {
+        "tcp": "10.1.30.146:34271/13979cbf3e3a3209/generate"
+      }
+    },
+    {
+      "component": "backend",
+      "endpoint": "worker_kv_indexer_query_dp0",
+      "namespace": "dynamo",
+      "instance_id": 1411769353400627721,
+      "transport": {
+        "tcp": "10.1.30.146:34271/13979cbf3e3a3209/worker_kv_indexer_query_dp0"
+      }
+    }
+  ]
+}
+INFO     test_serve_deployment[multimodal_agg_qwen]:common.py:100 TESTING: Payload: ChatPayload
+INFO     tests.utils.client:client.py:94 Sending request (curl equivalent):
+curl -X POST "http://localhost:8058/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "What colors are in the following image? Respond only with the colors."
+        },
+        {
+          "type": "image_url",
+          "image_url": {
+            "url": "http://localhost:8765/llm-graphic.png"
+          }
+        }
+      ]
+    }
+  ],
+  "max_tokens": 100,
+  "stream": false,
+  "logprobs": false,
+  "model": "Qwen/Qwen2.5-VL-7B-Instruct"
+}'
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8058
+INFO     werkzeug:_internal.py:97 127.0.0.1 - - [05/Mar/2026 18:25:21] "GET /llm-graphic.png HTTP/1.1" 200 -
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8058 "POST /v1/chat/completions HTTP/1.1" 200 434
+INFO     tests.utils.client:client.py:111 Received response: status=200, elapsed=3.56s
+DEBUG    tests.utils.client:client.py:118 Response headers: {'content-type': 'application/json', 'content-length': '434', 'date': 'Thu, 05 Mar 2026 18:25:25 GMT'}
+DEBUG    tests.utils.client:client.py:133 Response body: {
+  "id": "chatcmpl-3b3c638d-25b9-4d89-8d91-8e50ea271f12",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "content": "Purple, White, Green",
+        "role": "assistant",
+        "reasoning_content": null
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "created": 1772735121,
+  "model": "Qwen/Qwen2.5-VL-7B-Instruct",
+  "object": "chat.completion",
+  "usage": {
+    "prompt_tokens": 2875,
+    "completion_tokens": 6,
+    "total_tokens": 2881
+  },
+  "nvext": {
+    "timing": {
+      "request_received_ms": 1772735121501,
+      "total_time_ms": 3559.690181
+    }
+  }
+}
+INFO     tests.utils.payloads:payloads.py:99 SUCCESS: Found 1/1 expected keywords: ['purple']
+INFO     tests.utils.engine_process:engine_process.py:104 Extracted content: 
+Purple, White, Green
+INFO     EngineProcess:managed_process.py:388 Terminating process group: 6998
+INFO     EngineProcess:managed_process.py:31 Terminating PID: 6998 name: bash
+INFO     EngineProcess:managed_process.py:36 Sending SIGTERM (kill): 6998 bash
+INFO     EngineProcess:managed_process.py:31 Terminating PID: 7000 name: tee
+INFO     EngineProcess:managed_process.py:36 Sending SIGTERM (kill): 7000 tee
+INFO     EngineProcess:managed_process.py:31 Terminating PID: 6999 name: sed
+INFO     EngineProcess:managed_process.py:36 Sending SIGTERM (kill): 6999 sed
+INFO     EngineProcess:managed_process.py:216 Checking for straggler processes: stragglers=['VLLM:EngineCore'], straggler_commands=[]
+INFO     EtcdServer:managed_process.py:388 Terminating process group: 6985
+INFO     EtcdServer:managed_process.py:31 Terminating PID: 6985 name: etcd
+INFO     EtcdServer:managed_process.py:36 Sending SIGTERM (kill): 6985 etcd
+INFO     EtcdServer:managed_process.py:31 Terminating PID: 6986 name: sed
+INFO     EtcdServer:managed_process.py:36 Sending SIGTERM (kill): 6986 sed
+INFO     NatsServer:managed_process.py:388 Terminating process group: 6973
+INFO     NatsServer:managed_process.py:31 Terminating PID: 6973 name: nats-server
+INFO     NatsServer:managed_process.py:36 Sending SIGTERM (kill): 6973 nats-server
+INFO     NatsServer:managed_process.py:31 Terminating PID: 6974 name: sed
+INFO     NatsServer:managed_process.py:36 Sending SIGTERM (kill): 6974 sed
