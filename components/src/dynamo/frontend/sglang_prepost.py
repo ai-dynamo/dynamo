@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import uuid
 from dataclasses import dataclass
 from typing import Any
 
@@ -12,7 +11,7 @@ from sglang.srt.entrypoints.openai.protocol import Tool as SglangTool
 from sglang.srt.function_call.function_call_parser import FunctionCallParser
 from sglang.srt.parser.reasoning_parser import ReasoningParser
 
-_MASK_64_BITS = (1 << 64) - 1
+from .utils import random_call_id
 
 
 @dataclass
@@ -139,7 +138,7 @@ def preprocess_chat_request(
 
 
 def _random_call_id() -> str:
-    return f"call_{uuid.uuid4().int & _MASK_64_BITS:016x}"
+    return random_call_id()
 
 
 class SglangStreamingPostProcessor:
@@ -148,7 +147,7 @@ class SglangStreamingPostProcessor:
     Handles:
     - Incremental detokenization via sliding-window decode (6-token lookback)
     - Reasoning content extraction via SGLang ReasoningParser
-    - Tool call parsing via SGLang FunctionCallParser with parameter diffing
+    - Tool call parsing via SGLang FunctionCallParser (parameter deltas)
     """
 
     LOOKBACK = 6  # token lookback for multi-byte character boundary handling

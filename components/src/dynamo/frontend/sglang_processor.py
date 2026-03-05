@@ -9,7 +9,6 @@ import asyncio
 import logging
 import os
 import time
-import uuid
 from collections.abc import AsyncGenerator
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures import wait as _futures_wait
@@ -31,11 +30,11 @@ from dynamo.llm import (
 from dynamo.runtime import DistributedRuntime
 
 from .sglang_prepost import (
-    _MASK_64_BITS,
     SglangStreamingPostProcessor,
     create_parsers,
     preprocess_chat_request,
 )
+from .utils import PreprocessError, random_uuid, worker_warmup
 
 logger = logging.getLogger(__name__)
 
@@ -49,19 +48,13 @@ _FINISH_REASON_MAP: dict[str, str] = {
 }
 
 
-def random_uuid() -> str:
-    return f"{uuid.uuid4().int & _MASK_64_BITS:016x}"
-
-
 def _map_finish_reason(raw: str | None) -> str | None:
     """Map Dynamo router finish reasons to OpenAI finish reasons."""
     if raw is None:
         return None
     if raw.startswith("error"):
         return "error"
-    if raw.startswith("abort") or raw.startswith("cancelled"):
-        return "stop"
-    if raw.startswith("content_filter"):
+    if raw.startswith("abort"):
         return "stop"
     return _FINISH_REASON_MAP.get(raw, raw)
 
@@ -83,14 +76,6 @@ class SglangPreprocessWorkerResult:
     request: dict[str, Any]
 
 
-class _PreprocessError(Exception):
-    """Raised by _preprocess_worker for user-facing errors."""
-
-    def __init__(self, error_dict: dict[str, Any]):
-        self.error_dict = error_dict
-        super().__init__(str(error_dict))
-
-
 def _init_worker(
     model_path: str,
     tool_call_parser_name: str | None,
@@ -101,11 +86,6 @@ def _init_worker(
     _w_tokenizer = get_tokenizer(model_path)
     _w_tool_call_parser_name = tool_call_parser_name
     _w_reasoning_parser_name = reasoning_parser_name
-
-
-def _worker_warmup() -> bool:
-    """Dummy task to ensure worker process is fully initialized."""
-    return True
 
 
 def _preprocess_worker(
@@ -123,7 +103,7 @@ def _preprocess_worker(
 
     n = request.get("n", 1)
     if n != 1:
-        raise _PreprocessError(
+        raise PreprocessError(
             {
                 "error": {
                     "message": (
@@ -340,7 +320,7 @@ class SglangProcessor:
                 preproc_result: SglangPreprocessWorkerResult = (
                     await asyncio.wrap_future(future)
                 )
-        except _PreprocessError as exc:
+        except PreprocessError as exc:
             yield exc.error_dict
             return
         except Exception as exc:
@@ -410,7 +390,6 @@ class SglangProcessor:
             # finish_reason.
             pending_token_ids: list[int] = []
             pending_usage: dict[str, Any] | None = None
-            tokens_since_flush = 0
 
             async for dynamo_response in dynamo_stream:
                 if self.is_kv_router:
@@ -442,10 +421,9 @@ class SglangProcessor:
                     pending_usage = usage
 
                 pending_token_ids.extend(new_ids)
-                tokens_since_flush += len(new_ids)
 
                 # Flush on finish or when we've accumulated enough tokens
-                if finish_reason or tokens_since_flush >= stream_interval:
+                if finish_reason or len(pending_token_ids) >= stream_interval:
                     mapped_response = {
                         "token_ids": pending_token_ids,
                         "finish_reason": finish_reason,
@@ -476,7 +454,6 @@ class SglangProcessor:
 
                     pending_token_ids = []
                     pending_usage = None
-                    tokens_since_flush = 0
         finally:
             if self.debug_perf and token_count > 0:
                 logger.info(
@@ -579,7 +556,7 @@ class SglangEngineFactory:
                 ),
             )
             futures = [
-                preprocess_pool.submit(_worker_warmup)
+                preprocess_pool.submit(worker_warmup)
                 for _ in range(preprocess_workers)
             ]
             done, not_done = _futures_wait(futures, timeout=120)

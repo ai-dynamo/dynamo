@@ -9,7 +9,6 @@ import asyncio
 import logging
 import os
 import time
-import uuid
 from argparse import Namespace
 from collections.abc import AsyncGenerator
 from concurrent.futures import ProcessPoolExecutor
@@ -44,11 +43,11 @@ from .prepost import (
     preprocess_chat_request,
     preprocess_chat_request_sync,
 )
+from .utils import PreprocessError, random_uuid, worker_warmup
 
 logger = logging.getLogger(__name__)
 
 
-_MASK_64_BITS = (1 << 64) - 1
 _FINISH_REASON_MAP: dict[str, FinishReason] = {
     "eos": FinishReason.STOP,
     "stop": FinishReason.STOP,
@@ -57,10 +56,6 @@ _FINISH_REASON_MAP: dict[str, FinishReason] = {
     "cancelled": FinishReason.ABORT,
     "content_filter": FinishReason.STOP,
 }
-
-
-def random_uuid() -> str:
-    return f"{uuid.uuid4().int & _MASK_64_BITS:016x}"  # 16 hex chars
 
 
 def map_finish_reason(raw_reason: str | None) -> FinishReason | None:
@@ -85,14 +80,6 @@ _w_tokenizer: Any = None
 _w_tool_parser_class: type[ToolParser] | None = None
 _w_reasoning_parser_class: type[ReasoningParser] | None = None
 _w_stream_interval: int = 20
-
-
-class _PreprocessError(Exception):
-    """Raised by _preprocess_worker for user-facing errors (e.g., n!=1)."""
-
-    def __init__(self, error_dict: dict[str, Any]):
-        self.error_dict = error_dict
-        super().__init__(str(error_dict))
 
 
 @dataclass
@@ -148,7 +135,7 @@ def _init_worker(
     _w_stream_interval = max(1, stream_interval)
 
 
-def _worker_warmup() -> bool:
+def worker_warmup() -> bool:
     """Dummy task to ensure worker process is fully initialized."""
     return True
 
@@ -226,7 +213,7 @@ def _preprocess_worker(
 
     sp = vllm_preproc.sampling_params
     if sp.n != 1:
-        raise _PreprocessError(
+        raise PreprocessError(
             {
                 "error": {
                     "message": (
@@ -668,7 +655,7 @@ class VllmProcessor:
                     future
                 )
             # Semaphore + worker released here
-        except _PreprocessError as exc:
+        except PreprocessError as exc:
             yield exc.error_dict
             return
         except Exception as exc:
@@ -844,7 +831,7 @@ class EngineFactory:
             )
             # Warm up all workers to ensure initialization completes
             futures = [
-                preprocess_pool.submit(_worker_warmup)
+                preprocess_pool.submit(worker_warmup)
                 for _ in range(preprocess_workers)
             ]
             done, not_done = _futures_wait(futures, timeout=120)
