@@ -24,11 +24,11 @@ import (
 )
 
 const (
-	testSecretName    = "mpi-ssh-secret"
-	testSourceNS      = "operator-ns"
-	testTargetNS      = "workload-ns"
-	testPrivateKey    = "fake-private-key"
-	testPublicKey     = "fake-public-key"
+	testSecretName = "mpi-ssh-secret"
+	testSourceNS   = "operator-ns"
+	testTargetNS   = "workload-ns"
+	testPrivateKey = "fake-private-key"
+	testPublicKey  = "fake-public-key"
 )
 
 type fakeKeyPairGenerator struct {
