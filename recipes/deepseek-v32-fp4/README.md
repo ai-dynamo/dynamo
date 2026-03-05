@@ -1,6 +1,6 @@
 # DeepSeek V3.2 NVFP4: Aggregated Round Robin vs Disaggregated KV Routing with WideEP
 
-This **GB200 NVL72** recipe for DeepSeek V3.2 demonstrates the performance difference between **aggregated (round-robin) routing** and **disaggregated (KV-aware) routing + WideEP** on a synthetic trace dataset adapted from the [Mooncake FAST25 paper](https://github.com/kvcache-ai/Mooncake). 
+This **GB200 NVL72** recipe for DeepSeek V3.2 demonstrates the performance difference between **aggregated (round-robin) routing** and **disaggregated (KV-aware) routing + WideEP** on a synthetic trace dataset adapted from the [Mooncake FAST25 paper](https://github.com/kvcache-ai/Mooncake).
 
 ## Results
 
