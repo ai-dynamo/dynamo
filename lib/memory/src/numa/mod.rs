@@ -107,7 +107,11 @@ fn cuda_device_id_to_nvidia_smi_id(device_id: u32) -> String {
     };
 
     // Parse comma-separated list. Supports: "0,1,2", "2,3", "GPU-uuid", "2,GPU-uuid", etc.
-    let devices: Vec<&str> = visible.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+    let devices: Vec<&str> = visible
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
     if device_id as usize >= devices.len() {
         tracing::warn!(
             "device_id {} out of range for CUDA_VISIBLE_DEVICES ({} devices), using identity",
@@ -146,12 +150,7 @@ pub fn get_device_numa_node(device_id: u32) -> NumaNode {
     // Use nvidia-smi topo to get NUMA ID of nearest CPU
     // -i must be physical device index or UUID, not process-local index
     let output = match Command::new("nvidia-smi")
-        .args([
-            "topo",
-            "--get-numa-id-of-nearby-cpu",
-            "-i",
-            &nvidia_smi_id,
-        ])
+        .args(["topo", "--get-numa-id-of-nearby-cpu", "-i", &nvidia_smi_id])
         .output()
     {
         Ok(out) if out.status.success() => out,
