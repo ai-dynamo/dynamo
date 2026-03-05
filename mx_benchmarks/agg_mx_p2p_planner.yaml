@@ -108,13 +108,16 @@ spec:
         mainContainer:
           image: nvcr.io/nvidian/dynamo-dev/hwoo:dynamo-mx-runtime
           securityContext:
+            runAsUser: 0
+            privileged: true
             capabilities:
               add:
-                - IPC_LOCK
+              - IPC_LOCK
           command:
-            - python3
-            - -m
-            - dynamo.vllm
+            - /bin/bash
+            - -c
+            - "ulimit -l unlimited && exec python3 -m dynamo.vllm \"$@\""
+            - --
           args:
             - --model
             - $(MODEL_NAME)
@@ -192,13 +195,16 @@ spec:
         mainContainer:
           image: nvcr.io/nvidian/dynamo-dev/hwoo:dynamo-mx-runtime
           securityContext:
+            runAsUser: 0
+            privileged: true
             capabilities:
               add:
-                - IPC_LOCK
+              - IPC_LOCK
           command:
-            - python3
-            - -m
-            - dynamo.vllm
+            - /bin/bash
+            - -c
+            - "ulimit -l unlimited && exec python3 -m dynamo.vllm \"$@\""
+            - --
           args:
             - --model
             - $(MODEL_NAME)

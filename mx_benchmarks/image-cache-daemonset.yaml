@@ -23,8 +23,7 @@ spec:
         dynamo/image-cache: "true"
       tolerations:
       - key: nvidia.com/gpu
-        operator: Equal
-        value: "true"
+        operator: Exists
         effect: NoSchedule
       containers:
       - name: cache

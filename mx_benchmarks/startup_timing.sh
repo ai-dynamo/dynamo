@@ -18,23 +18,53 @@ parse_target_timings() {
   local clean
   clean=$(sed 's/\x1b\[[0-9;]*m//g' "$log")
 
-  # Runtime start: first timestamp in log
-  local start_ts
-  start_ts=$(echo "$clean" | grep -oP '\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}' | head -1)
+  # Extract a timestamp from a log line. Handles two formats:
+  #   ISO:  2026-03-04T08:03:54.250816Z (Dynamo runtime)
+  #   vLLM: INFO 03-04 08:03:28 (vLLM worker, no year)
+  # Returns epoch seconds, or empty on failure.
+  _line_epoch() {
+    local line="$1"
+    # Try ISO first
+    local iso
+    iso=$(echo "$line" | grep -oP '\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}' | head -1)
+    if [[ -n "$iso" ]]; then
+      date -d "$iso" +%s 2>/dev/null
+      return
+    fi
+    # Try vLLM format: "INFO MM-DD HH:MM:SS"
+    local vllm_ts
+    vllm_ts=$(echo "$line" | grep -oP 'INFO \K\d{2}-\d{2} \d{2}:\d{2}:\d{2}' | head -1)
+    if [[ -n "$vllm_ts" ]]; then
+      # Infer year from first ISO timestamp in the log
+      local year
+      year=$(echo "$clean" | grep -oP '^\d{4}' | head -1)
+      year="${year:-$(date +%Y)}"
+      date -d "${year}-${vllm_ts}" +%s 2>/dev/null
+      return
+    fi
+  }
 
-  # Ready for inference
-  local ready_ts
-  ready_ts=$(echo "$clean" | grep 'warmup complete' | grep -oP '\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}' | head -1)
+  # Runtime start: first timestamp in log (ISO)
+  local start_ts start_epoch=""
+  start_ts=$(echo "$clean" | grep -oP '\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}' | head -1)
+  if [[ -n "$start_ts" ]]; then
+    start_epoch=$(date -d "$start_ts" +%s 2>/dev/null) || start_epoch=""
+  fi
+
+  # Ready for inference: try "warmup complete", then "Registered base model"
+  local ready_line="" ready_epoch=""
+  ready_line=$(echo "$clean" | grep 'warmup complete' | head -1)
+  if [[ -z "$ready_line" ]]; then
+    ready_line=$(echo "$clean" | grep 'Registered base model' | head -1)
+  fi
+  if [[ -n "$ready_line" ]]; then
+    ready_epoch=$(_line_epoch "$ready_line")
+  fi
 
   # Total startup (seconds)
   local total_s="N/A"
-  if [[ -n "$start_ts" && -n "$ready_ts" ]]; then
-    local s_epoch r_epoch
-    s_epoch=$(date -d "$start_ts" +%s 2>/dev/null) || s_epoch=""
-    r_epoch=$(date -d "$ready_ts" +%s 2>/dev/null) || r_epoch=""
-    if [[ -n "$s_epoch" && -n "$r_epoch" ]]; then
-      total_s=$(( r_epoch - s_epoch ))
-    fi
+  if [[ -n "$start_epoch" && -n "$ready_epoch" ]]; then
+    total_s=$(( ready_epoch - start_epoch ))
   fi
 
   # Weight loading (disk mode)
@@ -67,35 +97,32 @@ parse_target_timings() {
   local compile_s
   compile_s=$(echo "$clean" | grep 'torch.compile takes' | grep -oP '[\d.]+(?= s)' | head -1)
 
-  # DeepGEMM warmup: progress bars lack timestamps, so measure the gap
-  # between torch.compile end and CUDA graph capture start.
-  # DeepGEMM warmup runs between these two events.
-  local deepgemm="0"
-  if echo "$clean" | grep -q 'DeepGEMM warmup'; then
-    local compile_end_ts cuda_start_ts
-    compile_end_ts=$(echo "$clean" | grep 'torch.compile takes' | grep -oP '\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}' | head -1)
-    cuda_start_ts=$(echo "$clean" | grep -m1 'Capturing CUDA graphs' | grep -oP '\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}' | head -1)
-    if [[ -n "$compile_end_ts" && -n "$cuda_start_ts" ]]; then
-      local ce cs_dg
-      ce=$(date -d "$compile_end_ts" +%s 2>/dev/null) || ce=""
-      cs_dg=$(date -d "$cuda_start_ts" +%s 2>/dev/null) || cs_dg=""
-      if [[ -n "$ce" && -n "$cs_dg" && "$cs_dg" -gt "$ce" ]]; then
-        deepgemm=$(( cs_dg - ce ))
-      fi
-    fi
+  # CUDA graph capture: parse "Graph capturing finished in XX secs"
+  local cuda_graph_s="0"
+  local cg_reported
+  cg_reported=$(echo "$clean" | grep -oP 'Graph capturing finished in \K\d+' | head -1)
+  if [[ -n "$cg_reported" ]]; then
+    cuda_graph_s="$cg_reported"
   fi
 
-  # CUDA graph capture
-  local cuda_graph_s="0"
-  local cg_start cg_end
-  cg_start=$(echo "$clean" | grep -m1 'Capturing CUDA graphs' | grep -oP '\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}' | head -1)
-  cg_end=$(echo "$clean" | grep 'warmup complete' | grep -oP '\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}' | head -1)
-  if [[ -n "$cg_start" && -n "$cg_end" ]]; then
-    local cs ce
-    cs=$(date -d "$cg_start" +%s 2>/dev/null) || cs=""
-    ce=$(date -d "$cg_end" +%s 2>/dev/null) || ce=""
-    if [[ -n "$cs" && -n "$ce" ]]; then
-      cuda_graph_s=$(( ce - cs ))
+  # DeepGEMM warmup: measure gap between torch.compile end and CUDA graph
+  # capture start. Since progress bars lack timestamps, compute:
+  #   graph_capture_end_time - graph_capture_duration - compile_end_time
+  local deepgemm="0"
+  if echo "$clean" | grep -q 'DeepGEMM warmup'; then
+    local compile_line graph_line
+    compile_line=$(echo "$clean" | grep 'torch.compile takes' | head -1)
+    graph_line=$(echo "$clean" | grep 'Graph capturing finished' | head -1)
+    if [[ -n "$compile_line" && -n "$graph_line" ]]; then
+      local ce ge
+      ce=$(_line_epoch "$compile_line")
+      ge=$(_line_epoch "$graph_line")
+      if [[ -n "$ce" && -n "$ge" && "$cuda_graph_s" != "0" ]]; then
+        local gap=$(( ge - cuda_graph_s - ce ))
+        if [[ "$gap" -gt 0 ]]; then
+          deepgemm="$gap"
+        fi
+      fi
     fi
   fi
 

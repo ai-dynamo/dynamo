@@ -20,7 +20,11 @@ spec:
         apt update && apt install tmux curl jq -y
 
         # Install benchmarking tool
-        pip install aiperf
+        # pip install aiperf
+        pip install tiktoken
+        pip install "aiperf @ git+https://github.com/ai-dynamo/aiperf.git@cc5bd8dd8b2f1f2e4e748cedc1054e8525d714d4"   # tokenizer fix
+        echo "aiperf installation completed"
+
 
         # Wait for model to be ready
         # echo "Waiting for model '${MODEL_NAME}' at http://${FRONTEND}:8000/v1/models..."
@@ -39,8 +43,25 @@ spec:
 
         # Run Benchmark so its easy to attach and watch
         tmux new-session -d -s benchmark -c "${ARTIFACT_DIR}"
-        tmux send-keys -t benchmark "aiperf profile -m ${MODEL_NAME} --input-file ${INPUT_FILE} --custom-dataset-type mooncake_trace --fixed-schedule --slice-duration ${SLICE_DURATION} --url http://${FRONTEND}:8000 --streaming --artifact-dir ${ARTIFACT_DIR} --goodput \"time_to_first_token:2000 inter_token_latency:25\" --server-metrics-formats json jsonl" C-m
-        sleep 7200
+        tmux send-keys -t benchmark "aiperf profile -m ${MODEL_NAME} --input-file ${INPUT_FILE} --custom-dataset-type mooncake_trace --fixed-schedule --slice-duration ${SLICE_DURATION} --url http://${FRONTEND}:8000 --streaming --artifact-dir ${ARTIFACT_DIR} --goodput \"time_to_first_token:3000 inter_token_latency:100\" --tokenizer-trust-remote-code --server-metrics-formats json jsonl" C-m
+
+        # Wait for the benchmark tmux session to finish
+        while tmux has-session -t benchmark 2>/dev/null; do
+          sleep 30
+        done
+
+        # aiperf profile \
+        #   -m ${MODEL_NAME} \
+        #   --input-file ${INPUT_FILE} \
+        #   --custom-dataset-type mooncake_trace \
+        #   --fixed-schedule \
+        #   --slice-duration ${SLICE_DURATION} \
+        #   --url http://${FRONTEND}:8000 \
+        #   --streaming \
+        #   --artifact-dir ${ARTIFACT_DIR} \
+        #   --goodput "time_to_first_token:3000 inter_token_latency:100" \
+        #   --tokenizer-trust-remote-code \
+        #   --server-metrics-formats json jsonl
     env:
       - name: MODEL_NAME
         value: meta-llama/Llama-3.3-70B-Instruct

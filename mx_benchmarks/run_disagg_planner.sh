@@ -51,6 +51,7 @@ ENABLE_TORCH_COMPILE_CACHE="${ENABLE_TORCH_COMPILE_CACHE:-1}"
 DEEPGEMM_SOURCE_WARMUP_MODE="${DEEPGEMM_SOURCE_WARMUP_MODE:-full}"
 DEEPGEMM_TARGET_WARMUP_MODE="${DEEPGEMM_TARGET_WARMUP_MODE:-skip}"
 ENABLE_REQUEST_LOGGING="${ENABLE_REQUEST_LOGGING:-0}"
+CLEANUP_ON_CRASH="${CLEANUP_ON_CRASH:-0}"
 INPUT_TRACE="${INPUT_TRACE:-conversation_trace.jsonl}"
 MAX_ISL="${MAX_ISL:-8000}"
 MAX_OSL="${MAX_OSL:-8000}"
@@ -77,8 +78,8 @@ if [[ -n "${KUBE_CONTEXT:-}" ]]; then
   echo "Using kube context: $KUBE_CONTEXT (isolated kubeconfig: $KUBECONFIG)"
 fi
 
-if [[ "$MODE" != "p2p" && "$MODE" != "disk" && "$MODE" != "both" && "$MODE" != "clean" && "$MODE" != "plot" && "$MODE" != "table" ]]; then
-  echo "Usage: $0 {p2p|disk|both|clean|plot|table}"
+if [[ "$MODE" != "p2p" && "$MODE" != "disk" && "$MODE" != "both" && "$MODE" != "clean" && "$MODE" != "plot" && "$MODE" != "table" && "$MODE" != "dry-run" ]]; then
+  echo "Usage: $0 {p2p|disk|both|clean|plot|table|dry-run}"
   exit 1
 fi
 
@@ -398,16 +399,27 @@ wait_for_aiperf() {
 
   local elapsed=0
   local timeout=3600
-  while ! kubectl exec "$pod" -n "$NAMESPACE" -- test -f "$timeslice_path" 2>/dev/null; do
+  while true; do
+    local pod_phase
+    pod_phase=$(kubectl get pod "$BENCHMARK_POD" -n "$NAMESPACE" -o jsonpath='{.status.phase}' 2>/dev/null || true)
+    if [[ "$pod_phase" == "Succeeded" || "$pod_phase" == "Failed" ]]; then
+      echo "  benchmark pod completed (phase=$pod_phase) after ~${elapsed}s"
+      break
+    fi
+    if kubectl exec "$pod" -n "$NAMESPACE" -- test -f "$timeslice_path" 2>/dev/null; then
+      echo "  aiperf finished after ~${elapsed}s"
+      break
+    fi
     sleep 30
     elapsed=$((elapsed + 30))
     if [[ "$elapsed" -ge "$timeout" ]]; then
       echo "WARNING: Timed out waiting for aiperf after ${timeout}s"
       return
     fi
-    echo "  waiting... (${elapsed}s)"
+    if (( elapsed % 60 == 0 )); then
+      echo "  waiting... (${elapsed}s)"
+    fi
   done
-  echo "  aiperf finished after ~${elapsed}s"
 }
 
 save_logs() {
@@ -436,6 +448,10 @@ save_logs() {
   if kubectl get pod "$BENCHMARK_POD" -n "$NAMESPACE" &>/dev/null; then
     echo "  aiperf: $BENCHMARK_POD"
     kubectl logs "$BENCHMARK_POD" -n "$NAMESPACE" 2>&1 | sed 's/\x1b\[[0-9;]*m//g' > "$logs_dir/aiperf.log" || true
+    kubectl exec "$BENCHMARK_POD" -n "$NAMESPACE" -- \
+      tmux capture-pane -t benchmark -p -S - 2>/dev/null \
+      | sed 's/\x1b\[[0-9;]*m//g' > "$logs_dir/aiperf_tmux.log" || true
+    [[ ! -s "$logs_dir/aiperf_tmux.log" ]] && rm -f "$logs_dir/aiperf_tmux.log"
   fi
 
   # Save DGD spec and describe output for debugging
@@ -555,12 +571,16 @@ run_experiment() {
     if [[ -n "$failed_pods" ]]; then
       echo "ERROR: Crashed pods detected:"
       echo "$failed_pods"
-      echo "Saving crash logs before cleanup..."
-      save_logs "$m"
-      echo "Cleaning up..."
-      kubectl delete pod "$BENCHMARK_POD" -n "$NAMESPACE" --ignore-not-found --wait
-      kubectl delete "dgd/$dgd_name" -n "$NAMESPACE" --ignore-not-found --wait
-      kubectl delete "deployment/${MX_SERVER_NAME}" -n "$NAMESPACE" --ignore-not-found --wait
+      if [[ "$CLEANUP_ON_CRASH" == "1" ]]; then
+        echo "Saving crash logs before cleanup (CLEANUP_ON_CRASH=1)..."
+        save_logs "$m"
+        echo "Cleaning up..."
+        kubectl delete pod "$BENCHMARK_POD" -n "$NAMESPACE" --ignore-not-found --wait
+        kubectl delete "dgd/$dgd_name" -n "$NAMESPACE" --ignore-not-found --wait
+        kubectl delete "deployment/${MX_SERVER_NAME}" -n "$NAMESPACE" --ignore-not-found --wait
+      else
+        echo "Leaving pods for investigation (set CLEANUP_ON_CRASH=1 to auto-cleanup)"
+      fi
       return 1
     fi
 
@@ -568,11 +588,15 @@ run_experiment() {
     wait_elapsed=$((wait_elapsed + 10))
     if [[ "$wait_elapsed" -ge 1800 ]]; then
       echo "ERROR: Timed out waiting for DGD $dgd_name after ${wait_elapsed}s"
-      save_logs "$m"
-      echo "Cleaning up..."
-      kubectl delete pod "$BENCHMARK_POD" -n "$NAMESPACE" --ignore-not-found --wait
-      kubectl delete "dgd/$dgd_name" -n "$NAMESPACE" --ignore-not-found --wait
-      kubectl delete "deployment/${MX_SERVER_NAME}" -n "$NAMESPACE" --ignore-not-found --wait
+      if [[ "$CLEANUP_ON_CRASH" == "1" ]]; then
+        save_logs "$m"
+        echo "Cleaning up (CLEANUP_ON_CRASH=1)..."
+        kubectl delete pod "$BENCHMARK_POD" -n "$NAMESPACE" --ignore-not-found --wait
+        kubectl delete "dgd/$dgd_name" -n "$NAMESPACE" --ignore-not-found --wait
+        kubectl delete "deployment/${MX_SERVER_NAME}" -n "$NAMESPACE" --ignore-not-found --wait
+      else
+        echo "Leaving pods for investigation (set CLEANUP_ON_CRASH=1 to auto-cleanup)"
+      fi
       return 1
     fi
     if (( wait_elapsed % 60 == 0 )); then
@@ -698,6 +722,67 @@ if [[ "$MODE" == "table" ]]; then
   exit 0
 fi
 
+if [[ "$MODE" == "dry-run" ]]; then
+  outdir="${LOCAL_ARTIFACTS}/dry-run"
+  mkdir -p "$outdir"
+  echo "===== Dry run: generating YAMLs to $outdir ====="
+
+  strip_run_tolerations() {
+    sed '/nodeSelector:/,+1d' \
+    | sed "\\|dynamo/${RUN_ID}-reserved|,+3d" \
+    | sed '/^[[:space:]]*tolerations:[[:space:]]*$/{N; /tolerations:\n[[:space:]]*$/d}'
+  }
+
+  for m in p2p disk; do
+    dgd_name=$(dgd_for_mode "$m")
+    default_dgd=$(default_dgd_for_mode "$m")
+    dgd_yaml=$(yaml_for_mode "$m")
+    dgd_out="$outdir/dgd-disagg-${m}.yaml"
+    model_sed < "$dgd_yaml" \
+      | sed "s|name: ${default_dgd}|name: ${dgd_name}|g" \
+      | planner_sed \
+      | strip_run_tolerations \
+      > "$dgd_out"
+    if [[ "$ENABLE_TORCH_COMPILE_CACHE" == "0" ]]; then
+      sed -i '/VllmDecodeWorker:/,$ { s|/models/.cache/vllm/compile_cache|/tmp/vllm_compile_cache|g }' "$dgd_out"
+    fi
+    if [[ "$DEEPGEMM_SOURCE_WARMUP_MODE" != "full" ]]; then
+      sed -i 's|value: "full"|value: "'"$DEEPGEMM_SOURCE_WARMUP_MODE"'"|g' "$dgd_out"
+    fi
+    if [[ "$DEEPGEMM_TARGET_WARMUP_MODE" != "skip" ]]; then
+      sed -i 's|value: "skip"|value: "'"$DEEPGEMM_TARGET_WARMUP_MODE"'"|g' "$dgd_out"
+      sed -i '/VllmDecodeWorker:/,$ { s|/models/.cache/deepgemm|/tmp/deepgemm|g }' "$dgd_out"
+    fi
+    if [[ "$ENABLE_REQUEST_LOGGING" == "1" ]]; then
+      sed -i '0,/^      envs:$/{/^      envs:$/a\        - name: DYN_LOG\
+          value: "info,dynamo_runtime::pipeline::network::egress::push_router=trace"
+}' "$dgd_out"
+      sed -i '/value: "false"/a\        - name: DYN_LOG\
+          value: "info,dynamo_runtime::pipeline::network::ingress=trace"' "$dgd_out"
+    fi
+    echo "  $dgd_out ($(wc -l < "$dgd_out") lines)"
+  done
+  for m in p2p disk; do
+    dgd_name=$(dgd_for_mode "$m")
+    frontend="${dgd_name}-frontend"
+    bench_mode="disagg-${m}"
+    perf_out="$outdir/perf-disagg-${m}.yaml"
+    model_sed < perf.yaml \
+      | sed -e "s/value: p2p/value: $bench_mode/" \
+            -e "s/value: vllm-agg-mx-p2p-frontend/value: $frontend/" \
+            -e "s/value: staircase_trace/value: $DATASET/" \
+            -e "s/value: \"60\"/value: \"$SLICE_DURATION\"/" \
+            -e "s/value: default_run/value: $RUN_TAG/" \
+      > "$perf_out"
+    echo "  $perf_out ($(wc -l < "$perf_out") lines)"
+  done
+  mx_out="$outdir/modelexpress.yaml"
+  model_sed < modelexpress-server.yaml | strip_run_tolerations > "$mx_out"
+  echo "  $mx_out ($(wc -l < "$mx_out") lines)"
+  echo "===== Done ====="
+  exit 0
+fi
+
 # Cleanup any leftover resources for THIS RUN_ID
 clean_all
 
@@ -728,10 +813,10 @@ P2P_SUBDIR="disagg-p2p" DISK_SUBDIR="disagg-disk" \
   source "${REPO_ROOT}/mx_benchmarks/startup_timing.sh"
 print_startup_table
 
-# Plot comparison (only when both modes have results)
-if [[ -d "$LOCAL_ARTIFACTS/disagg-p2p" ]] && [[ -d "$LOCAL_ARTIFACTS/disagg-disk" ]]; then
+# Plot results (works with one or both modes)
+if [[ -d "$LOCAL_ARTIFACTS/disagg-p2p" ]] || [[ -d "$LOCAL_ARTIFACTS/disagg-disk" ]]; then
   echo ""
-  echo "===== Generating comparison plot ====="
+  echo "===== Generating plot ====="
   python "${REPO_ROOT}/mx_benchmarks/plot_scaleup.py" \
     --artifacts-dir "$LOCAL_ARTIFACTS" \
     --slice-duration "$SLICE_DURATION" \

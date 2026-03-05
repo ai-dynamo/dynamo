@@ -1,0 +1,54 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Simple curl client pod to test the vLLM target server
+apiVersion: v1
+kind: Pod
+metadata:
+  name: vllm-curl-client
+  labels:
+    app: vllm-curl-client
+spec:
+  restartPolicy: Never
+  containers:
+    - name: curl
+      image: curlimages/curl:latest
+      command: ["sh", "-c"]
+      env:
+        - name: FRONTEND
+          value: vllm-agg-mx-p2p-kimi-k25-frontend
+      args:
+        - |
+          set -ex
+
+          VLLM_URL="http://${FRONTEND}:8000"
+
+          echo "Checking available models..."
+          curl -s "${VLLM_URL}/v1/models" | head -c 500
+          echo ""
+
+          echo "Sending first chat completion request..."
+          curl -s "${VLLM_URL}/v1/chat/completions" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "model": "moonshotai/Kimi-K2.5",
+              "messages": [
+                {"role": "user", "content": "Hello, how are you?"}
+              ],
+              "max_tokens": 50
+            }'
+          echo ""
+
+          echo "Sending second chat completion request..."
+          curl -s "${VLLM_URL}/v1/chat/completions" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "model": "moonshotai/Kimi-K2.5",
+              "messages": [
+                {"role": "user", "content": "Hello, how are you?"}
+              ],
+              "max_tokens": 50
+            }'
+          echo ""
+          echo "Request completed successfully"
+

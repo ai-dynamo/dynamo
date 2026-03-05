@@ -93,13 +93,11 @@ spec:
         # Set to "1" for contiguous regions (experimental - see docs/CONTIGUOUS_CONTEXT.md)
         - name: MX_CONTIGUOUS_REG
           value: "0"
-        # UCX transport settings for GPUDirect RDMA
+        # UCX transport settings: exclude GGA and pin to real IB HCAs (B200 mlx5_bond_0 is Ethernet)
         - name: UCX_TLS
-          value: "rc_x,rc,dc_x,dc,cuda_copy"
-        - name: UCX_RNDV_SCHEME
-          value: "get_zcopy"
-        - name: UCX_RNDV_THRESH
-          value: "0"
+          value: "^gga"
+        - name: UCX_NET_DEVICES
+          value: "mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1,mlx5_4:1,mlx5_5:1,mlx5_10:1,mlx5_11:1"
       extraPodSpec:
         nodeSelector:
           dynamo/role: "source"
@@ -114,13 +112,16 @@ spec:
         mainContainer:
           image: nvcr.io/nvidian/dynamo-dev/hwoo:dynamo-mx-runtime
           securityContext:
+            runAsUser: 0
+            privileged: true
             capabilities:
               add:
-                - IPC_LOCK
+              - IPC_LOCK
           command:
-            - python3
-            - -m
-            - dynamo.vllm
+            - /bin/bash
+            - -c
+            - "ulimit -l unlimited && exec python3 -m dynamo.vllm \"$@\""
+            - --
           args:
             - --model
             - $(MODEL_NAME)
@@ -178,13 +179,11 @@ spec:
         # Set to "1" for contiguous regions (experimental - see docs/CONTIGUOUS_CONTEXT.md)
         - name: MX_CONTIGUOUS_REG
           value: "0"
-        # UCX transport settings for GPUDirect RDMA
+        # UCX transport settings: exclude GGA and pin to real IB HCAs (B200 mlx5_bond_0 is Ethernet)
         - name: UCX_TLS
-          value: "rc_x,rc,dc_x,dc,cuda_copy"
-        - name: UCX_RNDV_SCHEME
-          value: "get_zcopy"
-        - name: UCX_RNDV_THRESH
-          value: "0"
+          value: "^gga"
+        - name: UCX_NET_DEVICES
+          value: "mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1,mlx5_4:1,mlx5_5:1,mlx5_10:1,mlx5_11:1"
       extraPodSpec:
         nodeSelector:
           dynamo/role: "target"
@@ -199,13 +198,16 @@ spec:
         mainContainer:
           image: nvcr.io/nvidian/dynamo-dev/hwoo:dynamo-mx-runtime
           securityContext:
+            runAsUser: 0
+            privileged: true
             capabilities:
               add:
-                - IPC_LOCK
+              - IPC_LOCK
           command:
-            - python3
-            - -m
-            - dynamo.vllm
+            - /bin/bash
+            - -c
+            - "ulimit -l unlimited && exec python3 -m dynamo.vllm \"$@\""
+            - --
           args:
             - --model
             - $(MODEL_NAME)

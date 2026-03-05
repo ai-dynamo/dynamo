@@ -205,20 +205,28 @@ def _plot_single(
 
 
 def plot_comparison(
-    p2p_timeslice_path: Path,
-    disk_timeslice_path: Path,
     slice_duration: float,
     stat: str,
     output_path: Path,
+    p2p_timeslice_path: Optional[Path] = None,
+    disk_timeslice_path: Optional[Path] = None,
     scaleup_time: Optional[float] = None,
     p2p_label: str = "MX P2P",
     disk_label: str = "Disk",
     p2p_server_metrics_path: Optional[Path] = None,
     disk_server_metrics_path: Optional[Path] = None,
 ) -> None:
-    """Generate comparison plots for all metrics."""
-    p2p_slices = load_timeslices(p2p_timeslice_path)
-    disk_slices = load_timeslices(disk_timeslice_path)
+    """Generate comparison plots for all metrics.
+
+    At least one of p2p_timeslice_path or disk_timeslice_path must be provided.
+    When only one is available, plots that series alone.
+    """
+    if not p2p_timeslice_path and not disk_timeslice_path:
+        print("No timeslice data provided, nothing to plot.")
+        return
+
+    p2p_slices = load_timeslices(p2p_timeslice_path) if p2p_timeslice_path else []
+    disk_slices = load_timeslices(disk_timeslice_path) if disk_timeslice_path else []
 
     # Collect available timeslice metrics
     available_timeslice: list[MetricConfig] = []
@@ -230,15 +238,16 @@ def plot_comparison(
 
     # Collect available server metrics
     available_server: list[MetricConfig] = []
-    if p2p_server_metrics_path and disk_server_metrics_path:
+    server_paths = [p for p in [p2p_server_metrics_path, disk_server_metrics_path] if p]
+    if server_paths:
         for m in SERVER_METRICS:
-            p2p_t, _ = load_server_metrics(
-                p2p_server_metrics_path, m.key, slice_duration
-            )
-            disk_t, _ = load_server_metrics(
-                disk_server_metrics_path, m.key, slice_duration
-            )
-            if p2p_t or disk_t:
+            has_data = False
+            for sp in server_paths:
+                t, _ = load_server_metrics(sp, m.key, slice_duration)
+                if t:
+                    has_data = True
+                    break
+            if has_data:
                 available_server.append(m)
 
     all_metrics = available_timeslice + available_server
@@ -276,11 +285,15 @@ def plot_comparison(
 
     # Plot server metrics
     for m in available_server:
-        p2p_t, p2p_v = load_server_metrics(
-            p2p_server_metrics_path, m.key, slice_duration
+        p2p_t, p2p_v = (
+            load_server_metrics(p2p_server_metrics_path, m.key, slice_duration)
+            if p2p_server_metrics_path
+            else ([], [])
         )
-        disk_t, disk_v = load_server_metrics(
-            disk_server_metrics_path, m.key, slice_duration
+        disk_t, disk_v = (
+            load_server_metrics(disk_server_metrics_path, m.key, slice_duration)
+            if disk_server_metrics_path
+            else ([], [])
         )
         _plot_single(
             axes[idx],
@@ -300,12 +313,15 @@ def plot_comparison(
     for j in range(n_metrics, len(axes)):
         axes[j].set_visible(False)
 
-    fig.suptitle(
-        f"MX P2P vs Disk Loading: Inference Metrics Over Time ({stat})",
-        fontsize=14,
-        fontweight="bold",
-        y=1.02,
-    )
+    # Build title based on what's available
+    if p2p_timeslice_path and disk_timeslice_path:
+        title = f"MX P2P vs Disk Loading: Inference Metrics Over Time ({stat})"
+    elif p2p_timeslice_path:
+        title = f"{p2p_label}: Inference Metrics Over Time ({stat})"
+    else:
+        title = f"{disk_label}: Inference Metrics Over Time ({stat})"
+
+    fig.suptitle(title, fontsize=14, fontweight="bold", y=1.02)
     fig.tight_layout()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, dpi=200, bbox_inches="tight")
@@ -379,30 +395,61 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    # Resolve paths
+    # Resolve paths — auto-discover from artifacts-dir, only use paths that exist
     p2p_path = args.p2p
     disk_path = args.disk
     p2p_server = None
     disk_server = None
 
     if args.artifacts_dir is not None:
-        if p2p_path is None:
-            p2p_path = args.artifacts_dir / "p2p" / TIMESLICE_FILENAME
-        if disk_path is None:
-            disk_path = args.artifacts_dir / "disk" / TIMESLICE_FILENAME
+        # Auto-discover subdirectories. Support both "p2p"/"disk" and
+        # "disagg-p2p"/"disagg-disk" layouts.
+        for subdir in ["p2p", "disagg-p2p"]:
+            candidate = args.artifacts_dir / subdir / TIMESLICE_FILENAME
+            if p2p_path is None and candidate.exists():
+                p2p_path = candidate
+                break
+        for subdir in ["disk", "disagg-disk"]:
+            candidate = args.artifacts_dir / subdir / TIMESLICE_FILENAME
+            if disk_path is None and candidate.exists():
+                disk_path = candidate
+                break
         # Auto-discover server metrics JSONL
-        p2p_candidate = args.artifacts_dir / "p2p" / SERVER_METRICS_FILENAME
-        disk_candidate = args.artifacts_dir / "disk" / SERVER_METRICS_FILENAME
-        if p2p_candidate.exists() and disk_candidate.exists():
-            p2p_server = p2p_candidate
-            disk_server = disk_candidate
+        if p2p_path:
+            p2p_candidate = p2p_path.parent / SERVER_METRICS_FILENAME
+            if p2p_candidate.exists():
+                p2p_server = p2p_candidate
+        if disk_path:
+            disk_candidate = disk_path.parent / SERVER_METRICS_FILENAME
+            if disk_candidate.exists():
+                disk_server = disk_candidate
 
-    if p2p_path is None or disk_path is None:
-        parser.error("Provide --artifacts-dir or both --p2p and --disk")
+    # Validate: need at least one
+    if p2p_path and not p2p_path.exists():
+        p2p_path = None
+    if disk_path and not disk_path.exists():
+        disk_path = None
 
-    for label, path in [("P2P", p2p_path), ("Disk", disk_path)]:
-        if not path.exists():
-            parser.error(f"{label} timeslice file not found: {path}")
+    if not p2p_path and not disk_path:
+        parser.error(
+            "No timeslice data found. Provide --artifacts-dir (with p2p/ and/or "
+            "disk/ subdirs) or at least one of --p2p / --disk"
+        )
+
+    found = []
+    if p2p_path:
+        found.append(f"P2P: {p2p_path.parent.name}/")
+    if disk_path:
+        found.append(f"Disk: {disk_path.parent.name}/")
+    print(f"Timeslice data: {', '.join(found)}")
+
+    if p2p_server or disk_server:
+        server_found = []
+        if p2p_server:
+            server_found.append(p2p_server.parent.name + "/")
+        if disk_server:
+            server_found.append(disk_server.parent.name + "/")
+        print(f"Server metrics: {', '.join(server_found)}")
 
     output_path = args.output
     if output_path is None:
@@ -410,11 +457,6 @@ def main() -> None:
             output_path = args.artifacts_dir / "scaleup_comparison.png"
         else:
             output_path = Path("scaleup_comparison.png")
-
-    if p2p_server:
-        print(
-            f"Server metrics found: {p2p_server.parent.name}/, {disk_server.parent.name}/"
-        )
 
     plot_comparison(
         p2p_timeslice_path=p2p_path,

@@ -27,12 +27,12 @@ run() {
 
 # Common settings for all runs
 export KUBE_CONTEXT="${KUBE_CONTEXT:-}"
-export RDMA_RESOURCE=rdma/shared_ib
+export RDMA_RESOURCE=rdma/ib
 export RDMA_COUNT=8
-export DYNAMO_IMAGE_TAG=vllm-runtime-ea86df298-mx_ref-64f9249-debug
+export DYNAMO_IMAGE_TAG=vllm-runtime-2e962f3e4-mx_ref-64f9249-debug
 export MX_SERVER_IMAGE_TAG=64f9249
 export VLLM_USE_DEEP_GEMM=1
-export VLLM_USE_FLASHINFER_MOE_FP8=0
+export VLLM_USE_FLASHINFER_MOE_FP8=1
 export ENABLE_TORCH_COMPILE_CACHE=1
 export DEEPGEMM_SOURCE_WARMUP_MODE=full
 export DEEPGEMM_TARGET_WARMUP_MODE=skip
@@ -51,14 +51,16 @@ export STAT=avg
 export ENABLE_REQUEST_LOGGING=0
 
 # ------------- Run moonshotai/Kimi-K2.5 -------------
-export RUN_ID=kimi-k25-0
+export RUN_ID=kimi-k25
 export MODEL_NAME=moonshotai/Kimi-K2.5
+export CLEANUP_ON_CRASH=1
+export EXCLUDED_NODES="cluster-0967a26d-pool-14bee067-prctr-9c2x7"
 
 # TP=8 default (clear cache for new TP config)
 export TP_SIZE=8
 export DP_SIZE=0
 export VLLM_EXTRA_ARGS=""
-export RUN_TAG=tp8-ep-trial1
+export RUN_TAG=tp8-ep-trial2
 run "Kimi-K2.5 TP=8 EP default"
 
 # ------------- Run deepseek-ai/DeepSeek-V3 -------------
@@ -128,6 +130,32 @@ run "Kimi-K2.5 TP=8 EP default"
 #--max-model-len 8192"
 #export RUN_TAG=dp8-ep-fp8-cxl-8192-no_deepgemm
 #run "DSv3.2 DP=8 EP fp8 max-model-len=8192"
+
+# ------------- Run Qwen/Qwen3-32B -------------
+# export RUN_ID=qwen3-32b-0
+# export MODEL_NAME=Qwen/Qwen3-32B
+
+# # TP=8 default (clear cache for new TP config)
+# export TP_SIZE=8
+# export DP_SIZE=0
+# export VLLM_EXTRA_ARGS=""
+# export RUN_TAG=tp8-ep-trial1
+# run "Qwen3-32B TP=8 EP default"
+
+# ------------- Run Qwen/Qwen3-0.6B -------------
+# export RUN_ID=qwen3-06b-0
+# export MODEL_NAME=Qwen/Qwen3-0.6B
+# export CLEANUP_ON_CRASH=0
+
+# # TP=8 default (clear cache for new TP config)
+# ENABLE_EP=0
+# export TP_SIZE=8
+# export DP_SIZE=0
+# export VLLM_EXTRA_ARGS=""
+# export RUN_TAG=tp8-ep-trial1
+# run "Qwen3-0.6B TP=8 EP default"
+
+
 
 echo ""
 echo "##############################################################"

@@ -1,0 +1,94 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Single-worker aggregated DGD. Frontend + one worker loading from disk.
+# No mx-target, no P2P transfer, no scale-up — just a baseline serving setup.
+
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-agg-single
+spec:
+  backendFramework: vllm
+  pvcs:
+    - create: false
+      name: model-cache-llama
+  services:
+    Frontend:
+      envFromSecret: hf-token-secret
+      componentType: frontend
+      replicas: 1
+      envs:
+        - name: MX_SERVER_ADDRESS
+          value: "modelexpress-server:8001"
+        - name: MODEL_EXPRESS_URL
+          value: "http://modelexpress-server:8001"
+        - name: HF_HUB_CACHE
+          value: "/models"
+      extraPodSpec:
+        nodeSelector:
+          dynamo/role: "source"
+        tolerations:
+          - key: "dynamo/reserved"
+            operator: "Equal"
+            value: "source"
+            effect: "NoSchedule"
+          - key: "nvidia.com/gpu"
+            operator: "Exists"
+            effect: "NoSchedule"
+        mainContainer:
+          image: nvcr.io/nvidian/dynamo-dev/hwoo:dynamo-mx-runtime
+      volumeMounts:
+        - name: model-cache-llama
+          mountPoint: /models
+
+    Worker:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      replicas: 1
+      resources:
+        limits:
+          gpu: "8"
+      envs:
+        - name: DYN_HEALTH_CHECK_ENABLED
+          value: "false"
+        - name: VLLM_RPC_TIMEOUT
+          value: "7200000"
+        - name: HF_HUB_CACHE
+          value: "/models"
+        - name: MODEL_NAME
+          value: "meta-llama/Llama-3.3-70B-Instruct"
+        - name: MX_SERVER_ADDRESS
+          value: "modelexpress-server:8001"
+        - name: MODEL_EXPRESS_URL
+          value: "http://modelexpress-server:8001"
+      extraPodSpec:
+        nodeSelector:
+          dynamo/role: "source"
+        tolerations:
+          - key: "dynamo/reserved"
+            operator: "Equal"
+            value: "source"
+            effect: "NoSchedule"
+          - key: "nvidia.com/gpu"
+            operator: "Exists"
+            effect: "NoSchedule"
+        mainContainer:
+          image: nvcr.io/nvidian/dynamo-dev/hwoo:dynamo-mx-runtime
+          command:
+            - python3
+            - -m
+            - dynamo.vllm
+          args:
+            - --model
+            - $(MODEL_NAME)
+            - --tensor-parallel-size
+            - "8"
+            - --trust-remote-code
+            - --load-format
+            - auto
+            - --compilation-config
+            - '{"cache_dir": "/models/.cache/vllm/compile_cache"}'
+      volumeMounts:
+        - name: model-cache-llama
+          mountPoint: /models

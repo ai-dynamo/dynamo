@@ -2,6 +2,9 @@
 # Finds node(s) with all GPUs available for a given role (source or target),
 # labels them, and deploys the image cache DaemonSet.
 #
+# If a pod gets evicted during rollout (e.g., DiskPressure), the bad node is
+# automatically un-labeled and replaced with a healthy one.
+#
 # Usage:
 #   ./setup-image-cache.sh source     # Find and label 1 source node
 #   ./setup-image-cache.sh target     # Find and label 1 target node (excludes source)
@@ -27,6 +30,7 @@ RDMA_RESOURCE="${RDMA_RESOURCE:-rdma/ib}"
 RDMA_COUNT="${RDMA_COUNT:-$TOTAL_GPUS}"
 REQUIRED_GPUS="$TOTAL_GPUS"
 REQUIRED_RDMA="$RDMA_COUNT"
+EXCLUDED_NODES="${EXCLUDED_NODES:-}"  # space-separated nodes to never select (e.g., known-bad nodes)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DAEMONSET_FILE="${SCRIPT_DIR}/image-cache-daemonset.yaml"
 
@@ -112,11 +116,11 @@ find_node() {
   return 1
 }
 
-excluded_nodes=$(get_excluded_nodes)
+excluded_nodes="$(get_excluded_nodes) $EXCLUDED_NODES"
 
 echo "Finding $COUNT $ROLE node(s) with $REQUIRED_GPUS free GPUs each..."
-if [[ -n "$excluded_nodes" ]]; then
-  echo "  Excluding already-labeled nodes: $excluded_nodes"
+if [[ -n "${excluded_nodes// /}" ]]; then
+  echo "  Excluding nodes: $excluded_nodes"
 fi
 
 found_nodes=()
@@ -164,7 +168,79 @@ sed -e "s|name: dynamo-image-cache|name: ${DAEMONSET_NAME}|g" \
 
 echo ""
 echo "Waiting for DaemonSet pods to be ready..."
-kubectl rollout status "daemonset/${DAEMONSET_NAME}" -n "$NAMESPACE" --timeout=600s
+
+# Poll for readiness, checking for evicted pods every cycle.
+# If a pod gets evicted (e.g., DiskPressure), un-label the bad node,
+# find a replacement, re-label, and continue waiting.
+MAX_RECOVER_ATTEMPTS=3
+recover_attempt=0
+evicted_nodes=""  # track nodes evicted during rollout so we never pick them again
+wait_elapsed=0
+timeout=600
+while true; do
+  sleep 10
+  wait_elapsed=$((wait_elapsed + 10))
+
+  # Check for evicted/failed pods first (fast detection)
+  evicted=$(kubectl get pods -n "$NAMESPACE" --no-headers \
+    -l "app=${DAEMONSET_NAME}" \
+    --field-selector="status.phase=Failed" \
+    -o custom-columns=":metadata.name,:spec.nodeName" 2>/dev/null || true)
+
+  if [[ -n "$evicted" ]]; then
+    recover_attempt=$((recover_attempt + 1))
+    if [[ "$recover_attempt" -gt "$MAX_RECOVER_ATTEMPTS" ]]; then
+      echo "ERROR: Exceeded $MAX_RECOVER_ATTEMPTS eviction recovery attempts, giving up"
+      exit 1
+    fi
+
+    while read -r pod node; do
+      [[ -z "$pod" ]] && continue
+      echo "Evicted pod detected: $pod on node $node (attempt $recover_attempt/$MAX_RECOVER_ATTEMPTS)"
+
+      # Remember this node so we never pick it again
+      evicted_nodes="$evicted_nodes $node"
+
+      # Delete the failed pod and un-label the bad node
+      kubectl delete pod "$pod" -n "$NAMESPACE" --ignore-not-found 2>/dev/null || true
+      kubectl label node "$node" "${LABEL_KEY}-" "${ROLE_LABEL}-" 2>/dev/null || true
+
+      # Find a replacement (exclude evicted nodes in addition to normal exclusions)
+      local_excluded="$(get_excluded_nodes) $EXCLUDED_NODES $evicted_nodes"
+      if find_node "$local_excluded"; then
+        echo "  Replacement found: $selected_node (replacing $node)"
+        kubectl label node "$selected_node" "$LABEL_KEY=$LABEL_VALUE" "$ROLE_LABEL=$ROLE"
+      else
+        echo "ERROR: No replacement node available for evicted $node"
+        exit 1
+      fi
+    done <<< "$evicted"
+
+    # Reset timeout after recovery to give the new pod time
+    wait_elapsed=0
+    continue
+  fi
+
+  # Check if DaemonSet is fully rolled out
+  desired=$(kubectl get "daemonset/${DAEMONSET_NAME}" -n "$NAMESPACE" \
+    -o jsonpath='{.status.desiredNumberScheduled}' 2>/dev/null || echo "0")
+  ready=$(kubectl get "daemonset/${DAEMONSET_NAME}" -n "$NAMESPACE" \
+    -o jsonpath='{.status.numberReady}' 2>/dev/null || echo "0")
+
+  if [[ "$desired" -gt 0 ]] && [[ "$ready" -ge "$desired" ]]; then
+    echo "  DaemonSet ready ($ready/$desired pods)"
+    break
+  fi
+
+  if [[ "$wait_elapsed" -ge "$timeout" ]]; then
+    echo "ERROR: Timed out waiting for DaemonSet rollout after ${timeout}s ($ready/$desired ready)"
+    exit 1
+  fi
+
+  if (( wait_elapsed % 60 == 0 )); then
+    echo "  waiting for DaemonSet... ($ready/$desired ready, ${wait_elapsed}s)"
+  fi
+done
 
 echo ""
-echo "Image cache is ready ($ROLE: ${found_nodes[*]})"
+echo "Image cache is ready ($ROLE: $(kubectl get nodes -l "${ROLE_LABEL}=${ROLE}" -o jsonpath='{.items[*].metadata.name}'))"
