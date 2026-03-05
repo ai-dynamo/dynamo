@@ -22,10 +22,10 @@ A KV event consumer (router, cache coordinator) subscribes to a live stream of b
 | **Event ordering** | Monotonic sequence number (8-byte int) | Monotonic `event_id` with consecutive-ID validation |
 | **Lookup** | Linear scan (`for seq, buf in buffer`) | Binary search (`binary_search_by_key`) |
 | **Serialization** | Pre-serialized msgpack bytes stored in buffer | Structured events stored; serialized on demand |
-| **Fallback when buffer too old** | None — data is lost | Tree dump of full RadixTree state |
-| **Initial sync** | No mechanism — consumer must start live | Tree dump (request with `start_event_id=None`) |
-| **Authoritative state** | None — buffer *is* the only state | RadixTree (buffer is just an optimization layer) |
-| **Compression / dedup** | None — every event stored as-is | RadixTree compresses shared prefixes across sequences |
+| **Fallback when buffer too old** | Consumer must rebuild externally | Tree dump of full RadixTree state |
+| **Initial sync** | Not built in — consumer starts from live stream | Tree dump (request with `start_event_id=None`) |
+| **Authoritative state** | Buffer only | RadixTree (buffer is an optimization layer) |
+| **Compression / dedup** | Events stored as-is (pre-serialized) | RadixTree compresses shared prefixes across sequences |
 | **Pruning** | Implicit via `maxlen` eviction | TTL + size-based pruning via `PruneManager` |
 | **Transport** | ZMQ PUB/SUB + ROUTER/REQ | Dynamo service RPC (request/response) |
 | **Multi-rank** | Port offset per DP rank | Separate query endpoint per DP rank |
@@ -44,11 +44,12 @@ vLLM's `ZmqEventPublisher` (in `vllm/distributed/kv_events.py`) runs two ZMQ soc
 
 The publisher keeps a `deque` of the last `buffer_steps` (default 10,000) serialized batches. When a consumer detects a gap, it sends the missing start sequence number to the ROUTER socket. The publisher linearly scans the buffer and streams back all batches from that sequence onward, ending with a sentinel (`seq=-1, payload=empty`).
 
-**Limitations:**
-- If the gap is older than the buffer window, the missed events are permanently lost.
-- No mechanism for initial state sync — a consumer that connects after events have already been published starts with an empty view.
+**Trade-offs:**
+- Lightweight — no additional state beyond the buffer itself; easy to reason about and deploy.
+- If the gap is older than the buffer window, the consumer must rebuild state through other means (e.g., restart and re-discover).
+- No built-in initial state sync — a consumer that connects after events have already been published starts with an empty view.
 - Linear scan on every replay request (no indexing into the buffer).
-- Consumer must handle dedup itself by checking `replay_seq > last_seq`.
+- Consumer handles dedup by checking `replay_seq > last_seq`.
 
 ### Dynamo: Buffer + Indexer with Tree Dump Fallback
 
@@ -69,7 +70,7 @@ When the router queries a worker for events via `get_events_in_id_range(start_id
 | `TreeDump` | Range too old or initial sync (`start_id=None`) | Dumps the full RadixTree as synthetic events — complete state snapshot |
 | `TooNew` | Consumer is ahead of producer | Error response; no gap to fill |
 
-The tree dump fallback is the key difference: when the buffer can't satisfy the request, the indexer falls back to dumping the entire tree state. This means "buffer too old" is a recoverable condition, not permanent data loss.
+The tree dump fallback means that when the buffer can't satisfy the request, the indexer falls back to dumping the entire tree state. This makes "buffer too old" a recoverable condition at the cost of additional complexity and memory for maintaining the tree.
 
 ## Gap Detection
 
@@ -86,9 +87,21 @@ if last_seq >= 0 and seq > last_seq + 1:
 **Dynamo** (from `lib/llm/src/kv_router/worker_query.rs`):
 The router tracks `last_recovered_event_id` per worker and requests `recover_from_worker(worker_id, dp_rank, start_event_id, end_event_id)` when it detects a gap or on initial discovery. The local indexer handles the complexity of deciding whether to replay from buffer or dump the tree.
 
-## Summary
+## When to Use Which
 
-vLLM's replay buffer is essentially Dynamo's local indexer stripped down to the `VecDeque` layer — same FIFO ring buffer concept for catching up on small, transient gaps. Dynamo adds the RadixTree underneath so "buffer too old" triggers a full state recovery (tree dump) rather than permanent data loss. This also gives Dynamo a natural mechanism for initial state sync: a new router simply requests events with `start_event_id=None` and gets a complete tree dump.
+**vLLM's built-in replay** is a good fit when:
+- You are running vLLM standalone and want basic gap recovery without additional infrastructure.
+- Your consumer is long-lived and rarely disconnects — transient gaps are the main concern.
+- You are building a custom external router or cache coordinator and want to consume KV events directly from vLLM without wrapping it in another framework.
+
+**Dynamo's local indexer** is a good fit when:
+- You need robust recovery, including initial state sync for newly joined routers or consumers that were offline for extended periods.
+- You are running multiple router replicas that may start at different times and need to converge on a consistent view of cache state.
+- You want dedup and recovery handled by the infrastructure rather than implementing it in each consumer.
+
+The two approaches share the same core idea — a FIFO ring buffer for catching up on small, transient gaps. Dynamo adds a RadixTree underneath as authoritative state, which enables the tree dump fallback for full state recovery at the cost of additional memory and complexity. vLLM keeps it simple with just the buffer, which is sufficient when consumers are stable and gaps are short-lived.
+
+For deployments using Dynamo's KV-aware routing, the local indexer is used automatically. For standalone vLLM deployments where you want to build your own event consumer, vLLM's replay buffer provides a lightweight starting point.
 
 ## See Also
 
