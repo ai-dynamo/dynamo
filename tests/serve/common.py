@@ -173,6 +173,10 @@ def params_with_model_mark(configs: Mapping[str, EngineConfig]):
     params = []
     for config_name, cfg in configs.items():
         marks = list(getattr(cfg, "marks", []))
-        marks.append(pytest.mark.model(cfg.model))
+        revision = getattr(cfg, "model_revision", None)
+        if revision:
+            marks.append(pytest.mark.model(cfg.model, revision=revision))
+        else:
+            marks.append(pytest.mark.model(cfg.model))
         params.append(pytest.param(config_name, marks=marks))
     return params
