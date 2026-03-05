@@ -59,7 +59,7 @@ spec:
         - /bin/bash
         - -c
         - |
-          set -e
+          set -euo pipefail
           ulimit -n 600000
           echo "File descriptor limit set to: $(ulimit -n)"
           echo 2097152 > /proc/sys/fs/inotify/max_user_watches 2>/dev/null || true
@@ -124,6 +124,7 @@ spec:
 
           echo ""
           echo "Running warmup benchmark..."
+          set +e
           aiperf profile \
             -m "nvidia/DeepSeek-V3.2-NVFP4" \
             --tokenizer "nvidia/DeepSeek-V3.2-NVFP4" \
@@ -169,6 +170,7 @@ spec:
           ls -la "${ARTIFACT_DIR}" 2>/dev/null || true
           echo "Benchmark complete!"
           exit $BENCH_EXIT_CODE
+          set -e
         env:
         - name: TARGET_MODEL
           value: nvidia/DeepSeek-V3.2-NVFP4

@@ -109,7 +109,7 @@ We use NVIDIA's official NVFP4-quantized checkpoint ([Huggingface](https://huggi
 kubectl apply -f model-cache/model-download.yaml -n ${NAMESPACE}
 kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=600s
 ```
-Similarly, copy the trace file for the benchmark () into the PVC:
+Similarly, copy the trace file for the benchmark into the PVC:
 ```bash
 # conversation_trace_synth_16.00x1+10.00_speedup1_maxisl110000.jsonl in our case
 kubectl cp <local_trace.jsonl> your-namespace/<helper-pod>:/model-cache/traces/
@@ -187,10 +187,10 @@ For production contexts, we can further evaluate the deployments with **goodput*
 
 ```bash
 # Delete benchmark pods
-kubectl delete pod -l app=benchmark -n ${NAMESPACE}
+kubectl delete job agg-round-robin-dsv32-nvfp4-bench disagg-kv-dsv32-nvfp4-bench -n ${NAMESPACE}
 
 # Delete deployments
-kubectl delete dynamographdeployment -n agg-round-robin-dsv32-nvfp4 -n ${NAMESPACE}
+kubectl delete dynamographdeployment agg-round-robin-dsv32-nvfp4 -n ${NAMESPACE}
 kubectl delete dynamographdeployment disagg-kv-dsv32-nvfp4 -n ${NAMESPACE}
 ```
 

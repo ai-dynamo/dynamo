@@ -59,7 +59,7 @@ spec:
         - /bin/bash
         - -c
         - |
-          set -e
+          set -euo pipefail
           ulimit -n 600000
           echo "File descriptor limit set to: $(ulimit -n)"
           echo 2097152 > /proc/sys/fs/inotify/max_user_watches 2>/dev/null || true
@@ -168,6 +168,7 @@ spec:
           echo "Results: ${ARTIFACT_DIR}"
           ls -la "${ARTIFACT_DIR}" 2>/dev/null || true
           echo "Benchmark complete!"
+          set -e
           exit $BENCH_EXIT_CODE
         env:
         - name: TARGET_MODEL

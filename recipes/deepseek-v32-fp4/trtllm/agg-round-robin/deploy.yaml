@@ -113,8 +113,6 @@ spec:
               value: NVLINK_TWO_SIDED
             - name: ENABLE_CONFIGURABLE_MOE
               value: "1"
-            - name: TLLM_OVERRIDE_LAYER_NUM
-              value: "61"
             - name: TLLM_LOG_LEVEL
               value: "INFO"
           image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.0
