@@ -9,5 +9,6 @@
 
 pub mod cache;
 pub mod common;
+pub mod engine;
 pub mod kv_manager;
 pub mod scheduler;

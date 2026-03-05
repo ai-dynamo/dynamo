@@ -43,7 +43,8 @@ pub use dynamo_mocker::common::protocols::{
 };
 use dynamo_mocker::common::utils::{compute_kv_transfer_delay, sleep_precise};
 pub use dynamo_mocker::common::{bootstrap, perf_model, protocols, running_mean, sequence};
-pub use dynamo_mocker::scheduler::Scheduler;
+pub use dynamo_mocker::engine::create_engine;
+pub use dynamo_mocker::scheduler::{Scheduler, SchedulerHandle};
 pub use dynamo_mocker::{kv_manager, scheduler};
 
 pub const MOCKER_COMPONENT: &str = "mocker";
@@ -207,7 +208,7 @@ fn generate_random_token() -> TokenIdType {
 }
 
 /// AsyncEngine wrapper around the Scheduler that generates random character tokens
-pub struct MockVllmEngine {
+pub struct MockEngine {
     active_requests: Arc<DashMap<Uuid, mpsc::UnboundedSender<OutputSignal>>>,
     request_senders: OnceCell<Vec<mpsc::UnboundedSender<DirectRequest>>>,
     senders_ready: Notify,
@@ -215,11 +216,11 @@ pub struct MockVllmEngine {
     /// Bootstrap server for prefill workers in disaggregated mode
     bootstrap_server: Arc<OnceCell<Arc<BootstrapServer>>>,
     /// Keep schedulers alive so their CancelGuards don't fire prematurely.
-    _schedulers: OnceCell<Vec<Scheduler>>,
+    _schedulers: OnceCell<Vec<Box<dyn SchedulerHandle>>>,
 }
 
-impl MockVllmEngine {
-    /// Create a new MockVllmEngine with the given parameters
+impl MockEngine {
+    /// Create a new MockEngine with the given parameters
     pub fn new(engine_args: MockEngineArgs) -> Self {
         Self {
             active_requests: Arc::new(DashMap::new()),
@@ -304,9 +305,9 @@ impl MockVllmEngine {
         &self,
         component: Option<&Component>,
         cancel_token: CancellationToken,
-    ) -> Vec<Scheduler> {
+    ) -> Vec<Box<dyn SchedulerHandle>> {
         let args = &self.engine_args;
-        let mut schedulers = Vec::<Scheduler>::new();
+        let mut schedulers = Vec::<Box<dyn SchedulerHandle>>::new();
         let mut senders = Vec::with_capacity(args.dp_size as usize);
 
         for dp_rank in 0..args.dp_size {
@@ -377,7 +378,7 @@ impl MockVllmEngine {
                 None => (None, None),
             };
 
-            let scheduler = Scheduler::new(
+            let scheduler = create_engine(
                 args.clone(),
                 dp_rank,
                 Some(output_tx),
@@ -428,7 +429,7 @@ impl MockVllmEngine {
 
     /// Start background tasks to publish metrics on change
     async fn start_metrics_publishing(
-        schedulers: &[Scheduler],
+        schedulers: &[Box<dyn SchedulerHandle>],
         component: Component,
         cancel_token: CancellationToken,
     ) -> Result<()> {
@@ -471,9 +472,7 @@ impl MockVllmEngine {
 }
 
 #[async_trait]
-impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
-    for MockVllmEngine
-{
+impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error> for MockEngine {
     async fn generate(
         &self,
         input: SingleIn<PreprocessedRequest>,
@@ -636,12 +635,12 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
 }
 
 pub struct AnnotatedMockEngine {
-    inner: Arc<MockVllmEngine>,
+    inner: Arc<MockEngine>,
 }
 
 impl AnnotatedMockEngine {
     pub fn new(
-        inner: MockVllmEngine,
+        inner: MockEngine,
         distributed_runtime: DistributedRuntime,
         endpoint_id: dynamo_runtime::protocols::EndpointId,
     ) -> Self {
@@ -710,7 +709,7 @@ pub async fn make_mocker_engine(
     // Create the mocker engine
     tracing::info!("Creating mocker engine with config: {args:?}");
     let annotated_engine =
-        AnnotatedMockEngine::new(MockVllmEngine::new(args), distributed_runtime, endpoint_id);
+        AnnotatedMockEngine::new(MockEngine::new(args), distributed_runtime, endpoint_id);
 
     Ok(Arc::new(annotated_engine))
 }
