@@ -11,10 +11,8 @@ use dynamo_runtime::discovery::DiscoverySpec;
 use dynamo_runtime::protocols::EndpointId;
 use dynamo_runtime::slug::Slug;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
-//use dynamo_runtime::utils::get_http_rpc_host_from_env;
 
 use crate::entrypoint::RouterConfig;
-//use dynamo_mocker::protocols::{MockEngineArgs, WorkerType};
 use crate::model_card::ModelDeploymentCard;
 use crate::model_type::{ModelInput, ModelType};
 use crate::preprocessor::media::{MediaDecoder, MediaFetcher};
@@ -234,43 +232,6 @@ impl LocalModelBuilder {
             .as_deref()
             .map(RequestTemplate::load)
             .transpose()?;
-
-        /*
-        // Override runtime configs with mocker engine args (applies to both paths)
-        if self.is_mocker
-            && let Some(path) = &self.extra_engine_args
-        {
-            let mocker_engine_args = MockEngineArgs::from_json_file(path)
-                .expect("Failed to load mocker engine args for runtime config overriding.");
-            self.kv_cache_block_size = mocker_engine_args.block_size as u32;
-            self.runtime_config.total_kv_blocks = Some(mocker_engine_args.num_gpu_blocks as u64);
-            self.runtime_config.max_num_seqs = mocker_engine_args.max_num_seqs.map(|v| v as u64);
-            self.runtime_config.max_num_batched_tokens =
-                mocker_engine_args.max_num_batched_tokens.map(|v| v as u64);
-            // Decode workers don't create the WorkerKvQuery endpoint (scheduler_component is None),
-            // so they must not advertise enable_local_indexer=true or the router will hang
-            // trying to query them during initial recovery.
-            self.runtime_config.enable_local_indexer = mocker_engine_args.enable_local_indexer
-                && mocker_engine_args.worker_type != WorkerType::Decode;
-            self.runtime_config.data_parallel_size = mocker_engine_args.dp_size;
-
-            // Set bootstrap endpoint for prefill workers with bootstrap_port configured
-            if mocker_engine_args.worker_type == WorkerType::Prefill
-                && let Some(port) = mocker_engine_args.bootstrap_port
-            {
-                let host = get_http_rpc_host_from_env();
-                self.runtime_config.disaggregated_endpoint =
-                    Some(runtime_config::DisaggregatedEndpoint {
-                        bootstrap_host: Some(host),
-                        bootstrap_port: Some(port),
-                    });
-                tracing::info!(
-                    bootstrap_port = port,
-                    "Mocker prefill worker: publishing bootstrap endpoint to discovery"
-                );
-            }
-        }
-        */
 
         // frontend and echo engine don't need a path.
         if self.model_path.is_none() {
