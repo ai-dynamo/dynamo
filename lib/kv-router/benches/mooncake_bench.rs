@@ -12,7 +12,8 @@ use dynamo_kv_router::indexer::{
 };
 use dynamo_kv_router::protocols::{KvCacheEvent, KvCacheEventData, RouterEvent};
 use dynamo_kv_router::{
-    ConcurrentRadixTree, InvertedIndex, NaiveNestedMap, PositionalIndexer, ThreadPoolIndexer,
+    ConcurrentRadixTree, ConcurrentRadixTreeCompressed, InvertedIndex, NaiveNestedMap,
+    PositionalIndexer, ThreadPoolIndexer,
 };
 use serde::Serialize;
 use std::sync::Arc;
@@ -45,6 +46,13 @@ enum IndexerArgs {
 
     /// Lock-based concurrent radix tree indexer.
     ConcurrentRadixTree {
+        /// Number of OS threads that consume and apply KV cache events.
+        #[clap(long, default_value = "16")]
+        num_event_workers: usize,
+    },
+
+    /// Compressed concurrent radix tree indexer (compressed edges).
+    ConcurrentRadixTreeCompressed {
         /// Number of OS threads that consume and apply KV cache events.
         #[clap(long, default_value = "16")]
         num_event_workers: usize,
@@ -88,6 +96,13 @@ impl IndexerArgs {
             IndexerArgs::ConcurrentRadixTree { num_event_workers } => Arc::new(
                 ThreadPoolIndexer::new(ConcurrentRadixTree::new(), num_event_workers, block_size),
             ),
+            IndexerArgs::ConcurrentRadixTreeCompressed { num_event_workers } => {
+                Arc::new(ThreadPoolIndexer::new(
+                    ConcurrentRadixTreeCompressed::new(),
+                    num_event_workers,
+                    block_size,
+                ))
+            }
             IndexerArgs::NaiveNestedMap {} => Arc::new(NaiveNestedMap::new()),
             IndexerArgs::InvertedIndex { .. } => Arc::new(InvertedIndex::new()),
         }
@@ -98,7 +113,10 @@ impl IndexerArgs {
     }
 
     fn is_multi_threaded(name: &str) -> bool {
-        matches!(name, "nested-map" | "concurrent-radix-tree")
+        matches!(
+            name,
+            "nested-map" | "concurrent-radix-tree" | "concurrent-radix-tree-compressed"
+        )
     }
 
     /// Construct an indexer from a short name string.
@@ -118,13 +136,17 @@ impl IndexerArgs {
             "concurrent-radix-tree" => IndexerArgs::ConcurrentRadixTree {
                 num_event_workers: nw,
             },
+            "concurrent-radix-tree-compressed" => IndexerArgs::ConcurrentRadixTreeCompressed {
+                num_event_workers: nw,
+            },
             "naive-nested-map" => IndexerArgs::NaiveNestedMap {},
             "inverted-index" => IndexerArgs::InvertedIndex {
                 num_event_workers: 0,
             },
             _ => anyhow::bail!(
                 "Unknown indexer '{}'. Valid names: radix-tree, radix-tree-sharded, \
-                 nested-map, concurrent-radix-tree, naive-nested-map, inverted-index",
+                 nested-map, concurrent-radix-tree, concurrent-radix-tree-compressed, \
+                 naive-nested-map, inverted-index",
                 name
             ),
         };
@@ -145,7 +167,7 @@ struct Args {
     /// Comma-separated list of indexer names to benchmark and compare on the
     /// same plot. Overrides the subcommand indexer when present. Valid names:
     /// radix-tree, radix-tree-sharded, nested-map, concurrent-radix-tree,
-    /// naive-nested-map, inverted-index.
+    /// concurrent-radix-tree-compressed, naive-nested-map, inverted-index.
     #[clap(long, value_delimiter = ',')]
     compare: Vec<String>,
 
@@ -558,6 +580,7 @@ async fn main() -> anyhow::Result<()> {
             IndexerArgs::RadixTreeSharded { .. } => "radix-tree-sharded",
             IndexerArgs::NestedMap { .. } => "nested-map",
             IndexerArgs::ConcurrentRadixTree { .. } => "concurrent-radix-tree",
+            IndexerArgs::ConcurrentRadixTreeCompressed { .. } => "concurrent-radix-tree-compressed",
             IndexerArgs::NaiveNestedMap {} => "naive-nested-map",
             IndexerArgs::InvertedIndex { .. } => "inverted-index",
         };

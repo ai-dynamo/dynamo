@@ -10,6 +10,7 @@ use tokio::time;
 use tokio_util::sync::CancellationToken;
 
 use super::concurrent_radix_tree::ConcurrentRadixTree;
+use super::concurrent_radix_tree_compressed::ConcurrentRadixTreeCompressed;
 use super::positional::PositionalIndexer;
 use super::*;
 use crate::protocols::*;
@@ -169,7 +170,10 @@ fn make_clear_event_with_dp_rank(worker_id: u64, dp_rank: u32) -> RouterEvent {
 
 #[template]
 #[rstest]
-fn indexer_template(#[values("single", "sharded", "flat", "concurrent")] variant: &str) {}
+fn indexer_template(
+    #[values("single", "sharded", "flat", "concurrent", "concurrent_compressed")] variant: &str,
+) {
+}
 
 fn make_indexer(variant: &str) -> Box<dyn KvIndexerInterface> {
     let token = CancellationToken::new();
@@ -186,6 +190,11 @@ fn make_indexer(variant: &str) -> Box<dyn KvIndexerInterface> {
         )),
         "concurrent" => Box::new(ThreadPoolIndexer::new(
             ConcurrentRadixTree::new(),
+            4,
+            kv_block_size,
+        )),
+        "concurrent_compressed" => Box::new(ThreadPoolIndexer::new(
+            ConcurrentRadixTreeCompressed::new(),
             4,
             kv_block_size,
         )),

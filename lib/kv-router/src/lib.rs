@@ -15,6 +15,7 @@ pub mod zmq_wire;
 
 // Backward-compat re-exports: old top-level module paths still work
 pub use indexer::concurrent_radix_tree;
+pub use indexer::concurrent_radix_tree_compressed;
 #[cfg(feature = "bench")]
 pub use indexer::naive as naive_indexers;
 pub use indexer::positional as nested_map;
@@ -37,6 +38,7 @@ pub use self::multi_worker_sequence::{
 };
 pub use self::sequence::{ActiveSequences, RequestId};
 pub use concurrent_radix_tree::ConcurrentRadixTree;
+pub use concurrent_radix_tree_compressed::ConcurrentRadixTreeCompressed;
 pub use config::{KvRouterConfig, RouterConfigOverride};
 pub use event_sink::EventSink;
 pub use indexer::{MaybeError, SyncIndexer, ThreadPoolIndexer};
