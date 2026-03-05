@@ -193,7 +193,7 @@ webhook:
 
 #### How It Works
 
-1. **Operator starts**: The `CertManager` checks for an existing certificate Secret. If missing or invalid, it generates a self-signed Root CA and server certificate and writes them to the Secret (`<release>-webhook-server-cert`).
+1. **Operator starts**: The `CertManager` checks for an existing certificate Secret (configured via `webhook.certificateSecret.name`, default: `webhook-server-cert`). If missing or invalid, it generates a self-signed Root CA and server certificate and writes them to the Secret.
 
 2. **CA bundle injection**: The `CABundleInjector` reads `ca.crt` from the Secret and patches both the `ValidatingWebhookConfiguration` and `MutatingWebhookConfiguration` with the base64-encoded CA bundle.
 
