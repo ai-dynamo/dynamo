@@ -22,6 +22,14 @@ def log_message(level: str, message: str, module: str, file: str, line: int) -> 
     """
     ...
 
+def get_tool_parser_names() -> list[str]:
+    """Get list of available tool parser names."""
+    ...
+
+def get_reasoning_parser_names() -> list[str]:
+    """Get list of available reasoning parser names."""
+    ...
+
 class JsonLike:
     """
     Any PyObject which can be serialized to JSON
@@ -935,6 +943,9 @@ class ModelType:
     Images: ModelType
     Audios: ModelType
     Videos: ModelType
+
+    def __or__(self, other: "ModelType") -> "ModelType":
+        ...
 
     def supports_chat(self) -> bool:
         """Return True if this model type supports chat."""
