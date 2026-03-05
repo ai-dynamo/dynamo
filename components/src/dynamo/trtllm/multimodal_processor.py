@@ -209,7 +209,7 @@ class MultimodalRequestProcessor:
         # mm_processor_kwargs must be a dict (not None) for TRT-LLM's processor
         processed_inputs: Dict[str, Any] = {"mm_processor_kwargs": {}}
 
-        # TODO: Remove the fallback to text_prompt for EPD-NIXL and embeddings cases.
+        # TODO(TRTLLM-11294): Remove the fallback to text_prompt for EPD-NIXL and embeddings cases.
         # This is a temporary workaround to bypass TRT-LLM's bug where token IDs & embeddings
         # are not processed correctly.
         extra_args = request.get("extra_args") or {}
@@ -324,7 +324,6 @@ class MultimodalRequestProcessor:
                 processed_inputs["multi_modal_embeddings"] = {
                     "image": loaded_embeddings
                 }
-                logging.info(f"Processed inputs: {processed_inputs}")
                 return processed_inputs
 
             if processed_mm_data:

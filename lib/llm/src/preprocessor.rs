@@ -1298,7 +1298,8 @@ impl
         };
 
         // Gather multimodal data (works with both embeddings and text prompts)
-        self.gather_multi_modal_data(&request, &mut builder, None).await?;
+        self.gather_multi_modal_data(&request, &mut builder, None)
+            .await?;
 
         let mut common_request = builder.build()?;
 
