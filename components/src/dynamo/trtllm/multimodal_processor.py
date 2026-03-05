@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import asyncio
 import logging
 import time
 from io import BytesIO
@@ -23,7 +22,6 @@ from urllib.parse import urlparse
 from urllib.request import urlopen
 
 import torch
-from tensorrt_llm.inputs import default_multimodal_input_loader
 from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
 
 from dynamo.common.multimodal.image_loader import ImageLoader
@@ -190,10 +188,6 @@ class MultimodalRequestProcessor:
             "prompt_token_ids": List[int]
         }
 
-        -----------------------------------------------------------------------------
-        TODO: Revert default_multimodal_input_loader calls having fixed TRT-LLM's
-        token IDs & MM data path in generate_async() for the embeddings case.
-        -----------------------------------------------------------------------------
         """
         self.previous_decoded_text = ""
 
@@ -255,6 +249,7 @@ class MultimodalRequestProcessor:
             if image_items and isinstance(image_items, list):
                 # Separate embedding paths from regular image URLs
                 # Items come from Rust in format: {"Url": "..."} or {"Decoded": ...}
+                embedding_paths = []
                 image_urls = []
 
                 for item in image_items:
@@ -275,7 +270,9 @@ class MultimodalRequestProcessor:
                         continue
 
                     # Check if this is an embedding file based on extension
-                    if not url.endswith((".pt", ".pth", ".bin")):
+                    if url.endswith((".pt", ".pth", ".bin")):
+                        embedding_paths.append(url)
+                    else:
                         # Keep original item format for load_image_batch
                         image_urls.append(
                             item if isinstance(item, dict) else {"Url": item}
