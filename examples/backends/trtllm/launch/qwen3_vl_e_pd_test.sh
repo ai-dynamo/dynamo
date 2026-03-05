@@ -3,34 +3,40 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
-# ║  LLaVA Raw-Embeddings End-to-End Test                                      ║
+# ║  Qwen3-VL-2B-Instruct  Multimodal End-to-End Test                         ║
 # ║                                                                            ║
-# ║  Phase 1 – Run HuggingFace vision encoder standalone on GPU 0             ║
-# ║             → produces /tmp/llava_embeddings.pt                            ║
-# ║                                                                            ║
-# ║  Part A — E/PD (Encode + Aggregated Prefill-Decode)                       ║
-# ║    Start Frontend + Encode + Agg PD → send raw-embeddings request          ║
+# ║  Part A — E/PD (Aggregated Prefill-Decode)                                ║
+# ║    1. Start Frontend + Encode + Agg PD on GPU 0                            ║
+# ║    2. Wait for readiness → send image-URL request → print output           ║
 # ║                                                                            ║
 # ║  Part B — E + P + D (Disaggregated Prefill / Decode)                      ║
-# ║    Start Frontend + Encode + Prefill + Decode → send same request          ║
+# ║    3. Tear down Part A workers                                             ║
+# ║    4. Start Frontend + Encode + Prefill + Decode on GPU 0                  ║
+# ║    5. Wait for readiness → send same request → print output                ║
 # ║                                                                            ║
-# ║  Summary — print both outputs in a table                                  ║
+# ║  Part C — P + D (Disaggregated Prefill / Decode, no Encode worker)        ║
+# ║    6. Tear down Part B workers                                             ║
+# ║    7. Start Frontend + Prefill + Decode on GPU 0                           ║
+# ║    8. Wait for readiness → send same request → print output                ║
 # ║                                                                            ║
-# ║  Known limitation: The default revision of llava-hf/llava-v1.6-mistral-7b ║
-# ║  crashes with TRT-LLM 1.2.0rc6.post1 – we pin revision 52320fb52229.     ║
+# ║  Part D — Aggregated (single worker, no disaggregation)                   ║
+# ║    9. Tear down Part C workers                                             ║
+# ║   10. Start Frontend + single Agg worker on GPU 0                          ║
+# ║   11. Wait for readiness → send same request → print output                ║
+# ║                                                                            ║
+# ║  Summary — print all 4 outputs side by side in a table                    ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
 set -euo pipefail
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 export DYNAMO_HOME=${DYNAMO_HOME:-"/workspace"}
-export SERVED_MODEL_NAME=${SERVED_MODEL_NAME:-"llava-hf/llava-v1.6-mistral-7b-hf"}
-export MODEL_REPO=${MODEL_REPO:-"llava-hf/llava-v1.6-mistral-7b-hf"}
-export MODEL_REVISION=${MODEL_REVISION:-"52320fb52229"}
-export AGG_ENGINE_ARGS=${AGG_ENGINE_ARGS:-"$DYNAMO_HOME/examples/backends/trtllm/engine_configs/llava-v1.6-mistral-7b-hf/agg.yaml"}
-export PREFILL_ENGINE_ARGS=${PREFILL_ENGINE_ARGS:-"$DYNAMO_HOME/examples/backends/trtllm/engine_configs/llava-v1.6-mistral-7b-hf/prefill.yaml"}
-export DECODE_ENGINE_ARGS=${DECODE_ENGINE_ARGS:-"$DYNAMO_HOME/examples/backends/trtllm/engine_configs/llava-v1.6-mistral-7b-hf/decode.yaml"}
-export ENCODE_ENGINE_ARGS=${ENCODE_ENGINE_ARGS:-"$DYNAMO_HOME/examples/backends/trtllm/engine_configs/llava-v1.6-mistral-7b-hf/encode.yaml"}
+export MODEL_PATH=${MODEL_PATH:-"Qwen/Qwen3-VL-2B-Instruct"}
+export SERVED_MODEL_NAME=${SERVED_MODEL_NAME:-"Qwen/Qwen3-VL-2B-Instruct"}
+export AGG_ENGINE_ARGS=${AGG_ENGINE_ARGS:-"$DYNAMO_HOME/examples/backends/trtllm/engine_configs/qwen3-vl-2b-instruct/agg.yaml"}
+export PREFILL_ENGINE_ARGS=${PREFILL_ENGINE_ARGS:-"$DYNAMO_HOME/examples/backends/trtllm/engine_configs/qwen3-vl-2b-instruct/prefill.yaml"}
+export DECODE_ENGINE_ARGS=${DECODE_ENGINE_ARGS:-"$DYNAMO_HOME/examples/backends/trtllm/engine_configs/qwen3-vl-2b-instruct/decode.yaml"}
+export ENCODE_ENGINE_ARGS=${ENCODE_ENGINE_ARGS:-"$DYNAMO_HOME/examples/backends/trtllm/engine_configs/qwen3-vl-2b-instruct/encode.yaml"}
 export AGG_CUDA_VISIBLE_DEVICES=${AGG_CUDA_VISIBLE_DEVICES:-"0"}
 export PREFILL_CUDA_VISIBLE_DEVICES=${PREFILL_CUDA_VISIBLE_DEVICES:-"0"}
 export DECODE_CUDA_VISIBLE_DEVICES=${DECODE_CUDA_VISIBLE_DEVICES:-"0"}
@@ -39,17 +45,15 @@ export ENCODE_ENDPOINT=${ENCODE_ENDPOINT:-"dyn://dynamo.tensorrt_llm_encode.gene
 export MODALITY=${MODALITY:-"multimodal"}
 export ALLOWED_LOCAL_MEDIA_PATH=${ALLOWED_LOCAL_MEDIA_PATH:-"/tmp"}
 export MAX_FILE_SIZE_MB=${MAX_FILE_SIZE_MB:-50}
-export CUSTOM_TEMPLATE=${CUSTOM_TEMPLATE:-"$DYNAMO_HOME/examples/backends/trtllm/templates/llava_multimodal.jinja"}
 export FRONTEND_PORT=${DYN_HTTP_PORT:-8000}
 
-EMBEDDINGS_FILE="/tmp/llava_embeddings.pt"
 TEST_IMAGE_URL="https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/diffusers/inpaint.png"
 FRONTEND_URL="http://localhost:${FRONTEND_PORT}"
 MAX_WAIT=300   # 5 minutes
 POLL_INTERVAL=5
 
 # Result accumulators — filled by send_request_and_print
-RESULT_A="" RESULT_B=""
+RESULT_A="" RESULT_B="" RESULT_C="" RESULT_D=""
 
 # ── Shared helper: track background PIDs for cleanup ─────────────────────────
 BG_PIDS=()
@@ -91,7 +95,7 @@ print(len(data.get('data', [])))
     return 1
 }
 
-# ── Shared helper: send raw-embeddings request and print the response ─────────
+# ── Shared helper: send request and print the response ────────────────────────
 # Usage: send_request_and_print <send_phase> <print_phase> <result_var_name>
 send_request_and_print() {
     local phase_send="$1"
@@ -100,8 +104,8 @@ send_request_and_print() {
 
     echo ""
     echo "══════════════════════════════════════════════════════════════"
-    echo "Phase ${phase_send}: Sending request with raw embeddings"
-    echo "         Embeddings file: ${EMBEDDINGS_FILE}"
+    echo "Phase ${phase_send}: Sending request with image URL"
+    echo "         Image: ${TEST_IMAGE_URL}"
     echo "══════════════════════════════════════════════════════════════"
 
     # Write payload to a temp file to avoid bash quoting issues
@@ -113,7 +117,7 @@ pathlib.Path('${payload_file}').write_text(json.dumps({
     'model': '${SERVED_MODEL_NAME}',
     'messages': [{'role': 'user', 'content': [
         {'type': 'text', 'text': 'Describe what this image shows.'},
-        {'type': 'image_url', 'image_url': {'url': 'file://${EMBEDDINGS_FILE}'}}
+        {'type': 'image_url', 'image_url': {'url': '${TEST_IMAGE_URL}'}}
     ]}],
     'max_tokens': 256,
 }))
@@ -172,134 +176,18 @@ except json.JSONDecodeError:
     eval "${result_var}=\${generated_text}"
 }
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Phase 1: Download model & produce embeddings with standalone HF encoder
-# ══════════════════════════════════════════════════════════════════════════════
-
-# ── Download model with pinned revision ───────────────────────────────────────
-export HF_MODEL_CACHE=${HF_MODEL_CACHE:-"/tmp/hf_models"}
-echo "══════════════════════════════════════════════════════════════"
-echo "Downloading model ${MODEL_REPO}@${MODEL_REVISION} → ${HF_MODEL_CACHE}"
-echo "══════════════════════════════════════════════════════════════"
-MODEL_PATH=$(HF_HUB_OFFLINE=0 python3 -c "
-from huggingface_hub import snapshot_download
-path = snapshot_download('${MODEL_REPO}', revision='${MODEL_REVISION}', cache_dir='${HF_MODEL_CACHE}')
-print(path)
-")
-
-if [ -z "$MODEL_PATH" ]; then
-    echo "ERROR: Failed to resolve local model path for ${MODEL_REPO}@${MODEL_REVISION}"
-    exit 1
-fi
-echo "Resolved MODEL_PATH=${MODEL_PATH}"
-export MODEL_PATH
-
-echo ""
-echo "══════════════════════════════════════════════════════════════"
-echo "Phase 1: Running standalone HF vision encoder on GPU 0"
-echo "         Image : ${TEST_IMAGE_URL}"
-echo "         Output: ${EMBEDDINGS_FILE}"
-echo "══════════════════════════════════════════════════════════════"
-
-CUDA_VISIBLE_DEVICES=0 python3 -c "
-import torch, sys, io, urllib.request
-from PIL import Image
-
-model_path = '${MODEL_PATH}'
-image_url  = '${TEST_IMAGE_URL}'
-output     = '${EMBEDDINGS_FILE}'
-
-# ── Load model (vision tower + projector only would be ideal, but we load
-#    the full model to guarantee identical weights) ──
-from transformers import LlavaNextForConditionalGeneration, LlavaNextProcessor
-
-print(f'Loading LlavaNext model from {model_path} …')
-model = LlavaNextForConditionalGeneration.from_pretrained(
-    model_path, torch_dtype=torch.float16, device_map='cuda:0',
-)
-processor = LlavaNextProcessor.from_pretrained(model_path)
-print('Model loaded.')
-
-# ── Download and process image ──
-print(f'Downloading image from {image_url} …')
-with urllib.request.urlopen(image_url) as resp:
-    image = Image.open(io.BytesIO(resp.read())).convert('RGB')
-
-print(f'Image size: {image.size}')
-inputs = processor(text='<image>', images=image, return_tensors='pt')
-pixel_values = inputs['pixel_values'].to(device='cuda:0', dtype=torch.float16)
-image_sizes  = inputs.get('image_sizes')
-
-print(f'pixel_values shape: {pixel_values.shape}  (5-D = multi-crop)')
-
-# ── Run vision encoder + projector ──
-print('Running vision tower …')
-with torch.no_grad():
-    # LlavaNext processor produces 5-D pixel_values: (batch, num_patches, C, H, W)
-    # The vision tower expects 4-D: (N, C, H, W) — flatten the batch+patches dims.
-    if pixel_values.ndim == 5:
-        b, n, c, h, w = pixel_values.shape
-        pixel_values_flat = pixel_values.reshape(b * n, c, h, w)
-    else:
-        pixel_values_flat = pixel_values
-
-    vision_out = model.vision_tower(pixel_values_flat, output_hidden_states=True)
-
-    # Select the feature layer that LlavaNext uses
-    layer_idx = model.config.vision_feature_layer
-    features = vision_out.hidden_states[layer_idx]
-
-    # Apply feature-selection strategy (remove CLS token for 'default')
-    strategy = getattr(model.config, 'vision_feature_select_strategy', 'default')
-    if strategy == 'default':
-        features = features[:, 1:]
-
-    # Project to LLM hidden space
-    embeddings = model.multi_modal_projector(features)
-
-    # Collapse (num_patches, seq_len, hidden) → (total_tokens, hidden) so the
-    # downstream TRT-LLM worker receives a single 2-D embedding tensor.
-    if embeddings.ndim == 3:
-        embeddings = embeddings.reshape(-1, embeddings.shape[-1])
-
-print(f'Embeddings shape : {embeddings.shape}')
-print(f'Embeddings dtype  : {embeddings.dtype}')
-
-# ── Save to disk ──
-embeddings_cpu = embeddings.cpu()
-torch.save(embeddings_cpu, output)
-print(f'Saved embeddings → {output}  ({embeddings_cpu.nelement() * embeddings_cpu.element_size() / 1024 / 1024:.1f} MB)')
-
-# ── Free GPU memory ──
-del model, processor, vision_out, features, embeddings, embeddings_cpu, pixel_values
-torch.cuda.empty_cache()
-print('GPU memory released.  Phase 1 complete ✓')
-"
-
-if [ ! -f "$EMBEDDINGS_FILE" ]; then
-    echo "ERROR: Embeddings file not produced at ${EMBEDDINGS_FILE}"
-    exit 1
-fi
-
-# ── Ensure the standalone encoder process is fully stopped and GPU 0 is free ─
-echo ""
-echo "Verifying GPU 0 is free after standalone encoder …"
-nvidia-smi --query-gpu=index,memory.used,memory.free --format=csv,noheader 2>/dev/null \
-    | head -1 || echo "(nvidia-smi not available – skipping GPU check)"
-echo "Standalone encoder stopped. GPU 0 is available for workers."
-
 # ╔══════════════════════════════════════════════════════════════════════════════╗
-# ║  Part A — E/PD (Encode + Aggregated Prefill-Decode) with raw embeddings   ║
+# ║  Part A — E/PD (Encode + Aggregated Prefill-Decode)                        ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 echo ""
 echo "┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓"
 echo "┃  Part A — E/PD (Encode + Aggregated Prefill-Decode)        ┃"
 echo "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛"
 
-# ── Phase 2: Start E/PD system ───────────────────────────────────────────────
+# ── Phase 1: Start E/PD system ───────────────────────────────────────────────
 echo ""
 echo "══════════════════════════════════════════════════════════════"
-echo "Phase 2: Starting E/PD system on port ${FRONTEND_PORT}"
+echo "Phase 1: Starting E/PD system on port ${FRONTEND_PORT}"
 echo "         Model      : ${SERVED_MODEL_NAME}"
 echo "         Encode GPU : ${ENCODE_CUDA_VISIBLE_DEVICES}"
 echo "         PD GPU     : ${AGG_CUDA_VISIBLE_DEVICES}"
@@ -309,7 +197,7 @@ echo "════════════════════════�
 python3 -m dynamo.frontend &
 BG_PIDS+=($!)
 
-# Encode worker
+# Encode worker (vision encoder)
 CUDA_VISIBLE_DEVICES=$ENCODE_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
   --model-path "$MODEL_PATH" \
   --served-model-name "$SERVED_MODEL_NAME" \
@@ -320,7 +208,7 @@ CUDA_VISIBLE_DEVICES=$ENCODE_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
   --disaggregation-mode encode &
 BG_PIDS+=($!)
 
-# Aggregated PD worker
+# Aggregated PD worker (prefill + decode)
 CUDA_VISIBLE_DEVICES=$AGG_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
   --model-path "$MODEL_PATH" \
   --served-model-name "$SERVED_MODEL_NAME" \
@@ -329,22 +217,21 @@ CUDA_VISIBLE_DEVICES=$AGG_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
   --allowed-local-media-path "$ALLOWED_LOCAL_MEDIA_PATH" \
   --max-file-size-mb "$MAX_FILE_SIZE_MB" \
   --disaggregation-mode prefill_and_decode \
-  --encode-endpoint "$ENCODE_ENDPOINT" \
-  --custom-jinja-template "$CUSTOM_TEMPLATE" &
+  --encode-endpoint "$ENCODE_ENDPOINT" &
 BG_PIDS+=($!)
 
-# ── Phase 3: Wait for readiness ─────────────────────────────────────────────
+# ── Phase 2: Wait for readiness ─────────────────────────────────────────────
 echo ""
 echo "══════════════════════════════════════════════════════════════"
-echo "Phase 3: Waiting for server to become ready …"
+echo "Phase 2: Waiting for server to become ready …"
 echo "══════════════════════════════════════════════════════════════"
 
 wait_for_server || exit 1
 echo "Waiting 10s for pipeline to stabilize …"
 sleep 10
 
-# ── Phases 4–5: Send request & print output ──────────────────────────────────
-send_request_and_print 4 5 RESULT_A
+# ── Phases 3–4: Send request & print output ──────────────────────────────────
+send_request_and_print 3 4 RESULT_A
 
 echo ""
 echo "══════════════════════════════════════════════════════════════"
@@ -358,17 +245,17 @@ cleanup
 sleep 5   # let GPU memory settle
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
-# ║  Part B — E + P + D (Disaggregated Prefill / Decode) with raw embeddings  ║
+# ║  Part B — E + P + D (Disaggregated Prefill / Decode)                       ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 echo ""
 echo "┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓"
 echo "┃  Part B — E + P + D (Disaggregated Prefill / Decode)       ┃"
 echo "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛"
 
-# ── Phase 6: Start disaggregated system ──────────────────────────────────────
+# ── Phase 5: Start disaggregated system ──────────────────────────────────────
 echo ""
 echo "══════════════════════════════════════════════════════════════"
-echo "Phase 6: Starting E+P+D system on port ${FRONTEND_PORT}"
+echo "Phase 5: Starting E+P+D system on port ${FRONTEND_PORT}"
 echo "         Model       : ${SERVED_MODEL_NAME}"
 echo "         Encode GPU  : ${ENCODE_CUDA_VISIBLE_DEVICES}"
 echo "         Prefill GPU : ${PREFILL_CUDA_VISIBLE_DEVICES}"
@@ -397,8 +284,7 @@ CUDA_VISIBLE_DEVICES=$PREFILL_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
   --extra-engine-args "$PREFILL_ENGINE_ARGS" \
   --modality "$MODALITY" \
   --disaggregation-mode prefill \
-  --encode-endpoint "$ENCODE_ENDPOINT" \
-  --custom-jinja-template "$CUSTOM_TEMPLATE" &
+  --encode-endpoint "$ENCODE_ENDPOINT" &
 BG_PIDS+=($!)
 
 # Decode worker
@@ -407,26 +293,148 @@ CUDA_VISIBLE_DEVICES=$DECODE_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
   --served-model-name "$SERVED_MODEL_NAME" \
   --extra-engine-args "$DECODE_ENGINE_ARGS" \
   --modality "$MODALITY" \
-  --disaggregation-mode decode \
-  --custom-jinja-template "$CUSTOM_TEMPLATE" &
+  --allowed-local-media-path "$ALLOWED_LOCAL_MEDIA_PATH" \
+  --max-file-size-mb "$MAX_FILE_SIZE_MB" \
+  --disaggregation-mode decode &
 BG_PIDS+=($!)
 
-# ── Phase 7: Wait for readiness ─────────────────────────────────────────────
+# ── Phase 6: Wait for readiness ─────────────────────────────────────────────
 echo ""
 echo "══════════════════════════════════════════════════════════════"
-echo "Phase 7: Waiting for server to become ready …"
+echo "Phase 6: Waiting for server to become ready …"
 echo "══════════════════════════════════════════════════════════════"
 
 wait_for_server || exit 1
 echo "Waiting 10s for pipeline to stabilize …"
 sleep 10
 
-# ── Phases 8–9: Send request & print output ──────────────────────────────────
-send_request_and_print 8 9 RESULT_B
+# ── Phases 7–8: Send request & print output ──────────────────────────────────
+send_request_and_print 7 8 RESULT_B
 
 echo ""
 echo "══════════════════════════════════════════════════════════════"
 echo "Part B (E+P+D) complete ✓"
+echo "══════════════════════════════════════════════════════════════"
+
+# ── Tear down E+P+D workers ─────────────────────────────────────────────────
+echo ""
+echo "Tearing down E+P+D workers …"
+cleanup
+sleep 5   # let GPU memory settle
+
+# ╔══════════════════════════════════════════════════════════════════════════════╗
+# ║  Part C — P + D (Disaggregated Prefill / Decode, no Encode worker)         ║
+# ╚══════════════════════════════════════════════════════════════════════════════╝
+echo ""
+echo "┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓"
+echo "┃  Part C — P + D (no Encode worker)                         ┃"
+echo "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛"
+
+# ── Phase 9: Start P+D system (no Encode worker) ────────────────────────────
+echo ""
+echo "══════════════════════════════════════════════════════════════"
+echo "Phase 9: Starting P+D system on port ${FRONTEND_PORT}"
+echo "         Model       : ${SERVED_MODEL_NAME}"
+echo "         Prefill GPU : ${PREFILL_CUDA_VISIBLE_DEVICES}"
+echo "         Decode GPU  : ${DECODE_CUDA_VISIBLE_DEVICES}"
+echo "══════════════════════════════════════════════════════════════"
+
+# Frontend
+python3 -m dynamo.frontend &
+BG_PIDS+=($!)
+
+# Prefill worker (handles multimodal processing internally — no encode endpoint)
+CUDA_VISIBLE_DEVICES=$PREFILL_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
+  --model-path "$MODEL_PATH" \
+  --served-model-name "$SERVED_MODEL_NAME" \
+  --extra-engine-args "$PREFILL_ENGINE_ARGS" \
+  --modality "$MODALITY" \
+  --allowed-local-media-path "$ALLOWED_LOCAL_MEDIA_PATH" \
+  --max-file-size-mb "$MAX_FILE_SIZE_MB" \
+  --disaggregation-mode prefill &
+BG_PIDS+=($!)
+
+# Decode worker
+CUDA_VISIBLE_DEVICES=$DECODE_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
+  --model-path "$MODEL_PATH" \
+  --served-model-name "$SERVED_MODEL_NAME" \
+  --extra-engine-args "$DECODE_ENGINE_ARGS" \
+  --modality "$MODALITY" \
+  --allowed-local-media-path "$ALLOWED_LOCAL_MEDIA_PATH" \
+  --max-file-size-mb "$MAX_FILE_SIZE_MB" \
+  --disaggregation-mode decode &
+BG_PIDS+=($!)
+
+# ── Phase 10: Wait for readiness ────────────────────────────────────────────
+echo ""
+echo "══════════════════════════════════════════════════════════════"
+echo "Phase 10: Waiting for server to become ready …"
+echo "══════════════════════════════════════════════════════════════"
+
+wait_for_server || exit 1
+echo "Waiting 10s for pipeline to stabilize …"
+sleep 10
+
+# ── Phases 11–12: Send request & print output ───────────────────────────────
+send_request_and_print 11 12 RESULT_C
+
+echo ""
+echo "══════════════════════════════════════════════════════════════"
+echo "Part C (P+D) complete ✓"
+echo "══════════════════════════════════════════════════════════════"
+
+# ── Tear down P+D workers ───────────────────────────────────────────────────
+echo ""
+echo "Tearing down P+D workers …"
+cleanup
+sleep 5   # let GPU memory settle
+
+# ╔══════════════════════════════════════════════════════════════════════════════╗
+# ║  Part D — Aggregated (single worker, no disaggregation)                    ║
+# ╚══════════════════════════════════════════════════════════════════════════════╝
+echo ""
+echo "┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓"
+echo "┃  Part D — Aggregated (single worker)                       ┃"
+echo "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛"
+
+# ── Phase 13: Start aggregated system ────────────────────────────────────────
+echo ""
+echo "══════════════════════════════════════════════════════════════"
+echo "Phase 13: Starting Aggregated system on port ${FRONTEND_PORT}"
+echo "          Model : ${SERVED_MODEL_NAME}"
+echo "          GPU   : ${AGG_CUDA_VISIBLE_DEVICES}"
+echo "══════════════════════════════════════════════════════════════"
+
+# Frontend
+python3 -m dynamo.frontend &
+BG_PIDS+=($!)
+
+# Single aggregated worker (handles encode + prefill + decode internally)
+CUDA_VISIBLE_DEVICES=$AGG_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
+  --model-path "$MODEL_PATH" \
+  --served-model-name "$SERVED_MODEL_NAME" \
+  --extra-engine-args "$AGG_ENGINE_ARGS" \
+  --modality "$MODALITY" \
+  --allowed-local-media-path "$ALLOWED_LOCAL_MEDIA_PATH" \
+  --max-file-size-mb "$MAX_FILE_SIZE_MB" &
+BG_PIDS+=($!)
+
+# ── Phase 14: Wait for readiness ────────────────────────────────────────────
+echo ""
+echo "══════════════════════════════════════════════════════════════"
+echo "Phase 14: Waiting for server to become ready …"
+echo "══════════════════════════════════════════════════════════════"
+
+wait_for_server || exit 1
+echo "Waiting 10s for pipeline to stabilize …"
+sleep 10
+
+# ── Phases 15–16: Send request & print output ───────────────────────────────
+send_request_and_print 15 16 RESULT_D
+
+echo ""
+echo "══════════════════════════════════════════════════════════════"
+echo "Part D (Aggregated) complete ✓"
 echo "══════════════════════════════════════════════════════════════"
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -435,10 +443,10 @@ echo "════════════════════════�
 echo ""
 echo ""
 echo "╔══════════════════════════════════════════════════════════════════════════════╗"
-echo "║              SUMMARY — Raw Embeddings (.pt) Deployments                    ║"
+echo "║                         SUMMARY — All Deployments                          ║"
 echo "╠══════════════════════════════════════════════════════════════════════════════╣"
-echo "║  Model     : ${SERVED_MODEL_NAME}"
-echo "║  Embeddings: ${EMBEDDINGS_FILE}"
+echo "║  Model: ${SERVED_MODEL_NAME}"
+echo "║  Image: ${TEST_IMAGE_URL}"
 echo "╚══════════════════════════════════════════════════════════════════════════════╝"
 echo ""
 
@@ -458,7 +466,9 @@ printf "│ %-27s │ %-8s │ %-79s │\n" "Deployment" "Status" "Generated Tex
 printf "├─────────────────────────────┼──────────┼─────────────────────────────────────────────────────────────────────────────────┤\n"
 
 for label_var in "A:E/PD (Encode+Agg PD):RESULT_A" \
-                 "B:E+P+D (Encode+P+D):RESULT_B"; do
+                 "B:E+P+D (Encode+P+D):RESULT_B" \
+                 "C:P+D (no Encode):RESULT_C" \
+                 "D:Aggregated (single):RESULT_D"; do
     IFS=':' read -r letter description var_name <<< "$label_var"
     eval "text=\${${var_name}}"
     if [ -z "$text" ]; then
