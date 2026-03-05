@@ -415,9 +415,6 @@ jobs:
     runs-on: ubuntu-latest
     needs: [vllm-pipeline, sglang-pipeline, trtllm-pipeline]
     if: always()
-    permissions:
-      contents: write
-      actions: read
     steps:
       - uses: actions/checkout@v4
 
