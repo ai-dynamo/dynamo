@@ -4,7 +4,7 @@
 import asyncio
 import json
 import logging
-from typing import AsyncIterator, Optional
+from typing import Any, AsyncIterator, Optional
 
 import sglang as sgl
 import torch
@@ -127,7 +127,7 @@ class EmbeddingsProcessor:
         """
         precomputed = embeddings.to(MultimodalConfig.EMBEDDINGS_DTYPE)
 
-        mm_item = {"image_grid_thw": torch.tensor(image_grid_thw)}
+        mm_item: dict[str, Any] = {"image_grid_thw": torch.tensor(image_grid_thw)}
         mm_item.update(
             {
                 "format": "processor_output",
@@ -271,7 +271,7 @@ class MultimodalWorkerHandler(BaseWorkerHandler):
         self,
         engine: sgl.Engine,
         config: Config,
-        prefill_client: Client = None,
+        prefill_client: Client | None = None,
         shutdown_event: Optional[asyncio.Event] = None,
     ):
         super().__init__(engine, config, None, None, shutdown_event)
@@ -413,6 +413,7 @@ class MultimodalWorkerHandler(BaseWorkerHandler):
         self, request: SglangMultimodalRequest, sampling_params: dict
     ) -> dict:
         """Get bootstrap info from prefill worker"""
+        assert self.prefill_client is not None
         prefill_stream = await self.prefill_client.generate(
             DisaggSglangMultimodalRequest(
                 request=request,
@@ -491,7 +492,7 @@ class MultimodalPrefillWorkerHandler(BaseWorkerHandler):
                 "bootstrap_room": bootstrap_room,
             }
 
-            yield bootstrap_info
+            yield json.dumps(bootstrap_info)
 
             # Process prefill generation
             await self._process_prefill_generation(disagg_request, bootstrap_room)
