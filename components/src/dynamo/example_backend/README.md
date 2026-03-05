@@ -29,14 +29,14 @@ python -m dynamo.example_backend --model <model_name_or_path> --token-delay 0.1
 | File | Purpose |
 |---|---|
 | `__main__.py` | Entry point (`python -m dynamo.example_backend`) |
-| `args.py` | `Config` (extends `DynamoRuntimeConfig`), `ExampleBackendConfig`, and CLI argument parsing |
+| `args.py` | `Config` (extends `DynamoBackendConfig`), `ExampleBackendConfig`, and CLI argument parsing |
 | `backend.py` | `ExampleBackend` — implements the three required `Backend` abstract methods |
 | `handlers.py` | `ExampleHandler` — tokenizes "Hello World!" and streams tokens with cancellation support |
 
 ## How It Works
 
 1. `ExampleBackend.create_engine()` returns `None` (no real engine needed).
-2. `ExampleBackend.create_handler()` creates an `ExampleHandler` with `config.backend.token_delay`.
+2. `ExampleBackend.create_handler()` creates an `ExampleHandler` with `config.extra.token_delay`.
 3. On each request, `ExampleHandler.generate()`:
    - Encodes "Hello World!" using the model's tokenizer.
    - Streams tokens one at a time, sleeping `token_delay` seconds between each.

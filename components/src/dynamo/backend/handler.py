@@ -36,7 +36,16 @@ import logging
 import tempfile
 from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
-from typing import Any, AsyncGenerator, AsyncIterator, Callable, Dict, List, Optional, Tuple
+from typing import (
+    Any,
+    AsyncGenerator,
+    AsyncIterator,
+    Callable,
+    Dict,
+    List,
+    Optional,
+    Tuple,
+)
 
 from dynamo.common import Context
 
@@ -83,12 +92,16 @@ def _extract_logprobs(
 
         token_top = []
         for tok_id, info in token_logprobs_dict.items():
-            token_top.append({
-                "rank": info.rank if hasattr(info, "rank") else 0,
-                "token_id": tok_id,
-                "token": info.decoded_token if hasattr(info, "decoded_token") else None,
-                "logprob": float(info.logprob),
-            })
+            token_top.append(
+                {
+                    "rank": info.rank if hasattr(info, "rank") else 0,
+                    "token_id": tok_id,
+                    "token": info.decoded_token
+                    if hasattr(info, "decoded_token")
+                    else None,
+                    "logprob": float(info.logprob),
+                }
+            )
         top_logprobs.append(token_top)
 
     return log_probs if log_probs else None, top_logprobs if top_logprobs else None

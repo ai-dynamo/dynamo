@@ -8,8 +8,8 @@ import logging
 import os
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
-from dynamo.common import Context
 from dynamo.backend import Handler
+from dynamo.common import Context
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +23,9 @@ _REPLY_TEXT = "Hello World!"
 _ALLOWED_MODELS: Optional[frozenset[str]] = None
 _raw = os.environ.get("DYNAMO_ALLOWED_MODELS")
 if _raw:
-    _ALLOWED_MODELS = frozenset(name.strip() for name in _raw.split(",") if name.strip())
+    _ALLOWED_MODELS = frozenset(
+        name.strip() for name in _raw.split(",") if name.strip()
+    )
 
 # Module-level cache so each model's tokenizer is loaded only once.
 _TOKENIZER_CACHE: Dict[str, Any] = {}
@@ -43,7 +45,9 @@ def _get_tokenizer(model: str) -> Any:
 def _encode_reply(model: str) -> List[int]:
     """Encode reply text using the model's tokenizer so it decodes to 'Hello World!'."""
     if _ALLOWED_MODELS is not None and model not in _ALLOWED_MODELS:
-        logger.warning("Model %s is not in the allowed models list; using fallback", model)
+        logger.warning(
+            "Model %s is not in the allowed models list; using fallback", model
+        )
         return _FALLBACK_REPLY_IDS
     try:
         tokenizer = _get_tokenizer(model)

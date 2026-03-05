@@ -97,7 +97,6 @@ if not hasattr(_core, "Context"):
 
 # --- ModelType stub (IntFlag used in endpoint_types) ---------------------
 if not hasattr(_core, "ModelType"):
-
     # NOTE: ModelType in dynamo._core conflates endpoint types (Chat,
     # Completions), worker roles (Prefill), capability flags (Embedding),
     # and output modalities (Images, Videos, Audios) into a single IntFlag.

@@ -6,8 +6,8 @@
 from typing import Any, Dict
 
 from dynamo.backend import Backend
-from dynamo.llm import ModelRuntimeConfig
 from dynamo.example_backend.handlers import ExampleHandler
+from dynamo.llm import ModelRuntimeConfig
 
 
 class ExampleBackend(Backend):
@@ -31,7 +31,7 @@ class ExampleBackend(Backend):
         return ExampleHandler(
             component=component,
             shutdown_event=self.shutdown_event,
-            token_delay=self.config.backend.token_delay,
+            token_delay=self.config.extra.token_delay,
         )
 
     def get_health_check_payload(self, engine: Any) -> Dict[str, Any]:

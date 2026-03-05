@@ -14,13 +14,12 @@ Key components:
 """
 
 from dynamo.backend.args import (
+    DynamoBackendArgGroup,
+    DynamoBackendConfig,
     DynamoRuntimeArgGroup,
     DynamoRuntimeConfig,
 )
-from dynamo.backend.base import (
-    DYNAMO_COMPONENT_REGISTRY,
-    Backend,
-)
+from dynamo.backend.base import DYNAMO_COMPONENT_REGISTRY, Backend
 from dynamo.backend.handler import Handler
 
 __all__ = [
@@ -30,6 +29,8 @@ __all__ = [
     "Backend",
     "Handler",
     # Configuration
+    "DynamoBackendConfig",
+    "DynamoBackendArgGroup",
     "DynamoRuntimeConfig",
     "DynamoRuntimeArgGroup",
 ]

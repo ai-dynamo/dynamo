@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from dynamo.example_backend.handlers import ExampleHandler, _FALLBACK_REPLY_IDS
+from dynamo.example_backend.handlers import _FALLBACK_REPLY_IDS, ExampleHandler
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -84,9 +84,9 @@ class TestExampleHandlerTokenDelay:
 
         assert len(results_fast) == len(results_slow)
         # Slow should take roughly 3x longer (allow some tolerance)
-        assert time_slow > time_fast * 1.5, (
-            f"3x delay should be notably slower: fast={time_fast:.3f}s, slow={time_slow:.3f}s"
-        )
+        assert (
+            time_slow > time_fast * 1.5
+        ), f"3x delay should be notably slower: fast={time_fast:.3f}s, slow={time_slow:.3f}s"
 
     @pytest.mark.asyncio
     async def test_yields_correct_token_format(self):

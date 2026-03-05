@@ -63,14 +63,14 @@ dynamo/my_backend/
 
 ### 2. Configuration (`args.py`)
 
-Inherit from `DynamoRuntimeConfig` and use `DynamoRuntimeArgGroup` for common CLI flags. Backend-specific fields go into a separate config object stored on `config.backend` so that standard Dynamo fields (`config.model`, `config.namespace`, …) are clearly separated from backend-specific ones (`config.backend.gpu_memory_fraction`):
+Inherit from `DynamoRuntimeConfig` and use `DynamoRuntimeArgGroup` for common CLI flags. Backend-specific fields go into a separate config object stored on `config.extra` so that standard Dynamo fields (`config.model`, `config.namespace`, …) are clearly separated from backend-specific ones (`config.extra.gpu_memory_fraction`):
 
 ```python
 from dynamo.backend import DynamoRuntimeConfig, DynamoRuntimeArgGroup
 from dynamo.common.configuration import ArgGroup
 
 class MyBackendConfig:
-    """Backend-specific settings — accessed via config.backend.<field>."""
+    """Backend-specific settings — accessed via config.extra.<field>."""
     def __init__(self, gpu_memory_fraction: float = 0.9, max_batch_size: int = 256):
         self.gpu_memory_fraction = gpu_memory_fraction
         self.max_batch_size = max_batch_size
@@ -91,14 +91,14 @@ def parse_args():
     MyBackendArgGroup().add_arguments(parser)
     args = parser.parse_args()
     config = Config.from_cli_args(args)
-    config.backend = MyBackendConfig(
+    config.extra = MyBackendConfig(
         gpu_memory_fraction=args.gpu_memory_fraction,
         max_batch_size=args.max_batch_size,
     )
     return config
 ```
 
-With this pattern, any code that reads `config.backend.gpu_memory_fraction` is immediately recognizable as backend-specific, while `config.model` is clearly a standard Dynamo field.
+With this pattern, any code that reads `config.extra.gpu_memory_fraction` is immediately recognizable as backend-specific, while `config.model` is clearly a standard Dynamo field.
 
 ### 3. Backend (`backend.py`)
 

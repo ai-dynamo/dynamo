@@ -12,7 +12,16 @@ import logging
 import time
 from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING, Any, AsyncIterator, Callable, Dict, List, Optional, Tuple
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    AsyncIterator,
+    Callable,
+    Dict,
+    List,
+    Optional,
+    Tuple,
+)
 
 if TYPE_CHECKING:
     from dynamo.backend.handler import Handler
@@ -157,8 +166,8 @@ class Backend(ABC):
     def _get_component_name(self) -> str:
         """Get the component name for Dynamo registration.
 
-        Default: "backend". Override or set ``config.component`` for
-        backends that register under a different component name.
+        Default: ``config.component`` (defaults to "backend" on
+        ``DynamoBackendConfig``). Override for dynamic component names.
         """
         return getattr(self.config, "component", "backend")
 
