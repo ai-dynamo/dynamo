@@ -74,7 +74,7 @@ The ISL/OSL/cache hit statistics of our trace is below.
 
 ## Prerequisites
 
-1. **Dynamo Platform installed** - See [Kubernetes Deployment Guide](../../docs/pages/kubernetes/README.md)
+1. **Dynamo Platform installed** - See [Kubernetes Deployment Guide](../../docs/kubernetes/README.md)
 2. **32x GB200 GPUs** across 8 nodes
 3. **HuggingFace token** configured:
    ```bash
