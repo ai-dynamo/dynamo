@@ -150,10 +150,12 @@ Use the proper folder in commands below.
 # agg
 kubectl apply -f recipes/llama-3-70b/vllm/agg/gaie/deploy.yaml -n ${NAMESPACE}
 # Deploy the GAIE http-route CR.
+# for the NAMESPACE use the namespace where you deployed your gagteway (kgateway-system, my-model)
 kubectl apply -f recipes/llama-3-70b/vllm/agg/gaie/http-route.yaml -n ${NAMESPACE}
 
 # or disagg
 kubectl apply -f recipes/llama-3-70b/vllm/disagg-single-node/gaie/deploy.yaml  -n ${NAMESPACE}
+# for the NAMESPACE use the namespace where you deployed your gagteway (kgateway-system, my-model)
 kubectl apply -f recipes/llama-3-70b/vllm/disagg-single-node/gaie/http-route.yaml -n ${NAMESPACE}
 ```
 
