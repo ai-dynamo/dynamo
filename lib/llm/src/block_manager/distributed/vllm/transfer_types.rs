@@ -140,10 +140,14 @@ pub struct RemoteTransferRequest {
     pub is_onboard: bool,
     pub pin_id: Option<uuid::Uuid>,
     pub token_blocks: Option<Vec<TokenBlock>>,
+    /// W3C traceparent for propagating trace context across async boundaries
+    pub traceparent: Option<String>,
 }
 
 impl RemoteTransferRequest {
     pub fn from_g4_params(params: &super::integration::G4OnboardParams) -> Self {
+        let traceparent = dynamo_runtime::logging::get_distributed_tracing_context()
+            .map(|ctx| ctx.create_traceparent());
         Self {
             request_id: params.request_id.clone(),
             sequence_hashes: params.sequence_hashes.clone(),
@@ -154,6 +158,7 @@ impl RemoteTransferRequest {
             is_onboard: true,
             pin_id: None,
             token_blocks: Some(params.token_blocks.clone()),
+            traceparent,
         }
     }
 
@@ -166,6 +171,8 @@ impl RemoteTransferRequest {
         pin_id: uuid::Uuid,
     ) -> Self {
         debug_assert!(sequence_hashes.len() == host_block_ids.len());
+        let traceparent = dynamo_runtime::logging::get_distributed_tracing_context()
+            .map(|ctx| ctx.create_traceparent());
         Self {
             request_id,
             sequence_hashes,
@@ -176,6 +183,7 @@ impl RemoteTransferRequest {
             is_onboard: false,
             pin_id: Some(pin_id),
             token_blocks: None,
+            traceparent,
         }
     }
 

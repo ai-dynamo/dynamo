@@ -308,14 +308,47 @@ class KvConnectorLeader:
             raise ValueError("Unsupported request - requires mm extra keys")
 
         all_token_ids = request.all_token_ids
+        request_id = request.request_id
 
-        # extract the critial aspects of the request that effect how the tokens are hashed
-        request = KvbmRequest(
-            request_id=request.request_id,
+        kvbm_request = KvbmRequest(
+            request_id=request_id,
             lora_name=request.lora_request.lora_name()
             if request.lora_request
             else None,
             salt_hash=request.cache_salt,
         )
 
-        self._connector.create_slot(request, all_token_ids)
+        self._connector.create_slot(kvbm_request, all_token_ids)
+
+        # Propagate traceparent to Rust (for KVBM spans) and back onto the
+        # request object (for the vLLM scheduler tracing patch).
+        #
+        # With --otlp-traces-endpoint, vLLM's own OTEL instrumentation
+        # creates the root server span and populates request.trace_headers.
+        # We just read it and pass it through. If trace_headers is None
+        # (OTEL not enabled), we create a fallback root span.
+        try:
+            trace_headers = getattr(request, "trace_headers", None)
+            tp = trace_headers.get("traceparent") if trace_headers else None
+
+            if not tp:
+                from kvbm.vllm_integration.connector.dynamo_connector import _get_tracer
+                tracer = _get_tracer()
+                if tracer is not None:
+                    span = tracer.start_span(
+                        "kvbm.request",
+                        attributes={"request_id": request_id},
+                    )
+                    sc = span.get_span_context()
+                    if sc and sc.trace_id and sc.span_id:
+                        tp = f"00-{format(sc.trace_id, '032x')}-{format(sc.span_id, '016x')}-01"
+                    span.end()
+
+            if tp:
+                self._connector.set_request_traceparent(request_id, tp)
+                if not getattr(request, "trace_headers", None):
+                    request.trace_headers = {"traceparent": tp}
+                elif "traceparent" not in request.trace_headers:
+                    request.trace_headers["traceparent"] = tp
+        except Exception:
+            pass

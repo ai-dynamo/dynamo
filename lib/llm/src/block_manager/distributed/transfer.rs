@@ -32,10 +32,22 @@ use tokio_util::sync::CancellationToken;
 
 use anyhow::Result;
 use async_trait::async_trait;
+use once_cell::sync::Lazy;
 use std::{any::Any, sync::Arc};
 
 type LocalBlock<S, M> = Block<S, locality::Local, M>;
 type LocalBlockDataList<S> = Vec<LocalBlockData<S>>;
+
+static G4_PIPELINE_CHUNK_SIZE: Lazy<usize> = Lazy::new(|| {
+    std::env::var("DYN_KVBM_G4_PIPELINE_CHUNK_SIZE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0)
+});
+
+fn g4_pipeline_chunk_size() -> usize {
+    *G4_PIPELINE_CHUNK_SIZE
+}
 
 /// A batching wrapper for connector transfers to prevent resource exhaustion.
 /// Splits large transfers into smaller batches that can be handled by the resource pools.
@@ -201,14 +213,12 @@ impl BlockTransferHandler {
     }
 
     /// Execute transfer directly without batching (used by the batcher)
+    #[tracing::instrument(level = "debug", skip_all, fields(
+        num_blocks = request.blocks().len(),
+        from_pool = ?request.from_pool(),
+        to_pool = ?request.to_pool(),
+    ))]
     pub async fn execute_transfer_direct(&self, request: BlockTransferRequest) -> Result<()> {
-        tracing::debug!(
-            "Performing transfer of {} blocks from {:?} to {:?}",
-            request.blocks().len(),
-            request.from_pool(),
-            request.to_pool()
-        );
-
         tracing::debug!("request: {request:#?}");
 
         let notify = match (request.from_pool(), request.to_pool()) {
@@ -230,6 +240,11 @@ impl BlockTransferHandler {
     ///
     /// Handles both onboard (remote -> host -> device) and offload (device -> host -> remote)
     /// transfers, with optional checksum logging when G4 validation is enabled.
+    #[tracing::instrument(level = "info", skip_all, fields(
+        request_id = %request.request_id,
+        operation_id = %request.operation_id,
+        otel.name = "kvbm.remote_transfer",
+    ))]
     pub async fn execute_remote_transfer(&self, request: RemoteTransferRequest) -> Result<()> {
         let remote_ctx = self
             .remote_context
@@ -278,48 +293,118 @@ impl BlockTransferHandler {
             .map(|&idx| host_blocks[idx].clone())
             .collect();
 
-        // For offload: compute checksums before writing to remote
-        if !is_onboard && g4_checksum_enabled() {
-            self.log_checksums_for_offload(&bounce_blocks, &pipeline, &request.request_id);
-        }
+        let chunk_size = g4_pipeline_chunk_size();
 
-        // Execute the remote <-> host transfer
-        pipeline
-            .execute(&bounce_blocks, remote_ctx.as_ref(), &self.cancel_token)
-            .await
-            .map_err(|e| anyhow::anyhow!("Remote transfer failed: {}", e))?;
+        if chunk_size > 0 && num_blocks > chunk_size && is_onboard {
+            self.execute_remote_transfer_chunked(
+                &request,
+                &pipeline,
+                &bounce_blocks,
+                bounce_ids,
+                remote_ctx,
+                backend,
+                chunk_size,
+            )
+            .await?;
+        } else {
+            let transfer_start = std::time::Instant::now();
 
-        // For onboard: compute checksums after reading from remote
-        if is_onboard && g4_checksum_enabled() {
-            self.log_checksums_for_onboard(&bounce_blocks, &pipeline, &request.request_id);
-        }
+            if !is_onboard && g4_checksum_enabled() {
+                self.log_checksums_for_offload(&bounce_blocks, &pipeline, &request.request_id);
+            }
 
-        // If this is a full pipeline with device blocks, execute host <-> device transfer
-        if let Some(device_ids) = pipeline.device_block_ids() {
-            if !device_ids.is_empty() {
-                let block_pairs: Vec<(usize, usize)> = if is_onboard {
-                    // Onboard: host -> device
-                    bounce_ids
-                        .iter()
-                        .copied()
-                        .zip(device_ids.iter().copied())
-                        .collect()
-                } else {
-                    // Offload: device -> host (already done before remote transfer)
-                    // This case is typically handled separately
-                    vec![]
-                };
+            {
+                use tracing::Instrument;
+                let r2h_span = tracing::info_span!(
+                    "r2h_transfer",
+                    otel.name = "kvbm.r2h",
+                    request_id = %request.request_id,
+                    num_blocks,
+                    backend,
+                );
 
-                if !block_pairs.is_empty() {
-                    let local_request = BlockTransferRequest {
-                        from_pool: if is_onboard { Host } else { Device },
-                        to_pool: if is_onboard { Device } else { Host },
-                        blocks: block_pairs,
-                        connector_req: None,
-                        sequence_hashes: None,
+                pipeline
+                    .execute(&bounce_blocks, remote_ctx.as_ref(), &self.cancel_token)
+                    .instrument(r2h_span)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Remote transfer failed: {}", e))?;
+            }
+
+            let r2h_elapsed = transfer_start.elapsed();
+
+            if is_onboard && g4_checksum_enabled() {
+                self.log_checksums_for_onboard(&bounce_blocks, &pipeline, &request.request_id);
+            }
+
+            if is_onboard {
+                tracing::info!(
+                    target: "kvbm-diag",
+                    request_id = %request.request_id,
+                    num_blocks,
+                    r2h_ms = r2h_elapsed.as_millis(),
+                    backend,
+                    "R2H phase complete (serial path)"
+                );
+            }
+
+            if let Some(device_ids) = pipeline.device_block_ids() {
+                if !device_ids.is_empty() {
+                    let block_pairs: Vec<(usize, usize)> = if is_onboard {
+                        bounce_ids
+                            .iter()
+                            .copied()
+                            .zip(device_ids.iter().copied())
+                            .collect()
+                    } else {
+                        vec![]
                     };
-                    self.execute_transfer(local_request).await?;
+
+                    if !block_pairs.is_empty() {
+                        use tracing::Instrument;
+                        let h2d_span = tracing::info_span!(
+                            "h2d_transfer",
+                            otel.name = "kvbm.h2d",
+                            request_id = %request.request_id,
+                            num_blocks = block_pairs.len(),
+                        );
+
+                        let local_request = BlockTransferRequest {
+                            from_pool: if is_onboard { Host } else { Device },
+                            to_pool: if is_onboard { Device } else { Host },
+                            blocks: block_pairs,
+                            connector_req: None,
+                            sequence_hashes: None,
+                        };
+                        self.execute_transfer(local_request).instrument(h2d_span).await?;
+
+                        if is_onboard {
+                            tracing::info!(
+                                target: "kvbm-diag",
+                                request_id = %request.request_id,
+                                num_blocks,
+                                r2h_ms = r2h_elapsed.as_millis(),
+                                h2d_ms = (transfer_start.elapsed() - r2h_elapsed).as_millis(),
+                                total_ms = transfer_start.elapsed().as_millis(),
+                                backend,
+                                "R2H+H2D complete (serial path)"
+                            );
+                        }
+                    }
+                } else if is_onboard {
+                    tracing::warn!(
+                        target: "kvbm-diag",
+                        request_id = %request.request_id,
+                        num_blocks,
+                        "H2D skipped: device_block_ids is empty"
+                    );
                 }
+            } else if is_onboard {
+                tracing::warn!(
+                    target: "kvbm-diag",
+                    request_id = %request.request_id,
+                    num_blocks,
+                    "H2D skipped: no device_block_ids in pipeline (Direct mode)"
+                );
             }
         }
 
@@ -330,6 +415,173 @@ impl BlockTransferHandler {
             num_blocks,
             backend = backend,
             "remote transfer completed"
+        );
+
+        Ok(())
+    }
+
+    /// Chunked pipelined remote transfer for onboard.
+    ///
+    /// Splits the block set into chunks and:
+    /// 1. Spawns concurrent R2H (remote→host) tasks per chunk to saturate NFS bandwidth
+    /// 2. Pipelines H2D (host→device) as each chunk's R2H completes
+    ///
+    /// This overlaps R2H of later chunks with H2D of earlier chunks, and enables
+    /// concurrent NFS reads that would otherwise be serialized in a single NIXL request.
+    #[tracing::instrument(level = "info", skip_all, fields(
+        request_id = %request.request_id,
+        chunk_size,
+        backend,
+        otel.name = "kvbm.remote_transfer_chunked",
+    ))]
+    async fn execute_remote_transfer_chunked(
+        &self,
+        request: &RemoteTransferRequest,
+        pipeline: &RemoteTransferPipeline,
+        bounce_blocks: &[LocalBlockData<PinnedStorage>],
+        bounce_ids: &[usize],
+        remote_ctx: &Arc<RemoteTransferContext>,
+        backend: &str,
+        chunk_size: usize,
+    ) -> Result<()> {
+        let num_blocks = pipeline.num_blocks();
+        let descriptors = pipeline.descriptors();
+        let device_ids = pipeline.device_block_ids();
+        let num_chunks = (num_blocks + chunk_size - 1) / chunk_size;
+
+        tracing::info!(
+            target: "kvbm-g4",
+            request_id = %request.request_id,
+            operation_id = %request.operation_id,
+            num_blocks,
+            chunk_size,
+            num_chunks,
+            backend,
+            "starting chunked R2H→H2D pipeline"
+        );
+
+        let start_time = std::time::Instant::now();
+
+        // Channel carries (chunk_index, start, end, result) from R2H tasks to the
+        // H2D consumer loop running on this task.
+        let (done_tx, mut done_rx) = tokio::sync::mpsc::channel::<(
+            usize,
+            usize,
+            usize,
+            std::result::Result<(), anyhow::Error>,
+        )>(num_chunks);
+
+        for chunk_idx in 0..num_chunks {
+            let start = chunk_idx * chunk_size;
+            let end = (start + chunk_size).min(num_blocks);
+
+            let chunk_descs = descriptors[start..end].to_vec();
+            let chunk_bounce = bounce_blocks[start..end].to_vec();
+            let ctx = Arc::clone(remote_ctx);
+            let cancel = self.cancel_token.clone();
+            let done_tx = done_tx.clone();
+
+            tokio::spawn(async move {
+                let sub_pipeline = RemoteTransferPipeline::onboard_direct(chunk_descs);
+                let result = sub_pipeline
+                    .execute(&chunk_bounce, &ctx, &cancel)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("R2H chunk {}: {}", chunk_idx, e));
+                let _ = done_tx.send((chunk_idx, start, end, result)).await;
+            });
+        }
+        drop(done_tx);
+
+        let mut r2h_completed = 0usize;
+        let mut r2h_error: Option<anyhow::Error> = None;
+        let mut h2d_tasks = tokio::task::JoinSet::new();
+        let handler = self.clone();
+
+        while let Some((chunk_idx, start, end, result)) = done_rx.recv().await {
+            match result {
+                Ok(()) => {
+                    r2h_completed += 1;
+                    tracing::debug!(
+                        target: "kvbm-g4",
+                        request_id = %request.request_id,
+                        chunk_idx,
+                        chunk_blocks = end - start,
+                        r2h_completed,
+                        num_chunks,
+                        elapsed_ms = start_time.elapsed().as_millis(),
+                        "chunk R2H done → spawning H2D"
+                    );
+
+                    if let Some(all_device_ids) = device_ids {
+                        let block_pairs: Vec<(usize, usize)> = bounce_ids[start..end]
+                            .iter()
+                            .copied()
+                            .zip(all_device_ids[start..end].iter().copied())
+                            .collect();
+
+                        if !block_pairs.is_empty() {
+                            let h2d_handler = handler.clone();
+                            h2d_tasks.spawn(async move {
+                                let local_request = BlockTransferRequest {
+                                    from_pool: Host,
+                                    to_pool: Device,
+                                    blocks: block_pairs,
+                                    connector_req: None,
+                                    sequence_hashes: None,
+                                };
+                                h2d_handler
+                                    .execute_transfer(local_request)
+                                    .await
+                                    .map_err(|e| anyhow::anyhow!("H2D chunk {}: {}", chunk_idx, e))
+                            });
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(
+                        target: "kvbm-g4",
+                        request_id = %request.request_id,
+                        chunk_idx,
+                        error = %e,
+                        "chunk R2H failed"
+                    );
+                    if r2h_error.is_none() {
+                        r2h_error = Some(e);
+                    }
+                }
+            }
+        }
+
+        // All R2H done (channel drained). Now wait for any remaining H2D tasks.
+        while let Some(result) = h2d_tasks.join_next().await {
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    tracing::error!(target: "kvbm-g4", error = %e, "H2D chunk failed");
+                    if r2h_error.is_none() {
+                        r2h_error = Some(e);
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(target: "kvbm-g4", error = %e, "H2D task panicked");
+                    if r2h_error.is_none() {
+                        r2h_error = Some(anyhow::anyhow!("H2D task panicked: {}", e));
+                    }
+                }
+            }
+        }
+
+        if let Some(e) = r2h_error {
+            return Err(e);
+        }
+
+        tracing::info!(
+            target: "kvbm-g4",
+            request_id = %request.request_id,
+            num_blocks,
+            num_chunks,
+            elapsed_ms = start_time.elapsed().as_millis(),
+            "chunked R2H→H2D pipeline complete"
         );
 
         Ok(())

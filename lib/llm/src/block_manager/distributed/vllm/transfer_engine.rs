@@ -316,6 +316,12 @@ impl LocalTransferEngine {
     }
 }
 
+#[tracing::instrument(level = "info", skip_all, fields(
+    request_id = %offload_req.request_id,
+    operation_id = %offload_req.operation_id,
+    num_blocks = offload_req.block_ids.len(),
+    otel.name = "kvbm.offload",
+))]
 async fn process_offload_request(
     offload_req: LocalOffloadRequest,
     block_manager: &VllmBlockManager,
@@ -445,6 +451,13 @@ where
     Ok(())
 }
 
+#[tracing::instrument(level = "info", skip_all, fields(
+    request_id = %onboard_req.request_id,
+    operation_id = %onboard_req.operation_id,
+    num_blocks = onboard_req.src_blocks.len(),
+    src_pool = ?onboard_req.src_blocks.storage_pool(),
+    otel.name = "kvbm.onboard_local",
+))]
 async fn process_onboard_request(
     onboard_req: LocalOnboardRequest,
     leader: &Arc<KvbmLeader>,
@@ -486,6 +499,13 @@ async fn process_onboard_request(
     Ok(())
 }
 
+#[tracing::instrument(level = "info", skip_all, fields(
+    request_id = %req.request_id,
+    operation_id = %req.operation_id,
+    is_onboard = req.is_onboard,
+    num_blocks = req.sequence_hashes.len(),
+    otel.name = "kvbm.process_remote_transfer",
+))]
 async fn process_remote_transfer_request(
     req: RemoteTransferRequest,
     block_manager: &VllmBlockManager,
@@ -515,9 +535,10 @@ async fn process_remote_transfer_request(
     if req.is_onboard {
         let inflight_receivers = leader.g4_inflight().check_inflight(&req.sequence_hashes);
         if !inflight_receivers.is_empty() {
-            for mut rx in inflight_receivers {
+            let waits = inflight_receivers.into_iter().map(|mut rx| async move {
                 let _ = tokio::time::timeout(*G4_TRANSFER_TIMEOUT, rx.changed()).await;
-            }
+            });
+            futures::future::join_all(waits).await;
             if let Some(host_pool) = block_manager.host() {
                 if let Ok(host_matches) = host_pool.match_sequence_hashes(&req.sequence_hashes).await
                     && host_matches.len() == req.sequence_hashes.len()
@@ -630,7 +651,7 @@ async fn process_remote_transfer_request(
     );
 
     let is_chained = !req.is_onboard;
-    let wire_req = crate::block_manager::distributed::RemoteTransferRequest::new_with_connector_req(
+    let mut wire_req = crate::block_manager::distributed::RemoteTransferRequest::new_with_connector_req(
         req.request_id.clone(),
         req.operation_id,
         &pipeline,
@@ -642,6 +663,7 @@ async fn process_remote_transfer_request(
             chained: is_chained,
         },
     );
+    wire_req.traceparent = req.traceparent.clone();
     let notify_receiver = leader.remote_transfer_request(wire_req).await?;
     let transfer_start = Instant::now();
     let transfer_bytes = (num_blocks as u64).saturating_mul(req.block_size as u64);

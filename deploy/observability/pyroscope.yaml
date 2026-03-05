@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Pyroscope configuration for Dynamo continuous profiling.
+# Receives profiling data from application SDKs (Python pyroscope-io, Rust pyroscope-rs)
+# and stores it locally. Grafana queries Pyroscope for flame graph visualization.
+
+storage:
+  backend: filesystem
+  filesystem:
+    dir: /data
+
+limits:
+  max_query_length: 0
+  max_query_lookback: 0
+
+self_profiling:
+  disable_push: true

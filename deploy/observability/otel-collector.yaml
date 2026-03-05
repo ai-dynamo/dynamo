@@ -1,0 +1,69 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# OpenTelemetry Collector configuration for Dynamo.
+#
+# Receives traces and metrics from Dynamo services via OTLP (gRPC/HTTP),
+# exports traces to Tempo, and derives RED metrics from spans via the
+# spanmetrics connector (exposed as a Prometheus scrape endpoint).
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+connectors:
+  spanmetrics:
+    histogram:
+      explicit:
+        buckets: [1ms, 5ms, 10ms, 25ms, 50ms, 100ms, 250ms, 500ms, 1s, 5s, 10s, 30s]
+    dimensions:
+      - name: kvbm.request_id
+    resource_metrics_key_attributes:
+      - service.name
+
+processors:
+  batch:
+    send_batch_size: 1024
+    timeout: 2s
+
+exporters:
+  otlp/tempo:
+    endpoint: tempo:4317
+    tls:
+      insecure: true
+
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    namespace: otel
+    resource_to_telemetry_conversion:
+      enabled: true
+
+  debug:
+    verbosity: basic
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+  zpages:
+    endpoint: 0.0.0.0:55679
+
+service:
+  extensions: [health_check, zpages]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp/tempo, spanmetrics, debug]
+    metrics:
+      receivers: [spanmetrics, otlp]
+      processors: [batch]
+      exporters: [prometheus]
+    # NOTE: Profiling is NOT routed through the OTEL Collector.
+    # OpenTelemetry's profiling signal is still experimental and the collector-contrib
+    # image does not include a stable Pyroscope exporter.
+    # Instead, applications push profiles directly to Pyroscope (http://pyroscope:4040)
+    # using the language-specific SDKs (pyroscope-io for Python, pyroscope-rs for Rust).

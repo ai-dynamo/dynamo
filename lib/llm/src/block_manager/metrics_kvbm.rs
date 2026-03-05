@@ -68,6 +68,13 @@ pub struct KvbmMetrics {
     // transfer latency histogram for remote storage operations
     pub remote_transfer_latency_seconds: HistogramVec,
 
+    // scheduler iteration gauges
+    pub scheduler_onboarding: Gauge,
+    pub scheduler_new_requests: Gauge,
+    pub scheduler_cached_requests: Gauge,
+    pub scheduler_finishing: Gauge,
+    pub scheduler_inflight: Gauge,
+
     shutdown_notify: Option<Arc<Notify>>,
 }
 
@@ -189,6 +196,21 @@ impl KvbmMetrics {
                 ],
             )
             .unwrap();
+        let scheduler_onboarding = mr
+            .create_gauge("scheduler_onboarding", "Number of requests with onboard transfers pending", &[])
+            .unwrap();
+        let scheduler_new_requests = mr
+            .create_gauge("scheduler_new_requests", "Number of new requests in current scheduler iteration", &[])
+            .unwrap();
+        let scheduler_cached_requests = mr
+            .create_gauge("scheduler_cached_requests", "Number of cached (continuing) requests in current scheduler iteration", &[])
+            .unwrap();
+        let scheduler_finishing = mr
+            .create_gauge("scheduler_finishing", "Number of requests finishing in current scheduler iteration", &[])
+            .unwrap();
+        let scheduler_inflight = mr
+            .create_gauge("scheduler_inflight", "Total inflight requests tracked by KVBM leader", &[])
+            .unwrap();
         // early return if no endpoint is needed
         if !create_endpoint {
             return Self {
@@ -208,6 +230,11 @@ impl KvbmMetrics {
                 offload_bytes_remote,
                 onboard_bytes_remote,
                 remote_transfer_latency_seconds,
+                scheduler_onboarding,
+                scheduler_new_requests,
+                scheduler_cached_requests,
+                scheduler_finishing,
+                scheduler_inflight,
                 shutdown_notify: None,
             };
         }
@@ -272,6 +299,11 @@ impl KvbmMetrics {
             offload_bytes_remote,
             onboard_bytes_remote,
             remote_transfer_latency_seconds,
+            scheduler_onboarding,
+            scheduler_new_requests,
+            scheduler_cached_requests,
+            scheduler_finishing,
+            scheduler_inflight,
             shutdown_notify: Some(notify),
         }
     }

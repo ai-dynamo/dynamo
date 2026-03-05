@@ -66,7 +66,7 @@ impl BlockHandle {
 
 impl Drop for BlockHandle {
     fn drop(&mut self) {
-        tracing::warn!(
+        tracing::trace!(
             sequence_hash = self.sequence_hash,
             "BlockHandle dropped — block unregistered from pool"
         );

@@ -49,11 +49,23 @@ scrape_configs:
       - targets: ['host.docker.internal:8081']
 
 
-  # KVBM leader related metrics
+  # vLLM + KVBM metrics (vLLM exposes /metrics on its serving port)
+  - job_name: 'vllm-kvbm'
+    scrape_interval: 5s
+    static_configs:
+      - targets: ['host.docker.internal:19000']
+
+  # KVBM leader related metrics (default port)
   - job_name: 'kvbm-metrics'
     scrape_interval: 2s
     static_configs:
       - targets: ['host.docker.internal:6880']
+
+  # OpenTelemetry Collector metrics + span-derived metrics (latency histograms, request counts)
+  - job_name: 'otel-collector'
+    scrape_interval: 5s
+    static_configs:
+      - targets: ['otel-collector:8889']
 
   # Uncomment to see its own Prometheus metrics
   # - job_name: 'prometheus'

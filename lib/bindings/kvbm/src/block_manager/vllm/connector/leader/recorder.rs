@@ -350,6 +350,10 @@ impl Leader for KvConnectorLeaderRecorder {
         Ok(())
     }
 
+    fn set_request_traceparent(&mut self, request_id: String, traceparent: String) -> anyhow::Result<()> {
+        self.connector_leader.set_request_traceparent(request_id, traceparent)
+    }
+
     fn clear_pool(&mut self, pool: String) -> anyhow::Result<()> {
         // Delegate directly to the inner leader; recording this action is not critical.
         self.connector_leader.clear_pool(pool)

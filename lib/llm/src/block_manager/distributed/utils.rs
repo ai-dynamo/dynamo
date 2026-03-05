@@ -107,6 +107,9 @@ pub struct RemoteTransferRequest {
     /// Optional connector request for completion tracking
     #[serde(skip_serializing_if = "Option::is_none")]
     pub connector_req: Option<LeaderTransferRequest>,
+    /// W3C traceparent for propagating trace context across ZMQ boundaries
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub traceparent: Option<String>,
 }
 
 /// Serializable version of RemoteTransferPipeline for ZMQ transport.
@@ -276,6 +279,7 @@ impl RemoteTransferRequest {
             operation_id,
             pipeline: pipeline.into(),
             connector_req: None,
+            traceparent: None,
         }
     }
 
@@ -291,7 +295,15 @@ impl RemoteTransferRequest {
             operation_id,
             pipeline: pipeline.into(),
             connector_req: Some(connector_req),
+            traceparent: None,
         }
+    }
+
+    /// Attach the current span's trace context so workers can continue the trace.
+    pub fn with_current_trace_context(mut self) -> Self {
+        self.traceparent = dynamo_runtime::logging::get_distributed_tracing_context()
+            .map(|ctx| ctx.create_traceparent());
+        self
     }
 
     /// Check if this is an onboard (remote -> device) request.

@@ -48,6 +48,8 @@ pub trait Leader: Send + Sync + std::fmt::Debug {
 
     fn create_slot(&mut self, request: KvbmRequest, tokens: Vec<u32>) -> anyhow::Result<()>;
 
+    fn set_request_traceparent(&mut self, request_id: String, traceparent: String) -> anyhow::Result<()>;
+
     fn slot_manager(&self) -> &ConnectorSlotManager<String>;
 
     fn clear_pool(&mut self, pool: String) -> anyhow::Result<()>;
@@ -207,6 +209,11 @@ impl Leader for KvConnectorLeader {
             .create_slot(request.request_id, request.salt_hash, tokens)
     }
 
+    fn set_request_traceparent(&mut self, request_id: String, traceparent: String) -> anyhow::Result<()> {
+        self.core.set_request_traceparent(request_id, traceparent);
+        Ok(())
+    }
+
     fn clear_pool(&mut self, pool: String) -> anyhow::Result<()> {
         self.core.clear_pool(pool)
     }
@@ -298,6 +305,12 @@ impl PyKvConnectorLeader {
     fn create_slot(&mut self, request: KvbmRequest, tokens: Vec<u32>) -> PyResult<()> {
         self.connector_leader
             .create_slot(request, tokens)
+            .map_err(to_pyerr)
+    }
+
+    fn set_request_traceparent(&mut self, request_id: String, traceparent: String) -> PyResult<()> {
+        self.connector_leader
+            .set_request_traceparent(request_id, traceparent)
             .map_err(to_pyerr)
     }
 

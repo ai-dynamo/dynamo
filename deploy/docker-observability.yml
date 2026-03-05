@@ -17,6 +17,7 @@ networks:
 volumes:
   grafana-data:
   tempo-data:
+  pyroscope-data:
 
 services:
   # DCGM stands for Data Center GPU Manager: https://developer.nvidia.com/dcgm
@@ -83,18 +84,49 @@ services:
       - dcgm-exporter
       - nats-prometheus-exporter
 
-  # Tempo - Distributed tracing backend
+  # OpenTelemetry Collector - receives traces/metrics from Dynamo, forwards to Tempo,
+  # and exposes a Prometheus scrape endpoint with span-derived metrics.
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.115.1
+    command: ["--config=/etc/otel-collector.yaml"]
+    volumes:
+      - ./observability/otel-collector.yaml:/etc/otel-collector.yaml
+    ports:
+      - "4317:4317"   # OTLP gRPC (dynamo services send here)
+      - "4318:4318"   # OTLP HTTP
+      - "8889:8889"   # Prometheus metrics from collector + spanmetrics
+      - "13133:13133" # Health check
+      - "55679:55679" # zPages debugging
+    networks:
+      - server
+    depends_on:
+      - tempo
+
+  # Tempo - Distributed tracing backend (receives from OTEL Collector)
   tempo:
-    image: grafana/tempo:2.8.2
+    image: grafana/tempo:2.10.1
     command: [ "-config.file=/etc/tempo.yaml" ]
     user: root
     volumes:
       - ./observability/tempo.yaml:/etc/tempo.yaml
       - tempo-data:/tmp/tempo
     ports:
-      - "3200:3200"   # Tempo HTTP
-      - "4317:4317"   # OTLP gRPC receiver (accessible from host)
-      - "4318:4318"   # OTLP HTTP receiver (accessible from host)
+      - "3200:3200"   # Tempo HTTP API
+    networks:
+      - server
+
+  # Pyroscope - Continuous profiling backend
+  # Receives profiling data from application SDKs (Python, Rust) and provides
+  # flame graph visualization in Grafana.
+  # UI also available directly at http://localhost:4040
+  pyroscope:
+    image: grafana/pyroscope:1.13.3
+    command: ["-config.file=/etc/pyroscope/config.yaml"]
+    volumes:
+      - ./observability/pyroscope.yaml:/etc/pyroscope/config.yaml
+      - pyroscope-data:/data
+    ports:
+      - "4040:4040"
     networks:
       - server
 
@@ -104,21 +136,23 @@ services:
   # To access Grafana from another machine, you may need to disable te firewall on your host. On Ubuntu:
   # sudo ufw allow 3000/tcp
   grafana:
-    image: grafana/grafana:12.2.0
+    image: grafana/grafana:12.4.0
     container_name: grafana
     volumes:
       - grafana-data:/var/lib/grafana
       - ./observability/grafana_dashboards:/etc/grafana/provisioning/dashboards
       - ./observability/grafana-datasources.yml:/etc/grafana/provisioning/datasources/prometheus.yml
       - ./observability/tempo-datasource.yml:/etc/grafana/provisioning/datasources/tempo.yml
+      - ./observability/pyroscope-datasource.yml:/etc/grafana/provisioning/datasources/pyroscope.yml
     environment:
       - GF_SERVER_HTTP_PORT=3000
       # do not make it admin/admin, because you will be prompted to change the password every time
       - GF_SECURITY_ADMIN_USER=dynamo
       - GF_SECURITY_ADMIN_PASSWORD=dynamo
       - GF_USERS_ALLOW_SIGN_UP=false
-      - GF_FEATURE_TOGGLES_ENABLE=traceqlEditor
-      - GF_INSTALL_PLUGINS=grafana-piechart-panel
+      - GF_FEATURE_TOGGLES_ENABLE=traceqlEditor traceToMetrics flameGraph
+      - GF_INSTALL_PLUGINS=grafana-piechart-panel,marcusolsson-gantt-panel
+      - GF_PANELS_DISABLE_SANITIZE_HTML=true
       # Default min interval is 5s, but can be configured lower
       - GF_DASHBOARDS_MIN_REFRESH_INTERVAL=2s
       # Disable password change requirement
@@ -133,5 +167,20 @@ services:
       - server
     depends_on:
       - prometheus
+      - tempo
+      - otel-collector
+      - pyroscope
+
+  gantt-ui:
+    build:
+      context: ./gantt-ui
+      dockerfile: Dockerfile
+    ports:
+      - "3001:80"
+    volumes:
+      - ../../responses.json:/srv/data/responses.json:ro
+    networks:
+      - server
+    depends_on:
       - tempo
 

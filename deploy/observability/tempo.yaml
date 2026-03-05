@@ -1,15 +1,21 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# Tempo in "scalable single binary" mode -- all components in one process
+# but with query_frontend enabled for Grafana 12.x streaming search.
+
+target: scalable-single-binary
+
 server:
   http_listen_port: 3200
+  grpc_listen_port: 9095
 
 distributor:
   receivers:
     otlp:
       protocols:
         grpc:
-          endpoint: 0.0.0.0:4317  # Receives from OTEL collector
+          endpoint: 0.0.0.0:4317
         http:
           endpoint: 0.0.0.0:4318
 
@@ -18,11 +24,26 @@ ingester:
   max_block_bytes: 1_000_000
   max_block_duration: 5m
 
+querier:
+  frontend_worker:
+    frontend_address: localhost:9095
+
+query_frontend:
+  search:
+    max_duration: 0s
+    query_backend_after: 0s
+    query_ingesters_until: 30m
+
+memberlist:
+  join_members:
+    - localhost:7946
+
 storage:
   trace:
     backend: local
     block:
       bloom_filter_false_positive: .05
+      version: vParquet4
     wal:
       path: /tmp/tempo/wal
     local:
@@ -34,3 +55,8 @@ compactor:
     max_compaction_objects: 1000000
     block_retention: 1h
     compacted_block_retention: 10m
+
+overrides:
+  defaults:
+    global:
+      max_bytes_per_trace: 50000000

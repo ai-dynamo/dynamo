@@ -1,0 +1,1484 @@
+{
+  "editable": true,
+  "graphTooltip": 2,
+  "panels": [
+    {
+      "title": "Search Traces (click a row to view waterfall)",
+      "type": "table",
+      "datasource": {
+        "type": "tempo",
+        "uid": "tempo"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "tempo"
+          },
+          "queryType": "traceql",
+          "query": "{ name = \"llm_request\" }",
+          "limit": 30,
+          "tableType": "traces"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "links": [
+            {
+              "title": "View waterfall",
+              "url": "/d/kvbm-tracing/kvbm-tracing?var-traceId=${__data.fields.traceID}&from=now-3h&to=now"
+            }
+          ]
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "traceDuration"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "ns"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          {
+            "displayName": "startTime",
+            "desc": true
+          }
+        ]
+      }
+    },
+    {
+      "title": "Slow Requests (highest TTFT first — click row for waterfall)",
+      "description": "Top 20 slowest requests by TTFT. Shows vllm.first_token spans sorted by ttft_ms descending. Click a row to drill into the trace waterfall.",
+      "type": "table",
+      "datasource": {
+        "type": "tempo",
+        "uid": "tempo"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 9
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "tempo"
+          },
+          "queryType": "traceql",
+          "query": "{ name = \"vllm.first_token\" } | select(span.ttft_ms, span.request_id)",
+          "limit": 20,
+          "tableType": "spans"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "sortBy",
+          "options": {
+            "sort": [
+              {
+                "field": "ttft_ms",
+                "desc": true
+              }
+            ]
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "links": [
+            {
+              "title": "View waterfall",
+              "url": "/d/kvbm-tracing/kvbm-tracing?var-traceId=${__data.fields.traceID}&from=now-3h&to=now"
+            }
+          ]
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "ttft_ms"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "TTFT (ms)"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "request_id"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Request ID"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "traceDuration"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "ns"
+              },
+              {
+                "id": "displayName",
+                "value": "Trace Duration"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          {
+            "displayName": "TTFT (ms)",
+            "desc": true
+          }
+        ]
+      }
+    },
+    {
+      "title": "Trace Waterfall: ${traceId}",
+      "type": "traces",
+      "datasource": {
+        "type": "tempo",
+        "uid": "tempo"
+      },
+      "gridPos": {
+        "h": 14,
+        "w": 24,
+        "x": 0,
+        "y": 18
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "tempo"
+          },
+          "queryType": "traceql",
+          "query": "${traceId}"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "sortBy",
+          "options": {
+            "sort": [
+              {
+                "field": "ttft_ms",
+                "desc": false
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "title": "Scheduler State (per-iteration snapshot)",
+      "description": "Live counts from build_connector_metadata: how many requests are new, cached (continuing), onboarding, or finishing each scheduler tick.",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "P1809F7CD0C75ACF3"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 66
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 30,
+            "lineWidth": 2,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "onboarding"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "orange",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "new"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "green",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "cached"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "blue",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "finishing"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "red",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "expr": "kvbm_scheduler_new_requests{job=\"kvbm-metrics\"}",
+          "legendFormat": "new"
+        },
+        {
+          "expr": "kvbm_scheduler_cached_requests{job=\"kvbm-metrics\"}",
+          "legendFormat": "cached"
+        },
+        {
+          "expr": "kvbm_scheduler_onboarding{job=\"kvbm-metrics\"}",
+          "legendFormat": "onboarding"
+        },
+        {
+          "expr": "kvbm_scheduler_finishing{job=\"kvbm-metrics\"}",
+          "legendFormat": "finishing"
+        }
+      ]
+    },
+    {
+      "title": "Scheduler Inflight Requests",
+      "description": "Total inflight requests tracked by the KVBM leader across all states.",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "P1809F7CD0C75ACF3"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 66
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 15,
+            "lineWidth": 2,
+            "gradientMode": "scheme"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "inflight"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "purple",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "expr": "kvbm_scheduler_inflight{job=\"kvbm-metrics\"}",
+          "legendFormat": "inflight"
+        }
+      ]
+    },
+    {
+      "title": "KVBM Cache Hit Rates (host / disk / remote)",
+      "description": "Sliding-window hit rates reported by the KVBM leader on port 6880.",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "P1809F7CD0C75ACF3"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 74
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "custom": {
+            "fillOpacity": 15,
+            "lineWidth": 2
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "host"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "green",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "disk"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "yellow",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "remote"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "blue",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "mean",
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "expr": "kvbm_host_cache_hit_rate{job=\"kvbm-metrics\"}",
+          "legendFormat": "host"
+        },
+        {
+          "expr": "kvbm_disk_cache_hit_rate{job=\"kvbm-metrics\"}",
+          "legendFormat": "disk"
+        },
+        {
+          "expr": "kvbm_remote_cache_hit_rate{job=\"kvbm-metrics\"}",
+          "legendFormat": "remote"
+        }
+      ]
+    },
+    {
+      "title": "KVBM Block Counts (cumulative)",
+      "description": "Cumulative onboard/offload block counters from the KVBM leader.",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "P1809F7CD0C75ACF3"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 74
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 10,
+            "lineWidth": 2
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "expr": "kvbm_onboard_blocks_h2d{job=\"kvbm-metrics\"}",
+          "legendFormat": "onboard H→D"
+        },
+        {
+          "expr": "kvbm_onboard_blocks_d2d{job=\"kvbm-metrics\"}",
+          "legendFormat": "onboard D→D"
+        },
+        {
+          "expr": "kvbm_onboard_blocks_r2d{job=\"kvbm-metrics\"}",
+          "legendFormat": "onboard R→D"
+        },
+        {
+          "expr": "kvbm_offload_blocks_d2h{job=\"kvbm-metrics\"}",
+          "legendFormat": "offload D→H"
+        },
+        {
+          "expr": "kvbm_offload_blocks_h2d{job=\"kvbm-metrics\"}",
+          "legendFormat": "offload H→D"
+        },
+        {
+          "expr": "kvbm_offload_blocks_d2r{job=\"kvbm-metrics\"}",
+          "legendFormat": "offload D→R"
+        }
+      ]
+    },
+    {
+      "title": "Remote Transfer Latency (KVBM native histogram)",
+      "description": "Latency histogram from the KVBM leader's own Prometheus endpoint — broken down by direction and backend.",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "P1809F7CD0C75ACF3"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 82
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "fillOpacity": 10,
+            "lineWidth": 2
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "mean",
+            "max"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le, direction, backend) (rate(kvbm_remote_transfer_latency_seconds_bucket{job=\"kvbm-metrics\"}[5m])))",
+          "legendFormat": "{{direction}}/{{backend}} p50"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, direction, backend) (rate(kvbm_remote_transfer_latency_seconds_bucket{job=\"kvbm-metrics\"}[5m])))",
+          "legendFormat": "{{direction}}/{{backend}} p95"
+        }
+      ]
+    },
+    {
+      "title": "Remote Bytes Transferred (GB/s)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "P1809F7CD0C75ACF3"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 82
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "GBs",
+          "custom": {
+            "fillOpacity": 20,
+            "lineWidth": 2
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "mean",
+            "max"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "expr": "rate(kvbm_offload_bytes_remote{job=\"kvbm-metrics\"}[1m]) / 1e9",
+          "legendFormat": "offload GB/s"
+        },
+        {
+          "expr": "rate(kvbm_onboard_bytes_remote{job=\"kvbm-metrics\"}[1m]) / 1e9",
+          "legendFormat": "onboard GB/s"
+        }
+      ]
+    },
+    {
+      "title": "Onboard Latency (R2H + H2D) p50/p95  [span-metrics]",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "P1809F7CD0C75ACF3"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 90
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "custom": {
+            "fillOpacity": 10,
+            "lineWidth": 2
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(otel_traces_span_metrics_duration_milliseconds_bucket{span_name=\"kvbm.r2h\"}[5m])))",
+          "legendFormat": "R2H p50"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(otel_traces_span_metrics_duration_milliseconds_bucket{span_name=\"kvbm.r2h\"}[5m])))",
+          "legendFormat": "R2H p95"
+        },
+        {
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(otel_traces_span_metrics_duration_milliseconds_bucket{span_name=\"kvbm.h2d\"}[5m])))",
+          "legendFormat": "H2D p50"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(otel_traces_span_metrics_duration_milliseconds_bucket{span_name=\"kvbm.h2d\"}[5m])))",
+          "legendFormat": "H2D p95"
+        },
+        {
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(otel_traces_span_metrics_duration_milliseconds_bucket{span_name=\"kvbm.remote_transfer\"}[5m])))",
+          "legendFormat": "Total onboard p50"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(otel_traces_span_metrics_duration_milliseconds_bucket{span_name=\"kvbm.remote_transfer\"}[5m])))",
+          "legendFormat": "Total onboard p95"
+        }
+      ]
+    },
+    {
+      "title": "Offload Latency p50/p95  [span-metrics]",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "P1809F7CD0C75ACF3"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 90
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "custom": {
+            "fillOpacity": 10,
+            "lineWidth": 2
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(otel_traces_span_metrics_duration_milliseconds_bucket{span_name=\"kvbm.offload\"}[5m])))",
+          "legendFormat": "offload p50"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(otel_traces_span_metrics_duration_milliseconds_bucket{span_name=\"kvbm.offload\"}[5m])))",
+          "legendFormat": "offload p95"
+        },
+        {
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(otel_traces_span_metrics_duration_milliseconds_bucket{span_name=\"kvbm.process_remote_transfer\"}[5m])))",
+          "legendFormat": "remote xfer p50"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(otel_traces_span_metrics_duration_milliseconds_bucket{span_name=\"kvbm.process_remote_transfer\"}[5m])))",
+          "legendFormat": "remote xfer p95"
+        }
+      ]
+    },
+    {
+      "title": "Onboard Throughput (span ops/s)",
+      "description": "Block transfer rate derived from OTEL span-metrics.",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "P1809F7CD0C75ACF3"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 98
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "fillOpacity": 20,
+            "lineWidth": 2
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "mean",
+            "max"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(otel_traces_span_metrics_calls_total{span_name=\"kvbm.r2h\"}[1m]))",
+          "legendFormat": "R2H ops/s"
+        },
+        {
+          "expr": "sum(rate(otel_traces_span_metrics_calls_total{span_name=\"kvbm.h2d\"}[1m]))",
+          "legendFormat": "H2D ops/s"
+        }
+      ]
+    },
+    {
+      "title": "Offload Throughput (span ops/s)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "P1809F7CD0C75ACF3"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 98
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "fillOpacity": 20,
+            "lineWidth": 2
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "mean",
+            "max"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(otel_traces_span_metrics_calls_total{span_name=\"kvbm.offload\"}[1m]))",
+          "legendFormat": "offload ops/s"
+        },
+        {
+          "expr": "sum(rate(otel_traces_span_metrics_calls_total{span_name=\"kvbm.process_remote_transfer\"}[1m]))",
+          "legendFormat": "remote xfer ops/s"
+        }
+      ]
+    },
+    {
+      "title": "KV Cache Hit Rate (vLLM)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "P1809F7CD0C75ACF3"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 106
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "fillOpacity": 20,
+            "lineWidth": 2
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "hit rate"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percentunit"
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "mean",
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "expr": "rate(vllm:external_prefix_cache_queries_total{job=\"vllm-kvbm\"}[1m])",
+          "legendFormat": "queries/s"
+        },
+        {
+          "expr": "rate(vllm:external_prefix_cache_hits_total{job=\"vllm-kvbm\"}[1m])",
+          "legendFormat": "hits/s"
+        },
+        {
+          "expr": "rate(vllm:external_prefix_cache_hits_total{job=\"vllm-kvbm\"}[1m]) / clamp_min(rate(vllm:external_prefix_cache_queries_total{job=\"vllm-kvbm\"}[1m]), 0.001)",
+          "legendFormat": "hit rate"
+        }
+      ]
+    },
+    {
+      "title": "TTFT and E2E Latency",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "P1809F7CD0C75ACF3"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 106
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "mean",
+            "max"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(vllm:time_to_first_token_seconds_bucket{job=\"vllm-kvbm\"}[5m])))",
+          "legendFormat": "TTFT p50"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(vllm:time_to_first_token_seconds_bucket{job=\"vllm-kvbm\"}[5m])))",
+          "legendFormat": "TTFT p95"
+        },
+        {
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(vllm:e2e_request_latency_seconds_bucket{job=\"vllm-kvbm\"}[5m])))",
+          "legendFormat": "E2E p50"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(vllm:e2e_request_latency_seconds_bucket{job=\"vllm-kvbm\"}[5m])))",
+          "legendFormat": "E2E p95"
+        }
+      ]
+    },
+    {
+      "title": "Dispatch Overhead (schedule → transfer start)",
+      "description": "Time between trigger_onboarding and worker_remote_transfer start. Shows mpsc + ZMQ dispatch latency.",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "P1809F7CD0C75ACF3"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 114
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "custom": {
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "mean",
+            "max"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(otel_traces_span_metrics_duration_milliseconds_bucket{span_name=\"kvbm.trigger_onboarding\"}[5m])))",
+          "legendFormat": "trigger p50"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(otel_traces_span_metrics_duration_milliseconds_bucket{span_name=\"kvbm.trigger_onboarding\"}[5m])))",
+          "legendFormat": "trigger p95"
+        },
+        {
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(otel_traces_span_metrics_duration_milliseconds_bucket{span_name=\"kvbm.onboard_from_g4\"}[5m])))",
+          "legendFormat": "g4 dispatch p50"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(otel_traces_span_metrics_duration_milliseconds_bucket{span_name=\"kvbm.onboard_from_g4\"}[5m])))",
+          "legendFormat": "g4 dispatch p95"
+        }
+      ]
+    },
+    {
+      "title": "vLLM Queue + Prefill + Inference",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "P1809F7CD0C75ACF3"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 114
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "mean",
+            "max"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(vllm:request_queue_time_seconds_bucket{job=\"vllm-kvbm\"}[5m])))",
+          "legendFormat": "queue p50"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(vllm:request_queue_time_seconds_bucket{job=\"vllm-kvbm\"}[5m])))",
+          "legendFormat": "queue p95"
+        },
+        {
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(vllm:request_prefill_time_seconds_bucket{job=\"vllm-kvbm\"}[5m])))",
+          "legendFormat": "prefill p50"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(vllm:request_prefill_time_seconds_bucket{job=\"vllm-kvbm\"}[5m])))",
+          "legendFormat": "prefill p95"
+        },
+        {
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(vllm:request_inference_time_seconds_bucket{job=\"vllm-kvbm\"}[5m])))",
+          "legendFormat": "inference p50"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(vllm:request_inference_time_seconds_bucket{job=\"vllm-kvbm\"}[5m])))",
+          "legendFormat": "inference p95"
+        }
+      ]
+    },
+    {
+      "title": "Concurrency",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "P1809F7CD0C75ACF3"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 122
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 30
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "mean",
+            "max"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "expr": "vllm:num_requests_running{job=\"vllm-kvbm\"}",
+          "legendFormat": "running"
+        },
+        {
+          "expr": "vllm:num_requests_waiting{job=\"vllm-kvbm\"}",
+          "legendFormat": "waiting"
+        },
+        {
+          "expr": "vllm:kv_cache_usage_perc{job=\"vllm-kvbm\"}",
+          "legendFormat": "GPU KV usage %"
+        }
+      ]
+    },
+    {
+      "title": "Token Throughput",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "P1809F7CD0C75ACF3"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 122
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 20
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "mean",
+            "max"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "expr": "rate(vllm:prompt_tokens_total{job=\"vllm-kvbm\"}[1m])",
+          "legendFormat": "prompt tok/s"
+        },
+        {
+          "expr": "rate(vllm:generation_tokens_total{job=\"vllm-kvbm\"}[1m])",
+          "legendFormat": "gen tok/s"
+        }
+      ]
+    },
+    {
+      "title": "Total Counts",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "P1809F7CD0C75ACF3"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 24,
+        "x": 0,
+        "y": 128
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "background",
+        "graphMode": "area"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "vllm:external_prefix_cache_hits_total{job=\"vllm-kvbm\"}",
+          "legendFormat": "cache hits (tok)"
+        },
+        {
+          "expr": "vllm:prompt_tokens_total{job=\"vllm-kvbm\"}",
+          "legendFormat": "prompt tokens"
+        },
+        {
+          "expr": "kvbm_matched_tokens{job=\"kvbm-metrics\"}",
+          "legendFormat": "KVBM matched tok"
+        },
+        {
+          "expr": "kvbm_onboard_blocks_h2d{job=\"kvbm-metrics\"}",
+          "legendFormat": "onboard H→D"
+        },
+        {
+          "expr": "kvbm_onboard_blocks_r2d{job=\"kvbm-metrics\"}",
+          "legendFormat": "onboard R→D"
+        },
+        {
+          "expr": "kvbm_offload_blocks_d2h{job=\"kvbm-metrics\"}",
+          "legendFormat": "offload D→H"
+        },
+        {
+          "expr": "kvbm_offload_blocks_d2r{job=\"kvbm-metrics\"}",
+          "legendFormat": "offload D→R"
+        },
+        {
+          "expr": "kvbm_remote_read_failures{job=\"kvbm-metrics\"}",
+          "legendFormat": "remote read fail"
+        },
+        {
+          "expr": "kvbm_remote_write_failures{job=\"kvbm-metrics\"}",
+          "legendFormat": "remote write fail"
+        }
+      ]
+    },
+    {
+      "title": "Concurrent Request Timeline",
+      "description": "Shows all recent requests on a shared time axis. Each row is a request, colored segments show lifecycle stage. Use the time picker to zoom into a burst of concurrent requests.",
+      "type": "state-timeline",
+      "datasource": {
+        "type": "tempo",
+        "uid": "tempo"
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 48
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "tempo"
+          },
+          "queryType": "traceql",
+          "query": "{ name =~ \"kvbm.get_matched_tokens|kvbm.worker_remote_transfer|vllm.prefill_scheduled|vllm.first_token|vllm.finished\" && span.request_id != \"\" } | select(span.request_id)",
+          "limit": 200,
+          "tableType": "spans"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "traceID": false,
+              "spanID": true,
+              "traceService": true,
+              "traceName": true,
+              "service.name": true
+            }
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "sort": [
+              {
+                "field": "Start time",
+                "desc": false
+              }
+            ]
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 80,
+            "lineWidth": 0
+          },
+          "links": [
+            {
+              "title": "View waterfall",
+              "url": "/d/kvbm-tracing/kvbm-tracing?var-traceId=${__data.fields.traceID}&from=now-1h&to=now"
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {
+        "showValue": "auto",
+        "mergeValues": false,
+        "alignValue": "left",
+        "rowHeight": 0.8,
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "title": "Request Gantt (TTFT + E2E per request)",
+      "description": "Each row is a request. TTFT (ms) and E2E (ms) shown as inline bar gauges for quick comparison across requests.",
+      "type": "table",
+      "datasource": {
+        "type": "tempo",
+        "uid": "tempo"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 58
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "tempo"
+          },
+          "queryType": "traceql",
+          "query": "{ name = \"vllm.finished\" } | select(span.request_id, span.e2e_ms, span.num_output_tokens)",
+          "limit": 30,
+          "tableType": "spans",
+          "refId": "finished"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "spanID": true,
+              "traceService": true,
+              "traceName": true,
+              "service.name": true
+            }
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "sort": [
+              {
+                "field": "Start time",
+                "desc": true
+              }
+            ]
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "links": [
+            {
+              "title": "View waterfall",
+              "url": "/d/kvbm-tracing/kvbm-tracing?var-traceId=${__data.fields.traceID}&from=now-1h&to=now"
+            }
+          ]
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "e2e_ms"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "E2E (ms)"
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "gauge",
+                  "mode": "gradient"
+                }
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "continuous-YlRd"
+                }
+              },
+              {
+                "id": "min",
+                "value": 0
+              },
+              {
+                "id": "max",
+                "value": 3000
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "request_id"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Request ID"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "num_output_tokens"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Output Tokens"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "traceDuration"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "ns"
+              },
+              {
+                "id": "displayName",
+                "value": "Trace Duration"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          {
+            "displayName": "Start time",
+            "desc": true
+          }
+        ]
+      }
+    },
+    {
+      "title": "Concurrent Request Gantt (standalone app)",
+      "description": "Custom Gantt timeline showing all recent requests on a shared time axis. Each row is a request, colored segments show lifecycle stages. Hover for details, click to drill into waterfall.",
+      "type": "text",
+      "gridPos": {
+        "h": 16,
+        "w": 24,
+        "x": 0,
+        "y": 32
+      },
+      "options": {
+        "mode": "html",
+        "content": "\n<div style=\"text-align:center;padding:40px 20px;font-family:monospace;\">\n  <p style=\"color:#aaa;font-size:14px;margin-bottom:16px;\">\n    The interactive Gantt timeline is now a standalone app with full zoom, pan, and brush selection.\n  </p>\n  <a href=\"http://localhost:3001\" target=\"_blank\"\n     style=\"display:inline-block;padding:12px 32px;background:#4182f0;color:#fff;border-radius:6px;text-decoration:none;font-size:14px;font-weight:600;\">\n    Open Gantt Timeline &rarr;\n  </a>\n  <p style=\"color:#666;font-size:11px;margin-top:12px;\">\n    Port 3001 &middot; Queries Tempo directly &middot; Drag to zoom, shift+drag to pan, scroll wheel zoom, double-click reset\n  </p>\n</div>\n",
+        "code": {
+          "language": "html",
+          "showLineNumbers": false,
+          "showMiniMap": false
+        }
+      }
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": [
+    "kvbm",
+    "tracing",
+    "otel"
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "traceId",
+        "type": "custom",
+        "label": "Trace ID",
+        "current": {
+          "text": "",
+          "value": ""
+        },
+        "query": ""
+      }
+    ]
+  },
+  "time": {
+    "from": "now-3h",
+    "to": "now"
+  },
+  "refresh": "30s",
+  "title": "KVBM Tracing",
+  "uid": "kvbm-tracing"
+}

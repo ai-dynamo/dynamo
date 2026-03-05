@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     sync::{Arc, OnceLock},
 };
 
@@ -87,6 +87,8 @@ pub struct KvConnectorLeaderCore {
     finishing_requests: HashSet<String>,
     iteration_counter: u64,
     kvbm_metrics: KvbmMetrics,
+    /// Maps request_id -> W3C traceparent so all spans for one request share a single trace ID.
+    request_traces: HashMap<String, String>,
 }
 
 impl KvConnectorLeaderCore {
@@ -103,6 +105,7 @@ impl KvConnectorLeaderCore {
             finishing_requests: HashSet::new(),
             iteration_counter: 0,
             kvbm_metrics,
+            request_traces: HashMap::new(),
         }
     }
 
@@ -113,12 +116,34 @@ impl KvConnectorLeaderCore {
             .expect("slot_manager not initialized")
     }
 
+    /// Get the traceparent for a request, if one was registered at create_slot time.
+    pub fn request_traceparent(&self, request_id: &str) -> Option<&str> {
+        self.request_traces.get(request_id).map(|s| s.as_str())
+    }
+
+    /// Override the traceparent for a request. Called from Python when the
+    /// connector can provide a traceparent from the HTTP/OTEL context.
+    pub fn set_request_traceparent(&mut self, request_id: String, traceparent: String) {
+        self.request_traces.insert(request_id, traceparent);
+    }
+
+    /// Enter a span linked to the request's trace. Returns the guard (drop to exit).
+    /// Falls back to a standalone span if no traceparent is registered.
+    fn enter_request_span(&self, request_id: &str, span_name: &'static str) -> tracing::span::EnteredSpan {
+        if let Some(tp) = self.request_traces.get(request_id) {
+            dynamo_runtime::logging::make_linked_span(span_name, tp).entered()
+        } else {
+            tracing::info_span!("kvbm_op", otel.name = span_name, request_id = request_id).entered()
+        }
+    }
+
     pub fn get_num_new_matched_tokens(
         &self,
         request_id: String,
         _request_num_tokens: usize,
         num_computed_tokens: usize,
     ) -> anyhow::Result<(Option<usize>, bool)> {
+        let _span = self.enter_request_span(&request_id, "kvbm.get_matched_tokens");
         debug_assert!(num_computed_tokens.is_multiple_of(self.block_size));
 
         crate::lock_slot!(self, &request_id => slot);
@@ -164,6 +189,14 @@ impl KvConnectorLeaderCore {
             self.kvbm_metrics
                 .matched_tokens
                 .inc_by(num_external_tokens as u64);
+            tracing::info!(
+                target: "kvbm-diag",
+                request_id = %request_id,
+                num_external_tokens,
+                num_computed_tokens,
+                total_tokens = slot.sequence().total_tokens(),
+                "get_num_new_matched_tokens → OnboardStaged (returning match)"
+            );
             Ok((Some(num_external_tokens), true))
         } else {
             Ok((Some(0), false))
@@ -176,11 +209,21 @@ impl KvConnectorLeaderCore {
         block_ids: Vec<BlockId>,
         num_external_tokens: usize,
     ) -> anyhow::Result<()> {
+        let _span = self.enter_request_span(&request_id, "kvbm.update_state_after_alloc");
         crate::lock_slot!(self, &request_id => slot);
         slot.append_mutable_device_blocks(&block_ids)?;
 
         if num_external_tokens > 0 {
             let num_computed_tokens = block_ids.len() * self.block_size - num_external_tokens;
+            tracing::info!(
+                target: "kvbm-diag",
+                request_id = %request_id,
+                num_external_tokens,
+                num_device_blocks = block_ids.len(),
+                num_computed_tokens,
+                block_size = self.block_size,
+                "update_state_after_alloc → triggering onboarding"
+            );
             slot.record_cached_device_tokens(num_computed_tokens);
             slot.advance_computed_position(num_computed_tokens)?;
             slot.trigger_onboarding(num_external_tokens)?;
@@ -194,6 +237,12 @@ impl KvConnectorLeaderCore {
         &mut self,
         scheduler_output: SchedulerOutput,
     ) -> anyhow::Result<Vec<u8>> {
+        self.kvbm_metrics.scheduler_new_requests.set(scheduler_output.new_requests.len() as f64);
+        self.kvbm_metrics.scheduler_cached_requests.set(scheduler_output.cached_requests.len() as f64);
+        self.kvbm_metrics.scheduler_finishing.set(self.finishing_requests.len() as f64);
+        self.kvbm_metrics.scheduler_onboarding.set(self.onboarding_slots.len() as f64);
+        self.kvbm_metrics.scheduler_inflight.set(self.inflight_requests.len() as f64);
+
         if !self.finishing_requests.is_empty() {
             let to_clean: Vec<String> = self.finishing_requests.drain().collect();
             for request_id in &to_clean {
@@ -209,7 +258,18 @@ impl KvConnectorLeaderCore {
         let mut md = ConnectorMetadata::new(iteration);
         let onboarding_slots = std::mem::take(&mut self.onboarding_slots);
 
+        if !onboarding_slots.is_empty() {
+            tracing::info!(
+                target: "kvbm-diag",
+                iteration,
+                num_onboarding = onboarding_slots.len(),
+                onboarding_reqs = ?onboarding_slots,
+                "build_connector_metadata: flushing onboarding slots"
+            );
+        }
+
         for request_id in &onboarding_slots {
+            let _req_span = self.enter_request_span(request_id, "kvbm.flush_onboarding");
             crate::lock_slot!(self, request_id => slot);
             crate::flush_slot_to_metadata!(slot, md, request_id);
             assert!(inflight_requests.remove(request_id));
@@ -223,6 +283,7 @@ impl KvConnectorLeaderCore {
                 continue;
             }
 
+            let _req_span = self.enter_request_span(request_id, "kvbm.schedule_new_request");
             assert!(inflight_requests.remove(request_id));
             crate::lock_slot!(self, request_id => slot);
             slot.record_start_iteration(iteration)?;
@@ -231,6 +292,17 @@ impl KvConnectorLeaderCore {
                 .num_scheduled_tokens
                 .get(request_id)
                 .unwrap_or(&0);
+
+            tracing::info!(
+                target: "kvbm-diag",
+                request_id = %request_id,
+                iteration,
+                vllm_num_computed_tokens = new_req.num_computed_tokens,
+                vllm_num_scheduled_tokens = scheduled_tokens,
+                slot_state = ?slot.state(),
+                slot_computed_tokens = slot.computed_tokens(),
+                "build_connector_metadata: new request from vLLM scheduler"
+            );
 
             slot.apply_scheduler_output(&[], &[], new_req.num_computed_tokens, scheduled_tokens, None)?;
             crate::flush_slot_to_metadata!(slot, md, new_req.request_id);
@@ -287,6 +359,7 @@ impl KvConnectorLeaderCore {
         _block_ids: Vec<BlockId>,
     ) -> anyhow::Result<bool> {
         self.onboarding_slots.remove(&request_id);
+        self.request_traces.remove(&request_id);
 
         if !self.slot_manager().has_slot(&request_id) {
             self.inflight_requests.remove(&request_id);
@@ -330,7 +403,20 @@ impl KvConnectorLeaderCore {
     ) -> anyhow::Result<()> {
         self.slot_manager()
             .create_slot(&request_id, tokens, salt_hash)?;
-        self.inflight_requests.insert(request_id);
+        self.inflight_requests.insert(request_id.clone());
+
+        if !self.request_traces.contains_key(&request_id) {
+            let root_span = tracing::info_span!(
+                "kvbm_request",
+                otel.name = "kvbm.request",
+                request_id = %request_id,
+            );
+            let _guard = root_span.entered();
+            if let Some(ctx) = dynamo_runtime::logging::get_distributed_tracing_context() {
+                self.request_traces
+                    .insert(request_id, ctx.create_traceparent());
+            }
+        }
         Ok(())
     }
 

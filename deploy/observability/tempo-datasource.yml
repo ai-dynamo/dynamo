@@ -13,12 +13,27 @@ datasources:
     editable: true
     jsonData:
       httpMethod: GET
+      grpcAddress: tempo:9095
       serviceMap:
-        datasourceUid: tempo
+        datasourceUid: prometheus
       search:
         hide: false
       nodeGraph:
         enabled: true
+      tracesToMetrics:
+        datasourceUid: prometheus
+        spanStartTimeShift: -1h
+        spanEndTimeShift: 1h
+        tags:
+          - key: service.name
+            value: service_name
+          - key: otel.name
+            value: span_name
+        queries:
+          - name: Span rate
+            query: sum(rate(otel_traces_span_metrics_calls_total{$$__tags}[5m]))
+          - name: Span duration (p95)
+            query: histogram_quantile(0.95, sum(rate(otel_traces_span_metrics_duration_bucket{$$__tags}[5m])) by (le))
       traceQuery:
         timeShiftEnabled: true
         spanStartTimeShift: 1h

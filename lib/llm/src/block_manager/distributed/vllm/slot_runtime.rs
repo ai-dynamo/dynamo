@@ -647,12 +647,16 @@ impl VllmConnectorSlot {
             }
         }
 
-        tracing::warn!(
-            target: "kvbm-g4",
+        tracing::error!(
+            target: "kvbm-diag",
             request_id = %self.request_id,
             state = ?self.state(),
             elapsed_ms = elapsed.as_millis(),
-            "onboard timed out in acquire_local_matches; recovering - will skip G4 on retry"
+            timeout_secs = timeout.as_secs(),
+            retry_count = self.g4.retry_count,
+            device_blocks = self.device_blocks.len(),
+            current_position = self.current_position,
+            "ONBOARD TIMEOUT — resetting slot to Preempted (this causes full recompute)"
         );
 
         let _ = self.operation_tracker.discard_pending();
@@ -672,6 +676,11 @@ impl VllmConnectorSlot {
         const MAX_G4_RETRIES: u32 = 3;
         self.g4.retry_count += 1;
         if self.g4.retry_count >= MAX_G4_RETRIES {
+            tracing::error!(
+                target: "kvbm-diag",
+                request_id = %self.request_id,
+                "G4 retries exhausted — will skip G4 for all future lookups on this slot"
+            );
             self.g4.skip_on_retry = true;
         }
         self.recovered_from_failed_transfer = true;
@@ -730,6 +739,14 @@ impl VllmConnectorSlot {
         }
     }
 
+    #[tracing::instrument(level = "info", skip_all, fields(
+        request_id = %self.request_id,
+        num_computed_tokens,
+        host_matched = host_blocks.len(),
+        disk_matched = disk_blocks.len(),
+        g4_matched = g4_hashes.len(),
+        otel.name = "kvbm.stage_local_matches",
+    ))]
     fn stage_local_matches(
         &mut self,
         num_computed_tokens: usize,
@@ -931,11 +948,17 @@ impl Slot for VllmConnectorSlot {
         // Genuine onboarding failures are handled by acquire_local_matches, which is called
         // when vLLM re-evaluates the request for KV matching after a failure/preemption.
         if matches!(self.state, SlotState::Onboarding(_)) {
-            tracing::debug!(
+            tracing::info!(
+                target: "kvbm-diag",
                 request_id = %self.request_id,
                 current_position = self.current_position,
-                num_computed_tokens = num_computed_tokens,
-                "Onboarding state in apply_scheduler_output - transitioning to normal execution"
+                evaluated_blocks = self.evaluated_blocks,
+                device_blocks = self.device_blocks.len(),
+                vllm_num_computed_tokens = num_computed_tokens,
+                vllm_num_scheduled_tokens = num_scheduled_tokens,
+                total_tokens = self.sequence.total_tokens(),
+                onboarding_state = ?self.state,
+                "apply_scheduler_output: Onboarding→Prefilling transition"
             );
             self.g4.onboarding_started_at = None;
         }
@@ -1320,6 +1343,13 @@ impl Slot for VllmConnectorSlot {
         self.stage_local_matches(num_computed_tokens, host_blocks, disk_blocks, vec![])
     }
 
+    #[tracing::instrument(level = "info", skip_all, fields(
+        request_id = %self.request_id,
+        num_external_tokens,
+        num_external_blocks = num_external_tokens / self.block_size,
+        current_position = self.current_position,
+        otel.name = "kvbm.trigger_onboarding",
+    ))]
     fn trigger_onboarding(&mut self, num_external_tokens: usize) -> Result<(), SlotError> {
         if !matches!(self.state(), SlotState::OnboardStaged(_)) {
             return Err(SlotError::InvalidOperation(format!(
@@ -1333,6 +1363,15 @@ impl Slot for VllmConnectorSlot {
         debug_assert_eq!(num_external_tokens % self.block_size, 0);
 
         self.evaluated_blocks = self.current_position / self.block_size;
+
+        tracing::info!(
+            target: "kvbm-diag",
+            has_host_staged = self.host.staging.is_some(),
+            has_disk_staged = self.disk.staging.is_some(),
+            has_g4_staged = self.g4.tier.staging.is_some(),
+            evaluated_blocks = self.evaluated_blocks,
+            "trigger_onboarding: dispatching transfers"
+        );
 
         crate::onboard_local_tier!(self, host, PinnedStorage);
         crate::onboard_local_tier!(self, disk, DiskStorage);
@@ -1613,6 +1652,11 @@ impl VllmConnectorSlot {
     /// to the worker, which handles the G4->Host->Device transfer atomically.
     /// Token blocks are threaded through so bounce buffers can be persisted
     /// in the host cache after the transfer completes.
+    #[tracing::instrument(level = "info", skip_all, fields(
+        request_id = %self.request_id,
+        num_blocks = sequence_hashes.len(),
+        otel.name = "kvbm.onboard_from_g4",
+    ))]
     fn onboard_from_g4(
         &mut self,
         sequence_hashes: Vec<u64>,
