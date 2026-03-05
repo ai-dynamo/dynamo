@@ -39,7 +39,16 @@ jobs:
     steps:
       - name: Extract version from branch
         id: extract
+        env:
+          POST_MERGE_RUN_ID: ${{ github.event.inputs.post_merge_run_id }}
         run: |
+          set -euo pipefail
+
+          if ! [[ "${POST_MERGE_RUN_ID}" =~ ^[0-9]+$ ]]; then
+            echo "Error: post_merge_run_id must be a numeric GitHub run ID (got: '${POST_MERGE_RUN_ID}')"
+            exit 1
+          fi
+
           BRANCH_NAME="${GITHUB_REF#refs/heads/}"
 
           # TEMPORARY: hardcode test version for non-release branches
@@ -52,9 +61,9 @@ jobs:
 
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
           echo "image_prefix=release-${VERSION}" >> $GITHUB_OUTPUT
-          echo "source_image_prefix=release-${VERSION}-${{ github.event.inputs.post_merge_run_id }}" >> $GITHUB_OUTPUT
+          echo "source_image_prefix=release-${VERSION}-${POST_MERGE_RUN_ID}" >> $GITHUB_OUTPUT
           echo "Detected version: ${VERSION}"
-          echo "Source image prefix: release-${VERSION}-${{ github.event.inputs.post_merge_run_id }}"
+          echo "Source image prefix: release-${VERSION}-${POST_MERGE_RUN_ID}"
 
   # ============================================================================
   # NGC PUBLISH: RC tag, crane copy to NGC, Helm chart push
