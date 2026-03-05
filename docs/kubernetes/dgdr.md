@@ -102,8 +102,7 @@ kubectl apply -f qwen3-first-model.yaml -n ${NAMESPACE}
 | `autoApply` | No | `true` | Automatically create and start the deployment after profiling |
 | `sla` | No | — | Target latency (TTFT, ITL in ms) for profiler optimization |
 | `workload` | No | — | Expected traffic shape (ISL, OSL, request rate) |
-| `hardware` | No | auto-detected | GPU SKU and count override; required when GPU discovery is disabled |
-| `hardware.maxGpus` | No | — | Cap on the number of GPUs the profiler may use when auto-discovering the cluster GPU count. Set this to avoid the profiler recommending a deployment that consumes all available cluster GPUs. |
+| `hardware` | No | auto-detected | GPU SKU and count override; required when GPU discovery is disabled. When not set, the auto-discovered GPU count is capped at 32 — set `hardware.totalGpus` explicitly to use more. |
 
 For the full spec reference, see the [DGDR API Reference](api-reference.md) and
 [Profiler Guide](../components/profiler/profiler-guide.md).
