@@ -37,23 +37,6 @@ spec:
                     values:
                       - disagg-kv-dsv32-nvfp4
               topologyKey: kubernetes.io/hostname
-      tolerations:
-        - key: dedicated
-          operator: Equal
-          value: user-workload
-          effect: NoSchedule
-        - key: dedicated
-          operator: Equal
-          value: user-workload
-          effect: NoExecute
-        - key: dedicated
-          operator: Equal
-          value: system-workload
-          effect: NoSchedule
-        - key: dedicated
-          operator: Equal
-          value: system-workload
-          effect: NoExecute
       containers:
       - command:
         - /bin/bash
