@@ -25,6 +25,7 @@ from dynamo.common.protocols.video_protocol import (
     VideoData,
 )
 from dynamo.common.storage import upload_to_fs
+from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.common.utils.output_modalities import RequestType, parse_request_type
 from dynamo.common.utils.video_utils import (
     compute_num_frames,
@@ -515,7 +516,7 @@ class OmniHandler(BaseOmniHandler):
                         "role": "assistant",
                         "content": delta_text,
                     },
-                    "finish_reason": self._normalize_finish_reason(output.finish_reason)
+                    "finish_reason": normalize_finish_reason(output.finish_reason)
                     if output.finish_reason
                     else None,
                 }
