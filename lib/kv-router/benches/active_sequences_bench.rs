@@ -289,11 +289,12 @@ async fn run_benchmark(
     // Total bench workers = trace workers × duplication factor.
     // Each gets a unique WorkerWithDpRank in the shared multi-worker.
     let total_workers = num_trace_workers * inference_worker_duplication_factor;
-    let dp_sizes: HashMap<u64, u32> = (0..total_workers as u64).map(|id| (id, 1)).collect();
+    let dp_range: HashMap<u64, (u32, u32)> =
+        (0..total_workers as u64).map(|id| (id, (0, 1))).collect();
     let multi = Arc::new(ActiveSequencesMultiWorker::new(
         NoopSequencePublisher,
         block_size as usize,
-        dp_sizes,
+        dp_range,
         false,
         0,
         "bench",

@@ -124,6 +124,37 @@ dynamo-operator:
 For detailed etcd configuration options, please refer to the official Bitnami etcd Helm chart documentation:
 **[etcd Helm Chart Documentation](https://github.com/bitnami/charts/tree/main/bitnami/etcd)**
 
+### Kai Scheduler and Grove Configuration
+
+For **production environments**, Kai Scheduler and Grove should be installed separately from this chart to allow independent lifecycle management, version pinning, and upgrade control.
+
+**Compatibility Matrix:**
+
+| dynamo-platform | kai-scheduler | Grove |
+|-----------------|---------------|-------|
+| 1.0.x           | >= v0.13.0    | >= v0.1.0-alpha.6 |
+
+After installing them separately, enable Dynamo integration:
+
+```yaml
+global:
+  kai-scheduler:
+    enabled: true   # Enables queue creation and schedulerName injection
+  grove:
+    enabled: true   # Enables multinode orchestration via PodCliqueSets
+```
+
+For **development/testing only**, you can deploy them as bundled subcharts:
+
+```yaml
+global:
+  kai-scheduler:
+    install: true   # Deploys the bundled kai-scheduler subchart (integration auto-enabled)
+  grove:
+    install: true   # Deploys the bundled Grove subchart (integration auto-enabled)
+```
+
+Note: `global.*.install` controls whether the bundled subcharts are deployed. When set, integration is automatically enabled. `global.*.enabled` can be set independently when using externally-managed installations.
 
 ## 📚 Additional Resources
 

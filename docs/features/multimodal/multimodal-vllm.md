@@ -418,12 +418,12 @@ Dynamo supports embedding cache in both aggregated and disaggregated settings:
 
 | Setting | Implementation | Launch Script |
 |---------|---------------|---------------|
-| **Aggregated** | `ec_both` via upstream vLLM (main or v0.17.0+) | `vllm_serve_embedding_cache.sh` |
 | **Disaggregated encoder** | Dynamo-managed cache in the worker layer on top of vLLM engine | `disagg_multimodal_e_pd.sh` |
+| **Aggregated** | Experimental via vLLM git patches | N/A |
 
 ### Aggregated Worker
 
-A single vLLM instance acts as both **producer** (encodes and saves embeddings to CPU cache) and **consumer** (loads cached embeddings back to GPU). Repeated images skip encoding entirely.
+A single vLLM instance caches encoded embeddings on CPU so repeated images skip encoding entirely. Experimental — requires vLLM patches (see below).
 
 ```mermaid
 ---
@@ -441,8 +441,25 @@ flowchart LR
 **Launch:**
 
 ```bash
-cd $DYNAMO_HOME/examples/backends/vllm
-bash launch/vllm_serve_embedding_cache.sh --multimodal-embedding-cache-capacity-gb 10
+
+cd /opt/dynamo/venv/lib/python3.12/site-packages
+
+curl -sL https://github.com/vllm-project/vllm/pull/34182.diff | patch -p1
+
+curl -sL https://github.com/vllm-project/vllm/pull/34783.diff | python3 -c "
+import sys
+chunks = sys.stdin.read().split('diff --git ')
+filtered = [c for c in chunks if c.startswith('a/vllm/')]
+print(''.join('diff --git ' + c for c in filtered))
+" | patch -p1
+
+vllm serve $model \
+    --ec-transfer-config "{
+        \"ec_role\": \"ec_both\",
+        \"ec_connector\": \"DynamoMultimodalEmbeddingCacheConnector\",
+        \"ec_connector_module_path\": \"dynamo.vllm.multimodal_utils.multimodal_embedding_cache_connector\",
+        \"ec_connector_extra_config\": {\"multimodal_embedding_cache_capacity_gb\": 10}
+    }"
 ```
 
 This configures `vllm serve` with `ec_role=ec_both` and the `DynamoMultimodalEmbeddingCacheConnector` automatically. The capacity parameter controls the CPU-side LRU cache size in GB (0 = disabled).
@@ -593,6 +610,38 @@ curl -X POST http://<decode-worker>/load_lora \
 ```
 
 If a LoRA is loaded on the prefill worker but not on the decode worker, the decode worker will fall back to the base model for that request.
+
+## Profiling
+
+Dynamo's multimodal workers include NVTX markers for `nsys` profiling. They are disabled by default (zero overhead) and enabled by setting `DYN_NVTX=1`.
+
+```bash
+cd $DYNAMO_HOME/examples/backends/vllm
+DYN_NVTX=1 nsys profile --trace=cuda,nvtx -o profile.nsys-rep \
+    bash launch/agg_multimodal.sh ...
+```
+
+| ENV Variable | Default | Description |
+|---|---|---|
+| `DYN_NVTX` | `0` | Set to `1` to enable NVTX range/mark annotations in encode, prefill, and decode workers for `nsys` profiling |
+
+Key NVTX ranges emitted:
+
+| Range | Worker | Description |
+|-------|--------|-------------|
+| `mm:encode_worker_generate` | Encode | Full encode request lifetime |
+| `mm:enc:cache_check` | Encode | Embedding cache lookup |
+| `mm:enc:image_load` | Encode | Image download/load |
+| `mm:enc:image_preprocess` | Encode | Image processor (CPU) |
+| `mm:enc:vision_encode` | Encode | ViT + projector GPU forward |
+| `mm:enc:embedding_transfer` | Encode | RDMA embedding staging |
+| `mm:pd_worker_generate` | PD | Full PD request lifetime |
+| `mm:pd:ttft` | PD | Worker-side TTFT: from request arrival at the PD worker to first output token (excludes client→frontend→worker network transit) |
+| `mm:pd:load_multimodal` | PD | Fetch embeddings from encode worker |
+| `mm:pd:disagg_prefill` | PD (disagg) | Prefill-only engine call |
+| `mm:pd:disagg_remote_decode` | PD (disagg) | Remote decode round-trip |
+| `mm:decode_worker_generate` | Decode | Full decode request lifetime |
+| `mm:decode:first_token` | Decode | Time to first output token |
 
 ## Known Limitations
 
