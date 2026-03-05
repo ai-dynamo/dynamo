@@ -30,8 +30,6 @@ spec:
           image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.0
           name: ""
           resources: {}
-        nodeSelector:
-          kubernetes.io/arch: arm64
         # tolerations:     # uncomment to populate any tolerations for the gpu nodes
       replicas: 1
     agg:
