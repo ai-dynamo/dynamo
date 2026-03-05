@@ -412,8 +412,8 @@ class MultimodalWorkerHandler(BaseWorkerHandler):
     async def _get_bootstrap_from_prefill(
         self, request: SglangMultimodalRequest, sampling_params: dict
     ) -> dict:
-        assert self.prefill_client is not None
         """Get bootstrap info from prefill worker"""
+        assert self.prefill_client is not None
         prefill_stream = await self.prefill_client.generate(
             DisaggSglangMultimodalRequest(
                 request=request,

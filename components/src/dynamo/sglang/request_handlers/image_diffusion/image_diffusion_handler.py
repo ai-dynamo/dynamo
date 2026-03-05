@@ -109,10 +109,9 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
                 seed=nvext.seed,
             )
 
-            user_id = req.user if req.user else context.id()
             context_id = context.id()
-            assert user_id is not None
             assert context_id is not None
+            user_id = req.user or context_id
             image_data = []
             for img in images:
                 # uploading or encoding the image
