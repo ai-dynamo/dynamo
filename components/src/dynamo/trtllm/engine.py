@@ -76,7 +76,7 @@ class TensorRTLLMEngine:
 
                 # Skip MultimodalEncoder for architectures that handle vision
                 # encoding inside the main model (e.g. Llama4).
-                if self._is_unsupported_encoder_arch(model):
+                if self._is_unsupported_encoder_arch(model):  # type: ignore
                     return
 
                 max_batch_size = self.engine_args.get("max_batch_size", 1)

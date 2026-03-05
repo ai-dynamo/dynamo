@@ -443,6 +443,7 @@ class ModelRuntimeConfig:
     enable_local_indexer: bool
     runtime_data: dict[str, Any]
     tensor_model_config: Any | None
+    data_parallel_size: int
 
     def __init__(self) -> None: ...
 
@@ -931,7 +932,10 @@ class KserveGrpcService:
 
 class ModelInput:
     """What type of request this model needs: Text, Tokens or Tensor"""
-    ...
+    Text: ModelInput
+    Tokens: ModelInput
+    Tensor: ModelInput
+
 
 class ModelType:
     """What type of request this model needs: Chat, Completions, Embedding, Tensor, Images, Videos or Prefill"""
