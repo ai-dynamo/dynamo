@@ -52,7 +52,6 @@ class FrontendConfig(KvRouterConfigBase):
     router_mode: str
     namespace: Optional[str] = None
     namespace_prefix: Optional[str] = None
-    decode_fallback: bool
     enforce_disagg: bool
 
     migration_limit: int
@@ -187,19 +186,6 @@ class FrontendArgGroup(ArgGroup):
                 "Dynamo namespace prefix for model discovery scoping. Discovers models from "
                 "namespaces starting with this prefix (e.g., 'ns' matches 'ns', 'ns-abc123', "
                 "'ns-def456'). Takes precedence over --namespace if both are specified."
-            ),
-        )
-
-        add_negatable_bool_argument(
-            g,
-            flag_name="--decode-fallback",
-            env_var="DYN_DECODE_FALLBACK",
-            default=False,
-            dest="decode_fallback",
-            help=(
-                "Allow falling back to decode-only (aggregated) mode when prefill workers are "
-                "unavailable. By default, disaggregated prefill-decode is enforced and requests "
-                "fail if no prefill workers are found."
             ),
         )
 
