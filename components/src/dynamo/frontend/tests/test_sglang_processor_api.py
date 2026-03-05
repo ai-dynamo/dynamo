@@ -10,9 +10,6 @@ upgrades that break our integration surface are caught immediately.
 import inspect
 import pickle
 
-import pytest
-
-
 # ---------------------------------------------------------------------------
 # Import tests -- verify all required modules and symbols exist
 # ---------------------------------------------------------------------------

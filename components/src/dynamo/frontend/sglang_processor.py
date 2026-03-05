@@ -400,9 +400,7 @@ class SglangProcessor:
                     engine_response = dynamo_response
 
                 if engine_response is None or "token_ids" not in engine_response:
-                    logger.error(
-                        "No outputs from engine for request %s", request_id
-                    )
+                    logger.error("No outputs from engine for request %s", request_id)
                     yield {
                         "error": {
                             "message": (
@@ -556,8 +554,7 @@ class SglangEngineFactory:
                 ),
             )
             futures = [
-                preprocess_pool.submit(worker_warmup)
-                for _ in range(preprocess_workers)
+                preprocess_pool.submit(worker_warmup) for _ in range(preprocess_workers)
             ]
             done, not_done = _futures_wait(futures, timeout=120)
             if not_done:
@@ -577,9 +574,7 @@ class SglangEngineFactory:
                 "SGLang preprocess worker pool ready (%d workers)", preprocess_workers
             )
 
-        logger.info(
-            "SGLang processor stream_interval=%d", self.stream_interval
-        )
+        logger.info("SGLang processor stream_interval=%d", self.stream_interval)
 
         gen = SglangProcessor(
             tokenizer,

@@ -162,9 +162,7 @@ class SglangStreamingPostProcessor:
         self.tokenizer = tokenizer
         self.tool_call_parser = tool_call_parser
         self.reasoning_parser = reasoning_parser
-        self._fast_plain_text = (
-            tool_call_parser is None and reasoning_parser is None
-        )
+        self._fast_plain_text = tool_call_parser is None and reasoning_parser is None
 
         self._all_token_ids: list[int] = []
         # Tool call state tracking
@@ -184,7 +182,9 @@ class SglangStreamingPostProcessor:
 
         # Trim to avoid unbounded growth -- only the tail matters for decoding
         if len(self._all_token_ids) > self.LOOKBACK * 4:
-            self._all_token_ids = self._all_token_ids[-(self.LOOKBACK + len(new_token_ids)):]
+            self._all_token_ids = self._all_token_ids[
+                -(self.LOOKBACK + len(new_token_ids)) :
+            ]
             prev_count = len(self._all_token_ids) - len(new_token_ids)
             start = max(0, prev_count - self.LOOKBACK)
 
@@ -200,7 +200,7 @@ class SglangStreamingPostProcessor:
         window_tokens = self._all_token_ids[start:]
         window_text = self.tokenizer.decode(window_tokens, skip_special_tokens=True)
 
-        return window_text[len(prefix_text):]
+        return window_text[len(prefix_text) :]
 
     def process_output(self, engine_response: dict[str, Any]) -> dict[str, Any] | None:
         """Process a single engine response chunk into an OpenAI SSE choice dict.

@@ -135,11 +135,6 @@ def _init_worker(
     _w_stream_interval = max(1, stream_interval)
 
 
-def worker_warmup() -> bool:
-    """Dummy task to ensure worker process is fully initialized."""
-    return True
-
-
 def _preprocess_worker(
     request: dict[str, Any],
     request_id: str,
@@ -831,8 +826,7 @@ class EngineFactory:
             )
             # Warm up all workers to ensure initialization completes
             futures = [
-                preprocess_pool.submit(worker_warmup)
-                for _ in range(preprocess_workers)
+                preprocess_pool.submit(worker_warmup) for _ in range(preprocess_workers)
             ]
             done, not_done = _futures_wait(futures, timeout=120)
             if not_done:
