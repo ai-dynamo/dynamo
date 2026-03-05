@@ -61,21 +61,77 @@ jobs:
         id: set-image
         shell: bash
         run: |
-          IMAGE_URI="${ECR_HOSTNAME}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}:main-operator"
+          IMAGE_URI="${ECR_HOSTNAME}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}:main-sglang-9c6f36e9a9a18976ef18f8b9e7e1ead3bdb4f12e-cuda12-amd6"
           echo "image_uri=${IMAGE_URI}" >> $GITHUB_OUTPUT
 
   # ── Job Y: Run "echo hello world" inside Container A ──────────────────
   job-y:
     name: Run Hello World on Container A
-    runs-on: prod-builder-v3
+    runs-on: prod-tester-amd-gpu-v1
     needs: job-x
     container:
       image: ${{ needs.job-x.outputs.image }}
     steps:
-      - name: Say Hello World
+      - name: Checkout repository
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      - name: Calculate target tag
+        id: calculate-target-tag
+        shell: bash
         run: |
-          ls -la /
-          pwd
+          python --version
+
+      # - name: Run Sanity Check on Runtime Image
+      #   shell: bash
+      #   run: |
+      #     echo "Running sanity check on image: ${{ steps.calculate-target-tag.outputs.test_image }}"
+
+      #     # Run the sanity check script inside the container
+      #     # The script is located in /workspace/deploy/sanity_check.py in runtime containers
+      #     export WORKSPACE=/workspace
+
+      #     set +e
+      #     docker run --rm "${{ steps.calculate-target-tag.outputs.test_image }}" python ${WORKSPACE}/deploy/sanity_check.py --runtime-check --no-gpu-check
+      #     SANITY_CHECK_EXIT_CODE=$?
+      #     set -e
+      #     if [ ${SANITY_CHECK_EXIT_CODE} -ne 0 ]; then
+      #       echo "ERROR: Sanity check failed - ai-dynamo packages not properly installed"
+      #       exit ${SANITY_CHECK_EXIT_CODE}
+      #     else
+      #       echo "✅ Sanity check passed"
+      #     fi
+      # # Run CPU-only tests first (parallelized for speed)
+      # # These are unit tests marked with gpu_0 that don't require GPU hardware
+      # - name: Run CPU-only tests (parallelized)
+      #   if: ${{ inputs.run_cpu_only_tests }}
+      #   timeout-minutes: ${{ inputs.cpu_only_test_timeout_minutes }}
+      #   uses: ./.github/actions/pytest
+      #   with:
+      #     image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
+      #     pytest_marks: ${{ inputs.cpu_only_test_markers }}
+      #     framework: ${{ inputs.framework }}
+      #     test_type: "pre_merge_cpu"
+      #     platform_arch: ${{ inputs.platform }}
+      #     enable_mypy: 'true'
+      #     hf_token: ${{ secrets.HF_TOKEN }}
+      #     parallel_mode: 'auto'
+      #     dind_as_sidecar: 'true'
+
+      # # Run GPU tests sequentially (only on amd64 runners with GPU)
+      # # These are e2e tests marked with gpu_1 that require GPU hardware
+      # - name: Run GPU tests (sequential)
+      #   timeout-minutes: ${{ inputs.single_gpu_test_timeout_minutes }}
+      #   if: ( inputs.platform == 'amd64' && inputs.run_single_gpu_tests == true ) # We only run GPU tests on amd64
+      #   uses: ./.github/actions/pytest
+      #   with:
+      #     image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
+      #     pytest_marks: ${{ inputs.single_gpu_test_markers }}
+      #     framework: ${{ inputs.framework }}
+      #     test_type: "pre_merge_gpu"
+      #     platform_arch: ${{ inputs.platform }}
+      #     enable_mypy: 'false' # already covered by CPU tests
+      #     hf_token: ${{ secrets.HF_TOKEN }}
+      #     parallel_mode: 'none'
+      #     dind_as_sidecar: 'true'
 
 
 #   changed-files:
