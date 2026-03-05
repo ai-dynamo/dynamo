@@ -176,7 +176,7 @@ def load_vision_model(model_id: str) -> torch.nn.Module:
             enforce_eager=False,
             kv_cache_memory_bytes=1024
             * 1024
-            * 8,  # 8MB KV cache for vLLM to complete the init lifecycle, encoder-only doesn't require KV cache.
+            * 64,  # 64MB KV cache for vLLM to complete the init lifecycle, encoder-only doesn't require KV cache.
             max_model_len=1,
             mm_encoder_only=True,
             enable_prefix_caching=False,
