@@ -28,6 +28,10 @@ pub struct ModelRuntimeConfig {
 
     pub reasoning_parser: Option<String>,
 
+    /// Starting rank of data parallel ranks for this worker (0 if DP not enabled)
+    #[serde(default = "default_data_parallel_start_rank")]
+    pub data_parallel_start_rank: u32,
+
     /// Total number of data parallel ranks for this worker (1 if DP not enabled)
     #[serde(default = "default_data_parallel_size")]
     pub data_parallel_size: u32,
@@ -55,6 +59,10 @@ pub struct ModelRuntimeConfig {
     pub disaggregated_endpoint: Option<DisaggregatedEndpoint>,
 }
 
+const fn default_data_parallel_start_rank() -> u32 {
+    0
+}
+
 const fn default_data_parallel_size() -> u32 {
     1
 }
@@ -71,12 +79,31 @@ impl Default for ModelRuntimeConfig {
             max_num_batched_tokens: None,
             tool_call_parser: None,
             reasoning_parser: None,
+            data_parallel_start_rank: default_data_parallel_start_rank(),
             data_parallel_size: default_data_parallel_size(),
             enable_local_indexer: true,
             runtime_data: HashMap::new(),
             tensor_model_config: None,
             disaggregated_endpoint: None,
         }
+    }
+}
+
+impl dynamo_kv_router::WorkerConfigLike for ModelRuntimeConfig {
+    fn data_parallel_start_rank(&self) -> u32 {
+        self.data_parallel_start_rank
+    }
+
+    fn data_parallel_size(&self) -> u32 {
+        self.data_parallel_size
+    }
+
+    fn max_num_batched_tokens(&self) -> Option<u64> {
+        self.max_num_batched_tokens
+    }
+
+    fn total_kv_blocks(&self) -> Option<u64> {
+        self.total_kv_blocks
     }
 }
 

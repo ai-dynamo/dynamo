@@ -16,6 +16,7 @@
 use dynamo_llm::tokenizers::traits::{Decoder, Encoder};
 use dynamo_llm::tokenizers::*;
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 
 const TEST_PROMPTS: [&str; 4] = [
@@ -205,4 +206,112 @@ fn test_decode_with_skip_special_tokens() {
     // Validate exact matches on the entire decoded strings
     assert_eq!(decoded_with_special, "<s> Hello world</s>");
     assert_eq!(decoded_without_special, "Hello world");
+}
+
+// --- tiktoken tests ---
+
+const MOCK_TIKTOKEN_DIR: &str = "tests/data/sample-models/mock-tiktoken";
+
+fn mock_tiktoken_model_path() -> String {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join(MOCK_TIKTOKEN_DIR)
+        .join("tiktoken.model")
+        .to_str()
+        .unwrap()
+        .to_string()
+}
+
+#[test]
+fn test_tiktoken_lifecycle() {
+    let path = mock_tiktoken_model_path();
+    let tokenizer =
+        TikTokenTokenizer::from_file_auto(&path).expect("Failed to load tiktoken tokenizer");
+
+    // Test simple encode/decode roundtrip
+    let text = "hello world";
+    let encoding = tokenizer.encode(text).expect("Failed to encode");
+    let ids = encoding.token_ids();
+    assert!(!ids.is_empty(), "Token IDs should not be empty");
+
+    // Verify Sp variant
+    match &encoding {
+        Encoding::Sp(_) => {}
+        other => panic!("Expected Encoding::Sp, got {:?}", other),
+    }
+
+    let decoded = tokenizer
+        .decode(ids, false)
+        .expect("Failed to decode token_ids");
+    assert_eq!(decoded, text);
+}
+
+#[test]
+fn test_tiktoken_decode_stream() {
+    let path = mock_tiktoken_model_path();
+    let tokenizer =
+        TikTokenTokenizer::from_file_auto(&path).expect("Failed to load tiktoken tokenizer");
+
+    let shared_tokenizer: Arc<dyn dynamo_llm::tokenizers::traits::Tokenizer> = Arc::new(tokenizer);
+
+    let text = "hello world";
+    let encoding = shared_tokenizer
+        .encode(text)
+        .expect("Failed to encode prompt");
+
+    let mut decoder = DecodeStream::new(shared_tokenizer.clone(), &[], false);
+    let mut output = String::new();
+    for token_id in encoding.token_ids() {
+        let step_text = decoder.step(*token_id).expect("Failed to decode token_id");
+        if let Some(t) = step_text {
+            output.push_str(&t);
+        }
+    }
+    assert_eq!(output, text);
+}
+
+#[test]
+fn compute_hashes_tiktoken() {
+    let path = mock_tiktoken_model_path();
+    let tokenizer =
+        TikTokenTokenizer::from_file_auto(&path).expect("Failed to load tiktoken tokenizer");
+
+    let simple_prompts = &["hello world", "hello", "world"];
+    let hashes = compute_hashes_for_tokenizer(&tokenizer, simple_prompts);
+
+    // Just verify we get consistent hashes (non-zero, deterministic)
+    let hashes2 = compute_hashes_for_tokenizer(&tokenizer, simple_prompts);
+    assert_eq!(hashes, hashes2, "Hashes should be deterministic");
+    assert!(hashes.iter().all(|&h| h != 0), "Hashes should be non-zero");
+}
+
+#[test]
+fn test_tiktoken_create_from_file() {
+    let path = mock_tiktoken_model_path();
+    // Test the factory function used by the Tokenizer wrapper
+    let tokenizer = create_tokenizer_from_file(&path).expect("Failed to create tokenizer");
+
+    let encoding = tokenizer
+        .encode("hello")
+        .expect("Failed to encode with factory-created tokenizer");
+    assert!(!encoding.token_ids().is_empty());
+}
+
+#[test]
+fn test_tiktoken_batch_encode() {
+    let path = mock_tiktoken_model_path();
+    let tokenizer =
+        TikTokenTokenizer::from_file_auto(&path).expect("Failed to load tiktoken tokenizer");
+
+    let inputs = &["hello", "world"];
+    let encodings = tokenizer
+        .encode_batch(inputs)
+        .expect("Failed to batch encode");
+    assert_eq!(encodings.len(), 2);
+
+    for (encoding, input) in encodings.iter().zip(inputs.iter()) {
+        let decoded = tokenizer
+            .decode(encoding.token_ids(), false)
+            .expect("Failed to decode");
+        assert_eq!(decoded, *input);
+    }
 }

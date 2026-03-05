@@ -43,8 +43,8 @@ def patch_memory_snapshot() -> None:
         manager = get_gms_client_memory_manager()
         assert manager is not None, "GMS client is not initialized"
 
-        if manager.mode == GrantedLockType.RO:
-            allocations = manager.list_allocations()
+        if manager.granted_lock_type == GrantedLockType.RO:
+            allocations = manager.list_handles()
             committed_bytes = sum(alloc.get("aligned_size", 0) for alloc in allocations)
         else:
             # NOTE: by design, we want to assume we have the whole GPU when writing

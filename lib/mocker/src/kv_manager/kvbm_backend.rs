@@ -188,7 +188,9 @@ impl KvbmLogicalKvManager {
 impl KvBackend for KvbmLogicalKvManager {
     fn process(&mut self, event: &MoveBlock) -> bool {
         match event {
-            MoveBlock::Use(blocks, _local_hashes, plhs) => self.process_use(blocks, plhs),
+            MoveBlock::Use(blocks, _local_hashes, plhs, _token_ids) => {
+                self.process_use(blocks, plhs)
+            }
             MoveBlock::Destroy(blocks) => {
                 self.process_destroy(blocks);
                 true
@@ -197,7 +199,7 @@ impl KvBackend for KvbmLogicalKvManager {
                 self.process_deref(blocks);
                 true
             }
-            MoveBlock::Promote(uuid, seq_hash, _parent_hash, _local_hash, plh) => {
+            MoveBlock::Promote(uuid, seq_hash, _parent_hash, _local_hash, plh, _token_ids) => {
                 self.process_promote(*uuid, *seq_hash, *plh);
                 true
             }
@@ -289,6 +291,7 @@ mod tests {
             vec![UniqueBlock::FullBlock(seq_hash)],
             vec![],
             vec![plh_val],
+            None,
         ))
     }
 
@@ -297,6 +300,7 @@ mod tests {
             vec![UniqueBlock::PartialBlock(uuid)],
             vec![],
             vec![],
+            None,
         ))
     }
 
@@ -362,6 +366,7 @@ mod tests {
             ],
             vec![],
             vec![p1, p2],
+            None,
         ));
         assert!(result);
 
@@ -507,7 +512,7 @@ mod tests {
         assert_eq!(s.inflight_mutable, 1);
         assert_eq!(s.inflight_immutable, 0);
 
-        mgr.process(&MoveBlock::Promote(uuid, 42, None, 0, p));
+        mgr.process(&MoveBlock::Promote(uuid, 42, None, 0, p, None));
 
         assert_eq!(mgr.num_active_blocks(), 1);
         assert!(mgr.active_partial.is_empty());
@@ -529,7 +534,7 @@ mod tests {
         use_partial(&mut mgr, uuid);
         let available_before = mgr.block_manager.available_blocks();
 
-        mgr.process(&MoveBlock::Promote(uuid, 42, None, 0, p));
+        mgr.process(&MoveBlock::Promote(uuid, 42, None, 0, p, None));
         deref_full(&mut mgr, 42);
 
         assert_eq!(mgr.num_active_blocks(), 0);
@@ -548,7 +553,7 @@ mod tests {
         let mut mgr = make_manager(10, 16);
         let uuid = Uuid::new_v4();
         let p = plh(500);
-        mgr.process(&MoveBlock::Promote(uuid, 42, None, 0, p));
+        mgr.process(&MoveBlock::Promote(uuid, 42, None, 0, p, None));
     }
 
     #[test]
@@ -670,7 +675,7 @@ mod tests {
     fn test_prefill_cost_no_overlap() {
         let mgr = make_manager(10, 16);
         let tokens: Vec<u32> = (0..35).collect();
-        let seq = ActiveSequence::new(tokens, 10, Some(16), true);
+        let seq = ActiveSequence::new(tokens, 10, Some(16), true, false);
 
         let cost = mgr.get_prefill_cost(&seq);
         assert_eq!(cost.new_blocks, seq.unique_blocks().len());
@@ -681,7 +686,7 @@ mod tests {
     fn test_prefill_cost_full_overlap() {
         let mut mgr = make_manager(10, 16);
         let tokens: Vec<u32> = (0..35).collect();
-        let seq = ActiveSequence::new(tokens, 10, Some(16), true);
+        let seq = ActiveSequence::new(tokens, 10, Some(16), true, false);
 
         for block in seq.unique_blocks() {
             if let UniqueBlock::FullBlock(h) = block {
@@ -702,7 +707,7 @@ mod tests {
     fn test_prefill_cost_partial_overlap() {
         let mut mgr = make_manager(10, 16);
         let tokens: Vec<u32> = (0..35).collect();
-        let seq = ActiveSequence::new(tokens, 10, Some(16), true);
+        let seq = ActiveSequence::new(tokens, 10, Some(16), true, false);
 
         if let UniqueBlock::FullBlock(h) = &seq.unique_blocks()[0] {
             let p = seq.positional_lineage_hashes()[0];
@@ -846,6 +851,7 @@ mod tests {
             vec![UniqueBlock::FullBlock(1), UniqueBlock::PartialBlock(uuid)],
             vec![],
             vec![p1],
+            None,
         ));
         assert!(result);
         assert_eq!(mgr.num_active_blocks(), 2);
@@ -855,7 +861,7 @@ mod tests {
         assert_eq!(s.inflight_immutable, 1);
         assert_eq!(s.allocations, 2);
 
-        mgr.process(&MoveBlock::Promote(uuid, 2, None, 0, p2));
+        mgr.process(&MoveBlock::Promote(uuid, 2, None, 0, p2, None));
 
         assert_eq!(mgr.num_active_blocks(), 2);
         let s = snap(&mgr);

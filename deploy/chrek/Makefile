@@ -54,17 +54,8 @@ lint-fix: golangci-lint ## Run golangci-lint linter and perform fixes.
 ##@ Build
 
 .PHONY: build
-build: fmt vet ## Build chrek-agent and restore-entrypoint binaries.
+build: fmt vet ## Build chrek-agent binary.
 	CGO_ENABLED=0 go build -ldflags="-w -s" -o bin/chrek-agent ./cmd/agent
-	CGO_ENABLED=0 go build -ldflags="-w -s" -o bin/restore-entrypoint ./cmd/restore-entrypoint
-
-.PHONY: build-agent
-build-agent: fmt vet ## Build chrek-agent binary only.
-	CGO_ENABLED=0 go build -ldflags="-w -s" -o bin/chrek-agent ./cmd/agent
-
-.PHONY: build-restore
-build-restore: fmt vet ## Build restore-entrypoint binary only.
-	CGO_ENABLED=0 go build -ldflags="-w -s" -o bin/restore-entrypoint ./cmd/restore-entrypoint
 
 .PHONY: run
 run: build ## Run chrek-agent from your host.
@@ -94,8 +85,15 @@ docker-build-placeholder: ## Build placeholder image for checkpoint restore. Req
 ifndef PLACEHOLDER_BASE_IMG
 	$(error PLACEHOLDER_BASE_IMG is required. Example: make docker-build-placeholder PLACEHOLDER_BASE_IMG=nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.1-cuda13)
 endif
+	@BASE_IMAGE_USER="$$( $(CONTAINER_TOOL) image inspect --format '{{.Config.User}}' ${PLACEHOLDER_BASE_IMG} 2>/dev/null || true )"; \
+	if [ -z "$$BASE_IMAGE_USER" ]; then \
+		$(CONTAINER_TOOL) pull ${PLACEHOLDER_BASE_IMG} >/dev/null; \
+		BASE_IMAGE_USER="$$( $(CONTAINER_TOOL) image inspect --format '{{.Config.User}}' ${PLACEHOLDER_BASE_IMG} 2>/dev/null || true )"; \
+	fi; \
+	if [ -z "$$BASE_IMAGE_USER" ]; then BASE_IMAGE_USER=root; fi; \
 	$(CONTAINER_TOOL) build --target placeholder \
 		--build-arg BASE_IMAGE=${PLACEHOLDER_BASE_IMG} \
+		--build-arg BASE_IMAGE_USER=$$BASE_IMAGE_USER \
 		-t ${PLACEHOLDER_IMG} .
 
 .PHONY: docker-push-agent

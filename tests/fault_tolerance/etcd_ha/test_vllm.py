@@ -51,7 +51,7 @@ class DynamoWorkerProcess(ManagedProcess):
         # Configure health check based on worker type
         if is_prefill:
             # Prefill workers check their own status endpoint
-            command.append("--is-prefill-worker")
+            command.extend(["--disaggregation-mode", "prefill"])
             health_check_urls = [(f"http://localhost:{port}/health", self.is_ready)]
         else:
             # Decode workers should also check their own status endpoint first,

@@ -68,17 +68,15 @@ def tensor_service(runtime):
             model_name, checksum, engine, runtime_config=runtime_config
         )
 
-        cancel_token = runtime.child_token()
-
         async def _serve():
-            await tensor_model_service.run(cancel_token)
+            await tensor_model_service.run(runtime)
 
         server_task = asyncio.create_task(_serve())
         try:
             await asyncio.sleep(1)  # wait service to start
             yield host, port
         finally:
-            cancel_token.cancel()
+            tensor_model_service.shutdown()
             with contextlib.suppress(asyncio.TimeoutError, asyncio.CancelledError):
                 await asyncio.wait_for(server_task, timeout=5)
 

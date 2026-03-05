@@ -34,7 +34,7 @@ This leads to:
 │  │ │ Memory Manager │ │ ◄── Unix ───────►│  │         GMSRPCClient            │    │ │
 │  │ └────────────────┘ │    Socket        │  └─────────────────────────────────┘    │ │
 │  │                    │       +          │                                         │ │
-│  │ ┌────────────────┐ │      FD          │  Writer-only: allocate_and_map, commit  │ │
+│  │ ┌────────────────┐ │      FD          │  Writer-only: create_mapping, commit    │ │
 │  │ │ State Machine  │ │  (SCM_RIGHTS)    └─────────────────────────────────────────┘ │
 │  │ └────────────────┘ │                                                              │
 │  │                    │                  ┌─────────────────────────────────────────┐ │
@@ -44,8 +44,8 @@ This leads to:
 │  │                    │    Socket        │  │         GMSRPCClient            │    │ │
 │  └────────────────────┘       +          │  └─────────────────────────────────┘    │ │
 │                              FD          │                                         │ │
-│                          (SCM_RIGHTS)    │  Reader-only: import_allocation,        │ │
-│                                          │               unmap, remap              │ │
+│                          (SCM_RIGHTS)    │  Reader-only: create_mapping (import),   │ │
+│                                          │               unmap_all_vas, remap      │ │
 │                                          └─────────────────────────────────────────┘ │
 │                                                                                      │
 └──────────────────────────────────────────────────────────────────────────────────────┘
@@ -189,17 +189,18 @@ sequenceDiagram
     participant C as GMSClientMemoryManager
     participant S as GMS Server
 
-    W->>C: new GMSClientMemoryManager(mode=RW)
+    W->>C: mgr = GMSClientMemoryManager(socket_path, device=0)
+    W->>C: mgr.connect(RW)
     C->>S: HandshakeRequest(lock_type=RW)
     S-->>C: HandshakeResponse(success=true)
 
     loop For each tensor
-        W->>C: allocate_and_map(size, tag)
+        W->>C: mgr.create_mapping(size=size, tag=tag)
         Note over C,S: See Memory Allocation Flow above
-        W->>C: metadata_put(key, allocation_id, offset, shape)
+        W->>C: mgr.metadata_put(key, allocation_id, offset, shape)
     end
 
-    W->>C: commit()
+    W->>C: mgr.commit()
     C->>S: CommitRequest()
     S->>S: FSM: RW → COMMITTED
     S-->>C: CommitResponse(success=true)
@@ -215,17 +216,18 @@ sequenceDiagram
     participant C as GMSClientMemoryManager
     participant S as GMS Server
 
-    R->>C: new GMSClientMemoryManager(mode=RO)
+    R->>C: mgr = GMSClientMemoryManager(socket_path, device=0)
+    R->>C: mgr.connect(RO)
     C->>S: HandshakeRequest(lock_type=RO)
     S-->>C: HandshakeResponse(success=true, committed=true)
 
-    R->>C: metadata_list()
+    R->>C: mgr.metadata_list()
     S-->>C: keys=[...]
 
     loop For each tensor key
-        R->>C: metadata_get(key)
+        R->>C: mgr.metadata_get(key)
         S-->>C: allocation_id, offset, shape
-        R->>C: import_allocation(allocation_id)
+        R->>C: mgr.create_mapping(allocation_id=allocation_id)
         Note over C,S: See Memory Import Flow above
     end
 
@@ -245,7 +247,7 @@ sequenceDiagram
 
     Note over R,GPU: Need to temporarily release GPU memory
 
-    R->>C: unmap()
+    R->>C: mgr.unmap_all_vas()
     C->>GPU: cudaDeviceSynchronize()
 
     loop For each mapping
@@ -254,18 +256,19 @@ sequenceDiagram
         Note over C: Keep VA reservation!
     end
 
-    C->>C: Save memory_layout_hash
+    R->>C: mgr.disconnect()
     C->>S: Close socket (release RO lock)
     S->>S: FSM: RO → COMMITTED (if last reader)
 
     Note over R,GPU: GPU memory released, VA preserved
     Note over R,GPU: Another writer could modify weights here
 
-    R->>C: remap()
+    R->>C: mgr.connect(RO)
     C->>S: HandshakeRequest(lock_type=RO)
     S->>S: FSM: COMMITTED → RO
     S-->>C: HandshakeResponse(success=true)
 
+    R->>C: mgr.remap_all_vas()
     C->>S: GetStateHashRequest()
     S-->>C: GetStateHashResponse(hash)
 
@@ -295,7 +298,8 @@ sequenceDiagram
 
     Note over P,S: Auto-mode: Writer if first, Reader if weights exist
 
-    P->>C: new GMSClientMemoryManager(mode=RW_OR_RO)
+    P->>C: mgr = GMSClientMemoryManager(socket_path, device=0)
+    P->>C: mgr.connect(RW_OR_RO)
     C->>S: HandshakeRequest(lock_type=RW_OR_RO)
 
     alt No committed weights AND no RW holder
@@ -340,11 +344,11 @@ Benefits:
 
 ### 3. VA-Stable Unmap/Remap
 
-During `unmap()`:
+During `unmap_all_vas()`:
 - Physical memory is released (`cuMemUnmap` + `cuMemRelease`)
 - VA reservations are **kept** (`cuMemAddressReserve` still valid)
 
-During `remap()`:
+During `remap_all_vas()`:
 - Same VAs are reused for mapping
 - **Tensor pointers remain valid** (no need to update PyTorch tensors)
 
@@ -354,7 +358,7 @@ On commit, the server computes a hash of:
 - All allocation IDs, sizes, and tags
 - All metadata entries
 
-On `remap()`, this hash is checked:
+On `remap_all_vas()`, this hash is checked:
 - If match: Safe to remap (layout unchanged)
 - If mismatch: Raise `StaleMemoryLayoutError` (must re-import)
 
@@ -393,46 +397,121 @@ fd = fds[0] if fds else -1
 
 ### GMSClientMemoryManager
 
+The API is organized in two tiers. **Tier 2 (convenience)** is what integrations normally use. **Tier 1 (atomic)** exposes individual operations for advanced callers.
+
 ```python
 class GMSClientMemoryManager:
-    def __init__(
-        socket_path: str,
-        mode: RequestedLockType,  # RW, RO, or RW_OR_RO
-        device: int = 0,
-        timeout_ms: Optional[int] = None,
-    ): ...
+    def __init__(socket_path: str, *, device: int = 0): ...
 
     # Properties
-    @property mode: GrantedLockType  # Actual granted mode
+    @property granted_lock_type: Optional[GrantedLockType]
     @property is_connected: bool
     @property is_unmapped: bool
     @property total_bytes: int
 
-    # Allocation (RW only)
-    def allocate_and_map(size: int, tag: str = "default") -> int  # Returns VA
-    def free_mapping(va: int) -> None
-    def clear_all() -> int  # Returns count cleared
+    # --- Tier 1: Connection ---
+    def connect(lock_type: RequestedLockType, timeout_ms: Optional[int] = None) -> None
+    def disconnect() -> None
 
-    # Import (RO or RW)
-    def import_allocation(allocation_id: str) -> int  # Returns VA
+    # --- Tier 1: Handle ops (server-side, RW only) ---
+    def allocate_handle(size: int, tag: str = "default") -> str     # Returns allocation_id
+    def export_handle(allocation_id: str) -> int                     # Returns FD
+    def get_handle_info(allocation_id: str) -> AllocationInfo
+    def free_handle(allocation_id: str) -> bool
+    def clear_all_handles() -> int                                   # Returns count cleared
+    def commit() -> bool                                             # Transition to COMMITTED
+    def get_memory_layout_hash() -> str
+    def list_handles(tag: Optional[str] = None) -> List[Dict]
 
-    # Metadata (RW: put/delete, RO: get/list)
+    # --- Tier 1: VA ops (local) ---
+    def reserve_va(size: int) -> int                                 # Returns VA
+    def map_va(fd, va, size, allocation_id, tag) -> int              # Returns handle
+    def unmap_va(va: int) -> None                                    # Keeps VA reservation
+    def free_va(va: int) -> None                                     # Releases VA reservation
+
+    # --- Tier 1: Metadata ---
     def metadata_put(key: str, allocation_id: str, offset: int, value: bytes) -> bool
     def metadata_get(key: str) -> Optional[Tuple[str, int, bytes]]
     def metadata_list(prefix: str = "") -> List[str]
     def metadata_delete(key: str) -> bool
 
-    # Lifecycle
-    def commit() -> bool  # Publish weights, release RW lock
-    def switch_to_read(timeout_ms: Optional[int] = None) -> None
-    def unmap() -> None   # Release RO lock, preserve VAs
-    def remap(timeout_ms: Optional[int] = None) -> bool
-    def close() -> None
+    # --- Tier 2: Convenience ---
+    def create_mapping(allocation_id=None, size=0, tag="default") -> int  # Allocate or import
+    def destroy_mapping(va: int) -> None
+    def unmap_all_vas() -> None          # Sync + unmap all, preserve VA reservations
+    def remap_all_vas() -> None          # Re-import at preserved VAs (checks layout hash)
+    def reallocate_all_handles(tag="default") -> None  # Fresh server handles for preserved VAs
+    def close(free: bool = False) -> None
 ```
-
 
 ## Limitations
 
 1. **Single-GPU per server**: Each GMS server manages one GPU device
 2. **CUDA VMM required**: Requires a GPU with Virtual Memory Management support. Check at runtime via `CU_DEVICE_ATTRIBUTE_VIRTUAL_MEMORY_MANAGEMENT_SUPPORTED` - there is no guaranteed minimum compute capability
 3. **No content validation**: Remap doesn't detect in-place weight modifications
+
+---
+
+## Framework Integration (vLLM / SGLang)
+
+GMS provides pre-built integrations for vLLM and SGLang. Enable GMS by passing `--load-format gms` when launching an engine.
+
+### How It Works
+
+When `--load-format gms` is set:
+
+1. **A GMS server must already be running** for the target GPU device. The engine connects to it via a Unix socket derived from the GPU UUID.
+2. The engine uses `RW_OR_RO` mode by default: the **first** process gets RW (loads weights from disk, commits to GMS), and **subsequent** processes get RO (import weights from GMS metadata).
+3. Weights are managed by GMS; KV cache is managed by the framework's own allocator (e.g., vLLM's `CuMemAllocator`).
+
+#### vLLM
+
+```bash
+python -m dynamo.vllm \
+  --model <model> \
+  --load-format gms \
+  --enable-sleep-mode \
+  --gpu-memory-utilization 0.9
+```
+
+The integration uses a custom worker class (`GMSWorker`) that:
+- Establishes the GMS connection early in `init_device()` so vLLM's `MemorySnapshot` can account for committed weights
+- Registers a custom model loader (`GMSModelLoader`) for the `gms` load format
+- Patches `torch.cuda.empty_cache` to avoid releasing GMS-managed memory
+- Routes weight allocation through a `CUDAPluggableAllocator` backed by GMS
+
+#### SGLang
+
+```bash
+python -m dynamo.sglang \
+  --model-path <model> \
+  --load-format gms \
+  --enable-memory-saver \
+  --mem-fraction-static 0.9
+```
+
+The integration patches `torch_memory_saver` to route weight operations through GMS:
+- Weights (`"weights"` / `"model_weights"` tags) go through `GMSMemorySaverImpl`
+- Other tags (e.g., `"kv_cache"`) are delegated to the default torch mempool implementation
+- The `--enable-memory-saver` flag is required to activate the memory saver pathway
+
+### Shadow Engine Failover (Sleep / Wake)
+
+Both integrations support releasing and reclaiming GPU memory for shadow engine patterns. The API names differ by framework:
+
+- **vLLM**: `sleep` / `wake_up` (via `/engine/sleep` and `/engine/wake_up` HTTP endpoints)
+- **SGLang**: `release_memory_occupation` / `resume_memory_occupation` (via the corresponding HTTP endpoints)
+
+Under the hood, sleeping calls `unmap_all_vas()` + `disconnect()` to release GPU memory while preserving VA reservations, and waking calls `connect(RO)` + `remap_all_vas()` to re-import weights at the same virtual addresses. Tensor pointers remain valid, so no model re-initialization is needed.
+
+This enables a shadow engine to release its GPU memory, let a primary engine use the GPU, and then reclaim the memory after the primary is killed.
+
+### Configuration via `model_loader_extra_config`
+
+To force read-only mode (import only, never load from disk), pass `gms_read_only` via the framework's `--model-loader-extra-config` flag:
+
+```bash
+--model-loader-extra-config '{"gms_read_only": true}'
+```
+
+This forces `RO` lock mode instead of the default `RW_OR_RO` auto-detection. The engine will only import existing committed weights and fail if none are available.

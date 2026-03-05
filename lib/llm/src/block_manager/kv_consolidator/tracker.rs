@@ -188,8 +188,8 @@ pub enum ConsolidatedEvent {
         parent_hash: Option<String>,
         token_ids: Vec<u32>,
         block_size: usize,
-        lora_id: Option<i32>,
-        source: String, // The source where it was first stored (vllm or kvbm)
+        lora_name: Option<String>,
+        source: String,
     },
     /// Block removed (removed from all sources)
     Remove {
@@ -257,7 +257,7 @@ impl CacheStatusTracker {
         token_ids: Vec<u32>,
         parent_hash: Option<String>,
         block_size: usize,
-        lora_id: Option<i32>,
+        lora_name: Option<String>,
         tier: Option<StorageTier>,
         data_parallel_rank: Option<i32>,
     ) -> bool {
@@ -327,7 +327,7 @@ impl CacheStatusTracker {
                     .as_ref()
                     .map(|p| &p[..16.min(p.len())])
                     .unwrap_or("none"),
-                lora_id,
+                lora_name,
                 data_parallel_rank,
                 &token_ids
             );
@@ -366,7 +366,7 @@ impl CacheStatusTracker {
                 parent_hash: resolved_parent_hash,
                 token_ids,
                 block_size,
-                lora_id,
+                lora_name,
                 source: source.to_str().to_string(),
             });
 
@@ -887,6 +887,62 @@ mod tests {
         assert_eq!(hash1, hash2);
         // Different tokens should produce different hash
         assert_ne!(hash1, hash3);
+    }
+
+    #[test]
+    fn test_lora_name_round_trip_through_tracker() {
+        let mut tracker = CacheStatusTracker::new();
+
+        let should_publish = tracker.handle_store(
+            "hash_lora".to_string(),
+            EventSource::Vllm,
+            vec![1, 2, 3, 4],
+            None,
+            4,
+            Some("my-adapter".to_string()),
+            Some(StorageTier::Device),
+            None,
+        );
+
+        assert!(should_publish);
+        let events = tracker.drain_events();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ConsolidatedEvent::Store {
+                lora_name,
+                token_ids,
+                ..
+            } => {
+                assert_eq!(lora_name.as_deref(), Some("my-adapter"));
+                assert_eq!(token_ids, &[1, 2, 3, 4]);
+            }
+            other => panic!("expected Store event, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_lora_name_none_for_base_model() {
+        let mut tracker = CacheStatusTracker::new();
+
+        tracker.handle_store(
+            "hash_base".to_string(),
+            EventSource::Vllm,
+            vec![1, 2, 3, 4],
+            None,
+            4,
+            None,
+            Some(StorageTier::Device),
+            None,
+        );
+
+        let events = tracker.drain_events();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ConsolidatedEvent::Store { lora_name, .. } => {
+                assert!(lora_name.is_none());
+            }
+            other => panic!("expected Store event, got: {:?}", other),
+        }
     }
 
     #[test]

@@ -45,4 +45,12 @@ Examples:
         help="Environment type (currently only kubernetes supported)",
     )
 
+    parser.add_argument(
+        "--no-operation",
+        action="store_true",
+        default=False,
+        dest="no_operation",
+        help="Log incoming scale requests without executing them (useful for testing the e2e flow without actual K8s scaling)",
+    )
+
     return parser

@@ -9,6 +9,9 @@
 
 FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
 
+# NOTE: Unlike vLLM/TRTLLM, the SGLang upstream runtime image already ships with the full CUDA
+# toolkit (nvcc, nvlink, ptxas, etc.), so no selective COPY of CUDA binaries is needed here.
+
 # cleanup unnecessary libs (python3-blinker conflicts with pip-installed blinker from Flask/dash)
 RUN apt remove -y python3-apt python3-blinker && \
     pip uninstall -y termplotlib
@@ -63,27 +66,40 @@ COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/nixl/ /o
 COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
 
 ENV SGLANG_VERSION="${RUNTIME_IMAGE_TAG%%-*}"
+
+{% if target not in ("dev", "local-dev") %}
 # Install packages as root to ensure they go to system location (/usr/local/lib/python3.12/dist-packages)
-ARG ENABLE_GPU_MEMORY_SERVICE
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     export PIP_CACHE_DIR=/root/.cache/pip && \
     pip install --break-system-packages \
         /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
         /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
         /opt/dynamo/wheelhouse/nixl/nixl*.whl \
-        sglang==${SGLANG_VERSION} && \
+        sglang==${SGLANG_VERSION}
+{% else %}
+# Dev/local-dev: skip dynamo wheel install (users build from source via cargo build + maturin develop).
+# Install NIXL wheel (pre-built C++ binary, not buildable from source) and sglang.
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    export PIP_CACHE_DIR=/root/.cache/pip && \
+    pip install --break-system-packages \
+        /opt/dynamo/wheelhouse/nixl/nixl*.whl \
+        sglang==${SGLANG_VERSION}
+{% endif %}
+
+# Install gpu_memory_service wheel if enabled (all targets)
+ARG ENABLE_GPU_MEMORY_SERVICE
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     if [ "${ENABLE_GPU_MEMORY_SERVICE}" = "true" ]; then \
+        export PIP_CACHE_DIR=/root/.cache/pip && \
         GMS_WHEEL=$(ls /opt/dynamo/wheelhouse/gpu_memory_service*.whl 2>/dev/null | head -1); \
-        if [ -z "$GMS_WHEEL" ]; then \
-            echo "ERROR: ENABLE_GPU_MEMORY_SERVICE is true but no gpu_memory_service wheel found in wheelhouse" >&2; \
-            exit 1; \
-        fi; \
-        pip install --no-cache-dir --break-system-packages "$GMS_WHEEL"; \
+        if [ -n "$GMS_WHEEL" ]; then pip install --no-cache-dir --break-system-packages "$GMS_WHEEL"; fi; \
     fi
 
+{% if target not in ("dev", "local-dev") %}
 # Copy benchmarks after wheel install so benchmarks changes don't invalidate the layer above
 # Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
 COPY --chmod=775 --chown=dynamo:0 benchmarks/ /workspace/benchmarks/
+{% endif %}
 
 # Install common and test dependencies as root
 RUN --mount=type=bind,source=container/deps/requirements.txt,target=/tmp/deps/requirements.txt \
@@ -94,12 +110,17 @@ RUN --mount=type=bind,source=container/deps/requirements.txt,target=/tmp/deps/re
         --requirement /tmp/deps/requirements.txt \
         --requirement /tmp/deps/requirements.test.txt \
         sglang==${SGLANG_VERSION} && \
+    #TODO: Temporary change until upstream sglang runtime image is updated
+    pip install --break-system-packages "urllib3>=2.6.3"
+
+{% if target not in ("dev", "local-dev") %}
+# Install benchmarks and fix permissions (dev/local-dev install from bind-mounted source if needed)
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    export PIP_CACHE_DIR=/root/.cache/pip && \
     cd /workspace/benchmarks && \
     pip install --break-system-packages . && \
-    #TODO: Temporary change until upstream sglang runtime image is updated
-    pip install --break-system-packages "urllib3>=2.6.3" && \
-    # pip/uv bypasses umask when creating .egg-info files, but chmod -R is fast here (small directory)
     chmod -R g+w /workspace/benchmarks
+{% endif %}
 
 # Force-reinstall NVIDIA packages in a separate layer so requirements.txt changes don't trigger re-download
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \

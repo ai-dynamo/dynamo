@@ -64,7 +64,7 @@ type ProfilingConfigSpec struct {
 
 	// ProfilerImage specifies the container image to use for profiling jobs.
 	// This image contains the profiler code and dependencies needed for SLA-based profiling.
-	// Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1"
+	// Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.9.0"
 	// +kubebuilder:validation:Required
 	ProfilerImage string `json:"profilerImage"`
 
@@ -132,7 +132,7 @@ type DeploymentOverridesSpec struct {
 	// WorkersImage specifies the container image to use for DynamoGraphDeployment worker components.
 	// This image is used for both temporary DGDs created during online profiling and the final DGD.
 	// If omitted, the image from the base config file (e.g., disagg.yaml) is used.
-	// Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1"
+	// Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.9.0"
 	// +kubebuilder:validation:Optional
 	WorkersImage string `json:"workersImage,omitempty"`
 }
@@ -151,7 +151,7 @@ type DynamoGraphDeploymentRequestSpec struct {
 	// The controller automatically sets this value in profilingConfig.config.engine.backend.
 	// Profiling runs on real GPUs or via AIC simulation to collect performance data.
 	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:Enum=vllm;sglang;trtllm
+	// +kubebuilder:validation:Enum=auto;vllm;sglang;trtllm
 	Backend string `json:"backend"`
 
 	// UseMocker indicates whether to deploy a mocker DynamoGraphDeployment instead of
@@ -279,7 +279,6 @@ type DynamoGraphDeploymentRequestStatus struct {
 //
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:storageversion
 // +kubebuilder:resource:shortName=dgdr
 // +kubebuilder:deprecatedversion:warning="nvidia.com/v1alpha1 DynamoGraphDeploymentRequest is deprecated; use nvidia.com/v1beta1 DynamoGraphDeploymentRequest"
 // +kubebuilder:printcolumn:name="Model",type=string,JSONPath=`.spec.model`

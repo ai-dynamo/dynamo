@@ -162,7 +162,7 @@ mod tests {
         fn use_blocks(manager: &mut KvManager, ids: Vec<u64>) -> bool {
             let blocks: Vec<_> = ids.iter().map(|&id| UniqueBlock::FullBlock(id)).collect();
             let hashes: Vec<_> = ids.into_iter().collect();
-            manager.process(&MoveBlock::Use(blocks, hashes, vec![]))
+            manager.process(&MoveBlock::Use(blocks, hashes, vec![], None))
         }
 
         let response = use_blocks(&mut manager, (0..10).collect());
@@ -183,7 +183,7 @@ mod tests {
         fn use_blocks(manager: &mut KvManager, ids: Vec<u64>) {
             let blocks: Vec<_> = ids.iter().map(|&id| UniqueBlock::FullBlock(id)).collect();
             let hashes: Vec<_> = ids.into_iter().collect();
-            manager.process(&MoveBlock::Use(blocks, hashes, vec![]));
+            manager.process(&MoveBlock::Use(blocks, hashes, vec![], None));
         }
 
         fn destroy_blocks(manager: &mut KvManager, ids: Vec<u64>) {

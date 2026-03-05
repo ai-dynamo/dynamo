@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Case 4: AIC unsupported model, rapid, without planner
+# l40s + vllm has no disagg support in AIC
+model: "Qwen/Qwen3-32B"
+backend: vllm
+image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:latest"
+hardware:
+  gpuSku: l40s
+  totalGpus: 4
+  numGpusPerNode: 4
+  vramMb: 48000
+sla:
+  itl: 50.0

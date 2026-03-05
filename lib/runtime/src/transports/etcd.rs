@@ -444,7 +444,7 @@ impl Client {
                 .await
             {
                 Ok((_, watch_stream)) => {
-                    tracing::debug!("Watch stream established for prefix '{}'", prefix);
+                    tracing::debug!("Watch stream established for prefix '{prefix}'");
                     return Ok(watch_stream);
                 }
                 Err(err) => {
@@ -486,7 +486,7 @@ impl Client {
                             return true; // Exit to reconnect
                         }
                         None => {
-                            tracing::warn!("Watch stream unexpectedly closed for prefix '{}'", prefix);
+                            tracing::warn!("Watch stream unexpectedly closed for prefix '{prefix}'");
                             return true; // Exit to reconnect
                         }
                     };
@@ -495,7 +495,7 @@ impl Client {
                     *start_revision = match response.header() {
                         Some(header) => header.revision() + 1,
                         None => {
-                            tracing::error!("Missing header in watch response for prefix '{}'", prefix);
+                            tracing::error!("Missing header in watch response for prefix '{prefix}'");
                             return false;
                         }
                     };
@@ -692,14 +692,14 @@ impl KvCache {
                         WatchEvent::Delete(kv) => {
                             let key = String::from_utf8_lossy(kv.key()).to_string();
 
-                            tracing::trace!("KvCache delete: {}", key);
+                            tracing::trace!("KvCache delete: {key}");
                             let mut cache_write = cache.write().await;
                             cache_write.remove(&key);
                         }
                     }
                 }
 
-                tracing::debug!("KvCache watcher for prefix '{}' stopped", prefix);
+                tracing::debug!("KvCache watcher for prefix '{prefix}' stopped");
             });
         }
 

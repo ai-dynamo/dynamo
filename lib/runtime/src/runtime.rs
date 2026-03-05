@@ -230,7 +230,7 @@ impl Runtime {
         }
 
         let count = thread_ids.lock().len();
-        tracing::debug!("Detected {} worker threads in runtime", count);
+        tracing::debug!("Detected {count} worker threads in runtime");
         count
     }
 
@@ -318,7 +318,7 @@ impl Runtime {
             tracing::info!("Phase 2: Waiting for graceful endpoints to complete");
 
             let count = tracker.get_count();
-            tracing::info!("Active graceful endpoints: {}", count);
+            tracing::info!("Active graceful endpoints: {count}");
 
             if count != 0 {
                 tracker.wait_for_completion().await;

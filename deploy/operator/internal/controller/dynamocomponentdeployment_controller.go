@@ -33,6 +33,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"emperror.dev/errors"
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/common"
@@ -69,13 +70,15 @@ const (
 type DynamoComponentDeploymentReconciler struct {
 	client.Client
 	Recorder              record.EventRecorder
-	Config                commonController.Config
+	Config                *configv1alpha1.OperatorConfiguration
+	RuntimeConfig         *commonController.RuntimeConfig
 	DockerSecretRetriever dockerSecretRetriever
 }
 
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamocomponentdeployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamocomponentdeployments/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamocomponentdeployments/finalizers,verbs=update
+// +kubebuilder:rbac:groups=nvidia.com,resources=dynamocheckpoints,verbs=get;list
 
 //+kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
@@ -179,7 +182,7 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 
 	// Create the appropriate workload resource based on deployment type
 	var componentReconcileResult ComponentReconcileResult
-	if r.Config.LWS.Enabled && dynamoComponentDeployment.IsMultinode() {
+	if r.RuntimeConfig.LWSEnabled && dynamoComponentDeployment.IsMultinode() {
 		componentReconcileResult, err = r.reconcileLeaderWorkerSetResources(ctx, dynamoComponentDeployment)
 	} else {
 		componentReconcileResult, err = r.reconcileDeploymentResources(ctx, dynamoComponentDeployment)
@@ -820,7 +823,7 @@ func (r *DynamoComponentDeploymentReconciler) createOrUpdateOrDeleteIngress(ctx 
 	if err != nil {
 		return false, err
 	}
-	if r.Config.IngressConfig.UseVirtualService() {
+	if r.Config.Ingress.UseVirtualService() {
 		modified_, _, err := commonController.SyncResource(ctx, r, opt.dynamoComponentDeployment, func(ctx context.Context) (*networkingv1beta1.VirtualService, bool, error) {
 			return r.generateVirtualService(ctx, opt)
 		})
@@ -951,6 +954,17 @@ func (r *DynamoComponentDeploymentReconciler) generateDeployment(ctx context.Con
 		}
 	}
 
+	// Checkpoint-restore pods must avoid overlap with prior replicas.
+	// Enforce Recreate whenever the rendered template is a restore target so
+	// the old pod is terminated before the restore placeholder is started.
+	if podTemplateSpec != nil &&
+		podTemplateSpec.Labels != nil &&
+		podTemplateSpec.Labels[commonconsts.KubeLabelIsRestoreTarget] == commonconsts.KubeLabelValueTrue {
+		strategy = appsv1.DeploymentStrategy{
+			Type: appsv1.RecreateDeploymentStrategyType,
+		}
+	}
+
 	kubeDeployment.Spec = appsv1.DeploymentSpec{
 		Replicas: opt.dynamoComponentDeployment.Spec.Replicas,
 		Selector: &metav1.LabelSelector{
@@ -1053,6 +1067,19 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 		maps.Copy(podAnnotations, extraPodMetadata.Annotations)
 		maps.Copy(podLabels, extraPodMetadata.Labels)
 	}
+	// Restore labels are operator-controlled. Clear any stale/user-provided
+	// value after metadata merge; the controller re-adds it only when the
+	// checkpoint contract below is satisfied.
+	delete(podLabels, commonconsts.KubeLabelIsRestoreTarget)
+
+	// Explicit restore orchestration contract:
+	// only mark pods as restore targets when checkpoint material is ready.
+	if checkpointInfo != nil && checkpointInfo.Enabled && checkpointInfo.Ready {
+		podLabels[commonconsts.KubeLabelIsRestoreTarget] = commonconsts.KubeLabelValueTrue
+		if checkpointInfo.Hash != "" {
+			podLabels[commonconsts.KubeLabelCheckpointHash] = checkpointInfo.Hash
+		}
+	}
 
 	// Propagate restart annotation to pod template to trigger rolling restart
 	// This is the same mechanism used by kubectl rollout restart
@@ -1097,7 +1124,7 @@ func (r *DynamoComponentDeploymentReconciler) generateService(opt generateResour
 		},
 	}
 
-	isK8sDiscovery := r.Config.IsK8sDiscoveryEnabled(dcd.Spec.Annotations)
+	isK8sDiscovery := commonController.IsK8sDiscoveryEnabled(r.Config.Discovery.Backend, dcd.Spec.Annotations)
 
 	if !(isK8sDiscovery || dcd.IsFrontendComponent()) {
 		return deleteStub, true, nil
@@ -1141,9 +1168,9 @@ func (r *DynamoComponentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager)
 		Owns(&corev1.Service{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Owns(&networkingv1.Ingress{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Owns(&corev1.PersistentVolumeClaim{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
-		WithEventFilter(commonController.EphemeralDeploymentEventFilter(r.Config))
+		WithEventFilter(commonController.EphemeralDeploymentEventFilter(r.Config, r.RuntimeConfig))
 
-	if r.Config.LWS.Enabled {
+	if r.RuntimeConfig.LWSEnabled {
 		m.Owns(&leaderworkersetv1.LeaderWorkerSet{}, builder.WithPredicates(predicate.Funcs{
 			// ignore creation cause we don't want to be called again after we create the LeaderWorkerSet
 			CreateFunc:  func(ce event.CreateEvent) bool { return false },
@@ -1160,7 +1187,7 @@ func (r *DynamoComponentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager)
 			}))
 	}
 
-	if r.Config.IngressConfig.UseVirtualService() {
+	if r.Config.Ingress.UseVirtualService() {
 		m.Owns(&networkingv1beta1.VirtualService{}, builder.WithPredicates(predicate.GenerationChangedPredicate{}))
 	}
 	m.Owns(&autoscalingv2.HorizontalPodAutoscaler{})

@@ -19,7 +19,7 @@ limitations under the License.
 
 A Helm chart for NVIDIA Dynamo Platform.
 
-![Version: 1.0.0-dev](https://img.shields.io/badge/Version-1.0.0--dev-informational?style=flat-square) ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square)
+![Version: 1.0.0](https://img.shields.io/badge/Version-1.0.0-informational?style=flat-square) ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square)
 
 ## 🚀 Overview
 
@@ -97,18 +97,23 @@ The chart includes built-in validation to prevent all operator conflicts:
 
 | Repository | Name | Version |
 |------------|------|---------|
-| file://components/operator | dynamo-operator | 1.0.0-dev |
+| file://components/operator | dynamo-operator | 1.0.0 |
 | https://charts.bitnami.com/bitnami | etcd | 12.0.18 |
 | https://nats-io.github.io/k8s/helm/charts/ | nats | 1.3.2 |
 | oci://ghcr.io/ai-dynamo/grove | grove(grove-charts) | v0.1.0-alpha.6 |
-| oci://ghcr.io/nvidia/kai-scheduler | kai-scheduler | v0.9.4 |
+| oci://ghcr.io/nvidia/kai-scheduler | kai-scheduler | v0.13.0-rc1 |
 
 ## Values
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | global.etcd.install | bool | `false` | Whether this chart should install the bundled etcd subchart. When true, deploys etcd and auto-configures the operator with its address. When false, etcd is not deployed. Use dynamo-operator.etcdAddr to point at an external instance if you are bringing your own etcd. |
+| global.kai-scheduler.install | bool | `false` | Whether this chart should install the bundled kai-scheduler subchart. When true, deploys kai-scheduler and its CRDs. Integration is automatically enabled. NOTE: For production environments, it is recommended to install kai-scheduler separately. |
+| global.kai-scheduler.enabled | bool | `false` | Whether to enable Kai Scheduler integration (queue creation, schedulerName injection). Set to true when kai-scheduler is available in the cluster (installed externally). Automatically enabled when install=true. The operator uses this to decide whether to inject schedulerName and queue labels into pod templates. |
+| global.grove.install | bool | `false` | Whether this chart should install the bundled Grove subchart. When true, deploys the Grove operator cluster-wide. Integration is automatically enabled. NOTE: For production environments, it is recommended to install Grove separately. |
+| global.grove.enabled | bool | `false` | Whether to enable Grove integration (multinode orchestration via PodCliqueSets). Set to true when Grove is available in the cluster (installed externally). Automatically true when install=true. The operator uses this to decide whether to create PodCliqueSets for multinode deployments. |
 | dynamo-operator.enabled | bool | `true` | Whether to enable the Dynamo Kubernetes operator deployment |
+| dynamo-operator.upgradeCRD | bool | `true` | Whether to manage CRDs via a pre-install/pre-upgrade hook Job. The Job runs the operator image with the crd-apply tool to apply CRDs via server-side apply. |
 | dynamo-operator.natsAddr | string | `""` | NATS server address for operator communication (leave empty to use the bundled NATS chart). Format: "nats://hostname:port" |
 | dynamo-operator.etcdAddr | string | `""` | etcd server address for an external etcd instance. Only needed when using external etcd without the bundled subchart. Format: "http://hostname:port" or "https://hostname:port" |
 | dynamo-operator.nats.enabled | bool | `true` | Whether the NATS is enabled |
@@ -161,21 +166,16 @@ The chart includes built-in validation to prevent all operator conflicts:
 | dynamo-operator.webhook.certManager.certificate.rootCA.duration | string | `"87600h"` | Duration for the root CA certificate (e.g., "87600h" for 10 years). The root CA typically has a much longer lifetime than the leaf certificates it signs. |
 | dynamo-operator.webhook.certManager.certificate.rootCA.renewBefore | string | `"720h"` | Time before root CA expiration to trigger renewal (e.g., "720h" for 30 days). Renewing a CA can be disruptive as all signed certificates must be reissued. |
 | dynamo-operator.checkpoint.enabled | bool | `false` | Whether to enable checkpoint/restore functionality |
-| dynamo-operator.checkpoint.initContainerImage | string | `"busybox:latest"` | Image used for init containers in checkpoint jobs (e.g., signal file cleanup) |
 | dynamo-operator.checkpoint.readyForCheckpointFilePath | string | `"/tmp/ready-for-checkpoint"` | Path written by worker when model is loaded and ready for checkpointing |
-| dynamo-operator.checkpoint.restoreMarkerFilePath | string | `"/tmp/dynamo-restored"` | Path written by restore-entrypoint after successful CRIU restore |
 | dynamo-operator.checkpoint.storage.type | string | `"pvc"` | Storage backend type: pvc, s3, or oci |
-| dynamo-operator.checkpoint.storage.signalHostPath | string | `"/var/lib/chrek/signals"` | Host path for signal files (communication between checkpoint pod and DaemonSet) |
 | dynamo-operator.checkpoint.storage.pvc.pvcName | string | `"chrek-pvc"` | Name of the PVC created by the chrek chart |
 | dynamo-operator.checkpoint.storage.pvc.basePath | string | `"/checkpoints"` | Base path within the PVC for storing checkpoints |
 | dynamo-operator.checkpoint.storage.s3.uri | string | `""` | S3 URI in format: s3://[endpoint/]bucket/prefix |
 | dynamo-operator.checkpoint.storage.s3.credentialsSecretRef | string | `""` | Reference to a secret containing AWS credentials |
 | dynamo-operator.checkpoint.storage.oci.uri | string | `""` | OCI URI in format: oci://registry/repository |
 | dynamo-operator.checkpoint.storage.oci.credentialsSecretRef | string | `""` | Reference to a docker config secret for registry authentication |
-| grove.enabled | bool | `false` | Whether to enable Grove for multi-node inference coordination, if enabled, the Grove operator will be deployed cluster-wide |
 | grove.tolerations | list | `[]` | Node tolerations for Grove pods |
 | grove.affinity | object | `{}` | Affinity for Grove pods |
-| kai-scheduler.enabled | bool | `false` | Whether to enable Kai Scheduler for intelligent resource allocation, if enabled, the Kai Scheduler operator will be deployed cluster-wide |
 | kai-scheduler.global.tolerations | list | `[]` | Node tolerations for kai-scheduler pods |
 | kai-scheduler.global.affinity | object | `{}` | Affinity for kai-scheduler pods |
 | etcd.image.repository | string | `"bitnamilegacy/etcd"` | following bitnami announcement for brownout - https://github.com/bitnami/charts/tree/main/bitnami/etcd#%EF%B8%8F-important-notice-upcoming-changes-to-the-bitnami-catalog, we need to use the legacy repository until we migrate to the new "secure" repository |
@@ -208,9 +208,41 @@ dynamo-operator:
 For detailed etcd configuration options, please refer to the official Bitnami etcd Helm chart documentation:
 **[etcd Helm Chart Documentation](https://github.com/bitnami/charts/tree/main/bitnami/etcd)**
 
+### Kai Scheduler and Grove Configuration
+
+For **production environments**, Kai Scheduler and Grove should be installed separately from this chart to allow independent lifecycle management, version pinning, and upgrade control.
+
+**Compatibility Matrix:**
+
+| dynamo-platform | kai-scheduler | Grove |
+|-----------------|---------------|-------|
+| 1.0.x           | >= v0.13.0    | >= v0.1.0-alpha.6 |
+
+After installing them separately, enable Dynamo integration:
+
+```yaml
+global:
+  kai-scheduler:
+    enabled: true   # Enables queue creation and schedulerName injection
+  grove:
+    enabled: true   # Enables multinode orchestration via PodCliqueSets
+```
+
+For **development/testing only**, you can deploy them as bundled subcharts:
+
+```yaml
+global:
+  kai-scheduler:
+    install: true   # Deploys the bundled kai-scheduler subchart (integration auto-enabled)
+  grove:
+    install: true   # Deploys the bundled Grove subchart (integration auto-enabled)
+```
+
+Note: `global.*.install` controls whether the bundled subcharts are deployed. When set, integration is automatically enabled. `global.*.enabled` can be set independently when using externally-managed installations.
+
 ## 📚 Additional Resources
 
-- [Dynamo Cloud Deployment Installation Guide](../../../../docs/pages/kubernetes/installation-guide.md)
+- [Dynamo Cloud Deployment Installation Guide](../../../../docs/kubernetes/installation-guide.md)
 - [NATS Documentation](https://docs.nats.io/)
 - [etcd Documentation](https://etcd.io/docs/)
 - [Kubernetes Operator Pattern](https://kubernetes.io/docs/concepts/extend-kubernetes/operator/)

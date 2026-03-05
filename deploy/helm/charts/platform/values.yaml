@@ -21,12 +21,38 @@ global:
     # When false, etcd is not deployed. Use dynamo-operator.etcdAddr to point at an external instance if you are bringing your own etcd.
     install: false
 
+  kai-scheduler:
+    # -- Whether this chart should install the bundled kai-scheduler subchart.
+    # When true, deploys kai-scheduler and its CRDs. Integration is automatically enabled.
+    # NOTE: For production environments, it is recommended to install kai-scheduler separately.
+    install: false
+    # -- Whether to enable Kai Scheduler integration (queue creation, schedulerName injection).
+    # Set to true when kai-scheduler is available in the cluster (installed externally).
+    # Automatically enabled when install=true. The operator uses this to decide whether to
+    # inject schedulerName and queue labels into pod templates.
+    enabled: false
+
+  grove:
+    # -- Whether this chart should install the bundled Grove subchart.
+    # When true, deploys the Grove operator cluster-wide. Integration is automatically enabled.
+    # NOTE: For production environments, it is recommended to install Grove separately.
+    install: false
+    # -- Whether to enable Grove integration (multinode orchestration via PodCliqueSets).
+    # Set to true when Grove is available in the cluster (installed externally).
+    # Automatically true when install=true. The operator uses this to decide whether to
+    # create PodCliqueSets for multinode deployments.
+    enabled: false
+
 # Subcharts configuration
 
 # Dynamo operator configuration
 dynamo-operator:
   # -- Whether to enable the Dynamo Kubernetes operator deployment
   enabled: true
+
+  # -- Whether to manage CRDs via a pre-install/pre-upgrade hook Job.
+  # The Job runs the operator image with the crd-apply tool to apply CRDs via server-side apply.
+  upgradeCRD: true
 
   # -- NATS server address for operator communication (leave empty to use the bundled NATS chart). Format: "nats://hostname:port"
   natsAddr: ""
@@ -219,14 +245,8 @@ dynamo-operator:
     # -- Whether to enable checkpoint/restore functionality
     enabled: false
 
-    # -- Image used for init containers in checkpoint jobs (e.g., signal file cleanup)
-    initContainerImage: "busybox:latest"
-
     # -- Path written by worker when model is loaded and ready for checkpointing
     readyForCheckpointFilePath: "/tmp/ready-for-checkpoint"
-
-    # -- Path written by restore-entrypoint after successful CRIU restore
-    restoreMarkerFilePath: "/tmp/dynamo-restored"
 
     # Storage configuration
     # These settings tell the operator where to find checkpoint storage
@@ -234,9 +254,6 @@ dynamo-operator:
     storage:
       # -- Storage backend type: pvc, s3, or oci
       type: pvc
-
-      # -- Host path for signal files (communication between checkpoint pod and DaemonSet)
-      signalHostPath: "/var/lib/chrek/signals"
 
       # PVC storage configuration (used when type=pvc)
       pvc:
@@ -260,18 +277,17 @@ dynamo-operator:
         credentialsSecretRef: ""
 
 # Grove component - distributed inference orchestration
+# Installation is controlled by global.grove.install above.
 grove:
-  # -- Whether to enable Grove for multi-node inference coordination, if enabled, the Grove operator will be deployed cluster-wide
-  enabled: false
   # -- Node tolerations for Grove pods
   tolerations: []
   # -- Affinity for Grove pods
   affinity: {}
 
 # Kai Scheduler component - advanced workload scheduling
+# Installation is controlled by global.kai-scheduler.install above.
+# Integration is controlled by global.kai-scheduler.enabled above.
 kai-scheduler:
-  # -- Whether to enable Kai Scheduler for intelligent resource allocation, if enabled, the Kai Scheduler operator will be deployed cluster-wide
-  enabled: false
   # Global configuration for kai-scheduler (applies to all components including crd-upgrader)
   global:
     # -- Node tolerations for kai-scheduler pods

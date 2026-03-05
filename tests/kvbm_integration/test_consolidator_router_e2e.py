@@ -354,8 +354,8 @@ def llm_worker(frontend_server, test_directory, runtime_services, engine_type):
             "dynamo.vllm",
             "--model",
             model_id,
-            "--connector",
-            "kvbm",
+            "--kv-transfer-config",
+            '{"kv_connector":"DynamoConnector","kv_connector_module_path":"kvbm.vllm_integration.connector","kv_role":"kv_both"}',
             "--enforce-eager",  # For faster startup in tests
         ]
     else:  # trtllm
@@ -777,8 +777,8 @@ class TestConsolidatorRouterE2E:
                     "dynamo.vllm",
                     "--model",
                     model_id,
-                    "--connector",
-                    "kvbm",
+                    "--kv-transfer-config",
+                    '{"kv_connector":"DynamoConnector","kv_connector_module_path":"kvbm.vllm_integration.connector","kv_role":"kv_both"}',
                     "--enforce-eager",
                     "--enable-prefix-caching",
                     "--num-gpu-blocks-override",

@@ -161,7 +161,8 @@ spec:
           args:
           - --model
           - Qwen/Qwen3-0.6B
-          - --is-prefill-worker
+          - --disaggregation-mode
+          - prefill
           - --tensor-parallel-size
           - "1"
           - --gpu-memory-utilization
@@ -226,7 +227,8 @@ spec:
           args:
           - --model
           - Qwen/Qwen3-0.6B
-          - --is-prefill-worker
+          - --disaggregation-mode
+          - prefill
           - --tensor-parallel-size
           - "1"
           - --gpu-memory-utilization

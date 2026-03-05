@@ -17,24 +17,10 @@ type TRTLLMBackend struct {
 	MpiRunSecretName string
 }
 
-// shellQuoteForBashC quotes a string for safe use inside a single-quoted bash -c '...' command.
-// Since the outer context is already single-quoted, we CANNOT use single quotes here.
-// Instead, we use double quotes and escape characters that are special inside double quotes:
-// backslash, double quote, dollar sign, and backtick.
-// Any embedded single quotes are also escaped (\') since the result lives inside bash -c '...'.
-func shellQuoteForBashC(s string) string {
-	if strings.ContainsAny(s, " \t\n'\"\\{}[]$`!") {
-		escaped := s
-		escaped = strings.ReplaceAll(escaped, `\`, `\\`) // must be first
-		escaped = strings.ReplaceAll(escaped, `"`, `\"`)
-		escaped = strings.ReplaceAll(escaped, `$`, `\$`)
-		escaped = strings.ReplaceAll(escaped, "`", "\\`")
-		escaped = strings.ReplaceAll(escaped, "'", `'"'"'`) // end single-quote, literal ', restart single-quote
-		return `"` + escaped + `"`
-	}
-	return s
-}
-
+// UpdateContainer configures the container for TRT-LLM multinode deployments.
+// For single-node deployments it is a no-op. For multinode, it mounts the SSH
+// keypair secret and injects the appropriate SSH setup and launch commands for
+// leader (mpirun) and worker (sshd) roles.
 func (b *TRTLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
 	// Check for volumeMounts with useAsCompilationCache=true
 	for _, volumeMount := range component.VolumeMounts {
@@ -92,7 +78,9 @@ func (b *TRTLLMBackend) UpdateContainer(container *corev1.Container, numberOfNod
 	}
 }
 
-func (b *TRTLLMBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentSharedSpec, serviceName string) {
+// UpdatePodSpec injects the SSH keypair volume into the pod spec for TRT-LLM
+// multinode deployments so that leader and worker containers can mount it.
+func (b *TRTLLMBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
 	// Add SSH keypair volume for TRTLLM multinode deployments
 	if numberOfNodes > 1 {
 		sshVolume := corev1.Volume{
@@ -205,7 +193,7 @@ func (b *TRTLLMBackend) setupWorkerContainer(container *corev1.Container) {
 	// Setup SSH for worker nodes
 	// Use $HOME instead of ~ for the same reasons as setupLeaderContainer (see comment above).
 	sshSetupCommands := []string{
-		"mkdir -p $HOME/.ssh $HOME/.ssh/host_keys $HOME/.ssh/run /run/sshd",
+		"mkdir -p $HOME/.ssh $HOME/.ssh/host_keys $HOME/.ssh/run",
 		"ls -la /ssh-pk/", // Debug: list files in ssh-pk directory
 		"cp /ssh-pk/private.key $HOME/.ssh/id_rsa",
 		"cp /ssh-pk/private.key.pub $HOME/.ssh/id_rsa.pub",
@@ -224,6 +212,10 @@ func (b *TRTLLMBackend) setupWorkerContainer(container *corev1.Container) {
 		// relative paths from the connecting user's /etc/passwd home (-> /root/).
 		// StrictModes disabled because /home/dynamo may be owned by a non-root UID
 		// while sshd runs as root, causing permission check failures.
+		// Note: /run/sshd (the privilege separation directory) is not needed here
+		// because sshd started as a non-root user skips the privsep directory check
+		// entirely — privsep requires forking a privileged monitor process, which is
+		// only possible when sshd starts as UID 0.
 		fmt.Sprintf("printf 'Port %d\\nHostKey '$HOME'/.ssh/host_keys/ssh_host_rsa_key\\nHostKey '$HOME'/.ssh/host_keys/ssh_host_ecdsa_key\\nHostKey '$HOME'/.ssh/host_keys/ssh_host_ed25519_key\\nPidFile '$HOME'/.ssh/run/sshd.pid\\nStrictModes no\\nPermitRootLogin yes\\nPasswordAuthentication no\\nPubkeyAuthentication yes\\nAuthorizedKeysFile '$HOME'/.ssh/authorized_keys\\n' > $HOME/.ssh/sshd_config", commonconsts.MpiRunSshPort),
 		"/usr/sbin/sshd -D -f $HOME/.ssh/sshd_config",
 	}

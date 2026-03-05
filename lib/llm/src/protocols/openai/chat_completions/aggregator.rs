@@ -133,9 +133,9 @@ impl DeltaAggregator {
                     }
                 };
 
-                if aggregator.error.is_none() && delta.data.is_some() {
-                    // Extract the data payload from the delta.
-                    let delta = delta.data.unwrap();
+                if aggregator.error.is_none()
+                    && let Some(delta) = delta.data
+                {
                     aggregator.id = delta.id;
                     aggregator.model = delta.model;
                     aggregator.created = delta.created;
@@ -457,6 +457,7 @@ mod tests {
             id: Some("test_id".to_string()),
             event: None,
             comment: None,
+            error: None,
         }
     }
 
@@ -694,6 +695,7 @@ mod tests {
             id: Some("test_id".to_string()),
             event: None,
             comment: None,
+            error: None,
         };
         let stream = Box::pin(stream::iter(vec![annotated_delta]));
 
@@ -759,6 +761,7 @@ mod tests {
             id: Some("test_id".to_string()),
             event: None,
             comment: None,
+            error: None,
         };
         let stream = Box::pin(stream::iter(vec![annotated_delta]));
 
@@ -801,6 +804,7 @@ mod tests {
             id: Some("test_id".to_string()),
             event: None,
             comment: None,
+            error: None,
         };
         let stream = Box::pin(stream::iter(vec![annotated_delta]));
 
@@ -843,6 +847,7 @@ mod tests {
             id: Some("test_id".to_string()),
             event: None,
             comment: None,
+            error: None,
         };
         let stream = Box::pin(stream::iter(vec![annotated_delta]));
 
@@ -883,6 +888,7 @@ mod tests {
             id: Some("test_id".to_string()),
             event: None,
             comment: None,
+            error: None,
         };
         let stream = Box::pin(stream::iter(vec![annotated_delta]));
 
@@ -927,6 +933,7 @@ mod tests {
             id: Some("test_id".to_string()),
             event: None,
             comment: None,
+            error: None,
         };
         let stream = Box::pin(stream::iter(vec![annotated_delta]));
 
@@ -969,6 +976,7 @@ mod tests {
             id: Some("test_id".to_string()),
             event: None,
             comment: None,
+            error: None,
         };
         let stream = Box::pin(stream::iter(vec![annotated_delta]));
 

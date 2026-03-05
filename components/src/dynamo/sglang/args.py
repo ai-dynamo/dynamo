@@ -9,7 +9,6 @@ import socket
 import sys
 import tempfile
 from argparse import Namespace
-from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, Generator, Optional
 
@@ -20,18 +19,13 @@ from sglang.srt.server_args_config_parser import ConfigArgumentMerger
 from dynamo.common.config_dump import register_encoder
 from dynamo.common.configuration.groups import DynamoRuntimeConfig
 from dynamo.common.configuration.groups.runtime_args import DynamoRuntimeArgGroup
+from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.runtime import parse_endpoint
 from dynamo.llm import fetch_model
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sglang.backend_args import DynamoSGLangArgGroup, DynamoSGLangConfig
 
 configure_dynamo_logging()
-
-
-class DisaggregationMode(Enum):
-    AGGREGATED = "agg"
-    PREFILL = "prefill"
-    DECODE = "decode"
 
 
 class DynamoConfig(DynamoRuntimeConfig, DynamoSGLangConfig):
@@ -224,29 +218,8 @@ async def parse_args(args: list[str]) -> Config:
         unknown.append("--config")
         unknown.append(temp_config_file)
 
-    # Handle SGLang --config file merge if present.
     if "--config" in unknown:
-        # Merge config file arguments with CLI arguments.
-        # ConfigArgumentMerger API changed after SGLang v0.5.7:
-        # - New API (post-v0.5.7): accepts parser= for proper store_true detection
-        # - Old API (v0.5.7 and earlier): only accepts boolean_actions=
-        # We use inspect.signature to detect the API rather than version checking
-        # since unreleased builds may have the new API while still reporting v0.5.7.
-        # Related upstream issue: https://github.com/sgl-project/sglang/issues/16256
-        # Upstream fix PR: https://github.com/sgl-project/sglang/pull/16638
-        import inspect
-
-        sig = inspect.signature(ConfigArgumentMerger.__init__)
-        if "parser" in sig.parameters:
-            config_merger = ConfigArgumentMerger(parser=sglang_only_parser)
-        else:
-            # Legacy path: extract store_true actions manually
-            boolean_actions = [
-                action.dest
-                for action in sglang_only_parser._actions
-                if isinstance(action, argparse._StoreTrueAction)
-            ]
-            config_merger = ConfigArgumentMerger(boolean_actions=boolean_actions)
+        config_merger = ConfigArgumentMerger(parser=sglang_only_parser)
         unknown = config_merger.merge_config_with_args(unknown)
 
     parsed_args = sglang_only_parser.parse_args(unknown)
@@ -428,6 +401,19 @@ async def parse_args(args: list[str]) -> Config:
 
     # Auto-detect diffusion worker mode if dllm_algorithm
     diffusion_worker = server_args.dllm_algorithm is not None
+
+    # SGLang's DLLM scheduler reads server_args.max_running_requests directly
+    # but the field stays None until the normal scheduler init sets it from
+    # tp_worker.get_worker_info(). Set a safe default so the DLLM mixin
+    # doesn't crash on `None - int`.
+    # Only applies to real DLLM workers (truthy algorithm string), not
+    # video/image diffusion stubs where dllm_algorithm=False.
+    if (
+        server_args.dllm_algorithm
+        and getattr(server_args, "max_running_requests", None) is None
+    ):
+        server_args.max_running_requests = 8
+        logging.info("Defaulting max_running_requests to 8 for diffusion worker")
 
     dynamo_config.namespace = parsed_namespace
     dynamo_config.component = parsed_component_name
