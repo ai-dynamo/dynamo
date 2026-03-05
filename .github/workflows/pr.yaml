@@ -38,9 +38,7 @@ jobs:
     runs-on: prod-builder-v3
     outputs:
       target_tag_plain: ${{ steps.calculate-target-tag.outputs.target_tag_plain }}
-      # image: ${{ steps.build-and-push-image.outputs.image_uri }}
-      image: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:main-operator
-      ecr_password: ${{ steps.ecr-token.outputs.password }}
+      image: ${{ steps.set-image.outputs.image_uri }}
     env:
       FRAMEWORK: ${{ inputs.framework }}
       IMAGE_REGISTRY: ai-dynamo
@@ -51,17 +49,6 @@ jobs:
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
         with:
           lfs: false
-      - name: Calculate target tag
-        id: calculate-target-tag
-        shell: bash
-        run: |
-          CUDA_VERSION_RAW=${{ inputs.cuda_version }}
-          CUDA_VERSION=${CUDA_VERSION_RAW%%.*}
-          TARGET_TAG_PLAIN="${{ github.sha }}-${{ inputs.framework }}"
-          DEFAULT_TARGET_IMAGE_URI="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${TARGET_TAG_PLAIN}-cuda${CUDA_VERSION}-${{ inputs.platform }}"
-          echo "default_target_image_uri=${DEFAULT_TARGET_IMAGE_URI}" >> $GITHUB_OUTPUT
-          echo "target_tag_plain=${TARGET_TAG_PLAIN}" >> $GITHUB_OUTPUT
-          echo "cuda_version_plain=${CUDA_VERSION}" >> $GITHUB_OUTPUT
       - name: Docker Login
         uses: ./.github/actions/docker-login
         with:
@@ -70,54 +57,20 @@ jobs:
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-      - name: Generate ECR token
-        id: ecr-token
+      - name: Set image URI
+        id: set-image
         shell: bash
         run: |
-          PASSWORD=$(aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }})
-          echo "::add-mask::${PASSWORD}"
-          echo "password=${PASSWORD}" >> $GITHUB_OUTPUT
-      # - name: Build and push Container
-      #   id: build-and-push-image
-      #   shell: bash
-      #   working-directory: ./deploy/operator
-      #   run: |
-      #     ECR_DEFAULT_IMAGE_BASE="${ECR_HOSTNAME}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}"
-      #     DEFAULT_TAG="tmp-test"
-      #     ACR_IMAGE_BASE="${{ secrets.AZURE_ACR_HOSTNAME }}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}"
-      #     IMAGE_URIS=(
-      #       "${ECR_DEFAULT_IMAGE_BASE}:${DEFAULT_TAG}"
-      #       "${ACR_IMAGE_BASE}:${DEFAULT_TAG}"
-      #     )
-
-      #     echo "image_uri=${ECR_DEFAULT_IMAGE_BASE}:${DEFAULT_TAG}" >> $GITHUB_OUTPUT
-      #     TAGGING_FLAGS=$(printf -- '-t %s ' "${IMAGE_URIS[@]}")
-      #     echo "flags for docker buildx: ${TAGGING_FLAGS}"
-
-      #     docker buildx build --push \
-      #         --platform linux/amd64,linux/arm64 \
-      #         --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
-      #         ${TAGGING_FLAGS} -f Dockerfile .
-
-      #     echo "### 🐳 Operator Container Images" >> $GITHUB_STEP_SUMMARY
-      #     echo "" >> $GITHUB_STEP_SUMMARY
-      #     echo "| Image URI |" >> $GITHUB_STEP_SUMMARY
-      #     echo "|-----|" >> $GITHUB_STEP_SUMMARY
-      #     for image_uri in "${IMAGE_URIS[@]}"; do
-      #       echo "| \`${image_uri}\` |" >> $GITHUB_STEP_SUMMARY
-      #     done
+          IMAGE_URI="${ECR_HOSTNAME}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}:main-operator"
+          echo "image_uri=${IMAGE_URI}" >> $GITHUB_OUTPUT
 
   # ── Job Y: Run "echo hello world" inside Container A ──────────────────
   job-y:
     name: Run Hello World on Container A
     runs-on: prod-builder-v3
-    needs: job-x   # Waits for Job X to complete and output the image URI
-
+    needs: job-x
     container:
       image: ${{ needs.job-x.outputs.image }}
-      credentials:
-        username: AWS
-        password: ${{ needs.job-x.outputs.ecr_password }}
     steps:
       - name: Say Hello World
         run: echo hello world
