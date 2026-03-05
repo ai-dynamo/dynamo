@@ -517,9 +517,7 @@ class BaseWorkerHandler(BaseGenerativeHandler):
             cancellation_future = context.async_killed_or_stopped()
 
             # Build list of futures/tasks to wait for
-            wait_for: list[asyncio.Future[Any]] = [
-                asyncio.create_task(cancellation_future)
-            ]
+            wait_for: list[asyncio.Future[Any]] = [cancellation_future]
             shutdown_task = None
 
             if self.shutdown_event:

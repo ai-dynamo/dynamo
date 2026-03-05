@@ -4,7 +4,7 @@
 import asyncio
 import json
 import logging
-from typing import AsyncIterator, Optional
+from typing import Any, AsyncIterator, Optional
 
 import sglang as sgl
 import torch
@@ -127,7 +127,7 @@ class EmbeddingsProcessor:
         """
         precomputed = embeddings.to(MultimodalConfig.EMBEDDINGS_DTYPE)
 
-        mm_item = {"image_grid_thw": torch.tensor(image_grid_thw)}
+        mm_item: dict[str, Any] = {"image_grid_thw": torch.tensor(image_grid_thw)}
         mm_item.update(
             {
                 "format": "processor_output",
