@@ -412,7 +412,17 @@ class ModelDeploymentCard:
         """Deserialize a model deployment card from a JSON string."""
         ...
 
-    ...
+    def model_type(self) -> ModelType:
+        """Return the model type of this deployment card."""
+        ...
+
+    def source_path(self) -> str:
+        """Return the source path of this deployment card."""
+        ...
+
+    def runtime_config(self) -> Any:
+        """Return the runtime configuration as a dict."""
+        ...
 
 class ModelRuntimeConfig:
     """
@@ -927,7 +937,10 @@ class ModelType:
     Images: ModelType
     Audios: ModelType
     Videos: ModelType
-    ...
+
+    def supports_chat(self) -> bool:
+        """Return True if this model type supports chat."""
+        ...
 
 class RouterMode:
     """Router mode for load balancing requests across workers"""
@@ -939,6 +952,8 @@ class RouterMode:
 
 class RouterConfig:
     """How to route the request"""
+    router_mode: RouterMode
+    kv_router_config: KvRouterConfig
 
     def __init__(
         self,
@@ -982,6 +997,7 @@ class KvRouterConfig:
         router_prune_target_ratio: float = 0.8,
         router_queue_threshold: Optional[float] = None,
         router_event_threads: int = 4,
+        router_enable_cache_control: bool = False,
     ) -> None:
         """
         Create a KV router configuration.
@@ -1012,6 +1028,8 @@ class KvRouterConfig:
                 If None, queueing is disabled and all requests go directly to the scheduler.
             router_event_threads: Number of event processing threads (default: 4).
                 When > 1, uses a concurrent radix tree with a thread pool.
+            router_enable_cache_control: Enable cache control (PIN with TTL) via the worker's
+                cache_control service mesh endpoint (default: False).
         """
         ...
 

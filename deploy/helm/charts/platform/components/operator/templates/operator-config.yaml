@@ -26,6 +26,10 @@ data:
     server:
       metrics:
         bindAddress: "127.0.0.1"
+      webhook:
+        certProvisionMode: {{ if or .Values.webhook.certManager.enabled .Values.webhook.certificateSecret.external }}"manual"{{ else }}"auto"{{ end }}
+        secretName: {{ .Values.webhook.certificateSecret.name | quote }}
+        serviceName: {{ include "dynamo-operator.fullname" . }}-webhook-service
     leaderElection:
       enabled: true
       id: {{ default "dynamo.nvidia.com" .Values.controllerManager.leaderElection.id | quote }}
