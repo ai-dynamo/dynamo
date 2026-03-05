@@ -10,10 +10,16 @@ from typing import Any, Optional
 
 from tensorrt_llm import LLM, MultimodalEncoder
 from tensorrt_llm.llmapi.llm import BaseLLM
+from transformers import AutoConfig
 
 from dynamo.trtllm.constants import DisaggregationMode
 
 logger = logging.getLogger(__name__)
+
+# Model architectures without standalone encoder support in TRT-LLM
+# (missing @register_vision_encoder). These handle vision encoding
+# inside the main model (prefill/decode) instead.
+_UNSUPPORTED_STANDALONE_ENCODER_ARCHS = {"Llama4ForConditionalGeneration"}
 
 
 class Backend(str, enum.Enum):
@@ -53,6 +59,11 @@ class TensorRTLLMEngine:
 
         self.engine_args = engine_args
 
+    @property
+    def encoder_available(self) -> bool:
+        """Whether the multimodal encoder LLM is initialized."""
+        return self._llm is not None
+
     async def initialize(self) -> None:
         if not self._llm:
             if self.disaggregation_mode == DisaggregationMode.ENCODE:
@@ -61,8 +72,14 @@ class TensorRTLLMEngine:
                 # (model, backend settings, kv cache config, etc.). ENCODE workers instead use
                 # TRT-LLM's `MultimodalEncoder`, which has a different constructor surface.
                 # We intentionally pass only the supported parameters to avoid unexpected kwargs.
-                max_batch_size = self.engine_args.get("max_batch_size", 1)
                 model = self.engine_args.get("model")
+
+                # Skip MultimodalEncoder for architectures that handle vision
+                # encoding inside the main model (e.g. Llama4).
+                if self._is_unsupported_encoder_arch(model):
+                    return
+
+                max_batch_size = self.engine_args.get("max_batch_size", 1)
                 logging.info(
                     f"Initializing multimodal encoder with max_batch_size: {max_batch_size}"
                 )
@@ -135,6 +152,17 @@ class TensorRTLLMEngine:
             "`%s` cannot be used with the `_autodeploy` backend. Ignoring.",
             field_name,
         )
+
+    @staticmethod
+    def _is_unsupported_encoder_arch(model_path: str) -> bool:
+        """Return True if *model_path*'s architecture is not supported by
+        TRT-LLM's standalone MultimodalEncoder."""
+        try:
+            config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+            archs = getattr(config, "architectures", None) or []
+            return any(a in _UNSUPPORTED_STANDALONE_ENCODER_ARCHS for a in archs)
+        except Exception:
+            return False
 
 
 @asynccontextmanager

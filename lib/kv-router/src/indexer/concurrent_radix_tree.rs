@@ -32,7 +32,7 @@ use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::indexer::{SyncIndexer, WorkerTask};
+use super::{SyncIndexer, WorkerTask};
 use crate::protocols::*;
 
 /// Thread-safe shared reference to a Block.
@@ -515,6 +515,25 @@ impl ConcurrentRadixTree {
         }
     }
 
+    fn remove_worker_dp_rank(
+        &self,
+        lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
+        worker_id: WorkerId,
+        dp_rank: DpRank,
+    ) {
+        let key = WorkerWithDpRank { worker_id, dp_rank };
+        if let Some(worker_lookup) = lookup.remove(&key) {
+            for (_, block) in worker_lookup.into_iter() {
+                let mut guard = block.write();
+                guard.workers.remove(&key);
+                if guard.workers.is_empty() {
+                    guard.children.clear();
+                }
+            }
+            self.tree_sizes.remove(&key);
+        }
+    }
+
     /// Clear all blocks for a worker but keep the worker tracked.
     fn clear_all_blocks(
         &self,
@@ -615,6 +634,9 @@ impl SyncIndexer for ConcurrentRadixTree {
                 }
                 WorkerTask::RemoveWorker(worker_id) => {
                     self.remove_or_clear_worker_blocks(&mut lookup, worker_id, false);
+                }
+                WorkerTask::RemoveWorkerDpRank(worker_id, dp_rank) => {
+                    self.remove_worker_dp_rank(&mut lookup, worker_id, dp_rank);
                 }
                 WorkerTask::DumpEvents(_sender) => {
                     // Handled directly via dump_events() on the shared tree.
