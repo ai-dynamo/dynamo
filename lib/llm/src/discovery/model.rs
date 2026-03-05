@@ -154,14 +154,18 @@ impl Model {
 
     /// Whether this model should be visible in /v1/models.
     pub fn is_displayable(&self) -> bool {
-        let has_any_serving_engine = self.worker_sets.iter().any(|entry| {
-            let ws = entry.value();
+        let has_serving_engine = |ws: &WorkerSet| {
             ws.has_chat_engine()
                 || ws.has_completions_engine()
                 || ws.has_embeddings_engine()
                 || ws.has_images_engine()
                 || ws.has_tensor_engine()
                 || ws.has_videos_engine()
+        };
+
+        let has_any_serving_engine = self.worker_sets.iter().any(|entry| {
+            let ws = entry.value();
+            has_serving_engine(ws.as_ref())
         });
 
         self.worker_sets.iter().any(|entry| {
@@ -169,13 +173,7 @@ impl Model {
             if ws.worker_count() == 0 {
                 return false;
             }
-            ws.has_chat_engine()
-                || ws.has_completions_engine()
-                || ws.has_embeddings_engine()
-                || ws.has_images_engine()
-                || ws.has_tensor_engine()
-                || ws.has_videos_engine()
-                || (!has_any_serving_engine && ws.is_prefill_set())
+            has_serving_engine(ws.as_ref()) || (!has_any_serving_engine && ws.is_prefill_set())
         })
     }
 
