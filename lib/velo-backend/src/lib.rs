@@ -328,6 +328,11 @@ impl VeloBackend {
             .cloned()
             .collect::<Vec<TransportKey>>();
 
+        assert!(
+            !sorted_transports.is_empty(),
+            "failed to properly sort compatible transports"
+        );
+
         let primary_transport_key = sorted_transports[0].clone();
         let alternative_transport_keys = sorted_transports[1..].to_vec();
 
