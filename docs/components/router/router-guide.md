@@ -347,6 +347,7 @@ Persistence behavior depends on which event transport mode is active:
 - On startup, the router queries each worker's local indexer to rebuild state
 - Recovery depends on workers being available; if a worker is down, its blocks cannot be recovered
 - Simpler infrastructure (no JetStream required)
+- For more info on how the local indexer handles gap detection and replay (and how it compares to vLLM's approach), see [KV Event Replay — Dynamo vs vLLM](kv-event-replay-comparison.md)
 
 **JetStream Mode** (`--router-durable-kv-events` on **both** frontend **and** workers):
 - Prefix blocks are stored in NATS JetStream with 1-hour retention
@@ -392,6 +393,7 @@ The cli args `--router-ttl-secs`, `--router-max-tree-size`, and `--router-prune-
 - **[Router README](README.md)**: Quick start guide for the KV Router
 - **[Router Examples](router-examples.md)**: Python API usage, K8s examples, and custom routing patterns
 - **[KV Router Index Data Structures](../../../lib/kv-router/src/indexer/README.md)**: `RadixTree`, `ConcurrentRadixTree`, and `PositionalIndexer` internals and concurrency model
+- **[KV Event Replay — Dynamo vs vLLM](kv-event-replay-comparison.md)**: How Dynamo's local indexer compares to vLLM's replay buffer for gap detection and recovery
 - **[Router Design](../../design-docs/router-design.md)**: Architecture details and event transport modes
 - **[KV Event Publishing for Custom Engines](../../integrations/kv-events-custom-engines.md)**: Integrate custom inference engines with KV-aware routing
 - **[Prometheus and Grafana Setup](../../observability/prometheus-grafana.md)**: General Prometheus/Grafana configuration
