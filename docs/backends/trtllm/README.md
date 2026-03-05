@@ -4,28 +4,13 @@
 title: TensorRT-LLM
 ---
 
-This directory contains examples and reference implementations for deploying Large Language Models (LLMs) in various configurations using TensorRT-LLM.
-
 ## Use the Latest Release
 
 We recommend using the [latest stable release](https://github.com/ai-dynamo/dynamo/releases/latest) of Dynamo to avoid breaking changes.
 
 ---
 
-## Table of Contents
-- [Feature Support Matrix](#feature-support-matrix)
-- [Quick Start](#quick-start)
-- [Single Node Examples](#single-node-examples)
-- [Advanced Examples](#advanced-examples)
-- [KV Cache Transfer](#kv-cache-transfer-in-disaggregated-serving)
-- [Client](#client)
-- [Benchmarking](#benchmarking)
-- [Multimodal Support](#multimodal-support)
-- [Video Diffusion Support](#video-diffusion-support-experimental)
-- [Logits Processing](#logits-processing)
-- [DP Rank Routing](#dp-rank-routing-attention-data-parallelism)
-- [Performance Sweep](#performance-sweep)
-- [Known Issues and Mitigations](#known-issues-and-mitigations)
+Dynamo TensorRT-LLM integrates [TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM) engines into Dynamo's distributed runtime, enabling disaggregated serving, KV-aware routing, multi-node deployments, and request cancellation. It supports LLM inference, multimodal models, video diffusion, and advanced features like speculative decoding and attention data parallelism.
 
 ## Feature Support Matrix
 
@@ -48,341 +33,58 @@ We recommend using the [latest stable release](https://github.com/ai-dynamo/dyna
 | **DP Rank Routing**| ✅           |                                                                 |
 | **GB200 Support**  | ✅           |                                                                 |
 
-## TensorRT-LLM Quick Start
+## Quick Start
 
-Below we provide a guide that lets you run all of our the common deployment patterns on a single node.
-
-### Start Infrastructure Services (Local Development Only)
-
-For local/bare-metal development, start etcd and optionally NATS using [Docker Compose](https://github.com/ai-dynamo/dynamo/tree/main/deploy/docker-compose.yml):
+**Step 1 (host terminal):** Start infrastructure services:
 
 ```bash
 docker compose -f deploy/docker-compose.yml up -d
 ```
 
+**Step 2 (host terminal):** Pull and run the prebuilt container:
+
+```bash
+DYNAMO_VERSION=0.9.0
+docker pull nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:$DYNAMO_VERSION
+docker run --gpus all -it --network host --ipc host \
+  nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:$DYNAMO_VERSION
+```
+
 > [!NOTE]
-> - **etcd** is optional but is the default local discovery backend. You can also use `--discovery-backend file` to use file system based discovery.
-> - **NATS** is optional - only needed if using KV routing with events. Workers must be explicitly configured to publish events. Use `--no-router-kv-events` on the frontend for prediction-based routing without events
-> - **On Kubernetes**, neither is required when using the Dynamo operator, which explicitly sets `DYN_DISCOVERY_BACKEND=kubernetes` to enable native K8s service discovery (DynamoWorkerMetadata CRD)
+> The `DYNAMO_VERSION` variable above can be set to any specific available version of the container.
+> To find the available `tensorrtllm-runtime` versions for Dynamo, visit the [NVIDIA NGC Catalog for Dynamo TensorRT-LLM Runtime](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/tensorrtllm-runtime).
 
-### Build container
+**Step 3 (inside the container):** Launch an aggregated serving deployment (uses `Qwen/Qwen3-0.6B` by default):
 
-```bash
-# TensorRT-LLM uses git-lfs, which needs to be installed in advance.
-apt-get update && apt-get -y install git git-lfs
-
-# On an x86 machine:
-python container/render.py --framework=trtllm --target=runtime --output-short-filename --cuda-version=13.1
-docker build -t dynamo:trtllm-latest -f container/rendered.Dockerfile .
-
-# On an ARM machine:
-python container/render.py --framework=trtllm --target=runtime --platform=arm64 --output-short-filename --cuda-version=13.1
-docker build -t dynamo:trtllm-latest -f container/rendered.Dockerfile .
-```
-
-### Run container
-
-```bash
-./container/run.sh --framework trtllm -it
-```
-
-## Single Node Examples
-
-> [!IMPORTANT]
-> Below we provide some simple shell scripts that run the components for each configuration. Each shell script is simply running the `python3 -m dynamo.frontend <args>` to start up the ingress and using `python3 -m dynamo.trtllm <args>` to start up the workers. You can easily take each command and run them in separate terminals.
-
-For detailed information about the architecture and how KV-aware routing works, see the [Router Guide](../../components/router/router-guide.md).
-
-### Aggregated
 ```bash
 cd $DYNAMO_HOME/examples/backends/trtllm
 ./launch/agg.sh
 ```
 
-### Aggregated with KV Routing
-```bash
-cd $DYNAMO_HOME/examples/backends/trtllm
-./launch/agg_router.sh
-```
+The launch script will automatically download the model and start the TensorRT-LLM engine. You can override the model by setting `MODEL_PATH` and `SERVED_MODEL_NAME` environment variables before running the script.
 
-### Disaggregated
+**Step 4 (host terminal):** Verify the deployment:
 
 ```bash
-cd $DYNAMO_HOME/examples/backends/trtllm
-./launch/disagg.sh
-```
-
-### Disaggregated with KV Routing
-
-> [!IMPORTANT]
-> In disaggregated workflow, requests are routed to the prefill worker to maximize KV cache reuse.
-
-```bash
-cd $DYNAMO_HOME/examples/backends/trtllm
-./launch/disagg_router.sh
-```
-
-### Aggregated with Multi-Token Prediction (MTP) and DeepSeek R1
-```bash
-cd $DYNAMO_HOME/examples/backends/trtllm
-
-export AGG_ENGINE_ARGS=./engine_configs/deepseek-r1/agg/mtp/mtp_agg.yaml
-export SERVED_MODEL_NAME="nvidia/DeepSeek-R1-FP4"
-# nvidia/DeepSeek-R1-FP4 is a large model
-export MODEL_PATH="nvidia/DeepSeek-R1-FP4"
-./launch/agg.sh
-```
-
-Notes:
-- There is a noticeable latency for the first two inference requests. Please send warm-up requests before starting the benchmark.
-- MTP performance may vary depending on the acceptance rate of predicted tokens, which is dependent on the dataset or queries used while benchmarking. Additionally, `ignore_eos` should generally be omitted or set to `false` when using MTP to avoid speculating garbage outputs and getting unrealistic acceptance rates.
-
-## Advanced Examples
-
-Below we provide a selected list of advanced examples. Please open up an issue if you'd like to see a specific example!
-
-### Multinode Deployment
-
-For comprehensive instructions on multinode serving, see the [multinode-examples.md](./multinode/multinode-examples.md) guide. It provides step-by-step deployment examples and configuration tips for running Dynamo with TensorRT-LLM across multiple nodes. While the walkthrough uses DeepSeek-R1 as the model, you can easily adapt the process for any supported model by updating the relevant configuration files. You can see [Llama4+eagle](./llama4-plus-eagle.md) guide to learn how to use these scripts when a single worker fits on the single node.
-
-### Speculative Decoding
-- **[Llama 4 Maverick Instruct + Eagle Speculative Decoding](./llama4-plus-eagle.md)**
-
-### Kubernetes Deployment
-
-For complete Kubernetes deployment instructions, configurations, and troubleshooting, see [TensorRT-LLM Kubernetes Deployment Guide](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm/deploy/README.md).
-
-### Client
-
-See [client](../sglang/README.md#testing-the-deployment) section to learn how to send request to the deployment.
-
-NOTE: To send a request to a multi-node deployment, target the node which is running `python3 -m dynamo.frontend <args>`.
-
-### Benchmarking
-
-To benchmark your deployment with AIPerf, see this utility script, configuring the
-`model` name and `host` based on your deployment: [perf.sh](https://github.com/ai-dynamo/dynamo/blob/main/benchmarks/llm/perf.sh)
-
-## KV Cache Transfer in Disaggregated Serving
-
-Dynamo with TensorRT-LLM supports two methods for transferring KV cache in disaggregated serving: UCX (default) and NIXL (experimental). For detailed information and configuration instructions for each method, see the [KV cache transfer guide](./kv-cache-transfer.md).
-
-
-## Request Migration
-
-Dynamo supports [request migration](../../fault-tolerance/request-migration.md) to handle worker failures gracefully. When enabled, requests can be automatically migrated to healthy workers if a worker fails mid-generation. See the [Request Migration Architecture](../../fault-tolerance/request-migration.md) documentation for configuration details.
-
-## Request Cancellation
-
-When a user cancels a request (e.g., by disconnecting from the frontend), the request is automatically cancelled across all workers, freeing compute resources for other requests.
-
-### Cancellation Support Matrix
-
-| | Prefill | Decode |
-|-|---------|--------|
-| **Aggregated** | ✅ | ✅ |
-| **Disaggregated** | ✅ | ✅ |
-
-For more details, see the [Request Cancellation Architecture](../../fault-tolerance/request-cancellation.md) documentation.
-
-## Client
-
-See [client](../sglang/README.md#testing-the-deployment) section to learn how to send request to the deployment.
-
-NOTE: To send a request to a multi-node deployment, target the node which is running `python3 -m dynamo.frontend <args>`.
-
-## Benchmarking
-
-To benchmark your deployment with AIPerf, see this utility script, configuring the
-`model` name and `host` based on your deployment: [perf.sh](https://github.com/ai-dynamo/dynamo/blob/main/benchmarks/llm/perf.sh)
-
-## Multimodal support
-
-Dynamo with the TensorRT-LLM backend supports multimodal models, enabling you to process both text and images (or pre-computed embeddings) in a single request. For detailed setup instructions, example requests, and best practices, see the [TensorRT-LLM Multimodal Guide](../../features/multimodal/multimodal-trtllm.md).
-
-## Video Diffusion Support (Experimental)
-
-Dynamo supports video generation using diffusion models through the `--modality video_diffusion` flag.
-
-### Requirements
-
-- **TensorRT-LLM with visual_gen**: The `visual_gen` module is part of TensorRT-LLM (`tensorrt_llm._torch.visual_gen`). Install TensorRT-LLM following the [official instructions](https://github.com/NVIDIA/TensorRT-LLM#installation).
-- **imageio with ffmpeg**: Required for encoding generated frames to MP4 video:
-  ```bash
-  pip install imageio[ffmpeg]
-  ```
-- **dynamo-runtime with video API**: The Dynamo runtime must include `ModelType.Videos` support. Ensure you're using a compatible version.
-
-### Supported Models
-
-| Diffusers Pipeline | Description | Example Model |
-|--------------------|-------------|---------------|
-| `WanPipeline` | Wan 2.1/2.2 Text-to-Video | `Wan-AI/Wan2.1-T2V-1.3B-Diffusers` |
-
-The pipeline type is **auto-detected** from the model's `model_index.json` — no `--model-type` flag is needed.
-
-### Quick Start
-
-```bash
-python -m dynamo.trtllm \
-  --modality video_diffusion \
-  --model-path Wan-AI/Wan2.1-T2V-1.3B-Diffusers \
-  --media-output-fs-url file:///tmp/dynamo_media
-```
-
-### API Endpoint
-
-Video generation uses the `/v1/videos` endpoint:
-
-```bash
-curl -X POST http://localhost:8000/v1/videos \
+curl localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "prompt": "A cat playing piano",
-    "model": "wan_t2v",
-    "seconds": 4,
-    "size": "832x480",
-    "nvext": {
-      "fps": 24
-    }
+    "model": "Qwen/Qwen3-0.6B",
+    "messages": [{"role": "user", "content": "Explain why Roger Federer is considered one of the greatest tennis players of all time"}],
+    "stream": true,
+    "max_tokens": 30
   }'
 ```
 
-### Configuration Options
+### Kubernetes Deployment
 
-| Flag | Description | Default |
-|------|-------------|---------|
-| `--media-output-fs-url` | Filesystem URL for storing generated media | `file:///tmp/dynamo_media` |
-| `--default-height` | Default video height | `480` |
-| `--default-width` | Default video width | `832` |
-| `--default-num-frames` | Default frame count | `81` |
-| `--enable-teacache` | Enable TeaCache optimization | `False` |
-| `--disable-torch-compile` | Disable torch.compile | `False` |
+You can deploy TensorRT-LLM with Dynamo on Kubernetes using a `DynamoGraphDeployment`. For more details, see the [TensorRT-LLM Kubernetes Deployment Guide](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm/deploy/README.md).
 
-### Limitations
+## Next Steps
 
-- Video diffusion is experimental and not recommended for production use
-- Only text-to-video is supported in this release (image-to-video planned)
-- Requires GPU with sufficient VRAM for the diffusion model
-
-## Logits Processing
-
-Logits processors let you modify the next-token logits at every decoding step (e.g., to apply custom constraints or sampling transforms). Dynamo provides a backend-agnostic interface and an adapter for TensorRT-LLM so you can plug in custom processors.
-
-### How it works
-- **Interface**: Implement `dynamo.logits_processing.BaseLogitsProcessor` which defines `__call__(input_ids, logits)` and modifies `logits` in-place.
-- **TRT-LLM adapter**: Use `dynamo.trtllm.logits_processing.adapter.create_trtllm_adapters(...)` to convert Dynamo processors into TRT-LLM-compatible processors and assign them to `SamplingParams.logits_processor`.
-- **Examples**: See example processors in `lib/bindings/python/src/dynamo/logits_processing/examples/` ([temperature](https://github.com/ai-dynamo/dynamo/tree/main/lib/bindings/python/src/dynamo/logits_processing/examples/temperature.py), [hello_world](https://github.com/ai-dynamo/dynamo/tree/main/lib/bindings/python/src/dynamo/logits_processing/examples/hello_world.py)).
-
-### Quick test: HelloWorld processor
-You can enable a test-only processor that forces the model to respond with "Hello world!". This is useful to verify the wiring without modifying your model or engine code.
-
-```bash
-cd $DYNAMO_HOME/examples/backends/trtllm
-export DYNAMO_ENABLE_TEST_LOGITS_PROCESSOR=1
-./launch/agg.sh
-```
-
-Notes:
-- When enabled, Dynamo initializes the tokenizer so the HelloWorld processor can map text to token IDs.
-- Expected chat response contains "Hello world".
-
-### Bring your own processor
-Implement a processor by conforming to `BaseLogitsProcessor` and modify logits in-place. For example, temperature scaling:
-
-```python
-from typing import Sequence
-import torch
-from dynamo.logits_processing import BaseLogitsProcessor
-
-class TemperatureProcessor(BaseLogitsProcessor):
-    def __init__(self, temperature: float = 1.0):
-        if temperature <= 0:
-            raise ValueError("Temperature must be positive")
-        self.temperature = temperature
-
-    def __call__(self, input_ids: Sequence[int], logits: torch.Tensor):
-        if self.temperature == 1.0:
-            return
-        logits.div_(self.temperature)
-```
-
-Wire it into TRT-LLM by adapting and attaching to `SamplingParams`:
-
-```python
-from dynamo.trtllm.logits_processing.adapter import create_trtllm_adapters
-from dynamo.logits_processing.examples import TemperatureProcessor
-
-processors = [TemperatureProcessor(temperature=0.7)]
-sampling_params.logits_processor = create_trtllm_adapters(processors)
-```
-
-### Current limitations
-- Per-request processing only (batch size must be 1); beam width > 1 is not supported.
-- Processors must modify logits in-place and not return a new tensor.
-- If your processor needs tokenization, ensure the tokenizer is initialized (do not skip tokenizer init).
-
-## DP Rank Routing (Attention Data Parallelism)
-
-TensorRT-LLM supports [attention data parallelism](https://lmsys.org/blog/2024-12-04-sglang-v0-4/#data-parallelism-attention-for-deepseek-models) (attention DP) for models like DeepSeek. When enabled, multiple attention DP ranks run within a single worker, each with its own KV cache. Dynamo can route requests to specific DP ranks based on KV cache state.
-
-### Dynamo vs TRT-LLM Internal Routing
-
-- **Dynamo DP Rank Routing**: The router selects the optimal DP rank based on KV cache overlap and instructs TRT-LLM to use that rank with strict routing (`attention_dp_relax=False`). Use this with `--router-mode kv` for cache-aware routing.
-- **TRT-LLM Internal Routing**: TRT-LLM's scheduler assigns DP ranks internally. Use this with `--router-mode round-robin` or `random` when KV-aware routing isn't needed.
-
-### Enabling DP Rank Routing
-
-```bash
-# Worker with attention DP
-# (TP=2 acts as the "world size", in effect creating 2 attention DP ranks)
-CUDA_VISIBLE_DEVICES=0,1 python3 -m dynamo.trtllm \
-  --model-path <MODEL_PATH> \
-  --tensor-parallel-size 2 \
-  --enable-attention-dp \
-  --publish-events-and-metrics
-
-# Frontend with KV routing
-python3 -m dynamo.frontend --router-mode kv
-```
-
-The `--enable-attention-dp` flag sets `attention_dp_size = tensor_parallel_size` and configures Dynamo to publish KV events per DP rank. The router automatically creates routing targets for each `(worker_id, dp_rank)` combination.
-
-> [!NOTE]
-> Attention DP requires TRT-LLM's PyTorch backend. AutoDeploy does not support attention DP.
-
-## Performance Sweep
-
-For detailed instructions on running comprehensive performance sweeps across both aggregated and disaggregated serving configurations, see the [TensorRT-LLM Benchmark Scripts for DeepSeek R1 model](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm/performance_sweeps/README.md). This guide covers recommended benchmarking setups, usage of provided scripts, and best practices for evaluating system performance.
-
-## Dynamo KV Block Manager Integration
-
-Dynamo with TensorRT-LLM currently supports integration with the Dynamo KV Block Manager. This integration can significantly reduce time-to-first-token (TTFT) latency, particularly in usage patterns such as multi-turn conversations and repeated long-context requests.
-
-Here is the instruction: [Running KVBM in TensorRT-LLM](../../components/kvbm/kvbm-guide.md#run-kvbm-in-dynamo-with-tensorrt-llm) .
-
-## Known Issues and Mitigations
-
-### KV Cache Exhaustion Causing Worker Deadlock (Disaggregated Serving)
-
-**Issue:** In disaggregated serving mode, TensorRT-LLM workers can become stuck and unresponsive after sustained high-load traffic. Once in this state, workers require a pod/process restart to recover.
-
-**Symptoms:**
-- Workers function normally initially but hang after heavy load testing
-- Inference requests get stuck and eventually timeout
-- Logs show warnings: `num_fitting_reqs=0 and fitting_disagg_gen_init_requests is empty, may not have enough kvCache`
-- Error logs may contain: `asyncio.exceptions.InvalidStateError: invalid state`
-
-**Root Cause:** When `max_tokens_in_buffer` in the cache transceiver config is smaller than the maximum input sequence length (ISL) being processed, KV cache exhaustion can occur under heavy load. This causes context transfers to timeout, leaving workers stuck waiting for phantom transfers and entering an irrecoverable deadlock state.
-
-**Mitigation:** Ensure `max_tokens_in_buffer` exceeds your maximum expected input sequence length. Update your engine configuration files (e.g., `prefill.yaml` and `decode.yaml`):
-
-```yaml
-cache_transceiver_config:
-  backend: DEFAULT
-  max_tokens_in_buffer: 65536  # Must exceed max ISL
-```
-
-For example, see `examples/backends/trtllm/engine_configs/gpt-oss-120b/prefill.yaml`.
-
-**Related Issue:** [#4327](https://github.com/ai-dynamo/dynamo/issues/4327)
+- **[Reference Guide](trtllm-reference-guide.md)**: Features, configuration, and operational details
+- **[Examples](trtllm-examples.md)**: All deployment patterns with launch scripts
+- **[KV Cache Transfer](trtllm-kv-cache-transfer.md)**: KV cache transfer methods for disaggregated serving
+- **[Prometheus Metrics](trtllm-prometheus.md)**: Metrics and monitoring
+- **[Multinode Examples](multinode/trtllm-multinode-examples.md)**: Multi-node deployment with SLURM
+- **[Deploying TensorRT-LLM with Dynamo on Kubernetes](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm/deploy/README.md)**: Kubernetes deployment guide
