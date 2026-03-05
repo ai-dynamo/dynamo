@@ -16,12 +16,13 @@ tensor_parallel_size: 1
 enable_attention_dp: false
 max_num_tokens: 2048
 max_batch_size: 8
-max_seq_len: 8192
+max_seq_len: 16384
+trust_remote_code: true
 backend: pytorch
 enable_chunked_prefill: true
 
 kv_cache_config:
-  free_gpu_memory_fraction: 0.30
+  free_gpu_memory_fraction: 0.95
   enable_block_reuse: false
 
 cache_transceiver_config:
