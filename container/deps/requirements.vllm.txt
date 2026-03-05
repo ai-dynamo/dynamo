@@ -4,5 +4,5 @@
 # vLLM-specific runtime dependencies (multimodal features).
 
 av==15.0.0
-sentencepiece==0.2.1
 nvtx==0.2.14
+sentencepiece==0.2.1
