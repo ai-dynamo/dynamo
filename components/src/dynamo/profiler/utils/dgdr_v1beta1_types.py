@@ -117,9 +117,14 @@ class SLASpec(BaseModel):
     @model_validator(mode="after")
     def _validate_sla_options(self) -> "SLASpec":
         """Ensure at most one SLA mode is active."""
-        has_ttft_itl = self.ttft is not None and self.itl is not None
         has_e2e = self.e2eLatency is not None
         has_opt = self.optimizationType is not None
+        ttft_itl_touched = (
+            "ttft" in self.model_fields_set or "itl" in self.model_fields_set
+        )
+        has_ttft_itl = (self.ttft is not None and self.itl is not None) and (
+            ttft_itl_touched or (not has_e2e and not has_opt)
+        )
         options_count = sum([has_ttft_itl, has_e2e, has_opt])
         if options_count > 1:
             raise ValueError(
@@ -253,7 +258,7 @@ class DynamoGraphDeploymentRequestSpec(BaseModel):
         default="rapid",
         description='SearchStrategy controls the profiling search depth. "rapid" performs a fast sweep; "thorough" explores more configurations.',
     )
-    autoApply: bool = Field(
+    autoApply: Optional[bool] = Field(
         default=True,
         description="AutoApply indicates whether to automatically create a DynamoGraphDeployment after profiling completes. If false, the generated spec is stored in status for manual review and application.",
     )

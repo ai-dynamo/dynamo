@@ -414,7 +414,7 @@ class HandlerBase(BaseGenerativeHandler):
         ep_disaggregated_params: Optional[Any],
     ) -> tuple[Any, Any, dict]:
         """
-        Setup disaggregated_params based on PREFILL/DECODE mode.
+        Setup disaggregated_params based on disaggregation mode.
 
         For PREFILL mode:
         - Uses ep_disaggregated_params from encode worker if available
@@ -423,6 +423,11 @@ class HandlerBase(BaseGenerativeHandler):
         For DECODE mode:
         - Decodes disaggregated_params from prefill_result
         - Extracts EPD metadata for prompt optimization
+
+        For PREFILL_AND_DECODE (aggregated) mode:
+        - Uses ep_disaggregated_params from encode worker if available
+          (passes multimodal_embedding_handles to TRT-LLM and sets
+          request_type="context_and_generation" for full prefill + decode)
 
         Args:
             request: Request dictionary (may contain prefill_result)
@@ -443,6 +448,20 @@ class HandlerBase(BaseGenerativeHandler):
                 disaggregated_params = LlmDisaggregatedParams(
                     request_type="context_only"
                 )
+
+        # AGGREGATED (prefill_and_decode) mode with encoder disaggregation:
+        # Pass the encode worker's DisaggregatedParams (containing
+        # multimodal_embedding_handles) directly so TRT-LLM can import
+        # the vision embeddings.  Use "context_and_generation" so the
+        # engine runs a full prefill + decode cycle.
+        elif (
+            self.disaggregation_mode == DisaggregationMode.AGGREGATED
+            and ep_disaggregated_params is not None
+        ):
+            disaggregated_params = DisaggregatedParamsCodec.decode(
+                ep_disaggregated_params
+            )
+            disaggregated_params.request_type = "context_and_generation"
 
         # DECODE mode: decode params from prefill_result
         prefill_result = request.get("prefill_result")
@@ -883,7 +902,9 @@ class HandlerBase(BaseGenerativeHandler):
             regex = guided_decoding.get("regex")
             choice = guided_decoding.get("choice")
             if choice and not regex:
-                regex = "(" + "|".join(re.escape(c) for c in choice) + ")"
+                valid_choices = [c for c in choice if c is not None]
+                if valid_choices:
+                    regex = "(" + "|".join(re.escape(c) for c in valid_choices) + ")"
 
             overrides["guided_decoding"] = GuidedDecodingParams(
                 json=guided_decoding.get("json"),

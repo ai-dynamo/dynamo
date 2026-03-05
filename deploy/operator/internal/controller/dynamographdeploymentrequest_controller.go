@@ -437,7 +437,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleProfilingPhase(ctx contex
 	}
 
 	// If autoApply is enabled, transition to Deploying phase
-	if dgdr.Spec.AutoApply {
+	if dgdr.Spec.AutoApply == nil || *dgdr.Spec.AutoApply {
 		logger.Info("AutoApply enabled, transitioning to Deploying phase")
 		return r.updatePhaseWithCondition(ctx, dgdr, nvidiacomv1beta1.DGDRPhaseDeploying, nvidiacomv1beta1.ConditionTypeSpecGenerated, metav1.ConditionTrue, nvidiacomv1beta1.EventReasonSpecGenerated, MessageSpecGenerated)
 	}
@@ -460,7 +460,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleDeployingPhase(ctx contex
 	logger := log.FromContext(ctx)
 	logger.Info("Handling deploying phase", "name", dgdr.Name)
 
-	if !dgdr.Spec.AutoApply {
+	if dgdr.Spec.AutoApply != nil && !*dgdr.Spec.AutoApply {
 		// Shouldn't be in this phase without autoApply
 		logger.Info("AutoApply not enabled, transitioning to Ready")
 		dgdr.Status.Phase = nvidiacomv1beta1.DGDRPhaseReady
@@ -1128,8 +1128,11 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 			},
 		}
 
-		// Apply overrides from spec.overrides.profilingJob if provided
-		applyProfilingJobOverrides(job, dgdr)
+		var jobOverrides *batchv1.JobSpec
+		if dgdr.Spec.Overrides != nil {
+			jobOverrides = dgdr.Spec.Overrides.ProfilingJob
+		}
+		applyProfilingJobOverrides(job, jobOverrides)
 
 		return job, false, nil
 	})
@@ -1146,50 +1149,6 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 	dgdr.Status.ProfilingJobName = job.Name
 
 	return nil
-}
-
-// applyProfilingJobOverrides applies user-specified overrides from
-// spec.overrides.profilingJob to both the pod spec and job spec.
-func applyProfilingJobOverrides(job *batchv1.Job, dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
-	if dgdr.Spec.Overrides == nil || dgdr.Spec.Overrides.ProfilingJob == nil {
-		return
-	}
-
-	overrides := dgdr.Spec.Overrides.ProfilingJob
-	podSpec := &job.Spec.Template.Spec
-
-	// Apply pod-level overrides
-	overridePS := overrides.Template.Spec
-	if len(overridePS.Containers) > 0 {
-		podSpec.Containers[0].Resources = overridePS.Containers[0].Resources
-	}
-	if len(overridePS.Tolerations) > 0 {
-		podSpec.Tolerations = overridePS.Tolerations
-	}
-	if len(overridePS.NodeSelector) > 0 {
-		podSpec.NodeSelector = overridePS.NodeSelector
-	}
-	if len(overridePS.ImagePullSecrets) > 0 {
-		// Merge override secrets with existing ones (deduplicate by name)
-		seen := make(map[string]bool)
-		for _, s := range podSpec.ImagePullSecrets {
-			seen[s.Name] = true
-		}
-		for _, s := range overridePS.ImagePullSecrets {
-			if !seen[s.Name] {
-				podSpec.ImagePullSecrets = append(podSpec.ImagePullSecrets, s)
-				seen[s.Name] = true
-			}
-		}
-	}
-	if overridePS.ServiceAccountName != "" {
-		podSpec.ServiceAccountName = overridePS.ServiceAccountName
-	}
-
-	// Apply job-level overrides
-	if overrides.BackoffLimit != nil {
-		job.Spec.BackoffLimit = overrides.BackoffLimit
-	}
 }
 
 // marshalDGDRSpec produces the JSON string passed to the profiler via --config.
@@ -1210,7 +1169,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) enrichHardwareFromDiscovery(ctx
 	}
 	hw := dgdr.Spec.Hardware
 	if hw.GPUSKU != "" && hw.VRAMMB != nil && hw.NumGPUsPerNode != nil {
-		return nil // all fields already set by user
+		return nil // all fields already set by user; TotalGPUs is filled below when discovery runs
 	}
 
 	gpuInfo, err := gpu.DiscoverGPUs(ctx, r.APIReader)
@@ -1221,6 +1180,8 @@ func (r *DynamoGraphDeploymentRequestReconciler) enrichHardwareFromDiscovery(ctx
 	logger := log.FromContext(ctx)
 	logger.Info("GPU discovery completed successfully",
 		"gpusPerNode", gpuInfo.GPUsPerNode,
+		"nodesWithGPUs", gpuInfo.NodesWithGPUs,
+		"totalGpus", gpuInfo.GPUsPerNode*gpuInfo.NodesWithGPUs,
 		"model", gpuInfo.Model,
 		"vramMiB", gpuInfo.VRAMPerGPU)
 
@@ -1234,6 +1195,10 @@ func (r *DynamoGraphDeploymentRequestReconciler) enrichHardwareFromDiscovery(ctx
 	if hw.NumGPUsPerNode == nil {
 		n := int32(gpuInfo.GPUsPerNode)
 		hw.NumGPUsPerNode = &n
+	}
+	if hw.TotalGPUs == nil {
+		total := int32(gpuInfo.GPUsPerNode * gpuInfo.NodesWithGPUs)
+		hw.TotalGPUs = &total
 	}
 	return nil
 }

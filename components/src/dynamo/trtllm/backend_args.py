@@ -198,6 +198,17 @@ class DynamoTrtllmArgGroup(ArgGroup):
             help="Maximum size of downloadable embedding files/Image URLs.",
         )
 
+        # --- Guided Decoding ---
+        add_argument(
+            g,
+            flag_name="--guided-decoding-backend",
+            env_var="DYN_TRTLLM_GUIDED_DECODING_BACKEND",
+            default=None,
+            choices=["xgrammar", "llguidance"],
+            help="Backend to use for guided decoding (structured output). "
+            "Options: xgrammar, llguidance.",
+        )
+
         diffusion_group = parser.add_argument_group(
             "Diffusion Options [Experimental]",
             "Options for video_diffusion modality",
@@ -409,17 +420,6 @@ class DynamoTrtllmArgGroup(ArgGroup):
             arg_type=int,
             help="FSDP size for DiT.",
         )
-        # --- Guided Decoding ---
-        add_argument(
-            g,
-            flag_name="--guided-decoding-backend",
-            env_var="DYN_TRTLLM_GUIDED_DECODING_BACKEND",
-            default=None,
-            choices=["xgrammar", "llguidance"],
-            help="Backend to use for guided decoding (structured output). "
-            "Options: xgrammar, llguidance.",
-        )
-
         add_negatable_bool_argument(
             diffusion_group,
             flag_name="--enable-async-cpu-offload",

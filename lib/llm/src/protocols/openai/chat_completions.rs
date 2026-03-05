@@ -92,6 +92,10 @@ impl NvExtProvider for NvCreateChatCompletionRequest {
     fn raw_prompt(&self) -> Option<String> {
         None
     }
+
+    fn effective_cache_control(&self) -> Option<&crate::protocols::openai::nvext::CacheControl> {
+        NvExtProvider::nvext(self).and_then(|ext| ext.cache_control.as_ref())
+    }
 }
 
 /// Implements `AnnotationsProvider` for `NvCreateChatCompletionRequest`,

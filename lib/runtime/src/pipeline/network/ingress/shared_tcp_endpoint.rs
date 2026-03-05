@@ -260,18 +260,18 @@ impl SharedTcpServer {
                 accept_result = listener.accept() => {
                     match accept_result {
                         Ok((stream, peer_addr)) => {
-                            tracing::trace!("Accepted TCP connection from {}", peer_addr);
+                            tracing::trace!("Accepted TCP connection from {peer_addr}");
 
                             let handlers = self.handlers.clone();
                             let work_tx = self.work_tx.clone();
                             tokio::spawn(async move {
                                 if let Err(e) = Self::handle_connection(stream, handlers, work_tx).await {
-                                    tracing::error!("TCP connection error: {}", e);
+                                    tracing::error!("TCP connection error: {e}");
                                 }
                             });
                         }
                         Err(e) => {
-                            tracing::error!("Failed to accept TCP connection: {}", e);
+                            tracing::error!("Failed to accept TCP connection: {e}");
                         }
                     }
                 }
@@ -409,7 +409,7 @@ impl SharedTcpServer {
                     break;
                 }
                 Err(e) => {
-                    tracing::warn!("Failed to read TCP request: {}", e);
+                    tracing::warn!("Failed to read TCP request: {e}");
                     // Send error response
                     let error_response =
                         TcpResponseMessage::new(Bytes::from(format!("Read error: {}", e)));
@@ -424,7 +424,7 @@ impl SharedTcpServer {
             let endpoint_path = match request_msg.endpoint_path() {
                 Ok(path) => path,
                 Err(e) => {
-                    tracing::warn!("Invalid UTF-8 in endpoint path: {}", e);
+                    tracing::warn!("Invalid UTF-8 in endpoint path: {e}");
                     let error_response =
                         TcpResponseMessage::new(Bytes::from_static(b"Invalid endpoint path"));
                     if let Ok(encoded) = error_response.encode() {
@@ -453,7 +453,7 @@ impl SharedTcpServer {
             let handler = match handler {
                 Some(h) => h,
                 None => {
-                    tracing::warn!("No handler found for endpoint: {}", endpoint_path);
+                    tracing::warn!("No handler found for endpoint: {endpoint_path}");
                     // Send error response
                     let error_response = TcpResponseMessage::new(Bytes::from(format!(
                         "Unknown endpoint: {}",
