@@ -474,34 +474,37 @@ jobs:
         run: |
           git fetch origin gh-pages:gh-pages 2>/dev/null || true
 
-          # Set up a working tree for gh-pages
           DEPLOY_DIR=$(mktemp -d)
-          if git show-ref --verify --quiet refs/heads/gh-pages; then
-            git worktree add "$DEPLOY_DIR" gh-pages
+          cd "$DEPLOY_DIR"
+          git init
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Reuse the checkout token for push access
+          git config http.https://github.com/.extraheader "AUTHORIZATION: basic $(echo -n "x-access-token:${{ github.token }}" | base64)"
+
+          # Pull existing gh-pages content or start fresh
+          if git ls-remote --exit-code origin gh-pages &>/dev/null; then
+            git fetch origin gh-pages
+            git checkout gh-pages
           else
-            git worktree add --orphan "$DEPLOY_DIR" gh-pages
+            git checkout --orphan gh-pages
           fi
 
           # Copy report to pre-merge subdirectory (preserve other subdirs)
-          mkdir -p "$DEPLOY_DIR/pre-merge"
-          rm -rf "$DEPLOY_DIR/pre-merge/*"
-          cp -r allure-report/* "$DEPLOY_DIR/pre-merge/"
+          mkdir -p pre-merge
+          rm -rf pre-merge/*
+          cp -r "${GITHUB_WORKSPACE}/allure-report/"* pre-merge/
 
           # Commit and push
-          cd "$DEPLOY_DIR"
           git add -A
           if git diff --cached --quiet; then
             echo "No changes to deploy"
           else
-            git config user.name "github-actions[bot]"
-            git config user.email "github-actions[bot]@users.noreply.github.com"
             git commit -m "Deploy Allure report for pre-merge (run ${{ github.run_id }})"
             git push origin gh-pages
           fi
-
-          # Cleanup worktree
-          cd -
-          git worktree remove "$DEPLOY_DIR" --force
 
       - name: Print report URL
         if: steps.check-results.outputs.has_results == 'true'
