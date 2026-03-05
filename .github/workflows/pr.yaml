@@ -38,7 +38,8 @@ jobs:
     runs-on: prod-builder-v3
     outputs:
       target_tag_plain: ${{ steps.calculate-target-tag.outputs.target_tag_plain }}
-      image: ${{ steps.build-and-push-image.outputs.image_uri }}
+      # image: ${{ steps.build-and-push-image.outputs.image_uri }}
+      image: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:main-operator
     env:
       FRAMEWORK: ${{ inputs.framework }}
       IMAGE_REGISTRY: ai-dynamo
@@ -68,35 +69,35 @@ jobs:
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-      - name: Build and push Container
-        id: build-and-push-image
-        shell: bash
-        working-directory: ./deploy/operator
-        run: |
-          ECR_DEFAULT_IMAGE_BASE="${ECR_HOSTNAME}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}"
-          DEFAULT_TAG="tmp-test"
-          ACR_IMAGE_BASE="${{ secrets.AZURE_ACR_HOSTNAME }}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}"
-          IMAGE_URIS=(
-            "${ECR_DEFAULT_IMAGE_BASE}:${DEFAULT_TAG}"
-            "${ACR_IMAGE_BASE}:${DEFAULT_TAG}"
-          )
+      # - name: Build and push Container
+      #   id: build-and-push-image
+      #   shell: bash
+      #   working-directory: ./deploy/operator
+      #   run: |
+      #     ECR_DEFAULT_IMAGE_BASE="${ECR_HOSTNAME}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}"
+      #     DEFAULT_TAG="tmp-test"
+      #     ACR_IMAGE_BASE="${{ secrets.AZURE_ACR_HOSTNAME }}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}"
+      #     IMAGE_URIS=(
+      #       "${ECR_DEFAULT_IMAGE_BASE}:${DEFAULT_TAG}"
+      #       "${ACR_IMAGE_BASE}:${DEFAULT_TAG}"
+      #     )
 
-          echo "image_uri=${ECR_DEFAULT_IMAGE_BASE}:${DEFAULT_TAG}" >> $GITHUB_OUTPUT
-          TAGGING_FLAGS=$(printf -- '-t %s ' "${IMAGE_URIS[@]}")
-          echo "flags for docker buildx: ${TAGGING_FLAGS}"
+      #     echo "image_uri=${ECR_DEFAULT_IMAGE_BASE}:${DEFAULT_TAG}" >> $GITHUB_OUTPUT
+      #     TAGGING_FLAGS=$(printf -- '-t %s ' "${IMAGE_URIS[@]}")
+      #     echo "flags for docker buildx: ${TAGGING_FLAGS}"
 
-          docker buildx build --push \
-              --platform linux/amd64,linux/arm64 \
-              --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
-              ${TAGGING_FLAGS} -f Dockerfile .
+      #     docker buildx build --push \
+      #         --platform linux/amd64,linux/arm64 \
+      #         --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
+      #         ${TAGGING_FLAGS} -f Dockerfile .
 
-          echo "### 🐳 Operator Container Images" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Image URI |" >> $GITHUB_STEP_SUMMARY
-          echo "|-----|" >> $GITHUB_STEP_SUMMARY
-          for image_uri in "${IMAGE_URIS[@]}"; do
-            echo "| \`${image_uri}\` |" >> $GITHUB_STEP_SUMMARY
-          done
+      #     echo "### 🐳 Operator Container Images" >> $GITHUB_STEP_SUMMARY
+      #     echo "" >> $GITHUB_STEP_SUMMARY
+      #     echo "| Image URI |" >> $GITHUB_STEP_SUMMARY
+      #     echo "|-----|" >> $GITHUB_STEP_SUMMARY
+      #     for image_uri in "${IMAGE_URIS[@]}"; do
+      #       echo "| \`${image_uri}\` |" >> $GITHUB_STEP_SUMMARY
+      #     done
 
   # ── Job Y: Run "echo hello world" inside Container A ──────────────────
   job-y:
