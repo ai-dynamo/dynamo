@@ -37,17 +37,6 @@ from dynamo.llm import (
     fetch_model,
     register_model,
 )
-
-# Optional imports for frontend decoding support
-try:
-    from dynamo.llm import MediaDecoder, MediaFetcher
-
-    MEDIA_DECODER_AVAILABLE = True
-except ImportError:
-    MediaDecoder = None
-    MediaFetcher = None
-    MEDIA_DECODER_AVAILABLE = False
-
 from dynamo.runtime import DistributedRuntime, Endpoint
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.vllm.worker_factory import WorkerFactory
@@ -62,6 +51,18 @@ from .health_check import (
     VllmPrefillHealthCheckPayload,
 )
 from .publisher import DYNAMO_COMPONENT_REGISTRY, StatLoggerFactory
+
+# Optional imports for frontend decoding support
+MediaDecoder: type | None = None
+MediaFetcher: type | None = None
+try:
+    from dynamo.llm import MediaDecoder, MediaFetcher
+
+    MEDIA_DECODER_AVAILABLE = True
+except ImportError:
+    MediaDecoder = None
+    MediaFetcher = None
+    MEDIA_DECODER_AVAILABLE = False
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
@@ -568,6 +569,7 @@ async def register_vllm_model(
                 "--frontend-decoding requires MediaDecoder support. "
                 "Ensure dynamo.llm module includes MediaDecoder and MediaFetcher."
             )
+        assert MediaDecoder is not None and MediaFetcher is not None
         media_decoder = MediaDecoder()
         media_decoder.enable_image({"limits": {"max_alloc": 128 * 1024 * 1024}})
         # media_decoder.enable_video({})
