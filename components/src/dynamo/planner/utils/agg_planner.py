@@ -40,9 +40,7 @@ class AggPlanner:
     # Engine metrics from agg workers are labeled "decode" by the router
     ENGINE_WORKER_TYPE = "decode"
 
-    def __init__(
-        self, runtime: Optional[DistributedRuntime], config: PlannerConfig
-    ) -> None:
+    def __init__(self, runtime: DistributedRuntime, config: PlannerConfig) -> None:
         self.config = config
         self.shared_state = PlannerSharedState()
 

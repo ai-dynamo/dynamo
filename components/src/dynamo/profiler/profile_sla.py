@@ -32,19 +32,19 @@ from dynamo.profiler.utils.config_modifiers.parallelization_mapping import (
 )
 from dynamo.profiler.utils.config_modifiers.protocol import apply_dgd_overrides
 from dynamo.profiler.utils.defaults import SearchStrategy
-from dynamo.profiler.utils.dgd_generation import generate_dgd_config_with_planner
+from dynamo.profiler.utils.dgd_generation import assemble_final_config
 from dynamo.profiler.utils.dgdr_v1beta1_types import (
     BackendType,
     DynamoGraphDeploymentRequestSpec,
 )
 from dynamo.profiler.utils.dgdr_validate import (
-    run_gate_checks,
-    validate_dgdr_for_profiler,
+    valid_dgdr_spec,
+    validate_dgdr_dynamo_features,
 )
 from dynamo.profiler.utils.profile_common import (
     ProfilerOperationalConfig,
     determine_picking_mode,
-    is_planner_enabled,
+    needs_profile_data,
     picked_config_from_row,
     resolve_model_path,
     warn_and_update_sla,
@@ -215,40 +215,6 @@ async def _execute_strategy(
     )
 
 
-def _assemble_final_config(
-    dgdr: DynamoGraphDeploymentRequestSpec,
-    ops: ProfilerOperationalConfig,
-    dgd_config: dict | None,
-    best_prefill_config: PickedParallelConfig,
-    best_decode_config: PickedParallelConfig,
-) -> Any:
-    """Handle mocker/planner branching and return the final DGD config."""
-    mocker_enabled = (
-        dgdr.features is not None
-        and dgdr.features.mocker is not None
-        and dgdr.features.mocker.enabled
-    )
-
-    if dgd_config and (is_planner_enabled(dgdr) or mocker_enabled):
-        dgd_config_path = f"{ops.output_dir}/picked_dgd_config.yaml"
-        with open(dgd_config_path, "w") as f:
-            yaml.safe_dump(dgd_config, f, sort_keys=False)
-
-        real_config, mocker_config = generate_dgd_config_with_planner(
-            dgdr=dgdr,
-            config_path=dgd_config_path,
-            output_dir=ops.output_dir if not ops.dry_run else None,
-            best_prefill_mapping=best_prefill_config,
-            best_decode_mapping=best_decode_config,
-        )
-
-        if mocker_enabled:
-            logger.info("Mocker enabled — using mocker DGD config.")
-            return mocker_config
-        return real_config
-    return dgd_config
-
-
 def _write_final_output(ops: ProfilerOperationalConfig, final_config: Any) -> bool:
     """Write final_config.yaml and profiler status. Returns False on unrecoverable failure."""
     output_file = f"{ops.output_dir}/final_config.yaml"
@@ -289,7 +255,7 @@ def _write_final_output(ops: ProfilerOperationalConfig, final_config: Any) -> bo
 async def run_profile(
     dgdr: DynamoGraphDeploymentRequestSpec,
     ops: ProfilerOperationalConfig | None = None,
-):
+) -> None:
     """Run the profiling pipeline.
 
     Args:
@@ -311,9 +277,8 @@ async def run_profile(
     )
 
     try:
-        # Validate and normalise — after this, required fields are guaranteed non-None
-        validate_dgdr_for_profiler(dgdr)
-
+        # Validate DGDR spec — after this, required fields are guaranteed non-None
+        valid_dgdr_spec(dgdr)
         (
             model,
             backend,
@@ -327,12 +292,12 @@ async def run_profile(
             search_strategy,
             picking_mode,
         ) = _extract_profiler_params(dgdr)
-
         if backend == "auto":
             aic_supported = _check_auto_backend_support(model, system)
         else:
             aic_supported = check_model_hardware_support(model, system, backend)
-        run_gate_checks(dgdr, aic_supported, search_strategy, backend)
+        # then validate DGDR features based on AIC support
+        validate_dgdr_dynamo_features(dgdr, aic_supported)
 
         (
             pick_result,
@@ -361,9 +326,10 @@ async def run_profile(
         dgd_config = pick_result.get("dgd_config") if not ops.dry_run else None
 
         # ---------------------------------------------------------------
-        # Interpolation curves
+        # Interpolation curves — only needed when something consumes
+        # the per-engine performance data (throughput scaling or mocker).
         # ---------------------------------------------------------------
-        if not ops.dry_run and is_planner_enabled(dgdr) and dgd_config:
+        if not ops.dry_run and dgd_config and needs_profile_data(dgdr):
             try:
                 model_cfg = get_model_config_from_model_path(resolve_model_path(dgdr))
                 sweep_max_context_length = model_cfg.get("max_position_embeddings", 0)
@@ -391,7 +357,7 @@ async def run_profile(
         # ---------------------------------------------------------------
         # Final DGD assembly
         # ---------------------------------------------------------------
-        final_config = _assemble_final_config(
+        final_config = assemble_final_config(
             dgdr, ops, dgd_config, best_prefill_config, best_decode_config
         )
 

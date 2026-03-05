@@ -370,6 +370,7 @@ impl KvRouter {
         update_states: bool,
         lora_name: Option<String>,
         priority_jump: f64,
+        expected_output_tokens: Option<u32>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
     ) -> anyhow::Result<(WorkerWithDpRank, u32)> {
         let start = Instant::now();
@@ -419,6 +420,7 @@ impl KvRouter {
                 update_states,
                 lora_name,
                 priority_jump,
+                expected_output_tokens,
                 allowed_worker_ids,
             )
             .instrument(tracing::info_span!("kv_router.schedule"))
@@ -491,6 +493,11 @@ impl KvRouter {
 
     pub async fn free(&self, request_id: &str) -> Result<(), SequenceError> {
         self.scheduler.free(request_id).await
+    }
+
+    /// Number of requests currently parked in the scheduler queue.
+    pub fn pending_count(&self) -> usize {
+        self.scheduler.pending_count()
     }
 
     /// Get the worker type for this router ("prefill" or "decode").
@@ -578,6 +585,7 @@ impl AsyncEngine<SingleIn<RouterRequest>, ManyOut<Annotated<RouterResponse>>, Er
                         true,
                         None,
                         0.0,
+                        None,
                         None,
                     )
                     .await?;
