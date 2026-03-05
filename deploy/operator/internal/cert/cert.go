@@ -131,8 +131,13 @@ func (cm *CertManager) setupAutoProvisioning(ctx context.Context, mgr ctrl.Manag
 			fmt.Sprintf("%s.%s", cm.cfg.ServiceName, cm.namespace),
 			fmt.Sprintf("%s.%s.svc.cluster.local", cm.cfg.ServiceName, cm.namespace),
 		},
-		EnableReadinessCheck:   true,
-		RestartOnSecretRefresh: true,
+		EnableReadinessCheck: true,
+		// RestartOnSecretRefresh is intentionally false (default). The rotator's
+		// ensureCertsMounted goroutine polls CertDir until the kubelet projects
+		// the updated secret, then closes IsReady. The webhook server is only
+		// started after IsReady fires, so the files are guaranteed to exist.
+		// Setting this to true would call os.Exit immediately after writing the
+		// secret, racing the kubelet volume projection on restart.
 	}
 	return cm.provisioner.AddRotator(mgr, rotator)
 }
