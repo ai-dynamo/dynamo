@@ -63,14 +63,14 @@ func (rsaKeyPairGenerator) Generate() ([]byte, []byte, error) {
 // lazily on first use.
 type SSHKeyManager struct {
 	client    client.Client
-	cfg       *configv1alpha1.MPIConfiguration
+	cfg       configv1alpha1.MPIConfiguration
 	generator KeyPairGenerator
 	logger    logr.Logger
 }
 
 // NewSSHKeyManager creates an SSHKeyManager backed by the production RSA
 // key generator. The client should be the manager's cached client.
-func NewSSHKeyManager(cl client.Client, cfg *configv1alpha1.MPIConfiguration) *SSHKeyManager {
+func NewSSHKeyManager(cl client.Client, cfg configv1alpha1.MPIConfiguration) *SSHKeyManager {
 	return &SSHKeyManager{
 		client:    cl,
 		cfg:       cfg,
@@ -94,12 +94,25 @@ func (m *SSHKeyManager) EnsureAndReplicate(ctx context.Context, targetNamespace 
 	return m.replicateToNamespace(ctx, targetNamespace)
 }
 
-func (m *SSHKeyManager) ensureSourceSecret(ctx context.Context) error {
-	key := types.NamespacedName{Namespace: m.cfg.SSHSecretNamespace, Name: m.cfg.SSHSecretName}
+// secretExists returns true if the SSH key secret already exists in the given namespace.
+func (m *SSHKeyManager) secretExists(ctx context.Context, namespace string) (bool, error) {
+	key := types.NamespacedName{Namespace: namespace, Name: m.cfg.SSHSecretName}
 	if err := m.client.Get(ctx, key, &corev1.Secret{}); err == nil {
-		return nil
-	} else if !apierrors.IsNotFound(err) {
+		return true, nil
+	} else if apierrors.IsNotFound(err) {
+		return false, nil
+	} else {
+		return false, err
+	}
+}
+
+func (m *SSHKeyManager) ensureSourceSecret(ctx context.Context) error {
+	exists, err := m.secretExists(ctx, m.cfg.SSHSecretNamespace)
+	if err != nil {
 		return err
+	}
+	if exists {
+		return nil
 	}
 
 	privKey, pubKey, err := m.generator.Generate()
@@ -134,11 +147,12 @@ func (m *SSHKeyManager) ensureSourceSecret(ctx context.Context) error {
 }
 
 func (m *SSHKeyManager) replicateToNamespace(ctx context.Context, targetNamespace string) error {
-	targetKey := types.NamespacedName{Namespace: targetNamespace, Name: m.cfg.SSHSecretName}
-	if err := m.client.Get(ctx, targetKey, &corev1.Secret{}); err == nil {
-		return nil
-	} else if !apierrors.IsNotFound(err) {
+	exists, err := m.secretExists(ctx, targetNamespace)
+	if err != nil {
 		return fmt.Errorf("checking target secret: %w", err)
+	}
+	if exists {
+		return nil
 	}
 
 	source := &corev1.Secret{}

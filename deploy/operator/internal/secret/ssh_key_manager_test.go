@@ -53,7 +53,7 @@ func newScheme() *runtime.Scheme {
 func newTestManager(builder *fake.ClientBuilder, gen KeyPairGenerator) *SSHKeyManager {
 	return &SSHKeyManager{
 		client: builder.Build(),
-		cfg: &configv1alpha1.MPIConfiguration{
+		cfg: configv1alpha1.MPIConfiguration{
 			SSHSecretName:      testSecretName,
 			SSHSecretNamespace: testSourceNS,
 		},

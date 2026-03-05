@@ -521,7 +521,7 @@ func main() {
 		}
 	}()
 
-	sshKeyManager := secret.NewSSHKeyManager(mgr.GetClient(), &operatorCfg.MPI)
+	sshKeyManager := secret.NewSSHKeyManager(mgr.GetClient(), operatorCfg.MPI)
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		setupLog.Error(err, "unable to set up health check")
