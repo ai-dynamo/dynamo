@@ -52,7 +52,7 @@ class FrontendConfig(KvRouterConfigBase):
     router_mode: str
     namespace: Optional[str] = None
     namespace_prefix: Optional[str] = None
-    decode_fallback: bool
+    enforce_disagg: bool
 
     migration_limit: int
     active_decode_blocks_threshold: Optional[float]
@@ -191,14 +191,16 @@ class FrontendArgGroup(ArgGroup):
 
         add_negatable_bool_argument(
             g,
-            flag_name="--decode-fallback",
-            env_var="DYN_DECODE_FALLBACK",
+            flag_name="--enforce-disagg",
+            env_var="DYN_ENFORCE_DISAGG",
             default=False,
-            dest="decode_fallback",
+            dest="enforce_disagg",
             help=(
-                "Allow falling back to decode-only (aggregated) mode when prefill workers are "
-                "unavailable. By default, disaggregated prefill-decode is enforced and requests "
-                "fail if no prefill workers are found."
+                "Strictly enforce disaggregated mode. Requests fail if the prefill router "
+                "has not activated yet (e.g., prefill workers still registering). Without "
+                "this flag, requests arriving before prefill workers are discovered fall "
+                "through to decode-only routing. Prefill errors always fail requests "
+                "regardless of this flag."
             ),
         )
 
