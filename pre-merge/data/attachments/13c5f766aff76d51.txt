@@ -1,0 +1,449 @@
+INFO     root:conftest.py:205 Downloading 5 models needed for collected tests
+Models: {'Qwen/Qwen2.5-VL-7B-Instruct', 'TinyLlama/TinyLlama-1.1B-Chat-v1.0', 'Qwen/Qwen3-VL-2B-Instruct', 'Qwen/Qwen3-0.6B', 'Qwen/Qwen2-VL-2B-Instruct'}
+INFO     root:conftest.py:147 HF_TOKEN found in environment
+INFO     root:conftest.py:159 Pre-downloading model: Qwen/Qwen2.5-VL-7B-Instruct
+DEBUG    urllib3.connectionpool:connectionpool.py:1049 Starting new HTTPS connection (1): huggingface.co:443
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "GET /api/models/Qwen/Qwen2.5-VL-7B-Instruct/revision/main HTTP/1.1" 200 None
+DEBUG    urllib3.connectionpool:connectionpool.py:1049 Starting new HTTPS connection (1): huggingface.co:443
+DEBUG    urllib3.connectionpool:connectionpool.py:1049 Starting new HTTPS connection (1): huggingface.co:443
+DEBUG    urllib3.connectionpool:connectionpool.py:1049 Starting new HTTPS connection (1): huggingface.co:443
+DEBUG    urllib3.connectionpool:connectionpool.py:1049 Starting new HTTPS connection (1): huggingface.co:443
+DEBUG    urllib3.connectionpool:connectionpool.py:1049 Starting new HTTPS connection (1): huggingface.co:443
+DEBUG    urllib3.connectionpool:connectionpool.py:1049 Starting new HTTPS connection (1): huggingface.co:443
+DEBUG    urllib3.connectionpool:connectionpool.py:1049 Starting new HTTPS connection (1): huggingface.co:443
+DEBUG    urllib3.connectionpool:connectionpool.py:1049 Starting new HTTPS connection (1): huggingface.co:443
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /Qwen/Qwen2.5-VL-7B-Instruct/resolve/cc594898137f460bfe9f0759e9844b3ce807cfb5/chat_template.json HTTP/1.1" 307 0
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /api/resolve-cache/models/Qwen/Qwen2.5-VL-7B-Instruct/cc594898137f460bfe9f0759e9844b3ce807cfb5/chat_template.json HTTP/1.1" 200 0
+DEBUG    filelock:_api.py:497 Attempting to acquire lock 140648812785504 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2.5-VL-7B-Instruct/732bd68bc5427d1fb6c06a59b3bf2456b2155d24.lock
+DEBUG    filelock:_api.py:500 Lock 140648812785504 acquired on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2.5-VL-7B-Instruct/732bd68bc5427d1fb6c06a59b3bf2456b2155d24.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /Qwen/Qwen2.5-VL-7B-Instruct/resolve/cc594898137f460bfe9f0759e9844b3ce807cfb5/config.json HTTP/1.1" 307 0
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /Qwen/Qwen2.5-VL-7B-Instruct/resolve/cc594898137f460bfe9f0759e9844b3ce807cfb5/README.md HTTP/1.1" 307 0
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "GET /api/resolve-cache/models/Qwen/Qwen2.5-VL-7B-Instruct/cc594898137f460bfe9f0759e9844b3ce807cfb5/chat_template.json HTTP/1.1" 200 None
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /Qwen/Qwen2.5-VL-7B-Instruct/resolve/cc594898137f460bfe9f0759e9844b3ce807cfb5/model-00001-of-00005.safetensors HTTP/1.1" 302 0
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /Qwen/Qwen2.5-VL-7B-Instruct/resolve/cc594898137f460bfe9f0759e9844b3ce807cfb5/.gitattributes HTTP/1.1" 307 0
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /api/resolve-cache/models/Qwen/Qwen2.5-VL-7B-Instruct/cc594898137f460bfe9f0759e9844b3ce807cfb5/config.json HTTP/1.1" 200 0
+DEBUG    filelock:_api.py:497 Attempting to acquire lock 140648810504864 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2.5-VL-7B-Instruct/e97b877e47fde53a6c6e77aafb36e58e91ee9d95c4a3eeac6f1b5c0e6a1c986e.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /api/resolve-cache/models/Qwen/Qwen2.5-VL-7B-Instruct/cc594898137f460bfe9f0759e9844b3ce807cfb5/README.md HTTP/1.1" 200 0
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /Qwen/Qwen2.5-VL-7B-Instruct/resolve/cc594898137f460bfe9f0759e9844b3ce807cfb5/model-00002-of-00005.safetensors HTTP/1.1" 302 0
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /Qwen/Qwen2.5-VL-7B-Instruct/resolve/cc594898137f460bfe9f0759e9844b3ce807cfb5/merges.txt HTTP/1.1" 307 0
+DEBUG    filelock:_api.py:500 Lock 140648810504864 acquired on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2.5-VL-7B-Instruct/e97b877e47fde53a6c6e77aafb36e58e91ee9d95c4a3eeac6f1b5c0e6a1c986e.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /Qwen/Qwen2.5-VL-7B-Instruct/resolve/cc594898137f460bfe9f0759e9844b3ce807cfb5/generation_config.json HTTP/1.1" 307 0
+DEBUG    filelock:_api.py:497 Attempting to acquire lock 140648812958384 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2.5-VL-7B-Instruct/58ee12a9fb3d8708a1e41e49cb9aa5ac5017b6a6.lock
+DEBUG    filelock:_api.py:497 Attempting to acquire lock 140648559151584 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2.5-VL-7B-Instruct/a9a300a43b4724eee2abe7c18ceb26768d0ab011eb0cad19d9bfd2476a24d024.lock
+DEBUG    filelock:_api.py:497 Attempting to acquire lock 140648559151248 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2.5-VL-7B-Instruct/5f169031e3f61faa8262272000c36d54bdc9b926.lock
+DEBUG    filelock:_api.py:500 Lock 140648559151248 acquired on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2.5-VL-7B-Instruct/5f169031e3f61faa8262272000c36d54bdc9b926.lock
+DEBUG    filelock:_api.py:500 Lock 140648812958384 acquired on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2.5-VL-7B-Instruct/58ee12a9fb3d8708a1e41e49cb9aa5ac5017b6a6.lock
+DEBUG    filelock:_api.py:500 Lock 140648559151584 acquired on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2.5-VL-7B-Instruct/a9a300a43b4724eee2abe7c18ceb26768d0ab011eb0cad19d9bfd2476a24d024.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /api/resolve-cache/models/Qwen/Qwen2.5-VL-7B-Instruct/cc594898137f460bfe9f0759e9844b3ce807cfb5/.gitattributes HTTP/1.1" 200 0
+DEBUG    filelock:_api.py:537 Attempting to release lock 140648812785504 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2.5-VL-7B-Instruct/732bd68bc5427d1fb6c06a59b3bf2456b2155d24.lock
+DEBUG    filelock:_api.py:541 Lock 140648812785504 released on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2.5-VL-7B-Instruct/732bd68bc5427d1fb6c06a59b3bf2456b2155d24.lock
+DEBUG    filelock:_api.py:497 Attempting to acquire lock 140648562464032 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2.5-VL-7B-Instruct/a6344aac8c09253b3b630fb776ae94478aa0275b.lock
+DEBUG    filelock:_api.py:500 Lock 140648562464032 acquired on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2.5-VL-7B-Instruct/a6344aac8c09253b3b630fb776ae94478aa0275b.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "GET /api/resolve-cache/models/Qwen/Qwen2.5-VL-7B-Instruct/cc594898137f460bfe9f0759e9844b3ce807cfb5/.gitattributes HTTP/1.1" 200 None
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /api/resolve-cache/models/Qwen/Qwen2.5-VL-7B-Instruct/cc594898137f460bfe9f0759e9844b3ce807cfb5/generation_config.json HTTP/1.1" 200 0
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "GET /api/resolve-cache/models/Qwen/Qwen2.5-VL-7B-Instruct/cc594898137f460bfe9f0759e9844b3ce807cfb5/README.md HTTP/1.1" 200 None
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /api/resolve-cache/models/Qwen/Qwen2.5-VL-7B-Instruct/cc594898137f460bfe9f0759e9844b3ce807cfb5/merges.txt HTTP/1.1" 200 0
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "GET /api/resolve-cache/models/Qwen/Qwen2.5-VL-7B-Instruct/cc594898137f460bfe9f0759e9844b3ce807cfb5/config.json HTTP/1.1" 200 None
+DEBUG    filelock:_api.py:497 Attempting to acquire lock 140660117112016 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2.5-VL-7B-Instruct/1088c9865dbf2e8152485664bb07495e89a14efb.lock
+DEBUG    filelock:_api.py:497 Attempting to acquire lock 140648559096416 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2.5-VL-7B-Instruct/20024bfe7c83998e9aeaf98a0cd6a2ce6306c2f0.lock
+DEBUG    filelock:_api.py:500 Lock 140660117112016 acquired on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2.5-VL-7B-Instruct/1088c9865dbf2e8152485664bb07495e89a14efb.lock
+DEBUG    filelock:_api.py:500 Lock 140648559096416 acquired on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2.5-VL-7B-Instruct/20024bfe7c83998e9aeaf98a0cd6a2ce6306c2f0.lock
+DEBUG    filelock:_api.py:537 Attempting to release lock 140648562464032 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2.5-VL-7B-Instruct/a6344aac8c09253b3b630fb776ae94478aa0275b.lock
+DEBUG    filelock:_api.py:541 Lock 140648562464032 released on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2.5-VL-7B-Instruct/a6344aac8c09253b3b630fb776ae94478aa0275b.lock
+DEBUG    filelock:_api.py:537 Attempting to release lock 140648559151248 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2.5-VL-7B-Instruct/5f169031e3f61faa8262272000c36d54bdc9b926.lock
+DEBUG    filelock:_api.py:537 Attempting to release lock 140648812958384 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2.5-VL-7B-Instruct/58ee12a9fb3d8708a1e41e49cb9aa5ac5017b6a6.lock
+DEBUG    filelock:_api.py:541 Lock 140648559151248 released on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2.5-VL-7B-Instruct/5f169031e3f61faa8262272000c36d54bdc9b926.lock
+DEBUG    filelock:_api.py:541 Lock 140648812958384 released on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2.5-VL-7B-Instruct/58ee12a9fb3d8708a1e41e49cb9aa5ac5017b6a6.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "GET /api/resolve-cache/models/Qwen/Qwen2.5-VL-7B-Instruct/cc594898137f460bfe9f0759e9844b3ce807cfb5/merges.txt HTTP/1.1" 200 None
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "GET /api/resolve-cache/models/Qwen/Qwen2.5-VL-7B-Instruct/cc594898137f460bfe9f0759e9844b3ce807cfb5/generation_config.json HTTP/1.1" 200 216
+DEBUG    filelock:_api.py:537 Attempting to release lock 140660117112016 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2.5-VL-7B-Instruct/1088c9865dbf2e8152485664bb07495e89a14efb.lock
+DEBUG    filelock:_api.py:541 Lock 140660117112016 released on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2.5-VL-7B-Instruct/1088c9865dbf2e8152485664bb07495e89a14efb.lock
+DEBUG    filelock:_api.py:537 Attempting to release lock 140648559096416 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2.5-VL-7B-Instruct/20024bfe7c83998e9aeaf98a0cd6a2ce6306c2f0.lock
+DEBUG    filelock:_api.py:541 Lock 140648559096416 released on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2.5-VL-7B-Instruct/20024bfe7c83998e9aeaf98a0cd6a2ce6306c2f0.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /Qwen/Qwen2.5-VL-7B-Instruct/resolve/cc594898137f460bfe9f0759e9844b3ce807cfb5/model-00003-of-00005.safetensors HTTP/1.1" 302 0
+DEBUG    filelock:_api.py:497 Attempting to acquire lock 140648562470128 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2.5-VL-7B-Instruct/111223d173e00bbee81cba1216fad28668df3476706b7fd26f4d5b50f8b3a507.lock
+DEBUG    filelock:_api.py:500 Lock 140648562470128 acquired on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2.5-VL-7B-Instruct/111223d173e00bbee81cba1216fad28668df3476706b7fd26f4d5b50f8b3a507.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /Qwen/Qwen2.5-VL-7B-Instruct/resolve/cc594898137f460bfe9f0759e9844b3ce807cfb5/model.safetensors.index.json HTTP/1.1" 307 0
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /Qwen/Qwen2.5-VL-7B-Instruct/resolve/cc594898137f460bfe9f0759e9844b3ce807cfb5/model-00005-of-00005.safetensors HTTP/1.1" 302 0
+DEBUG    filelock:_api.py:497 Attempting to acquire lock 140648559149424 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2.5-VL-7B-Instruct/0c859795ad3a627a9b95bcb762e059d5b768a4a36fdd4affeff269d93fdecc67.lock
+DEBUG    filelock:_api.py:500 Lock 140648559149424 acquired on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2.5-VL-7B-Instruct/0c859795ad3a627a9b95bcb762e059d5b768a4a36fdd4affeff269d93fdecc67.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /Qwen/Qwen2.5-VL-7B-Instruct/resolve/cc594898137f460bfe9f0759e9844b3ce807cfb5/model-00004-of-00005.safetensors HTTP/1.1" 302 0
+DEBUG    filelock:_api.py:497 Attempting to acquire lock 140648811241616 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2.5-VL-7B-Instruct/ef47f634fa57d46ee134edcc09f34085a47da1e16c12a2abe0d67118be6d72ed.lock
+DEBUG    filelock:_api.py:500 Lock 140648811241616 acquired on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2.5-VL-7B-Instruct/ef47f634fa57d46ee134edcc09f34085a47da1e16c12a2abe0d67118be6d72ed.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "GET /api/models/Qwen/Qwen2.5-VL-7B-Instruct/xet-read-token/cc594898137f460bfe9f0759e9844b3ce807cfb5 HTTP/1.1" 200 405
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /api/resolve-cache/models/Qwen/Qwen2.5-VL-7B-Instruct/cc594898137f460bfe9f0759e9844b3ce807cfb5/model.safetensors.index.json HTTP/1.1" 200 0
+DEBUG    filelock:_api.py:497 Attempting to acquire lock 140648812969232 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2.5-VL-7B-Instruct/f0c9e9b8e043f5de0ac99fd8b2ea75515d811e7b.lock
+DEBUG    filelock:_api.py:500 Lock 140648812969232 acquired on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2.5-VL-7B-Instruct/f0c9e9b8e043f5de0ac99fd8b2ea75515d811e7b.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "GET /api/resolve-cache/models/Qwen/Qwen2.5-VL-7B-Instruct/cc594898137f460bfe9f0759e9844b3ce807cfb5/model.safetensors.index.json HTTP/1.1" 200 None
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /Qwen/Qwen2.5-VL-7B-Instruct/resolve/cc594898137f460bfe9f0759e9844b3ce807cfb5/preprocessor_config.json HTTP/1.1" 307 0
+DEBUG    filelock:_api.py:537 Attempting to release lock 140648812969232 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2.5-VL-7B-Instruct/f0c9e9b8e043f5de0ac99fd8b2ea75515d811e7b.lock
+DEBUG    filelock:_api.py:541 Lock 140648812969232 released on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2.5-VL-7B-Instruct/f0c9e9b8e043f5de0ac99fd8b2ea75515d811e7b.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /api/resolve-cache/models/Qwen/Qwen2.5-VL-7B-Instruct/cc594898137f460bfe9f0759e9844b3ce807cfb5/preprocessor_config.json HTTP/1.1" 200 0
+DEBUG    filelock:_api.py:497 Attempting to acquire lock 140648812966736 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2.5-VL-7B-Instruct/7f3b746825e5eef53ed8ed57a91df9e86ee62c0a.lock
+DEBUG    filelock:_api.py:500 Lock 140648812966736 acquired on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2.5-VL-7B-Instruct/7f3b746825e5eef53ed8ed57a91df9e86ee62c0a.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "GET /api/resolve-cache/models/Qwen/Qwen2.5-VL-7B-Instruct/cc594898137f460bfe9f0759e9844b3ce807cfb5/preprocessor_config.json HTTP/1.1" 200 350
+DEBUG    filelock:_api.py:537 Attempting to release lock 140648812966736 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2.5-VL-7B-Instruct/7f3b746825e5eef53ed8ed57a91df9e86ee62c0a.lock
+DEBUG    filelock:_api.py:541 Lock 140648812966736 released on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2.5-VL-7B-Instruct/7f3b746825e5eef53ed8ed57a91df9e86ee62c0a.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /Qwen/Qwen2.5-VL-7B-Instruct/resolve/cc594898137f460bfe9f0759e9844b3ce807cfb5/tokenizer.json HTTP/1.1" 307 0
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /api/resolve-cache/models/Qwen/Qwen2.5-VL-7B-Instruct/cc594898137f460bfe9f0759e9844b3ce807cfb5/tokenizer.json HTTP/1.1" 200 0
+DEBUG    filelock:_api.py:497 Attempting to acquire lock 140648559096416 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2.5-VL-7B-Instruct/443909a61d429dff23010e5bddd28ff530edda00.lock
+DEBUG    filelock:_api.py:500 Lock 140648559096416 acquired on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2.5-VL-7B-Instruct/443909a61d429dff23010e5bddd28ff530edda00.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "GET /api/resolve-cache/models/Qwen/Qwen2.5-VL-7B-Instruct/cc594898137f460bfe9f0759e9844b3ce807cfb5/tokenizer.json HTTP/1.1" 200 None
+DEBUG    filelock:_api.py:537 Attempting to release lock 140648559096416 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2.5-VL-7B-Instruct/443909a61d429dff23010e5bddd28ff530edda00.lock
+DEBUG    filelock:_api.py:541 Lock 140648559096416 released on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2.5-VL-7B-Instruct/443909a61d429dff23010e5bddd28ff530edda00.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /Qwen/Qwen2.5-VL-7B-Instruct/resolve/cc594898137f460bfe9f0759e9844b3ce807cfb5/tokenizer_config.json HTTP/1.1" 307 0
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "GET /api/models/Qwen/Qwen2.5-VL-7B-Instruct/xet-read-token/cc594898137f460bfe9f0759e9844b3ce807cfb5 HTTP/1.1" 200 405
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "GET /api/models/Qwen/Qwen2.5-VL-7B-Instruct/xet-read-token/cc594898137f460bfe9f0759e9844b3ce807cfb5 HTTP/1.1" 200 405
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /api/resolve-cache/models/Qwen/Qwen2.5-VL-7B-Instruct/cc594898137f460bfe9f0759e9844b3ce807cfb5/tokenizer_config.json HTTP/1.1" 200 0
+DEBUG    filelock:_api.py:497 Attempting to acquire lock 140660083172144 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2.5-VL-7B-Instruct/91684ea3dc135a7d815e2c932054ce88c1aab41f.lock
+DEBUG    filelock:_api.py:500 Lock 140660083172144 acquired on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2.5-VL-7B-Instruct/91684ea3dc135a7d815e2c932054ce88c1aab41f.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "GET /api/models/Qwen/Qwen2.5-VL-7B-Instruct/xet-read-token/cc594898137f460bfe9f0759e9844b3ce807cfb5 HTTP/1.1" 200 405
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "GET /api/resolve-cache/models/Qwen/Qwen2.5-VL-7B-Instruct/cc594898137f460bfe9f0759e9844b3ce807cfb5/tokenizer_config.json HTTP/1.1" 200 None
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "GET /api/models/Qwen/Qwen2.5-VL-7B-Instruct/xet-read-token/cc594898137f460bfe9f0759e9844b3ce807cfb5 HTTP/1.1" 200 405
+DEBUG    filelock:_api.py:537 Attempting to release lock 140660083172144 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2.5-VL-7B-Instruct/91684ea3dc135a7d815e2c932054ce88c1aab41f.lock
+DEBUG    filelock:_api.py:541 Lock 140660083172144 released on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2.5-VL-7B-Instruct/91684ea3dc135a7d815e2c932054ce88c1aab41f.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /Qwen/Qwen2.5-VL-7B-Instruct/resolve/cc594898137f460bfe9f0759e9844b3ce807cfb5/vocab.json HTTP/1.1" 307 0
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /api/resolve-cache/models/Qwen/Qwen2.5-VL-7B-Instruct/cc594898137f460bfe9f0759e9844b3ce807cfb5/vocab.json HTTP/1.1" 200 0
+DEBUG    filelock:_api.py:497 Attempting to acquire lock 140648645182624 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2.5-VL-7B-Instruct/4783fe10ac3adce15ac8f358ef5462739852c569.lock
+DEBUG    filelock:_api.py:500 Lock 140648645182624 acquired on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2.5-VL-7B-Instruct/4783fe10ac3adce15ac8f358ef5462739852c569.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "GET /api/resolve-cache/models/Qwen/Qwen2.5-VL-7B-Instruct/cc594898137f460bfe9f0759e9844b3ce807cfb5/vocab.json HTTP/1.1" 200 None
+DEBUG    filelock:_api.py:537 Attempting to release lock 140648645182624 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2.5-VL-7B-Instruct/4783fe10ac3adce15ac8f358ef5462739852c569.lock
+DEBUG    filelock:_api.py:541 Lock 140648645182624 released on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2.5-VL-7B-Instruct/4783fe10ac3adce15ac8f358ef5462739852c569.lock
+DEBUG    filelock:_api.py:537 Attempting to release lock 140648559149424 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2.5-VL-7B-Instruct/0c859795ad3a627a9b95bcb762e059d5b768a4a36fdd4affeff269d93fdecc67.lock
+DEBUG    filelock:_api.py:541 Lock 140648559149424 released on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2.5-VL-7B-Instruct/0c859795ad3a627a9b95bcb762e059d5b768a4a36fdd4affeff269d93fdecc67.lock
+DEBUG    filelock:_api.py:537 Attempting to release lock 140648562470128 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2.5-VL-7B-Instruct/111223d173e00bbee81cba1216fad28668df3476706b7fd26f4d5b50f8b3a507.lock
+DEBUG    filelock:_api.py:541 Lock 140648562470128 released on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2.5-VL-7B-Instruct/111223d173e00bbee81cba1216fad28668df3476706b7fd26f4d5b50f8b3a507.lock
+DEBUG    filelock:_api.py:537 Attempting to release lock 140648559151584 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2.5-VL-7B-Instruct/a9a300a43b4724eee2abe7c18ceb26768d0ab011eb0cad19d9bfd2476a24d024.lock
+DEBUG    filelock:_api.py:541 Lock 140648559151584 released on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2.5-VL-7B-Instruct/a9a300a43b4724eee2abe7c18ceb26768d0ab011eb0cad19d9bfd2476a24d024.lock
+DEBUG    filelock:_api.py:537 Attempting to release lock 140648810504864 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2.5-VL-7B-Instruct/e97b877e47fde53a6c6e77aafb36e58e91ee9d95c4a3eeac6f1b5c0e6a1c986e.lock
+DEBUG    filelock:_api.py:541 Lock 140648810504864 released on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2.5-VL-7B-Instruct/e97b877e47fde53a6c6e77aafb36e58e91ee9d95c4a3eeac6f1b5c0e6a1c986e.lock
+DEBUG    filelock:_api.py:537 Attempting to release lock 140648811241616 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2.5-VL-7B-Instruct/ef47f634fa57d46ee134edcc09f34085a47da1e16c12a2abe0d67118be6d72ed.lock
+DEBUG    filelock:_api.py:541 Lock 140648811241616 released on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2.5-VL-7B-Instruct/ef47f634fa57d46ee134edcc09f34085a47da1e16c12a2abe0d67118be6d72ed.lock
+INFO     root:conftest.py:186 Successfully pre-downloaded: Qwen/Qwen2.5-VL-7B-Instruct
+INFO     root:conftest.py:159 Pre-downloading model: TinyLlama/TinyLlama-1.1B-Chat-v1.0
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "GET /api/models/TinyLlama/TinyLlama-1.1B-Chat-v1.0/revision/main HTTP/1.1" 200 None
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /TinyLlama/TinyLlama-1.1B-Chat-v1.0/resolve/fe8a4ea1ffedaf415f4da2f062534de366a451e6/generation_config.json HTTP/1.1" 307 0
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /TinyLlama/TinyLlama-1.1B-Chat-v1.0/resolve/fe8a4ea1ffedaf415f4da2f062534de366a451e6/.gitattributes HTTP/1.1" 307 0
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /TinyLlama/TinyLlama-1.1B-Chat-v1.0/resolve/fe8a4ea1ffedaf415f4da2f062534de366a451e6/special_tokens_map.json HTTP/1.1" 307 0
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /TinyLlama/TinyLlama-1.1B-Chat-v1.0/resolve/fe8a4ea1ffedaf415f4da2f062534de366a451e6/eval_results.json HTTP/1.1" 307 0
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /TinyLlama/TinyLlama-1.1B-Chat-v1.0/resolve/fe8a4ea1ffedaf415f4da2f062534de366a451e6/tokenizer.json HTTP/1.1" 307 0
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /TinyLlama/TinyLlama-1.1B-Chat-v1.0/resolve/fe8a4ea1ffedaf415f4da2f062534de366a451e6/README.md HTTP/1.1" 307 0
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /TinyLlama/TinyLlama-1.1B-Chat-v1.0/resolve/fe8a4ea1ffedaf415f4da2f062534de366a451e6/model.safetensors HTTP/1.1" 302 0
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /api/resolve-cache/models/TinyLlama/TinyLlama-1.1B-Chat-v1.0/fe8a4ea1ffedaf415f4da2f062534de366a451e6/generation_config.json HTTP/1.1" 200 0
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /api/resolve-cache/models/TinyLlama/TinyLlama-1.1B-Chat-v1.0/fe8a4ea1ffedaf415f4da2f062534de366a451e6/.gitattributes HTTP/1.1" 200 0
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /api/resolve-cache/models/TinyLlama/TinyLlama-1.1B-Chat-v1.0/fe8a4ea1ffedaf415f4da2f062534de366a451e6/eval_results.json HTTP/1.1" 200 0
+DEBUG    filelock:_api.py:497 Attempting to acquire lock 140652842071872 on /home/dynamo/.cache/huggingface/hub/.locks/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/a6344aac8c09253b3b630fb776ae94478aa0275b.lock
+DEBUG    filelock:_api.py:497 Attempting to acquire lock 140652842070672 on /home/dynamo/.cache/huggingface/hub/.locks/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/6e6001da2106d4757498752a021df6c2bdc332c650aae4bae6b0c004dcf14933.lock
+DEBUG    filelock:_api.py:500 Lock 140652842070672 acquired on /home/dynamo/.cache/huggingface/hub/.locks/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/6e6001da2106d4757498752a021df6c2bdc332c650aae4bae6b0c004dcf14933.lock
+DEBUG    filelock:_api.py:500 Lock 140652842071872 acquired on /home/dynamo/.cache/huggingface/hub/.locks/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/a6344aac8c09253b3b630fb776ae94478aa0275b.lock
+DEBUG    filelock:_api.py:497 Attempting to acquire lock 140648559161952 on /home/dynamo/.cache/huggingface/hub/.locks/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/768e95e5b4dada726d7631277a4a87ecbb236f70.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /TinyLlama/TinyLlama-1.1B-Chat-v1.0/resolve/fe8a4ea1ffedaf415f4da2f062534de366a451e6/config.json HTTP/1.1" 307 0
+DEBUG    filelock:_api.py:497 Attempting to acquire lock 140648559161040 on /home/dynamo/.cache/huggingface/hub/.locks/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/f1ffbab317a5c0582b8ee6756a3cdfeb0cf684bc.lock
+DEBUG    filelock:_api.py:500 Lock 140648559161952 acquired on /home/dynamo/.cache/huggingface/hub/.locks/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/768e95e5b4dada726d7631277a4a87ecbb236f70.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /api/resolve-cache/models/TinyLlama/TinyLlama-1.1B-Chat-v1.0/fe8a4ea1ffedaf415f4da2f062534de366a451e6/tokenizer.json HTTP/1.1" 200 0
+DEBUG    filelock:_api.py:500 Lock 140648559161040 acquired on /home/dynamo/.cache/huggingface/hub/.locks/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/f1ffbab317a5c0582b8ee6756a3cdfeb0cf684bc.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /api/resolve-cache/models/TinyLlama/TinyLlama-1.1B-Chat-v1.0/fe8a4ea1ffedaf415f4da2f062534de366a451e6/special_tokens_map.json HTTP/1.1" 200 0
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /api/resolve-cache/models/TinyLlama/TinyLlama-1.1B-Chat-v1.0/fe8a4ea1ffedaf415f4da2f062534de366a451e6/README.md HTTP/1.1" 200 0
+DEBUG    filelock:_api.py:497 Attempting to acquire lock 140655384285200 on /home/dynamo/.cache/huggingface/hub/.locks/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/492d4b2966a1763442d426d880dbc29f94906e4c.lock
+DEBUG    filelock:_api.py:500 Lock 140655384285200 acquired on /home/dynamo/.cache/huggingface/hub/.locks/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/492d4b2966a1763442d426d880dbc29f94906e4c.lock
+DEBUG    filelock:_api.py:497 Attempting to acquire lock 140653001422752 on /home/dynamo/.cache/huggingface/hub/.locks/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/9737c9ce5074907aa44d575918c5367cd877471f.lock
+DEBUG    filelock:_api.py:497 Attempting to acquire lock 140648559169984 on /home/dynamo/.cache/huggingface/hub/.locks/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/a6e931b92caff4c79c5c56282f1e89569a0ae558.lock
+DEBUG    filelock:_api.py:500 Lock 140653001422752 acquired on /home/dynamo/.cache/huggingface/hub/.locks/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/9737c9ce5074907aa44d575918c5367cd877471f.lock
+DEBUG    filelock:_api.py:500 Lock 140648559169984 acquired on /home/dynamo/.cache/huggingface/hub/.locks/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/a6e931b92caff4c79c5c56282f1e89569a0ae558.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /api/resolve-cache/models/TinyLlama/TinyLlama-1.1B-Chat-v1.0/fe8a4ea1ffedaf415f4da2f062534de366a451e6/config.json HTTP/1.1" 200 0
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "GET /api/resolve-cache/models/TinyLlama/TinyLlama-1.1B-Chat-v1.0/fe8a4ea1ffedaf415f4da2f062534de366a451e6/.gitattributes HTTP/1.1" 200 None
+DEBUG    filelock:_api.py:497 Attempting to acquire lock 140648559176080 on /home/dynamo/.cache/huggingface/hub/.locks/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/4ea05f1bc289d48ba9b92eea2f58ad8acd3dce5d.lock
+DEBUG    filelock:_api.py:500 Lock 140648559176080 acquired on /home/dynamo/.cache/huggingface/hub/.locks/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/4ea05f1bc289d48ba9b92eea2f58ad8acd3dce5d.lock
+DEBUG    filelock:_api.py:537 Attempting to release lock 140652842071872 on /home/dynamo/.cache/huggingface/hub/.locks/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/a6344aac8c09253b3b630fb776ae94478aa0275b.lock
+DEBUG    filelock:_api.py:541 Lock 140652842071872 released on /home/dynamo/.cache/huggingface/hub/.locks/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/a6344aac8c09253b3b630fb776ae94478aa0275b.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "GET /api/resolve-cache/models/TinyLlama/TinyLlama-1.1B-Chat-v1.0/fe8a4ea1ffedaf415f4da2f062534de366a451e6/eval_results.json HTTP/1.1" 200 566
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "GET /api/resolve-cache/models/TinyLlama/TinyLlama-1.1B-Chat-v1.0/fe8a4ea1ffedaf415f4da2f062534de366a451e6/generation_config.json HTTP/1.1" 200 124
+DEBUG    filelock:_api.py:537 Attempting to release lock 140648559161040 on /home/dynamo/.cache/huggingface/hub/.locks/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/f1ffbab317a5c0582b8ee6756a3cdfeb0cf684bc.lock
+DEBUG    filelock:_api.py:541 Lock 140648559161040 released on /home/dynamo/.cache/huggingface/hub/.locks/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/f1ffbab317a5c0582b8ee6756a3cdfeb0cf684bc.lock
+DEBUG    filelock:_api.py:537 Attempting to release lock 140648559161952 on /home/dynamo/.cache/huggingface/hub/.locks/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/768e95e5b4dada726d7631277a4a87ecbb236f70.lock
+DEBUG    filelock:_api.py:541 Lock 140648559161952 released on /home/dynamo/.cache/huggingface/hub/.locks/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/768e95e5b4dada726d7631277a4a87ecbb236f70.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "GET /api/resolve-cache/models/TinyLlama/TinyLlama-1.1B-Chat-v1.0/fe8a4ea1ffedaf415f4da2f062534de366a451e6/tokenizer.json HTTP/1.1" 200 None
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "GET /api/resolve-cache/models/TinyLlama/TinyLlama-1.1B-Chat-v1.0/fe8a4ea1ffedaf415f4da2f062534de366a451e6/special_tokens_map.json HTTP/1.1" 200 551
+DEBUG    filelock:_api.py:537 Attempting to release lock 140655384285200 on /home/dynamo/.cache/huggingface/hub/.locks/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/492d4b2966a1763442d426d880dbc29f94906e4c.lock
+DEBUG    filelock:_api.py:541 Lock 140655384285200 released on /home/dynamo/.cache/huggingface/hub/.locks/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/492d4b2966a1763442d426d880dbc29f94906e4c.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "GET /api/resolve-cache/models/TinyLlama/TinyLlama-1.1B-Chat-v1.0/fe8a4ea1ffedaf415f4da2f062534de366a451e6/config.json HTTP/1.1" 200 608
+DEBUG    filelock:_api.py:537 Attempting to release lock 140648559176080 on /home/dynamo/.cache/huggingface/hub/.locks/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/4ea05f1bc289d48ba9b92eea2f58ad8acd3dce5d.lock
+DEBUG    filelock:_api.py:541 Lock 140648559176080 released on /home/dynamo/.cache/huggingface/hub/.locks/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/4ea05f1bc289d48ba9b92eea2f58ad8acd3dce5d.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "GET /api/resolve-cache/models/TinyLlama/TinyLlama-1.1B-Chat-v1.0/fe8a4ea1ffedaf415f4da2f062534de366a451e6/README.md HTTP/1.1" 200 None
+DEBUG    filelock:_api.py:537 Attempting to release lock 140653001422752 on /home/dynamo/.cache/huggingface/hub/.locks/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/9737c9ce5074907aa44d575918c5367cd877471f.lock
+DEBUG    filelock:_api.py:541 Lock 140653001422752 released on /home/dynamo/.cache/huggingface/hub/.locks/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/9737c9ce5074907aa44d575918c5367cd877471f.lock
+DEBUG    filelock:_api.py:537 Attempting to release lock 140648559169984 on /home/dynamo/.cache/huggingface/hub/.locks/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/a6e931b92caff4c79c5c56282f1e89569a0ae558.lock
+DEBUG    filelock:_api.py:541 Lock 140648559169984 released on /home/dynamo/.cache/huggingface/hub/.locks/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/a6e931b92caff4c79c5c56282f1e89569a0ae558.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "GET /api/models/TinyLlama/TinyLlama-1.1B-Chat-v1.0/xet-read-token/fe8a4ea1ffedaf415f4da2f062534de366a451e6 HTTP/1.1" 200 405
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /TinyLlama/TinyLlama-1.1B-Chat-v1.0/resolve/fe8a4ea1ffedaf415f4da2f062534de366a451e6/tokenizer_config.json HTTP/1.1" 307 0
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /TinyLlama/TinyLlama-1.1B-Chat-v1.0/resolve/fe8a4ea1ffedaf415f4da2f062534de366a451e6/tokenizer.model HTTP/1.1" 302 0
+DEBUG    filelock:_api.py:497 Attempting to acquire lock 140652842071872 on /home/dynamo/.cache/huggingface/hub/.locks/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/9e556afd44213b6bd1be2b850ebbbd98f5481437a8021afaf58ee7fb1818d347.lock
+DEBUG    filelock:_api.py:500 Lock 140652842071872 acquired on /home/dynamo/.cache/huggingface/hub/.locks/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/9e556afd44213b6bd1be2b850ebbbd98f5481437a8021afaf58ee7fb1818d347.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /api/resolve-cache/models/TinyLlama/TinyLlama-1.1B-Chat-v1.0/fe8a4ea1ffedaf415f4da2f062534de366a451e6/tokenizer_config.json HTTP/1.1" 200 0
+DEBUG    filelock:_api.py:497 Attempting to acquire lock 140653001422752 on /home/dynamo/.cache/huggingface/hub/.locks/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/fa96b85858f4053b0142a18e2b09dbe94e3fae46.lock
+DEBUG    filelock:_api.py:500 Lock 140653001422752 acquired on /home/dynamo/.cache/huggingface/hub/.locks/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/fa96b85858f4053b0142a18e2b09dbe94e3fae46.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "GET /api/resolve-cache/models/TinyLlama/TinyLlama-1.1B-Chat-v1.0/fe8a4ea1ffedaf415f4da2f062534de366a451e6/tokenizer_config.json HTTP/1.1" 200 None
+DEBUG    filelock:_api.py:537 Attempting to release lock 140653001422752 on /home/dynamo/.cache/huggingface/hub/.locks/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/fa96b85858f4053b0142a18e2b09dbe94e3fae46.lock
+DEBUG    filelock:_api.py:541 Lock 140653001422752 released on /home/dynamo/.cache/huggingface/hub/.locks/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/fa96b85858f4053b0142a18e2b09dbe94e3fae46.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "GET /api/models/TinyLlama/TinyLlama-1.1B-Chat-v1.0/xet-read-token/fe8a4ea1ffedaf415f4da2f062534de366a451e6 HTTP/1.1" 200 405
+DEBUG    filelock:_api.py:537 Attempting to release lock 140652842071872 on /home/dynamo/.cache/huggingface/hub/.locks/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/9e556afd44213b6bd1be2b850ebbbd98f5481437a8021afaf58ee7fb1818d347.lock
+DEBUG    filelock:_api.py:541 Lock 140652842071872 released on /home/dynamo/.cache/huggingface/hub/.locks/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/9e556afd44213b6bd1be2b850ebbbd98f5481437a8021afaf58ee7fb1818d347.lock
+DEBUG    filelock:_api.py:537 Attempting to release lock 140652842070672 on /home/dynamo/.cache/huggingface/hub/.locks/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/6e6001da2106d4757498752a021df6c2bdc332c650aae4bae6b0c004dcf14933.lock
+DEBUG    filelock:_api.py:541 Lock 140652842070672 released on /home/dynamo/.cache/huggingface/hub/.locks/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/6e6001da2106d4757498752a021df6c2bdc332c650aae4bae6b0c004dcf14933.lock
+INFO     root:conftest.py:186 Successfully pre-downloaded: TinyLlama/TinyLlama-1.1B-Chat-v1.0
+INFO     root:conftest.py:159 Pre-downloading model: Qwen/Qwen3-VL-2B-Instruct
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "GET /api/models/Qwen/Qwen3-VL-2B-Instruct/revision/main HTTP/1.1" 200 None
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /Qwen/Qwen3-VL-2B-Instruct/resolve/89644892e4d85e24eaac8bacfd4f463576704203/chat_template.json HTTP/1.1" 307 0
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /Qwen/Qwen3-VL-2B-Instruct/resolve/89644892e4d85e24eaac8bacfd4f463576704203/generation_config.json HTTP/1.1" 307 0
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /Qwen/Qwen3-VL-2B-Instruct/resolve/89644892e4d85e24eaac8bacfd4f463576704203/config.json HTTP/1.1" 307 0
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /Qwen/Qwen3-VL-2B-Instruct/resolve/89644892e4d85e24eaac8bacfd4f463576704203/.gitattributes HTTP/1.1" 307 0
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /Qwen/Qwen3-VL-2B-Instruct/resolve/89644892e4d85e24eaac8bacfd4f463576704203/model.safetensors HTTP/1.1" 302 0
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /Qwen/Qwen3-VL-2B-Instruct/resolve/89644892e4d85e24eaac8bacfd4f463576704203/README.md HTTP/1.1" 307 0
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /api/resolve-cache/models/Qwen/Qwen3-VL-2B-Instruct/89644892e4d85e24eaac8bacfd4f463576704203/chat_template.json HTTP/1.1" 200 0
+DEBUG    filelock:_api.py:497 Attempting to acquire lock 140648559151728 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-VL-2B-Instruct/e49e75bdda104c8de941eb20e0b3765184fb27bc.lock
+DEBUG    filelock:_api.py:497 Attempting to acquire lock 140648811513856 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-VL-2B-Instruct/7de1838c87a5349b016c26a1c3f7d2bc400a3d485f95ef39a7059ffd734977a0.lock
+DEBUG    filelock:_api.py:500 Lock 140648559151728 acquired on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-VL-2B-Instruct/e49e75bdda104c8de941eb20e0b3765184fb27bc.lock
+DEBUG    filelock:_api.py:500 Lock 140648811513856 acquired on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-VL-2B-Instruct/7de1838c87a5349b016c26a1c3f7d2bc400a3d485f95ef39a7059ffd734977a0.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /api/resolve-cache/models/Qwen/Qwen3-VL-2B-Instruct/89644892e4d85e24eaac8bacfd4f463576704203/generation_config.json HTTP/1.1" 200 0
+DEBUG    filelock:_api.py:497 Attempting to acquire lock 140648559160608 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-VL-2B-Instruct/7bb37933d2d86e4ceaabcc6540be989658f238e9.lock
+DEBUG    filelock:_api.py:500 Lock 140648559160608 acquired on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-VL-2B-Instruct/7bb37933d2d86e4ceaabcc6540be989658f238e9.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /Qwen/Qwen3-VL-2B-Instruct/resolve/89644892e4d85e24eaac8bacfd4f463576704203/preprocessor_config.json HTTP/1.1" 307 0
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /api/resolve-cache/models/Qwen/Qwen3-VL-2B-Instruct/89644892e4d85e24eaac8bacfd4f463576704203/config.json HTTP/1.1" 200 0
+DEBUG    filelock:_api.py:497 Attempting to acquire lock 140648559179920 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-VL-2B-Instruct/0cd8c646eb55794594b14fefcd1d3acea5cc000f.lock
+DEBUG    filelock:_api.py:500 Lock 140648559179920 acquired on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-VL-2B-Instruct/0cd8c646eb55794594b14fefcd1d3acea5cc000f.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /api/resolve-cache/models/Qwen/Qwen3-VL-2B-Instruct/89644892e4d85e24eaac8bacfd4f463576704203/README.md HTTP/1.1" 200 0
+DEBUG    filelock:_api.py:497 Attempting to acquire lock 140648559173824 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-VL-2B-Instruct/13afcb1d2c695b57ebe4ee740db48671069566ce.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /api/resolve-cache/models/Qwen/Qwen3-VL-2B-Instruct/89644892e4d85e24eaac8bacfd4f463576704203/.gitattributes HTTP/1.1" 200 0
+DEBUG    filelock:_api.py:500 Lock 140648559173824 acquired on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-VL-2B-Instruct/13afcb1d2c695b57ebe4ee740db48671069566ce.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "GET /api/resolve-cache/models/Qwen/Qwen3-VL-2B-Instruct/89644892e4d85e24eaac8bacfd4f463576704203/chat_template.json HTTP/1.1" 200 None
+DEBUG    filelock:_api.py:497 Attempting to acquire lock 140648813957088 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-VL-2B-Instruct/a6344aac8c09253b3b630fb776ae94478aa0275b.lock
+DEBUG    filelock:_api.py:500 Lock 140648813957088 acquired on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-VL-2B-Instruct/a6344aac8c09253b3b630fb776ae94478aa0275b.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "GET /api/resolve-cache/models/Qwen/Qwen3-VL-2B-Instruct/89644892e4d85e24eaac8bacfd4f463576704203/generation_config.json HTTP/1.1" 200 269
+DEBUG    filelock:_api.py:537 Attempting to release lock 140648559160608 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-VL-2B-Instruct/7bb37933d2d86e4ceaabcc6540be989658f238e9.lock
+DEBUG    filelock:_api.py:537 Attempting to release lock 140648559151728 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-VL-2B-Instruct/e49e75bdda104c8de941eb20e0b3765184fb27bc.lock
+DEBUG    filelock:_api.py:541 Lock 140648559160608 released on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-VL-2B-Instruct/7bb37933d2d86e4ceaabcc6540be989658f238e9.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /api/resolve-cache/models/Qwen/Qwen3-VL-2B-Instruct/89644892e4d85e24eaac8bacfd4f463576704203/preprocessor_config.json HTTP/1.1" 200 0
+DEBUG    filelock:_api.py:541 Lock 140648559151728 released on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-VL-2B-Instruct/e49e75bdda104c8de941eb20e0b3765184fb27bc.lock
+DEBUG    filelock:_api.py:497 Attempting to acquire lock 140648811822544 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-VL-2B-Instruct/2ea84a437d448ff71b08df68fdd949d5cc4ebb64.lock
+DEBUG    filelock:_api.py:500 Lock 140648811822544 acquired on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-VL-2B-Instruct/2ea84a437d448ff71b08df68fdd949d5cc4ebb64.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "GET /api/resolve-cache/models/Qwen/Qwen3-VL-2B-Instruct/89644892e4d85e24eaac8bacfd4f463576704203/config.json HTTP/1.1" 200 None
+DEBUG    filelock:_api.py:537 Attempting to release lock 140648559179920 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-VL-2B-Instruct/0cd8c646eb55794594b14fefcd1d3acea5cc000f.lock
+DEBUG    filelock:_api.py:541 Lock 140648559179920 released on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-VL-2B-Instruct/0cd8c646eb55794594b14fefcd1d3acea5cc000f.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "GET /api/resolve-cache/models/Qwen/Qwen3-VL-2B-Instruct/89644892e4d85e24eaac8bacfd4f463576704203/README.md HTTP/1.1" 200 None
+DEBUG    filelock:_api.py:537 Attempting to release lock 140648559173824 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-VL-2B-Instruct/13afcb1d2c695b57ebe4ee740db48671069566ce.lock
+DEBUG    filelock:_api.py:541 Lock 140648559173824 released on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-VL-2B-Instruct/13afcb1d2c695b57ebe4ee740db48671069566ce.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "GET /api/resolve-cache/models/Qwen/Qwen3-VL-2B-Instruct/89644892e4d85e24eaac8bacfd4f463576704203/preprocessor_config.json HTTP/1.1" 200 390
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "GET /api/resolve-cache/models/Qwen/Qwen3-VL-2B-Instruct/89644892e4d85e24eaac8bacfd4f463576704203/.gitattributes HTTP/1.1" 200 None
+DEBUG    filelock:_api.py:537 Attempting to release lock 140648811822544 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-VL-2B-Instruct/2ea84a437d448ff71b08df68fdd949d5cc4ebb64.lock
+DEBUG    filelock:_api.py:537 Attempting to release lock 140648813957088 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-VL-2B-Instruct/a6344aac8c09253b3b630fb776ae94478aa0275b.lock
+DEBUG    filelock:_api.py:541 Lock 140648811822544 released on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-VL-2B-Instruct/2ea84a437d448ff71b08df68fdd949d5cc4ebb64.lock
+DEBUG    filelock:_api.py:541 Lock 140648813957088 released on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-VL-2B-Instruct/a6344aac8c09253b3b630fb776ae94478aa0275b.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /Qwen/Qwen3-VL-2B-Instruct/resolve/89644892e4d85e24eaac8bacfd4f463576704203/merges.txt HTTP/1.1" 307 0
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /api/resolve-cache/models/Qwen/Qwen3-VL-2B-Instruct/89644892e4d85e24eaac8bacfd4f463576704203/merges.txt HTTP/1.1" 200 0
+DEBUG    filelock:_api.py:497 Attempting to acquire lock 140648811237488 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-VL-2B-Instruct/20024bfe7c83998e9aeaf98a0cd6a2ce6306c2f0.lock
+DEBUG    filelock:_api.py:500 Lock 140648811237488 acquired on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-VL-2B-Instruct/20024bfe7c83998e9aeaf98a0cd6a2ce6306c2f0.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "GET /api/resolve-cache/models/Qwen/Qwen3-VL-2B-Instruct/89644892e4d85e24eaac8bacfd4f463576704203/merges.txt HTTP/1.1" 200 None
+DEBUG    filelock:_api.py:537 Attempting to release lock 140648811237488 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-VL-2B-Instruct/20024bfe7c83998e9aeaf98a0cd6a2ce6306c2f0.lock
+DEBUG    filelock:_api.py:541 Lock 140648811237488 released on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-VL-2B-Instruct/20024bfe7c83998e9aeaf98a0cd6a2ce6306c2f0.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "GET /api/models/Qwen/Qwen3-VL-2B-Instruct/xet-read-token/89644892e4d85e24eaac8bacfd4f463576704203 HTTP/1.1" 200 405
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /Qwen/Qwen3-VL-2B-Instruct/resolve/89644892e4d85e24eaac8bacfd4f463576704203/video_preprocessor_config.json HTTP/1.1" 307 0
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /Qwen/Qwen3-VL-2B-Instruct/resolve/89644892e4d85e24eaac8bacfd4f463576704203/tokenizer_config.json HTTP/1.1" 307 0
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /Qwen/Qwen3-VL-2B-Instruct/resolve/89644892e4d85e24eaac8bacfd4f463576704203/vocab.json HTTP/1.1" 307 0
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /Qwen/Qwen3-VL-2B-Instruct/resolve/89644892e4d85e24eaac8bacfd4f463576704203/tokenizer.json HTTP/1.1" 307 0
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /api/resolve-cache/models/Qwen/Qwen3-VL-2B-Instruct/89644892e4d85e24eaac8bacfd4f463576704203/video_preprocessor_config.json HTTP/1.1" 200 0
+DEBUG    filelock:_api.py:497 Attempting to acquire lock 140648811526768 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-VL-2B-Instruct/3ba673a5ad7d4d13f54155ecd38b2a94a6dac8fe.lock
+DEBUG    filelock:_api.py:500 Lock 140648811526768 acquired on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-VL-2B-Instruct/3ba673a5ad7d4d13f54155ecd38b2a94a6dac8fe.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /api/resolve-cache/models/Qwen/Qwen3-VL-2B-Instruct/89644892e4d85e24eaac8bacfd4f463576704203/tokenizer_config.json HTTP/1.1" 200 0
+DEBUG    filelock:_api.py:497 Attempting to acquire lock 140648559230176 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-VL-2B-Instruct/d3d3763207692c78780f4bf42d4dadf49a5c8012.lock
+DEBUG    filelock:_api.py:500 Lock 140648559230176 acquired on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-VL-2B-Instruct/d3d3763207692c78780f4bf42d4dadf49a5c8012.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /api/resolve-cache/models/Qwen/Qwen3-VL-2B-Instruct/89644892e4d85e24eaac8bacfd4f463576704203/vocab.json HTTP/1.1" 200 0
+DEBUG    filelock:_api.py:497 Attempting to acquire lock 140648559173824 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-VL-2B-Instruct/4783fe10ac3adce15ac8f358ef5462739852c569.lock
+DEBUG    filelock:_api.py:500 Lock 140648559173824 acquired on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-VL-2B-Instruct/4783fe10ac3adce15ac8f358ef5462739852c569.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /api/resolve-cache/models/Qwen/Qwen3-VL-2B-Instruct/89644892e4d85e24eaac8bacfd4f463576704203/tokenizer.json HTTP/1.1" 200 0
+DEBUG    filelock:_api.py:497 Attempting to acquire lock 140648811520000 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-VL-2B-Instruct/c6cc1014128b19d1fc46b1d30a23e3b1d35db421.lock
+DEBUG    filelock:_api.py:500 Lock 140648811520000 acquired on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-VL-2B-Instruct/c6cc1014128b19d1fc46b1d30a23e3b1d35db421.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "GET /api/resolve-cache/models/Qwen/Qwen3-VL-2B-Instruct/89644892e4d85e24eaac8bacfd4f463576704203/video_preprocessor_config.json HTTP/1.1" 200 385
+DEBUG    filelock:_api.py:537 Attempting to release lock 140648811526768 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-VL-2B-Instruct/3ba673a5ad7d4d13f54155ecd38b2a94a6dac8fe.lock
+DEBUG    filelock:_api.py:541 Lock 140648811526768 released on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-VL-2B-Instruct/3ba673a5ad7d4d13f54155ecd38b2a94a6dac8fe.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "GET /api/resolve-cache/models/Qwen/Qwen3-VL-2B-Instruct/89644892e4d85e24eaac8bacfd4f463576704203/tokenizer_config.json HTTP/1.1" 200 None
+DEBUG    filelock:_api.py:537 Attempting to release lock 140648559230176 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-VL-2B-Instruct/d3d3763207692c78780f4bf42d4dadf49a5c8012.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "GET /api/resolve-cache/models/Qwen/Qwen3-VL-2B-Instruct/89644892e4d85e24eaac8bacfd4f463576704203/vocab.json HTTP/1.1" 200 None
+DEBUG    filelock:_api.py:541 Lock 140648559230176 released on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-VL-2B-Instruct/d3d3763207692c78780f4bf42d4dadf49a5c8012.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "GET /api/resolve-cache/models/Qwen/Qwen3-VL-2B-Instruct/89644892e4d85e24eaac8bacfd4f463576704203/tokenizer.json HTTP/1.1" 200 None
+DEBUG    filelock:_api.py:537 Attempting to release lock 140648559173824 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-VL-2B-Instruct/4783fe10ac3adce15ac8f358ef5462739852c569.lock
+DEBUG    filelock:_api.py:541 Lock 140648559173824 released on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-VL-2B-Instruct/4783fe10ac3adce15ac8f358ef5462739852c569.lock
+DEBUG    filelock:_api.py:537 Attempting to release lock 140648811520000 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-VL-2B-Instruct/c6cc1014128b19d1fc46b1d30a23e3b1d35db421.lock
+DEBUG    filelock:_api.py:541 Lock 140648811520000 released on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-VL-2B-Instruct/c6cc1014128b19d1fc46b1d30a23e3b1d35db421.lock
+DEBUG    filelock:_api.py:537 Attempting to release lock 140648811513856 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-VL-2B-Instruct/7de1838c87a5349b016c26a1c3f7d2bc400a3d485f95ef39a7059ffd734977a0.lock
+DEBUG    filelock:_api.py:541 Lock 140648811513856 released on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-VL-2B-Instruct/7de1838c87a5349b016c26a1c3f7d2bc400a3d485f95ef39a7059ffd734977a0.lock
+INFO     root:conftest.py:186 Successfully pre-downloaded: Qwen/Qwen3-VL-2B-Instruct
+INFO     root:conftest.py:159 Pre-downloading model: Qwen/Qwen3-0.6B
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "GET /api/models/Qwen/Qwen3-0.6B/revision/main HTTP/1.1" 200 None
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /Qwen/Qwen3-0.6B/resolve/c1899de289a04d12100db370d81485cdf75e47ca/.gitattributes HTTP/1.1" 307 0
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /Qwen/Qwen3-0.6B/resolve/c1899de289a04d12100db370d81485cdf75e47ca/merges.txt HTTP/1.1" 307 0
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /Qwen/Qwen3-0.6B/resolve/c1899de289a04d12100db370d81485cdf75e47ca/generation_config.json HTTP/1.1" 307 0
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /Qwen/Qwen3-0.6B/resolve/c1899de289a04d12100db370d81485cdf75e47ca/tokenizer.json HTTP/1.1" 302 0
+DEBUG    filelock:_api.py:497 Attempting to acquire lock 140648559158256 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-0.6B/aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4.lock
+DEBUG    filelock:_api.py:500 Lock 140648559158256 acquired on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-0.6B/aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /Qwen/Qwen3-0.6B/resolve/c1899de289a04d12100db370d81485cdf75e47ca/config.json HTTP/1.1" 307 0
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /Qwen/Qwen3-0.6B/resolve/c1899de289a04d12100db370d81485cdf75e47ca/README.md HTTP/1.1" 307 0
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /Qwen/Qwen3-0.6B/resolve/c1899de289a04d12100db370d81485cdf75e47ca/LICENSE HTTP/1.1" 307 0
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /Qwen/Qwen3-0.6B/resolve/c1899de289a04d12100db370d81485cdf75e47ca/model.safetensors HTTP/1.1" 302 0
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /api/resolve-cache/models/Qwen/Qwen3-0.6B/c1899de289a04d12100db370d81485cdf75e47ca/.gitattributes HTTP/1.1" 200 0
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /api/resolve-cache/models/Qwen/Qwen3-0.6B/c1899de289a04d12100db370d81485cdf75e47ca/merges.txt HTTP/1.1" 200 0
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /api/resolve-cache/models/Qwen/Qwen3-0.6B/c1899de289a04d12100db370d81485cdf75e47ca/generation_config.json HTTP/1.1" 200 0
+DEBUG    filelock:_api.py:497 Attempting to acquire lock 140648559181216 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-0.6B/f47f71177f32bcd101b7573ec9171e6a57f4f4d31148d38e382306f42996874b.lock
+DEBUG    filelock:_api.py:500 Lock 140648559181216 acquired on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-0.6B/f47f71177f32bcd101b7573ec9171e6a57f4f4d31148d38e382306f42996874b.lock
+DEBUG    filelock:_api.py:497 Attempting to acquire lock 140648559227968 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-0.6B/52373fe24473b1aa44333d318f578ae6bf04b49b.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /api/resolve-cache/models/Qwen/Qwen3-0.6B/c1899de289a04d12100db370d81485cdf75e47ca/config.json HTTP/1.1" 200 0
+DEBUG    filelock:_api.py:500 Lock 140648559227968 acquired on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-0.6B/52373fe24473b1aa44333d318f578ae6bf04b49b.lock
+DEBUG    filelock:_api.py:497 Attempting to acquire lock 140648559154368 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-0.6B/20a8a9156fc8c3f25295ca067f61fdf120d517c5.lock
+DEBUG    filelock:_api.py:497 Attempting to acquire lock 140648559224176 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-0.6B/31349551d90c7606f325fe0f11bbb8bd5fa0d7c7.lock
+DEBUG    filelock:_api.py:500 Lock 140648559224176 acquired on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-0.6B/31349551d90c7606f325fe0f11bbb8bd5fa0d7c7.lock
+DEBUG    filelock:_api.py:500 Lock 140648559154368 acquired on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-0.6B/20a8a9156fc8c3f25295ca067f61fdf120d517c5.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /api/resolve-cache/models/Qwen/Qwen3-0.6B/c1899de289a04d12100db370d81485cdf75e47ca/LICENSE HTTP/1.1" 200 0
+DEBUG    filelock:_api.py:497 Attempting to acquire lock 140648559223888 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-0.6B/f5c3703b78ae2a478ae15b247e9f855e0ce2107b.lock
+DEBUG    filelock:_api.py:497 Attempting to acquire lock 140648559220288 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-0.6B/6634c8cc3133b3848ec74b9f275acaaa1ea618ab.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /api/resolve-cache/models/Qwen/Qwen3-0.6B/c1899de289a04d12100db370d81485cdf75e47ca/README.md HTTP/1.1" 200 0
+DEBUG    filelock:_api.py:500 Lock 140648559223888 acquired on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-0.6B/f5c3703b78ae2a478ae15b247e9f855e0ce2107b.lock
+DEBUG    filelock:_api.py:500 Lock 140648559220288 acquired on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-0.6B/6634c8cc3133b3848ec74b9f275acaaa1ea618ab.lock
+DEBUG    filelock:_api.py:497 Attempting to acquire lock 140648559236768 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-0.6B/a50b19e76f5274f9ec99f5a5d99873dca5bff25e.lock
+DEBUG    filelock:_api.py:500 Lock 140648559236768 acquired on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-0.6B/a50b19e76f5274f9ec99f5a5d99873dca5bff25e.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "GET /api/resolve-cache/models/Qwen/Qwen3-0.6B/c1899de289a04d12100db370d81485cdf75e47ca/.gitattributes HTTP/1.1" 200 None
+DEBUG    filelock:_api.py:537 Attempting to release lock 140648559227968 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-0.6B/52373fe24473b1aa44333d318f578ae6bf04b49b.lock
+DEBUG    filelock:_api.py:541 Lock 140648559227968 released on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-0.6B/52373fe24473b1aa44333d318f578ae6bf04b49b.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "GET /api/resolve-cache/models/Qwen/Qwen3-0.6B/c1899de289a04d12100db370d81485cdf75e47ca/merges.txt HTTP/1.1" 200 None
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "GET /api/resolve-cache/models/Qwen/Qwen3-0.6B/c1899de289a04d12100db370d81485cdf75e47ca/generation_config.json HTTP/1.1" 200 239
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "GET /api/resolve-cache/models/Qwen/Qwen3-0.6B/c1899de289a04d12100db370d81485cdf75e47ca/config.json HTTP/1.1" 200 726
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "GET /api/resolve-cache/models/Qwen/Qwen3-0.6B/c1899de289a04d12100db370d81485cdf75e47ca/LICENSE HTTP/1.1" 200 None
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "GET /api/resolve-cache/models/Qwen/Qwen3-0.6B/c1899de289a04d12100db370d81485cdf75e47ca/README.md HTTP/1.1" 200 None
+DEBUG    filelock:_api.py:537 Attempting to release lock 140648559154368 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-0.6B/20a8a9156fc8c3f25295ca067f61fdf120d517c5.lock
+DEBUG    filelock:_api.py:537 Attempting to release lock 140648559223888 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-0.6B/f5c3703b78ae2a478ae15b247e9f855e0ce2107b.lock
+DEBUG    filelock:_api.py:541 Lock 140648559154368 released on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-0.6B/20a8a9156fc8c3f25295ca067f61fdf120d517c5.lock
+DEBUG    filelock:_api.py:537 Attempting to release lock 140648559220288 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-0.6B/6634c8cc3133b3848ec74b9f275acaaa1ea618ab.lock
+DEBUG    filelock:_api.py:541 Lock 140648559220288 released on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-0.6B/6634c8cc3133b3848ec74b9f275acaaa1ea618ab.lock
+DEBUG    filelock:_api.py:541 Lock 140648559223888 released on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-0.6B/f5c3703b78ae2a478ae15b247e9f855e0ce2107b.lock
+DEBUG    filelock:_api.py:537 Attempting to release lock 140648559236768 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-0.6B/a50b19e76f5274f9ec99f5a5d99873dca5bff25e.lock
+DEBUG    filelock:_api.py:541 Lock 140648559236768 released on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-0.6B/a50b19e76f5274f9ec99f5a5d99873dca5bff25e.lock
+DEBUG    filelock:_api.py:537 Attempting to release lock 140648559224176 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-0.6B/31349551d90c7606f325fe0f11bbb8bd5fa0d7c7.lock
+DEBUG    filelock:_api.py:541 Lock 140648559224176 released on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-0.6B/31349551d90c7606f325fe0f11bbb8bd5fa0d7c7.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "GET /api/models/Qwen/Qwen3-0.6B/xet-read-token/c1899de289a04d12100db370d81485cdf75e47ca HTTP/1.1" 200 405
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "GET /api/models/Qwen/Qwen3-0.6B/xet-read-token/c1899de289a04d12100db370d81485cdf75e47ca HTTP/1.1" 200 405
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /Qwen/Qwen3-0.6B/resolve/c1899de289a04d12100db370d81485cdf75e47ca/vocab.json HTTP/1.1" 307 0
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /Qwen/Qwen3-0.6B/resolve/c1899de289a04d12100db370d81485cdf75e47ca/tokenizer_config.json HTTP/1.1" 307 0
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /api/resolve-cache/models/Qwen/Qwen3-0.6B/c1899de289a04d12100db370d81485cdf75e47ca/vocab.json HTTP/1.1" 200 0
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /api/resolve-cache/models/Qwen/Qwen3-0.6B/c1899de289a04d12100db370d81485cdf75e47ca/tokenizer_config.json HTTP/1.1" 200 0
+DEBUG    filelock:_api.py:497 Attempting to acquire lock 140660050526128 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-0.6B/4783fe10ac3adce15ac8f358ef5462739852c569.lock
+DEBUG    filelock:_api.py:497 Attempting to acquire lock 140660046941504 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-0.6B/417d038a63fa3de29cfde265caedae14d1a58d92.lock
+DEBUG    filelock:_api.py:500 Lock 140660050526128 acquired on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-0.6B/4783fe10ac3adce15ac8f358ef5462739852c569.lock
+DEBUG    filelock:_api.py:500 Lock 140660046941504 acquired on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-0.6B/417d038a63fa3de29cfde265caedae14d1a58d92.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "GET /api/resolve-cache/models/Qwen/Qwen3-0.6B/c1899de289a04d12100db370d81485cdf75e47ca/tokenizer_config.json HTTP/1.1" 200 None
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "GET /api/resolve-cache/models/Qwen/Qwen3-0.6B/c1899de289a04d12100db370d81485cdf75e47ca/vocab.json HTTP/1.1" 200 None
+DEBUG    filelock:_api.py:537 Attempting to release lock 140660046941504 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-0.6B/417d038a63fa3de29cfde265caedae14d1a58d92.lock
+DEBUG    filelock:_api.py:541 Lock 140660046941504 released on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-0.6B/417d038a63fa3de29cfde265caedae14d1a58d92.lock
+DEBUG    filelock:_api.py:537 Attempting to release lock 140660050526128 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-0.6B/4783fe10ac3adce15ac8f358ef5462739852c569.lock
+DEBUG    filelock:_api.py:541 Lock 140660050526128 released on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-0.6B/4783fe10ac3adce15ac8f358ef5462739852c569.lock
+DEBUG    filelock:_api.py:537 Attempting to release lock 140648559158256 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-0.6B/aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4.lock
+DEBUG    filelock:_api.py:541 Lock 140648559158256 released on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-0.6B/aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4.lock
+DEBUG    filelock:_api.py:537 Attempting to release lock 140648559181216 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-0.6B/f47f71177f32bcd101b7573ec9171e6a57f4f4d31148d38e382306f42996874b.lock
+DEBUG    filelock:_api.py:541 Lock 140648559181216 released on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen3-0.6B/f47f71177f32bcd101b7573ec9171e6a57f4f4d31148d38e382306f42996874b.lock
+INFO     root:conftest.py:186 Successfully pre-downloaded: Qwen/Qwen3-0.6B
+INFO     root:conftest.py:159 Pre-downloading model: Qwen/Qwen2-VL-2B-Instruct
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "GET /api/models/Qwen/Qwen2-VL-2B-Instruct/revision/main HTTP/1.1" 200 None
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /Qwen/Qwen2-VL-2B-Instruct/resolve/895c3a49bc3fa70a340399125c650a463535e71c/README.md HTTP/1.1" 307 0
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /Qwen/Qwen2-VL-2B-Instruct/resolve/895c3a49bc3fa70a340399125c650a463535e71c/.gitattributes HTTP/1.1" 307 0
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /Qwen/Qwen2-VL-2B-Instruct/resolve/895c3a49bc3fa70a340399125c650a463535e71c/generation_config.json HTTP/1.1" 307 0
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /Qwen/Qwen2-VL-2B-Instruct/resolve/895c3a49bc3fa70a340399125c650a463535e71c/model-00001-of-00002.safetensors HTTP/1.1" 302 0
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /Qwen/Qwen2-VL-2B-Instruct/resolve/895c3a49bc3fa70a340399125c650a463535e71c/LICENSE HTTP/1.1" 307 0
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /Qwen/Qwen2-VL-2B-Instruct/resolve/895c3a49bc3fa70a340399125c650a463535e71c/config.json HTTP/1.1" 307 0
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /api/resolve-cache/models/Qwen/Qwen2-VL-2B-Instruct/895c3a49bc3fa70a340399125c650a463535e71c/.gitattributes HTTP/1.1" 200 0
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /api/resolve-cache/models/Qwen/Qwen2-VL-2B-Instruct/895c3a49bc3fa70a340399125c650a463535e71c/README.md HTTP/1.1" 200 0
+DEBUG    filelock:_api.py:497 Attempting to acquire lock 140648559236096 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2-VL-2B-Instruct/994ac2b03f97de8bc647d0fe5eba2e4b632b3e28dc03574c29bdfc36cf47e1b9.lock
+DEBUG    filelock:_api.py:500 Lock 140648559236096 acquired on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2-VL-2B-Instruct/994ac2b03f97de8bc647d0fe5eba2e4b632b3e28dc03574c29bdfc36cf47e1b9.lock
+DEBUG    filelock:_api.py:497 Attempting to acquire lock 140648559247136 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2-VL-2B-Instruct/a6344aac8c09253b3b630fb776ae94478aa0275b.lock
+DEBUG    filelock:_api.py:497 Attempting to acquire lock 140648559234176 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2-VL-2B-Instruct/069d978f02c1c1eb03153ef9d986334b77168182.lock
+DEBUG    filelock:_api.py:500 Lock 140648559247136 acquired on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2-VL-2B-Instruct/a6344aac8c09253b3b630fb776ae94478aa0275b.lock
+DEBUG    filelock:_api.py:500 Lock 140648559234176 acquired on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2-VL-2B-Instruct/069d978f02c1c1eb03153ef9d986334b77168182.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /Qwen/Qwen2-VL-2B-Instruct/resolve/895c3a49bc3fa70a340399125c650a463535e71c/chat_template.json HTTP/1.1" 307 0
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /api/resolve-cache/models/Qwen/Qwen2-VL-2B-Instruct/895c3a49bc3fa70a340399125c650a463535e71c/generation_config.json HTTP/1.1" 200 0
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /api/resolve-cache/models/Qwen/Qwen2-VL-2B-Instruct/895c3a49bc3fa70a340399125c650a463535e71c/LICENSE HTTP/1.1" 200 0
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /api/resolve-cache/models/Qwen/Qwen2-VL-2B-Instruct/895c3a49bc3fa70a340399125c650a463535e71c/config.json HTTP/1.1" 200 0
+DEBUG    filelock:_api.py:497 Attempting to acquire lock 140648559173200 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2-VL-2B-Instruct/6634c8cc3133b3848ec74b9f275acaaa1ea618ab.lock
+DEBUG    filelock:_api.py:497 Attempting to acquire lock 140648559240080 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2-VL-2B-Instruct/896384ee102f9a2696e2f6eb02ba5a143f198fac.lock
+DEBUG    filelock:_api.py:500 Lock 140648559240080 acquired on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2-VL-2B-Instruct/896384ee102f9a2696e2f6eb02ba5a143f198fac.lock
+DEBUG    filelock:_api.py:500 Lock 140648559173200 acquired on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2-VL-2B-Instruct/6634c8cc3133b3848ec74b9f275acaaa1ea618ab.lock
+DEBUG    filelock:_api.py:497 Attempting to acquire lock 140648559231728 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2-VL-2B-Instruct/8e922d54443e7d2ad46c01baea1b772ecbc6228e.lock
+DEBUG    filelock:_api.py:500 Lock 140648559231728 acquired on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2-VL-2B-Instruct/8e922d54443e7d2ad46c01baea1b772ecbc6228e.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "GET /api/resolve-cache/models/Qwen/Qwen2-VL-2B-Instruct/895c3a49bc3fa70a340399125c650a463535e71c/.gitattributes HTTP/1.1" 200 None
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /api/resolve-cache/models/Qwen/Qwen2-VL-2B-Instruct/895c3a49bc3fa70a340399125c650a463535e71c/chat_template.json HTTP/1.1" 200 0
+DEBUG    filelock:_api.py:497 Attempting to acquire lock 140648559223840 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2-VL-2B-Instruct/732bd68bc5427d1fb6c06a59b3bf2456b2155d24.lock
+DEBUG    filelock:_api.py:500 Lock 140648559223840 acquired on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2-VL-2B-Instruct/732bd68bc5427d1fb6c06a59b3bf2456b2155d24.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "GET /api/resolve-cache/models/Qwen/Qwen2-VL-2B-Instruct/895c3a49bc3fa70a340399125c650a463535e71c/README.md HTTP/1.1" 200 None
+DEBUG    filelock:_api.py:537 Attempting to release lock 140648559247136 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2-VL-2B-Instruct/a6344aac8c09253b3b630fb776ae94478aa0275b.lock
+DEBUG    filelock:_api.py:537 Attempting to release lock 140648559234176 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2-VL-2B-Instruct/069d978f02c1c1eb03153ef9d986334b77168182.lock
+DEBUG    filelock:_api.py:541 Lock 140648559247136 released on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2-VL-2B-Instruct/a6344aac8c09253b3b630fb776ae94478aa0275b.lock
+DEBUG    filelock:_api.py:541 Lock 140648559234176 released on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2-VL-2B-Instruct/069d978f02c1c1eb03153ef9d986334b77168182.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "GET /api/resolve-cache/models/Qwen/Qwen2-VL-2B-Instruct/895c3a49bc3fa70a340399125c650a463535e71c/LICENSE HTTP/1.1" 200 None
+DEBUG    filelock:_api.py:537 Attempting to release lock 140648559173200 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2-VL-2B-Instruct/6634c8cc3133b3848ec74b9f275acaaa1ea618ab.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /Qwen/Qwen2-VL-2B-Instruct/resolve/895c3a49bc3fa70a340399125c650a463535e71c/merges.txt HTTP/1.1" 307 0
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "GET /api/resolve-cache/models/Qwen/Qwen2-VL-2B-Instruct/895c3a49bc3fa70a340399125c650a463535e71c/config.json HTTP/1.1" 200 None
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "GET /api/resolve-cache/models/Qwen/Qwen2-VL-2B-Instruct/895c3a49bc3fa70a340399125c650a463535e71c/generation_config.json HTTP/1.1" 200 272
+DEBUG    filelock:_api.py:541 Lock 140648559173200 released on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2-VL-2B-Instruct/6634c8cc3133b3848ec74b9f275acaaa1ea618ab.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "GET /api/resolve-cache/models/Qwen/Qwen2-VL-2B-Instruct/895c3a49bc3fa70a340399125c650a463535e71c/chat_template.json HTTP/1.1" 200 None
+DEBUG    filelock:_api.py:537 Attempting to release lock 140648559240080 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2-VL-2B-Instruct/896384ee102f9a2696e2f6eb02ba5a143f198fac.lock
+DEBUG    filelock:_api.py:537 Attempting to release lock 140648559223840 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2-VL-2B-Instruct/732bd68bc5427d1fb6c06a59b3bf2456b2155d24.lock
+DEBUG    filelock:_api.py:537 Attempting to release lock 140648559231728 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2-VL-2B-Instruct/8e922d54443e7d2ad46c01baea1b772ecbc6228e.lock
+DEBUG    filelock:_api.py:541 Lock 140648559240080 released on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2-VL-2B-Instruct/896384ee102f9a2696e2f6eb02ba5a143f198fac.lock
+DEBUG    filelock:_api.py:541 Lock 140648559231728 released on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2-VL-2B-Instruct/8e922d54443e7d2ad46c01baea1b772ecbc6228e.lock
+DEBUG    filelock:_api.py:541 Lock 140648559223840 released on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2-VL-2B-Instruct/732bd68bc5427d1fb6c06a59b3bf2456b2155d24.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /api/resolve-cache/models/Qwen/Qwen2-VL-2B-Instruct/895c3a49bc3fa70a340399125c650a463535e71c/merges.txt HTTP/1.1" 200 0
+DEBUG    filelock:_api.py:497 Attempting to acquire lock 140648559215968 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2-VL-2B-Instruct/20024bfe7c83998e9aeaf98a0cd6a2ce6306c2f0.lock
+DEBUG    filelock:_api.py:500 Lock 140648559215968 acquired on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2-VL-2B-Instruct/20024bfe7c83998e9aeaf98a0cd6a2ce6306c2f0.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "GET /api/resolve-cache/models/Qwen/Qwen2-VL-2B-Instruct/895c3a49bc3fa70a340399125c650a463535e71c/merges.txt HTTP/1.1" 200 None
+DEBUG    filelock:_api.py:537 Attempting to release lock 140648559215968 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2-VL-2B-Instruct/20024bfe7c83998e9aeaf98a0cd6a2ce6306c2f0.lock
+DEBUG    filelock:_api.py:541 Lock 140648559215968 released on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2-VL-2B-Instruct/20024bfe7c83998e9aeaf98a0cd6a2ce6306c2f0.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "GET /api/models/Qwen/Qwen2-VL-2B-Instruct/xet-read-token/895c3a49bc3fa70a340399125c650a463535e71c HTTP/1.1" 200 405
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /Qwen/Qwen2-VL-2B-Instruct/resolve/895c3a49bc3fa70a340399125c650a463535e71c/preprocessor_config.json HTTP/1.1" 307 0
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /Qwen/Qwen2-VL-2B-Instruct/resolve/895c3a49bc3fa70a340399125c650a463535e71c/model-00002-of-00002.safetensors HTTP/1.1" 302 0
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /Qwen/Qwen2-VL-2B-Instruct/resolve/895c3a49bc3fa70a340399125c650a463535e71c/model.safetensors.index.json HTTP/1.1" 307 0
+DEBUG    filelock:_api.py:497 Attempting to acquire lock 140648558642528 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2-VL-2B-Instruct/92540d8353c8d226a589a3b179bdb33851c970ee2cc2ac7ba035f79425e7b833.lock
+DEBUG    filelock:_api.py:500 Lock 140648558642528 acquired on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2-VL-2B-Instruct/92540d8353c8d226a589a3b179bdb33851c970ee2cc2ac7ba035f79425e7b833.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /api/resolve-cache/models/Qwen/Qwen2-VL-2B-Instruct/895c3a49bc3fa70a340399125c650a463535e71c/preprocessor_config.json HTTP/1.1" 200 0
+DEBUG    filelock:_api.py:497 Attempting to acquire lock 140648559253584 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2-VL-2B-Instruct/c8bf52bdaee98b049e28da3ef94119f896b03a8d.lock
+DEBUG    filelock:_api.py:500 Lock 140648559253584 acquired on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2-VL-2B-Instruct/c8bf52bdaee98b049e28da3ef94119f896b03a8d.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /Qwen/Qwen2-VL-2B-Instruct/resolve/895c3a49bc3fa70a340399125c650a463535e71c/vocab.json HTTP/1.1" 307 0
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /api/resolve-cache/models/Qwen/Qwen2-VL-2B-Instruct/895c3a49bc3fa70a340399125c650a463535e71c/model.safetensors.index.json HTTP/1.1" 200 0
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /Qwen/Qwen2-VL-2B-Instruct/resolve/895c3a49bc3fa70a340399125c650a463535e71c/tokenizer.json HTTP/1.1" 307 0
+DEBUG    filelock:_api.py:497 Attempting to acquire lock 140648558641232 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2-VL-2B-Instruct/293d54cd8408e82d1bdd2eabd07d9311eb406b52.lock
+DEBUG    filelock:_api.py:500 Lock 140648558641232 acquired on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2-VL-2B-Instruct/293d54cd8408e82d1bdd2eabd07d9311eb406b52.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "GET /api/resolve-cache/models/Qwen/Qwen2-VL-2B-Instruct/895c3a49bc3fa70a340399125c650a463535e71c/preprocessor_config.json HTTP/1.1" 200 347
+DEBUG    filelock:_api.py:537 Attempting to release lock 140648559253584 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2-VL-2B-Instruct/c8bf52bdaee98b049e28da3ef94119f896b03a8d.lock
+DEBUG    filelock:_api.py:541 Lock 140648559253584 released on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2-VL-2B-Instruct/c8bf52bdaee98b049e28da3ef94119f896b03a8d.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /api/resolve-cache/models/Qwen/Qwen2-VL-2B-Instruct/895c3a49bc3fa70a340399125c650a463535e71c/vocab.json HTTP/1.1" 200 0
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /Qwen/Qwen2-VL-2B-Instruct/resolve/895c3a49bc3fa70a340399125c650a463535e71c/tokenizer_config.json HTTP/1.1" 307 0
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /api/resolve-cache/models/Qwen/Qwen2-VL-2B-Instruct/895c3a49bc3fa70a340399125c650a463535e71c/tokenizer.json HTTP/1.1" 200 0
+DEBUG    filelock:_api.py:497 Attempting to acquire lock 140648559242288 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2-VL-2B-Instruct/4783fe10ac3adce15ac8f358ef5462739852c569.lock
+DEBUG    filelock:_api.py:500 Lock 140648559242288 acquired on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2-VL-2B-Instruct/4783fe10ac3adce15ac8f358ef5462739852c569.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "GET /api/resolve-cache/models/Qwen/Qwen2-VL-2B-Instruct/895c3a49bc3fa70a340399125c650a463535e71c/model.safetensors.index.json HTTP/1.1" 200 None
+DEBUG    filelock:_api.py:497 Attempting to acquire lock 140648559243920 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2-VL-2B-Instruct/f5195cf97e3c90290b670d48a7c46fef5f145ebc.lock
+DEBUG    filelock:_api.py:500 Lock 140648559243920 acquired on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2-VL-2B-Instruct/f5195cf97e3c90290b670d48a7c46fef5f145ebc.lock
+DEBUG    filelock:_api.py:537 Attempting to release lock 140648558641232 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2-VL-2B-Instruct/293d54cd8408e82d1bdd2eabd07d9311eb406b52.lock
+DEBUG    filelock:_api.py:541 Lock 140648558641232 released on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2-VL-2B-Instruct/293d54cd8408e82d1bdd2eabd07d9311eb406b52.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /api/resolve-cache/models/Qwen/Qwen2-VL-2B-Instruct/895c3a49bc3fa70a340399125c650a463535e71c/tokenizer_config.json HTTP/1.1" 200 0
+DEBUG    filelock:_api.py:497 Attempting to acquire lock 140648559254400 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2-VL-2B-Instruct/ecbc13d75ff851c4f1e57990064f81303b2494f6.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "GET /api/resolve-cache/models/Qwen/Qwen2-VL-2B-Instruct/895c3a49bc3fa70a340399125c650a463535e71c/vocab.json HTTP/1.1" 200 None
+DEBUG    filelock:_api.py:500 Lock 140648559254400 acquired on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2-VL-2B-Instruct/ecbc13d75ff851c4f1e57990064f81303b2494f6.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "GET /api/resolve-cache/models/Qwen/Qwen2-VL-2B-Instruct/895c3a49bc3fa70a340399125c650a463535e71c/tokenizer.json HTTP/1.1" 200 None
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "GET /api/resolve-cache/models/Qwen/Qwen2-VL-2B-Instruct/895c3a49bc3fa70a340399125c650a463535e71c/tokenizer_config.json HTTP/1.1" 200 None
+DEBUG    filelock:_api.py:537 Attempting to release lock 140648559254400 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2-VL-2B-Instruct/ecbc13d75ff851c4f1e57990064f81303b2494f6.lock
+DEBUG    filelock:_api.py:541 Lock 140648559254400 released on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2-VL-2B-Instruct/ecbc13d75ff851c4f1e57990064f81303b2494f6.lock
+DEBUG    filelock:_api.py:537 Attempting to release lock 140648559243920 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2-VL-2B-Instruct/f5195cf97e3c90290b670d48a7c46fef5f145ebc.lock
+DEBUG    filelock:_api.py:541 Lock 140648559243920 released on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2-VL-2B-Instruct/f5195cf97e3c90290b670d48a7c46fef5f145ebc.lock
+DEBUG    filelock:_api.py:537 Attempting to release lock 140648559242288 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2-VL-2B-Instruct/4783fe10ac3adce15ac8f358ef5462739852c569.lock
+DEBUG    filelock:_api.py:541 Lock 140648559242288 released on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2-VL-2B-Instruct/4783fe10ac3adce15ac8f358ef5462739852c569.lock
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "GET /api/models/Qwen/Qwen2-VL-2B-Instruct/xet-read-token/895c3a49bc3fa70a340399125c650a463535e71c HTTP/1.1" 200 405
+DEBUG    filelock:_api.py:537 Attempting to release lock 140648558642528 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2-VL-2B-Instruct/92540d8353c8d226a589a3b179bdb33851c970ee2cc2ac7ba035f79425e7b833.lock
+DEBUG    filelock:_api.py:541 Lock 140648558642528 released on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2-VL-2B-Instruct/92540d8353c8d226a589a3b179bdb33851c970ee2cc2ac7ba035f79425e7b833.lock
+DEBUG    filelock:_api.py:537 Attempting to release lock 140648559236096 on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2-VL-2B-Instruct/994ac2b03f97de8bc647d0fe5eba2e4b632b3e28dc03574c29bdfc36cf47e1b9.lock
+DEBUG    filelock:_api.py:541 Lock 140648559236096 released on /home/dynamo/.cache/huggingface/hub/.locks/models--Qwen--Qwen2-VL-2B-Instruct/994ac2b03f97de8bc647d0fe5eba2e4b632b3e28dc03574c29bdfc36cf47e1b9.lock
+INFO     root:conftest.py:186 Successfully pre-downloaded: Qwen/Qwen2-VL-2B-Instruct

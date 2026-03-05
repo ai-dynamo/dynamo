@@ -1,0 +1,2 @@
+INFO     dynamo.sglang.request_handlers.image_diffusion.image_diffusion_handler:image_diffusion_handler.py:57 Image diffusion worker handler initialized with fs_url=file:///tmp/images, url_base=file:///tmp/images
+DEBUG    asyncio:selector_events.py:64 Using selector: EpollSelector

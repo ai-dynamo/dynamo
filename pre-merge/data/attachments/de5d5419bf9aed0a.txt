@@ -1,0 +1,53 @@
+[2m2026-03-05T18:04:13.861243Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: nats-server --trace -p 4243 in /workspace
+[2m2026-03-05T18:04:13.862324Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 4243
+[2m2026-03-05T18:04:13.963098Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 4243
+[2m2026-03-05T18:04:13.963272Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m Running custom health check '_nats_ready'
+[2m2026-03-05T18:04:13.965247Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+[2m2026-03-05T18:04:13.966074Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: etcd --listen-client-urls http://0.0.0.0:2395 --advertise-client-urls http://0.0.0.0:2395 --listen-peer-urls http://0.0.0.0:2396 --initial-advertise-peer-urls http://localhost:2396 --initial-cluster default=http://localhost:2396 --data-dir /tmp/etcd_ef8e60ae in /workspace
+[2m2026-03-05T18:04:13.966996Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 2395
+[2m2026-03-05T18:04:14.067553Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 2395
+[2m2026-03-05T18:04:14.070874Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m Starting aggregated_lmcache_multiproc test_deployment
+[2m2026-03-05T18:04:14.070952Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m Using model: Qwen/Qwen3-0.6B
+[2m2026-03-05T18:04:14.071005Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m Script: agg_lmcache_multiproc.sh
+[2m2026-03-05T18:04:14.071192Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: bash /workspace/examples/backends/vllm/launch/agg_lmcache_multiproc.sh in /workspace/examples/backends/vllm
+[2m2026-03-05T18:04:14.072373Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8061/v1/models
+[2m2026-03-05T18:04:36.096296Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Still waiting for URL http://localhost:8061/v1/models (custom check failed) (attempt=12, elapsed=21.0s)
+[2m2026-03-05T18:04:47.107050Z[0m [31mERROR[0m [2mmanaged_process._check_process_alive[0m[2m:[0m Main server process died with exit code -15 while waiting for health check
+[2m2026-03-05T18:04:47.107551Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m === Last 20 lines from /tmp/dynamo_tests/test_serve_deployment[aggregated_lmcache_multiproc]/bash.log.txt ===
+[2m2026-03-05T18:04:47.107716Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH]     return func(*args, **kwargs)
+[2m2026-03-05T18:04:47.107831Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH]            ^^^^^^^^^^^^^^^^^^^^^
+[2m2026-03-05T18:04:47.107886Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH]   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/v1/engine/core_client.py", line 835, in __init__
+[2m2026-03-05T18:04:47.107929Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH]     super().__init__(
+[2m2026-03-05T18:04:47.107970Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH]   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/v1/engine/core_client.py", line 490, in __init__
+[2m2026-03-05T18:04:47.108016Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH]     with launch_core_engines(vllm_config, executor_class, log_stats) as (
+[2m2026-03-05T18:04:47.108059Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH]   File "/usr/lib/python3.12/contextlib.py", line 144, in __exit__
+[2m2026-03-05T18:04:47.108141Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH]     next(self.gen)
+[2m2026-03-05T18:04:47.108186Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH]   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/v1/engine/utils.py", line 925, in launch_core_engines
+[2m2026-03-05T18:04:47.108229Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH]     wait_for_engine_startup(
+[2m2026-03-05T18:04:47.108271Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH]   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/v1/engine/utils.py", line 984, in wait_for_engine_startup
+[2m2026-03-05T18:04:47.108314Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH]     raise RuntimeError(
+[2m2026-03-05T18:04:47.108354Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH] RuntimeError: Engine core initialization failed. See root cause above. Failed core proc(s): {}
+[2m2026-03-05T18:04:47.108394Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH] Cleaning up...
+[2m2026-03-05T18:04:47.108432Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH] \x1b[2m2026-03-05T18:04:46.023481Z\x1b[0m \x1b[32m INFO\x1b[0m \x1b[2mdynamo_runtime::runtime\x1b[0m\x1b[2m:\x1b[0m Runtime shutdown initiated
+[2m2026-03-05T18:04:47.108471Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH] \x1b[2m2026-03-05T18:04:46.023572Z\x1b[0m \x1b[32m INFO\x1b[0m \x1b[2mdynamo_runtime::runtime\x1b[0m\x1b[2m:\x1b[0m Phase 1: Cancelling endpoint shutdown token
+[2m2026-03-05T18:04:47.108525Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH] \x1b[2m2026-03-05T18:04:46.023589Z\x1b[0m \x1b[32m INFO\x1b[0m \x1b[2mdynamo_runtime::runtime\x1b[0m\x1b[2m:\x1b[0m Phase 2: Waiting for graceful endpoints to complete
+[2m2026-03-05T18:04:47.108567Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH] \x1b[2m2026-03-05T18:04:46.023594Z\x1b[0m \x1b[32m INFO\x1b[0m \x1b[2mdynamo_runtime::runtime\x1b[0m\x1b[2m:\x1b[0m Active graceful endpoints: 0
+[2m2026-03-05T18:04:47.108606Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH] \x1b[2m2026-03-05T18:04:46.023597Z\x1b[0m \x1b[32m INFO\x1b[0m \x1b[2mdynamo_runtime::runtime\x1b[0m\x1b[2m:\x1b[0m Phase 3: All endpoints ended gracefully. Connections to backend services will now be disconnected
+[2m2026-03-05T18:04:47.108655Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH] \x1b[2m2026-03-05T18:04:46.023648Z\x1b[0m \x1b[32m INFO\x1b[0m \x1b[2mdynamo_llm::http::service::service_v2\x1b[0m\x1b[2m:\x1b[0m HTTP server shutdown requested
+[2m2026-03-05T18:04:47.108699Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m === End of log tail ===
+[2m2026-03-05T18:04:47.108770Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Terminating process group: 4679
+[2m2026-03-05T18:04:49.112542Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 4681 name: tee
+[2m2026-03-05T18:04:49.112697Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 4681 tee
+[2m2026-03-05T18:04:49.113632Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 4680 name: sed
+[2m2026-03-05T18:04:49.113728Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 4680 sed
+[2m2026-03-05T18:04:49.114046Z[0m [32m INFO[0m [2mmanaged_process._cleanup_stragglers[0m[2m:[0m Checking for straggler processes: stragglers=['VLLM:EngineCore'], straggler_commands=[]
+[2m2026-03-05T18:04:49.142790Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Terminating process group: 4665
+[2m2026-03-05T18:04:51.146179Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 4665 name: etcd
+[2m2026-03-05T18:04:51.146326Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 4665 etcd
+[2m2026-03-05T18:04:51.147039Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 4666 name: sed
+[2m2026-03-05T18:04:51.147130Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 4666 sed
+[2m2026-03-05T18:04:51.150935Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Terminating process group: 4653
+[2m2026-03-05T18:04:53.153964Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 4653 name: nats-server
+[2m2026-03-05T18:04:53.154158Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 4653 nats-server
+[2m2026-03-05T18:04:53.154824Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 4654 name: sed
+[2m2026-03-05T18:04:53.154916Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 4654 sed

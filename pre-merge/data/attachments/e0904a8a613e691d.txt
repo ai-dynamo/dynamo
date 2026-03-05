@@ -1,0 +1,2 @@
+DEBUG    asyncio:selector_events.py:64 Using selector: EpollSelector
+DEBUG    root:aggregated_handler.py:38 AggregatedHandler Request ID: test-id

@@ -1,0 +1,2 @@
+DEBUG    asyncio:selector_events.py:64 Using selector: EpollSelector
+INFO     root:args.py:114 Loading disagg config section 'decode' from /tmp/pytest_temp/test_disagg_config_key_not_fou0/disagg.yaml

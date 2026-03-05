@@ -1,0 +1,1 @@
+[2m2026-03-05T17:54:09.740662Z[0m [33m WARN[0m [2mprometheus._get_average_metric[0m[2m:[0m No prometheus metric data available for dynamo_frontend_test_metric with model target_model and dynamo namespace test_namespace, use 0 instead

@@ -1,0 +1,2 @@
+DEBUG    asyncio:selector_events.py:64 Using selector: EpollSelector
+DEBUG    dynamo.trtllm.engine:engine.py:187 TensorRT-LLM engine initialized in 0.00s

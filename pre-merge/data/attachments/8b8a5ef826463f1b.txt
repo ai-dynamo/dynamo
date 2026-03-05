@@ -1,0 +1,3 @@
+DEBUG    asyncio:selector_events.py:64 Using selector: EpollSelector
+DEBUG    root:handlers.py:129 Prefill Request ID: test-id
+DEBUG    root:handlers.py:130 PrefillHandler.generate received request: {'messages': []}

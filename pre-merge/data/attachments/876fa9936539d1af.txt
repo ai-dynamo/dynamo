@@ -1,0 +1,1 @@
+INFO     dynamo.planner.utils.planner_core:planner_core.py:240 Using GPU counts from CLI: prefill=None, decode=4

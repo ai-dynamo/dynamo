@@ -1,0 +1,10 @@
+DEBUG    dynamo.vllm.args:args.py:226 --enable-prefix-caching or --no-enable-prefix-caching not specified. Defaulting to True (vLLM v1 default behavior)
+DEBUG    dynamo.vllm.args:args.py:234 Setting reasonable default of 16 for block_size
+INFO     dynamo.vllm.args:args.py:278 Decode worker detected (disaggregation_mode=decode): kv_events_config disabled (decode workers don't publish KV events)
+INFO     dynamo.vllm.args:args.py:257 Using kv_events_config for publishing vLLM kv events over zmq: None (use_kv_events=False)
+DEBUG    dynamo.vllm.args:args.py:262 Setting Dynamo defaults for vLLM
+DEBUG    dynamo.vllm.args:args.py:266  engine_args.runner = generate
+DEBUG    dynamo.vllm.args:args.py:266  engine_args.skip_tokenizer_init = False
+DEBUG    dynamo.vllm.args:args.py:266  engine_args.enable_log_requests = False
+DEBUG    dynamo.vllm.args:args.py:266  engine_args.disable_log_stats = False
+DEBUG    dynamo.vllm.args:args.py:266  engine_args.kv_events_config = None

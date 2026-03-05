@@ -1,0 +1,6 @@
+DEBUG    asyncio:selector_events.py:64 Using selector: EpollSelector
+DEBUG    urllib3.connectionpool:connectionpool.py:544 https://huggingface.co:443 "HEAD /Qwen/Qwen3-0.6B/resolve/main/hf_quant_config.json HTTP/1.1" 404 0
+INFO     sglang.srt.server_args:server_args.py:1835 Attention backend not specified. Use flashinfer backend by default.
+INFO     root:args.py:382 Using dynamo's built in tokenizer. Setting skip_tokenizer_init to True
+INFO     root:args.py:398 Derived use_kv_events=False from kv_events_config=None
+DEBUG    root:args.py:425 Dynamo configs: DynamoConfig(component='backend', connector=[], custom_jinja_template=None, diffusion_worker=False, disagg_config=None, disagg_config_key=None, discovery_backend='etcd', dump_config_to=None, durable_kv_events=False, dyn_reasoning_parser=None, dyn_tool_call_parser=None, embedding_worker=False, enable_local_indexer=True, endpoint='generate', endpoint_types='completions', event_plane='nats', image_diffusion_worker=False, media_output_fs_url='file:///tmp/dynamo_media', media_output_http_url=None, multimodal_embedding_cache_capacity_gb=0, multimodal_encode_worker=False, multimodal_processor=False, multimodal_worker=False, namespace='dynamo', output_modalities=['text'], request_plane='tcp', use_kv_events=False, use_sglang_tokenizer=False, video_generation_worker=False)

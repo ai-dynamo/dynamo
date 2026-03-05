@@ -1,0 +1,91 @@
+[2m2026-03-05T17:58:15.012729Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: nats-server --trace -p 4265 in /workspace
+[2m2026-03-05T17:58:15.014850Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 4265
+[2m2026-03-05T17:58:15.215909Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 4265
+[2m2026-03-05T17:58:15.216109Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m Running custom health check '_nats_ready'
+[2m2026-03-05T17:58:15.220181Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+[2m2026-03-05T17:58:15.221309Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: etcd --listen-client-urls http://0.0.0.0:2441 --advertise-client-urls http://0.0.0.0:2441 --listen-peer-urls http://0.0.0.0:2442 --initial-advertise-peer-urls http://localhost:2442 --initial-cluster default=http://localhost:2442 --data-dir /tmp/etcd_sjdmunk1 in /workspace
+[2m2026-03-05T17:58:15.222749Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 2441
+[2m2026-03-05T17:58:15.423446Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 2441
+[2m2026-03-05T17:58:15.424337Z[0m [32m INFO[0m [2mtest_router_e2e_with_sglang.test_sglang_kv_router_basic[0m[2m:[0m Starting SGLang KV router test with 2 workers using request_plane=tcp
+[2m2026-03-05T17:58:15.576369Z[0m [32m INFO[0m [2mtest_router_e2e_with_sglang.__init__[0m[2m:[0m Created SGLang worker 0 on GPU 0 (mem_frac=0.4, system_port=8181, kv_port=8118) with endpoint: dyn://test-namespace-yytmpuxifx.backend.generate
+[2m2026-03-05T17:58:15.576700Z[0m [32m INFO[0m [2mtest_router_e2e_with_sglang.__init__[0m[2m:[0m Created SGLang worker 1 on GPU 0 (mem_frac=0.4, system_port=8182, kv_port=8119) with endpoint: dyn://test-namespace-yytmpuxifx.backend.generate
+[2m2026-03-05T17:58:15.576838Z[0m [32m INFO[0m [2mtest_router_e2e_with_sglang.__enter__[0m[2m:[0m [SGLangProcess] Starting 2 worker processes sequentially...
+[2m2026-03-05T17:58:15.576954Z[0m [32m INFO[0m [2mtest_router_e2e_with_sglang.__enter__[0m[2m:[0m [SGLangProcess] Starting SGLang worker 0...
+[2m2026-03-05T17:58:15.577094Z[0m [32m INFO[0m [2mtest_router_e2e_with_sglang.__enter__[0m[2m:[0m [SGLangProcess] Launching process 0 (pid will be assigned)...
+[2m2026-03-05T17:58:15.577153Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python3 -m dynamo.sglang --model-path silence09/DeepSeek-R1-Small-2layers --page-size 16 --disable-cuda-graph --mem-fraction-static 0.4 --context-length 1024 --kv-events-config {"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:8118"} in /workspace
+[2m2026-03-05T17:58:15.579020Z[0m [32m INFO[0m [2mtest_router_e2e_with_sglang.__enter__[0m[2m:[0m [SGLangProcess] Worker 0 launched with PID: 239
+[2m2026-03-05T17:58:15.579161Z[0m [32m INFO[0m [2mtest_router_e2e_with_sglang.__enter__[0m[2m:[0m [SGLangProcess] Waiting 5s for worker 0 to initialize before starting next worker...
+[2m2026-03-05T17:58:20.579386Z[0m [32m INFO[0m [2mtest_router_e2e_with_sglang.__enter__[0m[2m:[0m [SGLangProcess] Starting SGLang worker 1...
+[2m2026-03-05T17:58:20.579614Z[0m [32m INFO[0m [2mtest_router_e2e_with_sglang.__enter__[0m[2m:[0m [SGLangProcess] Launching process 1 (pid will be assigned)...
+[2m2026-03-05T17:58:20.579690Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python3 -m dynamo.sglang --model-path silence09/DeepSeek-R1-Small-2layers --page-size 16 --disable-cuda-graph --mem-fraction-static 0.4 --context-length 1024 --kv-events-config {"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:8119"} in /workspace
+[2m2026-03-05T17:58:20.580990Z[0m [32m INFO[0m [2mtest_router_e2e_with_sglang.__enter__[0m[2m:[0m [SGLangProcess] Worker 1 launched with PID: 276
+[2m2026-03-05T17:58:20.581128Z[0m [32m INFO[0m [2mtest_router_e2e_with_sglang.__enter__[0m[2m:[0m [SGLangProcess] All 2 workers launched with sequential initialization.
+[2m2026-03-05T17:58:20.581190Z[0m [32m INFO[0m [2mtest_router_e2e_with_sglang.__enter__[0m[2m:[0m [SGLangProcess] Waiting for health checks to complete...
+[2m2026-03-05T17:58:20.581247Z[0m [32m INFO[0m [2mtest_router_e2e_with_sglang.__enter__[0m[2m:[0m [SGLangProcess] Checking health for worker 0...
+[2m2026-03-05T17:58:20.581307Z[0m [32m INFO[0m [2mtest_router_e2e_with_sglang.__enter__[0m[2m:[0m [SGLangProcess] Worker 0 health checks passed
+[2m2026-03-05T17:58:20.581362Z[0m [32m INFO[0m [2mtest_router_e2e_with_sglang.__enter__[0m[2m:[0m [SGLangProcess] Checking health for worker 1...
+[2m2026-03-05T17:58:20.581416Z[0m [32m INFO[0m [2mtest_router_e2e_with_sglang.__enter__[0m[2m:[0m [SGLangProcess] Worker 1 health checks passed
+[2m2026-03-05T17:58:20.581467Z[0m [32m INFO[0m [2mtest_router_e2e_with_sglang.__enter__[0m[2m:[0m [SGLangProcess] All workers started successfully and passed health checks!
+[2m2026-03-05T17:58:20.581533Z[0m [32m INFO[0m [2mtest_router_e2e_with_sglang.test_sglang_kv_router_basic[0m[2m:[0m Starting 2 SGLang workers
+[2m2026-03-05T17:58:20.581592Z[0m [32m INFO[0m [2mtest_router_e2e_with_sglang.test_sglang_kv_router_basic[0m[2m:[0m All SGLang workers using namespace: test-namespace-yytmpuxifx
+[2m2026-03-05T17:58:20.582993Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python3 -m dynamo.frontend --kv-cache-block-size 16 --router-mode kv --http-port 8090 --discovery-backend etcd --namespace test-namespace-yytmpuxifx in /workspace
+[2m2026-03-05T17:58:20.584167Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 8090
+[2m2026-03-05T17:58:21.286792Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 8090
+[2m2026-03-05T17:58:21.286970Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8090/v1/models
+[2m2026-03-05T17:58:21.298891Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8090/v1/models (attempt=1, elapsed=0.0s)
+Response:
+{
+  "object": "list",
+  "data": []
+}
+[2m2026-03-05T17:58:21.299124Z[0m [32m INFO[0m [2mcommon._test_router_basic[0m[2m:[0m Starting KV router frontend on port 8090
+[2m2026-03-05T17:58:21.299196Z[0m [32m INFO[0m [2mcommon._test_router_basic[0m[2m:[0m Waiting for workers to register with frontend...
+[2m2026-03-05T17:58:21.299467Z[0m [32m INFO[0m [2mcommon.wait_for_frontend_ready[0m[2m:[0m Waiting for 2 workers to register on HTTP frontend (timeout=180s)...
+[2m2026-03-05T17:58:37.349898Z[0m [32m INFO[0m [2mcommon.wait_for_frontend_ready[0m[2m:[0m Workers registered. Found 1 model(s): ['silence09/DeepSeek-R1-Small-2layers']
+[2m2026-03-05T17:58:37.350216Z[0m [32m INFO[0m [2mcommon.wait_for_frontend_ready[0m[2m:[0m Waiting for chat completions pipeline to be built...
+[2m2026-03-05T17:59:18.565763Z[0m [32m INFO[0m [2mcommon.wait_for_frontend_ready[0m[2m:[0m Chat completions pipeline ready!
+[2m2026-03-05T17:59:18.566877Z[0m [32m INFO[0m [2mcommon._test_router_basic[0m[2m:[0m Sending 10 concurrent requests to frontend...
+[2m2026-03-05T17:59:18.567211Z[0m [32m INFO[0m [2mcommon.send_inflight_requests[0m[2m:[0m Sending initial test request to URL 0 (http://localhost:8090/v1/chat/completions) with retry...
+[2m2026-03-05T17:59:28.008690Z[0m [32m INFO[0m [2mcommon.send_inflight_requests[0m[2m:[0m Completed all requests: 10 successful, 0 failed
+[2m2026-03-05T17:59:28.009168Z[0m [32m INFO[0m [2mcommon.send_inflight_requests[0m[2m:[0m All 10 requests completed successfully
+[2m2026-03-05T17:59:28.009687Z[0m [32m INFO[0m [2mcommon._test_router_basic[0m[2m:[0m Successfully completed 10 requests
+[2m2026-03-05T17:59:28.009763Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Terminating process group: 279
+[2m2026-03-05T17:59:30.013579Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 279 name: python3
+[2m2026-03-05T17:59:30.013730Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 279 python3
+[2m2026-03-05T17:59:30.028495Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 281 name: tee
+[2m2026-03-05T17:59:30.028603Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 281 tee
+[2m2026-03-05T17:59:30.029918Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 280 name: sed
+[2m2026-03-05T17:59:30.030015Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 280 sed
+[2m2026-03-05T17:59:30.038322Z[0m [32m INFO[0m [2mtest_router_e2e_with_sglang.__exit__[0m[2m:[0m Stopping SGLang worker 0
+[2m2026-03-05T17:59:30.038401Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Terminating process group: 239
+[2m2026-03-05T17:59:32.042469Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 239 name: python3
+[2m2026-03-05T17:59:32.042627Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 239 python3
+[2m2026-03-05T17:59:32.134861Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 415 name: python3
+[2m2026-03-05T17:59:32.135039Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 415 python3
+[2m2026-03-05T17:59:32.135296Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 416 name: sglang::schedul
+[2m2026-03-05T17:59:32.135469Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 416 sglang::schedul
+[2m2026-03-05T17:59:32.135655Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 417 name: sglang::detoken
+[2m2026-03-05T17:59:32.135787Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 417 sglang::detoken
+[2m2026-03-05T17:59:32.137177Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 241 name: tee
+[2m2026-03-05T17:59:32.137270Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 241 tee
+[2m2026-03-05T17:59:32.138410Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 240 name: sed
+[2m2026-03-05T17:59:32.138507Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 240 sed
+[2m2026-03-05T17:59:32.144352Z[0m [32m INFO[0m [2mtest_router_e2e_with_sglang.__exit__[0m[2m:[0m Stopping SGLang worker 1
+[2m2026-03-05T17:59:32.144424Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Terminating process group: 276
+[2m2026-03-05T17:59:34.152479Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 276 name: python3
+[2m2026-03-05T17:59:34.152658Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 276 python3
+[2m2026-03-05T17:59:34.246460Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 278 name: tee
+[2m2026-03-05T17:59:34.246609Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 278 tee
+[2m2026-03-05T17:59:34.247656Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 277 name: sed
+[2m2026-03-05T17:59:34.247779Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 277 sed
+[2m2026-03-05T17:59:34.253756Z[0m [32m INFO[0m [2mtest_router_e2e_with_sglang.__exit__[0m[2m:[0m Waiting for SGLang worker resources to fully clean up...
+[2m2026-03-05T17:59:36.257813Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Terminating process group: 226
+[2m2026-03-05T17:59:38.261464Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 226 name: etcd
+[2m2026-03-05T17:59:38.261615Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 226 etcd
+[2m2026-03-05T17:59:38.262640Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 227 name: sed
+[2m2026-03-05T17:59:38.262735Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 227 sed
+[2m2026-03-05T17:59:38.269084Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Terminating process group: 214
+[2m2026-03-05T17:59:40.272306Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 214 name: nats-server
+[2m2026-03-05T17:59:40.272457Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 214 nats-server
+[2m2026-03-05T17:59:40.273413Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 215 name: sed
+[2m2026-03-05T17:59:40.273507Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 215 sed

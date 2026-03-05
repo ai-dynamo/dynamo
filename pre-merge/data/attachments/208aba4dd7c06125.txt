@@ -1,0 +1,3 @@
+INFO     dynamo.common.memory.multimodal_embedding_cache_manager:multimodal_embedding_cache_manager.py:63 MultimodalEmbeddingCacheManager initialized: capacity=0.10GB
+INFO     dynamo.vllm.multimodal_handlers.multimodal_pd_worker_handler:multimodal_pd_worker_handler.py:85 Multimodal PD Worker startup started.
+INFO     dynamo.vllm.multimodal_handlers.multimodal_pd_worker_handler:multimodal_pd_worker_handler.py:111 Multimodal PD Worker has been initialized

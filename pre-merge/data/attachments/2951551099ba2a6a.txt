@@ -1,0 +1,1 @@
+[2m2026-03-05T18:00:13.998599Z[0m [33m WARN[0m [2mengine._warn_about_unsupported_field[0m[2m:[0m `pipeline_parallel_size` cannot be used with the `_autodeploy` backend. Ignoring.

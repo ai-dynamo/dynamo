@@ -1,0 +1,11 @@
+DEBUG    dynamo.vllm.args:args.py:226 --enable-prefix-caching or --no-enable-prefix-caching not specified. Defaulting to True (vLLM v1 default behavior)
+DEBUG    dynamo.vllm.args:args.py:234 Setting reasonable default of 16 for block_size
+DEBUG    dynamo.vllm.args:args.py:492 Preserving existing VLLM_NIXL_SIDE_CHANNEL_HOST=10.1.71.149
+INFO     dynamo.vllm.args:args.py:312 Using env-var DYN_VLLM_KV_EVENT_PORT=20080 to create kv_events_config
+INFO     dynamo.vllm.args:args.py:257 Using kv_events_config for publishing vLLM kv events over zmq: KVEventsConfig(enable_kv_cache_events=True, publisher='zmq', endpoint='tcp://*:20080', replay_endpoint=None, buffer_steps=10000, hwm=100000, max_queue_size=100000, topic='') (use_kv_events=True)
+DEBUG    dynamo.vllm.args:args.py:262 Setting Dynamo defaults for vLLM
+DEBUG    dynamo.vllm.args:args.py:266  engine_args.runner = generate
+DEBUG    dynamo.vllm.args:args.py:266  engine_args.skip_tokenizer_init = False
+DEBUG    dynamo.vllm.args:args.py:266  engine_args.enable_log_requests = False
+DEBUG    dynamo.vllm.args:args.py:266  engine_args.disable_log_stats = False
+DEBUG    dynamo.vllm.args:args.py:266  engine_args.kv_events_config = KVEventsConfig(enable_kv_cache_events=True, publisher='zmq', endpoint='tcp://*:20080', replay_endpoint=None, buffer_steps=10000, hwm=100000, max_queue_size=100000, topic='')

@@ -1,0 +1,7 @@
+[2m2026-03-05T17:54:45.345809Z[0m [31mERROR[0m [2mprometheus.parse_frontend_metric_containers[0m[2m:[0m Error parsing frontend metric container: 2 validation errors for FrontendMetricContainer
+metric
+  Field required [type=missing, input_value={'invalid_structure': 'ba... 'value': 'not_a_tuple'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.11/v/missing
+value
+  Input should be a valid tuple [type=tuple_type, input_value='not_a_tuple', input_type=str]
+    For further information visit https://errors.pydantic.dev/2.11/v/tuple_type

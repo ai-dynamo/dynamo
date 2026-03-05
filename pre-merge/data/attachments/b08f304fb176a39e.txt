@@ -1,0 +1,10 @@
+INFO     dynamo.sglang.request_handlers.image_diffusion.image_diffusion_handler:image_diffusion_handler.py:57 Image diffusion worker handler initialized with fs_url=file:///tmp/images, url_base=file:///tmp/images
+DEBUG    asyncio:selector_events.py:64 Using selector: EpollSelector
+INFO     dynamo.sglang.request_handlers.image_diffusion.image_diffusion_handler:image_diffusion_handler.py:84 Image diffusion request: {'prompt': 'A yellow square', 'model': 'test-model', 'size': '256x256', 'response_format': 'b64_json', 'user': 'test-user', 'nvext': {'num_inference_steps': 10, 'guidance_scale': 7.5, 'seed': 42, 'negative_prompt': 'negative'}}
+DEBUG    dynamo.sglang.request_handlers.image_diffusion.image_diffusion_handler:image_diffusion_handler.py:89 Image diffusion request with trace: {'traceparent': '00-1234567890-1234567890-01'}
+ERROR    dynamo.sglang.request_handlers.image_diffusion.image_diffusion_handler:image_diffusion_handler.py:129 Error in diffusion generation: object list can't be used in 'await' expression
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.12/dist-packages/dynamo/sglang/request_handlers/image_diffusion/image_diffusion_handler.py", line 102, in generate
+    images = await self._generate_images(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: object list can't be used in 'await' expression

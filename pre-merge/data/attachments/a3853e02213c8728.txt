@@ -1,0 +1,2 @@
+[2m2026-03-05T17:54:45.393304Z[0m [33m WARN[0m [2mmultimodal_embedding_cache_connector.__init__[0m[2m:[0m DynamoMultimodalEmbeddingCacheConnector requires vLLM >= 0.17.0, but found 0.16.0. Some features may not work correctly.
+[2m2026-03-05T17:54:45.393806Z[0m [32m INFO[0m [2mmultimodal_embedding_cache_connector.__init__[0m[2m:[0m DynamoMultimodalEmbeddingCacheConnector initialized: capacity_gb=1.00, capacity_bytes=1073741824, bytes_per_embed=8192
