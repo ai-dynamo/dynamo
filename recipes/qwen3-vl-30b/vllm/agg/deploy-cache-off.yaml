@@ -20,11 +20,8 @@ spec:
           value: tcp
       extraPodSpec:
         mainContainer:
-          command:
-            - python
-            - -m
-            - dynamo.frontend
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.0
+          image: dynamo:latest-vllm-runtime
+          imagePullPolicy: IfNotPresent
           workingDir: /workspace
       replicas: 1
       resources:
@@ -52,7 +49,8 @@ spec:
                 --max-model-len 16384 \
                 --disable-log-requests \
                 --enable-prefix-caching
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.0
+          image: dynamo:latest-vllm-runtime
+          imagePullPolicy: IfNotPresent
           env:
             - name: HF_HOME
               value: /home/dynamo/.cache/huggingface

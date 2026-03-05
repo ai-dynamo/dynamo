@@ -17,8 +17,8 @@ Options:
 
 Example:
   ./patch_vllm_agg_encoder_cache.sh \
-    --base-image nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.0 \
-    --output-image my-registry/vllm-runtime:0.8.0-agg-ec-patched
+    --base-image <your dynamo image>:<your tag> \
+    --output-image <your dynamo image>:<your tag>-agg-ec-patched
 EOF
 }
 
@@ -81,11 +81,7 @@ COPY vllm_pr34182.diff /tmp/vllm_pr34182.diff
 COPY vllm_pr34783_vllm_only.diff /tmp/vllm_pr34783_vllm_only.diff
 
 RUN set -eux; \
-  SITE_PACKAGES_ROOT="$(python3 - <<'PY' \
-import pathlib, vllm \
-print(pathlib.Path(vllm.__file__).resolve().parent.parent) \
-PY \
-  )"; \
+  SITE_PACKAGES_ROOT="$(python3 -c 'import pathlib, vllm; print(pathlib.Path(vllm.__file__).resolve().parent.parent)')"; \
   cd "${SITE_PACKAGES_ROOT}"; \
   patch --dry-run -p1 < /tmp/vllm_pr34182.diff; \
   patch -p1 < /tmp/vllm_pr34182.diff; \

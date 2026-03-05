@@ -3,7 +3,7 @@
 apiVersion: v1
 kind: Pod
 metadata:
-  name: qwen3-vl-30b-disagg-e-pd-benchmark
+  name: qwen3-vl-30b-disagg-e-pd-benchmark-cache-off
   labels:
     app: benchmark
 spec:
@@ -62,6 +62,12 @@ spec:
               --shared-system-prompt-length "${SYSTEM_PROMPT_TOKENS}" \
               --url "http://${FRONTEND}:8000" \
               --streaming \
+              --request-count "${REQUEST_COUNT}" \
+              --concurrency "${CONCURRENCY}" \
+              --request-rate "${REQUEST_RATE}" \
+              --request-rate-mode constant \
+              --warmup-request-count "${WARMUP_REQUEST_COUNT}" \
+              --warmup-duration "${WARMUP_DURATION}" \
               --artifact-dir "${run_dir}" \
               --extra-inputs "max_tokens:${MAX_TOKENS}" \
               --extra-inputs "min_tokens:${MAX_TOKENS}" \
@@ -81,6 +87,16 @@ spec:
           value: "1000"
         - name: MAX_TOKENS
           value: "500"
+        - name: REQUEST_COUNT
+          value: "5000"
+        - name: CONCURRENCY
+          value: "32"
+        - name: REQUEST_RATE
+          value: "32"
+        - name: WARMUP_REQUEST_COUNT
+          value: "50"
+        - name: WARMUP_DURATION
+          value: "60"
         - name: DATASET_DIR
           value: /perf-cache/datasets
         - name: ARTIFACT_BASE_DIR

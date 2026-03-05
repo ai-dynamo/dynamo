@@ -1,233 +1,176 @@
 # Qwen3-VL-30B-A3B: Encoder Cache in Disaggregated E/PD
 
-This recipe demonstrates throughput/latency gains from enabling multimodal encoder cache in disaggregated serving for `Qwen/Qwen3-VL-30B-A3B-Instruct`.
+This recipe demonstrates throughput/latency improvements from enabling multimodal encoder cache in disaggregated serving under different image re-use configurations.
 
-The experiment uses:
-- E/PD topology: 1 encode worker + 7 PD workers
-- 5000 requests per run
-- 1000-token user text target
-- image reuse sweep: duplicate probability `{0.00, 0.10, 0.25, 0.50, 0.75}`
-- cache comparison: embedding cache OFF vs ON
-- embedding transfer mode: `DYN_VLLM_EMBEDDING_TRANSFER_MODE=nixl-write`
-- request plane: `DYN_REQUEST_PLANE=tcp`
+## Results
 
-## Why TCP Request Plane Is Used
+### `agg`
 
-Multimodal requests can include large image payloads (base64 or expanded metadata). The TCP request plane avoids message-size constraints that can appear on the default messaging plane and is commonly used in E/PD multimodal launches for stability with large payloads.
+| Reuse Tag | P90 TTFT (No Encoder Cache, ms) | P90 TTFT (With Encoder Cache, ms) | TTFT Improvement (%) |
+|---|---:|---:|---:|
+| `r00` | TBD | TBD | TBD |
+| `r10` | TBD | TBD | TBD |
+| `r25` | TBD | TBD | TBD |
+| `r50` | TBD | TBD | TBD |
+| `r75` | TBD | TBD | TBD |
 
-For this recipe:
-- `DYN_REQUEST_PLANE=tcp` is strongly recommended for robustness in multimodal runs.
-- It is not an image-encoder optimization by itself; it is a transport/reliability choice for request delivery.
+### `disagg_ep_d`
 
-## Hardware Requirements
+| Reuse Tag | P90 TTFT (No Encoder Cache, ms) | P90 TTFT (With Encoder Cache, ms) | TTFT Improvement (%) |
+|---|---:|---:|---:|
+| `r00` | TBD | TBD | TBD |
+| `r10` | TBD | TBD | TBD |
+| `r25` | TBD | TBD | TBD |
+| `r50` | TBD | TBD | TBD |
+| `r75` | TBD | TBD | TBD |
 
-- 8 GPUs on one node (validated target: 1 GPU for encoder + 7 GPUs for PD workers)
-- Kubernetes cluster with Dynamo CRDs installed
-- RWX-capable StorageClass for shared PVCs
+### `disagg_e_pd`
 
-## Repository Layout
+| Reuse Tag | P90 TTFT (No Encoder Cache, ms) | P90 TTFT (With Encoder Cache, ms) | TTFT Improvement (%) |
+|---|---:|---:|---:|
+| `r00` | TBD | TBD | TBD |
+| `r10` | TBD | TBD | TBD |
+| `r25` | TBD | TBD | TBD |
+| `r50` | TBD | TBD | TBD |
+| `r75` | TBD | TBD | TBD |
 
-```text
-qwen3-vl-30b/
-  README.md
-  patches/
-    patch_vllm_agg_encoder_cache.sh
-    patch_vllm_mm_router.sh
-  model-cache/
-    model-cache.yaml
-    model-download.yaml
-  vllm/
-    agg/
-      deploy-cache-off.yaml
-      deploy-cache-on.yaml
-    disagg-ep-d/
-      deploy-cache-off.yaml
-      deploy-cache-on.yaml
-    disagg-e-pd/
-      deploy.yaml
-      perf.yaml
-      generate_datasets.sh
-```
+## Pre-requisites
 
-## Deployment Variants
+1. **Dynamo Platform installed** - See [Kubernetes Deployment Guide](../../docs/kubernetes/README.md)
+2. **8x B200 GPUs** 
+3. **HuggingFace token** configured:
+   ```bash
+   export NAMESPACE=your-namespace
+   kubectl create secret generic hf-token-secret \
+     --from-literal=HF_TOKEN="your-token" \
+     -n ${NAMESPACE}
+   ```
 
-- `vllm/agg/deploy-cache-off.yaml`: aggregated DP8xTP1 workers (8 replicas, TP1 each), cache disabled.
-- `vllm/agg/deploy-cache-on.yaml`: aggregated DP8xTP1 workers (8 replicas, TP1 each), cache enabled.
-- `vllm/disagg-e-pd/deploy.yaml`: E/PD (1E:7PD), cache enabled by default.
-- `vllm/disagg-ep-d/deploy-cache-off.yaml`: EP/D (4EP:4D), cache disabled.
-- `vllm/disagg-ep-d/deploy-cache-on.yaml`: EP/D (4EP:4D), cache enabled (`--multimodal-embedding-cache-capacity-gb 10` on EP workers).
+## Experiment Overview
 
-For your “no dedicated encoder GPU” goal, EP/D is the relevant topology: encoding is handled in the EP workers (prefill stage), so there is no standalone encode worker service consuming its own GPU.
+We compare the impact of encoder cache toggled on vs off for three deployment modes:
+- `agg TP=1 x8 replicas`
+- `disagg E/PD x1 encode worker, x7 pd workers`
+- `disagg EP/D x2 EP workers, x6 decode workers`
 
-## Offline Patch Scripts (Build New Images)
+To test this, the `data-gen/generate-datastes-job.yaml` creates 5 datasets of synthetic text + image data each with varying levels of image per request overlap. They are tagged as `r_{##}` representing the ratio of total slots to image slots. For example, r_{50} refers to a dataset where the image pool is half the size of the total slots. In other words, you would need to traverse half of the entire dataset to have seen every image. Refer to jsonl [documention](https://github.com/ai-dynamo/dynamo/tree/main/benchmarks/multimodal/jsonl) for more details on data generation. 
 
-Use these scripts to patch vLLM at image build time (offline from runtime pod startup).
+Each dataset is hardcoded to have 1000 requests, 1000 tokens of user-input text.
 
-### Aggregated Encoder Cache Patch Image
+### Notes: 
 
-```bash
-cd patches
-./patch_vllm_agg_encoder_cache.sh \
-  --base-image nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.0 \
-  --output-image <registry>/vllm-runtime:0.8.0-agg-ec-patched
-```
+1. Exact cache hit rates cannot be explicitly controlled via dataset due potential LRU encoder cache eviction policies; however, decreasing the image pool relative to the number of requests allows for proportionally higher probabilities of seeing duplicate images and cache hits.
 
-### MM-Aware Router Patch Image
-
-```bash
-cd patches
-./patch_vllm_mm_router.sh \
-  --base-image nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.0 \
-  --output-image <registry>/vllm-runtime:0.8.0-mm-router-patched
-```
-
-After building, push with your normal registry workflow if needed, then set deployment `image` fields to your patched tags.
-
-## Experiment Matrix
-
-`generate_datasets.sh` maps duplicate probabilities to `--images-pool` values (for 5000 requests x 3 images/request = 15000 total image slots):
-
-| Tag | Duplicate Probability | Images Pool |
-|-----|------------------------|-------------|
-| `r00` | 0.00 | 15000 |
-| `r10` | 0.10 | 13500 |
-| `r25` | 0.25 | 11250 |
-| `r50` | 0.50 | 7500 |
-| `r75` | 0.75 | 3750 |
-
-Run each reuse level twice:
-- cache OFF (`MM_EMBEDDING_CACHE_GB=0`)
-- cache ON (`MM_EMBEDDING_CACHE_GB>0`, recommended start: `10`)
-
-Total runs: 10
-
-## Prerequisites
-
-1. Dynamo platform is installed.
-2. HuggingFace token is configured:
-
-```bash
-export NAMESPACE=your-namespace
-kubectl create secret generic hf-token-secret \
-  --from-literal=HF_TOKEN="your-token" \
-  -n ${NAMESPACE}
-```
-
-3. Update `model-cache/model-cache.yaml` with your `storageClassName`.
+(2) Agg encoder cache requires `ec_both` ECConnector role in vLLM, but that functionality was merged post 1.0.0 release. If you see an error such as `Input should be 'ec_producer' or 'ec_consumer' [type=literal_error, input_value='ec_both', input_type=str]`, you can use the `patches/patch_vllm_agg_encoder_cache.sh` script to re-tag your dynamo image with the patch applied. See [mulitmodal-vllm.md](https://github.com/ai-dynamo/dynamo/blob/main/docs/features/multimodal/multimodal-vllm.md#embedding-cache) for more details.
 
 ## Quick Start
 
-### 1) Create storage
+### 1. Set Namespace and Create Storage
 
 ```bash
+export NAMESPACE=your-namespace
 kubectl apply -f model-cache/model-cache.yaml -n ${NAMESPACE}
+kubectl get pvc -n ${NAMESPACE}
 ```
 
-### 2) Download model into shared cache
+### 2. Download Model and Generate Datasets
 
 ```bash
 kubectl apply -f model-cache/model-download.yaml -n ${NAMESPACE}
 kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=3600s
+
+kubectl apply -f data-gen/generate-datasets-job.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Complete job/qwen3-vl-30b-generate-datasets -n ${NAMESPACE} --timeout=3600s
+kubectl logs job/qwen3-vl-30b-generate-datasets -n ${NAMESPACE}
 ```
 
-### 3) Deploy graph
+### 3. Deploy and Benchmark
 
-Pick one deployment manifest from the variants above. For E/PD (cache on by default):
+**Option A: Aggregated (`agg`)**
 
 ```bash
+# Cache OFF
+kubectl apply -f vllm/agg/deploy-cache-off.yaml -n ${NAMESPACE}
+kubectl delete pod qwen3-vl-30b-agg-benchmark-cache-off -n ${NAMESPACE} --ignore-not-found=true
+kubectl apply -f vllm/agg/perf-cache-off.yaml -n ${NAMESPACE}
+```
+
+For cache ON with `agg`, use the patched image first:
+
+```bash
+cd patches
+./patch_vllm_agg_encoder_cache.sh \
+  --base-image <your dynamo image>:<your tag> \
+  --output-image <your dynamo image>:<your tag>-agg-ec-patched
+```
+
+```bash
+# Cache ON
+kubectl apply -f vllm/agg/deploy-cache-on.yaml -n ${NAMESPACE}
+kubectl delete pod qwen3-vl-30b-agg-benchmark-cache-on -n ${NAMESPACE} --ignore-not-found=true
+kubectl apply -f vllm/agg/perf-cache-on.yaml -n ${NAMESPACE}
+```
+
+**Option B: Disaggregated EP/D (`disagg_ep_d`)**
+
+```bash
+# Cache OFF
+kubectl apply -f vllm/disagg-ep-d/deploy-cache-off.yaml -n ${NAMESPACE}
+kubectl apply -f vllm/disagg-ep-d/perf-cache-off.yaml -n ${NAMESPACE}
+
+# Cache ON
+kubectl apply -f vllm/disagg-ep-d/deploy-cache-on.yaml -n ${NAMESPACE}
+kubectl apply -f vllm/disagg-ep-d/perf-cache-on.yaml -n ${NAMESPACE}
+```
+
+**Option C: Disaggregated E/PD (`disagg_e_pd`)**
+
+```bash
+# Cache OFF
 kubectl apply -f vllm/disagg-e-pd/deploy.yaml -n ${NAMESPACE}
-kubectl wait --for=condition=ready pod \
-  -l nvidia.com/dynamo-graph-deployment-name=qwen3-vl-30b-disagg-e-pd-1e-7pd \
-  -n ${NAMESPACE} --timeout=1800s
-```
+kubectl apply -f vllm/disagg-e-pd/perf-cache-off.yaml -n ${NAMESPACE}
 
-### 4) Generate datasets (local machine)
-
-From this recipe directory:
-
-```bash
-cd vllm/disagg-e-pd
-chmod +x generate_datasets.sh
-./generate_datasets.sh
-```
-
-This generates five JSONL files under `vllm/disagg-e-pd/datasets/`.
-
-### 5) Upload datasets to perf cache
-
-Create a temporary helper pod that mounts `perf-cache`, copy datasets into it, then remove the pod:
-
-```bash
-kubectl run perf-cache-helper -n ${NAMESPACE} --image=python:3.11 --restart=Never \
-  --overrides='
-{
-  "apiVersion": "v1",
-  "spec": {
-    "containers": [{
-      "name": "helper",
-      "image": "python:3.11",
-      "command": ["sleep","3600"],
-      "volumeMounts": [{"name":"perf-cache","mountPath":"/perf-cache"}]
-    }],
-    "volumes": [{
-      "name":"perf-cache",
-      "persistentVolumeClaim":{"claimName":"perf-cache"}
-    }]
-  }
-}'
-
-kubectl cp ./datasets/. ${NAMESPACE}/perf-cache-helper:/perf-cache/datasets
-kubectl delete pod perf-cache-helper -n ${NAMESPACE}
-```
-
-### 6) Run benchmark sweep
-
-`perf.yaml` runs tags `r00,r10,r25,r50,r75` and writes artifacts under `/perf-cache/artifacts/qwen3_vl_30b_encoder_cache/<CACHE_MODE>_*`.
-Set `FRONTEND` in `perf.yaml` to match your selected deployment:
-- `qwen3-vl-30b-disagg-e-pd-1e-7pd-frontend`
-- `qwen3-vl-30b-disagg-ep-d-cache-on-frontend` or `qwen3-vl-30b-disagg-ep-d-cache-off-frontend`
-- `qwen3-vl-30b-agg-cache-on-frontend` or `qwen3-vl-30b-agg-cache-off-frontend`
-
-```bash
-kubectl apply -f vllm/disagg-e-pd/perf.yaml -n ${NAMESPACE}
-```
-
-### 7) Cache mode handling
-
-- For cache-off runs, apply a `*-cache-off.yaml` manifest and set `CACHE_MODE=cache_off` in `perf.yaml`.
-- For cache-on runs, apply a `*-cache-on.yaml` manifest (or E/PD default deploy) and set `CACHE_MODE=cache_on` in `perf.yaml`.
-
-```bash
-# Re-apply after editing deploy.yaml MM_EMBEDDING_CACHE_GB
+# Cache ON
 kubectl apply -f vllm/disagg-e-pd/deploy.yaml -n ${NAMESPACE}
-
-# Re-apply after editing perf.yaml CACHE_MODE=cache_on
-kubectl apply -f vllm/disagg-e-pd/perf.yaml -n ${NAMESPACE}
+kubectl apply -f vllm/disagg-e-pd/perf-cache-on.yaml -n ${NAMESPACE}
 ```
 
-### 8) Collect artifacts
+### 4. Monitor Benchmark Progress
 
 ```bash
 kubectl get pods -n ${NAMESPACE} -l app=benchmark
-kubectl exec -it -n ${NAMESPACE} qwen3-vl-30b-disagg-e-pd-benchmark -- \
-  ls -la /perf-cache/artifacts/qwen3_vl_30b_encoder_cache
-kubectl cp ${NAMESPACE}/qwen3-vl-30b-disagg-e-pd-benchmark:/perf-cache/artifacts/qwen3_vl_30b_encoder_cache \
-  ./qwen3_vl_30b_encoder_cache_results
+
+# Follow one benchmark pod at a time
+kubectl logs -f qwen3-vl-30b-agg-benchmark-cache-off -n ${NAMESPACE}
+kubectl logs -f qwen3-vl-30b-agg-benchmark-cache-on -n ${NAMESPACE}
 ```
 
-## Expected Results
+Wait for `All runs complete. Artifacts in /perf-cache/artifacts/qwen3_vl_30b_encoder_cache/<config>`.
 
-As duplicate-image probability increases, cache-hit opportunity increases. With cache ON, expect:
-- lower TTFT relative to cache OFF
-- improved tail latency at higher reuse levels
-- higher effective throughput under the same request shape
-
-The largest gains should appear at `r50` and `r75`.
-
-## Cleanup
+### 5. Run Analysis and View Results
 
 ```bash
-kubectl delete pod -l app=benchmark -n ${NAMESPACE}
-kubectl delete dynamographdeployment qwen3-vl-30b-disagg-e-pd-1e-7pd -n ${NAMESPACE}
-kubectl delete job model-download -n ${NAMESPACE}
+# Aggregated
+kubectl delete job qwen3-vl-30b-agg-analysis -n ${NAMESPACE} --ignore-not-found=true
+kubectl apply -f vllm/agg/analysis.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Complete job/qwen3-vl-30b-agg-analysis -n ${NAMESPACE} --timeout=600s
+kubectl logs job/qwen3-vl-30b-agg-analysis -n ${NAMESPACE}
+
+# EP/D
+kubectl delete job qwen3-vl-30b-disagg-ep-d-analysis -n ${NAMESPACE} --ignore-not-found=true
+kubectl apply -f vllm/disagg-ep-d/analysis.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Complete job/qwen3-vl-30b-disagg-ep-d-analysis -n ${NAMESPACE} --timeout=600s
+kubectl logs job/qwen3-vl-30b-disagg-ep-d-analysis -n ${NAMESPACE}
+
+# E/PD
+kubectl delete job qwen3-vl-30b-disagg-e-pd-analysis -n ${NAMESPACE} --ignore-not-found=true
+kubectl apply -f vllm/disagg-e-pd/analysis.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Complete job/qwen3-vl-30b-disagg-e-pd-analysis -n ${NAMESPACE} --timeout=600s
+kubectl logs job/qwen3-vl-30b-disagg-e-pd-analysis -n ${NAMESPACE}
 ```
+
+Analysis CSV outputs:
+
+- `/perf-cache/artifacts/qwen3_vl_30b_encoder_cache/agg/analysis/cache_on_vs_off_summary.csv`
+- `/perf-cache/artifacts/qwen3_vl_30b_encoder_cache/disagg_ep_d/analysis/cache_on_vs_off_summary.csv`
+- `/perf-cache/artifacts/qwen3_vl_30b_encoder_cache/disagg_e_pd/analysis/cache_on_vs_off_summary.csv`
