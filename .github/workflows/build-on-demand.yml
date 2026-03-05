@@ -51,7 +51,7 @@ jobs:
 
   vllm-pipeline:
     needs: [init]
-    # if: inputs.build_vllm
+    if: inputs.build_vllm
     uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
     with:
       framework: vllm
