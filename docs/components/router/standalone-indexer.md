@@ -39,7 +39,7 @@ Multiple indexer replicas can subscribe to the same ZMQ worker endpoints for fau
 ### How It Works
 
 1. Workers are registered via `--workers` CLI, which connects ZMQ SUB sockets immediately.
-2. A 1-second delay allows ZMQ subscription handshakes to complete in the background.
+2. A 1-second delay ensures the peer's tree state has advanced past the ZMQ connection point, so the dump covers any events that would otherwise be lost to the slow-joiner window.
 3. The indexer fetches a `/dump` from the first reachable peer in `--peers`.
 4. Dump events are applied to populate the radix tree.
 5. ZMQ listeners are unblocked and begin draining any events that buffered during recovery.
@@ -319,7 +319,7 @@ sequenceDiagram
     participant W as Workers (ZMQ PUB)
 
     B->>W: Connect ZMQ SUB sockets
-    Note over B,W: 1s delay for subscription handshake
+    Note over B,W: 1s delay for peer tree to advance past connection point
     B->>A: GET /dump
     A-->>B: Radix tree snapshot + block sizes
     Note over B: Apply dump events

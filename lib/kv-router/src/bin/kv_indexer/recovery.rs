@@ -22,11 +22,11 @@ pub async fn recover_from_peers(peers: &[String], registry: &WorkerRegistry) -> 
         .build()
         .context("failed to build HTTP client")?;
 
-    // Brief delay to let ZMQ subscription handshakes complete. Workers were
-    // registered (ZMQ sockets connected) before this function is called, but
-    // the PUB-side subscription processing is asynchronous. Without this
-    // delay, the PUB may not yet know about our SUB sockets and would
-    // silently drop events sent during the handshake window.
+    // Brief delay to ensure the peer's tree state has advanced past the
+    // point where our ZMQ SUB sockets connected. The dump must cover any
+    // events that would otherwise be lost to the slow-joiner window —
+    // without this delay, the peer's dump could be stale relative to our
+    // ZMQ connection floor.
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
     for peer_url in peers {

@@ -118,8 +118,8 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // P2P recovery: fetch dump from a peer before starting ZMQ listeners.
-    // The 1s delay inside recover_from_peers lets ZMQ subscription handshakes
-    // complete so no events are lost to the slow-joiner problem.
+    // The 1s delay inside recover_from_peers ensures the peer's tree has
+    // advanced past our ZMQ connection floor before we fetch the dump.
     if !peers.is_empty() {
         match recovery::recover_from_peers(&peers, &registry).await {
             Ok(true) => tracing::info!("P2P recovery completed"),
