@@ -1334,8 +1334,8 @@ mod tests {
             // a string does NOT fire the completion — only the final outer `}` does.
             let mut state = StreamingToolCallState::new(0, "id1".into(), "fn1".into());
             assert!(!state.feed(r#"{"code": "if (x) {"#)); // inner `{` is in a string
-            assert!(!state.feed(r#"return }"#));           // inner `}` is in a string
-            assert!(state.feed(r#"}"}"#));                 // `}` closes string, `}` closes object
+            assert!(!state.feed(r#"return }"#)); // inner `}` is in a string
+            assert!(state.feed(r#"}"}"#)); // `}` closes string, `}` closes object
             assert_eq!(state.accumulated_args, r#"{"code": "if (x) {return }}"}"#);
         }
 
@@ -1429,11 +1429,22 @@ mod tests {
             //   - synthetic chunk carries correct id, name, fully-assembled arguments
             //   - non-tool-call chunks produce no extra output
             let chunks = vec![
-                make_chunk(0, None),                                                        // non-tool chunk
-                make_chunk(0, Some(vec![make_tc(0, Some("call_1"), Some("get_weather"), Some(r#"{"city":"#))])),
+                make_chunk(0, None), // non-tool chunk
+                make_chunk(
+                    0,
+                    Some(vec![make_tc(
+                        0,
+                        Some("call_1"),
+                        Some("get_weather"),
+                        Some(r#"{"city":"#),
+                    )]),
+                ),
                 make_chunk(0, Some(vec![make_tc(0, None, None, Some(r#""San "#))])),
-                make_chunk(0, Some(vec![make_tc(0, None, None, Some(r#"Francisco"}"#))])), // completes here
-                make_chunk(0, None),                                                        // non-tool chunk
+                make_chunk(
+                    0,
+                    Some(vec![make_tc(0, None, None, Some(r#"Francisco"}"#))]),
+                ), // completes here
+                make_chunk(0, None), // non-tool chunk
             ];
             let input = stream::iter(chunks);
             let output: Vec<_> = streaming_tool_call_adapter(input).collect().await;
@@ -1451,9 +1462,15 @@ mod tests {
             let synthetic = &output[4];
             assert_eq!(synthetic.event.as_deref(), Some("tool_call.complete"));
             let tc = &synthetic.data.as_ref().unwrap().choices[0]
-                .delta.tool_calls.as_ref().unwrap()[0];
+                .delta
+                .tool_calls
+                .as_ref()
+                .unwrap()[0];
             assert_eq!(tc.id.as_deref(), Some("call_1"));
-            assert_eq!(tc.function.as_ref().unwrap().name.as_deref(), Some("get_weather"));
+            assert_eq!(
+                tc.function.as_ref().unwrap().name.as_deref(),
+                Some("get_weather")
+            );
             assert_eq!(
                 tc.function.as_ref().unwrap().arguments.as_deref(),
                 Some(r#"{"city":"San Francisco"}"#)
@@ -1466,13 +1483,19 @@ mod tests {
             // in chunk 0; call_a completes in chunk 1. Verifies the compound
             // (choice_index, tool_call_index) key prevents state collision.
             let chunks = vec![
-                make_chunk(0, Some(vec![
-                    make_tc(0, Some("call_a"), Some("fn_a"), Some(r#"{"x"#)),   // partial
-                    make_tc(1, Some("call_b"), Some("fn_b"), Some(r#"{"y":2}"#)), // complete
-                ])),
-                make_chunk(0, Some(vec![
-                    make_tc(0, None, None, Some(r#":1}"#)), // call_a completes
-                ])),
+                make_chunk(
+                    0,
+                    Some(vec![
+                        make_tc(0, Some("call_a"), Some("fn_a"), Some(r#"{"x"#)), // partial
+                        make_tc(1, Some("call_b"), Some("fn_b"), Some(r#"{"y":2}"#)), // complete
+                    ]),
+                ),
+                make_chunk(
+                    0,
+                    Some(vec![
+                        make_tc(0, None, None, Some(r#":1}"#)), // call_a completes
+                    ]),
+                ),
             ];
             let input = stream::iter(chunks);
             let output: Vec<_> = streaming_tool_call_adapter(input).collect().await;
@@ -1483,16 +1506,28 @@ mod tests {
             let synth_b = &output[1];
             assert_eq!(synth_b.event.as_deref(), Some("tool_call.complete"));
             let tc_b = &synth_b.data.as_ref().unwrap().choices[0]
-                .delta.tool_calls.as_ref().unwrap()[0];
+                .delta
+                .tool_calls
+                .as_ref()
+                .unwrap()[0];
             assert_eq!(tc_b.id.as_deref(), Some("call_b"));
-            assert_eq!(tc_b.function.as_ref().unwrap().arguments.as_deref(), Some(r#"{"y":2}"#));
+            assert_eq!(
+                tc_b.function.as_ref().unwrap().arguments.as_deref(),
+                Some(r#"{"y":2}"#)
+            );
 
             let synth_a = &output[3];
             assert_eq!(synth_a.event.as_deref(), Some("tool_call.complete"));
             let tc_a = &synth_a.data.as_ref().unwrap().choices[0]
-                .delta.tool_calls.as_ref().unwrap()[0];
+                .delta
+                .tool_calls
+                .as_ref()
+                .unwrap()[0];
             assert_eq!(tc_a.id.as_deref(), Some("call_a"));
-            assert_eq!(tc_a.function.as_ref().unwrap().arguments.as_deref(), Some(r#"{"x":1}"#));
+            assert_eq!(
+                tc_a.function.as_ref().unwrap().arguments.as_deref(),
+                Some(r#"{"x":1}"#)
+            );
         }
     }
 }
