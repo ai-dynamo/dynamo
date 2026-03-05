@@ -196,9 +196,7 @@ class HandlerBase(BaseGenerativeHandler):
         """
         try:
             cancellation_triggers: list[asyncio.Future[Any]] = [
-                asyncio.create_task(
-                    context.async_killed_or_stopped()
-                ),  # Request cancellation
+                context.async_killed_or_stopped(),  # Request cancellation
             ]
             # Shutdown cancellation
             shutdown_task = None
