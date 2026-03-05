@@ -23,6 +23,7 @@ spec:
           gpu: "1"
         requests:
           custom:
+            # Increase this value for larger models
             ephemeral-storage: "2Gi"
       extraPodSpec:
         mainContainer:
@@ -47,6 +48,7 @@ spec:
           gpu: "1"
         requests:
           custom:
+            # Increase this value for larger models
             ephemeral-storage: "2Gi"
       extraPodSpec:
         mainContainer:
