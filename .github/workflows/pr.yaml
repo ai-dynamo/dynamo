@@ -8,6 +8,9 @@ on:
     branches:
       - "pull-request/[0-9]+"
       # Note: release/* branches are handled by release.yml workflow
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:
     inputs:
       run_deploy_operator:
