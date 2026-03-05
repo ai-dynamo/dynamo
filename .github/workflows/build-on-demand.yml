@@ -13,22 +13,22 @@ on:
         description: 'Build and push vllm image, tagged with branch name'
         required: false
         type: boolean
-        default: false
+        default: true
       build_sglang:
         description: 'Build and push sglang image, tagged with branch name'
         required: false
         type: boolean
-        default: false
+        default: true
       build_trtllm:
         description: 'Build and push trtllm image, tagged with branch name'
         required: false
         type: boolean
-        default: false
+        default: true
       build_operator:
         description: 'Build and push operator image, tagged with branch name'
         required: false
         type: boolean
-        default: false
+        default: true
 
 env:
   BUILDER_NAME: b-${{ github.run_id }}-${{ github.run_attempt }}
