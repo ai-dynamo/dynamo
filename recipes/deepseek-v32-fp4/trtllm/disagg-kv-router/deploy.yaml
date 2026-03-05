@@ -32,23 +32,6 @@ spec:
           resources: {}
         nodeSelector:
           kubernetes.io/arch: arm64
-        tolerations:
-          - effect: NoSchedule
-            key: dedicated
-            operator: Equal
-            value: user-workload
-          - effect: NoExecute
-            key: dedicated
-            operator: Equal
-            value: user-workload
-          - effect: NoSchedule
-            key: dedicated
-            operator: Equal
-            value: system-workload
-          - effect: NoExecute
-            key: dedicated
-            operator: Equal
-            value: system-workload
       replicas: 1
     prefill:
       componentType: worker
