@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use anyhow::{Result, bail};
 use dashmap::DashMap;
 use dashmap::mapref::one::Ref;
+use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use dynamo_kv_router::protocols::WorkerId;
@@ -32,16 +33,43 @@ pub struct WorkerEntry {
 pub struct WorkerRegistry {
     workers: DashMap<WorkerId, WorkerEntry>,
     indexers: DashMap<IndexerKey, IndexerEntry>,
+    peers: DashMap<String, ()>,
     num_threads: usize,
+    ready_tx: watch::Sender<bool>,
+    ready_rx: watch::Receiver<bool>,
 }
 
 impl WorkerRegistry {
     pub fn new(num_threads: usize) -> Self {
+        let (ready_tx, ready_rx) = watch::channel(false);
         Self {
             workers: DashMap::new(),
             indexers: DashMap::new(),
+            peers: DashMap::new(),
             num_threads,
+            ready_tx,
+            ready_rx,
         }
+    }
+
+    pub fn signal_ready(&self) {
+        let _ = self.ready_tx.send(true);
+    }
+
+    pub fn ready_rx(&self) -> watch::Receiver<bool> {
+        self.ready_rx.clone()
+    }
+
+    pub fn register_peer(&self, url: String) {
+        self.peers.entry(url).or_insert(());
+    }
+
+    pub fn deregister_peer(&self, url: &str) -> bool {
+        self.peers.remove(url).is_some()
+    }
+
+    pub fn list_peers(&self) -> Vec<String> {
+        self.peers.iter().map(|entry| entry.key().clone()).collect()
     }
 
     pub fn register(
@@ -102,9 +130,10 @@ impl WorkerRegistry {
         let cancel = CancellationToken::new();
         let child_cancel = cancel.child_token();
         let addr = endpoint.clone();
+        let ready = self.ready_rx();
 
         tokio::spawn(async move {
-            run_zmq_listener(instance_id, dp_rank, addr, bs, indexer, child_cancel).await;
+            run_zmq_listener(instance_id, dp_rank, addr, bs, indexer, child_cancel, ready).await;
         });
 
         entry.endpoints.insert(dp_rank, endpoint);
@@ -233,10 +262,35 @@ impl WorkerRegistry {
         self.indexers.get(key)
     }
 
-    pub fn all_indexers(&self) -> Vec<(IndexerKey, Indexer)> {
+    pub fn get_or_create_indexer(&self, key: IndexerKey, block_size: u32) -> Indexer {
+        self.indexers
+            .entry(key.clone())
+            .or_insert_with(|| {
+                tracing::info!(
+                    model_name = %key.model_name,
+                    tenant_id = %key.tenant_id,
+                    block_size,
+                    "Creating indexer from recovery dump"
+                );
+                IndexerEntry {
+                    indexer: create_indexer(block_size, self.num_threads),
+                    block_size,
+                }
+            })
+            .indexer
+            .clone()
+    }
+
+    pub fn all_indexers_with_block_size(&self) -> Vec<(IndexerKey, Indexer, u32)> {
         self.indexers
             .iter()
-            .map(|entry| (entry.key().clone(), entry.value().indexer.clone()))
+            .map(|entry| {
+                (
+                    entry.key().clone(),
+                    entry.value().indexer.clone(),
+                    entry.value().block_size,
+                )
+            })
             .collect()
     }
 }
