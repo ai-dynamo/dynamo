@@ -13,6 +13,7 @@ use dynamo_kv_router::protocols::{
 pub use dynamo_kv_router::test_utils::{NoopSequencePublisher, SimpleWorkerConfig};
 use dynamo_mocker::common::protocols::{DirectRequest, KvCacheEventSink, MockEngineArgs};
 use dynamo_mocker::scheduler::Scheduler;
+use dynamo_mocker::scheduler::SchedulerHandle;
 use dynamo_tokens::compute_hash_v2;
 use indicatif::{ProgressBar, ProgressStyle};
 use plotters::prelude::*;
@@ -367,27 +368,23 @@ pub async fn generate_kv_events(
 
             while i < worker_trace.len() {
                 let prev_i = i;
-                scheduler
-                    .receive(DirectRequest {
-                        tokens: tokens_from_request(&worker_trace[i], block_size),
-                        max_output_tokens: worker_trace[i].output_length as usize,
-                        uuid: Some(worker_trace[i].uuid),
-                        dp_rank: 0,
-                    })
-                    .await;
+                scheduler.receive(DirectRequest {
+                    tokens: tokens_from_request(&worker_trace[i], block_size),
+                    max_output_tokens: worker_trace[i].output_length as usize,
+                    uuid: Some(worker_trace[i].uuid),
+                    dp_rank: 0,
+                });
                 i += 1;
 
                 while i < worker_trace.len()
                     && worker_trace[i].timestamp == worker_trace[i - 1].timestamp
                 {
-                    scheduler
-                        .receive(DirectRequest {
-                            tokens: tokens_from_request(&worker_trace[i], block_size),
-                            max_output_tokens: worker_trace[i].output_length as usize,
-                            uuid: Some(worker_trace[i].uuid),
-                            dp_rank: 0,
-                        })
-                        .await;
+                    scheduler.receive(DirectRequest {
+                        tokens: tokens_from_request(&worker_trace[i], block_size),
+                        max_output_tokens: worker_trace[i].output_length as usize,
+                        uuid: Some(worker_trace[i].uuid),
+                        dp_rank: 0,
+                    });
                     i += 1;
                 }
 

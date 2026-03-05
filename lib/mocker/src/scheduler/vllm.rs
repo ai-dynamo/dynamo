@@ -253,18 +253,18 @@ impl Scheduler {
             _cancel_guard: cancel_guard,
         }
     }
+}
 
-    /// Add a new request to the prefill queue
-    pub async fn receive(&self, request: DirectRequest) {
+impl super::SchedulerHandle for Scheduler {
+    fn receive(&self, request: DirectRequest) {
         let _ = self.request_tx.send(request);
     }
 
-    pub fn request_sender(&self) -> mpsc::UnboundedSender<DirectRequest> {
+    fn request_sender(&self) -> mpsc::UnboundedSender<DirectRequest> {
         self.request_tx.clone()
     }
 
-    /// Get a watch receiver for forward pass metrics
-    pub fn metrics_receiver(&self) -> tokio::sync::watch::Receiver<MockerMetrics> {
+    fn metrics_receiver(&self) -> tokio::sync::watch::Receiver<MockerMetrics> {
         self.metrics_rx.clone()
     }
 }
@@ -455,6 +455,7 @@ async fn simulate_decode(
 
     let context_length = if count > 0 { total_length / count } else { 0 };
     let decoding_time = perf_model.predict_decode_time(active_kv_tokens, context_length);
+
     let total_time = Duration::from_secs_f64(decoding_time / 1000.0);
 
     // Process decoding
@@ -574,6 +575,7 @@ fn process_signals(kv_manager: &mut KvManager, signals: &[MoveBlock]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scheduler::SchedulerHandle;
     use rstest::rstest;
     use std::time::Duration;
     use tokio::time::interval;
@@ -657,7 +659,7 @@ mod tests {
                 uuid: None,
                 dp_rank: 0,
             };
-            scheduler.receive(request).await;
+            scheduler.receive(request);
         }
 
         let start_time = std::time::Instant::now();
@@ -756,7 +758,7 @@ mod tests {
                 uuid: None,
                 dp_rank: 0,
             };
-            scheduler.receive(request).await;
+            scheduler.receive(request);
             // Sleep for 0.1 second after each request
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
@@ -1016,7 +1018,7 @@ mod tests {
             dp_rank: 0,
         };
 
-        scheduler.receive(request).await;
+        scheduler.receive(request);
 
         // Receive exactly 129 tokens
         let mut received_count = 0;

@@ -125,6 +125,17 @@ def create_temp_engine_args_file(args: argparse.Namespace) -> Path:
         # - kv_bytes_per_token is auto-computed in main.py after model prefetch,
         # - kv_cache_dtype is only used Python-side for the auto-computation.
         "kv_transfer_bandwidth": getattr(args, "kv_transfer_bandwidth", None),
+        "engine_type": getattr(args, "engine_type", None),
+        "sglang_schedule_policy": getattr(args, "sglang_schedule_policy", None),
+        "sglang_page_size": getattr(args, "sglang_page_size", None),
+        "sglang_max_prefill_tokens": getattr(args, "sglang_max_prefill_tokens", None),
+        "sglang_chunked_prefill_size": getattr(
+            args, "sglang_chunked_prefill_size", None
+        ),
+        "sglang_clip_max_new_tokens": getattr(args, "sglang_clip_max_new_tokens", None),
+        "sglang_schedule_conservativeness": getattr(
+            args, "sglang_schedule_conservativeness", None
+        ),
     }
 
     # Parse --reasoning JSON string into a nested object
@@ -337,6 +348,54 @@ def parse_args() -> argparse.Namespace:
         help="Enable reasoning token output. JSON object with fields: "
         "start_thinking_token_id (u32), end_thinking_token_id (u32), thinking_ratio (0.0-1.0). "
         'Example: \'{"start_thinking_token_id": 123, "end_thinking_token_id": 456, "thinking_ratio": 0.6}\'',
+    )
+
+    # Engine type selection
+    parser.add_argument(
+        "--engine-type",
+        type=str,
+        default=None,
+        choices=["vllm", "sglang"],
+        help="Engine simulation type: 'vllm' (default) or 'sglang'.",
+    )
+
+    # SGLang-specific configuration
+    parser.add_argument(
+        "--sglang-schedule-policy",
+        type=str,
+        default=None,
+        choices=["fifo", "fcfs", "lpm"],
+        help="SGLang scheduling policy: 'fifo'/'fcfs' (default) or 'lpm' (longest prefix match).",
+    )
+    parser.add_argument(
+        "--sglang-page-size",
+        type=int,
+        default=None,
+        help="SGLang radix cache page size in tokens (default: 1).",
+    )
+    parser.add_argument(
+        "--sglang-max-prefill-tokens",
+        type=int,
+        default=None,
+        help="SGLang maximum prefill tokens budget per batch (default: 16384).",
+    )
+    parser.add_argument(
+        "--sglang-chunked-prefill-size",
+        type=int,
+        default=None,
+        help="SGLang chunked prefill size — max tokens per chunk (default: 8192).",
+    )
+    parser.add_argument(
+        "--sglang-clip-max-new-tokens",
+        type=int,
+        default=None,
+        help="SGLang clip max new tokens for admission budget (default: 4096).",
+    )
+    parser.add_argument(
+        "--sglang-schedule-conservativeness",
+        type=float,
+        default=None,
+        help="SGLang schedule conservativeness factor 0.0-1.0 (default: 1.0).",
     )
 
     # Legacy support - allow direct JSON file specification
