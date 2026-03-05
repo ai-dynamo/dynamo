@@ -110,8 +110,6 @@ def _accumulate_embeddings(
                 )
             )
     else:
-        # Plain tensor embeddings
-        logger.info(f"Get embedding of shape {mm_data['image'].shape}")
         # [gluo FIXME] embedding with multiple images?
         if multi_modal_data["image"] == []:
             multi_modal_data["image"] = mm_data["image"]
@@ -250,11 +248,6 @@ async def _fetch_embeddings(
     # ── 2. Fetch uncached from encode workers ────────────────────────
     pending: _PendingRelease | None = None
     if to_fetch:
-        if cache is not None:
-            logger.info(
-                f"[{request_id}] Cache miss for {len(to_fetch)}/{len(image_urls)} URLs, "
-                "fetching from encode workers"
-            )
         miss_urls = [url for _, url, _ in to_fetch]
         groups, pending = await _fetch_from_encode_workers(
             encode_worker_client,
@@ -274,8 +267,6 @@ async def _fetch_embeddings(
                     ),
                 )
             results[idx] = group
-    else:
-        logger.info(f"[{request_id}] All {len(image_urls)} URLs served from cache")
 
     return [r for r in results if r is not None], pending
 

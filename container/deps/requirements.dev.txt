@@ -6,5 +6,3 @@
 mypy==1.18.2
 pre-commit==4.5.0
 pyright==1.1.407
-types-aiofiles==25.1.0.20251011
-types-PyYAML==6.0.12.20250915
