@@ -8,10 +8,24 @@ import argparse
 from dynamo.backend import DynamoRuntimeArgGroup, DynamoRuntimeConfig
 
 
+class ExampleEngineConfig:
+    """Engine-specific configuration for the example backend.
+
+    Accessed via ``config.engine.token_delay`` to clearly distinguish
+    engine-specific fields from standard Dynamo runtime fields.
+    """
+
+    def __init__(self, token_delay: float = 0.0) -> None:
+        self.token_delay = token_delay
+
+    def __repr__(self) -> str:
+        return f"ExampleEngineConfig(token_delay={self.token_delay!r})"
+
+
 class Config(DynamoRuntimeConfig):
     """Example backend configuration."""
 
-    token_delay: float = 0.0
+    pass
 
 
 def parse_args() -> Config:
@@ -26,5 +40,8 @@ def parse_args() -> Config:
     )
     args = parser.parse_args()
     config = Config.from_cli_args(args)
+    config.engine = ExampleEngineConfig(
+        token_delay=getattr(args, "token_delay", 0.0),
+    )
     config.validate()
     return config

@@ -256,7 +256,7 @@ class Handler(ABC):
                            Backends pass their engine-specific abort here.
         """
         try:
-            wait_for = [context.async_killed_or_stopped()]
+            wait_for = [asyncio.create_task(context.async_killed_or_stopped())]
             shutdown_task = None
 
             if self.shutdown_event:

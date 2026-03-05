@@ -31,7 +31,7 @@ class ExampleBackend(Backend):
         return ExampleHandler(
             component=component,
             shutdown_event=self.shutdown_event,
-            token_delay=getattr(self.config, "token_delay", 0.0),
+            token_delay=self.config.engine.token_delay,
         )
 
     def get_health_check_payload(self, engine: Any) -> Dict[str, Any]:

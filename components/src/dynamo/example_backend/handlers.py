@@ -5,6 +5,7 @@
 
 import asyncio
 import logging
+import os
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
 from dynamo.common import Context
@@ -17,13 +18,35 @@ _FALLBACK_REPLY_IDS: List[int] = [0]
 
 _REPLY_TEXT = "Hello World!"
 
+# Server-side allowlist of model names that may be used with the tokenizer.
+# Set DYNAMO_ALLOWED_MODELS as a comma-separated list of model names.
+_ALLOWED_MODELS: Optional[frozenset[str]] = None
+_raw = os.environ.get("DYNAMO_ALLOWED_MODELS")
+if _raw:
+    _ALLOWED_MODELS = frozenset(name.strip() for name in _raw.split(",") if name.strip())
+
+# Module-level cache so each model's tokenizer is loaded only once.
+_TOKENIZER_CACHE: Dict[str, Any] = {}
+
+
+def _get_tokenizer(model: str) -> Any:
+    """Return a cached tokenizer for *model*, creating it on first use."""
+    if model not in _TOKENIZER_CACHE:
+        from transformers import AutoTokenizer  # type: ignore[import-untyped]
+
+        _TOKENIZER_CACHE[model] = AutoTokenizer.from_pretrained(
+            model, trust_remote_code=False
+        )
+    return _TOKENIZER_CACHE[model]
+
 
 def _encode_reply(model: str) -> List[int]:
     """Encode reply text using the model's tokenizer so it decodes to 'Hello World!'."""
+    if _ALLOWED_MODELS is not None and model not in _ALLOWED_MODELS:
+        logger.warning("Model %s is not in the allowed models list; using fallback", model)
+        return _FALLBACK_REPLY_IDS
     try:
-        from transformers import AutoTokenizer  # type: ignore[import-untyped]
-
-        tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=True)
+        tokenizer = _get_tokenizer(model)
         return tokenizer.encode(_REPLY_TEXT, add_special_tokens=False)
     except Exception as e:
         logger.debug(

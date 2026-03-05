@@ -25,8 +25,16 @@ class DynamoRuntimeConfig(ConfigBase):
     """Common configuration fields for all backend workers.
 
     This provides the base configuration that all backends share. Backend-specific
-    configurations should inherit from this class.
+    configurations should inherit from this class and set the ``engine`` attribute
+    to a typed engine-specific config object so that standard Dynamo fields
+    (accessed as ``config.<field>``) are clearly separated from engine-specific
+    fields (accessed as ``config.engine.<field>``).
     """
+
+    # Backend-specific engine configuration.  Subclasses should set this to a
+    # typed object (e.g., ``MyEngineConfig``) so callers access engine-specific
+    # settings via ``config.engine.<field>`` rather than flat attributes.
+    engine: Optional[Any] = None
 
     # Dynamo hierarchy
     namespace: str

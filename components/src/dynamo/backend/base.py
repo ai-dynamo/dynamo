@@ -551,17 +551,18 @@ class Backend(ABC):
                 await self._run_cleanup()
                 return
 
-            # Step 8: Create handler
-            self.handler = self._run_create_handler(engine, component, endpoint)
-
-            # Step 9: Set up KV publishers
-            self._run_setup_kv_publishers()
-
-            # Step 10: Register engine routes
-            self._run_register_engine_routes(self.runtime, self.handler)
-
-            # Step 11: Register and serve
+            # Steps 8–12 are wrapped so cleanup runs even if pre-serve steps fail.
             try:
+                # Step 8: Create handler
+                self.handler = self._run_create_handler(engine, component, endpoint)
+
+                # Step 9: Set up KV publishers
+                self._run_setup_kv_publishers()
+
+                # Step 10: Register engine routes
+                self._run_register_engine_routes(self.runtime, self.handler)
+
+                # Step 11: Register and serve
                 await self._run_serve(self.handler, endpoint, engine)
             finally:
                 # Step 12: Cleanup
