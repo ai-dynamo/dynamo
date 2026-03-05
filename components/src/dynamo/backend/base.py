@@ -145,15 +145,30 @@ class Backend(ABC):
         if self.shutdown_event is None:
             self.shutdown_event = asyncio.Event()
 
-        runtime, loop = create_runtime(
-            store_kv=self.config.store_kv,
+        runtime, _loop = create_runtime(
+            discovery_backend=self.config.discovery_backend,
             request_plane=self.config.request_plane,
             event_plane=self.config.event_plane,
-            use_kv_events=self.config.use_kv_events,
-            shutdown_event=self.shutdown_event,
+            use_kv_events=getattr(self.config, "use_kv_events", False),
         )
         self.runtime = runtime
         logger.info(f"[{self.backend_name}] Runtime ready")
+
+    def _get_component_name(self) -> str:
+        """Get the component name for Dynamo registration.
+
+        Default: "backend". Override or set ``config.component`` for
+        backends that register under a different component name.
+        """
+        return getattr(self.config, "component", "backend")
+
+    def _get_endpoint_name(self) -> str:
+        """Get the endpoint name for Dynamo registration.
+
+        Default: "generate". Override or set ``config.endpoint`` for
+        backends that register under a different endpoint name.
+        """
+        return getattr(self.config, "endpoint", None) or "generate"
 
     def setup_component(self) -> Tuple[Any, Any]:
         """Set up the Dynamo component and endpoint.
@@ -161,17 +176,19 @@ class Backend(ABC):
         Returns:
             Tuple of (component, endpoint).
         """
+        component_name = self._get_component_name()
+        endpoint_name = self._get_endpoint_name()
         logger.info(
             f"[{self.backend_name}] Setting up component "
-            f"(namespace={self.config.namespace}, component={self.config.component})..."
+            f"(namespace={self.config.namespace}, component={component_name})..."
         )
         if self.runtime is None:
             raise RuntimeError("Runtime not initialized. Call setup_runtime() first.")
 
         self.component = self.runtime.namespace(self.config.namespace).component(
-            self.config.component
+            component_name
         )
-        self.endpoint = self.component.endpoint(self.config.endpoint)
+        self.endpoint = self.component.endpoint(endpoint_name)
         logger.info(f"[{self.backend_name}] Component and endpoint ready")
         return self.component, self.endpoint
 
@@ -263,11 +280,7 @@ class Backend(ABC):
             return self.config.get_model_name()
         if hasattr(self.config, "served_model_name") and self.config.served_model_name:
             return self.config.served_model_name
-        if hasattr(self.config, "model"):
-            return self.config.model
-        if hasattr(self.config, "model_path"):
-            return self.config.model_path
-        return "unknown"
+        return self._get_model_path()
 
     def _get_endpoint_types(self) -> str:
         """Get endpoint types from config."""
@@ -312,7 +325,7 @@ class Backend(ABC):
         return LLMBackendMetrics(
             registry=DYNAMO_COMPONENT_REGISTRY,
             model_name=self._get_model_name(),
-            component_name=getattr(self.config, "component", ""),
+            component_name=self._get_component_name(),
         )
 
     def get_additional_endpoints(self) -> Dict[str, Callable]:
@@ -365,6 +378,38 @@ class Backend(ABC):
 
         await asyncio.gather(*serve_coros)
 
+    def _get_disaggregation_mode(self) -> str:
+        """Get the disaggregation mode from config.
+
+        Returns one of: "aggregated", "prefill", "decode".
+        """
+        return getattr(self.config, "disaggregation_mode", "aggregated")
+
+    def _build_model_type(self) -> "ModelType":
+        """Build the ModelType flags for register_llm().
+
+        Combines endpoint types (chat/completions), input type, and
+        disaggregation mode into the ModelType flags that register_llm()
+        expects. Backends can override to customize.
+
+        Note: ModelType currently conflates endpoint types, worker roles,
+        and media modalities into a single flag set. This method isolates
+        that conflation to a single point in the Backend interface.
+        """
+        input_type = self._get_input_type()
+        model_type = parse_endpoint_types(self._get_endpoint_types())
+
+        disagg_mode = self._get_disaggregation_mode()
+        if disagg_mode == "prefill":
+            model_type = model_type | ModelType.Prefill
+
+        # When input is text (e.g. using framework tokenizer),
+        # restrict to Chat for non-embedding models
+        if input_type == ModelInput.Text and model_type != ModelType.Embedding:
+            model_type = ModelType.Chat
+
+        return model_type
+
     async def register_model(self, endpoint: Any, engine: Any) -> None:
         """Register the model with the Dynamo frontend.
 
@@ -381,22 +426,13 @@ class Backend(ABC):
         if runtime_config is None:
             return
 
-        # Determine input and model type
         input_type = self._get_input_type()
-        model_type = parse_endpoint_types(self._get_endpoint_types())
+        model_type = self._build_model_type()
 
-        # Apply disaggregation mode
-        disagg_mode = getattr(self.config, "disaggregation_mode", "aggregated")
-        if disagg_mode == "prefill":
-            model_type = model_type | ModelType.Prefill
-            # Prefill workers don't parse tool calls or reasoning
+        # Prefill workers don't parse tool calls or reasoning
+        if self._get_disaggregation_mode() == "prefill":
             runtime_config.tool_call_parser = None
             runtime_config.reasoning_parser = None
-
-        # When input is text (e.g. using framework tokenizer),
-        # restrict to Chat for non-embedding models
-        if input_type == ModelInput.Text and model_type != ModelType.Embedding:
-            model_type = ModelType.Chat
 
         # Log runtime config (use getattr: some bindings expose setters only)
         logger.info(
@@ -519,7 +555,7 @@ class Backend(ABC):
                 await self._metrics_task
             except asyncio.CancelledError:
                 pass
-        if self.handler and hasattr(self.handler, "cleanup"):
+        if self.handler:
             self.handler.cleanup()
         await self.async_post_serve_cleanup()
         logger.info(f"[{self.backend_name}] Cleanup complete")

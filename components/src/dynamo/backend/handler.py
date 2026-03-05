@@ -39,9 +39,59 @@ from contextlib import asynccontextmanager
 from typing import Any, AsyncGenerator, AsyncIterator, Callable, Dict, List, Optional, Tuple
 
 from dynamo.common import Context
-from dynamo.common.utils.logprobs import extract_logprobs
 
 logger = logging.getLogger(__name__)
+
+
+def _extract_logprobs(
+    logprobs: Optional[list],
+    token_ids: list,
+    num_output_tokens_so_far: int,
+) -> Tuple[Optional[List[float]], Optional[List[List[Dict]]]]:
+    """Extract logprobs from engine output for new tokens.
+
+    Handles the common TokenLogprobs dict format as well as the edge case
+    where logprobs may be a plain list of floats.
+    """
+    if logprobs is None:
+        return None, None
+
+    new_logprobs = logprobs[num_output_tokens_so_far:]
+    if not new_logprobs:
+        return None, None
+
+    # Plain list of floats (e.g. TRT-LLM edge case)
+    if isinstance(new_logprobs[0], float):
+        return [float(lp) for lp in new_logprobs], None
+
+    log_probs: List[float] = []
+    top_logprobs: List[List[Dict]] = []
+
+    for token_idx, token_logprobs_dict in enumerate(new_logprobs):
+        if token_logprobs_dict is None:
+            continue
+
+        actual_token_id = token_ids[num_output_tokens_so_far + token_idx]
+
+        if actual_token_id in token_logprobs_dict:
+            selected = token_logprobs_dict[actual_token_id]
+            log_probs.append(float(selected.logprob))
+        else:
+            first = next(iter(token_logprobs_dict.values()), None)
+            if first:
+                log_probs.append(float(first.logprob))
+
+        token_top = []
+        for tok_id, info in token_logprobs_dict.items():
+            token_top.append({
+                "rank": info.rank if hasattr(info, "rank") else 0,
+                "token_id": tok_id,
+                "token": info.decoded_token if hasattr(info, "decoded_token") else None,
+                "logprob": float(info.logprob),
+            })
+        top_logprobs.append(token_top)
+
+    return log_probs if log_probs else None, top_logprobs if top_logprobs else None
 
 
 class Handler(ABC):
@@ -155,7 +205,7 @@ class Handler(ABC):
         next_total_toks = len(output.token_ids)
         out = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
 
-        log_probs, top_logprobs = extract_logprobs(
+        log_probs, top_logprobs = _extract_logprobs(
             output.logprobs, output.token_ids, num_output_tokens_so_far
         )
         if log_probs is not None:

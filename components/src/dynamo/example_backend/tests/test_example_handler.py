@@ -1,5 +1,6 @@
 """Example tests for the ExampleHandler."""
 
+import asyncio
 import time
 from unittest.mock import MagicMock
 
@@ -19,6 +20,13 @@ def create_mock_context(request_id: str = "test-id") -> MagicMock:
     ctx.id = MagicMock(return_value=request_id)
     ctx.is_stopped = MagicMock(return_value=False)
     ctx.is_killed = MagicMock(return_value=False)
+    # async_killed_or_stopped must return an awaitable that blocks until stopped
+    _never = asyncio.get_event_loop().create_future()
+
+    async def _async_killed_or_stopped():
+        await _never
+
+    ctx.async_killed_or_stopped = _async_killed_or_stopped
     return ctx
 
 

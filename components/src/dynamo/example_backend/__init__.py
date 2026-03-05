@@ -7,8 +7,8 @@ This backend returns a fixed "Hello World!" reply streamed token by token.
 It exists as a minimal reference for writing new backends.
 """
 
-from dynamo.example_backend.args import ExampleEngineConfig
-from dynamo.example_backend.backends import ExampleBackend
+from dynamo.example_backend.args import ExampleBackendConfig
+from dynamo.example_backend.backend import ExampleBackend
 from dynamo.example_backend.handlers import ExampleHandler
 
-__all__ = ["ExampleBackend", "ExampleEngineConfig", "ExampleHandler"]
+__all__ = ["ExampleBackend", "ExampleBackendConfig", "ExampleHandler"]

@@ -8,7 +8,7 @@ import os
 
 async def _run() -> None:
     from dynamo.example_backend.args import parse_args
-    from dynamo.example_backend.backends import ExampleBackend
+    from dynamo.example_backend.backend import ExampleBackend
 
     config = parse_args()
 
