@@ -521,12 +521,7 @@ func main() {
 		}
 	}()
 
-	// Create MPI SSH SecretReplicator for cross-namespace secret replication
-	mpiSecretReplicator := secret.NewSecretReplicator(
-		mgr.GetClient(),
-		operatorCfg.MPI.SSHSecretNamespace,
-		operatorCfg.MPI.SSHSecretName,
-	)
+	sshKeyManager := secret.NewSSHKeyManager(mgr.GetClient(), &operatorCfg.MPI)
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		setupLog.Error(err, "unable to set up health check")
@@ -549,7 +544,7 @@ func main() {
 	// Controllers don't depend on TLS certificates.
 	if err := registerControllers(
 		mgr, operatorCfg, runtimeConfig,
-		dockerSecretRetriever, mpiSecretReplicator,
+		dockerSecretRetriever, sshKeyManager,
 	); err != nil {
 		setupLog.Error(err, "failed to register controllers")
 		os.Exit(1)
@@ -591,7 +586,7 @@ func registerControllers(
 	operatorCfg *configv1alpha1.OperatorConfiguration,
 	runtimeConfig *commonController.RuntimeConfig,
 	dockerSecretRetriever *secrets.DockerSecretIndexer,
-	mpiSecretReplicator *secret.SecretReplicator,
+	sshKeyManager *secret.SSHKeyManager,
 ) error {
 	if err := (&controller.DynamoComponentDeploymentReconciler{
 		Client:                mgr.GetClient(),
@@ -617,7 +612,7 @@ func registerControllers(
 		RuntimeConfig:         runtimeConfig,
 		DockerSecretRetriever: dockerSecretRetriever,
 		ScaleClient:           scaleClient,
-		MPISecretReplicator:   mpiSecretReplicator,
+		SSHKeyManager:         sshKeyManager,
 		RBACManager:           rbacManager,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to create DynamoGraphDeployment controller: %w", err)
