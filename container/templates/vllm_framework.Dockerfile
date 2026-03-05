@@ -10,7 +10,7 @@
 # PURPOSE: Framework development and vLLM compilation
 #
 # This stage builds and compiles framework dependencies including:
-# - vLLM inference engine with CUDA/XPU support
+# - vLLM inference engine with CUDA/XPU/CPU support
 # - DeepGEMM and FlashInfer optimizations
 # - All necessary build tools and compilation dependencies
 # - Framework-level Python packages and extensions
@@ -28,6 +28,10 @@ COPY --from=dynamo_base /bin/uv /bin/uvx /bin/
 
 ARG PYTHON_VERSION
 ARG DEVICE
+
+ARG COMMON_UTILS
+RUN apt clean && apt-get update -y && \
+    apt-get install -y --no-install-recommends --fix-missing $COMMON_UTILS
 
 # Cache apt downloads; sharing=locked avoids apt/dpkg races with concurrent builds.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
@@ -86,6 +90,27 @@ ENV CUDA_HOME=/usr/local/cuda
 RUN wget --tries=3 --waitretry=5 https://raw.githubusercontent.com/intel/llm-scaler/35a14cbc08d714f460a29b7a7328df5620c8530f/vllm/patches/ai-dynamo-xpu/patches/vllm-xpu-v0.14.0.patch -O /tmp/vllm-xpu.patch
 ENV VLLM_TARGET_DEVICE=xpu
 ENV VLLM_WORKER_MULTIPROC_METHOD=spawn
+{% endif %}
+
+{% if device == "cpu" %}
+## Use guidelines from https://docs.vllm.ai/en/stable/getting_started/installation/cpu/#build-image-from-source
+## to build a cross compiled target to support AVX512, AMX ISA's
+## vllm-0.16 has a bug that handles non-AVX512 supported cases incorrectly
+## -  https://github.com/vllm-project/vllm/issues/33991
+## -  Build settings chosen to cross-compile with AVX512 support.
+
+ENV VLLM_TARGET_DEVICE=cpu
+ARG VLLM_CPU_DISABLE_AVX512=false  # If false, decide based on build-machine support or below flags (latter overrides former). If true, disable AVX512 support.
+ARG VLLM_CPU_AVX512=true           # Support for building with AVX512 ISA (Explicitly enable to cross-compile)
+ARG VLLM_CPU_AVX512BF16=true       # Support for building with AVX512BF16 ISA
+ARG VLLM_CPU_AVX512VNNI=false      # Support for building with VLLM_CPU_AVX512VNNI ISA
+ARG VLLM_CPU_AMXBF16=true          # Support for building with AMXBF16 ISA
+
+ENV VLLM_CPU_DISABLE_AVX512=${VLLM_CPU_DISABLE_AVX512}
+ENV VLLM_CPU_AVX512=${VLLM_CPU_AVX512}
+ENV VLLM_CPU_AVX512BF16=${VLLM_CPU_AVX512BF16}
+ENV VLLM_CPU_AVX512VNNI=${VLLM_CPU_AVX512VNNI}
+ENV VLLM_CPU_AMXBF16=${VLLM_CPU_AMXBF16}
 {% endif %}
 
 # Install VLLM and related dependencies

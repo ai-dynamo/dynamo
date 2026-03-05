@@ -53,6 +53,12 @@ vllm:
     base_image_tag: 2025.3.2-0-devel-ubuntu24.04
     runtime_image_tag: 2025.3.2-0-devel-ubuntu24.04
     vllm_ref: v0.14.0
+  cpu:
+    base_image: ubuntu
+    runtime_image: ubuntu
+    base_image_tag: 24.04
+    runtime_image_tag: 24.04
+    vllm_ref: v0.16.0
   flashinf_ref: v0.6.4
   lmcache_ref: 0.4.1
   vllm_omni_ref: "v0.16.0"

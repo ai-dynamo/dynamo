@@ -37,7 +37,7 @@ ARG RUNTIME_IMAGE_TAG={{ context[framework][device_key].runtime_image_tag }}
 {%- endif %}
 
 # wheel builder image selection
-{% if device == "xpu" %}
+{% if device == "xpu" or device == "cpu" %}
 ARG WHEEL_BUILDER_IMAGE=${BASE_IMAGE}:${BASE_IMAGE_TAG}
 {% elif platform == "multi" %}
 {# Multi-arch: manylinux selection is handled via --platform-pinned stage aliases   #}
@@ -131,3 +131,8 @@ ARG TRTLLM_PYTHON_VERSION={{ context[framework].python_version }}
 ARG EFA_VERSION={{ context.dynamo.efa_version }}
 ARG EFA_BASE_IMAGE={{ "runtime" if target=="runtime" else "dev" }}
 {%- endif -%}
+
+# Install common utilities in base docker file
+ARG COMMON_UTILS="curl ca-certificates zip unzip git \
+ libsndfile1 libsm6 libxext6 libgl1 lsb-release \
+ libaio-dev numactl wget vim linux-libc-dev"

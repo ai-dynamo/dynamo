@@ -33,6 +33,11 @@ ARG CARGO_BUILD_JOBS
 ARG DEVICE
 
 WORKDIR /workspace
+ARG COMMON_UTILS
+{% if device == "xpu" or device == "cpu" %}
+RUN apt clean && apt-get update -y && \
+    apt-get install -y --no-install-recommends --fix-missing $COMMON_UTILS
+{% endif %}
 
 {% if device == "cuda" %}
 # Copy CUDA from base stage
@@ -54,37 +59,22 @@ COPY --from=dynamo_base $RUSTUP_HOME $RUSTUP_HOME
 COPY --from=dynamo_base $CARGO_HOME $CARGO_HOME
 
 {% if device == "xpu" %}
-SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 RUN wget -O- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB | gpg --dearmor | tee /usr/share/keyrings/oneapi-archive-keyring.gpg > /dev/null && \
     echo "deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main" | tee /etc/apt/sources.list.d/oneAPI.list && \
     add-apt-repository -y ppa:kobuk-team/intel-graphics
 
+# Fetch UCX patch
 RUN wget --tries=3 --waitretry=5 https://raw.githubusercontent.com/intel/llm-scaler/35a14cbc08d714f460a29b7a7328df5620c8530f/vllm/patches/ai-dynamo-xpu/patches/ucx-v1.12.0.patch -O /tmp/ucx.patch
 
-RUN apt clean && apt-get update -y && \
-    apt-get install -y --no-install-recommends --fix-missing \
-    curl \
-    #ffmpeg \
-    ca-certificates \
-    zip \
-    unzip \
-    git \
-    libsndfile1 \
-    libsm6 \
-    libxext6 \
-    libgl1 \
-    lsb-release \
-    libaio-dev \
-    numactl \
-    wget \
-    vim \
-    linux-libc-dev && \
-    # Install Intel GPU runtime packages
-    apt update -y && apt upgrade -y && \
+# Install Intel GPU runtime packages
+RUN apt update -y && apt upgrade -y && \
     apt-get install -y libze1 libze-dev libze-intel-gpu1 intel-opencl-icd  \
     libze-intel-gpu-raytracing intel-ocloc intel-oneapi-compiler-dpcpp-cpp-2025.3 && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
+{% endif %}
 
+{% if device == "xpu" or device == "cpu" %}
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 RUN apt-get update -y \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         # NIXL build dependencies
@@ -189,14 +179,14 @@ RUN set -eux; \
 # Point build tools explicitly at the modern protoc
 ENV PROTOC=/usr/local/bin/protoc
 
-{% if device == "xpu" %}
+{% if device == "xpu" or device == "cpu" %}
 # Install uv package manager
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
-ENV LD_LIBRARY_PATH=/usr/local/lib:/usr/local/lib64:$LD_LIBRARY_PATH
+ENV LD_LIBRARY_PATH=/usr/local/lib:/usr/local/lib64:${LD_LIBRARY_PATH:-}
 {% else %}
 ENV CUDA_PATH=/usr/local/cuda \
     PATH=/usr/local/cuda/bin:$PATH \
-    LD_LIBRARY_PATH=/usr/local/cuda/lib64:/usr/local/lib:/usr/local/lib64:$LD_LIBRARY_PATH \
+    LD_LIBRARY_PATH=/usr/local/cuda/lib64:/usr/local/lib:/usr/local/lib64:${LD_LIBRARY_PATH:-} \
     NVIDIA_DRIVER_CAPABILITIES=video,compute,utility
 {% endif %}
 
@@ -253,11 +243,11 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     if [ "$USE_SCCACHE" = "true" ]; then \
         eval $(/tmp/use-sccache.sh setup-env); \
     fi && \
-    if [ "$DEVICE" = "xpu" ]; then \
-    apt-get update -y && apt-get install -y pkg-config; \
+    if [ "$DEVICE" = "xpu" ] || [ "$DEVICE" = "cpu" ]; then \
+    apt-get update -y && apt-get install -y build-essential pkg-config xz-utils; \
     apt-get clean && rm -rf /var/lib/apt/lists/*; \
     elif [ "$DEVICE" = "cuda" ]; then \
-    dnf install -y pkg-config; \
+    dnf install -y pkg-config xz; \
     fi && \
     cd /tmp && \
     curl --retry 5 --retry-delay 3 -LO https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz && \
@@ -330,6 +320,18 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
         --with-dm                   \
         --with-gdrcopy=/usr/local   \
         --with-efa                  \
+        --enable-mt;                 \
+    elif [ "$DEVICE" = "cpu" ]; then  \
+     ./contrib/configure-release     \
+        --prefix=/usr/local/ucx     \
+        --enable-shared             \
+        --disable-static            \
+        --disable-doxygen-doc       \
+        --enable-optimizations      \
+        --enable-cma                \
+        --enable-devel-headers      \
+        --with-verbs                \
+        --without-cuda              \
         --enable-mt;                 \
      fi && \
      make -j &&                      \
@@ -495,8 +497,8 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     git checkout ${NIXL_REF} && \
     if [ "$DEVICE" = "cuda" ]; then \
         PKG_NAME="nixl-cu${CUDA_MAJOR}"; \
-    elif [ "$DEVICE" = "xpu" ]; then \
-        PKG_NAME="nixl-xpu"; \
+    else \
+        PKG_NAME="nixl-${DEVICE}"; \
     fi && \
     ./contrib/tomlutil.py --wheel-name $PKG_NAME pyproject.toml && \
     mkdir build && \
@@ -508,6 +510,9 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
             -Dlibfabric_path="/usr/local/libfabric"; \
     elif [ "$DEVICE" = "xpu" ]; then \
         meson setup build/ --prefix=/opt/intel/intel_nixl --buildtype=release \
+            -Ducx_path="/usr/local/ucx"; \
+    elif [ "$DEVICE" = "cpu" ]; then \
+        meson setup build/ --prefix=/opt/nvidia/nvda_nixl --buildtype=release \
             -Ducx_path="/usr/local/ucx"; \
     fi && \
     cd build && \
@@ -579,7 +584,7 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
                 --plat manylinux_2_28_${ARCH_ALT} \
                 --wheel-dir /opt/dynamo/dist \
                 target/wheels/*.whl; \
-        elif [ "$DEVICE" = "xpu" ]; then \
+        elif [ "$DEVICE" = "xpu" ] || [ "$DEVICE" = "cpu" ]; then \
             cp target/wheels/*.whl /opt/dynamo/dist/; \
         fi; \
     fi && \

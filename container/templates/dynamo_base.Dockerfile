@@ -14,6 +14,10 @@ ARG TARGETARCH
 USER root
 WORKDIR /opt/dynamo
 
+ARG COMMON_UTILS
+RUN apt clean && apt-get update -y && \
+    apt-get install -y --no-install-recommends --fix-missing $COMMON_UTILS
+
 # Install sccache into the base image so downstream stages can COPY it
 # instead of downloading from GitHub (avoids 502 errors under parallel builds)
 ARG SCCACHE_VERSION=v0.14.0
