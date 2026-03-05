@@ -118,23 +118,7 @@ spec:
           workingDir: /workspace/
         nodeSelector:
           kubernetes.io/arch: arm64
-        tolerations:
-          - effect: NoSchedule
-            key: dedicated
-            operator: Equal
-            value: user-workload
-          - effect: NoExecute
-            key: dedicated
-            operator: Equal
-            value: user-workload
-          - effect: NoSchedule
-            key: dedicated
-            operator: Equal
-            value: system-workload
-          - effect: NoExecute
-            key: dedicated
-            operator: Equal
-            value: system-workload
+        #tolerations: :     # uncomment to populate any tolerations for the gpu nodes
         resourceClaims:
           - name: compute-domain-channel
             resourceClaimTemplateName: your-compute-domain-channel
