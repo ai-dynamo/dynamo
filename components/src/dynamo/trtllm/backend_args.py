@@ -161,6 +161,22 @@ class DynamoTrtllmArgGroup(ArgGroup):
         )
         add_argument(
             g,
+            flag_name="--model-express-url",
+            env_var="MODEL_EXPRESS_URL",
+            default=None,
+            help="ModelExpress P2P server URL (e.g., modelexpress-server:8001). "
+            "When set, enables P2P weight transfer (role determines behavior).",
+        )
+        add_argument(
+            g,
+            flag_name="--model-express-role",
+            env_var="MX_ROLE",
+            default="target",
+            help="ModelExpress role: 'source' (load from disk, publish for RDMA), "
+            "'target' (receive weights via RDMA).",
+        )
+        add_argument(
+            g,
             flag_name="--disaggregation-mode",
             env_var="DYN_TRTLLM_DISAGGREGATION_MODE",
             default=DisaggregationMode.AGGREGATED.value,
@@ -462,6 +478,9 @@ class DynamoTrtllmConfig(ConfigBase):
     publish_events_and_metrics: bool
     disable_request_abort: bool
     guided_decoding_backend: Optional[str] = None
+
+    model_express_url: Optional[str] = None
+    model_express_role: str = "target"
 
     disaggregation_mode: DisaggregationMode
     modality: Modality

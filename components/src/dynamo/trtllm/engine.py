@@ -27,6 +27,8 @@ class TensorRTLLMEngine:
         self,
         engine_args,
         disaggregation_mode: Optional[DisaggregationMode] = None,
+        model_express_url: Optional[str] = None,
+        model_express_role: str = "target",
     ):
         self._llm: Optional[LLM] = None
         self.disaggregation_mode = (
@@ -51,9 +53,18 @@ class TensorRTLLMEngine:
             )
 
         self.engine_args = engine_args
+        self._model_express_url = model_express_url
+        self._model_express_role = model_express_role
 
     async def initialize(self):
         if not self._llm:
+            # If ModelExpress P2P is configured, set up based on role
+            if self._model_express_url:
+                if self._model_express_role == "target":
+                    self._setup_modelexpress_loader()
+                elif self._model_express_role == "source":
+                    self._setup_modelexpress_source()
+
             if self.disaggregation_mode == DisaggregationMode.ENCODE:
                 # Initialize the multimodal encoder for full EPD
                 # Prefill/decode workers initialize the standard TRT-LLM `LLM` from `engine_args`
@@ -75,6 +86,13 @@ class TensorRTLLMEngine:
                 # Prefill/decode workers: initialize standard TRT-LLM `LLM` with full engine_args
                 # (model path, backend settings, KV cache config, disaggregation settings, etc.)
                 self._llm = self._llm_cls(**self.engine_args)
+
+            # After LLM init: if source role, register weights with NIXL and publish
+            if (
+                self._model_express_url
+                and self._model_express_role == "source"
+            ):
+                self._publish_modelexpress_source()
 
     async def cleanup(self):
         if self._llm:
@@ -100,6 +118,91 @@ class TensorRTLLMEngine:
         enable_attention_dp = getattr(self.llm.args, "enable_attention_dp", False)
         tensor_parallel_size = getattr(self.llm.args, "tensor_parallel_size", 1)
         return tensor_parallel_size if enable_attention_dp else 1
+
+    def _setup_modelexpress_source(self) -> None:
+        """Prepare source environment before LLM init.
+
+        Source loads weights from disk normally. After LLM init,
+        _publish_modelexpress_source() registers them with NIXL and publishes.
+        """
+        import os
+
+        os.environ["MODEL_EXPRESS_URL"] = self._model_express_url
+        os.environ.setdefault(
+            "MODEL_NAME",
+            self.engine_args.get("model", "unknown"),
+        )
+        logger.info(
+            "ModelExpress source mode: will publish weights after loading from %s",
+            self.engine_args.get("model", "unknown"),
+        )
+
+    def _publish_modelexpress_source(self) -> None:
+        """Register model params with NIXL and publish to MX server.
+
+        Called after LLM init when role=source. At this point weights are
+        loaded and compiled. We register the PyTorch model parameters with
+        NIXL for RDMA reads by targets.
+        """
+        try:
+            from modelexpress.trtllm_live_transfer import MxLiveSource
+        except ImportError:
+            raise ImportError(
+                "ModelExpress source mode requires the 'modelexpress' package. "
+                "Install with: pip install modelexpress"
+            )
+
+        import os
+
+        model_name = os.environ.get(
+            "MODEL_NAME", self.engine_args.get("model", "unknown")
+        )
+        model_path = self.engine_args.get("model", "")
+
+        source = MxLiveSource(
+            self._llm,
+            model_name=model_name,
+            mx_server=self._model_express_url,
+            model_path=model_path,
+        )
+        source.publish()
+        logger.info(
+            "ModelExpress source: published weights for '%s' — serving inference AND RDMA",
+            model_name,
+        )
+
+    def _setup_modelexpress_loader(self) -> None:
+        """Configure ModelExpress live checkpoint loader for P2P weight transfer.
+
+        Uses Phase 3 (MxLiveCheckpointLoader) for direct GPU param-to-param RDMA:
+        source model params -> NIXL -> target model params. No disk I/O, no format
+        conversion, no weight mapper fusing. Requires LoadFormat.PRESHARDED.
+        """
+        try:
+            from modelexpress.trtllm_live_transfer import MxLiveCheckpointLoader
+        except ImportError:
+            raise ImportError(
+                "ModelExpress P2P is enabled (--model-express-url) but the "
+                "'modelexpress' package is not installed. "
+                "Install with: pip install modelexpress"
+            )
+
+        import os
+        from tensorrt_llm.llmapi.llm_args import LoadFormat
+
+        os.environ["MODEL_EXPRESS_URL"] = self._model_express_url
+        os.environ.setdefault(
+            "MODEL_NAME",
+            self.engine_args.get("model", "unknown"),
+        )
+
+        loader = MxLiveCheckpointLoader()
+        self.engine_args["checkpoint_loader"] = loader
+        self.engine_args["load_format"] = LoadFormat.PRESHARDED
+        logger.info(
+            "ModelExpress P2P enabled: live GPU-to-GPU transfer from %s",
+            self._model_express_url,
+        )
 
     @staticmethod
     def _prune_engine_args_for_autodeploy(engine_args) -> None:
@@ -141,6 +244,8 @@ async def get_llm_engine(
     engine_args,
     disaggregation_mode: Optional[DisaggregationMode] = None,
     component_gauges=None,
+    model_express_url: Optional[str] = None,
+    model_express_role: str = "target",
 ) -> AsyncGenerator[TensorRTLLMEngine, None]:
     """Get TensorRT-LLM engine instance with load time tracking.
 
@@ -148,11 +253,15 @@ async def get_llm_engine(
         engine_args: Engine configuration arguments.
         disaggregation_mode: Optional disaggregation mode configuration.
         component_gauges: Optional LLMBackendGauges instance for recording load time.
+        model_express_url: Optional ModelExpress P2P server URL for RDMA weight transfer.
+        model_express_role: Role for ModelExpress ('source' or 'target').
     """
     # Time engine initialization
     start_time = time.time()
 
-    engine = TensorRTLLMEngine(engine_args, disaggregation_mode)
+    engine = TensorRTLLMEngine(
+        engine_args, disaggregation_mode, model_express_url, model_express_role
+    )
     try:
         await engine.initialize()
         load_time = time.time() - start_time
