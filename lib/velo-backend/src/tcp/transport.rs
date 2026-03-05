@@ -384,6 +384,9 @@ impl Transport for TcpTransport {
 ///
 /// This task runs on the LocalSet and handles writing framed bytes to the TCP stream.
 /// It receives pre-encoded frames via a flume channel and writes them to the socket.
+///
+/// Cleanup (draining queued messages and removing the stale map entry) always runs,
+/// even if the initial TCP connect fails.
 async fn connection_writer_task(
     addr: SocketAddr,
     instance_id: crate::InstanceId,
@@ -391,12 +394,43 @@ async fn connection_writer_task(
     connections: Arc<DashMap<crate::InstanceId, ConnectionHandle>>,
     _cancel_token: CancellationToken,
 ) -> Result<()> {
+    let result = connection_writer_inner(addr, instance_id, &rx).await;
+
+    // Always drain queued messages and notify their error handlers.
+    //
+    // TODO: There is a tiny race between the drain finishing and `drop(rx)`:
+    // a sender on another thread could `try_send` successfully in that window,
+    // and the message would be silently dropped when rx is destroyed. Closing
+    // this fully would require swapping the map entry with a "poisoned" handle
+    // (a disconnected tx) before draining, so fast-path senders see a failure
+    // instead. Not worth the complexity today — at most one message is affected,
+    // and async senders already get `SendError` once rx is dropped.
+    while let Ok(msg) = rx.try_recv() {
+        msg.on_error("Connection closed");
+    }
+
+    // Drop the receiver so our sender half becomes disconnected, then remove
+    // the stale entry. The predicate ensures we only remove our own entry —
+    // a replacement connection's tx will still be connected.
+    drop(rx);
+    connections.remove_if(&instance_id, |_, h| h.tx.is_disconnected());
+
+    debug!("Connection to {} ({}) closed", instance_id, addr);
+
+    result
+}
+
+/// Inner loop: connect, configure the socket, and send frames until the channel
+/// closes or a write error occurs.
+async fn connection_writer_inner(
+    addr: SocketAddr,
+    instance_id: crate::InstanceId,
+    rx: &flume::Receiver<SendTask>,
+) -> Result<()> {
     debug!("Connecting to {}", addr);
 
-    // Connect to remote peer
     let mut stream = TcpStream::connect(addr).await.context("connect failed")?;
 
-    // Configure socket for low latency
     if let Err(e) = stream.set_nodelay(true) {
         warn!("Failed to set TCP_NODELAY: {}", e);
     }
@@ -414,13 +448,9 @@ async fn connection_writer_task(
         warn!("Failed to set send buffer size: {}", e);
     }
 
-    // Create framed writer
-
     debug!("Connected to {}", addr);
 
-    // Main send loop
     while let Ok(msg) = rx.recv_async().await {
-        // Send pre-framed bytes
         if let Err(e) =
             TcpFrameCodec::encode_frame(&mut stream, msg.msg_type, &msg.header, &msg.payload).await
         {
@@ -429,20 +459,6 @@ async fn connection_writer_task(
             break;
         }
     }
-
-    // Drain any remaining queued messages and notify their error handlers
-    drop(stream);
-    while let Ok(msg) = rx.try_recv() {
-        msg.on_error("Connection closed");
-    }
-
-    // Drop the receiver so our sender half becomes disconnected, then remove
-    // the stale entry. The predicate ensures we only remove our own entry —
-    // a replacement connection's tx will still be connected.
-    drop(rx);
-    connections.remove_if(&instance_id, |_, h| h.tx.is_disconnected());
-
-    debug!("Connection to {} ({}) closed", instance_id, addr);
 
     Ok(())
 }
@@ -893,6 +909,50 @@ mod tests {
         assert!(
             !entry.tx.is_disconnected(),
             "stale handle should have been replaced with a live one"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_writer_task_drains_on_connect_failure() {
+        // Use an address where nothing is listening so connect will fail.
+        // Binding then immediately dropping gives us a port that is guaranteed closed.
+        let tmp = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = tmp.local_addr().unwrap();
+        drop(tmp);
+
+        let iid = crate::InstanceId::new_v4();
+        let (tx, rx) = flume::bounded::<SendTask>(8);
+
+        let connections: Arc<DashMap<crate::InstanceId, ConnectionHandle>> =
+            Arc::new(DashMap::new());
+        connections.insert(iid, ConnectionHandle { tx: tx.clone() });
+
+        // Queue a message *before* the writer task even starts — this simulates
+        // the race between create_connection returning and connect completing.
+        let error_handler = Arc::new(TrackingErrorHandler::new());
+        tx.send(SendTask {
+            msg_type: MessageType::Message,
+            header: Bytes::from_static(b"hdr"),
+            payload: Bytes::from_static(b"pay"),
+            on_error: error_handler.clone(),
+        })
+        .unwrap();
+
+        let conns = Arc::clone(&connections);
+        let cancel = CancellationToken::new();
+
+        let writer = tokio::spawn(connection_writer_task(addr, iid, rx, conns, cancel));
+        let _ = writer.await;
+
+        assert_eq!(
+            error_handler.error_count(),
+            1,
+            "queued message should have its on_error called when connect fails"
+        );
+
+        assert!(
+            !connections.contains_key(&iid),
+            "writer task should clean up its DashMap entry on connect failure"
         );
     }
 }
