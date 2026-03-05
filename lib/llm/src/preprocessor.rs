@@ -224,9 +224,9 @@ impl OpenAIPreprocessor {
             .apply_template(request)
             .with_context(|| "Failed to apply prompt template")?;
         let annotations = self
-            .gather_tokens(request, &mut builder, formatted_prompt, tracker)
+            .gather_tokens(request, &mut builder, formatted_prompt.clone(), tracker)
             .with_context(|| "Failed to gather tokens")?;
-        self.gather_multi_modal_data(request, &mut builder)
+        self.gather_multi_modal_data(request, &mut builder, formatted_prompt)
             .await
             .with_context(|| "Failed to gather multimodal data")?;
 
@@ -344,6 +344,7 @@ impl OpenAIPreprocessor {
         &self,
         request: &R,
         builder: &mut PreprocessedRequestBuilder,
+        formatted_prompt: Option<String>,
     ) -> Result<()> {
         let mut media_map: MultimodalDataMap = HashMap::new();
         let mut fetch_tasks: Vec<(String, ChatCompletionRequestUserMessageContentPart)> =
@@ -410,12 +411,16 @@ impl OpenAIPreprocessor {
         if !media_map.is_empty() {
             builder.multi_modal_data(Some(media_map));
 
-            // Preserve original messages in extra_args for multimodal workers that need them
-            // (e.g., TRT-LLM multimodal processor needs raw messages for proper tokenization)
+            // Preserve original messages and formatted prompt in extra_args for multimodal
+            // workers (e.g., TRT-LLM needs messages and the template-rendered prompt with
+            // <image> placeholders for embedding-path / NIXL flows).
             let messages_json = serde_json::to_value(request.messages())?;
-            let extra_args = serde_json::json!({
+            let mut extra_args = serde_json::json!({
                 "messages": messages_json
             });
+            if let Some(ref prompt) = formatted_prompt {
+                extra_args["formatted_prompt"] = serde_json::Value::String(prompt.clone());
+            }
             builder.extra_args(Some(extra_args));
         }
 
@@ -1293,7 +1298,7 @@ impl
         };
 
         // Gather multimodal data (works with both embeddings and text prompts)
-        self.gather_multi_modal_data(&request, &mut builder).await?;
+        self.gather_multi_modal_data(&request, &mut builder, None).await?;
 
         let mut common_request = builder.build()?;
 
