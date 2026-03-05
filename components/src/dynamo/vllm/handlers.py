@@ -261,7 +261,7 @@ def build_sampling_params_openai(
     return sampling_params
 
 
-def get_dp_range_for_worker(vllm_config: VllmConfig) -> range:
+def get_dp_range_for_worker(vllm_config: VllmConfig) -> tuple[int, int]:
     """
     Get the global DP rank range that this worker is responsible for based on vLLM config.
     Note that the 'vllm_config' is normalized so the load balancing flags are set properly.

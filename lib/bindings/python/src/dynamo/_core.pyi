@@ -454,6 +454,7 @@ class ModelRuntimeConfig:
     data_parallel_size: int
     runtime_data: dict[str, Any]
     tensor_model_config: Any | None
+    data_parallel_start_rank: int
 
     def __init__(self) -> None: ...
 

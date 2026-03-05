@@ -150,7 +150,9 @@ class EncodeWorkerHandler:
             with _nvtx.annotate("mm:enc:cache_check", color="cyan"):
                 # Before batch process images, check cache first
                 need_encode_indexes = []
-                embedding_lists = [None] * len(request.multimodal_inputs)
+                embedding_lists: list[EmbeddingItem | None] = [None] * len(
+                    request.multimodal_inputs
+                )
                 for idx in range(len(request.multimodal_inputs)):
                     if not request.multimodal_inputs[idx].multimodal_input.image_url:
                         raise ValueError("image_url is required for the encode worker.")
@@ -275,6 +277,7 @@ class EncodeWorkerHandler:
                         )
                     )
                     for embedding_item in embedding_lists
+                    if embedding_item is not None
                 ]
                 transfer_requests = await asyncio.gather(*send_tasks)
 
@@ -282,6 +285,7 @@ class EncodeWorkerHandler:
 
                 for idx, item in enumerate(zip(embedding_lists, transfer_requests)):
                     embedding_item, transfer_request = item
+                    assert embedding_item is not None
                     logger.debug(
                         f"{embedding_item.embeddings.shape} prepared for transfer."
                     )
