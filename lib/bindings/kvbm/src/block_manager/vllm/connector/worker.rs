@@ -387,10 +387,9 @@ impl Worker for KvConnectorWorker {
                 } else {
                     // No slot and not tracked — the request was never started or
                     // was already fully cleaned up. Do NOT add to
-                    // is_finished_offloading: vLLM has already removed this
-                    // request from its `self.requests` table, so signaling
-                    // finished_sending would hit `assert req_id in self.requests`
-                    // in the Python scheduler and crash the engine.
+                    // is_finished_offloading: if we signal finished_sending for
+                    // a request that vLLM has already freed, the scheduler hits
+                    // `assert req_id in self.requests` and crashes.
                     tracing::warn!(
                         request_id,
                         "finished request received for unknown request_id; \
@@ -430,12 +429,12 @@ impl Worker for KvConnectorWorker {
                 }
             } else {
                 // Slot was removed between when we added it to
-                // maybe_finished_offloading and now (e.g., abort race).
-                // Signal completion so vLLM can clean up.
+                // maybe_finished_offloading and now. Signal completion so
+                // vLLM can free the request via _free_blocks().
                 tracing::warn!(
                     request_id,
                     "request slot missing from maybe_finished_offloading set; \
-                     signaling completion to unblock vLLM"
+                     signaling completion"
                 );
                 is_finished_offloading.insert(request_id.clone());
             }
@@ -468,12 +467,12 @@ impl Worker for KvConnectorWorker {
                 }
             } else {
                 // Slot was removed between when we added it to
-                // maybe_finished_onboarding and now (e.g., abort race).
-                // Signal completion so vLLM can clean up.
+                // maybe_finished_onboarding and now. Signal completion so
+                // vLLM can free the request via _free_blocks().
                 tracing::warn!(
                     request_id,
                     "request slot missing from maybe_finished_onboarding set; \
-                     signaling completion to unblock vLLM"
+                     signaling completion"
                 );
                 is_finished_onboarding.insert(request_id.clone());
             }

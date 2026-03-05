@@ -550,12 +550,19 @@ impl Leader for KvConnectorLeader {
             );
             self.inflight_requests.remove(&request_id);
             // We must return `true` here even though the leader slot is gone.
-            // The worker may still have this request in its `maybe_finished_offloading`
-            // set from a prior iteration. If we return `false`, vLLM will immediately
-            // delete the request from `self.requests`. When the worker later reports
-            // completion via `finished_sending`, vLLM's scheduler hits
-            // `assert req_id in self.requests` and crashes.
-            // Returning `true` keeps the request alive in vLLM until the worker signals.
+            //
+            // Within a single call to vLLM's `update_from_output()`, two things
+            // happen in sequence:
+            //   1. Stopped requests call _free_request() → request_finished() (here)
+            //   2. Worker's finished_sending is processed by _update_from_kv_xfer_finished()
+            //
+            // The worker's get_finished() ran during the forward pass and may have
+            // reported this request in finished_sending for this same step. If we
+            // return `false`, vLLM deletes the request from self.requests at step 1.
+            // Then step 2 hits `assert req_id in self.requests` and crashes.
+            //
+            // Returning `true` keeps the request in self.requests so step 2 can
+            // process finished_sending and call _free_blocks() properly.
             return Ok(true);
         }
 
