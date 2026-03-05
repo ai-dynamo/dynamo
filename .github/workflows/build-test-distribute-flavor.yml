@@ -221,7 +221,7 @@ jobs:
             BRANCH_TAG="${{ inputs.sanitized_ref_name }}-${{ inputs.framework }}"
             RESULT+="${ECR_REGISTRY}/ai-dynamo/dynamo:${BRANCH_TAG}-cuda${CUDA_VERSION_MAJOR}-${{ inputs.platform }}"$'\n'
             RESULT+="${ACR_REGISTRY}/ai-dynamo/dynamo:${BRANCH_TAG}-cuda${CUDA_VERSION_MAJOR}-${{ inputs.platform }}"$'\n'
-            RESULT+="${ACR_REGISTRY}/ai-dynamo/dynamo:${{ steps.calculate-target-tag.outputs.target_tag_plain }}-${{ inputs.platform }}"$'\n'
+            RESULT+="${ACR_REGISTRY}/ai-dynamo/dynamo:${{ steps.calculate-target-tag.outputs.target_tag_plain }}-cuda${CUDA_VERSION_MAJOR}-${{ inputs.platform }}"$'\n'
           fi
           if [ -n "$RESULT" ]; then
             echo "tags<<EOF" >> $GITHUB_OUTPUT
