@@ -234,33 +234,18 @@ def warn_gpu_shortage(
         )
 
 
-DEFAULT_GPU_TOLERATIONS = [
-    {"key": "nvidia.com/gpu", "operator": "Exists", "effect": "NoSchedule"},
-]
-
-
 def get_profiling_job_tolerations(dgdr: DynamoGraphDeploymentRequestSpec) -> list:
-    """Return tolerations to apply to DGD worker pods.
-
-    Starts with the default GPU toleration (matching the operator's base profiling
-    job pod spec) and merges any user-provided overrides on top.
-    """
-    user_tolerations: list = []
+    """Return tolerations from overrides.profilingJob.template.spec.tolerations."""
     try:
-        if dgdr.overrides is not None and dgdr.overrides.profilingJob is not None:
-            user_tolerations = (
-                dgdr.overrides.profilingJob.get("template", {})
-                .get("spec", {})
-                .get("tolerations", [])
-            )
+        if dgdr.overrides is None or dgdr.overrides.profilingJob is None:
+            return []
+        return (
+            dgdr.overrides.profilingJob.get("template", {})
+            .get("spec", {})
+            .get("tolerations", [])
+        )
     except (AttributeError, KeyError):
-        pass
-
-    merged = list(DEFAULT_GPU_TOLERATIONS)
-    for t in user_tolerations:
-        if t not in merged:
-            merged.append(t)
-    return merged
+        return []
 
 
 def inject_tolerations_into_dgd(dgd_config: dict, tolerations: list) -> dict:

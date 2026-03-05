@@ -1111,15 +1111,6 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 				RunAsGroup:   ptr.To[int64](1000),
 				FSGroup:      ptr.To[int64](1000),
 			},
-			// Tolerate GPU node taints by default — profiling jobs always target GPU nodes.
-			// Users can override via spec.overrides.profilingJob.template.spec.tolerations.
-			Tolerations: []corev1.Toleration{
-				{
-					Key:      "nvidia.com/gpu",
-					Operator: corev1.TolerationOpExists,
-					Effect:   corev1.TaintEffectNoSchedule,
-				},
-			},
 			Containers: []corev1.Container{profilerContainer, sidecarContainer},
 			Volumes:    volumes,
 			ImagePullSecrets: []corev1.LocalObjectReference{
