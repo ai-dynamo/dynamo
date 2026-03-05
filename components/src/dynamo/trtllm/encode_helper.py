@@ -432,8 +432,15 @@ class EncodeHelper:
                     "error": "model_dir and model_type are required for full EPD encode"
                 }
                 return
-            if engine is None:
-                yield {"error": "No engine configured on encode worker for full EPD"}
+            if engine is None or not engine.encoder_available:
+                yield {
+                    "error": (
+                        "MultimodalEncoder is not available on this encode worker. "
+                        "The model architecture may not support standalone encoder "
+                        "in TRT-LLM. Use the embedding-path flow or run without "
+                        "disaggregated encode mode."
+                    )
+                }
                 return
             # Use token_ids from request (Rust preprocessor already applied
             # chat template and tokenized; token_ids then include image placeholder tokens
