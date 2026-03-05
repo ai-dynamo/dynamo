@@ -102,7 +102,7 @@ jobs:
   # ── Job Y: Run "echo hello world" inside Container A ──────────────────
   job-y:
     name: Run Hello World on Container A
-    runs-on: runner-x
+    runs-on: prod-builder-v3
     needs: job-x   # Waits for Job X to complete and output the image URI
 
     container:
