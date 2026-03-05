@@ -92,32 +92,75 @@ pub fn get_current_cpu_numa_node() -> NumaNode {
     }
 }
 
+/// Resolve process-local CUDA device index to the physical identifier for nvidia-smi.
+///
+/// When `CUDA_VISIBLE_DEVICES` is set, the process sees a remapped device space (e.g. only
+/// GPU 2 visible as device 0). nvidia-smi's `-i` flag expects the *physical* device index or
+/// UUID, not the process-local index. This function parses `CUDA_VISIBLE_DEVICES` to map
+/// process-local `device_id` to the correct physical identifier.
+///
+/// Returns the identifier string to pass to `nvidia-smi -i` (physical index or UUID).
+fn cuda_device_id_to_nvidia_smi_id(device_id: u32) -> String {
+    let visible = match std::env::var("CUDA_VISIBLE_DEVICES") {
+        Ok(v) if !v.trim().is_empty() => v,
+        _ => return device_id.to_string(), // No remapping: identity
+    };
+
+    // Parse comma-separated list. Supports: "0,1,2", "2,3", "GPU-uuid", "2,GPU-uuid", etc.
+    let devices: Vec<&str> = visible.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+    if device_id as usize >= devices.len() {
+        tracing::warn!(
+            "device_id {} out of range for CUDA_VISIBLE_DEVICES ({} devices), using identity",
+            device_id,
+            devices.len()
+        );
+        return device_id.to_string();
+    }
+
+    let id = devices[device_id as usize];
+    // If it parses as integer, use as-is (physical index). Otherwise treat as UUID.
+    if id.parse::<u32>().is_ok() {
+        id.to_string()
+    } else {
+        id.to_string() // UUID or other format - nvidia-smi accepts it
+    }
+}
+
 /// Get NUMA node for a GPU device.
 ///
 /// For GPU memory, the NUMA affinity depends on which PCIe bus the GPU is attached to.
 /// This is queried via nvidia-smi. Falls back to a heuristic (device_id % 2) if nvidia-smi
 /// is unavailable.
 ///
+/// When `CUDA_VISIBLE_DEVICES` is set, the process-local `device_id` is correctly mapped
+/// to the physical GPU identifier before querying nvidia-smi, so NUMA attribution is accurate.
+///
 /// # Arguments
-/// * `device_id` - CUDA device index (0, 1, 2, ...)
+/// * `device_id` - CUDA device index (0, 1, 2, ...) as seen by the process
 ///
 /// # Returns
 /// The NUMA node closest to the specified GPU, or a heuristic fallback.
 pub fn get_device_numa_node(device_id: u32) -> NumaNode {
+    let nvidia_smi_id = cuda_device_id_to_nvidia_smi_id(device_id);
+
     // Use nvidia-smi topo to get NUMA ID of nearest CPU
-    // This directly returns the NUMA node
+    // -i must be physical device index or UUID, not process-local index
     let output = match Command::new("nvidia-smi")
         .args([
             "topo",
             "--get-numa-id-of-nearby-cpu",
             "-i",
-            &device_id.to_string(),
+            &nvidia_smi_id,
         ])
         .output()
     {
         Ok(out) if out.status.success() => out,
         _ => {
-            tracing::warn!("nvidia-smi failed for GPU {}, using heuristic", device_id);
+            tracing::warn!(
+                "nvidia-smi failed for GPU {} (nvidia-smi -i {}), using heuristic",
+                device_id,
+                nvidia_smi_id
+            );
             return NumaNode(device_id % 2);
         }
     };
@@ -127,7 +170,12 @@ pub fn get_device_numa_node(device_id: u32) -> NumaNode {
         && let Some(numa_str) = line.split(':').nth(1)
         && let Ok(node) = numa_str.trim().parse::<u32>()
     {
-        tracing::trace!("GPU {} on NUMA node {}", device_id, node);
+        tracing::trace!(
+            "GPU {} (physical {}) on NUMA node {}",
+            device_id,
+            nvidia_smi_id,
+            node
+        );
         return NumaNode(node);
     }
     tracing::warn!("Failed to get NUMA node for GPU {}", device_id);
@@ -241,6 +289,38 @@ mod tests {
         // Should return either a valid node (0-7) or use heuristic (gpu_id % 2)
         // On dual-socket systems, GPU 0 typically on node 0 or 1
         println!("GPU 0 detected on NUMA node: {}", node.0);
+    }
+
+    #[test]
+    fn test_cuda_visible_devices_mapping() {
+        // Verify cuda_device_id_to_nvidia_smi_id maps correctly when CUDA_VISIBLE_DEVICES is set.
+        // When unset, process-local 0 maps to physical 0.
+        unsafe { std::env::remove_var("CUDA_VISIBLE_DEVICES") };
+        let id = super::cuda_device_id_to_nvidia_smi_id(0);
+        assert_eq!(id, "0");
+
+        // CUDA_VISIBLE_DEVICES=2: process 0 -> physical 2
+        unsafe { std::env::set_var("CUDA_VISIBLE_DEVICES", "2") };
+        let id = super::cuda_device_id_to_nvidia_smi_id(0);
+        assert_eq!(id, "2");
+
+        // CUDA_VISIBLE_DEVICES=2,3: process 0->2, process 1->3
+        unsafe { std::env::set_var("CUDA_VISIBLE_DEVICES", "2,3") };
+        assert_eq!(super::cuda_device_id_to_nvidia_smi_id(0), "2");
+        assert_eq!(super::cuda_device_id_to_nvidia_smi_id(1), "3");
+
+        // UUID format passes through
+        unsafe { std::env::set_var("CUDA_VISIBLE_DEVICES", "GPU-abc123") };
+        let id = super::cuda_device_id_to_nvidia_smi_id(0);
+        assert_eq!(id, "GPU-abc123");
+
+        // Out-of-range falls back to identity
+        unsafe { std::env::set_var("CUDA_VISIBLE_DEVICES", "2") };
+        let id = super::cuda_device_id_to_nvidia_smi_id(1);
+        assert_eq!(id, "1");
+
+        // Cleanup
+        unsafe { std::env::remove_var("CUDA_VISIBLE_DEVICES") };
     }
 
     #[test]
