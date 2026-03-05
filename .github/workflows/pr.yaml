@@ -73,7 +73,7 @@ jobs:
       image: ${{ needs.job-x.outputs.image }}
     steps:
       - name: Say Hello World
-        run: echo hello world
+        run: ls -la 
 
 #   changed-files:
 #     runs-on: ubuntu-latest
