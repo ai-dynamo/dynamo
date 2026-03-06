@@ -71,7 +71,6 @@ class FrontendConfig(KvRouterConfigBase):
     event_plane: str
     chat_processor: str
     enable_anthropic_api: bool
-    debug_perf: bool
     preprocess_workers: int
 
     def validate(self) -> None:
@@ -355,19 +354,6 @@ class FrontendArgGroup(ArgGroup):
                 "processor."
             ),
             choices=["dynamo", "vllm"],
-        )
-
-        add_negatable_bool_argument(
-            g,
-            flag_name="--dyn-debug-perf",
-            env_var="DYN_DEBUG_PERF",
-            default=False,
-            dest="debug_perf",
-            help=(
-                "[EXPERIMENTAL] Enable performance instrumentation for diagnosing preprocessing bottlenecks. "
-                "Logs per-function timing, request concurrency, and hot-path section durations. "
-                "'--dyn-chat-processor vllm' only."
-            ),
         )
 
         add_argument(
