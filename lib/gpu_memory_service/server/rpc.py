@@ -66,12 +66,19 @@ class GMSRPCServer:
         self,
         socket_path: str,
         device: int = 0,
+        *,
+        allocation_retry_interval: float = 0.5,
+        allocation_retry_timeout: Optional[float] = None,
     ):
         self.socket_path = socket_path
         self.device = device
 
         # Request handler (business logic)
-        self._handler = RequestHandler(device)
+        self._handler = RequestHandler(
+            device,
+            allocation_retry_interval=allocation_retry_interval,
+            allocation_retry_timeout=allocation_retry_timeout,
+        )
 
         # State machine - handles all state transitions and permission checks
         self._sm = GMSLocalFSM(on_rw_abort=self._handler.on_rw_abort)
