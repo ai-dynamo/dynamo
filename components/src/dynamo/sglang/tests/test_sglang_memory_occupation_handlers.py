@@ -7,7 +7,10 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
+from dynamo.sglang.request_handlers.handler_base import (
+    DEFAULT_MEMORY_OCCUPATION_TAGS,
+    BaseWorkerHandler,
+)
 
 pytestmark = [
     pytest.mark.unit,
@@ -68,6 +71,16 @@ async def test_release_and_resume_are_idempotent():
     assert second_release["status"] == "ok"
     assert first_resume["status"] == "ok"
     assert second_resume["status"] == "ok"
+    assert DEFAULT_MEMORY_OCCUPATION_TAGS == ["kv_cache", "weights"]
+
+    release_req = (
+        handler.engine.tokenizer_manager.release_memory_occupation.await_args.args[0]
+    )
+    resume_req = (
+        handler.engine.tokenizer_manager.resume_memory_occupation.await_args.args[0]
+    )
+    assert release_req.tags == DEFAULT_MEMORY_OCCUPATION_TAGS
+    assert resume_req.tags == DEFAULT_MEMORY_OCCUPATION_TAGS
 
     handler.engine.tokenizer_manager.pause_generation.assert_awaited_once()
     handler.engine.tokenizer_manager.release_memory_occupation.assert_awaited_once()
@@ -97,7 +110,7 @@ async def test_partial_resume_keeps_worker_paused_until_all_tags_resumed():
 
 
 @pytest.mark.asyncio
-async def test_resume_retries_continue_when_memory_is_already_restored():
+async def test_resume_with_no_sleeping_tags_is_noop_even_if_serving_flag_is_false():
     handler = _make_handler()
     handler._memory_serving_active = False
 
@@ -105,5 +118,33 @@ async def test_resume_retries_continue_when_memory_is_already_restored():
 
     assert result["status"] == "ok"
     handler.engine.tokenizer_manager.resume_memory_occupation.assert_not_awaited()
-    handler.engine.tokenizer_manager.continue_generation.assert_awaited_once()
-    handler.generate_endpoint.register_endpoint_instance.assert_awaited_once()
+    handler.engine.tokenizer_manager.continue_generation.assert_not_awaited()
+    handler.generate_endpoint.register_endpoint_instance.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_release_returns_error_when_worker_has_no_tokenizer_manager():
+    handler = _make_handler()
+    handler.engine = None
+
+    result = await handler.release_memory_occupation({})
+
+    assert result == {
+        "status": "error",
+        "message": "memory control not supported on this worker",
+    }
+    handler.generate_endpoint.unregister_endpoint_instance.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_resume_returns_error_when_worker_has_no_tokenizer_manager():
+    handler = _make_handler()
+    handler.engine = None
+
+    result = await handler.resume_memory_occupation({})
+
+    assert result == {
+        "status": "error",
+        "message": "memory control not supported on this worker",
+    }
+    handler.generate_endpoint.register_endpoint_instance.assert_not_awaited()

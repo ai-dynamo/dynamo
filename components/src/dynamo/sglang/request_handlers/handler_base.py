@@ -196,6 +196,16 @@ class BaseWorkerHandler(BaseGenerativeHandler):
 
         body = body or {}
         tags = self._normalize_memory_tags(body.get("tags", body.get("tag")))
+        tokenizer_manager = (
+            getattr(self.engine, "tokenizer_manager", None)
+            if self.engine is not None
+            else None
+        )
+        if tokenizer_manager is None:
+            return {
+                "status": "error",
+                "message": "memory control not supported on this worker",
+            }
 
         async with self._memory_occupation_lock:
             tags_to_release = [
@@ -219,13 +229,11 @@ class BaseWorkerHandler(BaseGenerativeHandler):
                             )
 
                     pause_req = PauseGenerationReqInput()
-                    await self.engine.tokenizer_manager.pause_generation(pause_req)
+                    await tokenizer_manager.pause_generation(pause_req)
                     self._memory_serving_active = False
 
                 release_req = ReleaseMemoryOccupationReqInput(tags=tags_to_release)
-                await self.engine.tokenizer_manager.release_memory_occupation(
-                    release_req, None
-                )
+                await tokenizer_manager.release_memory_occupation(release_req, None)
                 self._released_memory_tags.update(tags_to_release)
 
                 return {
@@ -255,28 +263,20 @@ class BaseWorkerHandler(BaseGenerativeHandler):
 
         body = body or {}
         tags = self._normalize_memory_tags(body.get("tags", body.get("tag")))
+        tokenizer_manager = (
+            getattr(self.engine, "tokenizer_manager", None)
+            if self.engine is not None
+            else None
+        )
+        if tokenizer_manager is None:
+            return {
+                "status": "error",
+                "message": "memory control not supported on this worker",
+            }
 
         async with self._memory_occupation_lock:
             tags_to_resume = [tag for tag in tags if tag in self._released_memory_tags]
             if not tags_to_resume:
-                if not self._memory_serving_active:
-                    try:
-                        continue_req = ContinueGenerationReqInput()
-                        await self.engine.tokenizer_manager.continue_generation(
-                            continue_req
-                        )
-                        self._memory_serving_active = True
-
-                        if self.generate_endpoint is not None:
-                            try:
-                                await self.generate_endpoint.register_endpoint_instance()
-                            except Exception as reg_err:
-                                logging.warning(
-                                    f"Failed to re-register endpoint to discovery: {reg_err}"
-                                )
-                    except Exception as e:
-                        logging.error(f"Failed to resume memory occupation: {e}")
-                        return {"status": "error", "message": str(e)}
                 return {
                     "status": "ok",
                     "message": f"Memory already resumed for tags: {tags}",
@@ -284,17 +284,13 @@ class BaseWorkerHandler(BaseGenerativeHandler):
 
             try:
                 resume_req = ResumeMemoryOccupationReqInput(tags=tags_to_resume)
-                await self.engine.tokenizer_manager.resume_memory_occupation(
-                    resume_req, None
-                )
+                await tokenizer_manager.resume_memory_occupation(resume_req, None)
                 self._released_memory_tags.difference_update(tags_to_resume)
 
                 # Resume serving only after all released tags have been restored.
                 if not self._released_memory_tags:
                     continue_req = ContinueGenerationReqInput()
-                    await self.engine.tokenizer_manager.continue_generation(
-                        continue_req
-                    )
+                    await tokenizer_manager.continue_generation(continue_req)
                     self._memory_serving_active = True
 
                     if self.generate_endpoint is not None:
