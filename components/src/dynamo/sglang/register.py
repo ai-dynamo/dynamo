@@ -21,8 +21,8 @@ async def _register_model_with_runtime_config(
     endpoint: Endpoint,
     server_args: ServerArgs,
     dynamo_args: DynamoConfig,
-    input_type: Optional[ModelInput] = ModelInput.Tokens,
-    output_type: Optional[ModelType] = ModelType.Chat | ModelType.Completions,
+    input_type: ModelInput = ModelInput.Tokens,
+    output_type: ModelType = ModelType.Chat | ModelType.Completions,
 ) -> bool:
     """Register LLM with the Dynamo runtime.
 
@@ -38,7 +38,6 @@ async def _register_model_with_runtime_config(
         True if registration succeeded, False otherwise.
     """
     runtime_config = await _get_runtime_config(engine, server_args, dynamo_args)
-    input_type = input_type
 
     if not server_args.skip_tokenizer_init:
         logging.warning(
@@ -56,6 +55,7 @@ async def _register_model_with_runtime_config(
             endpoint,
             server_args.model_path,
             server_args.served_model_name,
+            context_length=server_args.context_length,
             kv_cache_block_size=server_args.page_size,
             runtime_config=runtime_config,
             custom_template_path=dynamo_args.custom_jinja_template,
@@ -134,6 +134,7 @@ def _get_bootstrap_info_for_config(
             )
 
         # Wrap IPv6 literal with brackets so f"{host}:{port}" stays valid.
+        assert isinstance(bootstrap_host, str)
         if ":" in bootstrap_host and not bootstrap_host.startswith("["):
             bootstrap_host = f"[{bootstrap_host}]"
             logging.info(f"Wrapped IPv6 address with brackets: {bootstrap_host}")
@@ -237,8 +238,8 @@ async def register_model_with_readiness_gate(
     generate_endpoint: Endpoint,
     server_args: ServerArgs,
     dynamo_args: DynamoConfig,
-    input_type: Optional[ModelInput] = ModelInput.Tokens,
-    output_type: Optional[ModelType] = ModelType.Chat | ModelType.Completions,
+    input_type: ModelInput = ModelInput.Tokens,
+    output_type: ModelType = ModelType.Chat | ModelType.Completions,
     readiness_gate: Optional[asyncio.Event] = None,
 ) -> None:
     """Wrapper function to register LLM with the Dynamo runtime and use optional readiness gate to signal success.

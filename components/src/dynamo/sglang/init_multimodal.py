@@ -31,7 +31,7 @@ async def init_multimodal_processor(
     shutdown_event: asyncio.Event,
     shutdown_endpoints: list,
     run_deferred_handlers: Callable[[], Awaitable[None]] | None = None,
-):
+) -> None:
     """Initialize multimodal processor component"""
     server_args, dynamo_args = config.server_args, config.dynamo_args
     generate_endpoint = runtime.endpoint(
@@ -86,7 +86,7 @@ async def init_multimodal_encode_worker(
     shutdown_event: asyncio.Event,
     shutdown_endpoints: list,
     run_deferred_handlers: Callable[[], Awaitable[None]] | None = None,
-):
+) -> None:
     """Initialize multimodal encode worker component"""
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
@@ -130,7 +130,7 @@ async def init_multimodal_worker(
     shutdown_event: asyncio.Event,
     shutdown_endpoints: list,
     run_deferred_handlers: Callable[[], Awaitable[None]] | None = None,
-):
+) -> None:
     """Initialize multimodal worker component.
 
     This worker is always an internal component that should not register with
@@ -185,7 +185,7 @@ async def init_multimodal_prefill_worker(
     shutdown_event: asyncio.Event,
     shutdown_endpoints: list,
     run_deferred_handlers: Callable[[], Awaitable[None]] | None = None,
-):
+) -> None:
     """Initialize multimodal prefill worker component"""
     server_args, dynamo_args = config.server_args, config.dynamo_args
 

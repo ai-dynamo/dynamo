@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 from typing import (
     Any,
     AsyncGenerator,
@@ -13,8 +14,6 @@ from typing import (
     Tuple,
 )
 
-from ._prometheus_names import prometheus_names
-
 # Import from specialized modules
 from .prometheus_metrics import RuntimeMetrics as PyRuntimeMetrics
 
@@ -22,6 +21,14 @@ def log_message(level: str, message: str, module: str, file: str, line: int) -> 
     """
     Log a message from Python with file and line info
     """
+    ...
+
+def get_tool_parser_names() -> list[str]:
+    """Get list of available tool parser names."""
+    ...
+
+def get_reasoning_parser_names() -> list[str]:
+    """Get list of available reasoning parser names."""
     ...
 
 class JsonLike:
@@ -220,6 +227,17 @@ class Client:
         """
         ...
 
+    async def generate(
+            self,
+            request: JsonLike,
+            annotated: bool | None = True,
+            context: Context | None = None,
+        ) -> AsyncIterator[JsonLike]:
+        """
+        Generate a response from the endpoint
+        """
+        ...
+
 
 class ModelCardInstanceId:
     """
@@ -322,7 +340,7 @@ class Context:
         """
         ...
 
-    async def async_killed_or_stopped(self) -> bool:
+    def async_killed_or_stopped(self) -> asyncio.Future[bool]:
         """
         Asynchronously wait until the context is killed or stopped.
 
@@ -437,6 +455,8 @@ class ModelRuntimeConfig:
     enable_local_indexer: bool
     runtime_data: dict[str, Any]
     tensor_model_config: Any | None
+    data_parallel_size: int
+    data_parallel_start_rank: int
 
     def __init__(self) -> None: ...
 
@@ -446,6 +466,14 @@ class ModelRuntimeConfig:
 
     def get_engine_specific(self, key: str) -> Any | None:
         """Get an engine-specific runtime configuration value"""
+        ...
+
+    def set_disaggregated_endpoint(
+            self,
+            bootstrap_host: str | None = None,
+            bootstrap_port: int | None = None,
+        ) -> None:
+        """Set the disaggregated endpoint for the model"""
         ...
 
 class OverlapScores:
@@ -925,7 +953,10 @@ class KserveGrpcService:
 
 class ModelInput:
     """What type of request this model needs: Text, Tokens or Tensor"""
-    ...
+    Text: ModelInput
+    Tokens: ModelInput
+    Tensor: ModelInput
+
 
 class ModelType:
     """What type of request this model needs: Chat, Completions, Embedding, Tensor, Images, Videos or Prefill"""
@@ -937,6 +968,9 @@ class ModelType:
     Images: ModelType
     Audios: ModelType
     Videos: ModelType
+
+    def __or__(self, other: "ModelType") -> "ModelType":
+        ...
 
     def supports_chat(self) -> bool:
         """Return True if this model type supports chat."""
@@ -962,7 +996,7 @@ class RouterConfig:
         active_decode_blocks_threshold: Optional[float] = None,
         active_prefill_tokens_threshold: Optional[int] = None,
         active_prefill_tokens_threshold_frac: Optional[float] = None,
-        decode_fallback: bool = False,
+        enforce_disagg: bool = False,
     ) -> None:
         """
         Create a RouterConfig.
@@ -973,7 +1007,7 @@ class RouterConfig:
             active_decode_blocks_threshold: Threshold percentage (0.0-1.0) for decode blocks busy detection
             active_prefill_tokens_threshold: Literal token count threshold for prefill busy detection
             active_prefill_tokens_threshold_frac: Fraction of max_num_batched_tokens for busy detection
-            decode_fallback: Allow falling back to decode-only mode when prefill workers are unavailable
+            enforce_disagg: Strictly enforce disaggregated mode, failing requests if no prefill workers are available
         """
         ...
 
@@ -1076,6 +1110,36 @@ async def unregister_model(
 def lora_name_to_id(lora_name: str) -> int:
     """Generate a deterministic integer ID from a LoRA name using blake3 hash."""
     ...
+
+class LoRADownloader:
+    """Unified interface for LoRA downloading and caching (local file:// and S3 s3:// URIs)."""
+
+    def __init__(self, cache_path: Optional[str] = None) -> None: ...
+    def download_if_needed(self, lora_uri: str) -> Awaitable[str]: ...
+    def get_cache_path(self, cache_key: str) -> str: ...
+    def is_cached(self, cache_key: str) -> bool: ...
+    def validate_cached(self, cache_key: str) -> bool: ...
+
+    @staticmethod
+    def uri_to_cache_key(uri: str) -> str: ...
+
+
+class MediaDecoder:
+    """Media decoder for image and video preprocessing."""
+
+    def __init__(self) -> None: ...
+    def enable_image(self, decoder_options: Dict[str, Any]) -> None: ...
+
+
+class MediaFetcher:
+    """Media fetcher for loading remote image/video URLs."""
+
+    def __init__(self) -> None: ...
+    def user_agent(self, user_agent: str) -> None: ...
+    def allow_direct_ip(self, allow: bool) -> None: ...
+    def allow_direct_port(self, allow: bool) -> None: ...
+    def allowed_media_domains(self, domains: List[str]) -> None: ...
+    def timeout_ms(self, timeout_ms: int) -> None: ...
 
 async def fetch_model(remote_name: str, ignore_weights: bool = False) -> str:
     """
@@ -1607,12 +1671,3 @@ class VirtualConnectorClient:
         """Blocks until there is a new decision to fetch using 'get'"""
         ...
 
-__all__ = [
-    "Client",
-    "Context",
-    "KserveGrpcService",
-    "ModelDeploymentCard",
-    "PythonAsyncEngine",
-    "prometheus_names",
-    "ModelCardInstanceId",
-]
