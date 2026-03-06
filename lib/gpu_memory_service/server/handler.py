@@ -6,6 +6,7 @@
 import hashlib
 import logging
 from dataclasses import dataclass
+from typing import Optional
 
 from gpu_memory_service.common.protocol.messages import (
     AllocateRequest,
@@ -41,6 +42,7 @@ class MetadataEntry:
     allocation_id: str
     offset_bytes: int
     value: bytes
+    epoch_id: str
 
 
 class RequestHandler:
@@ -48,51 +50,119 @@ class RequestHandler:
 
     def __init__(self, device: int = 0):
         self._memory_manager = GMSServerMemoryManager(device)
-        self._metadata: dict[str, MetadataEntry] = {}
-        self._memory_layout_hash: str = (
-            ""  # Hash of allocations + metadata, computed on commit
-        )
+        self._metadata_by_epoch: dict[str, dict[str, MetadataEntry]] = {}
+        self._committed_epoch_id: Optional[str] = None
+        self._active_rw_epoch_id: Optional[str] = None
+        self._next_epoch_index: int = 0
+        self._memory_layout_hash: str = ""
         logger.info(f"RequestHandler initialized: device={device}")
 
     @property
     def granularity(self) -> int:
         return self._memory_manager.granularity
 
+    @property
+    def committed_epoch_id(self) -> Optional[str]:
+        return self._committed_epoch_id
+
+    @property
+    def active_rw_epoch_id(self) -> Optional[str]:
+        return self._active_rw_epoch_id
+
+    def _new_epoch_id(self) -> str:
+        self._next_epoch_index += 1
+        return f"epoch_{self._next_epoch_index}"
+
+    def _require_active_rw_epoch(self) -> str:
+        if self._active_rw_epoch_id is None:
+            raise RuntimeError("RW epoch is not active")
+        return self._active_rw_epoch_id
+
+    def _compute_memory_layout_hash(self, epoch_id: str) -> str:
+        """Compute hash of allocations + metadata for a single epoch."""
+        h = hashlib.sha256()
+
+        allocations = sorted(
+            self._memory_manager.list_allocations(epoch_id=epoch_id),
+            key=lambda x: x.allocation_id,
+        )
+        for info in allocations:
+            h.update(
+                f"{info.allocation_id}:{info.size}:{info.aligned_size}:{info.tag}:{info.epoch_id}".encode()
+            )
+
+        metadata = self._metadata_by_epoch.get(epoch_id, {})
+        for key in sorted(metadata.keys()):
+            entry = metadata[key]
+            h.update(
+                f"{key}:{entry.allocation_id}:{entry.offset_bytes}:{entry.epoch_id}:".encode()
+            )
+            h.update(entry.value)
+
+        return h.hexdigest()
+
+    def on_rw_connect(self) -> None:
+        """Called after RW lock acquisition."""
+        if self._active_rw_epoch_id is not None:
+            raise RuntimeError("RW epoch is already active")
+
+        # Any RW epoch invalidates committed visibility.
+        if self._committed_epoch_id is not None:
+            old_epoch = self._committed_epoch_id
+            self._memory_manager.clear_epoch(old_epoch)
+            self._metadata_by_epoch.pop(old_epoch, None)
+            self._committed_epoch_id = None
+            self._memory_layout_hash = ""
+            logger.info(f"RW connected; invalidated committed epoch {old_epoch}")
+
+        epoch_id = self._new_epoch_id()
+        self._active_rw_epoch_id = epoch_id
+        self._metadata_by_epoch[epoch_id] = {}
+        logger.info(f"RW connected; opened active epoch {epoch_id}")
+
     def on_rw_abort(self) -> None:
         """Called when RW connection closes without commit."""
-        logger.warning("RW aborted; clearing allocations and metadata")
-        self._memory_manager.clear_all()
-        self._metadata.clear()
-        self._memory_layout_hash = ""
+        epoch_id = self._active_rw_epoch_id
+        if epoch_id is None:
+            return
+
+        logger.warning(f"RW aborted; clearing active epoch {epoch_id}")
+        self._memory_manager.clear_epoch(epoch_id)
+        self._metadata_by_epoch.pop(epoch_id, None)
+        self._active_rw_epoch_id = None
+
+        if self._committed_epoch_id is None:
+            self._memory_layout_hash = ""
 
     def on_commit(self) -> None:
-        """Called when RW connection commits. Computes state hash."""
-        self._memory_layout_hash = self._compute_memory_layout_hash()
-        logger.info(f"Committed with state hash: {self._memory_layout_hash[:16]}...")
+        """Called when RW connection commits."""
+        epoch_id = self._require_active_rw_epoch()
 
-    def _compute_memory_layout_hash(self) -> str:
-        """Compute hash of current allocations + metadata."""
-        h = hashlib.sha256()
-        # Hash allocations (sorted by ID for determinism)
-        for info in sorted(
-            self._memory_manager.list_allocations(), key=lambda x: x.allocation_id
-        ):
-            h.update(
-                f"{info.allocation_id}:{info.size}:{info.aligned_size}:{info.tag}".encode()
-            )
-        # Hash metadata (sorted by key for determinism)
-        for key in sorted(self._metadata.keys()):
-            entry = self._metadata[key]
-            h.update(f"{key}:{entry.allocation_id}:{entry.offset_bytes}:".encode())
-            h.update(entry.value)
-        return h.hexdigest()
+        self._memory_layout_hash = self._compute_memory_layout_hash(epoch_id)
+
+        old_committed = self._committed_epoch_id
+        self._committed_epoch_id = epoch_id
+        self._active_rw_epoch_id = None
+
+        # Drop old committed allocations and metadata immediately once replaced.
+        if old_committed is not None and old_committed != epoch_id:
+            self._memory_manager.clear_epoch(old_committed)
+            self._metadata_by_epoch.pop(old_committed, None)
+
+        logger.info(
+            f"Committed epoch {epoch_id} with state hash: {self._memory_layout_hash[:16]}..."
+        )
 
     def on_shutdown(self) -> None:
         """Called on server shutdown."""
         if self._memory_manager.allocation_count > 0:
             count = self._memory_manager.clear_all()
-            self._metadata.clear()
             logger.info(f"Released {count} GPU allocations during shutdown")
+
+        self._metadata_by_epoch.clear()
+        self._committed_epoch_id = None
+        self._active_rw_epoch_id = None
+        self._memory_layout_hash = ""
 
     # ==================== State Queries ====================
 
@@ -124,88 +194,98 @@ class RequestHandler:
     # ==================== Allocation Operations ====================
 
     def handle_allocate(self, req: AllocateRequest) -> AllocateResponse:
-        """Create physical memory allocation.
-
-        Requires RW connection (enforced by server).
-        """
-        info = self._memory_manager.allocate(req.size, req.tag)
+        """Create physical memory allocation in active RW epoch."""
+        epoch_id = self._require_active_rw_epoch()
+        info = self._memory_manager.allocate(req.size, req.tag, epoch_id=epoch_id)
         return AllocateResponse(
             allocation_id=info.allocation_id,
             size=info.size,
             aligned_size=info.aligned_size,
+            epoch_id=info.epoch_id,
         )
 
-    def handle_export(self, allocation_id: str) -> tuple[GetAllocationResponse, int]:
+    def handle_export(
+        self, allocation_id: str, epoch_id: str
+    ) -> tuple[GetAllocationResponse, int]:
         """Export allocation as POSIX FD.
 
         Returns (response, fd). Caller must close fd after sending.
         """
-        fd = self._memory_manager.export_fd(allocation_id)
-        info = self._memory_manager.get_allocation(allocation_id)
+        fd = self._memory_manager.export_fd(allocation_id, epoch_id=epoch_id)
+        info = self._memory_manager.get_allocation(allocation_id, epoch_id=epoch_id)
         response = GetAllocationResponse(
             allocation_id=info.allocation_id,
             size=info.size,
             aligned_size=info.aligned_size,
             tag=info.tag,
+            epoch_id=info.epoch_id,
         )
         return response, fd
 
-    def handle_get_allocation(self, req: GetAllocationRequest) -> GetAllocationResponse:
-        """Get allocation info."""
+    def handle_get_allocation(
+        self, req: GetAllocationRequest, epoch_id: str
+    ) -> GetAllocationResponse:
+        """Get allocation info for a specific epoch."""
         try:
-            info = self._memory_manager.get_allocation(req.allocation_id)
+            info = self._memory_manager.get_allocation(req.allocation_id, epoch_id=epoch_id)
             return GetAllocationResponse(
                 allocation_id=info.allocation_id,
                 size=info.size,
                 aligned_size=info.aligned_size,
                 tag=info.tag,
+                epoch_id=info.epoch_id,
             )
         except AllocationNotFoundError:
             raise ValueError(f"Unknown allocation: {req.allocation_id}") from None
 
     def handle_list_allocations(
-        self, req: ListAllocationsRequest
+        self, req: ListAllocationsRequest, epoch_id: str
     ) -> ListAllocationsResponse:
-        """List all allocations."""
-        allocations = self._memory_manager.list_allocations(req.tag)
+        """List allocations for a specific epoch."""
+        allocations = self._memory_manager.list_allocations(req.tag, epoch_id=epoch_id)
         result = [
             {
                 "allocation_id": info.allocation_id,
                 "size": info.size,
                 "aligned_size": info.aligned_size,
                 "tag": info.tag,
+                "epoch_id": info.epoch_id,
             }
             for info in allocations
         ]
         return ListAllocationsResponse(allocations=result)
 
     def handle_free(self, req: FreeRequest) -> FreeResponse:
-        """Free single allocation.
-
-        Requires RW connection (enforced by server).
-        """
-        success = self._memory_manager.free(req.allocation_id)
+        """Free single allocation from active RW epoch."""
+        epoch_id = self._require_active_rw_epoch()
+        success = self._memory_manager.free(req.allocation_id, epoch_id=epoch_id)
         return FreeResponse(success=success)
 
     def handle_clear_all(self) -> ClearAllResponse:
-        """Clear all allocations and metadata.
-
-        Requires RW connection (enforced by server).
-        """
-        count = self._memory_manager.clear_all()
-        self._metadata.clear()
+        """Clear allocations and metadata in active RW epoch."""
+        epoch_id = self._require_active_rw_epoch()
+        count = self._memory_manager.clear_epoch(epoch_id)
+        self._metadata_by_epoch[epoch_id] = {}
         return ClearAllResponse(cleared_count=count)
 
     # ==================== Metadata Operations ====================
 
     def handle_metadata_put(self, req: MetadataPutRequest) -> MetadataPutResponse:
-        self._metadata[req.key] = MetadataEntry(
-            req.allocation_id, req.offset_bytes, req.value
+        epoch_id = self._require_active_rw_epoch()
+        epoch_metadata = self._metadata_by_epoch.setdefault(epoch_id, {})
+        epoch_metadata[req.key] = MetadataEntry(
+            req.allocation_id,
+            req.offset_bytes,
+            req.value,
+            epoch_id,
         )
         return MetadataPutResponse(success=True)
 
-    def handle_metadata_get(self, req: MetadataGetRequest) -> MetadataGetResponse:
-        entry = self._metadata.get(req.key)
+    def handle_metadata_get(
+        self, req: MetadataGetRequest, epoch_id: str
+    ) -> MetadataGetResponse:
+        epoch_metadata = self._metadata_by_epoch.get(epoch_id, {})
+        entry = epoch_metadata.get(req.key)
         if entry is None:
             return MetadataGetResponse(found=False)
         return MetadataGetResponse(
@@ -218,15 +298,18 @@ class RequestHandler:
     def handle_metadata_delete(
         self, req: MetadataDeleteRequest
     ) -> MetadataDeleteResponse:
-        return MetadataDeleteResponse(
-            deleted=self._metadata.pop(req.key, None) is not None
-        )
+        epoch_id = self._require_active_rw_epoch()
+        epoch_metadata = self._metadata_by_epoch.setdefault(epoch_id, {})
+        return MetadataDeleteResponse(deleted=epoch_metadata.pop(req.key, None) is not None)
 
-    def handle_metadata_list(self, req: MetadataListRequest) -> MetadataListResponse:
+    def handle_metadata_list(
+        self, req: MetadataListRequest, epoch_id: str
+    ) -> MetadataListResponse:
+        epoch_metadata = self._metadata_by_epoch.get(epoch_id, {})
         keys = (
-            [k for k in self._metadata if k.startswith(req.prefix)]
+            [k for k in epoch_metadata if k.startswith(req.prefix)]
             if req.prefix
-            else list(self._metadata)
+            else list(epoch_metadata)
         )
         return MetadataListResponse(keys=sorted(keys))
 

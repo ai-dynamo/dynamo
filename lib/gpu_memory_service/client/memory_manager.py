@@ -237,13 +237,22 @@ class GMSClientMemoryManager:
         return self._client_rpc.clear_all()
 
     def commit(self) -> bool:
-        """Server-only commit: transition to COMMITTED state.
+        """Synchronize, downgrade access, then commit.
 
-        No synchronize(), no CUDA access flip. The caller is responsible for
-        synchronizing before calling this. Server closes the RW socket on
-        success, so self._client becomes None.
+        Commit is a publish barrier. It guarantees all prior GPU writes in the
+        current context are complete before the server transitions state.
         """
         self._require_rw()
+
+        # Publish barrier: all writer-side GPU work must be visible before commit.
+        synchronize()
+
+        # Freeze current mappings as RO before releasing RW lock ownership.
+        for mapping in self._mappings.values():
+            if mapping.handle == 0:
+                continue
+            set_access(mapping.va, mapping.aligned_size, self.device, GrantedLockType.RO)
+
         ok = self._client_rpc.commit()
         if ok:
             self._client = None

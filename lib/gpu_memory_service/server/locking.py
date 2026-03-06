@@ -17,7 +17,6 @@ State Diagram:
     COMMITTED ◄──RO_DISCONNECT (last)── RO ◄──RO_CONNECT
                       │                  ▲
                       │                  │
-                      └──RO_CONNECT──────┘
                       └──RO_DISCONNECT───┘ (not last)
 """
 
@@ -132,7 +131,7 @@ TRANSITIONS: list[Transition] = [
         to_state=ServerState.COMMITTED,
     ),
     # From RW: abort (disconnect without commit) transitions to EMPTY
-    # Writer aborts, state invalidated
+    # Any writable epoch invalidates committed state until the next commit.
     Transition(
         from_states=frozenset({ServerState.RW}),
         event=StateEvent.RW_ABORT,
@@ -281,7 +280,8 @@ class GMSLocalFSM:
         match event:
             case StateEvent.RW_CONNECT:
                 self._rw_conn = conn
-                self._committed = False  # Invalidate on RW connect
+                # RW lock means mappings can be writable, so committed is invalid.
+                self._committed = False
             case StateEvent.RW_COMMIT:
                 self._committed = True
                 self._rw_conn = None
