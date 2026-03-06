@@ -49,9 +49,9 @@ SEARCH_PATHS = [
 # ---------------------------------------------------------------------------
 
 MODULE_ORDER: list[str] = [
-    "dynamo._core",
-    "dynamo.runtime",
     "dynamo.llm",
+    "dynamo.runtime",
+    "dynamo._core",
     "dynamo.frontend",
     "dynamo.common",
     "dynamo.health_check",

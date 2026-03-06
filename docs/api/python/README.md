@@ -11,9 +11,9 @@ This page documents the public Python API for NVIDIA Dynamo. Classes and functio
 
 | Name | Description |
 | --- | --- |
-| [`Core Bindings`](#core-bindings) | Low-level Rust-backed runtime, routing, KV cache, memory, and model management bindings. |
-| [`dynamo.runtime`](#dynamoruntime) | Decorators and utilities for defining Dynamo workers and endpoints. |
 | [`dynamo.llm`](#dynamollm) | LLM serving pipeline components and engine integration. |
+| [`dynamo.runtime`](#dynamoruntime) | Decorators and utilities for defining Dynamo workers and endpoints. |
+| [`Core Bindings`](#core-bindings) | Low-level Rust-backed runtime, routing, KV cache, memory, and model management bindings. |
 | [`dynamo.frontend`](#dynamofrontend) | HTTP frontend configuration and OpenAI-compatible API gateway. |
 | [`dynamo.common`](#dynamocommon) | Shared configuration, constants, storage, and utility functions. |
 | [`dynamo.health_check`](#dynamohealth_check) | Health check payload and environment-based configuration. |
@@ -25,868 +25,98 @@ This page documents the public Python API for NVIDIA Dynamo. Classes and functio
 
 ---
 
-## Core Bindings
+## dynamo.llm
 
-Low-level Rust-backed runtime, routing, KV cache, memory, and model management bindings.
+LLM serving pipeline components and engine integration.
 
 ### Classes
 
 <details>
-<summary><strong>`RuntimeMetrics` — Helper class for registering Prometheus metrics callbacks on an Endpoint.</strong></summary>
+<summary><strong>`EngineType` — Engine type for Dynamo workers</strong></summary>
 
-*Source: [`dynamo/prometheus_metrics.pyi#L12`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/prometheus_metrics.pyi#L12)*
-
-Provides utilities for integrating external metrics (e.g., from vLLM, SGLang, TensorRT-LLM).
-<b>Methods</b>
-
-#### `register_prometheus_expfmt_callback(callback: Callable[[], str] = None)`
-
-*Source: [`dynamo/prometheus_metrics.pyi#L19`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/prometheus_metrics.pyi#L19)*
-
-Register a Python callback that returns Prometheus exposition text.
-The returned text will be appended to the /metrics endpoint output.
-
-This allows you to integrate external Prometheus metrics (e.g. from vLLM)
-directly into the endpoint's metrics output.
-
-<b>Parameters</b>
-
-| Parameter | Type | Description |
-| --- | --- | --- |
-| `callback` | `Callable[[], str]` | A callable that takes no arguments and returns a string      in Prometheus text exposition format |
-
-</details>
-
-<details>
-<summary><strong>`JsonLike` — Any PyObject which can be serialized to JSON</strong></summary>
-
-*Source: [`dynamo/_core.pyi#L34`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L34)*
+*Source: [`dynamo/_core.pyi#L1786`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1786)*
 
 <b>Examples</b>
 
 ```python
->>> request: JsonLike = {"prompt": "Hello", "max_tokens": 128}
->>> request_list: JsonLike = [1, 2, 3]
->>> request_str: JsonLike = "plain text input"
-```
-
-</details>
-
-<details>
-<summary><strong>`DistributedRuntime` — The runtime object for dynamo applications</strong></summary>
-
-*Source: [`dynamo/_core.pyi#L48`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L48)*
-
-<b>Examples</b>
-
-```python
->>> import asyncio
->>> loop = asyncio.get_event_loop()
->>> runtime = DistributedRuntime(loop, "etcd", "nats")
->>> endpoint = runtime.endpoint("myns.backend.generate")
->>> client = await endpoint.client()
-```
-<b>Constructor</b>
-
-#### `__new__(event_loop: Any = None, discovery_backend: str = None, request_plane: str = None, enable_nats: Optional[bool] = None) -> DistributedRuntime`
-
-*Source: [`dynamo/_core.pyi#L60`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L60)*
-
-Create a new DistributedRuntime.
-
-<b>Parameters</b>
-
-| Parameter | Type | Description |
-| --- | --- | --- |
-| `event_loop` | `Any` | The asyncio event loop |
-| `discovery_backend` | `str` | Discovery backend ("kubernetes", "etcd", "file", or "mem") |
-| `request_plane` | `str` | Request plane transport ("tcp", "http", or "nats") |
-| `enable_nats` | `Optional[bool]` | Whether to enable NATS for KV events. Defaults to True.         If request_plane is "nats", NATS is always enabled.         Pass False to disable NATS initialization (e.g., for approximate routing). |
-<b>Methods</b>
-
-#### `endpoint(path: str = None) -> Endpoint`
-
-*Source: [`dynamo/_core.pyi#L80`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L80)*
-
-Get an endpoint directly by path.
-
-<b>Parameters</b>
-
-| Parameter | Type | Description |
-| --- | --- | --- |
-| `path` | `str` | Endpoint path in format 'namespace.component.endpoint'   or 'dyn://namespace.component.endpoint' |
-
-<b>Returns:</b> `Endpoint` -- The requested endpoint
-
-<b>Raises</b>
-
-- `ValueError` -- If path format is invalid (not 3 parts separated by dots)
-- `Exception` -- If namespace or component creation fails
-
-<b>Example</b>
-
-endpoint = runtime.endpoint("demo.backend.generate")
-endpoint = runtime.endpoint("dyn://demo.backend.generate")
-#### `shutdown()`
-
-*Source: [`dynamo/_core.pyi#L101`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L101)*
-
-Shutdown the runtime by triggering the cancellation token
-#### `register_engine_route(route_name: str = None, callback: Callable[[dict], Awaitable[dict]] = None)`
-
-*Source: [`dynamo/_core.pyi#L107`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L107)*
-
-Register an async callback for /engine/`{route_name}` on the system status server.
-
-<b>Parameters</b>
-
-| Parameter | Type | Description |
-| --- | --- | --- |
-| `route_name` | `str` | The route path (e.g., "start_profile" creates /engine/start_profile) |
-| `callback` | `Callable[[dict], Awaitable[dict]]` | Async function with signature: async def(body: dict) -> dict |
-
-<b>Example</b>
-
-async def start_profile(body: dict) -> dict:
-    await engine.start_profile(**body)
-    return `{"status": "ok", "message": "Profiling started"}`
-
-runtime.register_engine_route("start_profile", start_profile)
-
-The callback receives the JSON request body as a dict and should return
-a dict that will be serialized as the JSON response.
-
-For GET requests or empty bodies, an empty dict `{}` is passed.
-
-</details>
-
-<details>
-<summary><strong>`Endpoint` — An Endpoint is a single API endpoint</strong></summary>
-
-*Source: [`dynamo/_core.pyi#L134`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L134)*
-
-<b>Examples</b>
-
-```python
->>> async def handler(request):
-...     yield {"text": "hello"}
->>> endpoint = runtime.endpoint("dynamo.backend.generate")
->>> await endpoint.serve_endpoint(handler)
+>>> from dynamo._core import EngineType
+>>> engine = EngineType.Dynamic
+>>> engine = EngineType.Echo
+>>> engine = EngineType.Mocker
 ```
 <b>Attributes</b>
 
-- `metrics`: `PyRuntimeMetrics` -- Get a PyRuntimeMetrics helper for registering Prometheus metrics callbacks.
+- `Echo`: `EngineType`
+- `Dynamic`: `EngineType`
+- `Mocker`: `EngineType`
 
-<b>Methods</b>
-
-#### `serve_endpoint(handler: RequestHandler = None, graceful_shutdown: bool = True, metrics_labels: Optional[List[Tuple[str, str]]] = None, health_check_payload: Optional[Dict[str, Any]] = None)`
-
-*Source: [`dynamo/_core.pyi#L147`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L147)*
-
-Serve an endpoint discoverable by all connected clients at
-`{{ namespace }}/components/{{ component_name }}/endpoints/{{ endpoint_name }}`
-
-<b>Parameters</b>
-
-| Parameter | Type | Description |
-| --- | --- | --- |
-| `handler` | `RequestHandler` | The request handler function |
-| `graceful_shutdown` | `bool` | Whether to wait for inflight requests to complete during shutdown (default: True) |
-| `metrics_labels` | `Optional[List[Tuple[str, str]]]` | Optional list of metrics labels to add to the metrics |
-| `health_check_payload` | `Optional[Dict[str, Any]]` | Optional dict containing the health check request payload                   that will be used to verify endpoint health |
-#### `client(router_mode: Optional[RouterMode] = None) -> Client`
-
-*Source: [`dynamo/_core.pyi#L161`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L161)*
-
-Create a `Client` capable of calling served instances of this endpoint.
-
-By default this uses round-robin routing when `router_mode` is not provided.
-
-<b>Parameters</b>
-
-| Parameter | Type | Default | Description |
-| --- | --- | --- | --- |
-| `router_mode` | `Optional[RouterMode]` | None |  |
-
-#### `connection_id() -> int`
-
-*Source: [`dynamo/_core.pyi#L169`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L169)*
-
-Opaque unique ID for this worker. May change over worker lifetime.
-#### `unregister_endpoint_instance()`
-
-*Source: [`dynamo/_core.pyi#L185`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L185)*
-
-Unregister this endpoint instance from discovery.
-
-This removes the endpoint from the instances bucket, preventing the router
-from sending requests to this worker. Use this when a worker is sleeping
-and should not receive any requests.
-#### `register_endpoint_instance()`
-
-*Source: [`dynamo/_core.pyi#L195`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L195)*
-
-Re-register this endpoint instance to discovery.
-
-This adds the endpoint back to the instances bucket, allowing the router
-to send requests to this worker again. Use this when a worker wakes up
-and should start receiving requests.
 
 </details>
 
 <details>
-<summary><strong>`Client` — A client capable of calling served instances of an endpoint</strong></summary>
+<summary><strong>`EntrypointArgs` — Settings to connect an input to a worker and run them.</strong></summary>
 
-*Source: [`dynamo/_core.pyi#L205`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L205)*
+*Source: [`dynamo/_core.pyi#L1800`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1800)*
+
+Use by `dynamo run`.
 
 <b>Examples</b>
 
 ```python
->>> client = await endpoint.client()
->>> async for chunk in await client.round_robin("hello world"):
-...     print(chunk.get("data"))
->>> async for resp in await client.random({"prompt": "hi"}):
-...     print(resp)
-```
-<b>Methods</b>
-
-#### `instance_ids() -> List[int]`
-
-*Source: [`dynamo/_core.pyi#L219`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L219)*
-
-Get list of current instance IDs.
-
-<b>Returns:</b> `List[int]` -- A list of currently available instance IDs
-#### `wait_for_instances() -> List[int]`
-
-*Source: [`dynamo/_core.pyi#L228`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L228)*
-
-Wait for instances to be available for work and return their IDs.
-
-<b>Returns:</b> `List[int]` -- A list of instance IDs that are available for work
-#### `random(request: JsonLike = None) -> AsyncIterator[JsonLike]`
-
-*Source: [`dynamo/_core.pyi#L237`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L237)*
-
-Pick a random instance of the endpoint and issue the request
-
-<b>Parameters</b>
-
-| Parameter | Type | Default | Description |
-| --- | --- | --- | --- |
-| `request` | `JsonLike` | None |  |
-
-#### `round_robin(request: JsonLike = None) -> AsyncIterator[JsonLike]`
-
-*Source: [`dynamo/_core.pyi#L243`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L243)*
-
-Pick the next instance of the endpoint in a round-robin fashion
-
-<b>Parameters</b>
-
-| Parameter | Type | Default | Description |
-| --- | --- | --- | --- |
-| `request` | `JsonLike` | None |  |
-
-#### `direct(request: JsonLike = None, instance: str = None) -> AsyncIterator[JsonLike]`
-
-*Source: [`dynamo/_core.pyi#L249`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L249)*
-
-Pick a specific instance of the endpoint
-
-<b>Parameters</b>
-
-| Parameter | Type | Default | Description |
-| --- | --- | --- | --- |
-| `request` | `JsonLike` | None |  |
-| `instance` | `str` | None |  |
-
-#### `generate(request: JsonLike = None, annotated: bool | None = True, context: Context | None = None) -> AsyncIterator[JsonLike]`
-
-*Source: [`dynamo/_core.pyi#L255`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L255)*
-
-Generate a response from the endpoint
-
-<b>Parameters</b>
-
-| Parameter | Type | Default | Description |
-| --- | --- | --- | --- |
-| `request` | `JsonLike` | None |  |
-| `annotated` | `bool | None` | True |  |
-| `context` | `Context | None` | None |  |
-
-
-</details>
-
-<details>
-<summary><strong>`ModelCardInstanceId` — Unique identifier for a worker instance: namespace, component, endpoint and instance_id.</strong></summary>
-
-*Source: [`dynamo/_core.pyi#L267`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L267)*
-
-The instance_id is not currently exposed in the Python bindings.
-<b>Methods</b>
-
-#### `triple() -> Tuple[str, str, str]`
-
-*Source: [`dynamo/_core.pyi#L272`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L272)*
-
-Triple of namespace, component and endpoint this worker is serving.
-
-</details>
-
-<details>
-<summary><strong>`Context` — Context wrapper around AsyncEngineContext for Python bindings.</strong></summary>
-
-*Source: [`dynamo/_core.pyi#L318`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L318)*
-
-Provides tracing and cancellation capabilities for request handling.
-
-<b>Examples</b>
-
-```python
->>> from dynamo._core import Context
->>> context = Context()
->>> context = Context(id="req-42")
->>> print(context.id())
->>> context.stop_generating()
->>> assert context.is_stopped()
-```
-<b>Attributes</b>
-
-- `trace_id`: `Optional[str]` -- Get the distributed trace ID if available.
-- `span_id`: `Optional[str]` -- Get the distributed span ID if available.
-- `parent_span_id`: `Optional[str]` -- Get the parent span ID if available.
-
-<b>Constructor</b>
-
-#### `__init__(id: Optional[str] = None)`
-
-*Source: [`dynamo/_core.pyi#L332`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L332)*
-
-Create a new Context instance.
-
-<b>Parameters</b>
-
-| Parameter | Type | Description |
-| --- | --- | --- |
-| `id` | `Optional[str]` | Optional request ID. If None, a default ID will be generated. |
-<b>Methods</b>
-
-#### `is_stopped() -> bool`
-
-*Source: [`dynamo/_core.pyi#L341`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L341)*
-
-Check if the context has been stopped (synchronous).
-
-<b>Returns:</b> `bool` -- True if the context is stopped, False otherwise.
-#### `is_killed() -> bool`
-
-*Source: [`dynamo/_core.pyi#L350`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L350)*
-
-Check if the context has been killed (synchronous).
-
-<b>Returns:</b> `bool` -- True if the context is killed, False otherwise.
-#### `stop_generating()`
-
-*Source: [`dynamo/_core.pyi#L359`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L359)*
-
-Issue a stop generating signal to the context.
-#### `id() -> Optional[str]`
-
-*Source: [`dynamo/_core.pyi#L365`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L365)*
-
-Get the context ID.
-
-<b>Returns:</b> `Optional[str]` -- The context identifier string, or None if not set.
-#### `async_killed_or_stopped() -> asyncio.Future[bool]`
-
-*Source: [`dynamo/_core.pyi#L374`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L374)*
-
-Asynchronously wait until the context is killed or stopped.
-
-<b>Returns:</b> `asyncio.Future[bool]` -- True when the context is killed or stopped.
-
-</details>
-
-<details>
-<summary><strong>`WorkerMetricsPublisher` — A metrics publisher will provide metrics to the router for load monitoring.</strong></summary>
-
-*Source: [`dynamo/_core.pyi#L413`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L413)*
-
-<b>Examples</b>
-
-```python
->>> publisher = WorkerMetricsPublisher()
->>> await publisher.create_endpoint(endpoint)
->>> publisher.publish(dp_rank=0, active_decode_blocks=128)
-```
-<b>Constructor</b>
-
-#### `__init__()`
-
-*Source: [`dynamo/_core.pyi#L425`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L425)*
-
-Create a `WorkerMetricsPublisher` object
-<b>Methods</b>
-
-#### `create_endpoint(endpoint: Endpoint = None)`
-
-*Source: [`dynamo/_core.pyi#L430`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L430)*
-
-Initialize the NATS endpoint for publishing worker metrics. Must be awaited.
-
-Extracts component information from the endpoint to set up metrics publishing
-on the correct NATS subject for routing decisions.
-
-<b>Parameters</b>
-
-| Parameter | Type | Description |
-| --- | --- | --- |
-| `endpoint` | `Endpoint` | The endpoint to extract component information from for metrics publishing |
-#### `publish(dp_rank: Optional[int] = None, active_decode_blocks: int = None)`
-
-*Source: [`dynamo/_core.pyi#L441`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L441)*
-
-Publish worker metrics for load monitoring.
-
-<b>Parameters</b>
-
-| Parameter | Type | Description |
-| --- | --- | --- |
-| `dp_rank` | `Optional[int]` | Data parallel rank of the worker (None defaults to 0) |
-| `active_decode_blocks` | `int` | Number of active KV cache blocks |
-
-</details>
-
-<details>
-<summary><strong>`ModelRuntimeConfig` — A model runtime configuration is a collection of runtime information</strong></summary>
-
-*Source: [`dynamo/_core.pyi#L487`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L487)*
-
-<b>Examples</b>
-
-```python
->>> from dynamo._core import ModelRuntimeConfig
->>> config = ModelRuntimeConfig()
->>> config.total_kv_blocks = 2048
->>> config.max_num_seqs = 256
->>> config.max_num_batched_tokens = 8192
->>> config.enable_local_indexer = True
->>> config.tool_call_parser = "hermes"
->>> config.set_engine_specific("tp_size", 4)
-```
-<b>Attributes</b>
-
-- `total_kv_blocks`: `int | None`
-- `max_num_seqs`: `int | None`
-- `max_num_batched_tokens`: `int | None`
-- `tool_call_parser`: `str | None`
-- `reasoning_parser`: `str | None`
-- `enable_local_indexer`: `bool`
-- `runtime_data`: `dict[str, Any]`
-- `tensor_model_config`: `Any | None`
-- `data_parallel_size`: `int`
-- `data_parallel_start_rank`: `int`
-
-<b>Constructor</b>
-
-#### `__init__()`
-
-*Source: [`dynamo/_core.pyi#L513`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L513)*
-
-<b>Methods</b>
-
-#### `set_engine_specific(key: str = None, value: Any = None)`
-
-*Source: [`dynamo/_core.pyi#L515`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L515)*
-
-Set an engine-specific runtime configuration value
-
-<b>Parameters</b>
-
-| Parameter | Type | Default | Description |
-| --- | --- | --- | --- |
-| `key` | `str` | None |  |
-| `value` | `Any` | None |  |
-
-#### `get_engine_specific(key: str = None) -> Any | None`
-
-*Source: [`dynamo/_core.pyi#L519`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L519)*
-
-Get an engine-specific runtime configuration value
-
-<b>Parameters</b>
-
-| Parameter | Type | Default | Description |
-| --- | --- | --- | --- |
-| `key` | `str` | None |  |
-
-#### `set_disaggregated_endpoint(bootstrap_host: str | None = None, bootstrap_port: int | None = None)`
-
-*Source: [`dynamo/_core.pyi#L523`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L523)*
-
-Set the disaggregated endpoint for the model
-
-<b>Parameters</b>
-
-| Parameter | Type | Default | Description |
-| --- | --- | --- | --- |
-| `bootstrap_host` | `str | None` | None |  |
-| `bootstrap_port` | `int | None` | None |  |
-
-
-</details>
-
-<details>
-<summary><strong>`OverlapScores` — A collection of prefix matching scores of workers for a given token ids.</strong></summary>
-
-*Source: [`dynamo/_core.pyi#L531`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L531)*
-
-'scores' is a map of worker id to the score which is the number of matching blocks.
-
-<b>Examples</b>
-
-```python
->>> from dynamo._core import RadixTree
->>> tree = RadixTree()
->>> scores = tree.find_matches([42, 43])
->>> worker_scores = scores.scores  # Dict[int, int]
->>> freqs = scores.frequencies  # List[int]
-```
-<b>Attributes</b>
-
-- `scores`: `Dict[int, int]` -- Map of worker_id to the score which is the number of matching blocks.
-- `frequencies`: `List[int]` -- List of frequencies that the blocks have been accessed.
-
-
-</details>
-
-<details>
-<summary><strong>`RadixTree` — A RadixTree that tracks KV cache blocks and can find prefix matches for sequences.</strong></summary>
-
-*Source: [`dynamo/_core.pyi#L565`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L565)*
-
-Thread-safe: operations route to a dedicated background thread and long calls
-release the Python GIL.
-
-<b>Examples</b>
-
-```python
->>> import json
->>> from dynamo._core import RadixTree
->>> tree = RadixTree()
->>> tree_ttl = RadixTree(expiration_duration_secs=120.0)
->>> event = {"event_id": 1, "data": {"stored": {"parent_hash": None,
-...     "blocks": [{"block_hash": 42, "tokens_hash": 42}]}}}
->>> tree.apply_event(0, json.dumps(event).encode())
->>> scores = tree.find_matches([42])
->>> print(scores.scores)
-```
-<b>Constructor</b>
-
-#### `__init__(expiration_duration_secs: Optional[float] = None)`
-
-*Source: [`dynamo/_core.pyi#L584`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L584)*
-
-Create a new RadixTree instance.
-
-<b>Parameters</b>
-
-| Parameter | Type | Description |
-| --- | --- | --- |
-| `expiration_duration_secs` | `Optional[float]` | Optional expiration duration in seconds for cached blocks.                     If None, blocks never expire. |
-<b>Methods</b>
-
-#### `find_matches(sequence: List[int] = None, early_exit: bool = False) -> OverlapScores`
-
-*Source: [`dynamo/_core.pyi#L594`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L594)*
-
-Find prefix matches for the given sequence of block hashes.
-
-<b>Parameters</b>
-
-| Parameter | Type | Description |
-| --- | --- | --- |
-| `sequence` | `List[int]` | List of block hashes to find matches for |
-| `early_exit` | `bool` | If True, stop searching after finding the first match |
-
-<b>Returns:</b> `OverlapScores` -- OverlapScores containing worker matching scores and frequencies
-#### `apply_event(worker_id: int = None, kv_cache_event_bytes: bytes = None)`
-
-*Source: [`dynamo/_core.pyi#L609`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L609)*
-
-Apply a KV cache event to update the RadixTree state.
-
-<b>Parameters</b>
-
-| Parameter | Type | Description |
-| --- | --- | --- |
-| `worker_id` | `int` | ID of the worker that generated the event |
-| `kv_cache_event_bytes` | `bytes` | Serialized KV cache event as bytes |
-
-<b>Raises</b>
-
-- `ValueError` -- If the event bytes cannot be deserialized
-#### `remove_worker(worker_id: int = None)`
-
-*Source: [`dynamo/_core.pyi#L622`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L622)*
-
-Remove all blocks associated with a specific worker.
-
-<b>Parameters</b>
-
-| Parameter | Type | Description |
-| --- | --- | --- |
-| `worker_id` | `int` | ID of the worker to remove |
-#### `clear_all_blocks(worker_id: int = None)`
-
-*Source: [`dynamo/_core.pyi#L631`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L631)*
-
-Clear all blocks for a specific worker.
-
-<b>Parameters</b>
-
-| Parameter | Type | Description |
-| --- | --- | --- |
-| `worker_id` | `int` | ID of the worker whose blocks should be cleared |
-#### `dump_tree_as_events() -> List[str]`
-
-*Source: [`dynamo/_core.pyi#L640`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L640)*
-
-Dump the current RadixTree state as a list of JSON-serialized KV cache events.
-
-<b>Returns:</b> `List[str]` -- List of JSON-serialized KV cache events as strings
-
-</details>
-
-<details>
-<summary><strong>`KvIndexer` — A KV Indexer that tracks KV Events emitted by workers. Events include add_block and remove_block.</strong></summary>
-
-*Source: [`dynamo/_core.pyi#L649`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L649)*
-
-<b>Examples</b>
-
-```python
->>> from dynamo._core import KvIndexer
->>> indexer = KvIndexer(endpoint=endpoint, block_size=64)
->>> scores = indexer.find_matches_for_request(token_ids=[1, 2, 3])
->>> print(scores.scores)
->>> print(indexer.block_size())
-```
-<b>Constructor</b>
-
-#### `__init__(endpoint: Endpoint = None, block_size: int = None)`
-
-*Source: [`dynamo/_core.pyi#L663`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L663)*
-
-Create a `KvIndexer` object
-
-<b>Parameters</b>
-
-| Parameter | Type | Default | Description |
-| --- | --- | --- | --- |
-| `endpoint` | `Endpoint` | None |  |
-| `block_size` | `int` | None |  |
-
-<b>Methods</b>
-
-#### `find_matches(sequence: List[int] = None) -> OverlapScores`
-
-*Source: [`dynamo/_core.pyi#L668`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L668)*
-
-Find prefix matches for the given sequence of block hashes.
-
-<b>Parameters</b>
-
-| Parameter | Type | Description |
-| --- | --- | --- |
-| `sequence` | `List[int]` | List of block hashes to find matches for |
-
-<b>Returns:</b> `OverlapScores` -- OverlapScores containing worker matching scores and frequencies
-#### `find_matches_for_request(token_ids: List[int] = None, lora_name: Optional[str] = None) -> OverlapScores`
-
-*Source: [`dynamo/_core.pyi#L680`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L680)*
-
-Return the overlapping scores of workers for the given token ids.
-
-<b>Parameters</b>
-
-| Parameter | Type | Default | Description |
-| --- | --- | --- | --- |
-| `token_ids` | `List[int]` | None |  |
-| `lora_name` | `Optional[str]` | None |  |
-
-#### `block_size() -> int`
-
-*Source: [`dynamo/_core.pyi#L688`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L688)*
-
-Return the block size of the KV Indexer.
-
-</details>
-
-<details>
-<summary><strong>`ApproxKvIndexer` — An approximate KV Indexer that doesn't receive KV cache events from workers.</strong></summary>
-
-*Source: [`dynamo/_core.pyi#L694`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L694)*
-
-Instead, it relies on routing decisions with TTL-based expiration and pruning
-to estimate which blocks are cached on which workers.
-
-This is useful when:
-- Backend engines don't emit KV events
-- You want to reduce event processing overhead
-- Lower routing accuracy is acceptable
-
-<b>Examples</b>
-
-```python
->>> from dynamo._core import ApproxKvIndexer
->>> indexer = ApproxKvIndexer(
-...     endpoint=endpoint, kv_block_size=64,
-...     router_ttl_secs=120.0, router_max_tree_size=1048576,
+>>> from dynamo._core import EntrypointArgs, EngineType, RouterConfig, RouterMode
+>>> args = EntrypointArgs(
+...     engine_type=EngineType.Dynamic,
+...     model_path="/models/llama-3-8b",
+...     model_name="dyn://dynamo.backend.generate",
+...     http_port=8000,
+...     router_config=RouterConfig(mode=RouterMode.KV),
 ... )
->>> scores = indexer.find_matches_for_request(token_ids=[1, 2, 3])
->>> await indexer.process_routing_decision_for_request([1, 2, 3], worker_id=0)
+>>> mocker_args = EntrypointArgs(
+...     engine_type=EngineType.Mocker,
+...     model_path="/models/llama-3-8b",
+...     is_prefill=True,
+... )
 ```
 <b>Constructor</b>
 
-#### `__init__(endpoint: Endpoint = None, kv_block_size: int = None, router_ttl_secs: float = 120.0, router_max_tree_size: int = 1048576, router_prune_target_ratio: float = 0.8)`
+#### `__init__(engine_type: EngineType = None, model_path: Optional[str] = None, model_name: Optional[str] = None, endpoint_id: Optional[str] = None, context_length: Optional[int] = None, template_file: Optional[str] = None, router_config: Optional[RouterConfig] = None, kv_cache_block_size: Optional[int] = None, http_host: Optional[str] = None, http_port: Optional[int] = None, http_metrics_port: Optional[int] = None, tls_cert_path: Optional[str] = None, tls_key_path: Optional[str] = None, extra_engine_args: Optional[str] = None, namespace: Optional[str] = None, is_prefill: bool = False, migration_limit: int = 0, chat_engine_factory: Optional[Callable] = None)`
 
-*Source: [`dynamo/_core.pyi#L717`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L717)*
+*Source: [`dynamo/_core.pyi#L1821`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1821)*
 
-Create an `ApproxKvIndexer` object
-
-<b>Parameters</b>
-
-| Parameter | Type | Description |
-| --- | --- | --- |
-| `component` | `Any` | The component to associate with this indexer |
-| `kv_block_size` | `int` | The KV cache block size |
-| `router_ttl_secs` | `float` | TTL for blocks in seconds (default: 120.0) |
-| `router_max_tree_size` | `int` | Maximum tree size before pruning (default: 1048576, which is 2^20) |
-| `router_prune_target_ratio` | `float` | Target size ratio after pruning (default: 0.8) |
-<b>Methods</b>
-
-#### `find_matches_for_request(token_ids: List[int] = None, lora_name: Optional[str] = None) -> OverlapScores`
-
-*Source: [`dynamo/_core.pyi#L737`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L737)*
-
-Return the overlapping scores of workers for the given token ids.
+Create EntrypointArgs.
 
 <b>Parameters</b>
 
 | Parameter | Type | Description |
 | --- | --- | --- |
-| `token_ids` | `List[int]` | List of token IDs to find matches for |
-| `lora_name` | `Optional[str]` | Optional LoRA adapter name for adapter-aware matching |
-
-<b>Returns:</b> `OverlapScores` -- OverlapScores containing worker matching scores and frequencies
-#### `block_size() -> int`
-
-*Source: [`dynamo/_core.pyi#L752`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L752)*
-
-Return the block size of the ApproxKvIndexer.
-
-<b>Returns:</b> `int` -- The KV cache block size
-#### `process_routing_decision_for_request(tokens: List[int] = None, worker_id: int = None, dp_rank: int = 0)`
-
-*Source: [`dynamo/_core.pyi#L761`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L761)*
-
-Notify the indexer that a token sequence has been routed to a specific worker.
-
-This updates the indexer's internal state to track which blocks are likely
-cached on which workers based on routing decisions.
-
-<b>Parameters</b>
-
-| Parameter | Type | Description |
-| --- | --- | --- |
-| `tokens` | `List[int]` | List of token IDs that were routed |
-| `worker_id` | `int` | The worker ID the request was routed to |
-| `dp_rank` | `int` | The data parallel rank (default: 0) |
+| `engine_type` | `EngineType` | The type of engine to use |
+| `model_path` | `Optional[str]` | Path to the model directory on disk |
+| `model_name` | `Optional[str]` | Model name or dynamo endpoint (e.g. 'dyn://namespace.component.endpoint') |
+| `endpoint_id` | `Optional[str]` | Optional endpoint ID |
+| `context_length` | `Optional[int]` | Optional context length override |
+| `template_file` | `Optional[str]` | Optional path to a prompt template file |
+| `router_config` | `Optional[RouterConfig]` | Optional router configuration |
+| `kv_cache_block_size` | `Optional[int]` | Optional KV cache block size |
+| `http_host` | `Optional[str]` | HTTP host to bind to |
+| `http_port` | `Optional[int]` | HTTP port to bind to |
+| `http_metrics_port` | `Optional[int]` | HTTP metrics port (for gRPC service) |
+| `tls_cert_path` | `Optional[str]` | TLS certificate path (PEM format) |
+| `tls_key_path` | `Optional[str]` | TLS key path (PEM format) |
+| `extra_engine_args` | `Optional[str]` | Path to extra engine arguments file |
+| `namespace` | `Optional[str]` | Dynamo namespace for model discovery scoping |
+| `is_prefill` | `bool` | Whether this is a prefill worker |
+| `migration_limit` | `int` | Maximum number of request migrations (0=disabled) |
+| `chat_engine_factory` | `Optional[Callable]` | Optional Python chat completions engine factory callback |
 
 </details>
 
 <details>
-<summary><strong>`KvEventPublisher` — A KV event publisher will publish KV events corresponding to the component.</strong></summary>
+<summary><strong>`HttpAsyncEngine` — An async engine for a distributed Dynamo http service. This is an extension of the</strong></summary>
 
-*Source: [`dynamo/_core.pyi#L778`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L778)*
+*Source: [`dynamo/_core.pyi#L922`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L922)*
 
-<b>Examples</b>
-
-```python
->>> publisher = KvEventPublisher(
-...     endpoint=endpoint, kv_block_size=64, dp_rank=0,
-...     zmq_endpoint="tcp://127.0.0.1:5557", zmq_topic="",
-... )
->>> publisher.publish_stored(
-...     token_ids=[1, 2, 3, 4], num_block_tokens=[4],
-...     block_hashes=[123456],
-... )
->>> publisher.publish_removed(block_hashes=[123456])
-```
-<b>Constructor</b>
-
-#### `__init__(endpoint: Endpoint = None, worker_id: int = 0, kv_block_size: int = 0, dp_rank: int = 0, enable_local_indexer: bool = False, zmq_endpoint: Optional[str] = None, zmq_topic: Optional[str] = None)`
-
-*Source: [`dynamo/_core.pyi#L796`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L796)*
-
-Create a `KvEventPublisher` object.
-
-When zmq_endpoint is provided, the publisher subscribes to a ZMQ socket for
-incoming engine events (e.g. from SGLang/vLLM) and relays them to NATS.
-
-When zmq_endpoint is None, events are pushed manually via publish_stored/publish_removed.
-
-<b>Parameters</b>
-
-| Parameter | Type | Description |
-| --- | --- | --- |
-| `endpoint` | `Endpoint` | The endpoint to extract component information from for event publishing |
-| `worker_id` | `int` | The worker ID (unused, inferred from endpoint) |
-| `kv_block_size` | `int` | The KV block size (must be > 0) |
-| `dp_rank` | `int` | The data parallel rank (defaults to 0) |
-| `enable_local_indexer` | `bool` | Enable worker-local KV indexer |
-| `zmq_endpoint` | `Optional[str]` | Optional ZMQ endpoint for relay mode (e.g. "tcp://127.0.0.1:5557") |
-| `zmq_topic` | `Optional[str]` | ZMQ topic to subscribe to (defaults to "" when zmq_endpoint is set) |
-<b>Methods</b>
-
-#### `publish_stored(token_ids: List[int] = None, num_block_tokens: List[int] = None, block_hashes: List[int] = None, parent_hash: Optional[int] = None, block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None, lora_name: Optional[str] = None)`
-
-*Source: [`dynamo/_core.pyi#L824`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L824)*
-
-Publish a KV stored event.
-
-Event IDs are managed internally by the publisher using a monotonic counter.
-
-<b>Parameters</b>
-
-| Parameter | Type | Description |
-| --- | --- | --- |
-| `token_ids` | `List[int]` | List of token IDs |
-| `num_block_tokens` | `List[int]` | Number of tokens per block |
-| `block_hashes` | `List[int]` | List of block hashes (signed 64-bit integers) |
-| `parent_hash` | `Optional[int]` | Optional parent hash (signed 64-bit integer) |
-| `block_mm_infos` | `Optional[List[Optional[Dict[str, Any]]]]` | Optional list of multimodal info for each block. Each item is either None or a dict with "mm_objects" key containing a list of `{"mm_hash": int, "offsets": [[start, end], ...]}` dicts. |
-| `lora_name` | `Optional[str]` | Optional LoRA adapter name for adapter-aware block hashing. |
-#### `publish_removed(block_hashes: List[int] = None)`
-
-*Source: [`dynamo/_core.pyi#L850`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L850)*
-
-Publish a KV removed event.
-
-Event IDs are managed internally by the publisher using a monotonic counter.
-
-<b>Parameters</b>
-
-| Parameter | Type | Description |
-| --- | --- | --- |
-| `block_hashes` | `List[int]` | List of block hashes to remove (signed 64-bit integers) |
-#### `shutdown()`
-
-*Source: [`dynamo/_core.pyi#L861`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L861)*
-
-Shuts down the event publisher, stopping any background tasks.
+python based AsyncEngine that handles HttpError exceptions from Python and
+converts them to the Rust version of HttpError
 
 </details>
 
@@ -936,49 +166,6 @@ Run the HTTP service.
 *Source: [`dynamo/_core.pyi#L897`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L897)*
 
 Shutdown the HTTP service by cancelling its internal token.
-
-</details>
-
-<details>
-<summary><strong>`PythonAsyncEngine` — Bridge a Python async generator onto Dynamo's AsyncEngine interface.</strong></summary>
-
-*Source: [`dynamo/_core.pyi#L903`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L903)*
-
-<b>Examples</b>
-
-```python
->>> import asyncio
->>> from dynamo._core import PythonAsyncEngine
->>> async def my_generator(request):
-...     yield {"text": "hello"}
->>> loop = asyncio.get_running_loop()
->>> engine = PythonAsyncEngine(my_generator, loop)
-```
-<b>Constructor</b>
-
-#### `__init__(generator: Any = None, event_loop: Any = None)`
-
-*Source: [`dynamo/_core.pyi#L916`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L916)*
-
-Wrap a Python generator and event loop for use with Dynamo services.
-
-<b>Parameters</b>
-
-| Parameter | Type | Default | Description |
-| --- | --- | --- | --- |
-| `generator` | `Any` | None |  |
-| `event_loop` | `Any` | None |  |
-
-
-</details>
-
-<details>
-<summary><strong>`HttpAsyncEngine` — An async engine for a distributed Dynamo http service. This is an extension of the</strong></summary>
-
-*Source: [`dynamo/_core.pyi#L922`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L922)*
-
-python based AsyncEngine that handles HttpError exceptions from Python and
-converts them to the Rust version of HttpError
 
 </details>
 
@@ -1126,410 +313,85 @@ Shutdown the KServe gRPC service by cancelling its internal token.
 </details>
 
 <details>
-<summary><strong>`ModelInput` — What type of request this model needs: Text, Tokens or Tensor</strong></summary>
+<summary><strong>`KvEventPublisher` — A KV event publisher will publish KV events corresponding to the component.</strong></summary>
 
-*Source: [`dynamo/_core.pyi#L1071`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1071)*
-
-<b>Examples</b>
-
-```python
->>> from dynamo._core import ModelInput
->>> input_type = ModelInput.Tokens
->>> input_type = ModelInput.Text
->>> input_type = ModelInput.Tensor
-```
-<b>Attributes</b>
-
-- `Text`: `ModelInput`
-- `Tokens`: `ModelInput`
-- `Tensor`: `ModelInput`
-
-
-</details>
-
-<details>
-<summary><strong>`ModelType` — What type of request this model needs: Chat, Completions, Embedding, TensorBased, Images, Audios, Videos, or Prefill</strong></summary>
-
-*Source: [`dynamo/_core.pyi#L1085`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1085)*
+*Source: [`dynamo/_core.pyi#L778`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L778)*
 
 <b>Examples</b>
 
 ```python
->>> from dynamo._core import ModelType
->>> model_type = ModelType.Chat | ModelType.Completions
->>> model_type = ModelType.TensorBased
->>> model_type = ModelType.Prefill
-```
-<b>Attributes</b>
-
-- `Chat`: `ModelType`
-- `Completions`: `ModelType`
-- `Embedding`: `ModelType`
-- `TensorBased`: `ModelType`
-- `Prefill`: `ModelType`
-- `Images`: `ModelType`
-- `Audios`: `ModelType`
-- `Videos`: `ModelType`
-
-<b>Methods</b>
-
-#### `supports_chat() -> bool`
-
-*Source: [`dynamo/_core.pyi#L1106`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1106)*
-
-Return True if this model type supports chat.
-
-</details>
-
-<details>
-<summary><strong>`RouterMode` — Router mode for load balancing requests across workers</strong></summary>
-
-*Source: [`dynamo/_core.pyi#L1110`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1110)*
-
-<b>Examples</b>
-
-```python
->>> from dynamo._core import RouterMode
->>> mode = RouterMode.RoundRobin
->>> mode = RouterMode.KV
->>> mode = RouterMode.Direct
-```
-<b>Attributes</b>
-
-- `RoundRobin`: `RouterMode`
-- `Random`: `RouterMode`
-- `KV`: `RouterMode`
-- `Direct`: `RouterMode`
-
-
-</details>
-
-<details>
-<summary><strong>`RouterConfig` — How to route the request</strong></summary>
-
-*Source: [`dynamo/_core.pyi#L1125`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1125)*
-
-<b>Examples</b>
-
-```python
->>> from dynamo._core import RouterConfig, RouterMode, KvRouterConfig
->>> config = RouterConfig(mode=RouterMode.RoundRobin)
->>> kv_config = KvRouterConfig(overlap_score_weight=0.5)
->>> config = RouterConfig(
-...     mode=RouterMode.KV,
-...     config=kv_config,
-...     active_decode_blocks_threshold=0.9,
-...     decode_fallback=True,
+>>> publisher = KvEventPublisher(
+...     endpoint=endpoint, kv_block_size=64, dp_rank=0,
+...     zmq_endpoint="tcp://127.0.0.1:5557", zmq_topic="",
 ... )
+>>> publisher.publish_stored(
+...     token_ids=[1, 2, 3, 4], num_block_tokens=[4],
+...     block_hashes=[123456],
+... )
+>>> publisher.publish_removed(block_hashes=[123456])
 ```
-<b>Attributes</b>
-
-- `router_mode`: `RouterMode`
-- `kv_router_config`: `KvRouterConfig`
-
 <b>Constructor</b>
 
-#### `__init__(mode: RouterMode = None, config: Optional[KvRouterConfig] = None, active_decode_blocks_threshold: Optional[float] = None, active_prefill_tokens_threshold: Optional[int] = None, active_prefill_tokens_threshold_frac: Optional[float] = None, decode_fallback: bool = False)`
+#### `__init__(endpoint: Endpoint = None, worker_id: int = 0, kv_block_size: int = 0, dp_rank: int = 0, enable_local_indexer: bool = False, zmq_endpoint: Optional[str] = None, zmq_topic: Optional[str] = None)`
 
-*Source: [`dynamo/_core.pyi#L1142`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1142)*
+*Source: [`dynamo/_core.pyi#L796`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L796)*
 
-Create a RouterConfig.
+Create a `KvEventPublisher` object.
+
+When zmq_endpoint is provided, the publisher subscribes to a ZMQ socket for
+incoming engine events (e.g. from SGLang/vLLM) and relays them to NATS.
+
+When zmq_endpoint is None, events are pushed manually via publish_stored/publish_removed.
 
 <b>Parameters</b>
 
 | Parameter | Type | Description |
 | --- | --- | --- |
-| `mode` | `RouterMode` | The router mode (RoundRobin, Random, KV, or Direct) |
-| `config` | `Optional[KvRouterConfig]` | Optional KV router configuration (used when mode is KV) |
-| `active_decode_blocks_threshold` | `Optional[float]` | Threshold percentage (0.0-1.0) for decode blocks busy detection |
-| `active_prefill_tokens_threshold` | `Optional[int]` | Literal token count threshold for prefill busy detection |
-| `active_prefill_tokens_threshold_frac` | `Optional[float]` | Fraction of max_num_batched_tokens for busy detection |
-| `decode_fallback` | `bool` | Allow falling back to decode-only mode when prefill workers are unavailable |
+| `endpoint` | `Endpoint` | The endpoint to extract component information from for event publishing |
+| `worker_id` | `int` | The worker ID (unused, inferred from endpoint) |
+| `kv_block_size` | `int` | The KV block size (must be > 0) |
+| `dp_rank` | `int` | The data parallel rank (defaults to 0) |
+| `enable_local_indexer` | `bool` | Enable worker-local KV indexer |
+| `zmq_endpoint` | `Optional[str]` | Optional ZMQ endpoint for relay mode (e.g. "tcp://127.0.0.1:5557") |
+| `zmq_topic` | `Optional[str]` | ZMQ topic to subscribe to (defaults to "" when zmq_endpoint is set) |
+<b>Methods</b>
 
-</details>
+#### `publish_stored(token_ids: List[int] = None, num_block_tokens: List[int] = None, block_hashes: List[int] = None, parent_hash: Optional[int] = None, block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None, lora_name: Optional[str] = None)`
 
-<details>
-<summary><strong>`KvRouterConfig` — Values for KV router</strong></summary>
+*Source: [`dynamo/_core.pyi#L824`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L824)*
 
-*Source: [`dynamo/_core.pyi#L1164`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1164)*
+Publish a KV stored event.
 
-<b>Examples</b>
-
-```python
->>> config = KvRouterConfig()
->>> config_custom = KvRouterConfig(
-...     overlap_score_weight=0.5,
-...     router_temperature=0.5,
-...     router_track_active_blocks=True,
-... )
-```
-<b>Constructor</b>
-
-#### `__init__(overlap_score_weight: float = 1.0, router_temperature: float = 0.0, use_kv_events: bool = True, durable_kv_events: bool = False, router_replica_sync: bool = False, router_track_active_blocks: bool = True, router_track_output_blocks: bool = False, router_assume_kv_reuse: bool = True, router_snapshot_threshold: Optional[int] = 1000000, router_reset_states: bool = False, router_ttl_secs: float = 120.0, router_max_tree_size: int = 1048576, router_prune_target_ratio: float = 0.8, router_queue_threshold: Optional[float] = None, router_event_threads: int = 4, router_enable_cache_control: bool = False)`
-
-*Source: [`dynamo/_core.pyi#L1177`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1177)*
-
-Create a KV router configuration.
+Event IDs are managed internally by the publisher using a monotonic counter.
 
 <b>Parameters</b>
 
 | Parameter | Type | Description |
 | --- | --- | --- |
-| `overlap_score_weight` | `float` | Weight for overlap score in worker selection (default: 1.0) |
-| `router_temperature` | `float` | Temperature for worker sampling via softmax (default: 0.0) |
-| `use_kv_events` | `bool` | Whether to use KV events from workers (default: True) |
-| `durable_kv_events` | `bool` | **Deprecated.** Enable durable KV events using NATS JetStream (default: False). This option will be removed in a future release. The event-plane subscriber (local_indexer mode) is now the recommended path. |
-| `router_replica_sync` | `bool` | Enable replica synchronization (default: False) |
-| `router_track_active_blocks` | `bool` | Track active blocks for load balancing (default: True) |
-| `router_track_output_blocks` | `bool` | Track output blocks during generation (default: False). When enabled, the router adds placeholder blocks as tokens are generated and applies fractional decay based on progress toward expected output sequence length (agent_hints.osl in nvext). |
-| `router_assume_kv_reuse` | `bool` | Assume KV cache reuse when tracking active blocks (default: True). When True, computes actual block hashes. When False, generates random hashes. |
-| `router_snapshot_threshold` | `Optional[int]` | Number of messages before snapshot (default: 1000000) |
-| `router_reset_states` | `bool` | Reset router state on startup (default: False) |
-| `router_ttl_secs` | `float` | TTL for blocks in seconds when not using KV events (default: 120.0) |
-| `router_max_tree_size` | `int` | Maximum tree size before pruning (default: 1048576, which is 2^20) |
-| `router_prune_target_ratio` | `float` | Target size ratio after pruning (default: 0.8) |
-| `router_queue_threshold` | `Optional[float]` | Queue threshold fraction for prefill token capacity (default: None). When set, requests are queued if all workers exceed this fraction of max_num_batched_tokens. Enables priority scheduling via latency_sensitivity hints. If None, queueing is disabled and all requests go directly to the scheduler. |
-| `router_event_threads` | `int` | Number of event processing threads (default: 4). When > 1, uses a concurrent radix tree with a thread pool. |
-| `router_enable_cache_control` | `bool` | Enable cache control (PIN with TTL) via the worker's cache_control service mesh endpoint (default: False). |
-
-</details>
-
-<details>
-<summary><strong>`LoRADownloader` — Unified interface for LoRA downloading and caching (local file:// and S3 s3:// URIs).</strong></summary>
-
-*Source: [`dynamo/_core.pyi#L1288`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1288)*
-
-<b>Constructor</b>
-
-#### `__init__(cache_path: Optional[str] = None)`
-
-*Source: [`dynamo/_core.pyi#L1291`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1291)*
-
-<b>Methods</b>
-
-#### `download_if_needed(lora_uri: str = None) -> Awaitable[str]`
-
-*Source: [`dynamo/_core.pyi#L1292`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1292)*
-
-#### `get_cache_path(cache_key: str = None) -> str`
-
-*Source: [`dynamo/_core.pyi#L1293`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1293)*
-
-#### `is_cached(cache_key: str = None) -> bool`
-
-*Source: [`dynamo/_core.pyi#L1294`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1294)*
-
-#### `validate_cached(cache_key: str = None) -> bool`
-
-*Source: [`dynamo/_core.pyi#L1295`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1295)*
-
-#### `uri_to_cache_key(uri: str = None) -> str`
-
-*Source: [`dynamo/_core.pyi#L1297`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1297)*
-
-
-</details>
-
-<details>
-<summary><strong>`MediaDecoder` — Media decoder for image and video preprocessing.</strong></summary>
-
-*Source: [`dynamo/_core.pyi#L1301`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1301)*
-
-<b>Constructor</b>
-
-#### `__init__()`
-
-*Source: [`dynamo/_core.pyi#L1304`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1304)*
-
-<b>Methods</b>
-
-#### `enable_image(decoder_options: Dict[str, Any] = None)`
-
-*Source: [`dynamo/_core.pyi#L1305`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1305)*
-
-
-</details>
-
-<details>
-<summary><strong>`MediaFetcher` — Media fetcher for loading remote image/video URLs.</strong></summary>
-
-*Source: [`dynamo/_core.pyi#L1308`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1308)*
-
-<b>Constructor</b>
-
-#### `__init__()`
-
-*Source: [`dynamo/_core.pyi#L1311`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1311)*
-
-<b>Methods</b>
-
-#### `user_agent(user_agent: str = None)`
-
-*Source: [`dynamo/_core.pyi#L1312`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1312)*
-
-#### `allow_direct_ip(allow: bool = None)`
-
-*Source: [`dynamo/_core.pyi#L1313`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1313)*
-
-#### `allow_direct_port(allow: bool = None)`
-
-*Source: [`dynamo/_core.pyi#L1314`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1314)*
-
-#### `allowed_media_domains(domains: List[str] = None)`
-
-*Source: [`dynamo/_core.pyi#L1315`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1315)*
-
-#### `timeout_ms(timeout_ms: int = None)`
-
-*Source: [`dynamo/_core.pyi#L1316`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1316)*
-
-
-</details>
-
-<details>
-<summary><strong>`EngineConfig` — Holds internal configuration for a Dynamo engine.</strong></summary>
-
-*Source: [`dynamo/_core.pyi#L1334`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1334)*
-
-<b>Examples</b>
-
-```python
->>> args = EntrypointArgs(engine_type=EngineType.Dynamic, model_path="/models/llama")
->>> engine_config = await make_engine(runtime, args)
->>> await run_input(runtime, "http", engine_config)
-```
-
-</details>
-
-<details>
-<summary><strong>`Layer` — A KV cache block layer</strong></summary>
-
-*Source: [`dynamo/_core.pyi#L1365`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1365)*
-
-
-</details>
-
-<details>
-<summary><strong>`Block` — A KV cache block</strong></summary>
-
-*Source: [`dynamo/_core.pyi#L1384`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1384)*
-
-<b>Examples</b>
-
-```python
->>> block = blocks[0]  # get first block from a BlockList
->>> num_layers = len(block)
->>> layer = block[0]
->>> all_layers = block.to_list()
-```
-<b>Methods</b>
-
-#### `to_list() -> List[Layer]`
-
-*Source: [`dynamo/_core.pyi#L1421`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1421)*
-
-Get a list of layers
-
-</details>
-
-<details>
-<summary><strong>`BlockList` — A list of KV cache blocks</strong></summary>
-
-*Source: [`dynamo/_core.pyi#L1440`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1440)*
-
-<b>Methods</b>
-
-#### `to_list() -> List[Block]`
-
-*Source: [`dynamo/_core.pyi#L1471`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1471)*
-
-Get a list of blocks
-
-</details>
-
-<details>
-<summary><strong>`BlockManager` — A KV cache block manager</strong></summary>
-
-*Source: [`dynamo/_core.pyi#L1477`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1477)*
-
-<b>Examples</b>
-
-```python
->>> bm = BlockManager(worker_id=0, num_layer=32, page_size=16, inner_dim=128)
->>> blocks = await bm.allocate_device_blocks(4)
->>> layer = blocks[0][0]  # first block, first layer
-```
-<b>Constructor</b>
-
-#### `__init__(worker_id: int = None, num_layer: int = None, page_size: int = None, inner_dim: int = None, dtype: Optional[str] = None, host_num_blocks: Optional[int] = None, device_num_blocks: Optional[int] = None, device_id: int = 0)`
-
-*Source: [`dynamo/_core.pyi#L1487`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1487)*
-
-Create a `BlockManager` object
+| `token_ids` | `List[int]` | List of token IDs |
+| `num_block_tokens` | `List[int]` | Number of tokens per block |
+| `block_hashes` | `List[int]` | List of block hashes (signed 64-bit integers) |
+| `parent_hash` | `Optional[int]` | Optional parent hash (signed 64-bit integer) |
+| `block_mm_infos` | `Optional[List[Optional[Dict[str, Any]]]]` | Optional list of multimodal info for each block. Each item is either None or a dict with "mm_objects" key containing a list of `{"mm_hash": int, "offsets": [[start, end], ...]}` dicts. |
+| `lora_name` | `Optional[str]` | Optional LoRA adapter name for adapter-aware block hashing. |
+#### `publish_removed(block_hashes: List[int] = None)`
+
+*Source: [`dynamo/_core.pyi#L850`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L850)*
+
+Publish a KV removed event.
+
+Event IDs are managed internally by the publisher using a monotonic counter.
 
 <b>Parameters</b>
 
-| Parameter | Type | Default | Description |
-| --- | --- | --- | --- |
-| `worker_id` | `int` | None |  |
-| `num_layer` | `int` | None |  |
-| `page_size` | `int` | None |  |
-| `inner_dim` | `int` | None |  |
-| `dtype` | `Optional[str]` | None |  |
-| `host_num_blocks` | `Optional[int]` | None |  |
-| `device_num_blocks` | `Optional[int]` | None |  |
-| `device_id` | `int` | 0 |  |
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `block_hashes` | `List[int]` | List of block hashes to remove (signed 64-bit integers) |
+#### `shutdown()`
 
-<b>Methods</b>
+*Source: [`dynamo/_core.pyi#L861`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L861)*
 
-#### `allocate_host_blocks_blocking(count: int = None) -> BlockList`
-
-*Source: [`dynamo/_core.pyi#L1522`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1522)*
-
-Allocate a list of host blocks (blocking call)
-
-<b>Parameters</b>
-
-| Parameter | Type | Default | Description |
-| --- | --- | --- | --- |
-| `count` | `int` | None |  |
-
-#### `allocate_host_blocks(count: int = None) -> BlockList`
-
-*Source: [`dynamo/_core.pyi#L1538`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1538)*
-
-Allocate a list of host blocks
-
-<b>Parameters</b>
-
-| Parameter | Type | Default | Description |
-| --- | --- | --- | --- |
-| `count` | `int` | None |  |
-
-#### `allocate_device_blocks_blocking(count: int = None) -> BlockList`
-
-*Source: [`dynamo/_core.pyi#L1554`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1554)*
-
-Allocate a list of device blocks (blocking call)
-
-<b>Parameters</b>
-
-| Parameter | Type | Default | Description |
-| --- | --- | --- | --- |
-| `count` | `int` | None |  |
-
-#### `allocate_device_blocks(count: int = None) -> BlockList`
-
-*Source: [`dynamo/_core.pyi#L1570`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1570)*
-
-Allocate a list of device blocks
-
-<b>Parameters</b>
-
-| Parameter | Type | Default | Description |
-| --- | --- | --- | --- |
-| `count` | `int` | None |  |
-
+Shuts down the event publisher, stopping any background tasks.
 
 </details>
 
@@ -1700,81 +562,1667 @@ tracking of active blocks and ensure accurate load balancing.
 </details>
 
 <details>
-<summary><strong>`EngineType` — Engine type for Dynamo workers</strong></summary>
+<summary><strong>`KvRouterConfig` — Values for KV router</strong></summary>
 
-*Source: [`dynamo/_core.pyi#L1786`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1786)*
-
-<b>Examples</b>
-
-```python
->>> from dynamo._core import EngineType
->>> engine = EngineType.Dynamic
->>> engine = EngineType.Echo
->>> engine = EngineType.Mocker
-```
-<b>Attributes</b>
-
-- `Echo`: `EngineType`
-- `Dynamic`: `EngineType`
-- `Mocker`: `EngineType`
-
-
-</details>
-
-<details>
-<summary><strong>`EntrypointArgs` — Settings to connect an input to a worker and run them.</strong></summary>
-
-*Source: [`dynamo/_core.pyi#L1800`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1800)*
-
-Use by `dynamo run`.
+*Source: [`dynamo/_core.pyi#L1164`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1164)*
 
 <b>Examples</b>
 
 ```python
->>> from dynamo._core import EntrypointArgs, EngineType, RouterConfig, RouterMode
->>> args = EntrypointArgs(
-...     engine_type=EngineType.Dynamic,
-...     model_path="/models/llama-3-8b",
-...     model_name="dyn://dynamo.backend.generate",
-...     http_port=8000,
-...     router_config=RouterConfig(mode=RouterMode.KV),
-... )
->>> mocker_args = EntrypointArgs(
-...     engine_type=EngineType.Mocker,
-...     model_path="/models/llama-3-8b",
-...     is_prefill=True,
+>>> config = KvRouterConfig()
+>>> config_custom = KvRouterConfig(
+...     overlap_score_weight=0.5,
+...     router_temperature=0.5,
+...     router_track_active_blocks=True,
 ... )
 ```
 <b>Constructor</b>
 
-#### `__init__(engine_type: EngineType = None, model_path: Optional[str] = None, model_name: Optional[str] = None, endpoint_id: Optional[str] = None, context_length: Optional[int] = None, template_file: Optional[str] = None, router_config: Optional[RouterConfig] = None, kv_cache_block_size: Optional[int] = None, http_host: Optional[str] = None, http_port: Optional[int] = None, http_metrics_port: Optional[int] = None, tls_cert_path: Optional[str] = None, tls_key_path: Optional[str] = None, extra_engine_args: Optional[str] = None, namespace: Optional[str] = None, is_prefill: bool = False, migration_limit: int = 0, chat_engine_factory: Optional[Callable] = None)`
+#### `__init__(overlap_score_weight: float = 1.0, router_temperature: float = 0.0, use_kv_events: bool = True, durable_kv_events: bool = False, router_replica_sync: bool = False, router_track_active_blocks: bool = True, router_track_output_blocks: bool = False, router_assume_kv_reuse: bool = True, router_snapshot_threshold: Optional[int] = 1000000, router_reset_states: bool = False, router_ttl_secs: float = 120.0, router_max_tree_size: int = 1048576, router_prune_target_ratio: float = 0.8, router_queue_threshold: Optional[float] = None, router_event_threads: int = 4, router_enable_cache_control: bool = False)`
 
-*Source: [`dynamo/_core.pyi#L1821`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1821)*
+*Source: [`dynamo/_core.pyi#L1177`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1177)*
 
-Create EntrypointArgs.
+Create a KV router configuration.
 
 <b>Parameters</b>
 
 | Parameter | Type | Description |
 | --- | --- | --- |
-| `engine_type` | `EngineType` | The type of engine to use |
-| `model_path` | `Optional[str]` | Path to the model directory on disk |
-| `model_name` | `Optional[str]` | Model name or dynamo endpoint (e.g. 'dyn://namespace.component.endpoint') |
-| `endpoint_id` | `Optional[str]` | Optional endpoint ID |
-| `context_length` | `Optional[int]` | Optional context length override |
-| `template_file` | `Optional[str]` | Optional path to a prompt template file |
-| `router_config` | `Optional[RouterConfig]` | Optional router configuration |
-| `kv_cache_block_size` | `Optional[int]` | Optional KV cache block size |
-| `http_host` | `Optional[str]` | HTTP host to bind to |
-| `http_port` | `Optional[int]` | HTTP port to bind to |
-| `http_metrics_port` | `Optional[int]` | HTTP metrics port (for gRPC service) |
-| `tls_cert_path` | `Optional[str]` | TLS certificate path (PEM format) |
-| `tls_key_path` | `Optional[str]` | TLS key path (PEM format) |
-| `extra_engine_args` | `Optional[str]` | Path to extra engine arguments file |
-| `namespace` | `Optional[str]` | Dynamo namespace for model discovery scoping |
-| `is_prefill` | `bool` | Whether this is a prefill worker |
-| `migration_limit` | `int` | Maximum number of request migrations (0=disabled) |
-| `chat_engine_factory` | `Optional[Callable]` | Optional Python chat completions engine factory callback |
+| `overlap_score_weight` | `float` | Weight for overlap score in worker selection (default: 1.0) |
+| `router_temperature` | `float` | Temperature for worker sampling via softmax (default: 0.0) |
+| `use_kv_events` | `bool` | Whether to use KV events from workers (default: True) |
+| `durable_kv_events` | `bool` | **Deprecated.** Enable durable KV events using NATS JetStream (default: False). This option will be removed in a future release. The event-plane subscriber (local_indexer mode) is now the recommended path. |
+| `router_replica_sync` | `bool` | Enable replica synchronization (default: False) |
+| `router_track_active_blocks` | `bool` | Track active blocks for load balancing (default: True) |
+| `router_track_output_blocks` | `bool` | Track output blocks during generation (default: False). When enabled, the router adds placeholder blocks as tokens are generated and applies fractional decay based on progress toward expected output sequence length (agent_hints.osl in nvext). |
+| `router_assume_kv_reuse` | `bool` | Assume KV cache reuse when tracking active blocks (default: True). When True, computes actual block hashes. When False, generates random hashes. |
+| `router_snapshot_threshold` | `Optional[int]` | Number of messages before snapshot (default: 1000000) |
+| `router_reset_states` | `bool` | Reset router state on startup (default: False) |
+| `router_ttl_secs` | `float` | TTL for blocks in seconds when not using KV events (default: 120.0) |
+| `router_max_tree_size` | `int` | Maximum tree size before pruning (default: 1048576, which is 2^20) |
+| `router_prune_target_ratio` | `float` | Target size ratio after pruning (default: 0.8) |
+| `router_queue_threshold` | `Optional[float]` | Queue threshold fraction for prefill token capacity (default: None). When set, requests are queued if all workers exceed this fraction of max_num_batched_tokens. Enables priority scheduling via latency_sensitivity hints. If None, queueing is disabled and all requests go directly to the scheduler. |
+| `router_event_threads` | `int` | Number of event processing threads (default: 4). When > 1, uses a concurrent radix tree with a thread pool. |
+| `router_enable_cache_control` | `bool` | Enable cache control (PIN with TTL) via the worker's cache_control service mesh endpoint (default: False). |
+
+</details>
+
+<details>
+<summary><strong>`LoRADownloader` — Unified interface for LoRA downloading and caching (local file:// and S3 s3:// URIs).</strong></summary>
+
+*Source: [`dynamo/_core.pyi#L1288`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1288)*
+
+<b>Constructor</b>
+
+#### `__init__(cache_path: Optional[str] = None)`
+
+*Source: [`dynamo/_core.pyi#L1291`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1291)*
+
+<b>Methods</b>
+
+#### `download_if_needed(lora_uri: str = None) -> Awaitable[str]`
+
+*Source: [`dynamo/_core.pyi#L1292`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1292)*
+
+#### `get_cache_path(cache_key: str = None) -> str`
+
+*Source: [`dynamo/_core.pyi#L1293`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1293)*
+
+#### `is_cached(cache_key: str = None) -> bool`
+
+*Source: [`dynamo/_core.pyi#L1294`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1294)*
+
+#### `validate_cached(cache_key: str = None) -> bool`
+
+*Source: [`dynamo/_core.pyi#L1295`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1295)*
+
+#### `uri_to_cache_key(uri: str = None) -> str`
+
+*Source: [`dynamo/_core.pyi#L1297`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1297)*
+
+
+</details>
+
+<details>
+<summary><strong>`MediaDecoder` — Media decoder for image and video preprocessing.</strong></summary>
+
+*Source: [`dynamo/_core.pyi#L1301`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1301)*
+
+<b>Constructor</b>
+
+#### `__init__()`
+
+*Source: [`dynamo/_core.pyi#L1304`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1304)*
+
+<b>Methods</b>
+
+#### `enable_image(decoder_options: Dict[str, Any] = None)`
+
+*Source: [`dynamo/_core.pyi#L1305`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1305)*
+
+
+</details>
+
+<details>
+<summary><strong>`MediaFetcher` — Media fetcher for loading remote image/video URLs.</strong></summary>
+
+*Source: [`dynamo/_core.pyi#L1308`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1308)*
+
+<b>Constructor</b>
+
+#### `__init__()`
+
+*Source: [`dynamo/_core.pyi#L1311`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1311)*
+
+<b>Methods</b>
+
+#### `user_agent(user_agent: str = None)`
+
+*Source: [`dynamo/_core.pyi#L1312`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1312)*
+
+#### `allow_direct_ip(allow: bool = None)`
+
+*Source: [`dynamo/_core.pyi#L1313`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1313)*
+
+#### `allow_direct_port(allow: bool = None)`
+
+*Source: [`dynamo/_core.pyi#L1314`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1314)*
+
+#### `allowed_media_domains(domains: List[str] = None)`
+
+*Source: [`dynamo/_core.pyi#L1315`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1315)*
+
+#### `timeout_ms(timeout_ms: int = None)`
+
+*Source: [`dynamo/_core.pyi#L1316`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1316)*
+
+
+</details>
+
+<details>
+<summary><strong>`ModelCardInstanceId` — Unique identifier for a worker instance: namespace, component, endpoint and instance_id.</strong></summary>
+
+*Source: [`dynamo/_core.pyi#L267`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L267)*
+
+The instance_id is not currently exposed in the Python bindings.
+<b>Methods</b>
+
+#### `triple() -> Tuple[str, str, str]`
+
+*Source: [`dynamo/_core.pyi#L272`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L272)*
+
+Triple of namespace, component and endpoint this worker is serving.
+
+</details>
+
+<details>
+<summary><strong>`ModelInput` — What type of request this model needs: Text, Tokens or Tensor</strong></summary>
+
+*Source: [`dynamo/_core.pyi#L1071`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1071)*
+
+<b>Examples</b>
+
+```python
+>>> from dynamo._core import ModelInput
+>>> input_type = ModelInput.Tokens
+>>> input_type = ModelInput.Text
+>>> input_type = ModelInput.Tensor
+```
+<b>Attributes</b>
+
+- `Text`: `ModelInput`
+- `Tokens`: `ModelInput`
+- `Tensor`: `ModelInput`
+
+
+</details>
+
+<details>
+<summary><strong>`ModelRuntimeConfig` — A model runtime configuration is a collection of runtime information</strong></summary>
+
+*Source: [`dynamo/_core.pyi#L487`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L487)*
+
+<b>Examples</b>
+
+```python
+>>> from dynamo._core import ModelRuntimeConfig
+>>> config = ModelRuntimeConfig()
+>>> config.total_kv_blocks = 2048
+>>> config.max_num_seqs = 256
+>>> config.max_num_batched_tokens = 8192
+>>> config.enable_local_indexer = True
+>>> config.tool_call_parser = "hermes"
+>>> config.set_engine_specific("tp_size", 4)
+```
+<b>Attributes</b>
+
+- `total_kv_blocks`: `int | None`
+- `max_num_seqs`: `int | None`
+- `max_num_batched_tokens`: `int | None`
+- `tool_call_parser`: `str | None`
+- `reasoning_parser`: `str | None`
+- `enable_local_indexer`: `bool`
+- `runtime_data`: `dict[str, Any]`
+- `tensor_model_config`: `Any | None`
+- `data_parallel_size`: `int`
+- `data_parallel_start_rank`: `int`
+
+<b>Constructor</b>
+
+#### `__init__()`
+
+*Source: [`dynamo/_core.pyi#L513`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L513)*
+
+<b>Methods</b>
+
+#### `set_engine_specific(key: str = None, value: Any = None)`
+
+*Source: [`dynamo/_core.pyi#L515`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L515)*
+
+Set an engine-specific runtime configuration value
+
+<b>Parameters</b>
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `key` | `str` | None |  |
+| `value` | `Any` | None |  |
+
+#### `get_engine_specific(key: str = None) -> Any | None`
+
+*Source: [`dynamo/_core.pyi#L519`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L519)*
+
+Get an engine-specific runtime configuration value
+
+<b>Parameters</b>
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `key` | `str` | None |  |
+
+#### `set_disaggregated_endpoint(bootstrap_host: str | None = None, bootstrap_port: int | None = None)`
+
+*Source: [`dynamo/_core.pyi#L523`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L523)*
+
+Set the disaggregated endpoint for the model
+
+<b>Parameters</b>
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `bootstrap_host` | `str | None` | None |  |
+| `bootstrap_port` | `int | None` | None |  |
+
+
+</details>
+
+<details>
+<summary><strong>`ModelType` — What type of request this model needs: Chat, Completions, Embedding, TensorBased, Images, Audios, Videos, or Prefill</strong></summary>
+
+*Source: [`dynamo/_core.pyi#L1085`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1085)*
+
+<b>Examples</b>
+
+```python
+>>> from dynamo._core import ModelType
+>>> model_type = ModelType.Chat | ModelType.Completions
+>>> model_type = ModelType.TensorBased
+>>> model_type = ModelType.Prefill
+```
+<b>Attributes</b>
+
+- `Chat`: `ModelType`
+- `Completions`: `ModelType`
+- `Embedding`: `ModelType`
+- `TensorBased`: `ModelType`
+- `Prefill`: `ModelType`
+- `Images`: `ModelType`
+- `Audios`: `ModelType`
+- `Videos`: `ModelType`
+
+<b>Methods</b>
+
+#### `supports_chat() -> bool`
+
+*Source: [`dynamo/_core.pyi#L1106`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1106)*
+
+Return True if this model type supports chat.
+
+</details>
+
+<details>
+<summary><strong>`OverlapScores` — A collection of prefix matching scores of workers for a given token ids.</strong></summary>
+
+*Source: [`dynamo/_core.pyi#L531`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L531)*
+
+'scores' is a map of worker id to the score which is the number of matching blocks.
+
+<b>Examples</b>
+
+```python
+>>> from dynamo._core import RadixTree
+>>> tree = RadixTree()
+>>> scores = tree.find_matches([42, 43])
+>>> worker_scores = scores.scores  # Dict[int, int]
+>>> freqs = scores.frequencies  # List[int]
+```
+<b>Attributes</b>
+
+- `scores`: `Dict[int, int]` -- Map of worker_id to the score which is the number of matching blocks.
+- `frequencies`: `List[int]` -- List of frequencies that the blocks have been accessed.
+
+
+</details>
+
+<details>
+<summary><strong>`PythonAsyncEngine` — Bridge a Python async generator onto Dynamo's AsyncEngine interface.</strong></summary>
+
+*Source: [`dynamo/_core.pyi#L903`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L903)*
+
+<b>Examples</b>
+
+```python
+>>> import asyncio
+>>> from dynamo._core import PythonAsyncEngine
+>>> async def my_generator(request):
+...     yield {"text": "hello"}
+>>> loop = asyncio.get_running_loop()
+>>> engine = PythonAsyncEngine(my_generator, loop)
+```
+<b>Constructor</b>
+
+#### `__init__(generator: Any = None, event_loop: Any = None)`
+
+*Source: [`dynamo/_core.pyi#L916`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L916)*
+
+Wrap a Python generator and event loop for use with Dynamo services.
+
+<b>Parameters</b>
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `generator` | `Any` | None |  |
+| `event_loop` | `Any` | None |  |
+
+
+</details>
+
+<details>
+<summary><strong>`RadixTree` — A RadixTree that tracks KV cache blocks and can find prefix matches for sequences.</strong></summary>
+
+*Source: [`dynamo/_core.pyi#L565`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L565)*
+
+Thread-safe: operations route to a dedicated background thread and long calls
+release the Python GIL.
+
+<b>Examples</b>
+
+```python
+>>> import json
+>>> from dynamo._core import RadixTree
+>>> tree = RadixTree()
+>>> tree_ttl = RadixTree(expiration_duration_secs=120.0)
+>>> event = {"event_id": 1, "data": {"stored": {"parent_hash": None,
+...     "blocks": [{"block_hash": 42, "tokens_hash": 42}]}}}
+>>> tree.apply_event(0, json.dumps(event).encode())
+>>> scores = tree.find_matches([42])
+>>> print(scores.scores)
+```
+<b>Constructor</b>
+
+#### `__init__(expiration_duration_secs: Optional[float] = None)`
+
+*Source: [`dynamo/_core.pyi#L584`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L584)*
+
+Create a new RadixTree instance.
+
+<b>Parameters</b>
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `expiration_duration_secs` | `Optional[float]` | Optional expiration duration in seconds for cached blocks.                     If None, blocks never expire. |
+<b>Methods</b>
+
+#### `find_matches(sequence: List[int] = None, early_exit: bool = False) -> OverlapScores`
+
+*Source: [`dynamo/_core.pyi#L594`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L594)*
+
+Find prefix matches for the given sequence of block hashes.
+
+<b>Parameters</b>
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `sequence` | `List[int]` | List of block hashes to find matches for |
+| `early_exit` | `bool` | If True, stop searching after finding the first match |
+
+<b>Returns:</b> `OverlapScores` -- OverlapScores containing worker matching scores and frequencies
+#### `apply_event(worker_id: int = None, kv_cache_event_bytes: bytes = None)`
+
+*Source: [`dynamo/_core.pyi#L609`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L609)*
+
+Apply a KV cache event to update the RadixTree state.
+
+<b>Parameters</b>
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `worker_id` | `int` | ID of the worker that generated the event |
+| `kv_cache_event_bytes` | `bytes` | Serialized KV cache event as bytes |
+
+<b>Raises</b>
+
+- `ValueError` -- If the event bytes cannot be deserialized
+#### `remove_worker(worker_id: int = None)`
+
+*Source: [`dynamo/_core.pyi#L622`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L622)*
+
+Remove all blocks associated with a specific worker.
+
+<b>Parameters</b>
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `worker_id` | `int` | ID of the worker to remove |
+#### `clear_all_blocks(worker_id: int = None)`
+
+*Source: [`dynamo/_core.pyi#L631`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L631)*
+
+Clear all blocks for a specific worker.
+
+<b>Parameters</b>
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `worker_id` | `int` | ID of the worker whose blocks should be cleared |
+#### `dump_tree_as_events() -> List[str]`
+
+*Source: [`dynamo/_core.pyi#L640`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L640)*
+
+Dump the current RadixTree state as a list of JSON-serialized KV cache events.
+
+<b>Returns:</b> `List[str]` -- List of JSON-serialized KV cache events as strings
+
+</details>
+
+<details>
+<summary><strong>`RouterConfig` — How to route the request</strong></summary>
+
+*Source: [`dynamo/_core.pyi#L1125`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1125)*
+
+<b>Examples</b>
+
+```python
+>>> from dynamo._core import RouterConfig, RouterMode, KvRouterConfig
+>>> config = RouterConfig(mode=RouterMode.RoundRobin)
+>>> kv_config = KvRouterConfig(overlap_score_weight=0.5)
+>>> config = RouterConfig(
+...     mode=RouterMode.KV,
+...     config=kv_config,
+...     active_decode_blocks_threshold=0.9,
+...     decode_fallback=True,
+... )
+```
+<b>Attributes</b>
+
+- `router_mode`: `RouterMode`
+- `kv_router_config`: `KvRouterConfig`
+
+<b>Constructor</b>
+
+#### `__init__(mode: RouterMode = None, config: Optional[KvRouterConfig] = None, active_decode_blocks_threshold: Optional[float] = None, active_prefill_tokens_threshold: Optional[int] = None, active_prefill_tokens_threshold_frac: Optional[float] = None, decode_fallback: bool = False)`
+
+*Source: [`dynamo/_core.pyi#L1142`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1142)*
+
+Create a RouterConfig.
+
+<b>Parameters</b>
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `mode` | `RouterMode` | The router mode (RoundRobin, Random, KV, or Direct) |
+| `config` | `Optional[KvRouterConfig]` | Optional KV router configuration (used when mode is KV) |
+| `active_decode_blocks_threshold` | `Optional[float]` | Threshold percentage (0.0-1.0) for decode blocks busy detection |
+| `active_prefill_tokens_threshold` | `Optional[int]` | Literal token count threshold for prefill busy detection |
+| `active_prefill_tokens_threshold_frac` | `Optional[float]` | Fraction of max_num_batched_tokens for busy detection |
+| `decode_fallback` | `bool` | Allow falling back to decode-only mode when prefill workers are unavailable |
+
+</details>
+
+<details>
+<summary><strong>`RouterMode` — Router mode for load balancing requests across workers</strong></summary>
+
+*Source: [`dynamo/_core.pyi#L1110`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1110)*
+
+<b>Examples</b>
+
+```python
+>>> from dynamo._core import RouterMode
+>>> mode = RouterMode.RoundRobin
+>>> mode = RouterMode.KV
+>>> mode = RouterMode.Direct
+```
+<b>Attributes</b>
+
+- `RoundRobin`: `RouterMode`
+- `Random`: `RouterMode`
+- `KV`: `RouterMode`
+- `Direct`: `RouterMode`
+
+
+</details>
+
+<details>
+<summary><strong>`WorkerMetricsPublisher` — A metrics publisher will provide metrics to the router for load monitoring.</strong></summary>
+
+*Source: [`dynamo/_core.pyi#L413`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L413)*
+
+<b>Examples</b>
+
+```python
+>>> publisher = WorkerMetricsPublisher()
+>>> await publisher.create_endpoint(endpoint)
+>>> publisher.publish(dp_rank=0, active_decode_blocks=128)
+```
+<b>Constructor</b>
+
+#### `__init__()`
+
+*Source: [`dynamo/_core.pyi#L425`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L425)*
+
+Create a `WorkerMetricsPublisher` object
+<b>Methods</b>
+
+#### `create_endpoint(endpoint: Endpoint = None)`
+
+*Source: [`dynamo/_core.pyi#L430`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L430)*
+
+Initialize the NATS endpoint for publishing worker metrics. Must be awaited.
+
+Extracts component information from the endpoint to set up metrics publishing
+on the correct NATS subject for routing decisions.
+
+<b>Parameters</b>
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `endpoint` | `Endpoint` | The endpoint to extract component information from for metrics publishing |
+#### `publish(dp_rank: Optional[int] = None, active_decode_blocks: int = None)`
+
+*Source: [`dynamo/_core.pyi#L441`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L441)*
+
+Publish worker metrics for load monitoring.
+
+<b>Parameters</b>
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `dp_rank` | `Optional[int]` | Data parallel rank of the worker (None defaults to 0) |
+| `active_decode_blocks` | `int` | Number of active KV cache blocks |
+
+</details>
+
+### Functions
+
+<details>
+<summary><strong>`compute_block_hash_for_seq()` — Compute block hashes for a sequence of tokens, optionally including multimodal metadata.</strong></summary>
+
+#### `compute_block_hash_for_seq(tokens: List[int] = None, kv_block_size: int = None, block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None, lora_name: Optional[str] = None) -> List[int]`
+
+*Source: [`dynamo/_core.pyi#L279`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L279)*
+
+When block_mm_infos is provided, the mm_hashes are included in the hash computation
+to ensure that blocks with identical tokens but different multimodal objects produce
+different hashes.
+
+<b>Parameters</b>
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `tokens` | `List[int]` | List of token IDs |
+| `kv_block_size` | `int` | Size of each block in tokens |
+| `block_mm_infos` | `Optional[List[Optional[Dict[str, Any]]]]` | Optional per-block multimodal metadata. Each element corresponds to a block            and should be None or a dict with structure:            \{                "mm_objects": [                    `{                        "mm_hash": int,  # Hash of the MM object                    }`                ]            \} |
+
+<b>Returns:</b> `List[int]` -- List of block hashes (one per block)
+
+<b>Examples</b>
+
+```python
+>>> tokens = [1, 2, 3, 4] * 8  # 32 tokens = 1 block
+>>> hashes = compute_block_hash_for_seq(tokens, 32)
+>>> mm_info = {"mm_objects": [{"mm_hash": 0xDEADBEEF}]}
+>>> hashes_mm = compute_block_hash_for_seq(tokens, 32, [mm_info])
+>>> hashes_lora = compute_block_hash_for_seq(tokens, 32, lora_name="my-adapter")
+```
+
+</details>
+
+<details>
+<summary><strong>`fetch_model()` — Download a model from Hugging Face, returning its local path.</strong></summary>
+
+#### `fetch_model(remote_name: str = None, ignore_weights: bool = False) -> str`
+
+*Source: [`dynamo/_core.pyi#L1318`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1318)*
+
+If `ignore_weights` is True, only fetches tokenizer and config files.
+
+<b>Parameters</b>
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `remote_name` | `str` | None |  |
+| `ignore_weights` | `bool` | False |  |
+
+
+<b>Examples</b>
+
+```python
+>>> model_path = await fetch_model("Qwen/Qwen3-0.6B")
+>>> tokenizer_path = await fetch_model("meta-llama/Llama-3-8B", ignore_weights=True)
+```
+
+</details>
+
+<details>
+<summary><strong>`lora_name_to_id()` — Generate a deterministic integer ID from a LoRA name using blake3 hash.</strong></summary>
+
+#### `lora_name_to_id(lora_name: str = None) -> int`
+
+*Source: [`dynamo/_core.pyi#L1284`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1284)*
+
+<b>Parameters</b>
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `lora_name` | `str` | None |  |
+
+
+</details>
+
+<details>
+<summary><strong>`make_engine()` — Make an engine matching the args</strong></summary>
+
+#### `make_engine(distributed_runtime: DistributedRuntime = None, args: EntrypointArgs = None) -> EngineConfig`
+
+*Source: [`dynamo/_core.pyi#L1344`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1344)*
+
+<b>Parameters</b>
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `distributed_runtime` | `DistributedRuntime` | None |  |
+| `args` | `EntrypointArgs` | None |  |
+
+
+<b>Examples</b>
+
+```python
+>>> from dynamo._core import EntrypointArgs, EngineType, make_engine
+>>> args = EntrypointArgs(engine_type=EngineType.Dynamic, model_path="/models/llama")
+>>> engine_config = await make_engine(runtime, args)
+```
+
+</details>
+
+<details>
+<summary><strong>`register_model()` — Attach the model at path to the given endpoint, and advertise it as model_type.</strong></summary>
+
+#### `register_model(model_input: ModelInput = None, model_type: ModelType = None, endpoint: Endpoint = None, model_path: str = None, model_name: Optional[str] = None, context_length: Optional[int] = None, kv_cache_block_size: Optional[int] = None, router_mode: Optional[RouterMode] = None, runtime_config: Optional[ModelRuntimeConfig] = None, user_data: Optional[Dict[str, Any]] = None, custom_template_path: Optional[str] = None, lora_name: Optional[str] = None, base_model_path: Optional[str] = None)`
+
+*Source: [`dynamo/_core.pyi#L1230`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1230)*
+
+LoRA Registration:
+    The `lora_name` and `base_model_path` parameters must be provided together or not at all.
+    Providing only one of these parameters will raise a ValueError.
+    - `lora_name`: The served model name for the LoRA model
+    - `base_model_path`: Path to the base model that the LoRA extends
+
+For TensorBased models (using ModelInput.Tensor), HuggingFace downloads are skipped
+and a minimal model card is registered directly. Use model_path as the display name
+for these models.
+
+<b>Parameters</b>
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `model_input` | `ModelInput` | None |  |
+| `model_type` | `ModelType` | None |  |
+| `endpoint` | `Endpoint` | None |  |
+| `model_path` | `str` | None |  |
+| `model_name` | `Optional[str]` | None |  |
+| `context_length` | `Optional[int]` | None |  |
+| `kv_cache_block_size` | `Optional[int]` | None |  |
+| `router_mode` | `Optional[RouterMode]` | None |  |
+| `runtime_config` | `Optional[ModelRuntimeConfig]` | None |  |
+| `user_data` | `Optional[Dict[str, Any]]` | None |  |
+| `custom_template_path` | `Optional[str]` | None |  |
+| `lora_name` | `Optional[str]` | None |  |
+| `base_model_path` | `Optional[str]` | None |  |
+
+
+<b>Examples</b>
+
+```python
+>>> from dynamo._core import ModelInput, ModelType, register_model
+>>> await register_model(
+...     ModelInput.Tokens,
+...     ModelType.Chat | ModelType.Completions,
+...     endpoint,
+...     "Qwen/Qwen3-0.6B",
+... )
+>>> await register_model(
+...     ModelInput.Tensor, ModelType.TensorBased,
+...     endpoint, "echo",
+...     runtime_config=runtime_config,
+... )
+```
+
+</details>
+
+<details>
+<summary><strong>`run_input()` — Start an engine, connect it to an input, and run until stopped.</strong></summary>
+
+#### `run_input(runtime: DistributedRuntime = None, input: str = None, engine_config: EngineConfig = None)`
+
+*Source: [`dynamo/_core.pyi#L1354`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1354)*
+
+<b>Parameters</b>
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `runtime` | `DistributedRuntime` | None |  |
+| `input` | `str` | None |  |
+| `engine_config` | `EngineConfig` | None |  |
+
+
+<b>Examples</b>
+
+```python
+>>> from dynamo._core import run_input
+>>> await run_input(runtime, "http", engine_config)
+>>> await run_input(runtime, "grpc", engine_config)
+>>> await run_input(runtime, "text", engine_config)
+```
+
+</details>
+
+<details>
+<summary><strong>`unregister_model()` — Unregister a model from the discovery system.</strong></summary>
+
+#### `unregister_model(endpoint: Endpoint = None, lora_name: Optional[str] = None)`
+
+*Source: [`dynamo/_core.pyi#L1273`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1273)*
+
+If lora_name is provided, unregisters a LoRA adapter instead of a base model.
+
+<b>Parameters</b>
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `endpoint` | `Endpoint` | None |  |
+| `lora_name` | `Optional[str]` | None |  |
+
+
+</details>
+
+---
+
+## dynamo.runtime
+
+Decorators and utilities for defining Dynamo workers and endpoints.
+
+### Classes
+
+<details>
+<summary><strong>`Client` — A client capable of calling served instances of an endpoint</strong></summary>
+
+*Source: [`dynamo/_core.pyi#L205`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L205)*
+
+<b>Examples</b>
+
+```python
+>>> client = await endpoint.client()
+>>> async for chunk in await client.round_robin("hello world"):
+...     print(chunk.get("data"))
+>>> async for resp in await client.random({"prompt": "hi"}):
+...     print(resp)
+```
+<b>Methods</b>
+
+#### `instance_ids() -> List[int]`
+
+*Source: [`dynamo/_core.pyi#L219`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L219)*
+
+Get list of current instance IDs.
+
+<b>Returns:</b> `List[int]` -- A list of currently available instance IDs
+#### `wait_for_instances() -> List[int]`
+
+*Source: [`dynamo/_core.pyi#L228`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L228)*
+
+Wait for instances to be available for work and return their IDs.
+
+<b>Returns:</b> `List[int]` -- A list of instance IDs that are available for work
+#### `random(request: JsonLike = None) -> AsyncIterator[JsonLike]`
+
+*Source: [`dynamo/_core.pyi#L237`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L237)*
+
+Pick a random instance of the endpoint and issue the request
+
+<b>Parameters</b>
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `request` | `JsonLike` | None |  |
+
+#### `round_robin(request: JsonLike = None) -> AsyncIterator[JsonLike]`
+
+*Source: [`dynamo/_core.pyi#L243`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L243)*
+
+Pick the next instance of the endpoint in a round-robin fashion
+
+<b>Parameters</b>
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `request` | `JsonLike` | None |  |
+
+#### `direct(request: JsonLike = None, instance: str = None) -> AsyncIterator[JsonLike]`
+
+*Source: [`dynamo/_core.pyi#L249`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L249)*
+
+Pick a specific instance of the endpoint
+
+<b>Parameters</b>
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `request` | `JsonLike` | None |  |
+| `instance` | `str` | None |  |
+
+#### `generate(request: JsonLike = None, annotated: bool | None = True, context: Context | None = None) -> AsyncIterator[JsonLike]`
+
+*Source: [`dynamo/_core.pyi#L255`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L255)*
+
+Generate a response from the endpoint
+
+<b>Parameters</b>
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `request` | `JsonLike` | None |  |
+| `annotated` | `bool | None` | True |  |
+| `context` | `Context | None` | None |  |
+
+
+</details>
+
+<details>
+<summary><strong>`Context` — Context wrapper around AsyncEngineContext for Python bindings.</strong></summary>
+
+*Source: [`dynamo/_core.pyi#L318`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L318)*
+
+Provides tracing and cancellation capabilities for request handling.
+
+<b>Examples</b>
+
+```python
+>>> from dynamo._core import Context
+>>> context = Context()
+>>> context = Context(id="req-42")
+>>> print(context.id())
+>>> context.stop_generating()
+>>> assert context.is_stopped()
+```
+<b>Attributes</b>
+
+- `trace_id`: `Optional[str]` -- Get the distributed trace ID if available.
+- `span_id`: `Optional[str]` -- Get the distributed span ID if available.
+- `parent_span_id`: `Optional[str]` -- Get the parent span ID if available.
+
+<b>Constructor</b>
+
+#### `__init__(id: Optional[str] = None)`
+
+*Source: [`dynamo/_core.pyi#L332`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L332)*
+
+Create a new Context instance.
+
+<b>Parameters</b>
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `id` | `Optional[str]` | Optional request ID. If None, a default ID will be generated. |
+<b>Methods</b>
+
+#### `is_stopped() -> bool`
+
+*Source: [`dynamo/_core.pyi#L341`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L341)*
+
+Check if the context has been stopped (synchronous).
+
+<b>Returns:</b> `bool` -- True if the context is stopped, False otherwise.
+#### `is_killed() -> bool`
+
+*Source: [`dynamo/_core.pyi#L350`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L350)*
+
+Check if the context has been killed (synchronous).
+
+<b>Returns:</b> `bool` -- True if the context is killed, False otherwise.
+#### `stop_generating()`
+
+*Source: [`dynamo/_core.pyi#L359`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L359)*
+
+Issue a stop generating signal to the context.
+#### `id() -> Optional[str]`
+
+*Source: [`dynamo/_core.pyi#L365`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L365)*
+
+Get the context ID.
+
+<b>Returns:</b> `Optional[str]` -- The context identifier string, or None if not set.
+#### `async_killed_or_stopped() -> asyncio.Future[bool]`
+
+*Source: [`dynamo/_core.pyi#L374`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L374)*
+
+Asynchronously wait until the context is killed or stopped.
+
+<b>Returns:</b> `asyncio.Future[bool]` -- True when the context is killed or stopped.
+
+</details>
+
+<details>
+<summary><strong>`DistributedRuntime` — The runtime object for dynamo applications</strong></summary>
+
+*Source: [`dynamo/_core.pyi#L48`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L48)*
+
+<b>Examples</b>
+
+```python
+>>> import asyncio
+>>> loop = asyncio.get_event_loop()
+>>> runtime = DistributedRuntime(loop, "etcd", "nats")
+>>> endpoint = runtime.endpoint("myns.backend.generate")
+>>> client = await endpoint.client()
+```
+<b>Constructor</b>
+
+#### `__new__(event_loop: Any = None, discovery_backend: str = None, request_plane: str = None, enable_nats: Optional[bool] = None) -> DistributedRuntime`
+
+*Source: [`dynamo/_core.pyi#L60`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L60)*
+
+Create a new DistributedRuntime.
+
+<b>Parameters</b>
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `event_loop` | `Any` | The asyncio event loop |
+| `discovery_backend` | `str` | Discovery backend ("kubernetes", "etcd", "file", or "mem") |
+| `request_plane` | `str` | Request plane transport ("tcp", "http", or "nats") |
+| `enable_nats` | `Optional[bool]` | Whether to enable NATS for KV events. Defaults to True.         If request_plane is "nats", NATS is always enabled.         Pass False to disable NATS initialization (e.g., for approximate routing). |
+<b>Methods</b>
+
+#### `endpoint(path: str = None) -> Endpoint`
+
+*Source: [`dynamo/_core.pyi#L80`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L80)*
+
+Get an endpoint directly by path.
+
+<b>Parameters</b>
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `path` | `str` | Endpoint path in format 'namespace.component.endpoint'   or 'dyn://namespace.component.endpoint' |
+
+<b>Returns:</b> `Endpoint` -- The requested endpoint
+
+<b>Raises</b>
+
+- `ValueError` -- If path format is invalid (not 3 parts separated by dots)
+- `Exception` -- If namespace or component creation fails
+
+<b>Example</b>
+
+endpoint = runtime.endpoint("demo.backend.generate")
+endpoint = runtime.endpoint("dyn://demo.backend.generate")
+#### `shutdown()`
+
+*Source: [`dynamo/_core.pyi#L101`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L101)*
+
+Shutdown the runtime by triggering the cancellation token
+#### `register_engine_route(route_name: str = None, callback: Callable[[dict], Awaitable[dict]] = None)`
+
+*Source: [`dynamo/_core.pyi#L107`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L107)*
+
+Register an async callback for /engine/`{route_name}` on the system status server.
+
+<b>Parameters</b>
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `route_name` | `str` | The route path (e.g., "start_profile" creates /engine/start_profile) |
+| `callback` | `Callable[[dict], Awaitable[dict]]` | Async function with signature: async def(body: dict) -> dict |
+
+<b>Example</b>
+
+async def start_profile(body: dict) -> dict:
+    await engine.start_profile(**body)
+    return `{"status": "ok", "message": "Profiling started"}`
+
+runtime.register_engine_route("start_profile", start_profile)
+
+The callback receives the JSON request body as a dict and should return
+a dict that will be serialized as the JSON response.
+
+For GET requests or empty bodies, an empty dict `{}` is passed.
+
+</details>
+
+<details>
+<summary><strong>`Endpoint` — An Endpoint is a single API endpoint</strong></summary>
+
+*Source: [`dynamo/_core.pyi#L134`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L134)*
+
+<b>Examples</b>
+
+```python
+>>> async def handler(request):
+...     yield {"text": "hello"}
+>>> endpoint = runtime.endpoint("dynamo.backend.generate")
+>>> await endpoint.serve_endpoint(handler)
+```
+<b>Attributes</b>
+
+- `metrics`: `PyRuntimeMetrics` -- Get a PyRuntimeMetrics helper for registering Prometheus metrics callbacks.
+
+<b>Methods</b>
+
+#### `serve_endpoint(handler: RequestHandler = None, graceful_shutdown: bool = True, metrics_labels: Optional[List[Tuple[str, str]]] = None, health_check_payload: Optional[Dict[str, Any]] = None)`
+
+*Source: [`dynamo/_core.pyi#L147`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L147)*
+
+Serve an endpoint discoverable by all connected clients at
+`{{ namespace }}/components/{{ component_name }}/endpoints/{{ endpoint_name }}`
+
+<b>Parameters</b>
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `handler` | `RequestHandler` | The request handler function |
+| `graceful_shutdown` | `bool` | Whether to wait for inflight requests to complete during shutdown (default: True) |
+| `metrics_labels` | `Optional[List[Tuple[str, str]]]` | Optional list of metrics labels to add to the metrics |
+| `health_check_payload` | `Optional[Dict[str, Any]]` | Optional dict containing the health check request payload                   that will be used to verify endpoint health |
+#### `client(router_mode: Optional[RouterMode] = None) -> Client`
+
+*Source: [`dynamo/_core.pyi#L161`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L161)*
+
+Create a `Client` capable of calling served instances of this endpoint.
+
+By default this uses round-robin routing when `router_mode` is not provided.
+
+<b>Parameters</b>
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `router_mode` | `Optional[RouterMode]` | None |  |
+
+#### `connection_id() -> int`
+
+*Source: [`dynamo/_core.pyi#L169`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L169)*
+
+Opaque unique ID for this worker. May change over worker lifetime.
+#### `unregister_endpoint_instance()`
+
+*Source: [`dynamo/_core.pyi#L185`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L185)*
+
+Unregister this endpoint instance from discovery.
+
+This removes the endpoint from the instances bucket, preventing the router
+from sending requests to this worker. Use this when a worker is sleeping
+and should not receive any requests.
+#### `register_endpoint_instance()`
+
+*Source: [`dynamo/_core.pyi#L195`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L195)*
+
+Re-register this endpoint instance to discovery.
+
+This adds the endpoint back to the instances bucket, allowing the router
+to send requests to this worker again. Use this when a worker wakes up
+and should start receiving requests.
+
+</details>
+
+<details>
+<summary><strong>`LogHandler` — Custom logging handler that sends log messages to the Rust env_logger</strong></summary>
+
+*Source: [`dynamo/runtime/logging.py#L26`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/runtime/logging.py#L26)*
+
+<b>Bases:</b> `logging.Handler`
+
+<b>Methods</b>
+
+#### `emit(record: logging.LogRecord = None)`
+
+*Source: [`dynamo/runtime/logging.py#L31`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/runtime/logging.py#L31)*
+
+Emit a log record
+
+<b>Parameters</b>
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `record` | `logging.LogRecord` | None |  |
+
+
+</details>
+
+<details>
+<summary><strong>`VllmColorFormatter` — Formatter that matches Rust tracing's compact colored output style.</strong></summary>
+
+*Source: [`dynamo/runtime/logging.py#L63`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/runtime/logging.py#L63)*
+
+Used for vLLM logs routed through a StreamHandler (bypassing the Rust
+bridge) so that VLLM_LOGGING_LEVEL is respected independently of DYN_LOG
+while still producing visually consistent colored output.
+<b>Bases:</b> `logging.Formatter`
+
+<b>Methods</b>
+
+#### `format(record: logging.LogRecord = None) -> str`
+
+*Source: [`dynamo/runtime/logging.py#L81`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/runtime/logging.py#L81)*
+
+
+</details>
+
+### Functions
+
+<details>
+<summary><strong>`dynamo_worker()` — Decorator that creates a DistributedRuntime and passes it to the worker function.</strong></summary>
+
+#### `dynamo_worker(enable_nats: bool = True)`
+
+*Source: [`dynamo/runtime/__init__.py#L19`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/runtime/__init__.py#L19)*
+
+<b>Parameters</b>
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `enable_nats` | `bool` | Whether to enable NATS for KV events. Defaults to True.         If request_plane is "nats", NATS is always enabled.         Pass False (via --no-kv-events flag) to disable NATS initialization. |
+
+<b>Examples</b>
+
+```python
+>>> from dynamo.runtime import DistributedRuntime, dynamo_worker
+>>>
+>>> @dynamo_worker()
+... async def worker(runtime: DistributedRuntime):
+...     endpoint = runtime.endpoint("dynamo.backend.generate")
+...     await endpoint.serve_endpoint(handler.generate)
+>>>
+>>> asyncio.run(worker())
+```
+
+</details>
+
+<details>
+<summary><strong>`dynamo_endpoint()` — Decorator that parses incoming requests into Pydantic models on an async generator endpoint.</strong></summary>
+
+#### `dynamo_endpoint(request_model: Union[Type[BaseModel], Type[Any]] = None, response_model: Type[BaseModel] = None) -> Callable`
+
+*Source: [`dynamo/runtime/__init__.py#L71`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/runtime/__init__.py#L71)*
+
+Currently validates and converts the *request* payload (JSON string or dict)
+into `012` is accepted for forward
+compatibility but response validation is not yet implemented.
+
+<b>Parameters</b>
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `request_model` | `Union[Type[BaseModel], Type[Any]]` | Pydantic model class (or Any) for incoming requests. |
+| `response_model` | `Type[BaseModel]` | Pydantic model class reserved for future response validation. |
+
+<b>Examples</b>
+
+```python
+>>> from pydantic import BaseModel
+>>> from dynamo.runtime import dynamo_endpoint
+>>>
+>>> class Request(BaseModel):
+...     data: str
+>>> class Response(BaseModel):
+...     char: str
+>>>
+>>> class RequestHandler:
+...     @dynamo_endpoint(Request, Response)
+...     async def generate(self, request):
+...         for char in request.data:
+...             yield char
+```
+
+</details>
+
+<details>
+<summary><strong>`log_message()` — Log a message from Python with file and line info</strong></summary>
+
+#### `log_message(level: str = None, message: str = None, module: str = None, file: str = None, line: int = None)`
+
+*Source: [`dynamo/_core.pyi#L20`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L20)*
+
+<b>Parameters</b>
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `level` | `str` | None |  |
+| `message` | `str` | None |  |
+| `module` | `str` | None |  |
+| `file` | `str` | None |  |
+| `line` | `int` | None |  |
+
+
+</details>
+
+<details>
+<summary><strong>`configure_logger()` — Called once to configure the Python logger to use the LogHandler</strong></summary>
+
+#### `configure_logger(service_name: str | None = None, worker_id: int | None = None)`
+
+*Source: [`dynamo/runtime/logging.py#L101`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/runtime/logging.py#L101)*
+
+<b>Parameters</b>
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `service_name` | `str | None` | None |  |
+| `worker_id` | `int | None` | None |  |
+
+
+</details>
+
+<details>
+<summary><strong>`configure_dynamo_logging()` — A single place to configure logging for Dynamo.</strong></summary>
+
+#### `configure_dynamo_logging(service_name: str | None = None, worker_id: int | None = None)`
+
+*Source: [`dynamo/runtime/logging.py#L130`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/runtime/logging.py#L130)*
+
+<b>Parameters</b>
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `service_name` | `str | None` | None |  |
+| `worker_id` | `int | None` | None |  |
+
+
+</details>
+
+<details>
+<summary><strong>`log_level_mapping()` — The DYN_LOG variable is set using &quot;debug&quot; or &quot;trace&quot; or &quot;info.</strong></summary>
+
+#### `log_level_mapping(level: str = None) -> int`
+
+*Source: [`dynamo/runtime/logging.py#L162`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/runtime/logging.py#L162)*
+
+This function maps those to the appropriate logging level and defaults to INFO
+if the variable is not set or a bad value.
+
+<b>Parameters</b>
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `level` | `str` | None |  |
+
+
+</details>
+
+<details>
+<summary><strong>`configure_sglang_logging()` — SGLang allows us to create a custom logging config file</strong></summary>
+
+#### `configure_sglang_logging(dyn_level: int = None)`
+
+*Source: [`dynamo/runtime/logging.py#L184`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/runtime/logging.py#L184)*
+
+<b>Parameters</b>
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `dyn_level` | `int` | None |  |
+
+
+</details>
+
+<details>
+<summary><strong>`configure_vllm_logging()` — Configure vLLM logging for the main process and subprocesses.</strong></summary>
+
+#### `configure_vllm_logging(dyn_level: int = None)`
+
+*Source: [`dynamo/runtime/logging.py#L216`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/runtime/logging.py#L216)*
+
+Main process: replaces vLLM's StreamHandler with a new StreamHandler that
+uses VllmColorFormatter and writes directly to stderr.  This bypasses the
+Rust LogHandler bridge so that VLLM_LOGGING_LEVEL is respected independently
+of DYN_LOG (the Rust bridge filters based on DYN_LOG).
+
+Subprocesses (EngineCore, workers): use vLLM's DEFAULT_LOGGING_CONFIG
+(StreamHandler to stderr) since the Rust runtime is not initialized there.
+Setting VLLM_CONFIGURE_LOGGING=1 without VLLM_LOGGING_CONFIG_PATH causes
+vLLM to use its built-in default config in spawned subprocesses.
+
+The dyn_level param is kept for signature compatibility but does not control
+the vLLM logger level. Use VLLM_LOGGING_LEVEL env var instead.
+
+<b>Parameters</b>
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `dyn_level` | `int` | None |  |
+
+
+</details>
+
+---
+
+## Core Bindings
+
+Low-level Rust-backed runtime, routing, KV cache, memory, and model management bindings.
+
+### Classes
+
+<details>
+<summary><strong>`RuntimeMetrics` — Helper class for registering Prometheus metrics callbacks on an Endpoint.</strong></summary>
+
+*Source: [`dynamo/prometheus_metrics.pyi#L12`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/prometheus_metrics.pyi#L12)*
+
+Provides utilities for integrating external metrics (e.g., from vLLM, SGLang, TensorRT-LLM).
+<b>Methods</b>
+
+#### `register_prometheus_expfmt_callback(callback: Callable[[], str] = None)`
+
+*Source: [`dynamo/prometheus_metrics.pyi#L19`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/prometheus_metrics.pyi#L19)*
+
+Register a Python callback that returns Prometheus exposition text.
+The returned text will be appended to the /metrics endpoint output.
+
+This allows you to integrate external Prometheus metrics (e.g. from vLLM)
+directly into the endpoint's metrics output.
+
+<b>Parameters</b>
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `callback` | `Callable[[], str]` | A callable that takes no arguments and returns a string      in Prometheus text exposition format |
+
+</details>
+
+<details>
+<summary><strong>`JsonLike` — Any PyObject which can be serialized to JSON</strong></summary>
+
+*Source: [`dynamo/_core.pyi#L34`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L34)*
+
+<b>Examples</b>
+
+```python
+>>> request: JsonLike = {"prompt": "Hello", "max_tokens": 128}
+>>> request_list: JsonLike = [1, 2, 3]
+>>> request_str: JsonLike = "plain text input"
+```
+
+</details>
+
+<details>
+<summary><strong>`KvIndexer` — A KV Indexer that tracks KV Events emitted by workers. Events include add_block and remove_block.</strong></summary>
+
+*Source: [`dynamo/_core.pyi#L649`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L649)*
+
+<b>Examples</b>
+
+```python
+>>> from dynamo._core import KvIndexer
+>>> indexer = KvIndexer(endpoint=endpoint, block_size=64)
+>>> scores = indexer.find_matches_for_request(token_ids=[1, 2, 3])
+>>> print(scores.scores)
+>>> print(indexer.block_size())
+```
+<b>Constructor</b>
+
+#### `__init__(endpoint: Endpoint = None, block_size: int = None)`
+
+*Source: [`dynamo/_core.pyi#L663`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L663)*
+
+Create a `KvIndexer` object
+
+<b>Parameters</b>
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `endpoint` | `Endpoint` | None |  |
+| `block_size` | `int` | None |  |
+
+<b>Methods</b>
+
+#### `find_matches(sequence: List[int] = None) -> OverlapScores`
+
+*Source: [`dynamo/_core.pyi#L668`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L668)*
+
+Find prefix matches for the given sequence of block hashes.
+
+<b>Parameters</b>
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `sequence` | `List[int]` | List of block hashes to find matches for |
+
+<b>Returns:</b> `OverlapScores` -- OverlapScores containing worker matching scores and frequencies
+#### `find_matches_for_request(token_ids: List[int] = None, lora_name: Optional[str] = None) -> OverlapScores`
+
+*Source: [`dynamo/_core.pyi#L680`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L680)*
+
+Return the overlapping scores of workers for the given token ids.
+
+<b>Parameters</b>
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `token_ids` | `List[int]` | None |  |
+| `lora_name` | `Optional[str]` | None |  |
+
+#### `block_size() -> int`
+
+*Source: [`dynamo/_core.pyi#L688`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L688)*
+
+Return the block size of the KV Indexer.
+
+</details>
+
+<details>
+<summary><strong>`ApproxKvIndexer` — An approximate KV Indexer that doesn't receive KV cache events from workers.</strong></summary>
+
+*Source: [`dynamo/_core.pyi#L694`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L694)*
+
+Instead, it relies on routing decisions with TTL-based expiration and pruning
+to estimate which blocks are cached on which workers.
+
+This is useful when:
+- Backend engines don't emit KV events
+- You want to reduce event processing overhead
+- Lower routing accuracy is acceptable
+
+<b>Examples</b>
+
+```python
+>>> from dynamo._core import ApproxKvIndexer
+>>> indexer = ApproxKvIndexer(
+...     endpoint=endpoint, kv_block_size=64,
+...     router_ttl_secs=120.0, router_max_tree_size=1048576,
+... )
+>>> scores = indexer.find_matches_for_request(token_ids=[1, 2, 3])
+>>> await indexer.process_routing_decision_for_request([1, 2, 3], worker_id=0)
+```
+<b>Constructor</b>
+
+#### `__init__(endpoint: Endpoint = None, kv_block_size: int = None, router_ttl_secs: float = 120.0, router_max_tree_size: int = 1048576, router_prune_target_ratio: float = 0.8)`
+
+*Source: [`dynamo/_core.pyi#L717`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L717)*
+
+Create an `ApproxKvIndexer` object
+
+<b>Parameters</b>
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `component` | `Any` | The component to associate with this indexer |
+| `kv_block_size` | `int` | The KV cache block size |
+| `router_ttl_secs` | `float` | TTL for blocks in seconds (default: 120.0) |
+| `router_max_tree_size` | `int` | Maximum tree size before pruning (default: 1048576, which is 2^20) |
+| `router_prune_target_ratio` | `float` | Target size ratio after pruning (default: 0.8) |
+<b>Methods</b>
+
+#### `find_matches_for_request(token_ids: List[int] = None, lora_name: Optional[str] = None) -> OverlapScores`
+
+*Source: [`dynamo/_core.pyi#L737`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L737)*
+
+Return the overlapping scores of workers for the given token ids.
+
+<b>Parameters</b>
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `token_ids` | `List[int]` | List of token IDs to find matches for |
+| `lora_name` | `Optional[str]` | Optional LoRA adapter name for adapter-aware matching |
+
+<b>Returns:</b> `OverlapScores` -- OverlapScores containing worker matching scores and frequencies
+#### `block_size() -> int`
+
+*Source: [`dynamo/_core.pyi#L752`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L752)*
+
+Return the block size of the ApproxKvIndexer.
+
+<b>Returns:</b> `int` -- The KV cache block size
+#### `process_routing_decision_for_request(tokens: List[int] = None, worker_id: int = None, dp_rank: int = 0)`
+
+*Source: [`dynamo/_core.pyi#L761`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L761)*
+
+Notify the indexer that a token sequence has been routed to a specific worker.
+
+This updates the indexer's internal state to track which blocks are likely
+cached on which workers based on routing decisions.
+
+<b>Parameters</b>
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `tokens` | `List[int]` | List of token IDs that were routed |
+| `worker_id` | `int` | The worker ID the request was routed to |
+| `dp_rank` | `int` | The data parallel rank (default: 0) |
+
+</details>
+
+<details>
+<summary><strong>`EngineConfig` — Holds internal configuration for a Dynamo engine.</strong></summary>
+
+*Source: [`dynamo/_core.pyi#L1334`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1334)*
+
+<b>Examples</b>
+
+```python
+>>> args = EntrypointArgs(engine_type=EngineType.Dynamic, model_path="/models/llama")
+>>> engine_config = await make_engine(runtime, args)
+>>> await run_input(runtime, "http", engine_config)
+```
+
+</details>
+
+<details>
+<summary><strong>`Layer` — A KV cache block layer</strong></summary>
+
+*Source: [`dynamo/_core.pyi#L1365`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1365)*
+
+
+</details>
+
+<details>
+<summary><strong>`Block` — A KV cache block</strong></summary>
+
+*Source: [`dynamo/_core.pyi#L1384`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1384)*
+
+<b>Examples</b>
+
+```python
+>>> block = blocks[0]  # get first block from a BlockList
+>>> num_layers = len(block)
+>>> layer = block[0]
+>>> all_layers = block.to_list()
+```
+<b>Methods</b>
+
+#### `to_list() -> List[Layer]`
+
+*Source: [`dynamo/_core.pyi#L1421`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1421)*
+
+Get a list of layers
+
+</details>
+
+<details>
+<summary><strong>`BlockList` — A list of KV cache blocks</strong></summary>
+
+*Source: [`dynamo/_core.pyi#L1440`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1440)*
+
+<b>Methods</b>
+
+#### `to_list() -> List[Block]`
+
+*Source: [`dynamo/_core.pyi#L1471`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1471)*
+
+Get a list of blocks
+
+</details>
+
+<details>
+<summary><strong>`BlockManager` — A KV cache block manager</strong></summary>
+
+*Source: [`dynamo/_core.pyi#L1477`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1477)*
+
+<b>Examples</b>
+
+```python
+>>> bm = BlockManager(worker_id=0, num_layer=32, page_size=16, inner_dim=128)
+>>> blocks = await bm.allocate_device_blocks(4)
+>>> layer = blocks[0][0]  # first block, first layer
+```
+<b>Constructor</b>
+
+#### `__init__(worker_id: int = None, num_layer: int = None, page_size: int = None, inner_dim: int = None, dtype: Optional[str] = None, host_num_blocks: Optional[int] = None, device_num_blocks: Optional[int] = None, device_id: int = 0)`
+
+*Source: [`dynamo/_core.pyi#L1487`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1487)*
+
+Create a `BlockManager` object
+
+<b>Parameters</b>
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `worker_id` | `int` | None |  |
+| `num_layer` | `int` | None |  |
+| `page_size` | `int` | None |  |
+| `inner_dim` | `int` | None |  |
+| `dtype` | `Optional[str]` | None |  |
+| `host_num_blocks` | `Optional[int]` | None |  |
+| `device_num_blocks` | `Optional[int]` | None |  |
+| `device_id` | `int` | 0 |  |
+
+<b>Methods</b>
+
+#### `allocate_host_blocks_blocking(count: int = None) -> BlockList`
+
+*Source: [`dynamo/_core.pyi#L1522`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1522)*
+
+Allocate a list of host blocks (blocking call)
+
+<b>Parameters</b>
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `count` | `int` | None |  |
+
+#### `allocate_host_blocks(count: int = None) -> BlockList`
+
+*Source: [`dynamo/_core.pyi#L1538`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1538)*
+
+Allocate a list of host blocks
+
+<b>Parameters</b>
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `count` | `int` | None |  |
+
+#### `allocate_device_blocks_blocking(count: int = None) -> BlockList`
+
+*Source: [`dynamo/_core.pyi#L1554`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1554)*
+
+Allocate a list of device blocks (blocking call)
+
+<b>Parameters</b>
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `count` | `int` | None |  |
+
+#### `allocate_device_blocks(count: int = None) -> BlockList`
+
+*Source: [`dynamo/_core.pyi#L1570`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1570)*
+
+Allocate a list of device blocks
+
+<b>Parameters</b>
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `count` | `int` | None |  |
+
 
 </details>
 
@@ -1930,26 +2378,6 @@ Return the runtime configuration as a dict.
 ### Functions
 
 <details>
-<summary><strong>`log_message()` — Log a message from Python with file and line info</strong></summary>
-
-#### `log_message(level: str = None, message: str = None, module: str = None, file: str = None, line: int = None)`
-
-*Source: [`dynamo/_core.pyi#L20`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L20)*
-
-<b>Parameters</b>
-
-| Parameter | Type | Default | Description |
-| --- | --- | --- | --- |
-| `level` | `str` | None |  |
-| `message` | `str` | None |  |
-| `module` | `str` | None |  |
-| `file` | `str` | None |  |
-| `line` | `int` | None |  |
-
-
-</details>
-
-<details>
 <summary><strong>`get_tool_parser_names()` — Get list of available tool parser names.</strong></summary>
 
 #### `get_tool_parser_names() -> list[str]`
@@ -1968,430 +2396,6 @@ Return the runtime configuration as a dict.
 
 
 </details>
-
-<details>
-<summary><strong>`compute_block_hash_for_seq()` — Compute block hashes for a sequence of tokens, optionally including multimodal metadata.</strong></summary>
-
-#### `compute_block_hash_for_seq(tokens: List[int] = None, kv_block_size: int = None, block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None, lora_name: Optional[str] = None) -> List[int]`
-
-*Source: [`dynamo/_core.pyi#L279`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L279)*
-
-When block_mm_infos is provided, the mm_hashes are included in the hash computation
-to ensure that blocks with identical tokens but different multimodal objects produce
-different hashes.
-
-<b>Parameters</b>
-
-| Parameter | Type | Description |
-| --- | --- | --- |
-| `tokens` | `List[int]` | List of token IDs |
-| `kv_block_size` | `int` | Size of each block in tokens |
-| `block_mm_infos` | `Optional[List[Optional[Dict[str, Any]]]]` | Optional per-block multimodal metadata. Each element corresponds to a block            and should be None or a dict with structure:            \{                "mm_objects": [                    `{                        "mm_hash": int,  # Hash of the MM object                    }`                ]            \} |
-
-<b>Returns:</b> `List[int]` -- List of block hashes (one per block)
-
-<b>Examples</b>
-
-```python
->>> tokens = [1, 2, 3, 4] * 8  # 32 tokens = 1 block
->>> hashes = compute_block_hash_for_seq(tokens, 32)
->>> mm_info = {"mm_objects": [{"mm_hash": 0xDEADBEEF}]}
->>> hashes_mm = compute_block_hash_for_seq(tokens, 32, [mm_info])
->>> hashes_lora = compute_block_hash_for_seq(tokens, 32, lora_name="my-adapter")
-```
-
-</details>
-
-<details>
-<summary><strong>`register_model()` — Attach the model at path to the given endpoint, and advertise it as model_type.</strong></summary>
-
-#### `register_model(model_input: ModelInput = None, model_type: ModelType = None, endpoint: Endpoint = None, model_path: str = None, model_name: Optional[str] = None, context_length: Optional[int] = None, kv_cache_block_size: Optional[int] = None, router_mode: Optional[RouterMode] = None, runtime_config: Optional[ModelRuntimeConfig] = None, user_data: Optional[Dict[str, Any]] = None, custom_template_path: Optional[str] = None, lora_name: Optional[str] = None, base_model_path: Optional[str] = None)`
-
-*Source: [`dynamo/_core.pyi#L1230`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1230)*
-
-LoRA Registration:
-    The `lora_name` and `base_model_path` parameters must be provided together or not at all.
-    Providing only one of these parameters will raise a ValueError.
-    - `lora_name`: The served model name for the LoRA model
-    - `base_model_path`: Path to the base model that the LoRA extends
-
-For TensorBased models (using ModelInput.Tensor), HuggingFace downloads are skipped
-and a minimal model card is registered directly. Use model_path as the display name
-for these models.
-
-<b>Parameters</b>
-
-| Parameter | Type | Default | Description |
-| --- | --- | --- | --- |
-| `model_input` | `ModelInput` | None |  |
-| `model_type` | `ModelType` | None |  |
-| `endpoint` | `Endpoint` | None |  |
-| `model_path` | `str` | None |  |
-| `model_name` | `Optional[str]` | None |  |
-| `context_length` | `Optional[int]` | None |  |
-| `kv_cache_block_size` | `Optional[int]` | None |  |
-| `router_mode` | `Optional[RouterMode]` | None |  |
-| `runtime_config` | `Optional[ModelRuntimeConfig]` | None |  |
-| `user_data` | `Optional[Dict[str, Any]]` | None |  |
-| `custom_template_path` | `Optional[str]` | None |  |
-| `lora_name` | `Optional[str]` | None |  |
-| `base_model_path` | `Optional[str]` | None |  |
-
-
-<b>Examples</b>
-
-```python
->>> from dynamo._core import ModelInput, ModelType, register_model
->>> await register_model(
-...     ModelInput.Tokens,
-...     ModelType.Chat | ModelType.Completions,
-...     endpoint,
-...     "Qwen/Qwen3-0.6B",
-... )
->>> await register_model(
-...     ModelInput.Tensor, ModelType.TensorBased,
-...     endpoint, "echo",
-...     runtime_config=runtime_config,
-... )
-```
-
-</details>
-
-<details>
-<summary><strong>`unregister_model()` — Unregister a model from the discovery system.</strong></summary>
-
-#### `unregister_model(endpoint: Endpoint = None, lora_name: Optional[str] = None)`
-
-*Source: [`dynamo/_core.pyi#L1273`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1273)*
-
-If lora_name is provided, unregisters a LoRA adapter instead of a base model.
-
-<b>Parameters</b>
-
-| Parameter | Type | Default | Description |
-| --- | --- | --- | --- |
-| `endpoint` | `Endpoint` | None |  |
-| `lora_name` | `Optional[str]` | None |  |
-
-
-</details>
-
-<details>
-<summary><strong>`lora_name_to_id()` — Generate a deterministic integer ID from a LoRA name using blake3 hash.</strong></summary>
-
-#### `lora_name_to_id(lora_name: str = None) -> int`
-
-*Source: [`dynamo/_core.pyi#L1284`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1284)*
-
-<b>Parameters</b>
-
-| Parameter | Type | Default | Description |
-| --- | --- | --- | --- |
-| `lora_name` | `str` | None |  |
-
-
-</details>
-
-<details>
-<summary><strong>`fetch_model()` — Download a model from Hugging Face, returning its local path.</strong></summary>
-
-#### `fetch_model(remote_name: str = None, ignore_weights: bool = False) -> str`
-
-*Source: [`dynamo/_core.pyi#L1318`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1318)*
-
-If `ignore_weights` is True, only fetches tokenizer and config files.
-
-<b>Parameters</b>
-
-| Parameter | Type | Default | Description |
-| --- | --- | --- | --- |
-| `remote_name` | `str` | None |  |
-| `ignore_weights` | `bool` | False |  |
-
-
-<b>Examples</b>
-
-```python
->>> model_path = await fetch_model("Qwen/Qwen3-0.6B")
->>> tokenizer_path = await fetch_model("meta-llama/Llama-3-8B", ignore_weights=True)
-```
-
-</details>
-
-<details>
-<summary><strong>`make_engine()` — Make an engine matching the args</strong></summary>
-
-#### `make_engine(distributed_runtime: DistributedRuntime = None, args: EntrypointArgs = None) -> EngineConfig`
-
-*Source: [`dynamo/_core.pyi#L1344`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1344)*
-
-<b>Parameters</b>
-
-| Parameter | Type | Default | Description |
-| --- | --- | --- | --- |
-| `distributed_runtime` | `DistributedRuntime` | None |  |
-| `args` | `EntrypointArgs` | None |  |
-
-
-<b>Examples</b>
-
-```python
->>> from dynamo._core import EntrypointArgs, EngineType, make_engine
->>> args = EntrypointArgs(engine_type=EngineType.Dynamic, model_path="/models/llama")
->>> engine_config = await make_engine(runtime, args)
-```
-
-</details>
-
-<details>
-<summary><strong>`run_input()` — Start an engine, connect it to an input, and run until stopped.</strong></summary>
-
-#### `run_input(runtime: DistributedRuntime = None, input: str = None, engine_config: EngineConfig = None)`
-
-*Source: [`dynamo/_core.pyi#L1354`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1354)*
-
-<b>Parameters</b>
-
-| Parameter | Type | Default | Description |
-| --- | --- | --- | --- |
-| `runtime` | `DistributedRuntime` | None |  |
-| `input` | `str` | None |  |
-| `engine_config` | `EngineConfig` | None |  |
-
-
-<b>Examples</b>
-
-```python
->>> from dynamo._core import run_input
->>> await run_input(runtime, "http", engine_config)
->>> await run_input(runtime, "grpc", engine_config)
->>> await run_input(runtime, "text", engine_config)
-```
-
-</details>
-
----
-
-## dynamo.runtime
-
-Decorators and utilities for defining Dynamo workers and endpoints.
-
-### Classes
-
-<details>
-<summary><strong>`LogHandler` — Custom logging handler that sends log messages to the Rust env_logger</strong></summary>
-
-*Source: [`dynamo/runtime/logging.py#L26`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/runtime/logging.py#L26)*
-
-<b>Bases:</b> `logging.Handler`
-
-<b>Methods</b>
-
-#### `emit(record: logging.LogRecord = None)`
-
-*Source: [`dynamo/runtime/logging.py#L31`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/runtime/logging.py#L31)*
-
-Emit a log record
-
-<b>Parameters</b>
-
-| Parameter | Type | Default | Description |
-| --- | --- | --- | --- |
-| `record` | `logging.LogRecord` | None |  |
-
-
-</details>
-
-<details>
-<summary><strong>`VllmColorFormatter` — Formatter that matches Rust tracing's compact colored output style.</strong></summary>
-
-*Source: [`dynamo/runtime/logging.py#L63`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/runtime/logging.py#L63)*
-
-Used for vLLM logs routed through a StreamHandler (bypassing the Rust
-bridge) so that VLLM_LOGGING_LEVEL is respected independently of DYN_LOG
-while still producing visually consistent colored output.
-<b>Bases:</b> `logging.Formatter`
-
-<b>Methods</b>
-
-#### `format(record: logging.LogRecord = None) -> str`
-
-*Source: [`dynamo/runtime/logging.py#L81`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/runtime/logging.py#L81)*
-
-
-</details>
-
-### Functions
-
-<details>
-<summary><strong>`dynamo_worker()` — Decorator that creates a DistributedRuntime and passes it to the worker function.</strong></summary>
-
-#### `dynamo_worker(enable_nats: bool = True)`
-
-*Source: [`dynamo/runtime/__init__.py#L19`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/runtime/__init__.py#L19)*
-
-<b>Parameters</b>
-
-| Parameter | Type | Description |
-| --- | --- | --- |
-| `enable_nats` | `bool` | Whether to enable NATS for KV events. Defaults to True.         If request_plane is "nats", NATS is always enabled.         Pass False (via --no-kv-events flag) to disable NATS initialization. |
-
-<b>Examples</b>
-
-```python
->>> from dynamo.runtime import DistributedRuntime, dynamo_worker
->>>
->>> @dynamo_worker()
-... async def worker(runtime: DistributedRuntime):
-...     endpoint = runtime.endpoint("dynamo.backend.generate")
-...     await endpoint.serve_endpoint(handler.generate)
->>>
->>> asyncio.run(worker())
-```
-
-</details>
-
-<details>
-<summary><strong>`dynamo_endpoint()` — Decorator that parses incoming requests into Pydantic models on an async generator endpoint.</strong></summary>
-
-#### `dynamo_endpoint(request_model: Union[Type[BaseModel], Type[Any]] = None, response_model: Type[BaseModel] = None) -> Callable`
-
-*Source: [`dynamo/runtime/__init__.py#L71`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/runtime/__init__.py#L71)*
-
-Currently validates and converts the *request* payload (JSON string or dict)
-into `012` is accepted for forward
-compatibility but response validation is not yet implemented.
-
-<b>Parameters</b>
-
-| Parameter | Type | Description |
-| --- | --- | --- |
-| `request_model` | `Union[Type[BaseModel], Type[Any]]` | Pydantic model class (or Any) for incoming requests. |
-| `response_model` | `Type[BaseModel]` | Pydantic model class reserved for future response validation. |
-
-<b>Examples</b>
-
-```python
->>> from pydantic import BaseModel
->>> from dynamo.runtime import dynamo_endpoint
->>>
->>> class Request(BaseModel):
-...     data: str
->>> class Response(BaseModel):
-...     char: str
->>>
->>> class RequestHandler:
-...     @dynamo_endpoint(Request, Response)
-...     async def generate(self, request):
-...         for char in request.data:
-...             yield char
-```
-
-</details>
-
-<details>
-<summary><strong>`configure_logger()` — Called once to configure the Python logger to use the LogHandler</strong></summary>
-
-#### `configure_logger(service_name: str | None = None, worker_id: int | None = None)`
-
-*Source: [`dynamo/runtime/logging.py#L101`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/runtime/logging.py#L101)*
-
-<b>Parameters</b>
-
-| Parameter | Type | Default | Description |
-| --- | --- | --- | --- |
-| `service_name` | `str | None` | None |  |
-| `worker_id` | `int | None` | None |  |
-
-
-</details>
-
-<details>
-<summary><strong>`configure_dynamo_logging()` — A single place to configure logging for Dynamo.</strong></summary>
-
-#### `configure_dynamo_logging(service_name: str | None = None, worker_id: int | None = None)`
-
-*Source: [`dynamo/runtime/logging.py#L130`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/runtime/logging.py#L130)*
-
-<b>Parameters</b>
-
-| Parameter | Type | Default | Description |
-| --- | --- | --- | --- |
-| `service_name` | `str | None` | None |  |
-| `worker_id` | `int | None` | None |  |
-
-
-</details>
-
-<details>
-<summary><strong>`log_level_mapping()` — The DYN_LOG variable is set using &quot;debug&quot; or &quot;trace&quot; or &quot;info.</strong></summary>
-
-#### `log_level_mapping(level: str = None) -> int`
-
-*Source: [`dynamo/runtime/logging.py#L162`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/runtime/logging.py#L162)*
-
-This function maps those to the appropriate logging level and defaults to INFO
-if the variable is not set or a bad value.
-
-<b>Parameters</b>
-
-| Parameter | Type | Default | Description |
-| --- | --- | --- | --- |
-| `level` | `str` | None |  |
-
-
-</details>
-
-<details>
-<summary><strong>`configure_sglang_logging()` — SGLang allows us to create a custom logging config file</strong></summary>
-
-#### `configure_sglang_logging(dyn_level: int = None)`
-
-*Source: [`dynamo/runtime/logging.py#L184`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/runtime/logging.py#L184)*
-
-<b>Parameters</b>
-
-| Parameter | Type | Default | Description |
-| --- | --- | --- | --- |
-| `dyn_level` | `int` | None |  |
-
-
-</details>
-
-<details>
-<summary><strong>`configure_vllm_logging()` — Configure vLLM logging for the main process and subprocesses.</strong></summary>
-
-#### `configure_vllm_logging(dyn_level: int = None)`
-
-*Source: [`dynamo/runtime/logging.py#L216`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/runtime/logging.py#L216)*
-
-Main process: replaces vLLM's StreamHandler with a new StreamHandler that
-uses VllmColorFormatter and writes directly to stderr.  This bypasses the
-Rust LogHandler bridge so that VLLM_LOGGING_LEVEL is respected independently
-of DYN_LOG (the Rust bridge filters based on DYN_LOG).
-
-Subprocesses (EngineCore, workers): use vLLM's DEFAULT_LOGGING_CONFIG
-(StreamHandler to stderr) since the Rust runtime is not initialized there.
-Setting VLLM_CONFIGURE_LOGGING=1 without VLLM_LOGGING_CONFIG_PATH causes
-vLLM to use its built-in default config in spawned subprocesses.
-
-The dyn_level param is kept for signature compatibility but does not control
-the vLLM logger level. Use VLLM_LOGGING_LEVEL env var instead.
-
-<b>Parameters</b>
-
-| Parameter | Type | Default | Description |
-| --- | --- | --- | --- |
-| `dyn_level` | `int` | None |  |
-
-
-</details>
-
----
-
-## dynamo.llm
-
-LLM serving pipeline components and engine integration.
 
 ---
 
@@ -5933,4 +5937,4 @@ Blocks the caller asynchronously until the operation has completed.
 
 ---
 
-*Source packages: `dynamo._core`, `dynamo.runtime`, `dynamo.llm`, `dynamo.frontend`, `dynamo.common`, `dynamo.health_check`, `dynamo.logits_processing`, `dynamo.planner`, `dynamo.router`, `dynamo.mocker`, `dynamo.nixl_connect`*
+*Source packages: `dynamo.llm`, `dynamo.runtime`, `dynamo._core`, `dynamo.frontend`, `dynamo.common`, `dynamo.health_check`, `dynamo.logits_processing`, `dynamo.planner`, `dynamo.router`, `dynamo.mocker`, `dynamo.nixl_connect`*
