@@ -35,12 +35,15 @@ def load_health_check_from_env(
         >>> import os
         >>> from dynamo.health_check import load_health_check_from_env
         >>>
+        >>> _prev = os.environ.get("DYN_HEALTH_CHECK_PAYLOAD")
         >>> os.environ["DYN_HEALTH_CHECK_PAYLOAD"] = (
         ...     '{"prompt": "test", "max_tokens": 1}'
         ... )
         >>> payload = load_health_check_from_env()
         >>> payload
         {'prompt': 'test', 'max_tokens': 1}
+        >>> if _prev is None: os.environ.pop("DYN_HEALTH_CHECK_PAYLOAD", None)
+        ... else: os.environ["DYN_HEALTH_CHECK_PAYLOAD"] = _prev
 
     Returns:
         Dict containing the health check payload, or None if not set.
@@ -81,8 +84,10 @@ class HealthCheckPayload:
     Environment variable DYN_HEALTH_CHECK_PAYLOAD can override the default.
 
     Examples:
+        >>> import os
         >>> from dynamo.health_check import HealthCheckPayload
         >>>
+        >>> os.environ.pop("DYN_HEALTH_CHECK_PAYLOAD", None)
         >>> class MyBackendHealthCheck(HealthCheckPayload):
         ...     def __init__(self):
         ...         self.default_payload = {

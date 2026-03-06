@@ -12,16 +12,16 @@ This page documents the public Python API for NVIDIA Dynamo. Classes and functio
 | Name | Description |
 | --- | --- |
 | [`Core Bindings`](#core-bindings) | Low-level Rust-backed runtime, routing, KV cache, memory, and model management bindings. |
-| [`dynamo.runtime`](#dynamo.runtime) | Decorators and utilities for defining Dynamo workers and endpoints. |
-| [`dynamo.llm`](#dynamo.llm) | LLM serving pipeline components and engine integration. |
-| [`dynamo.frontend`](#dynamo.frontend) | HTTP frontend configuration and OpenAI-compatible API gateway. |
-| [`dynamo.common`](#dynamo.common) | Shared configuration, constants, storage, and utility functions. |
-| [`dynamo.health_check`](#dynamo.health_check) | Health check payload and environment-based configuration. |
-| [`dynamo.logits_processing`](#dynamo.logits_processing) | Custom logits processing for LLM token generation. |
-| [`dynamo.planner`](#dynamo.planner) | Scaling connectors and decision types for the Dynamo Planner. |
-| [`dynamo.router`](#dynamo.router) | Request routing configuration and argument groups. |
-| [`dynamo.mocker`](#dynamo.mocker) | Mock engine for testing without GPU resources. |
-| [`dynamo.nixl_connect`](#dynamo.nixl_connect) | RDMA-based data transfer operations via the NIXL library. |
+| [`dynamo.runtime`](#dynamoruntime) | Decorators and utilities for defining Dynamo workers and endpoints. |
+| [`dynamo.llm`](#dynamollm) | LLM serving pipeline components and engine integration. |
+| [`dynamo.frontend`](#dynamofrontend) | HTTP frontend configuration and OpenAI-compatible API gateway. |
+| [`dynamo.common`](#dynamocommon) | Shared configuration, constants, storage, and utility functions. |
+| [`dynamo.health_check`](#dynamohealth_check) | Health check payload and environment-based configuration. |
+| [`dynamo.logits_processing`](#dynamologits_processing) | Custom logits processing for LLM token generation. |
+| [`dynamo.planner`](#dynamoplanner) | Scaling connectors and decision types for the Dynamo Planner. |
+| [`dynamo.router`](#dynamorouter) | Request routing configuration and argument groups. |
+| [`dynamo.mocker`](#dynamomocker) | Mock engine for testing without GPU resources. |
+| [`dynamo.nixl_connect`](#dynamonixl_connect) | RDMA-based data transfer operations via the NIXL library. |
 
 ---
 
@@ -34,14 +34,14 @@ Low-level Rust-backed runtime, routing, KV cache, memory, and model management b
 <details>
 <summary><strong>`RuntimeMetrics` — Helper class for registering Prometheus metrics callbacks on an Endpoint.</strong></summary>
 
-*Source: [`dynamo/prometheus_metrics.pyi#L12`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/prometheus_metrics.pyi#L12)*
+*Source: [`dynamo/prometheus_metrics.pyi#L12`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/prometheus_metrics.pyi#L12)*
 
 Provides utilities for integrating external metrics (e.g., from vLLM, SGLang, TensorRT-LLM).
 <b>Methods</b>
 
-#### `register_prometheus_expfmt_callback(callback: Callable[[], str])`
+#### `register_prometheus_expfmt_callback(callback: Callable[[], str] = None)`
 
-*Source: [`dynamo/prometheus_metrics.pyi#L19`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/prometheus_metrics.pyi#L19)*
+*Source: [`dynamo/prometheus_metrics.pyi#L19`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/prometheus_metrics.pyi#L19)*
 
 Register a Python callback that returns Prometheus exposition text.
 The returned text will be appended to the /metrics endpoint output.
@@ -60,7 +60,7 @@ directly into the endpoint's metrics output.
 <details>
 <summary><strong>`JsonLike` — Any PyObject which can be serialized to JSON</strong></summary>
 
-*Source: [`dynamo/_core.pyi#L34`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L34)*
+*Source: [`dynamo/_core.pyi#L34`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L34)*
 
 <b>Examples</b>
 
@@ -75,7 +75,7 @@ directly into the endpoint's metrics output.
 <details>
 <summary><strong>`DistributedRuntime` — The runtime object for dynamo applications</strong></summary>
 
-*Source: [`dynamo/_core.pyi#L48`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L48)*
+*Source: [`dynamo/_core.pyi#L48`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L48)*
 
 <b>Examples</b>
 
@@ -88,9 +88,9 @@ directly into the endpoint's metrics output.
 ```
 <b>Constructor</b>
 
-#### `__new__(event_loop: Any, discovery_backend: str, request_plane: str, enable_nats: Optional[bool] = None) -> DistributedRuntime`
+#### `__new__(event_loop: Any = None, discovery_backend: str = None, request_plane: str = None, enable_nats: Optional[bool] = None) -> DistributedRuntime`
 
-*Source: [`dynamo/_core.pyi#L60`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L60)*
+*Source: [`dynamo/_core.pyi#L60`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L60)*
 
 Create a new DistributedRuntime.
 
@@ -104,9 +104,9 @@ Create a new DistributedRuntime.
 | `enable_nats` | `Optional[bool]` | Whether to enable NATS for KV events. Defaults to True.         If request_plane is "nats", NATS is always enabled.         Pass False to disable NATS initialization (e.g., for approximate routing). |
 <b>Methods</b>
 
-#### `endpoint(path: str) -> Endpoint`
+#### `endpoint(path: str = None) -> Endpoint`
 
-*Source: [`dynamo/_core.pyi#L80`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L80)*
+*Source: [`dynamo/_core.pyi#L80`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L80)*
 
 Get an endpoint directly by path.
 
@@ -129,12 +129,12 @@ endpoint = runtime.endpoint("demo.backend.generate")
 endpoint = runtime.endpoint("dyn://demo.backend.generate")
 #### `shutdown()`
 
-*Source: [`dynamo/_core.pyi#L101`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L101)*
+*Source: [`dynamo/_core.pyi#L101`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L101)*
 
 Shutdown the runtime by triggering the cancellation token
-#### `register_engine_route(route_name: str, callback: Callable[[dict], Awaitable[dict]])`
+#### `register_engine_route(route_name: str = None, callback: Callable[[dict], Awaitable[dict]] = None)`
 
-*Source: [`dynamo/_core.pyi#L107`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L107)*
+*Source: [`dynamo/_core.pyi#L107`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L107)*
 
 Register an async callback for /engine/`{route_name}` on the system status server.
 
@@ -163,16 +163,15 @@ For GET requests or empty bodies, an empty dict `{}` is passed.
 <details>
 <summary><strong>`Endpoint` — An Endpoint is a single API endpoint</strong></summary>
 
-*Source: [`dynamo/_core.pyi#L134`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L134)*
+*Source: [`dynamo/_core.pyi#L134`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L134)*
 
 <b>Examples</b>
 
 ```python
+>>> async def handler(request):
+...     yield {"text": "hello"}
 >>> endpoint = runtime.endpoint("dynamo.backend.generate")
->>> await endpoint.serve_endpoint(RequestHandler().generate)
->>> client = await endpoint.client()
->>> async for resp in await client.round_robin("hello"):
-...     print(resp)
+>>> await endpoint.serve_endpoint(handler)
 ```
 <b>Attributes</b>
 
@@ -180,9 +179,9 @@ For GET requests or empty bodies, an empty dict `{}` is passed.
 
 <b>Methods</b>
 
-#### `serve_endpoint(handler: RequestHandler, graceful_shutdown: bool = True, metrics_labels: Optional[List[Tuple[str, str]]] = None, health_check_payload: Optional[Dict[str, Any]] = None)`
+#### `serve_endpoint(handler: RequestHandler = None, graceful_shutdown: bool = True, metrics_labels: Optional[List[Tuple[str, str]]] = None, health_check_payload: Optional[Dict[str, Any]] = None)`
 
-*Source: [`dynamo/_core.pyi#L148`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L148)*
+*Source: [`dynamo/_core.pyi#L147`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L147)*
 
 Serve an endpoint discoverable by all connected clients at
 `{{ namespace }}/components/{{ component_name }}/endpoints/{{ endpoint_name }}`
@@ -197,7 +196,7 @@ Serve an endpoint discoverable by all connected clients at
 | `health_check_payload` | `Optional[Dict[str, Any]]` | Optional dict containing the health check request payload                   that will be used to verify endpoint health |
 #### `client(router_mode: Optional[RouterMode] = None) -> Client`
 
-*Source: [`dynamo/_core.pyi#L162`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L162)*
+*Source: [`dynamo/_core.pyi#L161`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L161)*
 
 Create a `Client` capable of calling served instances of this endpoint.
 
@@ -211,12 +210,12 @@ By default this uses round-robin routing when `router_mode` is not provided.
 
 #### `connection_id() -> int`
 
-*Source: [`dynamo/_core.pyi#L170`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L170)*
+*Source: [`dynamo/_core.pyi#L169`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L169)*
 
 Opaque unique ID for this worker. May change over worker lifetime.
 #### `unregister_endpoint_instance()`
 
-*Source: [`dynamo/_core.pyi#L186`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L186)*
+*Source: [`dynamo/_core.pyi#L185`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L185)*
 
 Unregister this endpoint instance from discovery.
 
@@ -225,7 +224,7 @@ from sending requests to this worker. Use this when a worker is sleeping
 and should not receive any requests.
 #### `register_endpoint_instance()`
 
-*Source: [`dynamo/_core.pyi#L196`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L196)*
+*Source: [`dynamo/_core.pyi#L195`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L195)*
 
 Re-register this endpoint instance to discovery.
 
@@ -238,7 +237,7 @@ and should start receiving requests.
 <details>
 <summary><strong>`Client` — A client capable of calling served instances of an endpoint</strong></summary>
 
-*Source: [`dynamo/_core.pyi#L206`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L206)*
+*Source: [`dynamo/_core.pyi#L205`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L205)*
 
 <b>Examples</b>
 
@@ -253,21 +252,21 @@ and should start receiving requests.
 
 #### `instance_ids() -> List[int]`
 
-*Source: [`dynamo/_core.pyi#L220`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L220)*
+*Source: [`dynamo/_core.pyi#L219`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L219)*
 
 Get list of current instance IDs.
 
 <b>Returns:</b> `List[int]` -- A list of currently available instance IDs
 #### `wait_for_instances() -> List[int]`
 
-*Source: [`dynamo/_core.pyi#L229`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L229)*
+*Source: [`dynamo/_core.pyi#L228`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L228)*
 
 Wait for instances to be available for work and return their IDs.
 
 <b>Returns:</b> `List[int]` -- A list of instance IDs that are available for work
-#### `random(request: JsonLike) -> AsyncIterator[JsonLike]`
+#### `random(request: JsonLike = None) -> AsyncIterator[JsonLike]`
 
-*Source: [`dynamo/_core.pyi#L238`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L238)*
+*Source: [`dynamo/_core.pyi#L237`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L237)*
 
 Pick a random instance of the endpoint and issue the request
 
@@ -275,11 +274,11 @@ Pick a random instance of the endpoint and issue the request
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
-| `request` | `JsonLike` |  |  |
+| `request` | `JsonLike` | None |  |
 
-#### `round_robin(request: JsonLike) -> AsyncIterator[JsonLike]`
+#### `round_robin(request: JsonLike = None) -> AsyncIterator[JsonLike]`
 
-*Source: [`dynamo/_core.pyi#L244`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L244)*
+*Source: [`dynamo/_core.pyi#L243`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L243)*
 
 Pick the next instance of the endpoint in a round-robin fashion
 
@@ -287,11 +286,11 @@ Pick the next instance of the endpoint in a round-robin fashion
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
-| `request` | `JsonLike` |  |  |
+| `request` | `JsonLike` | None |  |
 
-#### `direct(request: JsonLike, instance: str) -> AsyncIterator[JsonLike]`
+#### `direct(request: JsonLike = None, instance: str = None) -> AsyncIterator[JsonLike]`
 
-*Source: [`dynamo/_core.pyi#L250`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L250)*
+*Source: [`dynamo/_core.pyi#L249`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L249)*
 
 Pick a specific instance of the endpoint
 
@@ -299,12 +298,12 @@ Pick a specific instance of the endpoint
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
-| `request` | `JsonLike` |  |  |
-| `instance` | `str` |  |  |
+| `request` | `JsonLike` | None |  |
+| `instance` | `str` | None |  |
 
-#### `generate(request: JsonLike, annotated: bool | None = True, context: Context | None = None) -> AsyncIterator[JsonLike]`
+#### `generate(request: JsonLike = None, annotated: bool | None = True, context: Context | None = None) -> AsyncIterator[JsonLike]`
 
-*Source: [`dynamo/_core.pyi#L256`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L256)*
+*Source: [`dynamo/_core.pyi#L255`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L255)*
 
 Generate a response from the endpoint
 
@@ -312,7 +311,7 @@ Generate a response from the endpoint
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
-| `request` | `JsonLike` |  |  |
+| `request` | `JsonLike` | None |  |
 | `annotated` | `bool | None` | True |  |
 | `context` | `Context | None` | None |  |
 
@@ -322,14 +321,14 @@ Generate a response from the endpoint
 <details>
 <summary><strong>`ModelCardInstanceId` — Unique identifier for a worker instance: namespace, component, endpoint and instance_id.</strong></summary>
 
-*Source: [`dynamo/_core.pyi#L268`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L268)*
+*Source: [`dynamo/_core.pyi#L267`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L267)*
 
 The instance_id is not currently exposed in the Python bindings.
 <b>Methods</b>
 
 #### `triple() -> Tuple[str, str, str]`
 
-*Source: [`dynamo/_core.pyi#L273`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L273)*
+*Source: [`dynamo/_core.pyi#L272`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L272)*
 
 Triple of namespace, component and endpoint this worker is serving.
 
@@ -338,7 +337,7 @@ Triple of namespace, component and endpoint this worker is serving.
 <details>
 <summary><strong>`Context` — Context wrapper around AsyncEngineContext for Python bindings.</strong></summary>
 
-*Source: [`dynamo/_core.pyi#L319`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L319)*
+*Source: [`dynamo/_core.pyi#L318`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L318)*
 
 Provides tracing and cancellation capabilities for request handling.
 
@@ -362,7 +361,7 @@ Provides tracing and cancellation capabilities for request handling.
 
 #### `__init__(id: Optional[str] = None)`
 
-*Source: [`dynamo/_core.pyi#L333`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L333)*
+*Source: [`dynamo/_core.pyi#L332`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L332)*
 
 Create a new Context instance.
 
@@ -375,33 +374,33 @@ Create a new Context instance.
 
 #### `is_stopped() -> bool`
 
-*Source: [`dynamo/_core.pyi#L342`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L342)*
+*Source: [`dynamo/_core.pyi#L341`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L341)*
 
 Check if the context has been stopped (synchronous).
 
 <b>Returns:</b> `bool` -- True if the context is stopped, False otherwise.
 #### `is_killed() -> bool`
 
-*Source: [`dynamo/_core.pyi#L351`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L351)*
+*Source: [`dynamo/_core.pyi#L350`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L350)*
 
 Check if the context has been killed (synchronous).
 
 <b>Returns:</b> `bool` -- True if the context is killed, False otherwise.
 #### `stop_generating()`
 
-*Source: [`dynamo/_core.pyi#L360`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L360)*
+*Source: [`dynamo/_core.pyi#L359`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L359)*
 
 Issue a stop generating signal to the context.
 #### `id() -> Optional[str]`
 
-*Source: [`dynamo/_core.pyi#L366`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L366)*
+*Source: [`dynamo/_core.pyi#L365`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L365)*
 
 Get the context ID.
 
 <b>Returns:</b> `Optional[str]` -- The context identifier string, or None if not set.
 #### `async_killed_or_stopped() -> asyncio.Future[bool]`
 
-*Source: [`dynamo/_core.pyi#L375`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L375)*
+*Source: [`dynamo/_core.pyi#L374`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L374)*
 
 Asynchronously wait until the context is killed or stopped.
 
@@ -412,7 +411,7 @@ Asynchronously wait until the context is killed or stopped.
 <details>
 <summary><strong>`WorkerMetricsPublisher` — A metrics publisher will provide metrics to the router for load monitoring.</strong></summary>
 
-*Source: [`dynamo/_core.pyi#L414`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L414)*
+*Source: [`dynamo/_core.pyi#L413`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L413)*
 
 <b>Examples</b>
 
@@ -425,14 +424,14 @@ Asynchronously wait until the context is killed or stopped.
 
 #### `__init__()`
 
-*Source: [`dynamo/_core.pyi#L426`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L426)*
+*Source: [`dynamo/_core.pyi#L425`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L425)*
 
 Create a `WorkerMetricsPublisher` object
 <b>Methods</b>
 
-#### `create_endpoint(endpoint: Endpoint)`
+#### `create_endpoint(endpoint: Endpoint = None)`
 
-*Source: [`dynamo/_core.pyi#L431`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L431)*
+*Source: [`dynamo/_core.pyi#L430`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L430)*
 
 Initialize the NATS endpoint for publishing worker metrics. Must be awaited.
 
@@ -444,9 +443,9 @@ on the correct NATS subject for routing decisions.
 | Parameter | Type | Description |
 | --- | --- | --- |
 | `endpoint` | `Endpoint` | The endpoint to extract component information from for metrics publishing |
-#### `publish(dp_rank: Optional[int], active_decode_blocks: int)`
+#### `publish(dp_rank: Optional[int] = None, active_decode_blocks: int = None)`
 
-*Source: [`dynamo/_core.pyi#L442`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L442)*
+*Source: [`dynamo/_core.pyi#L441`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L441)*
 
 Publish worker metrics for load monitoring.
 
@@ -462,7 +461,7 @@ Publish worker metrics for load monitoring.
 <details>
 <summary><strong>`ModelRuntimeConfig` — A model runtime configuration is a collection of runtime information</strong></summary>
 
-*Source: [`dynamo/_core.pyi#L488`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L488)*
+*Source: [`dynamo/_core.pyi#L487`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L487)*
 
 <b>Examples</b>
 
@@ -493,13 +492,13 @@ Publish worker metrics for load monitoring.
 
 #### `__init__()`
 
-*Source: [`dynamo/_core.pyi#L514`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L514)*
+*Source: [`dynamo/_core.pyi#L513`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L513)*
 
 <b>Methods</b>
 
-#### `set_engine_specific(key: str, value: Any)`
+#### `set_engine_specific(key: str = None, value: Any = None)`
 
-*Source: [`dynamo/_core.pyi#L516`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L516)*
+*Source: [`dynamo/_core.pyi#L515`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L515)*
 
 Set an engine-specific runtime configuration value
 
@@ -507,12 +506,12 @@ Set an engine-specific runtime configuration value
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
-| `key` | `str` |  |  |
-| `value` | `Any` |  |  |
+| `key` | `str` | None |  |
+| `value` | `Any` | None |  |
 
-#### `get_engine_specific(key: str) -> Any | None`
+#### `get_engine_specific(key: str = None) -> Any | None`
 
-*Source: [`dynamo/_core.pyi#L520`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L520)*
+*Source: [`dynamo/_core.pyi#L519`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L519)*
 
 Get an engine-specific runtime configuration value
 
@@ -520,11 +519,11 @@ Get an engine-specific runtime configuration value
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
-| `key` | `str` |  |  |
+| `key` | `str` | None |  |
 
 #### `set_disaggregated_endpoint(bootstrap_host: str | None = None, bootstrap_port: int | None = None)`
 
-*Source: [`dynamo/_core.pyi#L524`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L524)*
+*Source: [`dynamo/_core.pyi#L523`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L523)*
 
 Set the disaggregated endpoint for the model
 
@@ -541,7 +540,7 @@ Set the disaggregated endpoint for the model
 <details>
 <summary><strong>`OverlapScores` — A collection of prefix matching scores of workers for a given token ids.</strong></summary>
 
-*Source: [`dynamo/_core.pyi#L532`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L532)*
+*Source: [`dynamo/_core.pyi#L531`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L531)*
 
 'scores' is a map of worker id to the score which is the number of matching blocks.
 
@@ -565,7 +564,7 @@ Set the disaggregated endpoint for the model
 <details>
 <summary><strong>`RadixTree` — A RadixTree that tracks KV cache blocks and can find prefix matches for sequences.</strong></summary>
 
-*Source: [`dynamo/_core.pyi#L566`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L566)*
+*Source: [`dynamo/_core.pyi#L565`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L565)*
 
 Thread-safe: operations route to a dedicated background thread and long calls
 release the Python GIL.
@@ -587,7 +586,7 @@ release the Python GIL.
 
 #### `__init__(expiration_duration_secs: Optional[float] = None)`
 
-*Source: [`dynamo/_core.pyi#L585`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L585)*
+*Source: [`dynamo/_core.pyi#L584`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L584)*
 
 Create a new RadixTree instance.
 
@@ -598,9 +597,9 @@ Create a new RadixTree instance.
 | `expiration_duration_secs` | `Optional[float]` | Optional expiration duration in seconds for cached blocks.                     If None, blocks never expire. |
 <b>Methods</b>
 
-#### `find_matches(sequence: List[int], early_exit: bool = False) -> OverlapScores`
+#### `find_matches(sequence: List[int] = None, early_exit: bool = False) -> OverlapScores`
 
-*Source: [`dynamo/_core.pyi#L595`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L595)*
+*Source: [`dynamo/_core.pyi#L594`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L594)*
 
 Find prefix matches for the given sequence of block hashes.
 
@@ -612,9 +611,9 @@ Find prefix matches for the given sequence of block hashes.
 | `early_exit` | `bool` | If True, stop searching after finding the first match |
 
 <b>Returns:</b> `OverlapScores` -- OverlapScores containing worker matching scores and frequencies
-#### `apply_event(worker_id: int, kv_cache_event_bytes: bytes)`
+#### `apply_event(worker_id: int = None, kv_cache_event_bytes: bytes = None)`
 
-*Source: [`dynamo/_core.pyi#L610`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L610)*
+*Source: [`dynamo/_core.pyi#L609`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L609)*
 
 Apply a KV cache event to update the RadixTree state.
 
@@ -628,9 +627,9 @@ Apply a KV cache event to update the RadixTree state.
 <b>Raises</b>
 
 - `ValueError` -- If the event bytes cannot be deserialized
-#### `remove_worker(worker_id: int)`
+#### `remove_worker(worker_id: int = None)`
 
-*Source: [`dynamo/_core.pyi#L623`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L623)*
+*Source: [`dynamo/_core.pyi#L622`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L622)*
 
 Remove all blocks associated with a specific worker.
 
@@ -639,9 +638,9 @@ Remove all blocks associated with a specific worker.
 | Parameter | Type | Description |
 | --- | --- | --- |
 | `worker_id` | `int` | ID of the worker to remove |
-#### `clear_all_blocks(worker_id: int)`
+#### `clear_all_blocks(worker_id: int = None)`
 
-*Source: [`dynamo/_core.pyi#L632`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L632)*
+*Source: [`dynamo/_core.pyi#L631`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L631)*
 
 Clear all blocks for a specific worker.
 
@@ -652,7 +651,7 @@ Clear all blocks for a specific worker.
 | `worker_id` | `int` | ID of the worker whose blocks should be cleared |
 #### `dump_tree_as_events() -> List[str]`
 
-*Source: [`dynamo/_core.pyi#L641`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L641)*
+*Source: [`dynamo/_core.pyi#L640`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L640)*
 
 Dump the current RadixTree state as a list of JSON-serialized KV cache events.
 
@@ -663,7 +662,7 @@ Dump the current RadixTree state as a list of JSON-serialized KV cache events.
 <details>
 <summary><strong>`KvIndexer` — A KV Indexer that tracks KV Events emitted by workers. Events include add_block and remove_block.</strong></summary>
 
-*Source: [`dynamo/_core.pyi#L650`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L650)*
+*Source: [`dynamo/_core.pyi#L649`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L649)*
 
 <b>Examples</b>
 
@@ -676,9 +675,9 @@ Dump the current RadixTree state as a list of JSON-serialized KV cache events.
 ```
 <b>Constructor</b>
 
-#### `__init__(endpoint: Endpoint, block_size: int)`
+#### `__init__(endpoint: Endpoint = None, block_size: int = None)`
 
-*Source: [`dynamo/_core.pyi#L664`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L664)*
+*Source: [`dynamo/_core.pyi#L663`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L663)*
 
 Create a `KvIndexer` object
 
@@ -686,14 +685,14 @@ Create a `KvIndexer` object
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
-| `endpoint` | `Endpoint` |  |  |
-| `block_size` | `int` |  |  |
+| `endpoint` | `Endpoint` | None |  |
+| `block_size` | `int` | None |  |
 
 <b>Methods</b>
 
-#### `find_matches(sequence: List[int]) -> OverlapScores`
+#### `find_matches(sequence: List[int] = None) -> OverlapScores`
 
-*Source: [`dynamo/_core.pyi#L669`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L669)*
+*Source: [`dynamo/_core.pyi#L668`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L668)*
 
 Find prefix matches for the given sequence of block hashes.
 
@@ -704,9 +703,9 @@ Find prefix matches for the given sequence of block hashes.
 | `sequence` | `List[int]` | List of block hashes to find matches for |
 
 <b>Returns:</b> `OverlapScores` -- OverlapScores containing worker matching scores and frequencies
-#### `find_matches_for_request(token_ids: List[int], lora_name: Optional[str] = None) -> OverlapScores`
+#### `find_matches_for_request(token_ids: List[int] = None, lora_name: Optional[str] = None) -> OverlapScores`
 
-*Source: [`dynamo/_core.pyi#L681`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L681)*
+*Source: [`dynamo/_core.pyi#L680`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L680)*
 
 Return the overlapping scores of workers for the given token ids.
 
@@ -714,12 +713,12 @@ Return the overlapping scores of workers for the given token ids.
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
-| `token_ids` | `List[int]` |  |  |
+| `token_ids` | `List[int]` | None |  |
 | `lora_name` | `Optional[str]` | None |  |
 
 #### `block_size() -> int`
 
-*Source: [`dynamo/_core.pyi#L689`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L689)*
+*Source: [`dynamo/_core.pyi#L688`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L688)*
 
 Return the block size of the KV Indexer.
 
@@ -728,7 +727,7 @@ Return the block size of the KV Indexer.
 <details>
 <summary><strong>`ApproxKvIndexer` — An approximate KV Indexer that doesn't receive KV cache events from workers.</strong></summary>
 
-*Source: [`dynamo/_core.pyi#L695`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L695)*
+*Source: [`dynamo/_core.pyi#L694`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L694)*
 
 Instead, it relies on routing decisions with TTL-based expiration and pruning
 to estimate which blocks are cached on which workers.
@@ -751,9 +750,9 @@ This is useful when:
 ```
 <b>Constructor</b>
 
-#### `__init__(endpoint: Endpoint, kv_block_size: int, router_ttl_secs: float = 120.0, router_max_tree_size: int = 1048576, router_prune_target_ratio: float = 0.8)`
+#### `__init__(endpoint: Endpoint = None, kv_block_size: int = None, router_ttl_secs: float = 120.0, router_max_tree_size: int = 1048576, router_prune_target_ratio: float = 0.8)`
 
-*Source: [`dynamo/_core.pyi#L718`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L718)*
+*Source: [`dynamo/_core.pyi#L717`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L717)*
 
 Create an `ApproxKvIndexer` object
 
@@ -768,9 +767,9 @@ Create an `ApproxKvIndexer` object
 | `router_prune_target_ratio` | `float` | Target size ratio after pruning (default: 0.8) |
 <b>Methods</b>
 
-#### `find_matches_for_request(token_ids: List[int], lora_name: Optional[str] = None) -> OverlapScores`
+#### `find_matches_for_request(token_ids: List[int] = None, lora_name: Optional[str] = None) -> OverlapScores`
 
-*Source: [`dynamo/_core.pyi#L738`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L738)*
+*Source: [`dynamo/_core.pyi#L737`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L737)*
 
 Return the overlapping scores of workers for the given token ids.
 
@@ -784,14 +783,14 @@ Return the overlapping scores of workers for the given token ids.
 <b>Returns:</b> `OverlapScores` -- OverlapScores containing worker matching scores and frequencies
 #### `block_size() -> int`
 
-*Source: [`dynamo/_core.pyi#L753`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L753)*
+*Source: [`dynamo/_core.pyi#L752`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L752)*
 
 Return the block size of the ApproxKvIndexer.
 
 <b>Returns:</b> `int` -- The KV cache block size
-#### `process_routing_decision_for_request(tokens: List[int], worker_id: int, dp_rank: int = 0)`
+#### `process_routing_decision_for_request(tokens: List[int] = None, worker_id: int = None, dp_rank: int = 0)`
 
-*Source: [`dynamo/_core.pyi#L762`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L762)*
+*Source: [`dynamo/_core.pyi#L761`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L761)*
 
 Notify the indexer that a token sequence has been routed to a specific worker.
 
@@ -811,7 +810,7 @@ cached on which workers based on routing decisions.
 <details>
 <summary><strong>`KvEventPublisher` — A KV event publisher will publish KV events corresponding to the component.</strong></summary>
 
-*Source: [`dynamo/_core.pyi#L779`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L779)*
+*Source: [`dynamo/_core.pyi#L778`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L778)*
 
 <b>Examples</b>
 
@@ -828,9 +827,9 @@ cached on which workers based on routing decisions.
 ```
 <b>Constructor</b>
 
-#### `__init__(endpoint: Endpoint, worker_id: int = 0, kv_block_size: int = 0, dp_rank: int = 0, enable_local_indexer: bool = False, zmq_endpoint: Optional[str] = None, zmq_topic: Optional[str] = None)`
+#### `__init__(endpoint: Endpoint = None, worker_id: int = 0, kv_block_size: int = 0, dp_rank: int = 0, enable_local_indexer: bool = False, zmq_endpoint: Optional[str] = None, zmq_topic: Optional[str] = None)`
 
-*Source: [`dynamo/_core.pyi#L797`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L797)*
+*Source: [`dynamo/_core.pyi#L796`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L796)*
 
 Create a `KvEventPublisher` object.
 
@@ -852,9 +851,9 @@ When zmq_endpoint is None, events are pushed manually via publish_stored/publish
 | `zmq_topic` | `Optional[str]` | ZMQ topic to subscribe to (defaults to "" when zmq_endpoint is set) |
 <b>Methods</b>
 
-#### `publish_stored(token_ids: List[int], num_block_tokens: List[int], block_hashes: List[int], parent_hash: Optional[int] = None, block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None, lora_name: Optional[str] = None)`
+#### `publish_stored(token_ids: List[int] = None, num_block_tokens: List[int] = None, block_hashes: List[int] = None, parent_hash: Optional[int] = None, block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None, lora_name: Optional[str] = None)`
 
-*Source: [`dynamo/_core.pyi#L825`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L825)*
+*Source: [`dynamo/_core.pyi#L824`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L824)*
 
 Publish a KV stored event.
 
@@ -870,9 +869,9 @@ Event IDs are managed internally by the publisher using a monotonic counter.
 | `parent_hash` | `Optional[int]` | Optional parent hash (signed 64-bit integer) |
 | `block_mm_infos` | `Optional[List[Optional[Dict[str, Any]]]]` | Optional list of multimodal info for each block. Each item is either None or a dict with "mm_objects" key containing a list of `{"mm_hash": int, "offsets": [[start, end], ...]}` dicts. |
 | `lora_name` | `Optional[str]` | Optional LoRA adapter name for adapter-aware block hashing. |
-#### `publish_removed(block_hashes: List[int])`
+#### `publish_removed(block_hashes: List[int] = None)`
 
-*Source: [`dynamo/_core.pyi#L851`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L851)*
+*Source: [`dynamo/_core.pyi#L850`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L850)*
 
 Publish a KV removed event.
 
@@ -885,7 +884,7 @@ Event IDs are managed internally by the publisher using a monotonic counter.
 | `block_hashes` | `List[int]` | List of block hashes to remove (signed 64-bit integers) |
 #### `shutdown()`
 
-*Source: [`dynamo/_core.pyi#L862`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L862)*
+*Source: [`dynamo/_core.pyi#L861`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L861)*
 
 Shuts down the event publisher, stopping any background tasks.
 
@@ -894,7 +893,7 @@ Shuts down the event publisher, stopping any background tasks.
 <details>
 <summary><strong>`HttpService` — A HTTP service for dynamo applications.</strong></summary>
 
-*Source: [`dynamo/_core.pyi#L868`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L868)*
+*Source: [`dynamo/_core.pyi#L867`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L867)*
 
 It is a OpenAI compatible http ingress into the Dynamo Distributed Runtime.
 
@@ -910,7 +909,7 @@ It is a OpenAI compatible http ingress into the Dynamo Distributed Runtime.
 
 #### `__init__(port: Optional[int] = None)`
 
-*Source: [`dynamo/_core.pyi#L880`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L880)*
+*Source: [`dynamo/_core.pyi#L879`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L879)*
 
 Create a new HTTP service.
 
@@ -921,9 +920,9 @@ Create a new HTTP service.
 | `port` | `Optional[int]` | Optional port number to bind the service to (default: 8080) |
 <b>Methods</b>
 
-#### `run(runtime: DistributedRuntime)`
+#### `run(runtime: DistributedRuntime = None)`
 
-*Source: [`dynamo/_core.pyi#L889`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L889)*
+*Source: [`dynamo/_core.pyi#L888`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L888)*
 
 Run the HTTP service.
 
@@ -934,7 +933,7 @@ Run the HTTP service.
 | `runtime` | `DistributedRuntime` | DistributedRuntime instance for token management |
 #### `shutdown()`
 
-*Source: [`dynamo/_core.pyi#L898`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L898)*
+*Source: [`dynamo/_core.pyi#L897`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L897)*
 
 Shutdown the HTTP service by cancelling its internal token.
 
@@ -943,7 +942,7 @@ Shutdown the HTTP service by cancelling its internal token.
 <details>
 <summary><strong>`PythonAsyncEngine` — Bridge a Python async generator onto Dynamo's AsyncEngine interface.</strong></summary>
 
-*Source: [`dynamo/_core.pyi#L904`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L904)*
+*Source: [`dynamo/_core.pyi#L903`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L903)*
 
 <b>Examples</b>
 
@@ -957,9 +956,9 @@ Shutdown the HTTP service by cancelling its internal token.
 ```
 <b>Constructor</b>
 
-#### `__init__(generator: Any, event_loop: Any)`
+#### `__init__(generator: Any = None, event_loop: Any = None)`
 
-*Source: [`dynamo/_core.pyi#L917`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L917)*
+*Source: [`dynamo/_core.pyi#L916`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L916)*
 
 Wrap a Python generator and event loop for use with Dynamo services.
 
@@ -967,8 +966,8 @@ Wrap a Python generator and event loop for use with Dynamo services.
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
-| `generator` | `Any` |  |  |
-| `event_loop` | `Any` |  |  |
+| `generator` | `Any` | None |  |
+| `event_loop` | `Any` | None |  |
 
 
 </details>
@@ -976,7 +975,7 @@ Wrap a Python generator and event loop for use with Dynamo services.
 <details>
 <summary><strong>`HttpAsyncEngine` — An async engine for a distributed Dynamo http service. This is an extension of the</strong></summary>
 
-*Source: [`dynamo/_core.pyi#L923`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L923)*
+*Source: [`dynamo/_core.pyi#L922`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L922)*
 
 python based AsyncEngine that handles HttpError exceptions from Python and
 converts them to the Rust version of HttpError
@@ -986,26 +985,23 @@ converts them to the Rust version of HttpError
 <details>
 <summary><strong>`KserveGrpcService` — A gRPC service implementing the KServe protocol for dynamo applications.</strong></summary>
 
-*Source: [`dynamo/_core.pyi#L932`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L932)*
+*Source: [`dynamo/_core.pyi#L931`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L931)*
 
 Provides model management for completions, chat completions, and tensor-based models.
 
 <b>Examples</b>
 
 ```python
->>> from dynamo._core import KserveGrpcService, PythonAsyncEngine
+>>> from dynamo._core import KserveGrpcService
 >>> service = KserveGrpcService(port=8787, host="0.0.0.0")
->>> engine = PythonAsyncEngine(my_generator, loop)
->>> service.add_completions_model("my-model", "checksum", engine)
->>> shutdown_signal = service.run(runtime)
->>> print(service.list_completions_models())
->>> await shutdown_signal
+>>> service.add_completions_model("model", "checksum", engine)
+>>> await service.run(runtime)
 ```
 <b>Constructor</b>
 
 #### `__init__(port: Optional[int] = None, host: Optional[str] = None)`
 
-*Source: [`dynamo/_core.pyi#L947`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L947)*
+*Source: [`dynamo/_core.pyi#L943`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L943)*
 
 Create a new KServe gRPC service.
 
@@ -1017,9 +1013,9 @@ Create a new KServe gRPC service.
 | `host` | `Optional[str]` | Optional host address to bind the service to |
 <b>Methods</b>
 
-#### `add_completions_model(model: str, checksum: str, engine: PythonAsyncEngine)`
+#### `add_completions_model(model: str = None, checksum: str = None, engine: PythonAsyncEngine = None)`
 
-*Source: [`dynamo/_core.pyi#L957`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L957)*
+*Source: [`dynamo/_core.pyi#L953`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L953)*
 
 Register a completions model with the service.
 
@@ -1030,9 +1026,9 @@ Register a completions model with the service.
 | `model` | `str` | The model name |
 | `checksum` | `str` | The model checksum |
 | `engine` | `PythonAsyncEngine` | The async engine to handle requests |
-#### `add_chat_completions_model(model: str, checksum: str, engine: PythonAsyncEngine)`
+#### `add_chat_completions_model(model: str = None, checksum: str = None, engine: PythonAsyncEngine = None)`
 
-*Source: [`dynamo/_core.pyi#L973`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L973)*
+*Source: [`dynamo/_core.pyi#L969`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L969)*
 
 Register a chat completions model with the service.
 
@@ -1043,9 +1039,9 @@ Register a chat completions model with the service.
 | `model` | `str` | The model name |
 | `checksum` | `str` | The model checksum |
 | `engine` | `PythonAsyncEngine` | The async engine to handle requests |
-#### `add_tensor_model(model: str, checksum: str, engine: PythonAsyncEngine, runtime_config: Optional[ModelRuntimeConfig])`
+#### `add_tensor_model(model: str = None, checksum: str = None, engine: PythonAsyncEngine = None, runtime_config: Optional[ModelRuntimeConfig] = None)`
 
-*Source: [`dynamo/_core.pyi#L989`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L989)*
+*Source: [`dynamo/_core.pyi#L985`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L985)*
 
 Register a tensor-based model with the service.
 
@@ -1056,9 +1052,9 @@ Register a tensor-based model with the service.
 | `model` | `str` | The model name |
 | `checksum` | `str` | The model checksum |
 | `engine` | `PythonAsyncEngine` | The async engine to handle requests |
-#### `remove_completions_model(model: str)`
+#### `remove_completions_model(model: str = None)`
 
-*Source: [`dynamo/_core.pyi#L1006`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1006)*
+*Source: [`dynamo/_core.pyi#L1002`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1002)*
 
 Remove a completions model from the service.
 
@@ -1067,9 +1063,9 @@ Remove a completions model from the service.
 | Parameter | Type | Description |
 | --- | --- | --- |
 | `model` | `str` | The model name to remove |
-#### `remove_chat_completions_model(model: str)`
+#### `remove_chat_completions_model(model: str = None)`
 
-*Source: [`dynamo/_core.pyi#L1015`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1015)*
+*Source: [`dynamo/_core.pyi#L1011`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1011)*
 
 Remove a chat completions model from the service.
 
@@ -1078,9 +1074,9 @@ Remove a chat completions model from the service.
 | Parameter | Type | Description |
 | --- | --- | --- |
 | `model` | `str` | The model name to remove |
-#### `remove_tensor_model(model: str)`
+#### `remove_tensor_model(model: str = None)`
 
-*Source: [`dynamo/_core.pyi#L1024`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1024)*
+*Source: [`dynamo/_core.pyi#L1020`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1020)*
 
 Remove a tensor model from the service.
 
@@ -1091,28 +1087,28 @@ Remove a tensor model from the service.
 | `model` | `str` | The model name to remove |
 #### `list_chat_completions_models() -> List[str]`
 
-*Source: [`dynamo/_core.pyi#L1033`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1033)*
+*Source: [`dynamo/_core.pyi#L1029`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1029)*
 
 List all registered chat completions models.
 
 <b>Returns:</b> `List[str]` -- List of model names
 #### `list_completions_models() -> List[str]`
 
-*Source: [`dynamo/_core.pyi#L1042`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1042)*
+*Source: [`dynamo/_core.pyi#L1038`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1038)*
 
 List all registered completions models.
 
 <b>Returns:</b> `List[str]` -- List of model names
 #### `list_tensor_models() -> List[str]`
 
-*Source: [`dynamo/_core.pyi#L1051`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1051)*
+*Source: [`dynamo/_core.pyi#L1047`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1047)*
 
 List all registered tensor models.
 
 <b>Returns:</b> `List[str]` -- List of model names
-#### `run(runtime: DistributedRuntime)`
+#### `run(runtime: DistributedRuntime = None)`
 
-*Source: [`dynamo/_core.pyi#L1060`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1060)*
+*Source: [`dynamo/_core.pyi#L1056`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1056)*
 
 Run the KServe gRPC service.
 
@@ -1123,7 +1119,7 @@ Run the KServe gRPC service.
 | `runtime` | `DistributedRuntime` | DistributedRuntime instance for token management |
 #### `shutdown()`
 
-*Source: [`dynamo/_core.pyi#L1069`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1069)*
+*Source: [`dynamo/_core.pyi#L1065`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1065)*
 
 Shutdown the KServe gRPC service by cancelling its internal token.
 
@@ -1132,7 +1128,7 @@ Shutdown the KServe gRPC service by cancelling its internal token.
 <details>
 <summary><strong>`ModelInput` — What type of request this model needs: Text, Tokens or Tensor</strong></summary>
 
-*Source: [`dynamo/_core.pyi#L1075`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1075)*
+*Source: [`dynamo/_core.pyi#L1071`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1071)*
 
 <b>Examples</b>
 
@@ -1152,9 +1148,9 @@ Shutdown the KServe gRPC service by cancelling its internal token.
 </details>
 
 <details>
-<summary><strong>`ModelType` — What type of request this model needs: Chat, Completions, Embedding, Tensor, Images, Videos or Prefill</strong></summary>
+<summary><strong>`ModelType` — What type of request this model needs: Chat, Completions, Embedding, TensorBased, Images, Audios, Videos, or Prefill</strong></summary>
 
-*Source: [`dynamo/_core.pyi#L1089`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1089)*
+*Source: [`dynamo/_core.pyi#L1085`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1085)*
 
 <b>Examples</b>
 
@@ -1179,7 +1175,7 @@ Shutdown the KServe gRPC service by cancelling its internal token.
 
 #### `supports_chat() -> bool`
 
-*Source: [`dynamo/_core.pyi#L1110`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1110)*
+*Source: [`dynamo/_core.pyi#L1106`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1106)*
 
 Return True if this model type supports chat.
 
@@ -1188,7 +1184,7 @@ Return True if this model type supports chat.
 <details>
 <summary><strong>`RouterMode` — Router mode for load balancing requests across workers</strong></summary>
 
-*Source: [`dynamo/_core.pyi#L1114`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1114)*
+*Source: [`dynamo/_core.pyi#L1110`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1110)*
 
 <b>Examples</b>
 
@@ -1211,7 +1207,7 @@ Return True if this model type supports chat.
 <details>
 <summary><strong>`RouterConfig` — How to route the request</strong></summary>
 
-*Source: [`dynamo/_core.pyi#L1129`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1129)*
+*Source: [`dynamo/_core.pyi#L1125`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1125)*
 
 <b>Examples</b>
 
@@ -1233,9 +1229,9 @@ Return True if this model type supports chat.
 
 <b>Constructor</b>
 
-#### `__init__(mode: RouterMode, config: Optional[KvRouterConfig] = None, active_decode_blocks_threshold: Optional[float] = None, active_prefill_tokens_threshold: Optional[int] = None, active_prefill_tokens_threshold_frac: Optional[float] = None, decode_fallback: bool = False)`
+#### `__init__(mode: RouterMode = None, config: Optional[KvRouterConfig] = None, active_decode_blocks_threshold: Optional[float] = None, active_prefill_tokens_threshold: Optional[int] = None, active_prefill_tokens_threshold_frac: Optional[float] = None, decode_fallback: bool = False)`
 
-*Source: [`dynamo/_core.pyi#L1146`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1146)*
+*Source: [`dynamo/_core.pyi#L1142`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1142)*
 
 Create a RouterConfig.
 
@@ -1255,7 +1251,7 @@ Create a RouterConfig.
 <details>
 <summary><strong>`KvRouterConfig` — Values for KV router</strong></summary>
 
-*Source: [`dynamo/_core.pyi#L1168`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1168)*
+*Source: [`dynamo/_core.pyi#L1164`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1164)*
 
 <b>Examples</b>
 
@@ -1271,7 +1267,7 @@ Create a RouterConfig.
 
 #### `__init__(overlap_score_weight: float = 1.0, router_temperature: float = 0.0, use_kv_events: bool = True, durable_kv_events: bool = False, router_replica_sync: bool = False, router_track_active_blocks: bool = True, router_track_output_blocks: bool = False, router_assume_kv_reuse: bool = True, router_snapshot_threshold: Optional[int] = 1000000, router_reset_states: bool = False, router_ttl_secs: float = 120.0, router_max_tree_size: int = 1048576, router_prune_target_ratio: float = 0.8, router_queue_threshold: Optional[float] = None, router_event_threads: int = 4, router_enable_cache_control: bool = False)`
 
-*Source: [`dynamo/_core.pyi#L1181`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1181)*
+*Source: [`dynamo/_core.pyi#L1177`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1177)*
 
 Create a KV router configuration.
 
@@ -1301,35 +1297,35 @@ Create a KV router configuration.
 <details>
 <summary><strong>`LoRADownloader` — Unified interface for LoRA downloading and caching (local file:// and S3 s3:// URIs).</strong></summary>
 
-*Source: [`dynamo/_core.pyi#L1292`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1292)*
+*Source: [`dynamo/_core.pyi#L1288`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1288)*
 
 <b>Constructor</b>
 
 #### `__init__(cache_path: Optional[str] = None)`
 
-*Source: [`dynamo/_core.pyi#L1295`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1295)*
+*Source: [`dynamo/_core.pyi#L1291`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1291)*
 
 <b>Methods</b>
 
-#### `download_if_needed(lora_uri: str) -> Awaitable[str]`
+#### `download_if_needed(lora_uri: str = None) -> Awaitable[str]`
 
-*Source: [`dynamo/_core.pyi#L1296`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1296)*
+*Source: [`dynamo/_core.pyi#L1292`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1292)*
 
-#### `get_cache_path(cache_key: str) -> str`
+#### `get_cache_path(cache_key: str = None) -> str`
 
-*Source: [`dynamo/_core.pyi#L1297`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1297)*
+*Source: [`dynamo/_core.pyi#L1293`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1293)*
 
-#### `is_cached(cache_key: str) -> bool`
+#### `is_cached(cache_key: str = None) -> bool`
 
-*Source: [`dynamo/_core.pyi#L1298`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1298)*
+*Source: [`dynamo/_core.pyi#L1294`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1294)*
 
-#### `validate_cached(cache_key: str) -> bool`
+#### `validate_cached(cache_key: str = None) -> bool`
 
-*Source: [`dynamo/_core.pyi#L1299`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1299)*
+*Source: [`dynamo/_core.pyi#L1295`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1295)*
 
-#### `uri_to_cache_key(uri: str) -> str`
+#### `uri_to_cache_key(uri: str = None) -> str`
 
-*Source: [`dynamo/_core.pyi#L1301`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1301)*
+*Source: [`dynamo/_core.pyi#L1297`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1297)*
 
 
 </details>
@@ -1337,19 +1333,19 @@ Create a KV router configuration.
 <details>
 <summary><strong>`MediaDecoder` — Media decoder for image and video preprocessing.</strong></summary>
 
-*Source: [`dynamo/_core.pyi#L1305`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1305)*
+*Source: [`dynamo/_core.pyi#L1301`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1301)*
 
 <b>Constructor</b>
 
 #### `__init__()`
 
-*Source: [`dynamo/_core.pyi#L1308`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1308)*
+*Source: [`dynamo/_core.pyi#L1304`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1304)*
 
 <b>Methods</b>
 
-#### `enable_image(decoder_options: Dict[str, Any])`
+#### `enable_image(decoder_options: Dict[str, Any] = None)`
 
-*Source: [`dynamo/_core.pyi#L1309`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1309)*
+*Source: [`dynamo/_core.pyi#L1305`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1305)*
 
 
 </details>
@@ -1357,35 +1353,35 @@ Create a KV router configuration.
 <details>
 <summary><strong>`MediaFetcher` — Media fetcher for loading remote image/video URLs.</strong></summary>
 
-*Source: [`dynamo/_core.pyi#L1312`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1312)*
+*Source: [`dynamo/_core.pyi#L1308`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1308)*
 
 <b>Constructor</b>
 
 #### `__init__()`
 
-*Source: [`dynamo/_core.pyi#L1315`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1315)*
+*Source: [`dynamo/_core.pyi#L1311`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1311)*
 
 <b>Methods</b>
 
-#### `user_agent(user_agent: str)`
+#### `user_agent(user_agent: str = None)`
 
-*Source: [`dynamo/_core.pyi#L1316`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1316)*
+*Source: [`dynamo/_core.pyi#L1312`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1312)*
 
-#### `allow_direct_ip(allow: bool)`
+#### `allow_direct_ip(allow: bool = None)`
 
-*Source: [`dynamo/_core.pyi#L1317`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1317)*
+*Source: [`dynamo/_core.pyi#L1313`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1313)*
 
-#### `allow_direct_port(allow: bool)`
+#### `allow_direct_port(allow: bool = None)`
 
-*Source: [`dynamo/_core.pyi#L1318`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1318)*
+*Source: [`dynamo/_core.pyi#L1314`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1314)*
 
-#### `allowed_media_domains(domains: List[str])`
+#### `allowed_media_domains(domains: List[str] = None)`
 
-*Source: [`dynamo/_core.pyi#L1319`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1319)*
+*Source: [`dynamo/_core.pyi#L1315`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1315)*
 
-#### `timeout_ms(timeout_ms: int)`
+#### `timeout_ms(timeout_ms: int = None)`
 
-*Source: [`dynamo/_core.pyi#L1320`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1320)*
+*Source: [`dynamo/_core.pyi#L1316`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1316)*
 
 
 </details>
@@ -1393,7 +1389,7 @@ Create a KV router configuration.
 <details>
 <summary><strong>`EngineConfig` — Holds internal configuration for a Dynamo engine.</strong></summary>
 
-*Source: [`dynamo/_core.pyi#L1338`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1338)*
+*Source: [`dynamo/_core.pyi#L1334`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1334)*
 
 <b>Examples</b>
 
@@ -1408,7 +1404,7 @@ Create a KV router configuration.
 <details>
 <summary><strong>`Layer` — A KV cache block layer</strong></summary>
 
-*Source: [`dynamo/_core.pyi#L1369`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1369)*
+*Source: [`dynamo/_core.pyi#L1365`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1365)*
 
 
 </details>
@@ -1416,7 +1412,7 @@ Create a KV router configuration.
 <details>
 <summary><strong>`Block` — A KV cache block</strong></summary>
 
-*Source: [`dynamo/_core.pyi#L1388`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1388)*
+*Source: [`dynamo/_core.pyi#L1384`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1384)*
 
 <b>Examples</b>
 
@@ -1430,7 +1426,7 @@ Create a KV router configuration.
 
 #### `to_list() -> List[Layer]`
 
-*Source: [`dynamo/_core.pyi#L1425`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1425)*
+*Source: [`dynamo/_core.pyi#L1421`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1421)*
 
 Get a list of layers
 
@@ -1439,13 +1435,13 @@ Get a list of layers
 <details>
 <summary><strong>`BlockList` — A list of KV cache blocks</strong></summary>
 
-*Source: [`dynamo/_core.pyi#L1444`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1444)*
+*Source: [`dynamo/_core.pyi#L1440`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1440)*
 
 <b>Methods</b>
 
 #### `to_list() -> List[Block]`
 
-*Source: [`dynamo/_core.pyi#L1475`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1475)*
+*Source: [`dynamo/_core.pyi#L1471`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1471)*
 
 Get a list of blocks
 
@@ -1454,7 +1450,7 @@ Get a list of blocks
 <details>
 <summary><strong>`BlockManager` — A KV cache block manager</strong></summary>
 
-*Source: [`dynamo/_core.pyi#L1481`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1481)*
+*Source: [`dynamo/_core.pyi#L1477`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1477)*
 
 <b>Examples</b>
 
@@ -1465,9 +1461,9 @@ Get a list of blocks
 ```
 <b>Constructor</b>
 
-#### `__init__(worker_id: int, num_layer: int, page_size: int, inner_dim: int, dtype: Optional[str] = None, host_num_blocks: Optional[int] = None, device_num_blocks: Optional[int] = None, device_id: int = 0)`
+#### `__init__(worker_id: int = None, num_layer: int = None, page_size: int = None, inner_dim: int = None, dtype: Optional[str] = None, host_num_blocks: Optional[int] = None, device_num_blocks: Optional[int] = None, device_id: int = 0)`
 
-*Source: [`dynamo/_core.pyi#L1491`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1491)*
+*Source: [`dynamo/_core.pyi#L1487`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1487)*
 
 Create a `BlockManager` object
 
@@ -1475,10 +1471,10 @@ Create a `BlockManager` object
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
-| `worker_id` | `int` |  |  |
-| `num_layer` | `int` |  |  |
-| `page_size` | `int` |  |  |
-| `inner_dim` | `int` |  |  |
+| `worker_id` | `int` | None |  |
+| `num_layer` | `int` | None |  |
+| `page_size` | `int` | None |  |
+| `inner_dim` | `int` | None |  |
 | `dtype` | `Optional[str]` | None |  |
 | `host_num_blocks` | `Optional[int]` | None |  |
 | `device_num_blocks` | `Optional[int]` | None |  |
@@ -1486,9 +1482,9 @@ Create a `BlockManager` object
 
 <b>Methods</b>
 
-#### `allocate_host_blocks_blocking(count: int) -> BlockList`
+#### `allocate_host_blocks_blocking(count: int = None) -> BlockList`
 
-*Source: [`dynamo/_core.pyi#L1526`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1526)*
+*Source: [`dynamo/_core.pyi#L1522`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1522)*
 
 Allocate a list of host blocks (blocking call)
 
@@ -1496,11 +1492,11 @@ Allocate a list of host blocks (blocking call)
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
-| `count` | `int` |  |  |
+| `count` | `int` | None |  |
 
-#### `allocate_host_blocks(count: int) -> BlockList`
+#### `allocate_host_blocks(count: int = None) -> BlockList`
 
-*Source: [`dynamo/_core.pyi#L1542`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1542)*
+*Source: [`dynamo/_core.pyi#L1538`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1538)*
 
 Allocate a list of host blocks
 
@@ -1508,11 +1504,11 @@ Allocate a list of host blocks
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
-| `count` | `int` |  |  |
+| `count` | `int` | None |  |
 
-#### `allocate_device_blocks_blocking(count: int) -> BlockList`
+#### `allocate_device_blocks_blocking(count: int = None) -> BlockList`
 
-*Source: [`dynamo/_core.pyi#L1558`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1558)*
+*Source: [`dynamo/_core.pyi#L1554`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1554)*
 
 Allocate a list of device blocks (blocking call)
 
@@ -1520,11 +1516,11 @@ Allocate a list of device blocks (blocking call)
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
-| `count` | `int` |  |  |
+| `count` | `int` | None |  |
 
-#### `allocate_device_blocks(count: int) -> BlockList`
+#### `allocate_device_blocks(count: int = None) -> BlockList`
 
-*Source: [`dynamo/_core.pyi#L1574`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1574)*
+*Source: [`dynamo/_core.pyi#L1570`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1570)*
 
 Allocate a list of device blocks
 
@@ -1532,7 +1528,7 @@ Allocate a list of device blocks
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
-| `count` | `int` |  |  |
+| `count` | `int` | None |  |
 
 
 </details>
@@ -1540,7 +1536,7 @@ Allocate a list of device blocks
 <details>
 <summary><strong>`KvRouter` — A KV-aware router that performs intelligent routing based on KV cache overlap.</strong></summary>
 
-*Source: [`dynamo/_core.pyi#L1598`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1598)*
+*Source: [`dynamo/_core.pyi#L1594`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1594)*
 
 <b>Examples</b>
 
@@ -1554,9 +1550,9 @@ Allocate a list of device blocks
 ```
 <b>Constructor</b>
 
-#### `__init__(endpoint: Endpoint, block_size: int, kv_router_config: KvRouterConfig)`
+#### `__init__(endpoint: Endpoint = None, block_size: int = None, kv_router_config: KvRouterConfig = None)`
 
-*Source: [`dynamo/_core.pyi#L1611`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1611)*
+*Source: [`dynamo/_core.pyi#L1607`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1607)*
 
 Create a new KvRouter instance.
 
@@ -1569,9 +1565,9 @@ Create a new KvRouter instance.
 | `kv_router_config` | `KvRouterConfig` | Configuration for the KV router |
 <b>Methods</b>
 
-#### `generate(token_ids: List[int], model: str, stop_conditions: Optional[JsonLike] = None, sampling_options: Optional[JsonLike] = None, output_options: Optional[JsonLike] = None, router_config_override: Optional[JsonLike] = None, worker_id: Optional[int] = None, dp_rank: Optional[int] = None, extra_args: Optional[JsonLike] = None, block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None, multi_modal_data: Optional[JsonLike] = None, mm_routing_info: Optional[JsonLike] = None) -> AsyncIterator[JsonLike]`
+#### `generate(token_ids: List[int] = None, model: str = None, stop_conditions: Optional[JsonLike] = None, sampling_options: Optional[JsonLike] = None, output_options: Optional[JsonLike] = None, router_config_override: Optional[JsonLike] = None, worker_id: Optional[int] = None, dp_rank: Optional[int] = None, extra_args: Optional[JsonLike] = None, block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None, multi_modal_data: Optional[JsonLike] = None, mm_routing_info: Optional[JsonLike] = None) -> AsyncIterator[JsonLike]`
 
-*Source: [`dynamo/_core.pyi#L1627`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1627)*
+*Source: [`dynamo/_core.pyi#L1623`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1623)*
 
 Generate text using the KV-aware router.
 
@@ -1600,9 +1596,9 @@ Generate text using the KV-aware router.
 - dp_rank allows targeting a specific data parallel replica when workers have
   multiple replicas (data_parallel_size > 1).
 - This is different from query_instance_id which doesn't route the request.
-#### `generate_from_request(request: JsonLike) -> AsyncIterator[JsonLike]`
+#### `generate_from_request(request: JsonLike = None) -> AsyncIterator[JsonLike]`
 
-*Source: [`dynamo/_core.pyi#L1682`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1682)*
+*Source: [`dynamo/_core.pyi#L1678`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1678)*
 
 Generate from a preprocessed request dict (PreprocessedRequest format).
 
@@ -1613,11 +1609,11 @@ Returns an async iterator yielding generation responses.
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
-| `request` | `JsonLike` |  |  |
+| `request` | `JsonLike` | None |  |
 
-#### `best_worker(token_ids: List[int], router_config_override: Optional[JsonLike] = None, request_id: Optional[str] = None, block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None, lora_name: Optional[str] = None) -> Tuple[int, int, int]`
+#### `best_worker(token_ids: List[int] = None, router_config_override: Optional[JsonLike] = None, request_id: Optional[str] = None, block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None, lora_name: Optional[str] = None) -> Tuple[int, int, int]`
 
-*Source: [`dynamo/_core.pyi#L1694`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1694)*
+*Source: [`dynamo/_core.pyi#L1690`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1690)*
 
 Find the best matching worker for the given tokens.
 
@@ -1634,9 +1630,9 @@ Find the best matching worker for the given tokens.
 - worker_id: The ID of the best matching worker
 - dp_rank: The data parallel rank of the selected worker
 - overlap_blocks: The number of overlapping blocks found
-#### `get_potential_loads(token_ids: List[int], lora_name: Optional[str] = None) -> List[Dict[str, int]]`
+#### `get_potential_loads(token_ids: List[int] = None, lora_name: Optional[str] = None) -> List[Dict[str, int]]`
 
-*Source: [`dynamo/_core.pyi#L1723`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1723)*
+*Source: [`dynamo/_core.pyi#L1719`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1719)*
 
 Get potential prefill and decode loads for all workers.
 
@@ -1657,14 +1653,14 @@ Get potential prefill and decode loads for all workers.
 If you need aggregated loads per worker_id, sum the values manually.
 #### `dump_events() -> str`
 
-*Source: [`dynamo/_core.pyi#L1747`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1747)*
+*Source: [`dynamo/_core.pyi#L1743`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1743)*
 
 Dump all events from the KV router's indexer.
 
 <b>Returns:</b> `str` -- A JSON string containing all indexer events
-#### `mark_prefill_complete(request_id: str)`
+#### `mark_prefill_complete(request_id: str = None)`
 
-*Source: [`dynamo/_core.pyi#L1756`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1756)*
+*Source: [`dynamo/_core.pyi#L1752`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1752)*
 
 Mark prefill as completed for a request.
 
@@ -1681,9 +1677,9 @@ in the decode phase. Used to update router state for accurate load tracking.
 > This is typically called automatically by the router when using the
 `generate()` method. Only call this manually if you're using
 `best_worker()` with `request_id` for custom routing.
-#### `free(request_id: str)`
+#### `free(request_id: str = None)`
 
-*Source: [`dynamo/_core.pyi#L1773`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1773)*
+*Source: [`dynamo/_core.pyi#L1769`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1769)*
 
 Free a request by its ID, signaling the router to release resources.
 
@@ -1706,7 +1702,7 @@ tracking of active blocks and ensure accurate load balancing.
 <details>
 <summary><strong>`EngineType` — Engine type for Dynamo workers</strong></summary>
 
-*Source: [`dynamo/_core.pyi#L1790`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1790)*
+*Source: [`dynamo/_core.pyi#L1786`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1786)*
 
 <b>Examples</b>
 
@@ -1728,7 +1724,7 @@ tracking of active blocks and ensure accurate load balancing.
 <details>
 <summary><strong>`EntrypointArgs` — Settings to connect an input to a worker and run them.</strong></summary>
 
-*Source: [`dynamo/_core.pyi#L1804`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1804)*
+*Source: [`dynamo/_core.pyi#L1800`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1800)*
 
 Use by `dynamo run`.
 
@@ -1751,9 +1747,9 @@ Use by `dynamo run`.
 ```
 <b>Constructor</b>
 
-#### `__init__(engine_type: EngineType, model_path: Optional[str] = None, model_name: Optional[str] = None, endpoint_id: Optional[str] = None, context_length: Optional[int] = None, template_file: Optional[str] = None, router_config: Optional[RouterConfig] = None, kv_cache_block_size: Optional[int] = None, http_host: Optional[str] = None, http_port: Optional[int] = None, http_metrics_port: Optional[int] = None, tls_cert_path: Optional[str] = None, tls_key_path: Optional[str] = None, extra_engine_args: Optional[str] = None, namespace: Optional[str] = None, is_prefill: bool = False, migration_limit: int = 0, chat_engine_factory: Optional[Callable] = None)`
+#### `__init__(engine_type: EngineType = None, model_path: Optional[str] = None, model_name: Optional[str] = None, endpoint_id: Optional[str] = None, context_length: Optional[int] = None, template_file: Optional[str] = None, router_config: Optional[RouterConfig] = None, kv_cache_block_size: Optional[int] = None, http_host: Optional[str] = None, http_port: Optional[int] = None, http_metrics_port: Optional[int] = None, tls_cert_path: Optional[str] = None, tls_key_path: Optional[str] = None, extra_engine_args: Optional[str] = None, namespace: Optional[str] = None, is_prefill: bool = False, migration_limit: int = 0, chat_engine_factory: Optional[Callable] = None)`
 
-*Source: [`dynamo/_core.pyi#L1825`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1825)*
+*Source: [`dynamo/_core.pyi#L1821`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1821)*
 
 Create EntrypointArgs.
 
@@ -1785,7 +1781,7 @@ Create EntrypointArgs.
 <details>
 <summary><strong>`PlannerDecision` — A request from planner to client to perform a scaling action.</strong></summary>
 
-*Source: [`dynamo/_core.pyi#L1871`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1871)*
+*Source: [`dynamo/_core.pyi#L1867`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1867)*
 
 Fields: num_prefill_workers, num_decode_workers, decision_id.
         -1 in any of those fields mean not set, usually because planner hasn't decided anything yet.
@@ -1805,33 +1801,33 @@ Call VirtualConnectorClient.complete(event) when action is completed.
 <details>
 <summary><strong>`VirtualConnectorCoordinator` — Internal planner virtual connector component</strong></summary>
 
-*Source: [`dynamo/_core.pyi#L1885`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1885)*
+*Source: [`dynamo/_core.pyi#L1881`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1881)*
 
 <b>Constructor</b>
 
-#### `__init__(runtime: DistributedRuntime, dynamo_namespace: str, check_interval_secs: int, max_wait_time_secs: int, max_retries: int)`
+#### `__init__(runtime: DistributedRuntime = None, dynamo_namespace: str = None, check_interval_secs: int = None, max_wait_time_secs: int = None, max_retries: int = None)`
 
-*Source: [`dynamo/_core.pyi#L1888`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1888)*
+*Source: [`dynamo/_core.pyi#L1884`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1884)*
 
 <b>Methods</b>
 
 #### `async_init()`
 
-*Source: [`dynamo/_core.pyi#L1891`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1891)*
+*Source: [`dynamo/_core.pyi#L1887`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1887)*
 
 Call this before using the object
 #### `read_state() -> PlannerDecision`
 
-*Source: [`dynamo/_core.pyi#L1895`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1895)*
+*Source: [`dynamo/_core.pyi#L1891`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1891)*
 
 Get the current values. Most for test / debug.
 #### `update_scaling_decision(num_prefill: Optional[int] = None, num_decode: Optional[int] = None)`
 
-*Source: [`dynamo/_core.pyi#L1899`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1899)*
+*Source: [`dynamo/_core.pyi#L1895`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1895)*
 
 #### `wait_for_scaling_completion()`
 
-*Source: [`dynamo/_core.pyi#L1902`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1902)*
+*Source: [`dynamo/_core.pyi#L1898`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1898)*
 
 
 </details>
@@ -1839,27 +1835,27 @@ Get the current values. Most for test / debug.
 <details>
 <summary><strong>`VirtualConnectorClient` — How a client discovers planner requests and marks them complete</strong></summary>
 
-*Source: [`dynamo/_core.pyi#L1905`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1905)*
+*Source: [`dynamo/_core.pyi#L1901`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1901)*
 
 <b>Constructor</b>
 
-#### `__init__(runtime: DistributedRuntime, dynamo_namespace: str)`
+#### `__init__(runtime: DistributedRuntime = None, dynamo_namespace: str = None)`
 
-*Source: [`dynamo/_core.pyi#L1908`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1908)*
+*Source: [`dynamo/_core.pyi#L1904`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1904)*
 
 <b>Methods</b>
 
 #### `get() -> PlannerDecision`
 
-*Source: [`dynamo/_core.pyi#L1911`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1911)*
+*Source: [`dynamo/_core.pyi#L1907`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1907)*
 
-#### `complete(decision: PlannerDecision)`
+#### `complete(decision: PlannerDecision = None)`
 
-*Source: [`dynamo/_core.pyi#L1914`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1914)*
+*Source: [`dynamo/_core.pyi#L1910`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1910)*
 
 #### `wait()`
 
-*Source: [`dynamo/_core.pyi#L1917`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1917)*
+*Source: [`dynamo/_core.pyi#L1913`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1913)*
 
 Blocks until there is a new decision to fetch using 'get'
 
@@ -1870,7 +1866,7 @@ Blocks until there is a new decision to fetch using 'get'
 <details>
 <summary><strong>`ModelDeploymentCard` — A model deployment card is a collection of model information</strong></summary>
 
-*Source: [`dynamo/_core.pyi#L456`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L456)*
+*Source: [`dynamo/_core.pyi#L455`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L455)*
 
 <b>Examples</b>
 
@@ -1884,12 +1880,12 @@ Blocks until there is a new decision to fetch using 'get'
 
 #### `to_json_str() -> str`
 
-*Source: [`dynamo/_core.pyi#L467`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L467)*
+*Source: [`dynamo/_core.pyi#L466`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L466)*
 
 Serialize the model deployment card to a JSON string.
-#### `from_json_str(json: str) -> ModelDeploymentCard`
+#### `from_json_str(json: str = None) -> ModelDeploymentCard`
 
-*Source: [`dynamo/_core.pyi#L471`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L471)*
+*Source: [`dynamo/_core.pyi#L470`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L470)*
 
 Deserialize a model deployment card from a JSON string.
 
@@ -1897,21 +1893,21 @@ Deserialize a model deployment card from a JSON string.
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
-| `json` | `str` |  |  |
+| `json` | `str` | None |  |
 
 #### `model_type() -> ModelType`
 
-*Source: [`dynamo/_core.pyi#L476`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L476)*
+*Source: [`dynamo/_core.pyi#L475`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L475)*
 
 Return the model type of this deployment card.
 #### `source_path() -> str`
 
-*Source: [`dynamo/_core.pyi#L480`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L480)*
+*Source: [`dynamo/_core.pyi#L479`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L479)*
 
 Return the source path of this deployment card.
 #### `runtime_config() -> Any`
 
-*Source: [`dynamo/_core.pyi#L484`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L484)*
+*Source: [`dynamo/_core.pyi#L483`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L483)*
 
 Return the runtime configuration as a dict.
 
@@ -1920,13 +1916,13 @@ Return the runtime configuration as a dict.
 <details>
 <summary><strong>`KvbmRequest` — A request for KV cache</strong></summary>
 
-*Source: [`dynamo/_core.pyi#L1590`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1590)*
+*Source: [`dynamo/_core.pyi#L1586`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1586)*
 
 <b>Constructor</b>
 
-#### `__init__(request_id: int, tokens: List[int], block_size: int)`
+#### `__init__(request_id: int = None, tokens: List[int] = None, block_size: int = None)`
 
-*Source: [`dynamo/_core.pyi#L1595`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1595)*
+*Source: [`dynamo/_core.pyi#L1591`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1591)*
 
 
 </details>
@@ -1936,19 +1932,19 @@ Return the runtime configuration as a dict.
 <details>
 <summary><strong>`log_message()` — Log a message from Python with file and line info</strong></summary>
 
-#### `log_message(level: str, message: str, module: str, file: str, line: int)`
+#### `log_message(level: str = None, message: str = None, module: str = None, file: str = None, line: int = None)`
 
-*Source: [`dynamo/_core.pyi#L20`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L20)*
+*Source: [`dynamo/_core.pyi#L20`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L20)*
 
 <b>Parameters</b>
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
-| `level` | `str` |  |  |
-| `message` | `str` |  |  |
-| `module` | `str` |  |  |
-| `file` | `str` |  |  |
-| `line` | `int` |  |  |
+| `level` | `str` | None |  |
+| `message` | `str` | None |  |
+| `module` | `str` | None |  |
+| `file` | `str` | None |  |
+| `line` | `int` | None |  |
 
 
 </details>
@@ -1958,7 +1954,7 @@ Return the runtime configuration as a dict.
 
 #### `get_tool_parser_names() -> list[str]`
 
-*Source: [`dynamo/_core.pyi#L26`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L26)*
+*Source: [`dynamo/_core.pyi#L26`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L26)*
 
 
 </details>
@@ -1968,7 +1964,7 @@ Return the runtime configuration as a dict.
 
 #### `get_reasoning_parser_names() -> list[str]`
 
-*Source: [`dynamo/_core.pyi#L30`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L30)*
+*Source: [`dynamo/_core.pyi#L30`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L30)*
 
 
 </details>
@@ -1976,9 +1972,9 @@ Return the runtime configuration as a dict.
 <details>
 <summary><strong>`compute_block_hash_for_seq()` — Compute block hashes for a sequence of tokens, optionally including multimodal metadata.</strong></summary>
 
-#### `compute_block_hash_for_seq(tokens: List[int], kv_block_size: int, block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None, lora_name: Optional[str] = None) -> List[int]`
+#### `compute_block_hash_for_seq(tokens: List[int] = None, kv_block_size: int = None, block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None, lora_name: Optional[str] = None) -> List[int]`
 
-*Source: [`dynamo/_core.pyi#L280`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L280)*
+*Source: [`dynamo/_core.pyi#L279`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L279)*
 
 When block_mm_infos is provided, the mm_hashes are included in the hash computation
 to ensure that blocks with identical tokens but different multimodal objects produce
@@ -2009,9 +2005,9 @@ different hashes.
 <details>
 <summary><strong>`register_model()` — Attach the model at path to the given endpoint, and advertise it as model_type.</strong></summary>
 
-#### `register_model(model_input: ModelInput, model_type: ModelType, endpoint: Endpoint, model_path: str, model_name: Optional[str] = None, context_length: Optional[int] = None, kv_cache_block_size: Optional[int] = None, router_mode: Optional[RouterMode] = None, runtime_config: Optional[ModelRuntimeConfig] = None, user_data: Optional[Dict[str, Any]] = None, custom_template_path: Optional[str] = None, lora_name: Optional[str] = None, base_model_path: Optional[str] = None)`
+#### `register_model(model_input: ModelInput = None, model_type: ModelType = None, endpoint: Endpoint = None, model_path: str = None, model_name: Optional[str] = None, context_length: Optional[int] = None, kv_cache_block_size: Optional[int] = None, router_mode: Optional[RouterMode] = None, runtime_config: Optional[ModelRuntimeConfig] = None, user_data: Optional[Dict[str, Any]] = None, custom_template_path: Optional[str] = None, lora_name: Optional[str] = None, base_model_path: Optional[str] = None)`
 
-*Source: [`dynamo/_core.pyi#L1234`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1234)*
+*Source: [`dynamo/_core.pyi#L1230`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1230)*
 
 LoRA Registration:
     The `lora_name` and `base_model_path` parameters must be provided together or not at all.
@@ -2027,10 +2023,10 @@ for these models.
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
-| `model_input` | `ModelInput` |  |  |
-| `model_type` | `ModelType` |  |  |
-| `endpoint` | `Endpoint` |  |  |
-| `model_path` | `str` |  |  |
+| `model_input` | `ModelInput` | None |  |
+| `model_type` | `ModelType` | None |  |
+| `endpoint` | `Endpoint` | None |  |
+| `model_path` | `str` | None |  |
 | `model_name` | `Optional[str]` | None |  |
 | `context_length` | `Optional[int]` | None |  |
 | `kv_cache_block_size` | `Optional[int]` | None |  |
@@ -2064,9 +2060,9 @@ for these models.
 <details>
 <summary><strong>`unregister_model()` — Unregister a model from the discovery system.</strong></summary>
 
-#### `unregister_model(endpoint: Endpoint, lora_name: Optional[str] = None)`
+#### `unregister_model(endpoint: Endpoint = None, lora_name: Optional[str] = None)`
 
-*Source: [`dynamo/_core.pyi#L1277`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1277)*
+*Source: [`dynamo/_core.pyi#L1273`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1273)*
 
 If lora_name is provided, unregisters a LoRA adapter instead of a base model.
 
@@ -2074,7 +2070,7 @@ If lora_name is provided, unregisters a LoRA adapter instead of a base model.
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
-| `endpoint` | `Endpoint` |  |  |
+| `endpoint` | `Endpoint` | None |  |
 | `lora_name` | `Optional[str]` | None |  |
 
 
@@ -2083,15 +2079,15 @@ If lora_name is provided, unregisters a LoRA adapter instead of a base model.
 <details>
 <summary><strong>`lora_name_to_id()` — Generate a deterministic integer ID from a LoRA name using blake3 hash.</strong></summary>
 
-#### `lora_name_to_id(lora_name: str) -> int`
+#### `lora_name_to_id(lora_name: str = None) -> int`
 
-*Source: [`dynamo/_core.pyi#L1288`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1288)*
+*Source: [`dynamo/_core.pyi#L1284`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1284)*
 
 <b>Parameters</b>
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
-| `lora_name` | `str` |  |  |
+| `lora_name` | `str` | None |  |
 
 
 </details>
@@ -2099,9 +2095,9 @@ If lora_name is provided, unregisters a LoRA adapter instead of a base model.
 <details>
 <summary><strong>`fetch_model()` — Download a model from Hugging Face, returning its local path.</strong></summary>
 
-#### `fetch_model(remote_name: str, ignore_weights: bool = False) -> str`
+#### `fetch_model(remote_name: str = None, ignore_weights: bool = False) -> str`
 
-*Source: [`dynamo/_core.pyi#L1322`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1322)*
+*Source: [`dynamo/_core.pyi#L1318`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1318)*
 
 If `ignore_weights` is True, only fetches tokenizer and config files.
 
@@ -2109,7 +2105,7 @@ If `ignore_weights` is True, only fetches tokenizer and config files.
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
-| `remote_name` | `str` |  |  |
+| `remote_name` | `str` | None |  |
 | `ignore_weights` | `bool` | False |  |
 
 
@@ -2125,16 +2121,16 @@ If `ignore_weights` is True, only fetches tokenizer and config files.
 <details>
 <summary><strong>`make_engine()` — Make an engine matching the args</strong></summary>
 
-#### `make_engine(distributed_runtime: DistributedRuntime, args: EntrypointArgs) -> EngineConfig`
+#### `make_engine(distributed_runtime: DistributedRuntime = None, args: EntrypointArgs = None) -> EngineConfig`
 
-*Source: [`dynamo/_core.pyi#L1348`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1348)*
+*Source: [`dynamo/_core.pyi#L1344`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1344)*
 
 <b>Parameters</b>
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
-| `distributed_runtime` | `DistributedRuntime` |  |  |
-| `args` | `EntrypointArgs` |  |  |
+| `distributed_runtime` | `DistributedRuntime` | None |  |
+| `args` | `EntrypointArgs` | None |  |
 
 
 <b>Examples</b>
@@ -2150,17 +2146,17 @@ If `ignore_weights` is True, only fetches tokenizer and config files.
 <details>
 <summary><strong>`run_input()` — Start an engine, connect it to an input, and run until stopped.</strong></summary>
 
-#### `run_input(runtime: DistributedRuntime, input: str, engine_config: EngineConfig)`
+#### `run_input(runtime: DistributedRuntime = None, input: str = None, engine_config: EngineConfig = None)`
 
-*Source: [`dynamo/_core.pyi#L1358`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/_core.pyi#L1358)*
+*Source: [`dynamo/_core.pyi#L1354`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1354)*
 
 <b>Parameters</b>
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
-| `runtime` | `DistributedRuntime` |  |  |
-| `input` | `str` |  |  |
-| `engine_config` | `EngineConfig` |  |  |
+| `runtime` | `DistributedRuntime` | None |  |
+| `input` | `str` | None |  |
+| `engine_config` | `EngineConfig` | None |  |
 
 
 <b>Examples</b>
@@ -2185,15 +2181,15 @@ Decorators and utilities for defining Dynamo workers and endpoints.
 <details>
 <summary><strong>`LogHandler` — Custom logging handler that sends log messages to the Rust env_logger</strong></summary>
 
-*Source: [`dynamo/runtime/logging.py#L26`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/runtime/logging.py#L26)*
+*Source: [`dynamo/runtime/logging.py#L26`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/runtime/logging.py#L26)*
 
 <b>Bases:</b> `logging.Handler`
 
 <b>Methods</b>
 
-#### `emit(record: logging.LogRecord)`
+#### `emit(record: logging.LogRecord = None)`
 
-*Source: [`dynamo/runtime/logging.py#L31`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/runtime/logging.py#L31)*
+*Source: [`dynamo/runtime/logging.py#L31`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/runtime/logging.py#L31)*
 
 Emit a log record
 
@@ -2201,7 +2197,7 @@ Emit a log record
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
-| `record` | `logging.LogRecord` |  |  |
+| `record` | `logging.LogRecord` | None |  |
 
 
 </details>
@@ -2209,7 +2205,7 @@ Emit a log record
 <details>
 <summary><strong>`VllmColorFormatter` — Formatter that matches Rust tracing's compact colored output style.</strong></summary>
 
-*Source: [`dynamo/runtime/logging.py#L63`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/runtime/logging.py#L63)*
+*Source: [`dynamo/runtime/logging.py#L63`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/runtime/logging.py#L63)*
 
 Used for vLLM logs routed through a StreamHandler (bypassing the Rust
 bridge) so that VLLM_LOGGING_LEVEL is respected independently of DYN_LOG
@@ -2218,9 +2214,9 @@ while still producing visually consistent colored output.
 
 <b>Methods</b>
 
-#### `format(record: logging.LogRecord) -> str`
+#### `format(record: logging.LogRecord = None) -> str`
 
-*Source: [`dynamo/runtime/logging.py#L81`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/runtime/logging.py#L81)*
+*Source: [`dynamo/runtime/logging.py#L81`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/runtime/logging.py#L81)*
 
 
 </details>
@@ -2232,7 +2228,7 @@ while still producing visually consistent colored output.
 
 #### `dynamo_worker(enable_nats: bool = True)`
 
-*Source: [`dynamo/runtime/__init__.py#L19`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/runtime/__init__.py#L19)*
+*Source: [`dynamo/runtime/__init__.py#L19`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/runtime/__init__.py#L19)*
 
 <b>Parameters</b>
 
@@ -2256,18 +2252,22 @@ while still producing visually consistent colored output.
 </details>
 
 <details>
-<summary><strong>`dynamo_endpoint()` — Decorator that validates request/response Pydantic models on an async generator endpoint.</strong></summary>
+<summary><strong>`dynamo_endpoint()` — Decorator that parses incoming requests into Pydantic models on an async generator endpoint.</strong></summary>
 
-#### `dynamo_endpoint(request_model: Union[Type[BaseModel], Type[Any]], response_model: Type[BaseModel]) -> Callable`
+#### `dynamo_endpoint(request_model: Union[Type[BaseModel], Type[Any]] = None, response_model: Type[BaseModel] = None) -> Callable`
 
-*Source: [`dynamo/runtime/__init__.py#L71`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/runtime/__init__.py#L71)*
+*Source: [`dynamo/runtime/__init__.py#L71`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/runtime/__init__.py#L71)*
+
+Currently validates and converts the *request* payload (JSON string or dict)
+into `012` is accepted for forward
+compatibility but response validation is not yet implemented.
 
 <b>Parameters</b>
 
 | Parameter | Type | Description |
 | --- | --- | --- |
 | `request_model` | `Union[Type[BaseModel], Type[Any]]` | Pydantic model class (or Any) for incoming requests. |
-| `response_model` | `Type[BaseModel]` | Pydantic model class for streamed response items. |
+| `response_model` | `Type[BaseModel]` | Pydantic model class reserved for future response validation. |
 
 <b>Examples</b>
 
@@ -2292,16 +2292,16 @@ while still producing visually consistent colored output.
 <details>
 <summary><strong>`configure_logger()` — Called once to configure the Python logger to use the LogHandler</strong></summary>
 
-#### `configure_logger(service_name: str | None, worker_id: int | None)`
+#### `configure_logger(service_name: str | None = None, worker_id: int | None = None)`
 
-*Source: [`dynamo/runtime/logging.py#L101`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/runtime/logging.py#L101)*
+*Source: [`dynamo/runtime/logging.py#L101`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/runtime/logging.py#L101)*
 
 <b>Parameters</b>
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
-| `service_name` | `str | None` |  |  |
-| `worker_id` | `int | None` |  |  |
+| `service_name` | `str | None` | None |  |
+| `worker_id` | `int | None` | None |  |
 
 
 </details>
@@ -2311,7 +2311,7 @@ while still producing visually consistent colored output.
 
 #### `configure_dynamo_logging(service_name: str | None = None, worker_id: int | None = None)`
 
-*Source: [`dynamo/runtime/logging.py#L130`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/runtime/logging.py#L130)*
+*Source: [`dynamo/runtime/logging.py#L130`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/runtime/logging.py#L130)*
 
 <b>Parameters</b>
 
@@ -2326,9 +2326,9 @@ while still producing visually consistent colored output.
 <details>
 <summary><strong>`log_level_mapping()` — The DYN_LOG variable is set using &quot;debug&quot; or &quot;trace&quot; or &quot;info.</strong></summary>
 
-#### `log_level_mapping(level: str) -> int`
+#### `log_level_mapping(level: str = None) -> int`
 
-*Source: [`dynamo/runtime/logging.py#L162`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/runtime/logging.py#L162)*
+*Source: [`dynamo/runtime/logging.py#L162`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/runtime/logging.py#L162)*
 
 This function maps those to the appropriate logging level and defaults to INFO
 if the variable is not set or a bad value.
@@ -2337,7 +2337,7 @@ if the variable is not set or a bad value.
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
-| `level` | `str` |  |  |
+| `level` | `str` | None |  |
 
 
 </details>
@@ -2345,15 +2345,15 @@ if the variable is not set or a bad value.
 <details>
 <summary><strong>`configure_sglang_logging()` — SGLang allows us to create a custom logging config file</strong></summary>
 
-#### `configure_sglang_logging(dyn_level: int)`
+#### `configure_sglang_logging(dyn_level: int = None)`
 
-*Source: [`dynamo/runtime/logging.py#L184`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/runtime/logging.py#L184)*
+*Source: [`dynamo/runtime/logging.py#L184`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/runtime/logging.py#L184)*
 
 <b>Parameters</b>
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
-| `dyn_level` | `int` |  |  |
+| `dyn_level` | `int` | None |  |
 
 
 </details>
@@ -2361,9 +2361,9 @@ if the variable is not set or a bad value.
 <details>
 <summary><strong>`configure_vllm_logging()` — Configure vLLM logging for the main process and subprocesses.</strong></summary>
 
-#### `configure_vllm_logging(dyn_level: int)`
+#### `configure_vllm_logging(dyn_level: int = None)`
 
-*Source: [`dynamo/runtime/logging.py#L216`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/runtime/logging.py#L216)*
+*Source: [`dynamo/runtime/logging.py#L216`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/runtime/logging.py#L216)*
 
 Main process: replaces vLLM's StreamHandler with a new StreamHandler that
 uses VllmColorFormatter and writes directly to stderr.  This bypasses the
@@ -2382,7 +2382,7 @@ the vLLM logger level. Use VLLM_LOGGING_LEVEL env var instead.
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
-| `dyn_level` | `int` |  |  |
+| `dyn_level` | `int` | None |  |
 
 
 </details>
@@ -2404,7 +2404,7 @@ HTTP frontend configuration and OpenAI-compatible API gateway.
 <details>
 <summary><strong>`KvRouterArgGroup` — CLI arguments for the 16 KvRouterConfig parameters.</strong></summary>
 
-*Source: [`dynamo/common/configuration/groups/kv_router_args.py#L80`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/common/configuration/groups/kv_router_args.py#L80)*
+*Source: [`dynamo/common/configuration/groups/kv_router_args.py#L80`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/configuration/groups/kv_router_args.py#L80)*
 
 <b>Examples</b>
 
@@ -2425,9 +2425,9 @@ HTTP frontend configuration and OpenAI-compatible API gateway.
 
 <b>Methods</b>
 
-#### `add_arguments(parser)`
+#### `add_arguments(parser = None)`
 
-*Source: [`dynamo/common/configuration/groups/kv_router_args.py#L97`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/common/configuration/groups/kv_router_args.py#L97)*
+*Source: [`dynamo/common/configuration/groups/kv_router_args.py#L97`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/configuration/groups/kv_router_args.py#L97)*
 
 
 </details>
@@ -2435,23 +2435,23 @@ HTTP frontend configuration and OpenAI-compatible API gateway.
 <details>
 <summary><strong>`KvRouterConfigBase` — Mixin carrying the 16 KvRouterConfig fields.</strong></summary>
 
-*Source: [`dynamo/common/configuration/groups/kv_router_args.py#L40`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/common/configuration/groups/kv_router_args.py#L40)*
+*Source: [`dynamo/common/configuration/groups/kv_router_args.py#L40`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/configuration/groups/kv_router_args.py#L40)*
 
 <b>Examples</b>
 
 ```python
->>> import argparse
 >>> from dynamo.common.configuration.groups.kv_router_args import (
 ...     KvRouterArgGroup,
 ...     KvRouterConfigBase,
 ... )
 >>>
 >>> class MyRouterConfig(KvRouterConfigBase):
-...     endpoint: str
+...     endpoint: str = "http://localhost:8080"
 >>>
->>> kwargs = my_config.kv_router_kwargs()
->>> kwargs["overlap_score_weight"]
-1.0
+>>> config = MyRouterConfig()
+>>> kwargs = config.kv_router_kwargs()
+>>> "overlap_score_weight" in kwargs
+True
 ```
 <b>Bases:</b> `ConfigBase`
 
@@ -2478,7 +2478,7 @@ HTTP frontend configuration and OpenAI-compatible API gateway.
 
 #### `kv_router_kwargs() -> dict`
 
-*Source: [`dynamo/common/configuration/groups/kv_router_args.py#L75`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/common/configuration/groups/kv_router_args.py#L75)*
+*Source: [`dynamo/common/configuration/groups/kv_router_args.py#L75`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/configuration/groups/kv_router_args.py#L75)*
 
 Return a dict suitable for `0`.
 
@@ -2487,7 +2487,7 @@ Return a dict suitable for `0`.
 <details>
 <summary><strong>`FrontendArgGroup` — Frontend configuration parameters.</strong></summary>
 
-*Source: [`dynamo/frontend/frontend_args.py#L113`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/frontend/frontend_args.py#L113)*
+*Source: [`dynamo/frontend/frontend_args.py#L113`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/frontend_args.py#L113)*
 
 <b>Examples</b>
 
@@ -2510,9 +2510,9 @@ Return a dict suitable for `0`.
 
 <b>Methods</b>
 
-#### `add_arguments(parser)`
+#### `add_arguments(parser = None)`
 
-*Source: [`dynamo/frontend/frontend_args.py#L132`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/frontend/frontend_args.py#L132)*
+*Source: [`dynamo/frontend/frontend_args.py#L132`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/frontend_args.py#L132)*
 
 
 </details>
@@ -2522,7 +2522,7 @@ Return a dict suitable for `0`.
 <details>
 <summary><strong>`FrontendConfig` — Configuration for the Dynamo frontend.</strong></summary>
 
-*Source: [`dynamo/frontend/frontend_args.py#L42`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/frontend/frontend_args.py#L42)*
+*Source: [`dynamo/frontend/frontend_args.py#L42`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/frontend_args.py#L42)*
 
 <b>Examples</b>
 
@@ -2578,7 +2578,7 @@ Return a dict suitable for `0`.
 
 #### `validate()`
 
-*Source: [`dynamo/frontend/frontend_args.py#L94`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/frontend/frontend_args.py#L94)*
+*Source: [`dynamo/frontend/frontend_args.py#L94`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/frontend_args.py#L94)*
 
 
 </details>
@@ -2586,7 +2586,7 @@ Return a dict suitable for `0`.
 <details>
 <summary><strong>`ArgGroup` — Base interface for configuration groups.</strong></summary>
 
-*Source: [`dynamo/common/configuration/arg_group.py#L9`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/common/configuration/arg_group.py#L9)*
+*Source: [`dynamo/common/configuration/arg_group.py#L9`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/configuration/arg_group.py#L9)*
 
 Each ArgGroup represents a domain of configuration parameters with clear ownership.
 
@@ -2612,9 +2612,9 @@ Each ArgGroup represents a domain of configuration parameters with clear ownersh
 ```
 <b>Methods</b>
 
-#### `add_arguments(parser: argparse.ArgumentParser)`
+#### `add_arguments(parser: argparse.ArgumentParser = None)`
 
-*Source: [`dynamo/common/configuration/arg_group.py#L34`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/common/configuration/arg_group.py#L34)*
+*Source: [`dynamo/common/configuration/arg_group.py#L34`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/configuration/arg_group.py#L34)*
 
 Register CLI arguments owned by this group.
 
@@ -2634,7 +2634,7 @@ It must not depend on runtime state or other groups.
 <details>
 <summary><strong>`PreprocessWorkerResult` — Picklable return value from the preprocess worker.</strong></summary>
 
-*Source: [`dynamo/frontend/vllm_processor.py#L96`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/frontend/vllm_processor.py#L96)*
+*Source: [`dynamo/frontend/vllm_processor.py#L96`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/vllm_processor.py#L96)*
 
 <b>Attributes</b>
 
@@ -2647,9 +2647,9 @@ It must not depend on runtime state or other groups.
 
 <b>Constructor</b>
 
-#### `__init__(dynamo_preproc: dict[str, Any], tokens: list[int], vllm_preproc: EngineCoreRequest, sampling_params: SamplingParams, request_for_sampling: Any, chat_template_kwargs: dict[str, Any])`
+#### `__init__(dynamo_preproc: dict[str, Any] = None, tokens: list[int] = None, vllm_preproc: EngineCoreRequest = None, sampling_params: SamplingParams = None, request_for_sampling: Any = None, chat_template_kwargs: dict[str, Any] = None)`
 
-*Source: [`dynamo/frontend/vllm_processor.py`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/frontend/vllm_processor.py)*
+*Source: [`dynamo/frontend/vllm_processor.py`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/vllm_processor.py)*
 
 
 </details>
@@ -2659,18 +2659,18 @@ It must not depend on runtime state or other groups.
 <details>
 <summary><strong>`preprocess_chat_request_sync()` — Sync version of preprocess_chat_request for worker processes.</strong></summary>
 
-#### `preprocess_chat_request_sync(request: dict[str, Any] | ChatCompletionRequest, tokenizer: TokenizerLike, renderer, tool_parser_class: type[ToolParser] | None) -> PreprocessResult`
+#### `preprocess_chat_request_sync(request: dict[str, Any] | ChatCompletionRequest = None, tokenizer: TokenizerLike = None, renderer = None, tool_parser_class: type[ToolParser] | None = None) -> PreprocessResult`
 
-*Source: [`dynamo/frontend/prepost.py#L190`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/frontend/prepost.py#L190)*
+*Source: [`dynamo/frontend/prepost.py#L190`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/prepost.py#L190)*
 
 <b>Parameters</b>
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
-| `request` | `dict[str, Any] | ChatCompletionRequest` |  |  |
-| `tokenizer` | `TokenizerLike` |  |  |
-| `renderer` | `Any` |  |  |
-| `tool_parser_class` | `type[ToolParser] | None` |  |  |
+| `request` | `dict[str, Any] | ChatCompletionRequest` | None |  |
+| `tokenizer` | `TokenizerLike` | None |  |
+| `renderer` | `Any` | None |  |
+| `tool_parser_class` | `type[ToolParser] | None` | None |  |
 
 
 </details>
@@ -2678,9 +2678,9 @@ It must not depend on runtime state or other groups.
 <details>
 <summary><strong>`register_encoder()` — Decorator to register custom encoders for specific types.</strong></summary>
 
-#### `register_encoder(type_class: type) -> Any`
+#### `register_encoder(type_class: type = None) -> Any`
 
-*Source: [`dynamo/common/config_dump/config_dumper.py#L209`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/common/config_dump/config_dumper.py#L209)*
+*Source: [`dynamo/common/config_dump/config_dumper.py#L209`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/config_dump/config_dumper.py#L209)*
 
 Usage:
     @register_encoder(MyClass)
@@ -2691,7 +2691,7 @@ Usage:
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
-| `type_class` | `type` |  |  |
+| `type_class` | `type` | None |  |
 
 
 </details>
@@ -2699,9 +2699,9 @@ Usage:
 <details>
 <summary><strong>`add_argument()` — Add a CLI argument with env var default, optional alias and dest, and help message construction.</strong></summary>
 
-#### `add_argument(parser: argparse.ArgumentParser | argparse._ArgumentGroup, flag_name: str, env_var: str, default: Any, help: str, obsolete_flag: Optional[str] = None, arg_type: Optional[Union[type, Callable[..., Any]]] = str, kwargs: Any = {})`
+#### `add_argument(parser: argparse.ArgumentParser | argparse._ArgumentGroup = None, flag_name: str = None, env_var: str = None, default: Any = None, help: str = None, obsolete_flag: Optional[str] = None, arg_type: Optional[Union[type, Callable[..., Any]]] = str, kwargs: Any = {})`
 
-*Source: [`dynamo/common/configuration/utils.py#L57`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/common/configuration/utils.py#L57)*
+*Source: [`dynamo/common/configuration/utils.py#L57`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/configuration/utils.py#L57)*
 
 <b>Examples</b>
 
@@ -2743,9 +2743,9 @@ Usage:
 <details>
 <summary><strong>`add_negatable_bool_argument()` — Add negatable boolean flag (--foo / --no-foo).</strong></summary>
 
-#### `add_negatable_bool_argument(parser: Any, flag_name: str, env_var: str, default: bool, help: str, dest: Optional[str] = None, obsolete_flag: Optional[str] = None)`
+#### `add_negatable_bool_argument(parser: Any = None, flag_name: str = None, env_var: str = None, default: bool = None, help: str = None, dest: Optional[str] = None, obsolete_flag: Optional[str] = None)`
 
-*Source: [`dynamo/common/configuration/utils.py#L128`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/common/configuration/utils.py#L128)*
+*Source: [`dynamo/common/configuration/utils.py#L128`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/configuration/utils.py#L128)*
 
 <b>Parameters</b>
 
@@ -2764,9 +2764,9 @@ Usage:
 <details>
 <summary><strong>`env_or_default()` — Get value from environment variable or return default.</strong></summary>
 
-#### `env_or_default(env_var: str, default: T, value_type: Optional[Union[type, Callable[..., Any]]] = None) -> T`
+#### `env_or_default(env_var: str = None, default: T = None, value_type: Optional[Union[type, Callable[..., Any]]] = None) -> T`
 
-*Source: [`dynamo/common/configuration/utils.py#L13`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/common/configuration/utils.py#L13)*
+*Source: [`dynamo/common/configuration/utils.py#L13`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/configuration/utils.py#L13)*
 
 Performs type conversion based on the default value's type.
 
@@ -2785,15 +2785,15 @@ Performs type conversion based on the default value's type.
 <details>
 <summary><strong>`validate_model_name()` — Validate that model-name is a non-empty string.</strong></summary>
 
-#### `validate_model_name(value: str) -> str`
+#### `validate_model_name(value: str = None) -> str`
 
-*Source: [`dynamo/frontend/frontend_args.py#L24`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/frontend/frontend_args.py#L24)*
+*Source: [`dynamo/frontend/frontend_args.py#L24`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/frontend_args.py#L24)*
 
 <b>Parameters</b>
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
-| `value` | `str` |  |  |
+| `value` | `str` | None |  |
 
 
 </details>
@@ -2801,15 +2801,15 @@ Performs type conversion based on the default value's type.
 <details>
 <summary><strong>`validate_model_path()` — Validate that model-path is a valid directory on disk.</strong></summary>
 
-#### `validate_model_path(value: str) -> str`
+#### `validate_model_path(value: str = None) -> str`
 
-*Source: [`dynamo/frontend/frontend_args.py#L33`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/frontend/frontend_args.py#L33)*
+*Source: [`dynamo/frontend/frontend_args.py#L33`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/frontend_args.py#L33)*
 
 <b>Parameters</b>
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
-| `value` | `str` |  |  |
+| `value` | `str` | None |  |
 
 
 </details>
@@ -2819,7 +2819,7 @@ Performs type conversion based on the default value's type.
 
 #### `enter_generator() -> int`
 
-*Source: [`dynamo/frontend/perf_instrumentation.py#L24`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/frontend/perf_instrumentation.py#L24)*
+*Source: [`dynamo/frontend/perf_instrumentation.py#L24`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/perf_instrumentation.py#L24)*
 
 Safe without a lock: only called while the GIL is held (all callers are
 in Python code), so the read-modify-write on the global int is atomic
@@ -2832,7 +2832,7 @@ with respect to other Python threads.
 
 #### `exit_generator() -> int`
 
-*Source: [`dynamo/frontend/perf_instrumentation.py#L39`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/frontend/perf_instrumentation.py#L39)*
+*Source: [`dynamo/frontend/perf_instrumentation.py#L39`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/perf_instrumentation.py#L39)*
 
 
 </details>
@@ -2840,9 +2840,9 @@ with respect to other Python threads.
 <details>
 <summary><strong>`dump_config()` — Dump the configuration to a file or stdout.</strong></summary>
 
-#### `dump_config(dump_config_to: Optional[str], config: Any)`
+#### `dump_config(dump_config_to: Optional[str] = None, config: Any = None)`
 
-*Source: [`dynamo/common/config_dump/config_dumper.py#L72`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/common/config_dump/config_dumper.py#L72)*
+*Source: [`dynamo/common/config_dump/config_dumper.py#L72`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/config_dump/config_dumper.py#L72)*
 
 If dump_config_to is not provided, the config will be logged to stdout at VERBOSE level.
 
@@ -2858,9 +2858,9 @@ If dump_config_to is not provided, the config will be logged to stdout at VERBOS
 <details>
 <summary><strong>`setup_engine_factory()` — When using vllm pre and post processor, create the EngineFactory that</strong></summary>
 
-#### `setup_engine_factory(runtime: DistributedRuntime, router_config: RouterConfig, config: FrontendConfig, vllm_flags: Namespace) -> EngineFactory`
+#### `setup_engine_factory(runtime: DistributedRuntime = None, router_config: RouterConfig = None, config: FrontendConfig = None, vllm_flags: Namespace = None) -> EngineFactory`
 
-*Source: [`dynamo/frontend/main.py#L51`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/frontend/main.py#L51)*
+*Source: [`dynamo/frontend/main.py#L51`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/main.py#L51)*
 
 creates the engines that run requests.
 
@@ -2868,10 +2868,10 @@ creates the engines that run requests.
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
-| `runtime` | `DistributedRuntime` |  |  |
-| `router_config` | `RouterConfig` |  |  |
-| `config` | `FrontendConfig` |  |  |
-| `vllm_flags` | `Namespace` |  |  |
+| `runtime` | `DistributedRuntime` | None |  |
+| `router_config` | `RouterConfig` | None |  |
+| `config` | `FrontendConfig` | None |  |
+| `vllm_flags` | `Namespace` | None |  |
 
 
 </details>
@@ -2881,7 +2881,7 @@ creates the engines that run requests.
 
 #### `parse_args() -> tuple[FrontendConfig, Optional[Namespace]]`
 
-*Source: [`dynamo/frontend/main.py#L66`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/frontend/main.py#L66)*
+*Source: [`dynamo/frontend/main.py#L66`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/main.py#L66)*
 
 <b>Returns:</b> `tuple[FrontendConfig, Optional[Namespace]]` -- Parsed configuration object.
 
@@ -2892,7 +2892,7 @@ creates the engines that run requests.
 
 #### `async_main()`
 
-*Source: [`dynamo/frontend/main.py#L118`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/frontend/main.py#L118)*
+*Source: [`dynamo/frontend/main.py#L118`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/main.py#L118)*
 
 Initializes the distributed runtime, configures routing, and starts
 the HTTP server or interactive mode based on command-line arguments.
@@ -2902,9 +2902,9 @@ the HTTP server or interactive mode based on command-line arguments.
 <details>
 <summary><strong>`graceful_shutdown()` — Handle graceful shutdown of the distributed runtime.</strong></summary>
 
-#### `graceful_shutdown(runtime: DistributedRuntime)`
+#### `graceful_shutdown(runtime: DistributedRuntime = None)`
 
-*Source: [`dynamo/frontend/main.py#L251`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/frontend/main.py#L251)*
+*Source: [`dynamo/frontend/main.py#L251`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/main.py#L251)*
 
 <b>Parameters</b>
 
@@ -2919,7 +2919,7 @@ the HTTP server or interactive mode based on command-line arguments.
 
 #### `main()`
 
-*Source: [`dynamo/frontend/main.py#L260`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/frontend/main.py#L260)*
+*Source: [`dynamo/frontend/main.py#L260`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/main.py#L260)*
 
 
 </details>
@@ -2935,7 +2935,7 @@ Shared configuration, constants, storage, and utility functions.
 <details>
 <summary><strong>`DisaggregationMode` — Disaggregation mode for LLM workers.</strong></summary>
 
-*Source: [`dynamo/common/constants.py#L9`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/common/constants.py#L9)*
+*Source: [`dynamo/common/constants.py#L9`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/constants.py#L9)*
 
 <b>Examples</b>
 
@@ -2960,7 +2960,7 @@ True
 <details>
 <summary><strong>`EmbeddingTransferMode` — Embedding transfer mode for LLM workers.</strong></summary>
 
-*Source: [`dynamo/common/constants.py#L25`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/common/constants.py#L25)*
+*Source: [`dynamo/common/constants.py#L25`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/constants.py#L25)*
 
 <b>Examples</b>
 
@@ -2987,7 +2987,7 @@ True
 <details>
 <summary><strong>`TransferRequest` — Data class for transfer requests containing necessary information for embedding transfer.</strong></summary>
 
-*Source: [`dynamo/common/multimodal/embedding_transfer.py#L50`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/common/multimodal/embedding_transfer.py#L50)*
+*Source: [`dynamo/common/multimodal/embedding_transfer.py#L50`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/embedding_transfer.py#L50)*
 
 <b>Bases:</b> `BaseModel`
 
@@ -3003,7 +3003,7 @@ True
 <details>
 <summary><strong>`NvCreateVideoRequest` — Request for video generation (/v1/videos endpoint).</strong></summary>
 
-*Source: [`dynamo/common/protocols/video_protocol.py#L44`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/common/protocols/video_protocol.py#L44)*
+*Source: [`dynamo/common/protocols/video_protocol.py#L44`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/protocols/video_protocol.py#L44)*
 
 Matches Rust NvCreateVideoRequest in lib/llm/src/protocols/openai/videos.rs.
 <b>Bases:</b> `BaseModel`
@@ -3025,7 +3025,7 @@ Matches Rust NvCreateVideoRequest in lib/llm/src/protocols/openai/videos.rs.
 <details>
 <summary><strong>`NvVideosResponse` — Response structure for video generation.</strong></summary>
 
-*Source: [`dynamo/common/protocols/video_protocol.py#L90`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/common/protocols/video_protocol.py#L90)*
+*Source: [`dynamo/common/protocols/video_protocol.py#L90`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/protocols/video_protocol.py#L90)*
 
 Matches Rust NvVideosResponse in lib/llm/src/protocols/openai/videos.rs.
 <b>Bases:</b> `BaseModel`
@@ -3048,7 +3048,7 @@ Matches Rust NvVideosResponse in lib/llm/src/protocols/openai/videos.rs.
 <details>
 <summary><strong>`VideoData` — Video data in response.</strong></summary>
 
-*Source: [`dynamo/common/protocols/video_protocol.py#L77`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/common/protocols/video_protocol.py#L77)*
+*Source: [`dynamo/common/protocols/video_protocol.py#L77`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/protocols/video_protocol.py#L77)*
 
 Matches Rust VideoData in lib/llm/src/protocols/openai/videos.rs.
 <b>Bases:</b> `BaseModel`
@@ -3066,7 +3066,7 @@ Matches Rust VideoData in lib/llm/src/protocols/openai/videos.rs.
 <details>
 <summary><strong>`ConfigBase` — Base configuration class that allows properties with and without defaults in arbitrary order.</strong></summary>
 
-*Source: [`dynamo/common/configuration/config_base.py#L7`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/common/configuration/config_base.py#L7)*
+*Source: [`dynamo/common/configuration/config_base.py#L7`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/configuration/config_base.py#L7)*
 
 <b>Examples</b>
 
@@ -3088,9 +3088,9 @@ Matches Rust VideoData in lib/llm/src/protocols/openai/videos.rs.
 ```
 <b>Methods</b>
 
-#### `from_cli_args(args: argparse.Namespace) -> Self`
+#### `from_cli_args(args: argparse.Namespace = None) -> Self`
 
-*Source: [`dynamo/common/configuration/config_base.py#L27`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/common/configuration/config_base.py#L27)*
+*Source: [`dynamo/common/configuration/config_base.py#L27`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/configuration/config_base.py#L27)*
 
 
 </details>
@@ -3098,7 +3098,7 @@ Matches Rust VideoData in lib/llm/src/protocols/openai/videos.rs.
 <details>
 <summary><strong>`MultimodalEmbeddingCacheManager` — LRU cache for encoder embeddings.</strong></summary>
 
-*Source: [`dynamo/common/memory/multimodal_embedding_cache_manager.py#L34`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/common/memory/multimodal_embedding_cache_manager.py#L34)*
+*Source: [`dynamo/common/memory/multimodal_embedding_cache_manager.py#L34`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/memory/multimodal_embedding_cache_manager.py#L34)*
 
 Stores tensors keyed by content hash with automatic eviction
 when capacity is exceeded.
@@ -3114,9 +3114,9 @@ Thread Safety:
 
 <b>Constructor</b>
 
-#### `__init__(capacity_bytes: int)`
+#### `__init__(capacity_bytes: int = None)`
 
-*Source: [`dynamo/common/memory/multimodal_embedding_cache_manager.py#L48`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/common/memory/multimodal_embedding_cache_manager.py#L48)*
+*Source: [`dynamo/common/memory/multimodal_embedding_cache_manager.py#L48`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/memory/multimodal_embedding_cache_manager.py#L48)*
 
 Initialize the encoder cache.
 
@@ -3127,9 +3127,9 @@ Initialize the encoder cache.
 | `capacity_bytes` | `int` | Maximum cache capacity in bytes. |
 <b>Methods</b>
 
-#### `get(key: str) -> Optional[CachedEmbedding]`
+#### `get(key: str = None) -> Optional[CachedEmbedding]`
 
-*Source: [`dynamo/common/memory/multimodal_embedding_cache_manager.py#L85`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/common/memory/multimodal_embedding_cache_manager.py#L85)*
+*Source: [`dynamo/common/memory/multimodal_embedding_cache_manager.py#L85`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/memory/multimodal_embedding_cache_manager.py#L85)*
 
 Get a cached embedding from the cache.
 
@@ -3142,9 +3142,9 @@ If found, the entry is moved to the end (most recently used).
 | `key` | `str` | Cache key (typically content hash). |
 
 <b>Returns:</b> `Optional[CachedEmbedding]` -- The cached embedding, or None if not found.
-#### `set(key: str, entry: CachedEmbedding) -> bool`
+#### `set(key: str = None, entry: CachedEmbedding = None) -> bool`
 
-*Source: [`dynamo/common/memory/multimodal_embedding_cache_manager.py#L106`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/common/memory/multimodal_embedding_cache_manager.py#L106)*
+*Source: [`dynamo/common/memory/multimodal_embedding_cache_manager.py#L106`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/memory/multimodal_embedding_cache_manager.py#L106)*
 
 Store a cached embedding in the cache.
 
@@ -3166,7 +3166,7 @@ If the tensor itself is larger than capacity, it is not stored.
 <details>
 <summary><strong>`AsyncEncoderCache` — Async wrapper with request coalescing over MultimodalEmbeddingCacheManager.</strong></summary>
 
-*Source: [`dynamo/common/multimodal/async_encoder_cache.py#L46`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/common/multimodal/async_encoder_cache.py#L46)*
+*Source: [`dynamo/common/multimodal/async_encoder_cache.py#L46`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/async_encoder_cache.py#L46)*
 
 Provides async get_or_compute that deduplicates concurrent requests
 for the same key, ensuring only one encoding runs at a time per key.
@@ -3180,9 +3180,9 @@ Thread Safety:
 
 <b>Constructor</b>
 
-#### `__init__(cache: MultimodalEmbeddingCacheManager)`
+#### `__init__(cache: MultimodalEmbeddingCacheManager = None)`
 
-*Source: [`dynamo/common/multimodal/async_encoder_cache.py#L58`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/common/multimodal/async_encoder_cache.py#L58)*
+*Source: [`dynamo/common/multimodal/async_encoder_cache.py#L58`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/async_encoder_cache.py#L58)*
 
 Initialize the async encoder cache.
 
@@ -3193,9 +3193,9 @@ Initialize the async encoder cache.
 | `cache` | `MultimodalEmbeddingCacheManager` | Underlying MultimodalEmbeddingCacheManager for storage. |
 <b>Methods</b>
 
-#### `get(key: str) -> Optional[torch.Tensor]`
+#### `get(key: str = None) -> Optional[torch.Tensor]`
 
-*Source: [`dynamo/common/multimodal/async_encoder_cache.py#L68`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/common/multimodal/async_encoder_cache.py#L68)*
+*Source: [`dynamo/common/multimodal/async_encoder_cache.py#L68`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/async_encoder_cache.py#L68)*
 
 Synchronous get from underlying cache.
 
@@ -3206,9 +3206,9 @@ Synchronous get from underlying cache.
 | `key` | `str` | Cache key. |
 
 <b>Returns:</b> `Optional[torch.Tensor]` -- Cached tensor or None if not found.
-#### `get_or_compute(key: str, compute_fn: Callable[[], Awaitable[torch.Tensor]]) -> torch.Tensor`
+#### `get_or_compute(key: str = None, compute_fn: Callable[[], Awaitable[torch.Tensor]] = None) -> torch.Tensor`
 
-*Source: [`dynamo/common/multimodal/async_encoder_cache.py#L80`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/common/multimodal/async_encoder_cache.py#L80)*
+*Source: [`dynamo/common/multimodal/async_encoder_cache.py#L80`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/async_encoder_cache.py#L80)*
 
 Get from cache or compute with request coalescing.
 
@@ -3234,7 +3234,7 @@ Otherwise, computes and caches the result.
 <details>
 <summary><strong>`LocalEmbeddingReceiver` — Receiver that reads embeddings from a local file path provided in the serialized request.</strong></summary>
 
-*Source: [`dynamo/common/multimodal/embedding_transfer.py#L180`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/common/multimodal/embedding_transfer.py#L180)*
+*Source: [`dynamo/common/multimodal/embedding_transfer.py#L180`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/embedding_transfer.py#L180)*
 
 <b>Bases:</b> `AbstractEmbeddingReceiver`
 
@@ -3247,13 +3247,13 @@ Otherwise, computes and caches the result.
 
 #### `__init__()`
 
-*Source: [`dynamo/common/multimodal/embedding_transfer.py#L185`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/common/multimodal/embedding_transfer.py#L185)*
+*Source: [`dynamo/common/multimodal/embedding_transfer.py#L185`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/embedding_transfer.py#L185)*
 
 <b>Methods</b>
 
-#### `receive_embeddings(request: TransferRequest) -> tuple[int, torch.Tensor]`
+#### `receive_embeddings(request: TransferRequest = None) -> tuple[int, torch.Tensor]`
 
-*Source: [`dynamo/common/multimodal/embedding_transfer.py#L190`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/common/multimodal/embedding_transfer.py#L190)*
+*Source: [`dynamo/common/multimodal/embedding_transfer.py#L190`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/embedding_transfer.py#L190)*
 
 Receive precomputed embeddings for a given request ID.
 
@@ -3267,9 +3267,9 @@ Receive precomputed embeddings for a given request ID.
 
 - `int` -- A tuple containing the tensor ID and the received embeddings as a torch.Tensor.
 - `torch.Tensor` -- Caller should invoke release_tensor(tensor_id) when the tensor is no longer needed to free up resources.
-#### `release_tensor(tensor_id: int)`
+#### `release_tensor(tensor_id: int = None)`
 
-*Source: [`dynamo/common/multimodal/embedding_transfer.py#L212`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/common/multimodal/embedding_transfer.py#L212)*
+*Source: [`dynamo/common/multimodal/embedding_transfer.py#L212`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/embedding_transfer.py#L212)*
 
 Indicate that the tensor associated with the ID is no longer in use.
 
@@ -3284,7 +3284,7 @@ Indicate that the tensor associated with the ID is no longer in use.
 <details>
 <summary><strong>`LocalEmbeddingSender` — Sender that saves embeddings to a local file and sends the file path as the serialized request.</strong></summary>
 
-*Source: [`dynamo/common/multimodal/embedding_transfer.py#L113`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/common/multimodal/embedding_transfer.py#L113)*
+*Source: [`dynamo/common/multimodal/embedding_transfer.py#L113`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/embedding_transfer.py#L113)*
 
 <b>Bases:</b> `AbstractEmbeddingSender`
 
@@ -3297,13 +3297,13 @@ Indicate that the tensor associated with the ID is no longer in use.
 
 #### `__init__()`
 
-*Source: [`dynamo/common/multimodal/embedding_transfer.py#L118`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/common/multimodal/embedding_transfer.py#L118)*
+*Source: [`dynamo/common/multimodal/embedding_transfer.py#L118`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/embedding_transfer.py#L118)*
 
 <b>Methods</b>
 
-#### `save_embeddings_to_file(embedding_key: str, embeddings: torch.Tensor) -> str`
+#### `save_embeddings_to_file(embedding_key: str = None, embeddings: torch.Tensor = None) -> str`
 
-*Source: [`dynamo/common/multimodal/embedding_transfer.py#L122`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/common/multimodal/embedding_transfer.py#L122)*
+*Source: [`dynamo/common/multimodal/embedding_transfer.py#L122`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/embedding_transfer.py#L122)*
 
 Save the embeddings to a local file and return the file path.
 
@@ -3316,9 +3316,9 @@ Save the embeddings to a local file and return the file path.
 
 Returns:
     The file path where the embeddings are saved.
-#### `send_embeddings(embeddings: torch.Tensor, stage_embeddings: bool = False) -> tuple[TransferRequest, Awaitable[None]]`
+#### `send_embeddings(embeddings: torch.Tensor = None, stage_embeddings: bool = False) -> tuple[TransferRequest, Awaitable[None]]`
 
-*Source: [`dynamo/common/multimodal/embedding_transfer.py#L145`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/common/multimodal/embedding_transfer.py#L145)*
+*Source: [`dynamo/common/multimodal/embedding_transfer.py#L145`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/embedding_transfer.py#L145)*
 
 Send precomputed embeddings for a given request ID.
 
@@ -3337,7 +3337,7 @@ Returns:
 <details>
 <summary><strong>`NixlReadEmbeddingReceiver` — Counter part of 'NixlReadEmbeddingSender', see 'NixlReadEmbeddingSender' for details.</strong></summary>
 
-*Source: [`dynamo/common/multimodal/embedding_transfer.py#L840`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/common/multimodal/embedding_transfer.py#L840)*
+*Source: [`dynamo/common/multimodal/embedding_transfer.py#L840`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/embedding_transfer.py#L840)*
 
 Initial implementation of another usage of NIXL connect library that persists
 connection (agent registration) and descriptors (memory registration) across multiple send operations
@@ -3362,13 +3362,13 @@ can simply loop around the large buffer.
 
 #### `__init__(embedding_hidden_size: int = 8 * 1024, max_item_mm_token: int = 1024, max_items: int = 1024)`
 
-*Source: [`dynamo/common/multimodal/embedding_transfer.py#L853`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/common/multimodal/embedding_transfer.py#L853)*
+*Source: [`dynamo/common/multimodal/embedding_transfer.py#L853`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/embedding_transfer.py#L853)*
 
 <b>Methods</b>
 
-#### `receive_embeddings(request: TransferRequest) -> tuple[int, torch.Tensor]`
+#### `receive_embeddings(request: TransferRequest = None) -> tuple[int, torch.Tensor]`
 
-*Source: [`dynamo/common/multimodal/embedding_transfer.py#L888`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/common/multimodal/embedding_transfer.py#L888)*
+*Source: [`dynamo/common/multimodal/embedding_transfer.py#L888`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/embedding_transfer.py#L888)*
 
 Receive precomputed embeddings for a given request ID.
 
@@ -3382,9 +3382,9 @@ Receive precomputed embeddings for a given request ID.
 
 - `int` -- A tuple containing the tensor ID and the received embeddings as a torch.Tensor.
 - `torch.Tensor` -- Caller should invoke release_tensor(tensor_id) when the tensor is no longer needed to free up resources.
-#### `release_tensor(tensor_id: int)`
+#### `release_tensor(tensor_id: int = None)`
 
-*Source: [`dynamo/common/multimodal/embedding_transfer.py#L947`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/common/multimodal/embedding_transfer.py#L947)*
+*Source: [`dynamo/common/multimodal/embedding_transfer.py#L947`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/embedding_transfer.py#L947)*
 
 Indicate that the tensor associated with the ID is no longer in use.
 
@@ -3399,7 +3399,7 @@ Indicate that the tensor associated with the ID is no longer in use.
 <details>
 <summary><strong>`NixlReadEmbeddingSender` — Initial implementation of NIXL READ based transfer. This implementation uses</strong></summary>
 
-*Source: [`dynamo/common/multimodal/embedding_transfer.py#L795`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/common/multimodal/embedding_transfer.py#L795)*
+*Source: [`dynamo/common/multimodal/embedding_transfer.py#L795`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/embedding_transfer.py#L795)*
 
 a monkey-patched version of 'nixl_connect' wrapper library to persist
 connection (agent registration) and descriptors across multiple send operations
@@ -3417,13 +3417,13 @@ i.e. provide NIXL WRITE based and READ based transfer classes.
 
 #### `__init__()`
 
-*Source: [`dynamo/common/multimodal/embedding_transfer.py#L806`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/common/multimodal/embedding_transfer.py#L806)*
+*Source: [`dynamo/common/multimodal/embedding_transfer.py#L806`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/embedding_transfer.py#L806)*
 
 <b>Methods</b>
 
-#### `send_embeddings(embeddings: torch.Tensor, stage_embeddings: bool = False) -> tuple[TransferRequest, Awaitable[None]]`
+#### `send_embeddings(embeddings: torch.Tensor = None, stage_embeddings: bool = False) -> tuple[TransferRequest, Awaitable[None]]`
 
-*Source: [`dynamo/common/multimodal/embedding_transfer.py#L809`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/common/multimodal/embedding_transfer.py#L809)*
+*Source: [`dynamo/common/multimodal/embedding_transfer.py#L809`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/embedding_transfer.py#L809)*
 
 Send precomputed embeddings.
 
@@ -3442,7 +3442,7 @@ Returns:
 <details>
 <summary><strong>`NixlWriteEmbeddingReceiver` — Counter part of 'NixlWriteEmbeddingSender', see 'NixlWriteEmbeddingSender' for details.</strong></summary>
 
-*Source: [`dynamo/common/multimodal/embedding_transfer.py#L609`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/common/multimodal/embedding_transfer.py#L609)*
+*Source: [`dynamo/common/multimodal/embedding_transfer.py#L609`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/embedding_transfer.py#L609)*
 
 The receiver manages a ring buffer for sender to write the embeddings into, and respond
 to the sender's transfer request with the buffer information for the WRITE transfer.
@@ -3464,13 +3464,13 @@ to the sender's transfer request with the buffer information for the WRITE trans
 
 #### `__init__(buffer_size = 2 * 8 * 1024 * 1024 * 256 * 2)`
 
-*Source: [`dynamo/common/multimodal/embedding_transfer.py#L616`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/common/multimodal/embedding_transfer.py#L616)*
+*Source: [`dynamo/common/multimodal/embedding_transfer.py#L616`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/embedding_transfer.py#L616)*
 
 <b>Methods</b>
 
-#### `receive_embeddings(request: TransferRequest, receive_timeout = 60) -> tuple[int, torch.Tensor]`
+#### `receive_embeddings(request: TransferRequest = None, receive_timeout = 60) -> tuple[int, torch.Tensor]`
 
-*Source: [`dynamo/common/multimodal/embedding_transfer.py#L639`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/common/multimodal/embedding_transfer.py#L639)*
+*Source: [`dynamo/common/multimodal/embedding_transfer.py#L639`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/embedding_transfer.py#L639)*
 
 Receive precomputed embeddings for a given request ID.
 
@@ -3485,9 +3485,9 @@ Receive precomputed embeddings for a given request ID.
 
 - `int` -- A tuple containing the tensor ID and the received embeddings as a torch.Tensor.
 - `torch.Tensor` -- Caller should invoke release_tensor(tensor_id) when the tensor is no longer needed to free up resources.
-#### `release_tensor(tensor_id: int)`
+#### `release_tensor(tensor_id: int = None)`
 
-*Source: [`dynamo/common/multimodal/embedding_transfer.py#L757`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/common/multimodal/embedding_transfer.py#L757)*
+*Source: [`dynamo/common/multimodal/embedding_transfer.py#L757`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/embedding_transfer.py#L757)*
 
 Indicate that the tensor associated with the ID is no longer in use.
 
@@ -3502,7 +3502,7 @@ Indicate that the tensor associated with the ID is no longer in use.
 <details>
 <summary><strong>`NixlWriteEmbeddingSender` — NIXL WRITE-based implementation of the embedding sender interface.</strong></summary>
 
-*Source: [`dynamo/common/multimodal/embedding_transfer.py#L353`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/common/multimodal/embedding_transfer.py#L353)*
+*Source: [`dynamo/common/multimodal/embedding_transfer.py#L353`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/embedding_transfer.py#L353)*
 
 Designed for scenarios where the sender transmits dynamically allocated
 tensors. Because these tensors allocation is external to the sender,
@@ -3544,13 +3544,13 @@ Protocol:
 
 #### `__init__()`
 
-*Source: [`dynamo/common/multimodal/embedding_transfer.py#L379`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/common/multimodal/embedding_transfer.py#L379)*
+*Source: [`dynamo/common/multimodal/embedding_transfer.py#L379`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/embedding_transfer.py#L379)*
 
 <b>Methods</b>
 
-#### `send_embeddings(embeddings: torch.Tensor, stage_embeddings: bool = False) -> tuple[TransferRequest, asyncio.Future]`
+#### `send_embeddings(embeddings: torch.Tensor = None, stage_embeddings: bool = False) -> tuple[TransferRequest, asyncio.Future]`
 
-*Source: [`dynamo/common/multimodal/embedding_transfer.py#L561`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/common/multimodal/embedding_transfer.py#L561)*
+*Source: [`dynamo/common/multimodal/embedding_transfer.py#L561`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/embedding_transfer.py#L561)*
 
 Send precomputed embeddings.
 
@@ -3569,7 +3569,7 @@ Returns:
 <details>
 <summary><strong>`LoRAManager` — Minimal Python wrapper around Rust core with extension points.</strong></summary>
 
-*Source: [`dynamo/common/lora/manager.py#L30`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/common/lora/manager.py#L30)*
+*Source: [`dynamo/common/lora/manager.py#L30`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/lora/manager.py#L30)*
 
 The manager uses the Rust-based LoRADownloader for S3 and local file sources,
 and allows registering custom Python sources for other protocols.
@@ -3577,12 +3577,12 @@ and allows registering custom Python sources for other protocols.
 <b>Examples</b>
 
 ```python
+>>> import asyncio
 >>> from dynamo.common.lora import LoRAManager
 >>> manager = LoRAManager()
->>> manager.register_custom_source("hf", my_hf_source)
->>> result = await manager.download_lora("s3://bucket/adapters/lora-v1")
->>> result["status"]
-'success'
+>>> result = asyncio.run(
+...     manager.download_lora("s3://bucket/adapters/lora-v1")
+... )
 >>> manager.is_cached("s3://bucket/adapters/lora-v1")
 True
 ```
@@ -3590,7 +3590,7 @@ True
 
 #### `__init__(cache_path: Optional[Path] = None)`
 
-*Source: [`dynamo/common/lora/manager.py#L48`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/common/lora/manager.py#L48)*
+*Source: [`dynamo/common/lora/manager.py#L48`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/lora/manager.py#L48)*
 
 Initialize LoRA manager.
 
@@ -3601,9 +3601,9 @@ Initialize LoRA manager.
 | `cache_path` | `Optional[Path]` | Optional custom cache path. If not provided, uses DYN_LORA_PATH env var. |
 <b>Methods</b>
 
-#### `register_custom_source(scheme: str, source: LoRASourceProtocol)`
+#### `register_custom_source(scheme: str = None, source: LoRASourceProtocol = None)`
 
-*Source: [`dynamo/common/lora/manager.py#L62`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/common/lora/manager.py#L62)*
+*Source: [`dynamo/common/lora/manager.py#L62`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/lora/manager.py#L62)*
 
 Register a custom Python source for a URI scheme.
 
@@ -3613,9 +3613,9 @@ Register a custom Python source for a URI scheme.
 | --- | --- | --- |
 | `scheme` | `str` | URI scheme without "://" (e.g., "hf" for hf:// URIs) |
 | `source` | `LoRASourceProtocol` | LoRA source implementing LoRASourceProtocol |
-#### `download_lora(lora_uri: str) -> Dict[str, Any]`
+#### `download_lora(lora_uri: str = None) -> Dict[str, Any]`
 
-*Source: [`dynamo/common/lora/manager.py#L72`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/common/lora/manager.py#L72)*
+*Source: [`dynamo/common/lora/manager.py#L72`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/lora/manager.py#L72)*
 
 Download LoRA if needed, return local path.
 
@@ -3634,9 +3634,9 @@ The source is inferred from the URI scheme:
 - status: "success" or "error"
 - local_path: Local path to LoRA (if successful)
 - message: Error message (if error)
-#### `is_cached(lora_uri: str) -> bool`
+#### `is_cached(lora_uri: str = None) -> bool`
 
-*Source: [`dynamo/common/lora/manager.py#L117`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/common/lora/manager.py#L117)*
+*Source: [`dynamo/common/lora/manager.py#L117`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/lora/manager.py#L117)*
 
 Check if LoRA is already cached locally.
 
@@ -3644,7 +3644,7 @@ Check if LoRA is already cached locally.
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
-| `lora_uri` | `str` |  |  |
+| `lora_uri` | `str` | None |  |
 
 
 </details>
@@ -3652,16 +3652,16 @@ Check if LoRA is already cached locally.
 <details>
 <summary><strong>`LoRASourceProtocol` — Protocol for custom Python LoRA sources.</strong></summary>
 
-*Source: [`dynamo/common/lora/manager.py#L15`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/common/lora/manager.py#L15)*
+*Source: [`dynamo/common/lora/manager.py#L15`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/lora/manager.py#L15)*
 
 Users can implement this to add custom sources.
 <b>Bases:</b> `Protocol`
 
 <b>Methods</b>
 
-#### `download(lora_uri: str, dest_path: Path) -> Path`
+#### `download(lora_uri: str = None, dest_path: Path = None) -> Path`
 
-*Source: [`dynamo/common/lora/manager.py#L21`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/common/lora/manager.py#L21)*
+*Source: [`dynamo/common/lora/manager.py#L21`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/lora/manager.py#L21)*
 
 Download LoRA to dest_path, return actual path
 
@@ -3669,12 +3669,12 @@ Download LoRA to dest_path, return actual path
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
-| `lora_uri` | `str` |  |  |
-| `dest_path` | `Path` |  |  |
+| `lora_uri` | `str` | None |  |
+| `dest_path` | `Path` | None |  |
 
-#### `exists(lora_uri: str) -> bool`
+#### `exists(lora_uri: str = None) -> bool`
 
-*Source: [`dynamo/common/lora/manager.py#L25`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/common/lora/manager.py#L25)*
+*Source: [`dynamo/common/lora/manager.py#L25`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/lora/manager.py#L25)*
 
 Check if LoRA exists in this source
 
@@ -3682,7 +3682,7 @@ Check if LoRA exists in this source
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
-| `lora_uri` | `str` |  |  |
+| `lora_uri` | `str` | None |  |
 
 
 </details>
@@ -3692,9 +3692,9 @@ Check if LoRA exists in this source
 <details>
 <summary><strong>`get_fs()` — Initialize fsspec filesystem for the given URL.</strong></summary>
 
-#### `get_fs(fs_url: str) -> DirFileSystem`
+#### `get_fs(fs_url: str = None) -> DirFileSystem`
 
-*Source: [`dynamo/common/storage.py#L42`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/common/storage.py#L42)*
+*Source: [`dynamo/common/storage.py#L42`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/storage.py#L42)*
 
 <b>Parameters</b>
 
@@ -3727,9 +3727,9 @@ Check if LoRA exists in this source
 <details>
 <summary><strong>`get_media_url()` — Build a public URL for a file stored in the media filesystem.</strong></summary>
 
-#### `get_media_url(fs: DirFileSystem, storage_path: str, base_url: Optional[str] = None) -> str`
+#### `get_media_url(fs: DirFileSystem = None, storage_path: str = None, base_url: Optional[str] = None) -> str`
 
-*Source: [`dynamo/common/storage.py#L82`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/common/storage.py#L82)*
+*Source: [`dynamo/common/storage.py#L82`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/storage.py#L82)*
 
 <b>Parameters</b>
 
@@ -3758,9 +3758,9 @@ Check if LoRA exists in this source
 <details>
 <summary><strong>`upload_to_fs()` — Upload bytes to the media filesystem and return the public URL.</strong></summary>
 
-#### `upload_to_fs(fs: DirFileSystem, storage_path: str, data: bytes, base_url: Optional[str] = None) -> str`
+#### `upload_to_fs(fs: DirFileSystem = None, storage_path: str = None, data: bytes = None, base_url: Optional[str] = None) -> str`
 
-*Source: [`dynamo/common/storage.py#L115`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/common/storage.py#L115)*
+*Source: [`dynamo/common/storage.py#L115`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/storage.py#L115)*
 
 This is the canonical helper for all backends (vLLM, SGLang, TRT-LLM)
 to store generated images/videos and produce a response URL.
@@ -3777,15 +3777,14 @@ to store generated images/videos and produce a response URL.
 <b>Examples</b>
 
 ```python
+>>> import asyncio
 >>> from dynamo.common.storage import get_fs, upload_to_fs
 >>>
 >>> fs = get_fs("s3://my-media-bucket")
 >>> image_bytes = b"\x89PNG..."
->>> url = await upload_to_fs(
-...     fs, "images/req-123/output.png", image_bytes
+>>> url = asyncio.run(
+...     upload_to_fs(fs, "images/req-123/output.png", image_bytes)
 ... )
->>> url
-'s3://my-media-bucket/images/req-123/output.png'
 ```
 
 <b>Returns:</b> `str` -- Public URL string for the uploaded file.
@@ -3795,9 +3794,9 @@ to store generated images/videos and produce a response URL.
 <details>
 <summary><strong>`add_config_dump_args()` — Add arguments to the parser to dump the config to a file.</strong></summary>
 
-#### `add_config_dump_args(parser: argparse.ArgumentParser)`
+#### `add_config_dump_args(parser: argparse.ArgumentParser = None)`
 
-*Source: [`dynamo/common/config_dump/config_dumper.py#L159`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/common/config_dump/config_dumper.py#L159)*
+*Source: [`dynamo/common/config_dump/config_dumper.py#L159`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/config_dump/config_dumper.py#L159)*
 
 <b>Parameters</b>
 
@@ -3810,9 +3809,9 @@ to store generated images/videos and produce a response URL.
 <details>
 <summary><strong>`get_config_dump()` — Collect comprehensive config information about a backend instance.</strong></summary>
 
-#### `get_config_dump(config: Any, extra_info: Optional[Dict[str, Any]] = None) -> str`
+#### `get_config_dump(config: Any = None, extra_info: Optional[Dict[str, Any]] = None) -> str`
 
-*Source: [`dynamo/common/config_dump/config_dumper.py#L108`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/common/config_dump/config_dumper.py#L108)*
+*Source: [`dynamo/common/config_dump/config_dumper.py#L108`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/config_dump/config_dumper.py#L108)*
 
 <b>Parameters</b>
 
@@ -3833,7 +3832,7 @@ to store generated images/videos and produce a response URL.
 
 #### `get_environment_vars(prefixes: Optional[List[str]] = None, include_sensitive: bool = False, additional_vars: Optional[Set[str]] = None) -> Dict[str, str]`
 
-*Source: [`dynamo/common/config_dump/environment.py#L51`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/common/config_dump/environment.py#L51)*
+*Source: [`dynamo/common/config_dump/environment.py#L51`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/config_dump/environment.py#L51)*
 
 <b>Parameters</b>
 
@@ -3863,7 +3862,7 @@ to store generated images/videos and produce a response URL.
 
 #### `get_gpu_info() -> Optional[Dict[str, Any]]`
 
-*Source: [`dynamo/common/config_dump/system_info.py#L98`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/common/config_dump/system_info.py#L98)*
+*Source: [`dynamo/common/config_dump/system_info.py#L98`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/config_dump/system_info.py#L98)*
 
 <b>Returns:</b>
 
@@ -3880,7 +3879,7 @@ to store generated images/videos and produce a response URL.
 
 #### `get_runtime_info() -> Dict[str, Any]`
 
-*Source: [`dynamo/common/config_dump/system_info.py#L60`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/common/config_dump/system_info.py#L60)*
+*Source: [`dynamo/common/config_dump/system_info.py#L60`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/config_dump/system_info.py#L60)*
 
 <b>Returns:</b> `Dict[str, Any]` -- Dictionary containing Python version, executable path, and command-line arguments.
 
@@ -3894,7 +3893,7 @@ to store generated images/videos and produce a response URL.
 
 #### `get_system_info() -> Dict[str, Any]`
 
-*Source: [`dynamo/common/config_dump/system_info.py#L13`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/common/config_dump/system_info.py#L13)*
+*Source: [`dynamo/common/config_dump/system_info.py#L13`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/config_dump/system_info.py#L13)*
 
 <b>Returns:</b>
 
@@ -3917,7 +3916,7 @@ Health check payload and environment-based configuration.
 <details>
 <summary><strong>`HealthCheckPayload` — Base class for managing health check payloads.</strong></summary>
 
-*Source: [`dynamo/health_check.py#L74`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/health_check.py#L74)*
+*Source: [`dynamo/health_check.py#L77`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/health_check.py#L77)*
 
 Each backend should extend this class and set self.default_payload
 in their __init__ method.
@@ -3927,8 +3926,10 @@ Environment variable DYN_HEALTH_CHECK_PAYLOAD can override the default.
 <b>Examples</b>
 
 ```python
+>>> import os
 >>> from dynamo.health_check import HealthCheckPayload
 >>>
+>>> os.environ.pop("DYN_HEALTH_CHECK_PAYLOAD", None)
 >>> class MyBackendHealthCheck(HealthCheckPayload):
 ...     def __init__(self):
 ...         self.default_payload = {
@@ -3949,7 +3950,7 @@ Environment variable DYN_HEALTH_CHECK_PAYLOAD can override the default.
 
 #### `__init__()`
 
-*Source: [`dynamo/health_check.py#L101`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/health_check.py#L101)*
+*Source: [`dynamo/health_check.py#L106`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/health_check.py#L106)*
 
 Initialize health check payload.
 
@@ -3958,7 +3959,7 @@ Subclasses should call super().__init__() after setting self.default_payload.
 
 #### `to_dict() -> Dict[str, Any]`
 
-*Source: [`dynamo/health_check.py#L114`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/health_check.py#L114)*
+*Source: [`dynamo/health_check.py#L119`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/health_check.py#L119)*
 
 Get the health check payload as a dictionary.
 
@@ -3974,7 +3975,7 @@ otherwise returns the default payload.
 
 #### `load_health_check_from_env(env_var: str = 'DYN_HEALTH_CHECK_PAYLOAD') -> Optional[Dict[str, Any]]`
 
-*Source: [`dynamo/health_check.py#L21`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/health_check.py#L21)*
+*Source: [`dynamo/health_check.py#L21`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/health_check.py#L21)*
 
 Supports two formats:
 1. JSON string: export DYN_HEALTH_CHECK_PAYLOAD='`{"prompt": "test", "max_tokens": 1}`'
@@ -3992,12 +3993,15 @@ Supports two formats:
 >>> import os
 >>> from dynamo.health_check import load_health_check_from_env
 >>>
+>>> _prev = os.environ.get("DYN_HEALTH_CHECK_PAYLOAD")
 >>> os.environ["DYN_HEALTH_CHECK_PAYLOAD"] = (
 ...     '{"prompt": "test", "max_tokens": 1}'
 ... )
 >>> payload = load_health_check_from_env()
 >>> payload
 {'prompt': 'test', 'max_tokens': 1}
+>>> if _prev is None: os.environ.pop("DYN_HEALTH_CHECK_PAYLOAD", None)
+... else: os.environ["DYN_HEALTH_CHECK_PAYLOAD"] = _prev
 ```
 
 <b>Returns:</b> `Optional[Dict[str, Any]]` -- Dict containing the health check payload, or None if not set.
@@ -4013,7 +4017,7 @@ Custom logits processing for LLM token generation.
 <details>
 <summary><strong>`BaseLogitsProcessor` — Protocol for logits processors in Dynamo.</strong></summary>
 
-*Source: [`dynamo/logits_processing/base.py#L16`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/logits_processing/base.py#L16)*
+*Source: [`dynamo/logits_processing/base.py#L16`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/logits_processing/base.py#L16)*
 
 All logits processors must implement this interface to be compatible
 with backend adapters (TRT-LLM, vLLM, SGLang).
@@ -4043,7 +4047,7 @@ with backend adapters (TRT-LLM, vLLM, SGLang).
 <details>
 <summary><strong>`HelloWorldLogitsProcessor` — Sample Logits Processor that always outputs a hardcoded</strong></summary>
 
-*Source: [`dynamo/logits_processing/examples/hello_world.py#L14`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/logits_processing/examples/hello_world.py#L14)*
+*Source: [`dynamo/logits_processing/examples/hello_world.py#L14`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/logits_processing/examples/hello_world.py#L14)*
 
 response (`RESPONSE`), no matter the input
 <b>Bases:</b> `BaseLogitsProcessor`
@@ -4057,9 +4061,9 @@ response (`RESPONSE`), no matter the input
 
 <b>Constructor</b>
 
-#### `__init__(tokenizer: PreTrainedTokenizerBase)`
+#### `__init__(tokenizer: PreTrainedTokenizerBase = None)`
 
-*Source: [`dynamo/logits_processing/examples/hello_world.py#L20`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/logits_processing/examples/hello_world.py#L20)*
+*Source: [`dynamo/logits_processing/examples/hello_world.py#L20`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/logits_processing/examples/hello_world.py#L20)*
 
 
 </details>
@@ -4067,7 +4071,7 @@ response (`RESPONSE`), no matter the input
 <details>
 <summary><strong>`TemperatureProcessor` — Example logits processor that applies temperature scaling.</strong></summary>
 
-*Source: [`dynamo/logits_processing/examples/temperature.py#L11`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/logits_processing/examples/temperature.py#L11)*
+*Source: [`dynamo/logits_processing/examples/temperature.py#L11`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/logits_processing/examples/temperature.py#L11)*
 
 This is a simple demonstration of how to implement a logits processor
 that can be used with any Dynamo backend.
@@ -4081,7 +4085,7 @@ that can be used with any Dynamo backend.
 
 #### `__init__(temperature: float = 1.0)`
 
-*Source: [`dynamo/logits_processing/examples/temperature.py#L19`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/logits_processing/examples/temperature.py#L19)*
+*Source: [`dynamo/logits_processing/examples/temperature.py#L19`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/logits_processing/examples/temperature.py#L19)*
 
 Args:
     temperature: Scaling factor. Higher values make distribution more uniform,
@@ -4107,7 +4111,7 @@ Scaling connectors and decision types for the Dynamo Planner.
 <details>
 <summary><strong>`SubComponentType` — Type of sub-component in a disaggregated deployment.</strong></summary>
 
-*Source: [`dynamo/planner/defaults.py#L162`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/planner/defaults.py#L162)*
+*Source: [`dynamo/planner/defaults.py#L162`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/defaults.py#L162)*
 
 <b>Examples</b>
 
@@ -4131,7 +4135,7 @@ True
 <details>
 <summary><strong>`ScaleStatus` — Status values for scaling operations</strong></summary>
 
-*Source: [`dynamo/planner/scale_protocol.py#L14`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/planner/scale_protocol.py#L14)*
+*Source: [`dynamo/planner/scale_protocol.py#L14`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/scale_protocol.py#L14)*
 
 <b>Bases:</b> `str`, `Enum`
 
@@ -4149,7 +4153,7 @@ True
 <details>
 <summary><strong>`ScaleRequest` — Request to scale a deployment.</strong></summary>
 
-*Source: [`dynamo/planner/scale_protocol.py#L22`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/planner/scale_protocol.py#L22)*
+*Source: [`dynamo/planner/scale_protocol.py#L22`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/scale_protocol.py#L22)*
 
 <b>Examples</b>
 
@@ -4188,7 +4192,7 @@ True
 <details>
 <summary><strong>`ScaleResponse` — Response from scaling operation</strong></summary>
 
-*Source: [`dynamo/planner/scale_protocol.py#L61`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/planner/scale_protocol.py#L61)*
+*Source: [`dynamo/planner/scale_protocol.py#L61`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/scale_protocol.py#L61)*
 
 <b>Bases:</b> `BaseModel`
 
@@ -4206,7 +4210,7 @@ True
 <details>
 <summary><strong>`SLAPlannerDefaults` — SLA-based planner defaults for throughput and latency targets.</strong></summary>
 
-*Source: [`dynamo/planner/defaults.py#L51`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/planner/defaults.py#L51)*
+*Source: [`dynamo/planner/defaults.py#L51`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/defaults.py#L51)*
 
 Provides default values for SLA objectives (TTFT, ITL), load prediction,
 and scaling parameters used by the planner.
@@ -4259,7 +4263,7 @@ and scaling parameters used by the planner.
 <details>
 <summary><strong>`GlobalPlannerConnector` — Connector that delegates scaling decisions to a centralized GlobalPlanner.</strong></summary>
 
-*Source: [`dynamo/planner/global_planner_connector.py#L24`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/planner/global_planner_connector.py#L24)*
+*Source: [`dynamo/planner/global_planner_connector.py#L24`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/global_planner_connector.py#L24)*
 
 This connector wraps RemotePlannerClient and implements the PlannerConnector
 interface, allowing planner_core.py to treat global-planner environment mode
@@ -4294,9 +4298,9 @@ consistently with kubernetes and virtual modes.
 
 <b>Constructor</b>
 
-#### `__init__(runtime: DistributedRuntime, dynamo_namespace: str, global_planner_namespace: str, global_planner_component: str = 'GlobalPlanner', model_name: Optional[str] = None)`
+#### `__init__(runtime: DistributedRuntime = None, dynamo_namespace: str = None, global_planner_namespace: str = None, global_planner_component: str = 'GlobalPlanner', model_name: Optional[str] = None)`
 
-*Source: [`dynamo/planner/global_planner_connector.py#L46`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/planner/global_planner_connector.py#L46)*
+*Source: [`dynamo/planner/global_planner_connector.py#L46`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/global_planner_connector.py#L46)*
 
 Initialize GlobalPlannerConnector.
 
@@ -4311,9 +4315,9 @@ Initialize GlobalPlannerConnector.
 | `model_name` | `Optional[str]` | Optional model name (will be managed remotely if not provided) |
 <b>Methods</b>
 
-#### `set_predicted_load(num_requests: Optional[float], isl: Optional[float], osl: Optional[float])`
+#### `set_predicted_load(num_requests: Optional[float] = None, isl: Optional[float] = None, osl: Optional[float] = None)`
 
-*Source: [`dynamo/planner/global_planner_connector.py#L85`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/planner/global_planner_connector.py#L85)*
+*Source: [`dynamo/planner/global_planner_connector.py#L85`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/global_planner_connector.py#L85)*
 
 Set predicted load for inclusion in next scale request.
 
@@ -4323,13 +4327,13 @@ This is called by planner_core.py before calling set_component_replicas.
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
-| `num_requests` | `Optional[float]` |  |  |
-| `isl` | `Optional[float]` |  |  |
-| `osl` | `Optional[float]` |  |  |
+| `num_requests` | `Optional[float]` | None |  |
+| `isl` | `Optional[float]` | None |  |
+| `osl` | `Optional[float]` | None |  |
 
-#### `set_component_replicas(target_replicas: list[TargetReplica], blocking: bool = True)`
+#### `set_component_replicas(target_replicas: list[TargetReplica] = None, blocking: bool = True)`
 
-*Source: [`dynamo/planner/global_planner_connector.py#L99`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/planner/global_planner_connector.py#L99)*
+*Source: [`dynamo/planner/global_planner_connector.py#L99`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/global_planner_connector.py#L99)*
 
 Set component replicas by delegating to GlobalPlanner.
 
@@ -4346,9 +4350,9 @@ Sends a ScaleRequest to the GlobalPlanner with the target replica configurations
 
 - `EmptyTargetReplicasError` -- If target_replicas is empty
 - `RuntimeError` -- If remote_client is not initialized or response indicates error
-#### `add_component(sub_component_type: SubComponentType, blocking: bool = True)`
+#### `add_component(sub_component_type: SubComponentType = None, blocking: bool = True)`
 
-*Source: [`dynamo/planner/global_planner_connector.py#L169`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/planner/global_planner_connector.py#L169)*
+*Source: [`dynamo/planner/global_planner_connector.py#L169`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/global_planner_connector.py#L169)*
 
 Add a component (not supported for GlobalPlanner).
 
@@ -4358,12 +4362,12 @@ GlobalPlanner only supports batch operations via set_component_replicas.
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
-| `sub_component_type` | `SubComponentType` |  |  |
+| `sub_component_type` | `SubComponentType` | None |  |
 | `blocking` | `bool` | True |  |
 
-#### `remove_component(sub_component_type: SubComponentType, blocking: bool = True)`
+#### `remove_component(sub_component_type: SubComponentType = None, blocking: bool = True)`
 
-*Source: [`dynamo/planner/global_planner_connector.py#L182`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/planner/global_planner_connector.py#L182)*
+*Source: [`dynamo/planner/global_planner_connector.py#L182`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/global_planner_connector.py#L182)*
 
 Remove a component (not supported for GlobalPlanner).
 
@@ -4373,12 +4377,12 @@ GlobalPlanner only supports batch operations via set_component_replicas.
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
-| `sub_component_type` | `SubComponentType` |  |  |
+| `sub_component_type` | `SubComponentType` | None |  |
 | `blocking` | `bool` | True |  |
 
 #### `validate_deployment(prefill_component_name: Optional[str] = None, decode_component_name: Optional[str] = None, kwargs = {})`
 
-*Source: [`dynamo/planner/global_planner_connector.py#L195`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/planner/global_planner_connector.py#L195)*
+*Source: [`dynamo/planner/global_planner_connector.py#L195`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/global_planner_connector.py#L195)*
 
 Validate deployment (no-op for GlobalPlanner).
 
@@ -4395,7 +4399,7 @@ validation is not needed in delegating mode.
 
 #### `wait_for_deployment_ready()`
 
-*Source: [`dynamo/planner/global_planner_connector.py#L212`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/planner/global_planner_connector.py#L212)*
+*Source: [`dynamo/planner/global_planner_connector.py#L212`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/global_planner_connector.py#L212)*
 
 Wait for deployment to be ready (no-op for GlobalPlanner).
 
@@ -4403,7 +4407,7 @@ The GlobalPlanner manages deployment state, so we don't need to
 wait locally in delegating mode.
 #### `get_model_name(kwargs = {}) -> str`
 
-*Source: [`dynamo/planner/global_planner_connector.py#L224`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/planner/global_planner_connector.py#L224)*
+*Source: [`dynamo/planner/global_planner_connector.py#L224`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/global_planner_connector.py#L224)*
 
 Get model name.
 
@@ -4422,7 +4426,7 @@ returns a placeholder indicating the model is managed remotely.
 <details>
 <summary><strong>`KubernetesConnector` — Connector that manages scaling via the Kubernetes DynamoGraphDeployment API.</strong></summary>
 
-*Source: [`dynamo/planner/kubernetes_connector.py#L48`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/planner/kubernetes_connector.py#L48)*
+*Source: [`dynamo/planner/kubernetes_connector.py#L48`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/kubernetes_connector.py#L48)*
 
 Implements the PlannerConnector interface for Kubernetes-based deployments,
 providing add/remove component operations, deployment validation, and
@@ -4431,16 +4435,17 @@ model name discovery from DGD service specs.
 <b>Examples</b>
 
 ```python
+>>> import asyncio
 >>> from dynamo.planner.kubernetes_connector import KubernetesConnector
 >>> from dynamo.planner.defaults import SubComponentType
 >>>
 >>> connector = KubernetesConnector(
 ...     dynamo_namespace="dynamo",
 ...     k8s_namespace="default",
+...     parent_dgd_name="my-dgd",
 ... )
->>> await connector.validate_deployment()
+>>> asyncio.run(connector.validate_deployment())
 >>> model_name = connector.get_model_name()
->>> await connector.add_component(SubComponentType.PREFILL)
 ```
 <b>Bases:</b> `PlannerConnector`
 
@@ -4453,15 +4458,15 @@ model name discovery from DGD service specs.
 
 <b>Constructor</b>
 
-#### `__init__(dynamo_namespace: str, model_name: Optional[str] = None, k8s_namespace: Optional[str] = None, parent_dgd_name: Optional[str] = None)`
+#### `__init__(dynamo_namespace: str = None, model_name: Optional[str] = None, k8s_namespace: Optional[str] = None, parent_dgd_name: Optional[str] = None)`
 
-*Source: [`dynamo/planner/kubernetes_connector.py#L68`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/planner/kubernetes_connector.py#L68)*
+*Source: [`dynamo/planner/kubernetes_connector.py#L69`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/kubernetes_connector.py#L69)*
 
 <b>Methods</b>
 
-#### `add_component(sub_component_type: SubComponentType, blocking: bool = True)`
+#### `add_component(sub_component_type: SubComponentType = None, blocking: bool = True)`
 
-*Source: [`dynamo/planner/kubernetes_connector.py#L97`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/planner/kubernetes_connector.py#L97)*
+*Source: [`dynamo/planner/kubernetes_connector.py#L98`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/kubernetes_connector.py#L98)*
 
 Add a component by increasing its replica count by 1
 
@@ -4469,12 +4474,12 @@ Add a component by increasing its replica count by 1
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
-| `sub_component_type` | `SubComponentType` |  |  |
+| `sub_component_type` | `SubComponentType` | None |  |
 | `blocking` | `bool` | True |  |
 
-#### `remove_component(sub_component_type: SubComponentType, blocking: bool = True)`
+#### `remove_component(sub_component_type: SubComponentType = None, blocking: bool = True)`
 
-*Source: [`dynamo/planner/kubernetes_connector.py#L117`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/planner/kubernetes_connector.py#L117)*
+*Source: [`dynamo/planner/kubernetes_connector.py#L118`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/kubernetes_connector.py#L118)*
 
 Remove a component by decreasing its replica count by 1
 
@@ -4482,12 +4487,12 @@ Remove a component by decreasing its replica count by 1
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
-| `sub_component_type` | `SubComponentType` |  |  |
+| `sub_component_type` | `SubComponentType` | None |  |
 | `blocking` | `bool` | True |  |
 
 #### `validate_deployment(prefill_component_name: Optional[str] = None, decode_component_name: Optional[str] = None, require_prefill: bool = True, require_decode: bool = True)`
 
-*Source: [`dynamo/planner/kubernetes_connector.py#L138`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/planner/kubernetes_connector.py#L138)*
+*Source: [`dynamo/planner/kubernetes_connector.py#L139`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/kubernetes_connector.py#L139)*
 
 Verify that the deployment contains services with subComponentType prefill and decode and the model name exists.
 Will fallback to worker service names for backwards compatibility. (TODO: deprecate)
@@ -4508,7 +4513,7 @@ Will fallback to worker service names for backwards compatibility. (TODO: deprec
 - `DeploymentValidationError` -- If the deployment does not contain services with subComponentType prefill and decode
 #### `get_model_name(deployment: Optional[dict] = None, require_prefill: bool = True, require_decode: bool = True) -> str`
 
-*Source: [`dynamo/planner/kubernetes_connector.py#L190`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/planner/kubernetes_connector.py#L190)*
+*Source: [`dynamo/planner/kubernetes_connector.py#L191`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/kubernetes_connector.py#L191)*
 
 Get the model name from the deployment
 
@@ -4522,7 +4527,7 @@ Get the model name from the deployment
 
 #### `get_gpu_counts(deployment: Optional[dict] = None, require_prefill: bool = True, require_decode: bool = True) -> tuple[int, int]`
 
-*Source: [`dynamo/planner/kubernetes_connector.py#L256`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/planner/kubernetes_connector.py#L256)*
+*Source: [`dynamo/planner/kubernetes_connector.py#L257`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/kubernetes_connector.py#L257)*
 
 Get the GPU counts for prefill and decode services from the deployment.
 
@@ -4541,7 +4546,7 @@ Get the GPU counts for prefill and decode services from the deployment.
 - `DeploymentValidationError` -- If GPU counts cannot be determined from DGD
 #### `get_frontend_metrics_url(port: int = 8000) -> Optional[str]`
 
-*Source: [`dynamo/planner/kubernetes_connector.py#L307`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/planner/kubernetes_connector.py#L307)*
+*Source: [`dynamo/planner/kubernetes_connector.py#L308`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/kubernetes_connector.py#L308)*
 
 Auto-discover the Frontend service's metrics URL from the DGD.
 
@@ -4559,12 +4564,12 @@ http://`{dgd_name}`-`{service_key_lowercase}`:`{port}`/metrics
 <b>Returns:</b> `Optional[str]` -- The metrics URL string, or None if no frontend service is found.
 #### `wait_for_deployment_ready()`
 
-*Source: [`dynamo/planner/kubernetes_connector.py#L329`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/planner/kubernetes_connector.py#L329)*
+*Source: [`dynamo/planner/kubernetes_connector.py#L330`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/kubernetes_connector.py#L330)*
 
 Wait for the deployment to be ready
 #### `get_actual_worker_counts(prefill_component_name: Optional[str] = None, decode_component_name: Optional[str] = None) -> tuple[int, int, bool]`
 
-*Source: [`dynamo/planner/kubernetes_connector.py#L335`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/planner/kubernetes_connector.py#L335)*
+*Source: [`dynamo/planner/kubernetes_connector.py#L336`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/kubernetes_connector.py#L336)*
 
 Get actual ready worker counts for prefill and decode from DGD status.
 
@@ -4580,9 +4585,9 @@ Get actual ready worker counts for prefill and decode from DGD status.
 
 - `int` -- tuple[int, int, bool]: (prefill_count, decode_count, is_stable)
 - `int` -- - is_stable: False if any service is in a rollout (scaling should be skipped)
-#### `set_component_replicas(target_replicas: list[TargetReplica], blocking: bool = True)`
+#### `set_component_replicas(target_replicas: list[TargetReplica] = None, blocking: bool = True)`
 
-*Source: [`dynamo/planner/kubernetes_connector.py#L381`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/planner/kubernetes_connector.py#L381)*
+*Source: [`dynamo/planner/kubernetes_connector.py#L382`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/kubernetes_connector.py#L382)*
 
 Set the replicas for multiple components at once
 
@@ -4590,7 +4595,7 @@ Set the replicas for multiple components at once
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
-| `target_replicas` | `list[TargetReplica]` |  |  |
+| `target_replicas` | `list[TargetReplica]` | None |  |
 | `blocking` | `bool` | True |  |
 
 
@@ -4599,7 +4604,7 @@ Set the replicas for multiple components at once
 <details>
 <summary><strong>`PlannerConnector` — Abstract base class for planner connectors that manage scaling operations.</strong></summary>
 
-*Source: [`dynamo/planner/planner_connector.py#L22`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/planner/planner_connector.py#L22)*
+*Source: [`dynamo/planner/planner_connector.py#L22`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/planner_connector.py#L22)*
 
 Concrete implementations include KubernetesConnector, VirtualConnector,
 and GlobalPlannerConnector.
@@ -4616,9 +4621,9 @@ True
 ```
 <b>Methods</b>
 
-#### `add_component(sub_component_type: SubComponentType, blocking: bool = True)`
+#### `add_component(sub_component_type: SubComponentType = None, blocking: bool = True)`
 
-*Source: [`dynamo/planner/planner_connector.py#L37`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/planner/planner_connector.py#L37)*
+*Source: [`dynamo/planner/planner_connector.py#L37`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/planner_connector.py#L37)*
 
 Add a component to the planner
 
@@ -4626,12 +4631,12 @@ Add a component to the planner
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
-| `sub_component_type` | `SubComponentType` |  |  |
+| `sub_component_type` | `SubComponentType` | None |  |
 | `blocking` | `bool` | True |  |
 
-#### `remove_component(sub_component_type: SubComponentType, blocking: bool = True)`
+#### `remove_component(sub_component_type: SubComponentType = None, blocking: bool = True)`
 
-*Source: [`dynamo/planner/planner_connector.py#L44`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/planner/planner_connector.py#L44)*
+*Source: [`dynamo/planner/planner_connector.py#L44`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/planner_connector.py#L44)*
 
 Remove a component from the planner
 
@@ -4639,7 +4644,7 @@ Remove a component from the planner
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
-| `sub_component_type` | `SubComponentType` |  |  |
+| `sub_component_type` | `SubComponentType` | None |  |
 | `blocking` | `bool` | True |  |
 
 
@@ -4648,7 +4653,7 @@ Remove a component from the planner
 <details>
 <summary><strong>`VirtualConnector` — This is a virtual connector for planner to output scaling decisions to non-native environments</strong></summary>
 
-*Source: [`dynamo/planner/virtual_connector.py#L28`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/planner/virtual_connector.py#L28)*
+*Source: [`dynamo/planner/virtual_connector.py#L28`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/virtual_connector.py#L28)*
 
 This virtual connector does not actually scale the deployment, instead, it communicates with the non-native environment through dynamo-runtime's VirtualConnectorCoordinator.
 The deployment environment needs to use VirtualConnectorClient (in the Rust/Python bindings) to read from the scaling decisions and update report scaling status.
@@ -4677,15 +4682,15 @@ The deployment environment needs to use VirtualConnectorClient (in the Rust/Pyth
 
 <b>Constructor</b>
 
-#### `__init__(runtime: DistributedRuntime, dynamo_namespace: str, model_name: Optional[str] = None)`
+#### `__init__(runtime: DistributedRuntime = None, dynamo_namespace: str = None, model_name: Optional[str] = None)`
 
-*Source: [`dynamo/planner/virtual_connector.py#L47`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/planner/virtual_connector.py#L47)*
+*Source: [`dynamo/planner/virtual_connector.py#L47`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/virtual_connector.py#L47)*
 
 <b>Methods</b>
 
-#### `add_component(sub_component_type: SubComponentType, blocking: bool = True)`
+#### `add_component(sub_component_type: SubComponentType = None, blocking: bool = True)`
 
-*Source: [`dynamo/planner/virtual_connector.py#L82`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/planner/virtual_connector.py#L82)*
+*Source: [`dynamo/planner/virtual_connector.py#L82`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/virtual_connector.py#L82)*
 
 Add a component by increasing its replica count by 1
 
@@ -4693,12 +4698,12 @@ Add a component by increasing its replica count by 1
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
-| `sub_component_type` | `SubComponentType` |  |  |
+| `sub_component_type` | `SubComponentType` | None |  |
 | `blocking` | `bool` | True |  |
 
-#### `remove_component(sub_component_type: SubComponentType, blocking: bool = True)`
+#### `remove_component(sub_component_type: SubComponentType = None, blocking: bool = True)`
 
-*Source: [`dynamo/planner/virtual_connector.py#L98`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/planner/virtual_connector.py#L98)*
+*Source: [`dynamo/planner/virtual_connector.py#L98`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/virtual_connector.py#L98)*
 
 Remove a component by decreasing its replica count by 1
 
@@ -4706,12 +4711,12 @@ Remove a component by decreasing its replica count by 1
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
-| `sub_component_type` | `SubComponentType` |  |  |
+| `sub_component_type` | `SubComponentType` | None |  |
 | `blocking` | `bool` | True |  |
 
-#### `set_component_replicas(target_replicas: list[TargetReplica], blocking: bool = True)`
+#### `set_component_replicas(target_replicas: list[TargetReplica] = None, blocking: bool = True)`
 
-*Source: [`dynamo/planner/virtual_connector.py#L114`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/planner/virtual_connector.py#L114)*
+*Source: [`dynamo/planner/virtual_connector.py#L114`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/virtual_connector.py#L114)*
 
 Set the replicas for multiple components at once
 
@@ -4719,12 +4724,12 @@ Set the replicas for multiple components at once
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
-| `target_replicas` | `list[TargetReplica]` |  |  |
+| `target_replicas` | `list[TargetReplica]` | None |  |
 | `blocking` | `bool` | True |  |
 
 #### `validate_deployment(prefill_component_name: Optional[str] = None, decode_component_name: Optional[str] = None, require_prefill: bool = True, require_decode: bool = True)`
 
-*Source: [`dynamo/planner/virtual_connector.py#L141`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/planner/virtual_connector.py#L141)*
+*Source: [`dynamo/planner/virtual_connector.py#L141`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/virtual_connector.py#L141)*
 
 Validate the deployment
 
@@ -4739,12 +4744,12 @@ Validate the deployment
 
 #### `wait_for_deployment_ready()`
 
-*Source: [`dynamo/planner/virtual_connector.py#L151`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/planner/virtual_connector.py#L151)*
+*Source: [`dynamo/planner/virtual_connector.py#L151`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/virtual_connector.py#L151)*
 
 Wait for the deployment to be ready
 #### `get_model_name(require_prefill: bool = True, require_decode: bool = True) -> str`
 
-*Source: [`dynamo/planner/virtual_connector.py#L155`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/planner/virtual_connector.py#L155)*
+*Source: [`dynamo/planner/virtual_connector.py#L155`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/virtual_connector.py#L155)*
 
 Get the model name from the deployment
 
@@ -4761,7 +4766,7 @@ Get the model name from the deployment
 <details>
 <summary><strong>`DeploymentModelNameMismatchError` — Raised when the model name is not the same in the deployment</strong></summary>
 
-*Source: [`dynamo/planner/utils/exceptions.py#L89`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/planner/utils/exceptions.py#L89)*
+*Source: [`dynamo/planner/utils/exceptions.py#L89`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/utils/exceptions.py#L89)*
 
 <b>Bases:</b> `PlannerError`
 
@@ -4773,9 +4778,9 @@ Get the model name from the deployment
 
 <b>Constructor</b>
 
-#### `__init__(prefill_model_name: str, decode_model_name: str)`
+#### `__init__(prefill_model_name: str = None, decode_model_name: str = None)`
 
-*Source: [`dynamo/planner/utils/exceptions.py#L92`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/planner/utils/exceptions.py#L92)*
+*Source: [`dynamo/planner/utils/exceptions.py#L92`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/utils/exceptions.py#L92)*
 
 
 </details>
@@ -4783,7 +4788,7 @@ Get the model name from the deployment
 <details>
 <summary><strong>`DeploymentValidationError` — Raised when deployment validation fails for multiple components.</strong></summary>
 
-*Source: [`dynamo/planner/utils/exceptions.py#L183`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/planner/utils/exceptions.py#L183)*
+*Source: [`dynamo/planner/utils/exceptions.py#L183`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/utils/exceptions.py#L183)*
 
 This is used to aggregate multiple validation errors into a single exception,
 providing a comprehensive view of all validation issues.
@@ -4795,9 +4800,9 @@ providing a comprehensive view of all validation issues.
 
 <b>Constructor</b>
 
-#### `__init__(errors: List[str])`
+#### `__init__(errors: List[str] = None)`
 
-*Source: [`dynamo/planner/utils/exceptions.py#L190`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/planner/utils/exceptions.py#L190)*
+*Source: [`dynamo/planner/utils/exceptions.py#L190`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/utils/exceptions.py#L190)*
 
 
 </details>
@@ -4805,7 +4810,7 @@ providing a comprehensive view of all validation issues.
 <details>
 <summary><strong>`EmptyTargetReplicasError` — Raised when target_replicas is empty or invalid.</strong></summary>
 
-*Source: [`dynamo/planner/utils/exceptions.py#L196`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/planner/utils/exceptions.py#L196)*
+*Source: [`dynamo/planner/utils/exceptions.py#L196`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/utils/exceptions.py#L196)*
 
 This occurs when attempting to set component replicas with an empty
 or invalid target_replicas dictionary.
@@ -4815,7 +4820,7 @@ or invalid target_replicas dictionary.
 
 #### `__init__()`
 
-*Source: [`dynamo/planner/utils/exceptions.py#L203`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/planner/utils/exceptions.py#L203)*
+*Source: [`dynamo/planner/utils/exceptions.py#L203`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/utils/exceptions.py#L203)*
 
 
 </details>
@@ -4823,7 +4828,7 @@ or invalid target_replicas dictionary.
 <details>
 <summary><strong>`ModelNameNotFoundError` — Raised when the model name is not found in the deployment</strong></summary>
 
-*Source: [`dynamo/planner/utils/exceptions.py#L81`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/planner/utils/exceptions.py#L81)*
+*Source: [`dynamo/planner/utils/exceptions.py#L81`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/utils/exceptions.py#L81)*
 
 <b>Bases:</b> `PlannerError`
 
@@ -4831,7 +4836,7 @@ or invalid target_replicas dictionary.
 
 #### `__init__()`
 
-*Source: [`dynamo/planner/utils/exceptions.py#L84`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/planner/utils/exceptions.py#L84)*
+*Source: [`dynamo/planner/utils/exceptions.py#L84`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/utils/exceptions.py#L84)*
 
 
 </details>
@@ -4839,7 +4844,7 @@ or invalid target_replicas dictionary.
 <details>
 <summary><strong>`PlannerError` — Base exception for all planner-related errors.</strong></summary>
 
-*Source: [`dynamo/planner/utils/exceptions.py#L41`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/planner/utils/exceptions.py#L41)*
+*Source: [`dynamo/planner/utils/exceptions.py#L41`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/utils/exceptions.py#L41)*
 
 This serves as the root exception class for all custom exceptions
 in the planner module, allowing for broad exception catching when needed.
@@ -4851,7 +4856,7 @@ in the planner module, allowing for broad exception catching when needed.
 <details>
 <summary><strong>`UserProvidedModelNameMismatchError` — Raised when the model name is not the same as the user provided model name</strong></summary>
 
-*Source: [`dynamo/planner/utils/exceptions.py#L104`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/planner/utils/exceptions.py#L104)*
+*Source: [`dynamo/planner/utils/exceptions.py#L104`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/utils/exceptions.py#L104)*
 
 <b>Bases:</b> `PlannerError`
 
@@ -4863,9 +4868,9 @@ in the planner module, allowing for broad exception catching when needed.
 
 <b>Constructor</b>
 
-#### `__init__(model_name: str, user_provided_model_name: str)`
+#### `__init__(model_name: str = None, user_provided_model_name: str = None)`
 
-*Source: [`dynamo/planner/utils/exceptions.py#L107`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/planner/utils/exceptions.py#L107)*
+*Source: [`dynamo/planner/utils/exceptions.py#L107`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/utils/exceptions.py#L107)*
 
 
 </details>
@@ -4873,7 +4878,7 @@ in the planner module, allowing for broad exception catching when needed.
 <details>
 <summary><strong>`DynamoGraphDeploymentNotFoundError` — Raised when Parent DynamoGraphDeployment cannot be found.</strong></summary>
 
-*Source: [`dynamo/planner/utils/exceptions.py#L51`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/planner/utils/exceptions.py#L51)*
+*Source: [`dynamo/planner/utils/exceptions.py#L51`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/utils/exceptions.py#L51)*
 
 This typically occurs when:
 - The DYN_PARENT_DGD_K8S_NAME environment variable is not set
@@ -4887,9 +4892,9 @@ This typically occurs when:
 
 <b>Constructor</b>
 
-#### `__init__(deployment_name: str, namespace: str)`
+#### `__init__(deployment_name: str = None, namespace: str = None)`
 
-*Source: [`dynamo/planner/utils/exceptions.py#L59`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/planner/utils/exceptions.py#L59)*
+*Source: [`dynamo/planner/utils/exceptions.py#L59`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/utils/exceptions.py#L59)*
 
 
 </details>
@@ -4897,7 +4902,7 @@ This typically occurs when:
 <details>
 <summary><strong>`DuplicateSubComponentError` — Raised when multiple services have the same subComponentType.</strong></summary>
 
-*Source: [`dynamo/planner/utils/exceptions.py#L160`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/planner/utils/exceptions.py#L160)*
+*Source: [`dynamo/planner/utils/exceptions.py#L160`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/utils/exceptions.py#L160)*
 
 This occurs when the DynamoGraphDeployment contains more than one service
 with the same subComponentType, which violates the expected uniqueness constraint.
@@ -4910,9 +4915,9 @@ with the same subComponentType, which violates the expected uniqueness constrain
 
 <b>Constructor</b>
 
-#### `__init__(sub_component_type: str, service_names: List[str])`
+#### `__init__(sub_component_type: str = None, service_names: List[str] = None)`
 
-*Source: [`dynamo/planner/utils/exceptions.py#L167`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/planner/utils/exceptions.py#L167)*
+*Source: [`dynamo/planner/utils/exceptions.py#L167`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/utils/exceptions.py#L167)*
 
 
 </details>
@@ -4920,7 +4925,7 @@ with the same subComponentType, which violates the expected uniqueness constrain
 <details>
 <summary><strong>`SubComponentNotFoundError` — Raised when a required subComponentType is not found in the deployment.</strong></summary>
 
-*Source: [`dynamo/planner/utils/exceptions.py#L140`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/planner/utils/exceptions.py#L140)*
+*Source: [`dynamo/planner/utils/exceptions.py#L140`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/utils/exceptions.py#L140)*
 
 This occurs when the DynamoGraphDeployment doesn't contain any service
 with the requested subComponentType (e.g., 'prefill', 'decode').
@@ -4932,9 +4937,9 @@ with the requested subComponentType (e.g., 'prefill', 'decode').
 
 <b>Constructor</b>
 
-#### `__init__(sub_component_type: str)`
+#### `__init__(sub_component_type: str = None)`
 
-*Source: [`dynamo/planner/utils/exceptions.py#L147`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/planner/utils/exceptions.py#L147)*
+*Source: [`dynamo/planner/utils/exceptions.py#L147`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/utils/exceptions.py#L147)*
 
 
 </details>
@@ -4942,7 +4947,7 @@ with the requested subComponentType (e.g., 'prefill', 'decode').
 <details>
 <summary><strong>`RemotePlannerClient` — Client for delegating scaling requests to centralized planner.</strong></summary>
 
-*Source: [`dynamo/planner/remote_planner_client.py#L17`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/planner/remote_planner_client.py#L17)*
+*Source: [`dynamo/planner/remote_planner_client.py#L17`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/remote_planner_client.py#L17)*
 
 <b>Examples</b>
 
@@ -4954,9 +4959,6 @@ with the requested subComponentType (e.g., 'prefill', 'decode').
 ...     central_component="GlobalPlanner",
 ...     connection_timeout=30.0,
 ... )
->>> response = await client.send_scale_request(scale_request)
->>> response.status
-<ScaleStatus.SUCCESS: 'success'>
 ```
 <b>Attributes</b>
 
@@ -4968,15 +4970,15 @@ with the requested subComponentType (e.g., 'prefill', 'decode').
 
 <b>Constructor</b>
 
-#### `__init__(runtime: DistributedRuntime, central_namespace: str, central_component: str, connection_timeout: float = 30.0, max_retries: int = 3)`
+#### `__init__(runtime: DistributedRuntime = None, central_namespace: str = None, central_component: str = None, connection_timeout: float = 30.0, max_retries: int = 3)`
 
-*Source: [`dynamo/planner/remote_planner_client.py#L33`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/planner/remote_planner_client.py#L33)*
+*Source: [`dynamo/planner/remote_planner_client.py#L30`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/remote_planner_client.py#L30)*
 
 <b>Methods</b>
 
-#### `send_scale_request(request: ScaleRequest) -> ScaleResponse`
+#### `send_scale_request(request: ScaleRequest = None) -> ScaleResponse`
 
-*Source: [`dynamo/planner/remote_planner_client.py#L105`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/planner/remote_planner_client.py#L105)*
+*Source: [`dynamo/planner/remote_planner_client.py#L102`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/remote_planner_client.py#L102)*
 
 Send scale request to centralized planner
 
@@ -4984,7 +4986,7 @@ Send scale request to centralized planner
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
-| `request` | `ScaleRequest` |  |  |
+| `request` | `ScaleRequest` | None |  |
 
 
 </details>
@@ -4994,9 +4996,9 @@ Send scale request to centralized planner
 <details>
 <summary><strong>`get_service_from_sub_component_type_or_name()` — Get the current replicas for a component in a graph deployment</strong></summary>
 
-#### `get_service_from_sub_component_type_or_name(deployment: dict, sub_component_type: SubComponentType, component_name: Optional[str] = None) -> Service`
+#### `get_service_from_sub_component_type_or_name(deployment: dict = None, sub_component_type: SubComponentType = None, component_name: Optional[str] = None) -> Service`
 
-*Source: [`dynamo/planner/defaults.py#L259`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/planner/defaults.py#L259)*
+*Source: [`dynamo/planner/defaults.py#L259`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/defaults.py#L259)*
 
 Returns: Service object
 
@@ -5004,8 +5006,8 @@ Returns: Service object
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
-| `deployment` | `dict` |  |  |
-| `sub_component_type` | `SubComponentType` |  |  |
+| `deployment` | `dict` | None |  |
+| `sub_component_type` | `SubComponentType` | None |  |
 | `component_name` | `Optional[str]` | None |  |
 
 
@@ -5021,7 +5023,7 @@ Returns: Service object
 
 #### `get_current_k8s_namespace() -> str`
 
-*Source: [`dynamo/planner/kube.py#L30`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/planner/kube.py#L30)*
+*Source: [`dynamo/planner/kube.py#L30`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/kube.py#L30)*
 
 
 </details>
@@ -5037,7 +5039,7 @@ Request routing configuration and argument groups.
 <details>
 <summary><strong>`DynamoRouterConfig` — Typed configuration for the standalone KV router (router-owned options only).</strong></summary>
 
-*Source: [`dynamo/router/backend_args.py#L13`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/router/backend_args.py#L13)*
+*Source: [`dynamo/router/backend_args.py#L13`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/backend_args.py#L13)*
 
 <b>Bases:</b> `ConfigBase`
 
@@ -5065,7 +5067,7 @@ Request routing configuration and argument groups.
 
 #### `validate()`
 
-*Source: [`dynamo/router/backend_args.py#L34`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/router/backend_args.py#L34)*
+*Source: [`dynamo/router/backend_args.py#L34`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/backend_args.py#L34)*
 
 Validate config invariants (aligned with Rust KvRouterConfig where applicable).
 
@@ -5074,7 +5076,7 @@ Validate config invariants (aligned with Rust KvRouterConfig where applicable).
 <details>
 <summary><strong>`DynamoRouterArgGroup` — CLI argument group for standalone router options.</strong></summary>
 
-*Source: [`dynamo/router/backend_args.py#L50`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/router/backend_args.py#L50)*
+*Source: [`dynamo/router/backend_args.py#L50`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/backend_args.py#L50)*
 
 <b>Bases:</b> `ArgGroup`
 
@@ -5084,9 +5086,9 @@ Validate config invariants (aligned with Rust KvRouterConfig where applicable).
 
 <b>Methods</b>
 
-#### `add_arguments(parser: argparse.ArgumentParser)`
+#### `add_arguments(parser: argparse.ArgumentParser = None)`
 
-*Source: [`dynamo/router/backend_args.py#L55`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/router/backend_args.py#L55)*
+*Source: [`dynamo/router/backend_args.py#L55`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/backend_args.py#L55)*
 
 Add router-owned arguments to parser.
 
@@ -5094,7 +5096,7 @@ Add router-owned arguments to parser.
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
-| `parser` | `argparse.ArgumentParser` |  |  |
+| `parser` | `argparse.ArgumentParser` | None |  |
 
 
 </details>
@@ -5104,15 +5106,15 @@ Add router-owned arguments to parser.
 <details>
 <summary><strong>`build_kv_router_config()` — Build KvRouterConfig from DynamoRouterConfig.</strong></summary>
 
-#### `build_kv_router_config(router_config: DynamoRouterConfig) -> KvRouterConfig`
+#### `build_kv_router_config(router_config: DynamoRouterConfig = None) -> KvRouterConfig`
 
-*Source: [`dynamo/router/args.py#L100`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/router/args.py#L100)*
+*Source: [`dynamo/router/args.py#L100`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/args.py#L100)*
 
 <b>Parameters</b>
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
-| `router_config` | `DynamoRouterConfig` |  |  |
+| `router_config` | `DynamoRouterConfig` | None |  |
 
 
 <b>Examples</b>
@@ -5138,7 +5140,7 @@ Mock engine for testing without GPU resources.
 <details>
 <summary><strong>`ProfileDataResult` — Result of processing --planner-profile-data argument. Cleans up tmpdir on deletion.</strong></summary>
 
-*Source: [`dynamo/mocker/args.py#L28`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/mocker/args.py#L28)*
+*Source: [`dynamo/mocker/args.py#L28`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker/args.py#L28)*
 
 <b>Attributes</b>
 
@@ -5146,9 +5148,9 @@ Mock engine for testing without GPU resources.
 
 <b>Constructor</b>
 
-#### `__init__(npz_path: Path | None, tmpdir: tempfile.TemporaryDirectory | None)`
+#### `__init__(npz_path: Path | None = None, tmpdir: tempfile.TemporaryDirectory | None = None)`
 
-*Source: [`dynamo/mocker/args.py#L31`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/mocker/args.py#L31)*
+*Source: [`dynamo/mocker/args.py#L31`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker/args.py#L31)*
 
 
 </details>
@@ -5160,7 +5162,7 @@ Mock engine for testing without GPU resources.
 
 #### `get_worker_namespace(namespace: Optional[str] = None) -> str`
 
-*Source: [`dynamo/common/utils/namespace.py#L8`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/common/utils/namespace.py#L8)*
+*Source: [`dynamo/common/utils/namespace.py#L8`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/utils/namespace.py#L8)*
 
 Uses the provided namespace, or falls back to the DYN_NAMESPACE environment
 variable (defaulting to "dynamo"). If DYN_NAMESPACE_WORKER_SUFFIX is set,
@@ -5179,9 +5181,9 @@ for the same model.
 <details>
 <summary><strong>`resolve_planner_profile_data()` — Resolve --planner-profile-data to an NPZ file path.</strong></summary>
 
-#### `resolve_planner_profile_data(planner_profile_data: Path | None) -> ProfileDataResult`
+#### `resolve_planner_profile_data(planner_profile_data: Path | None = None) -> ProfileDataResult`
 
-*Source: [`dynamo/mocker/args.py#L46`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/mocker/args.py#L46)*
+*Source: [`dynamo/mocker/args.py#L46`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker/args.py#L46)*
 
 Handles backward compatibility by accepting either:
 1. A mocker-format NPZ file (returned as-is)
@@ -5204,9 +5206,9 @@ Handles backward compatibility by accepting either:
 <details>
 <summary><strong>`create_temp_engine_args_file()` — Create a temporary JSON file with MockEngineArgs from CLI arguments.</strong></summary>
 
-#### `create_temp_engine_args_file(args: argparse.Namespace) -> Path`
+#### `create_temp_engine_args_file(args: argparse.Namespace = None) -> Path`
 
-*Source: [`dynamo/mocker/args.py#L93`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/mocker/args.py#L93)*
+*Source: [`dynamo/mocker/args.py#L93`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker/args.py#L93)*
 
 Returns the path to the temporary file.
 
@@ -5214,7 +5216,7 @@ Returns the path to the temporary file.
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
-| `args` | `argparse.Namespace` |  |  |
+| `args` | `argparse.Namespace` | None |  |
 
 
 </details>
@@ -5222,9 +5224,9 @@ Returns the path to the temporary file.
 <details>
 <summary><strong>`validate_worker_type_args()` — Resolve disaggregation mode from --disaggregation-mode or legacy boolean flags.</strong></summary>
 
-#### `validate_worker_type_args(args: argparse.Namespace)`
+#### `validate_worker_type_args(args: argparse.Namespace = None)`
 
-*Source: [`dynamo/mocker/args.py#L149`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/mocker/args.py#L149)*
+*Source: [`dynamo/mocker/args.py#L149`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker/args.py#L149)*
 
 Raises ValueError if validation fails.
 
@@ -5232,7 +5234,7 @@ Raises ValueError if validation fails.
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
-| `args` | `argparse.Namespace` |  |  |
+| `args` | `argparse.Namespace` | None |  |
 
 
 </details>
@@ -5240,15 +5242,15 @@ Raises ValueError if validation fails.
 <details>
 <summary><strong>`parse_bootstrap_ports()` — Parse comma-separated bootstrap ports string into list of integers.</strong></summary>
 
-#### `parse_bootstrap_ports(ports_str: str | None) -> list[int]`
+#### `parse_bootstrap_ports(ports_str: str | None = None) -> list[int]`
 
-*Source: [`dynamo/mocker/args.py#L195`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/mocker/args.py#L195)*
+*Source: [`dynamo/mocker/args.py#L195`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker/args.py#L195)*
 
 <b>Parameters</b>
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
-| `ports_str` | `str | None` |  |  |
+| `ports_str` | `str | None` | None |  |
 
 
 </details>
@@ -5256,15 +5258,15 @@ Raises ValueError if validation fails.
 <details>
 <summary><strong>`prefetch_model()` — Pre-fetch model from HuggingFace to avoid rate limiting with many workers.</strong></summary>
 
-#### `prefetch_model(model_path: str)`
+#### `prefetch_model(model_path: str = None)`
 
-*Source: [`dynamo/mocker/main.py#L42`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/mocker/main.py#L42)*
+*Source: [`dynamo/mocker/main.py#L42`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker/main.py#L42)*
 
 <b>Parameters</b>
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
-| `model_path` | `str` |  |  |
+| `model_path` | `str` | None |  |
 
 
 </details>
@@ -5274,7 +5276,7 @@ Raises ValueError if validation fails.
 
 #### `worker()`
 
-*Source: [`dynamo/mocker/main.py#L60`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/mocker/main.py#L60)*
+*Source: [`dynamo/mocker/main.py#L60`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker/main.py#L60)*
 
 Each mocker gets its own DistributedRuntime instance for true isolation,
 while still sharing the same event loop and tokio runtime.
@@ -5304,9 +5306,9 @@ Launch multiple workers with stagger delay:
 <details>
 <summary><strong>`compute_stagger_delay()` — Compute the stagger delay based on worker count to give the frontend time to process registrations.</strong></summary>
 
-#### `compute_stagger_delay(num_workers: int, stagger_delay: float) -> float`
+#### `compute_stagger_delay(num_workers: int = None, stagger_delay: float = None) -> float`
 
-*Source: [`dynamo/mocker/main.py#L132`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/mocker/main.py#L132)*
+*Source: [`dynamo/mocker/main.py#L132`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker/main.py#L132)*
 
 Returns the delay in seconds between worker launches.
 
@@ -5314,8 +5316,8 @@ Returns the delay in seconds between worker launches.
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
-| `num_workers` | `int` |  |  |
-| `stagger_delay` | `float` |  |  |
+| `num_workers` | `int` | None |  |
+| `stagger_delay` | `float` | None |  |
 
 
 </details>
@@ -5323,9 +5325,9 @@ Returns the delay in seconds between worker launches.
 <details>
 <summary><strong>`launch_workers()` — Launch mocker worker(s) with isolated DistributedRuntime instances.</strong></summary>
 
-#### `launch_workers(args: argparse.Namespace, extra_engine_args_path: Path)`
+#### `launch_workers(args: argparse.Namespace = None, extra_engine_args_path: Path = None)`
 
-*Source: [`dynamo/mocker/main.py#L154`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/mocker/main.py#L154)*
+*Source: [`dynamo/mocker/main.py#L154`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker/main.py#L154)*
 
 Each worker gets its own DistributedRuntime, which means:
 - Separate etcd/NATS connections
@@ -5337,8 +5339,8 @@ Each worker gets its own DistributedRuntime, which means:
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
-| `args` | `argparse.Namespace` |  |  |
-| `extra_engine_args_path` | `Path` |  |  |
+| `args` | `argparse.Namespace` | None |  |
+| `extra_engine_args_path` | `Path` | None |  |
 
 
 </details>
@@ -5354,7 +5356,7 @@ RDMA-based data transfer operations via the NIXL library.
 <details>
 <summary><strong>`DeviceKind` — Type of memory a descriptor has been allocated to.</strong></summary>
 
-*Source: [`dynamo/nixl_connect/__init__.py#L1242`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/nixl_connect/__init__.py#L1242)*
+*Source: [`dynamo/nixl_connect/__init__.py#L1242`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1242)*
 
 <b>Bases:</b> `IntEnum`
 
@@ -5370,7 +5372,7 @@ RDMA-based data transfer operations via the NIXL library.
 <details>
 <summary><strong>`OperationKind` — Kind of an operation.</strong></summary>
 
-*Source: [`dynamo/nixl_connect/__init__.py#L1268`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/nixl_connect/__init__.py#L1268)*
+*Source: [`dynamo/nixl_connect/__init__.py#L1268`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1268)*
 
 <b>Bases:</b> `IntEnum`
 
@@ -5386,7 +5388,7 @@ RDMA-based data transfer operations via the NIXL library.
 <details>
 <summary><strong>`OperationStatus` — Status of an operation.</strong></summary>
 
-*Source: [`dynamo/nixl_connect/__init__.py#L1286`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/nixl_connect/__init__.py#L1286)*
+*Source: [`dynamo/nixl_connect/__init__.py#L1286`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1286)*
 
 <b>Bases:</b> `IntEnum`
 
@@ -5407,7 +5409,7 @@ RDMA-based data transfer operations via the NIXL library.
 <details>
 <summary><strong>`RdmaMetadata` — Pydantic serialization type for describing the passive side of a transfer.</strong></summary>
 
-*Source: [`dynamo/nixl_connect/__init__.py#L1626`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/nixl_connect/__init__.py#L1626)*
+*Source: [`dynamo/nixl_connect/__init__.py#L1626`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1626)*
 
 <b>Bases:</b> `BaseModel`
 
@@ -5423,12 +5425,12 @@ RDMA-based data transfer operations via the NIXL library.
 
 #### `to_descriptors() -> Descriptor | list[Descriptor]`
 
-*Source: [`dynamo/nixl_connect/__init__.py#L1641`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/nixl_connect/__init__.py#L1641)*
+*Source: [`dynamo/nixl_connect/__init__.py#L1641`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1641)*
 
 Deserializes the request descriptor into a `dynamo.nixl_connect.Descriptor` or list of `dynamo.nixl_connect.Descriptor` objects.
-#### `validate_operation_kind(v: int) -> int`
+#### `validate_operation_kind(v: int = None) -> int`
 
-*Source: [`dynamo/nixl_connect/__init__.py#L1653`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/nixl_connect/__init__.py#L1653)*
+*Source: [`dynamo/nixl_connect/__init__.py#L1653`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1653)*
 
 
 </details>
@@ -5436,7 +5438,7 @@ Deserializes the request descriptor into a `dynamo.nixl_connect.Descriptor` or l
 <details>
 <summary><strong>`SerializedDescriptor` — Pydantic serialization type for memory descriptors.</strong></summary>
 
-*Source: [`dynamo/nixl_connect/__init__.py#L1752`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/nixl_connect/__init__.py#L1752)*
+*Source: [`dynamo/nixl_connect/__init__.py#L1752`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1752)*
 
 <b>Bases:</b> `BaseModel`
 
@@ -5451,20 +5453,20 @@ Deserializes the request descriptor into a `dynamo.nixl_connect.Descriptor` or l
 
 #### `to_descriptor() -> Descriptor`
 
-*Source: [`dynamo/nixl_connect/__init__.py#L1767`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/nixl_connect/__init__.py#L1767)*
+*Source: [`dynamo/nixl_connect/__init__.py#L1767`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1767)*
 
 Deserialize the serialized descriptor into a `Descriptor` object.
-#### `validate_device(v: str) -> str`
+#### `validate_device(v: str = None) -> str`
 
-*Source: [`dynamo/nixl_connect/__init__.py#L1773`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/nixl_connect/__init__.py#L1773)*
+*Source: [`dynamo/nixl_connect/__init__.py#L1773`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1773)*
 
-#### `validate_ptr(v: int) -> int`
+#### `validate_ptr(v: int = None) -> int`
 
-*Source: [`dynamo/nixl_connect/__init__.py#L1785`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/nixl_connect/__init__.py#L1785)*
+*Source: [`dynamo/nixl_connect/__init__.py#L1785`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1785)*
 
-#### `validate_size(v: int) -> int`
+#### `validate_size(v: int = None) -> int`
 
-*Source: [`dynamo/nixl_connect/__init__.py#L1792`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/nixl_connect/__init__.py#L1792)*
+*Source: [`dynamo/nixl_connect/__init__.py#L1792`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1792)*
 
 
 </details>
@@ -5474,7 +5476,7 @@ Deserialize the serialized descriptor into a `Descriptor` object.
 <details>
 <summary><strong>`AbstractOperation` — Abstract base class for awaitable NIXL based RDMA operations.</strong></summary>
 
-*Source: [`dynamo/nixl_connect/__init__.py#L65`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/nixl_connect/__init__.py#L65)*
+*Source: [`dynamo/nixl_connect/__init__.py#L65`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L65)*
 
 <b>Attributes</b>
 
@@ -5483,15 +5485,15 @@ Deserialize the serialized descriptor into a `Descriptor` object.
 
 <b>Constructor</b>
 
-#### `__init__(connection: Connection, operation_kind: OperationKind, local_descriptors: Descriptor | list[Descriptor], remote_descriptors: Optional[Descriptor | list[Descriptor]], notification_key: Optional[str])`
+#### `__init__(connection: Connection = None, operation_kind: OperationKind = None, local_descriptors: Descriptor | list[Descriptor] = None, remote_descriptors: Optional[Descriptor | list[Descriptor]] = None, notification_key: Optional[str] = None)`
 
-*Source: [`dynamo/nixl_connect/__init__.py#L70`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/nixl_connect/__init__.py#L70)*
+*Source: [`dynamo/nixl_connect/__init__.py#L70`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L70)*
 
 <b>Methods</b>
 
 #### `wait_for_completion()`
 
-*Source: [`dynamo/nixl_connect/__init__.py#L209`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/nixl_connect/__init__.py#L209)*
+*Source: [`dynamo/nixl_connect/__init__.py#L209`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L209)*
 
 Blocks the caller asynchronously until the operation has completed.
 
@@ -5500,7 +5502,7 @@ Blocks the caller asynchronously until the operation has completed.
 <details>
 <summary><strong>`ActiveOperation` — Abstract class for active operations that initiates a NIXL based RDMA transfer based `RdmaMetadata`</strong></summary>
 
-*Source: [`dynamo/nixl_connect/__init__.py#L243`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/nixl_connect/__init__.py#L243)*
+*Source: [`dynamo/nixl_connect/__init__.py#L243`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L243)*
 
 provided by the remote worker's corresponding `PassiveOperation`.
 <b>Bases:</b> `AbstractOperation`
@@ -5512,15 +5514,15 @@ provided by the remote worker's corresponding `PassiveOperation`.
 
 <b>Constructor</b>
 
-#### `__init__(remote: Remote, operation_kind: OperationKind, local_descriptors: Descriptor | list[Descriptor], remote_descriptors: Descriptor | list[Descriptor], notification_key: str)`
+#### `__init__(remote: Remote = None, operation_kind: OperationKind = None, local_descriptors: Descriptor | list[Descriptor] = None, remote_descriptors: Descriptor | list[Descriptor] = None, notification_key: str = None)`
 
-*Source: [`dynamo/nixl_connect/__init__.py#L249`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/nixl_connect/__init__.py#L249)*
+*Source: [`dynamo/nixl_connect/__init__.py#L249`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L249)*
 
 <b>Methods</b>
 
 #### `cancel()`
 
-*Source: [`dynamo/nixl_connect/__init__.py#L465`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/nixl_connect/__init__.py#L465)*
+*Source: [`dynamo/nixl_connect/__init__.py#L465`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L465)*
 
 Cancels the operation.
 No affect if the operation has already completed or errored, or has been cancelled.
@@ -5530,7 +5532,7 @@ No affect if the operation has already completed or errored, or has been cancell
 <details>
 <summary><strong>`Connector` — Core class for managing the connection between workers in a distributed environment.</strong></summary>
 
-*Source: [`dynamo/nixl_connect/__init__.py#L613`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/nixl_connect/__init__.py#L613)*
+*Source: [`dynamo/nixl_connect/__init__.py#L613`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L613)*
 
 Use this class to create readable and writable operations, or read and write data to remote workers.
 <b>Attributes</b>
@@ -5543,7 +5545,7 @@ Use this class to create readable and writable operations, or read and write dat
 
 #### `__init__(worker_id: Optional[str] = None)`
 
-*Source: [`dynamo/nixl_connect/__init__.py#L619`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/nixl_connect/__init__.py#L619)*
+*Source: [`dynamo/nixl_connect/__init__.py#L619`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L619)*
 
 Creates a new Connector instance.
 
@@ -5558,9 +5560,9 @@ Creates a new Connector instance.
 - `TypeError` -- When `worker_id` is provided and not of type `uuid.UUID`.
 <b>Methods</b>
 
-#### `begin_read(remote_metadata: RdmaMetadata, local_descriptors: Descriptor | list[Descriptor]) -> ReadOperation`
+#### `begin_read(remote_metadata: RdmaMetadata = None, local_descriptors: Descriptor | list[Descriptor] = None) -> ReadOperation`
 
-*Source: [`dynamo/nixl_connect/__init__.py#L696`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/nixl_connect/__init__.py#L696)*
+*Source: [`dynamo/nixl_connect/__init__.py#L696`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L696)*
 
 Creates a read operation for fulfilling a remote readable operation.
 
@@ -5578,9 +5580,9 @@ Creates a read operation for fulfilling a remote readable operation.
 
 - `TypeError` -- When `remote_metadata` is not of type `RdmaMetadata`.
 - `TypeError` -- When `local_descriptors` is not of type `dynamo.nixl_connect.Descriptor` or `list[dynamo.nixl_connect.Descriptor]`.
-#### `begin_write(local_descriptors: Descriptor | list[Descriptor], remote_metadata: RdmaMetadata) -> WriteOperation`
+#### `begin_write(local_descriptors: Descriptor | list[Descriptor] = None, remote_metadata: RdmaMetadata = None) -> WriteOperation`
 
-*Source: [`dynamo/nixl_connect/__init__.py#L744`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/nixl_connect/__init__.py#L744)*
+*Source: [`dynamo/nixl_connect/__init__.py#L744`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L744)*
 
 Creates a write operation for transferring data to a remote worker.
 
@@ -5590,9 +5592,9 @@ Creates a write operation for transferring data to a remote worker.
 | --- | --- | --- |
 | `local_descriptors` | `Descriptor | list[Descriptor]` | Local descriptors of one or more data objects to be transferred to the remote worker. |
 | `remote_metadata` | `RdmaMetadata` | Serialized request from a remote worker that has created a readable operation. |
-#### `create_readable(local_descriptors: Descriptor | list[Descriptor]) -> ReadableOperation`
+#### `create_readable(local_descriptors: Descriptor | list[Descriptor] = None) -> ReadableOperation`
 
-*Source: [`dynamo/nixl_connect/__init__.py#L782`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/nixl_connect/__init__.py#L782)*
+*Source: [`dynamo/nixl_connect/__init__.py#L782`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L782)*
 
 Creates a readable operation for transferring data from a remote worker.
 
@@ -5600,13 +5602,13 @@ Creates a readable operation for transferring data from a remote worker.
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
-| `local_descriptors` | `Descriptor | list[Descriptor]` |  |  |
+| `local_descriptors` | `Descriptor | list[Descriptor]` | None |  |
 
 
 <b>Returns:</b> `ReadableOperation` -- A readable operation that can be used to transfer data from a remote worker.
-#### `create_writable(local_descriptors: Descriptor | list[Descriptor]) -> WritableOperation`
+#### `create_writable(local_descriptors: Descriptor | list[Descriptor] = None) -> WritableOperation`
 
-*Source: [`dynamo/nixl_connect/__init__.py#L798`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/nixl_connect/__init__.py#L798)*
+*Source: [`dynamo/nixl_connect/__init__.py#L798`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L798)*
 
 Creates a writable operation for transferring data to a remote worker.
 
@@ -5614,13 +5616,13 @@ Creates a writable operation for transferring data to a remote worker.
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
-| `local_descriptors` | `Descriptor | list[Descriptor]` |  |  |
+| `local_descriptors` | `Descriptor | list[Descriptor]` | None |  |
 
 
 <b>Returns:</b> `WritableOperation` -- A writable operation that can be used to transfer data to a remote worker.
 #### `initialize()`
 
-*Source: [`dynamo/nixl_connect/__init__.py#L814`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/nixl_connect/__init__.py#L814)*
+*Source: [`dynamo/nixl_connect/__init__.py#L814`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L814)*
 
 Deprecated method.
 
@@ -5629,7 +5631,7 @@ Deprecated method.
 <details>
 <summary><strong>`Descriptor` — Memory descriptor that ensures memory is registered w/ NIXL, used for transferring data between workers.</strong></summary>
 
-*Source: [`dynamo/nixl_connect/__init__.py#L832`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/nixl_connect/__init__.py#L832)*
+*Source: [`dynamo/nixl_connect/__init__.py#L832`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L832)*
 
 <b>Attributes</b>
 
@@ -5641,9 +5643,9 @@ Deprecated method.
 
 <b>Constructor</b>
 
-#### `__init__(data: torch.Tensor | tuple[array_module.ndarray, Device | str] | bytes | tuple[int, int, Device | str, Any])`
+#### `__init__(data: torch.Tensor | tuple[array_module.ndarray, Device | str] | bytes | tuple[int, int, Device | str, Any] = None)`
 
-*Source: [`dynamo/nixl_connect/__init__.py#L837`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/nixl_connect/__init__.py#L837)*
+*Source: [`dynamo/nixl_connect/__init__.py#L837`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L837)*
 
 Memory descriptor for transferring data between workers.
 
@@ -5660,9 +5662,9 @@ Memory descriptor for transferring data between workers.
 - `TypeError` -- When `data` is a tuple but the elements are not of the expected types (i.e., [`ndarray`, `Device|str`] OR [`int`, `int`, `Device|str`, `Any`]).
 <b>Methods</b>
 
-#### `from_serialized(serialized: SerializedDescriptor) -> Descriptor`
+#### `from_serialized(serialized: SerializedDescriptor = None) -> Descriptor`
 
-*Source: [`dynamo/nixl_connect/__init__.py#L1024`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/nixl_connect/__init__.py#L1024)*
+*Source: [`dynamo/nixl_connect/__init__.py#L1024`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1024)*
 
 Deserializes a `SerializedDescriptor` into a `Descriptor` object.
 
@@ -5673,9 +5675,9 @@ Deserializes a `SerializedDescriptor` into a `Descriptor` object.
 | `serialized` | `SerializedDescriptor` | The serialized descriptor to deserialize. |
 
 <b>Returns:</b> `Descriptor` -- The deserialized descriptor.
-#### `deregister_with_connector(connection: Connection)`
+#### `deregister_with_connector(connection: Connection = None)`
 
-*Source: [`dynamo/nixl_connect/__init__.py#L1060`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/nixl_connect/__init__.py#L1060)*
+*Source: [`dynamo/nixl_connect/__init__.py#L1060`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1060)*
 
 Deregisters the memory of the descriptor with NIXL.
 
@@ -5683,11 +5685,11 @@ Deregisters the memory of the descriptor with NIXL.
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
-| `connection` | `Connection` |  |  |
+| `connection` | `Connection` | None |  |
 
-#### `register_with_connector(connection: Connection)`
+#### `register_with_connector(connection: Connection = None)`
 
-*Source: [`dynamo/nixl_connect/__init__.py#L1088`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/nixl_connect/__init__.py#L1088)*
+*Source: [`dynamo/nixl_connect/__init__.py#L1088`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1088)*
 
 Registers the memory of the descriptor with NIXL.
 
@@ -5695,7 +5697,7 @@ Registers the memory of the descriptor with NIXL.
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
-| `connection` | `Connection` |  |  |
+| `connection` | `Connection` | None |  |
 
 
 </details>
@@ -5703,7 +5705,7 @@ Registers the memory of the descriptor with NIXL.
 <details>
 <summary><strong>`Device` — Represents a device in the system.</strong></summary>
 
-*Source: [`dynamo/nixl_connect/__init__.py#L1177`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/nixl_connect/__init__.py#L1177)*
+*Source: [`dynamo/nixl_connect/__init__.py#L1177`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1177)*
 
 <b>Attributes</b>
 
@@ -5712,9 +5714,9 @@ Registers the memory of the descriptor with NIXL.
 
 <b>Constructor</b>
 
-#### `__init__(metadata: str | tuple[DeviceKind, int])`
+#### `__init__(metadata: str | tuple[DeviceKind, int] = None)`
 
-*Source: [`dynamo/nixl_connect/__init__.py#L1182`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/nixl_connect/__init__.py#L1182)*
+*Source: [`dynamo/nixl_connect/__init__.py#L1182`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1182)*
 
 
 </details>
@@ -5722,7 +5724,7 @@ Registers the memory of the descriptor with NIXL.
 <details>
 <summary><strong>`PassiveOperation` — Abstract class for common functionality of passive operations.</strong></summary>
 
-*Source: [`dynamo/nixl_connect/__init__.py#L1324`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/nixl_connect/__init__.py#L1324)*
+*Source: [`dynamo/nixl_connect/__init__.py#L1324`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1324)*
 
 <b>Bases:</b> `AbstractOperation`
 
@@ -5732,15 +5734,15 @@ Registers the memory of the descriptor with NIXL.
 
 <b>Constructor</b>
 
-#### `__init__(connection: Connection, operation_kind: OperationKind, local_descriptors: Descriptor | list[Descriptor])`
+#### `__init__(connection: Connection = None, operation_kind: OperationKind = None, local_descriptors: Descriptor | list[Descriptor] = None)`
 
-*Source: [`dynamo/nixl_connect/__init__.py#L1329`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/nixl_connect/__init__.py#L1329)*
+*Source: [`dynamo/nixl_connect/__init__.py#L1329`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1329)*
 
 <b>Methods</b>
 
 #### `metadata(hex_encode: bool = False) -> RdmaMetadata`
 
-*Source: [`dynamo/nixl_connect/__init__.py#L1392`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/nixl_connect/__init__.py#L1392)*
+*Source: [`dynamo/nixl_connect/__init__.py#L1392`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1392)*
 
 Gets the request descriptor for the operation.
 
@@ -5752,7 +5754,7 @@ Gets the request descriptor for the operation.
 
 #### `wait_for_completion()`
 
-*Source: [`dynamo/nixl_connect/__init__.py#L1474`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/nixl_connect/__init__.py#L1474)*
+*Source: [`dynamo/nixl_connect/__init__.py#L1474`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1474)*
 
 Blocks the caller asynchronously until the operation has completed.
 
@@ -5761,16 +5763,16 @@ Blocks the caller asynchronously until the operation has completed.
 <details>
 <summary><strong>`ReadOperation` — Operation that initiates an RDMA read operation to transfer data from a remote worker's `ReadableOperation`,</strong></summary>
 
-*Source: [`dynamo/nixl_connect/__init__.py#L1482`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/nixl_connect/__init__.py#L1482)*
+*Source: [`dynamo/nixl_connect/__init__.py#L1482`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1482)*
 
 as described by `remote_metadata`, to local buffers.
 <b>Bases:</b> `ActiveOperation`
 
 <b>Constructor</b>
 
-#### `__init__(connection: Connection, remote_metadata: RdmaMetadata, local_descriptors: Descriptor | list[Descriptor])`
+#### `__init__(connection: Connection = None, remote_metadata: RdmaMetadata = None, local_descriptors: Descriptor | list[Descriptor] = None)`
 
-*Source: [`dynamo/nixl_connect/__init__.py#L1488`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/nixl_connect/__init__.py#L1488)*
+*Source: [`dynamo/nixl_connect/__init__.py#L1488`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1488)*
 
 Creates a new instance of `ReadOperation`, registers `local_descriptors` with NIXL,
 and begins an RDMA read operation which will transfer data described by `remote_metadata`
@@ -5787,19 +5789,19 @@ to `local_descriptors`.
 
 #### `cancel()`
 
-*Source: [`dynamo/nixl_connect/__init__.py#L1560`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/nixl_connect/__init__.py#L1560)*
+*Source: [`dynamo/nixl_connect/__init__.py#L1560`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1560)*
 
 Cancels the operation.
 No affect if the operation has already completed or errored, or been cancelled.
 #### `results() -> list[Descriptor]`
 
-*Source: [`dynamo/nixl_connect/__init__.py#L1567`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/nixl_connect/__init__.py#L1567)*
+*Source: [`dynamo/nixl_connect/__init__.py#L1567`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1567)*
 
 Gets the results of the operation.
 Returns a single descriptor if only one was requested, or a list of descriptors if multiple were requested.
 #### `wait_for_completion()`
 
-*Source: [`dynamo/nixl_connect/__init__.py#L1581`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/nixl_connect/__init__.py#L1581)*
+*Source: [`dynamo/nixl_connect/__init__.py#L1581`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1581)*
 
 Blocks the caller asynchronously until the operation has completed.
 
@@ -5808,21 +5810,21 @@ Blocks the caller asynchronously until the operation has completed.
 <details>
 <summary><strong>`ReadableOperation` — Operation that can be awaited until a remote worker has completed a `ReadOperation`.</strong></summary>
 
-*Source: [`dynamo/nixl_connect/__init__.py#L1588`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/nixl_connect/__init__.py#L1588)*
+*Source: [`dynamo/nixl_connect/__init__.py#L1588`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1588)*
 
 <b>Bases:</b> `PassiveOperation`
 
 <b>Constructor</b>
 
-#### `__init__(connection: Connection, local_descriptors: Descriptor | list[Descriptor])`
+#### `__init__(connection: Connection = None, local_descriptors: Descriptor | list[Descriptor] = None)`
 
-*Source: [`dynamo/nixl_connect/__init__.py#L1593`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/nixl_connect/__init__.py#L1593)*
+*Source: [`dynamo/nixl_connect/__init__.py#L1593`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1593)*
 
 <b>Methods</b>
 
 #### `wait_for_completion()`
 
-*Source: [`dynamo/nixl_connect/__init__.py#L1619`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/nixl_connect/__init__.py#L1619)*
+*Source: [`dynamo/nixl_connect/__init__.py#L1619`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1619)*
 
 Blocks the caller asynchronously until the operation has completed.
 
@@ -5831,7 +5833,7 @@ Blocks the caller asynchronously until the operation has completed.
 <details>
 <summary><strong>`Remote` — Identifies a remote NIXL enabled worker relative to a local NIXL enabled worker.</strong></summary>
 
-*Source: [`dynamo/nixl_connect/__init__.py#L1663`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/nixl_connect/__init__.py#L1663)*
+*Source: [`dynamo/nixl_connect/__init__.py#L1663`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1663)*
 
 <b>Attributes</b>
 
@@ -5840,9 +5842,9 @@ Blocks the caller asynchronously until the operation has completed.
 
 <b>Constructor</b>
 
-#### `__init__(connection: Connection, nixl_metadata: bytes | str)`
+#### `__init__(connection: Connection = None, nixl_metadata: bytes | str = None)`
 
-*Source: [`dynamo/nixl_connect/__init__.py#L1668`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/nixl_connect/__init__.py#L1668)*
+*Source: [`dynamo/nixl_connect/__init__.py#L1668`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1668)*
 
 
 </details>
@@ -5850,15 +5852,15 @@ Blocks the caller asynchronously until the operation has completed.
 <details>
 <summary><strong>`WritableOperation` — Operation which can be awaited until written to by a `WriteOperation` from a remote worker.</strong></summary>
 
-*Source: [`dynamo/nixl_connect/__init__.py#L1802`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/nixl_connect/__init__.py#L1802)*
+*Source: [`dynamo/nixl_connect/__init__.py#L1802`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1802)*
 
 <b>Bases:</b> `PassiveOperation`
 
 <b>Constructor</b>
 
-#### `__init__(connection: Connection, local_descriptors: Descriptor | list[Descriptor])`
+#### `__init__(connection: Connection = None, local_descriptors: Descriptor | list[Descriptor] = None)`
 
-*Source: [`dynamo/nixl_connect/__init__.py#L1807`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/nixl_connect/__init__.py#L1807)*
+*Source: [`dynamo/nixl_connect/__init__.py#L1807`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1807)*
 
 Creates a new instance of `WritableOperation`, registers the operation and descriptors w/ NIXL,
 and enables an RDMA write operation to occur.
@@ -5876,7 +5878,7 @@ and enables an RDMA write operation to occur.
 
 #### `wait_for_completion()`
 
-*Source: [`dynamo/nixl_connect/__init__.py#L1850`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/nixl_connect/__init__.py#L1850)*
+*Source: [`dynamo/nixl_connect/__init__.py#L1850`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1850)*
 
 Blocks the caller asynchronously until the operation has completed.
 
@@ -5885,16 +5887,16 @@ Blocks the caller asynchronously until the operation has completed.
 <details>
 <summary><strong>`WriteOperation` — Awaitable write operation which initiates an RDMA write operation to a remote worker</strong></summary>
 
-*Source: [`dynamo/nixl_connect/__init__.py#L1857`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/nixl_connect/__init__.py#L1857)*
+*Source: [`dynamo/nixl_connect/__init__.py#L1857`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1857)*
 
 which provided a `RdmaMetadata` object from a `WritableOperation`.
 <b>Bases:</b> `ActiveOperation`
 
 <b>Constructor</b>
 
-#### `__init__(connection: Connection, local_descriptors: Descriptor | list[Descriptor], remote_metadata: RdmaMetadata)`
+#### `__init__(connection: Connection = None, local_descriptors: Descriptor | list[Descriptor] = None, remote_metadata: RdmaMetadata = None)`
 
-*Source: [`dynamo/nixl_connect/__init__.py#L1863`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/nixl_connect/__init__.py#L1863)*
+*Source: [`dynamo/nixl_connect/__init__.py#L1863`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1863)*
 
 Creates a new instance of `WriteOperation`, registers `local_descriptors` with NIXL,
 and begins an RDMA write operation which will transfer from `local_descriptors` to
@@ -5917,13 +5919,13 @@ remote target(s) described by `remote_metadata`
 
 #### `cancel()`
 
-*Source: [`dynamo/nixl_connect/__init__.py#L1936`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/nixl_connect/__init__.py#L1936)*
+*Source: [`dynamo/nixl_connect/__init__.py#L1936`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1936)*
 
 Cancels the operation.
 No affect if the operation has already completed or errored, or has been cancelled.
 #### `wait_for_completion()`
 
-*Source: [`dynamo/nixl_connect/__init__.py#L1943`](https://github.com/ai-dynamo/dynamo/blob/main/dynamo/nixl_connect/__init__.py#L1943)*
+*Source: [`dynamo/nixl_connect/__init__.py#L1943`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1943)*
 
 Blocks the caller asynchronously until the operation has completed.
 

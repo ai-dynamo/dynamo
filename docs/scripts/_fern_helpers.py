@@ -57,7 +57,8 @@ def escape_mdx_prose(text: str) -> str:
 
 def slugify(text: str) -> str:
     """Convert text to a URL-safe anchor slug."""
-    return text.lower().replace(" ", "-").replace(",", "")
+    text = re.sub(r"[^\w\s-]", "", text.lower())
+    return re.sub(r"[-\s]+", "-", text).strip("-")
 
 
 def render_card_group(cards: list[dict[str, str]], cols: int) -> str:

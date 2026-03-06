@@ -35,13 +35,13 @@ class LoRAManager:
     and allows registering custom Python sources for other protocols.
 
     Examples:
+        >>> import asyncio
         >>> from dynamo.common.lora import LoRAManager
         >>> manager = LoRAManager()
-        >>> manager.register_custom_source("hf", my_hf_source)
-        >>> result = await manager.download_lora("s3://bucket/adapters/lora-v1")
-        >>> result["status"]
-        'success'
-        >>> manager.is_cached("s3://bucket/adapters/lora-v1")
+        >>> result = asyncio.run(
+        ...     manager.download_lora("s3://bucket/adapters/lora-v1")
+        ... )  # doctest: +SKIP
+        >>> manager.is_cached("s3://bucket/adapters/lora-v1")  # doctest: +SKIP
         True
     """
 

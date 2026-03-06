@@ -136,11 +136,10 @@ class Endpoint:
     An Endpoint is a single API endpoint
 
     Examples:
-        >>> endpoint = runtime.endpoint("dynamo.backend.generate")
-        >>> await endpoint.serve_endpoint(RequestHandler().generate)
-        >>> client = await endpoint.client()
-        >>> async for resp in await client.round_robin("hello"):
-        ...     print(resp)
+        >>> async def handler(request):  # doctest: +SKIP
+        ...     yield {"text": "hello"}
+        >>> endpoint = runtime.endpoint("dynamo.backend.generate")  # doctest: +SKIP
+        >>> await endpoint.serve_endpoint(handler)  # doctest: +SKIP
     """
 
     ...
@@ -935,13 +934,10 @@ class KserveGrpcService:
     Provides model management for completions, chat completions, and tensor-based models.
 
     Examples:
-        >>> from dynamo._core import KserveGrpcService, PythonAsyncEngine
-        >>> service = KserveGrpcService(port=8787, host="0.0.0.0")
-        >>> engine = PythonAsyncEngine(my_generator, loop)
-        >>> service.add_completions_model("my-model", "checksum", engine)
-        >>> shutdown_signal = service.run(runtime)
-        >>> print(service.list_completions_models())
-        >>> await shutdown_signal
+        >>> from dynamo._core import KserveGrpcService  # doctest: +SKIP
+        >>> service = KserveGrpcService(port=8787, host="0.0.0.0")  # doctest: +SKIP
+        >>> service.add_completions_model("model", "checksum", engine)  # doctest: +SKIP
+        >>> await service.run(runtime)  # doctest: +SKIP
     """
 
     def __init__(self, port: Optional[int] = None, host: Optional[str] = None) -> None:
@@ -1087,7 +1083,7 @@ class ModelInput:
 
 
 class ModelType:
-    """What type of request this model needs: Chat, Completions, Embedding, Tensor, Images, Videos or Prefill
+    """What type of request this model needs: Chat, Completions, Embedding, TensorBased, Images, Audios, Videos, or Prefill
 
     Examples:
         >>> from dynamo._core import ModelType

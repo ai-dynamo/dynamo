@@ -72,11 +72,15 @@ def dynamo_endpoint(
     request_model: Union[Type[BaseModel], Type[Any]], response_model: Type[BaseModel]
 ) -> Callable:
     """
-    Decorator that validates request/response Pydantic models on an async generator endpoint.
+    Decorator that parses incoming requests into Pydantic models on an async generator endpoint.
+
+    Currently validates and converts the *request* payload (JSON string or dict)
+    into ``request_model``.  ``response_model`` is accepted for forward
+    compatibility but response validation is not yet implemented.
 
     Args:
         request_model: Pydantic model class (or Any) for incoming requests.
-        response_model: Pydantic model class for streamed response items.
+        response_model: Pydantic model class reserved for future response validation.
 
     Examples:
         >>> from pydantic import BaseModel

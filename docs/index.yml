@@ -251,6 +251,16 @@ navigation:
       - page: Dynamo Docs Guide
         path: README.md
 
+  # ==================== API Reference ====================
+  - section: API Reference
+    contents:
+      - page: Python API
+        path: api/python/README.md
+      - page: Rust API
+        path: api/rust/README.md
+      - page: Kubernetes CRD
+        path: kubernetes/api-reference.md
+
   # ==================== Hidden Pages ====================
   # Pages accessible via direct URL but not shown in main navigation.
   # Matches Sphinx hidden_toctree.rst -- pages linked from within content
@@ -288,8 +298,6 @@ navigation:
           - page: RDMA Metadata
             path: api/nixl-connect/rdma-metadata.md
       # -- Kubernetes (hidden sub-pages) --
-      - page: API Reference (K8s)
-        path: kubernetes/api-reference.md
       - page: Creating Deployments
         path: kubernetes/deployment/create-deployment.md
       - page: FluxCD

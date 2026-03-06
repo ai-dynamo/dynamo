@@ -458,7 +458,7 @@ jobs:
           VERSION="${{ steps.version.outputs.version }}"
           # Update docs.rs links from /latest to version-pinned URLs
           # The Rust page was synced from pages-dev, just sed-replace the version
-          find "fern/pages-$TAG/api/rust" -name "*.md" -exec \
+          find "fern/pages-$TAG/api/rust" \( -name "*.md" -o -name "*.mdx" \) -exec \
             sed -i "s|docs.rs/\([^/]*\)/latest|docs.rs/\1/$VERSION|g" {} +
 
       - name: Update GitHub links to 'main' to version tag

@@ -227,18 +227,19 @@ def _source_link(obj: Any) -> str:
         filepath = obj.filepath
         if filepath is None:
             return ""
-        rel = str(filepath)
+        repo_rel = str(Path(filepath).relative_to(REPO_ROOT))
+        display_rel = repo_rel
         for prefix in SEARCH_PATHS:
             try:
-                rel = str(filepath.relative_to(prefix))
+                display_rel = str(Path(filepath).relative_to(prefix))
                 break
             except ValueError:
                 continue
         lineno = getattr(obj, "lineno", None)
         suffix = f"#L{lineno}" if lineno else ""
         return (
-            f"*Source: [`{rel}{suffix}`]"
-            f"(https://github.com/ai-dynamo/dynamo/blob/main/{rel}{suffix})*\n"
+            f"*Source: [`{display_rel}{suffix}`]"
+            f"(https://github.com/ai-dynamo/dynamo/blob/main/{repo_rel}{suffix})*\n"
         )
     except Exception:
         return ""
@@ -504,7 +505,8 @@ def _build_signature(func: Any, params: list | None = None) -> str:
             continue
         ann = _format_annotation(p.annotation)
         entry = f"{p.name}: {ann}" if ann else p.name
-        if p.default is not None and str(p.default) != _PARAM_EMPTY_SENTINEL:
+        default = str(p.default)
+        if default != _PARAM_EMPTY_SENTINEL:
             entry += f" = {p.default}"
         sig_params.append(entry)
     ret = _format_annotation(getattr(func, "returns", None))
@@ -521,7 +523,7 @@ def _render_parameters_table(params: Any) -> str:
         if param.name in ("self", "cls"):
             continue
         annotation = _format_annotation(param.annotation) or "Any"
-        default = str(param.default) if param.default is not None else ""
+        default = str(param.default)
         if default == _PARAM_EMPTY_SENTINEL:
             default = ""
         rows.append(

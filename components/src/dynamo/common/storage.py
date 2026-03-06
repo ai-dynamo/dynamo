@@ -130,15 +130,14 @@ async def upload_to_fs(
         base_url: Optional CDN / proxy base URL for URL rewriting.
 
     Examples:
+        >>> import asyncio
         >>> from dynamo.common.storage import get_fs, upload_to_fs
         >>>
         >>> fs = get_fs("s3://my-media-bucket")
         >>> image_bytes = b"\\x89PNG..."
-        >>> url = await upload_to_fs(
-        ...     fs, "images/req-123/output.png", image_bytes
-        ... )
-        >>> url
-        's3://my-media-bucket/images/req-123/output.png'
+        >>> url = asyncio.run(
+        ...     upload_to_fs(fs, "images/req-123/output.png", image_bytes)
+        ... )  # doctest: +SKIP
 
     Returns:
         Public URL string for the uploaded file.

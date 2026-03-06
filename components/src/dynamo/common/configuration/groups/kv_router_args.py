@@ -41,18 +41,18 @@ class KvRouterConfigBase(ConfigBase):
     """Mixin carrying the 16 KvRouterConfig fields.
 
     Examples:
-        >>> import argparse
         >>> from dynamo.common.configuration.groups.kv_router_args import (
         ...     KvRouterArgGroup,
         ...     KvRouterConfigBase,
         ... )
         >>>
         >>> class MyRouterConfig(KvRouterConfigBase):
-        ...     endpoint: str
+        ...     endpoint: str = "http://localhost:8080"
         >>>
-        >>> kwargs = my_config.kv_router_kwargs()
-        >>> kwargs["overlap_score_weight"]
-        1.0
+        >>> config = MyRouterConfig()
+        >>> kwargs = config.kv_router_kwargs()
+        >>> "overlap_score_weight" in kwargs
+        True
     """
 
     overlap_score_weight: float

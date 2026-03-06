@@ -154,7 +154,7 @@ def _resolve_meta(name: str, full_text: str) -> dict[str, str]:
 # ---------------------------------------------------------------------------
 
 _RESOURCE_SECTION_RE = re.compile(
-    r"^### Resource Types\s*\n((?:-\s+\[.+?\]\n?)+)",
+    r"^### Resource Types\s*\n((?:-\s+\[.+?\]\(.*?\)\s*\n)+)",
     re.MULTILINE,
 )
 
@@ -200,9 +200,9 @@ _API_GROUP_RE = re.compile(
 )
 
 _TAB_TITLES: dict[str, str] = {
-    "nvidia.com/v1alpha1": "v1alpha1",
-    "nvidia.com/v1beta1": "v1beta1",
-    "operator.config.dynamo.nvidia.com/v1alpha1": "Operator Config",
+    "nvidia.com/v1alpha1": "`v1alpha1`",
+    "nvidia.com/v1beta1": "`v1beta1`",
+    "operator.config.dynamo.nvidia.com/v1alpha1": "`OperatorConfiguration`",
 }
 
 
@@ -270,11 +270,39 @@ def _is_already_fernified(text: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
+def _inject_frontmatter(
+    text: str,
+    *,
+    sidebar_title: str = "Kubernetes CRD",
+    max_toc_depth: int = 3,
+) -> str:
+    """Add Fern-specific frontmatter fields (sidebar-title, max-toc-depth)."""
+    return text.replace(
+        "# SPDX-License-Identifier: Apache-2.0\n---",
+        "# SPDX-License-Identifier: Apache-2.0\n"
+        f"sidebar-title: {sidebar_title}\n"
+        f"max-toc-depth: {max_toc_depth}\n---",
+        1,
+    )
+
+
+_BARE_VERSION_RE = re.compile(
+    r"(?<![`#/])" r"((?:[\w.]+/)?v1(?:alpha|beta)\d+)" r"(?!/)" r"(?![-\w]*[)`])",
+)
+
+
+def backtick_api_versions(text: str) -> str:
+    """Wrap bare v1alpha1/v1beta1 version strings in backticks."""
+    return _BARE_VERSION_RE.sub(r"`\1`", text)
+
+
 def fernify(text: str) -> str:
     """Apply all Fern transforms to the K8s API reference."""
+    text = _inject_frontmatter(text)
     text = build_resource_cards(text, RESOURCE_META)
     text = fernify_headings_to_accordion(text, 4)
     text = wrap_api_groups_in_tabs(text)
+    text = backtick_api_versions(text)
     text = convert_admonitions(text)
     return text
 
