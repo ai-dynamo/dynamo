@@ -15,7 +15,6 @@ Compared to aggregated mode, disaggregated mode has some known randomness.
 Example reference: https://github.com/vllm-project/vllm/issues/7779#issuecomment-2304967870
 """
 
-import torch
 import logging
 import os
 import signal
@@ -51,12 +50,15 @@ pytestmark = [
 
 SUCCESS_RATE_THRESHOLD = 0.95
 
+
 # TRT-LLM will crash when loading the deepseek-ai/DeepSeek-R1-Distill-Llama-8B model on GB200 with a KV block size of 16.
 # As a workaround, use a block size of 32 on GB200.
 def is_gb200() -> bool:
-    if not torch.cuda.is_available() or torch.cuda.device_count() == 0:
-        return False
-    return "GB200" in torch.cuda.get_device_name(0).upper()
+    out = subprocess.check_output(
+        ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+        text=True,
+    )
+    return bool(out.strip()) and "GB200" in out.splitlines()[0].upper()
 
 
 class LLMServerManager:
