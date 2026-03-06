@@ -52,6 +52,12 @@ const (
 	requestTimeout      = 5 * time.Second
 	dialTimeout         = 3 * time.Second
 	tlsHandshakeTimeout = 3 * time.Second
+
+	CloudProviderGCP     = "gcp"
+	CloudProviderAWS     = "aws"
+	CloudProviderAKS     = "aks"
+	CloudProviderOther   = "other"
+	CloudProviderUnknown = "unknown"
 )
 
 // GPUInfo contains discovered GPU configuration from cluster nodes
@@ -218,7 +224,7 @@ func (g *GPUDiscovery) DiscoverGPUsFromDCGM(ctx context.Context, k8sClient clien
 	// Infer cloud provider for the best node
 	cloudProvider, err := GetCloudProviderInfo(ctx, k8sClient)
 	if err != nil {
-		cloudProvider = "unknown"
+		cloudProvider = CloudProviderUnknown
 	}
 	bestNode.CloudProvider = cloudProvider
 	bestNode.NodesWithGPUs = nodesWithGPUs
@@ -723,10 +729,10 @@ func InferHardwareSystem(gpuProduct string) string {
 func GetCloudProviderInfo(ctx context.Context, k8sClient client.Reader) (string, error) {
 	var nodeList corev1.NodeList
 	if err := k8sClient.List(ctx, &nodeList); err != nil {
-		return "unknown", fmt.Errorf("failed to list nodes: %w", err)
+		return CloudProviderUnknown, fmt.Errorf("failed to list nodes: %w", err)
 	}
 	if len(nodeList.Items) == 0 {
-		return "unknown", fmt.Errorf("no nodes found in cluster")
+		return CloudProviderUnknown, fmt.Errorf("no nodes found in cluster")
 	}
 	// Use first node as representative (assumes homogeneous control plane)
 	node := nodeList.Items[0]
@@ -736,33 +742,33 @@ func GetCloudProviderInfo(ctx context.Context, k8sClient client.Reader) (string,
 	// ---- Primary Detection: providerID ----
 	switch {
 	case strings.Contains(providerID, "azure"):
-		return "aks", nil
+		return CloudProviderAKS, nil
 	case strings.Contains(providerID, "aws"):
-		return "aws", nil
+		return CloudProviderAWS, nil
 	case strings.Contains(providerID, "gce"):
-		return "gcp", nil
+		return CloudProviderGCP, nil
 	}
 	// ---- Secondary Detection: Node Labels ----
 	// AKS labels
 	if _, ok := labels["kubernetes.azure.com/cluster"]; ok {
-		return "aks", nil
+		return CloudProviderAKS, nil
 	}
 	if strings.Contains(instanceType, "standard_") {
-		return "aks", nil
+		return CloudProviderAKS, nil
 	}
 	// EKS labels
 	if _, ok := labels["eks.amazonaws.com/nodegroup"]; ok {
-		return "aws", nil
+		return CloudProviderAWS, nil
 	}
 	if strings.HasPrefix(instanceType, "p") {
-		return "aws", nil
+		return CloudProviderAWS, nil
 	}
 	// GKE labels
 	if _, ok := labels["cloud.google.com/gke-nodepool"]; ok {
-		return "gcp", nil
+		return CloudProviderGCP, nil
 	}
 	if strings.HasPrefix(instanceType, "a2-") {
-		return "gcp", nil
+		return CloudProviderGCP, nil
 	}
 	return "other", nil
 }
