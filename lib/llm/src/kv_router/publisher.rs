@@ -54,7 +54,8 @@ const MAX_BACKOFF_EXPONENT: u32 = 8; // Cap at 2^8 = 256x multiplier to prevent 
 
 // Batching configuration
 const MAX_BATCHING_TIMEOUT_MS: u64 = 15_000; // 15 seconds, prevents misconfiguration
-pub const DEFAULT_BATCHING_TIMEOUT_MS: u64 = 5; // 5ms default batch window for merging events
+pub const DEFAULT_BATCHING_TIMEOUT_MS: Option<u64> = None; // disabled by default
+const DEFAULT_MAX_BATCH_BLOCKS: usize = 128; // Max blocks to batch before flushing
 
 // ---------------------------------------------------------------------------
 // Engines dropped events metric
@@ -168,6 +169,11 @@ impl BatchingState {
         self.pending_removed.is_some() || self.pending_stored.is_some()
     }
 
+    fn pending_block_count(&self) -> usize {
+        self.pending_removed.as_ref().map(|r| r.block_hashes.len()).unwrap_or(0)
+            + self.pending_stored.as_ref().map(|s| s.blocks.len()).unwrap_or(0)
+    }
+
     /// Records that a flush just happened. Called after every flush to track
     /// idle periods for stale-data detection.
     fn record_flush_time(&mut self) {
@@ -275,7 +281,7 @@ impl KvEventPublisher {
             source_config,
             false,
             0,
-            Some(DEFAULT_BATCHING_TIMEOUT_MS),
+            DEFAULT_BATCHING_TIMEOUT_MS,
         )
     }
 
@@ -565,6 +571,7 @@ async fn run_event_processor_loop<P: EventSink + Send + Sync + 'static>(
     mut rx: mpsc::UnboundedReceiver<KvCacheEvent>,
     local_indexer: Option<Arc<LocalKvIndexer>>,
     timeout_ms: Option<u64>,
+    max_batch_blocks: usize,
 ) {
     let mut batching_state = BatchingState::new();
     // Track last raw input event_id for gap detection (dropped events before batching).
@@ -663,10 +670,12 @@ async fn run_event_processor_loop<P: EventSink + Send + Sync + 'static>(
                 // Track dp_rank after the match so in-flight flushes use the old value.
                 batching_state.last_dp_rank = event.dp_rank;
 
-                // Flush after every event when disabled (None), or when the window has elapsed.
+                // Flush after every event when disabled (None), or when the window has elapsed,
+                // or when the batch exceeds the max block count.
                 // The sleep arm only arms when batching is enabled; this covers the disabled path.
                 if batching_state.has_pending()
-                    && timeout_ms.is_none_or(|ms| batching_state.is_timeout_elapsed(ms))
+                    && (timeout_ms.is_none_or(|ms| batching_state.is_timeout_elapsed(ms))
+                        || batching_state.pending_block_count() > max_batch_blocks)
                 {
                     batching_state.flush(&publisher, &local_indexer, worker_id).await;
                 }
@@ -697,6 +706,7 @@ async fn start_event_processor<P: EventSink + Send + Sync + 'static>(
         rx,
         local_indexer,
         batching_timeout_ms,
+        DEFAULT_MAX_BATCH_BLOCKS,
     )
     .await
 }
@@ -717,6 +727,7 @@ async fn start_event_processor_jetstream<P: EventSink + Send + Sync + 'static>(
         rx,
         local_indexer,
         batching_timeout_ms,
+        DEFAULT_MAX_BATCH_BLOCKS,
     )
     .await
 }
@@ -2407,7 +2418,7 @@ mod event_processor_tests {
         let cancellation_token = CancellationToken::new();
 
         let handle = tokio::spawn(async move {
-            run_event_processor_loop(publisher_clone, 1, cancellation_token, rx, None, timeout_ms)
+            run_event_processor_loop(publisher_clone, 1, cancellation_token, rx, None, timeout_ms, DEFAULT_MAX_BATCH_BLOCKS)
                 .await
         });
 
@@ -2496,7 +2507,7 @@ mod event_processor_tests {
         let cancellation_token = CancellationToken::new();
 
         let handle = tokio::spawn(async move {
-            run_event_processor_loop(publisher_clone, 1, cancellation_token, rx, None, timeout_ms)
+            run_event_processor_loop(publisher_clone, 1, cancellation_token, rx, None, timeout_ms, DEFAULT_MAX_BATCH_BLOCKS)
                 .await
         });
 
@@ -2586,7 +2597,7 @@ mod event_processor_tests {
         let cancellation_token = CancellationToken::new();
 
         let handle = tokio::spawn(async move {
-            run_event_processor_loop(publisher_clone, 1, cancellation_token, rx, None, timeout_ms)
+            run_event_processor_loop(publisher_clone, 1, cancellation_token, rx, None, timeout_ms, DEFAULT_MAX_BATCH_BLOCKS)
                 .await
             // SLEEP HERE?! so that events are not batched!
         });
@@ -2661,7 +2672,7 @@ mod event_processor_tests {
         let cancellation_token = CancellationToken::new();
 
         let handle = tokio::spawn(async move {
-            run_event_processor_loop(publisher_clone, 1, cancellation_token, rx, None, timeout_ms)
+            run_event_processor_loop(publisher_clone, 1, cancellation_token, rx, None, timeout_ms, DEFAULT_MAX_BATCH_BLOCKS)
                 .await
         });
 
@@ -2726,7 +2737,7 @@ mod event_processor_tests {
         let cancellation_token = CancellationToken::new();
 
         let handle = tokio::spawn(async move {
-            run_event_processor_loop(publisher_clone, 1, cancellation_token, rx, None, timeout_ms)
+            run_event_processor_loop(publisher_clone, 1, cancellation_token, rx, None, timeout_ms, DEFAULT_MAX_BATCH_BLOCKS)
                 .await
         });
 
@@ -2785,7 +2796,7 @@ mod event_processor_tests {
         let cancellation_token = CancellationToken::new();
 
         let handle = tokio::spawn(async move {
-            run_event_processor_loop(publisher_clone, 1, cancellation_token, rx, None, timeout_ms)
+            run_event_processor_loop(publisher_clone, 1, cancellation_token, rx, None, timeout_ms, DEFAULT_MAX_BATCH_BLOCKS)
                 .await
         });
 
@@ -2869,7 +2880,7 @@ mod event_processor_tests {
         let cancellation_token = CancellationToken::new();
 
         let handle = tokio::spawn(async move {
-            run_event_processor_loop(publisher_clone, 1, cancellation_token, rx, None, timeout_ms)
+            run_event_processor_loop(publisher_clone, 1, cancellation_token, rx, None, timeout_ms, DEFAULT_MAX_BATCH_BLOCKS)
                 .await
         });
 
@@ -2947,7 +2958,7 @@ mod event_processor_tests {
         let cancellation_token = CancellationToken::new();
 
         let handle = tokio::spawn(async move {
-            run_event_processor_loop(publisher_clone, 1, cancellation_token, rx, None, timeout_ms)
+            run_event_processor_loop(publisher_clone, 1, cancellation_token, rx, None, timeout_ms, DEFAULT_MAX_BATCH_BLOCKS)
                 .await
         });
 
@@ -3009,7 +3020,7 @@ mod event_processor_tests {
         let cancellation_token = CancellationToken::new();
 
         let handle = tokio::spawn(async move {
-            run_event_processor_loop(publisher_clone, 1, cancellation_token, rx, None, timeout_ms)
+            run_event_processor_loop(publisher_clone, 1, cancellation_token, rx, None, timeout_ms, DEFAULT_MAX_BATCH_BLOCKS)
                 .await
         });
 
@@ -3118,7 +3129,7 @@ mod event_processor_tests {
         let cancellation_token = CancellationToken::new();
 
         let handle = tokio::spawn(async move {
-            run_event_processor_loop(publisher_clone, 1, cancellation_token, rx, None, timeout_ms)
+            run_event_processor_loop(publisher_clone, 1, cancellation_token, rx, None, timeout_ms, DEFAULT_MAX_BATCH_BLOCKS)
                 .await
         });
 
