@@ -188,6 +188,16 @@ class DynamoKVBMConnectorWorker(KvCacheConnectorWorker):
                     "cargo build -p kvbm --features nccl"
                 )
                 nccl_rank, nccl_world_size, nccl_comm_ref = None, None, None
+            except Exception as e:
+                logger.warning(
+                    "KVBM MLA support: _create_kvbm_nccl_comm failed (nccl_rank=%s, "
+                    "nccl_world_size=%s). MLA broadcast disabled; using worker-level "
+                    "replication (each GPU loads independently). Error: %s",
+                    nccl_rank,
+                    nccl_world_size,
+                    e,
+                )
+                nccl_rank, nccl_world_size, nccl_comm_ref = None, None, None
         elif enable_nccl_mla:
             logger.info(
                 "KVBM: MPI not available, using standard sharded mode. "
