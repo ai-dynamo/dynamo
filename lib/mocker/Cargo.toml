@@ -32,6 +32,7 @@ uuid = { workspace = true }
 
 # crate-specific
 ndarray = "0.16"
+slotmap = "1"
 ndarray-npy = "0.9"
 ndarray-interp = "0.5"
 
