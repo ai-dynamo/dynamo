@@ -125,8 +125,8 @@ func TestEnrichHardwareFromDiscovery_NormalizesUserProvidedGPUSKU(t *testing.T) 
 	dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
 		Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
 			Hardware: &nvidiacomv1beta1.HardwareSpec{
-				GPUSKU:        "NVIDIA-B200", // raw product name, should be normalized
-				VRAMMB:        &vram,
+				GPUSKU:         "NVIDIA-B200", // raw product name, should be normalized
+				VRAMMB:         &vram,
 				NumGPUsPerNode: &n,
 			},
 		},
