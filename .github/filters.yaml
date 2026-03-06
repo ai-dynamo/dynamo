@@ -1,17 +1,18 @@
 # CI Filter Patterns - See FILTERS.md for documentation
 #
 # Filters that trigger CI jobs:
-#   core     -> dynamo build-test, all backend builds (vllm/sglang/trtllm), deploy tests
+#   core     -> dynamo build-test, all backend builds (vllm/sglang/trtllm)
 #   operator -> operator build and test
-#   deploy   -> deploy-test-vllm-disagg-router
+#   deploy   -> deploy tests
+#   planner  -> dynamo build-test
 #   vllm     -> vllm build and test
 #   sglang   -> sglang build and test
 #   trtllm   -> trtllm build and test
-#   frontend -> frontend EPP image build
+#   frontend -> frontend EPP image build, dynamo build-test
 #   docs     -> fern docs lint, sync, and version release (docs/ directory)
 #
 # Filters for coverage only (no CI triggered):
-#   examples, ignore, planner
+#   examples, ignore
 
 all:
   - '**'
@@ -19,6 +20,7 @@ all:
 docs:
   - 'docs/**'
   - 'fern/**'
+  - '.github/workflows/fern-docs.yml'
   - '**/*.md'
   - '**/*.txt'
   - '**/.gitignore'
@@ -44,7 +46,6 @@ ignore:
   - '.clang-format'
   - 'dynamo.code-workspace'
   - 'deploy/*'
-  - 'launch/**'
   - '.github/scripts/**'
   - '.github/ISSUE_TEMPLATE/**'
   - '.github/pull_request_template.md'
@@ -65,6 +66,7 @@ ci: &ci
   - '.github/filters.yaml'
   - '.github/actions/**'
   - '.github/scripts/parse_buildkit_output.py'
+  - '.github/scripts/route_buildkit.sh'
 
 core:
   # Exclude documentation files first, then include patterns override for specific paths
@@ -98,18 +100,22 @@ operator:
   - *ci
   - 'deploy/operator/**'
   - 'deploy/operator/.*'
-  - 'docs/pages/kubernetes/api-reference.md'
+  - 'docs/kubernetes/api-reference.md'
 
 deploy:
   - '!**/*.md'
   - '!**/*.rst'
+  - *ci
   - 'deploy/helm/**'
   - 'deploy/utils/**'
   - 'deploy/chrek/**'
+  - 'tests/deploy/**'
 
 planner:
   - 'components/src/dynamo/planner/**'
+  - 'components/src/dynamo/global_planner/**'
   - 'tests/planner/**'
+  - 'tests/global_planner/**'
   - 'components/src/dynamo/profiler/**'
   - 'components/src/dynamo/global_router/**'
 

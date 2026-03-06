@@ -72,7 +72,7 @@ async def worker(runtime: DistributedRuntime):
     service.add_chat_completions_model(served_model_name, "mdcsum", engine)
 
     print("Starting service...")
-    shutdown_signal = service.run(runtime.child_token())
+    shutdown_signal = service.run(runtime)
 
     try:
         print(f"Serving endpoint: {host}:{port}/v1/models")
@@ -88,6 +88,7 @@ async def worker(runtime: DistributedRuntime):
         print(f"Unexpected error occurred: {e}")
     finally:
         print("Shutting down worker...")
+        service.shutdown()  # Shutdown service first
         runtime.shutdown()
 
 

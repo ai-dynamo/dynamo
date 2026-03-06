@@ -6,14 +6,19 @@ import logging
 from typing import AsyncIterator, Optional
 
 import torch
+
+# MMEncoder chain imports compiled CUDA ops; may fail in CPU-only environments.
+try:
+    from sglang.srt.disaggregation.encode_server import MMEncoder
+except (ImportError, OSError):
+    MMEncoder = None  # type: ignore[assignment]
 from sglang.srt.parser.conversation import chat_templates
-from transformers import AutoImageProcessor, AutoModel, AutoTokenizer
+from transformers import AutoTokenizer
 
 import dynamo.nixl_connect as connect
-from dynamo._core import Client, Component, Context
+from dynamo._core import Client, Context
 from dynamo.runtime import DistributedRuntime
 from dynamo.sglang.args import Config
-from dynamo.sglang.multimodal_utils import ImageLoader, encode_image_embeddings
 from dynamo.sglang.protocol import SglangMultimodalRequest
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 
@@ -32,8 +37,6 @@ except ImportError as e:
 
     DEVICE = "cpu"
 
-CACHE_SIZE_MAXIMUM = 8
-
 
 class MultimodalEncodeWorkerHandler(BaseWorkerHandler):
     """
@@ -43,28 +46,26 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler):
 
     def __init__(
         self,
-        component: Component,
         config: Config,
         pd_worker_client: Client,
         shutdown_event: Optional[asyncio.Event] = None,
     ) -> None:
-        super().__init__(
-            component, engine=None, config=config, shutdown_event=shutdown_event
-        )
+        super().__init__(engine=None, config=config, shutdown_event=shutdown_event)
         self.pd_worker_client = pd_worker_client
         self.model = config.server_args.model_path
-        self.served_model_name = config.server_args.served_model_name
 
-        self.image_loader = ImageLoader(cache_size=CACHE_SIZE_MAXIMUM)
+        if MMEncoder is None:
+            raise RuntimeError(
+                "MMEncoder is not available. "
+                "Multimodal encode worker requires a CUDA environment."
+            )
 
-        self.image_processor = AutoImageProcessor.from_pretrained(
-            self.model, trust_remote_code=True
-        )
-        self.vision_model = AutoModel.from_pretrained(
-            self.model,
-            device_map="auto",
-            torch_dtype=torch.float16,
-            trust_remote_code=True,
+        # torch.distributed requires a dist_init_method even for tp=1;
+        # port 0 lets the OS assign a free port.
+        self.encoder = MMEncoder(
+            server_args=config.server_args,
+            dist_init_method="tcp://127.0.0.1:0",
+            rank=0,
         )
 
         # Load tokenizer to convert image token string to integer ID
@@ -92,7 +93,7 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler):
 
         self.min_workers = 1
 
-    def cleanup(self):
+    def cleanup(self) -> None:
         pass
 
     async def generate(
@@ -112,60 +113,138 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler):
                 request = SglangMultimodalRequest.model_validate(request)
 
         # The following steps encode the requested image for SGLang:
-        # 1. Open the image from the provided URL.
-        # 2. Process the image using the processor (which handles tokenization).
-        # 3. Extract input_ids and image data from processed result.
-        # 4. Run the image through the vision model to get precomputed embeddings.
-        # 5. Create SGLang-specific multimodal data format.
-        # 6. Create a descriptor for the embeddings and send to downstream worker.
+        # 1. Pass the image URL to MMEncoder which loads, preprocesses, and
+        #    runs the vision encoder.
+        # 2. Expand each image placeholder token to match patch count.
+        # 3. Create a single NIXL descriptor for concatenated embeddings.
+        # 4. Send request + metadata to downstream worker.
+        # 5. Stream the downstream worker's response back to the caller.
 
         try:
-            if not request.multimodal_input.image_url:
-                raise ValueError("image_url is required for the encode worker.")
+            multimodal_groups = request.multimodal_inputs
+            if not multimodal_groups:
+                raise ValueError("multimodal_inputs is required for the encode worker.")
 
-            image = await self.image_loader.load_image(
-                request.multimodal_input.image_url
+            image_urls = []
+            for idx, mm_group in enumerate(multimodal_groups):
+                mm_input = mm_group.multimodal_input
+                if not mm_input or not mm_input.image_url:
+                    raise ValueError(
+                        f"image_url is required for the encode worker (index={idx})."
+                    )
+                if mm_input.video_url is not None:
+                    raise NotImplementedError(
+                        "video_url encoding is not supported in SGLang encode worker"
+                    )
+                image_urls.append(mm_input.image_url)
+
+            image_grid_dim, precomputed_embeddings = await self.encoder._encode(
+                image_urls
             )
 
-            image_embeds = self.image_processor(images=image, return_tensors="pt")
-            precomputed_embeddings = encode_image_embeddings(
-                model_name=self.served_model_name,
-                image_embeds=image_embeds,
-                vision_encoder=self.vision_model,
-                projector=None,
+            image_grid_thw_list = (
+                image_grid_dim.tolist()
+                if isinstance(image_grid_dim, torch.Tensor)
+                else image_grid_dim
             )
 
-            image_grid_thw = (
-                image_embeds["image_grid_thw"].tolist()
-                if "image_grid_thw" in image_embeds
-                else None
-            )
+            if len(image_grid_thw_list) != len(multimodal_groups):
+                raise ValueError("image_grid_thw size mismatch")
 
-            # Store the image data info in the request for downstream
-            request.image_grid_thw = image_grid_thw
+            def _build_token_counts(total_tokens: int) -> list[int]:
+                if total_tokens <= 0:
+                    raise ValueError("Invalid token statistics for embeddings")
+
+                # image_grid_thw is [t, h, w]. We derive per-item relative sizes
+                # from spatial grid (h * w), then infer merge factor
+                # from the total embedding token count.
+                grid_sizes = []
+                for image_grid_thw in image_grid_thw_list:
+                    if not isinstance(image_grid_thw, list) or len(image_grid_thw) != 3:
+                        raise ValueError(
+                            "Cannot split embeddings: invalid image_grid_thw"
+                        )
+                    grid_sizes.append(int(image_grid_thw[1] * image_grid_thw[2]))
+
+                total_grid_tokens = sum(grid_sizes)
+                if total_grid_tokens <= 0:
+                    raise ValueError("Invalid grid statistics for embeddings")
+
+                if total_grid_tokens % total_tokens != 0:
+                    raise ValueError(
+                        "Cannot infer merge factor: grid token total is not divisible by embedding token total"
+                    )
+
+                merge_factor = total_grid_tokens // total_tokens
+                token_counts = []
+                for grid_count in grid_sizes:
+                    if grid_count % merge_factor != 0:
+                        raise ValueError(
+                            "Cannot split embeddings: per-image grid token count not divisible by inferred merge factor"
+                        )
+                    token_counts.append(grid_count // merge_factor)
+
+                if sum(token_counts) != total_tokens:
+                    raise ValueError(
+                        "Cannot split embeddings: per-image token counts do not match embedding token total"
+                    )
+
+                return token_counts
+
+            if isinstance(precomputed_embeddings, torch.Tensor):
+                if precomputed_embeddings.ndim != 2:
+                    raise ValueError(
+                        "Unsupported embeddings tensor rank from encoder: "
+                        f"{precomputed_embeddings.ndim}. Expected 2D [tokens, hidden]."
+                    )
+
+                token_counts = _build_token_counts(precomputed_embeddings.shape[0])
+            else:
+                raise ValueError(
+                    "Unsupported embeddings type from encoder: "
+                    f"{type(precomputed_embeddings)}"
+                )
+
+            image_placeholder_count = request.request.token_ids.count(
+                self.image_token_id
+            )
+            if image_placeholder_count < len(multimodal_groups):
+                raise ValueError(
+                    "Not enough image placeholders in token_ids for provided images"
+                )
+
+            # Keep per-image grid metadata in request groups for worker-side mm_item.
+            for idx, (mm_group, image_grid_thw) in enumerate(
+                zip(multimodal_groups, image_grid_thw_list)
+            ):
+                mm_group.image_grid_thw = image_grid_thw
+                mm_group.multimodal_input.image_url = None
+
+            # Store shared serialized tensor metadata at request level.
             request.embeddings_shape = tuple(precomputed_embeddings.shape)
+            request.serialized_request = None
 
-            # Replace the single image token with multiple image tokens based on embedding shape
-            image_token_id_index = request.request.token_ids.index(self.image_token_id)
+            search_start = 0
+            for num_image_tokens in token_counts:
+                try:
+                    image_token_id_index = request.request.token_ids.index(
+                        self.image_token_id, search_start
+                    )
+                except ValueError as e:
+                    raise ValueError(
+                        "Not enough image tokens found for provided images"
+                    ) from e
 
-            num_image_tokens = precomputed_embeddings.shape[
-                1
-            ]  # Number of image patches
-            # Replace single image token with multiple image tokens
-            request.request.token_ids = (
-                request.request.token_ids[:image_token_id_index]
-                + [self.image_token_id] * num_image_tokens
-                + request.request.token_ids[
-                    image_token_id_index + 1 :
-                ]  # Skip the original token
-            )
+                request.request.token_ids = (
+                    request.request.token_ids[:image_token_id_index]
+                    + [self.image_token_id] * num_image_tokens
+                    + request.request.token_ids[image_token_id_index + 1 :]
+                )
+                search_start = image_token_id_index + num_image_tokens
 
-            # Create descriptor for the multimodal data
             descriptor = connect.Descriptor(precomputed_embeddings)
-
             with await self._connector.create_readable(descriptor) as readable:
                 request.serialized_request = readable.metadata()
-
                 logger.debug(f"Request: {request.model_dump_json()}")
 
                 # Get the response generator from downstream worker
@@ -183,7 +262,7 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler):
             logger.error(f"Error processing request: {e}")
             raise
 
-    async def async_init(self, runtime: DistributedRuntime):
+    async def async_init(self, runtime: DistributedRuntime) -> None:
         logger.info("Startup started.")
         # Create and initialize a dynamo connector for this worker.
         # We'll needs this to move data between this worker and remote workers efficiently.

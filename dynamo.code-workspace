@@ -10,7 +10,6 @@
     "settings": {
         "rust-analyzer.linkedProjects": [
             "Cargo.toml",
-            "launch/dynamo-run/Cargo.toml",
             "lib/bindings/python/Cargo.toml"
         ],
         "rust-analyzer.procMacro.enable": true,

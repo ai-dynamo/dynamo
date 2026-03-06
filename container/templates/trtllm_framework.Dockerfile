@@ -92,7 +92,9 @@ COPY --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/fl
 COPY --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/torch_tensorrt ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/torch_tensorrt
 COPY --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/torch_tensorrt-${TORCH_TENSORRT_VER}.dist-info ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/torch_tensorrt-${TORCH_TENSORRT_VER}.dist-info
 
-RUN uv pip install flashinfer-python==${FLASHINFER_PYTHON_VER}
+RUN --mount=type=cache,target=/root/.cache/uv \
+    export UV_CACHE_DIR=/root/.cache/uv UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
+    uv pip install flashinfer-python==${FLASHINFER_PYTHON_VER}
 
 # Install TensorRT-LLM and related dependencies
 ARG HAS_TRTLLM_CONTEXT
@@ -103,7 +105,7 @@ ARG GITHUB_TRTLLM_COMMIT
 {% if context.trtllm.has_trtllm_context == "1" %}
 # Copy only wheel files and commit info from trtllm_wheel stage from build_context
 COPY --from=trtllm_wheel / /trtllm_wheel/
-{%- endif -%}
+{%- endif %}
 COPY --from=trtllm_wheel_image /app/tensorrt_llm /trtllm_wheel_image/
 
 # Cache uv downloads; uv handles its own locking for this cache.

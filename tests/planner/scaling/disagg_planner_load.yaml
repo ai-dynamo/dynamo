@@ -1,0 +1,81 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-disagg-planner
+spec:
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          workingDir: /workspace/examples/backends/vllm
+          command:
+            - python3
+          args:
+            - -m
+            - dynamo.frontend
+            - --router-mode
+            - kv
+    Planner:
+      componentType: planner
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          workingDir: /workspace/components/src/dynamo/planner
+          command:
+          - python3
+          - -m
+          - planner_sla
+          args:
+            - --environment=kubernetes
+            - --backend=vllm
+            - --enable-loadbased-scaling
+            - --disable-throughput-scaling
+            - --loadbased-adjustment-interval=5
+            - --loadbased-min-observations=5
+    VllmDecodeWorker:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      subComponentType: decode
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          workingDir: /workspace/examples/backends/vllm
+          command:
+            - python3
+          args:
+            - -m
+            - dynamo.vllm
+            - --model
+            - nvidia/Llama-3.1-8B-Instruct-FP8
+    VllmPrefillWorker:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      subComponentType: prefill
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          workingDir: /workspace/examples/backends/vllm
+          command:
+            - python3
+          args:
+            - -m
+            - dynamo.vllm
+            - --model
+            - nvidia/Llama-3.1-8B-Instruct-FP8
+            - --disaggregation-mode
+            - prefill

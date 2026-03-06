@@ -1,20 +1,25 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use dynamo_llm::{self as llm_rs};
 use llm_rs::model_card::ModelDeploymentCard as RsModelDeploymentCard;
 use llm_rs::model_type::{ModelInput, ModelType};
 use pyo3::prelude::*;
 
-use crate::{CancellationToken, engine::*, llm::local_model::ModelRuntimeConfig, to_pyerr};
+use crate::{
+    CancellationToken, DistributedRuntime, engine::*, llm::local_model::ModelRuntimeConfig,
+    to_pyerr,
+};
 
 pub use dynamo_llm::grpc::service::kserve;
 
 #[pyclass]
 pub struct KserveGrpcService {
     inner: kserve::KserveService,
+    // CancellationToken is already Send + Sync + Clone, no Mutex needed
+    cancel_token: Arc<OnceLock<CancellationToken>>,
 }
 
 #[pymethods]
@@ -30,7 +35,10 @@ impl KserveGrpcService {
             builder = builder.host(host);
         }
         let inner = builder.build().map_err(to_pyerr)?;
-        Ok(Self { inner })
+        Ok(Self {
+            inner,
+            cancel_token: Arc::new(OnceLock::new()),
+        })
     }
 
     pub fn add_completions_model(
@@ -128,11 +136,39 @@ impl KserveGrpcService {
         Ok(self.inner.model_manager().list_tensor_models())
     }
 
-    fn run<'p>(&self, py: Python<'p>, token: CancellationToken) -> PyResult<Bound<'p, PyAny>> {
+    fn run<'p>(&self, py: Python<'p>, runtime: &DistributedRuntime) -> PyResult<Bound<'p, PyAny>> {
+        // Check if run() was already called to avoid creating unnecessary token
+        if self.cancel_token.get().is_some() {
+            return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "KserveGrpcService.run() has already been called on this instance",
+            ));
+        }
+
         let service = self.inner.clone();
+        // Only create token if we passed the check above
+        let token = runtime.inner().child_token();
+
+        // Store the token for shutdown - should always succeed after the check above
+        self.cancel_token
+            .set(CancellationToken {
+                inner: token.clone(),
+            })
+            .map_err(|_| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                    "Race condition detected in KserveGrpcService.run()",
+                )
+            })?;
+
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            service.run(token.inner).await.map_err(to_pyerr)?;
+            service.run(token).await.map_err(to_pyerr)?;
             Ok(())
         })
+    }
+
+    fn shutdown(&self) {
+        // CancellationToken.cancel() is thread-safe, no lock needed
+        if let Some(token) = self.cancel_token.get() {
+            token.inner.cancel();
+        }
     }
 }

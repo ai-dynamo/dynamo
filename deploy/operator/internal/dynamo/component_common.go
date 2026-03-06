@@ -6,6 +6,7 @@
 package dynamo
 
 import (
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
@@ -48,8 +49,9 @@ type ComponentContext struct {
 	ComponentType                  string
 	ParentGraphDeploymentName      string
 	ParentGraphDeploymentNamespace string
-	DiscoveryBackend               string
+	DiscoveryBackend               configv1alpha1.DiscoveryBackend
 	EPPConfig                      *v1alpha1.EPPConfig
+	WorkerHashSuffix               string
 }
 
 func (b *BaseComponentDefaults) GetBaseContainer(context ComponentContext) (corev1.Container, error) {

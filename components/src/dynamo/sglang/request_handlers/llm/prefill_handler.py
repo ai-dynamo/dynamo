@@ -7,7 +7,7 @@ from typing import Any, AsyncGenerator, Dict, Optional
 
 import sglang as sgl
 
-from dynamo._core import Component, Context
+from dynamo._core import Context
 from dynamo.sglang.args import Config
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
@@ -18,7 +18,6 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
     def __init__(
         self,
-        component: Component,
         engine: sgl.Engine,
         config: Config,
         publisher: DynamoSglangPublisher,
@@ -28,7 +27,6 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         """Initialize prefill worker handler.
 
         Args:
-            component: The Dynamo runtime component.
             engine: The SGLang engine instance.
             config: SGLang and Dynamo configuration.
             publisher: The SGLang publisher instance.
@@ -37,10 +35,8 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         """
         self.engine = engine
         self.bootstrap_host, self.bootstrap_port = self._get_bootstrap_info(self.engine)
-        super().__init__(
-            component, engine, config, publisher, generate_endpoint, shutdown_event
-        )
-        self._consume_tasks = set()
+        super().__init__(engine, config, publisher, generate_endpoint, shutdown_event)
+        self._consume_tasks: set[asyncio.Task[Any]] = set()
         logging.info(
             f"Prefill worker handler initialized - bootstrap host: {self.bootstrap_host}, bootstrap port: {self.bootstrap_port}"
         )
@@ -118,6 +114,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         }
 
         input_param = self._get_input_param(inner_request)
+        priority = (inner_request.get("routing") or {}).get("priority")
 
         trace_header = self._get_trace_header(context) if self.enable_trace else None
 
@@ -130,6 +127,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             bootstrap_room=bootstrap_room,
             external_trace_header=trace_header,
             rid=trace_id,
+            **self._priority_kwargs(priority),
         )
 
         task = asyncio.create_task(self._consume_results(results, context))
@@ -148,7 +146,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             context: Context object for cancellation handling.
         """
         # Use Future pattern for request ID - will be set when first response arrives
-        request_id_future = asyncio.Future()
+        request_id_future: asyncio.Future[str] = asyncio.Future()
         async with self._cancellation_monitor(request_id_future, context):
             async for res in results:
                 # Extract SGLang request ID from the first response and set the future

@@ -13,10 +13,14 @@
 //!   cargo bench --package dynamo-kv-router --bench kv_indexer_bench --features bench -- microbench --help
 //!   cargo bench --package dynamo-kv-router --bench kv_indexer_bench --features bench -- stress --help
 
+#[path = "common/mod.rs"]
+mod common;
+use common::{SequenceData, generate_sequences};
+
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use dynamo_bench::common::LatencyStats;
 use dynamo_kv_router::{
     ConcurrentRadixTree,
-    bench_utils::{LatencyStats, SequenceData, generate_sequences},
     indexer::{
         KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvIndexerSharded, ThreadPoolIndexer,
     },
@@ -415,7 +419,7 @@ async fn bench_store<I: BenchableIndexer>(
         }
     }
 
-    LatencyStats::from_durations(durations).unwrap()
+    LatencyStats::from_durations(&durations).unwrap()
 }
 
 /// Benchmark find_matches operation (hit case)
@@ -442,7 +446,7 @@ async fn bench_find_matches_hit<I: BenchableIndexer>(
         }
     }
 
-    LatencyStats::from_durations(durations).unwrap()
+    LatencyStats::from_durations(&durations).unwrap()
 }
 
 /// Benchmark find_matches operation (miss case)
@@ -470,7 +474,7 @@ async fn bench_find_matches_miss<I: BenchableIndexer>(
         }
     }
 
-    LatencyStats::from_durations(durations).unwrap()
+    LatencyStats::from_durations(&durations).unwrap()
 }
 
 /// Benchmark apply_event (remove) operation
@@ -501,7 +505,7 @@ async fn bench_remove<I: BenchableIndexer>(
         }
     }
 
-    LatencyStats::from_durations(durations).unwrap()
+    LatencyStats::from_durations(&durations).unwrap()
 }
 
 /// Run all microbenchmarks for an indexer
@@ -815,7 +819,7 @@ async fn run_microbench_mode(args: MicrobenchArgs) {
 // ============================================================================
 
 /// Result of a single request during stress test
-#[allow(dead_code)]
+#[expect(dead_code)]
 struct RequestResult {
     request_id: u64,
     submit_time: Instant,
@@ -854,7 +858,7 @@ async fn run_stress_test<I: BenchableIndexer + 'static>(
         let _ = indexer.find_matches(seq.local_hashes.clone()).await;
         baseline_durations.push(start.elapsed());
     }
-    let stats = LatencyStats::from_durations(baseline_durations.clone()).unwrap();
+    let stats = LatencyStats::from_durations(&baseline_durations).unwrap();
     let baseline_service_time = stats.p50;
     let theoretical_max = stats.throughput_ops_sec;
 
@@ -1041,7 +1045,7 @@ fn print_stress_results(args: &StressArgs, results: &StressResults) {
         println!("    Achieved: {:.1} req/sec", achieved_throughput);
         println!();
 
-        if let Some(stats) = LatencyStats::from_durations(results.latencies.clone()) {
+        if let Some(stats) = LatencyStats::from_durations(&results.latencies) {
             println!("  Latency (end-to-end, includes queue wait):");
             println!("    min:  {:>12?}", stats.min);
             println!("    p50:  {:>12?}", stats.p50);
@@ -1163,7 +1167,7 @@ fn print_stress_comparison(results: &[StressResults], args: &StressArgs) {
     // Latency p50
     let mut row = format!("{:<35}", "Latency p50 (us)");
     for result in results {
-        if let Some(stats) = LatencyStats::from_durations(result.latencies.clone()) {
+        if let Some(stats) = LatencyStats::from_durations(&result.latencies) {
             row.push_str(&format!(" {:>18.2}", stats.p50.as_nanos() as f64 / 1000.0));
         } else {
             row.push_str(&format!(" {:>18}", "-"));
@@ -1174,7 +1178,7 @@ fn print_stress_comparison(results: &[StressResults], args: &StressArgs) {
     // Latency p99
     let mut row = format!("{:<35}", "Latency p99 (us)");
     for result in results {
-        if let Some(stats) = LatencyStats::from_durations(result.latencies.clone()) {
+        if let Some(stats) = LatencyStats::from_durations(&result.latencies) {
             row.push_str(&format!(" {:>18.2}", stats.p99.as_nanos() as f64 / 1000.0));
         } else {
             row.push_str(&format!(" {:>18}", "-"));
@@ -1279,7 +1283,7 @@ async fn run_stress_mode(args: StressArgs) {
     // Test single indexer
     if matches!(args.indexer_type, IndexerType::Single | IndexerType::All) {
         let token = CancellationToken::new();
-        let mut indexer = KvIndexer::new(token.clone(), args.common.block_size, metrics.clone());
+        let indexer = KvIndexer::new(token.clone(), args.common.block_size, metrics.clone());
 
         println!(
             "\n  Applying {} store events to KvIndexer...",
@@ -1289,7 +1293,7 @@ async fn run_stress_mode(args: StressArgs) {
 
         for (event_id, seq) in sequences.iter().enumerate() {
             let event = seq.to_store_event(event_id as u64);
-            KvIndexerInterface::apply_event(&mut indexer, event).await;
+            KvIndexerInterface::apply_event(&indexer, event).await;
 
             if args.common.verbose && (event_id + 1) % 100 == 0 {
                 println!("    Applied {}/{} events...", event_id + 1, sequences.len());
@@ -1321,7 +1325,7 @@ async fn run_stress_mode(args: StressArgs) {
     // Test sharded indexer
     if matches!(args.indexer_type, IndexerType::Sharded | IndexerType::All) {
         let token = CancellationToken::new();
-        let mut indexer = KvIndexerSharded::new(
+        let indexer = KvIndexerSharded::new(
             token.clone(),
             args.num_shards,
             args.common.block_size,
@@ -1336,7 +1340,7 @@ async fn run_stress_mode(args: StressArgs) {
 
         for (event_id, seq) in sequences.iter().enumerate() {
             let event = seq.to_store_event(event_id as u64);
-            KvIndexerInterface::apply_event(&mut indexer, event).await;
+            KvIndexerInterface::apply_event(&indexer, event).await;
 
             if args.common.verbose && (event_id + 1) % 100 == 0 {
                 println!("    Applied {}/{} events...", event_id + 1, sequences.len());

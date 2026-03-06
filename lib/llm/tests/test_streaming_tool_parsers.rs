@@ -123,6 +123,7 @@ fn load_test_data(file_path: &str) -> TestData {
                 data: Some(response),
                 event: None,
                 comment: None,
+                error: None,
             }
         })
         .collect();

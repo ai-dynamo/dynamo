@@ -50,7 +50,7 @@ async fn main_loop(
     }
     let theme = dialoguer::theme::ColorfulTheme::default();
 
-    // Initial prompt is the pipe case: `echo "Hello" | dynamo-run ..`
+    // Initial prompt is from piped stdin.
     // We run that single prompt and exit
     let single = initial_prompt.is_some();
     let mut history = dialoguer::BasicHistory::default();
@@ -187,7 +187,9 @@ async fn main_loop(
         let assistant_message = dynamo_async_openai::types::ChatCompletionRequestMessage::Assistant(
             dynamo_async_openai::types::ChatCompletionRequestAssistantMessage {
                 content: Some(assistant_content),
-                reasoning_content: (!assistant_reasoning.is_empty()).then_some(assistant_reasoning),
+                reasoning_content: (!assistant_reasoning.is_empty()).then_some(
+                    dynamo_async_openai::types::ReasoningContent::Text(assistant_reasoning),
+                ),
                 ..Default::default()
             },
         );

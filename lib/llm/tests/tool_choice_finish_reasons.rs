@@ -67,6 +67,7 @@ async fn apply_jail_transformation(
         id: None,
         event: None,
         comment: None,
+        error: None,
     }]);
 
     let mut builder = JailedStream::builder();

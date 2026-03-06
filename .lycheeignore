@@ -3,3 +3,7 @@
 
 # Ignore URLs in test data files
 .*tests/data.*
+
+# Ignore placeholder URLs in docs templates
+^https://\.\.\./
+^https://github\.com/\.\.\.

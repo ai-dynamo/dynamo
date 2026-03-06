@@ -4,11 +4,13 @@
 # Usage: `python -m dynamo.mocker --model-path /data/models/Qwen3-0.6B`
 # Now supports vLLM-style individual arguments for MockEngineArgs
 
+import argparse
 import asyncio
 import json
 import logging
 import os
 import signal
+import socket
 import tempfile
 from pathlib import Path
 
@@ -16,11 +18,19 @@ import uvloop
 
 os.environ.setdefault("DYN_COMPUTE_THREADS", "0")
 
-from dynamo.llm import EngineType, EntrypointArgs, fetch_llm, make_engine, run_input
+from dynamo.llm import (
+    EngineType,
+    EntrypointArgs,
+    ModelRuntimeConfig,
+    fetch_model,
+    make_engine,
+    run_input,
+)
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 
 from .args import create_temp_engine_args_file, parse_args, resolve_planner_profile_data
+from .utils.kv_cache import compute_kv_bytes_per_token
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
@@ -46,7 +56,7 @@ async def prefetch_model(model_path: str) -> None:
 
     logger.info(f"Pre-fetching model from HuggingFace: {model_path}")
     try:
-        local_path = await fetch_llm(model_path, ignore_weights=True)
+        local_path = await fetch_model(model_path, ignore_weights=True)
         logger.info(f"Model cached at: {local_path}")
     except Exception as e:
         logger.warning(
@@ -80,6 +90,20 @@ async def worker():
     # Pre-fetch model once to avoid HuggingFace rate limiting when launching many workers
     if args.num_workers > 1 and args.model_path:
         await prefetch_model(args.model_path)
+
+    # Auto-compute kv_bytes_per_token from model config if not explicitly set
+    if args.kv_bytes_per_token is None and args.model_path:
+        args.kv_bytes_per_token = compute_kv_bytes_per_token(
+            args.model_path, args.kv_cache_dtype
+        )
+
+    # Inject kv_bytes_per_token into engine args JSON (computed after model prefetch)
+    if args.kv_bytes_per_token is not None and not args.extra_engine_args:
+        with open(extra_engine_args_path) as f:
+            engine_args = json.load(f)
+        engine_args["kv_bytes_per_token"] = args.kv_bytes_per_token
+        with open(extra_engine_args_path, "w") as f:
+            json.dump(engine_args, f, indent=2)
 
     try:
         logger.info(
@@ -120,7 +144,47 @@ def compute_stagger_delay(num_workers: int, stagger_delay: float) -> float:
         return 0.2
 
 
-async def launch_workers(args, extra_engine_args_path):
+def _build_runtime_config(
+    engine_args: dict,
+) -> tuple[int, ModelRuntimeConfig]:
+    """Build a ModelRuntimeConfig from the engine args dict.
+
+    Returns (kv_cache_block_size, runtime_config). Defaults match
+    the Rust MockEngineArgsBuilder so hand-crafted JSON files that
+    omit fields behave identically.
+    """
+    is_prefill = engine_args.get("is_prefill", False)
+    is_decode = engine_args.get("is_decode", False)
+
+    rc = ModelRuntimeConfig()
+    rc.total_kv_blocks = engine_args.get("num_gpu_blocks", 16384)
+    if (v := engine_args.get("max_num_seqs")) is not None:
+        rc.max_num_seqs = v
+    if (v := engine_args.get("max_num_batched_tokens")) is not None:
+        rc.max_num_batched_tokens = v
+    rc.enable_local_indexer = (
+        engine_args.get("enable_local_indexer", False) and not is_decode
+    )
+    rc.data_parallel_size = engine_args.get("dp_size", 1)
+
+    bootstrap_port = engine_args.get("bootstrap_port")
+    if is_prefill and bootstrap_port is not None:
+        host = os.environ.get(
+            "DYN_HTTP_RPC_HOST", socket.gethostbyname(socket.gethostname())
+        )
+        rc.set_disaggregated_endpoint(
+            bootstrap_host=host, bootstrap_port=bootstrap_port
+        )
+        logger.info(
+            "Mocker prefill worker: publishing bootstrap endpoint to discovery "
+            f"(bootstrap_port={bootstrap_port})"
+        )
+
+    block_size = engine_args.get("block_size", 64)
+    return block_size, rc
+
+
+async def launch_workers(args: argparse.Namespace, extra_engine_args_path: Path):
     """Launch mocker worker(s) with isolated DistributedRuntime instances.
 
     Each worker gets its own DistributedRuntime, which means:
@@ -149,35 +213,47 @@ async def launch_workers(args, extra_engine_args_path):
             f"(estimated total: {total_time:.1f}s)"
         )
 
-    # Load base engine args if we need to create per-worker files with bootstrap_port
-    base_engine_args = None
-    if args.bootstrap_ports_list:
-        with open(extra_engine_args_path) as f:
-            base_engine_args = json.load(f)
+    # Always load base engine args for runtime config construction
+    with open(extra_engine_args_path) as f:
+        base_engine_args = json.load(f)
+
+    needs_per_worker_args = bool(
+        args.bootstrap_ports_list or args.zmq_kv_events_ports_list
+    )
 
     for worker_id in range(args.num_workers):
         logger.info(f"Creating mocker worker {worker_id + 1}/{args.num_workers}")
 
         # Create a separate DistributedRuntime for this worker (on same event loop)
-        runtime = DistributedRuntime(loop, args.store_kv, args.request_plane)
+        runtime = DistributedRuntime(
+            loop,
+            args.discovery_backend,
+            args.request_plane,
+        )
         runtimes.append(runtime)
 
-        # Determine which engine args file to use
-        if args.bootstrap_ports_list:
-            # Create per-worker temp file with this worker's bootstrap_port
+        # Determine which engine args file and dict to use
+        worker_engine_args_path: Path | str
+        if needs_per_worker_args:
             worker_args = base_engine_args.copy()
-            worker_args["bootstrap_port"] = args.bootstrap_ports_list[worker_id]
+            if args.bootstrap_ports_list:
+                worker_args["bootstrap_port"] = args.bootstrap_ports_list[worker_id]
+            if args.zmq_kv_events_ports_list:
+                worker_args["zmq_kv_events_port"] = args.zmq_kv_events_ports_list[
+                    worker_id
+                ]
             with tempfile.NamedTemporaryFile(
                 mode="w", suffix=".json", delete=False
-            ) as f:
-                json.dump(worker_args, f)
-                worker_engine_args_path = Path(f.name)
+            ) as tmp:
+                json.dump(worker_args, tmp)
+                worker_engine_args_path = Path(tmp.name)
             per_worker_temp_files.append(worker_engine_args_path)
-            logger.debug(
-                f"Worker {worker_id}: using bootstrap_port {args.bootstrap_ports_list[worker_id]}"
-            )
+            logger.debug(f"Worker {worker_id}: per-worker args {worker_args}")
         else:
+            worker_args = base_engine_args
             worker_engine_args_path = extra_engine_args_path
+
+        kv_cache_block_size, runtime_config = _build_runtime_config(worker_args)
 
         # Create EntrypointArgs for this worker
         entrypoint_args = EntrypointArgs(
@@ -185,7 +261,9 @@ async def launch_workers(args, extra_engine_args_path):
             model_path=args.model_path,
             model_name=args.model_name,
             endpoint_id=args.endpoint,
-            extra_engine_args=worker_engine_args_path,
+            extra_engine_args=str(worker_engine_args_path),
+            runtime_config=runtime_config,
+            kv_cache_block_size=kv_cache_block_size,
             is_prefill=args.is_prefill_worker,
         )
 

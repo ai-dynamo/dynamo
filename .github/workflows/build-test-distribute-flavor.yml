@@ -22,16 +22,63 @@ on:
         description: 'CUDA version to build (e.g., 12.9, 13.0)'
         required: true
         type: string
-      run_tests:
-        description: 'Whether to run pytest'
+      build_timeout_minutes:
+        description: 'Timeout in minutes for the build step'
+        required: false
+        type: number
+        default: 60
+      run_cpu_only_tests:
+        description: 'Whether to run CPU-only tests'
         required: false
         type: boolean
         default: true
+      cpu_only_test_markers:
+        description: 'CPU-only pytest markers'
+        required: false
+        type: string
+      cpu_only_test_timeout_minutes:
+        description: 'Timeout in minutes for CPU tests'
+        required: false
+        type: number
+        default: 10
+      run_single_gpu_tests:
+        description: 'Whether to run single GPU tests'
+        required: false
+        type: boolean
+        default: true
+      single_gpu_test_markers:
+        description: 'Single GPU pytest markers'
+        required: false
+        type: string
+      single_gpu_test_timeout_minutes:
+        description: 'Timeout in minutes for single GPU tests'
+        required: false
+        type: number
+        default: 30
+      run_multi_gpu_tests:
+        description: 'Whether to run multi-gpu tests'
+        required: false
+        type: boolean
+        default: true
+      multi_gpu_test_markers:
+        description: 'Multi GPU pytest markers'
+        required: false
+        type: string
+      multi_gpu_test_timeout_minutes:
+        description: 'Timeout in minutes for multi GPU tests'
+        required: false
+        type: number
+        default: 30
       copy_to_acr:
         description: 'Whether to copy images to ACR'
         required: false
         type: boolean
         default: true
+      copy_timeout_minutes:
+        description: 'Timeout in minutes for the copy to ACR step'
+        required: false
+        type: number
+        default: 10
       builder_name:
         description: 'Buildkit builder name'
         required: true
@@ -66,26 +113,21 @@ on:
         required: false
         type: boolean
         default: false
-      build_timeout_minutes:
-        description: 'Timeout in minutes for the build step'
+      make_efa:
+        description: 'Enable AWS EFA support in the build'
         required: false
-        type: number
-        default: 60
-      test_gpu_timeout_minutes:
-        description: 'Timeout in minutes for the GPU test step'
+        type: boolean
+        default: false
+      build_only:
+        description: 'Build and push only — skip all tests, show summary'
         required: false
-        type: number
-        default: 30
-      test_cpu_timeout_minutes:
-        description: 'Timeout in minutes for the CPU test step'
+        type: boolean
+        default: false
+      sanitized_ref_name:
+        description: 'Sanitized git ref name for branch-tagged images (used with build_only)'
         required: false
-        type: number
-        default: 10
-      copy_timeout_minutes:
-        description: 'Timeout in minutes for the copy to ACR step'
-        required: false
-        type: number
-        default: 5
+        type: string
+        default: ''
     secrets:
       AWS_DEFAULT_REGION:
         required: true
@@ -97,8 +139,6 @@ on:
         required: true
       AZURE_ACR_PASSWORD:
         required: true
-      CI_TOKEN:
-        required: false
       SCCACHE_S3_BUCKET:
         required: false
       AWS_ACCESS_KEY_ID:
@@ -129,27 +169,6 @@ jobs:
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
         with:
           lfs: true
-      - name: Calculate extra tags with platform suffix # will get redundant upon multi arch builds support
-        id: extra-tags
-        shell: bash
-        env:
-          EXTRA_TAGS: ${{ inputs.extra_tags }}
-          CUDA_VERSION: ${{ inputs.cuda_version }}
-        run: |
-          CUDA_VERSION_MAJOR=${CUDA_VERSION%%.*}
-          if [ -n "$EXTRA_TAGS" ]; then
-            RESULT=""
-            while IFS= read -r tag; do
-              if [ -n "$tag" ]; then
-                RESULT+="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${tag}-cuda${CUDA_VERSION_MAJOR}-${{ inputs.platform }}"$'\n'
-              fi
-            done <<< "$EXTRA_TAGS"
-            echo "tags<<EOF" >> $GITHUB_OUTPUT
-            echo "$RESULT" >> $GITHUB_OUTPUT
-            echo "EOF" >> $GITHUB_OUTPUT
-          else
-            echo "tags=" >> $GITHUB_OUTPUT
-          fi
       - name: Docker Login
         uses: ./.github/actions/docker-login
         with:
@@ -164,7 +183,11 @@ jobs:
         run: |
           CUDA_VERSION_RAW=${{ inputs.cuda_version }}
           CUDA_VERSION=${CUDA_VERSION_RAW%%.*}
-          TARGET_TAG_PLAIN="${{ github.sha }}-${{ inputs.framework }}"
+          EFA_SUFFIX=""
+          if [ "${{ inputs.make_efa }}" == "true" ]; then
+            EFA_SUFFIX="-efa"
+          fi
+          TARGET_TAG_PLAIN="${{ github.sha }}-${{ inputs.framework }}${EFA_SUFFIX}"
           DEFAULT_TARGET_IMAGE_URI="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${TARGET_TAG_PLAIN}-cuda${CUDA_VERSION}-${{ inputs.platform }}"
           echo "default_target_image_uri=${DEFAULT_TARGET_IMAGE_URI}" >> $GITHUB_OUTPUT
           echo "target_tag_plain=${TARGET_TAG_PLAIN}" >> $GITHUB_OUTPUT
@@ -176,6 +199,37 @@ jobs:
           flavor: ${{ inputs.framework }}
           arch: ${{ inputs.platform }}
           cuda_version: ${{ inputs.cuda_version }}
+      - name: Calculate extra tags with platform suffix # will get redundant upon multi arch builds support
+        id: extra-tags
+        shell: bash
+        env:
+          EXTRA_TAGS: ${{ inputs.extra_tags }}
+          CUDA_VERSION: ${{ inputs.cuda_version }}
+        run: |
+          CUDA_VERSION_MAJOR=${CUDA_VERSION%%.*}
+          ECR_REGISTRY="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com"
+          ACR_REGISTRY="${{ secrets.AZURE_ACR_HOSTNAME }}"
+          RESULT=""
+          if [ -n "$EXTRA_TAGS" ]; then
+            while IFS= read -r tag; do
+              if [ -n "$tag" ]; then
+                RESULT+="${ECR_REGISTRY}/ai-dynamo/dynamo:${tag}-cuda${CUDA_VERSION_MAJOR}-${{ inputs.platform }}"$'\n'
+              fi
+            done <<< "$EXTRA_TAGS"
+          fi
+          if [ "${{ inputs.build_only }}" == "true" ]; then
+            BRANCH_TAG="${{ inputs.sanitized_ref_name }}-${{ inputs.framework }}"
+            RESULT+="${ECR_REGISTRY}/ai-dynamo/dynamo:${BRANCH_TAG}-cuda${CUDA_VERSION_MAJOR}-${{ inputs.platform }}"$'\n'
+            RESULT+="${ACR_REGISTRY}/ai-dynamo/dynamo:${BRANCH_TAG}-cuda${CUDA_VERSION_MAJOR}-${{ inputs.platform }}"$'\n'
+            RESULT+="${ACR_REGISTRY}/ai-dynamo/dynamo:${{ steps.calculate-target-tag.outputs.target_tag_plain }}-cuda${CUDA_VERSION_MAJOR}-${{ inputs.platform }}"$'\n'
+          fi
+          if [ -n "$RESULT" ]; then
+            echo "tags<<EOF" >> $GITHUB_OUTPUT
+            echo "$RESULT" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+          else
+            echo "tags=" >> $GITHUB_OUTPUT
+          fi
       - name: Print Build Container inputs
         run: |
           echo "=== Build Container Inputs ==="
@@ -192,11 +246,16 @@ jobs:
         shell: bash
         run: |
           echo "Generating Dockerfile for target: ${{ inputs.target }} and framework: ${{ inputs.framework }}"
+          MAKE_EFA_FLAG=""
+          if [ "${{ inputs.make_efa }}" == "true" ]; then
+            MAKE_EFA_FLAG="--make-efa"
+          fi
           python ./container/render.py \
               --target=${{ inputs.target }} \
               --framework=${{ inputs.framework }} \
               --platform=${{ inputs.platform }} \
               --cuda-version=${{ inputs.cuda_version }} \
+              ${MAKE_EFA_FLAG} \
               --show-result \
               --output-short-filename
       - name: Build Container
@@ -209,7 +268,6 @@ jobs:
           target: ${{ inputs.target }}
           platform: ${{ inputs.platform }}
           cuda_version: ${{ inputs.cuda_version }}
-          ci_token: ${{ secrets.CI_TOKEN }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
@@ -228,13 +286,29 @@ jobs:
           echo "| Image URI |" >> $GITHUB_STEP_SUMMARY
           echo "|-----|" >> $GITHUB_STEP_SUMMARY
           echo "| \`${{ steps.calculate-target-tag.outputs.default_target_image_uri }}\` |" >> $GITHUB_STEP_SUMMARY
+          EXTRA_TAGS="${{ steps.extra-tags.outputs.tags }}"
+          if [ -n "$EXTRA_TAGS" ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### 🏷️ Extra Tags" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "| Image URI |" >> $GITHUB_STEP_SUMMARY
+            echo "|-----|" >> $GITHUB_STEP_SUMMARY
+            while IFS= read -r tag; do
+              if [ -n "$tag" ]; then
+                echo "| \`${tag}\` |" >> $GITHUB_STEP_SUMMARY
+              fi
+            done <<< "$EXTRA_TAGS"
+          fi
 
 
   # ============================================================================
   # TEST
   # ============================================================================
   test:
-    if: inputs.run_tests && inputs.build_image
+    if: |
+        !inputs.build_only &&
+        ( inputs.run_cpu_only_tests || inputs.run_single_gpu_tests ) &&
+        inputs.build_image
     needs: [build]
     name: Test ${{ inputs.framework }}-cuda${{ inputs.cuda_version }}-${{ inputs.platform }}
     runs-on: ${{ inputs.platform == 'amd64' && 'prod-tester-amd-gpu-v1' || 'prod-tester-arm-v1' }}
@@ -263,9 +337,10 @@ jobs:
       - name: Pull relevant images
         shell: bash
         run: |
+          source ./.github/scripts/retry_docker.sh
           start_time=$(date +%s)
-          docker pull ${{ steps.calculate-target-tag.outputs.test_image }}
-          docker pull quay.io/minio/minio
+          retry_pull ${{ steps.calculate-target-tag.outputs.test_image }}
+          retry_pull quay.io/minio/minio
           end_time=$(date +%s)
           duration=$((end_time - start_time))
           echo "⏱️ Image pull duration: ${duration}s"
@@ -292,11 +367,12 @@ jobs:
       # Run CPU-only tests first (parallelized for speed)
       # These are unit tests marked with gpu_0 that don't require GPU hardware
       - name: Run CPU-only tests (parallelized)
-        timeout-minutes: ${{ inputs.test_cpu_timeout_minutes }}
+        if: ${{ inputs.run_cpu_only_tests }}
+        timeout-minutes: ${{ inputs.cpu_only_test_timeout_minutes }}
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
-          pytest_marks: ${{ format('pre_merge and {0} and gpu_0', inputs.framework) }}
+          pytest_marks: ${{ inputs.cpu_only_test_markers }}
           framework: ${{ inputs.framework }}
           test_type: "pre_merge_cpu"
           platform_arch: ${{ inputs.platform }}
@@ -308,12 +384,12 @@ jobs:
       # Run GPU tests sequentially (only on amd64 runners with GPU)
       # These are e2e tests marked with gpu_1 that require GPU hardware
       - name: Run GPU tests (sequential)
-        timeout-minutes: ${{ inputs.test_gpu_timeout_minutes }}
-        if: ${{ inputs.platform == 'amd64' }} # We only run GPU tests on amd64
+        timeout-minutes: ${{ inputs.single_gpu_test_timeout_minutes }}
+        if: ( inputs.platform == 'amd64' && inputs.run_single_gpu_tests == true ) # We only run GPU tests on amd64
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
-          pytest_marks: ${{ format('pre_merge and {0} and gpu_1', inputs.framework) }}
+          pytest_marks: ${{ inputs.single_gpu_test_markers }}
           framework: ${{ inputs.framework }}
           test_type: "pre_merge_gpu"
           platform_arch: ${{ inputs.platform }}
@@ -322,14 +398,78 @@ jobs:
           parallel_mode: 'none'
           dind_as_sidecar: 'true'
 
-# ============================================================================
-# COPY TO ACR
-# ============================================================================
+  # ============================================================================
+  # MULTI-GPU TESTS
+  # ============================================================================
+
+  multi-gpu-test:
+    # Multi-GPU support limited to AMD64 only
+    if: |
+        !inputs.build_only &&
+        inputs.run_multi_gpu_tests &&
+        inputs.build_image &&
+        ( inputs.platform != 'arm64' )
+    needs: [build]
+    name: Multi-gpu Test ${{ inputs.framework }}-cuda${{ inputs.cuda_version }}-${{ inputs.platform }}
+    runs-on: prod-tester-amd-gpu-4-v1
+    env:
+      FRAMEWORK: ${{ inputs.framework }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      - name: Calculate target tag
+        id: calculate-target-tag
+        shell: bash
+        run: |
+          CUDA_VERSION_RAW=${{ inputs.cuda_version }}
+          CUDA_VERSION=${CUDA_VERSION_RAW%%.*}
+          echo "cuda_version_plain=${CUDA_VERSION}" >> $GITHUB_OUTPUT
+          TEST_IMAGE=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build.outputs.target_tag_plain }}-cuda${CUDA_VERSION}-${{ inputs.platform }}
+          echo "test_image=${TEST_IMAGE}" >> $GITHUB_OUTPUT
+      - name: Docker Login
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      - name: Pull relevant images
+        shell: bash
+        run: |
+          source ./.github/scripts/retry_docker.sh
+          start_time=$(date +%s)
+          retry_pull ${{ steps.calculate-target-tag.outputs.test_image }}
+          retry_pull quay.io/minio/minio
+          end_time=$(date +%s)
+          duration=$((end_time - start_time))
+          echo "⏱️ Image pull duration: ${duration}s"
+      # Run GPU tests sequentially (only on amd64 runners with GPU)
+      # These are e2e tests marked with gpu_2 or gpu_4 that require GPU hardware
+      - name: Run GPU tests (sequential)
+        timeout-minutes: ${{ inputs.multi_gpu_test_timeout_minutes }}
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
+          pytest_marks: ${{ inputs.multi_gpu_test_markers }}
+          framework: ${{ inputs.framework }}
+          test_type: "pre_merge_gpu"
+          platform_arch: ${{ inputs.platform }}
+          enable_mypy: 'false' # already covered by CPU tests
+          hf_token: ${{ secrets.HF_TOKEN }}
+          parallel_mode: 'none'
+          dind_as_sidecar: 'true'
+
+
+  # ============================================================================
+  # COPY TO ACR
+  # ============================================================================
   copy-to-acr:
     needs: [build, test]
     # Run if copy_to_acr is true AND build succeeded AND (test succeeded OR test was skipped)
     if: |
       always() &&
+      !inputs.build_only &&
       inputs.copy_to_acr &&
       needs.build.result == 'success' &&
       (needs.test.result == 'success' || needs.test.result == 'skipped')

@@ -11,10 +11,11 @@ from contextlib import asynccontextmanager
 import numpy as np
 import uvicorn
 import zmq
+import zmq.asyncio
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, ValidationError
 
-from dynamo._core import RadixTree, ZmqKvEventListener
+from dynamo._core import RadixTree
 
 logger = logging.getLogger(__name__)
 
@@ -110,15 +111,22 @@ class KvRouter:
             )
             for i in range(num_workers)
         ]
+        self.async_context = zmq.asyncio.Context()
         self.kv_listeners = [
-            ZmqKvEventListener(
-                f"tcp://localhost:{base_kv_events_port + i}", "", block_size
-            )
+            self._create_kv_listener(base_kv_events_port + i)
             for i in range(num_workers)
         ]
 
         self.background_tasks: list[asyncio.Task] = []
         logger.info("Router initialized")
+
+    def _create_kv_listener(self, port: int) -> zmq.asyncio.Socket:
+        """Create an async ZMQ SUB socket for receiving KV cache events."""
+        sock = self.async_context.socket(zmq.SUB)
+        sock.connect(f"tcp://localhost:{port}")
+        sock.setsockopt(zmq.SUBSCRIBE, b"")
+        sock.setsockopt(zmq.RCVTIMEO, 1)
+        return sock
 
     # -------------------------------------------------------------------------
     # Background Tasks
@@ -153,15 +161,15 @@ class KvRouter:
 
     async def _poll_worker_kv_events(self, worker_id: int):
         """Poll KV events for a single worker and update RadixTree."""
+        sock = self.kv_listeners[worker_id]
         while True:
             try:
-                events: list[str] = await self.kv_listeners[worker_id].get_events()
-                for event_str in events:
-                    event = json.loads(event_str)
-                    dump_kv_event(worker_id, event)
-                    self.radix_tree.apply_event(
-                        worker_id, json.dumps(event).encode("utf-8")
-                    )
+                event_bytes = await sock.recv(zmq.NOBLOCK)
+                event = json.loads(event_bytes)
+                dump_kv_event(worker_id, event)
+                self.radix_tree.apply_event(
+                    worker_id, json.dumps(event).encode("utf-8")
+                )
             except zmq.Again:
                 pass
             except (zmq.ZMQError, json.JSONDecodeError) as e:
@@ -250,8 +258,11 @@ class KvRouter:
 
         for listener in self.load_listeners:
             listener.close()
+        for listener in self.kv_listeners:
+            listener.close()
 
         self.context.term()
+        self.async_context.term()
         logger.info("KvRouter shutdown completed")
 
 

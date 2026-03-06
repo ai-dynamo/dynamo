@@ -20,6 +20,8 @@ kind: HTTPRoute
 metadata:
   name: llama3-70b-agg-route
 spec:
+  hostnames:
+    - llama3-70b-agg.example.com
   parentRefs:
     - group: gateway.networking.k8s.io
       kind: Gateway
