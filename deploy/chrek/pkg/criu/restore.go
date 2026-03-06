@@ -83,7 +83,7 @@ func ExecuteRestore(
 
 // BuildRestoreOpts assembles CriuOpts for a CRIU restore from the checkpoint manifest.
 // ImagesDirFd and WorkDirFd are left unset — ExecuteRestore opens them at restore time.
-func BuildRestoreOpts(m *types.CheckpointManifest, cgroupRoot string, log logr.Logger) (*criurpc.CriuOpts, error) {
+func BuildRestoreOpts(m *types.CheckpointManifest, checkpointPath string, cgroupRoot string, log logr.Logger) (*criurpc.CriuOpts, error) {
 	extMounts, err := buildRestoreExtMounts(m)
 	if err != nil {
 		return nil, err
@@ -112,7 +112,7 @@ func BuildRestoreOpts(m *types.CheckpointManifest, cgroupRoot string, log logr.L
 		}
 	}
 
-	criuConfPath := filepath.Join(settings.WorkDir, "..", criuConfFilename)
+	criuConfPath := filepath.Join(checkpointPath, criuConfFilename)
 	if _, err := os.Stat(criuConfPath); err == nil {
 		criuOpts.ConfigFile = proto.String(criuConfPath)
 	}
