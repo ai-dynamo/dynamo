@@ -5,7 +5,7 @@ import json
 import logging
 import os
 import shutil
-from typing import Optional
+from enum import Enum
 
 import pytest
 
@@ -29,6 +29,12 @@ pytestmark = [
 ]
 
 
+class WorkerMode(Enum):
+    AGGREGATED = "aggregated"
+    PREFILL = "prefill"
+    DECODE = "decode"
+
+
 class DynamoWorkerProcess(ManagedProcess):
     """Process manager for Dynamo worker with vLLM backend and ETCD HA support"""
 
@@ -36,7 +42,7 @@ class DynamoWorkerProcess(ManagedProcess):
         self,
         request,
         etcd_endpoints: list,
-        is_prefill: Optional[bool] = None,
+        mode: WorkerMode = WorkerMode.AGGREGATED,
     ):
         command = [
             "python3",
@@ -52,21 +58,15 @@ class DynamoWorkerProcess(ManagedProcess):
         ]
 
         # Set port based on worker type
-        port = "8082" if is_prefill else "8081"
+        port = "8082" if mode == WorkerMode.PREFILL else "8081"
 
         # Configure disaggregation mode, KV transfer, and health checks per worker type
-        if is_prefill is True:
+        if mode == WorkerMode.PREFILL:
             command.extend(["--disaggregation-mode", "prefill"])
             health_check_urls = [(f"http://localhost:{port}/health", self.is_ready)]
-        elif is_prefill is False:
-            command.extend(["--disaggregation-mode", "decode"])
-            health_check_urls = [
-                (f"http://localhost:{port}/health", self.is_ready),
-                (f"http://localhost:{FRONTEND_PORT}/v1/models", check_models_api),
-                (f"http://localhost:{FRONTEND_PORT}/health", check_health_generate),
-            ]
         else:
-            # Aggregated mode: no disaggregation
+            if mode == WorkerMode.DECODE:
+                command.extend(["--disaggregation-mode", "decode"])
             health_check_urls = [
                 (f"http://localhost:{port}/health", self.is_ready),
                 (f"http://localhost:{FRONTEND_PORT}/v1/models", check_models_api),
@@ -81,7 +81,7 @@ class DynamoWorkerProcess(ManagedProcess):
         env["DYN_SYSTEM_PORT"] = port
 
         # Both prefill and decode workers need kv-transfer-config for disaggregated mode
-        if is_prefill is not None:
+        if mode != WorkerMode.AGGREGATED:
             command.extend(
                 [
                     "--kv-transfer-config",
@@ -95,7 +95,7 @@ class DynamoWorkerProcess(ManagedProcess):
             )
 
         # KV events config and NIXL side channel port only for prefill worker
-        if is_prefill is True:
+        if mode == WorkerMode.PREFILL:
             command.extend(
                 [
                     "--kv-events-config",
@@ -112,7 +112,7 @@ class DynamoWorkerProcess(ManagedProcess):
             env["VLLM_NIXL_SIDE_CHANNEL_PORT"] = "5601"
 
         # Set log directory based on worker type
-        worker_type = "prefill_worker" if is_prefill else "worker"
+        worker_type = "prefill_worker" if mode == WorkerMode.PREFILL else "worker"
         log_dir = f"{request.node.name}_{worker_type}"
 
         # Clean up any existing log directory from previous runs
@@ -138,20 +138,18 @@ class DynamoWorkerProcess(ManagedProcess):
             log_dir=log_dir,
         )
 
-        self.is_prefill = is_prefill
+        self.mode = mode
 
     def is_ready(self, response) -> bool:
         """Check the health of the worker process"""
+        worker_type = "Prefill worker" if self.mode == WorkerMode.PREFILL else "Worker"
         try:
             data = response.json()
             if data.get("status") == "ready":
-                worker_type = "Prefill worker" if self.is_prefill else "Worker"
                 logger.info(f"{worker_type} status is ready")
                 return True
-            worker_type = "Prefill worker" if self.is_prefill else "Worker"
             logger.warning(f"{worker_type} status is not ready: {data.get('status')}")
         except ValueError:
-            worker_type = "Prefill worker" if self.is_prefill else "Worker"
             logger.warning(f"{worker_type} health response is not valid JSON")
         return False
 
@@ -268,11 +266,15 @@ def test_etcd_ha_failover_vllm_disaggregated(
                 logger.info("Frontend started successfully")
 
                 # Step 4: Start the prefill worker
-                with DynamoWorkerProcess(request, etcd_endpoints, is_prefill=True):
+                with DynamoWorkerProcess(
+                    request, etcd_endpoints, mode=WorkerMode.PREFILL
+                ):
                     logger.info("Prefill worker started successfully")
 
                     # Step 5: Start the decode worker
-                    with DynamoWorkerProcess(request, etcd_endpoints, is_prefill=False):
+                    with DynamoWorkerProcess(
+                        request, etcd_endpoints, mode=WorkerMode.DECODE
+                    ):
                         logger.info("Decode worker started successfully")
 
                         # Step 6: Send initial inference request to verify system is working
@@ -395,13 +397,13 @@ def test_etcd_non_ha_shutdown_vllm_disaggregated(
 
                 # Step 4: Start the prefill worker
                 with DynamoWorkerProcess(
-                    request, etcd_endpoints, is_prefill=True
+                    request, etcd_endpoints, mode=WorkerMode.PREFILL
                 ) as prefill_worker:
                     logger.info("Prefill worker started successfully")
 
                     # Step 5: Start the decode worker
                     with DynamoWorkerProcess(
-                        request, etcd_endpoints, is_prefill=False
+                        request, etcd_endpoints, mode=WorkerMode.DECODE
                     ) as decode_worker:
                         logger.info("Decode worker started successfully")
 
