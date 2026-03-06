@@ -14,7 +14,7 @@ repository.workspace = true
 default = []
 metrics = []
 bench = ["dep:clap", "dep:indicatif", "dep:serde_json", "dynamo-runtime/integration", "dep:plotters"]
-indexer-bin = ["metrics", "dep:axum", "dep:clap", "dep:zeromq", "dep:tracing-subscriber", "dep:serde_json"]
+indexer-bin = ["metrics", "dep:axum", "dep:clap", "dep:zeromq", "dep:tracing-subscriber", "dep:serde_json", "dep:reqwest"]
 
 [dependencies]
 # repo
@@ -52,6 +52,7 @@ rustc-hash = "2.1.1"
 
 # indexer-bin (optional)
 axum = { workspace = true, optional = true }
+reqwest = { workspace = true, optional = true }
 zeromq = { version = "0.4.1", optional = true }
 tracing-subscriber = { workspace = true, optional = true }
 
