@@ -9,8 +9,6 @@ incremental detokenization, error handling, and deprecation warnings.
 Parallels test_vllm_unit.py for the vLLM backend.
 """
 
-import json
-import warnings
 
 import pytest
 from sglang.srt.utils.hf_transformers_utils import get_tokenizer
@@ -551,9 +549,7 @@ class TestPreprocessChatRequest:
             tool_call_parser_name=None,
             reasoning_parser_name=None,
         )
-        assert len(with_system.prompt_token_ids) > len(
-            without_system.prompt_token_ids
-        )
+        assert len(with_system.prompt_token_ids) > len(without_system.prompt_token_ids)
 
 
 # ---------------------------------------------------------------------------
@@ -570,9 +566,7 @@ class TestIncrementalDetokenization:
             tokenizer=tokenizer, tool_call_parser=None, reasoning_parser=None
         )
         token_ids = tokenizer.encode("Hello world")
-        choice = post.process_output(
-            {"token_ids": token_ids, "finish_reason": "stop"}
-        )
+        choice = post.process_output({"token_ids": token_ids, "finish_reason": "stop"})
         assert choice is not None
         assert "Hello world" in choice["delta"]["content"]
 
@@ -660,9 +654,7 @@ class TestFastPlainTextPath:
             tokenizer=tokenizer, tool_call_parser=None, reasoning_parser=None
         )
         token_ids = tokenizer.encode("Hello")
-        choice = post.process_output(
-            {"token_ids": token_ids, "finish_reason": None}
-        )
+        choice = post.process_output({"token_ids": token_ids, "finish_reason": None})
         assert choice is not None
         assert choice["delta"]["role"] == "assistant"
         assert "content" in choice["delta"]
