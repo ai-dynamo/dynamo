@@ -9,6 +9,8 @@ from pathlib import Path
 import yaml
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
+_VALID_ARCHS = {"amd64", "arm64"}
+
 
 def parse_platform(platform_str: str) -> str:
     """Normalize a --platform value to the template variable used by Jinja2.
@@ -17,12 +19,20 @@ def parse_platform(platform_str: str) -> str:
     arm64), and comma-separated lists for multi-arch (linux/amd64,linux/arm64).
 
     Returns one of: 'amd64', 'arm64', or 'multi'.
+
+    Raises ValueError for unrecognized architecture values.
     """
     parts = [p.strip() for p in platform_str.split(",")]
-    if len(parts) > 1:
+    archs = [p.split("/")[-1] for p in parts]
+    for arch in archs:
+        if arch not in _VALID_ARCHS:
+            raise ValueError(
+                f"Unrecognized architecture '{arch}' in --platform '{platform_str}'. "
+                f"Valid architectures: {', '.join(sorted(_VALID_ARCHS))}"
+            )
+    if len(archs) > 1:
         return "multi"
-    # Strip the OS prefix if present: linux/amd64 -> amd64
-    return parts[0].split("/")[-1]
+    return archs[0]
 
 
 def parse_args():
