@@ -9,9 +9,9 @@
 # ║    1. Start Frontend + Encode + Agg PD on GPU 0                            ║
 # ║    2. Wait for readiness → send image-URL request → print output           ║
 # ║                                                                            ║
-# ║  Part B — E + P + D (Disaggregated Prefill / Decode)                      ║
+# ║  Part B — Aggregated (single worker, no disaggregation)                   ║
 # ║    3. Tear down Part A workers                                             ║
-# ║    4. Start Frontend + Encode + Prefill + Decode on GPU 0                  ║
+# ║    4. Start Frontend + single Agg worker on GPU 0                          ║
 # ║    5. Wait for readiness → send same request → print output                ║
 # ║                                                                            ║
 # ║  Part C — P + D (Disaggregated Prefill / Decode, no Encode worker)        ║
@@ -19,9 +19,9 @@
 # ║    7. Start Frontend + Prefill + Decode on GPU 0                           ║
 # ║    8. Wait for readiness → send same request → print output                ║
 # ║                                                                            ║
-# ║  Part D — Aggregated (single worker, no disaggregation)                   ║
+# ║  Part D — E + P + D (Disaggregated Prefill / Decode)                      ║
 # ║    9. Tear down Part C workers                                             ║
-# ║   10. Start Frontend + single Agg worker on GPU 0                          ║
+# ║   10. Start Frontend + Encode + Prefill + Decode on GPU 0                  ║
 # ║   11. Wait for readiness → send same request → print output                ║
 # ║                                                                            ║
 # ║  Summary — print all 4 outputs side by side in a table                    ║
@@ -53,7 +53,7 @@ MAX_WAIT=300   # 5 minutes
 POLL_INTERVAL=5
 
 # Result accumulators — filled by send_request_and_print
-RESULT_A="" RESULT_B="" RESULT_C="" RESULT_D=""
+RESULT_A1="" RESULT_A2="" RESULT_B1="" RESULT_B2="" RESULT_C1="" RESULT_C2="" RESULT_D1="" RESULT_D2=""
 
 # ── Shared helper: track background PIDs for cleanup ─────────────────────────
 BG_PIDS=()
@@ -230,8 +230,11 @@ wait_for_server || exit 1
 echo "Waiting 10s for pipeline to stabilize …"
 sleep 10
 
-# ── Phases 3–4: Send request & print output ──────────────────────────────────
-send_request_and_print 3 4 RESULT_A
+# ── Phases 3–4: Send requests & print output (2 requests, one after another) ─
+send_request_and_print "3a" "4a" RESULT_A1
+echo ""
+echo "Sending second request …"
+send_request_and_print "3b" "4b" RESULT_A2
 
 echo ""
 echo "══════════════════════════════════════════════════════════════"
@@ -245,57 +248,33 @@ cleanup
 sleep 5   # let GPU memory settle
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
-# ║  Part B — E + P + D (Disaggregated Prefill / Decode)                       ║
+# ║  Part B — Aggregated (single worker, no disaggregation)                    ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 echo ""
 echo "┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓"
-echo "┃  Part B — E + P + D (Disaggregated Prefill / Decode)       ┃"
+echo "┃  Part B — Aggregated (single worker)                       ┃"
 echo "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛"
 
-# ── Phase 5: Start disaggregated system ──────────────────────────────────────
+# ── Phase 5: Start aggregated system ─────────────────────────────────────────
 echo ""
 echo "══════════════════════════════════════════════════════════════"
-echo "Phase 5: Starting E+P+D system on port ${FRONTEND_PORT}"
-echo "         Model       : ${SERVED_MODEL_NAME}"
-echo "         Encode GPU  : ${ENCODE_CUDA_VISIBLE_DEVICES}"
-echo "         Prefill GPU : ${PREFILL_CUDA_VISIBLE_DEVICES}"
-echo "         Decode GPU  : ${DECODE_CUDA_VISIBLE_DEVICES}"
+echo "Phase 5: Starting Aggregated system on port ${FRONTEND_PORT}"
+echo "          Model : ${SERVED_MODEL_NAME}"
+echo "          GPU   : ${AGG_CUDA_VISIBLE_DEVICES}"
 echo "══════════════════════════════════════════════════════════════"
 
 # Frontend
 python3 -m dynamo.frontend &
 BG_PIDS+=($!)
 
-# Encode worker (vision encoder)
-CUDA_VISIBLE_DEVICES=$ENCODE_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
+# Single aggregated worker (handles encode + prefill + decode internally)
+CUDA_VISIBLE_DEVICES=$AGG_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
   --model-path "$MODEL_PATH" \
   --served-model-name "$SERVED_MODEL_NAME" \
-  --extra-engine-args "$ENCODE_ENGINE_ARGS" \
+  --extra-engine-args "$AGG_ENGINE_ARGS" \
   --modality "$MODALITY" \
   --allowed-local-media-path "$ALLOWED_LOCAL_MEDIA_PATH" \
-  --max-file-size-mb "$MAX_FILE_SIZE_MB" \
-  --disaggregation-mode encode &
-BG_PIDS+=($!)
-
-# Prefill worker
-CUDA_VISIBLE_DEVICES=$PREFILL_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
-  --model-path "$MODEL_PATH" \
-  --served-model-name "$SERVED_MODEL_NAME" \
-  --extra-engine-args "$PREFILL_ENGINE_ARGS" \
-  --modality "$MODALITY" \
-  --disaggregation-mode prefill \
-  --encode-endpoint "$ENCODE_ENDPOINT" &
-BG_PIDS+=($!)
-
-# Decode worker
-CUDA_VISIBLE_DEVICES=$DECODE_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
-  --model-path "$MODEL_PATH" \
-  --served-model-name "$SERVED_MODEL_NAME" \
-  --extra-engine-args "$DECODE_ENGINE_ARGS" \
-  --modality "$MODALITY" \
-  --allowed-local-media-path "$ALLOWED_LOCAL_MEDIA_PATH" \
-  --max-file-size-mb "$MAX_FILE_SIZE_MB" \
-  --disaggregation-mode decode &
+  --max-file-size-mb "$MAX_FILE_SIZE_MB" &
 BG_PIDS+=($!)
 
 # ── Phase 6: Wait for readiness ─────────────────────────────────────────────
@@ -308,17 +287,20 @@ wait_for_server || exit 1
 echo "Waiting 10s for pipeline to stabilize …"
 sleep 10
 
-# ── Phases 7–8: Send request & print output ──────────────────────────────────
-send_request_and_print 7 8 RESULT_B
+# ── Phases 7–8: Send requests & print output (2 requests, one after another) ─
+send_request_and_print "7a" "8a" RESULT_B1
+echo ""
+echo "Sending second request …"
+send_request_and_print "7b" "8b" RESULT_B2
 
 echo ""
 echo "══════════════════════════════════════════════════════════════"
-echo "Part B (E+P+D) complete ✓"
+echo "Part B (Aggregated) complete ✓"
 echo "══════════════════════════════════════════════════════════════"
 
-# ── Tear down E+P+D workers ─────────────────────────────────────────────────
+# ── Tear down Aggregated workers ─────────────────────────────────────────────
 echo ""
-echo "Tearing down E+P+D workers …"
+echo "Tearing down Aggregated workers …"
 cleanup
 sleep 5   # let GPU memory settle
 
@@ -375,8 +357,11 @@ wait_for_server || exit 1
 echo "Waiting 10s for pipeline to stabilize …"
 sleep 10
 
-# ── Phases 11–12: Send request & print output ───────────────────────────────
-send_request_and_print 11 12 RESULT_C
+# ── Phases 11–12: Send requests & print output (2 requests, one after another)
+send_request_and_print "11a" "12a" RESULT_C1
+echo ""
+echo "Sending second request …"
+send_request_and_print "11b" "12b" RESULT_C2
 
 echo ""
 echo "══════════════════════════════════════════════════════════════"
@@ -390,33 +375,57 @@ cleanup
 sleep 5   # let GPU memory settle
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
-# ║  Part D — Aggregated (single worker, no disaggregation)                    ║
+# ║  Part D — E + P + D (Disaggregated Prefill / Decode)                       ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 echo ""
 echo "┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓"
-echo "┃  Part D — Aggregated (single worker)                       ┃"
+echo "┃  Part D — E + P + D (Disaggregated Prefill / Decode)       ┃"
 echo "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛"
 
-# ── Phase 13: Start aggregated system ────────────────────────────────────────
+# ── Phase 13: Start disaggregated system ─────────────────────────────────────
 echo ""
 echo "══════════════════════════════════════════════════════════════"
-echo "Phase 13: Starting Aggregated system on port ${FRONTEND_PORT}"
-echo "          Model : ${SERVED_MODEL_NAME}"
-echo "          GPU   : ${AGG_CUDA_VISIBLE_DEVICES}"
+echo "Phase 13: Starting E+P+D system on port ${FRONTEND_PORT}"
+echo "          Model       : ${SERVED_MODEL_NAME}"
+echo "          Encode GPU  : ${ENCODE_CUDA_VISIBLE_DEVICES}"
+echo "          Prefill GPU : ${PREFILL_CUDA_VISIBLE_DEVICES}"
+echo "          Decode GPU  : ${DECODE_CUDA_VISIBLE_DEVICES}"
 echo "══════════════════════════════════════════════════════════════"
 
 # Frontend
 python3 -m dynamo.frontend &
 BG_PIDS+=($!)
 
-# Single aggregated worker (handles encode + prefill + decode internally)
-CUDA_VISIBLE_DEVICES=$AGG_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
+# Encode worker (vision encoder)
+CUDA_VISIBLE_DEVICES=$ENCODE_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
   --model-path "$MODEL_PATH" \
   --served-model-name "$SERVED_MODEL_NAME" \
-  --extra-engine-args "$AGG_ENGINE_ARGS" \
+  --extra-engine-args "$ENCODE_ENGINE_ARGS" \
   --modality "$MODALITY" \
   --allowed-local-media-path "$ALLOWED_LOCAL_MEDIA_PATH" \
-  --max-file-size-mb "$MAX_FILE_SIZE_MB" &
+  --max-file-size-mb "$MAX_FILE_SIZE_MB" \
+  --disaggregation-mode encode &
+BG_PIDS+=($!)
+
+# Prefill worker
+CUDA_VISIBLE_DEVICES=$PREFILL_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
+  --model-path "$MODEL_PATH" \
+  --served-model-name "$SERVED_MODEL_NAME" \
+  --extra-engine-args "$PREFILL_ENGINE_ARGS" \
+  --modality "$MODALITY" \
+  --disaggregation-mode prefill \
+  --encode-endpoint "$ENCODE_ENDPOINT" &
+BG_PIDS+=($!)
+
+# Decode worker
+CUDA_VISIBLE_DEVICES=$DECODE_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
+  --model-path "$MODEL_PATH" \
+  --served-model-name "$SERVED_MODEL_NAME" \
+  --extra-engine-args "$DECODE_ENGINE_ARGS" \
+  --modality "$MODALITY" \
+  --allowed-local-media-path "$ALLOWED_LOCAL_MEDIA_PATH" \
+  --max-file-size-mb "$MAX_FILE_SIZE_MB" \
+  --disaggregation-mode decode &
 BG_PIDS+=($!)
 
 # ── Phase 14: Wait for readiness ────────────────────────────────────────────
@@ -429,12 +438,15 @@ wait_for_server || exit 1
 echo "Waiting 10s for pipeline to stabilize …"
 sleep 10
 
-# ── Phases 15–16: Send request & print output ───────────────────────────────
-send_request_and_print 15 16 RESULT_D
+# ── Phases 15–16: Send requests & print output (2 requests, one after another)
+send_request_and_print "15a" "16a" RESULT_D1
+echo ""
+echo "Sending second request …"
+send_request_and_print "15b" "16b" RESULT_D2
 
 echo ""
 echo "══════════════════════════════════════════════════════════════"
-echo "Part D (Aggregated) complete ✓"
+echo "Part D (E+P+D) complete ✓"
 echo "══════════════════════════════════════════════════════════════"
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -465,10 +477,14 @@ printf "┌───────────────────────
 printf "│ %-27s │ %-8s │ %-79s │\n" "Deployment" "Status" "Generated Text (first 120 chars)"
 printf "├─────────────────────────────┼──────────┼─────────────────────────────────────────────────────────────────────────────────┤\n"
 
-for label_var in "A:E/PD (Encode+Agg PD):RESULT_A" \
-                 "B:E+P+D (Encode+P+D):RESULT_B" \
-                 "C:P+D (no Encode):RESULT_C" \
-                 "D:Aggregated (single):RESULT_D"; do
+for label_var in "A-Req1:E/PD (Agg PD) #1:RESULT_A1" \
+                 "A-Req2:E/PD (Agg PD) #2:RESULT_A2" \
+                 "B-Req1:Aggregated #1:RESULT_B1" \
+                 "B-Req2:Aggregated #2:RESULT_B2" \
+                 "C-Req1:P+D (no Encode) #1:RESULT_C1" \
+                 "C-Req2:P+D (no Encode) #2:RESULT_C2" \
+                 "D-Req1:E+P+D (Encode+P+D) #1:RESULT_D1" \
+                 "D-Req2:E+P+D (Encode+P+D) #2:RESULT_D2"; do
     IFS=':' read -r letter description var_name <<< "$label_var"
     eval "text=\${${var_name}}"
     if [ -z "$text" ]; then
@@ -481,7 +497,7 @@ for label_var in "A:E/PD (Encode+Agg PD):RESULT_A" \
         status="PASS"
         display=$(truncate_text "$text")
     fi
-    printf "│ %-27s │ %-8s │ %-79s │\n" "Part ${letter}: ${description}" "$status" "$display"
+    printf "│ %-27s │ %-8s │ %-79s │\n" "${letter}: ${description}" "$status" "$display"
 done
 
 printf "└─────────────────────────────┴──────────┴─────────────────────────────────────────────────────────────────────────────────┘\n"

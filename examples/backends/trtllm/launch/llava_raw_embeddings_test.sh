@@ -11,10 +11,13 @@
 # ║  Part A — E/PD (Encode + Aggregated Prefill-Decode)                       ║
 # ║    Start Frontend + Encode + Agg PD → send raw-embeddings request          ║
 # ║                                                                            ║
-# ║  Part B — E + P + D (Disaggregated Prefill / Decode)                      ║
+# ║  Part B — P + D (Prefill / Decode, no Encode worker)                      ║
+# ║    Start Frontend + Prefill + Decode → send same request                   ║
+# ║                                                                            ║
+# ║  Part C — E + P + D (Disaggregated Prefill / Decode)                      ║
 # ║    Start Frontend + Encode + Prefill + Decode → send same request          ║
 # ║                                                                            ║
-# ║  Summary — print both outputs in a table                                  ║
+# ║  Summary — print all outputs in a table                                   ║
 # ║                                                                            ║
 # ║  Known limitation: The default revision of llava-hf/llava-v1.6-mistral-7b ║
 # ║  crashes with TRT-LLM 1.2.0rc6.post1 – we pin revision 52320fb52229.     ║
@@ -49,7 +52,7 @@ MAX_WAIT=300   # 5 minutes
 POLL_INTERVAL=5
 
 # Result accumulators — filled by send_request_and_print
-RESULT_A="" RESULT_B=""
+RESULT_A1="" RESULT_A2="" RESULT_B1="" RESULT_B2="" RESULT_C1="" RESULT_C2=""
 
 # ── Shared helper: track background PIDs for cleanup ─────────────────────────
 BG_PIDS=()
@@ -343,8 +346,11 @@ wait_for_server || exit 1
 echo "Waiting 10s for pipeline to stabilize …"
 sleep 10
 
-# ── Phases 4–5: Send request & print output ──────────────────────────────────
-send_request_and_print 4 5 RESULT_A
+# ── Phases 4–5: Send requests & print output (2 requests, one after another) ─
+send_request_and_print "4a" "5a" RESULT_A1
+echo ""
+echo "Sending second request …"
+send_request_and_print "4b" "5b" RESULT_A2
 
 echo ""
 echo "══════════════════════════════════════════════════════════════"
@@ -358,21 +364,91 @@ cleanup
 sleep 5   # let GPU memory settle
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
-# ║  Part B — E + P + D (Disaggregated Prefill / Decode) with raw embeddings  ║
+# ║  Part B — P + D (Prefill / Decode, no Encode) with raw embeddings         ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 echo ""
 echo "┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓"
-echo "┃  Part B — E + P + D (Disaggregated Prefill / Decode)       ┃"
+echo "┃  Part B — P + D (no Encode worker)                         ┃"
 echo "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛"
 
-# ── Phase 6: Start disaggregated system ──────────────────────────────────────
+# ── Phase 6: Start P+D system (no Encode worker) ────────────────────────────
 echo ""
 echo "══════════════════════════════════════════════════════════════"
-echo "Phase 6: Starting E+P+D system on port ${FRONTEND_PORT}"
+echo "Phase 6: Starting P+D system on port ${FRONTEND_PORT}"
 echo "         Model       : ${SERVED_MODEL_NAME}"
-echo "         Encode GPU  : ${ENCODE_CUDA_VISIBLE_DEVICES}"
 echo "         Prefill GPU : ${PREFILL_CUDA_VISIBLE_DEVICES}"
 echo "         Decode GPU  : ${DECODE_CUDA_VISIBLE_DEVICES}"
+echo "══════════════════════════════════════════════════════════════"
+
+# Frontend
+python3 -m dynamo.frontend &
+BG_PIDS+=($!)
+
+# Prefill worker (handles multimodal processing internally — no encode endpoint)
+CUDA_VISIBLE_DEVICES=$PREFILL_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
+  --model-path "$MODEL_PATH" \
+  --served-model-name "$SERVED_MODEL_NAME" \
+  --extra-engine-args "$PREFILL_ENGINE_ARGS" \
+  --modality "$MODALITY" \
+  --allowed-local-media-path "$ALLOWED_LOCAL_MEDIA_PATH" \
+  --max-file-size-mb "$MAX_FILE_SIZE_MB" \
+  --disaggregation-mode prefill \
+  --custom-jinja-template "$CUSTOM_TEMPLATE" &
+BG_PIDS+=($!)
+
+# Decode worker
+CUDA_VISIBLE_DEVICES=$DECODE_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
+  --model-path "$MODEL_PATH" \
+  --served-model-name "$SERVED_MODEL_NAME" \
+  --extra-engine-args "$DECODE_ENGINE_ARGS" \
+  --modality "$MODALITY" \
+  --disaggregation-mode decode \
+  --custom-jinja-template "$CUSTOM_TEMPLATE" &
+BG_PIDS+=($!)
+
+# ── Phase 7: Wait for readiness ─────────────────────────────────────────────
+echo ""
+echo "══════════════════════════════════════════════════════════════"
+echo "Phase 7: Waiting for server to become ready …"
+echo "══════════════════════════════════════════════════════════════"
+
+wait_for_server || exit 1
+echo "Waiting 10s for pipeline to stabilize …"
+sleep 10
+
+# ── Phases 8–9: Send requests & print output (2 requests, one after another) ─
+send_request_and_print "8a" "9a" RESULT_B1
+echo ""
+echo "Sending second request …"
+send_request_and_print "8b" "9b" RESULT_B2
+
+echo ""
+echo "══════════════════════════════════════════════════════════════"
+echo "Part B (P+D) complete ✓"
+echo "══════════════════════════════════════════════════════════════"
+
+# ── Tear down P+D workers ───────────────────────────────────────────────────
+echo ""
+echo "Tearing down P+D workers …"
+cleanup
+sleep 5   # let GPU memory settle
+
+# ╔══════════════════════════════════════════════════════════════════════════════╗
+# ║  Part C — E + P + D (Disaggregated Prefill / Decode) with raw embeddings  ║
+# ╚══════════════════════════════════════════════════════════════════════════════╝
+echo ""
+echo "┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓"
+echo "┃  Part C — E + P + D (Disaggregated Prefill / Decode)       ┃"
+echo "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛"
+
+# ── Phase 10: Start disaggregated system ─────────────────────────────────────
+echo ""
+echo "══════════════════════════════════════════════════════════════"
+echo "Phase 10: Starting E+P+D system on port ${FRONTEND_PORT}"
+echo "          Model       : ${SERVED_MODEL_NAME}"
+echo "          Encode GPU  : ${ENCODE_CUDA_VISIBLE_DEVICES}"
+echo "          Prefill GPU : ${PREFILL_CUDA_VISIBLE_DEVICES}"
+echo "          Decode GPU  : ${DECODE_CUDA_VISIBLE_DEVICES}"
 echo "══════════════════════════════════════════════════════════════"
 
 # Frontend
@@ -411,22 +487,25 @@ CUDA_VISIBLE_DEVICES=$DECODE_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
   --custom-jinja-template "$CUSTOM_TEMPLATE" &
 BG_PIDS+=($!)
 
-# ── Phase 7: Wait for readiness ─────────────────────────────────────────────
+# ── Phase 11: Wait for readiness ────────────────────────────────────────────
 echo ""
 echo "══════════════════════════════════════════════════════════════"
-echo "Phase 7: Waiting for server to become ready …"
+echo "Phase 11: Waiting for server to become ready …"
 echo "══════════════════════════════════════════════════════════════"
 
 wait_for_server || exit 1
 echo "Waiting 10s for pipeline to stabilize …"
 sleep 10
 
-# ── Phases 8–9: Send request & print output ──────────────────────────────────
-send_request_and_print 8 9 RESULT_B
+# ── Phases 12–13: Send requests & print output (2 requests, one after another)
+send_request_and_print "12a" "13a" RESULT_C1
+echo ""
+echo "Sending second request …"
+send_request_and_print "12b" "13b" RESULT_C2
 
 echo ""
 echo "══════════════════════════════════════════════════════════════"
-echo "Part B (E+P+D) complete ✓"
+echo "Part C (E+P+D) complete ✓"
 echo "══════════════════════════════════════════════════════════════"
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -457,8 +536,12 @@ printf "┌───────────────────────
 printf "│ %-27s │ %-8s │ %-79s │\n" "Deployment" "Status" "Generated Text (first 120 chars)"
 printf "├─────────────────────────────┼──────────┼─────────────────────────────────────────────────────────────────────────────────┤\n"
 
-for label_var in "A:E/PD (Encode+Agg PD):RESULT_A" \
-                 "B:E+P+D (Encode+P+D):RESULT_B"; do
+for label_var in "A-Req1:E/PD (Agg PD) #1:RESULT_A1" \
+                 "A-Req2:E/PD (Agg PD) #2:RESULT_A2" \
+                 "B-Req1:P+D (no Encode) #1:RESULT_B1" \
+                 "B-Req2:P+D (no Encode) #2:RESULT_B2" \
+                 "C-Req1:E+P+D (Disagg) #1:RESULT_C1" \
+                 "C-Req2:E+P+D (Disagg) #2:RESULT_C2"; do
     IFS=':' read -r letter description var_name <<< "$label_var"
     eval "text=\${${var_name}}"
     if [ -z "$text" ]; then
@@ -471,7 +554,7 @@ for label_var in "A:E/PD (Encode+Agg PD):RESULT_A" \
         status="PASS"
         display=$(truncate_text "$text")
     fi
-    printf "│ %-27s │ %-8s │ %-79s │\n" "Part ${letter}: ${description}" "$status" "$display"
+    printf "│ %-27s │ %-8s │ %-79s │\n" "${letter}: ${description}" "$status" "$display"
 done
 
 printf "└─────────────────────────────┴──────────┴─────────────────────────────────────────────────────────────────────────────────┘\n"
