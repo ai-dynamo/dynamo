@@ -713,13 +713,25 @@ pub fn kvbm_metrics_endpoint_enabled() -> bool {
         .unwrap_or(false)
 }
 
-static KVBM_METRICS_PORT_COUNTER: AtomicU16 = AtomicU16::new(0);
-
 /// Base port cached from `parse_kvbm_metrics_port()` on first call.
 static KVBM_METRICS_BASE_PORT: OnceLock<u16> = OnceLock::new();
 
-/// Return a unique metrics port and DP rank for each KVBM connector leader.
-/// Each call returns `(base_port + N, N)` where N auto-increments from 0.
+/// Counter for vLLM leaders that run in a single process (rank not directly available).
+static KVBM_METRICS_PORT_COUNTER: AtomicU16 = AtomicU16::new(0);
+
+/// Return metrics port for the given DP rank: `(base_port + rank, rank)`.
+///
+/// Use this when the caller knows its rank (e.g. TRT-LLM where `worker_id == mappings.rank`).
+/// Each process in a multi-process DP setup should pass its own rank so that ports don't collide.
+pub fn kvbm_metrics_port_for_rank(rank: u16) -> (u16, u16) {
+    let base = *KVBM_METRICS_BASE_PORT.get_or_init(parse_kvbm_metrics_port);
+    (base + rank, rank)
+}
+
+/// Return a unique metrics port using an auto-incrementing counter: `(base_port + N, N)`.
+///
+/// Use this when rank is not directly available (e.g. vLLM where multiple DP leaders
+/// live in the same process). NOT safe across separate processes (counter resets to 0).
 pub fn allocate_kvbm_metrics_port() -> (u16, u16) {
     let base = *KVBM_METRICS_BASE_PORT.get_or_init(parse_kvbm_metrics_port);
     let offset = KVBM_METRICS_PORT_COUNTER.fetch_add(1, Ordering::Relaxed);
