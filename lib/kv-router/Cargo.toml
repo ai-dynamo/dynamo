@@ -13,7 +13,7 @@ repository.workspace = true
 [features]
 default = []
 metrics = []
-bench = ["dep:clap", "dep:indicatif", "dep:serde_json", "dynamo-runtime/integration", "dep:plotters"]
+bench = ["dep:clap", "dep:indicatif", "dep:serde_json", "dep:plotters"]
 indexer-bin = ["metrics", "dep:axum", "dep:clap", "dep:zeromq", "dep:tracing-subscriber", "dep:serde_json"]
 
 [dependencies]
