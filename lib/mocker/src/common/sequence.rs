@@ -54,7 +54,8 @@ pub struct ActiveSequence {
     #[getter(copy)]
     num_input_tokens: usize,
 
-    creation_signal: Option<MoveBlock>,
+    #[getter(copy)]
+    num_allocated_blocks: usize,
 
     #[getter(copy)]
     enable_prefix_caching: bool,
@@ -75,28 +76,9 @@ impl ActiveSequence {
         let block_size = block_size.unwrap_or(64);
         let num_input_tokens = tokens.len();
 
-        let block_token_ids: Option<Vec<Vec<u32>>> = if emit_token_ids {
-            let num_complete = tokens.len() / block_size;
-            Some(
-                tokens
-                    .chunks(block_size)
-                    .take(num_complete)
-                    .map(|c| c.to_vec())
-                    .collect(),
-            )
-        } else {
-            None
-        };
-
         let tokens = Tokens::from(tokens).into_sequence(block_size as u32, Some(1337));
         let unique_blocks =
             create_unique_blocks_from_sequence(&tokens, block_size, enable_prefix_caching);
-        let block_hashes = tokens.blocks().iter().map(|b| b.block_hash()).collect();
-        let creation_signal = Some(MoveBlock::Use(
-            unique_blocks.clone(),
-            block_hashes,
-            block_token_ids,
-        ));
 
         let seq = Self {
             unique_blocks,
@@ -105,7 +87,7 @@ impl ActiveSequence {
             max_output_tokens,
             generated_tokens: 0,
             num_input_tokens,
-            creation_signal,
+            num_allocated_blocks: 0,
             enable_prefix_caching,
             emit_token_ids,
         };
@@ -125,8 +107,45 @@ impl ActiveSequence {
         self.tokens.total_tokens() == 0
     }
 
+    /// Allocate KV blocks for tokens up to `cumulative_tokens`.
+    /// Returns a `MoveBlock::Use` signal for only the newly allocated blocks,
+    /// or `None` if no new blocks are needed.
+    pub fn allocate_blocks_for_chunk(&mut self, cumulative_tokens: usize) -> Option<MoveBlock> {
+        let target_blocks = cumulative_tokens
+            .div_ceil(self.block_size)
+            .min(self.unique_blocks.len());
+        if target_blocks <= self.num_allocated_blocks {
+            return None;
+        }
+
+        let range = self.num_allocated_blocks..target_blocks;
+        let blocks = self.unique_blocks[range.clone()].to_vec();
+
+        let all_hashes = self.block_hashes();
+        let num_full = all_hashes.len();
+        let hash_start = self.num_allocated_blocks.min(num_full);
+        let hash_end = target_blocks.min(num_full);
+        let hashes = all_hashes[hash_start..hash_end].to_vec();
+
+        let token_ids = if self.emit_token_ids && hash_start < hash_end {
+            let all_token_ids: Vec<Vec<u32>> = self
+                .tokens
+                .blocks()
+                .iter()
+                .map(|b| b.tokens().to_vec())
+                .collect();
+            Some(all_token_ids[hash_start..hash_end].to_vec())
+        } else {
+            None
+        };
+
+        self.num_allocated_blocks = target_blocks;
+        Some(MoveBlock::Use(blocks, hashes, token_ids))
+    }
+
+    /// Allocate all remaining blocks at once (backward compat).
     pub fn take_creation_signal(&mut self) -> Option<MoveBlock> {
-        self.creation_signal.take()
+        self.allocate_blocks_for_chunk(self.len())
     }
 
     pub fn block_hashes(&self) -> Vec<u64> {
@@ -262,31 +281,12 @@ impl ActiveSequence {
             .collect()
     }
 
-    /// Move the request to a preempted state and return the free signals from freeing current blocks
+    /// Move the request to a preempted state and return the free signals from freeing current blocks.
     /// Upon preemption, the sequence retains the tokens generated during the decode phase (if any).
+    /// Resets `num_allocated_blocks` so re-admission will re-allocate from scratch.
     pub fn reset_with_signal(&mut self) -> Vec<MoveBlock> {
         let free_signal = self.free_signal();
-
-        // Don't reset generated_tokens since we're keeping the tokens in the sequence
-
-        let block_token_ids = if self.emit_token_ids {
-            Some(
-                self.tokens
-                    .blocks()
-                    .iter()
-                    .map(|b| b.tokens().to_vec())
-                    .collect(),
-            )
-        } else {
-            None
-        };
-
-        self.creation_signal = Some(MoveBlock::Use(
-            self.unique_blocks.clone(),
-            self.block_hashes(),
-            block_token_ids,
-        ));
-
+        self.num_allocated_blocks = 0;
         free_signal
     }
 
