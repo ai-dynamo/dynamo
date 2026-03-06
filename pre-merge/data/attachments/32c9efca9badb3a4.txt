@@ -1,0 +1,2 @@
+[2m2026-03-06T06:57:35.286526Z[0m [32m INFO[0m [2mimage_diffusion_handler.__init__[0m[2m:[0m Image diffusion worker handler initialized with fs_url=file:///tmp/images, url_base=file:///tmp/images
+[2m2026-03-06T06:57:35.308246Z[0m [32m INFO[0m [2mimage_diffusion_handler.generate[0m[2m:[0m Image diffusion request: {'prompt': 'A red square', 'model': 'test-model', 'size': '256x256', 'response_format': 'url', 'user': 'test-user', 'nvext': {'num_inference_steps': 10, 'guidance_scale': 7.5, 'seed': 42, 'negative_prompt': None}}

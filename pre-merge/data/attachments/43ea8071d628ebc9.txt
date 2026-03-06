@@ -1,0 +1,2 @@
+[2m2026-03-06T07:00:51.234357Z[0m [32m INFO[0m [2mimage_diffusion_handler.__init__[0m[2m:[0m Image diffusion worker handler initialized with fs_url=file:///tmp/images, url_base=file:///tmp/images
+[2m2026-03-06T07:00:51.235687Z[0m [32m INFO[0m [2mimage_diffusion_handler.generate[0m[2m:[0m Image diffusion request: {'prompt': 'A green square', 'model': 'test-model', 'size': '256x256', 'response_format': 'b64_json', 'user': 'test-user'}

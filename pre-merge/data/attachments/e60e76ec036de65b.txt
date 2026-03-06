@@ -1,1 +1,0 @@
-[2m2026-03-06T06:57:36.167346Z[0m [31mERROR[0m [2mprometheus.get_prometheus_expfmt[0m[2m:[0m Error getting metrics: Registry error

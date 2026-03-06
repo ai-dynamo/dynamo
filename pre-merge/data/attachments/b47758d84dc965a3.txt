@@ -1,1 +1,0 @@
-[2m2026-03-06T06:55:32.042192Z[0m [31mERROR[0m [2mhandlers._decode_prompt_embeds[0m[2m:[0m Invalid base64 encoding in prompt_embeds: Incorrect padding

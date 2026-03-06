@@ -1,0 +1,129 @@
+INFO     NatsServer:managed_process.py:307 Running command: nats-server --trace -p 4286 in /workspace
+INFO     NatsServer:managed_process.py:473 Checking Port: 4286
+INFO     NatsServer:managed_process.py:481 SUCCESS: Check Port: 4286
+INFO     NatsServer:managed_process.py:586 Running custom health check '_nats_ready'
+DEBUG    asyncio:selector_events.py:64 Using selector: EpollSelector
+INFO     NatsServer:managed_process.py:606 SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+INFO     EtcdServer:managed_process.py:307 Running command: etcd --listen-client-urls http://0.0.0.0:2445 --advertise-client-urls http://0.0.0.0:2445 --listen-peer-urls http://0.0.0.0:2446 --initial-advertise-peer-urls http://localhost:2446 --initial-cluster default=http://localhost:2446 --data-dir /tmp/etcd_5wiumyxs in /workspace
+INFO     EtcdServer:managed_process.py:473 Checking Port: 2445
+INFO     EtcdServer:managed_process.py:481 SUCCESS: Check Port: 2445
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:357 Starting SGLang KV router test with 2 workers using request_plane=tcp
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:240 Created SGLang worker 0 on GPU 0 (mem_frac=0.4, system_port=8170, kv_port=8101) with endpoint: dyn://test-namespace-tgszuqsirc.backend.generate
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:240 Created SGLang worker 1 on GPU 0 (mem_frac=0.4, system_port=8171, kv_port=8102) with endpoint: dyn://test-namespace-tgszuqsirc.backend.generate
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:254 [SGLangProcess] Starting 2 worker processes sequentially...
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:260 [SGLangProcess] Starting SGLang worker 0...
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:274 [SGLangProcess] Launching process 0 (pid will be assigned)...
+INFO     ManagedProcess:managed_process.py:307 Running command: python3 -m dynamo.sglang --model-path silence09/DeepSeek-R1-Small-2layers --page-size 16 --disable-cuda-graph --mem-fraction-static 0.4 --context-length 1024 --kv-events-config {"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:8101"} in /workspace
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:278 [SGLangProcess] Worker 0 launched with PID: 265
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:287 [SGLangProcess] Waiting 5s for worker 0 to initialize before starting next worker...
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:260 [SGLangProcess] Starting SGLang worker 1...
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:274 [SGLangProcess] Launching process 1 (pid will be assigned)...
+INFO     ManagedProcess:managed_process.py:307 Running command: python3 -m dynamo.sglang --model-path silence09/DeepSeek-R1-Small-2layers --page-size 16 --disable-cuda-graph --mem-fraction-static 0.4 --context-length 1024 --kv-events-config {"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:8102"} in /workspace
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:278 [SGLangProcess] Worker 1 launched with PID: 301
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:303 [SGLangProcess] All 2 workers launched with sequential initialization.
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:306 [SGLangProcess] Waiting for health checks to complete...
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:310 [SGLangProcess] Checking health for worker 0...
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:315 [SGLangProcess] Worker 0 health checks passed
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:310 [SGLangProcess] Checking health for worker 1...
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:315 [SGLangProcess] Worker 1 health checks passed
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:322 [SGLangProcess] All workers started successfully and passed health checks!
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:369 Starting 2 SGLang workers
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:370 All SGLang workers using namespace: test-namespace-tgszuqsirc
+INFO     KVRouterProcess:managed_process.py:307 Running command: python3 -m dynamo.frontend --kv-cache-block-size 16 --router-mode kv --http-port 8009 --discovery-backend etcd --namespace test-namespace-tgszuqsirc in /workspace
+INFO     KVRouterProcess:managed_process.py:473 Checking Port: 8009
+INFO     KVRouterProcess:managed_process.py:481 SUCCESS: Check Port: 8009
+INFO     KVRouterProcess:managed_process.py:501 Checking URL http://localhost:8009/v1/models
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8009
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8009 "GET /v1/models HTTP/1.1" 200 27
+INFO     KVRouterProcess:managed_process.py:521 SUCCESS: Check URL: http://localhost:8009/v1/models (attempt=1, elapsed=0.0s)
+Response:
+{
+  "object": "list",
+  "data": []
+}
+INFO     tests.router.common:common.py:720 Starting KV router frontend on port 8009
+INFO     tests.router.common:common.py:725 Waiting for workers to register with frontend...
+DEBUG    asyncio:selector_events.py:64 Using selector: EpollSelector
+INFO     tests.router.common:common.py:248 Waiting for 2 workers to register on HTTP frontend (timeout=180s)...
+DEBUG    tests.router.common:common.py:275 No models registered yet (elapsed: 0.0s)
+DEBUG    tests.router.common:common.py:275 No models registered yet (elapsed: 1.0s)
+DEBUG    tests.router.common:common.py:275 No models registered yet (elapsed: 2.0s)
+DEBUG    tests.router.common:common.py:275 No models registered yet (elapsed: 3.0s)
+DEBUG    tests.router.common:common.py:275 No models registered yet (elapsed: 4.0s)
+DEBUG    tests.router.common:common.py:275 No models registered yet (elapsed: 5.0s)
+DEBUG    tests.router.common:common.py:275 No models registered yet (elapsed: 6.0s)
+DEBUG    tests.router.common:common.py:275 No models registered yet (elapsed: 7.0s)
+DEBUG    tests.router.common:common.py:275 No models registered yet (elapsed: 8.0s)
+DEBUG    tests.router.common:common.py:275 No models registered yet (elapsed: 9.0s)
+DEBUG    tests.router.common:common.py:275 No models registered yet (elapsed: 10.0s)
+DEBUG    tests.router.common:common.py:275 No models registered yet (elapsed: 11.0s)
+DEBUG    tests.router.common:common.py:275 No models registered yet (elapsed: 12.0s)
+DEBUG    tests.router.common:common.py:275 No models registered yet (elapsed: 13.0s)
+DEBUG    tests.router.common:common.py:275 No models registered yet (elapsed: 14.0s)
+DEBUG    tests.router.common:common.py:275 No models registered yet (elapsed: 15.0s)
+INFO     tests.router.common:common.py:270 Workers registered. Found 1 model(s): ['silence09/DeepSeek-R1-Small-2layers']
+INFO     tests.router.common:common.py:285 Waiting for chat completions pipeline to be built...
+INFO     tests.router.common:common.py:305 Chat completions pipeline ready!
+INFO     tests.router.common:common.py:735 Sending 10 concurrent requests to frontend...
+DEBUG    asyncio:selector_events.py:64 Using selector: EpollSelector
+INFO     tests.router.common:common.py:486 Sending initial test request to URL 0 (http://localhost:8009/v1/chat/completions) with retry...
+DEBUG    tests.router.common:common.py:404 First request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:509 Request 1 to URL 0 completed with 22 chunks
+DEBUG    tests.router.common:common.py:509 Request 6 to URL 0 completed with 22 chunks
+DEBUG    tests.router.common:common.py:509 Request 2 to URL 0 completed with 22 chunks
+DEBUG    tests.router.common:common.py:509 Request 8 to URL 0 completed with 22 chunks
+DEBUG    tests.router.common:common.py:509 Request 7 to URL 0 completed with 22 chunks
+DEBUG    tests.router.common:common.py:509 Request 3 to URL 0 completed with 22 chunks
+DEBUG    tests.router.common:common.py:509 Request 9 to URL 0 completed with 22 chunks
+DEBUG    tests.router.common:common.py:509 Request 0 to URL 0 completed with 22 chunks
+DEBUG    tests.router.common:common.py:509 Request 5 to URL 0 completed with 22 chunks
+DEBUG    tests.router.common:common.py:509 Request 4 to URL 0 completed with 22 chunks
+INFO     tests.router.common:common.py:528 Completed all requests: 10 successful, 0 failed
+INFO     tests.router.common:common.py:533 All 10 requests completed successfully
+INFO     tests.router.common:common.py:744 Successfully completed 10 requests
+INFO     KVRouterProcess:managed_process.py:388 Terminating process group: 304
+INFO     KVRouterProcess:managed_process.py:31 Terminating PID: 304 name: python3
+INFO     KVRouterProcess:managed_process.py:36 Sending SIGTERM (kill): 304 python3
+INFO     KVRouterProcess:managed_process.py:31 Terminating PID: 306 name: tee
+INFO     KVRouterProcess:managed_process.py:36 Sending SIGTERM (kill): 306 tee
+INFO     KVRouterProcess:managed_process.py:31 Terminating PID: 305 name: sed
+INFO     KVRouterProcess:managed_process.py:36 Sending SIGTERM (kill): 305 sed
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:330 Stopping SGLang worker 0
+INFO     ManagedProcess:managed_process.py:388 Terminating process group: 265
+INFO     ManagedProcess:managed_process.py:31 Terminating PID: 265 name: python3
+INFO     ManagedProcess:managed_process.py:36 Sending SIGTERM (kill): 265 python3
+INFO     ManagedProcess:managed_process.py:31 Terminating PID: 440 name: python3
+INFO     ManagedProcess:managed_process.py:36 Sending SIGTERM (kill): 440 python3
+INFO     ManagedProcess:managed_process.py:31 Terminating PID: 441 name: sglang::schedul
+INFO     ManagedProcess:managed_process.py:36 Sending SIGTERM (kill): 441 sglang::schedul
+INFO     ManagedProcess:managed_process.py:31 Terminating PID: 442 name: sglang::detoken
+INFO     ManagedProcess:managed_process.py:36 Sending SIGTERM (kill): 442 sglang::detoken
+INFO     ManagedProcess:managed_process.py:31 Terminating PID: 267 name: tee
+INFO     ManagedProcess:managed_process.py:36 Sending SIGTERM (kill): 267 tee
+INFO     ManagedProcess:managed_process.py:31 Terminating PID: 266 name: sed
+INFO     ManagedProcess:managed_process.py:36 Sending SIGTERM (kill): 266 sed
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:330 Stopping SGLang worker 1
+INFO     ManagedProcess:managed_process.py:388 Terminating process group: 301
+INFO     ManagedProcess:managed_process.py:31 Terminating PID: 301 name: python3
+INFO     ManagedProcess:managed_process.py:36 Sending SIGTERM (kill): 301 python3
+INFO     ManagedProcess:managed_process.py:31 Terminating PID: 584 name: python3
+INFO     ManagedProcess:managed_process.py:36 Sending SIGTERM (kill): 584 python3
+INFO     ManagedProcess:managed_process.py:31 Terminating PID: 585 name: sglang::schedul
+INFO     ManagedProcess:managed_process.py:36 Sending SIGTERM (kill): 585 sglang::schedul
+INFO     ManagedProcess:managed_process.py:31 Terminating PID: 586 name: sglang::detoken
+INFO     ManagedProcess:managed_process.py:36 Sending SIGTERM (kill): 586 sglang::detoken
+INFO     ManagedProcess:managed_process.py:31 Terminating PID: 303 name: tee
+INFO     ManagedProcess:managed_process.py:36 Sending SIGTERM (kill): 303 tee
+INFO     ManagedProcess:managed_process.py:31 Terminating PID: 302 name: sed
+INFO     ManagedProcess:managed_process.py:36 Sending SIGTERM (kill): 302 sed
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:335 Waiting for SGLang worker resources to fully clean up...
+INFO     EtcdServer:managed_process.py:388 Terminating process group: 251
+INFO     EtcdServer:managed_process.py:31 Terminating PID: 251 name: etcd
+INFO     EtcdServer:managed_process.py:36 Sending SIGTERM (kill): 251 etcd
+INFO     EtcdServer:managed_process.py:31 Terminating PID: 252 name: sed
+INFO     EtcdServer:managed_process.py:36 Sending SIGTERM (kill): 252 sed
+INFO     NatsServer:managed_process.py:388 Terminating process group: 238
+INFO     NatsServer:managed_process.py:31 Terminating PID: 238 name: nats-server
+INFO     NatsServer:managed_process.py:36 Sending SIGTERM (kill): 238 nats-server
+INFO     NatsServer:managed_process.py:31 Terminating PID: 239 name: sed
+INFO     NatsServer:managed_process.py:36 Sending SIGTERM (kill): 239 sed

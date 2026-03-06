@@ -1,0 +1,1 @@
+[2m2026-03-06T06:55:33.624206Z[0m [33m WARN[0m [2mprometheus.get_avg_request_count[0m[2m:[0m No prometheus metric data available for dynamo_component_router_requests_total, use 0 instead

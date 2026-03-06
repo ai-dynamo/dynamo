@@ -1,0 +1,1 @@
+[2m2026-03-06T06:57:34.095045Z[0m [32m INFO[0m [2mplanner_core._initialize_gpu_counts[0m[2m:[0m Using GPU counts from CLI: prefill=2, decode=4
