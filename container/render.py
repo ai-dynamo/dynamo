@@ -4,7 +4,6 @@
 
 import argparse
 import re
-import subprocess
 from pathlib import Path
 
 import yaml
@@ -133,24 +132,6 @@ def validate_args(args):
     )
 
 
-def get_commit_sha():
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            capture_output=True, text=True, check=True,
-        )
-        sha = result.stdout.strip()
-        dirty = subprocess.run(
-            ["git", "status", "--porcelain"],
-            capture_output=True, text=True, check=True,
-        )
-        if dirty.stdout.strip():
-            sha += "-dirty"
-        return sha
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return ""
-
-
 def render(args, context, script_dir):
     env = Environment(
         loader=FileSystemLoader(script_dir),
@@ -167,7 +148,6 @@ def render(args, context, script_dir):
         platform=args.platform,
         cuda_version=args.cuda_version,
         make_efa=args.make_efa,
-        commit_sha=get_commit_sha(),
     )
     # Replace all instances of 3+ newlines with 2 newlines
     cleaned = re.sub(r"\n{3,}", "\n\n", rendered)
