@@ -58,20 +58,28 @@ _FINISH_REASON_MAP: dict[str, str] = {
     "stop": "stop",
     "length": "length",
     "error": "error",
+    "abort": "stop",
     "cancelled": "stop",
     "content_filter": "stop",
 }
 
 
 def _map_finish_reason(raw: str | None) -> str | None:
-    """Map Dynamo router finish reasons to OpenAI finish reasons."""
+    """Map Dynamo router finish reasons to OpenAI finish reasons.
+
+    Exact matches use the dict.  Prefixed variants (``error:timeout``,
+    ``abort:cancelled``) are handled by ``startswith`` fallbacks.
+    """
     if raw is None:
         return None
+    mapped = _FINISH_REASON_MAP.get(raw)
+    if mapped is not None:
+        return mapped
     if raw.startswith("error"):
         return "error"
     if raw.startswith("abort"):
         return "stop"
-    return _FINISH_REASON_MAP.get(raw, raw)
+    return raw
 
 
 # ---------------------------------------------------------------------------
@@ -390,9 +398,11 @@ class SglangProcessor:
 
             # Accumulate tokens for batched detokenization when
             # stream_interval > 1.  Flush every N tokens or on
-            # finish_reason.
+            # finish_reason.  Use si=1 for the first chunk to minimize
+            # TTFT, then switch to the configured interval.
             pending_token_ids: list[int] = []
             pending_usage: dict[str, Any] | None = None
+            first_chunk = True
 
             async for dynamo_response in dynamo_stream:
                 if self.is_kv_router:
@@ -423,8 +433,10 @@ class SglangProcessor:
 
                 pending_token_ids.extend(new_ids)
 
-                # Flush on finish or when we've accumulated enough tokens
-                if finish_reason or len(pending_token_ids) >= stream_interval:
+                # Flush on finish or when we've accumulated enough tokens.
+                # First chunk flushes immediately (si=1) to minimize TTFT.
+                flush_threshold = 1 if first_chunk else stream_interval
+                if finish_reason or len(pending_token_ids) >= flush_threshold:
                     mapped_response = {
                         "token_ids": pending_token_ids,
                         "finish_reason": finish_reason,
@@ -455,6 +467,7 @@ class SglangProcessor:
 
                     pending_token_ids = []
                     pending_usage = None
+                    first_chunk = False
         finally:
             if self.debug_perf and token_count > 0:
                 logger.info(

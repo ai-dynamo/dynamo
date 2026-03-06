@@ -248,6 +248,9 @@ class TestMapFinishReason:
         """error:* strings all map to 'error'."""
         assert _map_finish_reason("error:timeout") == "error"
 
+    def test_abort_exact(self):
+        assert _map_finish_reason("abort") == "stop"
+
     def test_abort_prefix(self):
         """abort:* strings all map to 'stop'."""
         assert _map_finish_reason("abort:cancelled") == "stop"

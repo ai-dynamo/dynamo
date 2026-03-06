@@ -99,7 +99,7 @@ These arguments are passed to the **frontend** (not the worker) when using `--dy
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DYN_SGLANG_STREAM_INTERVAL` | `20` | Number of tokens to accumulate before detokenizing. Higher values improve throughput but increase time-to-first-token. |
+| `DYN_SGLANG_STREAM_INTERVAL` | `20` | Number of tokens to accumulate before detokenizing. Higher values improve throughput. The first chunk always emits immediately (interval=1) to minimize time-to-first-token. |
 
 ## Tool Calling
 
@@ -184,10 +184,10 @@ The SGLang processor adds Python overhead compared to the default Rust preproces
 | `stream_interval` | Throughput vs Rust | TTFT Impact | Use Case |
 |-------------------|--------------------|-------------|----------|
 | 1 | ~50-60% | Minimal | Low-latency streaming |
-| 20 (default) | ~85-100% | Moderate | General use |
-| 50+ | ~95%+ | High | Batch/throughput-oriented |
+| 20 (default) | ~85-100% | Minimal | General use |
+| 50+ | ~95%+ | Moderate | Batch/throughput-oriented |
 
-Higher values reduce Python GIL contention by batching tokens before detokenization. The default of 20 balances throughput and responsiveness.
+Higher values reduce Python GIL contention by batching tokens before detokenization. The first chunk always emits immediately regardless of the interval, so TTFT is unaffected. The default of 20 balances throughput and responsiveness.
 
 ### Preprocessing Offload
 
