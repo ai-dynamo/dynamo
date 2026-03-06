@@ -21,7 +21,7 @@ import re
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
-from typing import Any, Optional, Union
+from typing import TYPE_CHECKING, Any, Optional, Union
 
 import torch
 from tensorrt_llm.executor.result import GenerationResult
@@ -48,6 +48,11 @@ from dynamo.trtllm.utils.disagg_utils import (
     DisaggregatedParamsCodec,
 )
 
+if TYPE_CHECKING:
+    from tensorrt_llm.metrics import MetricsCollector
+
+    from dynamo.trtllm.metrics import AdditionalMetricsCollector
+
 configure_dynamo_logging()
 
 
@@ -69,12 +74,12 @@ class RequestHandlerConfig:
     runtime: Optional[
         DistributedRuntime
     ] = None  # DistributedRuntime reference for graceful shutdown
-    metrics_collector: Optional[Any] = None  # TensorRT-LLM MetricsCollector
+    metrics_collector: Optional["MetricsCollector"] = None
     kv_block_size: int = 32
     shutdown_event: Optional[asyncio.Event] = None
     encoder_cache_capacity_gb: float = 0  # Encoder cache capacity in GB
     disable_request_abort: bool = True
-    additional_metrics: Optional[object] = None  # AdditionalMetricsCollector
+    additional_metrics: Optional["AdditionalMetricsCollector"] = None
 
 
 class HandlerBase(BaseGenerativeHandler):
@@ -632,17 +637,17 @@ class HandlerBase(BaseGenerativeHandler):
                 sampling_options = request.get("sampling_options", {})
                 guided = sampling_options.get("guided_decoding")
                 if guided and isinstance(guided, dict):
-                    if any(
-                        guided.get(k)
+                    has_structured_guidance = any(
+                        guided.get(k) is not None
                         for k in (
                             "json",
                             "regex",
                             "grammar",
                             "json_object",
-                            "choice",
                             "structural_tag",
                         )
-                    ):
+                    ) or bool(guided.get("choice"))
+                    if has_structured_guidance:
                         metrics_collector.record_request_type_structured_output()
                 if (
                     request.get("multi_modal_data")

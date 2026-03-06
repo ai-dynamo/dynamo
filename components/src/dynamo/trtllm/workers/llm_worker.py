@@ -406,15 +406,14 @@ async def init_llm_worker(
                 )
                 logging.info("TensorRT-LLM MetricsCollector initialized")
 
-                # Build prefix filter list — trtllm_ engine metrics + additional metrics
+                # Prefix filter: all TRT-LLM metrics (engine + additional) use "trtllm_" prefix
                 _metric_prefixes = ["trtllm_"]
 
-                # --- Additional metrics ---
+                # Additional metrics (abort tracking, request types, KV transfer perf).
+                # Wrapped in try/except because AdditionalMetricsCollector depends on
+                # prometheus_names which may not be available in all packaging variants.
                 try:
-                    from dynamo.trtllm.metrics import (
-                        ADDITIONAL_METRIC_PREFIXES,
-                        AdditionalMetricsCollector,
-                    )
+                    from dynamo.trtllm.metrics import AdditionalMetricsCollector
 
                     disagg_mode_str = (
                         config.disaggregation_mode.value
@@ -428,7 +427,6 @@ async def init_llm_worker(
                             "engine_type": "trtllm",
                         },
                     )
-                    _metric_prefixes.extend(ADDITIONAL_METRIC_PREFIXES)
                     logging.info(
                         "Additional metrics initialized (disagg_mode=%s)",
                         disagg_mode_str,

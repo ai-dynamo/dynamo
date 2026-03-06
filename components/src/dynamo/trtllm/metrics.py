@@ -35,6 +35,8 @@ from datetime import timedelta
 
 from prometheus_client import Counter, Histogram
 
+from dynamo.prometheus_names import trtllm_additional as metric_names
+
 logger = logging.getLogger(__name__)
 
 # Histogram buckets for KV cache transfer metrics
@@ -81,15 +83,6 @@ KV_TRANSFER_BYTES_BUCKETS = (
 )
 
 
-# Metric name prefixes for register_engine_metrics_callback filtering.
-# Must be kept in sync with the metric names defined in AdditionalMetricsCollector.
-ADDITIONAL_METRIC_PREFIXES = [
-    "num_aborted_requests_total",
-    "request_type_",
-    "kv_transfer_",
-]
-
-
 class AdditionalMetricsCollector:
     """
     Additional Prometheus metrics for dynamo-trtllm.
@@ -107,43 +100,43 @@ class AdditionalMetricsCollector:
 
         # --- Abort tracking ---
         self.num_aborted_requests = Counter(
-            "num_aborted_requests_total",
+            metric_names.NUM_ABORTED_REQUESTS_TOTAL,
             "Total number of aborted/cancelled requests",
             labelnames=self._labelnames,
         )
 
         # --- Request type counters ---
         self.request_type_image = Counter(
-            "request_type_image_total",
+            metric_names.REQUEST_TYPE_IMAGE_TOTAL,
             "Total number of requests containing image content",
             labelnames=self._labelnames,
         )
         self.request_type_structured_output = Counter(
-            "request_type_structured_output_total",
+            metric_names.REQUEST_TYPE_STRUCTURED_OUTPUT_TOTAL,
             "Total number of requests using guided/structured decoding",
             labelnames=self._labelnames,
         )
 
         # --- KV cache transfer metrics ---
         self.kv_transfer_success = Counter(
-            "kv_transfer_success_total",
+            metric_names.KV_TRANSFER_SUCCESS_TOTAL,
             "Total number of successful KV cache transfers",
             labelnames=self._labelnames,
         )
         self.kv_transfer_latency = Histogram(
-            "kv_transfer_latency_seconds",
+            metric_names.KV_TRANSFER_LATENCY_SECONDS,
             "KV cache transfer latency per request in seconds",
             labelnames=self._labelnames,
             buckets=KV_TRANSFER_LATENCY_BUCKETS,
         )
         self.kv_transfer_bytes = Histogram(
-            "kv_transfer_bytes",
+            metric_names.KV_TRANSFER_BYTES,
             "KV cache transfer size per request in bytes",
             labelnames=self._labelnames,
             buckets=KV_TRANSFER_BYTES_BUCKETS,
         )
         self.kv_transfer_speed = Histogram(
-            "kv_transfer_speed_gb_s",
+            metric_names.KV_TRANSFER_SPEED_GB_S,
             "KV cache transfer speed per request in GB/s",
             labelnames=self._labelnames,
             buckets=KV_TRANSFER_SPEED_BUCKETS,

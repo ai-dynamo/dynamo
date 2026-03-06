@@ -23,7 +23,7 @@ class TestAdditionalMetricsCollector(unittest.TestCase):
         ) as MockHistogram:
             from prometheus_client import Counter, Histogram
 
-            def make_counter(name, documentation, labelnames=None, **kw):
+            def make_counter(name, documentation, labelnames=None, **_kw):
                 return Counter(
                     name,
                     documentation,
@@ -32,7 +32,7 @@ class TestAdditionalMetricsCollector(unittest.TestCase):
                 )
 
             def make_histogram(
-                name, documentation, labelnames=None, buckets=None, **kw
+                name, documentation, labelnames=None, buckets=None, **_kw
             ):
                 kwargs = {"registry": self.registry}
                 if buckets is not None:
@@ -54,7 +54,7 @@ class TestAdditionalMetricsCollector(unittest.TestCase):
                 },
             )
 
-    def _get_metric_value(self, name, labels=None):
+    def _get_metric_value(self, name, _labels=None):
         """Get a metric value from the registry."""
         output = generate_latest(self.registry).decode()
         for line in output.splitlines():
@@ -71,21 +71,21 @@ class TestAdditionalMetricsCollector(unittest.TestCase):
         """Test abort tracking."""
         self.collector.record_request_abort()
         output = generate_latest(self.registry).decode()
-        self.assertIn("num_aborted_requests_total", output)
+        self.assertIn("trtllm_num_aborted_requests_total", output)
 
     def test_request_type_counters(self):
         """Test request type counters."""
         self.collector.record_request_type_image()
         self.collector.record_request_type_structured_output()
         output = generate_latest(self.registry).decode()
-        self.assertIn("request_type_image_total", output)
-        self.assertIn("request_type_structured_output_total", output)
+        self.assertIn("trtllm_request_type_image_total", output)
+        self.assertIn("trtllm_request_type_structured_output_total", output)
 
     def test_kv_transfer_success_counter(self):
         """Test KV transfer success counter."""
         self.collector.record_kv_transfer_success()
         output = generate_latest(self.registry).decode()
-        self.assertIn("kv_transfer_success_total", output)
+        self.assertIn("trtllm_kv_transfer_success_total", output)
 
     def test_kv_transfer_perf_metrics(self):
         """Test KV transfer latency/bytes/speed from timing_metrics."""
@@ -97,9 +97,9 @@ class TestAdditionalMetricsCollector(unittest.TestCase):
         result = self.collector.record_kv_transfer_perf(tm)
         self.assertTrue(result)
         output = generate_latest(self.registry).decode()
-        self.assertIn("kv_transfer_latency_seconds", output)
-        self.assertIn("kv_transfer_bytes_bucket", output)
-        self.assertIn("kv_transfer_speed_gb_s", output)
+        self.assertIn("trtllm_kv_transfer_latency_seconds", output)
+        self.assertIn("trtllm_kv_transfer_bytes_bucket", output)
+        self.assertIn("trtllm_kv_transfer_speed_gb_s", output)
 
     def test_kv_transfer_perf_skipped_when_no_transfer(self):
         """Test that KV transfer perf is not recorded when no transfer occurred."""
@@ -111,7 +111,9 @@ class TestAdditionalMetricsCollector(unittest.TestCase):
         result = self.collector.record_kv_transfer_perf(tm)
         self.assertFalse(result)
         # Histogram is defined but should have no observations
-        sample = self.registry.get_sample_value("kv_transfer_latency_seconds_count")
+        sample = self.registry.get_sample_value(
+            "trtllm_kv_transfer_latency_seconds_count"
+        )
         self.assertEqual(sample, 0.0)
 
     def test_kv_transfer_perf_return_values(self):
