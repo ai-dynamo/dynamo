@@ -1712,17 +1712,3 @@ class PerformanceMetricsRegistry:
     def new_rate_metric(self, name: str, quantiles: Optional[List[float]] = None, sample_period_seconds: float = 1.0, window_seconds: Optional[float] = None) -> RateMetric: ...
     def new_distribution_metric(self, name: str, quantiles: Optional[List[float]] = None, window_seconds: Optional[float] = None) -> DistributionMetric: ...
     def new_ratio_metric(self, name: str, quantiles: Optional[List[float]] = None, window_seconds: Optional[float] = None) -> RatioMetric: ...
-
-__all__ = [
-    "Client",
-    "Context",
-    "KserveGrpcService",
-    "ModelDeploymentCard",
-    "RateMetric",
-    "DistributionMetric",
-    "RatioMetric",
-    "PerformanceMetricsRegistry",
-    "PythonAsyncEngine",
-    "prometheus_names",
-    "ModelCardInstanceId",
-]
