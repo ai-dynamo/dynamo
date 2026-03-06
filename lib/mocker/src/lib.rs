@@ -10,4 +10,6 @@
 pub mod cache;
 pub mod common;
 pub mod kv_manager;
+pub mod mocker;
+pub use mocker::make_mocker_engine; // Re-export nicely for bindings
 pub mod scheduler;
