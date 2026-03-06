@@ -98,7 +98,7 @@ jobs:
       - name: Clean up previous unsigned-commits comments
         if: steps.fork_check.outputs.is_fork == 'true' && steps.author_check.outputs.is_approved == 'true'
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.AUTO_VERIFIER_CI_TOKEN }}
           REPO_OWNER: ${{ github.repository_owner }}
           REPO_NAME: ${{ github.event.repository.name }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -112,7 +112,7 @@ jobs:
       - name: Comment unsigned commits
         if: steps.fork_check.outputs.is_fork == 'true' && steps.author_check.outputs.is_approved == 'true' && steps.signature_check.outputs.all_signed == 'false'
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.AUTO_VERIFIER_CI_TOKEN }}
           REPO_OWNER: ${{ github.repository_owner }}
           REPO_NAME: ${{ github.event.repository.name }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
