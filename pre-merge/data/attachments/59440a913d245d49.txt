@@ -1,0 +1,85 @@
+[2m2026-03-06T19:59:33.270495Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: nats-server --trace -p 4320 in /workspace
+[2m2026-03-06T19:59:33.271521Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 4320
+[2m2026-03-06T19:59:33.372210Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 4320
+[2m2026-03-06T19:59:33.372494Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m Running custom health check '_nats_ready'
+[2m2026-03-06T19:59:33.374797Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+[2m2026-03-06T19:59:33.375496Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: etcd --listen-client-urls http://0.0.0.0:2396 --advertise-client-urls http://0.0.0.0:2396 --listen-peer-urls http://0.0.0.0:2397 --initial-advertise-peer-urls http://localhost:2397 --initial-cluster default=http://localhost:2397 --data-dir /tmp/etcd_ev7mkb_w in /workspace
+[2m2026-03-06T19:59:33.376353Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 2396
+[2m2026-03-06T19:59:33.477015Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 2396
+[2m2026-03-06T19:59:33.478426Z[0m [32m INFO[0m [2mtest_router_e2e_with_vllm.test_vllm_kv_router_basic[0m[2m:[0m Starting vLLM KV router test with 2 workers using request_plane=tcp
+[2m2026-03-06T19:59:33.684270Z[0m [32m INFO[0m [2mtest_router_e2e_with_vllm.__init__[0m[2m:[0m Created vLLM worker 0 on GPU 0 (gpu_mem=0.4, system_port=8128) with endpoint: dyn://test-namespace-pltzlnqzyu.backend.generate
+[2m2026-03-06T19:59:33.684618Z[0m [32m INFO[0m [2mtest_router_e2e_with_vllm.__init__[0m[2m:[0m Created vLLM worker 1 on GPU 0 (gpu_mem=0.4, system_port=8129) with endpoint: dyn://test-namespace-pltzlnqzyu.backend.generate
+[2m2026-03-06T19:59:33.684765Z[0m [32m INFO[0m [2mtest_router_e2e_with_vllm.__enter__[0m[2m:[0m [VLLMProcess] Starting 2 worker processes sequentially...
+[2m2026-03-06T19:59:33.684894Z[0m [32m INFO[0m [2mtest_router_e2e_with_vllm.__enter__[0m[2m:[0m [VLLMProcess] Starting vLLM worker 0...
+[2m2026-03-06T19:59:33.685127Z[0m [32m INFO[0m [2mtest_router_e2e_with_vllm.__enter__[0m[2m:[0m [VLLMProcess] Launching process 0 (pid will be assigned)...
+[2m2026-03-06T19:59:33.685236Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python3 -m dynamo.vllm --model TinyLlama/TinyLlama-1.1B-Chat-v1.0 --block-size 16 --enforce-eager --gpu-memory-utilization 0.4 --max-model-len 1024 --kv-events-config {"publisher": "zmq", "topic": "kv-events", "endpoint": "tcp://*:8090", "enable_kv_cache_events": true} in /workspace
+[2m2026-03-06T19:59:33.687200Z[0m [32m INFO[0m [2mtest_router_e2e_with_vllm.__enter__[0m[2m:[0m [VLLMProcess] Worker 0 launched with PID: 2093
+[2m2026-03-06T19:59:33.687362Z[0m [32m INFO[0m [2mtest_router_e2e_with_vllm.__enter__[0m[2m:[0m [VLLMProcess] Waiting 5s for worker 0 to initialize NIXL before starting next worker...
+[2m2026-03-06T19:59:38.687596Z[0m [32m INFO[0m [2mtest_router_e2e_with_vllm.__enter__[0m[2m:[0m [VLLMProcess] Starting vLLM worker 1...
+[2m2026-03-06T19:59:38.687814Z[0m [32m INFO[0m [2mtest_router_e2e_with_vllm.__enter__[0m[2m:[0m [VLLMProcess] Launching process 1 (pid will be assigned)...
+[2m2026-03-06T19:59:38.687890Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python3 -m dynamo.vllm --model TinyLlama/TinyLlama-1.1B-Chat-v1.0 --block-size 16 --enforce-eager --gpu-memory-utilization 0.4 --max-model-len 1024 --kv-events-config {"publisher": "zmq", "topic": "kv-events", "endpoint": "tcp://*:8091", "enable_kv_cache_events": true} in /workspace
+[2m2026-03-06T19:59:38.689192Z[0m [32m INFO[0m [2mtest_router_e2e_with_vllm.__enter__[0m[2m:[0m [VLLMProcess] Worker 1 launched with PID: 2146
+[2m2026-03-06T19:59:38.689320Z[0m [32m INFO[0m [2mtest_router_e2e_with_vllm.__enter__[0m[2m:[0m [VLLMProcess] All 2 workers launched with sequential initialization.
+[2m2026-03-06T19:59:38.689383Z[0m [32m INFO[0m [2mtest_router_e2e_with_vllm.__enter__[0m[2m:[0m [VLLMProcess] Waiting for health checks to complete...
+[2m2026-03-06T19:59:38.689437Z[0m [32m INFO[0m [2mtest_router_e2e_with_vllm.__enter__[0m[2m:[0m [VLLMProcess] Checking health for worker 0...
+[2m2026-03-06T19:59:38.689492Z[0m [32m INFO[0m [2mtest_router_e2e_with_vllm.__enter__[0m[2m:[0m [VLLMProcess] Worker 0 health checks passed
+[2m2026-03-06T19:59:38.689545Z[0m [32m INFO[0m [2mtest_router_e2e_with_vllm.__enter__[0m[2m:[0m [VLLMProcess] Checking health for worker 1...
+[2m2026-03-06T19:59:38.689599Z[0m [32m INFO[0m [2mtest_router_e2e_with_vllm.__enter__[0m[2m:[0m [VLLMProcess] Worker 1 health checks passed
+[2m2026-03-06T19:59:38.689649Z[0m [32m INFO[0m [2mtest_router_e2e_with_vllm.__enter__[0m[2m:[0m [VLLMProcess] All workers started successfully and passed health checks!
+[2m2026-03-06T19:59:38.689711Z[0m [32m INFO[0m [2mtest_router_e2e_with_vllm.test_vllm_kv_router_basic[0m[2m:[0m Starting 2 vLLM workers
+[2m2026-03-06T19:59:38.689760Z[0m [32m INFO[0m [2mtest_router_e2e_with_vllm.test_vllm_kv_router_basic[0m[2m:[0m All vLLM workers using namespace: test-namespace-pltzlnqzyu
+[2m2026-03-06T19:59:38.690471Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python3 -m dynamo.frontend --kv-cache-block-size 16 --router-mode kv --http-port 8029 --discovery-backend etcd --namespace test-namespace-pltzlnqzyu in /workspace
+[2m2026-03-06T19:59:38.691590Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 8029
+[2m2026-03-06T19:59:39.293868Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 8029
+[2m2026-03-06T19:59:39.294055Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8029/v1/models
+[2m2026-03-06T19:59:39.296056Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8029/v1/models (attempt=1, elapsed=0.0s)
+Response:
+{
+  "object": "list",
+  "data": []
+}
+[2m2026-03-06T19:59:39.296206Z[0m [32m INFO[0m [2mcommon._test_router_basic[0m[2m:[0m Starting KV router frontend on port 8029
+[2m2026-03-06T19:59:39.296263Z[0m [32m INFO[0m [2mcommon._test_router_basic[0m[2m:[0m Waiting for workers to register with frontend...
+[2m2026-03-06T19:59:39.296521Z[0m [32m INFO[0m [2mcommon.wait_for_frontend_ready[0m[2m:[0m Waiting for 2 workers to register on HTTP frontend (timeout=180s)...
+[2m2026-03-06T20:00:01.361395Z[0m [32m INFO[0m [2mcommon.wait_for_frontend_ready[0m[2m:[0m Workers registered. Found 1 model(s): ['TinyLlama/TinyLlama-1.1B-Chat-v1.0']
+[2m2026-03-06T20:00:01.361706Z[0m [32m INFO[0m [2mcommon.wait_for_frontend_ready[0m[2m:[0m Waiting for chat completions pipeline to be built...
+[2m2026-03-06T20:00:01.480154Z[0m [32m INFO[0m [2mcommon.wait_for_frontend_ready[0m[2m:[0m Chat completions pipeline ready!
+[2m2026-03-06T20:00:01.481061Z[0m [32m INFO[0m [2mcommon._test_router_basic[0m[2m:[0m Sending 10 concurrent requests to frontend...
+[2m2026-03-06T20:00:01.481365Z[0m [32m INFO[0m [2mcommon.send_inflight_requests[0m[2m:[0m Sending initial test request to URL 0 (http://localhost:8029/v1/chat/completions) with retry...
+[2m2026-03-06T20:00:02.825402Z[0m [32m INFO[0m [2mcommon.send_inflight_requests[0m[2m:[0m Completed all requests: 10 successful, 0 failed
+[2m2026-03-06T20:00:02.825868Z[0m [32m INFO[0m [2mcommon.send_inflight_requests[0m[2m:[0m All 10 requests completed successfully
+[2m2026-03-06T20:00:02.826400Z[0m [32m INFO[0m [2mcommon._test_router_basic[0m[2m:[0m Successfully completed 10 requests
+[2m2026-03-06T20:00:02.826470Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Terminating process group: 2149
+[2m2026-03-06T20:00:04.829851Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 2149 name: python3
+[2m2026-03-06T20:00:04.830042Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 2149 python3
+[2m2026-03-06T20:00:04.837856Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 2151 name: tee
+[2m2026-03-06T20:00:04.837965Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 2151 tee
+[2m2026-03-06T20:00:04.838652Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 2150 name: sed
+[2m2026-03-06T20:00:04.838744Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 2150 sed
+[2m2026-03-06T20:00:04.841991Z[0m [32m INFO[0m [2mtest_router_e2e_with_vllm.__exit__[0m[2m:[0m Stopping vLLM worker 0
+[2m2026-03-06T20:00:04.842072Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Terminating process group: 2093
+[2m2026-03-06T20:00:06.845261Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 2093 name: python3
+[2m2026-03-06T20:00:06.845465Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 2093 python3
+[2m2026-03-06T20:00:06.938273Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 2095 name: tee
+[2m2026-03-06T20:00:06.938439Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 2095 tee
+[2m2026-03-06T20:00:06.939064Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 2094 name: sed
+[2m2026-03-06T20:00:06.939176Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 2094 sed
+[2m2026-03-06T20:00:06.941168Z[0m [32m INFO[0m [2mtest_router_e2e_with_vllm.__exit__[0m[2m:[0m Stopping vLLM worker 1
+[2m2026-03-06T20:00:06.941237Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Terminating process group: 2146
+[2m2026-03-06T20:00:08.944840Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 2146 name: python3
+[2m2026-03-06T20:00:08.945002Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 2146 python3
+[2m2026-03-06T20:00:08.945560Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 2148 name: tee
+[2m2026-03-06T20:00:08.945655Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 2148 tee
+[2m2026-03-06T20:00:08.946127Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 2147 name: sed
+[2m2026-03-06T20:00:08.946247Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 2147 sed
+[2m2026-03-06T20:00:08.947897Z[0m [32m INFO[0m [2mtest_router_e2e_with_vllm.__exit__[0m[2m:[0m Waiting for vLLM worker resources to fully clean up...
+[2m2026-03-06T20:00:10.952355Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Terminating process group: 2081
+[2m2026-03-06T20:00:12.955242Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 2081 name: etcd
+[2m2026-03-06T20:00:12.955392Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 2081 etcd
+[2m2026-03-06T20:00:12.955874Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 2082 name: sed
+[2m2026-03-06T20:00:12.955964Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 2082 sed
+[2m2026-03-06T20:00:12.957929Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Terminating process group: 2069
+[2m2026-03-06T20:00:14.961032Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 2069 name: nats-server
+[2m2026-03-06T20:00:14.961386Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 2069 nats-server
+[2m2026-03-06T20:00:14.961868Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 2070 name: sed
+[2m2026-03-06T20:00:14.961962Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 2070 sed

@@ -1,0 +1,1 @@
+{"id":"69bdcb9193414e72cf9f4aa57bad10c7","fullName":"components.src.dynamo.vllm.tests.multimodal_handlers.test_vllm_multimodal_pd_worker_handler.TestLoadMultimodalData#test_passes_cache_to_load_multimodal_embeddings","name":"test_passes_cache_to_load_multimodal_embeddings","status":"passed","testResultsByEnv":{"default":"95c75287d4ee4102a147b7d1c111c948"}}

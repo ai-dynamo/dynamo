@@ -1,2 +1,0 @@
-[2m2026-03-06T06:58:54.058200Z[0m [32m INFO[0m [2margs.create_kv_events_config[0m[2m:[0m Using env-var DYN_VLLM_KV_EVENT_PORT=20080 to create kv_events_config
-[2m2026-03-06T06:58:54.058267Z[0m [32m INFO[0m [2margs.update_engine_config_with_dynamo[0m[2m:[0m Using kv_events_config for publishing vLLM kv events over zmq: KVEventsConfig(enable_kv_cache_events=True, publisher='zmq', endpoint='tcp://*:20080', replay_endpoint=None, buffer_steps=10000, hwm=100000, max_queue_size=100000, topic='') (use_kv_events=True)

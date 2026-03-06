@@ -1,0 +1,46 @@
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10069
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:10069 "POST /v1/chat/completions HTTP/1.1" 200 412
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10069
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:10069 "POST /v1/chat/completions HTTP/1.1" 200 477
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10069
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:10069 "POST /v1/chat/completions HTTP/1.1" 200 412
+INFO     FrontendProcess:managed_process.py:388 Terminating process group: 1006
+INFO     FrontendProcess:managed_process.py:31 Terminating PID: 1006 name: python3
+INFO     FrontendProcess:managed_process.py:36 Sending SIGTERM (kill): 1006 python3
+INFO     FrontendProcess:managed_process.py:31 Terminating PID: 1008 name: tee
+INFO     FrontendProcess:managed_process.py:36 Sending SIGTERM (kill): 1008 tee
+INFO     FrontendProcess:managed_process.py:31 Terminating PID: 1007 name: sed
+INFO     FrontendProcess:managed_process.py:36 Sending SIGTERM (kill): 1007 sed
+INFO     FrontendProcess:managed_process.py:216 Checking for straggler processes: stragglers=[], straggler_commands=['-m dynamo.frontend']
+INFO     TRTLLMMMRouterWorkerProcess:managed_process.py:388 Terminating process group: 869
+INFO     TRTLLMMMRouterWorkerProcess:managed_process.py:31 Terminating PID: 869 name: python3
+INFO     TRTLLMMMRouterWorkerProcess:managed_process.py:36 Sending SIGTERM (kill): 869 python3
+INFO     TRTLLMMMRouterWorkerProcess:managed_process.py:31 Terminating PID: 871 name: tee
+INFO     TRTLLMMMRouterWorkerProcess:managed_process.py:36 Sending SIGTERM (kill): 871 tee
+INFO     TRTLLMMMRouterWorkerProcess:managed_process.py:31 Terminating PID: 870 name: sed
+INFO     TRTLLMMMRouterWorkerProcess:managed_process.py:36 Sending SIGTERM (kill): 870 sed
+INFO     TRTLLMMMRouterWorkerProcess:managed_process.py:216 Checking for straggler processes: stragglers=[], straggler_commands=['mm_router_worker']
+INFO     TRTLLMWorkerProcess:managed_process.py:388 Terminating process group: 546
+INFO     TRTLLMWorkerProcess:managed_process.py:31 Terminating PID: 546 name: python3
+INFO     TRTLLMWorkerProcess:managed_process.py:36 Sending SIGTERM (kill): 546 python3
+INFO     TRTLLMWorkerProcess:managed_process.py:31 Terminating PID: 565 name: orted
+INFO     TRTLLMWorkerProcess:managed_process.py:36 Sending SIGTERM (kill): 565 orted
+INFO     TRTLLMWorkerProcess:managed_process.py:31 Terminating PID: 1123 name: torch_shm_manager
+INFO     TRTLLMWorkerProcess:managed_process.py:36 Sending SIGTERM (kill): 1123 torch_shm_manager
+INFO     TRTLLMWorkerProcess:managed_process.py:31 Terminating PID: 675 name: python3
+INFO     TRTLLMWorkerProcess:managed_process.py:36 Sending SIGTERM (kill): 675 python3
+INFO     TRTLLMWorkerProcess:managed_process.py:31 Terminating PID: 548 name: tee
+INFO     TRTLLMWorkerProcess:managed_process.py:36 Sending SIGTERM (kill): 548 tee
+INFO     TRTLLMWorkerProcess:managed_process.py:31 Terminating PID: 547 name: sed
+INFO     TRTLLMWorkerProcess:managed_process.py:36 Sending SIGTERM (kill): 547 sed
+INFO     TRTLLMWorkerProcess:managed_process.py:216 Checking for straggler processes: stragglers=[], straggler_commands=['-m dynamo.trtllm']
+INFO     EtcdServer:managed_process.py:388 Terminating process group: 535
+INFO     EtcdServer:managed_process.py:31 Terminating PID: 535 name: etcd
+INFO     EtcdServer:managed_process.py:36 Sending SIGTERM (kill): 535 etcd
+INFO     EtcdServer:managed_process.py:31 Terminating PID: 536 name: sed
+INFO     EtcdServer:managed_process.py:36 Sending SIGTERM (kill): 536 sed
+INFO     NatsServer:managed_process.py:388 Terminating process group: 521
+INFO     NatsServer:managed_process.py:31 Terminating PID: 521 name: nats-server
+INFO     NatsServer:managed_process.py:36 Sending SIGTERM (kill): 521 nats-server
+INFO     NatsServer:managed_process.py:31 Terminating PID: 522 name: sed
+INFO     NatsServer:managed_process.py:36 Sending SIGTERM (kill): 522 sed

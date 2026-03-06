@@ -1,0 +1,1 @@
+{"id":"1a6aadae3336297e963f713b0718f643","fullName":"tests.planner.unit.test_sla_planner_scaling.TestInitializeGpuCounts#test_kubernetes_mode_fallback_to_cli_on_dgd_error","name":"test_kubernetes_mode_fallback_to_cli_on_dgd_error","status":"passed","testResultsByEnv":{"default":"d791816868566859b5da6bb9f8cb00cd"}}

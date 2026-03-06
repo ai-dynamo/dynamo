@@ -1,0 +1,1 @@
+{"id":"75289bc24025ef0f04e56e82effaf254","fullName":"components.src.dynamo.vllm.tests.multimodal_handlers.test_vllm_multimodal_pd_worker_handler.TestInit#test_embedding_cache_created_when_capacity_set","name":"test_embedding_cache_created_when_capacity_set","status":"passed","testResultsByEnv":{"default":"90ff0656e0c2b4298fcffb331a7012fb"}}

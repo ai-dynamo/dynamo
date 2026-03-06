@@ -1,0 +1,40 @@
+[2m2026-03-06T19:54:21.197539Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Terminating process group: 1006
+[2m2026-03-06T19:54:23.201557Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 1006 name: python3
+[2m2026-03-06T19:54:23.201702Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 1006 python3
+[2m2026-03-06T19:54:23.215852Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 1008 name: tee
+[2m2026-03-06T19:54:23.215944Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 1008 tee
+[2m2026-03-06T19:54:23.216655Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 1007 name: sed
+[2m2026-03-06T19:54:23.216730Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 1007 sed
+[2m2026-03-06T19:54:23.216847Z[0m [32m INFO[0m [2mmanaged_process._cleanup_stragglers[0m[2m:[0m Checking for straggler processes: stragglers=[], straggler_commands=['-m dynamo.frontend']
+[2m2026-03-06T19:54:23.220148Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Terminating process group: 869
+[2m2026-03-06T19:54:25.222898Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 869 name: python3
+[2m2026-03-06T19:54:25.223017Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 869 python3
+[2m2026-03-06T19:54:25.223701Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 871 name: tee
+[2m2026-03-06T19:54:25.223779Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 871 tee
+[2m2026-03-06T19:54:25.224382Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 870 name: sed
+[2m2026-03-06T19:54:25.224457Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 870 sed
+[2m2026-03-06T19:54:25.224571Z[0m [32m INFO[0m [2mmanaged_process._cleanup_stragglers[0m[2m:[0m Checking for straggler processes: stragglers=[], straggler_commands=['mm_router_worker']
+[2m2026-03-06T19:54:25.226848Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Terminating process group: 546
+[2m2026-03-06T19:54:27.230470Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 546 name: python3
+[2m2026-03-06T19:54:27.230627Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 546 python3
+[2m2026-03-06T19:54:27.403336Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 565 name: orted
+[2m2026-03-06T19:54:27.403542Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 565 orted
+[2m2026-03-06T19:54:27.403736Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 1123 name: torch_shm_manager
+[2m2026-03-06T19:54:27.403845Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 1123 torch_shm_manager
+[2m2026-03-06T19:54:27.403975Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 675 name: python3
+[2m2026-03-06T19:54:27.404049Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 675 python3
+[2m2026-03-06T19:54:28.735137Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 548 name: tee
+[2m2026-03-06T19:54:28.735252Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 548 tee
+[2m2026-03-06T19:54:28.735712Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 547 name: sed
+[2m2026-03-06T19:54:28.735785Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 547 sed
+[2m2026-03-06T19:54:28.735899Z[0m [32m INFO[0m [2mmanaged_process._cleanup_stragglers[0m[2m:[0m Checking for straggler processes: stragglers=[], straggler_commands=['-m dynamo.trtllm']
+[2m2026-03-06T19:54:28.738191Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Terminating process group: 535
+[2m2026-03-06T19:54:30.741221Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 535 name: etcd
+[2m2026-03-06T19:54:30.741334Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 535 etcd
+[2m2026-03-06T19:54:30.741800Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 536 name: sed
+[2m2026-03-06T19:54:30.741875Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 536 sed
+[2m2026-03-06T19:54:30.743695Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Terminating process group: 521
+[2m2026-03-06T19:54:32.746541Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 521 name: nats-server
+[2m2026-03-06T19:54:32.746799Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 521 nats-server
+[2m2026-03-06T19:54:32.747470Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 522 name: sed
+[2m2026-03-06T19:54:32.747545Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 522 sed

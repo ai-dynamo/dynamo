@@ -1,0 +1,2 @@
+[2m2026-03-06T19:53:09.040552Z[0m [32m INFO[0m [2mmultimodal_pd_worker_handler.__init__[0m[2m:[0m Multimodal PD Worker startup started.
+[2m2026-03-06T19:53:09.040638Z[0m [32m INFO[0m [2mmultimodal_pd_worker_handler.__init__[0m[2m:[0m Multimodal PD Worker has been initialized

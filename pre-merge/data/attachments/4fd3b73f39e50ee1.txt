@@ -1,0 +1,119 @@
+[2m2026-03-06T20:12:31.649102Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: nats-server --trace -p 4268 in /workspace
+[2m2026-03-06T20:12:31.650181Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 4268
+[2m2026-03-06T20:12:31.750686Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 4268
+[2m2026-03-06T20:12:31.750829Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m Running custom health check '_nats_ready'
+[2m2026-03-06T20:12:31.752666Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+[2m2026-03-06T20:12:31.753307Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: etcd --listen-client-urls http://0.0.0.0:2458 --advertise-client-urls http://0.0.0.0:2458 --listen-peer-urls http://0.0.0.0:2459 --initial-advertise-peer-urls http://localhost:2459 --initial-cluster default=http://localhost:2459 --data-dir /tmp/etcd_q0ij3k55 in /workspace
+[2m2026-03-06T20:12:31.754142Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 2458
+[2m2026-03-06T20:12:31.854692Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 2458
+[2m2026-03-06T20:12:31.857812Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m Starting multimodal_agg_qwen test_deployment
+[2m2026-03-06T20:12:31.857885Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m Using model: Qwen/Qwen2.5-VL-7B-Instruct
+[2m2026-03-06T20:12:31.857934Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m Script: agg_multimodal.sh
+[2m2026-03-06T20:12:31.858105Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: bash /workspace/examples/backends/vllm/launch/agg_multimodal.sh --model Qwen/Qwen2.5-VL-7B-Instruct in /workspace/examples/backends/vllm
+[2m2026-03-06T20:12:31.859284Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8091/v1/models
+[2m2026-03-06T20:12:53.884035Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Still waiting for URL http://localhost:8091/v1/models (custom check failed) (attempt=12, elapsed=21.0s)
+[2m2026-03-06T20:13:13.904700Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Still waiting for URL http://localhost:8091/v1/models (custom check failed) (attempt=22, elapsed=41.0s)
+[2m2026-03-06T20:13:33.925062Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Still waiting for URL http://localhost:8091/v1/models (custom check failed) (attempt=32, elapsed=61.1s)
+[2m2026-03-06T20:13:39.931491Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8091/v1/models (attempt=35, elapsed=67.1s)
+Response:
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "Qwen/Qwen2.5-VL-7B-Instruct",
+      "object": "model",
+      "created": 1772828018,
+      "owned_by": "nvidia"
+    }
+  ]
+}
+[2m2026-03-06T20:13:39.931673Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8091/health
+[2m2026-03-06T20:13:40.934038Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8091/health (attempt=1, elapsed=0.0s)
+Response:
+{
+  "status": "healthy",
+  "endpoints": [
+    "dyn://dynamo.backend.clear_kv_blocks",
+    "dyn://dynamo.backend.generate",
+    "dyn://dynamo.backend.worker_kv_indexer_query_dp0"
+  ],
+  "instances": [
+    {
+      "component": "backend",
+      "endpoint": "clear_kv_blocks",
+      "namespace": "dynamo",
+      "instance_id": 409718460092947209,
+      "transport": {
+        "tcp": "10.1.78.181:36097/5af9cc4c7c29b09/clear_kv_blocks"
+      }
+    },
+    {
+      "component": "backend",
+      "endpoint": "generate",
+      "namespace": "dynamo",
+      "instance_id": 409718460092947209,
+      "transport": {
+        "tcp": "10.1.78.181:36097/5af9cc4c7c29b09/generate"
+      }
+    },
+    {
+      "component": "backend",
+      "endpoint": "worker_kv_indexer_query_dp0",
+      "namespace": "dynamo",
+      "instance_id": 409718460092947209,
+      "transport": {
+        "tcp": "10.1.78.181:36097/5af9cc4c7c29b09/worker_kv_indexer_query_dp0"
+      }
+    }
+  ]
+}
+[2m2026-03-06T20:13:40.934419Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m TESTING: Payload: ChatPayload
+[2m2026-03-06T20:13:40.934803Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Sending request (curl equivalent):
+curl -X POST "http://localhost:8091/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "What colors are in the following image? Respond only with the colors."
+        },
+        {
+          "type": "image_url",
+          "image_url": {
+            "url": "http://localhost:8765/llm-graphic.png"
+          }
+        }
+      ]
+    }
+  ],
+  "max_tokens": 100,
+  "stream": false,
+  "logprobs": false,
+  "model": "Qwen/Qwen2.5-VL-7B-Instruct"
+}'
+[2m2026-03-06T20:13:40.980091Z[0m [32m INFO[0m [2m_internal._log[0m[2m:[0m 127.0.0.1 - - [06/Mar/2026 20:13:40] "GET /llm-graphic.png HTTP/1.1" 200 -
+[2m2026-03-06T20:13:44.532061Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Received response: status=200, elapsed=3.60s
+[2m2026-03-06T20:13:44.532399Z[0m [32m INFO[0m [2mpayloads.validate[0m[2m:[0m SUCCESS: Found 1/1 expected keywords: ['purple']
+[2m2026-03-06T20:13:44.532457Z[0m [32m INFO[0m [2mengine_process.check_response[0m[2m:[0m Extracted content: 
+Purple, White, Green
+[2m2026-03-06T20:13:44.532509Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Terminating process group: 7134
+[2m2026-03-06T20:13:46.536419Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 7134 name: bash
+[2m2026-03-06T20:13:46.536583Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 7134 bash
+[2m2026-03-06T20:13:46.537746Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 7136 name: tee
+[2m2026-03-06T20:13:46.537841Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 7136 tee
+[2m2026-03-06T20:13:46.539374Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 7135 name: sed
+[2m2026-03-06T20:13:46.539468Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 7135 sed
+[2m2026-03-06T20:13:46.539824Z[0m [32m INFO[0m [2mmanaged_process._cleanup_stragglers[0m[2m:[0m Checking for straggler processes: stragglers=['VLLM:EngineCore'], straggler_commands=[]
+[2m2026-03-06T20:13:46.549071Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Terminating process group: 7121
+[2m2026-03-06T20:13:48.552787Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 7121 name: etcd
+[2m2026-03-06T20:13:48.552926Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 7121 etcd
+[2m2026-03-06T20:13:48.553936Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 7122 name: sed
+[2m2026-03-06T20:13:48.554028Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 7122 sed
+[2m2026-03-06T20:13:48.560383Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Terminating process group: 7109
+[2m2026-03-06T20:13:50.563962Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 7109 name: nats-server
+[2m2026-03-06T20:13:50.564119Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 7109 nats-server
+[2m2026-03-06T20:13:50.565095Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 7110 name: sed
+[2m2026-03-06T20:13:50.565187Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 7110 sed

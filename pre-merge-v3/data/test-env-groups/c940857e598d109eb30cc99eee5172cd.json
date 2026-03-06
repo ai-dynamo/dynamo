@@ -1,0 +1,1 @@
+{"id":"c940857e598d109eb30cc99eee5172cd","fullName":"tests.planner.unit.test_prometheus.TestPrometheusAPIClientRouterSource#test_get_avg_request_count_uses_router_requests_total","name":"test_get_avg_request_count_uses_router_requests_total","status":"passed","testResultsByEnv":{"default":"e3ae1c04b648df131b4ae3eb2dc9fe66"}}

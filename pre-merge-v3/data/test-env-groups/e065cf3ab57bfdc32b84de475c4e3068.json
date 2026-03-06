@@ -1,0 +1,1 @@
+{"id":"e065cf3ab57bfdc32b84de475c4e3068","fullName":"components.src.dynamo.vllm.tests.test_vllm_prompt_embeds.TestEmbeddingsDataFormats#test_embedding_value_ranges_preserved","name":"test_embedding_value_ranges_preserved[precise]","status":"passed","testResultsByEnv":{"default":"4f1b39067b660d9d4dac9465e543e4a9"}}

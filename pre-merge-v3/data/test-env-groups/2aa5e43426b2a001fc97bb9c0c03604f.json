@@ -1,0 +1,1 @@
+{"id":"2aa5e43426b2a001fc97bb9c0c03604f","fullName":"components.src.dynamo.vllm.tests.test_vllm_renderer_api.TestVllmRendererApi#test_chat_completion_request_model_validate_contract","name":"test_chat_completion_request_model_validate_contract","status":"passed","testResultsByEnv":{"default":"b3b4a749e213a5eaa7a605adb7cdc4f3"}}

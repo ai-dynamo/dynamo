@@ -1,0 +1,1 @@
+[2m2026-03-06T19:54:55.775294Z[0m [32m INFO[0m [2mmultimodal_embedding_cache_connector.__init__[0m[2m:[0m DynamoMultimodalEmbeddingCacheConnector initialized: capacity_gb=1.00, capacity_bytes=1073741824, bytes_per_embed=8192

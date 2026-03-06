@@ -1,0 +1,18 @@
+[2m2026-03-06T19:54:46.263381Z[0m [32m INFO[0m [2mconftest.predownload_models[0m[2m:[0m Downloading 5 models needed for collected tests
+Models: {'Qwen/Qwen2-VL-2B-Instruct', 'TinyLlama/TinyLlama-1.1B-Chat-v1.0', 'Qwen/Qwen2.5-VL-7B-Instruct', 'Qwen/Qwen3-0.6B', 'Qwen/Qwen3-VL-2B-Instruct'}
+[2m2026-03-06T19:54:46.263473Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m HF_TOKEN found in environment
+[2m2026-03-06T19:54:46.263524Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: Qwen/Qwen2-VL-2B-Instruct
+Fetching 14 files:   0%|          | 0/14 [00:00<?, ?it/s]Fetching 14 files:   7%|▋         | 1/14 [00:00<00:04,  2.95it/s]Fetching 14 files:  57%|█████▋    | 8/14 [00:05<00:04,  1.46it/s]Fetching 14 files: 100%|██████████| 14/14 [00:05<00:00,  2.61it/s]
+[2m2026-03-06T19:54:51.800376Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Successfully pre-downloaded: Qwen/Qwen2-VL-2B-Instruct
+[2m2026-03-06T19:54:51.800440Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: TinyLlama/TinyLlama-1.1B-Chat-v1.0
+Fetching 10 files:   0%|          | 0/10 [00:00<?, ?it/s]Fetching 10 files:  10%|█         | 1/10 [00:00<00:01,  7.67it/s]Fetching 10 files:  60%|██████    | 6/10 [00:04<00:02,  1.34it/s]Fetching 10 files: 100%|██████████| 10/10 [00:04<00:00,  2.33it/s]
+[2m2026-03-06T19:54:56.211465Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Successfully pre-downloaded: TinyLlama/TinyLlama-1.1B-Chat-v1.0
+[2m2026-03-06T19:54:56.211525Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: Qwen/Qwen2.5-VL-7B-Instruct
+Fetching 16 files:   0%|          | 0/16 [00:00<?, ?it/s]Fetching 16 files:   6%|▋         | 1/16 [00:00<00:02,  6.39it/s]Fetching 16 files:  44%|████▍     | 7/16 [00:17<00:23,  2.65s/it]Fetching 16 files: 100%|██████████| 16/16 [00:17<00:00,  1.11s/it]
+[2m2026-03-06T19:55:14.141499Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Successfully pre-downloaded: Qwen/Qwen2.5-VL-7B-Instruct
+[2m2026-03-06T19:55:14.141562Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: Qwen/Qwen3-0.6B
+Fetching 10 files:   0%|          | 0/10 [00:00<?, ?it/s]Fetching 10 files:  10%|█         | 1/10 [00:00<00:01,  7.95it/s]Fetching 10 files:  70%|███████   | 7/10 [00:03<00:01,  1.85it/s]Fetching 10 files: 100%|██████████| 10/10 [00:03<00:00,  2.74it/s]
+[2m2026-03-06T19:55:17.913806Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Successfully pre-downloaded: Qwen/Qwen3-0.6B
+[2m2026-03-06T19:55:17.913878Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: Qwen/Qwen3-VL-2B-Instruct
+Fetching 12 files:   0%|          | 0/12 [00:00<?, ?it/s]Fetching 12 files:   8%|▊         | 1/12 [00:00<00:01,  7.73it/s]Fetching 12 files:  58%|█████▊    | 7/12 [00:05<00:03,  1.29it/s]Fetching 12 files: 100%|██████████| 12/12 [00:05<00:00,  2.30it/s]
+[2m2026-03-06T19:55:23.246473Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Successfully pre-downloaded: Qwen/Qwen3-VL-2B-Instruct

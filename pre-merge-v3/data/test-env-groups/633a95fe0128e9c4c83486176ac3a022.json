@@ -1,0 +1,1 @@
+{"id":"633a95fe0128e9c4c83486176ac3a022","fullName":"components.src.dynamo.trtllm.tests.request_handlers.test_trtllm_aggregated_handler.TestAggregatedHandlerGenerate#test_embeddings_passed_to_generate_locally","name":"test_embeddings_passed_to_generate_locally","status":"passed","testResultsByEnv":{"default":"5cbef748de1abb5fdf452b207bf960ae"}}

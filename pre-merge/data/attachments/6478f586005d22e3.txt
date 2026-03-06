@@ -1,0 +1,27 @@
+INFO     dynamo.sglang.request_handlers.image_diffusion.image_diffusion_handler:image_diffusion_handler.py:57 Image diffusion worker handler initialized with fs_url=file:///tmp/images, url_base=file:///tmp/images
+DEBUG    asyncio:selector_events.py:64 Using selector: EpollSelector
+INFO     dynamo.sglang.request_handlers.image_diffusion.image_diffusion_handler:image_diffusion_handler.py:84 Image diffusion request: {'prompt': 'Test prompt', 'model': 'test-model', 'size': '256x256', 'response_format': 'url', 'user': 'test-user', 'nvext': {'num_inference_steps': 10, 'guidance_scale': 7.5, 'seed': 42, 'negative_prompt': None}}
+DEBUG    dynamo.sglang.request_handlers.image_diffusion.image_diffusion_handler:image_diffusion_handler.py:89 Image diffusion request with trace: {'traceparent': '00-test-trace-id-test-span-id-01'}
+ERROR    dynamo.sglang.request_handlers.image_diffusion.image_diffusion_handler:image_diffusion_handler.py:130 Error in diffusion generation: Generation failed
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.12/dist-packages/dynamo/sglang/request_handlers/image_diffusion/image_diffusion_handler.py", line 102, in generate
+    images = await self._generate_images(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/dynamo/sglang/request_handlers/image_diffusion/image_diffusion_handler.py", line 159, in _generate_images
+    result = await asyncio.to_thread(
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/asyncio/threads.py", line 25, in to_thread
+    return await loop.run_in_executor(None, func_call)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/concurrent/futures/thread.py", line 58, in run
+    result = self.fn(*self.args, **self.kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/unittest/mock.py", line 1134, in __call__
+    return self._mock_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/unittest/mock.py", line 1138, in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/unittest/mock.py", line 1193, in _execute_mock_call
+    raise effect
+RuntimeError: Generation failed

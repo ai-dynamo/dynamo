@@ -1,0 +1,192 @@
+INFO     NatsServer:managed_process.py:307 Running command: nats-server --trace -p 4274 in /workspace
+INFO     NatsServer:managed_process.py:473 Checking Port: 4274
+INFO     NatsServer:managed_process.py:481 SUCCESS: Check Port: 4274
+INFO     NatsServer:managed_process.py:586 Running custom health check '_nats_ready'
+DEBUG    asyncio:selector_events.py:64 Using selector: EpollSelector
+INFO     NatsServer:managed_process.py:606 SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+INFO     EtcdServer:managed_process.py:307 Running command: etcd --listen-client-urls http://0.0.0.0:2464 --advertise-client-urls http://0.0.0.0:2464 --listen-peer-urls http://0.0.0.0:2465 --initial-advertise-peer-urls http://localhost:2465 --initial-cluster default=http://localhost:2465 --data-dir /tmp/etcd_r_7supfl in /workspace
+INFO     EtcdServer:managed_process.py:473 Checking Port: 2464
+INFO     EtcdServer:managed_process.py:481 SUCCESS: Check Port: 2464
+INFO     test_sglang_deployment[template_verification-2]:common.py:41 Starting template_verification test_deployment
+INFO     test_sglang_deployment[template_verification-2]:common.py:47 Using model: Qwen/Qwen3-0.6B
+INFO     test_sglang_deployment[template_verification-2]:common.py:48 Script: template_verifier.sh
+INFO     EngineProcess:managed_process.py:307 Running command: bash /workspace/tests/serve/launch/template_verifier.sh in /workspace/tests/serve
+INFO     EngineProcess:managed_process.py:501 Checking URL http://localhost:8051/v1/models
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8051
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8051
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8051 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8051
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8051 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8051
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8051 "GET /v1/models HTTP/1.1" 200 109
+INFO     EngineProcess:managed_process.py:521 SUCCESS: Check URL: http://localhost:8051/v1/models (attempt=4, elapsed=5.0s)
+Response:
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "Qwen/Qwen3-0.6B",
+      "object": "model",
+      "created": 1772827099,
+      "owned_by": "nvidia"
+    }
+  ]
+}
+INFO     EngineProcess:managed_process.py:501 Checking URL http://localhost:8051/health
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8051
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8051 "GET /health HTTP/1.1" 200 242
+INFO     EngineProcess:managed_process.py:521 SUCCESS: Check URL: http://localhost:8051/health (attempt=1, elapsed=0.0s)
+Response:
+{
+  "status": "healthy",
+  "endpoints": [
+    "dyn://test.backend.generate"
+  ],
+  "instances": [
+    {
+      "component": "backend",
+      "endpoint": "generate",
+      "namespace": "test",
+      "instance_id": 7937485237023270665,
+      "transport": {
+        "tcp": "10.1.6.151:35981/6e279cc4baade709/generate"
+      }
+    }
+  ]
+}
+INFO     test_sglang_deployment[template_verification-2]:common.py:100 TESTING: Payload: ChatPayload
+INFO     tests.utils.client:client.py:94 Sending request (curl equivalent):
+curl -X POST "http://localhost:8051/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Tell me a knock knock joke about AI."
+    }
+  ],
+  "max_tokens": 1000,
+  "temperature": 0.0,
+  "stream": false,
+  "model": "Qwen/Qwen3-0.6B"
+}'
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8051
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8051 "POST /v1/chat/completions HTTP/1.1" 200 268
+INFO     tests.utils.client:client.py:111 Received response: status=200, elapsed=0.01s
+DEBUG    tests.utils.client:client.py:118 Response headers: {'content-type': 'application/json', 'content-length': '268', 'date': 'Fri, 06 Mar 2026 19:58:21 GMT'}
+DEBUG    tests.utils.client:client.py:133 Response body: {
+  "id": "chatcmpl-06801541-04b9-4921-aafb-73ec3c902689",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "content": "Successfully Applied Chat Template",
+        "role": "assistant",
+        "reasoning_content": null
+      }
+    }
+  ],
+  "created": 1772827101,
+  "model": "Qwen/Qwen3-0.6B",
+  "object": "chat.completion",
+  "usage": null
+}
+INFO     tests.utils.payloads:payloads.py:99 SUCCESS: Found 1/1 expected keywords: ['Successfully Applied Chat Template']
+INFO     tests.utils.engine_process:engine_process.py:104 Extracted content: 
+Successfully Applied Chat Template
+INFO     tests.utils.client:client.py:94 Sending request (curl equivalent):
+curl -X POST "http://localhost:8051/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Tell me a knock knock joke about AI."
+    }
+  ],
+  "max_tokens": 1000,
+  "temperature": 0.0,
+  "stream": false,
+  "model": "Qwen/Qwen3-0.6B"
+}'
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8051
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8051 "POST /v1/chat/completions HTTP/1.1" 200 268
+INFO     tests.utils.client:client.py:111 Received response: status=200, elapsed=0.00s
+DEBUG    tests.utils.client:client.py:118 Response headers: {'content-type': 'application/json', 'content-length': '268', 'date': 'Fri, 06 Mar 2026 19:58:21 GMT'}
+DEBUG    tests.utils.client:client.py:133 Response body: {
+  "id": "chatcmpl-b16bb31e-8125-4953-814d-6345a3348da9",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "content": "Successfully Applied Chat Template",
+        "role": "assistant",
+        "reasoning_content": null
+      }
+    }
+  ],
+  "created": 1772827101,
+  "model": "Qwen/Qwen3-0.6B",
+  "object": "chat.completion",
+  "usage": null
+}
+INFO     tests.utils.payloads:payloads.py:99 SUCCESS: Found 1/1 expected keywords: ['Successfully Applied Chat Template']
+INFO     tests.utils.engine_process:engine_process.py:104 Extracted content: 
+Successfully Applied Chat Template
+INFO     tests.utils.client:client.py:94 Sending request (curl equivalent):
+curl -X POST "http://localhost:8051/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Tell me a knock knock joke about AI."
+    }
+  ],
+  "max_tokens": 1000,
+  "temperature": 0.0,
+  "stream": false,
+  "model": "Qwen/Qwen3-0.6B"
+}'
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8051
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8051 "POST /v1/chat/completions HTTP/1.1" 200 268
+INFO     tests.utils.client:client.py:111 Received response: status=200, elapsed=0.00s
+DEBUG    tests.utils.client:client.py:118 Response headers: {'content-type': 'application/json', 'content-length': '268', 'date': 'Fri, 06 Mar 2026 19:58:21 GMT'}
+DEBUG    tests.utils.client:client.py:133 Response body: {
+  "id": "chatcmpl-6b0f3a79-7748-4706-9db5-6eaac49f9f31",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "content": "Successfully Applied Chat Template",
+        "role": "assistant",
+        "reasoning_content": null
+      }
+    }
+  ],
+  "created": 1772827101,
+  "model": "Qwen/Qwen3-0.6B",
+  "object": "chat.completion",
+  "usage": null
+}
+INFO     tests.utils.payloads:payloads.py:99 SUCCESS: Found 1/1 expected keywords: ['Successfully Applied Chat Template']
+INFO     tests.utils.engine_process:engine_process.py:104 Extracted content: 
+Successfully Applied Chat Template
+INFO     EngineProcess:managed_process.py:388 Terminating process group: 3669
+INFO     EngineProcess:managed_process.py:31 Terminating PID: 3669 name: python
+INFO     EngineProcess:managed_process.py:36 Sending SIGTERM (kill): 3669 python
+INFO     EngineProcess:managed_process.py:31 Terminating PID: 3671 name: tee
+INFO     EngineProcess:managed_process.py:36 Sending SIGTERM (kill): 3671 tee
+INFO     EngineProcess:managed_process.py:31 Terminating PID: 3670 name: sed
+INFO     EngineProcess:managed_process.py:36 Sending SIGTERM (kill): 3670 sed
+INFO     EngineProcess:managed_process.py:216 Checking for straggler processes: stragglers=['SGLANG:EngineCore'], straggler_commands=[]
+INFO     EtcdServer:managed_process.py:388 Terminating process group: 3655
+INFO     EtcdServer:managed_process.py:31 Terminating PID: 3655 name: etcd
+INFO     EtcdServer:managed_process.py:36 Sending SIGTERM (kill): 3655 etcd
+INFO     EtcdServer:managed_process.py:31 Terminating PID: 3656 name: sed
+INFO     EtcdServer:managed_process.py:36 Sending SIGTERM (kill): 3656 sed
+INFO     NatsServer:managed_process.py:388 Terminating process group: 3643
+INFO     NatsServer:managed_process.py:31 Terminating PID: 3643 name: nats-server
+INFO     NatsServer:managed_process.py:36 Sending SIGTERM (kill): 3643 nats-server
+INFO     NatsServer:managed_process.py:31 Terminating PID: 3644 name: sed
+INFO     NatsServer:managed_process.py:36 Sending SIGTERM (kill): 3644 sed

@@ -1,0 +1,164 @@
+INFO     NatsServer:managed_process.py:307 Running command: nats-server --trace -p 4224 in /workspace
+INFO     NatsServer:managed_process.py:473 Checking Port: 4224
+INFO     NatsServer:managed_process.py:481 SUCCESS: Check Port: 4224
+INFO     NatsServer:managed_process.py:586 Running custom health check '_nats_ready'
+DEBUG    asyncio:selector_events.py:64 Using selector: EpollSelector
+INFO     NatsServer:managed_process.py:606 SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+INFO     EtcdServer:managed_process.py:307 Running command: etcd --listen-client-urls http://0.0.0.0:2470 --advertise-client-urls http://0.0.0.0:2470 --listen-peer-urls http://0.0.0.0:2471 --initial-advertise-peer-urls http://localhost:2471 --initial-cluster default=http://localhost:2471 --data-dir /tmp/etcd_brk5y497 in /workspace
+INFO     EtcdServer:managed_process.py:473 Checking Port: 2470
+INFO     EtcdServer:managed_process.py:481 SUCCESS: Check Port: 2470
+INFO     test_sglang_deployment[multimodal_agg_qwen-2]:common.py:41 Starting multimodal_agg_qwen test_deployment
+INFO     test_sglang_deployment[multimodal_agg_qwen-2]:common.py:47 Using model: Qwen/Qwen2.5-VL-7B-Instruct
+INFO     test_sglang_deployment[multimodal_agg_qwen-2]:common.py:48 Script: agg.sh
+INFO     EngineProcess:managed_process.py:307 Running command: bash /workspace/examples/backends/sglang/launch/agg.sh --model-path Qwen/Qwen2.5-VL-7B-Instruct --chat-template qwen2-vl in /workspace/examples/backends/sglang
+INFO     EngineProcess:managed_process.py:501 Checking URL http://localhost:8066/v1/models
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8066
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8066
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8066 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8066
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8066 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8066
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8066 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8066
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8066 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8066
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8066 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8066
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8066 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8066
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8066 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8066
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8066 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8066
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8066 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8066
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8066 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8066
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8066 "GET /v1/models HTTP/1.1" 200 27
+INFO     EngineProcess:managed_process.py:553 Still waiting for URL http://localhost:8066/v1/models (custom check failed) (attempt=12, elapsed=21.0s)
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8066
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8066 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8066
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8066 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8066
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8066 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8066
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8066 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8066
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8066 "GET /v1/models HTTP/1.1" 200 121
+INFO     EngineProcess:managed_process.py:521 SUCCESS: Check URL: http://localhost:8066/v1/models (attempt=17, elapsed=31.0s)
+Response:
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "Qwen/Qwen2.5-VL-7B-Instruct",
+      "object": "model",
+      "created": 1772827138,
+      "owned_by": "nvidia"
+    }
+  ]
+}
+INFO     EngineProcess:managed_process.py:501 Checking URL http://localhost:8066/health
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8066
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8066 "GET /health HTTP/1.1" 200 246
+INFO     EngineProcess:managed_process.py:521 SUCCESS: Check URL: http://localhost:8066/health (attempt=1, elapsed=0.0s)
+Response:
+{
+  "status": "healthy",
+  "endpoints": [
+    "dyn://dynamo.backend.generate"
+  ],
+  "instances": [
+    {
+      "component": "backend",
+      "endpoint": "generate",
+      "namespace": "dynamo",
+      "instance_id": 6295078747920003081,
+      "transport": {
+        "tcp": "10.1.6.151:46329/575c9cc4bae1f009/generate"
+      }
+    }
+  ]
+}
+INFO     test_sglang_deployment[multimodal_agg_qwen-2]:common.py:100 TESTING: Payload: ChatPayload
+INFO     tests.utils.client:client.py:94 Sending request (curl equivalent):
+curl -X POST "http://localhost:8066/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "What is in this image?"
+        },
+        {
+          "type": "image_url",
+          "image_url": {
+            "url": "http://images.cocodataset.org/test2017/000000155781.jpg"
+          }
+        }
+      ]
+    }
+  ],
+  "max_tokens": 100,
+  "stream": false,
+  "logprobs": false,
+  "temperature": 0.0,
+  "model": "Qwen/Qwen2.5-VL-7B-Instruct"
+}'
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8066
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8066 "POST /v1/chat/completions HTTP/1.1" 200 819
+INFO     tests.utils.client:client.py:111 Received response: status=200, elapsed=8.13s
+DEBUG    tests.utils.client:client.py:118 Response headers: {'content-type': 'application/json', 'content-length': '819', 'date': 'Fri, 06 Mar 2026 19:59:09 GMT'}
+DEBUG    tests.utils.client:client.py:133 Response body: {
+  "id": "chatcmpl-d1891a34-b681-4bd7-8153-147067da3d83",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "content": "The image shows a streetcar or trolleybus parked on a street, with the words \"OUT OF SERVICE\" displayed prominently on its front electronic sign. The vehicle appears to be stationary, and the street is quiet, with no visible pedestrians or vehicles. The surroundings include trees, a sidewalk, and a residential area in the background. The lighting and foggy atmosphere suggest it is either dawn or dusk.",
+        "role": "assistant",
+        "reasoning_content": null
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "created": 1772827140,
+  "model": "Qwen/Qwen2.5-VL-7B-Instruct",
+  "object": "chat.completion",
+  "usage": {
+    "prompt_tokens": 372,
+    "completion_tokens": 82,
+    "total_tokens": 454
+  },
+  "nvext": {
+    "timing": {
+      "request_received_ms": 1772827140954,
+      "total_time_ms": 8126.298778
+    }
+  }
+}
+INFO     tests.utils.payloads:payloads.py:99 SUCCESS: Found 1/1 expected keywords: ['image']
+INFO     tests.utils.engine_process:engine_process.py:104 Extracted content: 
+The image shows a streetcar or trolleybus parked on a street, with the words "OUT OF SERVICE" displayed prominently on its front electronic sign. The vehicle appears to be stationary, and the street i...
+INFO     EngineProcess:managed_process.py:388 Terminating process group: 3873
+INFO     EngineProcess:managed_process.py:31 Terminating PID: 3873 name: bash
+INFO     EngineProcess:managed_process.py:36 Sending SIGTERM (kill): 3873 bash
+INFO     EngineProcess:managed_process.py:31 Terminating PID: 3875 name: tee
+INFO     EngineProcess:managed_process.py:36 Sending SIGTERM (kill): 3875 tee
+INFO     EngineProcess:managed_process.py:31 Terminating PID: 3874 name: sed
+INFO     EngineProcess:managed_process.py:36 Sending SIGTERM (kill): 3874 sed
+INFO     EngineProcess:managed_process.py:216 Checking for straggler processes: stragglers=['SGLANG:EngineCore'], straggler_commands=[]
+INFO     EtcdServer:managed_process.py:388 Terminating process group: 3859
+INFO     EtcdServer:managed_process.py:31 Terminating PID: 3859 name: etcd
+INFO     EtcdServer:managed_process.py:36 Sending SIGTERM (kill): 3859 etcd
+INFO     EtcdServer:managed_process.py:31 Terminating PID: 3860 name: sed
+INFO     EtcdServer:managed_process.py:36 Sending SIGTERM (kill): 3860 sed
+INFO     NatsServer:managed_process.py:388 Terminating process group: 3847
+INFO     NatsServer:managed_process.py:31 Terminating PID: 3847 name: nats-server
+INFO     NatsServer:managed_process.py:36 Sending SIGTERM (kill): 3847 nats-server
+INFO     NatsServer:managed_process.py:31 Terminating PID: 3848 name: sed
+INFO     NatsServer:managed_process.py:36 Sending SIGTERM (kill): 3848 sed

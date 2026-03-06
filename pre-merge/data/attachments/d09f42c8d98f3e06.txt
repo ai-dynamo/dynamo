@@ -1,0 +1,353 @@
+INFO     NatsServer:managed_process.py:307 Running command: nats-server --trace -p 4309 in /workspace
+INFO     NatsServer:managed_process.py:473 Checking Port: 4309
+INFO     NatsServer:managed_process.py:481 SUCCESS: Check Port: 4309
+INFO     NatsServer:managed_process.py:586 Running custom health check '_nats_ready'
+DEBUG    asyncio:selector_events.py:64 Using selector: EpollSelector
+INFO     NatsServer:managed_process.py:606 SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+INFO     EtcdServer:managed_process.py:307 Running command: etcd --listen-client-urls http://0.0.0.0:2454 --advertise-client-urls http://0.0.0.0:2454 --listen-peer-urls http://0.0.0.0:2455 --initial-advertise-peer-urls http://localhost:2455 --initial-cluster default=http://localhost:2455 --data-dir /tmp/etcd_5ebdbvu0 in /workspace
+INFO     EtcdServer:managed_process.py:473 Checking Port: 2454
+INFO     EtcdServer:managed_process.py:481 SUCCESS: Check Port: 2454
+INFO     test_sglang_deployment[embedding_agg-2]:common.py:41 Starting embedding_agg test_deployment
+INFO     test_sglang_deployment[embedding_agg-2]:common.py:47 Using model: Qwen/Qwen3-Embedding-4B
+INFO     test_sglang_deployment[embedding_agg-2]:common.py:48 Script: agg_embed.sh
+INFO     EngineProcess:managed_process.py:307 Running command: bash /workspace/examples/backends/sglang/launch/agg_embed.sh in /workspace/examples/backends/sglang
+INFO     EngineProcess:managed_process.py:501 Checking URL http://localhost:8049/v1/models
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8049
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8049
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8049 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8049
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8049 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8049
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8049 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8049
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8049 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8049
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8049 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8049
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8049 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8049
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8049 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8049
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8049 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8049
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8049 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8049
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8049 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8049
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8049 "GET /v1/models HTTP/1.1" 200 117
+INFO     EngineProcess:managed_process.py:521 SUCCESS: Check URL: http://localhost:8049/v1/models (attempt=12, elapsed=21.0s)
+Response:
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "Qwen/Qwen3-Embedding-4B",
+      "object": "model",
+      "created": 1772826918,
+      "owned_by": "nvidia"
+    }
+  ]
+}
+INFO     EngineProcess:managed_process.py:501 Checking URL http://localhost:8049/health
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8049
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8049 "GET /health HTTP/1.1" 200 245
+INFO     EngineProcess:managed_process.py:521 SUCCESS: Check URL: http://localhost:8049/health (attempt=1, elapsed=0.0s)
+Response:
+{
+  "status": "healthy",
+  "endpoints": [
+    "dyn://dynamo.backend.generate"
+  ],
+  "instances": [
+    {
+      "component": "backend",
+      "endpoint": "generate",
+      "namespace": "dynamo",
+      "instance_id": 112762359393387017,
+      "transport": {
+        "tcp": "10.1.73.178:37441/1909cc4b7ad8209/generate"
+      }
+    }
+  ]
+}
+INFO     test_sglang_deployment[embedding_agg-2]:common.py:100 TESTING: Payload: EmbeddingPayload
+INFO     tests.utils.client:client.py:94 Sending request (curl equivalent):
+curl -X POST "http://localhost:8049/v1/embeddings" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "input": [
+    "The sky is blue.",
+    "Machine learning is fascinating."
+  ],
+  "model": "Qwen/Qwen3-Embedding-4B"
+}'
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8049
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8049 "POST /v1/embeddings HTTP/1.1" 200 64790
+INFO     tests.utils.client:client.py:111 Received response: status=200, elapsed=0.83s
+DEBUG    tests.utils.client:client.py:118 Response headers: {'content-type': 'application/json', 'content-length': '64790', 'date': 'Fri, 06 Mar 2026 19:55:21 GMT'}
+DEBUG    tests.utils.client:client.py:133 Response body: {
+  "object": "list",
+  "model": "Qwen/Qwen3-Embedding-4B",
+  "data": [
+    {
+      "index": 0,
+      "object": "embedding",
+      "embedding": [
+        0.00014686584,
+        -0.04321289,
+        -0.0032958984,
+        0.020751953,
+        0.0008354187,
+        0.010009766,
+        0.055419922,
+        0.0234375,
+        0.011962891,
+        -0.013671875,
+        0.05883789,
+        0.04321289,
+        -0.00041389465,
+        -0.040039062,
+        -0.017456055,
+        0.017456055,
+        0.0064697266,
+        -0.031982422,
+        0.041015625,
+        -0.0038146973,
+        -0.011413574,
+        0.015075684,
+        -0.030761719,
+        -0.007232666,
+        0.011230469,
+        -0.016357422,
+        -0.020996094,
+        -0.030395508,
+        0.024291992,
+        0.07763672,
+        -0.05834961,
+        0.01550293,
+        0.02734375,
+        -0.024902344,
+        0.0031280518,
+        -0.022094727,
+        0.010437012,
+        -0.009765625,
+        0.0099487305,
+        -0.04028... (truncated)
+INFO     tests.utils.payloads:payloads.py:99 SUCCESS: Found 1/1 expected keywords: ['Generated 2 embeddings with dimension']
+INFO     tests.utils.engine_process:engine_process.py:104 Extracted content: 
+Generated 2 embeddings with dimension 2560
+INFO     tests.utils.client:client.py:94 Sending request (curl equivalent):
+curl -X POST "http://localhost:8049/v1/embeddings" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "input": [
+    "The sky is blue.",
+    "Machine learning is fascinating."
+  ],
+  "model": "Qwen/Qwen3-Embedding-4B"
+}'
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8049
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8049 "POST /v1/embeddings HTTP/1.1" 200 64790
+INFO     tests.utils.client:client.py:111 Received response: status=200, elapsed=0.20s
+DEBUG    tests.utils.client:client.py:118 Response headers: {'content-type': 'application/json', 'content-length': '64790', 'date': 'Fri, 06 Mar 2026 19:55:21 GMT'}
+DEBUG    tests.utils.client:client.py:133 Response body: {
+  "object": "list",
+  "model": "Qwen/Qwen3-Embedding-4B",
+  "data": [
+    {
+      "index": 0,
+      "object": "embedding",
+      "embedding": [
+        0.00014686584,
+        -0.04321289,
+        -0.0032958984,
+        0.020751953,
+        0.0008354187,
+        0.010009766,
+        0.055419922,
+        0.0234375,
+        0.011962891,
+        -0.013671875,
+        0.05883789,
+        0.04321289,
+        -0.00041389465,
+        -0.040039062,
+        -0.017456055,
+        0.017456055,
+        0.0064697266,
+        -0.031982422,
+        0.041015625,
+        -0.0038146973,
+        -0.011413574,
+        0.015075684,
+        -0.030761719,
+        -0.007232666,
+        0.011230469,
+        -0.016357422,
+        -0.020996094,
+        -0.030395508,
+        0.024291992,
+        0.07763672,
+        -0.05834961,
+        0.01550293,
+        0.02734375,
+        -0.024902344,
+        0.0031280518,
+        -0.022094727,
+        0.010437012,
+        -0.009765625,
+        0.0099487305,
+        -0.04028... (truncated)
+INFO     tests.utils.payloads:payloads.py:99 SUCCESS: Found 1/1 expected keywords: ['Generated 2 embeddings with dimension']
+INFO     tests.utils.engine_process:engine_process.py:104 Extracted content: 
+Generated 2 embeddings with dimension 2560
+INFO     test_sglang_deployment[embedding_agg-2]:common.py:100 TESTING: Payload: EmbeddingPayload
+INFO     tests.utils.client:client.py:94 Sending request (curl equivalent):
+curl -X POST "http://localhost:8049/v1/embeddings" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "input": [
+    "Hello, world!"
+  ],
+  "model": "Qwen/Qwen3-Embedding-4B"
+}'
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8049
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8049 "POST /v1/embeddings HTTP/1.1" 200 32492
+INFO     tests.utils.client:client.py:111 Received response: status=200, elapsed=0.04s
+DEBUG    tests.utils.client:client.py:118 Response headers: {'content-type': 'application/json', 'content-length': '32492', 'date': 'Fri, 06 Mar 2026 19:55:21 GMT'}
+DEBUG    tests.utils.client:client.py:133 Response body: {
+  "object": "list",
+  "model": "Qwen/Qwen3-Embedding-4B",
+  "data": [
+    {
+      "index": 0,
+      "object": "embedding",
+      "embedding": [
+        0.00012397766,
+        -0.048095703,
+        -0.006591797,
+        0.044921875,
+        0.00037956238,
+        0.03857422,
+        0.10546875,
+        0.0040893555,
+        0.021362305,
+        -0.00050354004,
+        0.014831543,
+        0.0,
+        -0.001663208,
+        -0.005584717,
+        -0.008178711,
+        -0.0032806396,
+        0.028808594,
+        -0.07128906,
+        0.028320312,
+        -0.003768921,
+        -0.0065307617,
+        0.024047852,
+        0.008300781,
+        -0.036865234,
+        0.008300781,
+        0.012573242,
+        -0.026611328,
+        -0.08203125,
+        0.053710938,
+        0.010070801,
+        -0.008911133,
+        -0.03466797,
+        0.040039062,
+        0.0009689331,
+        -0.000869751,
+        -0.010559082,
+        -0.010009766,
+        -0.008361816,
+        0.000541687,
+        -0.01794433... (truncated)
+INFO     tests.utils.payloads:payloads.py:99 SUCCESS: Found 1/1 expected keywords: ['Generated 1 embeddings with dimension']
+INFO     tests.utils.engine_process:engine_process.py:104 Extracted content: 
+Generated 1 embeddings with dimension 2560
+INFO     test_sglang_deployment[embedding_agg-2]:common.py:100 TESTING: Payload: EmbeddingPayload
+INFO     tests.utils.client:client.py:94 Sending request (curl equivalent):
+curl -X POST "http://localhost:8049/v1/embeddings" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "input": [
+    "The quick brown fox jumps over the lazy dog.",
+    "Machine learning is transforming technology.",
+    "Natural language processing enables computers to understand text."
+  ],
+  "model": "Qwen/Qwen3-Embedding-4B"
+}'
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8049
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8049 "POST /v1/embeddings HTTP/1.1" 200 97297
+INFO     tests.utils.client:client.py:111 Received response: status=200, elapsed=0.13s
+DEBUG    tests.utils.client:client.py:118 Response headers: {'content-type': 'application/json', 'content-length': '97297', 'date': 'Fri, 06 Mar 2026 19:55:22 GMT'}
+DEBUG    tests.utils.client:client.py:133 Response body: {
+  "object": "list",
+  "model": "Qwen/Qwen3-Embedding-4B",
+  "data": [
+    {
+      "index": 0,
+      "object": "embedding",
+      "embedding": [
+        -0.00031089783,
+        -0.02319336,
+        0.015380859,
+        0.013916016,
+        -0.0011749268,
+        0.028320312,
+        0.06933594,
+        0.004058838,
+        0.013366699,
+        0.0043945312,
+        0.037841797,
+        -0.0033416748,
+        0.0006790161,
+        -0.061035156,
+        0.007080078,
+        -0.03515625,
+        0.087402344,
+        -0.03930664,
+        0.013671875,
+        -0.0017471313,
+        -0.013183594,
+        -0.008178711,
+        -0.011047363,
+        -0.032226562,
+        -0.0061035156,
+        0.020874023,
+        -0.023071289,
+        -0.005340576,
+        0.021728516,
+        0.010253906,
+        -0.05859375,
+        0.0013504028,
+        0.029907227,
+        0.0030517578,
+        -0.0010223389,
+        -0.020751953,
+        0.001335144,
+        -0.008178711,
+        -0.015380859,
+        -... (truncated)
+INFO     tests.utils.payloads:payloads.py:99 SUCCESS: Found 1/1 expected keywords: ['Generated 3 embeddings with dimension']
+INFO     tests.utils.engine_process:engine_process.py:104 Extracted content: 
+Generated 3 embeddings with dimension 2560
+INFO     EngineProcess:managed_process.py:388 Terminating process group: 4373
+INFO     EngineProcess:managed_process.py:31 Terminating PID: 4373 name: bash
+INFO     EngineProcess:managed_process.py:36 Sending SIGTERM (kill): 4373 bash
+INFO     EngineProcess:managed_process.py:31 Terminating PID: 4375 name: tee
+INFO     EngineProcess:managed_process.py:36 Sending SIGTERM (kill): 4375 tee
+INFO     EngineProcess:managed_process.py:31 Terminating PID: 4374 name: sed
+INFO     EngineProcess:managed_process.py:36 Sending SIGTERM (kill): 4374 sed
+INFO     EngineProcess:managed_process.py:216 Checking for straggler processes: stragglers=['SGLANG:EngineCore'], straggler_commands=[]
+INFO     EtcdServer:managed_process.py:388 Terminating process group: 4359
+INFO     EtcdServer:managed_process.py:31 Terminating PID: 4359 name: etcd
+INFO     EtcdServer:managed_process.py:36 Sending SIGTERM (kill): 4359 etcd
+INFO     EtcdServer:managed_process.py:31 Terminating PID: 4360 name: sed
+INFO     EtcdServer:managed_process.py:36 Sending SIGTERM (kill): 4360 sed
+INFO     NatsServer:managed_process.py:388 Terminating process group: 4346
+INFO     NatsServer:managed_process.py:31 Terminating PID: 4346 name: nats-server
+INFO     NatsServer:managed_process.py:36 Sending SIGTERM (kill): 4346 nats-server
+INFO     NatsServer:managed_process.py:31 Terminating PID: 4347 name: sed
+INFO     NatsServer:managed_process.py:36 Sending SIGTERM (kill): 4347 sed

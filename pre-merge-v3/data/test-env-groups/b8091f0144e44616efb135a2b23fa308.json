@@ -1,0 +1,1 @@
+{"id":"b8091f0144e44616efb135a2b23fa308","fullName":"components.src.dynamo.vllm.tests.test_vllm_omni_handler.TestFormatImageChunk#test_image_generation_default_format_returns_b64","name":"test_image_generation_default_format_returns_b64","status":"passed","testResultsByEnv":{"default":"a9f20c2fcf82988a4f15649cf631a10a"}}

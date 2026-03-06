@@ -1,0 +1,202 @@
+[PYTHON3] /opt/dynamo/venv/lib/python3.12/site-packages/torch/library.py:356: UserWarning: Warning only once for all operators,  other operators may also be overridden.
+[PYTHON3]   Overriding a previously registered kernel for the same operator and the same dispatch key
+[PYTHON3]   operator: flash_attn::_flash_attn_backward(Tensor dout, Tensor q, Tensor k, Tensor v, Tensor out, Tensor softmax_lse, Tensor(a6!)? dq, Tensor(a7!)? dk, Tensor(a8!)? dv, float dropout_p, float softmax_scale, bool causal, SymInt window_size_left, SymInt window_size_right, float softcap, Tensor? alibi_slopes, bool deterministic, Tensor? rng_state=None) -> Tensor
+[PYTHON3]     registered at /opt/dynamo/venv/lib/python3.12/site-packages/torch/_library/custom_ops.py:922
+[PYTHON3]   dispatch key: ADInplaceOrView
+[PYTHON3]   previous kernel: no debug info
+[PYTHON3]        new kernel: registered at /opt/dynamo/venv/lib/python3.12/site-packages/torch/_library/custom_ops.py:922 (Triggered internally at /opt/pytorch/pytorch/aten/src/ATen/core/dispatch/OperatorEntry.cpp:208.)
+[PYTHON3]   self.m.impl(
+[PYTHON3] /opt/dynamo/venv/lib/python3.12/site-packages/modelopt/torch/__init__.py:36: UserWarning: transformers version 4.57.1 is incompatible with nvidia-modelopt and may cause issues. Please install recommended version with `pip install nvidia-modelopt[hf]` if working with HF models.
+[PYTHON3]   _warnings.warn(
+[PYTHON3] /opt/dynamo/venv/lib/python3.12/site-packages/torch/library.py:356: UserWarning: Warning only once for all operators,  other operators may also be overridden.
+[PYTHON3]   Overriding a previously registered kernel for the same operator and the same dispatch key
+[PYTHON3]   operator: flash_attn::_flash_attn_backward(Tensor dout, Tensor q, Tensor k, Tensor v, Tensor out, Tensor softmax_lse, Tensor(a6!)? dq, Tensor(a7!)? dk, Tensor(a8!)? dv, float dropout_p, float softmax_scale, bool causal, SymInt window_size_left, SymInt window_size_right, float softcap, Tensor? alibi_slopes, bool deterministic, Tensor? rng_state=None) -> Tensor
+[PYTHON3]     registered at /opt/dynamo/venv/lib/python3.12/site-packages/torch/_library/custom_ops.py:922
+[PYTHON3]   dispatch key: ADInplaceOrView
+[PYTHON3]   previous kernel: no debug info
+[PYTHON3]        new kernel: registered at /opt/dynamo/venv/lib/python3.12/site-packages/torch/_library/custom_ops.py:922 (Triggered internally at /opt/pytorch/pytorch/aten/src/ATen/core/dispatch/OperatorEntry.cpp:208.)
+[PYTHON3]   self.m.impl(
+[PYTHON3] [TensorRT-LLM] TensorRT LLM version: 1.3.0rc5
+[PYTHON3] [2026-03-06 19:56:45] INFO __init__.py:53: dynamo.nixl_connect: Utilizing CuPy to enable GPU acceleration.
+[PYTHON3] [2m2026-03-06T19:56:45.086603Z[0m [32m INFO[0m [2mdynamo_runtime::distributed[0m[2m:[0m Initializing KV store discovery backend: Etcd(http://localhost:2428)
+[PYTHON3] [2m2026-03-06T19:56:45.089340Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::manager[0m[2m:[0m Initializing NetworkManager with TCP request plane [3mmode[0m[2m=[0mtcp [3mhost[0m[2m=[0m10.1.83.110 [3mport[0m[2m=[0mOS-assigned
+[PYTHON3] [2m2026-03-06T19:56:45.089883Z[0m [32m INFO[0m [2mdynamo_runtime::system_status_server[0m[2m:[0m [spawn_system_status_server] binding to: 0.0.0.0:8167
+[PYTHON3] [2m2026-03-06T19:56:45.089919Z[0m [32m INFO[0m [2mdynamo_runtime::system_status_server[0m[2m:[0m [spawn_system_status_server] system status server bound to: 0.0.0.0:8167
+[PYTHON3] [2m2026-03-06T19:56:45.089940Z[0m [32m INFO[0m [2mdynamo_runtime::distributed[0m[2m:[0m System status server started successfully on 0.0.0.0:8167
+[PYTHON3] [2m2026-03-06T19:56:45.090072Z[0m [32m INFO[0m [2mgraceful_shutdown.install_signal_handlers[0m[2m:[0m Signal handlers set up for graceful shutdown (discovery unregister + grace period)
+[PYTHON3] [2m2026-03-06T19:56:45.090177Z[0m [32m INFO[0m [2mmain.worker[0m[2m:[0m Initializing the worker with config: Config(allowed_local_media_path='', attn_backend='VANILLA', component='tensorrt_llm', connector=[], custom_jinja_template=None, default_guidance_scale=5.0, default_height=480, default_num_frames=81, default_num_inference_steps=50, default_width=832, disable_request_abort=True, disable_torch_compile=False, disaggregation_mode=<DisaggregationMode.AGGREGATED: 'prefill_and_decode'>, discovery_backend='etcd', dit_cfg_size=1, dit_dp_size=1, dit_fsdp_size=1, dit_ring_size=1, dit_tp_size=1, dit_ulysses_size=1, dump_config_to=None, durable_kv_events=False, dyn_reasoning_parser=None, dyn_tool_call_parser=None, enable_async_cpu_offload=False, enable_attention_dp=False, enable_cuda_graph=False, enable_fullgraph=False, enable_layerwise_nvtx_marker=False, enable_local_indexer=True, enable_teacache=False, encode_endpoint='', endpoint='generate', endpoint_types='chat,completions', event_plane='nats', expert_parallel_size=None, extra_engine_args='', free_gpu_memory_fraction=0.4, fuse_qkv=True, gpus_per_node=None, guided_decoding_backend=None, kv_block_size=32, max_batch_size=2048, max_beam_width=1, max_file_size_mb=50, max_num_tokens=8192, max_seq_len=1024, media_output_fs_url='file:///tmp/dynamo_media', media_output_http_url=None, modality=<Modality.TEXT: 'text'>, model='TinyLlama/TinyLlama-1.1B-Chat-v1.0', multimodal_embedding_cache_capacity_gb=0, namespace='test-namespace-abdttzvdvj', output_modalities=['text'], override_engine_args='', pipeline_parallel_size=1, publish_events_and_metrics=True, quant_algo=None, quant_dynamic=True, request_plane='tcp', revision=None, served_model_name=None, skip_components='', teacache_thresh=0.2, teacache_use_ret_steps=True, tensor_parallel_size=1, torch_compile_mode='default', torch_dtype='bfloat16', use_kv_events=True, warmup_steps=1)
+[PYTHON3] [2m2026-03-06T19:56:45.090215Z[0m [32m INFO[0m [2m__init__.init_worker[0m[2m:[0m Initializing worker with modality=Modality.TEXT
+[PYTHON3] [2m2026-03-06T19:56:45.090554Z[0m [32m INFO[0m [2m__init__[0m[2m:[0m Loaded nixl API module: <module 'nixl_cu13._api' from '/opt/dynamo/venv/lib/python3.12/site-packages/nixl_cu13/_api.py'>
+[PYTHON3] [2m2026-03-06T19:56:45.093979Z[0m [33m WARN[0m [2mconsolidator_config.should_enable_consolidator[0m[2m:[0m KV Event Consolidator is not enabled: kv_connector_config is not a dict
+[PYTHON3] [2m2026-03-06T19:56:45.094069Z[0m [32m INFO[0m [2mllm_worker.init_llm_worker[0m[2m:[0m TensorRT-LLM engine args: {'model': 'TinyLlama/TinyLlama-1.1B-Chat-v1.0', 'scheduler_config': SchedulerConfig(capacity_scheduler_policy=<CapacitySchedulerPolicy.GUARANTEED_NO_EVICT: 'GUARANTEED_NO_EVICT'>, context_chunking_policy=None, dynamic_batch_config=DynamicBatchConfig(enable_batch_size_tuning=True, enable_max_num_tokens_tuning=False, dynamic_batch_moving_average_window=128), waiting_queue_policy=<WaitingQueuePolicy.FCFS: 'fcfs'>), 'tensor_parallel_size': 1, 'pipeline_parallel_size': 1, 'moe_expert_parallel_size': None, 'enable_attention_dp': False, 'backend': <Backend.PYTORCH: 'pytorch'>, 'kv_cache_config': {'enable_block_reuse': True, 'free_gpu_memory_fraction': 0.4, 'onboard_blocks': True, 'event_buffer_max_size': 1024, 'attention_dp_events_gather_period_ms': 5, 'enable_partial_reuse': True, 'copy_on_partial_reuse': True, 'use_uvm': False, 'max_gpu_total_bytes': 0, 'dtype': 'auto', 'mamba_ssm_cache_dtype': 'auto', 'tokens_per_block': 32, 'use_kv_cache_manager_v2': False, 'max_util_for_resume': 0.95}, 'gpus_per_node': 1, 'max_num_tokens': 8192, 'max_seq_len': 1024, 'max_beam_width': 1, 'max_batch_size': 2048, 'return_perf_metrics': True, 'enable_iter_perf_stats': True, 'kv_connector_config': None}
+[PYTHON3] [2m2026-03-06T19:56:45.164342Z[0m [32m INFO[0m [2mllm_worker.init_llm_worker[0m[2m:[0m Registering model with endpoint types: chat,completions
+[PYTHON3] [2m2026-03-06T19:56:45.164410Z[0m [32m INFO[0m [2mllm_worker.init_llm_worker[0m[2m:[0m Initializing NIXL Connect.
+[PYTHON3] [03/06/2026-19:56:45] [TRT-LLM] [I] Using LLM with PyTorch backend
+[PYTHON3] [03/06/2026-19:56:45] [TRT-LLM] [I] neither checkpoint_format nor checkpoint_loader were provided, checkpoint_format will be set to HF.
+[PYTHON3] The argument `trust_remote_code` is to be used with Auto classes. It has no effect here and is ignored.
+[PYTHON3] You are using a model of type llama to instantiate a model of type . This is not supported for all configurations of models and can yield errors.
+[PYTHON3] `torch_dtype` is deprecated! Use `dtype` instead!
+[PYTHON3] [33;20mrank 0 using MpiPoolSession to spawn MPI processes
+[PYTHON3] /opt/dynamo/venv/lib/python3.12/site-packages/modelopt/torch/__init__.py:36: UserWarning: transformers version 4.57.1 is incompatible with nvidia-modelopt and may cause issues. Please install recommended version with `pip install nvidia-modelopt[hf]` if working with HF models.
+[PYTHON3]   _warnings.warn(
+[PYTHON3] [0m/opt/dynamo/venv/lib/python3.12/site-packages/torch/library.py:356: UserWarning: Warning only once for all operators,  other operators may also be overridden.
+[PYTHON3]   Overriding a previously registered kernel for the same operator and the same dispatch key
+[PYTHON3]   operator: flash_attn::_flash_attn_backward(Tensor dout, Tensor q, Tensor k, Tensor v, Tensor out, Tensor softmax_lse, Tensor(a6!)? dq, Tensor(a7!)? dk, Tensor(a8!)? dv, float dropout_p, float softmax_scale, bool causal, SymInt window_size_left, SymInt window_size_right, float softcap, Tensor? alibi_slopes, bool deterministic, Tensor? rng_state=None) -> Tensor
+[PYTHON3]     registered at /opt/dynamo/venv/lib/python3.12/site-packages/torch/_library/custom_ops.py:922
+[PYTHON3]   dispatch key: ADInplaceOrView
+[PYTHON3]   previous kernel: no debug info
+[PYTHON3]        new kernel: registered at /opt/dynamo/venv/lib/python3.12/site-packages/torch/_library/custom_ops.py:922 (Triggered internally at /opt/pytorch/pytorch/aten/src/ATen/core/dispatch/OperatorEntry.cpp:208.)
+[PYTHON3]   self.m.impl(
+[PYTHON3] [TensorRT-LLM] TensorRT LLM version: 1.3.0rc5
+[PYTHON3] [2026-03-06 19:56:50] INFO __init__.py:53: dynamo.nixl_connect: Utilizing CuPy to enable GPU acceleration.
+[PYTHON3] [2m2026-03-06T19:56:50.053726Z[0m [32m INFO[0m [2mdynamo_runtime::distributed[0m[2m:[0m Initializing KV store discovery backend: Etcd(http://localhost:2428)
+[PYTHON3] [2m2026-03-06T19:56:50.056358Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::manager[0m[2m:[0m Initializing NetworkManager with TCP request plane [3mmode[0m[2m=[0mtcp [3mhost[0m[2m=[0m10.1.83.110 [3mport[0m[2m=[0mOS-assigned
+[PYTHON3] [2m2026-03-06T19:56:50.056884Z[0m [32m INFO[0m [2mdynamo_runtime::system_status_server[0m[2m:[0m [spawn_system_status_server] binding to: 0.0.0.0:8168
+[PYTHON3] [2m2026-03-06T19:56:50.056920Z[0m [32m INFO[0m [2mdynamo_runtime::system_status_server[0m[2m:[0m [spawn_system_status_server] system status server bound to: 0.0.0.0:8168
+[PYTHON3] [2m2026-03-06T19:56:50.056938Z[0m [32m INFO[0m [2mdynamo_runtime::distributed[0m[2m:[0m System status server started successfully on 0.0.0.0:8168
+[PYTHON3] [2m2026-03-06T19:56:50.057058Z[0m [32m INFO[0m [2mgraceful_shutdown.install_signal_handlers[0m[2m:[0m Signal handlers set up for graceful shutdown (discovery unregister + grace period)
+[PYTHON3] [2m2026-03-06T19:56:50.057137Z[0m [32m INFO[0m [2mmain.worker[0m[2m:[0m Initializing the worker with config: Config(allowed_local_media_path='', attn_backend='VANILLA', component='tensorrt_llm', connector=[], custom_jinja_template=None, default_guidance_scale=5.0, default_height=480, default_num_frames=81, default_num_inference_steps=50, default_width=832, disable_request_abort=True, disable_torch_compile=False, disaggregation_mode=<DisaggregationMode.AGGREGATED: 'prefill_and_decode'>, discovery_backend='etcd', dit_cfg_size=1, dit_dp_size=1, dit_fsdp_size=1, dit_ring_size=1, dit_tp_size=1, dit_ulysses_size=1, dump_config_to=None, durable_kv_events=False, dyn_reasoning_parser=None, dyn_tool_call_parser=None, enable_async_cpu_offload=False, enable_attention_dp=False, enable_cuda_graph=False, enable_fullgraph=False, enable_layerwise_nvtx_marker=False, enable_local_indexer=True, enable_teacache=False, encode_endpoint='', endpoint='generate', endpoint_types='chat,completions', event_plane='nats', expert_parallel_size=None, extra_engine_args='', free_gpu_memory_fraction=0.4, fuse_qkv=True, gpus_per_node=None, guided_decoding_backend=None, kv_block_size=32, max_batch_size=2048, max_beam_width=1, max_file_size_mb=50, max_num_tokens=8192, max_seq_len=1024, media_output_fs_url='file:///tmp/dynamo_media', media_output_http_url=None, modality=<Modality.TEXT: 'text'>, model='TinyLlama/TinyLlama-1.1B-Chat-v1.0', multimodal_embedding_cache_capacity_gb=0, namespace='test-namespace-abdttzvdvj', output_modalities=['text'], override_engine_args='', pipeline_parallel_size=1, publish_events_and_metrics=True, quant_algo=None, quant_dynamic=True, request_plane='tcp', revision=None, served_model_name=None, skip_components='', teacache_thresh=0.2, teacache_use_ret_steps=True, tensor_parallel_size=1, torch_compile_mode='default', torch_dtype='bfloat16', use_kv_events=True, warmup_steps=1)
+[PYTHON3] [2m2026-03-06T19:56:50.057171Z[0m [32m INFO[0m [2m__init__.init_worker[0m[2m:[0m Initializing worker with modality=Modality.TEXT
+[PYTHON3] [2m2026-03-06T19:56:50.057472Z[0m [32m INFO[0m [2m__init__[0m[2m:[0m Loaded nixl API module: <module 'nixl_cu13._api' from '/opt/dynamo/venv/lib/python3.12/site-packages/nixl_cu13/_api.py'>
+[PYTHON3] [2m2026-03-06T19:56:50.060838Z[0m [33m WARN[0m [2mconsolidator_config.should_enable_consolidator[0m[2m:[0m KV Event Consolidator is not enabled: kv_connector_config is not a dict
+[PYTHON3] [2m2026-03-06T19:56:50.060928Z[0m [32m INFO[0m [2mllm_worker.init_llm_worker[0m[2m:[0m TensorRT-LLM engine args: {'model': 'TinyLlama/TinyLlama-1.1B-Chat-v1.0', 'scheduler_config': SchedulerConfig(capacity_scheduler_policy=<CapacitySchedulerPolicy.GUARANTEED_NO_EVICT: 'GUARANTEED_NO_EVICT'>, context_chunking_policy=None, dynamic_batch_config=DynamicBatchConfig(enable_batch_size_tuning=True, enable_max_num_tokens_tuning=False, dynamic_batch_moving_average_window=128), waiting_queue_policy=<WaitingQueuePolicy.FCFS: 'fcfs'>), 'tensor_parallel_size': 1, 'pipeline_parallel_size': 1, 'moe_expert_parallel_size': None, 'enable_attention_dp': False, 'backend': <Backend.PYTORCH: 'pytorch'>, 'kv_cache_config': {'enable_block_reuse': True, 'free_gpu_memory_fraction': 0.4, 'onboard_blocks': True, 'event_buffer_max_size': 1024, 'attention_dp_events_gather_period_ms': 5, 'enable_partial_reuse': True, 'copy_on_partial_reuse': True, 'use_uvm': False, 'max_gpu_total_bytes': 0, 'dtype': 'auto', 'mamba_ssm_cache_dtype': 'auto', 'tokens_per_block': 32, 'use_kv_cache_manager_v2': False, 'max_util_for_resume': 0.95}, 'gpus_per_node': 1, 'max_num_tokens': 8192, 'max_seq_len': 1024, 'max_beam_width': 1, 'max_batch_size': 2048, 'return_perf_metrics': True, 'enable_iter_perf_stats': True, 'kv_connector_config': None}
+[PYTHON3] [2m2026-03-06T19:56:50.126353Z[0m [32m INFO[0m [2mllm_worker.init_llm_worker[0m[2m:[0m Registering model with endpoint types: chat,completions
+[PYTHON3] [2m2026-03-06T19:56:50.126418Z[0m [32m INFO[0m [2mllm_worker.init_llm_worker[0m[2m:[0m Initializing NIXL Connect.
+[PYTHON3] [03/06/2026-19:56:50] [TRT-LLM] [I] Using LLM with PyTorch backend
+[PYTHON3] [03/06/2026-19:56:50] [TRT-LLM] [I] neither checkpoint_format nor checkpoint_loader were provided, checkpoint_format will be set to HF.
+[PYTHON3] The argument `trust_remote_code` is to be used with Auto classes. It has no effect here and is ignored.
+[PYTHON3] You are using a model of type llama to instantiate a model of type . This is not supported for all configurations of models and can yield errors.
+[PYTHON3] `torch_dtype` is deprecated! Use `dtype` instead!
+[PYTHON3] [33;20mrank 0 using MpiPoolSession to spawn MPI processes
+[PYTHON3] [0m/opt/dynamo/venv/lib/python3.12/site-packages/torch/library.py:356: UserWarning: Warning only once for all operators,  other operators may also be overridden.
+[PYTHON3]   Overriding a previously registered kernel for the same operator and the same dispatch key
+[PYTHON3]   operator: flash_attn::_flash_attn_backward(Tensor dout, Tensor q, Tensor k, Tensor v, Tensor out, Tensor softmax_lse, Tensor(a6!)? dq, Tensor(a7!)? dk, Tensor(a8!)? dv, float dropout_p, float softmax_scale, bool causal, SymInt window_size_left, SymInt window_size_right, float softcap, Tensor? alibi_slopes, bool deterministic, Tensor? rng_state=None) -> Tensor
+[PYTHON3]     registered at /opt/dynamo/venv/lib/python3.12/site-packages/torch/_library/custom_ops.py:922
+[PYTHON3]   dispatch key: ADInplaceOrView
+[PYTHON3]   previous kernel: no debug info
+[PYTHON3]        new kernel: registered at /opt/dynamo/venv/lib/python3.12/site-packages/torch/_library/custom_ops.py:922 (Triggered internally at /opt/pytorch/pytorch/aten/src/ATen/core/dispatch/OperatorEntry.cpp:208.)
+[PYTHON3]   self.m.impl(
+[PYTHON3] Multiple distributions found for package optimum. Picked distribution: optimum
+[PYTHON3] Multiple distributions found for package modelopt. Picked distribution: nvidia-modelopt
+[PYTHON3] /opt/dynamo/venv/lib/python3.12/site-packages/modelopt/torch/__init__.py:36: UserWarning: transformers version 4.57.1 is incompatible with nvidia-modelopt and may cause issues. Please install recommended version with `pip install nvidia-modelopt[hf]` if working with HF models.
+[PYTHON3]   _warnings.warn(
+[PYTHON3] Multiple distributions found for package optimum. Picked distribution: optimum
+[PYTHON3] Multiple distributions found for package modelopt. Picked distribution: nvidia-modelopt
+[PYTHON3] [TensorRT-LLM] TensorRT LLM version: 1.3.0rc5
+[PYTHON3] [2026-03-06 19:57:04] INFO __init__.py:53: dynamo.nixl_connect: Utilizing CuPy to enable GPU acceleration.
+[PYTHON3] [TensorRT-LLM][INFO] Refreshed the MPI local session
+[PYTHON3] /opt/dynamo/venv/lib/python3.12/site-packages/modelopt/torch/__init__.py:36: UserWarning: transformers version 4.57.1 is incompatible with nvidia-modelopt and may cause issues. Please install recommended version with `pip install nvidia-modelopt[hf]` if working with HF models.
+[PYTHON3]   _warnings.warn(
+[PYTHON3] /opt/dynamo/venv/lib/python3.12/site-packages/pydantic/_internal/_fields.py:198: UserWarning: Field name "schema" in "ResponseFormat" shadows an attribute in parent "OpenAIBaseModel"
+[PYTHON3]   warnings.warn(
+[PYTHON3] `torch_dtype` is deprecated! Use `dtype` instead!
+[PYTHON3] Loading safetensors weights in parallel:   0%|          | 0/1 [00:00<?, ?it/s]Loading safetensors weights in parallel: 100%|██████████| 1/1 [00:00<00:00, 196.26it/s]
+[PYTHON3] Loading weights concurrently:   0%|          | 0/470 [00:00<?, ?it/s]Loading weights concurrently:  44%|████▍     | 208/470 [00:00<00:00, 2067.68it/s]Loading weights concurrently:  95%|█████████▌| 447/470 [00:00<00:00, 2255.68it/s]Loading weights concurrently: 100%|██████████| 470/470 [00:00<00:00, 2017.56it/s]
+[PYTHON3] Model init total -- 1.44s
+[PYTHON3] [TensorRT-LLM][INFO] Max KV cache blocks per sequence: 32 [window size=1024], tokens per block=32, primary blocks=2048, secondary blocks=0, max sequence length=1024
+[PYTHON3] [TensorRT-LLM][INFO] Number of tokens per block: 32.
+[PYTHON3] [TensorRT-LLM][INFO] [MemUsageChange] Allocated 1.38 GiB for max tokens in paged KV cache (65536).
+[PYTHON3] [TensorRT-LLM][WARNING] Attention workspace size is not enough, increase the size from 0 bytes to 67462144 bytes
+[PYTHON3] [TensorRT-LLM][WARNING] Attention workspace size is not enough, increase the size from 0 bytes to 34367488 bytes
+[PYTHON3] [TensorRT-LLM] TensorRT LLM version: 1.3.0rc5
+[PYTHON3] [2026-03-06 19:57:08] INFO __init__.py:53: dynamo.nixl_connect: Utilizing CuPy to enable GPU acceleration.
+[PYTHON3] [TensorRT-LLM][INFO] Refreshed the MPI local session
+[PYTHON3] /opt/dynamo/venv/lib/python3.12/site-packages/pydantic/_internal/_fields.py:198: UserWarning: Field name "schema" in "ResponseFormat" shadows an attribute in parent "OpenAIBaseModel"
+[PYTHON3]   warnings.warn(
+[PYTHON3] `torch_dtype` is deprecated! Use `dtype` instead!
+[PYTHON3] [TensorRT-LLM][WARNING] [kv cache manager] storeContextBlocks: Can not find sequence for request 2048
+[PYTHON3] [TensorRT-LLM][WARNING] [kv cache manager] storeContextBlocks: Can not find sequence for request 2049
+[PYTHON3] [TensorRT-LLM][WARNING] [kv cache manager] storeContextBlocks: Can not find sequence for request 2050
+[PYTHON3] [TensorRT-LLM][WARNING] [kv cache manager] storeContextBlocks: Can not find sequence for request 2051
+[PYTHON3] [TensorRT-LLM][WARNING] [kv cache manager] storeContextBlocks: Can not find sequence for request 2052
+[PYTHON3] [TensorRT-LLM][WARNING] [kv cache manager] storeContextBlocks: Can not find sequence for request 2053
+[PYTHON3] [TensorRT-LLM][WARNING] [kv cache manager] storeContextBlocks: Can not find sequence for request 2054
+[PYTHON3] [TensorRT-LLM][WARNING] [kv cache manager] storeContextBlocks: Can not find sequence for request 2055
+[PYTHON3] [TensorRT-LLM][WARNING] [kv cache manager] storeContextBlocks: Can not find sequence for request 2056
+[PYTHON3] [TensorRT-LLM][INFO] Max KV cache blocks per sequence: 32 [window size=1024], tokens per block=32, primary blocks=9602, secondary blocks=0, max sequence length=1024
+[PYTHON3] [TensorRT-LLM][INFO] Number of tokens per block: 32.
+[PYTHON3] [TensorRT-LLM][INFO] [MemUsageChange] Allocated 6.45 GiB for max tokens in paged KV cache (307264).
+[PYTHON3] [TensorRT-LLM][WARNING] Attention workspace size is not enough, increase the size from 0 bytes to 67462144 bytes
+[PYTHON3] [TensorRT-LLM][WARNING] Attention workspace size is not enough, increase the size from 0 bytes to 34367488 bytes
+[PYTHON3] Loading safetensors weights in parallel:   0%|          | 0/1 [00:00<?, ?it/s]Loading safetensors weights in parallel: 100%|██████████| 1/1 [00:00<00:00, 201.26it/s]
+[PYTHON3] Loading weights concurrently:   0%|          | 0/470 [00:00<?, ?it/s]Loading weights concurrently:  45%|████▍     | 210/470 [00:00<00:00, 2090.41it/s]Loading weights concurrently:  91%|█████████▏| 430/470 [00:00<00:00, 2107.63it/s]Loading weights concurrently: 100%|██████████| 470/470 [00:00<00:00, 1867.19it/s]
+[PYTHON3] Model init total -- 1.57s
+[PYTHON3] [TensorRT-LLM][INFO] Max KV cache blocks per sequence: 32 [window size=1024], tokens per block=32, primary blocks=2048, secondary blocks=0, max sequence length=1024
+[PYTHON3] [TensorRT-LLM][INFO] Number of tokens per block: 32.
+[PYTHON3] [TensorRT-LLM][INFO] [MemUsageChange] Allocated 1.38 GiB for max tokens in paged KV cache (65536).
+[PYTHON3] [TensorRT-LLM][WARNING] Attention workspace size is not enough, increase the size from 0 bytes to 67462144 bytes
+[PYTHON3] [TensorRT-LLM][WARNING] Attention workspace size is not enough, increase the size from 0 bytes to 34367488 bytes
+[PYTHON3] [2m2026-03-06T19:57:13.583840Z[0m [32m INFO[0m [2mllm_worker.init_llm_worker[0m[2m:[0m Set runtime config max_num_seqs: 2048
+[PYTHON3] [2m2026-03-06T19:57:13.583910Z[0m [32m INFO[0m [2mllm_worker.init_llm_worker[0m[2m:[0m Set runtime config max_num_batched_tokens: 8192
+[PYTHON3] [2m2026-03-06T19:57:13.583952Z[0m [32m INFO[0m [2mllm_worker.init_llm_worker[0m[2m:[0m Set runtime config data_parallel_size: 1
+[PYTHON3] [2m2026-03-06T19:57:13.584200Z[0m [32m INFO[0m [2mllm_worker.init_llm_worker[0m[2m:[0m TensorRT-LLM MetricsCollector initialized
+[PYTHON3] [2m2026-03-06T19:57:13.584300Z[0m [32m INFO[0m [2mllm_worker.init_llm_worker[0m[2m:[0m TensorRT-LLM Prometheus metrics registered
+[PYTHON3] [2m2026-03-06T19:57:13.585728Z[0m [32m INFO[0m [2mdynamo_llm::hub[0m[2m:[0m Found cached model 'TinyLlama/TinyLlama-1.1B-Chat-v1.0' at "/home/dynamo/.cache/huggingface/hub/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/snapshots/fe8a4ea1ffedaf415f4da2f062534de366a451e6", skipping download
+[PYTHON3] [2m2026-03-06T19:57:13.585756Z[0m [32m INFO[0m [2mdynamo_llm::hub[0m[2m:[0m Offline mode: using cached model 'TinyLlama/TinyLlama-1.1B-Chat-v1.0' without API validation
+[PYTHON3] [2m2026-03-06T19:57:13.588824Z[0m [32m INFO[0m [2m_core[0m[2m:[0m Registered base model 'TinyLlama/TinyLlama-1.1B-Chat-v1.0' MDC
+[PYTHON3] [2m2026-03-06T19:57:13.589014Z[0m [32m INFO[0m [2mhealth_check._get_bos_token_id_from_tokenizer[0m[2m:[0m Using model's BOS token ID for health check: 1
+[PYTHON3] [2m2026-03-06T19:57:13.589135Z[0m [32m INFO[0m [2mpublisher.__init__[0m[2m:[0m TensorRT-LLM: ZMQ endpoint not provided, ZMQ publisher will not be initialized
+[PYTHON3] [2m2026-03-06T19:57:13.589269Z[0m [32m INFO[0m [2mdynamo_llm::kv_router::publisher[0m[2m:[0m Initializing KvEventPublisher for worker 4497861021593153036 in component tensorrt_llm
+[PYTHON3] [2m2026-03-06T19:57:13.589277Z[0m [32m INFO[0m [2mdynamo_llm::kv_router::publisher[0m[2m:[0m LocalKvIndexer enabled for worker 4497861021593153036 in component tensorrt_llm
+[PYTHON3] [2m2026-03-06T19:57:13.589386Z[0m [32m INFO[0m [2mdynamo_llm::kv_router::publisher[0m[2m:[0m Using event plane for KV event publishing (local_indexer mode)
+[PYTHON3] [2m2026-03-06T19:57:13.589436Z[0m [32m INFO[0m [2mpublisher.initialize[0m[2m:[0m Created 1 KV event publisher(s) for attention DP ranks
+[PYTHON3] [2m2026-03-06T19:57:13.589443Z[0m [32m INFO[0m [2mdynamo_llm::kv_router::worker_query[0m[2m:[0m WorkerKvQuery endpoint starting for worker 4497861021593153036 dp_rank 0 on endpoint 'worker_kv_indexer_query_dp0'
+[PYTHON3] [2m2026-03-06T19:57:13.589450Z[0m [32m INFO[0m [2mdynamo_runtime::discovery::kv_store[0m[2m:[0m KVStoreDiscovery::register: EventChannel bucket=v1/event_channels, key=test-namespace-abdttzvdvj/tensorrt_llm/kv-events/3e6b9cc4b922ae0c
+[PYTHON3] [2m2026-03-06T19:57:13.589746Z[0m [32m INFO[0m [2mdynamo_runtime::discovery::kv_store[0m[2m:[0m KVStoreDiscovery::register: EventChannel bucket=v1/event_channels, key=test-namespace-abdttzvdvj//kv_metrics/3e6b9cc4b922ae0c
+[PYTHON3] [2m2026-03-06T19:57:13.589834Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::manager[0m[2m:[0m Creating TCP request plane server [3mbind_addr[0m[2m=[0m10.1.83.110:0 [3mport_source[0m[2m=[0m"OS-assigned"
+[PYTHON3] [2m2026-03-06T19:57:13.589854Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::ingress::shared_tcp_endpoint[0m[2m:[0m Initializing TCP server with dispatcher (concurrency=1500, queue=6000)
+[PYTHON3] [2m2026-03-06T19:57:13.589861Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::ingress::shared_tcp_endpoint[0m[2m:[0m Started TCP worker dispatcher with concurrency limit 1500
+[PYTHON3] [2m2026-03-06T19:57:13.589865Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::ingress::shared_tcp_endpoint[0m[2m:[0m Binding TCP server to 10.1.83.110:0
+[PYTHON3] [2m2026-03-06T19:57:13.589914Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::ingress::shared_tcp_endpoint[0m[2m:[0m TCP server bound successfully [3mrequested[0m[2m=[0m10.1.83.110:0 [3mactual[0m[2m=[0m10.1.83.110:42827
+[PYTHON3] [2m2026-03-06T19:57:13.589929Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::manager[0m[2m:[0m TCP request plane server started [3mactual_addr[0m[2m=[0m10.1.83.110:42827 [3mactual_port[0m[2m=[0m42827
+[PYTHON3] [2m2026-03-06T19:57:13.589949Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::ingress::shared_tcp_endpoint[0m[2m:[0m Registered endpoint 'worker_kv_indexer_query_dp0' with shared TCP server on 10.1.83.110:42827
+[PYTHON3] [2m2026-03-06T19:57:13.590168Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::ingress::shared_tcp_endpoint[0m[2m:[0m Registered endpoint 'generate' with shared TCP server on 10.1.83.110:42827
+[PYTHON3] [2m2026-03-06T19:57:13.591518Z[0m [32m INFO[0m [2mdynamo_runtime::transports::event_plane[0m[2m:[0m EventPublisher registered with discovery [3mtopic[0m[2m=[0mkv-events [3mtransport[0m[2m=[0mNats [3minstance_id[0m[2m=[0m4497861021593153036
+[PYTHON3] [2m2026-03-06T19:57:13.595018Z[0m [32m INFO[0m [2mdynamo_runtime::transports::event_plane[0m[2m:[0m EventPublisher registered with discovery [3mtopic[0m[2m=[0mkv_metrics [3mtransport[0m[2m=[0mNats [3minstance_id[0m[2m=[0m4497861021593153036
+[PYTHON3] [TensorRT-LLM][WARNING] [kv cache manager] storeContextBlocks: Can not find sequence for request 2048
+[PYTHON3] [TensorRT-LLM][WARNING] [kv cache manager] storeContextBlocks: Can not find sequence for request 2049
+[PYTHON3] [TensorRT-LLM][WARNING] [kv cache manager] storeContextBlocks: Can not find sequence for request 2050
+[PYTHON3] [TensorRT-LLM][WARNING] [kv cache manager] storeContextBlocks: Can not find sequence for request 2051
+[PYTHON3] [TensorRT-LLM][WARNING] [kv cache manager] storeContextBlocks: Can not find sequence for request 2052
+[PYTHON3] [TensorRT-LLM][WARNING] [kv cache manager] storeContextBlocks: Can not find sequence for request 2053
+[PYTHON3] [TensorRT-LLM][WARNING] [kv cache manager] storeContextBlocks: Can not find sequence for request 2054
+[PYTHON3] [TensorRT-LLM][WARNING] [kv cache manager] storeContextBlocks: Can not find sequence for request 2055
+[PYTHON3] [TensorRT-LLM][WARNING] [kv cache manager] storeContextBlocks: Can not find sequence for request 2056
+[PYTHON3] [TensorRT-LLM][INFO] Max KV cache blocks per sequence: 32 [window size=1024], tokens per block=32, primary blocks=5566, secondary blocks=0, max sequence length=1024
+[PYTHON3] [TensorRT-LLM][INFO] Number of tokens per block: 32.
+[PYTHON3] [TensorRT-LLM][INFO] [MemUsageChange] Allocated 3.74 GiB for max tokens in paged KV cache (178112).
+[PYTHON3] [TensorRT-LLM][WARNING] Attention workspace size is not enough, increase the size from 0 bytes to 67462144 bytes
+[PYTHON3] [TensorRT-LLM][WARNING] Attention workspace size is not enough, increase the size from 0 bytes to 34367488 bytes
+[PYTHON3] [2m2026-03-06T19:57:18.044858Z[0m [32m INFO[0m [2mllm_worker.init_llm_worker[0m[2m:[0m Set runtime config max_num_seqs: 2048
+[PYTHON3] [2m2026-03-06T19:57:18.044956Z[0m [32m INFO[0m [2mllm_worker.init_llm_worker[0m[2m:[0m Set runtime config max_num_batched_tokens: 8192
+[PYTHON3] [2m2026-03-06T19:57:18.045015Z[0m [32m INFO[0m [2mllm_worker.init_llm_worker[0m[2m:[0m Set runtime config data_parallel_size: 1
+[PYTHON3] [2m2026-03-06T19:57:18.045361Z[0m [32m INFO[0m [2mllm_worker.init_llm_worker[0m[2m:[0m TensorRT-LLM MetricsCollector initialized
+[PYTHON3] [2m2026-03-06T19:57:18.045512Z[0m [32m INFO[0m [2mllm_worker.init_llm_worker[0m[2m:[0m TensorRT-LLM Prometheus metrics registered
+[PYTHON3] [2m2026-03-06T19:57:18.047132Z[0m [32m INFO[0m [2mdynamo_llm::hub[0m[2m:[0m Found cached model 'TinyLlama/TinyLlama-1.1B-Chat-v1.0' at "/home/dynamo/.cache/huggingface/hub/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/snapshots/fe8a4ea1ffedaf415f4da2f062534de366a451e6", skipping download
+[PYTHON3] [2m2026-03-06T19:57:18.047157Z[0m [32m INFO[0m [2mdynamo_llm::hub[0m[2m:[0m Offline mode: using cached model 'TinyLlama/TinyLlama-1.1B-Chat-v1.0' without API validation
+[PYTHON3] [2m2026-03-06T19:57:18.053012Z[0m [32m INFO[0m [2m_core[0m[2m:[0m Registered base model 'TinyLlama/TinyLlama-1.1B-Chat-v1.0' MDC
+[PYTHON3] [2m2026-03-06T19:57:18.053171Z[0m [32m INFO[0m [2mhealth_check._get_bos_token_id_from_tokenizer[0m[2m:[0m Using model's BOS token ID for health check: 1
+[PYTHON3] [2m2026-03-06T19:57:18.053273Z[0m [32m INFO[0m [2mpublisher.__init__[0m[2m:[0m TensorRT-LLM: ZMQ endpoint not provided, ZMQ publisher will not be initialized
+[PYTHON3] [2m2026-03-06T19:57:18.053383Z[0m [32m INFO[0m [2mdynamo_llm::kv_router::publisher[0m[2m:[0m Initializing KvEventPublisher for worker 4497861021593153038 in component tensorrt_llm
+[PYTHON3] [2m2026-03-06T19:57:18.053390Z[0m [32m INFO[0m [2mdynamo_llm::kv_router::publisher[0m[2m:[0m LocalKvIndexer enabled for worker 4497861021593153038 in component tensorrt_llm
+[PYTHON3] [2m2026-03-06T19:57:18.053503Z[0m [32m INFO[0m [2mdynamo_llm::kv_router::publisher[0m[2m:[0m Using event plane for KV event publishing (local_indexer mode)
+[PYTHON3] [2m2026-03-06T19:57:18.053544Z[0m [32m INFO[0m [2mpublisher.initialize[0m[2m:[0m Created 1 KV event publisher(s) for attention DP ranks
+[PYTHON3] [2m2026-03-06T19:57:18.053571Z[0m [32m INFO[0m [2mdynamo_llm::kv_router::worker_query[0m[2m:[0m WorkerKvQuery endpoint starting for worker 4497861021593153038 dp_rank 0 on endpoint 'worker_kv_indexer_query_dp0'
+[PYTHON3] [2m2026-03-06T19:57:18.053580Z[0m [32m INFO[0m [2mdynamo_runtime::discovery::kv_store[0m[2m:[0m KVStoreDiscovery::register: EventChannel bucket=v1/event_channels, key=test-namespace-abdttzvdvj/tensorrt_llm/kv-events/3e6b9cc4b922ae0e
+[PYTHON3] [2m2026-03-06T19:57:18.053872Z[0m [32m INFO[0m [2mdynamo_runtime::discovery::kv_store[0m[2m:[0m KVStoreDiscovery::register: EventChannel bucket=v1/event_channels, key=test-namespace-abdttzvdvj//kv_metrics/3e6b9cc4b922ae0e
+[PYTHON3] [2m2026-03-06T19:57:18.054091Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::manager[0m[2m:[0m Creating TCP request plane server [3mbind_addr[0m[2m=[0m10.1.83.110:0 [3mport_source[0m[2m=[0m"OS-assigned"
+[PYTHON3] [2m2026-03-06T19:57:18.054119Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::ingress::shared_tcp_endpoint[0m[2m:[0m Initializing TCP server with dispatcher (concurrency=1500, queue=6000)
+[PYTHON3] [2m2026-03-06T19:57:18.054131Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::ingress::shared_tcp_endpoint[0m[2m:[0m Started TCP worker dispatcher with concurrency limit 1500
+[PYTHON3] [2m2026-03-06T19:57:18.054139Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::ingress::shared_tcp_endpoint[0m[2m:[0m Binding TCP server to 10.1.83.110:0
+[PYTHON3] [2m2026-03-06T19:57:18.054189Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::ingress::shared_tcp_endpoint[0m[2m:[0m TCP server bound successfully [3mrequested[0m[2m=[0m10.1.83.110:0 [3mactual[0m[2m=[0m10.1.83.110:35359
+[PYTHON3] [2m2026-03-06T19:57:18.054205Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::manager[0m[2m:[0m TCP request plane server started [3mactual_addr[0m[2m=[0m10.1.83.110:35359 [3mactual_port[0m[2m=[0m35359
+[PYTHON3] [2m2026-03-06T19:57:18.054229Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::ingress::shared_tcp_endpoint[0m[2m:[0m Registered endpoint 'worker_kv_indexer_query_dp0' with shared TCP server on 10.1.83.110:35359
+[PYTHON3] [2m2026-03-06T19:57:18.054428Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::ingress::shared_tcp_endpoint[0m[2m:[0m Registered endpoint 'generate' with shared TCP server on 10.1.83.110:35359
+[PYTHON3] [2m2026-03-06T19:57:18.055422Z[0m [32m INFO[0m [2mdynamo_runtime::transports::event_plane[0m[2m:[0m EventPublisher registered with discovery [3mtopic[0m[2m=[0mkv-events [3mtransport[0m[2m=[0mNats [3minstance_id[0m[2m=[0m4497861021593153038
+[PYTHON3] [2m2026-03-06T19:57:18.056972Z[0m [32m INFO[0m [2mdynamo_runtime::transports::event_plane[0m[2m:[0m EventPublisher registered with discovery [3mtopic[0m[2m=[0mkv_metrics [3mtransport[0m[2m=[0mNats [3minstance_id[0m[2m=[0m4497861021593153038
+[PYTHON3] [2m2026-03-06T19:57:39.298496Z[0m [32m INFO[0m [2mgraceful_shutdown.graceful_shutdown_with_discovery[0m[2m:[0m Received shutdown signal; unregistering endpoints from discovery
+[PYTHON3] [2m2026-03-06T19:57:39.302418Z[0m [32m INFO[0m [2mdynamo_runtime::component::endpoint[0m[2m:[0m Successfully unregistered endpoint instance from discovery - worker removed from routing pool [3minstance_id[0m[2m=[0m4497861021593153036
+[PYTHON3] [2m2026-03-06T19:57:39.302882Z[0m [32m INFO[0m [2mgraceful_shutdown.graceful_shutdown_with_discovery[0m[2m:[0m Grace period 5.00s before stopping endpoints
+[PYTHON3] [2m2026-03-06T19:57:41.856040Z[0m [32m INFO[0m [2mgraceful_shutdown.graceful_shutdown_with_discovery[0m[2m:[0m Received shutdown signal; unregistering endpoints from discovery
+[PYTHON3] [2m2026-03-06T19:57:41.858218Z[0m [32m INFO[0m [2mdynamo_runtime::component::endpoint[0m[2m:[0m Successfully unregistered endpoint instance from discovery - worker removed from routing pool [3minstance_id[0m[2m=[0m4497861021593153038
+[PYTHON3] [2m2026-03-06T19:57:41.858620Z[0m [32m INFO[0m [2mgraceful_shutdown.graceful_shutdown_with_discovery[0m[2m:[0m Grace period 5.00s before stopping endpoints

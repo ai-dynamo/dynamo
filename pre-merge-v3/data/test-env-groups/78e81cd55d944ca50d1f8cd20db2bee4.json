@@ -1,0 +1,1 @@
+{"id":"78e81cd55d944ca50d1f8cd20db2bee4","fullName":"components.src.dynamo.vllm.tests.multimodal_handlers.test_vllm_multimodal_pd_worker_handler.TestParseFrontendRequest#test_extracts_token_ids_and_sampling_params","name":"test_extracts_token_ids_and_sampling_params","status":"passed","testResultsByEnv":{"default":"8142bc16f15d434b043b12747bfd536c"}}

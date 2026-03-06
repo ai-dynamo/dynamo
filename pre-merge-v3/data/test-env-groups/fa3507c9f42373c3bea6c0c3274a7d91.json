@@ -1,0 +1,1 @@
+{"id":"fa3507c9f42373c3bea6c0c3274a7d91","fullName":"components.src.dynamo.vllm.tests.test_vllm_renderer_api.TestVllmRendererApi#test_chat_completion_request_has_required_fields","name":"test_chat_completion_request_has_required_fields","status":"passed","testResultsByEnv":{"default":"1075ce3eb965da81ca6eea9ee3ff40c9"}}

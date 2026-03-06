@@ -1,0 +1,1 @@
+{"id":"64513c11dd145b571ebca8539fae6580","fullName":"components.src.dynamo.vllm.tests.multimodal_utils.test_vllm_multimodal_embedding_cache_connector.TestSchedulerSideLRU#test_skip_oversized_item","name":"test_skip_oversized_item","status":"passed","testResultsByEnv":{"default":"6670f61a83f444a92f0d07234e24dc15"}}

@@ -1,0 +1,2 @@
+WARNING  dynamo.vllm.multimodal_utils.multimodal_embedding_cache_connector:multimodal_embedding_cache_connector.py:51 DynamoMultimodalEmbeddingCacheConnector requires vLLM >= 0.17.0, but found 0.16.0. Some features may not work correctly.
+INFO     dynamo.vllm.multimodal_utils.multimodal_embedding_cache_connector:multimodal_embedding_cache_connector.py:95 DynamoMultimodalEmbeddingCacheConnector initialized: capacity_gb=1.00, capacity_bytes=1073741824, bytes_per_embed=8192

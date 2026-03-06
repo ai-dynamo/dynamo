@@ -1,0 +1,1 @@
+{"id":"37c0e721c469ce8a037405c68b1208e4","fullName":"components.src.dynamo.vllm.tests.multimodal_handlers.test_vllm_multimodal_pd_worker_handler.TestParseFrontendRequest#test_extracts_image_urls","name":"test_extracts_image_urls","status":"passed","testResultsByEnv":{"default":"3b0ba0fdf90bcb900d679caa5d66f53a"}}

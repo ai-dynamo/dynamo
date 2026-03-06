@@ -1,0 +1,39 @@
+INFO     tests.deploy.test_deploy:test_deploy.py:144 Starting deployment test for vllm-disagg (source: examples, model: Qwen/Qwen3-0.6B, namespace: gh-id-22778315473-pr-6903-dt)
+INFO     tests.deploy.test_deploy:test_deploy.py:148 Log directory: test_deployment[vllm-disagg]
+INFO     ManagedDeployment:managed_deployment.py:527 Loading kubeconfig from KUBECONFIG: /home/runner/_work/dynamo/dynamo/.kubeconfig
+INFO     ManagedDeployment:managed_deployment.py:530 Successfully loaded kubeconfig from KUBECONFIG
+INFO     ManagedDeployment:managed_deployment.py:725 Starting Deployment vllm-disagg with spec <tests.utils.managed_deployment.DeploymentSpec object at 0xffff7f8b8f50>
+INFO     ManagedDeployment:managed_deployment.py:738 {'apiVersion': 'nvidia.com/v1alpha1', 'kind': 'DynamoGraphDeployment', 'metadata': {'name': 'vllm-disagg', 'namespace': 'gh-id-22778315473-pr-6903-dt'}, 'spec': {'services': {'Frontend': {'componentType': 'frontend', 'replicas': 1, 'extraPodSpec': {'mainContainer': {'image': 'dynamoci.azurecr.io/ai-dynamo/dynamo:e6caeae014d3e406a018f0cd173b82497efac4e6-vllm-cuda12-amd64'}}}, 'VllmDecodeWorker': {'envFromSecret': 'hf-token-secret', 'componentType': 'worker', 'subComponentType': 'decode', 'replicas': 1, 'resources': {'limits': {'gpu': '1'}, 'requests': {'custom': {'ephemeral-storage': '2Gi'}}}, 'extraPodSpec': {'mainContainer': {'image': 'dynamoci.azurecr.io/ai-dynamo/dynamo:e6caeae014d3e406a018f0cd173b82497efac4e6-vllm-cuda12-amd64', 'workingDir': '/workspace/examples/backends/vllm', 'command': ['python3', '-m', 'dynamo.vllm'], 'args': ['--model', 'Qwen/Qwen3-0.6B', '--disaggregation-mode', 'decode']}}}, 'VllmPrefillWorker': {'envFromSecret': 'hf-token-secret', 'componentType': 'worker', 'subComponentType': 'prefill', 'replicas': 1, 'resources': {'limits': {'gpu': '1'}, 'requests': {'custom': {'ephemeral-storage': '2Gi'}}}, 'extraPodSpec': {'mainContainer': {'image': 'dynamoci.azurecr.io/ai-dynamo/dynamo:e6caeae014d3e406a018f0cd173b82497efac4e6-vllm-cuda12-amd64', 'workingDir': '/workspace/examples/backends/vllm', 'command': ['python3', '-m', 'dynamo.vllm'], 'args': ['--model', 'Qwen/Qwen3-0.6B', '--disaggregation-mode', 'prefill', '--kv-transfer-config', '{"kv_connector":"NixlConnector","kv_role":"kv_both"}']}}}}}}
+INFO     ManagedDeployment:managed_deployment.py:739 Deployment Started vllm-disagg
+INFO     ManagedDeployment:managed_deployment.py:629 Waiting for Deployment vllm-disagg to have Ready condition True and state successful
+INFO     ManagedDeployment:managed_deployment.py:680 Current deployment state: pending
+INFO     ManagedDeployment:managed_deployment.py:681 Current conditions: [{'lastTransitionTime': '2026-03-06T20:24:19Z', 'message': 'Resources not ready: vllm-disagg-vllmdecodeworker-814d8ef7: Component deployment not ready - Available condition not true; vllm-disagg-vllmprefillworker-814d8ef7: Component deployment not ready - Available condition not true', 'reason': 'some_resources_are_not_ready', 'status': 'False', 'type': 'Ready'}]
+INFO     ManagedDeployment:managed_deployment.py:682 Elapsed time: 62.9s / 1800s
+INFO     ManagedDeployment:managed_deployment.py:685 Deployment has Ready condition False and state pending, desired condition True and state successful
+INFO     ManagedDeployment:managed_deployment.py:668 Current deployment state: successful
+INFO     ManagedDeployment:managed_deployment.py:669 Current conditions: [{'lastTransitionTime': '2026-03-06T20:25:54Z', 'message': 'All resources are ready', 'reason': 'all_resources_are_ready', 'status': 'True', 'type': 'Ready'}]
+INFO     ManagedDeployment:managed_deployment.py:670 Elapsed time: 112.0s / 1800s
+INFO     ManagedDeployment:managed_deployment.py:674 Deployment vllm-disagg has Ready condition True and state successful
+INFO     tests.deploy.test_deploy:test_deploy.py:166 Found frontend pod: vllm-disagg-frontend-79f96777b9-7hb9w
+INFO     tests.deploy.test_deploy:test_deploy.py:176 Port forwarding established: http://localhost:26886
+INFO     tests.deploy.test_deploy:client.py:203 Model 'Qwen/Qwen3-0.6B' is available and responding
+INFO     tests.deploy.test_deploy:client.py:205 Model ready, waiting 5s for stabilization...
+INFO     tests.utils.client:client.py:94 Sending request (curl equivalent):
+curl -X POST "http://localhost:26886/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "model": "Qwen/Qwen3-0.6B",
+  "messages": [
+    {
+      "role": "user",
+      "content": "In the heart of Eldoria, an ancient land of boundless magic and mysterious creatures, lies the long-forgotten city of Aeloria. Once a beacon of knowledge and power, Aeloria was buried beneath the shifting sands of time, lost to the world for centuries. You are an intrepid explorer, known for your unparalleled curiosity and courage, who has stumbled upon an ancient map hinting at the city's location. Your journey will take you through treacherous deserts, enchanted forests, and across perilous mountain ranges. Describe your first steps into the ruins of Aeloria."
+    }
+  ],
+  "max_tokens": 30,
+  "temperature": 0.0,
+  "stream": false
+}'
+INFO     tests.utils.client:client.py:111 Received response: status=200, elapsed=0.62s
+INFO     tests.deploy.test_deploy:test_deploy.py:95 Response validation passed: model=Qwen/Qwen3-0.6B, content_length=122
+INFO     tests.deploy.test_deploy:test_deploy.py:212 Deployment test PASSED for vllm-disagg (source: examples, model: Qwen/Qwen3-0.6B, namespace: gh-id-22778315473-pr-6903-dt)
+INFO     ManagedDeployment:managed_deployment.py:1013 Cleaning up 2 active port forwards

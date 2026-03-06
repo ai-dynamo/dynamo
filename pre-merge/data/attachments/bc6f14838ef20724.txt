@@ -1,0 +1,3 @@
+DEBUG    asyncio:selector_events.py:64 Using selector: EpollSelector
+INFO     root:args.py:114 Loading disagg config section 'prefill' from /tmp/pytest_temp/test_disagg_config_rejects_dyn0/disagg.yaml
+INFO     root:args.py:151 Successfully wrote config section to temp file

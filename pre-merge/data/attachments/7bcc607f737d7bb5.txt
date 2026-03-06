@@ -1,2 +1,0 @@
-DEBUG    asyncio:selector_events.py:64 Using selector: EpollSelector
-DEBUG    root:handler_base.py:221 Aborted Request ID: test-id-1
