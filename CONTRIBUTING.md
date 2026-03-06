@@ -129,7 +129,7 @@ Issues labeled `good-first-issue` are sized for new contributors. We provide ext
 
 <!-- We were given the feedback that having information on architecture, languages used, etc. would be helpful for external contributors -->
 
-Understanding Dynamo's architecture helps you find where to make changes. For the complete picture, see the [Architecture Documentation](docs/pages/design-docs/architecture.md) and [Support Matrix](docs/pages/reference/support-matrix.md).
+Understanding Dynamo's architecture helps you find where to make changes. For the complete picture, see the [Architecture Documentation](docs/design-docs/architecture.md) and [Support Matrix](docs/reference/support-matrix.md).
 
 ![Dynamo Architecture](docs/assets/img/architecture.png)
 
@@ -148,9 +148,9 @@ Understanding Dynamo's architecture helps you find where to make changes. For th
 
 | Plane | Purpose | Documentation |
 |-------|---------|---------------|
-| **Discovery Plane** | Service registration and discovery across components | [docs/pages/design-docs/distributed-runtime.md](docs/pages/design-docs/distributed-runtime.md) |
-| **Request Plane** | High-performance request routing between components | [docs/pages/design-docs/request-plane.md](docs/pages/design-docs/request-plane.md) |
-| **KV Event Plane** | KV cache event propagation for cache-aware routing | [docs/pages/design-docs/event-plane.md](docs/pages/design-docs/event-plane.md) |
+| **Discovery Plane** | Service registration and discovery across components | [docs/design-docs/distributed-runtime.md](docs/design-docs/distributed-runtime.md) |
+| **Request Plane** | High-performance request routing between components | [docs/design-docs/request-plane.md](docs/design-docs/request-plane.md) |
+| **KV Event Plane** | KV cache event propagation for cache-aware routing | [docs/design-docs/event-plane.md](docs/design-docs/event-plane.md) |
 
 ### Kubernetes Deployment
 

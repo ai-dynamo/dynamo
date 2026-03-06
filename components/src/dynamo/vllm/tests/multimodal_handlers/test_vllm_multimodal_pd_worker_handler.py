@@ -37,7 +37,7 @@ def _make_config(
     multimodal_embedding_cache_capacity_gb: float = 0,
 ) -> MagicMock:
     """Create a mock Config with the fields used by MultimodalPDWorkerHandler."""
-    from dynamo.vllm.constants import DisaggregationMode
+    from dynamo.vllm.constants import DisaggregationMode, EmbeddingTransferMode
 
     config = MagicMock()
     config.model = model
@@ -47,6 +47,9 @@ def _make_config(
         if is_prefill_worker
         else DisaggregationMode.AGGREGATED
     )
+    # NIXL_WRITE / NIXL_READ modes require GPU, the tests may run in CPU-only environments,
+    # so set to LOCAL mode.
+    config.embedding_transfer_mode = EmbeddingTransferMode.LOCAL
     config.enable_multimodal = enable_multimodal
     config.multimodal_embedding_cache_capacity_gb = (
         multimodal_embedding_cache_capacity_gb
@@ -177,7 +180,7 @@ class TestLoadMultimodalData:
         mock_client = MagicMock()
         handler = _make_handler(encode_worker_client=mock_client)
 
-        fake_mm_data = defaultdict(list, {"image": torch.randn(1, 10)})
+        fake_mm_data = defaultdict(list, {"image": torch.randn(1, 10)})  # type: ignore
         with patch.object(
             mod,
             "load_multimodal_embeddings",

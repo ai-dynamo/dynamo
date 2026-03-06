@@ -1,9 +1,9 @@
 # CI Filter Patterns - See FILTERS.md for documentation
 #
 # Filters that trigger CI jobs:
-#   core     -> dynamo build-test, all backend builds (vllm/sglang/trtllm), deploy tests
+#   core     -> dynamo build-test, all backend builds (vllm/sglang/trtllm)
 #   operator -> operator build and test
-#   deploy   -> deploy-test-vllm-disagg-router
+#   deploy   -> deploy tests
 #   planner  -> dynamo build-test
 #   vllm     -> vllm build and test
 #   sglang   -> sglang build and test
@@ -100,14 +100,16 @@ operator:
   - *ci
   - 'deploy/operator/**'
   - 'deploy/operator/.*'
-  - 'docs/pages/kubernetes/api-reference.md'
+  - 'docs/kubernetes/api-reference.md'
 
 deploy:
   - '!**/*.md'
   - '!**/*.rst'
+  - *ci
   - 'deploy/helm/**'
   - 'deploy/utils/**'
   - 'deploy/chrek/**'
+  - 'tests/deploy/**'
 
 planner:
   - 'components/src/dynamo/planner/**'

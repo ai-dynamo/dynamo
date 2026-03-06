@@ -305,7 +305,7 @@ def create_kv_events_config(
         "(matching upstream vLLM). To preserve current behavior, pass "
         "--kv-events-config explicitly. For example:\n"
         f'  --kv-events-config \'{{"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"tcp://*:{port}"}}\'\n'
-        "See docs/pages/backends/vllm/README.md for details.",
+        "See docs/backends/vllm/README.md for details.",
         FutureWarning,
         stacklevel=2,
     )
@@ -374,6 +374,10 @@ def _connector_to_kv_transfer_json(connectors: list[str]) -> str:
         if c == "lmcache":
             multi_connectors.append(
                 {"kv_connector": "LMCacheConnectorV1", "kv_role": "kv_both"}
+            )
+        elif c == "flexkv":
+            multi_connectors.append(
+                {"kv_connector": "FlexKVConnectorV1", "kv_role": "kv_both"}
             )
         elif c == "nixl":
             multi_connectors.append(

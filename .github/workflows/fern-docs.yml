@@ -101,13 +101,7 @@ jobs:
       - name: Install Fern CLI
         run: npm install -g fern-api
 
-      # Fern CLI expects a fern/ directory; create symlink after docs/ migration
-      - name: Create fern directory symlink
-        working-directory: docs
-        run: ln -s . fern
-
       - name: Validate Fern configuration
-        working-directory: docs
         run: fern check
 
   fern-broken-links:
@@ -130,13 +124,7 @@ jobs:
       - name: Install Fern CLI
         run: npm install -g fern-api
 
-      # Fern CLI expects a fern/ directory; create symlink after docs/ migration
-      - name: Create fern directory symlink
-        working-directory: docs
-        run: ln -s . fern
-
       - name: Check for broken links
-        working-directory: docs
         run: fern docs broken-links
 
   #############################################################################
@@ -178,23 +166,34 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
       - name: Sync dev content from main
         run: |
-          # Sync pages/ directory (dev content)
-          echo "Syncing pages/ to docs-website branch..."
-          rm -rf docs-checkout/fern/pages
-          cp -r source-checkout/docs/pages docs-checkout/fern/pages
+          # Sync content directories from docs/ to fern/pages-dev/ on docs-website
+          # Excludes non-content items that are synced separately or not needed
+          echo "Syncing content pages to docs-website branch..."
+          rm -rf docs-checkout/fern/pages-dev
+          mkdir -p docs-checkout/fern/pages-dev
+          rsync -a \
+            --exclude='assets' \
+            --exclude='blogs' \
+            --exclude='diagrams' \
+            --exclude='index.yml' \
+            source-checkout/docs/ docs-checkout/fern/pages-dev/
 
-          # Sync versions/dev.yml (dev navigation)
-          echo "Syncing versions/dev.yml to docs-website branch..."
-          cp source-checkout/docs/versions/dev.yml docs-checkout/fern/versions/dev.yml
+          # Sync index.yml as versions/dev.yml and transform paths for docs-website layout
+          echo "Syncing index.yml to docs-website branch as versions/dev.yml..."
+          cp source-checkout/docs/index.yml docs-checkout/fern/versions/dev.yml
 
           # Sync assets/ directory
           echo "Syncing assets/ to docs-website branch..."
           rm -rf docs-checkout/fern/assets
           cp -r source-checkout/docs/assets docs-checkout/fern/assets
 
+          # Symlink assets into pages-dev/ so relative image paths in markdown resolve correctly
+          # (e.g. ../../assets/img/foo.png from pages-dev/observability/metrics.md)
+          ln -sfn ../assets docs-checkout/fern/pages-dev/assets
+
           # Sync fern.config.json
           echo "Syncing fern.config.json to docs-website branch..."
-          cp source-checkout/docs/fern.config.json docs-checkout/fern/fern.config.json
+          cp source-checkout/fern/fern.config.json docs-checkout/fern/fern.config.json
 
           # Sync docs/README.md (developer guide, referenced from dev.yml)
           if [ -f source-checkout/docs/README.md ]; then
@@ -202,20 +201,20 @@ jobs:
           fi
 
           # Sync .gitignore if it exists
-          if [ -f source-checkout/docs/.gitignore ]; then
-            cp source-checkout/docs/.gitignore docs-checkout/fern/.gitignore
+          if [ -f source-checkout/fern/.gitignore ]; then
+            cp source-checkout/fern/.gitignore docs-checkout/fern/.gitignore
           fi
 
           # Sync convert_callouts.py script
-          if [ -f source-checkout/docs/convert_callouts.py ]; then
-            cp source-checkout/docs/convert_callouts.py docs-checkout/fern/convert_callouts.py
+          if [ -f source-checkout/fern/convert_callouts.py ]; then
+            cp source-checkout/fern/convert_callouts.py docs-checkout/fern/convert_callouts.py
           fi
 
           # Sync components/ directory (e.g., CustomFooter.tsx)
-          if [ -d source-checkout/docs/components ]; then
+          if [ -d source-checkout/fern/components ]; then
             echo "Syncing components/ to docs-website branch..."
             rm -rf docs-checkout/fern/components
-            cp -r source-checkout/docs/components docs-checkout/fern/components
+            cp -r source-checkout/fern/components docs-checkout/fern/components
           fi
 
           # Sync blogs/ directory
@@ -226,15 +225,26 @@ jobs:
           fi
 
           # Sync main.css
-          if [ -f source-checkout/docs/main.css ]; then
+          if [ -f source-checkout/fern/main.css ]; then
             echo "Syncing main.css to docs-website branch..."
-            cp source-checkout/docs/main.css docs-checkout/fern/main.css
+            cp source-checkout/fern/main.css docs-checkout/fern/main.css
           fi
+
+      - name: Transform paths in dev.yml for docs-website layout
+        run: |
+          # In the source repo, index.yml uses paths relative to docs/ (e.g. getting-started/quickstart.md).
+          # On docs-website, fern/versions/dev.yml needs ../pages-dev/ prefix for content
+          # and ../ prefix for blogs (which are a sibling of pages/, not inside it).
+          #
+          # Order matters: transform blogs/ first so the second sub() won't re-match them
+          # (they'll start with ../ which doesn't match ^[a-zA-Z]).
+          yq -i '(.. | select(has("path")).path) |= sub("^blogs/", "../blogs/")' docs-checkout/fern/versions/dev.yml
+          yq -i '(.. | select(has("path")).path) |= sub("^([a-zA-Z])", "../pages-dev/${1}")' docs-checkout/fern/versions/dev.yml
 
       - name: Convert GitHub callouts to Fern format
         run: |
           echo "Converting GitHub-style callouts to Fern format in pages/..."
-          python3 docs-checkout/fern/convert_callouts.py --dir docs-checkout/fern/pages
+          python3 docs-checkout/fern/convert_callouts.py --dir docs-checkout/fern/pages-dev
           echo "Callout conversion complete."
 
       - name: Update docs.yml preserving products
@@ -248,7 +258,11 @@ jobs:
           cat /tmp/preserved_product.yml
 
           # Copy docs.yml from source to get config updates (redirects, layout, etc.)
-          cp ../../source-checkout/docs/docs.yml docs.yml
+          cp ../../source-checkout/fern/docs.yml docs.yml
+
+          # Fix asset paths: source uses ../docs/assets/ (relative to fern/ in source repo),
+          # but on docs-website assets live at fern/assets/ so we need ./assets/
+          sed -i 's|\.\./docs/assets/|./assets/|g' docs.yml
 
           # Restore the preserved products[0] block
           yq -i '.products[0] = load("/tmp/preserved_product.yml")' docs.yml
@@ -290,11 +304,15 @@ jobs:
         env:
           FERN_TOKEN: ${{ secrets.FERN_TOKEN }}
         run: |
-          OUTPUT=$(fern generate --docs --preview 2>&1)
-          FERN_EXIT=$?
+          if OUTPUT=$(fern generate --docs --preview 2>&1); then
+            FERN_EXIT=0
+          else
+            FERN_EXIT=$?
+          fi
           echo "$OUTPUT"
           if [ $FERN_EXIT -ne 0 ]; then
-            echo "::warning::Fern docs preview generation failed (exit $FERN_EXIT)"
+            echo "::error::Fern docs preview generation failed (exit $FERN_EXIT)"
+            exit 1
           fi
           URL=$(echo "$OUTPUT" | grep -oP 'Published docs to \K\S+') || true
           if [ -n "$URL" ]; then
@@ -411,10 +429,10 @@ jobs:
         run: |
           TAG="${{ steps.version.outputs.tag }}"
 
-          echo "Creating fern/pages-$TAG/ from fern/pages/..."
+          echo "Creating fern/pages-$TAG/ from fern/pages-dev/..."
 
-          # Copy current pages/ to pages-vX.Y.Z/
-          cp -r fern/pages "fern/pages-$TAG"
+          # Copy current pages-dev/ to pages-vX.Y.Z/
+          cp -r fern/pages-dev "fern/pages-$TAG"
 
           echo "Created fern/pages-$TAG/"
           ls -la "fern/pages-$TAG/" | head -20
@@ -466,8 +484,8 @@ jobs:
           sed -i "s/# Navigation structure for Latest version/# Navigation structure for $TAG version/" "$VERSION_FILE"
           sed -i "s|# Matching https://docs.nvidia.com/dynamo/latest/|# Snapshot from tag $TAG|" "$VERSION_FILE"
 
-          # Update all page paths from ../pages/ to ../pages-vX.Y.Z/
-          sed -i "s|path: \.\./pages/|path: ../pages-$TAG/|g" "$VERSION_FILE"
+          # Update all page paths from ../pages-dev/ to ../pages-vX.Y.Z/
+          sed -i "s|path: \.\./pages-dev/|path: ../pages-$TAG/|g" "$VERSION_FILE"
 
           echo "Created $VERSION_FILE"
           echo "First 30 lines:"

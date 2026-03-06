@@ -271,10 +271,10 @@ def construct_qwen_decode_mm_data(
     # WAR: Use request_id hash as seed for unique placeholder values.
     # This prevents prefix cache from incorrectly matching different images
     # that happen to have the same dimensions (same image_grid_thw).
-    seed = hash(request_id) & 0xFFFFFFFF  # Convert to positive 32-bit int
-    generator = torch.Generator().manual_seed(seed)
-    image_embeds = torch.randn(
-        embeddings_shape, dtype=dtype, device="cpu", generator=generator
+    # bit ops to convert request ID to somewhat unique value that fits in the dtype range
+    fill_value = hash(request_id) & ((1 << (dtype.itemsize * 8)) - 1)
+    image_embeds = torch.full(
+        embeddings_shape, fill_value=fill_value, dtype=dtype, device="cpu"
     )
     if image_embeds.ndim == 3:
         image_embeds = image_embeds.squeeze(0)

@@ -83,6 +83,7 @@ ENV PATH=/usr/local/ucx/bin:$PATH
 ### VIRTUAL ENVIRONMENT SETUP ###
 
 # Copy uv directly from official image (like Dockerfile.vllm does)
+# TODO: Pin uv image to a specific version tag for reproducibility (e.g. ghcr.io/astral-sh/uv:0.10.7)
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
 # Create fresh virtual environment (following Dockerfile.vllm pattern)
