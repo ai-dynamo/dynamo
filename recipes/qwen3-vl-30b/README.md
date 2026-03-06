@@ -2,38 +2,6 @@
 
 This recipe demonstrates throughput/latency improvements from enabling multimodal encoder cache in disaggregated serving under different image re-use configurations.
 
-## Results
-
-### `agg`
-
-| Reuse Tag | P90 TTFT (No Encoder Cache, ms) | P90 TTFT (With Encoder Cache, ms) | TTFT Improvement (%) |
-|---|---:|---:|---:|
-| `r00` | TBD | TBD | TBD |
-| `r10` | TBD | TBD | TBD |
-| `r25` | TBD | TBD | TBD |
-| `r50` | TBD | TBD | TBD |
-| `r75` | TBD | TBD | TBD |
-
-### `disagg_ep_d`
-
-| Reuse Tag | P90 TTFT (No Encoder Cache, ms) | P90 TTFT (With Encoder Cache, ms) | TTFT Improvement (%) |
-|---|---:|---:|---:|
-| `r00` | TBD | TBD | TBD |
-| `r10` | TBD | TBD | TBD |
-| `r25` | TBD | TBD | TBD |
-| `r50` | TBD | TBD | TBD |
-| `r75` | TBD | TBD | TBD |
-
-### `disagg_e_pd`
-
-| Reuse Tag | P90 TTFT (No Encoder Cache, ms) | P90 TTFT (With Encoder Cache, ms) | TTFT Improvement (%) |
-|---|---:|---:|---:|
-| `r00` | TBD | TBD | TBD |
-| `r10` | TBD | TBD | TBD |
-| `r25` | TBD | TBD | TBD |
-| `r50` | TBD | TBD | TBD |
-| `r75` | TBD | TBD | TBD |
-
 ## Pre-requisites
 
 1. **Dynamo Platform installed** - See [Kubernetes Deployment Guide](../../docs/kubernetes/README.md)
@@ -46,12 +14,20 @@ This recipe demonstrates throughput/latency improvements from enabling multimoda
      -n ${NAMESPACE}
    ```
 
-## Experiment Overview
+## Overview
 
 We compare the impact of encoder cache toggled on vs off for three deployment modes:
 - `agg TP=1 x8 replicas`
 - `disagg E/PD x1 encode worker, x7 pd workers`
 - `disagg EP/D x4 EP workers, x4 decode workers`
+
+## Available Configurations
+
+| Configuration | GPUs | Mode | Description |
+|--------------|------|------|-------------|
+| [**vllm/agg**](vllm/agg/) | 8x GPU | Aggregated | agg TP=1 x8 replicas |
+| [**vllm/disagg-e-pd**](vllm/disagg-e-pd/) | 8x GPU | Disaggregated E/PD | disagg E/PD x1 encode worker, x7 pd workers |
+| [**vllm/disagg-ep-d**](vllm/disagg-ep-d/) | 8x GPU | Disaggregated EP/D | disagg EP/D x4 EP workers, x4 decode workers |
 
 To test this, the `data-gen/generate-datasets-job.yaml` creates 5 datasets of synthetic text + image data each with varying levels of image per request overlap. The script does this by manipulating the "total slots" and "image pool".
 
