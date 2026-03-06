@@ -17,10 +17,12 @@ pub mod speculative_prefill;
 pub mod tools;
 use anyhow::Context;
 use anyhow::{Result, bail};
+
 use dynamo_async_openai::types::{
     ChatCompletionRequestMessage, ChatCompletionRequestUserMessageContent,
     ChatCompletionRequestUserMessageContentPart, ChatCompletionToolChoiceOption, EncodingFormat,
 };
+use dynamo_runtime::error::{DynamoError, ErrorType};
 use futures::Stream;
 use futures::stream::{self, StreamExt};
 use prompt::OAIPromptFormatter;
@@ -146,6 +148,8 @@ pub struct OpenAIPreprocessor {
     runtime_config: crate::local_model::runtime_config::ModelRuntimeConfig,
     tool_call_parser: Option<String>,
     media_loader: Option<MediaLoader>,
+    /// Max context length (in tokens) this model can handle, from ModelDeploymentCard
+    context_length: u32,
 }
 
 impl OpenAIPreprocessor {
@@ -185,6 +189,8 @@ impl OpenAIPreprocessor {
             None => None,
         };
 
+        let context_length = mdc.context_length;
+
         Ok(Arc::new(Self {
             formatter,
             tokenizer,
@@ -194,6 +200,7 @@ impl OpenAIPreprocessor {
             runtime_config,
             tool_call_parser,
             media_loader,
+            context_length,
         }))
     }
     /// Encode a string to it's tokens
@@ -224,9 +231,9 @@ impl OpenAIPreprocessor {
             .apply_template(request)
             .with_context(|| "Failed to apply prompt template")?;
         let annotations = self
-            .gather_tokens(request, &mut builder, formatted_prompt, tracker)
+            .gather_tokens(request, &mut builder, formatted_prompt.clone(), tracker)
             .with_context(|| "Failed to gather tokens")?;
-        self.gather_multi_modal_data(request, &mut builder)
+        self.gather_multi_modal_data(request, &mut builder, formatted_prompt)
             .await
             .with_context(|| "Failed to gather multimodal data")?;
 
@@ -344,6 +351,7 @@ impl OpenAIPreprocessor {
         &self,
         request: &R,
         builder: &mut PreprocessedRequestBuilder,
+        formatted_prompt: Option<String>,
     ) -> Result<()> {
         let mut media_map: MultimodalDataMap = HashMap::new();
         let mut fetch_tasks: Vec<(String, ChatCompletionRequestUserMessageContentPart)> =
@@ -410,12 +418,16 @@ impl OpenAIPreprocessor {
         if !media_map.is_empty() {
             builder.multi_modal_data(Some(media_map));
 
-            // Preserve original messages in extra_args for multimodal workers that need them
-            // (e.g., TRT-LLM multimodal processor needs raw messages for proper tokenization)
+            // Preserve original messages and formatted prompt in extra_args for multimodal
+            // workers (e.g., TRT-LLM needs messages and the template-rendered prompt with
+            // <image> placeholders for embedding-path / NIXL flows).
             let messages_json = serde_json::to_value(request.messages())?;
-            let extra_args = serde_json::json!({
+            let mut extra_args = serde_json::json!({
                 "messages": messages_json
             });
+            if let Some(ref prompt) = formatted_prompt {
+                extra_args["formatted_prompt"] = serde_json::Value::String(prompt.clone());
+            }
             builder.extra_args(Some(extra_args));
         }
 
@@ -437,16 +449,19 @@ impl OpenAIPreprocessor {
         tracker: Option<&RequestTracker>,
     ) -> Result<HashMap<String, String>> {
         let mut annotations = HashMap::new();
+        let mut token_count: Option<usize> = None;
         // match request type before any conversion/processing
         match request.prompt_input_type() {
             PromptInput::Tokens(_) => {
                 if let Some(token_input) = request.extract_tokens() {
                     match token_input {
                         TokenInput::Single(tokens) => {
+                            token_count = Some(tokens.len());
                             builder.token_ids(tokens);
                         }
                         TokenInput::Batch(token_batches) => {
                             if token_batches.len() == 1 {
+                                token_count = Some(token_batches[0].len());
                                 builder.token_ids(token_batches[0].clone());
                             } else {
                                 bail!(
@@ -511,12 +526,15 @@ impl OpenAIPreprocessor {
                                 );
                             }
 
+                            token_count = Some(tokens_vec.len());
                             builder.token_ids(tokens_vec);
                         }
                         TextInput::Batch(texts) => {
                             if texts.len() == 1 {
                                 let encoding = self.encode_with_timing(&texts[0], tracker)?;
-                                builder.token_ids(encoding.token_ids().to_vec());
+                                let tokens = encoding.token_ids().to_vec();
+                                token_count = Some(tokens.len());
+                                builder.token_ids(tokens);
                             } else {
                                 bail!(
                                     "Batch text input not supported for more than one text in requests (got {})",
@@ -528,7 +546,36 @@ impl OpenAIPreprocessor {
                 }
             }
         }
+
+        // Validate prompt token count against model's context length
+        if let Some(count) = token_count {
+            Self::validate_token_count(count, self.context_length)?;
+        }
+
         Ok(annotations)
+    }
+
+    /// Validate that the prompt token count does not consume the model's entire context length.
+    /// Returns an error if the prompt leaves no room for output tokens.
+    fn validate_token_count(token_count: usize, context_length: u32) -> Result<()> {
+        let max_len = context_length as usize;
+        // max_len == 0 means context_length was not configured (model_card.rs defaults
+        // to 0 when max_position_embeddings is absent), so skip validation.
+        // Use >= because context_length is the total budget (input + output): if the
+        // prompt alone fills it, there is zero room for output tokens.
+        if max_len > 0 && token_count >= max_len {
+            return Err(DynamoError::builder()
+                .error_type(ErrorType::InvalidArgument)
+                .message(format!(
+                    "This model's maximum context length is {} tokens. \
+                     However, your messages resulted in {} tokens. \
+                     Please reduce the length of the messages.",
+                    max_len, token_count,
+                ))
+                .build()
+                .into());
+        }
+        Ok(())
     }
 
     fn encode_with_timing(
@@ -1293,7 +1340,8 @@ impl
         };
 
         // Gather multimodal data (works with both embeddings and text prompts)
-        self.gather_multi_modal_data(&request, &mut builder).await?;
+        self.gather_multi_modal_data(&request, &mut builder, None)
+            .await?;
 
         let mut common_request = builder.build()?;
 

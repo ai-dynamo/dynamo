@@ -160,7 +160,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         else:
             # Extract image URLs for multimodal requests. SGLang's mm_data_processor
             # handles loading/preprocessing, and the scheduler does vision encoding.
-            image_data = None
+            image_data: list[str] | None = None
             image_items = request.get("multi_modal_data", {}).get("image_url")
             if image_items:
                 image_data = []
@@ -215,7 +215,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             Dict with token_ids and optional finish_reason.
         """
         # Use Future pattern for request ID - will be set when first response arrives
-        request_id_future = asyncio.Future()
+        request_id_future: asyncio.Future[str] = asyncio.Future()
         async with self._cancellation_monitor(request_id_future, context):
             async for res in stream_source:
                 # Extract SGLang request ID from the first response and set the future
@@ -289,7 +289,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         count = 0
 
         # Use Future pattern for request ID - will be set when first response arrives
-        request_id_future = asyncio.Future()
+        request_id_future: asyncio.Future[str] = asyncio.Future()
         async with self._cancellation_monitor(request_id_future, context):
             async for res in stream_source:
                 # Extract SGLang request ID from the first response and set the future
