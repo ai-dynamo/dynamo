@@ -33,6 +33,17 @@ fn build_nccl_config(
                 use cudarc::nccl::sys::ncclComm_t;
                 Ok(unsafe { NcclConfig::enabled(ptr as ncclComm_t, r, ws) })
             }
+            (Some(r), Some(ws), Some(0)) => anyhow::bail!(
+                "NCCL replicated mode requires a valid communicator: rank={}, world_size={}, nccl_comm_ptr=0 (invalid). \
+                 Provide a non-null nccl_comm_ptr or omit rank/world_size/nccl_comm_ptr for sharded mode.",
+                r, ws
+            ),
+            (r, ws, ptr) if wants_replicated => anyhow::bail!(
+                "NCCL replicated mode requires rank, world_size, and nccl_comm_ptr together; \
+                 partial or invalid configuration is not allowed. Got rank={:?}, world_size={:?}, nccl_comm_ptr={:?}. \
+                 Provide all three (with nccl_comm_ptr != 0) or omit all for sharded mode.",
+                r, ws, ptr
+            ),
             _ => Ok(NcclConfig::disabled()),
         }
     }
