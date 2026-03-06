@@ -48,8 +48,18 @@ class MetadataEntry:
 class RequestHandler:
     """Handles allocation and metadata requests."""
 
-    def __init__(self, device: int = 0):
-        self._memory_manager = GMSServerMemoryManager(device)
+    def __init__(
+        self,
+        device: int = 0,
+        *,
+        allocation_retry_interval: float = 0.5,
+        allocation_retry_timeout: Optional[float] = None,
+    ):
+        self._memory_manager = GMSServerMemoryManager(
+            device,
+            allocation_retry_interval=allocation_retry_interval,
+            allocation_retry_timeout=allocation_retry_timeout,
+        )
         self._metadata_by_epoch: dict[str, dict[str, MetadataEntry]] = {}
         self._committed_epoch_id: Optional[str] = None
         self._active_rw_epoch_id: Optional[str] = None

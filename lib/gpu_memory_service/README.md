@@ -197,9 +197,9 @@ When a writer requests a new allocation, GMS treats CUDA OOM as a transient cond
 - `cuMemCreate` OOM does **not** immediately fail the request.
 - The server retries in a loop and only returns success after allocation is created.
 - Between retries, GMS performs best-effort device free-memory polling (NVML) for observability and logs progress.
-- Optional environment overrides:
-  - `GMS_ALLOC_RETRY_INTERVAL` (default `0.5`)
-  - `GMS_ALLOC_RETRY_TIMEOUT` (default unset = wait indefinitely)
+- Server CLI flags:
+  - `--alloc-retry-interval` (default `0.5`)
+  - `--alloc-retry-timeout` (default unset = wait indefinitely)
 
 This ensures the "new epoch gets new allocations" workflow can wait for memory reclamation instead of racing into immediate OOM failures.
 
