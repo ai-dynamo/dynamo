@@ -58,8 +58,8 @@ pub struct MockerMetrics {
 
 /// Enum representing either a direct request or an active sequence
 pub enum Request {
-    Direct(DirectRequest),
-    Active(ActiveSequence),
+    Direct(Box<DirectRequest>),
+    Active(Box<ActiveSequence>),
 }
 
 #[derive(Default)]
@@ -90,7 +90,7 @@ impl SchedulerState {
     fn receive(&mut self, request: DirectRequest) -> Uuid {
         // Use the provided UUID if available, otherwise generate a new one
         let uuid = request.uuid.unwrap_or_else(Uuid::new_v4);
-        self.requests.insert(uuid, Request::Direct(request));
+        self.requests.insert(uuid, Request::Direct(Box::new(request)));
         self.waiting.push_back(uuid);
         uuid
     }
@@ -114,7 +114,7 @@ impl SchedulerState {
     /// Move a UUID and its Request to the ready queue.
     fn move_to_prefill(&mut self, uuid: Uuid, active_seq: ActiveSequence, cost: PrefillCost) {
         self.waiting_tokens += cost.new_tokens;
-        self.requests.insert(uuid, Request::Active(active_seq));
+        self.requests.insert(uuid, Request::Active(Box::new(active_seq)));
         self.prefill.push_back(uuid);
         self.prefill_costs.insert(uuid, cost);
     }
@@ -545,7 +545,7 @@ fn try_schedule(
     while let Some((uuid, request)) = state.next() {
         // Convert Request to ActiveSequence
         let active_sequence = match request {
-            Request::Active(active_seq) => active_seq,
+            Request::Active(active_seq) => *active_seq,
             Request::Direct(direct_request) => ActiveSequence::new(
                 direct_request.tokens,
                 direct_request.max_output_tokens,
@@ -582,7 +582,7 @@ fn try_schedule(
 
         // Cannot schedule, put first in line instead
         if !(under_block_budget && under_token_budget && under_seq_budget) {
-            state.first_in_line(uuid, Request::Active(active_sequence));
+            state.first_in_line(uuid, Request::Active(Box::new(active_sequence)));
             break;
         }
 

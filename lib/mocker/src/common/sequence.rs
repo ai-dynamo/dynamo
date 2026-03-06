@@ -214,7 +214,12 @@ impl ActiveSequence {
 
         let new_partial_block = UniqueBlock::default();
         self.unique_blocks.push(new_partial_block.clone());
-        signals.push(MoveBlock::Use(vec![new_partial_block], vec![], vec![], None));
+        signals.push(MoveBlock::Use(
+            vec![new_partial_block],
+            vec![],
+            vec![],
+            None,
+        ));
         Some(signals)
     }
 
