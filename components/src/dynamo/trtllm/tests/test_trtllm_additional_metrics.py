@@ -3,11 +3,17 @@
 
 """Tests for AdditionalMetricsCollector and additional metrics integration."""
 
+import ast
+import inspect
+import textwrap
 import unittest
 from datetime import timedelta
 from unittest.mock import MagicMock, patch
 
 from prometheus_client import CollectorRegistry, generate_latest
+
+from dynamo.trtllm.metrics import AdditionalMetricsCollector
+from dynamo.trtllm.request_handlers.handler_base import HandlerBase
 
 
 class TestAdditionalMetricsCollector(unittest.TestCase):
@@ -43,8 +49,6 @@ class TestAdditionalMetricsCollector(unittest.TestCase):
 
             MockCounter.side_effect = make_counter
             MockHistogram.side_effect = make_histogram
-
-            from dynamo.trtllm.metrics import AdditionalMetricsCollector
 
             self.collector = AdditionalMetricsCollector(
                 labels={
@@ -170,12 +174,6 @@ class TestHandlerBaseMetricsInstrumentation(unittest.TestCase):
 
     def test_structured_output_detection_keys(self):
         """Verify guided decoding detection keys in generate_locally match _override_sampling_params."""
-        import ast
-        import inspect
-        import textwrap
-
-        from dynamo.trtllm.request_handlers.handler_base import HandlerBase
-
         # Extract detection keys from generate_locally: the tuple in
         #   any(guided.get(k) for k in ("json", ...))
         gen_source = textwrap.dedent(inspect.getsource(HandlerBase.generate_locally))

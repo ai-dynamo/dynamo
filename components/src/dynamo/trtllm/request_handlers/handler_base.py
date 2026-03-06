@@ -43,15 +43,16 @@ from dynamo.trtllm.logits_processing.adapter import create_trtllm_adapters
 from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
 from dynamo.trtllm.publisher import Publisher
 from dynamo.trtllm.request_handlers.base_generative_handler import BaseGenerativeHandler
+from dynamo.trtllm.metrics import AdditionalMetricsCollector
 from dynamo.trtllm.utils.disagg_utils import (
     DisaggregatedParams,
     DisaggregatedParamsCodec,
 )
 
 if TYPE_CHECKING:
+    # tensorrt_llm may use a different version that doesn't have MetricsCollector,
+    # so guard this import inside TYPE_CHECKING to avoid runtime import errors.
     from tensorrt_llm.metrics import MetricsCollector
-
-    from dynamo.trtllm.metrics import AdditionalMetricsCollector
 
 configure_dynamo_logging()
 
