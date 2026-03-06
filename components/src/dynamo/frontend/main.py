@@ -228,7 +228,7 @@ async def async_main():
     if config.chat_processor == "vllm":
         assert (
             vllm_flags is not None
-        ), "vllm_flags is required when chat_processor is vllm"
+        ), "vllm_flags is required when chat processor is vllm"
         chat_engine_factory = setup_engine_factory(
             runtime, router_config, config, vllm_flags
         ).chat_engine_factory
