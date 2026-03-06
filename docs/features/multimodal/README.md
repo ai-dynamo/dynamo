@@ -8,7 +8,7 @@ subtitle: Deploy multimodal models with image, video, and audio support in Dynam
 Dynamo supports multimodal inference across multiple LLM backends, enabling models to process images, video, and audio alongside text.
 
 <Warning>
-**Security Requirement**: Multimodal processing must be explicitly enabled at startup. See the relevant backend documentation for the necessary flags. This prevents unintended processing of multimodal data from untrusted sources.
+**Security Requirement**: Multimodal processing must be explicitly enabled at startup. See the relevant backend documentation ([vLLM](multimodal-vllm.md), [SGLang](multimodal-sglang.md), [TRT-LLM](multimodal-trtllm.md)) for the necessary flags. This prevents unintended processing of multimodal data from untrusted sources.
 </Warning>
 
 ## Key Features
