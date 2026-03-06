@@ -174,13 +174,21 @@ class GMSRPCServer:
             recv_buffer=recv_buffer,
         )
 
+        if granted_mode == GrantedLockType.RW:
+            self._handler.on_rw_connect()
+
         # State transition: connect
         event = (
             StateEvent.RW_CONNECT
             if granted_mode == GrantedLockType.RW
             else StateEvent.RO_CONNECT
         )
-        self._sm.transition(event, conn)
+        try:
+            self._sm.transition(event, conn)
+        except Exception:
+            if granted_mode == GrantedLockType.RW:
+                self._handler.on_rw_abort()
+            raise
 
         await send_message(
             writer,
@@ -327,14 +335,22 @@ class GMSRPCServer:
     # Handlers take (msg) and return response. Special cases handled separately.
     _HANDLERS: ClassVar[dict[type, str]] = {
         AllocateRequest: "handle_allocate",
-        GetAllocationRequest: "handle_get_allocation",
-        ListAllocationsRequest: "handle_list_allocations",
         FreeRequest: "handle_free",
         MetadataPutRequest: "handle_metadata_put",
-        MetadataGetRequest: "handle_metadata_get",
         MetadataDeleteRequest: "handle_metadata_delete",
-        MetadataListRequest: "handle_metadata_list",
     }
+
+    def _get_epoch_for_read(self, conn: Connection) -> str:
+        if conn.mode == GrantedLockType.RO:
+            epoch_id = self._handler.committed_epoch_id
+            if epoch_id is None:
+                raise RuntimeError("Committed epoch is not available")
+            return epoch_id
+
+        epoch_id = self._handler.active_rw_epoch_id
+        if epoch_id is None:
+            raise RuntimeError("RW epoch is not active")
+        return epoch_id
 
     async def _dispatch(self, conn: Connection, msg) -> tuple[object, int, bool]:
         """Dispatch request to handler. Returns (response, fd, should_close)."""
@@ -361,7 +377,8 @@ class GMSRPCServer:
             return self._handler.handle_get_allocation_state(), -1, False
 
         if msg_type is ExportRequest:
-            response, fd = self._handler.handle_export(msg.allocation_id)
+            epoch_id = self._get_epoch_for_read(conn)
+            response, fd = self._handler.handle_export(msg.allocation_id, epoch_id)
             return response, fd, False
 
         if msg_type is ClearAllRequest:
@@ -369,6 +386,22 @@ class GMSRPCServer:
 
         if msg_type is GetStateHashRequest:
             return self._handler.handle_get_memory_layout_hash(), -1, False
+
+        if msg_type is GetAllocationRequest:
+            epoch_id = self._get_epoch_for_read(conn)
+            return self._handler.handle_get_allocation(msg, epoch_id), -1, False
+
+        if msg_type is ListAllocationsRequest:
+            epoch_id = self._get_epoch_for_read(conn)
+            return self._handler.handle_list_allocations(msg, epoch_id), -1, False
+
+        if msg_type is MetadataGetRequest:
+            epoch_id = self._get_epoch_for_read(conn)
+            return self._handler.handle_metadata_get(msg, epoch_id), -1, False
+
+        if msg_type is MetadataListRequest:
+            epoch_id = self._get_epoch_for_read(conn)
+            return self._handler.handle_metadata_list(msg, epoch_id), -1, False
 
         # Standard dispatch: handler takes msg, returns response
         handler_name = self._HANDLERS.get(msg_type)

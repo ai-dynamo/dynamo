@@ -28,7 +28,7 @@ from gpu_memory_service.common.cuda_vmm_utils import (
 logger = logging.getLogger(__name__)
 
 
-@dataclass
+@dataclass(frozen=True)
 class AllocationInfo:
     """Information about a single GPU memory allocation.
 
@@ -38,6 +38,7 @@ class AllocationInfo:
         aligned_size: Actual size after alignment to VMM granularity
         handle: CUmemGenericAllocationHandle value
         tag: User-provided tag for grouping allocations
+        epoch_id: Epoch that owns this allocation
         created_at: Timestamp when allocation was created
     """
 
@@ -46,6 +47,7 @@ class AllocationInfo:
     aligned_size: int
     handle: int
     tag: str
+    epoch_id: str
     created_at: float
 
 
@@ -96,10 +98,16 @@ class GMSServerMemoryManager:
     def total_bytes(self) -> int:
         return sum(info.aligned_size for info in self._allocations.values())
 
-    def _get(self, allocation_id: str) -> AllocationInfo:
+    def _get(
+        self, allocation_id: str, epoch_id: Optional[str] = None
+    ) -> AllocationInfo:
         info = self._allocations.get(allocation_id)
         if info is None:
             raise AllocationNotFoundError(f"Unknown allocation: {allocation_id}")
+        if epoch_id is not None and info.epoch_id != epoch_id:
+            raise AllocationNotFoundError(
+                f"Allocation {allocation_id} is not in epoch {epoch_id}"
+            )
         return info
 
     def _release(self, info: AllocationInfo) -> None:
@@ -107,7 +115,9 @@ class GMSServerMemoryManager:
         if result != cuda.CUresult.CUDA_SUCCESS:
             logger.warning(f"cuMemRelease failed for {info.allocation_id}: {result}")
 
-    def allocate(self, size: int, tag: str = "default") -> AllocationInfo:
+    def allocate(
+        self, size: int, tag: str = "default", epoch_id: str = ""
+    ) -> AllocationInfo:
         """Create a physical memory allocation (no VA mapping).
 
         Uses cuMemCreate to allocate physical GPU memory that can be exported
@@ -116,6 +126,7 @@ class GMSServerMemoryManager:
         Args:
             size: Requested size in bytes (will be aligned up to granularity)
             tag: Tag for grouping allocations (e.g., "weights", "kv_cache")
+            epoch_id: Epoch that owns this allocation
 
         Returns:
             AllocationInfo with allocation_id, aligned_size, handle
@@ -123,6 +134,9 @@ class GMSServerMemoryManager:
         Raises:
             RuntimeError: If CUDA allocation fails
         """
+        if not epoch_id:
+            raise ValueError("epoch_id must be non-empty")
+
         aligned_size = align_to_granularity(size, self._granularity)
 
         prop = cuda.CUmemAllocationProp()
@@ -136,21 +150,23 @@ class GMSServerMemoryManager:
         result, handle = cuda.cuMemCreate(aligned_size, prop, 0)
         check_cuda_result(result, "cuMemCreate")
 
+        # epoch_id is immutable: assigned at allocation creation and never changes.
         info = AllocationInfo(
             allocation_id=str(uuid4()),
             size=size,
             aligned_size=aligned_size,
             handle=int(handle),
             tag=tag,
+            epoch_id=epoch_id,
             created_at=time.time(),
         )
         self._allocations[info.allocation_id] = info
         logger.debug(
-            f"Allocated {info.allocation_id}: size={size}, aligned={aligned_size}, tag={tag}"
+            f"Allocated {info.allocation_id}: size={size}, aligned={aligned_size}, tag={tag}, epoch={epoch_id}"
         )
         return info
 
-    def export_fd(self, allocation_id: str) -> int:
+    def export_fd(self, allocation_id: str, epoch_id: Optional[str] = None) -> int:
         """Export allocation as POSIX FD for SCM_RIGHTS transfer.
 
         The returned file descriptor can be sent to another process via
@@ -170,7 +186,7 @@ class GMSServerMemoryManager:
             AllocationNotFoundError: If allocation_id doesn't exist
             RuntimeError: If CUDA export fails
         """
-        info = self._get(allocation_id)
+        info = self._get(allocation_id, epoch_id=epoch_id)
         result, fd = cuda.cuMemExportToShareableHandle(
             info.handle,
             cuda.CUmemAllocationHandleType.CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR,
@@ -179,7 +195,7 @@ class GMSServerMemoryManager:
         check_cuda_result(result, "cuMemExportToShareableHandle")
         return int(fd)
 
-    def free(self, allocation_id: str) -> bool:
+    def free(self, allocation_id: str, epoch_id: Optional[str] = None) -> bool:
         """Release physical memory for a single allocation.
 
         Args:
@@ -188,9 +204,12 @@ class GMSServerMemoryManager:
         Returns:
             True if allocation existed and was freed, False otherwise
         """
-        info = self._allocations.pop(allocation_id, None)
+        info = self._allocations.get(allocation_id)
         if info is None:
             return False
+        if epoch_id is not None and info.epoch_id != epoch_id:
+            return False
+        self._allocations.pop(allocation_id, None)
         self._release(info)
         logger.debug(f"Freed allocation: {allocation_id}")
         return True
@@ -211,12 +230,33 @@ class GMSServerMemoryManager:
         logger.info(f"Cleared {count} allocations")
         return count
 
-    def get_allocation(self, allocation_id: str) -> AllocationInfo:
-        """Get allocation info. Raises AllocationNotFoundError if not found."""
-        return self._get(allocation_id)
+    def clear_epoch(self, epoch_id: str) -> int:
+        """Release all allocations in a specific epoch."""
+        to_clear = [
+            allocation_id
+            for allocation_id, info in self._allocations.items()
+            if info.epoch_id == epoch_id
+        ]
+        for allocation_id in to_clear:
+            info = self._allocations.pop(allocation_id)
+            self._release(info)
+        if to_clear:
+            logger.info(f"Cleared {len(to_clear)} allocations from epoch {epoch_id}")
+        return len(to_clear)
 
-    def list_allocations(self, tag: Optional[str] = None) -> List[AllocationInfo]:
+    def get_allocation(
+        self, allocation_id: str, epoch_id: Optional[str] = None
+    ) -> AllocationInfo:
+        """Get allocation info. Raises AllocationNotFoundError if not found."""
+        return self._get(allocation_id, epoch_id=epoch_id)
+
+    def list_allocations(
+        self, tag: Optional[str] = None, epoch_id: Optional[str] = None
+    ) -> List[AllocationInfo]:
         """List all allocations, optionally filtered by tag."""
+        allocations = self._allocations.values()
+        if epoch_id is not None:
+            allocations = [info for info in allocations if info.epoch_id == epoch_id]
         if tag is None:
-            return list(self._allocations.values())
-        return [info for info in self._allocations.values() if info.tag == tag]
+            return list(allocations)
+        return [info for info in allocations if info.tag == tag]

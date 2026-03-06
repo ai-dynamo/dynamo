@@ -67,9 +67,9 @@ The server consists of three main components:
 
 1. **Memory Manager** - Allocates physical GPU memory via CUDA VMM (`cuMemCreate`) and exports shareable file descriptors (`cuMemExportToShareableHandle`). Critically, it never calls `cuMemMap` - clients handle all virtual address mapping.
 
-2. **State Machine (FSM)** - Manages the global lock state and enforces access rules that ensures consistency across multiple clients. See [State Machine](#state-machine) below for details.
+2. **State Machine (FSM)** - Manages global lock state and committed visibility. Any RW session immediately invalidates committed visibility until a fresh commit. See [State Machine](#state-machine) below.
 
-3. **Metadata Store** - Key-value store for tensor metadata (shapes, dtypes, offsets), enabling clients to reconstruct model structure.
+3. **Metadata Store** - Epoch-scoped key-value store for tensor metadata (shapes, dtypes, offsets), enabling clients to reconstruct model structure.
 
 ### Client
 
@@ -152,18 +152,18 @@ stateDiagram-v2
 
 | State | Description | Can Connect RW | Can Connect RO |
 |-------|-------------|:--------------:|:--------------:|
-| `EMPTY` | No connections, no committed weights | ✓ | ✗ |
+| `EMPTY` | No connections, no committed epoch visible | ✓ | ✗ |
 | `RW` | Writer connected (exclusive access) | ✗ | ✗ |
-| `COMMITTED` | Weights published, no active connections | ✓ | ✓ |
+| `COMMITTED` | Published immutable epoch visible to readers, no active connections | ✓ | ✓ |
 | `RO` | One or more readers connected (shared access) | ✗ | ✓ |
 
 ### Events
 
 | Event | Trigger | Description |
 |-------|---------|-------------|
-| `RW_CONNECT` | Writer connects | Acquires exclusive write lock |
+| `RW_CONNECT` | Writer connects | Acquires exclusive write lock and invalidates previous committed visibility immediately |
 | `RW_COMMIT` | Writer calls `commit()` | Publishes weights, releases lock |
-| `RW_ABORT` | Writer disconnects without commit | Discards allocations, releases lock |
+| `RW_ABORT` | Writer disconnects without commit | Drops active RW epoch and returns to `EMPTY` |
 | `RO_CONNECT` | Reader connects | Acquires shared read lock |
 | `RO_DISCONNECT` | Reader disconnects | Releases shared lock; if last reader, returns to COMMITTED |
 
@@ -174,6 +174,18 @@ The socket connection **is** the lock:
 - **Crash resilience**: Connection close (including process crash) automatically releases the lock
 - **No explicit unlock**: Eliminates forgotten locks and deadlocks
 - **Atomic transitions**: State changes happen atomically with socket operations
+
+### Epoch Model
+
+GMS uses epoch-scoped allocations and metadata:
+
+- Every allocation is assigned an `epoch_id` at allocation time.
+- `epoch_id` is write-once and never mutated.
+- RO requests are served only from the current committed epoch.
+- RW requests mutate only the active RW epoch.
+- Transition to `EMPTY` marks a new uncommitted epoch boundary.
+- On `RW_CONNECT`, prior committed visibility is invalidated immediately.
+- On `RW_COMMIT`, the active RW epoch becomes the committed epoch atomically.
 
 ---
 
@@ -192,6 +204,7 @@ sequenceDiagram
     W->>C: mgr = GMSClientMemoryManager(socket_path, device=0)
     W->>C: mgr.connect(RW)
     C->>S: HandshakeRequest(lock_type=RW)
+    S->>S: Invalidate prior committed epoch visibility
     S-->>C: HandshakeResponse(success=true)
 
     loop For each tensor
@@ -361,6 +374,8 @@ On commit, the server computes a hash of:
 On `remap_all_vas()`, this hash is checked:
 - If match: Safe to remap (layout unchanged)
 - If mismatch: Raise `StaleMemoryLayoutError` (must re-import)
+
+The hash is tied to the currently committed epoch and is cleared as soon as a writer acquires RW.
 
 **Important**: This detects **structural** changes, not **content** changes.
 Weight values can be modified in-place (e.g., RL training updates) as long as the structure is preserved.
