@@ -170,8 +170,15 @@ impl BatchingState {
     }
 
     fn pending_block_count(&self) -> usize {
-        self.pending_removed.as_ref().map(|r| r.block_hashes.len()).unwrap_or(0)
-            + self.pending_stored.as_ref().map(|s| s.blocks.len()).unwrap_or(0)
+        self.pending_removed
+            .as_ref()
+            .map(|r| r.block_hashes.len())
+            .unwrap_or(0)
+            + self
+                .pending_stored
+                .as_ref()
+                .map(|s| s.blocks.len())
+                .unwrap_or(0)
     }
 
     /// Records that a flush just happened. Called after every flush to track
@@ -2418,8 +2425,16 @@ mod event_processor_tests {
         let cancellation_token = CancellationToken::new();
 
         let handle = tokio::spawn(async move {
-            run_event_processor_loop(publisher_clone, 1, cancellation_token, rx, None, timeout_ms, DEFAULT_MAX_BATCH_BLOCKS)
-                .await
+            run_event_processor_loop(
+                publisher_clone,
+                1,
+                cancellation_token,
+                rx,
+                None,
+                timeout_ms,
+                DEFAULT_MAX_BATCH_BLOCKS,
+            )
+            .await
         });
 
         for i in 0..event_count {
@@ -2507,8 +2522,16 @@ mod event_processor_tests {
         let cancellation_token = CancellationToken::new();
 
         let handle = tokio::spawn(async move {
-            run_event_processor_loop(publisher_clone, 1, cancellation_token, rx, None, timeout_ms, DEFAULT_MAX_BATCH_BLOCKS)
-                .await
+            run_event_processor_loop(
+                publisher_clone,
+                1,
+                cancellation_token,
+                rx,
+                None,
+                timeout_ms,
+                DEFAULT_MAX_BATCH_BLOCKS,
+            )
+            .await
         });
 
         for i in 0..event_count {
@@ -2597,8 +2620,16 @@ mod event_processor_tests {
         let cancellation_token = CancellationToken::new();
 
         let handle = tokio::spawn(async move {
-            run_event_processor_loop(publisher_clone, 1, cancellation_token, rx, None, timeout_ms, DEFAULT_MAX_BATCH_BLOCKS)
-                .await
+            run_event_processor_loop(
+                publisher_clone,
+                1,
+                cancellation_token,
+                rx,
+                None,
+                timeout_ms,
+                DEFAULT_MAX_BATCH_BLOCKS,
+            )
+            .await
             // SLEEP HERE?! so that events are not batched!
         });
 
@@ -2672,8 +2703,16 @@ mod event_processor_tests {
         let cancellation_token = CancellationToken::new();
 
         let handle = tokio::spawn(async move {
-            run_event_processor_loop(publisher_clone, 1, cancellation_token, rx, None, timeout_ms, DEFAULT_MAX_BATCH_BLOCKS)
-                .await
+            run_event_processor_loop(
+                publisher_clone,
+                1,
+                cancellation_token,
+                rx,
+                None,
+                timeout_ms,
+                DEFAULT_MAX_BATCH_BLOCKS,
+            )
+            .await
         });
 
         // Send 5 removed events with 2ms delay between each
@@ -2737,8 +2776,16 @@ mod event_processor_tests {
         let cancellation_token = CancellationToken::new();
 
         let handle = tokio::spawn(async move {
-            run_event_processor_loop(publisher_clone, 1, cancellation_token, rx, None, timeout_ms, DEFAULT_MAX_BATCH_BLOCKS)
-                .await
+            run_event_processor_loop(
+                publisher_clone,
+                1,
+                cancellation_token,
+                rx,
+                None,
+                timeout_ms,
+                DEFAULT_MAX_BATCH_BLOCKS,
+            )
+            .await
         });
 
         // Send a Removed event
@@ -2796,8 +2843,16 @@ mod event_processor_tests {
         let cancellation_token = CancellationToken::new();
 
         let handle = tokio::spawn(async move {
-            run_event_processor_loop(publisher_clone, 1, cancellation_token, rx, None, timeout_ms, DEFAULT_MAX_BATCH_BLOCKS)
-                .await
+            run_event_processor_loop(
+                publisher_clone,
+                1,
+                cancellation_token,
+                rx,
+                None,
+                timeout_ms,
+                DEFAULT_MAX_BATCH_BLOCKS,
+            )
+            .await
         });
 
         // Send events with dp_rank=0
@@ -2880,8 +2935,16 @@ mod event_processor_tests {
         let cancellation_token = CancellationToken::new();
 
         let handle = tokio::spawn(async move {
-            run_event_processor_loop(publisher_clone, 1, cancellation_token, rx, None, timeout_ms, DEFAULT_MAX_BATCH_BLOCKS)
-                .await
+            run_event_processor_loop(
+                publisher_clone,
+                1,
+                cancellation_token,
+                rx,
+                None,
+                timeout_ms,
+                DEFAULT_MAX_BATCH_BLOCKS,
+            )
+            .await
         });
 
         // Send first batch: 3 events with dp_rank=0, event_ids 10-12
@@ -2958,8 +3021,16 @@ mod event_processor_tests {
         let cancellation_token = CancellationToken::new();
 
         let handle = tokio::spawn(async move {
-            run_event_processor_loop(publisher_clone, 1, cancellation_token, rx, None, timeout_ms, DEFAULT_MAX_BATCH_BLOCKS)
-                .await
+            run_event_processor_loop(
+                publisher_clone,
+                1,
+                cancellation_token,
+                rx,
+                None,
+                timeout_ms,
+                DEFAULT_MAX_BATCH_BLOCKS,
+            )
+            .await
         });
 
         // Wait longer than timeout to simulate idle period (timer becomes stale)
@@ -3020,8 +3091,16 @@ mod event_processor_tests {
         let cancellation_token = CancellationToken::new();
 
         let handle = tokio::spawn(async move {
-            run_event_processor_loop(publisher_clone, 1, cancellation_token, rx, None, timeout_ms, DEFAULT_MAX_BATCH_BLOCKS)
-                .await
+            run_event_processor_loop(
+                publisher_clone,
+                1,
+                cancellation_token,
+                rx,
+                None,
+                timeout_ms,
+                DEFAULT_MAX_BATCH_BLOCKS,
+            )
+            .await
         });
 
         // Send first batch: 2 sequential stored events with dp_rank=0, event_ids 100-101
@@ -3129,8 +3208,16 @@ mod event_processor_tests {
         let cancellation_token = CancellationToken::new();
 
         let handle = tokio::spawn(async move {
-            run_event_processor_loop(publisher_clone, 1, cancellation_token, rx, None, timeout_ms, DEFAULT_MAX_BATCH_BLOCKS)
-                .await
+            run_event_processor_loop(
+                publisher_clone,
+                1,
+                cancellation_token,
+                rx,
+                None,
+                timeout_ms,
+                DEFAULT_MAX_BATCH_BLOCKS,
+            )
+            .await
         });
 
         // First event: parent_hash=None, block_hash=1
