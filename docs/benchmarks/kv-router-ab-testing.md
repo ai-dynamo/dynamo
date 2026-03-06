@@ -7,6 +7,7 @@ title: KV Router A/B Testing
 This guide walks you through setting up and running A/B benchmarks to compare Dynamo's KV Smart Router against standard round-robin routing on a Kubernetes cluster.
 
 ## Overview
+
 Dynamo's KV Smart Router intelligently routes requests based on KV cache affinity, improving performance for workloads with shared prompt prefixes. This guide helps you:
 
 1. Deploy two identical Dynamo configurations:
@@ -28,7 +29,7 @@ Dynamo's KV Smart Router intelligently routes requests based on KV cache affinit
 - HuggingFace account and token (if model downloads are gated)
 - Kubernetes cluster with:
   - GPU nodes (H100, H200, or similar)
-  - Sufficient GPU capacity (16+ GPUs recommended for this example)
+  - Sufficient GPU capacity (8+ GPUs recommended for this example)
   - Dynamo platform installed globally OR ability to install per-namespace
 
 ### Knowledge Requirements
@@ -41,28 +42,23 @@ Dynamo's KV Smart Router intelligently routes requests based on KV cache affinit
 
 ## Architecture
 
-This guide sets up two parallel deployments, as well as a benchmarking pod that can test each deployment:
+This guide uses a single namespace. We deploy one configuration (e.g. router-ON), run the benchmark, tear it down, then deploy the other (router-OFF) and run the same benchmark. 
 
 ```text
-┌─────────────────────────────────────┐
-│  Deployment A: Router OFF           │
-│  Namespace: router-off-test          │
-│  ├─ Frontend (Standard Routing)     │
-│  └─ 8x Decode Workers (1 GPU each)  │
-└─────────────────────────────────────┘
-
-┌─────────────────────────────────────┐
-│  Deployment B: Router ON             │
-│  Namespace: router-on-test           │
-│  ├─ Frontend (KV Smart Router)      │
-│  └─ 8x Decode Workers (1 GPU each)  │
-└─────────────────────────────────────┘
-
-┌─────────────────────────────────────┐
-│  Benchmark Pod                       │
-│  Namespace: benchmark                │
-│  └─ AIPerf + Dataset                 │
-└─────────────────────────────────────┘
+┌──────────────────────────────────────────────┐
+│ Namespace: dynamo-bench                       │
+│ (one of A or B active at a time)              │
+│                                              │
+│  Deployment A: Router OFF                     │
+│    ├─ Frontend (Standard Routing)              │
+│    └─ 8x Decode Workers (1 GPU each)          │
+│                                              │
+│  Deployment B: Router ON                      │
+│    ├─ Frontend (KV Smart Router)               │
+│    └─ 8x Decode Workers (1 GPU each)          │
+│                                              │
+│  Benchmark Pod (AIPerf + Dataset)             │
+└──────────────────────────────────────────────┘
 ```
 
 **Key Difference:** Deployment B sets `DYN_ROUTER_MODE=kv` on the frontend to enable KV cache-aware routing.
@@ -71,37 +67,25 @@ This guide sets up two parallel deployments, as well as a benchmarking pod that 
 
 ## Phase 1: Namespace and Infrastructure Setup
 
-### Step 1.1: Create Namespaces
+### Step 1.1: Create Namespace
 
 ```bash
-# Create namespaces for both deployments
-kubectl create namespace router-off-test
-kubectl create namespace router-on-test
-kubectl create namespace benchmark
+kubectl create namespace dynamo-bench
 ```
 
 ### Step 1.2: Create HuggingFace Token Secret (optional)
 
-If the model you're seeking to deploy requires HF token to download (Llama family models require this), replace `YOUR_HF_TOKEN` with your actual HuggingFace token:
+If the model requires an HF token (e.g. gated models):
 
 ```bash
-# Router-OFF namespace
 kubectl create secret generic hf-token-secret \
   --from-literal=HF_TOKEN="YOUR_HF_TOKEN" \
-  -n router-off-test
-
-# Router-ON namespace
-kubectl create secret generic hf-token-secret \
-  --from-literal=HF_TOKEN="YOUR_HF_TOKEN" \
-  -n router-on-test
+  -n dynamo-bench
 ```
 
-### Step 1.3: Install Dynamo Platform (Per-Namespace)
+### Step 1.3: Install Dynamo Platform
 
-If your cluster uses namespace-restricted Dynamo operators, you'll need to install the Dynamo platform in each namespace. Follow the [Dynamo Kubernetes Installation Guide](https://github.com/ai-dynamo/dynamo/blob/main/docs/kubernetes/installation-guide.md) to install the platform in both namespaces:
-
-- `router-off-test`
-- `router-on-test`
+If your cluster uses namespace-restricted Dynamo operators, you'll need to install the Dynamo platform in the workload namespace. Follow the [Dynamo Kubernetes Installation Guide](https://github.com/ai-dynamo/dynamo/blob/main/docs/kubernetes/installation-guide.md) to install the platform in `dynamo-bench`.
 
 **Key Configuration Notes:**
 - If your cluster uses namespace restrictions, ensure `dynamo-operator.namespaceRestriction.enabled=true` is set during installation
@@ -110,20 +94,11 @@ If your cluster uses namespace-restricted Dynamo operators, you'll need to insta
 
 ### Step 1.4: Verify Infrastructure
 
-Wait for operators and infrastructure to be ready:
-
 ```bash
-# Check router-off-test
-kubectl get pods -n router-off-test
-
-# Check router-on-test
-kubectl get pods -n router-on-test
+kubectl get pods -n dynamo-bench
 ```
 
-You should see:
-- `dynamo-platform-dynamo-operator-controller-manager` (2/2 Running)
-- `dynamo-platform-etcd-0` (1/1 Running)
-- `dynamo-platform-nats-0` (2/2 Running)
+Expect operator, etcd, and nats pods Running before deploying the graph.
 
 ---
 
@@ -131,25 +106,30 @@ You should see:
 
 ### Step 2.1: Create Deployment YAMLs
 
-Create `router-off-deployment.yaml`:
+Create `router-off-deployment.yaml` (baseline):
 
 ```yaml
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
-  name: vllm-agg-no-router
+  name: qwen32b-baseline
 spec:
   services:
     Frontend:
-      dynamoNamespace: vllm-agg-no-router
+      dynamoNamespace: qwen32b-baseline
       componentType: frontend
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.5.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.9.0
+          env:
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
     VllmDecodeWorker:
       envFromSecret: hf-token-secret
-      dynamoNamespace: vllm-agg-no-router
+      dynamoNamespace: qwen32b-baseline
       componentType: worker
       replicas: 8
       resources:
@@ -164,15 +144,32 @@ spec:
                     - key: node.kubernetes.io/instance-type
                       operator: In
                       values:
-                        - gpu-h200-sxm  # Adjust to your GPU node type
+                        - Standard_NC80adis_H100_v5  # Adjust to your GPU node type
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.5.0
-          workingDir: /workspace/examples/backends/vllm
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.9.0
+          workingDir: /workspace
           command:
             - /bin/sh
             - -c
           args:
-            - python3 -m dynamo.vllm --model Qwen/Qwen3-32B --quantization fp8
+            - >-
+              python3 -m dynamo.vllm
+              --model Qwen/Qwen3-32B
+              --quantization fp8
+              --kv-cache-dtype fp8
+              --max-model-len 131072
+              --hf-overrides '{"rope_scaling":{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768},"max_position_embeddings":131072}'
+              --gpu-memory-utilization 0.90
+              --block-size 64
+              --async-scheduling
+              --disable-log-requests
+          env:
+            - name: DYN_HEALTH_CHECK_ENABLED
+              value: "false"
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
           startupProbe:
             httpGet:
               path: /health
@@ -180,7 +177,7 @@ spec:
             initialDelaySeconds: 120
             periodSeconds: 30
             timeoutSeconds: 10
-            failureThreshold: 60  # 32 minutes total (120s + 60*30s)
+            failureThreshold: 60
           livenessProbe:
             httpGet:
               path: /live
@@ -197,30 +194,36 @@ spec:
             periodSeconds: 30
             timeoutSeconds: 10
             failureThreshold: 10
+      subComponentType: decode
 ```
 
-Create `router-on-deployment.yaml`:
+Create `router-on-deployment.yaml` (KV router ON):
 
 ```yaml
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
-  name: vllm-agg-router
+  name: qwen32b-kv-router
 spec:
   services:
     Frontend:
-      dynamoNamespace: vllm-agg-router
+      dynamoNamespace: qwen32b-kv-router
       componentType: frontend
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.5.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.9.0
+          env:
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
       envs:
         - name: DYN_ROUTER_MODE
           value: kv  # KEY DIFFERENCE: Enable KV Smart Router
     VllmDecodeWorker:
       envFromSecret: hf-token-secret
-      dynamoNamespace: vllm-agg-router
+      dynamoNamespace: qwen32b-kv-router
       componentType: worker
       replicas: 8
       resources:
@@ -235,15 +238,32 @@ spec:
                     - key: node.kubernetes.io/instance-type
                       operator: In
                       values:
-                        - gpu-h200-sxm  # Adjust to your GPU node type
+                        - Standard_NC80adis_H100_v5  # Adjust to your GPU node type
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.5.0
-          workingDir: /workspace/examples/backends/vllm
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.9.0
+          workingDir: /workspace
           command:
             - /bin/sh
             - -c
           args:
-            - python3 -m dynamo.vllm --model Qwen/Qwen3-32B --quantization fp8
+            - >-
+              python3 -m dynamo.vllm
+              --model Qwen/Qwen3-32B
+              --quantization fp8
+              --kv-cache-dtype fp8
+              --max-model-len 131072
+              --hf-overrides '{"rope_scaling":{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768},"max_position_embeddings":131072}'
+              --gpu-memory-utilization 0.90
+              --block-size 64
+              --async-scheduling
+              --disable-log-requests
+          env:
+            - name: DYN_HEALTH_CHECK_ENABLED
+              value: "false"
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
           startupProbe:
             httpGet:
               path: /health
@@ -251,7 +271,7 @@ spec:
             initialDelaySeconds: 120
             periodSeconds: 30
             timeoutSeconds: 10
-            failureThreshold: 60  # 32 minutes total (120s + 60*30s)
+            failureThreshold: 60
           livenessProbe:
             httpGet:
               path: /live
@@ -268,37 +288,41 @@ spec:
             periodSeconds: 30
             timeoutSeconds: 10
             failureThreshold: 10
+      subComponentType: decode
 ```
 
-### Step 2.2: Deploy Both Configurations
+### Step 2.2: Deploy Router-ON First
 
 ```bash
-# Deploy router-OFF
-kubectl apply -f router-off-deployment.yaml -n router-off-test
-
-# Deploy router-ON
-kubectl apply -f router-on-deployment.yaml -n router-on-test
+kubectl apply -f router-on-deployment.yaml -n dynamo-bench
 ```
 
-**💡 Optimization Tip:** Each worker will download the model independently (~20 minutes per pod). For faster initialization, add a shared PVC with `ReadWriteMany` access mode to cache the model.
+**💡 Optimization Tip:** Each worker will download the model independently (~20 minutes per pod). For faster initialization, add a shared PVC with `ReadWriteMany` access mode to cache the model. (This is the DynamoGraphDeployment approach; other setups may use node-local storage such as hostPath instead.)
 
-First, create the PVC separately:
+First, create the PVC in the same namespace as your deployment (e.g. `dynamo-bench`). Use a storage class that supports ReadWriteMany:
+
+```bash
+kubectl get storageclass   # choose one with ReadWriteMany (e.g. azurefile-csi-premium, nfs, efs)
+```
 
 ```yaml
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: model-cache
+  namespace: dynamo-bench
 spec:
   accessModes:
     - ReadWriteMany
-  storageClassName: "your-shared-storage-class"  # e.g., nfs, efs, nebius-shared-fs
+  storageClassName: "azurefile-csi-premium"   # Adjust to your cluster
   resources:
     requests:
       storage: 100Gi
 ```
 
-Then reference it in your DynamoGraphDeployment:
+Apply it: `kubectl apply -f pvc-model-cache.yaml`
+
+Then reference the existing PVC in your DynamoGraphDeployment by adding the following under `spec` (and under `VllmDecodeWorker`, add `volumeMounts`):
 
 ```yaml
 spec:
@@ -314,16 +338,12 @@ spec:
           useAsCompilationCache: false
 ```
 
-With this configuration, only the first worker downloads the model; others use the cached version, reducing startup time from 20+ minutes to ~2 minutes per pod.
+With this configuration, the first run has one worker download; the rest load from cache. The main benefit is on redeploy: the model stays on the PVC, so new pods load from cache and come up in ~5–10 minutes instead of downloading again.
 
 ### Step 2.3: Monitor Deployment Progress
 
 ```bash
-# Watch router-OFF pods
-kubectl get pods -n router-off-test -w
-
-# Watch router-ON pods
-kubectl get pods -n router-on-test -w
+kubectl get pods -n dynamo-bench -w
 ```
 
 Wait for all pods to reach `Running` status and pass readiness probes.
@@ -333,113 +353,59 @@ Wait for all pods to reach `Running` status and pass readiness probes.
 - **Without shared PVC**: 20-30 minutes per worker (workers download independently)
   - For 8 workers: Budget **1-2 hours** for full deployment (workers start in parallel but are limited by node scheduling)
 
-The startup probe allows 32 minutes per pod (failureThreshold: 60), which accommodates model download and initialization.
+The deployment's startup probe (`initialDelaySeconds: 120`, `periodSeconds: 30`, `failureThreshold: 60`) allows up to 32 minutes per pod for model download and initialization.
 
-### Step 2.4: Verify All Workers Are Healthy
+### Step 2.4: Verify Workers Are Healthy
 
-> ⚠️ **CRITICAL CHECKPOINT**: Before running benchmarks, you **MUST** verify equal worker health in both deployments. Unequal worker counts will invalidate your comparison results.
+Before running the first benchmark, confirm 8/8 workers are Ready:
 
 ```bash
-# Quick health check - both should show "8/8"
-echo "Router OFF: $(kubectl get pods -n router-off-test -l nvidia.com/dynamo-component-type=worker --field-selector=status.phase=Running -o json | jq '[.items[] | select(.status.conditions[] | select(.type=="Ready" and .status=="True"))] | length')/8 ready"
-echo "Router ON:  $(kubectl get pods -n router-on-test -l nvidia.com/dynamo-component-type=worker --field-selector=status.phase=Running -o json | jq '[.items[] | select(.status.conditions[] | select(.type=="Ready" and .status=="True"))] | length')/8 ready"
-
-# Detailed view
-kubectl get pods -n router-off-test -l nvidia.com/dynamo-component-type=worker
-kubectl get pods -n router-on-test -l nvidia.com/dynamo-component-type=worker
+kubectl get pods -n dynamo-bench -l nvidia.com/dynamo-component-type=worker
 ```
 
-**Both must show 8/8 workers in Ready state (1/1 Running).** If workers are not ready:
-- Check logs: `kubectl logs -n <namespace> <pod-name>`
-- Common issues: model download in progress, startup probe timeout, insufficient GPU resources
-
-**Do not proceed with benchmarks until all 16 workers (8 per deployment) are healthy.**
+Do not proceed until all 8 show `1/1 Running` and Ready. Repeat this check after you tear down router-ON and deploy router-OFF (Phase 5).
 
 ---
 
 ## Phase 3: Prepare Benchmark Dataset
 
-### Understanding the Mooncake Trace Dataset
+### Understanding the Mooncake Toolagent Trace
 
-For this A/B comparison, we use the **Mooncake Trace Dataset**, published by [Mooncake AI](https://github.com/kvcache-ai/Mooncake). This is a privacy-preserving dataset of real-world LLM inference traffic from production arxiv workloads.
+For this A/B comparison, we use the [**Mooncake FAST'25 Toolagent Trace**](https://github.com/kvcache-ai/Mooncake/blob/main/FAST25-release/traces/toolagent_trace.jsonl), published by [Mooncake AI](https://github.com/kvcache-ai/Mooncake) (USENIX FAST'25 Best Paper). This is a privacy-preserving dataset of real-world LLM inference traffic from production **tool-agent workloads** — AI agents that iteratively call tools and APIs while maintaining a growing conversation context. The trace contains **23,608 requests** spanning ~59 minutes of real-time traffic.
+
+**Why the toolagent trace?** Tool-agent workloads are ideal for evaluating KV cache routing because each agent session involves repeated LLM calls that share a long, growing prefix (system prompt + conversation history + tool results), producing high natural prefix overlap between requests. The Mooncake toolagent trace captures these realistic patterns, letting us demonstrate the router's real-world performance gains.
 
 **What's in the dataset?** Each trace entry contains:
 - **Timestamp:** When the request arrived (for realistic request timing)
 - **Input/output lengths:** Number of tokens in prompts and responses
-- **Block hash IDs:** Cryptographic hashes representing KV cache blocks (explained below)
+- **Block hash IDs:** Cryptographic hashes representing KV cache blocks (no user text)
 
-**Sample trace entry:**
+**Sample trace entries (showing prefix reuse):**
 ```json
-{
-  "timestamp": 27482,
-  "input_length": 6955,
-  "output_length": 52,
-  "hash_ids": [46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 2353, 2354]
-}
+{"timestamp": 0, "input_length": 9013, "output_length": 3, "hash_ids": [46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63]}
+{"timestamp": 0, "input_length": 6506, "output_length": 3, "hash_ids": [46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 64]}
 ```
 
-### Why Mooncake Traces Matter for KV Cache Benchmarking
-
-**The Challenge:** Traditional LLM benchmarks use synthetic or random data, which are often insufficient to capture real-world optimizations like KV Smart Router. To properly evaluate this feature, we need realistic traffic patterns with **prefix repetition** - but this creates a privacy problem: how do we measure realistic KV cache hit patterns without exposing actual user conversations?
-
-**Mooncake's Solution: Privacy-Preserving Block Hashes**
-
-Instead of storing actual prompt text, the Mooncake dataset uses cryptographic hashes to represent KV cache blocks. Each hash ID represents a **512-token block**, and the hash includes both the current block and all preceding blocks. This preserves the **pattern of prefix reuse** while completely protecting user privacy.
-
-### How it works - Multi-turn conversation example
-
-```text
-Turn 1 (initial request - long document analysis):
-  Input: ~8,000 tokens (e.g., research paper + question)
-  Hash IDs: [46][47][48][49][50][51][52][53][54][55][56][57][58][59][60][61]
-            └─ 16 blocks × 512 tokens/block = ~8,192 tokens
-
-Turn 2 (follow-up question on same document):
-  Input: Same document + new question (~8,500 tokens)
-  Hash IDs: [46][47][48][49][50][51][52][53][54][55][56][57][58][59][60][61][62]
-            └──────────── Reuses first 16 blocks (~8,192 tokens) ───────────────┘
-
-            ✅ Cache hit: First 8,192 tokens don't need recomputation!
-
-Turn 3 (another follow-up):
-  Input: Same document + different question (~9,000 tokens)
-  Hash IDs: [46][47][48][49][50][51][52][53][54][55][56][57][58][59][60][61][62][63]
-            └──────────── Reuses first 16 blocks (~8,192 tokens) ───────────────┘
-```
-
-When requests share the same hash IDs (e.g., blocks 46-61), it means they share those 512-token blocks - indicating **significant prefix overlap** (in this case, 8,192 tokens). The **KV Smart Router** routes requests with matching hash IDs to the same worker, maximizing cache hits and avoiding redundant computation for those shared prefix tokens.
-
-**Key Dataset Properties:**
-- ✅ **Realistic timing:** Request arrival patterns from production workloads
-- ✅ **Real prefix patterns:** Up to 50% cache hit ratio ([Mooncake technical report](https://github.com/kvcache-ai/Mooncake))
-- ✅ **Privacy-preserving:** No actual text - only hash-based cache block identifiers
-- ✅ **Reproducible:** Public dataset enables fair comparisons across different systems
-
-**Why this matters:** With random synthetic data, the KV Smart Router would show no benefit because there's no prefix reuse to exploit. Mooncake traces provide realistic workload patterns that demonstrate the router's real-world performance gains while respecting user privacy.
-
----
+These two requests share blocks 46–57 (12 blocks × 512 tokens = ~6,144 tokens of shared prefix) — a tool agent continuing the same session with accumulated context. Each hash ID represents a **512-token block**, and the hash includes both the current block and all preceding blocks, preserving the pattern of prefix reuse while protecting user privacy. The **KV Smart Router** routes requests with matching hash IDs to the same worker, maximizing cache hits.
 
 ### Download and Prepare the Dataset
 
 ```bash
-# Download the Mooncake arxiv trace dataset
-curl -sL https://raw.githubusercontent.com/kvcache-ai/Mooncake/refs/heads/main/FAST25-release/arxiv-trace/mooncake_trace.jsonl -o mooncake_trace.jsonl
+# Download the Mooncake FAST'25 toolagent trace
+curl -sL https://raw.githubusercontent.com/kvcache-ai/Mooncake/refs/heads/main/FAST25-release/traces/toolagent_trace.jsonl -o toolagent_trace.jsonl
 
-# Trim to 1000 requests for faster benchmarking
-head -n 1000 mooncake_trace.jsonl > mooncake_trace_small.jsonl
-
-# Speed up timestamps 4x (reduces benchmark time from ~12 min to ~3 min)
+# Slow down timestamps to 0.80× replay speed (~5.3 req/s instead of ~6.7 req/s)
 python3 - <<'PY'
 import json
 
-with open("mooncake_trace_small.jsonl") as src, open("mooncake_trace_4x.jsonl", "w") as dst:
+with open("toolagent_trace.jsonl") as src, open("toolagent_trace_080x.jsonl", "w") as dst:
     for line in src:
         rec = json.loads(line)
-        rec["timestamp"] = int(rec["timestamp"] / 4)
+        rec["timestamp"] = int(rec["timestamp"] / 0.80)
         dst.write(json.dumps(rec) + "\n")
 PY
 
-echo "Dataset ready: mooncake_trace_4x.jsonl (1000 requests, 4x speed)"
+echo "Dataset ready: toolagent_trace_080x.jsonl (23,608 requests, 0.80x speed)"
 ```
 
 ---
@@ -455,7 +421,7 @@ apiVersion: batch/v1
 kind: Job
 metadata:
   name: aiperf-benchmark
-  namespace: benchmark
+  namespace: dynamo-bench
 spec:
   backoffLimit: 1
   template:
@@ -463,7 +429,7 @@ spec:
       restartPolicy: Never
       containers:
       - name: benchmark
-        image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.5.0
+        image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.9.0
         command: ["/bin/sh", "-c", "sleep infinity"]
         imagePullPolicy: IfNotPresent
         resources:
@@ -480,74 +446,98 @@ kubectl apply -f benchmark-job.yaml
 Wait for pod to be ready:
 
 ```bash
-kubectl get pods -n benchmark
+kubectl get pods -n dynamo-bench
 ```
 
 ### Step 4.2: Copy Dataset to Benchmark Pod
 
 ```bash
-POD_NAME=$(kubectl get pods -n benchmark -l job-name=aiperf-benchmark -o jsonpath='{.items[0].metadata.name}')
-
-kubectl -n benchmark cp mooncake_trace_4x.jsonl ${POD_NAME}:/tmp/mooncake_trace_4x.jsonl
+POD_NAME=$(kubectl get pods -n dynamo-bench -l job-name=aiperf-benchmark -o jsonpath='{.items[0].metadata.name}')
+kubectl -n dynamo-bench cp toolagent_trace_080x.jsonl ${POD_NAME}:/tmp/toolagent_trace_080x.jsonl
 ```
 
 ### Step 4.3: Install AIPerf
 
 ```bash
-kubectl -n benchmark exec ${POD_NAME} -- bash -lc '. /opt/dynamo/venv/bin/activate && pip install -q aiperf'
+kubectl -n dynamo-bench exec ${POD_NAME} -- bash -lc '
+  . /opt/dynamo/venv/bin/activate
+  pip install -q aiperf==0.5.0
+'
 ```
 
 ---
 
 ## Phase 5: Run Benchmarks
 
-### Step 5.1: Benchmark Router-OFF (Baseline)
+### Step 5.1: Benchmark Router-ON
+
+Run the benchmark against the **router-ON** deployment:
 
 ```bash
-kubectl -n benchmark exec ${POD_NAME} -- bash -lc '
+kubectl -n dynamo-bench exec ${POD_NAME} -- bash -lc '
   . /opt/dynamo/venv/bin/activate
-  aiperf profile \
-    --model "Qwen/Qwen3-32B" \
-    --url "http://vllm-agg-no-router-frontend.router-off-test.svc.cluster.local:8000" \
-    --endpoint-type chat \
-    --input-file /tmp/mooncake_trace_4x.jsonl \
-    --custom-dataset-type mooncake_trace \
+  AIPERF_HTTP_CONNECTION_LIMIT=200 aiperf profile \
+    -m "Qwen/Qwen3-32B" \
     --tokenizer "Qwen/Qwen3-32B" \
-    --streaming \
-    --request-count 1000 \
+    --input-file "/tmp/toolagent_trace_080x.jsonl" \
+    --custom-dataset-type "mooncake_trace" \
     --fixed-schedule \
-    --output-artifact-dir /tmp/router_off_results
+    --url "http://qwen32b-kv-router-frontend.dynamo-bench.svc.cluster.local:8000" \
+    --streaming \
+    --random-seed 42 \
+    --workers-max 200 \
+    --request-timeout-seconds 1000 \
+    --profile-export-level "records" \
+    --record-processors 8 \
+    --artifact-dir "/tmp/aiperf_qwen32b_toolagent_router_on" \
+    --goodput "time_to_first_token:5000 inter_token_latency:100"
 '
 ```
 
-**Note:** This will take 3-5 minutes. The terminal output includes a summary table.
+AIPerf writes the run to `/tmp/aiperf_qwen32b_toolagent_router_on` on the pod (summary JSON and `profile_export.jsonl`).
 
-### Step 5.2: Benchmark Router-ON (KV Smart Router)
+### Step 5.2: Switch to Router-OFF and Benchmark
+
+Tear down router-ON and deploy the baseline:
 
 ```bash
-kubectl -n benchmark exec ${POD_NAME} -- bash -lc '
+kubectl delete dynamographdeployment qwen32b-kv-router -n dynamo-bench
+kubectl apply -f router-off-deployment.yaml -n dynamo-bench
+```
+
+Wait for 8/8 workers to be Ready again, then run the same benchmark against the baseline frontend:
+
+```bash
+kubectl -n dynamo-bench exec ${POD_NAME} -- bash -lc '
   . /opt/dynamo/venv/bin/activate
-  aiperf profile \
-    --model "Qwen/Qwen3-32B" \
-    --url "http://vllm-agg-router-frontend.router-on-test.svc.cluster.local:8000" \
-    --endpoint-type chat \
-    --input-file /tmp/mooncake_trace_4x.jsonl \
-    --custom-dataset-type mooncake_trace \
+  AIPERF_HTTP_CONNECTION_LIMIT=200 aiperf profile \
+    -m "Qwen/Qwen3-32B" \
     --tokenizer "Qwen/Qwen3-32B" \
-    --streaming \
-    --request-count 1000 \
+    --input-file "/tmp/toolagent_trace_080x.jsonl" \
+    --custom-dataset-type "mooncake_trace" \
     --fixed-schedule \
-    --output-artifact-dir /tmp/router_on_results
+    --url "http://qwen32b-baseline-frontend.dynamo-bench.svc.cluster.local:8000" \
+    --streaming \
+    --random-seed 42 \
+    --workers-max 200 \
+    --request-timeout-seconds 1000 \
+    --profile-export-level "records" \
+    --record-processors 8 \
+    --artifact-dir "/tmp/aiperf_qwen32b_toolagent_router_off" \
+    --goodput "time_to_first_token:5000 inter_token_latency:100"
 '
 ```
 
 ### Step 5.3: Collect Results
 
+Copy the artifact directories (or the summary/export files inside them) to your machine:
+
 ```bash
-# Copy results to local machine
-kubectl -n benchmark cp ${POD_NAME}:/tmp/router_off_results/profile_export_aiperf.csv ./router_off_results.csv
-kubectl -n benchmark cp ${POD_NAME}:/tmp/router_on_results/profile_export_aiperf.csv ./router_on_results.csv
+kubectl -n dynamo-bench cp ${POD_NAME}:/tmp/aiperf_qwen32b_toolagent_router_on ./aiperf_router_on
+kubectl -n dynamo-bench cp ${POD_NAME}:/tmp/aiperf_qwen32b_toolagent_router_off ./aiperf_router_off
 ```
+
+AIPerf writes a summary and per-request records; use these to compare TTFT, latency, and throughput between router-ON and router-OFF.
 
 ---
 
@@ -575,14 +565,9 @@ kubectl -n benchmark cp ${POD_NAME}:/tmp/router_on_results/profile_export_aiperf
 
 **Factors that reduce KV router benefit:**
 - **Unique prompts** with no prefix reuse
-- **Short prompts** (\<1000 tokens) where routing overhead exceeds benefit
+- **Short prompts** (<1000 tokens) where routing overhead exceeds benefit
 - **Evenly distributed load** where round-robin is already optimal
 - **Low request rate** where cache eviction negates benefits
-
-**Expected Performance:**
-- **High prefix overlap workloads**: 20-50% TTFT improvement
-- **Moderate prefix overlap**: 10-20% improvement
-- **Low prefix overlap**: \<5% improvement (may not be worth enabling)
 
 **KV Smart Router is beneficial when:**
 - TTFT improvements > 20%
@@ -590,48 +575,36 @@ kubectl -n benchmark cp ${POD_NAME}:/tmp/router_on_results/profile_export_aiperf
 - Workload demonstrates measurable prefix reuse patterns
 
 **Standard routing is better when:**
-- KV router shows \<10% improvement
+- KV router shows <10% improvement
 - Increased latency variance is observed
 - Load distribution across workers is more important than cache affinity
 
 ### Example Comparison
 
-From the terminal output, compare the summary tables:
+From our Dynamo Operator benchmark with the full toolagent trace at 0.80× replay speed:
 
-```
-Router-OFF (Baseline):
-  TTFT avg: 12,764 ms    p99: 45,898 ms
-  Request Latency avg: 32,978 ms
-  Output Token Throughput: 1,614 tokens/sec
-  Request Throughput: 8.61 req/sec
+| Metric | Router-OFF (Baseline) | Router-ON (KV Router) | Improvement |
+|--------|----------------------|----------------------|-------------|
+| TTFT avg | 63,652 ms | 2,586 ms | **96% faster** |
+| TTFT p99 | 332,974 ms | 17,871 ms | **95% faster** |
+| E2E Latency avg | 92,856 ms | 19,112 ms | **79% faster** |
+| E2E Latency p99 | 411,252 ms | 88,274 ms | **79% faster** |
 
-Router-ON (KV Router):
-  TTFT avg: 8,012 ms     p99: 28,644 ms  (37% faster ✅)
-  Request Latency avg: 28,972 ms  (12% faster ✅)
-  Output Token Throughput: 1,746 tokens/sec  (8% higher ✅)
-  Request Throughput: 9.33 req/sec  (8% higher ✅)
-```
+In this example with all 8 workers healthy, the **KV router dramatically outperformed** the baseline:
+- **96% faster TTFT** — Users see first token in ~2.6s instead of ~64s
+- **79% lower E2E latency** — Requests complete in ~19s instead of ~93s
+- **95% faster TTFT p99** — Tail latency drops from ~333s to ~18s
 
-In this example with all 8 workers healthy, the **KV router significantly outperformed** the baseline:
-- **37% faster TTFT** - Users see first token much sooner
-- **8% higher throughput** - System processes more requests per second
-- **12% lower latency** - Faster end-to-end completion
-
-The Mooncake arxiv dataset has sufficient prefix overlap (long input sequences with similar patterns) to benefit from KV cache-aware routing. Workloads with explicit shared prefixes (system prompts, templates) may see even greater improvements.
+The toolagent trace has heavy prefix overlap from tool-agent sessions with repeated context. Without the KV router, requests with overlapping prefixes are scattered across workers, causing redundant recomputation and unbounded queue growth at high utilization. With the KV router, matching prefixes are routed to the same worker, maximizing cache hits and keeping latencies stable under load.
 
 ---
 
 ## Phase 7: Cleanup
 
 ```bash
-# Delete deployments
-kubectl delete dynamographdeployment vllm-agg-no-router -n router-off-test
-kubectl delete dynamographdeployment vllm-agg-router -n router-on-test
-
-# Delete namespaces (removes all resources)
-kubectl delete namespace router-off-test
-kubectl delete namespace router-on-test
-kubectl delete namespace benchmark
+kubectl delete dynamographdeployment --all -n dynamo-bench
+kubectl delete job aiperf-benchmark -n dynamo-bench
+kubectl delete namespace dynamo-bench
 ```
 
 ---
@@ -648,7 +621,7 @@ kubectl delete namespace benchmark
 kubectl describe nodes | grep -A 10 "Allocated resources"
 
 # Reduce worker replicas if needed
-kubectl edit dynamographdeployment -n <namespace>
+kubectl edit dynamographdeployment -n dynamo-bench
 ```
 
 ### Issue: ImagePullBackOff Errors
@@ -658,7 +631,7 @@ kubectl edit dynamographdeployment -n <namespace>
 **Solution:**
 ```bash
 # Check available versions
-kubectl get pods -n dynamo-system -o yaml | grep image:
+kubectl get pods -n dynamo-bench -o yaml | grep image:
 
 # Update deployment YAML to match cluster version
 ```
@@ -669,8 +642,8 @@ kubectl get pods -n dynamo-system -o yaml | grep image:
 
 **Solution:**
 - Ensure Dynamo platform is Helm-installed in the namespace
-- Verify operator has `--restrictedNamespace=<your-namespace>` argument
-- Check operator logs: `kubectl logs -n <namespace> deployment/dynamo-platform-dynamo-operator-controller-manager`
+- Verify operator has `--restrictedNamespace=dynamo-bench` argument
+- Check operator logs: `kubectl logs -n dynamo-bench deployment/dynamo-platform-dynamo-operator-controller-manager`
 
 ### Issue: Workers Not Becoming Ready
 
@@ -679,7 +652,7 @@ kubectl get pods -n dynamo-system -o yaml | grep image:
 **Solution:**
 ```bash
 # Check worker logs
-kubectl logs -n <namespace> <worker-pod-name>
+kubectl logs -n dynamo-bench <worker-pod-name>
 
 # Common issues:
 # - Invalid HuggingFace token
@@ -689,7 +662,7 @@ kubectl logs -n <namespace> <worker-pod-name>
 
 ### Issue: Workers Restarting in CrashLoopBackOff
 
-**Cause:** Startup probe timeout - workers killed before finishing initialization
+**Cause:** Startup probe timeout — workers killed before finishing initialization
 
 **Symptoms:**
 - Pods show "Container main failed startup probe, will be restarted"
@@ -701,7 +674,7 @@ Increase the startup probe `failureThreshold`:
 
 ```bash
 # Patch the deployment to allow 32 minutes instead of 22
-kubectl patch dynamographdeployment <deployment-name> -n <namespace> --type='json' \
+kubectl patch dynamographdeployment <deployment-name> -n dynamo-bench --type='json' \
   -p='[{"op": "replace", "path": "/spec/services/VllmDecodeWorker/extraPodSpec/mainContainer/startupProbe/failureThreshold", "value": 60}]'
 ```
 
@@ -719,7 +692,6 @@ startupProbe:
 
 **Model Loading Times (approximate):**
 - Qwen3-32B: ~20-25 minutes (first download)
-- Llama-70B: ~25-30 minutes (first download)
 - With cached model on node: ~2-5 minutes
 
 ### Issue: Unequal Worker Health
@@ -729,10 +701,10 @@ startupProbe:
 **Solution:**
 ```bash
 # Check all worker status
-kubectl get pods -n <namespace> -l nvidia.com/dynamo-component-type=worker
+kubectl get pods -n dynamo-bench -l nvidia.com/dynamo-component-type=worker
 
 # Describe problematic pods
-kubectl describe pod <pod-name> -n <namespace>
+kubectl describe pod <pod-name> -n dynamo-bench
 
 # Fix issues before benchmarking or results will be skewed
 ```
@@ -753,7 +725,7 @@ Change `replicas: 8` in the deployment YAMLs. Ensure both deployments use the sa
 
 ### Using Custom Datasets
 
-Replace mooncake dataset with your own JSONL file:
+Replace the Mooncake trace with your own JSONL file:
 - Format: One request per line with `timestamp` field
 - AIPerf supports various formats via `--custom-dataset-type`
 
@@ -772,12 +744,12 @@ VllmPrefillWorker:
 
 ## Best Practices
 
-1. **Equal Conditions:** Ensure both deployments have identical worker counts and health before benchmarking
+1. **Equal Conditions:** Ensure both deployments have identical worker counts and health (8/8 Ready) before benchmarking
 2. **Warm-Up:** Run a small test (100 requests) before the full benchmark to warm up caches
 3. **Multiple Runs:** Run benchmarks 3+ times and average results for statistical significance
 4. **Monitor Workers:** Watch for any pod restarts or issues during benchmark runs
 5. **Document Conditions:** Record cluster state, worker health, and any anomalies
-6. **Test Relevant Workloads:** Use datasets that match your actual use case for meaningful results
+6. **Consistent Configuration:** Use the same trace file and AIPerf options for both runs
 
 ---
 
@@ -794,8 +766,6 @@ For questions or issues, consult the [Dynamo documentation](https://github.com/a
 - `router-off-deployment.yaml`: Standard routing deployment
 - `router-on-deployment.yaml`: KV router enabled deployment
 - `benchmark-job.yaml`: AIPerf benchmark pod
-- `prepare-dataset.sh`: Dataset preparation script
-- Results CSVs: Detailed metrics from AIPerf
+- AIPerf artifact dirs: summary JSON and `profile_export.jsonl` per run
 
 **Repository:** [https://github.com/ai-dynamo/dynamo](https://github.com/ai-dynamo/dynamo)
-
