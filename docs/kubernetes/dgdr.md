@@ -69,8 +69,7 @@ kubectl get secret hf-token-secret -n ${NAMESPACE}
 
 ## Step 2: Create the DynamoGraphDeploymentRequest
 
-Save the following as `qwen3-first-model.yaml`, replacing `RELEASE_VERSION` with your version
-(e.g. `1.0.0`):
+Save the following as `qwen3-first-model.yaml`:
 
 ```yaml
 apiVersion: nvidia.com/v1beta1
@@ -82,7 +81,7 @@ spec:
   model: Qwen/Qwen3-0.6B
 
   # Profiling job container image — must match your installed platform version
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:RELEASE_VERSION"
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:${RELEASE_VERSION}"
 ```
 
 Apply it:
@@ -145,6 +144,18 @@ The `PHASE` column progresses through:
 > `Deployed` is the success terminal state when `autoApply: true` (the default).
 > If you set `autoApply: false`, the phase stops at `Ready` — profiling is complete and the
 > generated DGD spec is stored in `.status`, but no deployment is created automatically.
+> To inspect and deploy it manually:
+>
+> ```bash
+> # View the generated DGD spec
+> kubectl get dynamographdeploymentrequest qwen3-first-model -n ${NAMESPACE} \
+>   -o jsonpath='{.status.profilingResults.selectedConfig}' | python3 -m json.tool
+>
+> # Save it and apply
+> kubectl get dynamographdeploymentrequest qwen3-first-model -n ${NAMESPACE} \
+>   -o jsonpath='{.status.profilingResults.selectedConfig}' > generated-dgd.yaml
+> kubectl apply -f generated-dgd.yaml -n ${NAMESPACE}
+> ```
 
 For a full status summary and events:
 
