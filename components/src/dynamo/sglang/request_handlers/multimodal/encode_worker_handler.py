@@ -93,7 +93,7 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler):
 
         self.min_workers = 1
 
-    def cleanup(self):
+    def cleanup(self) -> None:
         pass
 
     async def generate(
@@ -262,7 +262,7 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler):
             logger.error(f"Error processing request: {e}")
             raise
 
-    async def async_init(self, runtime: DistributedRuntime):
+    async def async_init(self, runtime: DistributedRuntime) -> None:
         logger.info("Startup started.")
         # Create and initialize a dynamo connector for this worker.
         # We'll needs this to move data between this worker and remote workers efficiently.
