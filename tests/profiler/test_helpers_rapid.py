@@ -30,6 +30,8 @@ try:
 except ImportError as e:
     pytest.skip(f"Skip (missing dependency): {e}", allow_module_level=True)
 
+pytestmark = [pytest.mark.profiler]
+
 
 # ---------------------------------------------------------------------------
 # Shared fixtures

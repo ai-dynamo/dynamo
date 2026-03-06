@@ -32,6 +32,7 @@ from dynamo.profiler.utils.profile_common import (
     is_planner_enabled,
     needs_profile_data,
 )
+from dynamo.profiler.utils.profile_common import derive_planner_image
 
 logger = logging.getLogger(__name__)
 
@@ -180,8 +181,10 @@ def add_planner_to_config(
     planner_cfg.profile_results_dir = PROFILE_DATA_MOUNT
 
     planner_service = DgdPlannerServiceConfig()
-    if planner_service.extraPodSpec.mainContainer:
-        planner_service.extraPodSpec.mainContainer.image = dgdr.image
+    if planner_service.extraPodSpec.mainContainer and dgdr.image:
+        planner_service.extraPodSpec.mainContainer.image = derive_planner_image(
+            dgdr.image
+        )
 
     planner_dict = planner_service.model_dump(exclude_unset=False)
 

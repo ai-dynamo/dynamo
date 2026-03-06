@@ -19,7 +19,11 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
+import pytest
+
 from utils.load_generator import LoadGenerator
+
+pytestmark = [pytest.mark.planner]
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
