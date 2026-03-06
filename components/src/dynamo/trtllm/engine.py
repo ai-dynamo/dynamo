@@ -143,6 +143,9 @@ class TensorRTLLMEngine:
         Called after LLM init when role=source. At this point weights are
         loaded and compiled. We register the PyTorch model parameters with
         NIXL for RDMA reads by targets.
+        
+        Note: The model may still be loading weights when this is called.
+        We retry with exponential backoff to wait for the model to be ready.
         """
         try:
             from modelexpress.trtllm_live_transfer import MxLiveSource
@@ -153,6 +156,7 @@ class TensorRTLLMEngine:
             )
 
         import os
+        import time
 
         model_name = os.environ.get(
             "MODEL_NAME", self.engine_args.get("model", "unknown")
@@ -165,11 +169,36 @@ class TensorRTLLMEngine:
             mx_server=self._model_express_url,
             model_path=model_path,
         )
-        source.publish()
-        logger.info(
-            "ModelExpress source: published weights for '%s' — serving inference AND RDMA",
-            model_name,
-        )
+        
+        # Retry with exponential backoff - model may still be loading weights
+        max_retries = 10
+        retry_delay = 5  # Start with 5 seconds
+        for attempt in range(max_retries):
+            try:
+                source.publish()
+                logger.info(
+                    "ModelExpress source: published weights for '%s' — serving inference AND RDMA",
+                    model_name,
+                )
+                return
+            except RuntimeError as e:
+                if "Cannot access underlying torch model" in str(e):
+                    if attempt < max_retries - 1:
+                        logger.info(
+                            "Model not ready yet (attempt %d/%d), waiting %ds before retry...",
+                            attempt + 1, max_retries, retry_delay
+                        )
+                        time.sleep(retry_delay)
+                        retry_delay = min(retry_delay * 2, 60)  # Exponential backoff, max 60s
+                    else:
+                        logger.error("Failed to publish after %d attempts: %s", max_retries, e)
+                        raise
+                else:
+                    # Other RuntimeError - don't retry
+                    raise
+            except Exception as e:
+                logger.error("Unexpected error during publish: %s", e)
+                raise
 
     def _setup_modelexpress_loader(self) -> None:
         """Configure ModelExpress live checkpoint loader for P2P weight transfer.
@@ -196,7 +225,9 @@ class TensorRTLLMEngine:
             self.engine_args.get("model", "unknown"),
         )
 
-        loader = MxLiveCheckpointLoader()
+        # Pass mx_server directly to loader to ensure it's available even if
+        # env var isn't propagated to all MPI ranks when load_weights() is called
+        loader = MxLiveCheckpointLoader(mx_server=self._model_express_url)
         self.engine_args["checkpoint_loader"] = loader
         self.engine_args["load_format"] = LoadFormat.PRESHARDED
         logger.info(
