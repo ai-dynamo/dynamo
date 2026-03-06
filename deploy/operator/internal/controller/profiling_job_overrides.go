@@ -154,6 +154,27 @@ func applyPodSpecOverrides(spec *corev1.PodSpec, overrides *corev1.PodSpec) {
 	if overrides.DNSConfig != nil {
 		spec.DNSConfig = overrides.DNSConfig
 	}
+	if overrides.SecurityContext != nil {
+		spec.SecurityContext = overrides.SecurityContext
+	}
+	if overrides.TerminationGracePeriodSeconds != nil {
+		spec.TerminationGracePeriodSeconds = overrides.TerminationGracePeriodSeconds
+	}
+	if len(overrides.TopologySpreadConstraints) > 0 {
+		spec.TopologySpreadConstraints = overrides.TopologySpreadConstraints
+	}
+	if overrides.NodeName != "" {
+		spec.NodeName = overrides.NodeName
+	}
+	if overrides.SchedulerName != "" {
+		spec.SchedulerName = overrides.SchedulerName
+	}
+	if overrides.AutomountServiceAccountToken != nil {
+		spec.AutomountServiceAccountToken = overrides.AutomountServiceAccountToken
+	}
+	if len(overrides.HostAliases) > 0 {
+		spec.HostAliases = overrides.HostAliases
+	}
 
 	spec.Volumes = mergeNamedSlice(spec.Volumes, overrides.Volumes, func(v corev1.Volume) string { return v.Name })
 	spec.InitContainers = mergeNamedSlice(spec.InitContainers, overrides.InitContainers, func(c corev1.Container) string { return c.Name })
