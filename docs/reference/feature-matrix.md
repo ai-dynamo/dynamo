@@ -133,4 +133,4 @@ TensorRT-LLM delivers maximum inference performance and optimization, with full 
 [trtllm-eagle]: ../additional-resources/tensor-rt-llm-details/llama-4-eagle
 
 {/* Dynamo Snapshot */}
-[snapshot]: ../kubernetes-deployment/dynamo-snapshot
+[snapshot]: ../kubernetes/snapshot/README.md
