@@ -37,14 +37,11 @@ export DECODE_ENGINE_ARGS=${DECODE_ENGINE_ARGS:-"$DYNAMO_HOME/tests/serve/trtllm
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-"0"}
 export MODALITY=${MODALITY:-"text"}
 
-# Setup cleanup trap
-cleanup() {
-    echo "Cleaning up background processes..."
-    kill $DYNAMO_PID $PREFILL_PID 2>/dev/null || true
-    wait $DYNAMO_PID $PREFILL_PID 2>/dev/null || true
-    echo "Cleanup complete."
-}
-trap cleanup EXIT INT TERM
+set -e
+trap 'echo Cleaning up...; kill 0' EXIT
+
+SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
 ENABLE_OTEL=false
 while [[ $# -gt 0 ]]; do
@@ -77,11 +74,14 @@ if [ "$ENABLE_OTEL" = true ]; then
     export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:-http://localhost:4317}
     TRACE_ARGS+=(--override-engine-args "{\"return_perf_metrics\": true, \"otlp_traces_endpoint\": \"${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT}\" }")
 fi
+
+HTTP_PORT="${DYN_HTTP_PORT:-8000}"
+print_launch_banner "Launching Disaggregated on Same GPU (1 GPU)" "$MODEL_PATH" "$HTTP_PORT"
+
 # run frontend
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
 OTEL_SERVICE_NAME=dynamo-frontend \
 python3 -m dynamo.frontend &
-DYNAMO_PID=$!
 
 # run prefill worker (shares GPU with decode)
 OTEL_SERVICE_NAME=dynamo-worker-prefill \
@@ -95,7 +95,6 @@ python3 -m dynamo.trtllm \
   --publish-events-and-metrics \
   --disaggregation-mode prefill \
   "${TRACE_ARGS[@]}" &
-PREFILL_PID=$!
 
 # run decode worker (shares GPU with prefill)
 OTEL_SERVICE_NAME=dynamo-worker-decode \
@@ -108,5 +107,7 @@ python3 -m dynamo.trtllm \
   --modality "$MODALITY" \
   --publish-events-and-metrics \
   --disaggregation-mode decode \
-  "${TRACE_ARGS[@]}"
+  "${TRACE_ARGS[@]}" &
 
+# Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
+wait_any_exit

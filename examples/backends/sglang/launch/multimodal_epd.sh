@@ -5,6 +5,9 @@
 # Multimodal E/PD: separate vision encoder (GPU 0) + combined PD worker (GPU 1).
 # GPUs: 2
 
+SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+source "$SCRIPT_DIR/../../../common/launch_utils.sh"
+
 # Setup cleanup trap
 cleanup() {
     echo "Cleaning up background processes..."
@@ -63,27 +66,7 @@ if [[ -n "$SERVED_MODEL_NAME" ]]; then
 fi
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
-echo "=========================================="
-echo "Launching Multimodal E/PD Workers"
-echo "=========================================="
-echo "Model:       $MODEL_NAME"
-echo "Frontend:    http://localhost:$HTTP_PORT"
-echo "=========================================="
-echo ""
-echo "Example test command:"
-echo ""
-echo "  curl http://localhost:${HTTP_PORT}/v1/chat/completions \\"
-echo "    -H 'Content-Type: application/json' \\"
-echo "    -d '{"
-echo "      \"model\": \"${MODEL_NAME}\","
-echo "      \"messages\": [{\"role\": \"user\", \"content\": ["
-echo "        {\"type\": \"text\", \"text\": \"Explain why Roger Federer is considered one of the greatest tennis players of all time\"},"
-echo "        {\"type\": \"image_url\", \"image_url\": {\"url\": \"http://images.cocodataset.org/test2017/000000155781.jpg\"}}"
-echo "      ]}],"
-echo "      \"max_tokens\": 50"
-echo "    }'"
-echo ""
-echo "=========================================="
+print_launch_banner --multimodal "Launching Multimodal E/PD Workers" "$MODEL_NAME" "$HTTP_PORT"
 
 # run ingress
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
@@ -110,5 +93,5 @@ CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.sglang \
   --disable-radix-cache \
   --disaggregation-transfer-backend nixl &
 
-# Wait for all background processes to complete
-wait
+# Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
+wait_any_exit
