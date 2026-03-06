@@ -278,7 +278,11 @@ impl EventCollector {
 }
 
 impl KvCacheEventSink for EventCollector {
-    fn publish(&self, event: KvCacheEvent) -> anyhow::Result<()> {
+    fn publish(
+        &self,
+        event: KvCacheEvent,
+        _block_token_ids: Option<&[Vec<u32>]>,
+    ) -> anyhow::Result<()> {
         let timestamp = Instant::now();
         if let Some(events) = self.events.lock().unwrap().as_mut() {
             events.push((event, timestamp));
@@ -992,6 +996,13 @@ fn run_tests() -> anyhow::Result<()> {
         "42",
     ]);
 
+    let path = match args.mooncake_trace_path.as_deref() {
+        Some(p) => p,
+        None => {
+            eprintln!("No mooncake_trace_path provided, skipping benchmark");
+            return Ok(());
+        }
+    };
     let traces = process_mooncake_trace(&args)?;
     std::fs::remove_file(&path).ok();
 
@@ -1037,6 +1048,10 @@ async fn main() -> anyhow::Result<()> {
         return run_tests();
     }
 
+    if args.mooncake_trace_path.is_none() {
+        eprintln!("No mooncake_trace_path provided, skipping benchmark");
+        return Ok(());
+    }
     let traces = process_mooncake_trace(&args)?;
     let events = generate_events(&traces, &args).await?;
 
