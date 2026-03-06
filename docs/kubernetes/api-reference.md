@@ -1416,7 +1416,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `gpuSku` _string_ | GPUSKU is the GPU SKU identifier (e.g., "H100_SXM", "A100_80GB"). |  | Optional: \{\} <br /> |
+| `gpuSku` _string_ | GPUSKU is the AIC hardware system identifier (e.g., "h100_sxm", "h200_sxm", "b200_sxm").<br />When omitted, the operator auto-detects this from cluster GPU labels via InferHardwareSystem.<br />The value must match an AIC system identifier, not a raw GPU product name (e.g., not "NVIDIA-B200"). |  | Optional: \{\} <br /> |
 | `vramMb` _float_ | VRAMMB is the VRAM per GPU in MiB. |  | Optional: \{\} <br /> |
 | `totalGpus` _integer_ | TotalGPUs is the total number of GPUs available in the cluster. |  | Optional: \{\} <br /> |
 | `numGpusPerNode` _integer_ | NumGPUsPerNode is the number of GPUs per node. |  | Optional: \{\} <br /> |

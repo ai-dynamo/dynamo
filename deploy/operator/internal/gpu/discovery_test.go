@@ -333,6 +333,9 @@ func TestInferHardwareSystem(t *testing.T) {
 		{"RTX 4090", "", "Consumer GPU (not in mapping)"},
 		{"Unknown-GPU", "", "Unknown GPU"},
 		{"", "", "Empty string"},
+		// GFD product names as seen in real cluster labels (regression for GPUSKU bug)
+		{"NVIDIA-B200", "b200_sxm", "B200 with NVIDIA prefix (GFD label format)"},
+		{"NVIDIA-H200-SXM5-141GB", "h200_sxm", "H200 with NVIDIA prefix (GFD label format)"},
 	}
 
 	for _, tt := range tests {

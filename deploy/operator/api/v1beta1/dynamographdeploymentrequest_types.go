@@ -324,7 +324,9 @@ type FeaturesSpec struct {
 // HardwareSpec describes the hardware resources available for profiling and deployment.
 // These fields are typically auto-filled by the operator from cluster discovery.
 type HardwareSpec struct {
-	// GPUSKU is the GPU SKU identifier (e.g., "H100_SXM", "A100_80GB").
+	// GPUSKU is the AIC hardware system identifier (e.g., "h100_sxm", "h200_sxm", "b200_sxm").
+	// When omitted, the operator auto-detects this from cluster GPU labels via InferHardwareSystem.
+	// The value must match an AIC system identifier, not a raw GPU product name (e.g., not "NVIDIA-B200").
 	// +optional
 	GPUSKU string `json:"gpuSku,omitempty"`
 

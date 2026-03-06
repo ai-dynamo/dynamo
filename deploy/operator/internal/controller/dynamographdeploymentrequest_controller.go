@@ -1176,6 +1176,15 @@ func (r *DynamoGraphDeploymentRequestReconciler) enrichHardwareFromDiscovery(ctx
 		dgdr.Spec.Hardware = &nvidiacomv1beta1.HardwareSpec{}
 	}
 	hw := dgdr.Spec.Hardware
+
+	// Normalize GPUSKU to AIC system identifier format regardless of whether it was
+	// user-provided or will be auto-detected. This handles cases like "NVIDIA-B200" → "b200_sxm".
+	if hw.GPUSKU != "" {
+		if normalized := gpu.InferHardwareSystem(hw.GPUSKU); normalized != "" {
+			hw.GPUSKU = normalized
+		}
+	}
+
 	if hw.GPUSKU != "" && hw.VRAMMB != nil && hw.NumGPUsPerNode != nil {
 		return nil // all fields already set by user; TotalGPUs is filled below when discovery runs
 	}
@@ -1191,10 +1200,19 @@ func (r *DynamoGraphDeploymentRequestReconciler) enrichHardwareFromDiscovery(ctx
 		"nodesWithGPUs", gpuInfo.NodesWithGPUs,
 		"totalGpus", gpuInfo.GPUsPerNode*gpuInfo.NodesWithGPUs,
 		"model", gpuInfo.Model,
+		"system", gpuInfo.System,
 		"vramMiB", gpuInfo.VRAMPerGPU)
 
 	if hw.GPUSKU == "" {
-		hw.GPUSKU = gpuInfo.Model
+		if gpuInfo.System != "" {
+			hw.GPUSKU = gpuInfo.System
+		} else {
+			// Unknown GPU type: use raw model name; profiler will attempt naive config generation.
+			hw.GPUSKU = gpuInfo.Model
+		}
+	} else if normalized := gpu.InferHardwareSystem(hw.GPUSKU); normalized != "" {
+		// User provided a partial GPUSKU (e.g. only VRAMMB was missing): ensure AIC format.
+		hw.GPUSKU = normalized
 	}
 	if hw.VRAMMB == nil {
 		vram := float64(gpuInfo.VRAMPerGPU)

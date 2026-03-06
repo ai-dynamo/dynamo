@@ -202,7 +202,7 @@ class HardwareSpec(BaseModel):
 
     gpuSku: Optional[str] = Field(
         default=None,
-        description='GPUSKU is the GPU SKU identifier (e.g., "H100_SXM", "A100_80GB").',
+        description='GPUSKU is the AIC hardware system identifier (e.g., "h100_sxm", "h200_sxm", "b200_sxm"). When omitted, the operator auto-detects this from cluster GPU labels via InferHardwareSystem. The value must match an AIC system identifier, not a raw GPU product name (e.g., not "NVIDIA-B200").',
     )
     vramMb: Optional[float] = Field(
         default=None, description="VRAMMB is the VRAM per GPU in MiB."
