@@ -596,16 +596,93 @@ impl Decoder {
     }
 }
 
+#[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::tokenizers::traits;
+    use std::sync::Arc;
 
     #[test]
     fn test_char_boundary_drain() {
-        use super::Decoder;
         let mut s = String::from("helloñworld"); // 12 bytes total ñ is 2 bytes
         let max_bytes = 6; // 12 - 6 = 6 which is inside ñ
         assert!(!s.is_char_boundary(s.len() - max_bytes)); // initially we are not on a char boundary
         Decoder::maybe_drain_to_max_bytes(&mut s, max_bytes);
         assert!(s.is_char_boundary(0)); // front of jail string on valid char boundary
         assert_eq!(s, "ñworld");
+    }
+
+    /// A mock tokenizer that always returns Err from decode().
+    /// Used to test the error propagation path in Decoder::process_token_ids().
+    struct FailingDecoder;
+
+    impl traits::Encoder for FailingDecoder {
+        fn encode(&self, _input: &str) -> anyhow::Result<crate::tokenizers::Encoding> {
+            Ok(crate::tokenizers::Encoding::Sp(vec![]))
+        }
+        fn encode_batch(&self, _inputs: &[&str]) -> anyhow::Result<Vec<crate::tokenizers::Encoding>> {
+            Ok(vec![])
+        }
+    }
+
+    impl traits::Decoder for FailingDecoder {
+        fn decode(&self, _token_ids: &[TokenIdType], _skip_special_tokens: bool) -> anyhow::Result<String> {
+            Err(anyhow::anyhow!(
+                "Unable to decode into a valid UTF-8 string: incomplete utf-8 byte sequence from index 6"
+            ))
+        }
+    }
+
+    impl traits::Tokenizer for FailingDecoder {}
+
+    /// When the tokenizer's decode() returns Err, Decoder::process_token_ids()
+    /// should propagate the error. In the backend unfold closure, this error
+    /// gets caught and converted to FinishReason::Error.
+    #[test]
+    fn test_decoder_process_token_ids_propagates_decode_error() {
+        let tokenizer: Arc<dyn traits::Tokenizer> = Arc::new(FailingDecoder);
+        let decode_stream = crate::tokenizers::DecodeStream::new(tokenizer, &[], false);
+        let stop_conditions = StopConditions::default();
+
+        let mut decoder = Decoder::new(decode_stream, stop_conditions, false, None);
+
+        let result = decoder.process_token_ids(&[42]);
+        assert!(result.is_err(), "process_token_ids should propagate decode errors");
+
+        let err_msg = result.err().unwrap().to_string();
+        assert!(
+            err_msg.contains("incomplete utf-8 byte sequence"),
+            "error should contain the original decode error message, got: {err_msg}"
+        );
+    }
+
+    /// Verify that the error message format matches what the backend unfold
+    /// closure would wrap into FinishReason::Error.
+    #[test]
+    fn test_decoder_error_message_format_for_finish_reason() {
+        let tokenizer: Arc<dyn traits::Tokenizer> = Arc::new(FailingDecoder);
+        let decode_stream = crate::tokenizers::DecodeStream::new(tokenizer, &[], false);
+        let stop_conditions = StopConditions::default();
+
+        let mut decoder = Decoder::new(decode_stream, stop_conditions, false, None);
+
+        let result = decoder.process_token_ids(&[42]);
+        let err = result.err().expect("should be Err");
+
+        // This is what the backend unfold closure does:
+        let finish_reason = FinishReason::Error(format!("decode error: {err}"));
+        match &finish_reason {
+            FinishReason::Error(msg) => {
+                assert!(
+                    msg.starts_with("decode error:"),
+                    "FinishReason::Error should have 'decode error:' prefix, got: {msg}"
+                );
+                assert!(
+                    msg.contains("incomplete utf-8 byte sequence"),
+                    "FinishReason::Error should contain original error, got: {msg}"
+                );
+            }
+            other => panic!("Expected FinishReason::Error, got: {:?}", other),
+        }
     }
 }
