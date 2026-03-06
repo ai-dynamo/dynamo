@@ -723,5 +723,13 @@ def apply_dgd_overrides(dgd_config: dict, overrides: dict) -> dict:
         A new dict with the overrides applied (the original is not mutated).
     """
     result = copy.deepcopy(dgd_config)
-    _deep_merge_overrides(result, overrides, path=[])
+    # Strip K8s envelope fields — these are controlled by the template and must
+    # not be overwritten by user-supplied overrides (e.g. apiVersion from a
+    # DGDR spec would change v1alpha1 → v1beta1 causing a 400 Bad Request).
+    filtered = {
+        k: v
+        for k, v in overrides.items()
+        if k not in ("apiVersion", "kind", "metadata")
+    }
+    _deep_merge_overrides(result, filtered, path=[])
     return result
