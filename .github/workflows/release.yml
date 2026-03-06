@@ -6,8 +6,8 @@ name: Release Pipeline
 on:
   workflow_dispatch:
     inputs:
-      post_merge_run_id:
-        description: 'Post-merge CI workflow run ID whose images to publish. Required for image provenance.'
+      commit_sha:
+        description: 'Git commit SHA whose post-merge CI images to publish (full 40-char SHA).'
         required: true
         type: string
       rc_number:
@@ -34,40 +34,36 @@ jobs:
     runs-on: prod-default-small-v2
     outputs:
       version: ${{ steps.extract.outputs.version }}
-      image_prefix: ${{ steps.extract.outputs.image_prefix }}
-      source_image_prefix: ${{ steps.extract.outputs.source_image_prefix }}
+      commit_sha: ${{ steps.extract.outputs.commit_sha }}
     steps:
-      - name: Extract version from branch
+      - name: Extract version and validate inputs
         id: extract
         env:
-          POST_MERGE_RUN_ID: ${{ github.event.inputs.post_merge_run_id }}
+          COMMIT_SHA: ${{ github.event.inputs.commit_sha }}
         run: |
           set -euo pipefail
 
-          if ! [[ "${POST_MERGE_RUN_ID}" =~ ^[0-9]+$ ]]; then
-            echo "Error: post_merge_run_id must be a numeric GitHub run ID (got: '${POST_MERGE_RUN_ID}')"
+          if ! [[ "${COMMIT_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Error: commit_sha must be a full 40-character hex SHA (got: '${COMMIT_SHA}')"
             exit 1
           fi
 
           BRANCH_NAME="${GITHUB_REF#refs/heads/}"
 
-          # TEMPORARY: hardcode test version for non-release branches
-          if [[ "$BRANCH_NAME" =~ ^release/[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            VERSION="${BRANCH_NAME#release/}"
-          else
-            echo "Warning: Not a release branch ($BRANCH_NAME), using test version 0.0.0-test"
-            VERSION="0.0.0-test"
+          if [[ ! "$BRANCH_NAME" =~ ^release/[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Error: Release pipeline must be triggered from a release/* branch (got: ${BRANCH_NAME})"
+            exit 1
           fi
+          VERSION="${BRANCH_NAME#release/}"
 
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
-          echo "image_prefix=release-${VERSION}" >> $GITHUB_OUTPUT
-          echo "source_image_prefix=release-${VERSION}-${POST_MERGE_RUN_ID}" >> $GITHUB_OUTPUT
+          echo "commit_sha=${COMMIT_SHA}" >> $GITHUB_OUTPUT
           echo "Detected version: ${VERSION}"
-          echo "Source image prefix: release-${VERSION}-${POST_MERGE_RUN_ID}"
+          echo "Source commit SHA: ${COMMIT_SHA}"
 
   # ============================================================================
   # NGC PUBLISH: RC tag, crane copy to NGC, Helm chart push
-  # Sources images from ECR using run-specific tags produced by post-merge CI.
+  # Sources images from ECR using SHA-based tags produced by post-merge CI.
   # ============================================================================
 
   release-publish:
@@ -78,14 +74,14 @@ jobs:
     environment: automated-release
     env:
       VERSION: ${{ needs.prepare-release.outputs.version }}
-      IMAGE_PREFIX: ${{ needs.prepare-release.outputs.image_prefix }}
-      SOURCE_IMAGE_PREFIX: ${{ needs.prepare-release.outputs.source_image_prefix }}
+      COMMIT_SHA: ${{ needs.prepare-release.outputs.commit_sha }}
       REGISTRY_IMAGE: ai-dynamo/dynamo
       AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
     steps:
-      - name: Checkout
+      - name: Checkout at source commit
         uses: actions/checkout@v4
         with:
+          ref: ${{ needs.prepare-release.outputs.commit_sha }}
           fetch-depth: 0
           fetch-tags: true
 
@@ -157,9 +153,10 @@ jobs:
       - name: Login to NGC
         env:
           NGC_TOKEN: ${{ secrets.NGC_PUBLISH_TOKEN }}
+          NGC_USERNAME: ${{ secrets.NGC_PUBLISH_USERNAME }}
         run: |
-          echo "${NGC_TOKEN}" | docker login nvcr.io -u '$oauthtoken' --password-stdin
-          echo "${NGC_TOKEN}" | crane auth login nvcr.io -u '$oauthtoken' --password-stdin
+          echo "${NGC_TOKEN}" | docker login nvcr.io -u "${NGC_USERNAME}" --password-stdin
+          echo "${NGC_TOKEN}" | crane auth login nvcr.io -u "${NGC_USERNAME}" --password-stdin
 
       - name: Copy images to NGC
         id: copy_images
@@ -180,9 +177,8 @@ jobs:
 
           echo "========================================"
           echo "Copying images from ECR to NGC (registry-to-registry)"
-          echo "Source prefix: ${SOURCE_IMAGE_PREFIX}"
+          echo "Source commit SHA: ${COMMIT_SHA}"
           echo "NGC Version Tag: ${NGC_VERSION_TAG}"
-          echo "Post-merge run ID: ${{ github.event.inputs.post_merge_run_id }}"
           echo "========================================"
 
           copy_image() {
@@ -220,7 +216,7 @@ jobs:
           for FRAMEWORK in "${CUDA12_FRAMEWORKS[@]}"; do
             NGC_NAME="${FRAMEWORK}-runtime"
             for ARCH in "${ARCHITECTURES[@]}"; do
-              SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${SOURCE_IMAGE_PREFIX}-${FRAMEWORK}-cuda12-${ARCH}"
+              SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-${FRAMEWORK}-cuda12-${ARCH}"
               TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${NGC_NAME}:${NGC_VERSION_TAG}-${ARCH}"
               copy_image "${SOURCE}" "${TARGET}" "${NGC_NAME}:${NGC_VERSION_TAG}-${ARCH}"
             done
@@ -244,7 +240,7 @@ jobs:
             fi
 
             for ARCH in "${ARCHITECTURES[@]}"; do
-              SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${SOURCE_IMAGE_PREFIX}-${FRAMEWORK}-cuda13-${ARCH}"
+              SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-${FRAMEWORK}-cuda13-${ARCH}"
               TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${NGC_NAME}:${NGC_VERSION_TAG}-cuda13-${ARCH}"
               copy_image "${SOURCE}" "${TARGET}" "${NGC_NAME}:${NGC_VERSION_TAG}-cuda13-${ARCH}"
             done
@@ -261,12 +257,12 @@ jobs:
           echo "=== EFA Runtime Images ==="
 
           # vllm EFA (CUDA 12, amd64 only)
-          SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${SOURCE_IMAGE_PREFIX}-vllm-efa-cuda12-amd64"
+          SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-vllm-efa-cuda12-amd64"
           TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/vllm-runtime:${NGC_VERSION_TAG}-efa"
           copy_image "${SOURCE}" "${TARGET}" "vllm-runtime:${NGC_VERSION_TAG}-efa"
 
           # trtllm EFA (CUDA 13, amd64 only)
-          SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${SOURCE_IMAGE_PREFIX}-trtllm-efa-cuda13-amd64"
+          SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-trtllm-efa-cuda13-amd64"
           TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/tensorrtllm-runtime:${NGC_VERSION_TAG}-efa"
           copy_image "${SOURCE}" "${TARGET}" "tensorrtllm-runtime:${NGC_VERSION_TAG}-efa"
 
@@ -275,7 +271,7 @@ jobs:
           echo "=== Frontend Images ==="
           FRONTEND_IMAGES=()
           for ARCH in "${ARCHITECTURES[@]}"; do
-            SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${SOURCE_IMAGE_PREFIX}-frontend-${ARCH}"
+            SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-frontend-${ARCH}"
             TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/dynamo-frontend:${NGC_VERSION_TAG}-${ARCH}"
             if copy_image "${SOURCE}" "${TARGET}" "dynamo-frontend:${NGC_VERSION_TAG}-${ARCH}"; then
               FRONTEND_IMAGES+=("${TARGET}")
@@ -295,7 +291,7 @@ jobs:
           # ---- Operator image (multi-arch manifest already built by post-merge operator-build) ----
           echo ""
           echo "=== Operator Image ==="
-          OPERATOR_SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${SOURCE_IMAGE_PREFIX}-operator"
+          OPERATOR_SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-operator"
           OPERATOR_TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/kubernetes-operator:${NGC_VERSION_TAG}"
           copy_image "${OPERATOR_SOURCE}" "${OPERATOR_TARGET}" "kubernetes-operator:${NGC_VERSION_TAG}"
 
@@ -321,6 +317,7 @@ jobs:
         env:
           NGC_HELM_REPO: https://helm.ngc.nvidia.com/${{ secrets.NGC_PUBLISH_ORG }}/ai-dynamo
           NGC_TOKEN: ${{ secrets.NGC_PUBLISH_TOKEN }}
+          NGC_USERNAME: ${{ secrets.NGC_PUBLISH_USERNAME }}
           HELM_CHART_VERSION: ${{ steps.rc_tag.outputs.helm_chart_version }}
         run: |
           set -euo pipefail
@@ -329,10 +326,13 @@ jobs:
 
           helm plugin install https://github.com/chartmuseum/helm-push || true
 
-          helm repo add "${REPO_ALIAS}" \
-            --username='$oauthtoken' \
-            --password="${NGC_TOKEN}" \
-            "${NGC_HELM_REPO}" > /dev/null 2>&1
+          if ! echo "${NGC_TOKEN}" | helm repo add "${REPO_ALIAS}" \
+            --username="${NGC_USERNAME}" \
+            --password-stdin \
+            "${NGC_HELM_REPO}" > /dev/null 2>&1; then
+            echo "Error: Failed to add NGC Helm repo"
+            exit 1
+          fi
 
           helm repo add nats https://nats-io.github.io/k8s/helm/charts/ || true
           helm repo add bitnami https://charts.bitnami.com/bitnami || true
@@ -374,10 +374,8 @@ jobs:
           echo "| Version | ${VERSION} |" >> $GITHUB_STEP_SUMMARY
           echo "| Git Tag | ${RC_TAG} |" >> $GITHUB_STEP_SUMMARY
           echo "| NGC Version Tag | ${NGC_VERSION_TAG} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Commit | ${{ github.sha }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Source Commit SHA | ${COMMIT_SHA} |" >> $GITHUB_STEP_SUMMARY
           echo "| Branch | ${{ github.ref_name }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Post-merge Run ID | ${{ github.event.inputs.post_merge_run_id }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Source Image Prefix | ${SOURCE_IMAGE_PREFIX} |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### NGC Publishing Results" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY

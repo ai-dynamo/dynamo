@@ -13,41 +13,14 @@ on:
 permissions:
   contents: read
 
-env:
-  BUILDER_NAME: b-${{ github.run_id }}-${{ github.run_attempt }}
-
 jobs:
   # ============================================================================
-  # PREPARE: Extract version from release branch for image tagging
-  # ============================================================================
-  prepare:
-    runs-on: ubuntu-latest
-    outputs:
-      image_prefix: ${{ steps.compute.outputs.image_prefix }}
-      image_prefix_runid: ${{ steps.compute.outputs.image_prefix_runid }}
-    steps:
-      - name: Compute image prefix from branch
-        id: compute
-        run: |
-          set -euo pipefail
-          BRANCH="${{ github.ref_name }}"
-          if [[ "$BRANCH" =~ ^release/[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            VERSION="${BRANCH#release/}"
-          else
-            echo "Warning: Not a release branch ($BRANCH), using test version 0.0.0-test"
-            VERSION="0.0.0-test"
-          fi
-          echo "image_prefix=release-${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "image_prefix_runid=release-${VERSION}-${{ github.run_id }}" >> "$GITHUB_OUTPUT"
-
-  # ============================================================================
-  # FRAMEWORK PIPELINES (Build -> Test -> Copy)
+  # FRAMEWORK PIPELINES (Build → Test → Copy)
   # ============================================================================
   # ============================================================================
   # VLLM PIPELINE
   # ============================================================================
   vllm-pipeline:
-    needs: [prepare]
     uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
     with:
       framework: vllm
@@ -55,8 +28,6 @@ jobs:
       platforms: '["amd64", "arm64"]'
       cuda_versions: '["12.9", "13.0"]'
       extra_tags: |
-        ${{ needs.prepare.outputs.image_prefix }}-vllm
-        ${{ needs.prepare.outputs.image_prefix_runid }}-vllm
         ${{ github.ref_name == 'main' && 'main-vllm' || '' }}
         ${{ github.ref_name == 'main' && format('main-vllm-{0}', github.sha) || '' }}
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
@@ -74,7 +45,6 @@ jobs:
   # SGLANG PIPELINE
   # ============================================================================
   sglang-pipeline:
-    needs: [prepare]
     uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
     with:
       framework: sglang
@@ -82,8 +52,6 @@ jobs:
       platforms: '["amd64", "arm64"]'
       cuda_versions: '["12.9", "13.0"]'
       extra_tags: |
-        ${{ needs.prepare.outputs.image_prefix }}-sglang
-        ${{ needs.prepare.outputs.image_prefix_runid }}-sglang
         ${{ github.ref_name == 'main' && 'main-sglang' || '' }}
         ${{ github.ref_name == 'main' && format('main-sglang-{0}', github.sha) || '' }}
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
@@ -101,7 +69,6 @@ jobs:
   # TRTLLM PIPELINE
   # ============================================================================
   trtllm-pipeline:
-    needs: [prepare]
     uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
     with:
       framework: trtllm
@@ -109,8 +76,6 @@ jobs:
       platforms: '["amd64", "arm64"]'
       cuda_versions: '["13.1"]'
       extra_tags: |
-        ${{ needs.prepare.outputs.image_prefix }}-trtllm
-        ${{ needs.prepare.outputs.image_prefix_runid }}-trtllm
         ${{ github.ref_name == 'main' && 'main-trtllm' || '' }}
         ${{ github.ref_name == 'main' && format('main-trtllm-{0}', github.sha) || '' }}
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
@@ -131,7 +96,6 @@ jobs:
   # VLLM EFA PIPELINE
   # ============================================================================
   vllm-efa-pipeline:
-    needs: [prepare]
     uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
     with:
       framework: vllm
@@ -140,8 +104,6 @@ jobs:
       cuda_versions: '["12.9"]'
       make_efa: true
       extra_tags: |
-        ${{ needs.prepare.outputs.image_prefix }}-vllm-efa
-        ${{ needs.prepare.outputs.image_prefix_runid }}-vllm-efa
         ${{ github.ref_name == 'main' && 'main-vllm-efa' || '' }}
         ${{ github.ref_name == 'main' && format('main-vllm-efa-{0}', github.sha) || '' }}
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
@@ -158,7 +120,6 @@ jobs:
   # TRTLLM EFA PIPELINE
   # ============================================================================
   trtllm-efa-pipeline:
-    needs: [prepare]
     uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
     with:
       framework: trtllm
@@ -167,8 +128,6 @@ jobs:
       cuda_versions: '["13.1"]'
       make_efa: true
       extra_tags: |
-        ${{ needs.prepare.outputs.image_prefix }}-trtllm-efa
-        ${{ needs.prepare.outputs.image_prefix_runid }}-trtllm-efa
         ${{ github.ref_name == 'main' && 'main-trtllm-efa' || '' }}
         ${{ github.ref_name == 'main' && format('main-trtllm-efa-{0}', github.sha) || '' }}
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
@@ -185,23 +144,22 @@ jobs:
   # Operator
   # ============================================================================
 
-  operator-build:
-    name: Build Operator Image
-    needs: [prepare]
+  operator:
+    name: Operator
     runs-on: prod-default-v2
     env:
       IMAGE_REGISTRY: ai-dynamo
       IMAGE_REPOSITORY: dynamo
       ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
     outputs:
-      operator_tag: ${{ steps.build-and-push.outputs.operator_tag }}
+      operator_default_tag: ${{ steps.build-and-push-image.outputs.operator_default_tag }}
     steps:
       - name: Checkout code
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
       - name: Initialize Dynamo Builder
         uses: ./.github/actions/init-dynamo-builder
         with:
-          builder_name: ${{ env.BUILDER_NAME }}
+          builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
           flavor: general
           all_arch: 'true'
       - name: Docker Login
@@ -242,64 +200,46 @@ jobs:
         run: |
           make check
       - name: Build and push Container
-        id: build-and-push
+        id: build-and-push-image
         shell: bash
         working-directory: ./deploy/operator
         env:
-          IMAGE_PREFIX: ${{ needs.prepare.outputs.image_prefix }}
-          IMAGE_PREFIX_RUNID: ${{ needs.prepare.outputs.image_prefix_runid }}
-          NO_CACHE_FLAG: ''
+          NO_CACHE_FLAG: '' # placeholder for future logic to add no cache flag if needed
         run: |
-          ECR_BASE="${ECR_HOSTNAME}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}"
-          ACR_BASE="${{ secrets.AZURE_ACR_HOSTNAME }}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}"
-          SHA_TAG="${{ github.sha }}-operator"
-          PREFIX_TAG="${IMAGE_PREFIX}-operator"
-          PREFIX_RUNID_TAG="${IMAGE_PREFIX_RUNID}-operator"
+          ECR_DEFAULT_IMAGE_BASE="${ECR_HOSTNAME}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}"
+          DEFAULT_TAG="${{ github.sha }}-operator"
+          ACR_IMAGE_BASE="${{ secrets.AZURE_ACR_HOSTNAME }}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}"
           IMAGE_URIS=(
-            "${ECR_BASE}:${SHA_TAG}"
-            "${ECR_BASE}:${PREFIX_TAG}"
-            "${ECR_BASE}:${PREFIX_RUNID_TAG}"
-            "${ACR_BASE}:${SHA_TAG}"
-            "${ACR_BASE}:${PREFIX_TAG}"
-            "${ACR_BASE}:${PREFIX_RUNID_TAG}"
+            "${ECR_DEFAULT_IMAGE_BASE}:${DEFAULT_TAG}"
+            "${ACR_IMAGE_BASE}:${DEFAULT_TAG}"
           )
 
           if [[ "${{ github.ref_name }}" == "main" ]]; then
             IMAGE_URIS+=(
-              "${ECR_BASE}:main-operator"
-              "${ACR_BASE}:main-operator"
+              "${ECR_DEFAULT_IMAGE_BASE}:main-operator"
+              "${ACR_IMAGE_BASE}:main-operator"
             )
           fi
 
-          echo "operator_tag=${PREFIX_TAG}" >> $GITHUB_OUTPUT
+          echo "operator_default_tag=${DEFAULT_TAG}" >> $GITHUB_OUTPUT
           TAGGING_FLAGS=$(printf -- '-t %s ' "${IMAGE_URIS[@]}")
+          echo "flags for docker buildx: ${TAGGING_FLAGS}"
 
           if [[ "$NO_CACHE_FLAG" == "true" ]]; then
             NO_CACHE_FLAG="--no-cache"
           fi
-          docker buildx build --push ${NO_CACHE_FLAG} --platform linux/amd64,linux/arm64 \
+          docker buildx build --push ${NO_CACHE_FLAG} \
+              --platform linux/amd64,linux/arm64 \
               --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
               ${TAGGING_FLAGS} -f Dockerfile .
 
-          echo "### Operator Container Images" >> $GITHUB_STEP_SUMMARY
+          echo "### 🐳 Operator Container Images" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Image URI |" >> $GITHUB_STEP_SUMMARY
           echo "|-----|" >> $GITHUB_STEP_SUMMARY
           for image_uri in "${IMAGE_URIS[@]}"; do
             echo "| \`${image_uri}\` |" >> $GITHUB_STEP_SUMMARY
           done
-
-  frontend-build:
-    name: Build Frontend Images
-    needs: [prepare]
-    if: startsWith(github.ref_name, 'release/')
-    uses: ./.github/workflows/build-frontend-image.yaml
-    with:
-      skip_change_detection: true
-      image_prefix: |
-        ${{ needs.prepare.outputs.image_prefix }}
-        ${{ needs.prepare.outputs.image_prefix_runid }}
-    secrets: inherit
 
   # ============================================================================
   # DEPLOYMENT JOBS
@@ -308,17 +248,17 @@ jobs:
 
   deploy-operator:
     runs-on: prod-default-small-v2
-    needs: [operator-build]
+    needs: [operator]
     outputs:
       NAMESPACE: ${{ steps.namespace.outputs.namespace }}
       OPERATOR_TAG: ${{ steps.operator-tag.outputs.tag }}
     steps:
-    - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+    - uses: actions/checkout@v4
     - name: Determine operator tag
       id: operator-tag
       run: |
-        if [ "${{ needs.operator-build.result }}" == "success" ]; then
-          TAG="${{ needs.operator-build.outputs.operator_tag }}"
+        if [ "${{ needs.operator.result }}" == "success" ]; then
+          TAG="${{ needs.operator.outputs.operator_default_tag }}"
         else
           TAG="main-operator"
         fi
@@ -329,6 +269,8 @@ jobs:
       env:
         BRANCH: ${{ github.ref_name }}
       run: |
+        # Sanitize branch name for k8s namespace
+        # Invalid patterns: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/
         BRANCH_SANITIZED="${BRANCH//\//-}"
         BRANCH_SANITIZED="${BRANCH_SANITIZED/pull-request/pr}"
         BRANCH_SANITIZED="${BRANCH_SANITIZED//./-}"
@@ -470,7 +412,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [vllm-pipeline, sglang-pipeline, trtllm-pipeline, vllm-efa-pipeline, trtllm-efa-pipeline, operator-build]
+    needs: [vllm-pipeline, sglang-pipeline, trtllm-pipeline, vllm-efa-pipeline, trtllm-efa-pipeline, operator]
     steps:
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
@@ -478,13 +420,13 @@ jobs:
       uses: ./.github/actions/bootstrap-buildkit
       continue-on-error: true
       with:
-        builder_name: ${{ env.BUILDER_NAME }}
-        buildkit_worker_addresses: ''
+        builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+        buildkit_worker_addresses: '' # k8s builder
         skip_bootstrap: true
-    - name: Builder Cleanup
+    - name: Builder Cleanup in case of k8s builder
       shell: bash
       run: |
-        docker buildx rm ${{ env.BUILDER_NAME }} || true
+        docker buildx rm b-${{ github.run_id }}-${{ github.run_attempt }} || true
 
   cleanup:
     name: Cleanup AKS resources
@@ -506,7 +448,7 @@ jobs:
     name: Notify Slack
     runs-on: prod-builder-amd-v1
     if: always() && failure()
-    needs: [vllm-pipeline, sglang-pipeline, trtllm-pipeline, vllm-efa-pipeline, trtllm-efa-pipeline, operator-build, frontend-build, deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm]
+    needs: [ vllm-pipeline, sglang-pipeline, trtllm-pipeline, vllm-efa-pipeline, trtllm-efa-pipeline, operator, deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm ]
     permissions:
       contents: read
     steps:
