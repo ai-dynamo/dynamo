@@ -332,13 +332,21 @@ jobs:
 
           helm plugin install https://github.com/chartmuseum/helm-push || true
 
+          echo "NGC_USERNAME is set: $([ -n "${NGC_USERNAME}" ] && echo 'yes' || echo 'no')"
+          echo "NGC_TOKEN is set: $([ -n "${NGC_TOKEN}" ] && echo 'yes' || echo 'no')"
+          echo "NGC_HELM_REPO is set: $([ -n "${NGC_HELM_REPO}" ] && echo 'yes' || echo 'no')"
+
+          HELM_ERR=$(mktemp)
           if ! echo "${NGC_TOKEN}" | helm repo add "${REPO_ALIAS}" \
             --username="${NGC_USERNAME}" \
             --password-stdin \
-            "${NGC_HELM_REPO}" > /dev/null 2>&1; then
+            "${NGC_HELM_REPO}" > /dev/null 2>"${HELM_ERR}"; then
             echo "Error: Failed to add NGC Helm repo"
+            sed 's|http[^ ]*|[REDACTED_URL]|g' "${HELM_ERR}" >&2
+            rm -f "${HELM_ERR}"
             exit 1
           fi
+          rm -f "${HELM_ERR}"
 
           helm repo add nats https://nats-io.github.io/k8s/helm/charts/ || true
           helm repo add bitnami https://charts.bitnami.com/bitnami || true
