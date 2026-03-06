@@ -116,6 +116,9 @@ runs:
         FRAMEWORK: ${{ inputs.framework }}
         PROFILE: ${{ inputs.profile }}
         IMAGE: ${{ inputs.image }}
+        DYNAMO_TEST_FRAMEWORK: ${{ inputs.framework }}
+        DYNAMO_TEST_PLATFORM: ${{ inputs.platform_arch }}
+        DYNAMO_TEST_TYPE: deploy_${{ inputs.profile }}
       run: |
         mkdir -p test-results
         pytest tests/deploy/test_deploy.py \
@@ -126,6 +129,7 @@ runs:
           -v -s \
           --durations=10 \
           --junitxml=test-results/pytest_deploy_${FRAMEWORK}_${PROFILE}_${{ inputs.platform_arch }}_${{ github.run_id }}_${{ job.check_run_id }}.xml \
+          --alluredir=test-results/allure-results \
           --log-cli-level=INFO
 
     - name: Cleanup Deployment
@@ -172,3 +176,12 @@ runs:
         name: test-results-${{ inputs.framework }}-${{ inputs.profile }}-${{ inputs.platform_arch }}-${{ github.run_id }}-${{ job.check_run_id }}
         path: test-results/pytest_deploy_${{ inputs.framework }}_${{ inputs.profile }}_${{ inputs.platform_arch }}_${{ github.run_id }}_${{ job.check_run_id }}.xml
         retention-days: 7
+
+    - name: Upload Allure Results
+      uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f #v6
+      if: always()
+      with:
+        name: allure-results-${{ inputs.framework }}-deploy_${{ inputs.profile }}-${{ inputs.platform_arch }}-${{ github.run_id }}-${{ job.check_run_id }}
+        path: test-results/allure-results/
+        retention-days: 7
+        if-no-files-found: ignore
