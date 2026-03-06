@@ -11,7 +11,7 @@ use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender, TryRecvError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -22,6 +22,8 @@ const SUFFIX_DENOMINATOR: &str = "denominator";
 const SUFFIX_RATIO: &str = "ratio";
 const DEFAULT_QUEUE_CAPACITY: usize = 16_384;
 const WORKER_POLL: Duration = Duration::from_millis(100);
+// guard against unbounded memory growth (should not happen for reasonable metrics)
+const MAX_SAMPLES_PER_METRIC: usize = 100_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PerformanceMetricKind {
@@ -141,7 +143,8 @@ pub struct RatioMetricHandle {
 struct RegistryInner {
     window_duration: Duration,
     publish_interval: Duration,
-    tx: SyncSender<WorkerMessage>,
+    control_tx: Sender<ControlMessage>,
+    data_tx: SyncSender<DataMessage>,
     dropped_events: AtomicU64,
     worker: Mutex<Option<JoinHandle<()>>>,
 }
@@ -184,6 +187,47 @@ enum MetricHandles {
     },
 }
 
+impl MetricHandles {
+    fn collectors(&self) -> Vec<Box<dyn prometheus::core::Collector>> {
+        match self {
+            MetricHandles::Rate {
+                per_second,
+                quantiles,
+            } => {
+                let mut out: Vec<Box<dyn prometheus::core::Collector>> =
+                    vec![Box::new(per_second.clone())];
+                out.extend(quantiles.iter().map(|(_, gauge)| {
+                    Box::new(gauge.clone()) as Box<dyn prometheus::core::Collector>
+                }));
+                out
+            }
+            MetricHandles::Distribution { avg, quantiles } => {
+                let mut out: Vec<Box<dyn prometheus::core::Collector>> = vec![Box::new(avg.clone())];
+                out.extend(quantiles.iter().map(|(_, gauge)| {
+                    Box::new(gauge.clone()) as Box<dyn prometheus::core::Collector>
+                }));
+                out
+            }
+            MetricHandles::Ratio {
+                numerator,
+                denominator,
+                ratio,
+                quantiles,
+            } => {
+                let mut out: Vec<Box<dyn prometheus::core::Collector>> = vec![
+                    Box::new(numerator.clone()),
+                    Box::new(denominator.clone()),
+                    Box::new(ratio.clone()),
+                ];
+                out.extend(quantiles.iter().map(|(_, gauge)| {
+                    Box::new(gauge.clone()) as Box<dyn prometheus::core::Collector>
+                }));
+                out
+            }
+        }
+    }
+}
+
 #[derive(Debug)]
 struct MetricEntry {
     spec: PerformanceMetricSpec,
@@ -203,7 +247,7 @@ enum MetricState {
     },
 }
 
-enum WorkerMessage {
+enum ControlMessage {
     RegisterMetric {
         spec: PerformanceMetricSpec,
         resp: mpsc::Sender<anyhow::Result<()>>,
@@ -211,22 +255,6 @@ enum WorkerMessage {
     UnregisterMetric {
         name: String,
         resp: mpsc::Sender<anyhow::Result<()>>,
-    },
-    RecordCount {
-        name: String,
-        count: u64,
-        recorded_at: Instant,
-    },
-    RecordValue {
-        name: String,
-        value: f64,
-        recorded_at: Instant,
-    },
-    RecordRatio {
-        name: String,
-        numerator: f64,
-        denominator: f64,
-        recorded_at: Instant,
     },
     SnapshotMetric {
         name: String,
@@ -244,6 +272,25 @@ enum WorkerMessage {
     Shutdown,
 }
 
+enum DataMessage {
+    RecordCount {
+        name: String,
+        count: u64,
+        recorded_at: Instant,
+    },
+    RecordValue {
+        name: String,
+        value: f64,
+        recorded_at: Instant,
+    },
+    RecordRatio {
+        name: String,
+        numerator: f64,
+        denominator: f64,
+        recorded_at: Instant,
+    },
+}
+
 impl PerformanceMetricsRegistry {
     pub fn new(window_duration: Duration) -> Self {
         Self::new_with_publish_interval(window_duration, Duration::from_secs(5))
@@ -257,14 +304,18 @@ impl PerformanceMetricsRegistry {
         let publish_interval = publish_interval
             .max(Duration::from_secs(2))
             .min(Duration::from_secs(60));
-        let (tx, rx) = mpsc::sync_channel::<WorkerMessage>(DEFAULT_QUEUE_CAPACITY);
-        let worker = std::thread::spawn(move || worker_loop(rx, window_duration, publish_interval));
+        let (control_tx, control_rx) = mpsc::channel::<ControlMessage>();
+        let (data_tx, data_rx) = mpsc::sync_channel::<DataMessage>(DEFAULT_QUEUE_CAPACITY);
+        let worker = std::thread::spawn(move || {
+            worker_loop(control_rx, data_rx, window_duration, publish_interval)
+        });
 
         Self {
             inner: Arc::new(RegistryInner {
                 window_duration,
                 publish_interval,
-                tx,
+                control_tx,
+                data_tx,
                 dropped_events: AtomicU64::new(0),
                 worker: Mutex::new(Some(worker)),
             }),
@@ -493,8 +544,8 @@ impl RatioMetricHandle {
 impl RegistryInner {
     fn register_metric(&self, spec: PerformanceMetricSpec) -> anyhow::Result<()> {
         let (resp_tx, resp_rx) = mpsc::channel();
-        self.tx
-            .send(WorkerMessage::RegisterMetric {
+        self.control_tx
+            .send(ControlMessage::RegisterMetric {
                 spec,
                 resp: resp_tx,
             })
@@ -506,8 +557,8 @@ impl RegistryInner {
 
     fn unregister_metric(&self, name: String) -> anyhow::Result<()> {
         let (resp_tx, resp_rx) = mpsc::channel();
-        self.tx
-            .send(WorkerMessage::UnregisterMetric {
+        self.control_tx
+            .send(ControlMessage::UnregisterMetric {
                 name,
                 resp: resp_tx,
             })
@@ -519,7 +570,7 @@ impl RegistryInner {
 
     fn try_unregister_metric(&self, name: String) {
         let (resp_tx, _resp_rx) = mpsc::channel();
-        let _ = self.tx.try_send(WorkerMessage::UnregisterMetric {
+        let _ = self.control_tx.send(ControlMessage::UnregisterMetric {
             name,
             resp: resp_tx,
         });
@@ -529,7 +580,7 @@ impl RegistryInner {
         if count == 0 {
             return Ok(());
         }
-        match self.tx.try_send(WorkerMessage::RecordCount {
+        match self.data_tx.try_send(DataMessage::RecordCount {
             name,
             count,
             recorded_at: Instant::now(),
@@ -549,7 +600,7 @@ impl RegistryInner {
         if !value.is_finite() || value < 0.0 {
             anyhow::bail!("value must be a finite non-negative number");
         }
-        match self.tx.try_send(WorkerMessage::RecordValue {
+        match self.data_tx.try_send(DataMessage::RecordValue {
             name,
             value,
             recorded_at: Instant::now(),
@@ -573,7 +624,7 @@ impl RegistryInner {
         {
             anyhow::bail!("numerator/denominator must be finite non-negative numbers");
         }
-        match self.tx.try_send(WorkerMessage::RecordRatio {
+        match self.data_tx.try_send(DataMessage::RecordRatio {
             name,
             numerator,
             denominator,
@@ -593,8 +644,8 @@ impl RegistryInner {
     fn snapshot_metric(&self, name: String) -> Option<MetricSnapshot> {
         let (resp_tx, resp_rx) = mpsc::channel();
         if self
-            .tx
-            .send(WorkerMessage::SnapshotMetric {
+            .control_tx
+            .send(ControlMessage::SnapshotMetric {
                 name,
                 resp: resp_tx,
             })
@@ -608,8 +659,8 @@ impl RegistryInner {
     fn snapshot_all(&self) -> Vec<MetricSnapshot> {
         let (resp_tx, resp_rx) = mpsc::channel();
         if self
-            .tx
-            .send(WorkerMessage::SnapshotAll { resp: resp_tx })
+            .control_tx
+            .send(ControlMessage::SnapshotAll { resp: resp_tx })
             .is_err()
         {
             return vec![];
@@ -624,8 +675,8 @@ impl RegistryInner {
         labels: Vec<(String, String)>,
     ) -> anyhow::Result<()> {
         let (resp_tx, resp_rx) = mpsc::channel();
-        self.tx
-            .send(WorkerMessage::AttachPublisher {
+        self.control_tx
+            .send(ControlMessage::AttachPublisher {
                 hierarchy,
                 metric_prefix,
                 labels,
@@ -650,46 +701,82 @@ impl RegistryInner {
 
 impl Drop for RegistryInner {
     fn drop(&mut self) {
-        let _ = self.tx.send(WorkerMessage::Shutdown);
+        let _ = self.control_tx.send(ControlMessage::Shutdown);
         if let Some(handle) = self.worker.lock().take() {
             let _ = handle.join();
         }
     }
 }
 
-fn worker_loop(rx: Receiver<WorkerMessage>, window_duration: Duration, publish_interval: Duration) {
+fn worker_loop(
+    control_rx: Receiver<ControlMessage>,
+    data_rx: Receiver<DataMessage>,
+    window_duration: Duration,
+    publish_interval: Duration,
+) {
     let mut state = WorkerState {
         window_duration,
         publish_interval,
         metrics: HashMap::new(),
         publisher: None,
     };
+    let mut control_disconnected = false;
+    let mut data_disconnected = false;
 
     loop {
-        match rx.recv_timeout(WORKER_POLL) {
+        while let Ok(msg) = control_rx.try_recv() {
+            if !handle_control_message(msg, &mut state) {
+                return;
+            }
+        }
+
+        match data_rx.recv_timeout(WORKER_POLL) {
             Ok(msg) => {
-                if !handle_message(msg, &mut state) {
-                    return;
+                handle_data_message(msg, &mut state);
+                while let Ok(msg) = data_rx.try_recv() {
+                    handle_data_message(msg, &mut state);
                 }
             }
             Err(RecvTimeoutError::Timeout) => {}
-            Err(RecvTimeoutError::Disconnected) => return,
+            Err(RecvTimeoutError::Disconnected) => data_disconnected = true,
+        }
+
+        loop {
+            match control_rx.try_recv() {
+                Ok(msg) => {
+                    if !handle_control_message(msg, &mut state) {
+                        return;
+                    }
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    control_disconnected = true;
+                    break;
+                }
+            }
         }
 
         maybe_auto_publish(&mut state);
+        if control_disconnected && data_disconnected {
+            return;
+        }
     }
 }
 
-fn handle_message(msg: WorkerMessage, state: &mut WorkerState) -> bool {
+fn handle_control_message(msg: ControlMessage, state: &mut WorkerState) -> bool {
     match msg {
-        WorkerMessage::RegisterMetric { spec, resp } => {
+        ControlMessage::RegisterMetric { spec, resp } => {
             let result = register_metric_in_state(state, spec);
             let _ = resp.send(result);
         }
-        WorkerMessage::UnregisterMetric { name, resp } => {
+        ControlMessage::UnregisterMetric { name, resp } => {
             let result = if state.metrics.remove(&name).is_some() {
                 if let Some(p) = state.publisher.as_mut() {
-                    p.handles.remove(&name);
+                    if let Some(handles) = p.handles.remove(&name) {
+                        for collector in handles.collectors() {
+                            let _ = p.hierarchy.get_metrics_registry().remove_metric(collector);
+                        }
+                    }
                 }
                 Ok(())
             } else {
@@ -697,41 +784,7 @@ fn handle_message(msg: WorkerMessage, state: &mut WorkerState) -> bool {
             };
             let _ = resp.send(result);
         }
-        WorkerMessage::RecordCount {
-            name,
-            count,
-            recorded_at,
-        } => {
-            if let Some(entry) = state.metrics.get_mut(&name)
-                && let MetricState::Rate { counts } = &mut entry.state
-            {
-                counts.push_back((recorded_at, count));
-            }
-        }
-        WorkerMessage::RecordValue {
-            name,
-            value,
-            recorded_at,
-        } => {
-            if let Some(entry) = state.metrics.get_mut(&name)
-                && let MetricState::Distribution { values } = &mut entry.state
-            {
-                values.push_back((recorded_at, value));
-            }
-        }
-        WorkerMessage::RecordRatio {
-            name,
-            numerator,
-            denominator,
-            recorded_at,
-        } => {
-            if let Some(entry) = state.metrics.get_mut(&name)
-                && let MetricState::Ratio { pairs } = &mut entry.state
-            {
-                pairs.push_back((recorded_at, numerator, denominator));
-            }
-        }
-        WorkerMessage::SnapshotMetric { name, resp } => {
+        ControlMessage::SnapshotMetric { name, resp } => {
             let now = Instant::now();
             let snapshot = state.metrics.get_mut(&name).map(|entry| {
                 let window = metric_window_duration(entry, state.window_duration);
@@ -740,7 +793,7 @@ fn handle_message(msg: WorkerMessage, state: &mut WorkerState) -> bool {
             });
             let _ = resp.send(snapshot);
         }
-        WorkerMessage::SnapshotAll { resp } => {
+        ControlMessage::SnapshotAll { resp } => {
             let now = Instant::now();
             let snapshots = state
                 .metrics
@@ -753,7 +806,7 @@ fn handle_message(msg: WorkerMessage, state: &mut WorkerState) -> bool {
                 .collect::<Vec<_>>();
             let _ = resp.send(snapshots);
         }
-        WorkerMessage::AttachPublisher {
+        ControlMessage::AttachPublisher {
             hierarchy,
             metric_prefix,
             labels,
@@ -762,10 +815,66 @@ fn handle_message(msg: WorkerMessage, state: &mut WorkerState) -> bool {
             let result = attach_publisher_in_state(state, hierarchy, metric_prefix, labels);
             let _ = resp.send(result);
         }
-        WorkerMessage::Shutdown => return false,
+        ControlMessage::Shutdown => return false,
     }
 
     true
+}
+
+fn handle_data_message(msg: DataMessage, state: &mut WorkerState) {
+    match msg {
+        DataMessage::RecordCount {
+            name,
+            count,
+            recorded_at,
+        } => {
+            if let Some(entry) = state.metrics.get_mut(&name)
+                && let MetricState::Rate { counts } = &mut entry.state
+            {
+                counts.push_back((recorded_at, count));
+                while counts.len() > MAX_SAMPLES_PER_METRIC {
+                    eprintln!(
+                        "warning: metric '{}' has more than {} samples; dropping oldest",
+                        name, MAX_SAMPLES_PER_METRIC
+                    );
+                    counts.pop_front();
+                }
+            }
+        }
+        DataMessage::RecordValue {
+            name,
+            value,
+            recorded_at,
+        } => {
+            if let Some(entry) = state.metrics.get_mut(&name)
+                && let MetricState::Distribution { values } = &mut entry.state
+            {
+                values.push_back((recorded_at, value));
+                while values.len() > MAX_SAMPLES_PER_METRIC {
+                    eprintln!(
+                        "warning: metric '{}' has more than {} samples; dropping oldest",
+                        name, MAX_SAMPLES_PER_METRIC
+                    );
+                    values.pop_front();
+                }
+            }
+        }
+        DataMessage::RecordRatio {
+            name,
+            numerator,
+            denominator,
+            recorded_at,
+        } => {
+            if let Some(entry) = state.metrics.get_mut(&name)
+                && let MetricState::Ratio { pairs } = &mut entry.state
+            {
+                pairs.push_back((recorded_at, numerator, denominator));
+                while pairs.len() > MAX_SAMPLES_PER_METRIC {
+                    pairs.pop_front();
+                }
+            }
+        }
+    }
 }
 
 fn register_metric_in_state(
@@ -1350,7 +1459,7 @@ mod tests {
         let tracker = PerformanceMetricsRegistry::new_attached(
             Duration::from_secs(60),
             Duration::from_secs(5),
-            hierarchy,
+            hierarchy.clone(),
             "performance",
             &[] as &[(&str, &str)],
         )
@@ -1364,7 +1473,7 @@ mod tests {
         let tracker = PerformanceMetricsRegistry::new_attached(
             Duration::from_secs(60),
             Duration::from_secs(5),
-            hierarchy,
+            hierarchy.clone(),
             "performance",
             &[] as &[(&str, &str)],
         )
@@ -1378,8 +1487,22 @@ mod tests {
             .unwrap();
         ttft.record_value(0.7).unwrap();
         assert!(ttft.snapshot().is_some());
+        assert!(
+            hierarchy
+                .metrics()
+                .prometheus_expfmt()
+                .unwrap()
+                .contains("performance_ttft_avg")
+        );
 
         tracker.unregister_metric("ttft").unwrap();
         assert!(ttft.snapshot().is_none());
+        assert!(
+            !hierarchy
+                .metrics()
+                .prometheus_expfmt()
+                .unwrap()
+                .contains("performance_ttft_avg")
+        );
     }
 }
