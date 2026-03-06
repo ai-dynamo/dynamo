@@ -84,7 +84,7 @@ navigation:
         path: components/kvbm/kvbm-guide.md
       - page: Dynamo Benchmarking
         path: benchmarks/benchmarking.md
-      - section: Multimodality
+      - section: Multimodal Model Serving
         contents:
           - section: Vision Language Models (VLMs)
             path: features/multimodal/README.md
