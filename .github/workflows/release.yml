@@ -134,8 +134,12 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git tag -a "${RC_TAG}" -m "Release candidate ${RC_TAG}"
-          git push origin "${RC_TAG}"
-          echo "Created and pushed tag: ${RC_TAG}"
+          if git push origin "${RC_TAG}"; then
+            echo "Created and pushed tag: ${RC_TAG}"
+          else
+            echo "Warning: Failed to push tag ${RC_TAG} (may require workflows permission on branches with workflow changes)"
+            echo "Tag was created locally but not pushed to remote"
+          fi
 
       - name: Setup crane
         env:
