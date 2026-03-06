@@ -10,7 +10,7 @@ subtitle: Route multimodal requests to workers with the best KV cache overlap
 Multimodal KV routing extends Dynamo's KV-aware router to account for image content when computing cache overlap scores. A dedicated MM router worker sits between the frontend and backend workers. It downloads images, computes a hash of each image (`mm_hash`), and includes this hash in per-block routing metadata. The KV router then selects the backend worker with the highest cache overlap, including overlap on image embedding blocks.
 
 Repeated requests containing the same image are routed to the worker that already has the corresponding KV cache blocks, maximizing prefix cache reuse.
-
+> Note: KV cache is separate from embedding cache (also called encoder cache), which reuses vision encoder outputs (image→embeddings) to avoid re-running the encoder. For encoder-side reuse see [Embedding Cache](https://github.com/ai-dynamo/dynamo/blob/main/docs/features/multimodal/embedding-cache.md).
 ## When to Use
 
 Use multimodal KV routing when:

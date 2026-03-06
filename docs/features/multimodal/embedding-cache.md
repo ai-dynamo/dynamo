@@ -8,14 +8,14 @@ subtitle: Cache vision encoder embeddings to skip re-encoding repeated images
 ## Overview
 
 The embedding cache is a CPU-side LRU cache that stores vision encoder outputs. When the same image appears in multiple requests, the cached embedding is reused instead of running the vision encoder again. This reduces GPU load on the encoder and lowers latency for repeated images.
-
+> Note: This feature can also be referred to as **encoder cache**. Embedding cache is separate from KV cache, which reuses attention key/value state after prefill to skip prefill and go straight to decode. For KV cache reuse and routing, see [Multimodal KV Routing](https://github.com/ai-dynamo/dynamo/blob/main/docs/features/multimodal/multimodal-kv-routing.md).
 ## When to Use
 
 Use the embedding cache when your workload includes repeated images across requests. Common scenarios:
 
 - Product catalog queries where users ask about the same product images
 - Document processing pipelines that reference shared diagrams or figures
-- Chat sessions where the same image is discussed across multiple turns
+- Chat sessions where the same image is discussed across multiple turns, like an architecture diagram in a code-gen use case. 
 
 If your workload consists entirely of unique images, the cache provides no benefit.
 
