@@ -28,7 +28,7 @@
 //! ## Preemption
 //! If a Use operation fails (typically due to insufficient space), a false boolean signal
 //! is returned to the scheduler for preemption. Initial KV block allocations for new requests
-//! should not fail due to the watermark checking.
+//! should not fail due to the capacity checking during scheduling.
 //!
 //! ## NOTE
 //! For simplicity (or non-simplicity), reference counting is tracked manually instead of using

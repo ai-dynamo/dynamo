@@ -9,7 +9,7 @@
 //! 3. Simulating the execution of running requests with realistic timing
 //!
 //! ## Scheduling Process
-//! The scheduler uses a watermark-based approach to determine if there's sufficient
+//! The scheduler checks direct block capacity to determine if there's sufficient
 //! KV cache space for new requests. It also enforces a batched tokens budget to prevent
 //! oversubscription of computational resources. Only requests that can be allocated
 //! these resources are moved from waiting to running state.
@@ -22,17 +22,16 @@
 //! ## Resource Management
 //! The scheduler communicates with the KvManager through MoveBlock signals at each
 //! stage of request processing. When resources become constrained, it employs an
-//! LRU-based preemption strategy where the oldest running request is evicted and
-//! placed at the back of the waiting queue to be rescheduled later.
+//! preemption strategy (LIFO by default, matching vLLM v1) where a running request
+//! is evicted and placed at the front of the waiting queue to be rescheduled later.
 //!
 //! ## NOTE
 //! The current prefill and decoding time simulations are not scientific at all and are WIP
 
-use crate::common::evictor::LRUEvictor;
 use crate::common::perf_model::PerfModel;
 use crate::common::protocols::{
-    DirectRequest, KvCacheEventSink, MockEngineArgs, MoveBlock, OutputSignal, PrefillCost,
-    WorkerType,
+    DirectRequest, KvCacheEventSink, MockEngineArgs, MoveBlock, OutputSignal, PreemptionMode,
+    PrefillCost, WorkerType,
 };
 use crate::common::running_mean::RunningMean;
 use crate::common::sequence::ActiveSequence;
@@ -66,7 +65,7 @@ pub enum Request {
 struct SchedulerState {
     waiting: VecDeque<Uuid>,
     prefill: VecDeque<Uuid>,
-    decode: LRUEvictor<Uuid>,
+    decode: VecDeque<Uuid>,
     requests: HashMap<Uuid, Request>,
     prefill_costs: HashMap<Uuid, PrefillCost>,
     max_num_batched_tokens: Option<usize>,
@@ -164,7 +163,7 @@ impl SchedulerState {
             (prefill_compute, false)
         } else {
             // Assume possible to complete prefilling the sequence, transfer to decode
-            self.decode.insert(uuid);
+            self.decode.push_back(uuid);
 
             self.active_tokens += new_tokens;
             self.waiting_tokens -= new_tokens;
@@ -207,21 +206,22 @@ impl SchedulerState {
     /// Remove a UUID and its associated Request from collections.
     fn complete(&mut self, uuid: &Uuid) {
         tracing::trace!("Request {uuid} will complete");
-        self.decode.remove(uuid);
+        self.decode.retain(|u| u != uuid);
         self.requests.remove(uuid);
         self.prefill_costs.remove(uuid);
         self.active_tokens -= 1;
     }
 
-    /// Preempt the oldest running request by evicting it from running, resetting the sequence,
+    /// Preempt a running request by evicting it from decode, resetting the sequence,
     /// and adding it back to the waiting queue.
-    /// Returns the signal from reset_with_signal or None if no requests are running.
-    fn preempt(&mut self) -> Vec<MoveBlock> {
-        // Evict the oldest UUID from running
-        let uuid = self
-            .decode
-            .evict()
-            .expect("Nothing to evict for preemption.");
+    /// In LIFO mode, evicts the newest request (matches vLLM v1).
+    /// In FIFO mode, evicts the oldest request.
+    fn preempt(&mut self, mode: PreemptionMode) -> Vec<MoveBlock> {
+        let uuid = match mode {
+            PreemptionMode::Lifo => self.decode.pop_back(),
+            PreemptionMode::Fifo => self.decode.pop_front(),
+        }
+        .expect("Nothing to evict for preemption.");
         let request = self
             .requests
             .remove(&uuid)
@@ -329,6 +329,7 @@ impl Scheduler {
                     &args.perf_model,
                     args.block_size,
                     args.speedup_ratio,
+                    args.preemption_mode,
                 )
                 .await;
 
@@ -451,6 +452,7 @@ async fn simulate_decode(
     perf_model: &PerfModel,
     block_size: usize,
     speedup_ratio: f64,
+    preemption_mode: PreemptionMode,
 ) -> Duration {
     let start_time = Instant::now();
 
@@ -460,7 +462,7 @@ async fn simulate_decode(
     // Compute average context length across all active decode requests
     let total_length: usize = state
         .decode
-        .keys()
+        .iter()
         .map(|uuid| {
             if let Request::Active(seq) = state.requests.get(uuid).unwrap() {
                 seq.len()
@@ -478,22 +480,46 @@ async fn simulate_decode(
     state.reset_active_tokens();
 
     // Process decoding
-    let uuids: Vec<Uuid> = state.decode.keys().cloned().collect();
+    let uuids: Vec<Uuid> = state.decode.iter().copied().collect();
     for uuid in uuids {
+        // Try to generate; if allocation fails, preempt until it succeeds
+        // or nothing is left to preempt (matches vLLM v1 scheduler loop).
+        // Reborrow sequence each iteration so the mutable ref doesn't
+        // conflict with state.preempt().
+        let mut allocated = false;
+        loop {
+            let Some(sequence) = state.run(uuid) else {
+                break;
+            };
+            let signals = sequence.generate();
+            if process_signals(kv_manager, &signals) {
+                allocated = true;
+                break;
+            }
+            sequence.pop(); // revert the failed generation
+
+            if state.decode.is_empty() {
+                break;
+            }
+
+            // Preempt one request and free its blocks
+            for signal in state.preempt(preemption_mode) {
+                kv_manager.process(&signal);
+            }
+
+            // If the current request was the one preempted, stop retrying
+            if !state.decode.contains(&uuid) {
+                break;
+            }
+        }
+
+        if !allocated {
+            continue;
+        }
+
         let Some(sequence) = state.run(uuid) else {
             continue;
         };
-        let signals = sequence.generate();
-
-        // Process all signals with the KvManager
-        // Handling of preemption on failure
-        if !process_signals(kv_manager, &signals) {
-            sequence.pop(); // revert the failed generation op
-            for signal in state.preempt() {
-                kv_manager.process(&signal);
-            }
-            continue;
-        }
 
         // Check completion and send notification
         let is_complete = sequence.generated_tokens() >= sequence.max_output_tokens();
@@ -565,8 +591,7 @@ fn try_schedule(
         current_seqs += 1;
 
         // Check various budgets to see if possible to schedule
-        let under_block_budget =
-            current_blocks as f64 <= (1. - args.watermark) * kv_manager.max_capacity() as f64;
+        let under_block_budget = current_blocks <= kv_manager.max_capacity();
         // If chunked prefill is enabled, we can be under token budget when scheduling
         let comparison_tokens = if args.enable_chunked_prefill {
             current_tokens - new_tokens
