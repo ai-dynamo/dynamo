@@ -493,7 +493,8 @@ impl BlockTransferHandler {
             }
         }
 
-        drop(group); // Ends the NCCL group, submits operations
+        group.end()?; // Submit the group so we can observe ncclGroupEnd errors
+        drop(group);
 
         // Synchronize: wait for all NCCL operations to complete on the stream
         let (tx, rx) = tokio::sync::oneshot::channel();
