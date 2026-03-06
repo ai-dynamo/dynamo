@@ -6,8 +6,10 @@ MM Router Handler - Routes requests to best vLLM worker based on KV cache overla
 """
 
 import logging
+import time
 from typing import Any, AsyncGenerator
 
+from dynamo.common.multimodal.image_loader import ImageLoader
 from dynamo.llm import KvRouter
 from dynamo.runtime.logging import configure_dynamo_logging
 
@@ -46,6 +48,7 @@ class MMRouterHandler:
         self.processor = processor
         self.model = model
         self.block_size = block_size
+        self.image_loader = ImageLoader()
 
     async def generate(self, request: dict) -> AsyncGenerator[dict, None]:
         """
@@ -65,6 +68,8 @@ class MMRouterHandler:
         Yields:
             Response chunks from the downstream vLLM worker
         """
+        handler_start = time.perf_counter()
+
         # Extract messages from extra_args (set by Frontend preprocessor)
         messages = request.get("extra_args", {}).get("messages", [])
         image_urls = extract_image_urls(messages)
@@ -75,21 +80,26 @@ class MMRouterHandler:
             # tokens from frontend. We need processor-expanded tokens to build block_mm_infos.
             # Request payload does not include a rendered template string; extra_args carries
             # original messages, so mm_processor reapplies chat template locally.
-            processed = process_multimodal(
+            mm_start = time.perf_counter()
+            processed = await process_multimodal(
                 messages=messages,
                 image_urls=image_urls,
                 tokenizer=self.tokenizer,
                 processor=self.processor,
                 model=self.model,
+                image_loader=self.image_loader,
             )
+            mm_ms = (time.perf_counter() - mm_start) * 1000
 
             # Build block_mm_infos for MM-aware hash computation
+            block_start = time.perf_counter()
             block_mm_infos = build_block_mm_infos(
                 num_tokens=len(processed.tokens),
                 block_size=self.block_size,
                 mm_hashes=processed.mm_hashes,
                 image_ranges=processed.image_ranges,
             )
+            block_mm_ms = (time.perf_counter() - block_start) * 1000
             if block_mm_infos is None:
                 raise ValueError(
                     "Failed to build block_mm_infos for multimodal request"
@@ -104,6 +114,8 @@ class MMRouterHandler:
                 f"{len(image_urls)} images, {routing_blocks} routing blocks"
             )
         else:
+            mm_ms = 0.0
+            block_mm_ms = 0.0
             # Text-only: rely on frontend-preprocessed token_ids (ModelInput.Tokens contract)
             tokens = request.get("token_ids")
             if not tokens:
@@ -135,6 +147,9 @@ class MMRouterHandler:
             "block_mm_infos": block_mm_infos,
         }
 
+        pre_route_ms = (time.perf_counter() - handler_start) * 1000
+
+        route_start = time.perf_counter()
         stream = await self.kv_router.generate(
             token_ids=token_ids,
             model=request["model"],
@@ -146,6 +161,29 @@ class MMRouterHandler:
             multi_modal_data=request.get("multi_modal_data"),
             mm_routing_info=mm_routing_info,
         )
+        kv_open_stream_ms = (time.perf_counter() - route_start) * 1000
 
+        first_chunk = True
         async for response in stream:
+            if first_chunk:
+                first_chunk_ms = (time.perf_counter() - handler_start) * 1000
+                kv_wait_first_chunk_ms = max(
+                    0.0, first_chunk_ms - pre_route_ms - kv_open_stream_ms
+                )
+                logger.debug(
+                    "[perf][mm_handler] generate: "
+                    "first_chunk=%.3fms pre_route=%.3fms "
+                    "process_mm=%.3fms build_block=%.3fms "
+                    "kv_open_stream=%.3fms kv_wait_first_chunk=%.3fms "
+                    "images=%d tokens=%d",
+                    first_chunk_ms,
+                    pre_route_ms,
+                    mm_ms,
+                    block_mm_ms,
+                    kv_open_stream_ms,
+                    kv_wait_first_chunk_ms,
+                    len(image_urls),
+                    len(token_ids),
+                )
+                first_chunk = False
             yield response

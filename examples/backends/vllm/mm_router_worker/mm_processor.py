@@ -10,8 +10,10 @@ Key differences from TRT-LLM version:
 - Token replacement: NOT needed — vLLM keeps the original image_token_id as-is
 """
 
+import asyncio
 import base64
 import logging
+import time
 from dataclasses import dataclass
 from io import BytesIO
 from typing import Any
@@ -20,9 +22,14 @@ from urllib.parse import urlparse
 import requests
 from PIL import Image
 
+from dynamo.common.multimodal.image_loader import ImageLoader
 from dynamo.vllm.multimodal_utils.hash_utils import compute_mm_uuids_from_images
 
 logger = logging.getLogger(__name__)
+
+
+def _elapsed_ms(start: float) -> float:
+    return (time.perf_counter() - start) * 1000
 
 
 # =============================================================================
@@ -58,41 +65,64 @@ def extract_image_urls(messages: list[dict]) -> list[str]:
     return urls
 
 
-def process_multimodal(
+async def process_multimodal(
     messages: list[dict],
     image_urls: list[str],
     tokenizer: Any,
     processor: Any,
     model: str,
+    image_loader: ImageLoader | None = None,
 ) -> ProcessedInput:
     """
     Process multimodal request: load images, get expanded tokens and mm_hashes.
 
-    Uses PIL for image loading and hashlib for mm_hash computation.
+    Uses async ImageLoader for non-blocking image download with FIFO cache.
     Unlike TRT-LLM, vLLM keeps original image_token_id (no replacement).
     """
+    total_start = time.perf_counter()
+
     # The preprocessed request does not carry a rendered template string; it carries
     # original messages in extra_args, so we must apply chat template again here.
+    prompt_start = time.perf_counter()
     prompt = _build_prompt_with_images(messages, tokenizer, processor)
+    prompt_ms = _elapsed_ms(prompt_start)
     logger.info(f"Prompt (first 300 chars): {prompt[:300]}")
 
-    # Load images as PIL
-    pil_images = []
-    for url in image_urls:
-        pil_img = _load_image(url)
-        pil_images.append(pil_img)
+    # Load images as PIL + raw bytes (async with cache if ImageLoader provided)
+    load_start = time.perf_counter()
+    if image_loader is not None:
+        pil_images = await asyncio.gather(
+            *[image_loader.load_image(url) for url in image_urls]
+        )
+    else:
+        pil_images = [_load_image(url) for url in image_urls]
+    load_ms = _elapsed_ms(load_start)
 
     # Get expanded tokens and image ranges (no token replacement for vLLM)
+    expand_start = time.perf_counter()
     tokens, image_ranges = _get_expanded_tokens(
         prompt, pil_images, tokenizer, processor
     )
+    expand_ms = _elapsed_ms(expand_start)
     logger.info(f"Expanded: {len(tokens)} tokens, " f"image_ranges={image_ranges}")
 
     # Compute mm_hashes exactly like vLLM handler's multi_modal_uuids path.
+    hash_start = time.perf_counter()
     mm_uuids = compute_mm_uuids_from_images(pil_images)
     mm_hashes = [int(uuid[:16], 16) for uuid in mm_uuids]
+    hash_ms = _elapsed_ms(hash_start)
 
     logger.info(f"mm_hashes={mm_hashes}")
+
+    total_ms = _elapsed_ms(total_start)
+    logger.debug(
+        "[perf][mm_router] process_multimodal: "
+        "total=%.3fms prompt=%.3fms load_images=%.3fms "
+        "expanded_tokens=%.3fms mm_hash=%.3fms "
+        "images=%d tokens=%d",
+        total_ms, prompt_ms, load_ms, expand_ms, hash_ms,
+        len(image_urls), len(tokens),
+    )
 
     return ProcessedInput(tokens=tokens, mm_hashes=mm_hashes, image_ranges=image_ranges)
 
@@ -196,36 +226,132 @@ def _get_expanded_tokens(
     """
     Get tokens with visual expansion and find each image's token range.
 
-    Unlike TRT-LLM, vLLM keeps the original image_token_id (no replacement).
+    Tries a fast path first (compute token count from image size, skip full
+    HF processor pixel preprocessing), falls back to slow path on failure.
     """
     if processor is None:
         return tokenizer.encode(prompt), None
 
-    try:
-        output = processor(
-            text=[prompt], images=pil_images, return_tensors="pt", padding=True
-        )
-        tokens = output["input_ids"][0].tolist()
+    total_start = time.perf_counter()
 
-        # Get image_token_id from processor
+    try:
         image_token_id = getattr(processor, "image_token_id", None)
         if image_token_id is None:
             raise ValueError("processor.image_token_id not found")
 
-        # Find contiguous image token ranges (NO replacement for vLLM)
+        # Fast path: compute token counts from image sizes, tokenize text only
+        try:
+            tpi_start = time.perf_counter()
+            tokens_per_image = _compute_tokens_per_image_fast(pil_images, processor)
+            tpi_ms = _elapsed_ms(tpi_start)
+
+            tok_start = time.perf_counter()
+            text_tokens = _tokenize_prompt_text_only(prompt, tokenizer, processor)
+            tok_ms = _elapsed_ms(tok_start)
+
+            exp_start = time.perf_counter()
+            expanded_tokens, image_ranges = _expand_image_tokens(
+                text_tokens, image_token_id, tokens_per_image
+            )
+            exp_ms = _elapsed_ms(exp_start)
+
+            logger.debug(
+                "[perf][mm_router] _get_expanded_tokens: mode=fast "
+                "total=%.3fms tpi=%.3fms tokenize=%.3fms expand=%.3fms "
+                "images=%d tokens=%d",
+                _elapsed_ms(total_start), tpi_ms, tok_ms, exp_ms,
+                len(pil_images), len(expanded_tokens),
+            )
+            return expanded_tokens, image_ranges
+
+        except Exception as fast_err:
+            logger.debug("Fast path failed, falling back: %s", fast_err)
+
+        # Slow path: full HF processor call
+        slow_start = time.perf_counter()
+        output = processor(
+            text=[prompt], images=pil_images, return_tensors="pt", padding=True
+        )
+        tokens = output["input_ids"][0].tolist()
+        slow_ms = _elapsed_ms(slow_start)
+
         contiguous_ranges = _find_image_token_ranges(tokens, image_token_id)
-
-        # Compute tokens per image from processor output
         tokens_per_image = _compute_tokens_per_image(output, processor)
-
-        # Split ranges according to tokens_per_image
         image_ranges = _compute_per_image_ranges(contiguous_ranges, tokens_per_image)
 
+        logger.debug(
+            "[perf][mm_router] _get_expanded_tokens: mode=slow "
+            "total=%.3fms processor=%.3fms images=%d tokens=%d",
+            _elapsed_ms(total_start), slow_ms, len(pil_images), len(tokens),
+        )
         return tokens, image_ranges
 
     except Exception as e:
         logger.warning(f"HF processor failed: {e}", exc_info=True)
         return tokenizer.encode(prompt), None
+
+
+def _compute_tokens_per_image_fast(
+    pil_images: list[Image.Image], processor: Any
+) -> list[int]:
+    """Compute per-image token counts from image sizes without full preprocessing."""
+    image_processor = getattr(processor, "image_processor", None)
+    if image_processor is None:
+        raise ValueError("processor.image_processor not found")
+
+    get_num_patches = getattr(image_processor, "get_number_of_image_patches", None)
+    if not callable(get_num_patches):
+        raise NotImplementedError("image_processor.get_number_of_image_patches not available")
+
+    merge_size = getattr(image_processor, "merge_size", None)
+    if merge_size is None:
+        raise ValueError("image_processor.merge_size not found")
+
+    tokens_per_image = []
+    images_kwargs: dict[str, Any] = {}
+    for img in pil_images:
+        num_patches = int(get_num_patches(img.height, img.width, images_kwargs))
+        tokens_per_image.append(num_patches // (merge_size**2))
+    return tokens_per_image
+
+
+def _tokenize_prompt_text_only(prompt: str, tokenizer: Any, processor: Any) -> list[int]:
+    """Tokenize prompt text without image expansion."""
+    if processor is not None and callable(processor):
+        out = processor(text=[prompt], images=None, return_tensors=None, padding=False)
+        return list(out["input_ids"][0])
+    if hasattr(tokenizer, "__call__"):
+        out = tokenizer([prompt], return_tensors=None)
+        return list(out["input_ids"][0])
+    return tokenizer.encode(prompt)
+
+
+def _expand_image_tokens(
+    tokens: list[int], image_token_id: int, tokens_per_image: list[int]
+) -> tuple[list[int], list[tuple[int, int]] | None]:
+    """Expand each image placeholder token and return per-image ranges."""
+    if not tokens_per_image:
+        return tokens, None
+
+    expanded: list[int] = []
+    ranges: list[tuple[int, int]] = []
+    img_idx = 0
+
+    for token in tokens:
+        if token != image_token_id:
+            expanded.append(token)
+            continue
+        if img_idx >= len(tokens_per_image):
+            raise ValueError(f"More placeholders than images ({img_idx + 1} > {len(tokens_per_image)})")
+        repeat = tokens_per_image[img_idx]
+        start = len(expanded)
+        expanded.extend([image_token_id] * repeat)
+        ranges.append((start, len(expanded)))
+        img_idx += 1
+
+    if img_idx != len(tokens_per_image):
+        raise ValueError(f"Not all images mapped: {img_idx} < {len(tokens_per_image)}")
+    return expanded, ranges
 
 
 def _compute_tokens_per_image(processor_output: dict, processor: Any) -> list[int]:
