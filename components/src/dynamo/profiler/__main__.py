@@ -127,7 +127,7 @@ def _parse_args() -> tuple[DynamoGraphDeploymentRequestSpec, ProfilerOperational
     return dgdr, ops
 
 
-def main():
+def main() -> None:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",

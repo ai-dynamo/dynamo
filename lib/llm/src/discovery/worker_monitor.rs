@@ -456,22 +456,25 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                         for (lease_id, runtime_config) in runtime_configs.iter() {
                             let mut state = worker_load_states.entry(*lease_id).or_default();
 
+                            let dp_start = runtime_config.data_parallel_start_rank;
+                            let dp_end = dp_start + runtime_config.data_parallel_size;
+
                             // Track dp_ranks for this worker (for cleanup when worker disappears)
                             let dp_ranks_set = known_worker_dp_ranks.entry(*lease_id).or_default();
-                            for dp_rank in 0..runtime_config.data_parallel_size {
+                            for dp_rank in dp_start..dp_end {
                                 dp_ranks_set.insert(dp_rank);
                             }
 
                             // Populate total_blocks for all dp_ranks (they share the same total)
                             if let Some(total_blocks) = runtime_config.total_kv_blocks {
-                                for dp_rank in 0..runtime_config.data_parallel_size {
+                                for dp_rank in dp_start..dp_end {
                                     state.kv_total_blocks.insert(dp_rank, total_blocks);
                                 }
                             }
 
                             // Populate max_num_batched_tokens for all dp_ranks
                             if let Some(max_batched) = runtime_config.max_num_batched_tokens {
-                                for dp_rank in 0..runtime_config.data_parallel_size {
+                                for dp_rank in dp_start..dp_end {
                                     state.max_num_batched_tokens.insert(dp_rank, max_batched);
                                 }
                             }

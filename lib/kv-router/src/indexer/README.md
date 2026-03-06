@@ -4,6 +4,25 @@ This document explains the KV cache index implementations: `RadixTree` (and its 
 
 The concurrent indexers achieve a combined throughput of over **10 million events + requests per second** with **p99 latency under 10 microseconds**.
 
+## Module Map
+
+| File | What it does |
+|------|-------------|
+| `mod.rs` | Module declarations and re-exports |
+| `traits.rs` | `KvIndexerInterface` (async trait) and `SyncIndexer` (sync trait for thread-pool backends) |
+| `types.rs` | `KvRouterError`, `MatchRequest`, `WorkerTask`, channel message types |
+| `metrics.rs` | `KvIndexerMetrics` — Prometheus counters and histograms |
+| `kv_indexer.rs` | `KvIndexer` — single-threaded async wrapper around `RadixTree` with tokio mpsc channels |
+| `radix_tree.rs` | `RadixTree` — single-threaded tree with `Rc<RefCell<RadixBlock>>` nodes, tracks per-block frequency |
+| `concurrent_radix_tree.rs` | `ConcurrentRadixTree` — thread-safe variant with `Arc<RwLock<Block>>` nodes and `DashMap` lookup |
+| `positional.rs` | `PositionalIndexer` — flat `DashMap<(pos, hash), SeqEntry>` with jump optimization |
+| `thread_pool.rs` | `ThreadPoolIndexer<T: SyncIndexer>` — N OS threads for sticky-routed writes, inline reads; wraps `ConcurrentRadixTree` or `PositionalIndexer` |
+| `sharded.rs` | `KvIndexerSharded` — N independent `RadixTree` shards each in its own OS thread, scatter-gather for matches |
+| `local.rs` | `LocalKvIndexer` — thin wrapper around `KvIndexer` with a circular event buffer for worker-side decentralized routing |
+| `pruning.rs` | `PruneManager` — TTL-based expiration and size-based pruning via `BinaryHeap<BlockEntry>` |
+| `naive.rs` | Brute-force baseline indexers (bench-only, behind `bench` feature flag) |
+| `tests.rs` | Integration tests for all indexer variants |
+
 ## Motivation: The Four Block Identifiers
 
 Every cached KV block in a distributed LLM system needs four pieces of information:

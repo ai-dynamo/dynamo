@@ -1,7 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Multimodality
+title: Multimodal Model Serving 
 subtitle: Deploy multimodal models with image, video, and audio support in Dynamo
 ---
 
@@ -12,7 +12,23 @@ Dynamo supports multimodal inference across multiple LLM backends, enabling mode
 </Warning>
 
 ## Key Features
-
+```mermaid
+---
+title: Sample flow for an aggregated VLM serving scenario
+---
+flowchart TD
+    A[Request] --> B{KV cache hit?}
+    B -->|Yes| C[Use KV]
+    B -->|No| D{Embedding cache hit?}
+    D -->|Yes| E[Load embedding]
+    D -->|No| F[Run encoder]
+    F --> G[save to cache]
+    G --> H["PREFILL (image tokens + text tokens → KV cache)"]
+    E --> H
+    C --> I[DECODE]
+    H --> I
+    I --> J[Response]
+Dynamo provides support for improving latency and throughput for vision-and-language workloads through the following features, that can be used together or separately, depending on your workload characteristics: 
 | Feature | Description |
 |---------|-------------|
 | **[Embedding Cache](embedding-cache.md)** | CPU-side LRU cache that skips re-encoding repeated images |
