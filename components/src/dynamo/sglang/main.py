@@ -12,7 +12,7 @@ from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.runtime import create_runtime
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sglang.args import parse_args
-from dynamo.sglang.checkpoint_restore import handle_checkpoint_mode
+from dynamo.sglang.dynamo_snapshot import handle_checkpoint_mode
 from dynamo.sglang.init_diffusion import (
     init_image_diffusion,
     init_llm_diffusion,
@@ -41,7 +41,7 @@ async def worker():
         config.server_args.load_format = setup_gms(config.server_args)
 
     # Checkpoint mode: engine must be created BEFORE runtime (no NATS/etcd during CRIU)
-    should_exit, checkpoint_restore_engine = await handle_checkpoint_mode(
+    should_exit, snapshot_engine = await handle_checkpoint_mode(
         config.server_args
     )
     if should_exit:
@@ -129,7 +129,7 @@ async def worker():
             shutdown_event,
             shutdown_endpoints,
             run_deferred_handlers,
-            checkpoint_restore_engine=checkpoint_restore_engine,
+            snapshot_engine=snapshot_engine,
         )
     else:
         await init_prefill(
@@ -138,7 +138,7 @@ async def worker():
             shutdown_event,
             shutdown_endpoints,
             run_deferred_handlers,
-            checkpoint_restore_engine=checkpoint_restore_engine,
+            snapshot_engine=snapshot_engine,
         )
 
 
