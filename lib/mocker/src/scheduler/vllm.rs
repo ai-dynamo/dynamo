@@ -90,7 +90,8 @@ impl SchedulerState {
     fn receive(&mut self, request: DirectRequest) -> Uuid {
         // Use the provided UUID if available, otherwise generate a new one
         let uuid = request.uuid.unwrap_or_else(Uuid::new_v4);
-        self.requests.insert(uuid, Request::Direct(Box::new(request)));
+        self.requests
+            .insert(uuid, Request::Direct(Box::new(request)));
         self.waiting.push_back(uuid);
         uuid
     }
@@ -114,7 +115,8 @@ impl SchedulerState {
     /// Move a UUID and its Request to the ready queue.
     fn move_to_prefill(&mut self, uuid: Uuid, active_seq: ActiveSequence, cost: PrefillCost) {
         self.waiting_tokens += cost.new_tokens;
-        self.requests.insert(uuid, Request::Active(Box::new(active_seq)));
+        self.requests
+            .insert(uuid, Request::Active(Box::new(active_seq)));
         self.prefill.push_back(uuid);
         self.prefill_costs.insert(uuid, cost);
     }
