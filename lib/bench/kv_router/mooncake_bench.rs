@@ -357,7 +357,7 @@ fn partition_trace(
 
 /// Linearly rescale all timestamps in a worker's trace so the total span equals
 /// `duration` milliseconds.
-fn scale_mooncake_trace(trace: &Vec<MooncakeRequest>, duration: u64) -> Vec<MooncakeRequest> {
+fn scale_mooncake_trace(trace: &[MooncakeRequest], duration: u64) -> Vec<MooncakeRequest> {
     let total_duration = trace.last().unwrap().timestamp - trace.first().unwrap().timestamp;
     trace
         .iter()
@@ -477,7 +477,7 @@ fn make_progress_bar(total: Option<u64>) -> ProgressBar {
 /// instant it was produced. Event ordering within a worker is guaranteed
 /// monotonically non-decreasing by timestamp.
 async fn generate_events(
-    traces: &Vec<Vec<MooncakeRequest>>,
+    traces: &[Vec<MooncakeRequest>],
     args: &Args,
 ) -> anyhow::Result<Vec<Vec<(KvCacheEvent, Instant)>>> {
     println!("Generating events...");
@@ -543,7 +543,7 @@ async fn generate_events(
                     );
                 }
 
-                tokio::time::sleep_until(tokio::time::Instant::from(target)).await;
+                tokio::time::sleep_until(target).await;
                 progress.inc((i - prev_i) as u64);
             }
 
@@ -644,12 +644,10 @@ fn prepare_worker_traces(
 
     scaled_request_traces
         .into_iter()
-        .zip(scaled_event_traces.into_iter())
+        .zip(scaled_event_traces)
         .map(|(request_trace, event_trace)| {
-            let mut merged: Vec<WorkerTrace> = request_trace
-                .into_iter()
-                .chain(event_trace.into_iter())
-                .collect();
+            let mut merged: Vec<WorkerTrace> =
+                request_trace.into_iter().chain(event_trace).collect();
             merged.sort_by_key(|entry| entry.timestamp_us);
             merged
         })
@@ -685,10 +683,7 @@ async fn run_benchmark(
         benchmark_duration_ms,
         args.trace_simulation_duration_ms,
     );
-    let worker_traces = worker_traces
-        .into_iter()
-        .map(|trace| Arc::new(trace))
-        .collect::<Vec<_>>();
+    let worker_traces = worker_traces.into_iter().map(Arc::new).collect::<Vec<_>>();
 
     let progress = make_progress_bar(Some(
         worker_traces
@@ -1004,7 +999,7 @@ fn run_tests() -> anyhow::Result<()> {
         }
     };
     let traces = process_mooncake_trace(&args)?;
-    std::fs::remove_file(&path).ok();
+    std::fs::remove_file(path).ok();
 
     let mut all_hashes: Vec<Vec<u64>> = traces
         .into_iter()

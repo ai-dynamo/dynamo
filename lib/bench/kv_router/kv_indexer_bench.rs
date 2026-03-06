@@ -1290,7 +1290,7 @@ async fn run_stress_mode(args: StressArgs) {
 
         for (event_id, seq) in sequences.iter().enumerate() {
             let event = seq.to_store_event(event_id as u64);
-            KvIndexerInterface::apply_event(&mut indexer, event).await;
+            KvIndexerInterface::apply_event(&indexer, event).await;
 
             if args.common.verbose && (event_id + 1) % 100 == 0 {
                 println!("    Applied {}/{} events...", event_id + 1, sequences.len());
@@ -1337,7 +1337,7 @@ async fn run_stress_mode(args: StressArgs) {
 
         for (event_id, seq) in sequences.iter().enumerate() {
             let event = seq.to_store_event(event_id as u64);
-            KvIndexerInterface::apply_event(&mut indexer, event).await;
+            KvIndexerInterface::apply_event(&indexer, event).await;
 
             if args.common.verbose && (event_id + 1) % 100 == 0 {
                 println!("    Applied {}/{} events...", event_id + 1, sequences.len());
