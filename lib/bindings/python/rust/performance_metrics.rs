@@ -2,10 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_runtime::metrics::performance_metrics::{
-can     DistributionMetricHandle, PerformanceMetricsRegistry, RateMetricHandle, RatioMetricHandle,
+    DistributionMetricHandle, PerformanceMetricsRegistry, RateMetricHandle, RatioMetricHandle,
 };
 use pyo3::{exceptions::PyValueError, prelude::*};
-use std::time::Duration;
 
 use crate::prometheus_metrics::RuntimeMetrics;
 
@@ -73,23 +72,17 @@ impl PyRatioMetric {
 #[pyclass(name = "PerformanceMetricsRegistry")]
 pub struct PyPerformanceMetricsRegistry {
     registry: PerformanceMetricsRegistry,
-    attached: bool,
 }
 
 #[pymethods]
 impl PyPerformanceMetricsRegistry {
     #[new]
-    #[pyo3(signature = (window_seconds = None, publish_cycle_seconds = None))]
-    fn new(window_seconds: Option<u64>, publish_cycle_seconds: Option<u64>) -> Self {
-        let seconds = window_seconds.unwrap_or(60).max(1);
-        let cycle = publish_cycle_seconds.unwrap_or(5).clamp(2, 60);
-        Self {
-            registry: PerformanceMetricsRegistry::new_with_publish_interval(
-                Duration::from_secs(seconds),
-                Duration::from_secs(cycle),
-            ),
-            attached: false,
-        }
+    fn new(runtime_metrics: &RuntimeMetrics) -> PyResult<Self> {
+        let hierarchy = runtime_metrics.hierarchy();
+        let registry = PerformanceMetricsRegistry::new_attached_default(hierarchy)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+        Ok(Self { registry })
     }
 
     fn window_seconds(&self) -> u64 {
@@ -144,36 +137,4 @@ impl PyPerformanceMetricsRegistry {
         Ok(PyRatioMetric { inner: handle })
     }
 
-    fn unregister_metric(&self, name: String) -> PyResult<()> {
-        self.registry
-            .unregister_metric(name)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
-    }
-
-    #[pyo3(signature = (runtime_metrics, metric_prefix = "performance", labels = None))]
-    fn attach_runtime_metrics(
-        &mut self,
-        runtime_metrics: &RuntimeMetrics,
-        metric_prefix: &str,
-        labels: Option<Vec<(String, String)>>,
-    ) -> PyResult<()> {
-        if self.attached {
-            return Err(PyValueError::new_err(
-                "performance metrics already attached for this registry",
-            ));
-        }
-        let hierarchy = runtime_metrics.hierarchy();
-        let label_storage = labels.unwrap_or_default();
-        let label_refs: Vec<(&str, &str)> = label_storage
-            .iter()
-            .map(|(k, v)| (k.as_str(), v.as_str()))
-            .collect();
-
-        self
-            .registry
-            .attach_to_hierarchy(hierarchy, metric_prefix, &label_refs)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        self.attached = true;
-        Ok(())
-    }
 }

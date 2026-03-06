@@ -119,8 +119,7 @@ impl Clone for PerformanceMetricsRegistry {
 
 #[derive(Clone)]
 struct PerformanceMetricHandle {
-    inner: Arc<RegistryInner>,
-    metric_name: String,
+    lease: Arc<MetricLease>,
 }
 
 #[derive(Clone)]
@@ -145,6 +144,11 @@ struct RegistryInner {
     tx: SyncSender<WorkerMessage>,
     dropped_events: AtomicU64,
     worker: Mutex<Option<JoinHandle<()>>>,
+}
+
+struct MetricLease {
+    registry: Arc<RegistryInner>,
+    metric_name: String,
 }
 
 struct WorkerState {
@@ -267,6 +271,46 @@ impl PerformanceMetricsRegistry {
         }
     }
 
+    pub fn new_attached(
+        window_duration: Duration,
+        publish_interval: Duration,
+        hierarchy: Arc<dyn MetricsHierarchy>,
+        metric_prefix: impl Into<String>,
+        labels: &[(&str, &str)],
+    ) -> anyhow::Result<Self> {
+        let registry = Self::new_with_publish_interval(window_duration, publish_interval);
+        registry.attach_to_hierarchy(hierarchy, metric_prefix.into(), labels)?;
+        Ok(registry)
+    }
+
+    pub fn new_attached_with_options(
+        hierarchy: Arc<dyn MetricsHierarchy>,
+        window_seconds: Option<u64>,
+        publish_cycle_seconds: Option<u64>,
+        metric_prefix: Option<String>,
+        labels: Option<Vec<(String, String)>>,
+    ) -> anyhow::Result<Self> {
+        let seconds = window_seconds.unwrap_or(60).max(1);
+        let cycle = publish_cycle_seconds.unwrap_or(5).clamp(2, 60);
+        let label_storage = labels.unwrap_or_default();
+        let label_refs = label_storage
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect::<Vec<_>>();
+
+        Self::new_attached(
+            Duration::from_secs(seconds),
+            Duration::from_secs(cycle),
+            hierarchy,
+            metric_prefix.unwrap_or_else(|| "performance".to_string()),
+            &label_refs,
+        )
+    }
+
+    pub fn new_attached_default(hierarchy: Arc<dyn MetricsHierarchy>) -> anyhow::Result<Self> {
+        Self::new_attached_with_options(hierarchy, None, None, None, None)
+    }
+
     pub fn window_duration(&self) -> Duration {
         self.inner.window_duration
     }
@@ -291,8 +335,10 @@ impl PerformanceMetricsRegistry {
         ))?;
         Ok(RateMetricHandle {
             inner: PerformanceMetricHandle {
-                inner: Arc::clone(&self.inner),
-                metric_name: name,
+                lease: Arc::new(MetricLease {
+                    registry: Arc::clone(&self.inner),
+                    metric_name: name,
+                }),
             },
         })
     }
@@ -312,8 +358,10 @@ impl PerformanceMetricsRegistry {
             ))?;
         Ok(DistributionMetricHandle {
             inner: PerformanceMetricHandle {
-                inner: Arc::clone(&self.inner),
-                metric_name: name,
+                lease: Arc::new(MetricLease {
+                    registry: Arc::clone(&self.inner),
+                    metric_name: name,
+                }),
             },
         })
     }
@@ -332,8 +380,10 @@ impl PerformanceMetricsRegistry {
         ))?;
         Ok(RatioMetricHandle {
             inner: PerformanceMetricHandle {
-                inner: Arc::clone(&self.inner),
-                metric_name: name,
+                lease: Arc::new(MetricLease {
+                    registry: Arc::clone(&self.inner),
+                    metric_name: name,
+                }),
             },
         })
     }
@@ -346,41 +396,55 @@ impl PerformanceMetricsRegistry {
         self.inner.snapshot_all()
     }
 
-    pub fn attach_to_hierarchy(
+    fn attach_to_hierarchy(
         &self,
         hierarchy: Arc<dyn MetricsHierarchy>,
-        metric_prefix: impl Into<String>,
-        labels: &[(impl AsRef<str>, impl AsRef<str>)],
+        metric_prefix: String,
+        labels: &[(&str, &str)],
     ) -> anyhow::Result<()> {
         let labels_owned = labels
             .iter()
-            .map(|(k, v)| (k.as_ref().to_string(), v.as_ref().to_string()))
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
             .collect::<Vec<_>>();
         self.inner
-            .attach_publisher(hierarchy, metric_prefix.into(), labels_owned)
+            .attach_publisher(hierarchy, metric_prefix, labels_owned)
     }
 }
 
 impl PerformanceMetricHandle {
     pub fn name(&self) -> &str {
-        &self.metric_name
+        &self.lease.metric_name
     }
 
     fn record_count(&self, count: u64) -> anyhow::Result<()> {
-        self.inner.record_count(self.metric_name.clone(), count)
+        self.lease
+            .registry
+            .record_count(self.lease.metric_name.clone(), count)
     }
 
     fn record_value(&self, value: f64) -> anyhow::Result<()> {
-        self.inner.record_value(self.metric_name.clone(), value)
+        self.lease
+            .registry
+            .record_value(self.lease.metric_name.clone(), value)
     }
 
     fn record_ratio(&self, numerator: f64, denominator: f64) -> anyhow::Result<()> {
-        self.inner
-            .record_ratio(self.metric_name.clone(), numerator, denominator)
+        self.lease
+            .registry
+            .record_ratio(self.lease.metric_name.clone(), numerator, denominator)
     }
 
     fn snapshot(&self) -> Option<MetricSnapshot> {
-        self.inner.snapshot_metric(self.metric_name.clone())
+        self.lease
+            .registry
+            .snapshot_metric(self.lease.metric_name.clone())
+    }
+}
+
+impl Drop for MetricLease {
+    fn drop(&mut self) {
+        self.registry
+            .try_unregister_metric(self.metric_name.clone());
     }
 }
 
@@ -451,6 +515,14 @@ impl RegistryInner {
         resp_rx
             .recv()
             .map_err(|_| anyhow::anyhow!("metrics worker did not respond"))?
+    }
+
+    fn try_unregister_metric(&self, name: String) {
+        let (resp_tx, _resp_rx) = mpsc::channel();
+        let _ = self.tx.try_send(WorkerMessage::UnregisterMetric {
+            name,
+            resp: resp_tx,
+        });
     }
 
     fn record_count(&self, name: String, count: u64) -> anyhow::Result<()> {
@@ -741,10 +813,6 @@ fn attach_publisher_in_state(
     metric_prefix: String,
     labels: Vec<(String, String)>,
 ) -> anyhow::Result<()> {
-    if state.metrics.is_empty() {
-        anyhow::bail!("no metrics registered; create metrics before attaching publisher");
-    }
-
     validate_metric_name_collisions(
         &state
             .metrics
@@ -1277,26 +1345,32 @@ mod tests {
     }
 
     #[test]
-    fn attach_without_registered_metrics_fails() {
-        let tracker = PerformanceMetricsRegistry::new(Duration::from_secs(60));
+    fn attach_without_registered_metrics_succeeds() {
         let hierarchy = Arc::new(TestHierarchy::new());
-        let result = tracker.attach_to_hierarchy(hierarchy, "performance", &[] as &[(&str, &str)]);
-        let err = match result {
-            Ok(_) => panic!("attach should fail when no metrics are registered"),
-            Err(err) => err,
-        };
-        assert!(err.to_string().contains("no metrics registered"));
+        let tracker = PerformanceMetricsRegistry::new_attached(
+            Duration::from_secs(60),
+            Duration::from_secs(5),
+            hierarchy,
+            "performance",
+            &[] as &[(&str, &str)],
+        )
+        .unwrap();
+        assert_eq!(tracker.snapshot_all().len(), 0);
     }
 
     #[test]
     fn register_after_attach_and_unregister_work() {
-        let tracker = PerformanceMetricsRegistry::new(Duration::from_secs(60));
+        let hierarchy = Arc::new(TestHierarchy::new());
+        let tracker = PerformanceMetricsRegistry::new_attached(
+            Duration::from_secs(60),
+            Duration::from_secs(5),
+            hierarchy,
+            "performance",
+            &[] as &[(&str, &str)],
+        )
+        .unwrap();
         let _tps = tracker
             .new_rate_metric("tps", vec![0.5], Some(1.0), None)
-            .unwrap();
-        let hierarchy = Arc::new(TestHierarchy::new());
-        tracker
-            .attach_to_hierarchy(hierarchy, "performance", &[] as &[(&str, &str)])
             .unwrap();
 
         let ttft = tracker
