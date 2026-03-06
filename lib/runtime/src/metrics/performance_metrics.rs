@@ -702,10 +702,10 @@ fn handle_message(msg: WorkerMessage, state: &mut WorkerState) -> bool {
             count,
             recorded_at,
         } => {
-            if let Some(entry) = state.metrics.get_mut(&name) {
-                if let MetricState::Rate { counts } = &mut entry.state {
-                    counts.push_back((recorded_at, count));
-                }
+            if let Some(entry) = state.metrics.get_mut(&name)
+                && let MetricState::Rate { counts } = &mut entry.state
+            {
+                counts.push_back((recorded_at, count));
             }
         }
         WorkerMessage::RecordValue {
@@ -713,10 +713,10 @@ fn handle_message(msg: WorkerMessage, state: &mut WorkerState) -> bool {
             value,
             recorded_at,
         } => {
-            if let Some(entry) = state.metrics.get_mut(&name) {
-                if let MetricState::Distribution { values } = &mut entry.state {
-                    values.push_back((recorded_at, value));
-                }
+            if let Some(entry) = state.metrics.get_mut(&name)
+                && let MetricState::Distribution { values } = &mut entry.state
+            {
+                values.push_back((recorded_at, value));
             }
         }
         WorkerMessage::RecordRatio {
@@ -725,10 +725,10 @@ fn handle_message(msg: WorkerMessage, state: &mut WorkerState) -> bool {
             denominator,
             recorded_at,
         } => {
-            if let Some(entry) = state.metrics.get_mut(&name) {
-                if let MetricState::Ratio { pairs } = &mut entry.state {
-                    pairs.push_back((recorded_at, numerator, denominator));
-                }
+            if let Some(entry) = state.metrics.get_mut(&name)
+                && let MetricState::Ratio { pairs } = &mut entry.state
+            {
+                pairs.push_back((recorded_at, numerator, denominator));
             }
         }
         WorkerMessage::SnapshotMetric { name, resp } => {
