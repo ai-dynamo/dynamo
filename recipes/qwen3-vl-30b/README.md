@@ -67,7 +67,7 @@ qwen3-vl-30b/
         └── perf.yaml
 ```
 
-The `deploy.yaml` scripts have `MM_EMBEDDING_CACHE_GB=0` by default, which represents an embedding cache **off** configuration. To toggle it on, set the env variable to a non-zero value. 
+The `deploy.yaml` scripts have `MM_EMBEDDING_CACHE_GB=0` by default, which represents an embedding cache **off** configuration. To toggle it on, set the env variable to a non-zero value.
 
 Similarly, each `perf.yaml` exposes a `CACHE_MODE` env variable to control where AIPerf dumps its results. Set it to either `cache_on` or `cache_off` depending on your deployment.
 
@@ -149,7 +149,7 @@ Wait for `All runs complete. Artifacts in /perf-cache/artifacts/qwen3_vl_30b_enc
 ### 5. Run Analysis and View Results
 
 ```bash
-# Set TOPOLOGY: {config} from above in vllm/analysis.yaml 
+# Set TOPOLOGY: {config} from above in vllm/analysis.yaml
 kubectl apply -f vllm/analysis.yaml -n ${NAMESPACE}
 kubectl wait --for=condition=Complete job/qwen3-vl-analysis -n ${NAMESPACE} --timeout=600s
 kubectl logs job/qwen3-vl-analysis -n ${NAMESPACE}
