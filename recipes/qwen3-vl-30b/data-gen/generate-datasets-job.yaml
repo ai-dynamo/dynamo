@@ -38,9 +38,9 @@ spec:
 
               mkdir -p "${OUTPUT_DIR}"
 
-              NUM_REQUESTS=5000
+              NUM_REQUESTS=500
               IMAGES_PER_REQUEST=3
-              USER_TEXT_TOKENS=1000
+              USER_TEXT_TOKENS=320
               IMAGE_MODE=http
               TOTAL_SLOTS=$((NUM_REQUESTS * IMAGES_PER_REQUEST))
 

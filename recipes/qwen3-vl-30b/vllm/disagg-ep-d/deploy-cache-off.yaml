@@ -37,11 +37,8 @@ spec:
       extraPodSpec:
         mainContainer:
           args:
-            - --multimodal-worker
-            - --disaggregation-mode
-            - prefill
+            - --is-prefill-worker
             - --enable-multimodal
-            - --enable-mm-embeds
             - --model
             - Qwen/Qwen3-VL-30B-A3B-Instruct
             - --tensor-parallel-size
@@ -87,9 +84,8 @@ spec:
       extraPodSpec:
         mainContainer:
           args:
-            - --multimodal-decode-worker
+            - --is-decode-worker
             - --enable-multimodal
-            - --enable-mm-embeds
             - --model
             - Qwen/Qwen3-VL-30B-A3B-Instruct
             - --tensor-parallel-size

@@ -20,7 +20,7 @@ spec:
           value: tcp
       extraPodSpec:
         mainContainer:
-          image: dynamo:latest-vllm-runtime
+          image: dynamo:latest-vllm-runtime-agg-ec-patched
           imagePullPolicy: IfNotPresent
           workingDir: /workspace
       replicas: 1
@@ -37,11 +37,8 @@ spec:
       extraPodSpec:
         mainContainer:
           args:
-            - --multimodal-worker
-            - --disaggregation-mode
-            - prefill
+            - --is-prefill-worker
             - --enable-multimodal
-            - --enable-mm-embeds
             - --model
             - Qwen/Qwen3-VL-30B-A3B-Instruct
             - --tensor-parallel-size
@@ -60,7 +57,7 @@ spec:
             - python3
             - -m
             - dynamo.vllm
-          image: dynamo:latest-vllm-runtime
+          image: dynamo:latest-vllm-runtime-agg-ec-patched
           imagePullPolicy: IfNotPresent
           env:
             - name: HF_HOME
@@ -90,9 +87,8 @@ spec:
       extraPodSpec:
         mainContainer:
           args:
-            - --multimodal-decode-worker
+            - --is-decode-worker
             - --enable-multimodal
-            - --enable-mm-embeds
             - --model
             - Qwen/Qwen3-VL-30B-A3B-Instruct
             - --tensor-parallel-size
@@ -108,7 +104,7 @@ spec:
             - python3
             - -m
             - dynamo.vllm
-          image: dynamo:latest-vllm-runtime
+          image: dynamo:latest-vllm-runtime-agg-ec-patched
           imagePullPolicy: IfNotPresent
           env:
             - name: HF_HOME

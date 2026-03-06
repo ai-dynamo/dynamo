@@ -53,15 +53,19 @@ We compare the impact of encoder cache toggled on vs off for three deployment mo
 - `disagg E/PD x1 encode worker, x7 pd workers`
 - `disagg EP/D x4 EP workers, x4 decode workers`
 
-To test this, the `data-gen/generate-datasets-job.yaml` creates 5 datasets of synthetic text + image data each with varying levels of image per request overlap. They are tagged as `r_{##}` representing the ratio of total slots to image slots. For example, r_{50} refers to a dataset where the image pool is half the size of the total slots. In other words, you would need to traverse half of the entire dataset to have seen every image. Refer to jsonl [documention](https://github.com/ai-dynamo/dynamo/tree/main/benchmarks/multimodal/jsonl) for more details on data generation.
+To test this, the `data-gen/generate-datasets-job.yaml` creates 5 datasets of synthetic text + image data each with varying levels of image per request overlap. The script does this by manipulating the "total slots" and "image pool".
 
-Each dataset is hardcoded to have 1000 requests, 1000 tokens of user-input text.
+Total number of slots is calculated as `num_requests*images/request`, representing how many total images the benchmark will iterate through. The image pool is how many images the benchmark can choose from to attach to a request.
+
+Each dataset is tagged as `r_{##}` representing the ratio of total slots to image slots. For example, r_{50} refers to a dataset where the image pool is half the size of the total slots. In other words, you would need to traverse half of the entire dataset to have seen every image. Refer to jsonl [documention](https://github.com/ai-dynamo/dynamo/tree/main/benchmarks/multimodal/jsonl) for more details on data generation.
+
+Each dataset is hardcoded to have 500 requests and 320 tokens of user-input text. AIPerf configures the system prompt via `--shared-system-prompt-length` and the `perf-*.yaml` have this at 160 tokens.
 
 ### Notes:
 
 1. Exact cache hit rates cannot be explicitly controlled via dataset due potential LRU encoder cache eviction policies; however, decreasing the image pool relative to the number of requests allows for proportionally higher probabilities of seeing duplicate images and cache hits.
 
-(2) Agg encoder cache requires `ec_both` ECConnector role in vLLM, but that functionality was merged post 1.0.0 release. If you see an error such as `Input should be 'ec_producer' or 'ec_consumer' [type=literal_error, input_value='ec_both', input_type=str]`, you can use the `patches/patch_vllm_agg_encoder_cache.sh` script to re-tag your dynamo image with the patch applied. See [mulitmodal-vllm.md](https://github.com/ai-dynamo/dynamo/blob/main/docs/features/multimodal/multimodal-vllm.md#embedding-cache) for more details.
+2. Agg encoder cache requires `ec_both` ECConnector role in vLLM, but that functionality was merged post 1.0.0 release. If you see an error such as `Input should be 'ec_producer' or 'ec_consumer' [type=literal_error, input_value='ec_both', input_type=str]`, you can use the `patches/patch_vllm_agg_encoder_cache.sh` script to re-tag your dynamo image with the patch applied. See [mulitmodal-vllm.md](https://github.com/ai-dynamo/dynamo/blob/main/docs/features/multimodal/multimodal-vllm.md#embedding-cache) for more details.
 
 ## Quick Start
 
