@@ -1205,6 +1205,8 @@ func (r *DynamoGraphDeploymentRequestReconciler) enrichHardwareFromDiscovery(ctx
 		hw.NumGPUsPerNode = &n
 	}
 	if hw.TotalGPUs == nil {
+		// TODO: This is a temporary limit to prevent the profiler from using too many GPUs.
+		// Will be removed once a fix is in the Profiler/AIC.
 		const defaultMaxAutoGPUs = int32(32)
 		total := int32(gpuInfo.GPUsPerNode * gpuInfo.NodesWithGPUs)
 		if total > defaultMaxAutoGPUs {
