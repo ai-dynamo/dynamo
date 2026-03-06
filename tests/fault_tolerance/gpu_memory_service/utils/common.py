@@ -35,6 +35,22 @@ def get_gpu_memory_used(device: int = 0) -> int:
         pynvml.nvmlShutdown()
 
 
+def wait_for_memory_drop(
+    baseline_bytes: int,
+    timeout_s: float = 30.0,
+    poll_interval_s: float = 0.5,
+) -> int:
+    """Wait until GPU memory usage drops below baseline, then return current usage."""
+    start = time.time()
+    current = get_gpu_memory_used()
+    while time.time() - start < timeout_s:
+        if current < baseline_bytes:
+            return current
+        time.sleep(poll_interval_s)
+        current = get_gpu_memory_used()
+    return current
+
+
 def kill_force(
     process: ManagedProcess,
     timeout_s: float = 30.0,
@@ -85,7 +101,11 @@ def kill_force(
 
 
 def send_completion(
-    port: int, prompt: str = "Hello", max_retries: int = 3, retry_delay: float = 1.0
+    port: int,
+    prompt: str = "Hello",
+    model: str = FAULT_TOLERANCE_MODEL_NAME,
+    max_retries: int = 3,
+    retry_delay: float = 1.0,
 ) -> dict:
     """Send a completion request to the frontend.
 
@@ -98,7 +118,7 @@ def send_completion(
             r = requests.post(
                 f"http://localhost:{port}/v1/completions",
                 json={
-                    "model": FAULT_TOLERANCE_MODEL_NAME,
+                    "model": model,
                     "prompt": prompt,
                     "max_tokens": 20,
                 },
@@ -164,6 +184,7 @@ def run_shadow_failover_test(
     ports: dict,
     make_shadow: Callable[[], ManagedProcess],
     make_primary: Callable[[], ManagedProcess],
+    model: str = FAULT_TOLERANCE_MODEL_NAME,
 ) -> None:
     """Shared shadow-engine failover flow for both vLLM and SGLang.
 
@@ -179,14 +200,14 @@ def run_shadow_failover_test(
         with DynamoFrontendProcess(request, frontend_port=frontend_port):
             with make_shadow() as shadow:
                 # Shadow inference
-                result = send_completion(frontend_port)
+                result = send_completion(frontend_port, model=model)
                 assert result["choices"], "Shadow inference failed"
                 logger.info(f"Shadow inference OK: {result}")
 
                 # Sleep shadow
                 mem_before = get_gpu_memory_used()
                 assert shadow.sleep()["status"] == "ok"
-                mem_after = get_gpu_memory_used()
+                mem_after = wait_for_memory_drop(mem_before)
                 logger.info(
                     f"Shadow sleep: {mem_before / (1 << 30):.2f} -> "
                     f"{mem_after / (1 << 30):.2f} GiB "
@@ -195,7 +216,7 @@ def run_shadow_failover_test(
 
                 # Primary: start, verify, kill -9
                 with make_primary() as primary:
-                    result = send_completion(frontend_port, "Primary test")
+                    result = send_completion(frontend_port, "Primary test", model=model)
                     assert result["choices"], "Primary inference failed"
                     logger.info(f"Primary inference OK: {result}")
                     kill_force(primary)
@@ -203,6 +224,6 @@ def run_shadow_failover_test(
                 # Wake shadow, verify 3x
                 assert shadow.wake()["status"] == "ok"
                 for i in range(3):
-                    result = send_completion(frontend_port, f"Verify {i}")
+                    result = send_completion(frontend_port, f"Verify {i}", model=model)
                     assert result["choices"], f"Verification {i} failed"
                 logger.info("All verification passed")

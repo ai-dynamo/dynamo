@@ -452,9 +452,9 @@ class GMSClientMemoryManager:
 
 ---
 
-## Framework Integration (vLLM / SGLang)
+## Framework Integration (vLLM / SGLang / TRT-LLM)
 
-GMS provides pre-built integrations for vLLM and SGLang. Enable GMS by passing `--load-format gms` when launching an engine.
+GMS provides pre-built integrations for vLLM, SGLang, and TRT-LLM. Enable GMS by passing `--load-format gms` when launching an engine.
 
 ### How It Works
 
@@ -495,12 +495,27 @@ The integration patches `torch_memory_saver` to route weight operations through 
 - Other tags (e.g., `"kv_cache"`) are delegated to the default torch mempool implementation
 - The `--enable-memory-saver` flag is required to activate the memory saver pathway
 
+#### TRT-LLM
+
+```bash
+python -m dynamo.trtllm \
+  --model <model> \
+  --load-format gms \
+  --enable-sleep
+```
+
+The integration patches TensorRT-LLM's model loader:
+- RW mode publishes weights to GMS and commits metadata for import
+- RO mode constructs the model in `MetaInitMode` and materializes tensors from GMS
+- `--model-loader-extra-config '{"gms_read_only": true}'` forces RO import mode
+
 ### Shadow Engine Failover (Sleep / Wake)
 
-Both integrations support releasing and reclaiming GPU memory for shadow engine patterns. The API names differ by framework:
+All integrations support releasing and reclaiming GPU memory for shadow engine patterns. The API names differ by framework:
 
 - **vLLM**: `sleep` / `wake_up` (via `/engine/sleep` and `/engine/wake_up` HTTP endpoints)
 - **SGLang**: `release_memory_occupation` / `resume_memory_occupation` (via the corresponding HTTP endpoints)
+- **TRT-LLM**: `release_memory_occupation` / `resume_memory_occupation` (via the corresponding HTTP endpoints)
 
 Under the hood, sleeping calls `unmap_all_vas()` + `disconnect()` to release GPU memory while preserving VA reservations, and waking calls `connect(RO)` + `remap_all_vas()` to re-import weights at the same virtual addresses. Tensor pointers remain valid, so no model re-initialization is needed.
 

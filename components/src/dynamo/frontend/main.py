@@ -191,14 +191,30 @@ async def async_main():
         router_mode = RouterMode.RoundRobin
         kv_router_config = None
 
-    router_config = RouterConfig(
-        router_mode,
-        kv_router_config,
-        active_decode_blocks_threshold=config.active_decode_blocks_threshold,
-        active_prefill_tokens_threshold=config.active_prefill_tokens_threshold,
-        active_prefill_tokens_threshold_frac=config.active_prefill_tokens_threshold_frac,
-        enforce_disagg=config.enforce_disagg,
-    )
+    router_config_kwargs: dict[str, Any] = {
+        "active_decode_blocks_threshold": config.active_decode_blocks_threshold,
+        "active_prefill_tokens_threshold": config.active_prefill_tokens_threshold,
+        "active_prefill_tokens_threshold_frac": config.active_prefill_tokens_threshold_frac,
+    }
+    try:
+        router_config = RouterConfig(
+            router_mode,
+            kv_router_config,
+            enforce_disagg=config.enforce_disagg,
+            **router_config_kwargs,
+        )
+    except TypeError as exc:
+        # Older runtime bindings may not expose `enforce_disagg` yet.
+        if "enforce_disagg" not in str(exc):
+            raise
+        logger.warning(
+            "RouterConfig binding does not support enforce_disagg; continuing without it"
+        )
+        router_config = RouterConfig(
+            router_mode,
+            kv_router_config,
+            **router_config_kwargs,
+        )
     kwargs: dict[str, Any] = {
         "http_host": config.http_host,
         "http_port": config.http_port,

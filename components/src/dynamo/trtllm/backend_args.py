@@ -133,6 +133,27 @@ class DynamoTrtllmArgGroup(ArgGroup):
         )
         add_argument(
             g,
+            flag_name="--load-format",
+            env_var="DYN_TRTLLM_LOAD_FORMAT",
+            default="auto",
+            help="Model loading format passed to TensorRT-LLM (for example: auto, gms).",
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--enable-sleep",
+            env_var="DYN_TRTLLM_ENABLE_SLEEP",
+            default=False,
+            help="Enable TRT-LLM sleep/wake engine routes for memory release and resume.",
+        )
+        add_argument(
+            g,
+            flag_name="--model-loader-extra-config",
+            env_var="DYN_TRTLLM_MODEL_LOADER_EXTRA_CONFIG",
+            default="",
+            help="JSON string for model loader extra config (for example: '{\"gms_read_only\": true}').",
+        )
+        add_argument(
+            g,
             flag_name="--extra-engine-args",
             env_var="DYN_TRTLLM_EXTRA_ENGINE_ARGS",
             default="",
@@ -458,6 +479,9 @@ class DynamoTrtllmConfig(ConfigBase):
     max_seq_len: int
     max_beam_width: int
     free_gpu_memory_fraction: float
+    load_format: str
+    enable_sleep: bool
+    model_loader_extra_config: str
     extra_engine_args: str
     override_engine_args: str
     publish_events_and_metrics: bool

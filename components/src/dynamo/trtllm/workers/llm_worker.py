@@ -22,7 +22,11 @@ from tensorrt_llm.llmapi import (
     SchedulerConfig,
 )
 from tensorrt_llm.llmapi.llm import SamplingParams
-from tensorrt_llm.llmapi.llm_args import KvCacheConnectorConfig
+from tensorrt_llm.llmapi.llm_args import (
+    KvCacheConnectorConfig,
+    LlmArgs,
+    LoadFormat,
+)
 from tensorrt_llm.llmapi.llm_utils import update_llm_args_with_extra_options
 from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
 from tensorrt_llm.metrics import MetricsCollector
@@ -109,6 +113,67 @@ def build_kv_connector_config(config: Config):
     return None
 
 
+def _parse_model_loader_extra_config(raw_value: object) -> dict[str, object]:
+    if raw_value is None:
+        return {}
+    if isinstance(raw_value, dict):
+        return raw_value
+    if isinstance(raw_value, str):
+        if not raw_value.strip():
+            return {}
+        try:
+            parsed = json.loads(raw_value)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"Invalid JSON in --model-loader-extra-config: {exc}"
+            ) from exc
+        if not isinstance(parsed, dict):
+            raise ValueError(
+                "--model-loader-extra-config must decode to a JSON object"
+            )
+        return parsed
+    raise ValueError(
+        "--model-loader-extra-config must be empty, a JSON object string, or a dict"
+    )
+
+
+def _llm_supports_engine_arg(arg_name: str) -> bool:
+    model_fields = getattr(LlmArgs, "model_fields", None)
+    if isinstance(model_fields, dict):
+        return arg_name in model_fields
+    return True
+
+
+def _set_optional_engine_arg(
+    arg_map: dict[str, object],
+    arg_name: str,
+    value: object,
+    *,
+    warn_if_unsupported: bool,
+) -> None:
+    if _llm_supports_engine_arg(arg_name):
+        arg_map[arg_name] = value
+        return
+    if warn_if_unsupported:
+        logging.warning(
+            "Installed TensorRT-LLM does not support engine arg `%s`; ignoring.",
+            arg_name,
+        )
+
+
+def _is_supported_load_format(load_format: str) -> bool:
+    members = getattr(LoadFormat, "__members__", None)
+    if members is None:
+        return True
+    normalized = load_format.upper()
+    if normalized in members:
+        return True
+    for member in members.values():
+        if str(getattr(member, "value", "")).lower() == load_format.lower():
+            return True
+    return False
+
+
 async def init_llm_worker(
     runtime: DistributedRuntime,
     config: Config,
@@ -165,6 +230,28 @@ async def init_llm_worker(
         dynamic_batch_config=dynamic_batch_config,
     )
     kv_connector_config = build_kv_connector_config(config)
+    try:
+        model_loader_extra_config = _parse_model_loader_extra_config(
+            config.model_loader_extra_config
+        )
+    except ValueError as exc:
+        logging.error("%s", exc)
+        sys.exit(1)
+
+    if config.load_format == "gms":
+        try:
+            from gpu_memory_service.integrations.trtllm import setup_gms
+        except ImportError as exc:
+            raise RuntimeError(
+                "GPU Memory Service is required for --load-format gms. "
+                "Install/update the gpu-memory-service package in this environment."
+            ) from exc
+
+        setup_gms(model_loader_extra_config)
+        logging.info(
+            "TensorRT-LLM GMS integration enabled (extra=%s)",
+            model_loader_extra_config,
+        )
 
     arg_map = {
         "model": model_path,
@@ -187,6 +274,31 @@ async def init_llm_worker(
         "enable_iter_perf_stats": config.publish_events_and_metrics,
         "kv_connector_config": kv_connector_config,
     }
+    engine_load_format = config.load_format
+    if config.load_format == "gms" and not _is_supported_load_format("gms"):
+        logging.warning(
+            "Installed TensorRT-LLM does not support load_format='gms'; using "
+            "load_format='auto' for engine args while keeping GMS patches enabled."
+        )
+        engine_load_format = "auto"
+    _set_optional_engine_arg(
+        arg_map,
+        "load_format",
+        engine_load_format,
+        warn_if_unsupported=config.load_format != "auto",
+    )
+    _set_optional_engine_arg(
+        arg_map,
+        "enable_sleep",
+        config.enable_sleep,
+        warn_if_unsupported=config.enable_sleep,
+    )
+    _set_optional_engine_arg(
+        arg_map,
+        "model_loader_extra_config",
+        model_loader_extra_config,
+        warn_if_unsupported=bool(model_loader_extra_config),
+    )
 
     # Add guided decoding backend if specified
     if config.guided_decoding_backend is not None:
@@ -437,6 +549,7 @@ async def init_llm_worker(
             disaggregation_mode=config.disaggregation_mode,
             encode_client=encode_client,
             multimodal_processor=multimodal_processor,
+            generate_endpoint=endpoint,
             connector=connector,
             runtime=runtime,  # Pass runtime for graceful shutdown
             metrics_collector=metrics_collector,
@@ -510,6 +623,18 @@ async def init_llm_worker(
             ) as publisher:
                 handler_config.publisher = publisher
                 handler = RequestHandlerFactory().get_request_handler(handler_config)
+                if config.enable_sleep:
+                    runtime.register_engine_route(
+                        "release_memory_occupation",
+                        handler.release_memory_occupation,
+                    )
+                    runtime.register_engine_route(
+                        "resume_memory_occupation",
+                        handler.resume_memory_occupation,
+                    )
+                    logging.info(
+                        "Registered engine routes: /engine/release_memory_occupation, /engine/resume_memory_occupation"
+                    )
                 await endpoint.serve_endpoint(
                     handler.generate,
                     metrics_labels=metrics_labels,
@@ -521,6 +646,18 @@ async def init_llm_worker(
                 consolidator_publisher.shutdown()
         else:
             handler = RequestHandlerFactory().get_request_handler(handler_config)
+            if config.enable_sleep:
+                runtime.register_engine_route(
+                    "release_memory_occupation",
+                    handler.release_memory_occupation,
+                )
+                runtime.register_engine_route(
+                    "resume_memory_occupation",
+                    handler.resume_memory_occupation,
+                )
+                logging.info(
+                    "Registered engine routes: /engine/release_memory_occupation, /engine/resume_memory_occupation"
+                )
             await endpoint.serve_endpoint(
                 handler.generate, health_check_payload=health_check_payload
             )
