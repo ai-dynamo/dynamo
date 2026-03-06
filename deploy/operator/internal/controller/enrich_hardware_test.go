@@ -97,7 +97,7 @@ func TestEnrichHardwareFromDiscovery_UsesAICSystemIdentifier(t *testing.T) {
 			err := r.enrichHardwareFromDiscovery(context.Background(), dgdr)
 			require.NoError(t, err)
 			require.NotNil(t, dgdr.Spec.Hardware)
-			assert.Equal(t, tt.expectedGPUSKU, dgdr.Spec.Hardware.GPUSKU,
+			assert.Equal(t, tt.expectedGPUSKU, string(dgdr.Spec.Hardware.GPUSKU),
 				"GPUSKU should be the AIC system identifier, not the raw GFD product name %q", tt.gfdProduct)
 		})
 	}
@@ -112,7 +112,7 @@ func TestEnrichHardwareFromDiscovery_FallsBackToModelForUnknownGPU(t *testing.T)
 	err := r.enrichHardwareFromDiscovery(context.Background(), dgdr)
 	require.NoError(t, err)
 	require.NotNil(t, dgdr.Spec.Hardware)
-	assert.Equal(t, "Tesla-V100-SXM2-16GB", dgdr.Spec.Hardware.GPUSKU,
+	assert.Equal(t, "Tesla-V100-SXM2-16GB", string(dgdr.Spec.Hardware.GPUSKU),
 		"Unknown GPU should fall back to raw model name")
 }
 
@@ -155,6 +155,6 @@ func TestEnrichHardwareFromDiscovery_NormalizesUserProvidedGPUSKU(t *testing.T) 
 
 	err := r.enrichHardwareFromDiscovery(context.Background(), dgdr)
 	require.NoError(t, err)
-	assert.Equal(t, "b200_sxm", dgdr.Spec.Hardware.GPUSKU,
+	assert.Equal(t, "b200_sxm", string(dgdr.Spec.Hardware.GPUSKU),
 		"User-provided raw product name should be normalized to AIC system identifier")
 }

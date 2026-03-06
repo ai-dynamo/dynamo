@@ -1177,16 +1177,13 @@ func (r *DynamoGraphDeploymentRequestReconciler) enrichHardwareFromDiscovery(ctx
 	}
 	hw := dgdr.Spec.Hardware
 
-	// Normalize a user-provided GPUSKU to the AIC system identifier format.
-	// Recognized raw GPU product names (e.g., "NVIDIA-B200") are mapped to their AIC identifier
-	// (e.g., "b200_sxm"). Values that cannot be mapped to any known AIC identifier are rejected.
+	// Normalize a user-provided GPUSKU to the canonical AIC system identifier
 	if hw.GPUSKU != "" {
-		normalized := gpu.InferHardwareSystem(hw.GPUSKU)
+		normalized := gpu.InferHardwareSystem(string(hw.GPUSKU))
 		if normalized == "" {
 			return fmt.Errorf(
-				"spec.hardware.gpuSku %q is not a recognized GPU product name or AIC system identifier; "+
-					"use an AIC system identifier (e.g., \"h100_sxm\", \"h200_sxm\", \"b200_sxm\") or a "+
-					"recognized GPU product name that InferHardwareSystem can map",
+				"spec.hardware.gpuSku %q is not a recognized AIC system identifier; "+
+					"valid values: gb200_sxm, h200_sxm, h100_sxm, b200_sxm, a100_sxm, l40s",
 				hw.GPUSKU,
 			)
 		}
@@ -1216,7 +1213,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) enrichHardwareFromDiscovery(ctx
 			hw.GPUSKU = gpuInfo.System
 		} else {
 			// Unknown GPU type: use raw model name; profiler will attempt naive config generation.
-			hw.GPUSKU = gpuInfo.Model
+			hw.GPUSKU = nvidiacomv1beta1.GPUSKUType(gpuInfo.Model)
 		}
 	}
 	if hw.VRAMMB == nil {

@@ -63,7 +63,7 @@ func TestDiscoverGPUs_SingleNode(t *testing.T) {
 	assert.Equal(t, 8, gpuInfo.GPUsPerNode)
 	assert.Equal(t, "H100-SXM5-80GB", gpuInfo.Model)
 	assert.Equal(t, 81920, gpuInfo.VRAMPerGPU)
-	assert.Equal(t, "h100_sxm", gpuInfo.System)
+	assert.Equal(t, "h100_sxm", string(gpuInfo.System))
 }
 
 func TestDiscoverGPUs_MultipleNodesHomogeneous(t *testing.T) {
@@ -341,7 +341,7 @@ func TestInferHardwareSystem(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.description, func(t *testing.T) {
 			result := InferHardwareSystem(tt.gpuProduct)
-			assert.Equal(t, tt.expectedSystem, result, "Failed for GPU: %s", tt.gpuProduct)
+			assert.Equal(t, tt.expectedSystem, string(result), "Failed for GPU: %s", tt.gpuProduct)
 		})
 	}
 }
@@ -357,7 +357,7 @@ func TestInferHardwareSystem_CaseInsensitive(t *testing.T) {
 
 	for _, variant := range variants {
 		result := InferHardwareSystem(variant)
-		assert.Equal(t, "h100_sxm", result, "Should handle case variations: %s", variant)
+		assert.Equal(t, "h100_sxm", string(result), "Should handle case variations: %s", variant)
 	}
 }
 
@@ -372,6 +372,6 @@ func TestInferHardwareSystem_SpacesAndDashes(t *testing.T) {
 
 	for _, variant := range variants {
 		result := InferHardwareSystem(variant)
-		assert.Equal(t, "h100_sxm", result, "Should normalize spaces/dashes: %s", variant)
+		assert.Equal(t, "h100_sxm", string(result), "Should normalize spaces/dashes: %s", variant)
 	}
 }

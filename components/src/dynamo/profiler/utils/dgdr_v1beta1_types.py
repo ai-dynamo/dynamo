@@ -62,6 +62,15 @@ class SearchStrategy(str, Enum):
     Thorough = "thorough"
 
 
+class GPUSKUType(str, Enum):
+    GB200SXM = "gb200_sxm"
+    H200SXM = "h200_sxm"
+    H100SXM = "h100_sxm"
+    B200SXM = "b200_sxm"
+    A100SXM = "a100_sxm"
+    L40S = "l40s"
+
+
 class BackendType(str, Enum):
     Auto = "auto"
     Sglang = "sglang"
@@ -200,9 +209,9 @@ class FeaturesSpec(BaseModel):
 class HardwareSpec(BaseModel):
     """HardwareSpec describes the hardware resources available for profiling and deployment. These fields are typically auto-filled by the operator from cluster discovery."""
 
-    gpuSku: Optional[str] = Field(
+    gpuSku: Optional[GPUSKUType] = Field(
         default=None,
-        description='GPUSKU is the AIC hardware system identifier (e.g., "h100_sxm", "h200_sxm", "b200_sxm"). When omitted, the operator auto-detects this from cluster GPU labels via InferHardwareSystem. Recognized raw GPU product names (e.g., "NVIDIA-B200") are also accepted and automatically normalized to the AIC identifier; unrecognized values that cannot be mapped are rejected.',
+        description="GPUSKU is the AIC hardware system identifier for the GPU. When omitted, the operator auto-detects this via InferHardwareSystem from cluster GPU node labels.",
     )
     vramMb: Optional[float] = Field(
         default=None, description="VRAMMB is the VRAM per GPU in MiB."
