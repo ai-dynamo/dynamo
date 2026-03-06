@@ -135,8 +135,10 @@ where
         // next build the two part message where we package the connection info and the request into
         // a single Vec<u8> that can be sent over the wire.
         // --- package this up in the WorkQueuePublisher ---
+        let serialize_start = std::time::Instant::now();
         let ctrl = serde_json::to_vec(&control_message)?;
         let data = serde_json::to_vec(&request)?;
+        let serialize_ms = serialize_start.elapsed().as_secs_f64() * 1000.0;
 
         tracing::trace!(
             request_id,
@@ -152,6 +154,8 @@ where
         // todo - update this
         let codec = TwoPartCodec::default();
         let buffer = codec.encode_message(msg)?;
+        let encode_ms = serialize_start.elapsed().as_secs_f64() * 1000.0 - serialize_ms;
+        let total_payload_bytes = buffer.len();
 
         // TRANSPORT ABSTRACT REQUIRED - END HERE
 
@@ -168,16 +172,25 @@ where
         inject_trace_headers_into_map(&mut headers);
 
         // Send request (works for all transport types)
+        let send_start = std::time::Instant::now();
         let _response = self
             .req_client
             .send_request(address, buffer, headers)
             .await?;
+        let send_ms = send_start.elapsed().as_secs_f64() * 1000.0;
 
-        tracing::trace!(request_id, "awaiting transport handshake");
+        let handshake_start = std::time::Instant::now();
         let response_stream = response_stream_provider
             .await
             .map_err(|_| PipelineError::DetachedStreamReceiver)?
             .map_err(PipelineError::ConnectionFailed)?;
+        let handshake_ms = handshake_start.elapsed().as_secs_f64() * 1000.0;
+
+        tracing::debug!(
+            request_id,
+            "[perf][addressed_router] serialize={:.3}ms encode={:.3}ms              send={:.3}ms handshake={:.3}ms payload={}bytes",
+            serialize_ms, encode_ms, send_ms, handshake_ms, total_payload_bytes,
+        );
 
         // TODO: Detect end-of-stream using Server-Sent Events (SSE)
         let mut is_complete_final = false;

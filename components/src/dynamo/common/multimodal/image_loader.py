@@ -43,10 +43,92 @@ class ImageLoader:
         self, cache_size: int = CACHE_SIZE_MAXIMUM, http_timeout: float = 30.0
     ):
         self._http_timeout = http_timeout
-        self._image_cache: dict[str, Image.Image] = {}
+        self._image_cache: dict[str, tuple[Image.Image, bytes]] = {}
         self._cache_queue: asyncio.Queue[str] = asyncio.Queue(maxsize=cache_size)
+        self._light_cache: dict[str, tuple[bytes, int, int]] = {}
 
     async def load_image(self, image_url: str) -> Image.Image:
+        """Load image from URL, returning PIL Image only (backward compatible)."""
+        image, _ = await self._fetch_image(image_url)
+        return image
+
+    async def load_image_with_raw_bytes(
+        self, image_url: str
+    ) -> tuple[Image.Image, bytes]:
+        """Load image from URL, returning both PIL Image and original raw bytes."""
+        return await self._fetch_image(image_url)
+
+    async def load_image_light(
+        self, image_url: str
+    ) -> tuple[bytes, int, int]:
+        """Load image returning (raw_bytes, width, height) without convert("RGB").
+
+        Uses PIL lazy open (header-only) to get dimensions. Much faster than
+        full image decode — suitable when only raw bytes and dimensions are needed
+        (e.g., MM Router hashing and token expansion).
+
+        HTTP URLs are cached (raw bytes + dimensions) for repeated access.
+        """
+        parsed_url = urlparse(image_url)
+
+        # Check light cache for HTTP URLs
+        if parsed_url.scheme in ("http", "https"):
+            image_url_lower = image_url.lower()
+            if image_url_lower in self._light_cache:
+                logger.debug(f"Light cache hit for URL: {image_url[:80]}")
+                return self._light_cache[image_url_lower]
+
+        raw_bytes = await self._fetch_raw_bytes(image_url)
+        image_data = BytesIO(raw_bytes)
+        image = await asyncio.to_thread(
+            Image.open, image_data, formats=["JPEG", "PNG", "WEBP"]
+        )
+        result = (raw_bytes, image.width, image.height)
+
+        # Cache HTTP URLs
+        if parsed_url.scheme in ("http", "https"):
+            image_url_lower = image_url.lower()
+            if len(self._light_cache) >= self.CACHE_SIZE_MAXIMUM:
+                # Evict oldest entry
+                oldest = next(iter(self._light_cache))
+                del self._light_cache[oldest]
+            self._light_cache[image_url_lower] = result
+
+        return result
+
+    async def _fetch_raw_bytes(self, image_url: str) -> bytes:
+        """Internal: fetch raw image bytes from URL or data URI."""
+        parsed_url = urlparse(image_url)
+
+        try:
+            if parsed_url.scheme == "data":
+                if not parsed_url.path.startswith("image/"):
+                    raise ValueError("Data URL must be an image type")
+                media_type, data = parsed_url.path.split(",", 1)
+                if ";base64" not in media_type:
+                    raise ValueError("Data URL must be base64 encoded")
+                try:
+                    return base64.b64decode(data)
+                except binascii.Error as e:
+                    raise ValueError(f"Invalid base64 encoding: {e}")
+            elif parsed_url.scheme in ("http", "https"):
+                http_client = get_http_client(self._http_timeout)
+                response = await http_client.get(image_url)
+                response.raise_for_status()
+                if not response.content:
+                    raise ValueError("Empty response content from image URL")
+                return response.content
+            else:
+                raise ValueError(f"Invalid image source scheme: {parsed_url.scheme}")
+        except httpx.HTTPError as e:
+            logger.error(f"HTTP error loading image: {e}")
+            raise
+        except Exception as e:
+            logger.error(f"Error loading image: {e}")
+            raise ValueError(f"Failed to load image: {e}")
+
+    async def _fetch_image(self, image_url: str) -> tuple[Image.Image, bytes]:
+        """Internal: fetch image and return (PIL Image, raw bytes)."""
         parsed_url = urlparse(image_url)
 
         # For HTTP(S) URLs, check cache first
@@ -56,66 +138,33 @@ class ImageLoader:
                 logger.debug(f"Image found in cache for URL: {image_url}")
                 return self._image_cache[image_url_lower]
 
-        try:
-            if parsed_url.scheme == "data":
-                # Parse data URL format: data:[<media type>][;base64],<data>
-                if not parsed_url.path.startswith("image/"):
-                    raise ValueError("Data URL must be an image type")
+        raw_bytes = await self._fetch_raw_bytes(image_url)
 
-                # Split the path into media type and data
-                media_type, data = parsed_url.path.split(",", 1)
-                if ";base64" not in media_type:
-                    raise ValueError("Data URL must be base64 encoded")
+        image_data = BytesIO(raw_bytes)
 
-                try:
-                    image_bytes = base64.b64decode(data)
-                    image_data = BytesIO(image_bytes)
-                except binascii.Error as e:
-                    raise ValueError(f"Invalid base64 encoding: {e}")
-            elif parsed_url.scheme in ("http", "https"):
-                http_client = get_http_client(self._http_timeout)
+        # PIL is sync, so offload to a thread to avoid blocking the event loop
+        # Restrict to supported formats to prevent PSD parsing (GHSA-cfh3-3jmp-rvhc)
+        image = await asyncio.to_thread(
+            Image.open, image_data, formats=["JPEG", "PNG", "WEBP"]
+        )
 
-                response = await http_client.get(image_url)
-                response.raise_for_status()
+        # Validate image format and convert to RGB
+        if image.format not in ("JPEG", "PNG", "WEBP"):
+            raise ValueError(f"Unsupported image format: {image.format}")
 
-                if not response.content:
-                    raise ValueError("Empty response content from image URL")
+        image_converted = image.convert("RGB")
 
-                image_data = BytesIO(response.content)
-            else:
-                raise ValueError(f"Invalid image source scheme: {parsed_url.scheme}")
+        # Cache HTTP(S) URLs
+        if parsed_url.scheme in ("http", "https"):
+            image_url_lower = image_url.lower()
+            if self._cache_queue.full():
+                oldest_image_url = await self._cache_queue.get()
+                del self._image_cache[oldest_image_url]
 
-            # PIL is sync, so offload to a thread to avoid blocking the event loop
-            # Restrict to supported formats to prevent PSD parsing (GHSA-cfh3-3jmp-rvhc)
-            image = await asyncio.to_thread(
-                Image.open, image_data, formats=["JPEG", "PNG", "WEBP"]
-            )
+            self._image_cache[image_url_lower] = (image_converted, raw_bytes)
+            await self._cache_queue.put(image_url_lower)
 
-            # Validate image format and convert to RGB
-            if image.format not in ("JPEG", "PNG", "WEBP"):
-                raise ValueError(f"Unsupported image format: {image.format}")
-
-            image_converted = image.convert("RGB")
-
-            # Cache HTTP(S) URLs
-            if parsed_url.scheme in ("http", "https"):
-                image_url_lower = image_url.lower()
-                # Cache the image for future use, and evict the oldest image if the cache is full
-                if self._cache_queue.full():
-                    oldest_image_url = await self._cache_queue.get()
-                    del self._image_cache[oldest_image_url]
-
-                self._image_cache[image_url_lower] = image_converted
-                await self._cache_queue.put(image_url_lower)
-
-            return image_converted
-
-        except httpx.HTTPError as e:
-            logger.error(f"HTTP error loading image: {e}")
-            raise
-        except Exception as e:
-            logger.error(f"Error loading image: {e}")
-            raise ValueError(f"Failed to load image: {e}")
+        return (image_converted, raw_bytes)
 
     async def load_image_batch(
         self,
@@ -190,3 +239,40 @@ class ImageLoader:
             raise Exception(collective_exceptions)
 
         return loaded_images
+
+    async def load_image_batch_with_raw_bytes(
+        self,
+        image_mm_items: List[Dict[str, Any]],
+    ) -> tuple[List[Any], List[bytes]]:
+        """Load a batch of images, returning both PIL Images and raw bytes.
+
+        Returns:
+            Tuple of (images, raw_bytes_list)
+        """
+        image_futures = []
+
+        for item in image_mm_items:
+            if isinstance(item, dict) and URL_VARIANT_KEY in item:
+                url = item[URL_VARIANT_KEY]
+                image_futures.append(self.load_image_with_raw_bytes(url))
+
+        results = await asyncio.gather(*image_futures, return_exceptions=True)
+        images = []
+        raw_bytes_list = []
+        collective_exceptions = ""
+        for media_item, result in zip(image_mm_items, results):
+            if isinstance(result, Exception):
+                source = media_item.get(URL_VARIANT_KEY, "unknown")
+                logger.error(f"Failed to load image from {source[:80]}...: {result}")
+                collective_exceptions += (
+                    f"Failed to load image from {source[:80]}...: {result}\n"
+                )
+                continue
+            img, raw = result
+            images.append(img)
+            raw_bytes_list.append(raw)
+
+        if collective_exceptions:
+            raise Exception(collective_exceptions)
+
+        return images, raw_bytes_list

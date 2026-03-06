@@ -104,6 +104,11 @@ pub struct MmRoutingInfo {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum MultimodalData {
     Url(url::Url),
+    /// Raw URL string that skips url::Url::parse() during deserialization.
+    /// Serializes as "Url" on the wire so downstream backends handle it
+    /// identically to the parsed Url variant.
+    #[serde(rename(serialize = "Url"), alias = "RawUrl")]
+    RawUrl(String),
     Decoded(RdmaMediaDataDescriptor),
 }
 

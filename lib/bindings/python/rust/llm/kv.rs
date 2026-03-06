@@ -771,49 +771,65 @@ impl KvRouter {
         multi_modal_data: Option<PyObject>,
         mm_routing_info: Option<PyObject>,
     ) -> PyResult<Bound<'p, PyAny>> {
+        let depyth_start = std::time::Instant::now();
         // Depythonize the options with defaults
+        let t0 = std::time::Instant::now();
         let stop_conditions: StopConditions = if let Some(obj) = stop_conditions {
             depythonize(obj.bind(py)).map_err(to_pyerr)?
         } else {
             StopConditions::default()
         };
+        let stop_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
+        let t0 = std::time::Instant::now();
         let sampling_options: SamplingOptions = if let Some(obj) = sampling_options {
             depythonize(obj.bind(py)).map_err(to_pyerr)?
         } else {
             SamplingOptions::default()
         };
+        let sampling_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
+        let t0 = std::time::Instant::now();
         let output_options: OutputOptions = if let Some(obj) = output_options {
             depythonize(obj.bind(py)).map_err(to_pyerr)?
         } else {
             OutputOptions::default()
         };
+        let output_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
+        let t0 = std::time::Instant::now();
         let router_config_override: Option<llm_rs::kv_router::RouterConfigOverride> =
             if let Some(obj) = router_config_override {
                 Some(depythonize(obj.bind(py)).map_err(to_pyerr)?)
             } else {
                 None
             };
+        let router_cfg_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
+        let t0 = std::time::Instant::now();
         let extra_args: Option<serde_json::Value> = if let Some(obj) = extra_args {
             Some(depythonize(obj.bind(py)).map_err(to_pyerr)?)
         } else {
             None
         };
+        let extra_args_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
+        let t0 = std::time::Instant::now();
         let block_mm_infos = block_mm_infos
             .map(|obj| depythonize_block_mm_infos(obj.bind(py)))
             .transpose()?;
+        let block_mm_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
+        let t0 = std::time::Instant::now();
         let multi_modal_data: Option<llm_rs::protocols::common::preprocessor::MultimodalDataMap> =
             if let Some(obj) = multi_modal_data {
                 Some(depythonize(obj.bind(py)).map_err(to_pyerr)?)
             } else {
                 None
             };
+        let mm_data_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
+        let t0 = std::time::Instant::now();
         let mm_routing_info: Option<llm_rs::protocols::common::preprocessor::MmRoutingInfo> =
             if let Some(obj) = mm_routing_info {
                 Some(depythonize(obj.bind(py)).map_err(to_pyerr)?)
@@ -825,6 +841,7 @@ impl KvRouter {
                     },
                 )
             };
+        let mm_routing_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
         // Create tracker to capture worker routing info from KvRouter
         let tracker = Arc::new(RequestTracker::new());
@@ -855,6 +872,15 @@ impl KvRouter {
         }
 
         let request = request_builder.build().map_err(to_pyerr)?;
+        let depyth_ms = depyth_start.elapsed().as_secs_f64() * 1000.0;
+        tracing::debug!(
+            "[perf][kv_binding] generate: depythonize_total={:.3}ms \
+             stop={:.3}ms sampling={:.3}ms output={:.3}ms router_cfg={:.3}ms \
+             extra_args={:.3}ms block_mm={:.3}ms mm_data={:.3}ms mm_routing={:.3}ms",
+            depyth_ms,
+            stop_ms, sampling_ms, output_ms, router_cfg_ms,
+            extra_args_ms, block_mm_ms, mm_data_ms, mm_routing_ms,
+        );
 
         // Use the helper method to process the request
         Self::process_request_to_stream(py, self.inner.clone(), request, Some(tracker))
@@ -880,6 +906,29 @@ impl KvRouter {
         };
 
         // Use the helper method to process the request
+        Self::process_request_to_stream(py, self.inner.clone(), request, Some(tracker))
+    }
+
+    /// Fast path: accept a pre-serialized JSON string instead of Python objects.
+    /// Avoids depythonize() overhead by using serde_json::from_str() directly.
+    fn generate_from_json_str<'p>(
+        &self,
+        py: Python<'p>,
+        json_str: &str,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let start = std::time::Instant::now();
+        let mut request: llm_rs::protocols::common::preprocessor::PreprocessedRequest =
+            serde_json::from_str(json_str).map_err(to_pyerr)?;
+        let from_str_ms = start.elapsed().as_secs_f64() * 1000.0;
+
+        let tracker = Arc::new(RequestTracker::new());
+        request.tracker = Some(tracker.clone());
+
+        tracing::debug!(
+            "[perf][kv_binding] generate_from_json_str: from_str={:.3}ms json_len={}",
+            from_str_ms, json_str.len(),
+        );
+
         Self::process_request_to_stream(py, self.inner.clone(), request, Some(tracker))
     }
 
