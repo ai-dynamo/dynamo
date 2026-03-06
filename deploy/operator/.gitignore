@@ -29,9 +29,6 @@ go.work
 .idea
 .vscode
 *.swp
-
-# Tilt local settings (personal overrides)
-tilt-settings.local.yaml
 *.swo
 *~
 

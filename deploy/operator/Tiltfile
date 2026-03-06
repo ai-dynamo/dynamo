@@ -35,10 +35,6 @@ if os.path.exists('tilt-settings.yaml'):
     data = read_yaml('tilt-settings.yaml', default={})
     if data:
         settings.update(data)
-if os.path.exists('tilt-settings.local.yaml'):
-    local_data = read_yaml('tilt-settings.local.yaml', default={})
-    if local_data:
-        settings.update(local_data)
 
 if 'allowed_contexts' in settings:
     allow_k8s_contexts(settings['allowed_contexts'])
