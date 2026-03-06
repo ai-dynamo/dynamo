@@ -197,7 +197,7 @@ async def async_main():
         active_decode_blocks_threshold=config.active_decode_blocks_threshold,
         active_prefill_tokens_threshold=config.active_prefill_tokens_threshold,
         active_prefill_tokens_threshold_frac=config.active_prefill_tokens_threshold_frac,
-        decode_fallback=config.decode_fallback,
+        enforce_disagg=config.enforce_disagg,
     )
     kwargs: dict[str, Any] = {
         "http_host": config.http_host,
@@ -228,7 +228,7 @@ async def async_main():
     if config.chat_processor == "vllm":
         assert (
             vllm_flags is not None
-        ), "vllm_flags is required when chat_processor is vllm"
+        ), "vllm_flags is required when chat processor is vllm"
         chat_engine_factory = setup_engine_factory(
             runtime, router_config, config, vllm_flags
         ).chat_engine_factory
