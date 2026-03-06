@@ -94,6 +94,26 @@ Response:
 
 Workers are marked as "busy" based on a dual-threshold system. A worker is considered busy when **either** threshold is exceeded.
 
+### Prerequisites for Decode-Block Rejection
+
+Decode-block based rejection (`active_decode_blocks_threshold`) only works when all of these conditions are true:
+
+1. A decode-block threshold is configured (`--active-decode-blocks-threshold` or `/busy_threshold` API).
+2. The frontend `KvWorkerMonitor` is receiving worker load events (`ActiveLoad`).
+3. Workers are publishing `active_decode_blocks`.
+4. Worker runtime config provides `kv_total_blocks` so utilization ratio can be computed.
+
+If any prerequisite is missing, decode-block busy detection is effectively disabled for those workers.
+
+### Important: Different from `router_track_active_blocks`
+
+`active_decode_blocks_threshold` and `router_track_active_blocks` are related to load, but they are not the same feature:
+
+- `active_decode_blocks_threshold` drives busy/free worker classification and request rejection (HTTP 503 when all workers are busy).
+- `router_track_active_blocks` controls KV router internal block bookkeeping used for routing decisions.
+
+In disaggregated setups, prefill routing intentionally disables `router_track_active_blocks`; this does **not** disable decode-block rejection for decode workers.
+
 ### KV Cache Block Threshold
 
 Monitors the percentage of KV cache blocks in use:
@@ -202,6 +222,13 @@ Track rejection behavior with these metrics:
 | `dynamo_tasks_rejected_total` | Counter | Total number of rejected tasks |
 | `dynamo_queued_requests` | Gauge | Requests waiting in HTTP queue |
 
+For decode-block rejection debugging, also inspect:
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `dynamo_frontend_worker_active_decode_blocks` | Gauge | Latest active decode blocks per worker and DP rank |
+| `dynamo_frontend_worker_active_prefill_tokens` | Gauge | Latest active prefill tokens per worker and DP rank |
+
 ### Example Prometheus Queries
 
 ```promql
@@ -307,6 +334,25 @@ If using Kubernetes HPA, ensure rejection thresholds trigger before autoscaling:
 # Rejection at 85% provides buffer
 --active-decode-blocks-threshold 0.85
 ```
+
+## Troubleshooting
+
+### Decode-block rejection not triggering
+
+1. Confirm threshold is actually set:
+```bash
+curl -s http://localhost:8000/busy_threshold
+```
+2. Verify frontend is receiving worker load updates:
+```bash
+curl -s http://localhost:8000/metrics | grep dynamo_frontend_worker_active_decode_blocks
+```
+3. Check frontend logs for worker-monitor subscription issues (for example, warnings that KV metrics subscriber is unavailable).
+4. Verify event transport configuration between frontend and workers (`--event-plane`, NATS/ZMQ connectivity).
+
+### Common confusion: `router_track_active_blocks`
+
+If `active_decode_blocks_threshold` is configured but you suspect `router_track_active_blocks` is the blocker, treat that as a separate routing knob. Busy rejection depends on worker load events and threshold configuration, not on the router's internal active-block tracking flag.
 
 ## Related Documentation
 
