@@ -1,19 +1,17 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Generic sliding-window performance metrics tracker.
+//! Generic sliding-window performance metrics with a command-loop backend.
 //!
-//! This module provides:
-//! - factory-style metric handles (`new_*_metric`)
-//! - per-kind recording (`rate`, `distribution`, `ratio`)
-//! - snapshot computation with optional quantiles
-//! - optional Prometheus gauge publisher
+//! All mutations and publishing are processed by a single worker thread via commands/events.
+//! Hot-path recording from metric handles is lock-free at call site (bounded `try_send`).
 
 use super::{MetricsHierarchy, create_metric, prometheus_names::build_component_metric_name};
 use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
-use std::sync::mpsc::{self, RecvTimeoutError, Sender};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -22,8 +20,9 @@ const SUFFIX_AVG: &str = "avg";
 const SUFFIX_NUMERATOR: &str = "numerator";
 const SUFFIX_DENOMINATOR: &str = "denominator";
 const SUFFIX_RATIO: &str = "ratio";
+const DEFAULT_QUEUE_CAPACITY: usize = 16_384;
+const WORKER_POLL: Duration = Duration::from_millis(100);
 
-/// Supported metric behaviors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PerformanceMetricKind {
     Rate,
@@ -31,13 +30,13 @@ pub enum PerformanceMetricKind {
     Ratio,
 }
 
-/// Declarative metric configuration used by tracker and publisher.
 #[derive(Debug, Clone)]
 pub struct PerformanceMetricSpec {
     pub name: String,
     pub kind: PerformanceMetricKind,
     pub quantiles: Vec<f64>,
     pub sample_period_seconds: Option<f64>,
+    pub window_seconds: Option<f64>,
 }
 
 impl PerformanceMetricSpec {
@@ -45,6 +44,7 @@ impl PerformanceMetricSpec {
         name: impl Into<String>,
         quantiles: Vec<f64>,
         sample_period_seconds: Option<f64>,
+        window_seconds: Option<f64>,
     ) -> Self {
         Self {
             name: name.into(),
@@ -53,29 +53,45 @@ impl PerformanceMetricSpec {
             sample_period_seconds: sample_period_seconds
                 .filter(|v| v.is_finite() && *v > 0.0)
                 .map(|v| v.max(0.1)),
+            window_seconds: window_seconds
+                .filter(|v| v.is_finite() && *v > 0.0)
+                .map(|v| v.max(0.1)),
         }
     }
 
-    pub fn distribution(name: impl Into<String>, quantiles: Vec<f64>) -> Self {
+    pub fn distribution(
+        name: impl Into<String>,
+        quantiles: Vec<f64>,
+        window_seconds: Option<f64>,
+    ) -> Self {
         Self {
             name: name.into(),
             kind: PerformanceMetricKind::Distribution,
             quantiles: normalize_quantiles(quantiles),
             sample_period_seconds: None,
+            window_seconds: window_seconds
+                .filter(|v| v.is_finite() && *v > 0.0)
+                .map(|v| v.max(0.1)),
         }
     }
 
-    pub fn ratio(name: impl Into<String>, quantiles: Vec<f64>) -> Self {
+    pub fn ratio(
+        name: impl Into<String>,
+        quantiles: Vec<f64>,
+        window_seconds: Option<f64>,
+    ) -> Self {
         Self {
             name: name.into(),
             kind: PerformanceMetricKind::Ratio,
             quantiles: normalize_quantiles(quantiles),
             sample_period_seconds: None,
+            window_seconds: window_seconds
+                .filter(|v| v.is_finite() && *v > 0.0)
+                .map(|v| v.max(0.1)),
         }
     }
 }
 
-/// Sliding-window snapshot for a single metric.
 #[derive(Debug, Clone)]
 pub struct MetricSnapshot {
     pub name: String,
@@ -88,151 +104,80 @@ pub struct MetricSnapshot {
     pub ratio: Option<f64>,
 }
 
-/// Sliding-window performance metric tracker.
-///
-/// Use `new_*_metric` methods to create handles and record values through them.
 #[derive(Debug)]
 pub struct PerformanceMetricsRegistry {
-    inner: Arc<PerformanceMetricsRegistryInner>,
+    inner: Arc<RegistryInner>,
 }
 
-#[derive(Debug)]
-struct PerformanceMetricsRegistryInner {
-    window_duration: Duration,
-    metrics: Mutex<HashMap<String, MetricEntry>>,
+impl Clone for PerformanceMetricsRegistry {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
+    }
 }
 
-/// Attached metrics session with Prometheus publisher handles.
-pub struct AttachedPerformanceMetrics {
-    tracker: Arc<PerformanceMetricsRegistryInner>,
-    publisher: PerformanceMetricsPrometheusPublisher,
-}
-
-/// Shared internal metric handle.
 #[derive(Clone)]
 struct PerformanceMetricHandle {
-    tracker: Arc<PerformanceMetricsRegistryInner>,
+    inner: Arc<RegistryInner>,
     metric_name: String,
 }
 
-impl PerformanceMetricHandle {
-    /// Metric name.
-    pub fn name(&self) -> &str {
-        &self.metric_name
-    }
-
-    fn record_count(&self, count: u64) -> anyhow::Result<()> {
-        self.tracker.record_count_internal(&self.metric_name, count)
-    }
-
-    fn record_value(&self, value: f64) -> anyhow::Result<()> {
-        self.tracker.record_value_internal(&self.metric_name, value)
-    }
-
-    fn record_ratio(&self, numerator: f64, denominator: f64) -> anyhow::Result<()> {
-        self.tracker
-            .record_ratio_internal(&self.metric_name, numerator, denominator)
-    }
-
-    fn snapshot(&self) -> Option<MetricSnapshot> {
-        self.tracker.snapshot_metric(&self.metric_name)
-    }
-}
-
-impl AttachedPerformanceMetrics {
-    /// Window duration used for snapshot calculations.
-    pub fn window_duration(&self) -> Duration {
-        self.tracker.window_duration()
-    }
-
-    /// Snapshot all registered metrics.
-    pub fn snapshot_all(&self) -> Vec<MetricSnapshot> {
-        self.tracker.snapshot_all()
-    }
-
-    /// Update registered gauges from latest tracker snapshots.
-    pub fn publish(&self) {
-        self.publisher.publish();
-    }
-
-    /// Start periodic publish loop.
-    pub fn start_auto_publish(&self, interval: Duration) {
-        self.publisher.start_auto_publish(interval);
-    }
-
-    /// Stop periodic publish loop.
-    pub fn stop_auto_publish(&self) {
-        self.publisher.stop_auto_publish();
-    }
-}
-
-/// Strongly typed handle for rate metrics.
 #[derive(Clone)]
 pub struct RateMetricHandle {
     inner: PerformanceMetricHandle,
 }
 
-impl RateMetricHandle {
-    /// Metric name.
-    pub fn name(&self) -> &str {
-        self.inner.name()
-    }
-
-    /// Record units/events for a rate metric.
-    pub fn record_count(&self, count: u64) -> anyhow::Result<()> {
-        self.inner.record_count(count)
-    }
-
-    /// Get current snapshot.
-    pub fn snapshot(&self) -> Option<MetricSnapshot> {
-        self.inner.snapshot()
-    }
-}
-
-/// Strongly typed handle for distribution metrics.
 #[derive(Clone)]
 pub struct DistributionMetricHandle {
     inner: PerformanceMetricHandle,
 }
 
-impl DistributionMetricHandle {
-    /// Metric name.
-    pub fn name(&self) -> &str {
-        self.inner.name()
-    }
-
-    /// Record value sample.
-    pub fn record_value(&self, value: f64) -> anyhow::Result<()> {
-        self.inner.record_value(value)
-    }
-
-    /// Get current snapshot.
-    pub fn snapshot(&self) -> Option<MetricSnapshot> {
-        self.inner.snapshot()
-    }
-}
-
-/// Strongly typed handle for ratio metrics.
 #[derive(Clone)]
 pub struct RatioMetricHandle {
     inner: PerformanceMetricHandle,
 }
 
-impl RatioMetricHandle {
-    /// Metric name.
-    pub fn name(&self) -> &str {
-        self.inner.name()
-    }
+#[derive(Debug)]
+struct RegistryInner {
+    window_duration: Duration,
+    publish_interval: Duration,
+    tx: SyncSender<WorkerMessage>,
+    dropped_events: AtomicU64,
+    worker: Mutex<Option<JoinHandle<()>>>,
+}
 
-    /// Record (numerator, denominator) sample.
-    pub fn record_ratio(&self, numerator: f64, denominator: f64) -> anyhow::Result<()> {
-        self.inner.record_ratio(numerator, denominator)
-    }
+struct WorkerState {
+    window_duration: Duration,
+    publish_interval: Duration,
+    metrics: HashMap<String, MetricEntry>,
+    publisher: Option<PublisherState>,
+}
 
-    /// Get current snapshot.
-    pub fn snapshot(&self) -> Option<MetricSnapshot> {
-        self.inner.snapshot()
-    }
+struct PublisherState {
+    hierarchy: Arc<dyn MetricsHierarchy>,
+    metric_prefix: String,
+    labels: Vec<(String, String)>,
+    handles: HashMap<String, MetricHandles>,
+    next_publish_at: Instant,
+}
+
+#[derive(Clone)]
+enum MetricHandles {
+    Rate {
+        per_second: prometheus::Gauge,
+        quantiles: Vec<(f64, prometheus::Gauge)>,
+    },
+    Distribution {
+        avg: prometheus::Gauge,
+        quantiles: Vec<(f64, prometheus::Gauge)>,
+    },
+    Ratio {
+        numerator: prometheus::Gauge,
+        denominator: prometheus::Gauge,
+        ratio: prometheus::Gauge,
+        quantiles: Vec<(f64, prometheus::Gauge)>,
+    },
 }
 
 #[derive(Debug)]
@@ -254,198 +199,301 @@ enum MetricState {
     },
 }
 
+enum WorkerMessage {
+    RegisterMetric {
+        spec: PerformanceMetricSpec,
+        resp: mpsc::Sender<anyhow::Result<()>>,
+    },
+    UnregisterMetric {
+        name: String,
+        resp: mpsc::Sender<anyhow::Result<()>>,
+    },
+    RecordCount {
+        name: String,
+        count: u64,
+        recorded_at: Instant,
+    },
+    RecordValue {
+        name: String,
+        value: f64,
+        recorded_at: Instant,
+    },
+    RecordRatio {
+        name: String,
+        numerator: f64,
+        denominator: f64,
+        recorded_at: Instant,
+    },
+    SnapshotMetric {
+        name: String,
+        resp: mpsc::Sender<Option<MetricSnapshot>>,
+    },
+    SnapshotAll {
+        resp: mpsc::Sender<Vec<MetricSnapshot>>,
+    },
+    AttachPublisher {
+        hierarchy: Arc<dyn MetricsHierarchy>,
+        metric_prefix: String,
+        labels: Vec<(String, String)>,
+        resp: mpsc::Sender<anyhow::Result<()>>,
+    },
+    Shutdown,
+}
+
 impl PerformanceMetricsRegistry {
-    /// Create tracker with bounded sliding window duration.
     pub fn new(window_duration: Duration) -> Self {
+        Self::new_with_publish_interval(window_duration, Duration::from_secs(5))
+    }
+
+    pub fn new_with_publish_interval(
+        window_duration: Duration,
+        publish_interval: Duration,
+    ) -> Self {
+        let window_duration = window_duration.max(Duration::from_secs(1));
+        let publish_interval = publish_interval
+            .max(Duration::from_secs(2))
+            .min(Duration::from_secs(60));
+        let (tx, rx) = mpsc::sync_channel::<WorkerMessage>(DEFAULT_QUEUE_CAPACITY);
+        let worker = std::thread::spawn(move || worker_loop(rx, window_duration, publish_interval));
+
         Self {
-            inner: Arc::new(PerformanceMetricsRegistryInner {
-                window_duration: window_duration.max(Duration::from_secs(1)),
-                metrics: Mutex::new(HashMap::new()),
+            inner: Arc::new(RegistryInner {
+                window_duration,
+                publish_interval,
+                tx,
+                dropped_events: AtomicU64::new(0),
+                worker: Mutex::new(Some(worker)),
             }),
         }
     }
 
-    /// Window duration used for snapshot calculations.
     pub fn window_duration(&self) -> Duration {
-        self.inner.window_duration()
+        self.inner.window_duration
     }
 
-    /// Clear all in-memory metric state.
-    pub fn clear(&self) {
-        self.inner.clear();
+    pub fn dropped_events(&self) -> u64 {
+        self.inner.dropped_events.load(Ordering::Relaxed)
     }
 
-    fn register_and_build_handle(
-        &self,
-        name: impl Into<String>,
-        register: impl FnOnce(&PerformanceMetricsRegistryInner, &str) -> anyhow::Result<()>,
-    ) -> anyhow::Result<PerformanceMetricHandle> {
-        let name = name.into();
-        register(&self.inner, &name)?;
-        Ok(PerformanceMetricHandle {
-            tracker: Arc::clone(&self.inner),
-            metric_name: name,
-        })
-    }
-
-    /// Factory: create a rate metric handle.
     pub fn new_rate_metric(
         &self,
         name: impl Into<String>,
         quantiles: Vec<f64>,
         sample_period_seconds: Option<f64>,
+        window_seconds: Option<f64>,
     ) -> anyhow::Result<RateMetricHandle> {
-        let inner = self.register_and_build_handle(name, |registry, metric_name| {
-            registry.register_rate_metric(metric_name, quantiles, sample_period_seconds)
-        })?;
-        Ok(RateMetricHandle { inner })
+        let name = name.into();
+        self.inner.register_metric(PerformanceMetricSpec::rate(
+            name.clone(),
+            quantiles,
+            sample_period_seconds,
+            window_seconds,
+        ))?;
+        Ok(RateMetricHandle {
+            inner: PerformanceMetricHandle {
+                inner: Arc::clone(&self.inner),
+                metric_name: name,
+            },
+        })
     }
 
-    /// Factory: create a distribution metric handle.
     pub fn new_distribution_metric(
         &self,
         name: impl Into<String>,
         quantiles: Vec<f64>,
+        window_seconds: Option<f64>,
     ) -> anyhow::Result<DistributionMetricHandle> {
-        let inner = self.register_and_build_handle(name, |registry, metric_name| {
-            registry.register_distribution_metric(metric_name, quantiles)
-        })?;
-        Ok(DistributionMetricHandle { inner })
+        let name = name.into();
+        self.inner
+            .register_metric(PerformanceMetricSpec::distribution(
+                name.clone(),
+                quantiles,
+                window_seconds,
+            ))?;
+        Ok(DistributionMetricHandle {
+            inner: PerformanceMetricHandle {
+                inner: Arc::clone(&self.inner),
+                metric_name: name,
+            },
+        })
     }
 
-    /// Factory: create a ratio metric handle.
     pub fn new_ratio_metric(
         &self,
         name: impl Into<String>,
         quantiles: Vec<f64>,
+        window_seconds: Option<f64>,
     ) -> anyhow::Result<RatioMetricHandle> {
-        let inner = self.register_and_build_handle(name, |registry, metric_name| {
-            registry.register_ratio_metric(metric_name, quantiles)
-        })?;
-        Ok(RatioMetricHandle { inner })
+        let name = name.into();
+        self.inner.register_metric(PerformanceMetricSpec::ratio(
+            name.clone(),
+            quantiles,
+            window_seconds,
+        ))?;
+        Ok(RatioMetricHandle {
+            inner: PerformanceMetricHandle {
+                inner: Arc::clone(&self.inner),
+                metric_name: name,
+            },
+        })
     }
 
-    /// Attach to a metrics hierarchy, consume builder, and return an attached metrics session.
-    pub fn attach_to_hierarchy<H: MetricsHierarchy + ?Sized>(
-        self,
-        hierarchy: &H,
-        metric_prefix: &str,
-        labels: &[(&str, &str)],
-    ) -> anyhow::Result<AttachedPerformanceMetrics> {
-        let publisher = PerformanceMetricsPrometheusPublisher::attach_to_hierarchy(
-            Arc::clone(&self.inner),
-            hierarchy,
-            metric_prefix,
-            labels,
-        )?;
-        Ok(AttachedPerformanceMetrics {
-            tracker: self.inner,
-            publisher,
-        })
+    pub fn unregister_metric(&self, name: impl Into<String>) -> anyhow::Result<()> {
+        self.inner.unregister_metric(name.into())
+    }
+
+    pub fn snapshot_all(&self) -> Vec<MetricSnapshot> {
+        self.inner.snapshot_all()
+    }
+
+    pub fn attach_to_hierarchy(
+        &self,
+        hierarchy: Arc<dyn MetricsHierarchy>,
+        metric_prefix: impl Into<String>,
+        labels: &[(impl AsRef<str>, impl AsRef<str>)],
+    ) -> anyhow::Result<()> {
+        let labels_owned = labels
+            .iter()
+            .map(|(k, v)| (k.as_ref().to_string(), v.as_ref().to_string()))
+            .collect::<Vec<_>>();
+        self.inner
+            .attach_publisher(hierarchy, metric_prefix.into(), labels_owned)
     }
 }
 
-impl PerformanceMetricsRegistryInner {
-    fn window_duration(&self) -> Duration {
-        self.window_duration
+impl PerformanceMetricHandle {
+    pub fn name(&self) -> &str {
+        &self.metric_name
     }
 
-    fn clear(&self) {
-        self.metrics.lock().clear();
+    fn record_count(&self, count: u64) -> anyhow::Result<()> {
+        self.inner.record_count(self.metric_name.clone(), count)
     }
 
+    fn record_value(&self, value: f64) -> anyhow::Result<()> {
+        self.inner.record_value(self.metric_name.clone(), value)
+    }
+
+    fn record_ratio(&self, numerator: f64, denominator: f64) -> anyhow::Result<()> {
+        self.inner
+            .record_ratio(self.metric_name.clone(), numerator, denominator)
+    }
+
+    fn snapshot(&self) -> Option<MetricSnapshot> {
+        self.inner.snapshot_metric(self.metric_name.clone())
+    }
+}
+
+impl RateMetricHandle {
+    pub fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    pub fn record_count(&self, count: u64) -> anyhow::Result<()> {
+        self.inner.record_count(count)
+    }
+
+    pub fn snapshot(&self) -> Option<MetricSnapshot> {
+        self.inner.snapshot()
+    }
+}
+
+impl DistributionMetricHandle {
+    pub fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    pub fn record_value(&self, value: f64) -> anyhow::Result<()> {
+        self.inner.record_value(value)
+    }
+
+    pub fn snapshot(&self) -> Option<MetricSnapshot> {
+        self.inner.snapshot()
+    }
+}
+
+impl RatioMetricHandle {
+    pub fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    pub fn record_ratio(&self, numerator: f64, denominator: f64) -> anyhow::Result<()> {
+        self.inner.record_ratio(numerator, denominator)
+    }
+
+    pub fn snapshot(&self) -> Option<MetricSnapshot> {
+        self.inner.snapshot()
+    }
+}
+
+impl RegistryInner {
     fn register_metric(&self, spec: PerformanceMetricSpec) -> anyhow::Result<()> {
-        let mut metrics = self.metrics.lock();
-        if spec.name.trim().is_empty() {
-            anyhow::bail!("metric name must not be empty");
-        }
-        if metrics.contains_key(&spec.name) {
-            anyhow::bail!("metric '{}' already registered", spec.name);
-        }
-
-        let state = match spec.kind {
-            PerformanceMetricKind::Rate => MetricState::Rate {
-                counts: VecDeque::new(),
-            },
-            PerformanceMetricKind::Distribution => MetricState::Distribution {
-                values: VecDeque::new(),
-            },
-            PerformanceMetricKind::Ratio => MetricState::Ratio {
-                pairs: VecDeque::new(),
-            },
-        };
-
-        metrics.insert(spec.name.clone(), MetricEntry { spec, state });
-        Ok(())
+        let (resp_tx, resp_rx) = mpsc::channel();
+        self.tx
+            .send(WorkerMessage::RegisterMetric {
+                spec,
+                resp: resp_tx,
+            })
+            .map_err(|_| anyhow::anyhow!("metrics worker is not running"))?;
+        resp_rx
+            .recv()
+            .map_err(|_| anyhow::anyhow!("metrics worker did not respond"))?
     }
 
-    fn register_rate_metric(
-        &self,
-        name: impl Into<String>,
-        quantiles: Vec<f64>,
-        sample_period_seconds: Option<f64>,
-    ) -> anyhow::Result<()> {
-        self.register_metric(PerformanceMetricSpec::rate(
-            name,
-            quantiles,
-            sample_period_seconds,
-        ))
+    fn unregister_metric(&self, name: String) -> anyhow::Result<()> {
+        let (resp_tx, resp_rx) = mpsc::channel();
+        self.tx
+            .send(WorkerMessage::UnregisterMetric {
+                name,
+                resp: resp_tx,
+            })
+            .map_err(|_| anyhow::anyhow!("metrics worker is not running"))?;
+        resp_rx
+            .recv()
+            .map_err(|_| anyhow::anyhow!("metrics worker did not respond"))?
     }
 
-    fn register_distribution_metric(
-        &self,
-        name: impl Into<String>,
-        quantiles: Vec<f64>,
-    ) -> anyhow::Result<()> {
-        self.register_metric(PerformanceMetricSpec::distribution(name, quantiles))
-    }
-
-    fn register_ratio_metric(
-        &self,
-        name: impl Into<String>,
-        quantiles: Vec<f64>,
-    ) -> anyhow::Result<()> {
-        self.register_metric(PerformanceMetricSpec::ratio(name, quantiles))
-    }
-
-    fn record_count_internal(&self, metric_name: &str, count: u64) -> anyhow::Result<()> {
+    fn record_count(&self, name: String, count: u64) -> anyhow::Result<()> {
         if count == 0 {
             return Ok(());
         }
-        let mut metrics = self.metrics.lock();
-        let entry = metrics
-            .get_mut(metric_name)
-            .ok_or_else(|| anyhow::anyhow!("unknown metric '{}'", metric_name))?;
-
-        match &mut entry.state {
-            MetricState::Rate { counts } => counts.push_back((Instant::now(), count)),
-            _ => anyhow::bail!("metric '{}' is not a rate metric", metric_name),
+        match self.tx.try_send(WorkerMessage::RecordCount {
+            name,
+            count,
+            recorded_at: Instant::now(),
+        }) {
+            Ok(()) => Ok(()),
+            Err(mpsc::TrySendError::Full(_)) => {
+                self.note_dropped_event();
+                Ok(())
+            }
+            Err(mpsc::TrySendError::Disconnected(_)) => {
+                anyhow::bail!("metrics worker is not running")
+            }
         }
-        Ok(())
     }
 
-    fn record_value_internal(&self, metric_name: &str, value: f64) -> anyhow::Result<()> {
+    fn record_value(&self, name: String, value: f64) -> anyhow::Result<()> {
         if !value.is_finite() || value < 0.0 {
             anyhow::bail!("value must be a finite non-negative number");
         }
-        let mut metrics = self.metrics.lock();
-        let entry = metrics
-            .get_mut(metric_name)
-            .ok_or_else(|| anyhow::anyhow!("unknown metric '{}'", metric_name))?;
-
-        match &mut entry.state {
-            MetricState::Distribution { values } => values.push_back((Instant::now(), value)),
-            _ => anyhow::bail!("metric '{}' is not a distribution metric", metric_name),
+        match self.tx.try_send(WorkerMessage::RecordValue {
+            name,
+            value,
+            recorded_at: Instant::now(),
+        }) {
+            Ok(()) => Ok(()),
+            Err(mpsc::TrySendError::Full(_)) => {
+                self.note_dropped_event();
+                Ok(())
+            }
+            Err(mpsc::TrySendError::Disconnected(_)) => {
+                anyhow::bail!("metrics worker is not running")
+            }
         }
-        Ok(())
     }
 
-    fn record_ratio_internal(
-        &self,
-        metric_name: &str,
-        numerator: f64,
-        denominator: f64,
-    ) -> anyhow::Result<()> {
+    fn record_ratio(&self, name: String, numerator: f64, denominator: f64) -> anyhow::Result<()> {
         if !numerator.is_finite()
             || !denominator.is_finite()
             || numerator < 0.0
@@ -453,264 +501,304 @@ impl PerformanceMetricsRegistryInner {
         {
             anyhow::bail!("numerator/denominator must be finite non-negative numbers");
         }
-
-        let mut metrics = self.metrics.lock();
-        let entry = metrics
-            .get_mut(metric_name)
-            .ok_or_else(|| anyhow::anyhow!("unknown metric '{}'", metric_name))?;
-
-        match &mut entry.state {
-            MetricState::Ratio { pairs } => {
-                pairs.push_back((Instant::now(), numerator, denominator))
+        match self.tx.try_send(WorkerMessage::RecordRatio {
+            name,
+            numerator,
+            denominator,
+            recorded_at: Instant::now(),
+        }) {
+            Ok(()) => Ok(()),
+            Err(mpsc::TrySendError::Full(_)) => {
+                self.note_dropped_event();
+                Ok(())
             }
-            _ => anyhow::bail!("metric '{}' is not a ratio metric", metric_name),
+            Err(mpsc::TrySendError::Disconnected(_)) => {
+                anyhow::bail!("metrics worker is not running")
+            }
         }
-        Ok(())
     }
 
-    fn metric_specs(&self) -> Vec<PerformanceMetricSpec> {
-        self.metrics
-            .lock()
+    fn snapshot_metric(&self, name: String) -> Option<MetricSnapshot> {
+        let (resp_tx, resp_rx) = mpsc::channel();
+        if self
+            .tx
+            .send(WorkerMessage::SnapshotMetric {
+                name,
+                resp: resp_tx,
+            })
+            .is_err()
+        {
+            return None;
+        }
+        resp_rx.recv().ok().flatten()
+    }
+
+    fn snapshot_all(&self) -> Vec<MetricSnapshot> {
+        let (resp_tx, resp_rx) = mpsc::channel();
+        if self
+            .tx
+            .send(WorkerMessage::SnapshotAll { resp: resp_tx })
+            .is_err()
+        {
+            return vec![];
+        }
+        resp_rx.recv().unwrap_or_default()
+    }
+
+    fn attach_publisher(
+        &self,
+        hierarchy: Arc<dyn MetricsHierarchy>,
+        metric_prefix: String,
+        labels: Vec<(String, String)>,
+    ) -> anyhow::Result<()> {
+        let (resp_tx, resp_rx) = mpsc::channel();
+        self.tx
+            .send(WorkerMessage::AttachPublisher {
+                hierarchy,
+                metric_prefix,
+                labels,
+                resp: resp_tx,
+            })
+            .map_err(|_| anyhow::anyhow!("metrics worker is not running"))?;
+        resp_rx
+            .recv()
+            .map_err(|_| anyhow::anyhow!("metrics worker did not respond"))?
+    }
+
+    fn note_dropped_event(&self) {
+        let dropped = self.dropped_events.fetch_add(1, Ordering::Relaxed) + 1;
+        if dropped == 1 || dropped.is_power_of_two() {
+            eprintln!(
+                "performance metrics queue full; dropped events total={}",
+                dropped
+            );
+        }
+    }
+}
+
+impl Drop for RegistryInner {
+    fn drop(&mut self) {
+        let _ = self.tx.send(WorkerMessage::Shutdown);
+        if let Some(handle) = self.worker.lock().take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+fn worker_loop(rx: Receiver<WorkerMessage>, window_duration: Duration, publish_interval: Duration) {
+    let mut state = WorkerState {
+        window_duration,
+        publish_interval,
+        metrics: HashMap::new(),
+        publisher: None,
+    };
+
+    loop {
+        match rx.recv_timeout(WORKER_POLL) {
+            Ok(msg) => {
+                if !handle_message(msg, &mut state) {
+                    return;
+                }
+            }
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => return,
+        }
+
+        maybe_auto_publish(&mut state);
+    }
+}
+
+fn handle_message(msg: WorkerMessage, state: &mut WorkerState) -> bool {
+    match msg {
+        WorkerMessage::RegisterMetric { spec, resp } => {
+            let result = register_metric_in_state(state, spec);
+            let _ = resp.send(result);
+        }
+        WorkerMessage::UnregisterMetric { name, resp } => {
+            let result = if state.metrics.remove(&name).is_some() {
+                if let Some(p) = state.publisher.as_mut() {
+                    p.handles.remove(&name);
+                }
+                Ok(())
+            } else {
+                Err(anyhow::anyhow!("unknown metric '{}'", name))
+            };
+            let _ = resp.send(result);
+        }
+        WorkerMessage::RecordCount {
+            name,
+            count,
+            recorded_at,
+        } => {
+            if let Some(entry) = state.metrics.get_mut(&name) {
+                if let MetricState::Rate { counts } = &mut entry.state {
+                    counts.push_back((recorded_at, count));
+                }
+            }
+        }
+        WorkerMessage::RecordValue {
+            name,
+            value,
+            recorded_at,
+        } => {
+            if let Some(entry) = state.metrics.get_mut(&name) {
+                if let MetricState::Distribution { values } = &mut entry.state {
+                    values.push_back((recorded_at, value));
+                }
+            }
+        }
+        WorkerMessage::RecordRatio {
+            name,
+            numerator,
+            denominator,
+            recorded_at,
+        } => {
+            if let Some(entry) = state.metrics.get_mut(&name) {
+                if let MetricState::Ratio { pairs } = &mut entry.state {
+                    pairs.push_back((recorded_at, numerator, denominator));
+                }
+            }
+        }
+        WorkerMessage::SnapshotMetric { name, resp } => {
+            let now = Instant::now();
+            let snapshot = state.metrics.get_mut(&name).map(|entry| {
+                let window = metric_window_duration(entry, state.window_duration);
+                prune_entry(now, window, entry);
+                snapshot_entry(now, window, entry)
+            });
+            let _ = resp.send(snapshot);
+        }
+        WorkerMessage::SnapshotAll { resp } => {
+            let now = Instant::now();
+            let snapshots = state
+                .metrics
+                .values_mut()
+                .map(|entry| {
+                    let window = metric_window_duration(entry, state.window_duration);
+                    prune_entry(now, window, entry);
+                    snapshot_entry(now, window, entry)
+                })
+                .collect::<Vec<_>>();
+            let _ = resp.send(snapshots);
+        }
+        WorkerMessage::AttachPublisher {
+            hierarchy,
+            metric_prefix,
+            labels,
+            resp,
+        } => {
+            let result = attach_publisher_in_state(state, hierarchy, metric_prefix, labels);
+            let _ = resp.send(result);
+        }
+        WorkerMessage::Shutdown => return false,
+    }
+
+    true
+}
+
+fn register_metric_in_state(
+    state: &mut WorkerState,
+    spec: PerformanceMetricSpec,
+) -> anyhow::Result<()> {
+    if spec.name.trim().is_empty() {
+        anyhow::bail!("metric name must not be empty");
+    }
+    if state.metrics.contains_key(&spec.name) {
+        anyhow::bail!("metric '{}' already registered", spec.name);
+    }
+
+    let state_variant = match spec.kind {
+        PerformanceMetricKind::Rate => MetricState::Rate {
+            counts: VecDeque::new(),
+        },
+        PerformanceMetricKind::Distribution => MetricState::Distribution {
+            values: VecDeque::new(),
+        },
+        PerformanceMetricKind::Ratio => MetricState::Ratio {
+            pairs: VecDeque::new(),
+        },
+    };
+
+    if let Some(p) = state.publisher.as_mut() {
+        validate_metric_name_collision_for_spec(spec.clone(), &p.metric_prefix, &p.handles)?;
+        let handles = build_metric_handles_for_spec(&spec, p)?;
+        p.handles.insert(spec.name.clone(), handles);
+    }
+
+    state.metrics.insert(
+        spec.name.clone(),
+        MetricEntry {
+            spec,
+            state: state_variant,
+        },
+    );
+    Ok(())
+}
+
+fn attach_publisher_in_state(
+    state: &mut WorkerState,
+    hierarchy: Arc<dyn MetricsHierarchy>,
+    metric_prefix: String,
+    labels: Vec<(String, String)>,
+) -> anyhow::Result<()> {
+    if state.metrics.is_empty() {
+        anyhow::bail!("no metrics registered; create metrics before attaching publisher");
+    }
+
+    validate_metric_name_collisions(
+        &state
+            .metrics
             .values()
             .map(|entry| entry.spec.clone())
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>(),
+        &metric_prefix,
+    )?;
+
+    let mut handles = HashMap::new();
+    let mut pub_state = PublisherState {
+        hierarchy,
+        metric_prefix,
+        labels,
+        handles: HashMap::new(),
+        next_publish_at: Instant::now() + state.publish_interval,
+    };
+
+    for entry in state.metrics.values() {
+        let h = build_metric_handles_for_spec(&entry.spec, &pub_state)?;
+        handles.insert(entry.spec.name.clone(), h);
+    }
+    pub_state.handles = handles;
+    state.publisher = Some(pub_state);
+    Ok(())
+}
+
+fn maybe_auto_publish(state: &mut WorkerState) {
+    let should_publish = state
+        .publisher
+        .as_ref()
+        .is_some_and(|p| Instant::now() >= p.next_publish_at);
+    if !should_publish {
+        return;
     }
 
-    /// Snapshot one metric by name.
-    fn snapshot_metric(&self, metric_name: &str) -> Option<MetricSnapshot> {
-        let now = Instant::now();
-        let mut metrics = self.metrics.lock();
-        let entry = metrics.get_mut(metric_name)?;
-        prune_entry(now, self.window_duration, entry);
-        Some(snapshot_entry(now, self.window_duration, entry))
-    }
-
-    /// Snapshot all registered metrics.
-    fn snapshot_all(&self) -> Vec<MetricSnapshot> {
-        let now = Instant::now();
-        let mut metrics = self.metrics.lock();
-        metrics
-            .values_mut()
-            .map(|entry| {
-                prune_entry(now, self.window_duration, entry);
-                snapshot_entry(now, self.window_duration, entry)
-            })
-            .collect::<Vec<_>>()
+    let _ = publish_state(state);
+    if let Some(p) = state.publisher.as_mut() {
+        p.next_publish_at = Instant::now() + state.publish_interval;
     }
 }
 
-/// Prometheus gauge publisher for tracker snapshots.
-pub struct PerformanceMetricsPrometheusPublisher {
-    tracker: Arc<PerformanceMetricsRegistryInner>,
-    handles: HashMap<String, MetricHandles>,
-    auto_publish_worker: Mutex<Option<AutoPublishWorker>>,
-}
+fn publish_state(state: &mut WorkerState) -> anyhow::Result<()> {
+    let Some(publisher) = state.publisher.as_mut() else {
+        return Ok(());
+    };
 
-#[derive(Clone)]
-enum MetricHandles {
-    Rate {
-        per_second: prometheus::Gauge,
-        quantiles: Vec<(f64, prometheus::Gauge)>,
-    },
-    Distribution {
-        avg: prometheus::Gauge,
-        quantiles: Vec<(f64, prometheus::Gauge)>,
-    },
-    Ratio {
-        numerator: prometheus::Gauge,
-        denominator: prometheus::Gauge,
-        ratio: prometheus::Gauge,
-        quantiles: Vec<(f64, prometheus::Gauge)>,
-    },
-}
+    let now = Instant::now();
+    for entry in state.metrics.values_mut() {
+        let window = metric_window_duration(entry, state.window_duration);
+        prune_entry(now, window, entry);
+        let snapshot = snapshot_entry(now, window, entry);
 
-struct AutoPublishWorker {
-    stop_tx: Sender<()>,
-    join_handle: JoinHandle<()>,
-}
-
-impl PerformanceMetricsPrometheusPublisher {
-    /// Attach publisher to a metrics hierarchy and register gauges.
-    ///
-    /// Metric set is fixed at attach time; create metrics first.
-    fn attach_to_hierarchy<H: MetricsHierarchy + ?Sized>(
-        tracker: Arc<PerformanceMetricsRegistryInner>,
-        hierarchy: &H,
-        metric_prefix: &str,
-        labels: &[(&str, &str)],
-    ) -> anyhow::Result<Self> {
-        let specs = tracker.metric_specs();
-        if specs.is_empty() {
-            anyhow::bail!("no metrics registered; create metrics before attaching publisher");
-        }
-        validate_metric_name_collisions(&specs, metric_prefix)?;
-        let mut handles = HashMap::new();
-
-        for spec in specs {
-            let base = format!("{}_{}", metric_prefix, spec.name);
-            let handles_entry = match spec.kind {
-                PerformanceMetricKind::Rate => {
-                    let per_second = create_metric::<prometheus::Gauge, H>(
-                        hierarchy,
-                        &format!("{}_{}", base, SUFFIX_PER_SECOND),
-                        "Sliding-window throughput per second",
-                        labels,
-                        None,
-                        None,
-                    )?;
-                    let quantiles = spec
-                        .quantiles
-                        .iter()
-                        .map(|q| {
-                            create_metric::<prometheus::Gauge, H>(
-                                hierarchy,
-                                &format!("{}_{}_{}", base, SUFFIX_PER_SECOND, quantile_suffix(*q)),
-                                "Sliding-window throughput quantile",
-                                labels,
-                                None,
-                                None,
-                            )
-                            .map(|g| (*q, g))
-                        })
-                        .collect::<anyhow::Result<Vec<_>>>()?;
-                    MetricHandles::Rate {
-                        per_second,
-                        quantiles,
-                    }
-                }
-                PerformanceMetricKind::Distribution => {
-                    let avg = create_metric::<prometheus::Gauge, H>(
-                        hierarchy,
-                        &format!("{}_{}", base, SUFFIX_AVG),
-                        "Sliding-window average value",
-                        labels,
-                        None,
-                        None,
-                    )?;
-                    let quantiles = spec
-                        .quantiles
-                        .iter()
-                        .map(|q| {
-                            create_metric::<prometheus::Gauge, H>(
-                                hierarchy,
-                                &format!("{}_{}", base, quantile_suffix(*q)),
-                                "Sliding-window quantile value",
-                                labels,
-                                None,
-                                None,
-                            )
-                            .map(|g| (*q, g))
-                        })
-                        .collect::<anyhow::Result<Vec<_>>>()?;
-                    MetricHandles::Distribution { avg, quantiles }
-                }
-                PerformanceMetricKind::Ratio => {
-                    let numerator = create_metric::<prometheus::Gauge, H>(
-                        hierarchy,
-                        &format!("{}_{}", base, SUFFIX_NUMERATOR),
-                        "Sliding-window numerator sum",
-                        labels,
-                        None,
-                        None,
-                    )?;
-                    let denominator = create_metric::<prometheus::Gauge, H>(
-                        hierarchy,
-                        &format!("{}_{}", base, SUFFIX_DENOMINATOR),
-                        "Sliding-window denominator sum",
-                        labels,
-                        None,
-                        None,
-                    )?;
-                    let ratio = create_metric::<prometheus::Gauge, H>(
-                        hierarchy,
-                        &format!("{}_{}", base, SUFFIX_RATIO),
-                        "Sliding-window weighted ratio",
-                        labels,
-                        None,
-                        None,
-                    )?;
-                    let quantiles = spec
-                        .quantiles
-                        .iter()
-                        .map(|q| {
-                            create_metric::<prometheus::Gauge, H>(
-                                hierarchy,
-                                &format!("{}_{}_{}", base, SUFFIX_RATIO, quantile_suffix(*q)),
-                                "Sliding-window ratio quantile",
-                                labels,
-                                None,
-                                None,
-                            )
-                            .map(|g| (*q, g))
-                        })
-                        .collect::<anyhow::Result<Vec<_>>>()?;
-                    MetricHandles::Ratio {
-                        numerator,
-                        denominator,
-                        ratio,
-                        quantiles,
-                    }
-                }
-            };
-            handles.insert(spec.name, handles_entry);
-        }
-
-        Ok(Self {
-            tracker,
-            handles,
-            auto_publish_worker: Mutex::new(None),
-        })
-    }
-
-    /// Update registered gauges from latest tracker snapshots.
-    pub fn publish(&self) {
-        publish_snapshots(&self.tracker, &self.handles);
-    }
-
-    /// Start periodic publish loop. Existing loop (if any) is replaced.
-    pub fn start_auto_publish(&self, interval: Duration) {
-        self.stop_auto_publish();
-        let tick = interval.max(Duration::from_millis(100));
-        let (stop_tx, stop_rx) = mpsc::channel::<()>();
-        let tracker = Arc::clone(&self.tracker);
-        let handles = self.handles.clone();
-        let join_handle = std::thread::spawn(move || {
-            loop {
-                match stop_rx.recv_timeout(tick) {
-                    Ok(_) => break,
-                    Err(RecvTimeoutError::Timeout) => publish_snapshots(&tracker, &handles),
-                    Err(RecvTimeoutError::Disconnected) => break,
-                }
-            }
-        });
-        *self.auto_publish_worker.lock() = Some(AutoPublishWorker {
-            stop_tx,
-            join_handle,
-        });
-    }
-
-    /// Stop periodic publish loop if running.
-    pub fn stop_auto_publish(&self) {
-        let worker = self.auto_publish_worker.lock().take();
-        if let Some(worker) = worker {
-            let _ = worker.stop_tx.send(());
-            let _ = worker.join_handle.join();
-        }
-    }
-}
-
-impl Drop for PerformanceMetricsPrometheusPublisher {
-    fn drop(&mut self) {
-        self.stop_auto_publish();
-    }
-}
-
-fn publish_snapshots(
-    tracker: &Arc<PerformanceMetricsRegistryInner>,
-    handles: &HashMap<String, MetricHandles>,
-) {
-    for snapshot in tracker.snapshot_all() {
-        if let Some(handle) = handles.get(&snapshot.name) {
+        if let Some(handle) = publisher.handles.get(&snapshot.name) {
             match handle {
                 MetricHandles::Rate {
                     per_second,
@@ -743,6 +831,140 @@ fn publish_snapshots(
             }
         }
     }
+
+    Ok(())
+}
+
+fn build_metric_handles_for_spec(
+    spec: &PerformanceMetricSpec,
+    publisher: &PublisherState,
+) -> anyhow::Result<MetricHandles> {
+    let base = format!("{}_{}", publisher.metric_prefix, spec.name);
+    let label_refs = publisher
+        .labels
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect::<Vec<_>>();
+
+    match spec.kind {
+        PerformanceMetricKind::Rate => {
+            let per_second = create_metric::<prometheus::Gauge, dyn MetricsHierarchy>(
+                publisher.hierarchy.as_ref(),
+                &format!("{}_{}", base, SUFFIX_PER_SECOND),
+                "Sliding-window throughput per second",
+                &label_refs,
+                None,
+                None,
+            )?;
+            let quantiles = spec
+                .quantiles
+                .iter()
+                .map(|q| {
+                    create_metric::<prometheus::Gauge, dyn MetricsHierarchy>(
+                        publisher.hierarchy.as_ref(),
+                        &format!("{}_{}_{}", base, SUFFIX_PER_SECOND, quantile_suffix(*q)),
+                        "Sliding-window throughput quantile",
+                        &label_refs,
+                        None,
+                        None,
+                    )
+                    .map(|g| (*q, g))
+                })
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            Ok(MetricHandles::Rate {
+                per_second,
+                quantiles,
+            })
+        }
+        PerformanceMetricKind::Distribution => {
+            let avg = create_metric::<prometheus::Gauge, dyn MetricsHierarchy>(
+                publisher.hierarchy.as_ref(),
+                &format!("{}_{}", base, SUFFIX_AVG),
+                "Sliding-window average value",
+                &label_refs,
+                None,
+                None,
+            )?;
+            let quantiles = spec
+                .quantiles
+                .iter()
+                .map(|q| {
+                    create_metric::<prometheus::Gauge, dyn MetricsHierarchy>(
+                        publisher.hierarchy.as_ref(),
+                        &format!("{}_{}", base, quantile_suffix(*q)),
+                        "Sliding-window quantile value",
+                        &label_refs,
+                        None,
+                        None,
+                    )
+                    .map(|g| (*q, g))
+                })
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            Ok(MetricHandles::Distribution { avg, quantiles })
+        }
+        PerformanceMetricKind::Ratio => {
+            let numerator = create_metric::<prometheus::Gauge, dyn MetricsHierarchy>(
+                publisher.hierarchy.as_ref(),
+                &format!("{}_{}", base, SUFFIX_NUMERATOR),
+                "Sliding-window numerator sum",
+                &label_refs,
+                None,
+                None,
+            )?;
+            let denominator = create_metric::<prometheus::Gauge, dyn MetricsHierarchy>(
+                publisher.hierarchy.as_ref(),
+                &format!("{}_{}", base, SUFFIX_DENOMINATOR),
+                "Sliding-window denominator sum",
+                &label_refs,
+                None,
+                None,
+            )?;
+            let ratio = create_metric::<prometheus::Gauge, dyn MetricsHierarchy>(
+                publisher.hierarchy.as_ref(),
+                &format!("{}_{}", base, SUFFIX_RATIO),
+                "Sliding-window weighted ratio",
+                &label_refs,
+                None,
+                None,
+            )?;
+            let quantiles = spec
+                .quantiles
+                .iter()
+                .map(|q| {
+                    create_metric::<prometheus::Gauge, dyn MetricsHierarchy>(
+                        publisher.hierarchy.as_ref(),
+                        &format!("{}_{}_{}", base, SUFFIX_RATIO, quantile_suffix(*q)),
+                        "Sliding-window ratio quantile",
+                        &label_refs,
+                        None,
+                        None,
+                    )
+                    .map(|g| (*q, g))
+                })
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            Ok(MetricHandles::Ratio {
+                numerator,
+                denominator,
+                ratio,
+                quantiles,
+            })
+        }
+    }
+}
+
+fn validate_metric_name_collision_for_spec(
+    spec: PerformanceMetricSpec,
+    metric_prefix: &str,
+    existing: &HashMap<String, MetricHandles>,
+) -> anyhow::Result<()> {
+    let mut names = HashSet::new();
+    for key in existing.keys() {
+        names.insert(key.clone());
+    }
+    if names.contains(&spec.name) {
+        anyhow::bail!("metric '{}' already registered", spec.name);
+    }
+    validate_metric_name_collisions(&[spec], metric_prefix)
 }
 
 fn normalize_quantiles(quantiles: Vec<f64>) -> Vec<f64> {
@@ -758,6 +980,14 @@ fn normalize_quantiles(quantiles: Vec<f64>) -> Vec<f64> {
         .into_iter()
         .filter(|q| seen_suffixes.insert(quantile_suffix(*q)))
         .collect()
+}
+
+fn metric_window_duration(entry: &MetricEntry, default_window: Duration) -> Duration {
+    entry
+        .spec
+        .window_seconds
+        .map(Duration::from_secs_f64)
+        .unwrap_or(default_window)
 }
 
 fn prune_entry(now: Instant, window_duration: Duration, entry: &mut MetricEntry) {
@@ -1007,7 +1237,7 @@ mod tests {
     fn ratio_snapshot_has_absolute_and_relative() {
         let tracker = PerformanceMetricsRegistry::new(Duration::from_secs(60));
         let kv = tracker
-            .new_ratio_metric("kv", vec![0.5, 0.9, 0.99])
+            .new_ratio_metric("kv", vec![0.5, 0.9, 0.99], None)
             .unwrap();
         kv.record_ratio(80.0, 100.0).unwrap();
         kv.record_ratio(20.0, 50.0).unwrap();
@@ -1024,7 +1254,7 @@ mod tests {
     fn rate_snapshot_has_quantiles() {
         let tracker = PerformanceMetricsRegistry::new(Duration::from_secs(10));
         let request_gps = tracker
-            .new_rate_metric("request_gps", vec![0.5, 0.9, 0.99], Some(1.0))
+            .new_rate_metric("request_gps", vec![0.5, 0.9, 0.99], Some(1.0), None)
             .unwrap();
         request_gps.record_count(8).unwrap();
         request_gps.record_count(12).unwrap();
@@ -1037,7 +1267,7 @@ mod tests {
 
     #[test]
     fn quantiles_are_deduped_by_prometheus_suffix() {
-        let spec = PerformanceMetricSpec::distribution("ttft", vec![0.994, 0.995, 0.999]);
+        let spec = PerformanceMetricSpec::distribution("ttft", vec![0.994, 0.995, 0.999], None);
         let suffixes = spec
             .quantiles
             .iter()
@@ -1049,8 +1279,8 @@ mod tests {
     #[test]
     fn attach_without_registered_metrics_fails() {
         let tracker = PerformanceMetricsRegistry::new(Duration::from_secs(60));
-        let hierarchy = TestHierarchy::new();
-        let result = tracker.attach_to_hierarchy(&hierarchy, "performance", &[]);
+        let hierarchy = Arc::new(TestHierarchy::new());
+        let result = tracker.attach_to_hierarchy(hierarchy, "performance", &[] as &[(&str, &str)]);
         let err = match result {
             Ok(_) => panic!("attach should fail when no metrics are registered"),
             Err(err) => err,
@@ -1059,19 +1289,23 @@ mod tests {
     }
 
     #[test]
-    fn attach_consumes_builder_and_handles_keep_working() {
+    fn register_after_attach_and_unregister_work() {
         let tracker = PerformanceMetricsRegistry::new(Duration::from_secs(60));
-        let tps = tracker
-            .new_rate_metric("tps", vec![0.5], Some(1.0))
+        let _tps = tracker
+            .new_rate_metric("tps", vec![0.5], Some(1.0), None)
             .unwrap();
-        let hierarchy = TestHierarchy::new();
-        let attached = tracker
-            .attach_to_hierarchy(&hierarchy, "performance", &[])
+        let hierarchy = Arc::new(TestHierarchy::new());
+        tracker
+            .attach_to_hierarchy(hierarchy, "performance", &[] as &[(&str, &str)])
             .unwrap();
 
-        tps.record_count(3).unwrap();
-        let snapshot = tps.snapshot().unwrap();
-        assert!(snapshot.rate_per_second.unwrap_or_default() >= 0.0);
-        attached.publish();
+        let ttft = tracker
+            .new_distribution_metric("ttft", vec![0.5], None)
+            .unwrap();
+        ttft.record_value(0.7).unwrap();
+        assert!(ttft.snapshot().is_some());
+
+        tracker.unregister_metric("ttft").unwrap();
+        assert!(ttft.snapshot().is_none());
     }
 }
