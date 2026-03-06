@@ -100,9 +100,12 @@ impl Decoder for TikTokenTokenizer {
             token_ids.to_vec()
         };
 
-        self.bpe
-            .decode(ids)
-            .map_err(|err| Error::msg(format!("Error decoding tiktoken tokens: {err}")))
+        // Use lossy UTF-8 conversion so that partial multi-byte sequences become U+FFFD (�).
+        // This is critical for incremental detokenization: DecodeStream::step() relies on
+        // the replacement character to detect incomplete sequences and buffer tokens until
+        // a complete character arrives. CoreBPE::decode() would error on invalid UTF-8 instead.
+        let bytes: Vec<u8> = self.bpe._decode_native_and_split(ids).flatten().collect();
+        Ok(String::from_utf8_lossy(&bytes).into_owned())
     }
 }
 
@@ -236,7 +239,9 @@ fn load_special_tokens(directory: &Path, num_base_tokens: usize) -> Result<FxHas
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tokenizers::DecodeStream;
     use std::io::Write;
+    use std::sync::Arc;
 
     fn create_test_tiktoken_file(dir: &Path) -> String {
         let engine = base64::engine::general_purpose::STANDARD;
@@ -441,6 +446,192 @@ mod tests {
         assert_eq!(tokens["[EOS]"], 101);
         // Should also have reserved tokens filling gaps
         assert!(tokens.len() > 2);
+    }
+
+    /// Helper: create a tiktoken file that includes raw byte tokens (byte fallback tokens).
+    fn create_test_tiktoken_file_with_byte_tokens(dir: &Path) -> String {
+        let engine = base64::engine::general_purpose::STANDARD;
+        let mut content = String::new();
+
+        let tokens: Vec<(&[u8], u32)> = vec![
+            (b"h", 0),
+            (b"e", 1),
+            (b"l", 2),
+            (b"o", 3),
+            (b" ", 4),
+            (b"hello", 5),
+        ];
+
+        for (token, rank) in &tokens {
+            let encoded = engine.encode(token);
+            content.push_str(&format!("{encoded} {rank}\n"));
+        }
+
+        // Byte-fallback tokens: individual bytes that form CJK character "你" (U+4F60)
+        // UTF-8 encoding: 0xE4 0xBD 0xA0
+        let byte_tokens: Vec<(Vec<u8>, u32)> = vec![
+            (vec![0xE4], 100),
+            (vec![0xBD], 101),
+            (vec![0xA0], 102),
+        ];
+
+        for (token, rank) in &byte_tokens {
+            let encoded = engine.encode(token);
+            content.push_str(&format!("{encoded} {rank}\n"));
+        }
+
+        // Bytes for emoji "😀" (U+1F600) — 4-byte UTF-8: 0xF0 0x9F 0x98 0x80
+        let emoji_tokens: Vec<(Vec<u8>, u32)> = vec![
+            (vec![0xF0], 200),
+            (vec![0x9F], 201),
+            (vec![0x98], 202),
+            (vec![0x80], 203),
+        ];
+
+        for (token, rank) in &emoji_tokens {
+            let encoded = engine.encode(token);
+            content.push_str(&format!("{encoded} {rank}\n"));
+        }
+
+        let file_path = dir.join("tiktoken.model");
+        let mut file = std::fs::File::create(&file_path).unwrap();
+        file.write_all(content.as_bytes()).unwrap();
+        file_path.to_str().unwrap().to_string()
+    }
+
+    fn create_byte_token_tokenizer(dir: &Path) -> TikTokenTokenizer {
+        let file_path = create_test_tiktoken_file_with_byte_tokens(dir);
+        let special_tokens = FxHashMap::default();
+        let pattern = r"[\w]+|[^\w\s]+|\s+";
+        TikTokenTokenizer::from_file(&file_path, pattern, special_tokens).unwrap()
+    }
+
+    /// Reproduces the original panic: decoding a single byte-fallback token that is
+    /// part of a multi-byte UTF-8 character. Before the fix, CoreBPE::decode() would
+    /// call String::from_utf8() on [0xE4] and error with "incomplete utf-8 byte sequence".
+    #[test]
+    fn test_decode_single_incomplete_utf8_byte_does_not_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let tokenizer = create_byte_token_tokenizer(dir.path());
+
+        let result = tokenizer.decode(&[100], false);
+        assert!(result.is_ok(), "decode() should not error on incomplete UTF-8 bytes");
+        let text = result.unwrap();
+        assert!(
+            text.contains('\u{FFFD}'),
+            "incomplete UTF-8 byte should produce replacement character, got: {:?}",
+            text
+        );
+    }
+
+    /// Without the fix, fails with "incomplete utf-8 byte sequence" from CoreBPE::decode().
+    #[test]
+    fn test_decode_two_of_three_utf8_bytes_does_not_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let tokenizer = create_byte_token_tokenizer(dir.path());
+
+        let result = tokenizer.decode(&[100, 101], false);
+        assert!(result.is_ok());
+        let text = result.unwrap();
+        assert!(
+            text.contains('\u{FFFD}'),
+            "incomplete 2-of-3 UTF-8 bytes should produce replacement character, got: {:?}",
+            text
+        );
+    }
+
+    /// When all bytes of a multi-byte character are present, the concatenated bytes form
+    /// valid UTF-8, so this test passes both before and after the fix. It serves as a
+    /// correctness check that the lossy conversion doesn't corrupt complete characters.
+    #[test]
+    fn test_decode_complete_multibyte_utf8_produces_correct_char() {
+        let dir = tempfile::tempdir().unwrap();
+        let tokenizer = create_byte_token_tokenizer(dir.path());
+
+        let result = tokenizer.decode(&[100, 101, 102], false);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "你");
+    }
+
+    /// All 4 emoji bytes together form valid UTF-8, so this passes both before and after
+    /// the fix. Validates that lossy conversion doesn't alter complete multi-byte sequences.
+    #[test]
+    fn test_decode_complete_4byte_emoji_from_byte_tokens() {
+        let dir = tempfile::tempdir().unwrap();
+        let tokenizer = create_byte_token_tokenizer(dir.path());
+
+        let result = tokenizer.decode(&[200, 201, 202, 203], false);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "😀");
+    }
+
+    /// Without the fix, fails with "incomplete utf-8 byte sequence" from CoreBPE::decode().
+    #[test]
+    fn test_decode_partial_emoji_does_not_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let tokenizer = create_byte_token_tokenizer(dir.path());
+
+        let result = tokenizer.decode(&[200], false);
+        assert!(result.is_ok());
+        assert!(result.unwrap().contains('\u{FFFD}'));
+    }
+
+    /// Without the fix, fails with "incomplete utf-8 byte sequence" from CoreBPE::decode().
+    #[test]
+    fn test_decode_mixed_ascii_and_incomplete_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let tokenizer = create_byte_token_tokenizer(dir.path());
+
+        let result = tokenizer.decode(&[5, 100], false);
+        assert!(result.is_ok());
+        let text = result.unwrap();
+        assert!(text.starts_with("hello"), "should start with 'hello', got: {:?}", text);
+        assert!(text.contains('\u{FFFD}'), "trailing incomplete byte should produce U+FFFD");
+    }
+
+    /// End-to-end incremental detokenization: DecodeStream buffers partial bytes,
+    /// emits the complete character once all bytes arrive.
+    /// Without the fix, fails with "incomplete utf-8 byte sequence" from CoreBPE::decode().
+    #[test]
+    fn test_decode_stream_incremental_multibyte_reassembly() {
+        let dir = tempfile::tempdir().unwrap();
+        let tokenizer = create_byte_token_tokenizer(dir.path());
+        let tokenizer_arc: Arc<dyn crate::tokenizers::traits::Tokenizer> = Arc::new(tokenizer);
+
+        let mut stream = DecodeStream::new(tokenizer_arc, &[5], false);
+
+        let r1 = stream.step(100).unwrap();
+        assert_eq!(r1, None, "first byte of 3-byte char should be buffered");
+
+        let r2 = stream.step(101).unwrap();
+        assert_eq!(r2, None, "second byte of 3-byte char should be buffered");
+
+        let r3 = stream.step(102).unwrap();
+        assert!(r3.is_some(), "third byte should complete the character");
+        assert_eq!(r3.unwrap(), "你");
+    }
+
+    /// Without the fix, fails with "incomplete utf-8 byte sequence" from CoreBPE::decode().
+    #[test]
+    fn test_decode_stream_incremental_emoji_reassembly() {
+        let dir = tempfile::tempdir().unwrap();
+        let tokenizer = create_byte_token_tokenizer(dir.path());
+        let tokenizer_arc: Arc<dyn crate::tokenizers::traits::Tokenizer> = Arc::new(tokenizer);
+
+        let mut stream = DecodeStream::new(tokenizer_arc, &[5], false);
+
+        let r1 = stream.step(200).unwrap();
+        assert_eq!(r1, None, "byte 1/4 of emoji should be buffered");
+
+        let r2 = stream.step(201).unwrap();
+        assert_eq!(r2, None, "byte 2/4 of emoji should be buffered");
+
+        let r3 = stream.step(202).unwrap();
+        assert_eq!(r3, None, "byte 3/4 of emoji should be buffered");
+
+        let r4 = stream.step(203).unwrap();
+        assert!(r4.is_some(), "byte 4/4 should complete the emoji");
+        assert_eq!(r4.unwrap(), "😀");
     }
 
     #[test]

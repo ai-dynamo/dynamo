@@ -182,7 +182,13 @@ impl
 
                     let data = output.data.as_ref().unwrap();
 
-                    let result = state.decoder.process_token_ids(&data.token_ids).unwrap();
+                    let result = match state.decoder.process_token_ids(&data.token_ids) {
+                        Ok(result) => result,
+                        Err(e) => {
+                            tracing::error!("Failed to process token_ids: {e}");
+                            return Some((output, state));
+                        }
+                    };
 
                     // NOTE: the `finish_reason` is computed from the generated `token_ids` alone.
                     // The `data` field can have a `finish_reason` set, coming from the underlying
