@@ -8,6 +8,7 @@
 
 use super::*;
 
+use std::cell::Cell;
 use std::ffi::c_void;
 use std::ops::Range;
 
@@ -28,15 +29,20 @@ fn check_nccl_result(result: ncclResult_t) -> Result<()> {
 
 /// RAII guard for NCCL group operations.
 ///
-/// Calls `ncclGroupStart` on creation and `ncclGroupEnd` on drop.
+/// Calls `ncclGroupStart` in [`NcclGroup::new`] and `ncclGroupEnd` in [`NcclGroup::end`]
+/// (or in [`Drop`] if [`NcclGroup::end`] was not called).
 /// Use this to batch multiple NCCL operations efficiently.
+///
+/// **Call [`NcclGroup::end`] before dropping** so submission errors can be observed.
+/// If you drop without calling `end()`, [`Drop`] will call `ncclGroupEnd()` and panic on error.
 ///
 /// # Example
 /// ```ignore
-/// let group = unsafe { NcclGroup::new()? };
+/// let mut group = unsafe { NcclGroup::new()? };
 /// unsafe { bcast_block(&block1, root, comm, stream)?; }
 /// unsafe { bcast_block(&block2, root, comm, stream)?; }
-/// drop(group); // Submits all queued operations
+/// group.end()?; // Submit the group; call before drop to observe errors
+/// drop(group);
 /// ```
 ///
 /// # Safety
@@ -44,30 +50,55 @@ fn check_nccl_result(result: ncclResult_t) -> Result<()> {
 /// - All ranks must create and drop the group collectively
 /// - NCCL operations between creation and drop must be valid
 pub struct NcclGroup {
-    _private: (), // Prevent construction outside of new()
+    /// Tracks whether `ncclGroupEnd` has been successfully called (via `end()` or will be in `Drop`).
+    ended: Cell<bool>,
 }
 
 impl NcclGroup {
     /// Start a new NCCL group.
     ///
+    /// Calls `ncclGroupStart`. All ranks must call this collectively.
+    ///
     /// # Safety
     /// - All ranks must call this collectively
-    /// - The group must be dropped (ending the group) before any synchronization
+    /// - Call [`NcclGroup::end`] before drop to observe submission errors; the group must be ended before any synchronization
     pub unsafe fn new() -> Result<Self> {
         let result = unsafe { ncclGroupStart() };
         check_nccl_result(result).context("ncclGroupStart failed")?;
-        Ok(Self { _private: () })
+        Ok(Self {
+            ended: Cell::new(false),
+        })
+    }
+
+    /// End the NCCL group and submit all queued operations.
+    ///
+    /// Calls `ncclGroupEnd()`. Call this before dropping the guard so submission
+    /// errors can be observed. If this returns `Ok(())`, [`Drop`] will not call
+    /// `ncclGroupEnd` again. If you drop without calling `end()`, [`Drop`] will
+    /// call `ncclGroupEnd()` and panic on error.
+    ///
+    /// Returns an error if the group was already ended or if `ncclGroupEnd` fails.
+    pub fn end(&self) -> Result<()> {
+        if self.ended.get() {
+            anyhow::bail!("NcclGroup::end called twice");
+        }
+        let result = unsafe { ncclGroupEnd() };
+        check_nccl_result(result).context("ncclGroupEnd failed")?;
+        self.ended.set(true);
+        Ok(())
     }
 }
 
 impl Drop for NcclGroup {
     fn drop(&mut self) {
-        // Safety: If we successfully created the group, we must end it.
-        // Panicking here is acceptable as failing to end a group is unrecoverable.
+        if self.ended.get() {
+            return; // end() already called ncclGroupEnd successfully
+        }
+        // Safety: We started the group in NcclGroup::new (ncclGroupStart); we must end it.
+        // Panic on error so we do not silently swallow ncclGroupEnd failures.
         let result = unsafe { ncclGroupEnd() };
         if result != ncclResult_t::ncclSuccess {
-            // Log error but don't panic in drop to avoid double-panic
-            tracing::error!("ncclGroupEnd failed in NcclGroup drop: {:?}", result);
+            panic!("ncclGroupEnd failed in NcclGroup drop: {:?}. Call NcclGroup::end() before drop to handle errors.", result);
         }
     }
 }
