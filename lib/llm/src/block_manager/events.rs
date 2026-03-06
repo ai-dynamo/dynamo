@@ -149,6 +149,7 @@ pub struct DynamoEventManager {
     consolidator_handle: Arc<crate::block_manager::kv_consolidator::KvEventConsolidatorHandle>,
     #[allow(dead_code)]
     _consolidator: Option<Arc<crate::block_manager::kv_consolidator::KvEventConsolidator>>,
+    data_parallel_rank: Option<i32>,
 }
 
 impl DynamoEventManager {
@@ -159,6 +160,7 @@ impl DynamoEventManager {
         Arc::new(Self {
             consolidator_handle,
             _consolidator: None,
+            data_parallel_rank: None,
         })
     }
 
@@ -169,6 +171,7 @@ impl DynamoEventManager {
     pub async fn new_with_config(
         config: crate::block_manager::kv_consolidator::KvEventConsolidatorConfig,
     ) -> anyhow::Result<Arc<Self>> {
+        let dp_rank = config.data_parallel_rank;
         let mut kv_event_consolidator = KvEventConsolidator::new(config)?;
         kv_event_consolidator.start().await?;
         let handle = kv_event_consolidator.get_handle();
@@ -176,6 +179,7 @@ impl DynamoEventManager {
         Ok(Arc::new(Self {
             consolidator_handle: Arc::new(handle),
             _consolidator: Some(Arc::new(kv_event_consolidator)),
+            data_parallel_rank: dp_rank,
         }))
     }
 
@@ -196,6 +200,7 @@ impl DynamoEventManager {
 
         // Send each block to the consolidator
         let kv_event_consolidator = self.consolidator_handle.clone();
+        let data_parallel_rank = self.data_parallel_rank;
 
         if let Ok(rt) = tokio::runtime::Handle::try_current() {
             rt.spawn(async move {
@@ -209,10 +214,11 @@ impl DynamoEventManager {
                     let tokens: Vec<u32> = handle.tokens().iter().copied().collect();
 
                     tracing::debug!(
-                        "DynamoEventManager sending store event to kv event consolidator: block_hash={}, block_size={}, tokens={}",
+                        "DynamoEventManager sending store event to kv event consolidator: block_hash={}, block_size={}, tokens={}, dp_rank={:?}",
                         block_hash,
                         block_size,
-                        tokens.len()
+                        tokens.len(),
+                        data_parallel_rank
                     );
 
                     // Send to consolidator with EventSource::Kvbm
@@ -225,7 +231,7 @@ impl DynamoEventManager {
                             block_size,
                             None, // lora_name
                             None, // tier
-                            None, // data_parallel_rank
+                            data_parallel_rank,
                         )
                         .await;
                 }

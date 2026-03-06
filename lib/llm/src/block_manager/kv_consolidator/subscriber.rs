@@ -241,8 +241,8 @@ fn process_event(
         }
 
         RawKvEvent::AllBlocksCleared => {
-            tracing::debug!("Processing AllBlocksCleared");
-            tracker.handle_clear_all();
+            tracing::debug!("Processing AllBlocksCleared (dp_rank={:?})", data_parallel_rank);
+            tracker.handle_clear_all_with_rank(data_parallel_rank);
         }
     }
 }

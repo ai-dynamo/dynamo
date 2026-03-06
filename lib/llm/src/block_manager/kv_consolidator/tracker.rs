@@ -148,16 +148,19 @@ pub struct BlockMetadata {
     /// The first external block hash seen for this token sequence (for output events)
     /// Different sources may have different external hashes, but they all represent the same token content
     pub first_block_hash: String,
+    /// Data parallel rank this block belongs to (from the first event that stored it)
+    pub dp_rank: Option<i32>,
 }
 
 impl BlockMetadata {
-    pub fn new(source: EventSource, block_hash: String) -> Self {
+    pub fn new(source: EventSource, block_hash: String, dp_rank: Option<i32>) -> Self {
         let mut sources = HashSet::new();
         sources.insert(source);
 
         Self {
             sources,
             first_block_hash: block_hash,
+            dp_rank,
         }
     }
 
@@ -190,14 +193,18 @@ pub enum ConsolidatedEvent {
         block_size: usize,
         lora_name: Option<String>,
         source: String,
+        dp_rank: Option<i32>,
     },
     /// Block removed (removed from all sources)
     Remove {
         block_hash: String,
-        source: String, // The source where it was last removed
+        source: String,
+        dp_rank: Option<i32>,
     },
     /// All blocks cleared
-    ClearAll,
+    ClearAll {
+        dp_rank: Option<i32>,
+    },
 }
 
 /// Cache Status Tracker
@@ -313,7 +320,7 @@ impl CacheStatusTracker {
             false
         } else {
             // First time seeing this block from any source - create metadata and queue STORE event
-            let metadata = BlockMetadata::new(source, block_hash.clone());
+            let metadata = BlockMetadata::new(source, block_hash.clone(), data_parallel_rank);
 
             tracing::debug!(
                 "New block {} (seq_hash={}) stored in source {:?} (tier={:?}): {} tokens, block_size={}, parent={}, lora={:?}, dp_rank={:?}\n  Token IDs: {:?}",
@@ -368,6 +375,7 @@ impl CacheStatusTracker {
                 block_size,
                 lora_name,
                 source: source.to_str().to_string(),
+                dp_rank: data_parallel_rank,
             });
 
             tracing::debug!(
@@ -432,6 +440,7 @@ impl CacheStatusTracker {
             if !metadata.exists_in_any_source() {
                 // Block is gone from all sources - remove from tracker and publish REMOVE
                 let first_block_hash = metadata.first_block_hash.clone();
+                let block_dp_rank = metadata.dp_rank;
                 self.blocks.remove(&sequence_hash);
 
                 // Double-check: clean up any stray hash mappings (should be empty by now)
@@ -453,6 +462,7 @@ impl CacheStatusTracker {
                 self.event_queue.push(ConsolidatedEvent::Remove {
                     block_hash: first_block_hash.clone(),
                     source: source.to_str().to_string(),
+                    dp_rank: block_dp_rank,
                 });
 
                 tracing::debug!(
@@ -489,11 +499,16 @@ impl CacheStatusTracker {
 
     /// Handle a CLEAR_ALL event
     pub fn handle_clear_all(&mut self) {
+        self.handle_clear_all_with_rank(None);
+    }
+
+    /// Handle a CLEAR_ALL event with a specific data parallel rank
+    pub fn handle_clear_all_with_rank(&mut self, dp_rank: Option<i32>) {
         let num_blocks = self.blocks.len();
-        tracing::debug!("Clearing all {} blocks from tracker", num_blocks);
+        tracing::debug!("Clearing all {} blocks from tracker (dp_rank={:?})", num_blocks, dp_rank);
         self.blocks.clear();
         self.hash_mapping.clear();
-        self.event_queue.push(ConsolidatedEvent::ClearAll);
+        self.event_queue.push(ConsolidatedEvent::ClearAll { dp_rank });
     }
 
     /// Drain all pending events to be published

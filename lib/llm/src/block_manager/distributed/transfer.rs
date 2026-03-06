@@ -30,6 +30,18 @@ use std::{any::Any, sync::Arc};
 type LocalBlock<S, M> = Block<S, locality::Local, M>;
 type LocalBlockDataList<S> = Vec<LocalBlockData<S>>;
 
+/// A named group of (device, host, disk) block pools.
+/// The primary KV cache is group 0; additional caches (e.g. indexer k cache for DSA) are group 1+.
+/// All groups share the same `num_blocks` and `page_size` but may differ in `num_layers`,
+/// `outer_dim`, `inner_dim`, and `dtype`.
+#[derive(Clone)]
+pub struct CacheGroup {
+    pub name: String,
+    pub device: Option<LocalBlockDataList<DeviceStorage>>,
+    pub host: Option<LocalBlockDataList<PinnedStorage>>,
+    pub disk: Option<LocalBlockDataList<DiskStorage>>,
+}
+
 /// A batching wrapper for connector transfers to prevent resource exhaustion.
 /// Splits large transfers into smaller batches that can be handled by the resource pools.
 #[derive(Clone, Debug)]
@@ -84,11 +96,14 @@ impl ConnectorTransferBatcher {
 }
 
 /// A handler for all block transfers. Wraps a group of [`BlockTransferPoolManager`]s.
+///
+/// Holds one or more [`CacheGroup`]s. The primary KV cache is always group 0.
+/// Additional caches (e.g. DSA indexer k cache) are group 1+.
+/// Transfer operations iterate all groups for the same block index mapping,
+/// guaranteeing lockstep movement.
 #[derive(Clone)]
 pub struct BlockTransferHandler {
-    device: Option<LocalBlockDataList<DeviceStorage>>,
-    host: Option<LocalBlockDataList<PinnedStorage>>,
-    disk: Option<LocalBlockDataList<DiskStorage>>,
+    cache_groups: Vec<CacheGroup>,
     context: Arc<TransferContext>,
     scheduler_client: Option<TransferSchedulerClient>,
     batcher: ConnectorTransferBatcher,
@@ -96,6 +111,7 @@ pub struct BlockTransferHandler {
 }
 
 impl BlockTransferHandler {
+    /// Backwards-compatible constructor that creates a single primary cache group.
     pub fn new(
         device_blocks: Option<Vec<LocalBlock<DeviceStorage, BasicMetadata>>>,
         host_blocks: Option<Vec<LocalBlock<PinnedStorage, BasicMetadata>>>,
@@ -104,17 +120,42 @@ impl BlockTransferHandler {
         scheduler_client: Option<TransferSchedulerClient>,
         // add worker-connector scheduler client here
     ) -> Result<Self> {
-        Ok(Self {
+        let primary = CacheGroup {
+            name: "primary".to_string(),
             device: Self::get_local_data(device_blocks),
             host: Self::get_local_data(host_blocks),
             disk: Self::get_local_data(disk_blocks),
+        };
+        Self::new_multi(vec![primary], context, scheduler_client)
+    }
+
+    /// Create a handler with multiple cache groups. Group 0 is the primary KV cache.
+    pub fn new_multi(
+        cache_groups: Vec<CacheGroup>,
+        context: Arc<TransferContext>,
+        scheduler_client: Option<TransferSchedulerClient>,
+    ) -> Result<Self> {
+        assert!(!cache_groups.is_empty(), "At least one cache group required");
+
+        Ok(Self {
+            cache_groups,
             context,
             scheduler_client,
             batcher: ConnectorTransferBatcher::new(),
         })
     }
 
-    fn get_local_data<S: Storage>(
+    /// Returns a reference to the primary (first) cache group.
+    pub fn primary(&self) -> &CacheGroup {
+        &self.cache_groups[0]
+    }
+
+    /// Returns the number of cache groups.
+    pub fn num_cache_groups(&self) -> usize {
+        self.cache_groups.len()
+    }
+
+    pub fn get_local_data<S: Storage>(
         blocks: Option<Vec<LocalBlock<S, BasicMetadata>>>,
     ) -> Option<LocalBlockDataList<S>> {
         blocks.map(|blocks| {
@@ -185,28 +226,53 @@ impl BlockTransferHandler {
     }
 
     /// Execute transfer directly without batching (used by the batcher)
+    /// Iterates all cache groups for the same block index mapping to ensure lockstep.
     pub async fn execute_transfer_direct(&self, request: BlockTransferRequest) -> Result<()> {
         tracing::debug!(
-            "Performing transfer of {} blocks from {:?} to {:?}",
+            "Performing transfer of {} blocks from {:?} to {:?} across {} cache group(s)",
             request.blocks().len(),
             request.from_pool(),
-            request.to_pool()
+            request.to_pool(),
+            self.cache_groups.len()
         );
 
         tracing::debug!("request: {request:#?}");
 
-        let notify = match (request.from_pool(), request.to_pool()) {
-            (Device, Host) => self.begin_transfer(&self.device, &self.host, request).await,
-            (Device, Disk) => self.begin_transfer(&self.device, &self.disk, request).await,
-            (Host, Device) => self.begin_transfer(&self.host, &self.device, request).await,
-            (Host, Disk) => self.begin_transfer(&self.host, &self.disk, request).await,
-            (Disk, Device) => self.begin_transfer(&self.disk, &self.device, request).await,
-            _ => {
-                return Err(anyhow::anyhow!("Invalid transfer type."));
-            }
-        }?;
+        // Fire begin_transfer for all cache groups, then await all notifications
+        let mut notifies = Vec::with_capacity(self.cache_groups.len());
 
-        notify.await?;
+        for group in &self.cache_groups {
+            let notify = match (request.from_pool(), request.to_pool()) {
+                (Device, Host) => {
+                    self.begin_transfer(&group.device, &group.host, request.clone())
+                        .await
+                }
+                (Device, Disk) => {
+                    self.begin_transfer(&group.device, &group.disk, request.clone())
+                        .await
+                }
+                (Host, Device) => {
+                    self.begin_transfer(&group.host, &group.device, request.clone())
+                        .await
+                }
+                (Host, Disk) => {
+                    self.begin_transfer(&group.host, &group.disk, request.clone())
+                        .await
+                }
+                (Disk, Device) => {
+                    self.begin_transfer(&group.disk, &group.device, request.clone())
+                        .await
+                }
+                _ => {
+                    return Err(anyhow::anyhow!("Invalid transfer type."));
+                }
+            }?;
+            notifies.push(notify);
+        }
+
+        for notify in notifies {
+            notify.await?;
+        }
         Ok(())
     }
 }
