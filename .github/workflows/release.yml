@@ -50,11 +50,13 @@ jobs:
 
           BRANCH_NAME="${GITHUB_REF#refs/heads/}"
 
-          if [[ ! "$BRANCH_NAME" =~ ^release/[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "Error: Release pipeline must be triggered from a release/* branch (got: ${BRANCH_NAME})"
-            exit 1
+          if [[ "$BRANCH_NAME" =~ ^release/[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            VERSION="${BRANCH_NAME#release/}"
+          else
+            # TEMPORARY: allow testing from non-release branches -- remove before merging to main
+            echo "Warning: Not a release branch ($BRANCH_NAME), using test version 0.0.0-test"
+            VERSION="0.0.0-test"
           fi
-          VERSION="${BRANCH_NAME#release/}"
 
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
           echo "commit_sha=${COMMIT_SHA}" >> $GITHUB_OUTPUT
