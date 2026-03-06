@@ -25,6 +25,7 @@ RUN wget --tries=3 --waitretry=5 \
     rm -rf sccache*
 
 # Install uv package manager
+# TODO: Pin uv image to a specific version tag for reproducibility (e.g. ghcr.io/astral-sh/uv:0.10.7)
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
 # Install NATS server
@@ -46,7 +47,7 @@ ENV PATH=/usr/local/bin/etcd/:$PATH
 ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
     PATH=/usr/local/cargo/bin:$PATH \
-    RUST_VERSION=1.90.0
+    RUST_VERSION=1.93.1
 
 # Define Rust target based on ARCH_ALT ARG
 ARG RUSTARCH=${ARCH_ALT}-unknown-linux-gnu
