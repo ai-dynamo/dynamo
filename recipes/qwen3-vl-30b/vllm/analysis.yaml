@@ -3,7 +3,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: qwen3-vl-30b-agg-analysis
+  name: qwen3-vl-analysis
 spec:
   backoffLimit: 1
   completions: 1
@@ -12,7 +12,7 @@ spec:
     metadata:
       labels:
         app: benchmark-analysis
-        topology: agg
+        topology: configurable
     spec:
       restartPolicy: Never
       containers:
@@ -25,9 +25,19 @@ spec:
               set -euo pipefail
               python3 - <<'PY'
               import csv
+              import os
               from pathlib import Path
 
-              topology = "agg"
+              raw_topology = (os.getenv("TOPOLOGY", "agg") or "").strip()
+              topology = raw_topology.replace("-", "_")
+              supported_topologies = {"agg", "disagg_e_pd", "disagg_ep_d"}
+              if topology not in supported_topologies:
+                  supported = ", ".join(sorted(supported_topologies))
+                  raise SystemExit(
+                      f"Unsupported TOPOLOGY='{raw_topology}'. "
+                      f"Use one of: {supported}"
+                  )
+
               base = Path("/perf-cache/artifacts/qwen3_vl_30b_encoder_cache") / topology
               out_dir = base / "analysis"
               out_dir.mkdir(parents=True, exist_ok=True)
@@ -98,6 +108,7 @@ spec:
                   writer.writeheader()
                   writer.writerows(rows)
 
+              print(f"TOPOLOGY={topology}")
               print(f"Wrote: {csv_out}")
               print("")
               print("Cache ON vs OFF (p90) summary:")
@@ -109,6 +120,9 @@ spec:
                   pct_s = "N/A" if r["pct_change_on_vs_off"] is None else f'{r["pct_change_on_vs_off"]:.2f}%'
                   print(f"{r['tag']:<6} {r['metric']:<36} {off_s:>12} {on_s:>12} {pct_s:>12}")
               PY
+          env:
+            - name: TOPOLOGY
+              value: agg
           volumeMounts:
             - name: perf-cache
               mountPath: /perf-cache

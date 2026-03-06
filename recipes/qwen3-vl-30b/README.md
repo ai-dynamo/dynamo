@@ -1,6 +1,6 @@
 # Qwen3-VL-30B-A3B: Encoder Cache in Disaggregated E/PD
 
-This recipe demonstrates throughput/latency improvements from enabling multimodal encoder cache in disaggregated serving under different image re-use configurations.
+This recipe demonstrates disaggregation configs and how to enable encoder cache for a multi-modal LLM in vLLM. It also includes dataset generation and perf scripts to evaluate the deployment against varying levels of image re-use.
 
 ## Pre-requisites
 
@@ -14,13 +14,6 @@ This recipe demonstrates throughput/latency improvements from enabling multimoda
      -n ${NAMESPACE}
    ```
 
-## Overview
-
-We compare the impact of encoder cache toggled on vs off for three deployment modes:
-- `agg TP=1 x8 replicas`
-- `disagg E/PD x1 encode worker, x7 pd workers`
-- `disagg EP/D x4 EP workers, x4 decode workers`
-
 ## Available Configurations
 
 | Configuration | GPUs | Mode | Description |
@@ -29,19 +22,56 @@ We compare the impact of encoder cache toggled on vs off for three deployment mo
 | [**vllm/disagg-e-pd**](vllm/disagg-e-pd/) | 8x GPU | Disaggregated E/PD | disagg E/PD x1 encode worker, x7 pd workers |
 | [**vllm/disagg-ep-d**](vllm/disagg-ep-d/) | 8x GPU | Disaggregated EP/D | disagg EP/D x4 EP workers, x4 decode workers |
 
-To test this, the `data-gen/generate-datasets-job.yaml` creates 5 datasets of synthetic text + image data each with varying levels of image per request overlap. The script does this by manipulating the "total slots" and "image pool".
+## Dataset Generation
+
+`data-gen/generate-datasets-job.yaml` creates 5 datasets of synthetic text + image data each with varying levels of image per request overlap. The script does this by manipulating the "total slots" and "image pool".
 
 Total number of slots is calculated as `num_requests*images/request`, representing how many total images the benchmark will iterate through. The image pool is how many images the benchmark can choose from to attach to a request.
 
 Each dataset is tagged as `r_{##}` representing the ratio of total slots to image slots. For example, r_{50} refers to a dataset where the image pool is half the size of the total slots. In other words, you would need to traverse half of the entire dataset to have seen every image. Refer to jsonl [documention](https://github.com/ai-dynamo/dynamo/tree/main/benchmarks/multimodal/jsonl) for more details on data generation.
 
-Each dataset is hardcoded to have 500 requests and 320 tokens of user-input text. AIPerf configures the system prompt via `--shared-system-prompt-length` and the `perf-*.yaml` have this at 160 tokens.
+Each dataset is hardcoded to have 500 requests and 320 tokens of user-input text. AIPerf configures the system prompt via `--shared-system-prompt-length` and the `perf.yaml` scripts have this set to 160 tokens.
 
-### Notes:
+## Notes
 
 1. Exact cache hit rates cannot be explicitly controlled via dataset due potential LRU encoder cache eviction policies; however, decreasing the image pool relative to the number of requests allows for proportionally higher probabilities of seeing duplicate images and cache hits.
 
-2. Agg encoder cache requires `ec_both` ECConnector role in vLLM, but that functionality was merged post 1.0.0 release. If you see an error such as `Input should be 'ec_producer' or 'ec_consumer' [type=literal_error, input_value='ec_both', input_type=str]`, you can use the `patches/patch_vllm_agg_encoder_cache.sh` script to re-tag your dynamo image with the patch applied. See [mulitmodal-vllm.md](https://github.com/ai-dynamo/dynamo/blob/main/docs/features/multimodal/multimodal-vllm.md#embedding-cache) for more details.
+**2. Agg encoder cache requires `ec_both` ECConnector role in vLLM, but that functionality was merged post 1.0.0 release. If you see an error such as `Input should be 'ec_producer' or 'ec_consumer' [type=literal_error, input_value='ec_both', input_type=str]`, you can use the `patches/patch_vllm_agg_encoder_cache.sh` script to re-tag your dynamo image with the patch applied. See [mulitmodal-vllm.md](https://github.com/ai-dynamo/dynamo/blob/main/docs/features/multimodal/multimodal-vllm.md#embedding-cache) for more details.**
+
+3. Replace placeholders in `*.yaml` before running:
+   - `storageClassName: "your-storage-class-name"` in `model-cache/model-cache.yaml`
+   - `image: <your-dynamo-image>` in all `vllm/*/deploy.yaml` files
+   - `NAMESPACE=your-namespace` and `HF_TOKEN="your-token"` in the setup commands
+
+## Directory setup
+
+Each `vllm/<config>` directory contains `deploy.yaml` and `perf.yaml` that set up Dynamo and benchmark with [AIPerf](https://github.com/ai-dynamo/aiperf), respectively. A shared `vllm/analysis.yaml` performs post-run analysis for any configuration.
+
+```text
+qwen3-vl-30b/
+├── model-cache/
+│   ├── model-cache.yaml
+│   └── model-download.yaml
+├── data-gen/
+│   └── generate-datasets-job.yaml
+└── vllm/
+    ├── analysis.yaml
+    ├── agg/
+    │   ├── deploy.yaml
+    │   └── perf.yaml
+    ├── disagg-e-pd/
+    │   ├── deploy.yaml
+    │   └── perf.yaml
+    └── disagg-ep-d/
+        ├── deploy.yaml
+        └── perf.yaml
+```
+
+The `deploy.yaml` scripts have `MM_EMBEDDING_CACHE_GB=0` by default, which represents an embedding cache **off** configuration. To toggle it on, set the env variable to a non-zero value. 
+
+Similarly, each `perf.yaml` exposes a `CACHE_MODE` env variable to control where AIPerf dumps its results. Set it to either `cache_on` or `cache_off` depending on your deployment.
+
+The shared `vllm/analysis.yaml` exposes a `TOPOLOGY` env variable. Set it to `agg`, `disagg_ep_d`, or `disagg_e_pd` before running analysis to point it to the correct AIPerf benchmarking results.
 
 ## Quick Start
 
@@ -69,50 +99,36 @@ kubectl logs job/qwen3-vl-30b-generate-datasets -n ${NAMESPACE}
 **Option A: Aggregated (`agg`)**
 
 ```bash
-# Cache OFF
-kubectl apply -f vllm/agg/deploy-cache-off.yaml -n ${NAMESPACE}
-kubectl delete pod qwen3-vl-30b-agg-benchmark-cache-off -n ${NAMESPACE} --ignore-not-found=true
-kubectl apply -f vllm/agg/perf-cache-off.yaml -n ${NAMESPACE}
-```
+# Cache OFF by default, set MM_EMBEDDING_CACHE_GB to enable
+# Requires patched image
+kubectl apply -f vllm/agg/deploy.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Ready dynamographdeployment/qwen3-vl-agg -n ${NAMESPACE} --timeout=900s
 
-For cache ON with `agg`, use the patched image first:
-
-```bash
-cd patches
-./patch_vllm_agg_encoder_cache.sh \
-  --base-image <your dynamo image>:<your tag> \
-  --output-image <your dynamo image>:<your tag>-agg-ec-patched
-```
-
-```bash
-# Cache ON
-kubectl apply -f vllm/agg/deploy-cache-on.yaml -n ${NAMESPACE}
-kubectl delete pod qwen3-vl-30b-agg-benchmark-cache-on -n ${NAMESPACE} --ignore-not-found=true
-kubectl apply -f vllm/agg/perf-cache-on.yaml -n ${NAMESPACE}
+kubectl apply -f vllm/agg/perf.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Ready pod/qwen3-vl-agg-benchmark -n ${NAMESPACE} --timeout=300s
 ```
 
 **Option B: Disaggregated EP/D (`disagg_ep_d`)**
 
 ```bash
-# Cache OFF
-kubectl apply -f vllm/disagg-ep-d/deploy-cache-off.yaml -n ${NAMESPACE}
-kubectl apply -f vllm/disagg-ep-d/perf-cache-off.yaml -n ${NAMESPACE}
+# Cache OFF by default, set MM_EMBEDDING_CACHE_GB to enable
+# Requires patched image
+kubectl apply -f vllm/disagg-ep-d/deploy.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Ready dynamographdeployment/qwen3-vl-disagg-ep-d -n ${NAMESPACE} --timeout=900s
 
-# Cache ON
-kubectl apply -f vllm/disagg-ep-d/deploy-cache-on.yaml -n ${NAMESPACE}
-kubectl apply -f vllm/disagg-ep-d/perf-cache-on.yaml -n ${NAMESPACE}
+kubectl apply -f vllm/disagg-ep-d/perf.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Ready pod/qwen3-vl-disagg-ep-d-benchmark -n ${NAMESPACE} --timeout=300s
 ```
 
 **Option C: Disaggregated E/PD (`disagg_e_pd`)**
 
 ```bash
-# Cache OFF
-kubectl apply -f vllm/disagg-e-pd/deploy-cache-off.yaml -n ${NAMESPACE}
-kubectl apply -f vllm/disagg-e-pd/perf-cache-off.yaml -n ${NAMESPACE}
+# Cache OFF by default, set MM_EMBEDDING_CACHE_GB to enable
+kubectl apply -f vllm/disagg-e-pd/deploy.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Ready dynamographdeployment/qwen3-vl-disagg-e-pd -n ${NAMESPACE} --timeout=900s
 
-# Cache ON
-kubectl apply -f vllm/disagg-e-pd/deploy-cache-on.yaml -n ${NAMESPACE}
-kubectl apply -f vllm/disagg-e-pd/perf-cache-on.yaml -n ${NAMESPACE}
+kubectl apply -f vllm/disagg-e-pd/perf.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Ready pod/qwen3-vl-disagg-e-pd-benchmark -n ${NAMESPACE} --timeout=300s
 ```
 
 ### 4. Monitor Benchmark Progress
@@ -120,9 +136,12 @@ kubectl apply -f vllm/disagg-e-pd/perf-cache-on.yaml -n ${NAMESPACE}
 ```bash
 kubectl get pods -n ${NAMESPACE} -l app=benchmark
 
-# Follow one benchmark pod at a time
-kubectl logs -f qwen3-vl-30b-agg-benchmark-cache-off -n ${NAMESPACE}
-kubectl logs -f qwen3-vl-30b-agg-benchmark-cache-on -n ${NAMESPACE}
+# Follow one benchmark pod to see AIPerf in realtime
+# {config} = agg, disagg-ep-d, or disagg-e-pd
+kubectl logs -f qwen3-vl-{config}-benchmark -n ${NAMESPACE}
+
+# Wait for completion
+kubectl wait --for=jsonpath='{.status.phase}'=Succeeded pod/qwen3-vl-{config}-benchmark -n ${NAMESPACE} --timeout=7200s
 ```
 
 Wait for `All runs complete. Artifacts in /perf-cache/artifacts/qwen3_vl_30b_encoder_cache/<config>`.
@@ -130,23 +149,10 @@ Wait for `All runs complete. Artifacts in /perf-cache/artifacts/qwen3_vl_30b_enc
 ### 5. Run Analysis and View Results
 
 ```bash
-# Aggregated
-kubectl delete job qwen3-vl-30b-agg-analysis -n ${NAMESPACE} --ignore-not-found=true
-kubectl apply -f vllm/agg/analysis.yaml -n ${NAMESPACE}
-kubectl wait --for=condition=Complete job/qwen3-vl-30b-agg-analysis -n ${NAMESPACE} --timeout=600s
-kubectl logs job/qwen3-vl-30b-agg-analysis -n ${NAMESPACE}
-
-# EP/D
-kubectl delete job qwen3-vl-30b-disagg-ep-d-analysis -n ${NAMESPACE} --ignore-not-found=true
-kubectl apply -f vllm/disagg-ep-d/analysis.yaml -n ${NAMESPACE}
-kubectl wait --for=condition=Complete job/qwen3-vl-30b-disagg-ep-d-analysis -n ${NAMESPACE} --timeout=600s
-kubectl logs job/qwen3-vl-30b-disagg-ep-d-analysis -n ${NAMESPACE}
-
-# E/PD
-kubectl delete job qwen3-vl-30b-disagg-e-pd-analysis -n ${NAMESPACE} --ignore-not-found=true
-kubectl apply -f vllm/disagg-e-pd/analysis.yaml -n ${NAMESPACE}
-kubectl wait --for=condition=Complete job/qwen3-vl-30b-disagg-e-pd-analysis -n ${NAMESPACE} --timeout=600s
-kubectl logs job/qwen3-vl-30b-disagg-e-pd-analysis -n ${NAMESPACE}
+# Set TOPOLOGY: {config} from above in vllm/analysis.yaml 
+kubectl apply -f vllm/analysis.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Complete job/qwen3-vl-analysis -n ${NAMESPACE} --timeout=600s
+kubectl logs job/qwen3-vl-analysis -n ${NAMESPACE}
 ```
 
 Analysis CSV outputs:

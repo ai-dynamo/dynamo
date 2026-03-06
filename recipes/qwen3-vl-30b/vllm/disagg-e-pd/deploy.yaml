@@ -3,7 +3,7 @@
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
-  name: qwen3-vl-30b-disagg-e-pd-cache-on
+  name: qwen3-vl-disagg-e-pd
 spec:
   pvcs:
     - create: false
@@ -20,7 +20,7 @@ spec:
           value: tcp
       extraPodSpec:
         mainContainer:
-          image: dynamo:latest-vllm-runtime
+          image: <your-dynamo-image>
           imagePullPolicy: IfNotPresent
           workingDir: /workspace
       replicas: 1
@@ -50,7 +50,7 @@ spec:
             - python3
             - -m
             - dynamo.vllm
-          image: dynamo:latest-vllm-runtime
+          image: <your-dynamo-image>
           imagePullPolicy: IfNotPresent
           env:
             - name: HF_HOME
@@ -97,7 +97,7 @@ spec:
                 --enable-prefix-caching \
                 --multimodal-embedding-cache-capacity-gb "${MM_EMBEDDING_CACHE_GB}" \
                 --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'
-          image: dynamo:latest-vllm-runtime
+          image: <your-dynamo-image>
           imagePullPolicy: IfNotPresent
           env:
             - name: HF_HOME
@@ -107,7 +107,7 @@ spec:
             - name: DYN_VLLM_EMBEDDING_TRANSFER_MODE
               value: nixl-write
             - name: MM_EMBEDDING_CACHE_GB
-              value: "10"
+              value: "0"
           workingDir: /workspace
       replicas: 7
       resources:

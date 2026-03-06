@@ -3,7 +3,7 @@
 apiVersion: v1
 kind: Pod
 metadata:
-  name: qwen3-vl-30b-agg-benchmark-cache-off
+  name: qwen3-vl-agg-benchmark
   labels:
     app: benchmark
 spec:
@@ -81,9 +81,9 @@ spec:
         - name: MODEL_NAME
           value: Qwen/Qwen3-VL-30B-A3B-Instruct
         - name: FRONTEND
-          value: qwen3-vl-30b-agg-cache-off-frontend
+          value: qwen3-vl-agg-frontend
         - name: CACHE_MODE
-          value: cache_off
+          value: cache_on
         - name: SYSTEM_PROMPT_TOKENS
           value: "160"
         - name: MAX_TOKENS

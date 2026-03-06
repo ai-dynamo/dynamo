@@ -3,7 +3,7 @@
 apiVersion: v1
 kind: Pod
 metadata:
-  name: qwen3-vl-30b-agg-benchmark-cache-on
+  name: qwen3-vl-disagg-e-pd-benchmark
   labels:
     app: benchmark
 spec:
@@ -81,7 +81,7 @@ spec:
         - name: MODEL_NAME
           value: Qwen/Qwen3-VL-30B-A3B-Instruct
         - name: FRONTEND
-          value: qwen3-vl-30b-agg-cache-on-frontend
+          value: qwen3-vl-disagg-e-pd-frontend
         - name: CACHE_MODE
           value: cache_on
         - name: SYSTEM_PROMPT_TOKENS
@@ -101,7 +101,7 @@ spec:
         - name: DATASET_DIR
           value: /perf-cache/datasets
         - name: ARTIFACT_BASE_DIR
-          value: /perf-cache/artifacts/qwen3_vl_30b_encoder_cache/agg
+          value: /perf-cache/artifacts/qwen3_vl_30b_encoder_cache/disagg_e_pd
       resources:
         requests:
           cpu: "8"
