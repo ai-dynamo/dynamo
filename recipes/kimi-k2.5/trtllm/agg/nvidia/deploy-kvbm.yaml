@@ -81,8 +81,22 @@ spec:
             containerPort: 9090
           - name: nixl
             containerPort: 19090
-          - name: kvbm
+          - name: kvbm-0
             containerPort: 6880
+          - name: kvbm-1
+            containerPort: 6881
+          - name: kvbm-2
+            containerPort: 6882
+          - name: kvbm-3
+            containerPort: 6883
+          - name: kvbm-4
+            containerPort: 6884
+          - name: kvbm-5
+            containerPort: 6885
+          - name: kvbm-6
+            containerPort: 6886
+          - name: kvbm-7
+            containerPort: 6887
           args:
           - |
             python3 -m dynamo.trtllm \

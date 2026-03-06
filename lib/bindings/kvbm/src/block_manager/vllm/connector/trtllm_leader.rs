@@ -8,7 +8,7 @@ use crate::block_manager::vllm::connector::leader::slot::{
     ConnectorSlotManager, SlotManager, SlotState,
 };
 use crate::block_manager::vllm::connector::leader::{
-    kvbm_metrics_endpoint_enabled, parse_kvbm_metrics_port,
+    allocate_kvbm_metrics_port, kvbm_metrics_endpoint_enabled,
 };
 use crate::block_manager::{distributed::KvbmLeader as PyKvbmLeader, vllm::KvbmRequest};
 use crate::get_current_tokio_handle;
@@ -80,10 +80,12 @@ impl KvConnectorLeader {
         let leader = leader_py.get_inner().clone();
         let handle: Handle = get_current_tokio_handle();
 
+        let (metrics_port, dp_rank) = allocate_kvbm_metrics_port();
+        let dp_rank_str = dp_rank.to_string();
         let kvbm_metrics = KvbmMetrics::new(
-            &KvbmMetricsRegistry::default(),
+            &KvbmMetricsRegistry::with_labels(&[("dp_rank", &dp_rank_str)]),
             kvbm_metrics_endpoint_enabled(),
-            parse_kvbm_metrics_port(),
+            metrics_port,
         );
 
         let kvbm_metrics_clone = kvbm_metrics.clone();

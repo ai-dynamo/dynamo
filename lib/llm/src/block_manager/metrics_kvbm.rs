@@ -190,7 +190,8 @@ impl KvbmMetrics {
             let listener = match TcpListener::bind(addr).await {
                 Ok(listener) => listener,
                 Err(err) => {
-                    panic!("failed to bind metrics server to {addr}: {err}");
+                    tracing::error!("[kvbm] failed to bind metrics server to {addr}: {err}");
+                    return;
                 }
             };
 
@@ -270,6 +271,8 @@ impl Drop for KvbmMetrics {
 pub struct KvbmMetricsRegistry {
     registry: Arc<Registry>,
     prefix: String,
+    /// Labels applied to every metric created by this registry (e.g. `dp_rank`).
+    global_labels: Vec<(String, String)>,
 }
 
 impl KvbmMetricsRegistry {
@@ -277,7 +280,32 @@ impl KvbmMetricsRegistry {
         Self {
             registry: Arc::new(Registry::new()),
             prefix: "kvbm".to_string(),
+            global_labels: Vec::new(),
         }
+    }
+
+    /// Create a registry whose metrics all carry the given const labels.
+    pub fn with_labels(labels: &[(&str, &str)]) -> Self {
+        Self {
+            registry: Arc::new(Registry::new()),
+            prefix: "kvbm".to_string(),
+            global_labels: labels
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        }
+    }
+
+    fn merged_labels(&self, labels: &[(&str, &str)]) -> HashMap<String, String> {
+        let mut map: HashMap<String, String> = self
+            .global_labels
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        for (k, v) in labels {
+            map.insert(k.to_string(), v.to_string());
+        }
+        map
     }
 
     pub fn create_intcounter(
@@ -287,10 +315,7 @@ impl KvbmMetricsRegistry {
         labels: &[(&str, &str)],
     ) -> anyhow::Result<IntCounter> {
         let metrics_name = sanitize_prometheus_name(&format!("{}_{}", self.prefix, name))?;
-        let const_labels: HashMap<String, String> = labels
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect();
+        let const_labels = self.merged_labels(labels);
         let opts = Opts::new(metrics_name, description).const_labels(const_labels);
         let c = IntCounter::with_opts(opts)?;
         self.registry.register(Box::new(c.clone()))?;
@@ -304,10 +329,7 @@ impl KvbmMetricsRegistry {
         labels: &[(&str, &str)],
     ) -> anyhow::Result<Gauge> {
         let metrics_name = sanitize_prometheus_name(&format!("{}_{}", self.prefix, name))?;
-        let const_labels: HashMap<String, String> = labels
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect();
+        let const_labels = self.merged_labels(labels);
         let opts = Opts::new(metrics_name, description).const_labels(const_labels);
         let g = Gauge::with_opts(opts)?;
         self.registry.register(Box::new(g.clone()))?;

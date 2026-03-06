@@ -1,13 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Standalone PodMonitor for KVBM metrics (port 6880).
+# Standalone PodMonitor for KVBM metrics (ports 6880-6887).
 # Apply this if you cannot upgrade the platform Helm chart.
 #
 # Usage: kubectl apply -f podmonitor-kvbm.yaml -n monitoring
 #
-# Scrapes KVBM metrics (port 6880) from worker pods in any namespace.
-# Only workers with the kvbm port exposed (e.g. DYN_KVBM_METRICS=true) are scraped.
+# Scrapes KVBM metrics (ports 6880-6887, one per DP rank) from worker pods in any namespace.
+# Only workers with the kvbm ports exposed (e.g. DYN_KVBM_METRICS=true) are scraped.
 #
 # If your Prometheus Operator watches a different namespace for PodMonitors,
 # change metadata.namespace and apply there.
@@ -22,7 +22,28 @@ spec:
   podMetricsEndpoints:
   - interval: 5s
     path: /metrics
-    port: kvbm
+    port: kvbm-0
+  - interval: 5s
+    path: /metrics
+    port: kvbm-1
+  - interval: 5s
+    path: /metrics
+    port: kvbm-2
+  - interval: 5s
+    path: /metrics
+    port: kvbm-3
+  - interval: 5s
+    path: /metrics
+    port: kvbm-4
+  - interval: 5s
+    path: /metrics
+    port: kvbm-5
+  - interval: 5s
+    path: /metrics
+    port: kvbm-6
+  - interval: 5s
+    path: /metrics
+    port: kvbm-7
   selector:
     matchLabels:
       nvidia.com/dynamo-component-type: worker

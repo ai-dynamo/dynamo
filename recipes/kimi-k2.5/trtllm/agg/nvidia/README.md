@@ -24,7 +24,7 @@ Key environment variables on the worker:
 |---|---|---|
 | `DYN_KVBM_CPU_CACHE_GB` | `10` | CPU cache size in GB for KVBM |
 | `DYN_KVBM_METRICS` | `true` | Enable Prometheus metrics endpoint |
-| `DYN_KVBM_METRICS_PORT` | `6880` | Port for the metrics endpoint |
+| `DYN_KVBM_METRICS_PORT` | `6880` | Base port for the metrics endpoint. With `enable_attention_dp: true`, each DP rank gets its own port: `base` through `base + dp_ranks - 1` (e.g. 6880–6887 for 8 DP ranks). |
 
 ## Enable Prometheus Metrics Scraping
 
@@ -34,7 +34,7 @@ If you have the [Prometheus Operator](https://github.com/prometheus-operator/pro
 kubectl apply -f podmonitor-kvbm.yaml -n monitoring
 ```
 
-This scrapes `/metrics` on port `6880` (named `kvbm`) every 5 seconds from worker pods labeled with:
+This scrapes `/metrics` on ports `6880`–`6887` (named `kvbm-0` through `kvbm-7`) every 5 seconds from worker pods labeled with:
 - `nvidia.com/dynamo-component-type: worker`
 - `nvidia.com/metrics-enabled: "true"`
 

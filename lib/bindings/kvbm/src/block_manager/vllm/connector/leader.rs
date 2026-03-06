@@ -26,6 +26,7 @@ use dynamo_llm::block_manager::{
 };
 use dynamo_llm::tokens::{SaltHash, TokenBlockSequence, Tokens};
 use dynamo_runtime::config::environment_names::kvbm as env_kvbm;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::{collections::HashSet, sync::Mutex};
 use tokio;
@@ -103,10 +104,12 @@ impl KvConnectorLeader {
         let leader = leader_py.get_inner().clone();
         let handle: Handle = get_current_tokio_handle();
 
+        let (metrics_port, dp_rank) = allocate_kvbm_metrics_port();
+        let dp_rank_str = dp_rank.to_string();
         let kvbm_metrics = KvbmMetrics::new(
-            &KvbmMetricsRegistry::default(),
+            &KvbmMetricsRegistry::with_labels(&[("dp_rank", &dp_rank_str)]),
             kvbm_metrics_endpoint_enabled(),
-            parse_kvbm_metrics_port(),
+            metrics_port,
         );
         let kvbm_metrics_clone = kvbm_metrics.clone();
 
@@ -708,6 +711,19 @@ pub fn kvbm_metrics_endpoint_enabled() -> bool {
     std::env::var(env_kvbm::DYN_KVBM_METRICS)
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
+}
+
+static KVBM_METRICS_PORT_COUNTER: AtomicU16 = AtomicU16::new(0);
+
+/// Base port cached from `parse_kvbm_metrics_port()` on first call.
+static KVBM_METRICS_BASE_PORT: OnceLock<u16> = OnceLock::new();
+
+/// Return a unique metrics port and DP rank for each KVBM connector leader.
+/// Each call returns `(base_port + N, N)` where N auto-increments from 0.
+pub fn allocate_kvbm_metrics_port() -> (u16, u16) {
+    let base = *KVBM_METRICS_BASE_PORT.get_or_init(parse_kvbm_metrics_port);
+    let offset = KVBM_METRICS_PORT_COUNTER.fetch_add(1, Ordering::Relaxed);
+    (base + offset, offset)
 }
 
 pub fn parse_kvbm_metrics_port() -> u16 {
