@@ -1177,19 +1177,6 @@ func (r *DynamoGraphDeploymentRequestReconciler) enrichHardwareFromDiscovery(ctx
 	}
 	hw := dgdr.Spec.Hardware
 
-	// Normalize a user-provided GPUSKU to the canonical AIC system identifier
-	if hw.GPUSKU != "" {
-		normalized := gpu.InferHardwareSystem(string(hw.GPUSKU))
-		if normalized == "" {
-			return fmt.Errorf(
-				"spec.hardware.gpuSku %q is not a recognized AIC system identifier; "+
-					"valid values: gb200_sxm, h200_sxm, h100_sxm, b200_sxm, a100_sxm, l40s",
-				hw.GPUSKU,
-			)
-		}
-		hw.GPUSKU = normalized
-	}
-
 	if hw.GPUSKU != "" && hw.VRAMMB != nil && hw.NumGPUsPerNode != nil {
 		return nil // all fields already set by user; TotalGPUs is filled below when discovery runs
 	}
