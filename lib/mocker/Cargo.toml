@@ -12,13 +12,14 @@ repository.workspace = true
 
 [dependencies]
 # repo
+dynamo-kv-router = { workspace = true }
 dynamo-runtime = { workspace = true }
 dynamo-tokens = { workspace = true }
-dynamo-kv-router = { workspace = true }
 
 # workspace
 anyhow = { workspace = true }
-validator = { workspace = true }
+bytes = { workspace = true }
+futures = { workspace = true }
 dashmap = { workspace = true }
 derive_builder = { workspace = true }
 derive-getters = { workspace = true }
@@ -26,17 +27,25 @@ rand = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
+tokio-stream = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
+validator = { workspace = true }
 
 # crate-specific
 ndarray = "0.16"
 ndarray-npy = "0.9"
 ndarray-interp = "0.5"
+zeromq = "0.4.1"
+rmp-serde = "1.3"
 
 [target.'cfg(target_os = "linux")'.dependencies]
+dynamo-llm = { workspace = true }
 tokio-timerfd = "0.2"
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+dynamo-llm = { path = "../llm", default-features = false }
 
 [dev-dependencies]
 rstest = "0.18.2"
