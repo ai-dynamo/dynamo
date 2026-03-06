@@ -131,4 +131,4 @@ ARG TRTLLM_PYTHON_VERSION={{ context[framework].python_version }}
 {% if make_efa == true %}
 ARG EFA_VERSION={{ context.dynamo.efa_version }}
 ARG EFA_BASE_IMAGE={{ "runtime" if target=="runtime" else "dev" }}
-{%- endif -%}
+{%- endif %}

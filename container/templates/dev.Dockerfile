@@ -357,8 +357,8 @@ RUN if command -v uv >/dev/null 2>&1; then \
         python3 -m pip install maturin[patchelf] ; \
     fi
 
-# Set commit SHA for tests (passed via docker build as --build-arg)
-ARG DYNAMO_COMMIT_SHA
+# Commit SHA baked in at render time; CI overrides with --build-arg DYNAMO_COMMIT_SHA=<sha>
+ARG DYNAMO_COMMIT_SHA={{ commit_sha }}
 ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA
 
 # Setup dev launch banner (displayed on interactive shell entry)

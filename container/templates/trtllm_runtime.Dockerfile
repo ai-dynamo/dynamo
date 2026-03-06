@@ -280,7 +280,8 @@ RUN chmod g+w ${VIRTUAL_ENV} /workspace /workspace/* /opt/dynamo /opt/dynamo/* &
     echo 'cat /opt/dynamo/.launch_screen' >> /etc/bash.bashrc
 
 USER dynamo
-ARG DYNAMO_COMMIT_SHA
+# Commit SHA baked in at render time; CI overrides with --build-arg DYNAMO_COMMIT_SHA=<sha>
+ARG DYNAMO_COMMIT_SHA={{ commit_sha }}
 ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA
 
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]

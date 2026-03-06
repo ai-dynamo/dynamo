@@ -152,7 +152,8 @@ WORKDIR ${WORKSPACE_DIR}
 COPY --chmod=775 --chown=dynamo:0 ./ ${WORKSPACE_DIR}/
 RUN chmod g+w ${WORKSPACE_DIR}
 
-ARG DYNAMO_COMMIT_SHA
+# Commit SHA baked in at render time; CI overrides with --build-arg DYNAMO_COMMIT_SHA=<sha>
+ARG DYNAMO_COMMIT_SHA={{ commit_sha }}
 ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA
 
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
