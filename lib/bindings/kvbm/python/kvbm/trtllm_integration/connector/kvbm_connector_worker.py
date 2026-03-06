@@ -73,14 +73,18 @@ def _create_kvbm_nccl_comm(rank: int, world_size: int) -> int:
         bootstrap_data = None
 
     # Broadcast bootstrap data to all ranks
-    logger.info(f"KVBM: Rank {rank} entering bcast (data_len={len(bootstrap_data) if bootstrap_data else 0})")
+    logger.info(
+        f"KVBM: Rank {rank} entering bcast (data_len={len(bootstrap_data) if bootstrap_data else 0})"
+    )
     bootstrap_data = comm.bcast(bootstrap_data, root=0)
-    logger.info(f"KVBM: Rank {rank} received bootstrap data (len={len(bootstrap_data)})")
+    logger.info(
+        f"KVBM: Rank {rank} received bootstrap data (len={len(bootstrap_data)})"
+    )
 
     # Non-rank-0 deserializes the data
     if rank != 0:
         bootstrap = NcclBootstrap.deserialize(bootstrap_data)
-    
+
     logger.info(f"KVBM: Rank {rank} bootstrap world_size={bootstrap.world_size()}")
 
     # In TRT-LLM TP mode with MPI, all ranks see all GPUs (device_count=4)
@@ -103,7 +107,7 @@ def _create_kvbm_nccl_comm(rank: int, world_size: int) -> int:
             f"KVBM: Rank {rank} on CUDA device {target_device} "
             f"(device_count={device_count})"
         )
-    
+
     torch.cuda.synchronize()  # Ensure device is properly initialized
 
     # Synchronize all ranks before NCCL initialization
@@ -152,7 +156,11 @@ class DynamoKVBMConnectorWorker(KvCacheConnectorWorker):
         # NCCL replicated mode for MLA support - controlled by feature flag
         # Set DYN_KVBM_NCCL_MLA_MODE=true to enable NCCL broadcast optimization for MLA models
         nccl_rank, nccl_world_size, nccl_comm_ptr = None, None, None
-        enable_nccl_mla = os.environ.get("DYN_KVBM_NCCL_MLA_MODE", "false").lower() in ("true", "1", "yes")
+        enable_nccl_mla = os.environ.get("DYN_KVBM_NCCL_MLA_MODE", "false").lower() in (
+            "true",
+            "1",
+            "yes",
+        )
 
         if enable_nccl_mla:
             logger.info("KVBM NCCL MLA mode enabled via DYN_KVBM_NCCL_MLA_MODE")
@@ -165,9 +173,7 @@ class DynamoKVBMConnectorWorker(KvCacheConnectorWorker):
 
         if enable_nccl_mla and nccl_rank is not None and nccl_world_size is not None:
             try:
-                nccl_comm_ptr = _create_kvbm_nccl_comm(
-                    nccl_rank, nccl_world_size
-                )
+                nccl_comm_ptr = _create_kvbm_nccl_comm(nccl_rank, nccl_world_size)
                 logger.info(
                     f"KVBM MLA support: NCCL broadcast optimization enabled. "
                     f"Rank {nccl_rank}/{nccl_world_size}: only rank 0 loads "
