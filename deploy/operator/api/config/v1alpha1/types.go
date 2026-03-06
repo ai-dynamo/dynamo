@@ -77,7 +77,7 @@ type OperatorConfiguration struct {
 // ServerConfiguration holds server bind addresses and ports.
 type ServerConfiguration struct {
 	// Metrics server configuration
-	// +kubebuilder:default={bindAddress: "127.0.0.1", port: 8080}
+	// +kubebuilder:default={bindAddress: "0.0.0.0", port: 8080, secure: true}
 	Metrics MetricsServer `json:"metrics"`
 	// Health probe server configuration
 	// +kubebuilder:default={bindAddress: "0.0.0.0", port: 8081}

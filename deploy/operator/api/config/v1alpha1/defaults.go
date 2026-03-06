@@ -33,7 +33,7 @@ func SetDefaultsOperatorConfiguration(obj *OperatorConfiguration) {
 		obj.Server.Metrics.Port = 8080
 	}
 	if obj.Server.Metrics.BindAddress == "" {
-		obj.Server.Metrics.BindAddress = "127.0.0.1"
+		obj.Server.Metrics.BindAddress = "0.0.0.0"
 	}
 	if obj.Server.HealthProbe.Port == 0 {
 		obj.Server.HealthProbe.Port = 8081
