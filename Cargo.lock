@@ -1846,6 +1846,7 @@ name = "dynamo-bench"
 version = "1.0.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "clap 4.5.60",
  "dynamo-kv-router",
  "dynamo-mocker",
