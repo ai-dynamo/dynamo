@@ -256,6 +256,28 @@ kubectl describe dynamographdeploymentrequest qwen3-first-model -n ${NAMESPACE}
 Common causes: no available GPU nodes, image pull failure (check NGC credentials or image tag),
 missing `hardware` config for a namespace-scoped operator.
 
+> [!TIP]
+> **GPU node taints** are a frequent cause of pods staying `Pending`. Many clusters (including
+> GKE by default and most shared/HPC environments) taint GPU nodes with
+> `nvidia.com/gpu:NoSchedule` so that only GPU-aware workloads land on them. If the profiling
+> job pod is stuck with a `0/N nodes are available: … node(s) had untolerated taint` event,
+> add a toleration to your DGDR via `overrides.profilingJob`. The operator and profiler
+> automatically forward it to every candidate and deployed pod:
+>
+> ```yaml
+> spec:
+>   ...
+>   overrides:
+>     profilingJob:
+>       template:
+>         spec:
+>           containers: []    # required placeholder; leave empty to inherit defaults
+>           tolerations:
+>             - key: nvidia.com/gpu
+>               operator: Exists
+>               effect: NoSchedule
+> ```
+
 **Profiling job fails**
 
 ```bash
