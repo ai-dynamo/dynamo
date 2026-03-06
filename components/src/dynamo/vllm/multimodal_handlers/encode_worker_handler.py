@@ -19,6 +19,7 @@ from dynamo.common.multimodal import (
     NixlWriteEmbeddingSender,
 )
 from dynamo.common.utils import nvtx_utils as _nvtx
+from dynamo.common.utils.time_section import time_and_log_code_section
 from dynamo.runtime import DistributedRuntime
 
 from ..constants import EmbeddingTransferMode
@@ -175,7 +176,9 @@ class EncodeWorkerHandler:
                         # keep track of key to avoid recompute of it
                         need_encode_indexes.append((idx, embedding_key))
 
-            with _nvtx.annotate("mm:enc:image_load", color="green"):
+            with _nvtx.annotate(
+                "mm:enc:image_load", color="green"
+            ), time_and_log_code_section("[ENCODE] image loading"):
                 # Load and generate image tensors
                 image_tasks = []
                 image_to_load = []
@@ -205,12 +208,16 @@ class EncodeWorkerHandler:
                     )
 
             if loaded_images:
-                with _nvtx.annotate("mm:enc:image_preprocess", color="yellow"):
+                with _nvtx.annotate(
+                    "mm:enc:image_preprocess", color="yellow"
+                ), time_and_log_code_section("[ENCODE] image processing"):
                     image_embeds = await asyncio.to_thread(
                         self.image_processor, images=loaded_images, return_tensors="pt"
                     )
 
-                with _nvtx.annotate("mm:enc:vision_encode", color="red"):
+                with _nvtx.annotate(
+                    "mm:enc:vision_encode", color="red"
+                ), time_and_log_code_section("[ENCODE] encoding"):
                     # Encode the image embeddings using model-specific encoder
                     embeddings = await asyncio.to_thread(
                         encode_image_embeddings,
