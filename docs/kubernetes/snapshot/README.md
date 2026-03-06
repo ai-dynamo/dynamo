@@ -87,7 +87,8 @@ helm install snapshot nvidia/snapshot \
   - Potentially compromise node security if exploited
 
 ### Technical Limitations
-- **vLLM and SGLang backends only**: TensorRT-LLM support is planned.
+- **x86_64 (amd64) only**: `cuda-checkpoint` does not support ARM64. The snapshot agent and placeholder images are built for x86_64 only.
+- **vLLM and SGLang backends only**: TensorRT-LLM is not supported.
 - **LLM workers only**: Checkpoint/restore supports LLM decode and prefill workers. Specialized workers (multimodal, embedding, diffusion) are not supported.
 - **Single-node only**: Checkpoints must be created and restored on the same node
 - **Single-GPU only**: Multi-GPU configurations not yet supported
