@@ -3,6 +3,7 @@
 
 """Dynamo SGLang wrapper configuration ArgGroup."""
 
+import argparse
 from typing import Optional
 
 from dynamo.common.configuration.arg_group import ArgGroup
@@ -17,7 +18,7 @@ class DynamoSGLangArgGroup(ArgGroup):
 
     name = "dynamo-sglang"
 
-    def add_arguments(self, parser) -> None:
+    def add_arguments(self, parser: argparse.ArgumentParser) -> None:
         """Add Dynamo SGLang arguments to parser."""
 
         parser.add_argument(

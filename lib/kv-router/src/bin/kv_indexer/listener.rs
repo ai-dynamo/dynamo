@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::AtomicU32;
 use std::time::Duration;
 
 use rmp_serde as rmps;
@@ -48,10 +48,10 @@ pub async fn run_zmq_listener(
         return;
     }
 
-    let next_event_id = AtomicU64::new(0);
+    let mut next_event_id = 0u64;
     let warning_count = Arc::new(AtomicU32::new(0));
     let mut consecutive_errors = 0u32;
-    #[allow(unused_assignments)]
+    #[expect(unused_assignments)]
     let mut exit_reason = "unknown";
     let mut messages_processed = 0u64;
 
@@ -94,29 +94,28 @@ pub async fn run_zmq_listener(
 
                 consecutive_errors = 0;
 
-                let mut frames: Vec<Vec<u8>> = msg.into_vec().into_iter().map(|f| f.to_vec()).collect();
-                if frames.len() != 3 {
-                    tracing::warn!(worker_id, "Unexpected ZMQ frame count: {}", frames.len());
+                if msg.len() != 3 {
+                    tracing::warn!(worker_id, "Unexpected ZMQ frame count: {}", msg.len());
                     continue;
                 }
 
-                let payload = frames.pop().unwrap();
-                let seq_bytes = frames.pop().unwrap();
-
+                let seq_bytes = msg.get(1).unwrap();
                 if seq_bytes.len() != 8 {
                     tracing::warn!(worker_id, "Invalid sequence number length: {}", seq_bytes.len());
                     continue;
                 }
 
-                let batch_result = rmps::from_slice::<KvEventBatch>(&payload);
+                let payload = msg.get(2).unwrap();
+                let batch_result = rmps::from_slice::<KvEventBatch>(payload);
                 let Ok(batch) = batch_result else {
                     tracing::warn!(worker_id, "Failed to decode KvEventBatch: {}", batch_result.unwrap_err());
                     continue;
                 };
 
-                let effective_dp_rank = batch.data_parallel_rank.map_or(dp_rank, |r| r as u32);
-                for raw_event in batch.events.into_iter() {
-                    let event_id = next_event_id.fetch_add(1, Ordering::SeqCst);
+                let effective_dp_rank = batch.data_parallel_rank.map_or(dp_rank, |r| r.cast_unsigned());
+                for raw_event in batch.events {
+                    let event_id = next_event_id;
+                    next_event_id += 1;
                     let kv_event = convert_event(raw_event, event_id, block_size, effective_dp_rank, &warning_count);
                     let router_event = RouterEvent::new(worker_id, kv_event);
                     indexer.apply_event(router_event).await;

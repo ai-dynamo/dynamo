@@ -918,6 +918,7 @@ impl KvRouter {
                     update_states,
                     lora_name,
                     0.0,
+                    None,
                     None, // allowed_worker_ids: pass via RoutingHints in PreprocessedRequest path
                 )
                 .await
