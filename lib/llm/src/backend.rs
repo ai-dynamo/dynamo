@@ -620,13 +620,20 @@ mod tests {
         fn encode(&self, _input: &str) -> anyhow::Result<crate::tokenizers::Encoding> {
             Ok(crate::tokenizers::Encoding::Sp(vec![]))
         }
-        fn encode_batch(&self, _inputs: &[&str]) -> anyhow::Result<Vec<crate::tokenizers::Encoding>> {
+        fn encode_batch(
+            &self,
+            _inputs: &[&str],
+        ) -> anyhow::Result<Vec<crate::tokenizers::Encoding>> {
             Ok(vec![])
         }
     }
 
     impl traits::Decoder for FailingDecoder {
-        fn decode(&self, _token_ids: &[TokenIdType], _skip_special_tokens: bool) -> anyhow::Result<String> {
+        fn decode(
+            &self,
+            _token_ids: &[TokenIdType],
+            _skip_special_tokens: bool,
+        ) -> anyhow::Result<String> {
             Err(anyhow::anyhow!(
                 "Unable to decode into a valid UTF-8 string: incomplete utf-8 byte sequence from index 6"
             ))
@@ -647,7 +654,10 @@ mod tests {
         let mut decoder = Decoder::new(decode_stream, stop_conditions, false, None);
 
         let result = decoder.process_token_ids(&[42]);
-        assert!(result.is_err(), "process_token_ids should propagate decode errors");
+        assert!(
+            result.is_err(),
+            "process_token_ids should propagate decode errors"
+        );
 
         let err_msg = result.err().unwrap().to_string();
         assert!(
