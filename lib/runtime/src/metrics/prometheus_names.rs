@@ -488,7 +488,7 @@ pub mod kvrouter {
 pub mod kv_publisher {
     /// Total number of raw events dropped by engines before reaching publisher (detected via event_id gaps)
     pub const ENGINES_DROPPED_EVENTS_TOTAL: &str = "kv_publisher_engines_dropped_events_total";
-} 
+}
 
 /// Additional TRT-LLM worker metrics beyond what the engine natively provides.
 ///
