@@ -14,9 +14,6 @@ spec:
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/epp-image:my-tag
-          env:
-            - name: DYN_DECODE_FALLBACK
-              value: "true"
       eppConfig:
         config:
           plugins:
