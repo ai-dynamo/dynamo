@@ -260,6 +260,8 @@ jobs:
           extra_tags: ${{ steps.extra-tags.outputs.tags }}
           push_image: ${{ inputs.push_image }}
           no_load: ${{ inputs.no_load }}
+          extra_build_args: |
+            DYNAMO_COMMIT_SHA=${{ github.sha }}
       - name: Show summary
         shell: bash
         if: ${{ inputs.push_image && inputs.show_summary }}
