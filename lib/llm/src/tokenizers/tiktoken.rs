@@ -469,11 +469,8 @@ mod tests {
 
         // Byte-fallback tokens: individual bytes that form CJK character "你" (U+4F60)
         // UTF-8 encoding: 0xE4 0xBD 0xA0
-        let byte_tokens: Vec<(Vec<u8>, u32)> = vec![
-            (vec![0xE4], 100),
-            (vec![0xBD], 101),
-            (vec![0xA0], 102),
-        ];
+        let byte_tokens: Vec<(Vec<u8>, u32)> =
+            vec![(vec![0xE4], 100), (vec![0xBD], 101), (vec![0xA0], 102)];
 
         for (token, rank) in &byte_tokens {
             let encoded = engine.encode(token);
@@ -515,7 +512,10 @@ mod tests {
         let tokenizer = create_byte_token_tokenizer(dir.path());
 
         let result = tokenizer.decode(&[100], false);
-        assert!(result.is_ok(), "decode() should not error on incomplete UTF-8 bytes");
+        assert!(
+            result.is_ok(),
+            "decode() should not error on incomplete UTF-8 bytes"
+        );
         let text = result.unwrap();
         assert!(
             text.contains('\u{FFFD}'),
@@ -585,8 +585,15 @@ mod tests {
         let result = tokenizer.decode(&[5, 100], false);
         assert!(result.is_ok());
         let text = result.unwrap();
-        assert!(text.starts_with("hello"), "should start with 'hello', got: {:?}", text);
-        assert!(text.contains('\u{FFFD}'), "trailing incomplete byte should produce U+FFFD");
+        assert!(
+            text.starts_with("hello"),
+            "should start with 'hello', got: {:?}",
+            text
+        );
+        assert!(
+            text.contains('\u{FFFD}'),
+            "trailing incomplete byte should produce U+FFFD"
+        );
     }
 
     /// End-to-end incremental detokenization: DecodeStream buffers partial bytes,

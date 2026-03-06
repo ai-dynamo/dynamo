@@ -327,20 +327,20 @@ fn test_tiktoken_roundtrip_multibyte_utf8() {
         TikTokenTokenizer::from_file_auto(&path).expect("Failed to load tiktoken tokenizer");
 
     let test_cases = &[
-        "hello world",                    // Plain ASCII
-        "deep learning is awesome",       // Normal English text
+        "hello world",                                  // Plain ASCII
+        "deep learning is awesome",                     // Normal English text
         "The quick brown fox jumps over the lazy dog.", // Pangram with punctuation
-        "line1\nline2\nline3",            // Newlines
-        "你好世界",                       // CJK: 3-byte UTF-8 chars
-        "😀😃😄😁",                       // Emoji: 4-byte UTF-8 chars
-        "hello 你好 world 🌍",            // Mixed ASCII + CJK + emoji
-        "café résumé naïve",              // Latin with diacritics (2-byte UTF-8)
-        "こんにちは",                      // Japanese hiragana
-        "Привет мир",                     // Cyrillic
-        "مرحبا",                          // Arabic (RTL)
-        "🧑‍💻👨‍👩‍👧‍👦",                          // Emoji ZWJ sequences (complex multi-codepoint)
-        "a你b😀c",                        // Interleaved single-byte and multi-byte
-        "",                               // Empty string
+        "line1\nline2\nline3",                          // Newlines
+        "你好世界",                                     // CJK: 3-byte UTF-8 chars
+        "😀😃😄😁",                                     // Emoji: 4-byte UTF-8 chars
+        "hello 你好 world 🌍",                          // Mixed ASCII + CJK + emoji
+        "café résumé naïve",                            // Latin with diacritics (2-byte UTF-8)
+        "こんにちは",                                   // Japanese hiragana
+        "Привет мир",                                   // Cyrillic
+        "مرحبا",                                        // Arabic (RTL)
+        "🧑‍💻👨‍👩‍👧‍👦",    // Emoji ZWJ sequences (complex multi-codepoint)
+        "a你b😀c", // Interleaved single-byte and multi-byte
+        "",        // Empty string
     ];
 
     for &text in test_cases {
@@ -352,10 +352,7 @@ fn test_tiktoken_roundtrip_multibyte_utf8() {
             .decode(encoding.token_ids(), false)
             .unwrap_or_else(|e| panic!("Failed to decode '{text}': {e}"));
 
-        assert_eq!(
-            decoded, text,
-            "Roundtrip failed for: '{text}'"
-        );
+        assert_eq!(decoded, text, "Roundtrip failed for: '{text}'");
     }
 }
 
@@ -391,11 +388,8 @@ fn test_tiktoken_roundtrip_multibyte_decode_stream() {
             .encode(output_text)
             .unwrap_or_else(|e| panic!("Failed to encode output '{output_text}': {e}"));
 
-        let mut stream = DecodeStream::new(
-            shared_tokenizer.clone(),
-            prompt_encoding.token_ids(),
-            false,
-        );
+        let mut stream =
+            DecodeStream::new(shared_tokenizer.clone(), prompt_encoding.token_ids(), false);
 
         let mut reassembled = String::new();
         for &token_id in output_encoding.token_ids() {
@@ -448,9 +442,6 @@ fn test_tiktoken_roundtrip_multibyte_sequence() {
             output.push_str(&chunk);
         }
 
-        assert_eq!(
-            output, text,
-            "Sequence roundtrip failed for: '{text}'"
-        );
+        assert_eq!(output, text, "Sequence roundtrip failed for: '{text}'");
     }
 }
