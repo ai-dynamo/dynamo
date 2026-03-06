@@ -105,6 +105,11 @@ Decode-block based rejection (`active_decode_blocks_threshold`) only works when 
 
 If any prerequisite is missing, decode-block busy detection is effectively disabled for those workers.
 
+Examples of missing prerequisites:
+
+- Frontend cannot receive events because worker-load subscription is unavailable (for example, event transport not reachable or misconfigured).
+- Workers are running in a mode/path that does not publish `active_decode_blocks` (for example, custom integrations without worker metrics publishing).
+
 ### Important: Different from `router_track_active_blocks`
 
 `active_decode_blocks_threshold` and `router_track_active_blocks` are related to load, but they are not the same feature:
@@ -348,7 +353,11 @@ curl -s http://localhost:8000/busy_threshold
 curl -s http://localhost:8000/metrics | grep dynamo_frontend_worker_active_decode_blocks
 ```
 3. Check frontend logs for worker-monitor subscription issues (for example, warnings that KV metrics subscriber is unavailable).
-4. Verify event transport configuration between frontend and workers (`--event-plane`, NATS/ZMQ connectivity).
+4. Verify worker `kv_total_blocks` is present (runtime config / worker metrics), for example:
+```bash
+curl -s http://<worker-system-port>/metrics | grep dynamo_component_total_blocks
+```
+5. Verify event transport configuration between frontend and workers (`--event-plane`, NATS/ZMQ connectivity).
 
 ### Common confusion: `router_track_active_blocks`
 
