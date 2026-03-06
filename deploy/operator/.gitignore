@@ -31,7 +31,6 @@ go.work
 *.swp
 
 # Tilt local settings (personal overrides)
-tilt-settings.yaml
 tilt-settings.local.yaml
 *.swo
 *~

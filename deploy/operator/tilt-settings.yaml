@@ -14,7 +14,7 @@ allowed_contexts:
 # Container registry to push the operator image to.
 # Can also be set via the REGISTRY env var (env var takes precedence).
 # Examples: docker.io/jont828, ghcr.io/myorg, myregistry.azurecr.io
-registry: docker.io/jont828
+# registry: docker.io/<your-username>
 
 # Skip running `make generate && make manifests` before applying CRDs.
 # Set to true when you haven't changed API types and want faster iteration.

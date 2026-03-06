@@ -35,6 +35,10 @@ if os.path.exists('tilt-settings.yaml'):
     data = read_yaml('tilt-settings.yaml', default={})
     if data:
         settings.update(data)
+if os.path.exists('tilt-settings.local.yaml'):
+    local_data = read_yaml('tilt-settings.local.yaml', default={})
+    if local_data:
+        settings.update(local_data)
 
 if 'allowed_contexts' in settings:
     allow_k8s_contexts(settings['allowed_contexts'])
@@ -323,8 +327,16 @@ def render_helm():
         if doc == None:
             continue
 
-        # Ensure every resource lands in the target namespace
-        if 'metadata' in doc and 'namespace' not in doc['metadata']:
+        # Ensure namespaced resources land in the target namespace.
+        # Cluster-scoped kinds must not have a namespace set.
+        _cluster_scoped_kinds = {
+            'ClusterRole', 'ClusterRoleBinding',
+            'ValidatingWebhookConfiguration', 'MutatingWebhookConfiguration',
+            'CustomResourceDefinition', 'Namespace',
+            'PriorityClass', 'StorageClass', 'IngressClass',
+        }
+        kind = doc.get('kind', '')
+        if 'metadata' in doc and 'namespace' not in doc['metadata'] and kind not in _cluster_scoped_kinds:
             doc['metadata']['namespace'] = NAMESPACE
 
         # Strip securityContext so Tilt's live_update (writing into the
