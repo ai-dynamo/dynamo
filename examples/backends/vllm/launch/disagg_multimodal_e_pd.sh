@@ -57,11 +57,36 @@ done
 PD_MAX_MODEL_LEN="16384"
 
 
-echo "=================================================="
-echo "Disaggregated Multimodal Serving (E + PD)"
-echo "=================================================="
-echo "Model: $MODEL_NAME"
-echo "=================================================="
+HTTP_PORT="${DYN_HTTP_PORT:-8000}"
+echo "=========================================="
+if [[ "$SINGLE_GPU" == "true" ]]; then
+    GPU_LABEL="1 GPU"
+else
+    GPU_LABEL="2 GPUs"
+fi
+echo "Launching Disaggregated Multimodal E+PD ($GPU_LABEL)"
+echo "=========================================="
+echo "Model:       $MODEL_NAME"
+echo "Frontend:    http://localhost:$HTTP_PORT"
+echo "=========================================="
+echo ""
+echo "Example test command:"
+echo ""
+echo "  curl http://localhost:${HTTP_PORT}/v1/chat/completions \\"
+echo "    -H 'Content-Type: application/json' \\"
+echo "    -d '{"
+echo "      \"model\": \"${MODEL_NAME}\","
+echo "      \"messages\": [{"
+echo "        \"role\": \"user\","
+echo "        \"content\": ["
+echo "          {\"type\": \"text\", \"text\": \"Describe the image.\"},"
+echo "          {\"type\": \"image_url\", \"image_url\": {\"url\": \"https://upload.wikimedia.org/wikipedia/commons/thumb/3/3a/Cat03.jpg/480px-Cat03.jpg\"}}"
+echo "        ]"
+echo "      }],"
+echo "      \"max_tokens\": 50"
+echo "    }'"
+echo ""
+echo "=========================================="
 
 
 # Start frontend (no router mode)
@@ -70,8 +95,11 @@ python -m dynamo.frontend &
 
 EXTRA_ARGS=""
 
-# Embedding transfer: 1 = local file (safetensors), 0 = NIXL RDMA
-export TRANSFER_LOCAL=${TRANSFER_LOCAL:-1}
+# Embedding transfer:
+#   "local" = local file (safetensors),
+#   "nixl-write" = NIXL WRITE transfer
+#   "nixl-read" = NIXL READ transfer (default: "local")
+export DYN_VLLM_EMBEDDING_TRANSFER_MODE=${DYN_VLLM_EMBEDDING_TRANSFER_MODE:-"local"}
 
 # GPU assignments (override via environment variables)
 if [[ "$SINGLE_GPU" == "true" ]]; then

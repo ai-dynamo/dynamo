@@ -18,9 +18,10 @@ import dataclasses
 import logging
 import os
 import re
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
-from typing import Any, AsyncGenerator, Optional, Union
+from typing import Any, Optional, Union
 
 import torch
 from tensorrt_llm.executor.result import GenerationResult
@@ -103,7 +104,7 @@ class HandlerBase(BaseGenerativeHandler):
         self.shutdown_event = config.shutdown_event
         self.disable_request_abort = config.disable_request_abort
 
-    def check_error(self, result: dict):
+    def check_error(self, result: dict) -> bool:
         """
         Check if there is an error in the result.
         """
@@ -194,7 +195,7 @@ class HandlerBase(BaseGenerativeHandler):
         Raise GeneratorExit if shutdown event is triggered.
         """
         try:
-            cancellation_triggers = [
+            cancellation_triggers: list[asyncio.Future[Any]] = [
                 context.async_killed_or_stopped(),  # Request cancellation
             ]
             # Shutdown cancellation
@@ -414,7 +415,7 @@ class HandlerBase(BaseGenerativeHandler):
         ep_disaggregated_params: Optional[Any],
     ) -> tuple[Any, Any, dict]:
         """
-        Setup disaggregated_params based on PREFILL/DECODE mode.
+        Setup disaggregated_params based on disaggregation mode.
 
         For PREFILL mode:
         - Uses ep_disaggregated_params from encode worker if available
@@ -424,6 +425,11 @@ class HandlerBase(BaseGenerativeHandler):
         - Decodes disaggregated_params from prefill_result
         - Extracts EPD metadata for prompt optimization
 
+        For PREFILL_AND_DECODE (aggregated) mode:
+        - Uses ep_disaggregated_params from encode worker if available
+          (passes multimodal_embedding_handles to TRT-LLM and sets
+          request_type="context_and_generation" for full prefill + decode)
+
         Args:
             request: Request dictionary (may contain prefill_result)
             ep_disaggregated_params: Optional params from encode worker (EPD flow)
@@ -432,7 +438,7 @@ class HandlerBase(BaseGenerativeHandler):
             Tuple of (disaggregated_params, ep_disaggregated_params, epd_metadata)
         """
         disaggregated_params = None
-        epd_metadata = {}
+        epd_metadata: dict[str, Any] = {}
 
         # PREFILL mode: setup context_only params
         if self.disaggregation_mode == DisaggregationMode.PREFILL:
@@ -443,6 +449,20 @@ class HandlerBase(BaseGenerativeHandler):
                 disaggregated_params = LlmDisaggregatedParams(
                     request_type="context_only"
                 )
+
+        # AGGREGATED (prefill_and_decode) mode with encoder disaggregation:
+        # Pass the encode worker's DisaggregatedParams (containing
+        # multimodal_embedding_handles) directly so TRT-LLM can import
+        # the vision embeddings.  Use "context_and_generation" so the
+        # engine runs a full prefill + decode cycle.
+        elif (
+            self.disaggregation_mode == DisaggregationMode.AGGREGATED
+            and ep_disaggregated_params is not None
+        ):
+            disaggregated_params = DisaggregatedParamsCodec.decode(
+                ep_disaggregated_params
+            )
+            disaggregated_params.request_type = "context_and_generation"
 
         # DECODE mode: decode params from prefill_result
         prefill_result = request.get("prefill_result")
@@ -589,7 +609,7 @@ class HandlerBase(BaseGenerativeHandler):
         context: Context,
         embeddings: Optional[Union[torch.Tensor, dict]] = None,
         ep_disaggregated_params: Optional[DisaggregatedParams] = None,
-    ):
+    ) -> AsyncGenerator[dict, None]:
         """
         Generate responses based on the disaggregation mode in the request.
 

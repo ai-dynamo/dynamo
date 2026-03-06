@@ -6,7 +6,6 @@ name: PR
 on:
   push:
     branches:
-      - main
       - "pull-request/[0-9]+"
       # Note: release/* branches are handled by release.yml workflow
   workflow_dispatch:
@@ -18,12 +17,9 @@ on:
         default: false
 
 concurrency:
-    # The group name is a ternary operation. If the ref_name is 'main',
-    # then the group name uses the run_id to ensure a unique group for
-    # 'main' pushes. Otherwise, the group name is the ref_name, so that
-    # workflows on the same PR/branch have the same group name for cancelling.
-    group: docker-build-test-${{ github.ref_name == 'main' && github.run_id || github.ref_name }}
-    cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  # The group name is the ref_name, so that workflows on the same PR/branch have the same group name for cancelling.
+  group: docker-build-test-${{ github.ref_name }}
+  cancel-in-progress: true
 
 env:
   BUILDER_NAME: b-${{ github.run_id }}-${{ github.run_attempt }}
@@ -156,13 +152,6 @@ jobs:
             "${ACR_IMAGE_BASE}:${DEFAULT_TAG}"
           )
 
-          if [[ "${{ github.ref_name }}" == "main" ]]; then
-            IMAGE_URIS+=(
-              "${ECR_DEFAULT_IMAGE_BASE}:main-operator"
-              "${ACR_IMAGE_BASE}:main-operator"
-            )
-          fi
-
           echo "operator_default_tag=${DEFAULT_TAG}" >> $GITHUB_OUTPUT
           TAGGING_FLAGS=$(printf -- '-t %s ' "${IMAGE_URIS[@]}")
           echo "flags for docker buildx: ${TAGGING_FLAGS}"
@@ -192,20 +181,19 @@ jobs:
   # ============================================================================
   vllm-pipeline:
     needs: [changed-files]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true'
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
     uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
     with:
       framework: vllm
       target: runtime
       platforms: '["amd64", "arm64"]'
       cuda_versions: '["12.9", "13.0"]'
-      extra_tags: |
-        ${{ github.ref_name == 'main' && 'main-vllm' || '' }}
-        ${{ github.ref_name == 'main' && format('main-vllm-{0}', github.sha) || '' }}
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
-      build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
-      copy_timeout_minutes: ${{ github.ref_name == 'main' && 20 || 10 }}
+      build_timeout_minutes: 60
+      copy_timeout_minutes: 10
+      run_cpu_only_tests: ${{ needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' }}
       cpu_only_test_markers: 'pre_merge and vllm and gpu_0'
+      run_single_gpu_tests: ${{ needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' }}
       single_gpu_test_markers: 'pre_merge and vllm and gpu_1'
       single_gpu_test_timeout_minutes: 35
       run_multi_gpu_tests: false  # TODO: Dmitry is working on fixing markers for multi-GPU tests, can enable after that is resolved
@@ -216,20 +204,19 @@ jobs:
   # ============================================================================
   sglang-pipeline:
     needs: [changed-files]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true'
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true'
     uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
     with:
       framework: sglang
       target: runtime
       platforms: '["amd64", "arm64"]'
       cuda_versions: '["12.9", "13.0"]'
-      extra_tags: |
-        ${{ github.ref_name == 'main' && 'main-sglang' || '' }}
-        ${{ github.ref_name == 'main' && format('main-sglang-{0}', github.sha) || '' }}
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
-      build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
-      copy_timeout_minutes: ${{ github.ref_name == 'main' && 20 || 10 }}
+      build_timeout_minutes: 60
+      copy_timeout_minutes: 10
+      run_cpu_only_tests: ${{ needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' }}
       cpu_only_test_markers: 'pre_merge and sglang and gpu_0'
+      run_single_gpu_tests: ${{ needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' }}
       single_gpu_test_markers: 'pre_merge and sglang and gpu_1'
       run_multi_gpu_tests: false  # TODO: Dmitry is working on fixing markers for multi-GPU tests, can enable after that is resolved
     secrets: inherit
@@ -239,20 +226,19 @@ jobs:
   # ============================================================================
   trtllm-pipeline:
     needs: [changed-files]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true'
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true'
     uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
     with:
       framework: trtllm
       target: runtime
       platforms: '["amd64", "arm64"]'
       cuda_versions: '["13.1"]'
-      extra_tags: |
-        ${{ github.ref_name == 'main' && 'main-trtllm' || '' }}
-        ${{ github.ref_name == 'main' && format('main-trtllm-{0}', github.sha) || '' }}
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
-      build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
-      copy_timeout_minutes: ${{ github.ref_name == 'main' && 20 || 10 }}
+      build_timeout_minutes: 60
+      copy_timeout_minutes: 10
+      run_cpu_only_tests: ${{ needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' }}
       cpu_only_test_markers: 'pre_merge and trtllm and gpu_0'
+      run_single_gpu_tests: ${{ needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' }}
       single_gpu_test_markers: 'pre_merge and trtllm and gpu_1'
       run_multi_gpu_tests: false  # TODO: Dmitry is working on fixing markers for multi-GPU tests, can enable after that is resolved
     secrets: inherit
@@ -265,11 +251,10 @@ jobs:
 
   deploy-operator:
     runs-on: prod-default-small-v2
-    # Run when any deploy test will run: if core, any framework, or deploy files changed
+    # Run when any deploy test will run: if any framework or deploy files changed
     if: |
       always() &&
-      (needs.changed-files.outputs.core == 'true' ||
-       needs.changed-files.outputs.vllm == 'true' ||
+      (needs.changed-files.outputs.vllm == 'true' ||
        needs.changed-files.outputs.sglang == 'true' ||
        needs.changed-files.outputs.trtllm == 'true' ||
        needs.changed-files.outputs.deploy == 'true') &&
@@ -317,7 +302,12 @@ jobs:
    # ============================================================================
   deploy-test-vllm:
     # Run if core, vllm, or deploy is changed
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
+    # always() is needed because reusable workflows with skipped internal jobs
+    # (e.g. multi-gpu tests, arm64 copy) cause GitHub Actions to skip dependent
+    # jobs unless always() is present. !failure() ensures we still skip on real failures.
+    if: |
+      always() && !failure() &&
+      (needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true')
     runs-on: prod-default-small-v2
     needs: [changed-files, deploy-operator, vllm-pipeline]
     timeout-minutes: 25
@@ -354,8 +344,10 @@ jobs:
 
   deploy-test-sglang:
     runs-on: prod-default-small-v2
-    # Run if core, sglang, or deploy is changed
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true'
+    # Run if core, sglang, or deploy is changed (see deploy-test-vllm for always() rationale)
+    if: |
+      always() && !failure() &&
+      (needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true')
     needs: [changed-files, deploy-operator, sglang-pipeline]
     timeout-minutes: 25
     permissions:
@@ -389,8 +381,10 @@ jobs:
 
   deploy-test-trtllm:
     runs-on: prod-default-small-v2
-    # Run if core, trtllm, or deploy is changed
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true'
+    # Run if core, trtllm, or deploy is changed (see deploy-test-vllm for always() rationale)
+    if: |
+      always() && !failure() &&
+      (needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true')
     needs: [changed-files, deploy-operator, trtllm-pipeline]
     timeout-minutes: 25
     permissions:

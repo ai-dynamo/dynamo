@@ -229,6 +229,9 @@ pub mod frontend_service {
     pub const WORKER_LAST_INTER_TOKEN_LATENCY_SECONDS: &str =
         "worker_last_inter_token_latency_seconds";
 
+    /// Number of requests pending in the router's scheduler queue (gauge per worker_type)
+    pub const ROUTER_QUEUE_PENDING_REQUESTS: &str = "router_queue_pending_requests";
+
     /// Label name for the type of migration
     pub const MIGRATION_TYPE_LABEL: &str = "migration_type";
 

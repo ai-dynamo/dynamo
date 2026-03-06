@@ -62,7 +62,7 @@ async def init_decode(
     shutdown_endpoints: list,
     run_deferred_handlers: Callable[[], Awaitable[None]] | None = None,
     checkpoint_restore_engine: Optional[sgl.Engine] = None,
-):
+) -> None:
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
     if server_args.node_rank >= 1:
@@ -152,7 +152,7 @@ async def init_prefill(
     shutdown_endpoints: list,
     run_deferred_handlers: Callable[[], Awaitable[None]] | None = None,
     checkpoint_restore_engine: Optional[sgl.Engine] = None,
-):
+) -> None:
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
     if server_args.node_rank >= 1:
