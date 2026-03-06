@@ -34,10 +34,12 @@ Agentic hints are per-request metadata that the agent client (e.g. Claude Code, 
 |------|-------------|
 | `latency_sensitivity` | Router queue priority (requires `--router-queue-threshold`). Higher values shift the request earlier in the queue so user-facing turns run before background work. |
 | `priority` | Engine queue ordering and KV cache eviction. Forwarded to the backend for scheduling and priority-based eviction. |
-| `expected_osl` / `osl` | Expected output sequence length (tokens). Used by the router for output block tracking and load-balancing accuracy when `--router-track-output-blocks` is enabled. |
+| `osl` | Expected output sequence length (tokens). Used by the router for output block tracking and load-balancing accuracy when `--router-track-output-blocks` is enabled. |
+| `speculative_prefill` | When true, after the assistant turn completes the system prefills the predicted next-turn prefix (conversation history + assistant text, e.g. thinking stripped) to warm the KV cache for the next request. |
 | `program_id` | (Planned) Identifies the agentic program for program-level metrics and cache affinity. |
 | `context_type` | (Planned) Semantic type (e.g. system prompt, tool definition, reasoning branch) for context-aware eviction. |
-| `cache_control` | TTL-based KV cache pinning. Pinned prefixes resist eviction for the specified duration (see [Cache Pinning (Experimental)](#cache-pinning-experimental)). |
+
+**`nvext.cache_control`** (sibling of `agent_hints`, not inside it) provides TTL-based KV cache pinning. Pinned prefixes resist eviction for the specified duration. See [SGLang for Agentic Workloads — Cache Pinning](../backends/sglang/agents.md#cache-pinning-experimental).
 
 
 ## Feature matrix
@@ -72,7 +74,7 @@ You can call Dynamo from LangChain using the [NVIDIA AI Endpoints integration](h
 
 - **Cache prefetching (future work):** Using the predictable agentic lifecycle (e.g. parent-child subagents, known next turn), Dynamo could proactively prefetch or move KV cache to a different worker so that the next request hits warm cache. 
 
-### Predictive prefill (speculative prefill)
+### Speculative prefill 
 
 After a turn finishes, the system can send a **speculative** `max_tokens=1` prefill with the **predicted next-turn prefix** (conversation history + assistant text, e.g. thinking stripped) to the same worker. When the real next request arrives, it hits a warm KV cache. Per-turn TTFT on turns 2+ can drop significantly (e.g. up to ~3× in [multiturn benchmarks](https://github.com/ai-dynamo/dynamo/blob/main/lib/bench/src/bin/README.md)). This can be extended so that Dynamo automatically sends tools and system prompt for subagents to a worker in advance, so subagent requests always hit warm cache.
 
