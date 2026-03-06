@@ -152,14 +152,21 @@ def _prune_infeasible_candidates(
     pruned: list = []
     for candidate in candidates:
         tp = candidate.tp
+        pp = getattr(candidate, "pp", 1) or 1
+        moe_tp = getattr(candidate, "moe_tp", 1) or 1
         ep = getattr(candidate, "moe_ep", 1) or 1
 
+        # Dense weights (attention, embeddings) are sharded by TP × PP.
+        total_shards_dense = tp * pp
         if model_info.is_moe:
-            # Dense weights: split by TP only (EP does not distribute them).
-            # Expert weights: split by TP × EP.
-            per_gpu_mib = dense_size_mib / tp + expert_size_mib / (tp * ep)
+            # Expert weights are additionally sharded by moe_tp × moe_ep.
+            total_shards_expert = total_shards_dense * moe_tp * ep
+            per_gpu_mib = (
+                dense_size_mib / total_shards_dense
+                + expert_size_mib / total_shards_expert
+            )
         else:
-            per_gpu_mib = model_info.model_size / tp
+            per_gpu_mib = model_info.model_size / total_shards_dense
 
         if per_gpu_mib <= usable_vram_mib:
             feasible.append(candidate)
@@ -178,9 +185,11 @@ def _prune_infeasible_candidates(
         )
         for candidate, per_gpu_mib in pruned:
             logger.warning(
-                "  Pruned %s tp=%d ep=%d: ~%.1f GiB estimated > %.1f GiB usable",
+                "  Pruned %s tp=%d pp=%d moe_tp=%d ep=%d: ~%.1f GiB estimated > %.1f GiB usable",
                 label,
                 candidate.tp,
+                getattr(candidate, "pp", 1) or 1,
+                getattr(candidate, "moe_tp", 1) or 1,
                 getattr(candidate, "moe_ep", 1) or 1,
                 per_gpu_mib / 1024,
                 usable_vram_mib / 1024,
@@ -482,8 +491,16 @@ async def run_thorough(
     # timeouts per OOM candidate.
     vram_mib = (dgdr.hardware and dgdr.hardware.vramMb) or 0.0
     if vram_mib > 0:
+        model_info = None
         try:
             model_info = get_model_info(model)
+        except (OSError, ValueError, RuntimeError) as exc:
+            logger.warning(
+                "Could not load model info for VRAM feasibility check (%s). "
+                "Skipping candidate pruning — infeasible candidates may be deployed.",
+                exc,
+            )
+        if model_info is not None:
             prefill_candidates = _prune_infeasible_candidates(
                 prefill_candidates, model_info, vram_mib, "prefill"
             )
@@ -494,12 +511,6 @@ async def run_thorough(
                 "After VRAM pruning: %d prefill candidates, %d decode candidates",
                 len(prefill_candidates),
                 len(decode_candidates),
-            )
-        except Exception as exc:
-            logger.warning(
-                "Could not load model info for VRAM feasibility check (%s). "
-                "Skipping candidate pruning — infeasible candidates may be deployed.",
-                exc,
             )
     else:
         logger.debug(

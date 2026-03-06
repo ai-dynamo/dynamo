@@ -289,9 +289,11 @@ def _make_model_info(
 class _FakeCandidate:
     """Minimal stand-in for an AIC profiling candidate."""
 
-    def __init__(self, tp: int, moe_ep: int = 1):
+    def __init__(self, tp: int, moe_ep: int = 1, pp: int = 1, moe_tp: int = 1):
         self.tp = tp
         self.moe_ep = moe_ep
+        self.pp = pp
+        self.moe_tp = moe_tp
 
 
 # ---------------------------------------------------------------------------
@@ -461,3 +463,35 @@ class TestPruneInfeasibleCandidates:
         assert tp1 not in result
         assert tp2 not in result
         assert tp4 in result
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_pp_shards_dense_weights(self):
+        """pp>1 reduces per-GPU dense-weight pressure, potentially saving a candidate."""
+        info = self._dsr1_info()
+        # tp=1, pp=1, ep=8 is pruned (OOM baseline)
+        tp1_pp1 = _FakeCandidate(tp=1, moe_ep=8, pp=1)
+        # tp=1, pp=2, ep=8: dense split across 2 pipeline stages → half the dense per GPU
+        tp1_pp2 = _FakeCandidate(tp=1, moe_ep=8, pp=2)
+        result = _prune_infeasible_candidates(
+            [tp1_pp1, tp1_pp2], info, self.B200_VRAM_MIB, "prefill"
+        )
+        assert tp1_pp1 not in result, "tp=1,pp=1,ep=8 must be pruned"
+        assert tp1_pp2 in result, "tp=1,pp=2,ep=8 should survive (pp halves dense load)"
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_moe_tp_shards_expert_weights(self):
+        """moe_tp>1 increases expert sharding, reducing per-GPU expert pressure."""
+        info = self._dsr1_info()
+        # tp=1, ep=8, moe_tp=1 → pruned
+        baseline = _FakeCandidate(tp=1, moe_ep=8, moe_tp=1)
+        # tp=1, ep=8, moe_tp=2 → expert shards = tp*pp*moe_tp*ep = 1*1*2*8 = 16
+        moe_tp2 = _FakeCandidate(tp=1, moe_ep=8, moe_tp=2)
+        result = _prune_infeasible_candidates(
+            [baseline, moe_tp2], info, self.B200_VRAM_MIB, "prefill"
+        )
+        assert baseline not in result, "tp=1,ep=8,moe_tp=1 must be pruned"
+        assert (
+            moe_tp2 in result
+        ), "tp=1,ep=8,moe_tp=2 should fit (experts split 16 ways)"
