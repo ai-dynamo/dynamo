@@ -34,15 +34,14 @@ const (
 	LabelGPUCount   = "nvidia.com/gpu.count"
 	LabelGPUProduct = "nvidia.com/gpu.product"
 	LabelGPUMemory  = "nvidia.com/gpu.memory"
-
 )
 
 // GPUInfo contains discovered GPU configuration from cluster nodes
 type GPUInfo struct {
-	GPUsPerNode   int    // Maximum GPUs per node found in the cluster
-	NodesWithGPUs int    // Number of nodes that have GPUs
-	Model         string // GPU product name (e.g., "H100-SXM5-80GB")
-	VRAMPerGPU    int    // VRAM in MiB per GPU
+	GPUsPerNode   int                         // Maximum GPUs per node found in the cluster
+	NodesWithGPUs int                         // Number of nodes that have GPUs
+	Model         string                      // GPU product name (e.g., "H100-SXM5-80GB")
+	VRAMPerGPU    int                         // VRAM in MiB per GPU
 	System        nvidiacomv1beta1.GPUSKUType // AIC hardware system identifier (e.g., "h100_sxm", "h200_sxm"), empty if unknown
 }
 
