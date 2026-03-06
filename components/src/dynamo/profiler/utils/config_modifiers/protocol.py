@@ -731,5 +731,19 @@ def apply_dgd_overrides(dgd_config: dict, overrides: dict) -> dict:
         for k, v in overrides.items()
         if k not in ("apiVersion", "kind", "metadata")
     }
+    # For metadata: strip identity/owner keys (name, namespace, uid,
+    # resourceVersion) which are template-controlled, but preserve safe fields
+    # such as labels and annotations supplied by the user.
+    if "metadata" in overrides and isinstance(overrides["metadata"], dict):
+        _METADATA_IDENTITY_KEYS = frozenset(
+            {"name", "namespace", "uid", "resourceVersion"}
+        )
+        sanitized_metadata = {
+            k: v
+            for k, v in overrides["metadata"].items()
+            if k not in _METADATA_IDENTITY_KEYS
+        }
+        if sanitized_metadata:
+            filtered["metadata"] = sanitized_metadata
     _deep_merge_overrides(result, filtered, path=[])
     return result
