@@ -24,6 +24,7 @@ pub mod audit;
 pub mod kv_router;
 pub mod local_model;
 pub mod lora;
+pub mod mocker;
 pub mod migration;
 pub mod model_card;
 pub mod model_type;
