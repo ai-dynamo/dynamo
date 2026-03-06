@@ -13,7 +13,13 @@ from unittest.mock import MagicMock, patch
 from prometheus_client import CollectorRegistry, generate_latest
 
 from dynamo.trtllm.metrics import AdditionalMetricsCollector
-from dynamo.trtllm.request_handlers.handler_base import HandlerBase
+
+try:
+    from dynamo.trtllm.request_handlers.handler_base import HandlerBase
+except ImportError:
+    # handler_base imports torch which requires CUDA libraries at import time;
+    # gracefully skip on CPU-only CI runners.
+    HandlerBase = None
 
 
 class TestAdditionalMetricsCollector(unittest.TestCase):
@@ -169,6 +175,7 @@ class TestAdditionalMetricsCollector(unittest.TestCase):
         # (kv_transfer_latency_seconds, kv_transfer_bytes, kv_transfer_speed_gb_s)
 
 
+@unittest.skipIf(HandlerBase is None, "HandlerBase requires CUDA/GPU libraries")
 class TestHandlerBaseMetricsInstrumentation(unittest.TestCase):
     """Test metrics instrumentation in handler_base.py generate_locally()."""
 

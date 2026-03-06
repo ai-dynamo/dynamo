@@ -40,10 +40,10 @@ from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.trtllm.constants import DisaggregationMode
 from dynamo.trtllm.engine import TensorRTLLMEngine
 from dynamo.trtllm.logits_processing.adapter import create_trtllm_adapters
+from dynamo.trtllm.metrics import AdditionalMetricsCollector
 from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
 from dynamo.trtllm.publisher import Publisher
 from dynamo.trtllm.request_handlers.base_generative_handler import BaseGenerativeHandler
-from dynamo.trtllm.metrics import AdditionalMetricsCollector
 from dynamo.trtllm.utils.disagg_utils import (
     DisaggregatedParams,
     DisaggregatedParamsCodec,
