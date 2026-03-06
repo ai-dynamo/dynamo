@@ -10,6 +10,7 @@
 use futures::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 
+pub mod anthropic;
 pub mod codec;
 pub mod common;
 pub mod openai;

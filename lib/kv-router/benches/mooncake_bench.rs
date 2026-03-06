@@ -1,29 +1,23 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+#[path = "common/mod.rs"]
+mod common;
+use common::*;
+
 use clap::{Parser, Subcommand};
 use dynamo_kv_router::LocalBlockHash;
 use dynamo_kv_router::indexer::{
     KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvIndexerSharded,
 };
-use dynamo_kv_router::protocols::RouterEvent;
-use dynamo_kv_router::{ConcurrentRadixTree, PositionalIndexer, ThreadPoolIndexer};
-use rand::prelude::*;
-use std::fs::File;
-use std::io::{BufRead, BufReader};
+use dynamo_kv_router::protocols::{KvCacheEvent, KvCacheEventData, RouterEvent};
+use dynamo_kv_router::{
+    ConcurrentRadixTree, InvertedIndex, NaiveNestedMap, PositionalIndexer, ThreadPoolIndexer,
+};
+use serde::Serialize;
 use std::sync::Arc;
-use uuid::Uuid;
-
-use dynamo_kv_router::protocols::{KvCacheEvent, KvCacheEventData};
-use dynamo_mocker::Scheduler;
-use dynamo_mocker::protocols::{DirectRequest, KvCacheEventSink, MockEngineArgs};
-use indicatif::{ProgressBar, ProgressStyle};
-use std::sync::Mutex;
-use tokio::task::JoinHandle;
 use tokio::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
-
-use serde::{Deserialize, Serialize};
 
 /// Indexer backend selection and its backend-specific parameters.
 #[derive(Subcommand, Debug, Clone)]
@@ -55,21 +49,32 @@ enum IndexerArgs {
         #[clap(long, default_value = "16")]
         num_event_workers: usize,
     },
+
+    /// Naive per-worker nested HashMap indexer behind a single-threaded actor
+    /// (blog section 2).
+    NaiveNestedMap {},
+
+    /// Inverted index keyed by local_hash (blog section 3).
+    InvertedIndex {
+        /// Number of OS threads that consume and apply KV cache events.
+        #[clap(long, default_value = "16")]
+        num_event_workers: usize,
+    },
 }
 
 impl IndexerArgs {
     /// Construct the concrete indexer from the parsed CLI args.
-    fn build(self, args: &Args) -> Arc<dyn KvIndexerInterface + Send + Sync> {
+    fn build(self, block_size: u32) -> Arc<dyn KvIndexerInterface + Send + Sync> {
         let cancel_token = CancellationToken::new();
         let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
         match self {
             IndexerArgs::RadixTree {} => {
-                Arc::new(KvIndexer::new(cancel_token, args.block_size, metrics))
+                Arc::new(KvIndexer::new(cancel_token, block_size, metrics))
             }
             IndexerArgs::RadixTreeSharded { num_shards } => Arc::new(KvIndexerSharded::new(
                 cancel_token,
                 num_shards,
-                args.block_size,
+                block_size,
                 metrics,
             )),
             IndexerArgs::NestedMap {
@@ -78,113 +83,88 @@ impl IndexerArgs {
             } => Arc::new(ThreadPoolIndexer::new(
                 PositionalIndexer::new(jump_size),
                 num_event_workers,
-                args.block_size,
+                block_size,
             )),
-            IndexerArgs::ConcurrentRadixTree { num_event_workers } => {
-                Arc::new(ThreadPoolIndexer::new(
-                    ConcurrentRadixTree::new(),
-                    num_event_workers,
-                    args.block_size,
-                ))
-            }
+            IndexerArgs::ConcurrentRadixTree { num_event_workers } => Arc::new(
+                ThreadPoolIndexer::new(ConcurrentRadixTree::new(), num_event_workers, block_size),
+            ),
+            IndexerArgs::NaiveNestedMap {} => Arc::new(NaiveNestedMap::new()),
+            IndexerArgs::InvertedIndex { .. } => Arc::new(InvertedIndex::new()),
         }
+    }
+
+    fn supports_remove(name: &str) -> bool {
+        !matches!(name, "naive-nested-map" | "inverted-index")
+    }
+
+    fn is_multi_threaded(name: &str) -> bool {
+        matches!(name, "nested-map" | "concurrent-radix-tree")
+    }
+
+    /// Construct an indexer from a short name string.
+    fn from_name(
+        name: &str,
+        block_size: u32,
+        num_event_workers: usize,
+    ) -> anyhow::Result<Arc<dyn KvIndexerInterface + Send + Sync>> {
+        let nw = num_event_workers;
+        let indexer_args = match name {
+            "radix-tree" => IndexerArgs::RadixTree {},
+            "radix-tree-sharded" => IndexerArgs::RadixTreeSharded { num_shards: 4 },
+            "nested-map" => IndexerArgs::NestedMap {
+                jump_size: 8,
+                num_event_workers: nw,
+            },
+            "concurrent-radix-tree" => IndexerArgs::ConcurrentRadixTree {
+                num_event_workers: nw,
+            },
+            "naive-nested-map" => IndexerArgs::NaiveNestedMap {},
+            "inverted-index" => IndexerArgs::InvertedIndex {
+                num_event_workers: 0,
+            },
+            _ => anyhow::bail!(
+                "Unknown indexer '{}'. Valid names: radix-tree, radix-tree-sharded, \
+                 nested-map, concurrent-radix-tree, naive-nested-map, inverted-index",
+                name
+            ),
+        };
+        Ok(indexer_args.build(block_size))
     }
 }
 
 #[derive(Parser, Debug)]
 #[clap(version, about, long_about = None)]
 struct Args {
-    /// Path to a JSONL mooncake trace file. Each line is a JSON object with
-    /// fields: uuid, timestamp, hash_ids, output_length.
-    mooncake_trace_path: String,
+    #[clap(flatten)]
+    common: CommonArgs,
 
-    /// Number of GPU blocks available in the mock engine's KV cache.
-    /// Smaller values force more evictions and produce more remove events.
-    #[clap(long, default_value = "2048")]
-    num_gpu_blocks: usize,
+    /// Output path for the sweep plot SVG.
+    #[clap(long, default_value = "sweep_plot.svg")]
+    sweep_output: String,
 
-    /// Number of tokens per KV cache block.
-    #[clap(long, default_value = "512")]
-    block_size: u32,
+    /// Comma-separated list of indexer names to benchmark and compare on the
+    /// same plot. Overrides the subcommand indexer when present. Valid names:
+    /// radix-tree, radix-tree-sharded, nested-map, concurrent-radix-tree,
+    /// naive-nested-map, inverted-index.
+    #[clap(long, value_delimiter = ',')]
+    compare: Vec<String>,
 
-    /// Wall-clock duration (ms) over which the trace is replayed during event
-    /// generation. Longer values produce more accurate inter-request timing but
-    /// increase setup time.
-    #[clap(long, default_value = "30000")]
-    trace_simulation_duration_ms: u64,
-
-    /// Wall-clock duration (ms) over which the benchmark replays requests and
-    /// events against the indexer under test.
-    #[clap(long, default_value = "60000")]
-    benchmark_duration_ms: u64,
-
-    /// Number of unique simulated inference workers. Each gets a random
-    /// partition of the trace and its own mock engine for event generation.
-    #[clap(short, long, default_value = "64")]
-    num_unique_inference_workers: usize,
-
-    /// How many times to duplicate the set of unique workers during the
-    /// benchmark phase. Total workers = num_unique_inference_workers * factor.
-    /// Duplicated workers replay identical traces with distinct worker IDs.
-    #[clap(short = 'd', long, default_value = "1")]
-    inference_worker_duplication_factor: usize,
-
-    /// RNG seed for reproducible worker-to-trace assignment.
-    #[clap(long, default_value = "42")]
-    seed: u64,
+    /// Number of OS threads for event processing in compare mode. Applies to
+    /// indexers that use a thread pool (nested-map, concurrent-radix-tree,
+    /// inverted-index). Ignored by radix-tree, radix-tree-sharded, and
+    /// naive-nested-map.
+    #[clap(long, default_value = "16")]
+    num_event_workers: usize,
 
     /// Indexer backend to benchmark (defaults to radix-tree if not specified).
     #[clap(subcommand)]
     indexer: Option<IndexerArgs>,
-
-    /// Ignored - passed by cargo bench harness.
-    #[arg(long, hide = true, global = true)]
-    bench: bool,
 }
 
 impl Args {
     /// Return the indexer config, falling back to RadixTree if none was specified.
     fn get_indexer(&self) -> IndexerArgs {
         self.indexer.clone().unwrap_or(IndexerArgs::RadixTree {})
-    }
-}
-
-/// A single request deserialized from the mooncake trace JSONL.
-#[derive(Serialize, Deserialize, Clone)]
-struct MooncakeRequest {
-    #[serde(default = "Uuid::new_v4")]
-    uuid: uuid::Uuid,
-    timestamp: u64,
-    hash_ids: Vec<u64>,
-    output_length: u64,
-}
-
-/// Collects KV cache events emitted by the mock engine during event generation,
-/// tagging each with the wall-clock instant it was produced.
-struct EventCollector {
-    events: Mutex<Option<Vec<(KvCacheEvent, Instant)>>>,
-}
-
-impl EventCollector {
-    fn new() -> Arc<Self> {
-        Arc::new(Self {
-            events: Mutex::new(Some(Vec::new())),
-        })
-    }
-
-    /// Take ownership of the collected events. Can only be called once.
-    fn get_events(self: Arc<Self>) -> Vec<(KvCacheEvent, Instant)> {
-        self.events.lock().unwrap().take().unwrap()
-    }
-}
-
-impl KvCacheEventSink for EventCollector {
-    fn publish(&self, event: KvCacheEvent) -> anyhow::Result<()> {
-        let timestamp = Instant::now();
-        if let Some(events) = self.events.lock().unwrap().as_mut() {
-            events.push((event, timestamp));
-        }
-        Ok(())
     }
 }
 
@@ -205,192 +185,6 @@ struct WorkerTrace {
     timestamp_us: u64,
 }
 
-/// Load the mooncake trace from disk and randomly partition requests across
-/// `num_unique_inference_workers` worker buckets using the configured seed.
-fn process_mooncake_trace(args: &Args) -> anyhow::Result<Vec<Vec<MooncakeRequest>>> {
-    let mut traces: Vec<Vec<MooncakeRequest>> = Vec::new();
-    for _ in 0..args.num_unique_inference_workers {
-        traces.push(Vec::new());
-    }
-
-    let mut rng = StdRng::seed_from_u64(args.seed);
-
-    let file = File::open(&args.mooncake_trace_path)?;
-    let reader = BufReader::new(file);
-
-    println!("Loading trace...");
-
-    let progress = make_progress_bar(None);
-
-    for line in reader.lines() {
-        let request = serde_json::from_str::<MooncakeRequest>(&line?)?;
-        traces[rng.random_range(0..args.num_unique_inference_workers)].push(request);
-        progress.inc(1);
-    }
-
-    Ok(traces)
-}
-
-/// Linearly rescale all timestamps in a worker's trace so the total span equals
-/// `duration` milliseconds.
-fn scale_mooncake_trace(trace: &Vec<MooncakeRequest>, duration: u64) -> Vec<MooncakeRequest> {
-    let total_duration = trace.last().unwrap().timestamp - trace.first().unwrap().timestamp;
-    trace
-        .iter()
-        .map(|request| MooncakeRequest {
-            timestamp: request.timestamp * duration / total_duration,
-            ..request.clone()
-        })
-        .collect::<Vec<MooncakeRequest>>()
-}
-
-/// Expand a request's block-level hash_ids into per-token IDs by repeating each
-/// hash_id `block_size` times.
-fn tokens_from_request(request: &MooncakeRequest, block_size: u32) -> Vec<u32> {
-    request
-        .hash_ids
-        .iter()
-        .flat_map(|id| (0..block_size).map(|_| *id as u32))
-        .collect()
-}
-
-/// Create a styled progress bar, optionally with a known total length.
-fn make_progress_bar(total: Option<u64>) -> ProgressBar {
-    let progress = match total {
-        Some(total) => ProgressBar::new(total),
-        None => ProgressBar::no_length(),
-    };
-
-    progress.set_style(
-        ProgressStyle::with_template(
-            "[{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({eta}) {msg}",
-        )
-        .unwrap()
-        .progress_chars("#>-"),
-    );
-
-    progress
-}
-
-/// Replay each worker's request trace through a mock engine in real-time to
-/// produce the KV cache events (store/remove/clear) that the engine would emit.
-///
-/// Returns one event list per worker, each entry paired with the wall-clock
-/// instant it was produced. Event ordering within a worker is guaranteed
-/// monotonically non-decreasing by timestamp.
-async fn generate_events(
-    traces: &Vec<Vec<MooncakeRequest>>,
-    args: &Args,
-) -> anyhow::Result<Vec<Vec<(KvCacheEvent, Instant)>>> {
-    println!("Generating events...");
-    let sched_args = MockEngineArgs::builder()
-        .num_gpu_blocks(args.num_gpu_blocks)
-        .block_size(args.block_size as usize)
-        .speedup_ratio(0.0)
-        .enable_prefix_caching(true)
-        .max_num_batched_tokens(None)
-        .max_num_seqs(None)
-        .build()?;
-
-    let scaled_traces = traces
-        .iter()
-        .map(|worker_trace| scale_mooncake_trace(worker_trace, args.trace_simulation_duration_ms));
-
-    let progress = make_progress_bar(Some(
-        traces.iter().map(|worker| worker.len() as u64).sum::<u64>(),
-    ));
-
-    let mut tasks: Vec<JoinHandle<Vec<(KvCacheEvent, Instant)>>> = Vec::new();
-    for worker_trace in scaled_traces {
-        let sched_args = sched_args.clone();
-        let progress = progress.clone();
-        let block_size = args.block_size;
-        tasks.push(tokio::spawn(async move {
-            let collector = EventCollector::new();
-
-            let scheduler = Scheduler::new(sched_args, 0, None, Some(collector.clone()), None);
-
-            let mut i = 0;
-            let mut target = Instant::now();
-
-            while i < worker_trace.len() {
-                let prev_i = i;
-                scheduler
-                    .receive(DirectRequest {
-                        tokens: tokens_from_request(&worker_trace[i], block_size),
-                        max_output_tokens: worker_trace[i].output_length as usize,
-                        uuid: Some(worker_trace[i].uuid),
-                        dp_rank: 0,
-                    })
-                    .await;
-                i += 1;
-
-                while i < worker_trace.len()
-                    && worker_trace[i].timestamp == worker_trace[i - 1].timestamp
-                {
-                    scheduler
-                        .receive(DirectRequest {
-                            tokens: tokens_from_request(&worker_trace[i], block_size),
-                            max_output_tokens: worker_trace[i].output_length as usize,
-                            uuid: Some(worker_trace[i].uuid),
-                            dp_rank: 0,
-                        })
-                        .await;
-                    i += 1;
-                }
-
-                if i < worker_trace.len() {
-                    target += Duration::from_millis(
-                        worker_trace[i].timestamp - worker_trace[i - 1].timestamp,
-                    );
-                }
-
-                tokio::time::sleep_until(tokio::time::Instant::from(target)).await;
-                progress.inc((i - prev_i) as u64);
-            }
-
-            collector.get_events()
-        }));
-    }
-
-    let mut events = Vec::new();
-    for task in tasks {
-        events.push(task.await?);
-    }
-
-    for worker_events in &events {
-        for i in 1..worker_events.len() {
-            assert!(worker_events[i].1 >= worker_events[i - 1].1);
-        }
-    }
-
-    println!(
-        "Generated {} events. Processing...",
-        events.iter().map(|e| e.len()).sum::<usize>()
-    );
-
-    if progress.elapsed() > Duration::from_millis(args.trace_simulation_duration_ms * 11 / 10) {
-        eprintln!(
-            "Warning: Generated events took significantly longer than the trace simulation duration. Inaccurate timing information has been produced. Rerun with a larger --trace-simulation-duration-ms."
-        );
-    }
-
-    let mut num_stored_events = 0;
-    let mut num_removed_events = 0;
-    for event in events.iter().flatten() {
-        match event.0.data {
-            KvCacheEventData::Stored(_) => num_stored_events += 1,
-            KvCacheEventData::Removed(_) => num_removed_events += 1,
-            _ => (),
-        }
-    }
-
-    println!("Store events: {}", num_stored_events);
-    println!("Remove events: {}", num_removed_events);
-
-    Ok(events)
-}
-
 /// Merge each worker's request trace and event trace into a single
 /// time-ordered sequence of `WorkerTrace` entries suitable for benchmark
 /// replay.
@@ -400,25 +194,34 @@ async fn generate_events(
 fn prepare_worker_traces(
     traces: Vec<Vec<MooncakeRequest>>,
     events: Vec<Vec<(KvCacheEvent, Instant)>>,
-    args: &Args,
+    block_size: u32,
+    benchmark_duration_ms: u64,
+    trace_simulation_duration_ms: u64,
 ) -> Vec<Vec<WorkerTrace>> {
     assert!(traces.len() == events.len());
 
     let scaled_request_traces: Vec<_> = traces
         .into_iter()
         .map(|trace| {
-            let trace_duration_ms =
-                trace.last().unwrap().timestamp - trace.first().unwrap().timestamp;
+            let Some(first) = trace.first() else {
+                return Vec::new();
+            };
+            let first_ts = first.timestamp;
+            let trace_duration_ms = trace.last().unwrap().timestamp - first_ts;
             trace
                 .into_iter()
                 .map(|request| WorkerTrace {
-                    timestamp_us: request.timestamp * 1000 * args.benchmark_duration_ms
-                        / trace_duration_ms,
+                    timestamp_us: if trace_duration_ms == 0 {
+                        0
+                    } else {
+                        (request.timestamp - first_ts) * 1000 * benchmark_duration_ms
+                            / trace_duration_ms
+                    },
                     entry: WorkerTraceEntry::Request(
                         request
                             .hash_ids
                             .iter()
-                            .map(|id| LocalBlockHash(*id))
+                            .map(|id| local_block_hash_from_id(*id, block_size))
                             .collect(),
                     ),
                 })
@@ -429,13 +232,15 @@ fn prepare_worker_traces(
     let scaled_event_traces: Vec<_> = events
         .into_iter()
         .map(|worker_events| {
-            let start_instant = worker_events.first().unwrap().1;
+            let Some(&(_, start_instant)) = worker_events.first() else {
+                return Vec::new();
+            };
             worker_events
                 .into_iter()
                 .map(|(event, timestamp)| WorkerTrace {
                     timestamp_us: (timestamp - start_instant).as_micros() as u64
-                        * args.benchmark_duration_ms
-                        / args.trace_simulation_duration_ms,
+                        * benchmark_duration_ms
+                        / trace_simulation_duration_ms,
                     entry: WorkerTraceEntry::Event(event),
                 })
                 .collect::<Vec<_>>()
@@ -444,16 +249,21 @@ fn prepare_worker_traces(
 
     scaled_request_traces
         .into_iter()
-        .zip(scaled_event_traces.into_iter())
+        .zip(scaled_event_traces)
         .map(|(request_trace, event_trace)| {
-            let mut merged: Vec<WorkerTrace> = request_trace
-                .into_iter()
-                .chain(event_trace.into_iter())
-                .collect();
+            let mut merged: Vec<WorkerTrace> =
+                request_trace.into_iter().chain(event_trace).collect();
             merged.sort_by_key(|entry| entry.timestamp_us);
             merged
         })
         .collect()
+}
+
+#[derive(Serialize)]
+struct SweepStepResult {
+    duration_ms: u64,
+    #[serde(flatten)]
+    results: BenchmarkResults,
 }
 
 /// Run the benchmark: replay each worker's merged trace against the indexer,
@@ -467,23 +277,28 @@ async fn run_benchmark(
     traces: Vec<Vec<MooncakeRequest>>,
     events: Vec<Vec<(KvCacheEvent, Instant)>>,
     args: &Args,
-) -> anyhow::Result<()> {
-    let worker_traces = prepare_worker_traces(traces, events, args);
-    let worker_traces = worker_traces
-        .into_iter()
-        .map(|trace| Arc::new(trace))
-        .collect::<Vec<_>>();
+    benchmark_duration_ms: u64,
+    count_events: bool,
+) -> anyhow::Result<BenchmarkResults> {
+    let worker_traces = prepare_worker_traces(
+        traces,
+        events,
+        args.common.block_size,
+        benchmark_duration_ms,
+        args.common.trace_simulation_duration_ms,
+    );
+    let worker_traces = worker_traces.into_iter().map(Arc::new).collect::<Vec<_>>();
 
     let progress = make_progress_bar(Some(
         worker_traces
             .iter()
             .map(|trace| trace.len() as u64)
             .sum::<u64>()
-            * args.inference_worker_duplication_factor as u64,
+            * args.common.inference_worker_duplication_factor as u64,
     ));
 
     let mut tasks = Vec::new();
-    for replica in 0..args.inference_worker_duplication_factor {
+    for replica in 0..args.common.inference_worker_duplication_factor {
         for (worker_id, worker_trace) in worker_traces.iter().enumerate() {
             let indexer = indexer.clone();
             let trace = worker_trace.clone();
@@ -567,21 +382,13 @@ async fn run_benchmark(
         latencies.extend(task.await??);
     }
 
-    if progress.elapsed() > Duration::from_millis(args.benchmark_duration_ms * 11 / 10) {
+    if progress.elapsed() > Duration::from_millis(benchmark_duration_ms * 11 / 10) {
         eprintln!(
             "WARNING: The benchmarker is unable to keep up with the request/event generation rate. Rerun with a larger --benchmark-duration-ms."
         )
     }
 
-    println!("Flushing event queue...");
-
-    let request_duration = progress.elapsed();
-
-    let flush_start = Instant::now();
-    let flush_size = indexer.flush().await;
-    let flush_duration = flush_start.elapsed();
-
-    let event_duration = progress.elapsed();
+    let total_duration = progress.elapsed();
 
     let total_events = worker_traces
         .iter()
@@ -592,54 +399,128 @@ async fn run_benchmark(
                 .count()
         })
         .sum::<usize>()
-        * args.inference_worker_duplication_factor;
+        * args.common.inference_worker_duplication_factor;
 
     let total_requests = worker_traces.iter().map(|trace| trace.len()).sum::<usize>()
-        * args.inference_worker_duplication_factor
+        * args.common.inference_worker_duplication_factor
         - total_events;
 
-    let event_queue_flush_percentage = flush_size as f32 / total_events as f32 * 100.0;
+    let total_request_blocks: usize = worker_traces
+        .iter()
+        .flat_map(|t| t.iter())
+        .filter_map(|entry| match &entry.entry {
+            WorkerTraceEntry::Request(hashes) => Some(hashes.len()),
+            _ => None,
+        })
+        .sum::<usize>()
+        * args.common.inference_worker_duplication_factor;
 
-    println!("Event queue flush duration: {:?}", flush_duration);
-    println!(
-        "Event queue flush size: {} ({}% of total events)",
-        flush_size, event_queue_flush_percentage
-    );
+    let total_event_blocks: usize = worker_traces
+        .iter()
+        .flat_map(|t| t.iter())
+        .filter_map(|entry| match &entry.entry {
+            WorkerTraceEntry::Event(ev) => match &ev.data {
+                KvCacheEventData::Stored(s) => Some(s.blocks.len()),
+                _ => Some(0),
+            },
+            _ => None,
+        })
+        .sum::<usize>()
+        * args.common.inference_worker_duplication_factor;
 
-    if event_queue_flush_percentage > 5.0 {
-        eprintln!(
-            "ERROR: Over 5% of events were unable to be completed within the benchmark duration.
-        Results are invalid. Rerun with a smaller trace or less worker duplication."
-        );
-    }
+    let counted_events = if count_events { total_events } else { 0 };
+    let counted_event_blocks = if count_events { total_event_blocks } else { 0 };
 
-    println!(
-        "Request Throughput: {} req/s",
-        total_requests as f32 / request_duration.as_millis() as f32 * 1000.0
-    );
-    println!(
-        "Event Throughput: {} events/s",
-        total_events as f32 / event_duration.as_millis() as f32 * 1000.0
-    );
+    let total_blocks = total_request_blocks + counted_event_blocks;
+    let total_ops = total_requests + counted_events;
+    let offered_ops_throughput = total_ops as f32 / benchmark_duration_ms as f32 * 1000.0;
+    let ops_throughput = total_ops as f32 / total_duration.as_millis() as f32 * 1000.0;
+    let offered_block_throughput = total_blocks as f32 / benchmark_duration_ms as f32 * 1000.0;
+    let block_throughput = total_blocks as f32 / total_duration.as_millis() as f32 * 1000.0;
 
     latencies.sort_unstable();
-    println!(
-        "Latency p50: {}us",
-        latencies[latencies.len() / 2] as f32 / 1000.0
-    );
-    println!(
-        "Latency p95: {}us",
-        latencies[latencies.len() * 95 / 100] as f32 / 1000.0
-    );
-    println!(
-        "Latency p99: {}us",
+    let latency_p99_us = if latencies.is_empty() {
+        0.0
+    } else {
         latencies[latencies.len() * 99 / 100] as f32 / 1000.0
-    );
-    println!(
-        "Latency max: {}us",
-        *latencies.last().unwrap() as f32 / 1000.0
-    );
+    };
 
+    println!(
+        "Ops Throughput: {} ops/s (requests + events)",
+        ops_throughput
+    );
+    println!("Block Throughput: {} block ops/s", block_throughput);
+    println!("Latency p99: {}us", latency_p99_us);
+
+    Ok(BenchmarkResults {
+        offered_ops_throughput,
+        ops_throughput,
+        offered_block_throughput,
+        block_throughput,
+        latency_p99_us,
+    })
+}
+
+fn run_tests() -> anyhow::Result<()> {
+    use std::collections::HashSet;
+    use std::fs::File;
+    use std::io::Write;
+
+    let path =
+        std::env::temp_dir().join(format!("mooncake_bench_test_{}.jsonl", std::process::id()));
+    {
+        let mut f = File::create(&path)?;
+        for (i, (hash_ids, output_length)) in
+            [(&[0u64, 1, 2] as &[u64], 10u64), (&[0, 1, 3, 4], 10)]
+                .iter()
+                .enumerate()
+        {
+            writeln!(
+                f,
+                "{}",
+                serde_json::json!({
+                    "timestamp": i as u64,
+                    "hash_ids": hash_ids,
+                    "output_length": output_length,
+                })
+            )?;
+        }
+    }
+
+    let traces = process_mooncake_trace(path.to_str().unwrap(), 2, 2, 2, 42)?;
+    std::fs::remove_file(&path).ok();
+
+    let mut all_hashes: Vec<Vec<u64>> = traces
+        .into_iter()
+        .flat_map(|w| w.into_iter().map(|r| r.hash_ids))
+        .collect();
+    all_hashes.sort();
+
+    // expand(2): [0,1,2] → [0,1,2,3,4,5], [0,1,3,4] → [0,1,2,3,6,7,8,9]
+    // duplicate(2): max=9, offset=10
+    let mut expected = vec![
+        vec![0, 1, 2, 3, 4, 5],
+        vec![10, 11, 12, 13, 14, 15],
+        vec![0, 1, 2, 3, 6, 7, 8, 9],
+        vec![10, 11, 12, 13, 16, 17, 18, 19],
+    ];
+    expected.sort();
+    assert_eq!(all_hashes, expected, "hash_ids mismatch");
+
+    // Verify prefix structure within each copy.
+    let copy0: Vec<&Vec<u64>> = all_hashes.iter().filter(|h| h[0] == 0).collect();
+    let copy1: Vec<&Vec<u64>> = all_hashes.iter().filter(|h| h[0] == 10).collect();
+    assert_eq!(copy0.len(), 2);
+    assert_eq!(copy1.len(), 2);
+    assert_eq!(copy0[0][..4], copy0[1][..4], "copy 0 shared prefix broken");
+    assert_eq!(copy1[0][..4], copy1[1][..4], "copy 1 shared prefix broken");
+
+    // Verify disjointness between copies.
+    let set0: HashSet<u64> = copy0.iter().flat_map(|h| h.iter().copied()).collect();
+    let set1: HashSet<u64> = copy1.iter().flat_map(|h| h.iter().copied()).collect();
+    assert!(set0.is_disjoint(&set1), "copies are not hash-disjoint");
+
+    println!("All tests passed.");
     Ok(())
 }
 
@@ -647,13 +528,161 @@ async fn run_benchmark(
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
-    let traces = process_mooncake_trace(&args)?;
+    if args.common.test {
+        return run_tests();
+    }
 
-    let events = generate_events(&traces, &args).await?;
+    let path = args
+        .common
+        .mooncake_trace_path
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("mooncake_trace_path is required for benchmarking"))?;
+    let traces = process_mooncake_trace(
+        path,
+        args.common.trace_length_factor,
+        args.common.trace_duplication_factor,
+        args.common.num_unique_inference_workers,
+        args.common.seed,
+    )?;
+    let events = generate_kv_events(
+        &traces,
+        args.common.num_gpu_blocks,
+        args.common.block_size,
+        args.common.trace_simulation_duration_ms,
+    )
+    .await?;
 
-    let indexer = args.get_indexer().build(&args);
+    let indexer_names: Vec<String> = if args.compare.is_empty() {
+        let name = match args.get_indexer() {
+            IndexerArgs::RadixTree {} => "radix-tree",
+            IndexerArgs::RadixTreeSharded { .. } => "radix-tree-sharded",
+            IndexerArgs::NestedMap { .. } => "nested-map",
+            IndexerArgs::ConcurrentRadixTree { .. } => "concurrent-radix-tree",
+            IndexerArgs::NaiveNestedMap {} => "naive-nested-map",
+            IndexerArgs::InvertedIndex { .. } => "inverted-index",
+        };
+        vec![name.to_string()]
+    } else {
+        args.compare.clone()
+    };
 
-    run_benchmark(indexer, traces, events, &args).await?;
+    if args.common.sweep {
+        let durations_low_to_high = compute_sweep_durations(
+            args.common.sweep_min_ms,
+            args.common.sweep_max_ms,
+            args.common.sweep_steps,
+        );
+        let durations_high_to_low: Vec<u64> = durations_low_to_high.iter().copied().rev().collect();
+
+        let mut all_results: Vec<(&str, Vec<(u64, BenchmarkResults)>)> = Vec::new();
+
+        for name in &indexer_names {
+            println!("\n{}", "=".repeat(60));
+            println!("Benchmarking indexer: {}", name);
+            println!("{}", "=".repeat(60));
+
+            let multi_threaded = IndexerArgs::is_multi_threaded(name);
+            let durations = if multi_threaded {
+                &durations_high_to_low
+            } else {
+                &durations_low_to_high
+            };
+
+            let mut results: Vec<(u64, BenchmarkResults)> = Vec::new();
+            let mut consecutive_keeping_up = 0u32;
+
+            for &dur_ms in durations {
+                println!("\n=== Sweep: benchmark_duration_ms = {} ===", dur_ms);
+                let indexer = if args.compare.is_empty() {
+                    args.get_indexer().build(args.common.block_size)
+                } else {
+                    IndexerArgs::from_name(name, args.common.block_size, args.num_event_workers)?
+                };
+                let count_events = IndexerArgs::supports_remove(name);
+                let result = run_benchmark(
+                    indexer,
+                    traces.clone(),
+                    events.clone(),
+                    &args,
+                    dur_ms,
+                    count_events,
+                )
+                .await?;
+
+                if multi_threaded {
+                    if result.block_throughput >= result.offered_block_throughput * 0.95 {
+                        consecutive_keeping_up += 1;
+                    } else {
+                        consecutive_keeping_up = 0;
+                    }
+                    results.push((dur_ms, result));
+                    if consecutive_keeping_up >= 5 {
+                        println!("Early stop: achieved >= 95% offered for 5 consecutive steps");
+                        break;
+                    }
+                } else {
+                    let saturated = result.offered_block_throughput > result.block_throughput * 5.0;
+                    results.push((dur_ms, result));
+                    if saturated {
+                        println!("Early stop: offered throughput >5x achieved throughput");
+                        break;
+                    }
+                }
+            }
+
+            results.sort_by_key(|(dur, _)| std::cmp::Reverse(*dur));
+            print_sweep_summary(name, &results);
+
+            all_results.push((name, results));
+        }
+
+        plot_sweep(&all_results, &args.sweep_output)?;
+
+        let json_path = args
+            .sweep_output
+            .replace(".png", ".json")
+            .replace(".svg", ".json");
+        let json_map: std::collections::BTreeMap<&str, Vec<SweepStepResult>> = all_results
+            .iter()
+            .map(|(name, results)| {
+                let steps = results
+                    .iter()
+                    .map(|(dur, r)| SweepStepResult {
+                        duration_ms: *dur,
+                        results: BenchmarkResults {
+                            offered_ops_throughput: r.offered_ops_throughput,
+                            ops_throughput: r.ops_throughput,
+                            offered_block_throughput: r.offered_block_throughput,
+                            block_throughput: r.block_throughput,
+                            latency_p99_us: r.latency_p99_us,
+                        },
+                    })
+                    .collect();
+                (*name, steps)
+            })
+            .collect();
+        std::fs::write(&json_path, serde_json::to_string_pretty(&json_map)?)?;
+        println!("Sweep results saved to {}", json_path);
+    } else {
+        for name in &indexer_names {
+            println!("\nBenchmarking indexer: {}", name);
+            let indexer = if args.compare.is_empty() {
+                args.get_indexer().build(args.common.block_size)
+            } else {
+                IndexerArgs::from_name(name, args.common.block_size, args.num_event_workers)?
+            };
+            let count_events = IndexerArgs::supports_remove(name);
+            run_benchmark(
+                indexer,
+                traces.clone(),
+                events.clone(),
+                &args,
+                args.common.benchmark_duration_ms,
+                count_events,
+            )
+            .await?;
+        }
+    }
 
     Ok(())
 }

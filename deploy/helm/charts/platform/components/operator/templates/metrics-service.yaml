@@ -12,7 +12,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-{{- if .Values.metricsService.enabled }}
+# metricsService.enabled: null/true = create, false = skip.
+# The Service is a core K8s resource (no CRD dependency), so null and true
+# both result in creation. Only explicit false disables it.
+{{- if not (eq (toString .Values.metricsService.enabled) "false") }}
 ---
 apiVersion: v1
 kind: Service

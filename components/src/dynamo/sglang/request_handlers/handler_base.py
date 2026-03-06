@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import inspect
 import logging
 import random
 import socket
@@ -12,8 +13,9 @@ from typing import Any, AsyncGenerator, Dict, Optional, Tuple
 import sglang as sgl
 from sglang.srt.utils import get_local_ip_auto
 
-from dynamo._core import Component, Context
+from dynamo._core import Context
 from dynamo.common.utils.input_params import InputParamManager
+from dynamo.runtime import DistributedRuntime
 from dynamo.sglang.args import Config
 from dynamo.sglang.publisher import DynamoSglangPublisher
 
@@ -29,18 +31,15 @@ class BaseGenerativeHandler(ABC):
 
     def __init__(
         self,
-        component: Component,
         config: Config,
         publisher: Optional[DynamoSglangPublisher] = None,
     ) -> None:
         """Initialize base generative handler.
 
         Args:
-            component: The Dynamo runtime component.
             config: SGLang and Dynamo configuration.
             publisher: Optional metrics publisher for the worker.
         """
-        self.component = component
         self.config = config
 
         # Set up metrics and KV publishers
@@ -97,7 +96,6 @@ class BaseWorkerHandler(BaseGenerativeHandler):
 
     def __init__(
         self,
-        component: Component,
         engine: sgl.Engine,
         config: Config,
         publisher: Optional[DynamoSglangPublisher] = None,
@@ -107,7 +105,6 @@ class BaseWorkerHandler(BaseGenerativeHandler):
         """Initialize base worker handler.
 
         Args:
-            component: The Dynamo runtime component.
             engine: The SGLang engine instance.
             config: SGLang and Dynamo configuration.
             publisher: Optional metrics publisher for the worker.
@@ -115,7 +112,7 @@ class BaseWorkerHandler(BaseGenerativeHandler):
             shutdown_event: Optional event to signal shutdown.
         """
         # Call parent constructor
-        super().__init__(component, config, publisher)
+        super().__init__(config, publisher)
 
         # LLM-specific initialization
         self.engine = engine
@@ -133,11 +130,25 @@ class BaseWorkerHandler(BaseGenerativeHandler):
         self.skip_tokenizer_init = config.server_args.skip_tokenizer_init
         self.enable_trace = config.server_args.enable_trace
 
-        self.input_param_manager = InputParamManager(
-            self.engine.tokenizer_manager.tokenizer
-            if not self.skip_tokenizer_init
-            else None
-        )
+        if engine is not None:
+            self.input_param_manager = InputParamManager(
+                self.engine.tokenizer_manager.tokenizer
+                if not self.skip_tokenizer_init
+                else None
+            )
+            self._engine_supports_priority = (
+                "priority" in inspect.signature(engine.async_generate).parameters
+            )
+        else:
+            # Encode-only workers (e.g. MultimodalEncodeWorkerHandler) don't
+            # have an sgl.Engine.
+            self.input_param_manager = InputParamManager(None)
+            self._engine_supports_priority = False
+
+    def _priority_kwargs(self, priority: Any) -> Dict[str, Any]:
+        if priority is not None and self._engine_supports_priority:
+            return {"priority": priority}
+        return {}
 
     async def release_memory_occupation(self, body: dict) -> dict:
         """Release GPU memory occupation and unregister from discovery.
@@ -320,7 +331,48 @@ class BaseWorkerHandler(BaseGenerativeHandler):
             "new_version": req.new_version,
         }
 
-    def register_engine_routes(self, runtime) -> None:
+    async def pin_prefix(self, body: dict) -> dict:
+        """Pin a prefix by token_ids to resist eviction.
+
+        Args:
+            body: Dict with "token_ids" list of token IDs and optional
+                  "ttl_seconds" (default 300).
+        """
+        token_ids = body.get("token_ids", [])
+        ttl_seconds = body.get("ttl_seconds", 300)
+        if not token_ids:
+            return {"status": "error", "message": "token_ids required"}
+        try:
+            result = await self.engine.tokenizer_manager.pin_prefix(
+                token_ids, ttl_seconds
+            )
+            return {
+                "status": "ok" if result.success else "error",
+                "nodes_pinned": result.nodes_pinned,
+                "message": result.message,
+            }
+        except Exception as e:
+            logging.error(f"Failed to pin prefix: {e}")
+            return {"status": "error", "message": str(e)}
+
+    async def cache_control(self, request, context=None):
+        """Service mesh endpoint for cache control operations.
+
+        Args:
+            request: Dict with "action" key and action-specific parameters.
+            context: Optional Dynamo context (unused but required by protocol).
+
+        Yields:
+            Single dict with operation result.
+        """
+        action = request.get("action")
+        if action == "pin_prefix":
+            result = await self.pin_prefix(request)
+        else:
+            result = {"status": "error", "message": f"Unknown action: {action}"}
+        yield result
+
+    def register_engine_routes(self, runtime: DistributedRuntime) -> None:
         """Register all engine routes for this handler.
 
         Args:
@@ -334,6 +386,7 @@ class BaseWorkerHandler(BaseGenerativeHandler):
         runtime.register_engine_route(
             "resume_memory_occupation", self.resume_memory_occupation
         )
+        runtime.register_engine_route("pin_prefix", self.pin_prefix)
         runtime.register_engine_route(
             "update_weights_from_disk", self.update_weights_from_disk
         )
@@ -431,6 +484,7 @@ class BaseWorkerHandler(BaseGenerativeHandler):
             bootstrap_host = get_local_ip_auto()
 
         # Wrap IPv6 literal with brackets so f"{host}:{port}" stays valid.
+        assert isinstance(bootstrap_host, str)
         if ":" in bootstrap_host and not bootstrap_host.startswith("["):
             bootstrap_host = f"[{bootstrap_host}]"
 
@@ -463,7 +517,7 @@ class BaseWorkerHandler(BaseGenerativeHandler):
             cancellation_future = context.async_killed_or_stopped()
 
             # Build list of futures/tasks to wait for
-            wait_for = [cancellation_future]
+            wait_for: list[asyncio.Future[Any]] = [cancellation_future]
             shutdown_task = None
 
             if self.shutdown_event:

@@ -15,6 +15,7 @@ import torch
 from tensorrt_llm.llmapi import DisaggregatedParams
 
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
+    CachedEmbedding,
     MultimodalEmbeddingCacheManager,
 )
 from dynamo.trtllm.multimodal.cuda_ipc import extract_embeddings_from_handles
@@ -47,8 +48,6 @@ async def fetch_embeddings_from_encoder(
     """
     if not image_urls:
         raise ValueError("image_urls must not be empty")
-
-    logger.info(f"fetch_embeddings_from_encoder: image_urls={image_urls}")
 
     if encoder_cache:
         # Cache path: extract embeddings to CPU tensors
@@ -147,25 +146,17 @@ async def _fetch_embeddings_with_cache(
         url_hash = MultimodalHasher.hash_bytes(url.encode())
         cached = cache.get(url_hash)
         if cached is not None:
-            logger.info(f"fetch_embeddings_with_cache: cache hit for URL: {url}")
-            embeddings_with_index.append((i, cached))
+            embeddings_with_index.append((i, cached.tensor))
         else:
-            logger.info(f"fetch_embeddings_with_cache: cache miss for URL: {url}")
             uncached_urls.append(url)
             uncached_indices.append(i)
             uncached_hashes.append(url_hash)
 
     # If all cached, return immediately
     if not uncached_urls:
-        logger.info(f"fetch_embeddings_with_cache: all {len(image_urls)} URLs cached")
         embeddings_with_index.sort(key=lambda x: x[0])
         tensors = [t for _, t in embeddings_with_index]
         return tensors
-
-    # Encode uncached URLs
-    logger.info(
-        f"fetch_embeddings_with_cache: encoding {len(uncached_urls)} uncached URLs"
-    )
 
     # Create modified request with only uncached URLs
     modified_request = _create_request_with_urls(request, uncached_urls)
@@ -189,10 +180,7 @@ async def _fetch_embeddings_with_cache(
 
     # Cache new tensors (reuse hashes computed during cache lookup)
     for url, url_hash, tensor in zip(uncached_urls, uncached_hashes, new_tensors):
-        cache.set(url_hash, tensor)
-        logger.info(
-            f"fetch_embeddings_with_cache: cached embedding for URL: {url}, shape: {tensor.shape}"
-        )
+        cache.set(url_hash, CachedEmbedding(tensor=tensor))
 
     # Add new tensors to our list with their original indices
     for idx, tensor in zip(uncached_indices, new_tensors):

@@ -10,14 +10,15 @@ if "PYTHONHASHSEED" not in os.environ:
 os.environ.setdefault("PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION", "python")
 
 import asyncio
+import json
 import logging
-import time
 from typing import AsyncGenerator, Optional
 
-import msgpack
 import zmq
 from tensorrt_llm import LLM
 from tensorrt_llm.llmapi import KvCacheConfig
+
+from dynamo.llm import compute_block_hash_for_seq_py
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +88,7 @@ class MetricsPublisher:
 
 
 class KvEventsPublisher:
-    """Publishes KV cache events over ZMQ."""
+    """Publishes KV cache events as KvCacheEvent JSON over ZMQ."""
 
     def __init__(self, port: int, block_size: int):
         self.context = zmq.Context()
@@ -95,7 +96,7 @@ class KvEventsPublisher:
         self.socket.bind(f"tcp://*:{port}")
         self.block_size = block_size
         self.partial_block_hashes: set[int] = set()
-        self.sequence_number = 0
+        self.next_event_id = 0
 
     def publish_stored(
         self,
@@ -104,34 +105,46 @@ class KvEventsPublisher:
         parent_hash: int | None,
         block_mm_infos: list[dict | None] | None,
     ):
-        """Publish a BlockStored event.
+        """Publish a KvCacheEvent with stored blocks.
 
-        Args:
-            block_hashes: List of block hashes being stored.
-            token_ids: All token IDs across the blocks.
-            parent_hash: Hash of the parent block (if any).
-            block_mm_infos: Per-block multimodal info list. Each element corresponds
-                to a block and is either the mm_info dict (for blocks containing
-                image tokens) or None (for text-only blocks).
+        Computes tokens_hash per block using compute_block_hash_for_seq_py
+        (including MM info when present) and publishes as KvCacheEvent JSON.
         """
+        # Compute tokens_hash per block (MM-aware when block_mm_infos provided)
+        tokens_hashes = compute_block_hash_for_seq_py(
+            token_ids, self.block_size, block_mm_infos
+        )
+
+        blocks = []
+        for i, ext_hash in enumerate(block_hashes):
+            block_data = {
+                "block_hash": to_unsigned_u64(ext_hash),
+                "tokens_hash": tokens_hashes[i],
+            }
+            mm_info = block_mm_infos[i] if block_mm_infos else None
+            if mm_info is not None:
+                block_data["mm_extra_info"] = mm_info
+            blocks.append(block_data)
+
         event = {
-            "type": "BlockStored",
-            "block_hashes": [to_unsigned_u64(h) for h in block_hashes],
-            "token_ids": token_ids,
-            "block_size": self.block_size,
+            "event_id": self.next_event_id,
+            "data": {
+                "stored": {
+                    "parent_hash": (
+                        to_unsigned_u64(parent_hash)
+                        if parent_hash is not None
+                        else None
+                    ),
+                    "blocks": blocks,
+                }
+            },
+            "dp_rank": 0,
         }
-
-        if parent_hash is not None:
-            event["parent_block_hash"] = to_unsigned_u64(parent_hash)
-
-        if block_mm_infos is not None:
-            event["block_mm_infos"] = block_mm_infos
-
-        self._send([event])
+        self.next_event_id += 1
+        self._send(event)
 
     def publish_removed(self, block_hashes: list[int]):
-        """Publish a BlockRemoved event."""
-        # Filter out partial blocks
+        """Publish a KvCacheEvent with removed blocks."""
         filtered = []
         for h in block_hashes:
             if h in self.partial_block_hashes:
@@ -139,21 +152,29 @@ class KvEventsPublisher:
             else:
                 filtered.append(to_unsigned_u64(h))
 
-        if filtered:
-            self._send([{"type": "BlockRemoved", "block_hashes": filtered}])
-
-    def _send(self, events: list[dict]):
-        """Send events via ZMQ multipart message."""
-        batch = [time.time(), events, 0]
-        try:
-            payload = msgpack.packb(batch, use_bin_type=True)
-        except Exception as e:
-            logger.error(f"msgpack error: {e}")
+        if not filtered:
             return
 
-        seq_bytes = self.sequence_number.to_bytes(8, byteorder="big")
-        self.sequence_number += 1
-        self.socket.send_multipart([b"", seq_bytes, payload])
+        event = {
+            "event_id": self.next_event_id,
+            "data": {
+                "removed": {
+                    "block_hashes": filtered,
+                }
+            },
+            "dp_rank": 0,
+        }
+        self.next_event_id += 1
+        self._send(event)
+
+    def _send(self, event: dict):
+        """Send a single KvCacheEvent as JSON over ZMQ."""
+        try:
+            payload = json.dumps(event).encode("utf-8")
+        except Exception as e:
+            logger.error(f"JSON encode error: {e}")
+            return
+        self.socket.send(payload)
 
     def close(self):
         self.socket.close()
@@ -414,7 +435,7 @@ class TrtllmWorker:
         await asyncio.sleep(2)
 
         try:
-            events = self.llm.get_kv_cache_events_async(timeout=None)
+            events = self.llm.get_kv_cache_events_async(timeout=5)
             logger.info(f"Worker {self.worker_id}: KV events iterator obtained")
 
             async for event in events:

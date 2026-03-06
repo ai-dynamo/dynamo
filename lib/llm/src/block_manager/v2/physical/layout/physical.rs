@@ -287,4 +287,8 @@ impl MemoryRegion for RemoteMemoryDescriptor {
     fn as_any(&self) -> &dyn Any {
         self
     }
+
+    fn nixl_descriptor(&self) -> Option<crate::block_manager::v2::memory::NixlDescriptor> {
+        None
+    }
 }

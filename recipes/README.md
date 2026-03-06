@@ -3,7 +3,7 @@
 Production-tested Kubernetes deployment recipes for LLM inference using NVIDIA Dynamo.
 
 > **Prerequisites:** This guide assumes you have already installed the Dynamo Kubernetes Platform.
-> If not, follow the **[Kubernetes Deployment Guide](../docs/pages/kubernetes/README.md)** first.
+> If not, follow the **[Kubernetes Deployment Guide](../docs/kubernetes/README.md)** first.
 
 ## Available Recipes
 
@@ -36,6 +36,7 @@ These recipes demonstrate aggregated or disaggregated serving:
 | **[DeepSeek-R1](deepseek-r1/sglang/disagg-16gpu/)** | SGLang | Disagg WideEP | 32x H200 | ✅*1 | ❌ | TP=16 per worker, multi-node | ❌ |
 | **[DeepSeek-R1](deepseek-r1/trtllm/disagg/wide_ep/gb200/)** | TensorRT-LLM | Disagg WideEP (GB200) | 32+4 GB200 | ✅ | ✅ | Multi-node: 8 decode + 1 prefill nodes | ❌ |
 | **[DeepSeek-R1](deepseek-r1/vllm/disagg/)** | vLLM | Disagg DEP16 | 32x H200 | ✅ | ❌ | Multi-node, data-expert parallel | ❌ |
+| **[Kimi-K2.5](kimi-k2.5/trtllm/agg/)** | TensorRT-LLM | Aggregated | 8x GPU | ✅ | ❌ | MoE model, TP8×EP8, reasoning + tool calling | ❌ |
 
 *1: Please use `deepseek-r1/model-cache/model-download-sglang.yaml` to download the model into the PVC.
 
@@ -67,8 +68,8 @@ Each complete recipe follows this standard structure:
 
 The recipes require the Dynamo Kubernetes Platform to be installed. Follow the installation guide:
 
-- **[Kubernetes Deployment Guide](../docs/pages/kubernetes/README.md)** - Quickstart (~10 minutes)
-- **[Detailed Installation Guide](../docs/pages/kubernetes/installation-guide.md)** - Advanced options
+- **[Kubernetes Deployment Guide](../docs/kubernetes/README.md)** - Quickstart (~10 minutes)
+- **[Detailed Installation Guide](../docs/kubernetes/installation-guide.md)** - Advanced options
 
 **2. GPU Cluster Requirements**
 
@@ -289,18 +290,18 @@ image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:x.y.z
 - Review pod logs: `kubectl logs <pod-name> -n ${NAMESPACE}`
 
 **For more troubleshooting:**
-- [Kubernetes Deployment Guide](../docs/pages/kubernetes/README.md#troubleshooting)
-- [Observability Documentation](../docs/pages/kubernetes/observability/)
+- [Kubernetes Deployment Guide](../docs/kubernetes/README.md#troubleshooting)
+- [Observability Documentation](../docs/kubernetes/observability/)
 
 ## Related Documentation
 
-- **[Kubernetes Deployment Guide](../docs/pages/kubernetes/README.md)** - Platform installation and concepts
-- **[API Reference](../docs/pages/kubernetes/api-reference.md)** - DynamoGraphDeployment CRD specification
-- **[vLLM Backend Guide](../docs/pages/backends/vllm/README.md)** - vLLM-specific features
-- **[SGLang Backend Guide](../docs/pages/backends/sglang/README.md)** - SGLang-specific features
-- **[TensorRT-LLM Backend Guide](../docs/pages/backends/trtllm/README.md)** - TensorRT-LLM features
-- **[Observability](../docs/pages/kubernetes/observability/)** - Monitoring and logging
-- **[Benchmarking Guide](../docs/pages/benchmarks/benchmarking.md)** - Performance testing
+- **[Kubernetes Deployment Guide](../docs/kubernetes/README.md)** - Platform installation and concepts
+- **[API Reference](../docs/kubernetes/api-reference.md)** - DynamoGraphDeployment CRD specification
+- **[vLLM Backend Guide](../docs/backends/vllm/README.md)** - vLLM-specific features
+- **[SGLang Backend Guide](../docs/backends/sglang/README.md)** - SGLang-specific features
+- **[TensorRT-LLM Backend Guide](../docs/backends/trtllm/README.md)** - TensorRT-LLM features
+- **[Observability](../docs/kubernetes/observability/)** - Monitoring and logging
+- **[Benchmarking Guide](../docs/benchmarks/benchmarking.md)** - Performance testing
 
 ## Contributing
 

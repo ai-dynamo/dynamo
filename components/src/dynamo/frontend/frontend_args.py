@@ -8,7 +8,10 @@ from typing import Any, Dict, Optional
 
 from dynamo.common.config_dump import register_encoder
 from dynamo.common.configuration.arg_group import ArgGroup
-from dynamo.common.configuration.config_base import ConfigBase
+from dynamo.common.configuration.groups.kv_router_args import (
+    KvRouterArgGroup,
+    KvRouterConfigBase,
+)
 from dynamo.common.configuration.utils import (
     add_argument,
     add_negatable_bool_argument,
@@ -36,7 +39,7 @@ def validate_model_path(value: str) -> str:
     return value
 
 
-class FrontendConfig(ConfigBase):
+class FrontendConfig(KvRouterConfigBase):
     """Configuration for the Dynamo frontend."""
 
     interactive: bool
@@ -47,22 +50,8 @@ class FrontendConfig(ConfigBase):
     tls_key_path: Optional[pathlib.Path]
 
     router_mode: str
-    kv_overlap_score_weight: float
-    router_temperature: float
-    use_kv_events: bool
-    router_ttl: float
-    router_max_tree_size: int
-    router_prune_target_ratio: float
     namespace: Optional[str] = None
-    router_replica_sync: bool
-    router_snapshot_threshold: int
-    router_reset_states: bool
-    durable_kv_events: bool
-    router_track_active_blocks: bool
-    router_assume_kv_reuse: bool
-    router_track_output_blocks: bool
-    router_event_threads: int
-    router_queue_threshold: Optional[float]
+    namespace_prefix: Optional[str] = None
     enforce_disagg: bool
 
     migration_limit: int
@@ -81,7 +70,9 @@ class FrontendConfig(ConfigBase):
     request_plane: str
     event_plane: str
     chat_processor: str
-    exp_python_factory: bool
+    enable_anthropic_api: bool
+    debug_perf: bool
+    preprocess_workers: int
 
     def validate(self) -> None:
         if bool(self.tls_cert_path) ^ bool(self.tls_key_path):  # ^ is XOR
@@ -92,6 +83,8 @@ class FrontendConfig(ConfigBase):
             raise ValueError(
                 "--migration-limit must be between 0 and 4294967295 (0=disabled)"
             )
+        if self.router_enable_cache_control and self.router_mode != "kv":
+            raise ValueError("--enable-cache-control requires --router-mode=kv")
 
 
 @register_encoder(FrontendConfig)
@@ -118,6 +111,17 @@ class FrontendArgGroup(ArgGroup):
             action=argparse.BooleanOptionalAction,
             default=env_or_default("DYN_INTERACTIVE", False),
             help="Interactive text chat.\nenv var: DYN_INTERACTIVE",
+        )
+
+        add_argument(
+            g,
+            flag_name="--namespace",
+            env_var="DYN_NAMESPACE",
+            default=None,
+            help=(
+                "Dynamo namespace for model discovery scoping. Use for exact namespace matching. "
+                "If --namespace-prefix is also specified, prefix takes precedence."
+            ),
         )
 
         add_argument(
@@ -169,195 +173,33 @@ class FrontendArgGroup(ArgGroup):
             help="How to route the request.",
             choices=["round-robin", "random", "kv", "direct"],
         )
-        add_argument(
-            g,
-            flag_name="--kv-overlap-score-weight",
-            env_var="DYN_KV_OVERLAP_SCORE_WEIGHT",
-            default=1.0,
-            help=(
-                "KV Router: Weight for overlap score in worker selection. "
-                "Higher values prioritize KV cache reuse."
-            ),
-            arg_type=float,
-        )
-        add_argument(
-            g,
-            flag_name="--router-temperature",
-            env_var="DYN_ROUTER_TEMPERATURE",
-            default=0.0,
-            help=(
-                "KV Router: Temperature for worker sampling via softmax. Higher values "
-                "promote more randomness, and 0 fallbacks to deterministic."
-            ),
-            arg_type=float,
-        )
-        add_negatable_bool_argument(
-            g,
-            flag_name="--kv-events",
-            env_var="DYN_KV_EVENTS",
-            default=True,
-            help=(
-                "KV Router: Enable/disable KV events. Use --kv-events to enable "
-                "(default, router receives cache state events from workers) or --no-kv-events "
-                "to disable (router predicts cache state based on routing decisions)."
-            ),
-            dest="use_kv_events",
-        )
-        add_argument(
-            g,
-            flag_name="--router-ttl",
-            env_var="DYN_ROUTER_TTL",
-            default=120.0,
-            help=(
-                "KV Router: Time-to-live in seconds for blocks when KV events are disabled. "
-                "Only used when --no-kv-events is set."
-            ),
-            arg_type=float,
-        )
-        add_argument(
-            g,
-            flag_name="--router-max-tree-size",
-            env_var="DYN_ROUTER_MAX_TREE_SIZE",
-            default=2**20,
-            help=(
-                "KV Router: Maximum tree size before pruning when KV events are disabled. "
-                "Only used when --no-kv-events is set."
-            ),
-            arg_type=int,
-        )
-        add_argument(
-            g,
-            flag_name="--router-prune-target-ratio",
-            env_var="DYN_ROUTER_PRUNE_TARGET_RATIO",
-            default=0.8,
-            help=(
-                "KV Router: Target size ratio after pruning when KV events are disabled. "
-                "Only used when --no-kv-events is set."
-            ),
-            arg_type=float,
-        )
+
+        # KV router options (shared with dynamo.router)
+        KvRouterArgGroup().add_arguments(parser)
 
         add_argument(
             g,
-            flag_name="--namespace",
-            env_var="DYN_NAMESPACE",
+            flag_name="--namespace-prefix",
+            env_var="DYN_NAMESPACE_PREFIX",
             default=None,
             help=(
-                "Dynamo namespace for model discovery scoping. If specified, models will "
-                "only be discovered from this namespace. If not specified, discovers models "
-                "from all namespaces (global discovery)."
+                "Dynamo namespace prefix for model discovery scoping. Discovers models from "
+                "namespaces starting with this prefix (e.g., 'ns' matches 'ns', 'ns-abc123', "
+                "'ns-def456'). Takes precedence over --namespace if both are specified."
             ),
         )
 
-        add_negatable_bool_argument(
-            g,
-            flag_name="--router-replica-sync",
-            env_var="DYN_ROUTER_REPLICA_SYNC",
-            default=False,
-            help=(
-                "KV Router: Enable replica synchronization across multiple router instances. "
-                "When true, routers will publish and subscribe to events to maintain "
-                "consistent state."
-            ),
-        )
-        add_argument(
-            g,
-            flag_name="--router-snapshot-threshold",
-            env_var="DYN_ROUTER_SNAPSHOT_THRESHOLD",
-            default=1000000,
-            help=(
-                "KV Router: Number of messages in stream before triggering a snapshot. "
-            ),
-            arg_type=int,
-        )
-        add_negatable_bool_argument(
-            g,
-            flag_name="--router-reset-states",
-            env_var="DYN_ROUTER_RESET_STATES",
-            default=False,
-            help=(
-                "KV Router: Reset router state on startup, purging stream and object store. "
-                "By default, states are persisted. WARNING: This can affect existing router "
-                "replicas."
-            ),
-        )
-        add_negatable_bool_argument(
-            g,
-            flag_name="--durable-kv-events",
-            env_var="DYN_DURABLE_KV_EVENTS",
-            default=False,
-            help=(
-                "KV Router: Enable durable KV events using NATS JetStream instead of NATS Core. "
-                "By default, the router uses the generic event plane (NATS Core or ZMQ) with "
-                "local_indexer mode. Use this flag when you need durability and multi-replica "
-                "consistency. Requires NATS with JetStream enabled."
-            ),
-        )
-        add_negatable_bool_argument(
-            g,
-            flag_name="--track-active-blocks",
-            env_var="DYN_TRACK_ACTIVE_BLOCKS",
-            default=True,
-            dest="router_track_active_blocks",
-            help=(
-                "KV Router: Track active blocks (blocks being used for ongoing generation). "
-                "By default, active blocks are tracked for load balancing. "
-            ),
-        )
-        add_negatable_bool_argument(
-            g,
-            flag_name="--assume-kv-reuse",
-            env_var="DYN_ASSUME_KV_REUSE",
-            default=True,
-            dest="router_assume_kv_reuse",
-            help=(
-                "KV Router: When tracking active blocks, assume KV cache reuse. "
-                "Use --no-assume-kv-reuse to generate random hashes instead (when KV cache reuse is not expected)."
-            ),
-        )
-        add_negatable_bool_argument(
-            g,
-            flag_name="--track-output-blocks",
-            env_var="DYN_ROUTER_TRACK_OUTPUT_BLOCKS",
-            default=False,
-            dest="router_track_output_blocks",
-            help=(
-                "KV Router: Track output blocks during generation. When enabled, the router adds "
-                "placeholder blocks as tokens are generated and applies fractional decay based on "
-                "progress toward expected_output_tokens."
-            ),
-        )
-        add_argument(
-            g,
-            flag_name="--router-event-threads",
-            env_var="DYN_ROUTER_EVENT_THREADS",
-            default=1,
-            help=(
-                "KV Router: Number of event processing threads. When > 1, uses a concurrent radix tree with a thread pool for higher throughput."
-            ),
-            arg_type=int,
-        )
-        add_argument(
-            g,
-            flag_name="--router-queue-threshold",
-            env_var="DYN_ROUTER_QUEUE_THRESHOLD",
-            default=None,
-            help=(
-                "KV Router: Queue threshold fraction for prefill token capacity. "
-                "When set, requests are queued if all workers exceed this fraction of "
-                "max_num_batched_tokens. Enables priority scheduling via latency_sensitivity "
-                "hints. Must be > 0. If not set, queueing is disabled."
-            ),
-            arg_type=float,
-        )
         add_negatable_bool_argument(
             g,
             flag_name="--enforce-disagg",
             env_var="DYN_ENFORCE_DISAGG",
             default=False,
+            dest="enforce_disagg",
             help=(
-                "Enforce disaggregated prefill-decode. When set, unactivated prefill router will "
-                "return an error instead of falling back to decode-only mode."
+                "Strictly enforce disaggregated mode. Requests will fail if the prefill router "
+                "has not activated yet (e.g., prefill workers still registering). This is stricter "
+                "than the default: without this flag, requests arriving before prefill workers are "
+                "discovered fall through to aggregated decode-only routing."
             ),
         )
 
@@ -492,11 +334,22 @@ class FrontendArgGroup(ArgGroup):
             help="Determines how events are published [nats|zmq]",
             choices=["nats", "zmq"],
         )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--enable-anthropic-api",
+            env_var="DYN_ENABLE_ANTHROPIC_API",
+            default=False,
+            help=(
+                "[EXPERIMENTAL] Enable Anthropic Messages API endpoint (/v1/messages). "
+                "This feature is experimental and may change."
+            ),
+        )
         add_argument(
             g,
-            flag_name="--chat-processor",
+            flag_name="--dyn-chat-processor",
             env_var="DYN_CHAT_PROCESSOR",
             default="dynamo",
+            dest="chat_processor",
             help=(
                 "[EXPERIMENTAL] When set to 'vllm', use local vllm for the pre and post "
                 "processor."
@@ -506,11 +359,28 @@ class FrontendArgGroup(ArgGroup):
 
         add_negatable_bool_argument(
             g,
-            flag_name="--exp-python-factory",
-            env_var="DYN_EXP_PYTHON_FACTORY",
+            flag_name="--dyn-debug-perf",
+            env_var="DYN_DEBUG_PERF",
             default=False,
+            dest="debug_perf",
             help=(
-                "[EXPERIMENTAL] Enable Python-based engine factory. When set, engines will be "
-                "created via a Python callback instead of the default Rust pipeline."
+                "[EXPERIMENTAL] Enable performance instrumentation for diagnosing preprocessing bottlenecks. "
+                "Logs per-function timing, request concurrency, and hot-path section durations. "
+                "'--dyn-chat-processor vllm' only."
             ),
+        )
+
+        add_argument(
+            g,
+            flag_name="--dyn-preprocess-workers",
+            env_var="DYN_PREPROCESS_WORKERS",
+            default=0,
+            dest="preprocess_workers",
+            help=(
+                "[EXPERIMENTAL] Number of worker processes for preprocessing and output processing. "
+                "When > 0, offloads CPU-bound work (tokenization, template rendering, "
+                "detokenization) to a ProcessPoolExecutor with N workers, each with its "
+                "own GIL. 0 (default) keeps all processing on the main event loop. '--dyn-chat-processor vllm' only."
+            ),
+            arg_type=int,
         )

@@ -4,13 +4,14 @@
 import asyncio
 import logging
 import socket
-from typing import Any, Optional
+from typing import Any, List, Optional
 
 import sglang as sgl
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import get_local_ip_auto
 
 from dynamo._core import Endpoint
+from dynamo.common.utils.output_modalities import get_output_modalities
 from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_model
 from dynamo.sglang.args import DynamoConfig
 
@@ -20,8 +21,8 @@ async def _register_model_with_runtime_config(
     endpoint: Endpoint,
     server_args: ServerArgs,
     dynamo_args: DynamoConfig,
-    input_type: Optional[ModelInput] = ModelInput.Tokens,
-    output_type: Optional[ModelType] = ModelType.Chat | ModelType.Completions,
+    input_type: ModelInput = ModelInput.Tokens,
+    output_type: ModelType = ModelType.Chat | ModelType.Completions,
 ) -> bool:
     """Register LLM with the Dynamo runtime.
 
@@ -37,7 +38,6 @@ async def _register_model_with_runtime_config(
         True if registration succeeded, False otherwise.
     """
     runtime_config = await _get_runtime_config(engine, server_args, dynamo_args)
-    input_type = input_type
 
     if not server_args.skip_tokenizer_init:
         logging.warning(
@@ -55,6 +55,7 @@ async def _register_model_with_runtime_config(
             endpoint,
             server_args.model_path,
             server_args.served_model_name,
+            context_length=server_args.context_length,
             kv_cache_block_size=server_args.page_size,
             runtime_config=runtime_config,
             custom_template_path=dynamo_args.custom_jinja_template,
@@ -133,6 +134,7 @@ def _get_bootstrap_info_for_config(
             )
 
         # Wrap IPv6 literal with brackets so f"{host}:{port}" stays valid.
+        assert isinstance(bootstrap_host, str)
         if ":" in bootstrap_host and not bootstrap_host.startswith("["):
             bootstrap_host = f"[{bootstrap_host}]"
             logging.info(f"Wrapped IPv6 address with brackets: {bootstrap_host}")
@@ -236,8 +238,8 @@ async def register_model_with_readiness_gate(
     generate_endpoint: Endpoint,
     server_args: ServerArgs,
     dynamo_args: DynamoConfig,
-    input_type: Optional[ModelInput] = ModelInput.Tokens,
-    output_type: Optional[ModelType] = ModelType.Chat | ModelType.Completions,
+    input_type: ModelInput = ModelInput.Tokens,
+    output_type: ModelType = ModelType.Chat | ModelType.Completions,
     readiness_gate: Optional[asyncio.Event] = None,
 ) -> None:
     """Wrapper function to register LLM with the Dynamo runtime and use optional readiness gate to signal success.
@@ -278,6 +280,7 @@ async def register_image_diffusion_model(
     generator: Any,  # DiffGenerator
     endpoint: Endpoint,
     server_args: ServerArgs,
+    output_modalities: Optional[List[str]] = None,
     readiness_gate: Optional[asyncio.Event] = None,
 ) -> None:
     """Register diffusion model with Dynamo runtime.
@@ -286,18 +289,37 @@ async def register_image_diffusion_model(
         generator: The SGLang DiffGenerator instance.
         endpoint: The Dynamo endpoint for generation requests.
         server_args: SGLang server configuration.
+        output_modalities: Optional list of output modality names to override
+            the default ModelType.Images registration.
         readiness_gate: Optional event to signal when registration completes.
 
     Note:
-        Image diffusion models use ModelInput.Text (text prompts) and ModelType.Images.
+        Image diffusion models use ModelInput.Text (text prompts) and ModelType.Images
+        by default. When output_modalities is provided, the ModelType is derived
+        from the given modality names instead.
     """
     # Use model_path as the model name (diffusion workers don't have served_model_name)
     model_name = server_args.model_path
 
+    model_type = ModelType.Images
+    if output_modalities:
+        resolved = get_output_modalities(output_modalities, model_name)
+        if resolved is not None:
+            model_type = resolved
+            logging.info(
+                "Using output modalities %s for diffusion model registration",
+                output_modalities,
+            )
+        else:
+            logging.warning(
+                "No recognized output modalities from %s, defaulting to ModelType.Images",
+                output_modalities,
+            )
+
     try:
         await register_model(
             ModelInput.Text,
-            ModelType.Images,
+            model_type,
             endpoint,
             model_name,
             model_name,

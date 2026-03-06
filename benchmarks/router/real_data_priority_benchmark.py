@@ -262,10 +262,9 @@ def main():
     for tier in TIERS:
         logger.info(f"  {tier} priority: {len(tier_requests[tier])} requests")
 
-    # Use different aiperf random seeds per run so that the generated prompts
-    # differ, preventing mocker KV cache hits between runs.
-    baseline_seed = args.seed
-    priority_seed = args.seed + 1
+    # Offset hash_ids for the priority run so it starts with a cold KV cache,
+    # keeping the comparison fair. Same seed for both runs so prompts match.
+    priority_tier_requests = offset_hash_ids(tier_requests)
 
     # Run 1: Baseline (same split, no priority tagging)
     baseline_dir = os.path.join(args.output_dir, "baseline")
@@ -277,20 +276,20 @@ def main():
         baseline_dir,
         tag_priority=False,
         logger=logger,
-        seed=baseline_seed,
+        seed=args.seed,
     )
 
-    # Run 2: With priority tagging
+    # Run 2: With priority tagging (offset hash_ids for cold cache)
     priority_dir = os.path.join(args.output_dir, "priority")
     logger.info("=== Running with priority tagging ===")
     run_concurrent_streams(
         args,
-        tier_requests,
+        priority_tier_requests,
         priority_values,
         priority_dir,
         tag_priority=True,
         logger=logger,
-        seed=priority_seed,
+        seed=args.seed,
     )
 
     # Plot comparison

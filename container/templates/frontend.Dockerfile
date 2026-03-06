@@ -60,9 +60,11 @@ COPY --chown=dynamo: ATTRIBUTION* LICENSE /workspace/
 ENV VIRTUAL_ENV=/opt/dynamo/venv
 ENV PATH="/opt/dynamo/venv/bin:$PATH"
 
-# Copy uv and wheelhouse from runtime stage
-COPY --chown=dynamo: --from=runtime /bin/uv /bin/uvx /bin/
-COPY --chown=dynamo: --from=runtime /opt/dynamo/wheelhouse/ /opt/dynamo/wheelhouse/
+# Copy uv from base stage and wheels from wheel_builder (no runtime stage dependency)
+COPY --chown=dynamo: --from=dynamo_base /bin/uv /bin/uvx /bin/
+COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
+COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
+COPY --chown=dynamo: --from=wheel_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
 
 # Create virtual environment
 RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \

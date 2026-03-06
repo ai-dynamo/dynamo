@@ -25,7 +25,9 @@ USER root
 #   --skip-kmod: Skip kernel module installation (handled by host)
 #   --skip-limit-conf: Skip ulimit configuration (handled by container runtime)
 #   --no-verify: Skip GPG verification (optional, can be removed if verification is needed)
-RUN mkdir -p /tmp/efa && \
+# Cache apt downloads; sharing=locked avoids apt/dpkg races with concurrent builds.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    mkdir -p /tmp/efa && \
     cd /tmp/efa && \
     curl --retry 3 --retry-delay 2 -fsSL -o aws-efa-installer-${EFA_VERSION}.tar.gz \
         https://efa-installer.amazonaws.com/aws-efa-installer-${EFA_VERSION}.tar.gz && \

@@ -53,6 +53,16 @@ impl ChoiceEmission {
             ChoiceEmission::Trailing(choice) => choice.index,
         }
     }
+
+    /// Get mutable access to the underlying choice.
+    fn choice_mut(&mut self) -> &mut ChatChoiceStream {
+        match self {
+            ChoiceEmission::PassThrough(choice) => choice,
+            ChoiceEmission::ToolCall(choice) => choice,
+            ChoiceEmission::Content(choice) => choice,
+            ChoiceEmission::Trailing(choice) => choice,
+        }
+    }
 }
 
 /// Configuration for jail detection and parsing
@@ -96,6 +106,8 @@ struct ChoiceJailState {
     stream_finish_reason: Option<FinishReason>,
     /// Number of tool calls already emitted for this choice
     emitted_tool_calls_count: usize,
+    /// Reasoning content collected while waiting for a suitable emission.
+    pending_reasoning_content: Option<String>,
 }
 
 fn create_choice_stream(
@@ -136,6 +148,7 @@ impl ChoiceJailState {
             partial_match_buffer: String::new(),
             stream_finish_reason: None,
             emitted_tool_calls_count: 0,
+            pending_reasoning_content: None,
         }
     }
 
@@ -196,11 +209,6 @@ impl ChoiceJailState {
 
                     if should_end {
                         // Complete tool call found in this chunk
-                        tracing::debug!(
-                            "Choice {} complete tool call detected in single chunk",
-                            choice.index
-                        );
-
                         let (jailed_part, trailing_part) = full_content.split_at(split_pos);
 
                         // Create the tool call choice
@@ -238,11 +246,6 @@ impl ChoiceJailState {
                         }
                     } else {
                         // Start jailing with the marker and suffix
-                        tracing::debug!(
-                            "Choice {} start marker '{}' detected, starting jail",
-                            choice.index,
-                            marker
-                        );
                         self.is_jailed = true;
                         self.accumulated_content = full_content;
                     }
@@ -291,10 +294,6 @@ impl ChoiceJailState {
 
                     if jail_stream.should_start_jail(&combined_content) {
                         // Start jailing with the combined content
-                        tracing::debug!(
-                            "Choice {} tool call start detected via parser, starting jail",
-                            choice.index
-                        );
                         self.is_jailed = true;
                         self.accumulated_content = combined_content;
                         self.partial_match_buffer.clear();
@@ -325,11 +324,6 @@ impl ChoiceJailState {
                 jail_stream.should_end_jail(&self.accumulated_content).await;
 
             if should_end {
-                tracing::debug!(
-                    "Choice {} jail exit detected, releasing accumulated content",
-                    choice.index
-                );
-
                 // Split the content
                 let (jailed_part, trailing_part) = self.accumulated_content.split_at(split_pos);
 
@@ -379,11 +373,6 @@ impl ChoiceJailState {
     /// Finalize any remaining content when stream ends
     async fn finalize(&mut self, jail_stream: &JailedStream) -> Option<ChoiceEmission> {
         if self.is_jailed && !self.accumulated_content.is_empty() {
-            tracing::debug!(
-                "Choice {} stream ended while jailed, releasing accumulated content",
-                self.index
-            );
-
             // Create a dummy choice for the method call
             #[allow(deprecated)]
             let dummy_choice = create_choice_stream(
@@ -396,7 +385,7 @@ impl ChoiceJailState {
                 None,
             );
 
-            let final_choice = jail_stream
+            let mut final_choice = jail_stream
                 .create_tool_call_choice(
                     self.index,
                     &self.accumulated_content,
@@ -404,6 +393,15 @@ impl ChoiceJailState {
                     self.emitted_tool_calls_count,
                 )
                 .await;
+
+            // Preserve any pending reasoning content collected while jailed.
+            if let Some(pending_reasoning) = self.pending_reasoning_content.take() {
+                if let Some(existing_reasoning) = final_choice.delta.reasoning_content.as_mut() {
+                    existing_reasoning.push_str(&pending_reasoning);
+                } else {
+                    final_choice.delta.reasoning_content = Some(pending_reasoning);
+                }
+            }
 
             if let Some(ref tool_calls) = final_choice.delta.tool_calls {
                 self.emitted_tool_calls_count += tool_calls.len();
@@ -545,6 +543,13 @@ impl JailedStream {
                                 let starts_jailed = matches!(self.jail_mode, JailMode::Immediate { .. });
                                 let choice_state = choice_states.get_or_create_state(choice.index, starts_jailed);
 
+                                if let Some(reasoning_content) = &choice.delta.reasoning_content {
+                                    let pending = choice_state
+                                        .pending_reasoning_content
+                                        .get_or_insert_with(String::new);
+                                    pending.push_str(reasoning_content);
+                                }
+
                                 // Store metadata when any choice becomes jailed (first time only)
                                 if !choice_state.is_jailed && self.should_start_jail(text)
                                     && last_annotated_id.is_none() {
@@ -557,7 +562,13 @@ impl JailedStream {
                                 choice_state.stream_finish_reason = choice.finish_reason;
 
                                 // Process this choice and get emissions
-                                let emissions = choice_state.process_content(choice, text, &self).await;
+                                let mut emissions = choice_state.process_content(choice, text, &self).await;
+                                if !emissions.is_empty()
+                                    && let Some(reasoning) = choice_state.pending_reasoning_content.take()
+                                    && let Some(first) = emissions.first_mut()
+                                {
+                                    first.choice_mut().delta.reasoning_content = Some(reasoning);
+                                }
                                 all_emissions.extend(emissions);
                             }
                             // For multimodal content, pass through unchanged (no jailing)
@@ -701,6 +712,7 @@ impl JailedStream {
                     id,
                     event,
                     comment,
+                    error: None,
                 }]
             }
             EmissionMode::SingleChoicePerChunk => {
@@ -716,6 +728,7 @@ impl JailedStream {
                             id: id.clone(),
                             event: event.clone(),
                             comment: comment.clone(),
+                            error: None,
                         }
                     })
                     .collect()
@@ -735,14 +748,6 @@ impl JailedStream {
         // Path 2: Check for tool call start pattern
         let tool_call_match = self.tool_call_parser.is_some()
             && detect_tool_call_start(content, self.tool_call_parser.as_deref()).unwrap_or(false);
-
-        tracing::debug!(
-            "should_start_jail: content={:?}, sequence_match={}, tool_call_match={}, sequences={:?}",
-            content,
-            sequence_match,
-            tool_call_match,
-            self.jail_start_sequences
-        );
 
         sequence_match || tool_call_match
     }
@@ -832,12 +837,13 @@ impl JailedStream {
             JailMode::MarkerBased => {
                 // Traditional marker-based tool call parsing
                 let tools_slice = self.tool_definitions.as_deref();
-                if let Ok((tool_calls, normal_text)) = try_tool_call_parse_aggregate(
+                let parse_result = try_tool_call_parse_aggregate(
                     accumulated_content,
                     self.tool_call_parser.as_deref(),
                     tools_slice,
                 )
-                .await
+                .await;
+                if let Ok((tool_calls, normal_text)) = parse_result
                     && !tool_calls.is_empty()
                 {
                     // Convert to streaming format

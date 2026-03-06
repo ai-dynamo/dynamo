@@ -4,14 +4,15 @@
 #   core     -> dynamo build-test, all backend builds (vllm/sglang/trtllm), deploy tests
 #   operator -> operator build and test
 #   deploy   -> deploy-test-vllm-disagg-router
+#   planner  -> dynamo build-test
 #   vllm     -> vllm build and test
 #   sglang   -> sglang build and test
 #   trtllm   -> trtllm build and test
-#   frontend -> frontend EPP image build
+#   frontend -> frontend EPP image build, dynamo build-test
 #   docs     -> fern docs lint, sync, and version release (docs/ directory)
 #
 # Filters for coverage only (no CI triggered):
-#   examples, ignore, planner
+#   examples, ignore
 
 all:
   - '**'
@@ -19,6 +20,7 @@ all:
 docs:
   - 'docs/**'
   - 'fern/**'
+  - '.github/workflows/fern-docs.yml'
   - '**/*.md'
   - '**/*.txt'
   - '**/.gitignore'
@@ -98,7 +100,7 @@ operator:
   - *ci
   - 'deploy/operator/**'
   - 'deploy/operator/.*'
-  - 'docs/pages/kubernetes/api-reference.md'
+  - 'docs/kubernetes/api-reference.md'
 
 deploy:
   - '!**/*.md'
@@ -109,7 +111,9 @@ deploy:
 
 planner:
   - 'components/src/dynamo/planner/**'
+  - 'components/src/dynamo/global_planner/**'
   - 'tests/planner/**'
+  - 'tests/global_planner/**'
   - 'components/src/dynamo/profiler/**'
   - 'components/src/dynamo/global_router/**'
 
