@@ -321,10 +321,7 @@ class TRTLLMProcess:
 @pytest.mark.gpu_1
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 @pytest.mark.timeout(300)
-@pytest.mark.xfail(
-    run=False,
-    reason="Intermittent hang causing downstream test failures (DYN-2365)",
-)
+@pytest.mark.skip(reason="Intermittent hang causing downstream test failures (DYN-2365)")
 def test_trtllm_kv_router_basic(
     request,
     runtime_services_dynamic_ports,
