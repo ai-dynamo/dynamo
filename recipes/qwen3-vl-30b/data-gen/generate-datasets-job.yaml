@@ -1,0 +1,75 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: qwen3-vl-30b-generate-datasets
+spec:
+  backoffLimit: 1
+  completions: 1
+  parallelism: 1
+  template:
+    metadata:
+      labels:
+        app: generate-datasets
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsUser: 0
+        runAsGroup: 0
+        fsGroup: 0
+      containers:
+        - name: generate-datasets
+          image: dynamo:latest-vllm-runtime
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/bash
+            - -lc
+            - |
+              set -euo pipefail
+
+              GENERATOR_MAIN="/workspace/benchmarks/multimodal/jsonl/main.py"
+              OUTPUT_DIR="/perf-cache/datasets"
+
+              if [[ ! -f "${GENERATOR_MAIN}" ]]; then
+                echo "Generator not found at ${GENERATOR_MAIN}"
+                exit 1
+              fi
+
+              mkdir -p "${OUTPUT_DIR}"
+
+              NUM_REQUESTS=500
+              IMAGES_PER_REQUEST=3
+              USER_TEXT_TOKENS=320
+              IMAGE_MODE=http
+              TOTAL_SLOTS=$((NUM_REQUESTS * IMAGES_PER_REQUEST))
+
+              declare -A POOLS=(
+                [r00]="${TOTAL_SLOTS}"
+                [r10]="$((TOTAL_SLOTS * 90 / 100))"
+                [r25]="$((TOTAL_SLOTS * 75 / 100))"
+                [r50]="$((TOTAL_SLOTS * 50 / 100))"
+                [r75]="$((TOTAL_SLOTS * 25 / 100))"
+              )
+
+              for tag in r00 r10 r25 r50 r75; do
+                output_file="${OUTPUT_DIR}/qwen3_vl_${NUM_REQUESTS}req_${IMAGES_PER_REQUEST}img_${tag}.jsonl"
+                pool_size="${POOLS[$tag]}"
+                echo "Generating ${output_file} (images-pool=${pool_size})"
+                python3 "${GENERATOR_MAIN}" \
+                  -n "${NUM_REQUESTS}" \
+                  --images-per-request "${IMAGES_PER_REQUEST}" \
+                  --images-pool "${pool_size}" \
+                  --user-text-tokens "${USER_TEXT_TOKENS}" \
+                  --image-mode "${IMAGE_MODE}" \
+                  -o "${output_file}"
+              done
+
+              echo "Dataset generation complete in ${OUTPUT_DIR}"
+          volumeMounts:
+            - name: perf-cache
+              mountPath: /perf-cache
+      volumes:
+        - name: perf-cache
+          persistentVolumeClaim:
+            claimName: perf-cache

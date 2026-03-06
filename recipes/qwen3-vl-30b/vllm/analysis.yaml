@@ -1,0 +1,132 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: qwen3-vl-analysis
+spec:
+  backoffLimit: 1
+  completions: 1
+  parallelism: 1
+  template:
+    metadata:
+      labels:
+        app: benchmark-analysis
+        topology: configurable
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: analysis
+          image: python:3.11
+          command:
+            - /bin/bash
+            - -lc
+            - |
+              set -euo pipefail
+              python3 - <<'PY'
+              import csv
+              import os
+              from pathlib import Path
+
+              raw_topology = (os.getenv("TOPOLOGY", "agg") or "").strip()
+              topology = raw_topology.replace("-", "_")
+              supported_topologies = {"agg", "disagg_e_pd", "disagg_ep_d"}
+              if topology not in supported_topologies:
+                  supported = ", ".join(sorted(supported_topologies))
+                  raise SystemExit(
+                      f"Unsupported TOPOLOGY='{raw_topology}'. "
+                      f"Use one of: {supported}"
+                  )
+
+              base = Path("/perf-cache/artifacts/qwen3_vl_30b_encoder_cache") / topology
+              out_dir = base / "analysis"
+              out_dir.mkdir(parents=True, exist_ok=True)
+
+              tags = ["r00", "r10", "r25", "r50", "r75"]
+              metrics = [
+                  "Time to First Token (ms)",
+                  "Request Latency (ms)",
+                  "Inter Token Latency (ms)",
+                  "Request Throughput (requests/sec)",
+                  "Output Token Throughput (tokens/sec)",
+                  "Image Throughput (images/sec)",
+                  "Image Latency (ms/image)",
+              ]
+
+              def load_p90_by_metric(run_dir: Path):
+                  csv_path = run_dir / "profile_export_aiperf.csv"
+                  if not csv_path.exists():
+                      return {}
+                  data = {}
+                  with csv_path.open(newline="") as f:
+                      reader = csv.DictReader(f)
+                      for row in reader:
+                          metric = (row.get("Metric") or "").strip()
+                          p90_raw = (row.get("p90") or "").strip()
+                          if not metric or p90_raw in ("", "N/A"):
+                              continue
+                          try:
+                              data[metric] = float(p90_raw.replace(",", ""))
+                          except ValueError:
+                              continue
+                  return data
+
+              rows = []
+              for tag in tags:
+                  off = load_p90_by_metric(base / f"cache_off_{tag}")
+                  on = load_p90_by_metric(base / f"cache_on_{tag}")
+                  for metric in metrics:
+                      off_v = off.get(metric)
+                      on_v = on.get(metric)
+                      pct = None
+                      if off_v is not None and on_v is not None and off_v != 0:
+                          pct = ((on_v - off_v) / off_v) * 100.0
+                      rows.append(
+                          {
+                              "topology": topology,
+                              "tag": tag,
+                              "metric": metric,
+                              "cache_off_p90": off_v,
+                              "cache_on_p90": on_v,
+                              "pct_change_on_vs_off": pct,
+                          }
+                      )
+
+              csv_out = out_dir / "cache_on_vs_off_summary.csv"
+              with csv_out.open("w", newline="") as f:
+                  writer = csv.DictWriter(
+                      f,
+                      fieldnames=[
+                          "topology",
+                          "tag",
+                          "metric",
+                          "cache_off_p90",
+                          "cache_on_p90",
+                          "pct_change_on_vs_off",
+                      ],
+                  )
+                  writer.writeheader()
+                  writer.writerows(rows)
+
+              print(f"TOPOLOGY={topology}")
+              print(f"Wrote: {csv_out}")
+              print("")
+              print("Cache ON vs OFF (p90) summary:")
+              print(f"{'tag':<6} {'metric':<36} {'off_p90':>12} {'on_p90':>12} {'pct_change':>12}")
+              print("-" * 84)
+              for r in rows:
+                  off_s = "N/A" if r["cache_off_p90"] is None else f'{r["cache_off_p90"]:.4f}'
+                  on_s = "N/A" if r["cache_on_p90"] is None else f'{r["cache_on_p90"]:.4f}'
+                  pct_s = "N/A" if r["pct_change_on_vs_off"] is None else f'{r["pct_change_on_vs_off"]:.2f}%'
+                  print(f"{r['tag']:<6} {r['metric']:<36} {off_s:>12} {on_s:>12} {pct_s:>12}")
+              PY
+          env:
+            - name: TOPOLOGY
+              value: agg
+          volumeMounts:
+            - name: perf-cache
+              mountPath: /perf-cache
+      volumes:
+        - name: perf-cache
+          persistentVolumeClaim:
+            claimName: perf-cache
