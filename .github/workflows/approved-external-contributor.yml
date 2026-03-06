@@ -143,9 +143,7 @@ jobs:
           REPO_NAME: ${{ github.event.repository.name }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_SHA: ${{ github.event.pull_request.head.sha }}
-          FALLBACK_SHA: ${{ github.sha }}
         run: |
-          sha="${PR_SHA:-${FALLBACK_SHA}}"
           gh pr comment "$PR_NUMBER" \
             --repo "$REPO_OWNER/$REPO_NAME" \
-            --body "/ok to test $sha"
+            --body "/ok to test $PR_SHA"
