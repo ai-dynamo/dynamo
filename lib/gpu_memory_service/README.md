@@ -368,7 +368,7 @@ During `remap_all_vas()`:
 ### 4. Memory Layout Hash
 
 On commit, the server computes a hash of:
-- All allocation IDs, sizes, and tags
+- All allocation IDs, sizes, aligned sizes, tags, and epoch IDs
 - All metadata entries
 
 On `remap_all_vas()`, this hash is checked:
