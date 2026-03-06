@@ -68,6 +68,7 @@ mod http;
 mod kserve_grpc;
 mod llm;
 mod parsers;
+mod performance_metrics;
 mod planner;
 mod prometheus_metrics;
 
@@ -176,6 +177,10 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::kv::KvRouter>()?;
     m.add_class::<RouterMode>()?;
     m.add_class::<kserve_grpc::KserveGrpcService>()?;
+    m.add_class::<performance_metrics::PyPerformanceMetricsRegistry>()?;
+    m.add_class::<performance_metrics::PyRateMetric>()?;
+    m.add_class::<performance_metrics::PyDistributionMetric>()?;
+    m.add_class::<performance_metrics::PyRatioMetric>()?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add_class::<planner::VirtualConnectorCoordinator>()?;
     m.add_class::<planner::VirtualConnectorClient>()?;
