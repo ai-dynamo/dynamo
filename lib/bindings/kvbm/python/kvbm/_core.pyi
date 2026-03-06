@@ -63,13 +63,16 @@ class NcclBootstrap:
         """
         ...
 
-    def init_communicator(self, rank: int) -> int:
+    def init_communicator(self, rank: int) -> "NcclCommRef":
         """
         Initialize the NCCL communicator.
 
         IMPORTANT: This is a collective operation!
         All ranks must call this function together with matching parameters.
         The function will block until all ranks have called it.
+
+        Returns an owning NcclCommRef; pass it to workers so the comm is
+        kept alive. The communicator is destroyed when the last reference is dropped.
 
         Parameters:
         -----------
@@ -78,8 +81,8 @@ class NcclBootstrap:
 
         Returns:
         --------
-        int
-            The raw ncclComm_t pointer as an integer
+        NcclCommRef
+            Owning reference; pass to KvbmWorker/PyTrtllmKvConnectorWorker
         """
         ...
 
@@ -91,6 +94,21 @@ class NcclBootstrap:
         --------
         int
             The world size
+        """
+        ...
+
+
+class NcclCommRef:
+    """
+    Owning reference to an NCCL communicator; calls ncclCommDestroy on drop.
+
+    Returned by NcclBootstrap.init_communicator. Pass to workers
+    (KvbmWorker, PyTrtllmKvConnectorWorker) so they keep the comm alive.
+    """
+
+    def as_raw(self) -> int:
+        """
+        Raw ncclComm_t pointer as an integer (borrowed; do not destroy).
         """
         ...
 
@@ -114,7 +132,7 @@ class KvbmWorker:
         disk_layout_type: Optional[Any] = None,
         rank: Optional[int] = None,
         world_size: Optional[int] = None,
-        nccl_comm_ptr: Optional[int] = None,
+        nccl_comm_ref: Optional["NcclCommRef"] = None,
     ) -> None:
         """
         Create a KvbmWorker instance.
@@ -145,8 +163,8 @@ class KvbmWorker:
             Rank for replicated mode (None = sharded mode)
         world_size: Optional[int]
             World size for replicated mode
-        nccl_comm_ptr: Optional[int]
-            Raw ncclComm_t pointer for replicated mode (from NcclBootstrap)
+        nccl_comm_ref: Optional[NcclCommRef]
+            Owning NCCL comm ref for replicated mode (from NcclBootstrap.init_communicator)
         """
         ...
 
@@ -396,7 +414,7 @@ class PyTrtllmKvConnectorWorker:
         trtllm_rank: str,
         rank: Optional[int] = None,
         world_size: Optional[int] = None,
-        nccl_comm_ptr: Optional[int] = None,
+        nccl_comm_ref: Optional["NcclCommRef"] = None,
     ) -> None:
         """
         Create a PyTrtllmKvConnectorWorker instance.
@@ -413,9 +431,8 @@ class PyTrtllmKvConnectorWorker:
         world_size: Optional[int]
             World size for replicated mode.
             Required for MLA support optimization.
-        nccl_comm_ptr: Optional[int]
-            Raw ncclComm_t pointer for replicated mode.
-            Can be obtained from NcclBootstrap.init_communicator().
+        nccl_comm_ref: Optional[NcclCommRef]
+            Owning NCCL comm ref from NcclBootstrap.init_communicator().
             Required for MLA support optimization.
         """
         ...

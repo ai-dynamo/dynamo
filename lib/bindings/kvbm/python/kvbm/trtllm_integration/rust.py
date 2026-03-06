@@ -7,7 +7,7 @@ Rust-based TensorRT-LLM integration loader.
 Uses objects from _vllm_integration module. Type stubs in kvbm/_core.pyi.
 
 KvConnectorWorker (PyTrtllmKvConnectorWorker) signature:
-    (py_drt, trtllm_rank, rank=None, world_size=None, nccl_comm_ptr=None)
+    (py_drt, trtllm_rank, rank=None, world_size=None, nccl_comm_ref=None)
 
 The rank, world_size, and nccl_comm_ptr parameters enable NCCL replicated mode
 for MLA (Multi-head Latent Attention) support with broadcast-based KV cache transfers.

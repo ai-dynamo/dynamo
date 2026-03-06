@@ -11,7 +11,7 @@ use llm_rs::block_manager::distributed::{
     KvbmWorkerConfig, NcclConfig,
 };
 #[cfg(feature = "nccl")]
-use llm_rs::block_manager::distributed::NcclBootstrap;
+use llm_rs::block_manager::distributed::{NcclBootstrap, NcclCommOwned};
 use llm_rs::block_manager::layout::LayoutType;
 use llm_rs::block_manager::storage::torch::{TorchDevice, TorchTensor};
 
@@ -171,6 +171,9 @@ impl BlockTransferHandler {
 pub struct KvbmWorker {
     inner: Arc<Mutex<KvbmWorkerImpl>>,
     _drt: Option<Arc<rs::DistributedRuntime>>,
+    /// Keeps the NCCL communicator alive for the worker lifetime; dropped with the worker.
+    #[cfg(feature = "nccl")]
+    _nccl_comm: Option<Arc<NcclCommOwned>>,
 }
 
 impl KvbmWorker {
@@ -182,7 +185,7 @@ impl KvbmWorker {
 #[pymethods]
 impl KvbmWorker {
     #[new]
-    #[pyo3(signature = (num_device_blocks, page_size, tensors, device_id=0, dtype_width_bytes=2, drt=None, layout_blocking=false, device_layout_type=None, host_layout_type=None, disk_layout_type=None, rank=None, world_size=None, nccl_comm_ptr=None))]
+    #[pyo3(signature = (num_device_blocks, page_size, tensors, device_id=0, dtype_width_bytes=2, drt=None, layout_blocking=false, device_layout_type=None, host_layout_type=None, disk_layout_type=None, rank=None, world_size=None, nccl_comm_ref=None))]
     fn new(
         num_device_blocks: usize,
         page_size: usize,
@@ -196,7 +199,7 @@ impl KvbmWorker {
         disk_layout_type: Option<PyLayoutType>,
         rank: Option<i32>,
         world_size: Option<i32>,
-        nccl_comm_ptr: Option<usize>,
+        nccl_comm_ref: Option<PyObject>,
     ) -> PyResult<Self> {
         let drt: Option<Arc<rs::DistributedRuntime>> = Python::with_gil(|py| {
             if let Some(obj) = drt {
@@ -215,8 +218,23 @@ impl KvbmWorker {
             vllm_tensors.push(Arc::new(vllm_tensor));
         }
 
-        // Build NcclConfig from bootstrapped comm (if provided)
-        // This will error if NCCL params are provided but feature is not enabled
+        // Own the NCCL communicator for the worker lifetime; NcclConfig gets a borrowed handle.
+        #[cfg(feature = "nccl")]
+        let _nccl_comm = nccl_comm_ref.as_ref().and_then(|obj| {
+            Python::with_gil(|py| {
+                obj.downcast_bound::<PyNcclCommRef>(py)
+                    .ok()
+                    .map(|r| r.borrow().get_arc())
+            })
+        });
+        #[cfg(feature = "nccl")]
+        let nccl_comm_ptr = _nccl_comm.as_ref().map(|a| a.as_raw() as usize);
+        #[cfg(not(feature = "nccl"))]
+        let nccl_comm_ptr: Option<usize> = None;
+        #[cfg(not(feature = "nccl"))]
+        let _ = nccl_comm_ref;
+
+        // Build NcclConfig from owned comm (borrowed handle only)
         let nccl_config = build_nccl_config(rank, world_size, nccl_comm_ptr).map_err(to_pyerr)?;
 
         let config = KvbmWorkerConfig::builder()
@@ -259,7 +277,38 @@ impl KvbmWorker {
         Ok(Self {
             inner: Arc::new(Mutex::new(worker)),
             _drt: drt,
+            #[cfg(feature = "nccl")]
+            _nccl_comm,
         })
+    }
+}
+
+/// Owning wrapper for an NCCL communicator; calls ncclCommDestroy on drop.
+///
+/// Returned by NcclBootstrap.init_communicator. Pass this object to workers
+/// (e.g. KvbmWorker, PyTrtllmKvConnectorWorker) so they keep the comm alive.
+/// The raw handle is exposed via as_raw() for NcclConfig; ownership stays here.
+#[cfg(feature = "nccl")]
+#[pyclass(name = "NcclCommRef")]
+pub struct PyNcclCommRef {
+    inner: Arc<NcclCommOwned>,
+}
+
+#[cfg(feature = "nccl")]
+#[pymethods]
+impl PyNcclCommRef {
+    /// Raw ncclComm_t pointer as an integer (borrowed; do not destroy).
+    /// Used by NcclConfig; the communicator is owned by this ref.
+    fn as_raw(&self) -> usize {
+        self.inner.as_raw() as usize
+    }
+}
+
+#[cfg(feature = "nccl")]
+impl PyNcclCommRef {
+    /// Clone the inner Arc so a worker can hold ownership until drop.
+    pub fn get_arc(&self) -> Arc<NcclCommOwned> {
+        Arc::clone(&self.inner)
     }
 }
 
@@ -324,14 +373,21 @@ impl PyNcclBootstrap {
     /// All ranks must call this function together with matching parameters.
     /// The function will block until all ranks have called it.
     ///
+    /// Returns an owning NcclCommRef; keep it alive for the lifetime of any
+    /// worker using this communicator. The communicator is destroyed when
+    /// the last reference is dropped.
+    ///
     /// Args:
     ///     rank: This rank's ID (0 to world_size-1)
     ///
     /// Returns:
-    ///     int: The raw ncclComm_t pointer as an integer
-    fn init_communicator(&self, rank: i32) -> PyResult<usize> {
+    ///     NcclCommRef: Owning wrapper; use .as_raw() for the raw handle if needed
+    fn init_communicator(&self, rank: i32) -> PyResult<PyNcclCommRef> {
         let comm = self.inner.init_communicator(rank).map_err(to_pyerr)?;
-        Ok(comm as usize)
+        let owned = unsafe { NcclCommOwned::from_raw(comm) };
+        Ok(PyNcclCommRef {
+            inner: Arc::new(owned),
+        })
     }
 
     /// Get the world size for this bootstrap.
