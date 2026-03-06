@@ -213,6 +213,31 @@ For larger contributions, follow these steps:
 
 ---
 
+## CI and Merge Process
+
+### Merge Readiness (`lgtm` label)
+
+The **LGTM Bot** automatically tracks merge readiness on every PR. When all gates pass — CI checks green, at least one approved review, no changes requested — it applies the `lgtm` label. The label is removed whenever CI status changes or new commits are pushed.
+
+A **Merge Checklist** comment is posted and kept up to date on each PR.
+
+### AI-Powered Diagnostics
+
+If CI fails, comment `/diagnose` on the PR to get an AI-powered analysis of the failure, including root cause and suggested fixes. This is especially helpful for distinguishing infrastructure flakes from real code errors.
+
+### CI Trigger Requirements
+
+| Contributor Level | CI Trigger |
+|-------------------|------------|
+| First-time contributor | Maintainer must comment `/ok to test <commit-sha>` for each push |
+| Returning contributor (L1) | Initial `/ok to test <commit-sha>`, then subsequent pushes auto-trigger |
+| Trusted contributor (L2+) | GPG-signed commits auto-trigger CI |
+| Maintainer | Automatic |
+
+See [LGTM_BOT.md](.github/LGTM_BOT.md) for maintainer documentation.
+
+---
+
 ## Code Style & Quality
 
 ### Pre-commit Hooks
