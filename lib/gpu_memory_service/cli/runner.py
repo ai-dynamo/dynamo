@@ -38,8 +38,22 @@ async def worker() -> None:
 
     logger.info(f"Starting GPU Memory Service Server for device {config.device}")
     logger.info(f"Socket path: {config.socket_path}")
+    logger.info(
+        "Allocation retry config: interval=%ss timeout=%s",
+        config.alloc_retry_interval,
+        (
+            f"{config.alloc_retry_timeout}s"
+            if config.alloc_retry_timeout is not None
+            else "none"
+        ),
+    )
 
-    server = GMSRPCServer(config.socket_path, device=config.device)
+    server = GMSRPCServer(
+        config.socket_path,
+        device=config.device,
+        allocation_retry_interval=config.alloc_retry_interval,
+        allocation_retry_timeout=config.alloc_retry_timeout,
+    )
 
     # Set up shutdown handling
     shutdown_event = asyncio.Event()

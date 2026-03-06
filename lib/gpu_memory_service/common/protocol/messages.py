@@ -74,6 +74,7 @@ class AllocateResponse(msgspec.Struct, tag="allocate_response"):
     allocation_id: str
     size: int
     aligned_size: int
+    epoch_id: str = ""
 
 
 class ExportRequest(msgspec.Struct, tag="export_request"):
@@ -89,6 +90,7 @@ class GetAllocationResponse(msgspec.Struct, tag="get_allocation_response"):
     size: int
     aligned_size: int
     tag: str
+    epoch_id: str = ""
 
 
 class ListAllocationsRequest(msgspec.Struct, tag="list_allocations_request"):

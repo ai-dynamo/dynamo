@@ -28,7 +28,7 @@ from gpu_memory_service.common.cuda_vmm_utils import (
 logger = logging.getLogger(__name__)
 
 
-@dataclass
+@dataclass(frozen=True)
 class AllocationInfo:
     """Information about a single GPU memory allocation.
 
@@ -38,6 +38,7 @@ class AllocationInfo:
         aligned_size: Actual size after alignment to VMM granularity
         handle: CUmemGenericAllocationHandle value
         tag: User-provided tag for grouping allocations
+        epoch_id: Epoch that owns this allocation
         created_at: Timestamp when allocation was created
     """
 
@@ -46,6 +47,7 @@ class AllocationInfo:
     aligned_size: int
     handle: int
     tag: str
+    epoch_id: str
     created_at: float
 
 
@@ -71,13 +73,39 @@ class GMSServerMemoryManager:
       The GMSLocalFSM's RW/RO semantics ensure single-writer access.
     """
 
-    def __init__(self, device: int = 0):
+    def __init__(
+        self,
+        device: int = 0,
+        *,
+        allocation_retry_interval: float = 0.5,
+        allocation_retry_timeout: Optional[float] = None,
+    ):
+        if allocation_retry_interval <= 0:
+            raise ValueError(
+                f"allocation_retry_interval must be > 0, got {allocation_retry_interval}"
+            )
+        if allocation_retry_timeout is not None and allocation_retry_timeout <= 0:
+            raise ValueError(
+                f"allocation_retry_timeout must be > 0 when set, got {allocation_retry_timeout}"
+            )
+
         self._device = device
         self._allocations: Dict[str, AllocationInfo] = {}
         ensure_cuda_initialized()
         self._granularity = get_allocation_granularity(device)
+        self._allocation_retry_interval = allocation_retry_interval
+        self._allocation_retry_timeout = allocation_retry_timeout
         logger.info(
-            f"GMSServerMemoryManager initialized: device={device}, granularity={self._granularity}"
+            "GMSServerMemoryManager initialized: device=%d, granularity=%d, "
+            "alloc_retry_interval=%.3f, alloc_retry_timeout=%s",
+            device,
+            self._granularity,
+            self._allocation_retry_interval,
+            (
+                f"{self._allocation_retry_timeout:.3f}"
+                if self._allocation_retry_timeout is not None
+                else "none"
+            ),
         )
 
     @property
@@ -96,10 +124,16 @@ class GMSServerMemoryManager:
     def total_bytes(self) -> int:
         return sum(info.aligned_size for info in self._allocations.values())
 
-    def _get(self, allocation_id: str) -> AllocationInfo:
+    def _get(
+        self, allocation_id: str, epoch_id: Optional[str] = None
+    ) -> AllocationInfo:
         info = self._allocations.get(allocation_id)
         if info is None:
             raise AllocationNotFoundError(f"Unknown allocation: {allocation_id}")
+        if epoch_id is not None and info.epoch_id != epoch_id:
+            raise AllocationNotFoundError(
+                f"Allocation {allocation_id} is not in epoch {epoch_id}"
+            )
         return info
 
     def _release(self, info: AllocationInfo) -> None:
@@ -107,15 +141,44 @@ class GMSServerMemoryManager:
         if result != cuda.CUresult.CUDA_SUCCESS:
             logger.warning(f"cuMemRelease failed for {info.allocation_id}: {result}")
 
-    def allocate(self, size: int, tag: str = "default") -> AllocationInfo:
+    def _query_device_free_memory_bytes(self) -> Optional[int]:
+        """Best-effort free-memory query via NVML for retry backoff decisions."""
+        try:
+            import pynvml
+
+            pynvml.nvmlInit()
+            try:
+                handle = pynvml.nvmlDeviceGetHandleByIndex(self._device)
+                info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                return int(info.free)
+            finally:
+                pynvml.nvmlShutdown()
+        except Exception as e:
+            logger.debug(
+                "NVML free-memory query failed for device %d: %s", self._device, e
+            )
+            return None
+
+    def _retry_timeout_exceeded(self, started_at: float) -> bool:
+        if self._allocation_retry_timeout is None:
+            return False
+        return (time.monotonic() - started_at) >= self._allocation_retry_timeout
+
+    def allocate(
+        self, size: int, tag: str = "default", epoch_id: str = ""
+    ) -> AllocationInfo:
         """Create a physical memory allocation (no VA mapping).
 
         Uses cuMemCreate to allocate physical GPU memory that can be exported
         as a file descriptor for sharing with other processes.
 
+        On CUDA OOM, this method blocks and retries until allocation succeeds
+        (or optional retry timeout is reached).
+
         Args:
             size: Requested size in bytes (will be aligned up to granularity)
             tag: Tag for grouping allocations (e.g., "weights", "kv_cache")
+            epoch_id: Epoch that owns this allocation
 
         Returns:
             AllocationInfo with allocation_id, aligned_size, handle
@@ -123,6 +186,9 @@ class GMSServerMemoryManager:
         Raises:
             RuntimeError: If CUDA allocation fails
         """
+        if not epoch_id:
+            raise ValueError("epoch_id must be non-empty")
+
         aligned_size = align_to_granularity(size, self._granularity)
 
         prop = cuda.CUmemAllocationProp()
@@ -133,24 +199,99 @@ class GMSServerMemoryManager:
             cuda.CUmemAllocationHandleType.CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR
         )
 
-        result, handle = cuda.cuMemCreate(aligned_size, prop, 0)
-        check_cuda_result(result, "cuMemCreate")
+        started_at = time.monotonic()
+        log_interval = 5.0
+        last_log_at = started_at - log_interval
+        attempts = 0
 
+        while True:
+            attempts += 1
+            now = time.monotonic()
+            free_bytes = self._query_device_free_memory_bytes()
+            if free_bytes is not None and free_bytes < aligned_size:
+                if self._retry_timeout_exceeded(started_at):
+                    raise RuntimeError(
+                        "Timed out waiting for GPU memory: "
+                        f"requested_size={size}, aligned_size={aligned_size}, tag={tag}, "
+                        f"epoch={epoch_id}, attempts={attempts}, "
+                        f"waited_sec={time.monotonic() - started_at:.3f}"
+                    )
+                if now - last_log_at >= log_interval:
+                    logger.warning(
+                        "Insufficient free memory before allocation (attempt=%d): "
+                        "aligned_size=%d bytes, free_bytes=%d, tag=%s, epoch=%s; "
+                        "retrying in %.3fs",
+                        attempts,
+                        aligned_size,
+                        free_bytes,
+                        tag,
+                        epoch_id,
+                        self._allocation_retry_interval,
+                    )
+                    last_log_at = now
+                time.sleep(self._allocation_retry_interval)
+                continue
+
+            result, handle = cuda.cuMemCreate(aligned_size, prop, 0)
+            if result == cuda.CUresult.CUDA_SUCCESS:
+                break
+
+            if result != cuda.CUresult.CUDA_ERROR_OUT_OF_MEMORY:
+                check_cuda_result(result, "cuMemCreate")
+
+            if self._retry_timeout_exceeded(started_at):
+                raise RuntimeError(
+                    "Timed out waiting for GPU memory: "
+                    f"requested_size={size}, aligned_size={aligned_size}, tag={tag}, "
+                    f"epoch={epoch_id}, attempts={attempts}, "
+                    f"waited_sec={time.monotonic() - started_at:.3f}"
+                )
+
+            now = time.monotonic()
+            if now - last_log_at >= log_interval:
+                if free_bytes is None:
+                    logger.warning(
+                        "cuMemCreate OOM (attempt=%d) for aligned_size=%d bytes, tag=%s, "
+                        "epoch=%s; retrying in %.3fs",
+                        attempts,
+                        aligned_size,
+                        tag,
+                        epoch_id,
+                        self._allocation_retry_interval,
+                    )
+                else:
+                    logger.warning(
+                        "cuMemCreate OOM (attempt=%d) for aligned_size=%d bytes, tag=%s, "
+                        "epoch=%s; free_bytes=%d; retrying in %.3fs",
+                        attempts,
+                        aligned_size,
+                        tag,
+                        epoch_id,
+                        free_bytes,
+                        self._allocation_retry_interval,
+                    )
+                last_log_at = now
+
+            # Fragmentation can still cause OOM even when free memory is high.
+            time.sleep(self._allocation_retry_interval)
+
+        # epoch_id is immutable: assigned at allocation creation and never changes.
         info = AllocationInfo(
             allocation_id=str(uuid4()),
             size=size,
             aligned_size=aligned_size,
             handle=int(handle),
             tag=tag,
+            epoch_id=epoch_id,
             created_at=time.time(),
         )
         self._allocations[info.allocation_id] = info
         logger.debug(
-            f"Allocated {info.allocation_id}: size={size}, aligned={aligned_size}, tag={tag}"
+            f"Allocated {info.allocation_id}: size={size}, aligned={aligned_size}, tag={tag}, epoch={epoch_id}"
         )
         return info
 
-    def export_fd(self, allocation_id: str) -> int:
+    def export_fd(self, allocation_id: str, epoch_id: Optional[str] = None) -> int:
         """Export allocation as POSIX FD for SCM_RIGHTS transfer.
 
         The returned file descriptor can be sent to another process via
@@ -170,7 +311,7 @@ class GMSServerMemoryManager:
             AllocationNotFoundError: If allocation_id doesn't exist
             RuntimeError: If CUDA export fails
         """
-        info = self._get(allocation_id)
+        info = self._get(allocation_id, epoch_id=epoch_id)
         result, fd = cuda.cuMemExportToShareableHandle(
             info.handle,
             cuda.CUmemAllocationHandleType.CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR,
@@ -179,7 +320,7 @@ class GMSServerMemoryManager:
         check_cuda_result(result, "cuMemExportToShareableHandle")
         return int(fd)
 
-    def free(self, allocation_id: str) -> bool:
+    def free(self, allocation_id: str, epoch_id: Optional[str] = None) -> bool:
         """Release physical memory for a single allocation.
 
         Args:
@@ -188,9 +329,18 @@ class GMSServerMemoryManager:
         Returns:
             True if allocation existed and was freed, False otherwise
         """
-        info = self._allocations.pop(allocation_id, None)
+        info = self._allocations.get(allocation_id)
         if info is None:
             return False
+        if epoch_id is not None and info.epoch_id != epoch_id:
+            logger.debug(
+                "Free skipped due to epoch mismatch: allocation_id=%s allocation_epoch=%s requested_epoch=%s",
+                allocation_id,
+                info.epoch_id,
+                epoch_id,
+            )
+            return False
+        self._allocations.pop(allocation_id, None)
         self._release(info)
         logger.debug(f"Freed allocation: {allocation_id}")
         return True
@@ -211,12 +361,33 @@ class GMSServerMemoryManager:
         logger.info(f"Cleared {count} allocations")
         return count
 
-    def get_allocation(self, allocation_id: str) -> AllocationInfo:
-        """Get allocation info. Raises AllocationNotFoundError if not found."""
-        return self._get(allocation_id)
+    def clear_epoch(self, epoch_id: str) -> int:
+        """Release all allocations in a specific epoch."""
+        to_clear = [
+            allocation_id
+            for allocation_id, info in self._allocations.items()
+            if info.epoch_id == epoch_id
+        ]
+        for allocation_id in to_clear:
+            info = self._allocations.pop(allocation_id)
+            self._release(info)
+        if to_clear:
+            logger.info(f"Cleared {len(to_clear)} allocations from epoch {epoch_id}")
+        return len(to_clear)
 
-    def list_allocations(self, tag: Optional[str] = None) -> List[AllocationInfo]:
+    def get_allocation(
+        self, allocation_id: str, epoch_id: Optional[str] = None
+    ) -> AllocationInfo:
+        """Get allocation info. Raises AllocationNotFoundError if not found."""
+        return self._get(allocation_id, epoch_id=epoch_id)
+
+    def list_allocations(
+        self, tag: Optional[str] = None, epoch_id: Optional[str] = None
+    ) -> List[AllocationInfo]:
         """List all allocations, optionally filtered by tag."""
+        allocations = self._allocations.values()
+        if epoch_id is not None:
+            allocations = [info for info in allocations if info.epoch_id == epoch_id]
         if tag is None:
-            return list(self._allocations.values())
-        return [info for info in self._allocations.values() if info.tag == tag]
+            return list(allocations)
+        return [info for info in allocations if info.tag == tag]
