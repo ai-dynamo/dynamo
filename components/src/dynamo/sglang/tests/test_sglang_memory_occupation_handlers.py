@@ -61,7 +61,6 @@ def _make_handler() -> _TestWorkerHandler:
     )
     handler._memory_occupation_lock = asyncio.Lock()
     handler._memory_released = False
-    handler._memory_serving_active = True
     return handler
 
 
@@ -131,9 +130,8 @@ async def test_resume_uses_default_tags_even_when_request_specifies_subset():
 
 
 @pytest.mark.asyncio
-async def test_resume_with_no_sleeping_state_is_noop_even_if_serving_flag_is_false():
+async def test_resume_with_no_sleeping_state_is_noop():
     handler = _make_handler()
-    handler._memory_serving_active = False
 
     result = await handler.resume_memory_occupation({})
 

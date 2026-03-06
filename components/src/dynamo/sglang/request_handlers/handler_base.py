@@ -150,7 +150,6 @@ class BaseWorkerHandler(BaseGenerativeHandler):
             self._engine_supports_priority = False
         self._memory_occupation_lock = asyncio.Lock()
         self._memory_released = False
-        self._memory_serving_active = True
 
     def _priority_kwargs(self, priority: Any) -> Dict[str, Any]:
         if priority is not None and self._engine_supports_priority:
@@ -199,7 +198,6 @@ class BaseWorkerHandler(BaseGenerativeHandler):
 
                 pause_req = PauseGenerationReqInput()
                 await tokenizer_manager.pause_generation(pause_req)
-                self._memory_serving_active = False
 
                 release_req = ReleaseMemoryOccupationReqInput(tags=tags)
                 await tokenizer_manager.release_memory_occupation(release_req, None)
@@ -253,7 +251,6 @@ class BaseWorkerHandler(BaseGenerativeHandler):
                 await tokenizer_manager.resume_memory_occupation(resume_req, None)
                 continue_req = ContinueGenerationReqInput()
                 await tokenizer_manager.continue_generation(continue_req)
-                self._memory_serving_active = True
 
                 if self.generate_endpoint is not None:
                     await self.generate_endpoint.register_endpoint_instance()
