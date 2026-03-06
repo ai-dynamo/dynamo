@@ -31,6 +31,10 @@ FROM ${DOCKER_PROXY}golang:${GO_VERSION} AS go-base
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
 
+# cuda-checkpoint only ships x86_64 binaries — abort early on unsupported archs
+RUN if [ "${TARGETARCH}" != "amd64" ]; then \
+      echo "ERROR: Dynamo Snapshot requires x86_64 (cuda-checkpoint has no ${TARGETARCH} binary)" && exit 1; \
+    fi
 RUN echo "Building for ${TARGETOS}/${TARGETARCH}"
 
 RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates \

@@ -141,6 +141,21 @@ Wheels are built using a manylinux_2_28-compatible environment and validated on 
 > [!Caution]
 > KV Block Manager is supported only with Python 3.12. Python 3.12 support is currently limited to Ubuntu 24.04.
 
+## Dynamo Snapshot (Checkpoint/Restore)
+
+Dynamo Snapshot provides fast pod startup via CRIU checkpoint/restore with GPU state preservation.
+
+| Requirement | Supported |
+| :--- | :--- |
+| **Architecture** | x86_64 only (ARM64 not supported — `cuda-checkpoint` has no ARM64 binary) |
+| **Backends** | SGLang, vLLM |
+| **Not Supported** | TensorRT-LLM, ARM64 nodes |
+| **Worker Types** | LLM decode and prefill only (multimodal, embedding, diffusion not supported) |
+| **GPU** | Single-GPU only (multi-GPU planned) |
+| **Storage** | PVC only (S3/OCI planned) |
+
+For setup instructions, see the [Dynamo Snapshot documentation](../kubernetes/snapshot/README.md).
+
 ## Cloud Service Provider Compatibility
 
 ### AWS
