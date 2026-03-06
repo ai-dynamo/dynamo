@@ -18,7 +18,6 @@ RUN apt remove -y python3-apt python3-blinker && \
 
 # This ARG is still utilized for SGLANG Version extraction
 ARG RUNTIME_IMAGE_TAG
-ARG ARCH_ALT
 WORKDIR /workspace
 
 # Install NATS and ETCD
@@ -65,25 +64,6 @@ RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/loca
 COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
 COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
 COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
-
-# NIXL environment and native libraries
-ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
-ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/${ARCH_ALT}-linux-gnu
-ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
-
-# Copy UCX and NIXL native libraries to system directories
-COPY --from=wheel_builder /usr/local/ucx /usr/local/ucx
-COPY --chown=dynamo:0 --from=wheel_builder $NIXL_PREFIX $NIXL_PREFIX
-COPY --chown=dynamo:0 --from=wheel_builder /opt/nvidia/nvda_nixl/lib64/. ${NIXL_LIB_DIR}/
-
-ENV PATH=/usr/local/ucx/bin:$PATH
-
-ENV LD_LIBRARY_PATH=\
-$NIXL_LIB_DIR:\
-$NIXL_PLUGIN_DIR:\
-/usr/local/ucx/lib:\
-/usr/local/ucx/lib/ucx:\
-$LD_LIBRARY_PATH
 
 ENV SGLANG_VERSION="${RUNTIME_IMAGE_TAG%%-*}"
 
