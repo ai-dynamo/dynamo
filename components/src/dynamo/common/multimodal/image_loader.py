@@ -17,6 +17,7 @@ import asyncio
 import base64
 import binascii
 import logging
+import os
 from io import BytesIO
 from typing import Any, Dict, Final, List, Optional
 from urllib.parse import urlparse
@@ -37,7 +38,7 @@ DECODED_VARIANT_KEY: Final = "Decoded"
 
 
 class ImageLoader:
-    CACHE_SIZE_MAXIMUM = 8
+    CACHE_SIZE_MAXIMUM = int(os.environ.get("DYN_MM_IMAGE_LOADER_CACHE_SIZE", 8))
 
     def __init__(
         self, cache_size: int = CACHE_SIZE_MAXIMUM, http_timeout: float = 30.0

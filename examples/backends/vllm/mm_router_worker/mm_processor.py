@@ -10,6 +10,7 @@ Key differences from TRT-LLM version:
 - Token replacement: NOT needed — vLLM keeps the original image_token_id as-is
 """
 
+import asyncio
 import base64
 import logging
 from dataclasses import dataclass
@@ -20,6 +21,7 @@ from urllib.parse import urlparse
 import requests
 from PIL import Image
 
+from dynamo.common.multimodal.image_loader import ImageLoader
 from dynamo.vllm.multimodal_utils.hash_utils import compute_mm_uuids_from_images
 
 logger = logging.getLogger(__name__)
@@ -58,17 +60,18 @@ def extract_image_urls(messages: list[dict]) -> list[str]:
     return urls
 
 
-def process_multimodal(
+async def process_multimodal(
     messages: list[dict],
     image_urls: list[str],
     tokenizer: Any,
     processor: Any,
     model: str,
+    image_loader: ImageLoader | None = None,
 ) -> ProcessedInput:
     """
     Process multimodal request: load images, get expanded tokens and mm_hashes.
 
-    Uses PIL for image loading and hashlib for mm_hash computation.
+    Uses async ImageLoader for non-blocking image download with FIFO cache.
     Unlike TRT-LLM, vLLM keeps original image_token_id (no replacement).
     """
     # The preprocessed request does not carry a rendered template string; it carries
@@ -76,11 +79,13 @@ def process_multimodal(
     prompt = _build_prompt_with_images(messages, tokenizer, processor)
     logger.info(f"Prompt (first 300 chars): {prompt[:300]}")
 
-    # Load images as PIL
-    pil_images = []
-    for url in image_urls:
-        pil_img = _load_image(url)
-        pil_images.append(pil_img)
+    # Load images as PIL (async with cache if ImageLoader provided)
+    if image_loader is not None:
+        pil_images = list(
+            await asyncio.gather(*[image_loader.load_image(url) for url in image_urls])
+        )
+    else:
+        pil_images = [_load_image(url) for url in image_urls]
 
     # Get expanded tokens and image ranges (no token replacement for vLLM)
     tokens, image_ranges = _get_expanded_tokens(

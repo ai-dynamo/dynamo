@@ -8,6 +8,7 @@ MM Router Handler - Routes requests to best vLLM worker based on KV cache overla
 import logging
 from typing import Any, AsyncGenerator
 
+from dynamo.common.multimodal.image_loader import ImageLoader
 from dynamo.llm import KvRouter
 from dynamo.runtime.logging import configure_dynamo_logging
 
@@ -46,6 +47,7 @@ class MMRouterHandler:
         self.processor = processor
         self.model = model
         self.block_size = block_size
+        self.image_loader = ImageLoader()
 
     async def generate(self, request: dict) -> AsyncGenerator[dict, None]:
         """
@@ -75,12 +77,13 @@ class MMRouterHandler:
             # tokens from frontend. We need processor-expanded tokens to build block_mm_infos.
             # Request payload does not include a rendered template string; extra_args carries
             # original messages, so mm_processor reapplies chat template locally.
-            processed = process_multimodal(
+            processed = await process_multimodal(
                 messages=messages,
                 image_urls=image_urls,
                 tokenizer=self.tokenizer,
                 processor=self.processor,
                 model=self.model,
+                image_loader=self.image_loader,
             )
 
             # Build block_mm_infos for MM-aware hash computation
