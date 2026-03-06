@@ -248,15 +248,75 @@ class GMSClientMemoryManager:
         synchronize()
 
         # Freeze current mappings as RO before releasing RW lock ownership.
+        downgraded: list[LocalMapping] = []
+        downgrade_failures: list[tuple[LocalMapping, Exception]] = []
         for mapping in self._mappings.values():
             if mapping.handle == 0:
                 continue
-            set_access(mapping.va, mapping.aligned_size, self.device, GrantedLockType.RO)
+            try:
+                set_access(
+                    mapping.va,
+                    mapping.aligned_size,
+                    self.device,
+                    GrantedLockType.RO,
+                )
+                downgraded.append(mapping)
+            except Exception as e:
+                downgrade_failures.append((mapping, e))
+                logger.error(
+                    "Failed to downgrade mapping to RO before commit: "
+                    "allocation_id=%s va=0x%x size=%d error=%s",
+                    mapping.allocation_id,
+                    mapping.va,
+                    mapping.aligned_size,
+                    e,
+                )
 
-        ok = self._client_rpc.commit()
+        try:
+            ok = bool(self._client_rpc.commit())
+        except Exception as e:
+            ok = False
+            logger.error("Commit RPC failed: %s", e)
+
         if ok:
+            if downgrade_failures:
+                logger.warning(
+                    "Commit succeeded with %d downgrade failures; "
+                    "some mappings may not have been switched to RO",
+                    len(downgrade_failures),
+                )
             self._client = None
-        return bool(ok)
+            return True
+
+        rollback_failures = 0
+        for mapping in downgraded:
+            try:
+                set_access(
+                    mapping.va,
+                    mapping.aligned_size,
+                    self.device,
+                    GrantedLockType.RW,
+                )
+            except Exception as e:
+                rollback_failures += 1
+                logger.error(
+                    "Failed to roll back mapping to RW after commit failure: "
+                    "allocation_id=%s va=0x%x size=%d error=%s",
+                    mapping.allocation_id,
+                    mapping.va,
+                    mapping.aligned_size,
+                    e,
+                )
+
+        logger.error(
+            "Commit failed; kept client handle for caller recovery "
+            "(downgraded=%d downgrade_failures=%d rollback_failures=%d, connected=%s)",
+            len(downgraded),
+            len(downgrade_failures),
+            rollback_failures,
+            bool(self._client and self._client.is_connected),
+        )
+        return False
 
     def get_memory_layout_hash(self) -> str:
         return self._client_rpc.get_memory_layout_hash()

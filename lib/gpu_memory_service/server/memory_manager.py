@@ -208,6 +208,12 @@ class GMSServerMemoryManager:
         if info is None:
             return False
         if epoch_id is not None and info.epoch_id != epoch_id:
+            logger.debug(
+                "Free skipped due to epoch mismatch: allocation_id=%s allocation_epoch=%s requested_epoch=%s",
+                allocation_id,
+                info.epoch_id,
+                epoch_id,
+            )
             return False
         self._allocations.pop(allocation_id, None)
         self._release(info)
