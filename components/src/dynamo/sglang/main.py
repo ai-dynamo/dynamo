@@ -12,7 +12,7 @@ from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.runtime import create_runtime
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sglang.args import parse_args
-from dynamo.sglang.dynamo_snapshot import handle_checkpoint_mode
+from dynamo.sglang.snapshot import handle_checkpoint_mode
 from dynamo.sglang.init_diffusion import (
     init_image_diffusion,
     init_llm_diffusion,

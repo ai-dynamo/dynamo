@@ -53,7 +53,7 @@ from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.vllm.worker_factory import WorkerFactory
 
 from .args import Config, _uses_dynamo_connector, parse_args
-from .dynamo_snapshot import get_checkpoint_config
+from .snapshot import get_checkpoint_config
 from .constants import DisaggregationMode
 from .handlers import DecodeWorkerHandler, PrefillWorkerHandler, get_dp_range_for_worker
 from .health_check import (
