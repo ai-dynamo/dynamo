@@ -60,7 +60,7 @@ def _make_handler() -> _TestWorkerHandler:
         register_endpoint_instance=AsyncMock(),
     )
     handler._memory_occupation_lock = asyncio.Lock()
-    handler._released_memory_tags = set()
+    handler._memory_released = False
     handler._memory_serving_active = True
     return handler
 
@@ -72,6 +72,7 @@ async def test_resume_before_release_is_noop():
     result = await handler.resume_memory_occupation({})
 
     assert result["status"] == "ok"
+    assert result["message"] == "Memory already resumed"
     handler.engine.tokenizer_manager.resume_memory_occupation.assert_not_awaited()
     handler.engine.tokenizer_manager.continue_generation.assert_not_awaited()
     handler.generate_endpoint.register_endpoint_instance.assert_not_awaited()
@@ -91,6 +92,8 @@ async def test_release_and_resume_are_idempotent():
     assert second_release["status"] == "ok"
     assert first_resume["status"] == "ok"
     assert second_resume["status"] == "ok"
+    assert second_release["message"] == "Memory already released"
+    assert second_resume["message"] == "Memory already resumed"
     assert DEFAULT_MEMORY_OCCUPATION_TAGS == ["kv_cache", "weights"]
 
     release_req = (
@@ -112,31 +115,30 @@ async def test_release_and_resume_are_idempotent():
 
 
 @pytest.mark.asyncio
-async def test_partial_resume_keeps_worker_paused_until_all_tags_resumed():
+async def test_resume_uses_default_tags_even_when_request_specifies_subset():
     handler = _make_handler()
 
-    await handler.release_memory_occupation({"tags": ["weights", "kv_cache"]})
-    partial_resume = await handler.resume_memory_occupation({"tags": ["weights"]})
+    await handler.release_memory_occupation({"tags": ["weights"]})
+    resume_result = await handler.resume_memory_occupation({"tags": ["weights"]})
 
-    assert partial_resume["status"] == "ok"
-    handler.engine.tokenizer_manager.continue_generation.assert_not_awaited()
-    handler.generate_endpoint.register_endpoint_instance.assert_not_awaited()
-
-    final_resume = await handler.resume_memory_occupation({"tags": ["kv_cache"]})
-
-    assert final_resume["status"] == "ok"
+    assert resume_result["status"] == "ok"
+    resume_req = (
+        handler.engine.tokenizer_manager.resume_memory_occupation.await_args.args[0]
+    )
+    assert resume_req.tags == DEFAULT_MEMORY_OCCUPATION_TAGS
     handler.engine.tokenizer_manager.continue_generation.assert_awaited_once()
     handler.generate_endpoint.register_endpoint_instance.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-async def test_resume_with_no_sleeping_tags_is_noop_even_if_serving_flag_is_false():
+async def test_resume_with_no_sleeping_state_is_noop_even_if_serving_flag_is_false():
     handler = _make_handler()
     handler._memory_serving_active = False
 
     result = await handler.resume_memory_occupation({})
 
     assert result["status"] == "ok"
+    assert result["message"] == "Memory already resumed"
     handler.engine.tokenizer_manager.resume_memory_occupation.assert_not_awaited()
     handler.engine.tokenizer_manager.continue_generation.assert_not_awaited()
     handler.generate_endpoint.register_endpoint_instance.assert_not_awaited()

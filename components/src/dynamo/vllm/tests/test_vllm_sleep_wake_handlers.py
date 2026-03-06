@@ -3,7 +3,7 @@
 
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, call
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -35,7 +35,7 @@ def _make_handler() -> _TestWorkerHandler:
         register_endpoint_instance=AsyncMock(),
     )
     handler._sleep_wake_lock = asyncio.Lock()
-    handler._sleeping_tags = set()
+    handler._engine_is_sleeping = False
     return handler
 
 
@@ -52,43 +52,30 @@ async def test_wake_up_before_sleep_is_noop():
 
 
 @pytest.mark.asyncio
-async def test_sleep_and_wake_are_tag_aware_and_resume_on_full_restore():
+async def test_sleep_and_wake_are_idempotent():
     handler = _make_handler()
 
     first_sleep = await handler.sleep({"level": 2})
-    partial_wake = await handler.wake_up({"tags": ["weights"]})
-    final_wake = await handler.wake_up({"tags": ["kv_cache"]})
+    second_sleep = await handler.sleep({"level": 2})
+    first_wake = await handler.wake_up({})
+    second_wake = await handler.wake_up({})
 
     assert first_sleep["status"] == "ok"
-    assert partial_wake["status"] == "ok"
-    assert final_wake["status"] == "ok"
+    assert second_sleep["status"] == "ok"
+    assert first_wake["status"] == "ok"
+    assert second_wake["status"] == "ok"
 
     handler.engine_client.pause_generation.assert_awaited_once()
     handler.engine_client.sleep.assert_awaited_once_with(2)
     handler.generate_endpoint.unregister_endpoint_instance.assert_awaited_once()
 
-    assert handler.engine_client.wake_up.await_args_list == [
-        call(["weights"]),
-        call(["kv_cache"]),
-    ]
+    handler.engine_client.wake_up.assert_awaited_once_with()
     handler.engine_client.resume_generation.assert_awaited_once()
     handler.generate_endpoint.register_endpoint_instance.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-async def test_repeated_sleep_is_idempotent():
-    handler = _make_handler()
-
-    first_sleep = await handler.sleep({"level": 1})
-    second_sleep = await handler.sleep({"level": 1})
-
-    assert first_sleep["status"] == "ok"
-    assert second_sleep["status"] == "ok"
-    handler.engine_client.sleep.assert_awaited_once_with(1)
-
-
-@pytest.mark.asyncio
-async def test_sleep_returns_error_for_unexpected_unregister_failure():
+async def test_sleep_returns_error_for_unregister_failure():
     handler = _make_handler()
     handler.generate_endpoint.unregister_endpoint_instance = AsyncMock(
         side_effect=RuntimeError("discovery backend down")
@@ -102,44 +89,15 @@ async def test_sleep_returns_error_for_unexpected_unregister_failure():
 
 
 @pytest.mark.asyncio
-async def test_sleep_ignores_benign_unregister_failure():
+async def test_wake_up_returns_error_for_register_failure():
     handler = _make_handler()
-    handler.generate_endpoint.unregister_endpoint_instance = AsyncMock(
-        side_effect=RuntimeError("endpoint already absent")
-    )
-
-    result = await handler.sleep({"level": 1})
-
-    assert result["status"] == "ok"
-    handler.engine_client.pause_generation.assert_awaited_once()
-    handler.engine_client.sleep.assert_awaited_once_with(1)
-
-
-@pytest.mark.asyncio
-async def test_wake_up_returns_error_for_unexpected_register_failure():
-    handler = _make_handler()
-    handler._sleeping_tags = {"weights"}
+    handler._engine_is_sleeping = True
     handler.generate_endpoint.register_endpoint_instance = AsyncMock(
         side_effect=RuntimeError("discovery write timeout")
     )
 
-    result = await handler.wake_up({"tags": ["weights"]})
+    result = await handler.wake_up({})
 
     assert result["status"] == "error"
-    handler.engine_client.wake_up.assert_awaited_once_with(["weights"])
-    handler.engine_client.resume_generation.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_wake_up_ignores_benign_register_failure():
-    handler = _make_handler()
-    handler._sleeping_tags = {"weights"}
-    handler.generate_endpoint.register_endpoint_instance = AsyncMock(
-        side_effect=RuntimeError("already registered")
-    )
-
-    result = await handler.wake_up({"tags": ["weights"]})
-
-    assert result["status"] == "ok"
-    handler.engine_client.wake_up.assert_awaited_once_with(["weights"])
+    handler.engine_client.wake_up.assert_awaited_once_with()
     handler.engine_client.resume_generation.assert_awaited_once()
