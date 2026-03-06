@@ -77,7 +77,7 @@ jobs:
             if [[ "$verified" != "true" ]]; then
               all_signed=false
               echo "Warning: Commit ${sha:0:7} is not properly signed: $reason" >&2
-              unsigned_commits=$(jq -n \
+              unsigned_commits=$(jq -cn \
                 --argjson arr "$unsigned_commits" \
                 --arg sha "${sha:0:7}" \
                 --arg reason "$reason" \
