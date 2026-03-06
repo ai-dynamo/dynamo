@@ -143,6 +143,13 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     # Create libnccl.so symlink pointing to libnccl.so.2. TensorRT-LLM requires explicit libnccl.so
     ln -sf /usr/lib/${ARCH_ALT}-linux-gnu/libnccl.so.2 /usr/lib/${ARCH_ALT}-linux-gnu/libnccl.so
 
+# nvcr.io/nvidia/cuda-dl-base includes the AWS OFI NCCL plugin, which can crash TRTLLM.
+# Disable it by renaming aws-ofi-nccl.conf and refreshing the dynamic linker cache.
+RUN if [ -f /etc/ld.so.conf.d/aws-ofi-nccl.conf ]; then \
+      mv /etc/ld.so.conf.d/aws-ofi-nccl.conf /etc/ld.so.conf.d/aws-ofi-nccl.conf.disabled; \
+    fi && \
+    ldconfig
+
 {% if context.trtllm.enable_media_ffmpeg == "true" %}
 # Copy ffmpeg libraries from wheel_builder (requires root, runs before USER dynamo)
 RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/local/ \
