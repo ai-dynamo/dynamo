@@ -28,9 +28,20 @@
 load('ext://restart_process', 'docker_build_with_restart')
 
 # ---------------------------------------------------------------------------
-# Settings
+# Settings — defaults are defined here; tilt-settings.yaml overrides them.
 # ---------------------------------------------------------------------------
-settings = {}
+settings = {
+    'namespace':            'dynamo-system',
+    'enable_nats':          True,       # required for DGD/DGDR workloads
+    'enable_etcd':          False,      # only if discoveryBackend is "etcd"
+    'enable_kai_scheduler': False,      # GPU-aware scheduling for multi-node
+    'enable_grove':         False,      # PodClique-based multi-node orchestration
+    'skip_codegen':         False,      # skip make generate/manifests for faster iteration
+    'webhook_cert_mode':    'auto',     # "auto", "cert-manager", or "external"
+    'webhook_ca_bundle':    '',         # required only for webhook_cert_mode=external
+    'image_pull_secret':    '',         # name of docker-registry Secret for private registries
+    'helm_values':          {},         # extra --set overrides passed to helm template
+}
 if os.path.exists('tilt-settings.yaml'):
     data = read_yaml('tilt-settings.yaml', default={})
     if data:
@@ -40,36 +51,20 @@ if 'allowed_contexts' in settings:
     allow_k8s_contexts(settings['allowed_contexts'])
 
 # Registry — resolved from (highest priority wins):
-#   1. REGISTRY env var          (e.g. REGISTRY=docker.io/jont828 tilt up)
+#   1. REGISTRY env var          (e.g. REGISTRY=docker.io/myuser tilt up)
 #   2. "registry" in tilt-settings.yaml
 # When set the operator image is pushed as <registry>/controller:tilt-dev.
 REGISTRY = os.getenv('REGISTRY', settings.get('registry', ''))
 if REGISTRY:
     REGISTRY = REGISTRY.rstrip('/')
 
-NAMESPACE   = settings.get('namespace', 'dynamo-system')
-HELM_VALUES = settings.get('helm_values', {})   # dict of dotted-key → value
-
-# Subchart toggles — NATS is required for DGD/DGDR workloads to function.
-# etcd is only needed when discoveryBackend is set to "etcd" (default is "kubernetes").
-# kai-scheduler and grove are optional orchestration add-ons.
-ENABLE_NATS          = settings.get('enable_nats', True)
-ENABLE_ETCD          = settings.get('enable_etcd', False)
-ENABLE_KAI_SCHEDULER = settings.get('enable_kai_scheduler', False)
-ENABLE_GROVE         = settings.get('enable_grove', False)
-
-# Image pull secret — set to the name of an existing docker-registry Secret in
-# NAMESPACE. When set, the Helm chart's imagePullSecrets field is populated so
-# the cluster can pull the operator (and kube-rbac-proxy) images from a private
-# registry.  Leave unset for public registries.
-#
-#   tilt-settings.yaml:
-#     image_pull_secret: regcred
-#
-# Create the secret first:
-#   kubectl create secret docker-registry regcred -n dynamo-system \
-#     --docker-server=docker.io --docker-username=<user> --docker-password=<token>
-IMAGE_PULL_SECRET = settings.get('image_pull_secret', '')
+NAMESPACE            = settings['namespace']
+HELM_VALUES          = settings['helm_values']
+ENABLE_NATS          = settings['enable_nats']
+ENABLE_ETCD          = settings['enable_etcd']
+ENABLE_KAI_SCHEDULER = settings['enable_kai_scheduler']
+ENABLE_GROVE         = settings['enable_grove']
+IMAGE_PULL_SECRET    = settings['image_pull_secret']
 
 # ---------------------------------------------------------------------------
 # Webhook certificate mode — mirrors the Helm chart's three modes:
@@ -87,13 +82,9 @@ IMAGE_PULL_SECRET = settings.get('image_pull_secret', '')
 #                  Equivalent to certificateSecret.external=true.  You must
 #                  also set webhook_ca_bundle (base64) so the API server
 #                  trusts the cert.
-#
-#   tilt-settings.yaml:
-#     webhook_cert_mode: cert-manager   # or "auto" (default), "external"
-#     webhook_ca_bundle: "LS0tLS1..."   # required only for "external"
 # ---------------------------------------------------------------------------
-WEBHOOK_CERT_MODE = settings.get('webhook_cert_mode', 'auto')
-WEBHOOK_CA_BUNDLE = settings.get('webhook_ca_bundle', '')
+WEBHOOK_CERT_MODE = settings['webhook_cert_mode']
+WEBHOOK_CA_BUNDLE = settings['webhook_ca_bundle']
 
 # ---------------------------------------------------------------------------
 # Operator version — passed as --operator-version to the manager binary.
@@ -152,7 +143,7 @@ local_resource(
 # ---------------------------------------------------------------------------
 # CRDs — regenerate & apply via server-side apply on change
 # ---------------------------------------------------------------------------
-SKIP_CODEGEN = settings.get('skip_codegen', False)
+SKIP_CODEGEN = settings['skip_codegen']
 _crd_cmd = 'kubectl apply --server-side --force-conflicts -f ' + CRD_DIR
 if not SKIP_CODEGEN:
     _crd_cmd = 'make generate && make manifests && ' + _crd_cmd
