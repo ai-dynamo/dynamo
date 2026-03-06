@@ -15,6 +15,21 @@ description = "Lightweight HTTP benchmarks for Dynamo endpoints"
 name = "multiturn_bench"
 path = "src/bin/multiturn_bench.rs"
 
+[[bench]]
+name = "kv_indexer_bench"
+path = "benches/kv_router/kv_indexer_bench.rs"
+harness = false
+
+[[bench]]
+name = "mooncake_bench"
+path = "benches/kv_router/mooncake_bench.rs"
+harness = false
+
+[[bench]]
+name = "active_sequences_bench"
+path = "benches/kv_router/active_sequences_bench.rs"
+harness = false
+
 [dependencies]
 anyhow = { workspace = true }
 clap = { version = "4.5", features = ["derive"] }
@@ -25,3 +40,13 @@ reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
+
+[dev-dependencies]
+dynamo-kv-router = { workspace = true, features = ["bench"] }
+dynamo-mocker = { workspace = true }
+dynamo-tokens = { workspace = true }
+minstant = "0.1.7"
+plotters = { version = "0.3", default-features = false, features = ["svg_backend", "line_series", "point_series", "full_palette"] }
+tokio = { workspace = true, features = ["rt", "macros", "time"] }
+tokio-util = { workspace = true }
+uuid = { workspace = true }

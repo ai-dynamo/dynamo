@@ -10,8 +10,8 @@
 //! Supported indexer types: single, sharded, nested, all
 //!
 //! Run with:
-//!   cargo bench --package dynamo-kv-router --bench kv_indexer_bench --features bench -- microbench --help
-//!   cargo bench --package dynamo-kv-router --bench kv_indexer_bench --features bench -- stress --help
+//!   cargo bench --package dynamo-bench --bench kv_indexer_bench -- microbench --help
+//!   cargo bench --package dynamo-bench --bench kv_indexer_bench -- stress --help
 
 #[path = "common/mod.rs"]
 mod common;
