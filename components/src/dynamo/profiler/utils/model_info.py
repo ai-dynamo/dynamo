@@ -121,6 +121,9 @@ class ModelInfo(BaseModel):
     intermediate_size: Optional[int] = None
     num_kv_heads: Optional[int] = None
     quantization_block_size: Optional[int] = None
+    hidden_size: Optional[int] = None
+    num_hidden_layers: Optional[int] = None
+    vocab_size: Optional[int] = None
 
 
 def get_model_info(
@@ -228,6 +231,10 @@ def get_model_info(
         ):
             quantization_block_size = max(quantization_block_size)
 
+    hidden_size = getattr(config, "hidden_size", None)
+    num_hidden_layers = getattr(config, "num_hidden_layers", None)
+    vocab_size = getattr(config, "vocab_size", None)
+
     return ModelInfo(
         model_size=model_size,
         architecture=architecture,
@@ -237,6 +244,9 @@ def get_model_info(
         intermediate_size=intermediate_size,
         num_kv_heads=num_kv_heads,
         quantization_block_size=quantization_block_size,
+        hidden_size=hidden_size,
+        num_hidden_layers=num_hidden_layers,
+        vocab_size=vocab_size,
     )
 
 

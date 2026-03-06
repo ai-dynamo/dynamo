@@ -44,6 +44,7 @@ from dynamo.profiler.utils.dgdr_v1beta1_types import (
     DynamoGraphDeploymentRequestSpec,
     ModelCacheSpec,
 )
+from dynamo.profiler.utils.model_info import ModelInfo, get_model_info
 from dynamo.profiler.utils.profile_common import (
     ProfilerOperationalConfig,
     derive_backend_image,
@@ -53,6 +54,139 @@ from dynamo.profiler.utils.profile_common import (
 from dynamo.profiler.utils.profile_decode import get_num_request_range
 
 logger = logging.getLogger(__name__)
+
+# Fraction of GPU VRAM assumed usable for model weights (remainder is KV cache
+# and activation workspace).
+_MODEL_GPU_MEM_FRAC = 0.9
+
+
+def _estimate_dense_size_mib(model_info: ModelInfo) -> float:
+    """Estimate the size of dense (non-expert) weights in MiB.
+
+    For non-MoE models, returns the full model size.
+    For MoE models, estimates only the attention projection and embedding
+    weights that are replicated per TP rank and are *not* distributed by EP.
+    The expert FFN weights are excluded because EP shards them.
+
+    The estimate uses the formula::
+
+        dense_params = num_hidden_layers × 4 × hidden_size²   (attention)
+                     + 2 × vocab_size × hidden_size            (embeddings + LM head)
+
+    This is intentionally conservative (may under-count some dense weights
+    such as shared experts and router networks) so that infeasible candidates
+    are pruned while over-large TP requirements are not imposed.
+
+    Returns:
+        Estimated dense weight size in MiB (model_size units).
+    """
+    if not model_info.is_moe or model_info.num_experts is None:
+        return model_info.model_size
+
+    hidden_size = model_info.hidden_size
+    num_layers = model_info.num_hidden_layers
+    vocab_size = model_info.vocab_size
+    num_experts = model_info.num_experts
+    intermediate_size = model_info.intermediate_size
+
+    if not (hidden_size and num_layers):
+        # Insufficient architecture info — fall back to full model size.
+        logger.debug(
+            "Missing hidden_size or num_hidden_layers; using full model size as "
+            "dense-layer estimate (conservative)."
+        )
+        return model_info.model_size
+
+    # Attention + embedding dense params.
+    attention_params = num_layers * 4 * hidden_size * hidden_size
+    embedding_params = 2 * (vocab_size or 0) * hidden_size
+    dense_params = attention_params + embedding_params
+
+    # Expert FFN params (sharded by EP).
+    if intermediate_size and num_experts > 0:
+        expert_params = num_layers * num_experts * 3 * hidden_size * intermediate_size
+    else:
+        expert_params = 0
+
+    total_estimated_params = dense_params + expert_params
+    if total_estimated_params == 0:
+        return model_info.model_size
+
+    dense_fraction = dense_params / total_estimated_params
+    return model_info.model_size * dense_fraction
+
+
+def _prune_infeasible_candidates(
+    candidates: list,
+    model_info: ModelInfo,
+    vram_mib: float,
+    label: str = "candidate",
+) -> list:
+    """Remove candidates whose estimated per-GPU memory exceeds available VRAM.
+
+    For MoE models, expert weights are distributed via EP across ``moe_ep``
+    GPUs, but dense weights (attention, embeddings) are *not* — they must fit
+    within ``vram_mib / tp``.  Candidates that cannot satisfy the memory
+    budget are logged and dropped, preventing guaranteed OOM deployments.
+
+    For non-MoE models all weights are TP-sharded uniformly.
+
+    Args:
+        candidates: List of profiling candidate objects (each with ``.tp``
+            and ``.moe_ep`` attributes).
+        model_info: Model architecture and weight-size metadata.
+        vram_mib: VRAM per GPU in MiB.
+        label: Human-readable name used in log messages (e.g. "prefill").
+
+    Returns:
+        Filtered list containing only memory-feasible candidates.
+    """
+    if vram_mib <= 0:
+        return candidates
+
+    dense_size_mib = _estimate_dense_size_mib(model_info)
+    expert_size_mib = max(0.0, model_info.model_size - dense_size_mib)
+    usable_vram_mib = vram_mib * _MODEL_GPU_MEM_FRAC
+
+    feasible: list = []
+    pruned: list = []
+    for candidate in candidates:
+        tp = candidate.tp
+        ep = getattr(candidate, "moe_ep", 1) or 1
+
+        if model_info.is_moe:
+            # Dense weights: split by TP only (EP does not distribute them).
+            # Expert weights: split by TP × EP.
+            per_gpu_mib = dense_size_mib / tp + expert_size_mib / (tp * ep)
+        else:
+            per_gpu_mib = model_info.model_size / tp
+
+        if per_gpu_mib <= usable_vram_mib:
+            feasible.append(candidate)
+        else:
+            pruned.append((candidate, per_gpu_mib))
+
+    if pruned:
+        logger.warning(
+            "Pruned %d infeasible %s candidate(s): estimated per-GPU memory "
+            "exceeds %.1f GiB × %.0f%% = %.1f GiB usable VRAM:",
+            len(pruned),
+            label,
+            vram_mib / 1024,
+            _MODEL_GPU_MEM_FRAC * 100,
+            usable_vram_mib / 1024,
+        )
+        for candidate, per_gpu_mib in pruned:
+            logger.warning(
+                "  Pruned %s tp=%d ep=%d: ~%.1f GiB estimated > %.1f GiB usable",
+                label,
+                candidate.tp,
+                getattr(candidate, "moe_ep", 1) or 1,
+                per_gpu_mib / 1024,
+                usable_vram_mib / 1024,
+            )
+
+    return feasible
 
 
 async def _benchmark_prefill_candidates(
@@ -340,6 +474,37 @@ async def run_thorough(
         len(prefill_candidates),
         len(decode_candidates),
     )
+
+    # --- Stage 1.5: Prune candidates that cannot fit in GPU VRAM ---
+    # For MoE models with EP, expert weights are sharded across moe_ep GPUs,
+    # but dense layers (attention, embeddings) are NOT — they must fit within
+    # vram_mib / tp.  Skipping this check wastes cluster time on 1-hour
+    # timeouts per OOM candidate.
+    vram_mib = (dgdr.hardware and dgdr.hardware.vramMb) or 0.0
+    if vram_mib > 0:
+        try:
+            model_info = get_model_info(model)
+            prefill_candidates = _prune_infeasible_candidates(
+                prefill_candidates, model_info, vram_mib, "prefill"
+            )
+            decode_candidates = _prune_infeasible_candidates(
+                decode_candidates, model_info, vram_mib, "decode"
+            )
+            logger.info(
+                "After VRAM pruning: %d prefill candidates, %d decode candidates",
+                len(prefill_candidates),
+                len(decode_candidates),
+            )
+        except Exception as exc:
+            logger.warning(
+                "Could not load model info for VRAM feasibility check (%s). "
+                "Skipping candidate pruning — infeasible candidates may be deployed.",
+                exc,
+            )
+    else:
+        logger.debug(
+            "hardware.vramMb not set; skipping per-candidate VRAM feasibility check."
+        )
 
     if dgdr.overrides and dgdr.overrides.dgd:
         for candidate in prefill_candidates:
