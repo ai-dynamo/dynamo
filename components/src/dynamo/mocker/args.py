@@ -90,7 +90,7 @@ def resolve_planner_profile_data(
     )
 
 
-def create_temp_engine_args_file(args) -> Path:
+def create_temp_engine_args_file(args: argparse.Namespace) -> Path:
     """
     Create a temporary JSON file with MockEngineArgs from CLI arguments.
     Returns the path to the temporary file.
@@ -146,7 +146,7 @@ def create_temp_engine_args_file(args) -> Path:
     return temp_path
 
 
-def validate_worker_type_args(args):
+def validate_worker_type_args(args: argparse.Namespace) -> None:
     """
     Resolve disaggregation mode from --disaggregation-mode or legacy boolean flags.
     Raises ValueError if validation fails.
@@ -199,7 +199,7 @@ def parse_bootstrap_ports(ports_str: str | None) -> list[int]:
     return [int(p.strip()) for p in ports_str.split(",")]
 
 
-def parse_args():
+def parse_args() -> argparse.Namespace:
     """Parse command-line arguments for the Dynamo mocker engine.
 
     Returns:

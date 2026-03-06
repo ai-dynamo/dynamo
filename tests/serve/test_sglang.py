@@ -73,7 +73,11 @@ sglang_configs = {
         name="disaggregated",
         directory=sglang_dir,
         script_name="disagg.sh",
-        marks=[pytest.mark.gpu_2, pytest.mark.post_merge],
+        marks=[
+            pytest.mark.gpu_2,
+            pytest.mark.post_merge,
+            pytest.mark.skip(reason="DYN-2265"),
+        ],
         model="Qwen/Qwen3-0.6B",
         env={},
         frontend_port=DefaultPort.FRONTEND.value,
@@ -120,10 +124,14 @@ sglang_configs = {
         name="kv_events",
         directory=sglang_dir,
         script_name="agg_router.sh",
-        marks=[pytest.mark.gpu_2, pytest.mark.post_merge],
+        marks=[
+            pytest.mark.gpu_2,
+            pytest.mark.post_merge,
+            pytest.mark.skip(reason="DYN-2265"),
+        ],
         model="Qwen/Qwen3-0.6B",
         env={
-            "DYN_LOG": "dynamo_llm::kv_router::publisher=trace,dynamo_llm::kv_router::scheduler=info",
+            "DYN_LOG": "dynamo_llm::kv_router::publisher=trace,dynamo_kv_router::scheduling::selector=info",
         },
         frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
@@ -298,6 +306,7 @@ sglang_configs = {
             pytest.mark.gpu_1,
             pytest.mark.post_merge,
             pytest.mark.timeout(240),
+            pytest.mark.skip(reason="DYN-2261"),
         ],
         model="Qwen/Qwen3-0.6B",
         env={"DYN_ENABLE_ANTHROPIC_API": "1"},

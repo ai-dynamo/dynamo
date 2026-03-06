@@ -36,7 +36,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         self.engine = engine
         self.bootstrap_host, self.bootstrap_port = self._get_bootstrap_info(self.engine)
         super().__init__(engine, config, publisher, generate_endpoint, shutdown_event)
-        self._consume_tasks = set()
+        self._consume_tasks: set[asyncio.Task[Any]] = set()
         logging.info(
             f"Prefill worker handler initialized - bootstrap host: {self.bootstrap_host}, bootstrap port: {self.bootstrap_port}"
         )
@@ -146,7 +146,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             context: Context object for cancellation handling.
         """
         # Use Future pattern for request ID - will be set when first response arrives
-        request_id_future = asyncio.Future()
+        request_id_future: asyncio.Future[str] = asyncio.Future()
         async with self._cancellation_monitor(request_id_future, context):
             async for res in results:
                 # Extract SGLang request ID from the first response and set the future

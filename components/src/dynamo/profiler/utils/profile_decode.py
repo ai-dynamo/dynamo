@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
-from typing import Callable, Optional, Tuple
+from typing import Any, Callable, Optional, Tuple
 
 import numpy as np
 
@@ -22,7 +22,9 @@ console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 
 
-def get_num_request_range(attn_dp_size, engine_max_concurrency, granularity):
+def get_num_request_range(
+    attn_dp_size: int, engine_max_concurrency: int, granularity: int
+) -> list[int]:
     # for MoE models with attn-dp, we want the num_request to be a multiple of attn_dp_size
     # so that we can make sure the request is sent to the same dp rank as the warmup request
     # this is guaranteed because the dp scheduler is scheduling round-robin
@@ -102,16 +104,16 @@ def _profile_decode_helper(
 
 
 def profile_decode(
-    work_dir,
-    model_name,
-    tokenizer,
-    url,
-    num_gpus,
-    max_kv_tokens,
-    max_context_length,
-    interpolation_granularity,
-    attention_dp_size,
-):
+    work_dir: str,
+    model_name: str,
+    tokenizer: str,
+    url: str,
+    num_gpus: int,
+    max_kv_tokens: int,
+    max_context_length: int,
+    interpolation_granularity: int,
+    attention_dp_size: int,
+) -> None:
     def get_itl_and_thpt_per_gpu(isl, osl, num_request):
         ai_perf_artifact_dir = f"{work_dir}/aiperf_isl{isl}_osl{osl}_n{num_request}"
         return get_decode_itl_and_thpt_per_gpu(
@@ -138,15 +140,15 @@ def profile_decode(
 
 
 def profile_decode_aiconfigurator(
-    work_dir,
-    num_gpus,
-    max_kv_tokens,
-    max_context_length,
-    interpolation_granularity,
+    work_dir: str,
+    num_gpus: int,
+    max_kv_tokens: int,
+    max_context_length: int,
+    interpolation_granularity: int,
     ai_configurator_perf_estimator: AIConfiguratorPerfEstimator,
-    attention_dp_size,
-    **model_config_kwargs,
-):
+    attention_dp_size: int,
+    **model_config_kwargs: Any,
+) -> None:
     def get_itl_and_thpt_per_gpu(isl, osl, num_request):
         perf_dict = ai_configurator_perf_estimator.estimate_perf(
             isl,
