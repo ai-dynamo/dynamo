@@ -78,6 +78,53 @@ class RequestHandler:
             raise RuntimeError("RW epoch is not active")
         return self._active_rw_epoch_id
 
+    def _validate_metadata_target(
+        self, epoch_id: str, allocation_id: str, offset_bytes: int
+    ) -> None:
+        try:
+            info = self._memory_manager.get_allocation(allocation_id, epoch_id=epoch_id)
+        except AllocationNotFoundError:
+            raise ValueError(
+                f"Metadata target allocation does not exist in epoch {epoch_id}: {allocation_id}"
+            ) from None
+
+        if offset_bytes < 0:
+            raise ValueError(f"offset_bytes must be >= 0, got {offset_bytes}")
+        if offset_bytes >= info.aligned_size:
+            raise ValueError(
+                f"offset_bytes {offset_bytes} out of range for allocation {allocation_id} "
+                f"(aligned_size={info.aligned_size})"
+            )
+
+    def _drop_metadata_for_allocation(self, epoch_id: str, allocation_id: str) -> int:
+        epoch_metadata = self._metadata_by_epoch.get(epoch_id)
+        if not epoch_metadata:
+            return 0
+
+        keys_to_remove = [
+            key for key, entry in epoch_metadata.items() if entry.allocation_id == allocation_id
+        ]
+        for key in keys_to_remove:
+            epoch_metadata.pop(key, None)
+        return len(keys_to_remove)
+
+    def _validate_epoch_integrity(self, epoch_id: str) -> None:
+        epoch_metadata = self._metadata_by_epoch.get(epoch_id, {})
+        for key, entry in epoch_metadata.items():
+            try:
+                info = self._memory_manager.get_allocation(entry.allocation_id, epoch_id=epoch_id)
+            except AllocationNotFoundError:
+                raise RuntimeError(
+                    f"Metadata key {key!r} references missing allocation "
+                    f"{entry.allocation_id!r} in epoch {epoch_id}"
+                ) from None
+
+            if entry.offset_bytes < 0 or entry.offset_bytes >= info.aligned_size:
+                raise RuntimeError(
+                    f"Metadata key {key!r} has invalid offset {entry.offset_bytes} "
+                    f"for allocation {entry.allocation_id!r} (aligned_size={info.aligned_size})"
+                )
+
     def _compute_memory_layout_hash(self, epoch_id: str) -> str:
         """Compute hash of allocations + metadata for a single epoch."""
         h = hashlib.sha256()
@@ -138,6 +185,8 @@ class RequestHandler:
         """Called when RW connection commits."""
         epoch_id = self._require_active_rw_epoch()
 
+        # Commit is the last chance to reject dangling metadata references.
+        self._validate_epoch_integrity(epoch_id)
         self._memory_layout_hash = self._compute_memory_layout_hash(epoch_id)
 
         old_committed = self._committed_epoch_id
@@ -259,6 +308,8 @@ class RequestHandler:
         """Free single allocation from active RW epoch."""
         epoch_id = self._require_active_rw_epoch()
         success = self._memory_manager.free(req.allocation_id, epoch_id=epoch_id)
+        if success:
+            self._drop_metadata_for_allocation(epoch_id, req.allocation_id)
         return FreeResponse(success=success)
 
     def handle_clear_all(self) -> ClearAllResponse:
@@ -272,6 +323,7 @@ class RequestHandler:
 
     def handle_metadata_put(self, req: MetadataPutRequest) -> MetadataPutResponse:
         epoch_id = self._require_active_rw_epoch()
+        self._validate_metadata_target(epoch_id, req.allocation_id, req.offset_bytes)
         epoch_metadata = self._metadata_by_epoch.setdefault(epoch_id, {})
         epoch_metadata[req.key] = MetadataEntry(
             req.allocation_id,
