@@ -155,7 +155,10 @@ func applyPodSpecOverrides(spec *corev1.PodSpec, overrides *corev1.PodSpec) {
 		spec.DNSConfig = overrides.DNSConfig
 	}
 	if overrides.SecurityContext != nil {
-		spec.SecurityContext = overrides.SecurityContext
+		if spec.SecurityContext == nil {
+			spec.SecurityContext = &corev1.PodSecurityContext{}
+		}
+		mergePodSecurityContext(spec.SecurityContext, overrides.SecurityContext)
 	}
 	if overrides.TerminationGracePeriodSeconds != nil {
 		spec.TerminationGracePeriodSeconds = overrides.TerminationGracePeriodSeconds
@@ -163,16 +166,16 @@ func applyPodSpecOverrides(spec *corev1.PodSpec, overrides *corev1.PodSpec) {
 	if len(overrides.TopologySpreadConstraints) > 0 {
 		spec.TopologySpreadConstraints = overrides.TopologySpreadConstraints
 	}
-	if overrides.NodeName != "" {
+	if overrides.NodeName != "" && isProfilingOverrideAllowed("NodeName") {
 		spec.NodeName = overrides.NodeName
 	}
-	if overrides.SchedulerName != "" {
+	if overrides.SchedulerName != "" && isProfilingOverrideAllowed("SchedulerName") {
 		spec.SchedulerName = overrides.SchedulerName
 	}
 	if overrides.AutomountServiceAccountToken != nil {
 		spec.AutomountServiceAccountToken = overrides.AutomountServiceAccountToken
 	}
-	if len(overrides.HostAliases) > 0 {
+	if len(overrides.HostAliases) > 0 && isProfilingOverrideAllowed("HostAliases") {
 		spec.HostAliases = overrides.HostAliases
 	}
 
@@ -202,6 +205,57 @@ func applyContainerOverrides(container *corev1.Container, overrides *corev1.Cont
 
 	if len(overrides.EnvFrom) > 0 {
 		container.EnvFrom = append(container.EnvFrom, overrides.EnvFrom...)
+	}
+}
+
+// allowedPrivilegedPodSpecFields is the explicit allowlist of privileged PodSpec
+// fields that profiling-job overrides may set. Fields absent from this set are
+// controller-owned and will not be overwritten by user overrides.
+var allowedPrivilegedPodSpecFields = map[string]struct{}{}
+
+// isProfilingOverrideAllowed reports whether the named privileged PodSpec field
+// is permitted for profiling-job overrides. Add a field name to
+// allowedPrivilegedPodSpecFields to enable it.
+func isProfilingOverrideAllowed(field string) bool {
+	_, ok := allowedPrivilegedPodSpecFields[field]
+	return ok
+}
+
+// mergePodSecurityContext copies non-nil fields from src into dst, preserving
+// any controller-enforced defaults already present on dst.
+func mergePodSecurityContext(dst, src *corev1.PodSecurityContext) {
+	if src.RunAsNonRoot != nil {
+		dst.RunAsNonRoot = src.RunAsNonRoot
+	}
+	if src.RunAsUser != nil {
+		dst.RunAsUser = src.RunAsUser
+	}
+	if src.RunAsGroup != nil {
+		dst.RunAsGroup = src.RunAsGroup
+	}
+	if src.FSGroup != nil {
+		dst.FSGroup = src.FSGroup
+	}
+	if src.SupplementalGroups != nil {
+		dst.SupplementalGroups = src.SupplementalGroups
+	}
+	if src.Sysctls != nil {
+		dst.Sysctls = src.Sysctls
+	}
+	if src.FSGroupChangePolicy != nil {
+		dst.FSGroupChangePolicy = src.FSGroupChangePolicy
+	}
+	if src.SeccompProfile != nil {
+		dst.SeccompProfile = src.SeccompProfile
+	}
+	if src.AppArmorProfile != nil {
+		dst.AppArmorProfile = src.AppArmorProfile
+	}
+	if src.SELinuxOptions != nil {
+		dst.SELinuxOptions = src.SELinuxOptions
+	}
+	if src.WindowsOptions != nil {
+		dst.WindowsOptions = src.WindowsOptions
 	}
 }
 
