@@ -18,11 +18,13 @@ import (
 const (
 	podResourcesSocket = "/var/lib/kubelet/pod-resources/kubelet.sock"
 	nvidiaGPUResource  = "nvidia.com/gpu"
+	nvidiaGPUDRADriver = "gpu.nvidia.com"
 )
 
 // GetPodGPUUUIDs resolves GPU UUIDs for a pod/container from the kubelet PodResources API.
-// All nvidia.com/gpu device entries are accumulated in case the kubelet splits them
-// across multiple entries (observed in some runtimes with multi-GPU pods).
+// It first checks device-plugin-allocated GPUs (nvidia.com/gpu entries in GetDevices()).
+// If none are found, it falls back to DRA-allocated GPUs (gpu.nvidia.com entries in
+// GetDynamicResources()), where the device name is the GPU UUID.
 func GetPodGPUUUIDs(ctx context.Context, podName, podNamespace, containerName string) ([]string, error) {
 	if podName == "" || podNamespace == "" {
 		return nil, nil
@@ -59,9 +61,44 @@ func GetPodGPUUUIDs(ctx context.Context, podName, podNamespace, containerName st
 					uuids = append(uuids, device.GetDeviceIds()...)
 				}
 			}
+			if len(uuids) == 0 {
+				for _, dr := range container.GetDynamicResources() {
+					for _, cr := range dr.GetClaimResources() {
+						if cr.GetDriverName() == nvidiaGPUDRADriver {
+							fmt.Println("GetPodGPUUUIDs: found DRA GPU", "uuid", cr.GetDeviceName())
+							uuids = append(uuids, cr.GetDeviceName())
+						}
+					}
+				}
+			}
 		}
 	}
 
+	return uuids, nil
+}
+
+// GetGPUUUIDsViaNvidiaSmi discovers GPU UUIDs by running nvidia-smi inside the
+// container's mount namespace. This is the fallback path when the kubelet
+// PodResources API does not report GPU devices (e.g. when GPUs are allocated
+// via DRA instead of the NVIDIA device plugin).
+func GetGPUUUIDsViaNvidiaSmi(pid int) ([]string, error) {
+	cmd := exec.Command(
+		"nsenter",
+		fmt.Sprintf("--mount=/host/proc/%d/ns/mnt", pid),
+		"--",
+		"nvidia-smi", "--query-gpu=gpu_uuid", "--format=csv,noheader",
+	)
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("nvidia-smi via nsenter (pid %d) failed: %w", pid, err)
+	}
+	var uuids []string
+	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			uuids = append(uuids, line)
+		}
+	}
 	return uuids, nil
 }
 
@@ -103,6 +140,8 @@ func BuildDeviceMap(sourceUUIDs, targetUUIDs []string) (string, error) {
 	if len(sourceUUIDs) == 0 {
 		return "", fmt.Errorf("GPU UUID list is empty")
 	}
+	fmt.Println("BuildDeviceMap: source UUIDs", "uuids", sourceUUIDs)
+	fmt.Println("BuildDeviceMap: target UUIDs", "uuids", targetUUIDs)
 
 	targetSet := make(map[string]bool, len(targetUUIDs))
 	for _, t := range targetUUIDs {
