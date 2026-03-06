@@ -57,7 +57,7 @@ Agentic hints are per-request metadata that the agent client (e.g. Claude Code, 
 
 ### Using Dynamo from LangChain
 
-You can call Dynamo from LangChain using the [NVIDIA AI Endpoints integration](https://docs.langchain.com/oss/python/integrations/chat/nvidia_ai_endpoints#use-with-nvidia-dynamo). Configure the chat model to use the Dynamo endpoint and pass agent hints via the client.
+Dynamo is now supported directly in LangChain using the [NVIDIA AI Endpoints integration](https://docs.langchain.com/oss/python/integrations/chat/nvidia_ai_endpoints#use-with-nvidia-dynamo). Configure the chat model to use the Dynamo endpoint and pass agent hints directly from the LangChain client.
 
 
 
