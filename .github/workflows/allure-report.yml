@@ -125,12 +125,13 @@ jobs:
       - name: Generate Allure 3 Report
         if: steps.check-results.outputs.has_results == 'true'
         run: |
-          cp -r allure-results allure-results-v3
+          mkdir -p allure-v3-workspace/allure-results
+          cp -r allure-results/* allure-v3-workspace/allure-results/
           if [ -d allure-results-v3-history ]; then
-            mkdir -p allure-results-v3/history
-            cp allure-results-v3-history/* allure-results-v3/history/ 2>/dev/null || true
+            mkdir -p allure-v3-workspace/allure-results/history
+            cp allure-results-v3-history/* allure-v3-workspace/allure-results/history/ 2>/dev/null || true
           fi
-          allure generate allure-results-v3 -o allure-report-v3 --clean
+          allure generate --cwd allure-v3-workspace -o allure-report-v3
 
       - name: Deploy to GitHub Pages
         if: steps.check-results.outputs.has_results == 'true'
