@@ -26,7 +26,6 @@ impl PyRateMetric {
             .record_count(count)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     }
-
 }
 
 #[pyclass(name = "DistributionMetric")]
@@ -46,7 +45,6 @@ impl PyDistributionMetric {
             .record_value(value)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     }
-
 }
 
 #[pyclass(name = "RatioMetric")]
@@ -66,7 +64,6 @@ impl PyRatioMetric {
             .record_ratio(numerator, denominator)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     }
-
 }
 
 #[pyclass(name = "PerformanceMetricsRegistry")]
@@ -136,5 +133,4 @@ impl PyPerformanceMetricsRegistry {
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok(PyRatioMetric { inner: handle })
     }
-
 }
