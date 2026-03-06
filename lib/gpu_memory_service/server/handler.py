@@ -102,7 +102,9 @@ class RequestHandler:
             return 0
 
         keys_to_remove = [
-            key for key, entry in epoch_metadata.items() if entry.allocation_id == allocation_id
+            key
+            for key, entry in epoch_metadata.items()
+            if entry.allocation_id == allocation_id
         ]
         for key in keys_to_remove:
             epoch_metadata.pop(key, None)
@@ -112,7 +114,9 @@ class RequestHandler:
         epoch_metadata = self._metadata_by_epoch.get(epoch_id, {})
         for key, entry in epoch_metadata.items():
             try:
-                info = self._memory_manager.get_allocation(entry.allocation_id, epoch_id=epoch_id)
+                info = self._memory_manager.get_allocation(
+                    entry.allocation_id, epoch_id=epoch_id
+                )
             except AllocationNotFoundError:
                 raise RuntimeError(
                     f"Metadata key {key!r} references missing allocation "
@@ -276,7 +280,9 @@ class RequestHandler:
     ) -> GetAllocationResponse:
         """Get allocation info for a specific epoch."""
         try:
-            info = self._memory_manager.get_allocation(req.allocation_id, epoch_id=epoch_id)
+            info = self._memory_manager.get_allocation(
+                req.allocation_id, epoch_id=epoch_id
+            )
             return GetAllocationResponse(
                 allocation_id=info.allocation_id,
                 size=info.size,
@@ -352,7 +358,9 @@ class RequestHandler:
     ) -> MetadataDeleteResponse:
         epoch_id = self._require_active_rw_epoch()
         epoch_metadata = self._metadata_by_epoch.setdefault(epoch_id, {})
-        return MetadataDeleteResponse(deleted=epoch_metadata.pop(req.key, None) is not None)
+        return MetadataDeleteResponse(
+            deleted=epoch_metadata.pop(req.key, None) is not None
+        )
 
     def handle_metadata_list(
         self, req: MetadataListRequest, epoch_id: str

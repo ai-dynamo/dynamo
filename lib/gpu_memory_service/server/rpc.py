@@ -175,6 +175,10 @@ class GMSRPCServer:
         )
 
         if granted_mode == GrantedLockType.RW:
+            # Intentional ordering: initialize epoch state via on_rw_connect()
+            # before _sm.transition(StateEvent.RW_CONNECT, ...). If the FSM
+            # transition fails, the except block calls on_rw_abort() to clean up
+            # any partially initialized RW epoch state.
             self._handler.on_rw_connect()
 
         # State transition: connect
