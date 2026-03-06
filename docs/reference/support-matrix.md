@@ -154,7 +154,7 @@ Dynamo Snapshot provides fast pod startup via CRIU checkpoint/restore with GPU s
 | **GPU** | Single-GPU only (multi-GPU planned) |
 | **Storage** | PVC only (S3/OCI planned) |
 
-For setup instructions, see the [Dynamo Snapshot documentation](../kubernetes-deployment/dynamo-snapshot).
+For setup instructions, see the [Dynamo Snapshot documentation](../kubernetes/snapshot/README.md).
 
 ## Cloud Service Provider Compatibility
 
