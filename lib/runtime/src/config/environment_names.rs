@@ -407,6 +407,7 @@ mod tests {
             logging::otlp::OTEL_EXPORT_ENABLED,
             logging::otlp::OTEL_EXPORTER_OTLP_TRACES_ENDPOINT,
             logging::otlp::OTEL_SERVICE_NAME,
+            logging::otlp::OTEL_EXPORTER_OTLP_LOGS_ENDPOINT,
             // Runtime
             runtime::DYN_RUNTIME_NUM_WORKER_THREADS,
             runtime::DYN_RUNTIME_MAX_BLOCKING_THREADS,
