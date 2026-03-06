@@ -233,10 +233,16 @@ async def handle_checkpoint_mode(server_args) -> tuple[bool, Optional[sgl.Engine
 
     logger.info("Checkpoint mode enabled (watcher-driven signals)")
 
-    # Enable memory_saver + weights CPU backup so weights survive CRIU
-    # (mirrors vLLM's enable_sleep_mode = True)
+    # Enable memory_saver so GPU memory can be released for CRIU.
+    # When using GMS, weights use VA-stable unmap/remap (no CPU backup); GMS
+    # forbids enable_weights_cpu_backup. Otherwise use CPU backup for weights.
     server_args.enable_memory_saver = True
-    server_args.enable_weights_cpu_backup = True
+    _using_gms = getattr(server_args, "load_format", None) == "gms" or (
+        isinstance(getattr(server_args, "load_format", None), type)
+        and getattr(server_args.load_format, "__name__", "") == "GMSModelLoader"
+    )
+    if not _using_gms:
+        server_args.enable_weights_cpu_backup = True
 
     start_time = time.time()
     engine = sgl.Engine(server_args=server_args)
