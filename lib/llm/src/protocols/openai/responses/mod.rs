@@ -5,14 +5,15 @@ pub mod stream_converter;
 
 use dynamo_async_openai::types::responses::{
     AssistantRole, FunctionCallOutput, FunctionToolCall, InputContent, InputItem, InputParam,
-    InputRole, Instructions, Item, MessageItem, OutputItem, OutputMessage, OutputMessageContent,
-    OutputStatus, OutputTextContent, Response, ResponseTextParam, Role as ResponseRole,
-    ServiceTier, Status, TextResponseFormatConfiguration, Tool, ToolChoiceOptions, ToolChoiceParam,
-    Truncation,
+    InputRole, InputTokenDetails, Instructions, Item, MessageItem, OutputItem, OutputMessage,
+    OutputMessageContent, OutputStatus, OutputTextContent, OutputTokenDetails, Response,
+    ResponseTextParam, ResponseUsage, Role as ResponseRole, ServiceTier, Status,
+    TextResponseFormatConfiguration, Tool, ToolChoiceOptions, ToolChoiceParam, Truncation,
 };
 use dynamo_async_openai::types::{
     ChatCompletionMessageToolCall, ChatCompletionNamedToolChoice,
     ChatCompletionRequestAssistantMessage, ChatCompletionRequestAssistantMessageContent,
+    ChatCompletionRequestDeveloperMessage, ChatCompletionRequestDeveloperMessageContent,
     ChatCompletionRequestMessage, ChatCompletionRequestMessageContentPartImage,
     ChatCompletionRequestMessageContentPartText, ChatCompletionRequestMessageContentPartVideo,
     ChatCompletionRequestSystemMessage, ChatCompletionRequestSystemMessageContent,
@@ -78,7 +79,7 @@ impl AnnotationsProvider for NvCreateResponse {
         self.nvext
             .as_ref()
             .and_then(|nvext| nvext.annotations.as_ref())
-            .map(|annotations| annotations.contains(&annotation.to_string()))
+            .map(|annotations| annotations.iter().any(|a| a == annotation))
             .unwrap_or(false)
     }
 }
@@ -237,11 +238,22 @@ fn convert_input_items_to_messages(
                 Item::Message(msg_item) => match msg_item {
                     MessageItem::Input(msg) => {
                         let chat_msg = match msg.role {
-                            InputRole::System | InputRole::Developer => {
+                            InputRole::System => {
                                 let text = convert_input_content_to_text(&msg.content);
                                 ChatCompletionRequestMessage::System(
                                     ChatCompletionRequestSystemMessage {
                                         content: ChatCompletionRequestSystemMessageContent::Text(
+                                            text,
+                                        ),
+                                        name: None,
+                                    },
+                                )
+                            }
+                            InputRole::Developer => {
+                                let text = convert_input_content_to_text(&msg.content);
+                                ChatCompletionRequestMessage::Developer(
+                                    ChatCompletionRequestDeveloperMessage {
+                                        content: ChatCompletionRequestDeveloperMessageContent::Text(
                                             text,
                                         ),
                                         name: None,
@@ -340,12 +352,20 @@ fn convert_input_items_to_messages(
                     }
                 };
                 let chat_msg = match easy.role {
-                    ResponseRole::System | ResponseRole::Developer => {
+                    ResponseRole::System => {
                         ChatCompletionRequestMessage::System(ChatCompletionRequestSystemMessage {
                             content: ChatCompletionRequestSystemMessageContent::Text(content_text),
                             name: None,
                         })
                     }
+                    ResponseRole::Developer => ChatCompletionRequestMessage::Developer(
+                        ChatCompletionRequestDeveloperMessage {
+                            content: ChatCompletionRequestDeveloperMessageContent::Text(
+                                content_text,
+                            ),
+                            name: None,
+                        },
+                    ),
                     ResponseRole::User => {
                         ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
                             content: ChatCompletionRequestUserMessageContent::Text(content_text),
@@ -585,6 +605,7 @@ pub struct ResponseParams {
     pub tools: Option<Vec<Tool>>,
     pub tool_choice: Option<ToolChoiceParam>,
     pub instructions: Option<String>,
+    pub previous_response_id: Option<String>,
 }
 
 /// Normalize tools so that `FunctionTool.strict` is always set.
@@ -642,6 +663,27 @@ pub fn chat_completion_to_response(
     let nvext = chat_resp.nvext.clone();
     let message_id = format!("msg_{}", Uuid::new_v4().simple());
     let response_id = format!("resp_{}", Uuid::new_v4().simple());
+
+    // Convert CompletionUsage to ResponseUsage if available
+    let usage = chat_resp.usage.as_ref().map(|u| ResponseUsage {
+        input_tokens: u.prompt_tokens,
+        input_tokens_details: InputTokenDetails {
+            cached_tokens: u
+                .prompt_tokens_details
+                .as_ref()
+                .and_then(|d| d.cached_tokens)
+                .unwrap_or(0),
+        },
+        output_tokens: u.completion_tokens,
+        output_tokens_details: OutputTokenDetails {
+            reasoning_tokens: u
+                .completion_tokens_details
+                .as_ref()
+                .and_then(|d| d.reasoning_tokens)
+                .unwrap_or(0),
+        },
+        total_tokens: u.total_tokens,
+    });
 
     let choice = chat_resp.choices.into_iter().next();
     let mut output = Vec::new();
@@ -746,7 +788,7 @@ pub fn chat_completion_to_response(
         instructions: params.instructions.clone().map(Instructions::Text),
         max_output_tokens: params.max_output_tokens,
         max_tool_calls: None,
-        previous_response_id: None,
+        previous_response_id: params.previous_response_id.clone(),
         prompt: None,
         prompt_cache_key: None,
         prompt_cache_retention: None,
@@ -754,7 +796,7 @@ pub fn chat_completion_to_response(
         safety_identifier: None,
         service_tier: Some(ServiceTier::Auto),
         top_logprobs: Some(0),
-        usage: None,
+        usage,
     };
 
     Ok(NvResponse {

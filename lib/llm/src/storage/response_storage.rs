@@ -1,0 +1,554 @@
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+//! Response storage trait and implementations
+//!
+//! Provides pluggable storage for stateful responses with session scoping.
+//! Users can bring their own storage backend (Redis, Postgres, S3, etc.)
+//! by implementing the ResponseStorage trait.
+
+use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
+use std::time::Duration;
+
+/// Stored response with session metadata
+///
+/// This struct represents a response that has been stored with full
+/// tenant and session context for later retrieval.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredResponse {
+    /// Unique response identifier
+    pub response_id: String,
+
+    /// Tenant identifier (for isolation)
+    pub tenant_id: String,
+
+    /// Session identifier (conversation context)
+    pub session_id: String,
+
+    /// The actual response data
+    pub response: serde_json::Value,
+
+    /// Creation timestamp (Unix epoch seconds)
+    pub created_at: u64,
+
+    /// Expiration timestamp (Unix epoch seconds), if TTL was set
+    pub expires_at: Option<u64>,
+}
+
+/// Storage errors
+#[derive(Debug, thiserror::Error)]
+pub enum StorageError {
+    /// Response not found (may have expired or never existed)
+    #[error("Response not found")]
+    NotFound,
+
+    /// Reserved for custom storage backends that enforce session boundaries.
+    /// Built-in backends return [`NotFound`](StorageError::NotFound) instead
+    /// (see trait-level isolation contract).
+    #[error("Session mismatch: response belongs to different session")]
+    SessionMismatch,
+
+    /// Reserved for custom storage backends that enforce session boundaries.
+    /// Built-in backends return [`NotFound`](StorageError::NotFound) instead
+    /// (see trait-level isolation contract).
+    #[error("Tenant mismatch: response belongs to different tenant")]
+    TenantMismatch,
+
+    /// Invalid key component (contains forbidden characters or exceeds length)
+    #[error("Invalid key: {0}")]
+    InvalidKey(String),
+
+    /// Session has reached its maximum response count
+    #[error("Session full: maximum responses per session reached")]
+    SessionFull,
+
+    /// Backend-specific error
+    #[error("Storage backend error: {0}")]
+    BackendError(String),
+
+    /// Serialization/deserialization error
+    #[error("Serialization error: {0}")]
+    SerializationError(String),
+}
+
+/// Maximum allowed length for key components (tenant_id, session_id, response_id).
+const MAX_KEY_COMPONENT_LEN: usize = 256;
+
+/// Validate a key component (tenant_id, session_id, or response_id).
+///
+/// Rejects values that contain `:` (used as key separator), exceed 256 chars,
+/// or contain characters outside `[a-zA-Z0-9._-]`.
+pub fn validate_key_component(value: &str) -> Result<(), StorageError> {
+    if value.len() > MAX_KEY_COMPONENT_LEN {
+        return Err(StorageError::InvalidKey(format!(
+            "key component exceeds {} characters",
+            MAX_KEY_COMPONENT_LEN,
+        )));
+    }
+    if value.is_empty() {
+        return Err(StorageError::InvalidKey(
+            "key component must not be empty".to_string(),
+        ));
+    }
+    if !value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
+    {
+        return Err(StorageError::InvalidKey(format!(
+            "key component contains invalid characters (allowed: a-zA-Z0-9._-): '{}'",
+            value,
+        )));
+    }
+    Ok(())
+}
+
+/// Pluggable storage backend for stateful responses.
+///
+/// Implementors must provide `store_response`, `get_response`, and
+/// `delete_response`. The `list_responses` and `fork_session` methods
+/// have default implementations but should be overridden for production use.
+///
+/// # Isolation Contract
+///
+/// - **Tenant isolation is mandatory.** `get_response` and `delete_response`
+///   must return `NotFound` (not `TenantMismatch`) when the tenant does not
+///   match, to avoid leaking existence information.
+/// - **Session is metadata, not a boundary.** Cross-session access within the
+///   same tenant is intentionally allowed for multi-agent workflows.
+///
+/// # Key Schema
+///
+/// Implementations should key on `(tenant_id, response_id)`. The recommended
+/// storage key pattern is `{tenant_id}:responses:{response_id}`, with
+/// `session_id` stored as metadata on the [`StoredResponse`].
+///
+/// # Built-in Backends
+///
+/// - [`InMemoryResponseStorage`](super::InMemoryResponseStorage) -- dev/test,
+///   single process, no persistence.
+/// - [`RedisResponseStorage`](super::RedisResponseStorage) -- production,
+///   requires the `redis-storage` feature flag.
+#[async_trait]
+pub trait ResponseStorage: Send + Sync {
+    /// Store a response in a specific session
+    ///
+    /// # Arguments
+    /// * `tenant_id` - Tenant identifier from request context
+    /// * `session_id` - Session identifier from request context
+    /// * `response_id` - Optional response ID (uses existing if provided, generates UUID if None)
+    /// * `response` - The response data to store
+    /// * `ttl` - Optional time-to-live for automatic expiration
+    ///
+    /// # Returns
+    /// The response_id (either provided or generated)
+    ///
+    /// # Errors
+    /// Returns `StorageError::BackendError` if the storage operation fails
+    async fn store_response(
+        &self,
+        tenant_id: &str,
+        session_id: &str,
+        response_id: Option<&str>,
+        response: serde_json::Value,
+        ttl: Option<Duration>,
+    ) -> Result<String, StorageError>;
+
+    /// Get a response, validating tenant and session
+    ///
+    /// # Arguments
+    /// * `tenant_id` - Tenant identifier from request context
+    /// * `session_id` - Session identifier from request context
+    /// * `response_id` - The response ID to retrieve
+    ///
+    /// # Returns
+    /// The stored response with metadata
+    ///
+    /// # Errors
+    /// * `StorageError::NotFound` - Response doesn't exist or has expired
+    /// * `StorageError::TenantMismatch` - Response belongs to different tenant
+    /// * `StorageError::SessionMismatch` - Response belongs to different session
+    /// * `StorageError::BackendError` - Storage operation failed
+    async fn get_response(
+        &self,
+        tenant_id: &str,
+        session_id: &str,
+        response_id: &str,
+    ) -> Result<StoredResponse, StorageError>;
+
+    /// Delete a response
+    ///
+    /// # Arguments
+    /// * `tenant_id` - Tenant identifier from request context
+    /// * `session_id` - Session identifier from request context
+    /// * `response_id` - The response ID to delete
+    ///
+    /// # Errors
+    /// * `StorageError::NotFound` - Response doesn't exist
+    /// * `StorageError::TenantMismatch` - Response belongs to different tenant
+    /// * `StorageError::SessionMismatch` - Response belongs to different session
+    /// * `StorageError::BackendError` - Storage operation failed
+    async fn delete_response(
+        &self,
+        tenant_id: &str,
+        session_id: &str,
+        response_id: &str,
+    ) -> Result<(), StorageError>;
+
+    /// List all responses in a session (optional, for debugging)
+    ///
+    /// This is useful for testing and debugging, but not required for
+    /// core functionality.
+    ///
+    /// # Arguments
+    /// * `tenant_id` - Tenant identifier
+    /// * `session_id` - Session identifier
+    /// * `limit` - Maximum number of responses to return
+    /// * `after` - Cursor: response_id to start after (for pagination)
+    ///
+    /// # Returns
+    /// List of responses in the session, ordered by creation time.
+    /// When `after` is provided, only responses after the cursor are returned.
+    async fn list_responses(
+        &self,
+        tenant_id: &str,
+        session_id: &str,
+        limit: Option<usize>,
+        after: Option<&str>,
+    ) -> Result<Vec<StoredResponse>, StorageError> {
+        // Default implementation returns empty list
+        // Implementations can override for better functionality
+        let _ = (tenant_id, session_id, limit, after);
+        Ok(Vec::new())
+    }
+
+    /// Fork a session by copying all responses up to a specific point
+    ///
+    /// This enables "branching" conversations - starting a new session
+    /// from a checkpoint in an existing one (rewinding).
+    ///
+    /// # Arguments
+    /// * `tenant_id` - Tenant identifier (must be same for source and target)
+    /// * `source_session_id` - Source session to fork from
+    /// * `target_session_id` - New session to fork into
+    /// * `up_to_response_id` - Optional: only copy responses up to this ID (rewind point)
+    ///
+    /// # Returns
+    /// Number of responses copied
+    async fn fork_session(
+        &self,
+        tenant_id: &str,
+        source_session_id: &str,
+        target_session_id: &str,
+        up_to_response_id: Option<&str>,
+    ) -> Result<usize, StorageError> {
+        // Default implementation - override for efficiency in production backends
+        let responses = self
+            .list_responses(tenant_id, source_session_id, None, None)
+            .await?;
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let mut copied_count = 0;
+        let mut found_stop = false;
+        for response in responses {
+            // Compute remaining TTL from the source response so forked
+            // entries expire at the same wall-clock time as the originals.
+            let remaining_ttl = response.expires_at.and_then(|exp| {
+                if exp > now {
+                    Some(std::time::Duration::from_secs(exp - now))
+                } else {
+                    None // already expired — skip would have filtered it
+                }
+            });
+
+            // Stop at rewind point if specified
+            if let Some(stop_id) = up_to_response_id
+                && response.response_id == stop_id
+            {
+                // Clone this one and stop
+                self.store_response(
+                    tenant_id,
+                    target_session_id,
+                    Some(&response.response_id),
+                    response.response.clone(),
+                    remaining_ttl,
+                )
+                .await?;
+                copied_count += 1;
+                found_stop = true;
+                break;
+            }
+
+            self.store_response(
+                tenant_id,
+                target_session_id,
+                Some(&response.response_id),
+                response.response.clone(),
+                remaining_ttl,
+            )
+            .await?;
+            copied_count += 1;
+        }
+
+        if up_to_response_id.is_some() && !found_stop {
+            return Err(StorageError::NotFound);
+        }
+
+        Ok(copied_count)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::InMemoryResponseStorage;
+
+    #[tokio::test]
+    async fn test_store_and_retrieve() {
+        let storage = InMemoryResponseStorage::new(0);
+        let response_data = serde_json::json!({"message": "Hello, world!"});
+
+        let response_id = storage
+            .store_response("tenant_a", "session_1", None, response_data.clone(), None)
+            .await
+            .unwrap();
+
+        let retrieved = storage
+            .get_response("tenant_a", "session_1", &response_id)
+            .await
+            .unwrap();
+
+        assert_eq!(retrieved.tenant_id, "tenant_a");
+        assert_eq!(retrieved.session_id, "session_1");
+        assert_eq!(retrieved.response, response_data);
+    }
+
+    #[tokio::test]
+    async fn test_tenant_isolation() {
+        let storage = InMemoryResponseStorage::new(0);
+        let response_data = serde_json::json!({"secret": "tenant_a_data"});
+
+        let response_id = storage
+            .store_response("tenant_a", "session_1", None, response_data, None)
+            .await
+            .unwrap();
+
+        // Tenant B should not be able to access tenant A's response
+        let result = storage
+            .get_response("tenant_b", "session_1", &response_id)
+            .await;
+
+        assert!(matches!(result, Err(StorageError::NotFound)));
+    }
+
+    #[tokio::test]
+    async fn test_cross_session_access_within_tenant() {
+        let storage = InMemoryResponseStorage::new(0);
+        let response_data = serde_json::json!({"data": "session_1"});
+
+        let response_id = storage
+            .store_response("tenant_a", "session_1", None, response_data.clone(), None)
+            .await
+            .unwrap();
+
+        // Same tenant, different session CAN access (session is metadata, not boundary)
+        let result = storage
+            .get_response("tenant_a", "session_2", &response_id)
+            .await;
+
+        assert!(result.is_ok());
+        let retrieved = result.unwrap();
+        assert_eq!(retrieved.session_id, "session_1"); // Original session metadata preserved
+        assert_eq!(retrieved.response, response_data);
+    }
+
+    #[tokio::test]
+    async fn test_delete_response() {
+        let storage = InMemoryResponseStorage::new(0);
+        let response_data = serde_json::json!({"data": "test"});
+
+        let response_id = storage
+            .store_response("tenant_a", "session_1", None, response_data, None)
+            .await
+            .unwrap();
+
+        // Delete the response
+        storage
+            .delete_response("tenant_a", "session_1", &response_id)
+            .await
+            .unwrap();
+
+        // Should no longer exist
+        let result = storage
+            .get_response("tenant_a", "session_1", &response_id)
+            .await;
+
+        assert!(matches!(result, Err(StorageError::NotFound)));
+    }
+
+    #[tokio::test]
+    async fn test_ttl_expiration() {
+        let storage = InMemoryResponseStorage::new(0);
+        let response_data = serde_json::json!({"data": "expires soon"});
+
+        let now_before = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        // Store with 10-second TTL
+        let response_id = storage
+            .store_response(
+                "tenant_a",
+                "session_1",
+                None,
+                response_data,
+                Some(Duration::from_secs(10)),
+            )
+            .await
+            .unwrap();
+
+        // Should NOT be expired yet
+        let result = storage
+            .get_response("tenant_a", "session_1", &response_id)
+            .await;
+
+        assert!(result.is_ok());
+        let stored = result.unwrap();
+        assert!(stored.expires_at.is_some());
+        assert!(stored.expires_at.unwrap() >= now_before + 10);
+    }
+
+    #[tokio::test]
+    async fn test_list_responses() {
+        let storage = InMemoryResponseStorage::new(0);
+
+        // Store multiple responses in same session
+        for i in 1..=5 {
+            storage
+                .store_response(
+                    "tenant_a",
+                    "session_1",
+                    None,
+                    serde_json::json!({"turn": i}),
+                    None,
+                )
+                .await
+                .unwrap();
+        }
+
+        // Store response in different session
+        storage
+            .store_response(
+                "tenant_a",
+                "session_2",
+                None,
+                serde_json::json!({"other": 1}),
+                None,
+            )
+            .await
+            .unwrap();
+
+        let responses = storage
+            .list_responses("tenant_a", "session_1", None, None)
+            .await
+            .unwrap();
+
+        assert_eq!(responses.len(), 5);
+    }
+
+    #[tokio::test]
+    async fn test_list_responses_with_limit() {
+        let storage = InMemoryResponseStorage::new(0);
+
+        for i in 1..=10 {
+            storage
+                .store_response(
+                    "tenant_a",
+                    "session_1",
+                    None,
+                    serde_json::json!({"turn": i}),
+                    None,
+                )
+                .await
+                .unwrap();
+        }
+
+        let responses = storage
+            .list_responses("tenant_a", "session_1", Some(3), None)
+            .await
+            .unwrap();
+
+        assert_eq!(responses.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_list_responses_with_cursor() {
+        let storage = InMemoryResponseStorage::new(0);
+
+        // Store 10 responses with known IDs
+        for i in 1..=10 {
+            storage
+                .store_response(
+                    "tenant_a",
+                    "session_1",
+                    Some(&format!("resp_{:02}", i)),
+                    serde_json::json!({"turn": i}),
+                    None,
+                )
+                .await
+                .unwrap();
+        }
+
+        // Fetch first page (limit=3)
+        let page1 = storage
+            .list_responses("tenant_a", "session_1", Some(3), None)
+            .await
+            .unwrap();
+
+        assert_eq!(page1.len(), 3);
+        assert_eq!(page1[0].response_id, "resp_01");
+        assert_eq!(page1[2].response_id, "resp_03");
+
+        // Fetch second page using cursor (after resp_03)
+        let page2 = storage
+            .list_responses("tenant_a", "session_1", Some(3), Some("resp_03"))
+            .await
+            .unwrap();
+
+        assert_eq!(page2.len(), 3);
+        assert_eq!(page2[0].response_id, "resp_04");
+        assert_eq!(page2[2].response_id, "resp_06");
+
+        // Fetch third page
+        let page3 = storage
+            .list_responses("tenant_a", "session_1", Some(3), Some("resp_06"))
+            .await
+            .unwrap();
+
+        assert_eq!(page3.len(), 3);
+        assert_eq!(page3[0].response_id, "resp_07");
+        assert_eq!(page3[2].response_id, "resp_09");
+
+        // Fetch fourth page (only 1 remaining)
+        let page4 = storage
+            .list_responses("tenant_a", "session_1", Some(3), Some("resp_09"))
+            .await
+            .unwrap();
+
+        assert_eq!(page4.len(), 1);
+        assert_eq!(page4[0].response_id, "resp_10");
+
+        // Fetch with cursor at end (should be empty)
+        let page5 = storage
+            .list_responses("tenant_a", "session_1", Some(3), Some("resp_10"))
+            .await
+            .unwrap();
+
+        assert_eq!(page5.len(), 0);
+    }
+}
