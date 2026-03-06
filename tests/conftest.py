@@ -102,6 +102,23 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     )
 
 
+def pytest_runtest_setup(item):
+    """Add Allure parameters from CI environment to differentiate matrix entries."""
+    try:
+        import allure
+    except ImportError:
+        return
+
+    env_params = {
+        "framework": os.environ.get("DYNAMO_TEST_FRAMEWORK"),
+        "platform": os.environ.get("DYNAMO_TEST_PLATFORM"),
+        "test_type": os.environ.get("DYNAMO_TEST_TYPE"),
+    }
+    for name, value in env_params.items():
+        if value:
+            allure.dynamic.parameter(name, value)
+
+
 LOG_FORMAT = "[TEST] %(asctime)s %(levelname)s %(name)s: %(message)s"
 DATE_FORMAT = "%Y-%m-%dT%H:%M:%S"
 

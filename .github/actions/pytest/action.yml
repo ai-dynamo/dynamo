@@ -151,6 +151,9 @@ runs:
           --cpus=${NUM_CPUS} \
           --network host \
           --env HF_TOKEN="${HF_TOKEN}" \
+          --env DYNAMO_TEST_FRAMEWORK="${{ inputs.framework }}" \
+          --env DYNAMO_TEST_PLATFORM="${{ inputs.platform_arch }}" \
+          --env DYNAMO_TEST_TYPE="${{ inputs.test_type }}" \
           --name ${{ env.CONTAINER_ID }}_pytest \
           -v "${TEST_RESULTS_DIR}:/workspace/test-results" \
           ${{ inputs.image_tag }} \
@@ -241,6 +244,9 @@ runs:
         docker run ${GPU_FLAGS} ${DOCKER_OPTS} --rm -w /workspace \
           --network host \
           --env HF_TOKEN="${HF_TOKEN}" \
+          --env DYNAMO_TEST_FRAMEWORK="${{ inputs.framework }}" \
+          --env DYNAMO_TEST_PLATFORM="${{ inputs.platform_arch }}" \
+          --env DYNAMO_TEST_TYPE="${{ inputs.test_type }}" \
           --name ${{ env.CONTAINER_ID }}_pytest \
           -v "${TEST_RESULTS_DIR}:/workspace/test-results" \
           ${{ inputs.image_tag }} \
