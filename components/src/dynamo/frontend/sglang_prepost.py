@@ -165,8 +165,17 @@ class SglangStreamingPostProcessor:
         self._fast_plain_text = tool_call_parser is None and reasoning_parser is None
 
         self._all_token_ids: list[int] = []
-        # Tool call state tracking
+        # Tool call accumulation.  SGLang's streaming parser returns
+        # deltas (name in one chunk, argument fragments across subsequent
+        # chunks).  However, when the complete tool-call JSON arrives in a
+        # single chunk the parser emits the name but never streams
+        # arguments (a chunking-sensitivity issue in the base detector).
+        # We accumulate names + arg fragments from streaming deltas and,
+        # on finish, fall back to parse_non_stream on the detector buffer
+        # for any tool call whose arguments are still missing.
         self._tool_call_ids: dict[int, str] = {}  # tool_index -> call_id
+        self._tool_call_names: dict[int, str] = {}  # tool_index -> name
+        self._tool_call_args: dict[int, list[str]] = {}  # tool_index -> arg chunks
 
     def _incremental_decode(self, new_token_ids: list[int]) -> str:
         """Decode new tokens with lookback window for multi-byte char boundaries.
@@ -243,8 +252,7 @@ class SglangStreamingPostProcessor:
             reasoning_text = r_text or None
             normal_text = n_text or ""
 
-        # -- Tool call parsing --
-        tool_call_deltas: list[dict[str, Any]] = []
+        # -- Tool call parsing (accumulate deltas) --
         content_text = normal_text
 
         if self.tool_call_parser and normal_text:
@@ -255,26 +263,12 @@ class SglangStreamingPostProcessor:
 
             for tc in tool_calls:
                 idx = tc.tool_index
-                # Generate call_id for new tool calls
                 if idx not in self._tool_call_ids:
                     self._tool_call_ids[idx] = _random_call_id()
-
-                # SGLang's FunctionCallParser returns parameter deltas
-                # (not accumulated), so use them directly.
-                param_delta = tc.parameters or ""
-
-                tc_delta: dict[str, Any] = {
-                    "index": idx,
-                    "id": self._tool_call_ids[idx],
-                    "type": "function",
-                    "function": {},
-                }
                 if tc.name:
-                    tc_delta["function"]["name"] = tc.name
-                if param_delta:
-                    tc_delta["function"]["arguments"] = param_delta
-
-                tool_call_deltas.append(tc_delta)
+                    self._tool_call_names[idx] = tc.name
+                if tc.parameters:
+                    self._tool_call_args.setdefault(idx, []).append(tc.parameters)
 
         # -- Assemble delta --
         delta: dict[str, Any] = {"role": "assistant"}
@@ -286,8 +280,41 @@ class SglangStreamingPostProcessor:
         if reasoning_text:
             delta["reasoning_content"] = reasoning_text
             has_content = True
-        if tool_call_deltas:
-            delta["tool_calls"] = tool_call_deltas
+
+        # Emit complete tool calls on finish.  For any tool call whose
+        # arguments are still empty (chunking-sensitivity issue), fall
+        # back to parse_non_stream on the detector's buffer.
+        if finish_reason and self._tool_call_names:
+            missing_args = any(
+                idx not in self._tool_call_args for idx in self._tool_call_names
+            )
+            if missing_args:
+                buffer = getattr(self.tool_call_parser.detector, "_buffer", "")
+                if buffer:
+                    _, final_calls = self.tool_call_parser.parse_non_stream(buffer)
+                    for tc in final_calls:
+                        idx = tc.tool_index
+                        if idx not in self._tool_call_ids:
+                            self._tool_call_ids[idx] = _random_call_id()
+                        if tc.name:
+                            self._tool_call_names[idx] = tc.name
+                        if tc.parameters:
+                            self._tool_call_args[idx] = [tc.parameters]
+
+            tool_calls_out: list[dict[str, Any]] = []
+            for idx in sorted(self._tool_call_names):
+                tool_calls_out.append(
+                    {
+                        "index": idx,
+                        "id": self._tool_call_ids[idx],
+                        "type": "function",
+                        "function": {
+                            "name": self._tool_call_names[idx],
+                            "arguments": "".join(self._tool_call_args.get(idx, [])),
+                        },
+                    }
+                )
+            delta["tool_calls"] = tool_calls_out
             has_content = True
 
         if has_content or finish_reason:
