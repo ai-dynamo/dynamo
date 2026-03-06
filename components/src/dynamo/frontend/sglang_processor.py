@@ -474,11 +474,15 @@ class SglangEngineFactory:
         router_config: RouterConfig,
         config: FrontendConfig,
         debug_perf: bool = False,
+        tool_call_parser_name: str | None = None,
+        reasoning_parser_name: str | None = None,
     ):
         self.runtime = runtime
         self.router_config = router_config
         self.config = config
         self.debug_perf = debug_perf
+        self.tool_call_parser_name = tool_call_parser_name
+        self.reasoning_parser_name = reasoning_parser_name
 
         self.stream_interval = 20
         raw_stream_interval = os.getenv("DYN_SGLANG_STREAM_INTERVAL")
@@ -514,9 +518,8 @@ class SglangEngineFactory:
 
         eos_token_id = getattr(tokenizer, "eos_token_id", None)
 
-        rc = mdc.runtime_config()
-        tool_call_parser_name = rc.get("tool_call_parser")
-        reasoning_parser_name = rc.get("reasoning_parser")
+        tool_call_parser_name = self.tool_call_parser_name
+        reasoning_parser_name = self.reasoning_parser_name
 
         if tool_call_parser_name:
             logger.info("SGLang tool call parser: %s", tool_call_parser_name)
