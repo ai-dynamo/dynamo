@@ -18,9 +18,9 @@ use dynamo_llm::entrypoint::input::Input;
 use dynamo_llm::kv_router::KvRouterConfig as RsKvRouterConfig;
 use dynamo_llm::local_model::DEFAULT_HTTP_PORT;
 use dynamo_llm::local_model::{LocalModel, LocalModelBuilder};
+use dynamo_llm::mocker::make_mocker_engine;
 use dynamo_llm::model_card::ModelDeploymentCard as RsModelDeploymentCard;
 use dynamo_llm::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine;
-use dynamo_llm::mocker::make_mocker_engine;
 use dynamo_mocker::common::protocols::MockEngineArgs;
 use dynamo_runtime::discovery::ModelCardInstanceId as RsModelCardInstanceId;
 use dynamo_runtime::protocols::EndpointId;
@@ -426,8 +426,7 @@ async fn select_engine(
             let endpoint = local_model.endpoint_id().clone();
 
             let engine =
-                make_mocker_engine(distributed_runtime.inner, endpoint, mocker_args)
-                    .await?;
+                make_mocker_engine(distributed_runtime.inner, endpoint, mocker_args).await?;
 
             RsEngineConfig::InProcessTokens {
                 engine,
