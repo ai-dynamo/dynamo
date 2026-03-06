@@ -981,7 +981,7 @@ class ModelType:
     Audios: ModelType
     Videos: ModelType
 
-    def __or__(self, other: "ModelType") -> "ModelType":
+    def __or__(self, other: ModelType) -> ModelType:
         ...
 
     def supports_chat(self) -> bool:
@@ -1091,6 +1091,8 @@ async def register_model(
     runtime_config: Optional[ModelRuntimeConfig] = None,
     user_data: Optional[Dict[str, Any]] = None,
     custom_template_path: Optional[str] = None,
+    media_decoder: Optional[MediaDecoder] = None,
+    media_fetcher: Optional[MediaFetcher] = None,
     lora_name: Optional[str] = None,
     base_model_path: Optional[str] = None,
 ) -> None:
@@ -1649,6 +1651,8 @@ class PlannerDecision:
             -1 in any of those fields mean not set, usually because planner hasn't decided anything yet.
     Call VirtualConnectorClient.complete(event) when action is completed.
     """
+    num_prefill_workers: int
+    num_decode_workers: int
     ...
 
 class VirtualConnectorCoordinator:

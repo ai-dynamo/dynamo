@@ -488,6 +488,36 @@ pub mod kvrouter {
 pub mod kv_publisher {
     /// Total number of raw events dropped by engines before reaching publisher (detected via event_id gaps)
     pub const ENGINES_DROPPED_EVENTS_TOTAL: &str = "kv_publisher_engines_dropped_events_total";
+} 
+
+/// Additional TRT-LLM worker metrics beyond what the engine natively provides.
+///
+/// These metrics are Python-only (registered via `prometheus_client`) and share the
+/// `trtllm_` prefix so they are captured by the same prefix filter as engine metrics.
+///
+/// ⚠️  Python codegen: Run gen-python-prometheus-names after changes
+pub mod trtllm_additional {
+    /// Total number of aborted/cancelled requests
+    pub const NUM_ABORTED_REQUESTS_TOTAL: &str = "trtllm_num_aborted_requests_total";
+
+    /// Total number of requests containing image content
+    pub const REQUEST_TYPE_IMAGE_TOTAL: &str = "trtllm_request_type_image_total";
+
+    /// Total number of requests using guided/structured decoding
+    pub const REQUEST_TYPE_STRUCTURED_OUTPUT_TOTAL: &str =
+        "trtllm_request_type_structured_output_total";
+
+    /// Total number of successful KV cache transfers
+    pub const KV_TRANSFER_SUCCESS_TOTAL: &str = "trtllm_kv_transfer_success_total";
+
+    /// KV cache transfer latency per request in seconds
+    pub const KV_TRANSFER_LATENCY_SECONDS: &str = "trtllm_kv_transfer_latency_seconds";
+
+    /// KV cache transfer size per request in bytes
+    pub const KV_TRANSFER_BYTES: &str = "trtllm_kv_transfer_bytes";
+
+    /// KV cache transfer speed per request in GB/s
+    pub const KV_TRANSFER_SPEED_GB_S: &str = "trtllm_kv_transfer_speed_gb_s";
 }
 
 // KV cache statistics metrics
