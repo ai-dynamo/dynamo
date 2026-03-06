@@ -235,22 +235,6 @@ navigation:
       - page: Planner Design
         path: design-docs/planner-design.md
 
-  # ==================== Blog ====================
-  - section: Blog
-    hidden: true
-    path: blogs/index.mdx
-    slug: blog
-    contents:
-      - page: "Flash Indexer: Inter-Galactic KV Routing"
-        path: blogs/flash-indexer/flash-indexer.md
-        slug: flash-indexer
-
-  # ==================== Documentation ====================
-  - section: Documentation
-    contents:
-      - page: Dynamo Docs Guide
-        path: README.md
-
   # ==================== API Reference ====================
   - section: API Reference
     contents:
@@ -261,6 +245,12 @@ navigation:
       - page: Kubernetes CRD
         path: kubernetes/api-reference.md
 
+  # ==================== Documentation ====================
+  - section: Documentation
+    contents:
+      - page: Dynamo Docs Guide
+        path: README.md
+
   # ==================== Hidden Pages ====================
   # Pages accessible via direct URL but not shown in main navigation.
   # Matches Sphinx hidden_toctree.rst -- pages linked from within content
@@ -268,6 +258,14 @@ navigation:
   - section: Additional Resources
     hidden: true
     contents:
+      # -- Blog --
+      - section: Blog
+        path: blogs/index.mdx
+        slug: blog
+        contents:
+          - page: "Flash Indexer: Inter-Galactic KV Routing"
+            path: blogs/flash-indexer/flash-indexer.md
+            slug: flash-indexer
       # -- Development --
       - page: Runtime Guide
         path: development/runtime-guide.md
