@@ -243,7 +243,8 @@ def setup_metrics_collection(config: Config, generate_endpoint, logger):
             registry=DYNAMO_COMPONENT_REGISTRY,
         )
 
-        if os.environ.get("PROMETHEUS_MULTIPROC_DIR"):
+        multiproc_dir = os.environ.get("PROMETHEUS_MULTIPROC_DIR")
+        if multiproc_dir and os.path.isdir(multiproc_dir):
             try:
                 # MultiProcessCollector reads metrics from .db files in PROMETHEUS_MULTIPROC_DIR
                 # Adding it to REGISTRY allows collecting both in-memory and .db file metrics
@@ -289,6 +290,11 @@ def setup_metrics_collection(config: Config, generate_endpoint, logger):
                     model_name=config.model,
                 )
         else:
+            if multiproc_dir:
+                logger.warning(
+                    f"PROMETHEUS_MULTIPROC_DIR={multiproc_dir} is not a valid directory, "
+                    "falling back to single-process metrics"
+                )
             # No multiprocess mode
             register_engine_metrics_callback(
                 endpoint=generate_endpoint,
@@ -382,6 +388,12 @@ def setup_vllm_engine(config, stat_logger=None):
     # instead of .name string, causing false error on exit. Set PROMETHEUS_MULTIPROC_DIR
     # ourselves to avoid this and handle cleanup properly.
     prometheus_temp_dir = None
+    existing_dir = os.environ.get("PROMETHEUS_MULTIPROC_DIR")
+    if existing_dir and not os.path.isdir(existing_dir):
+        logger.warning(
+            f"PROMETHEUS_MULTIPROC_DIR={existing_dir} does not exist, recreating"
+        )
+        os.makedirs(existing_dir, exist_ok=True)
     if "PROMETHEUS_MULTIPROC_DIR" not in os.environ:
         prometheus_temp_dir = tempfile.TemporaryDirectory(prefix="vllm_prometheus_")
         os.environ["PROMETHEUS_MULTIPROC_DIR"] = prometheus_temp_dir.name
