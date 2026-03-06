@@ -43,9 +43,13 @@ EOF
 }
 
 install_sccache() {
-    # Auto-detect architecture via uname -m (returns x86_64 or aarch64)
+    # Derive arch from TARGETARCH (set by BuildKit) with uname -m fallback
     local arch_alt
-    arch_alt=$(uname -m)
+    if [ -n "${TARGETARCH:-}" ]; then
+        arch_alt=$([ "$TARGETARCH" = "amd64" ] && echo "x86_64" || echo "aarch64")
+    else
+        arch_alt=$(uname -m)
+    fi
     if command -v sccache >/dev/null 2>&1; then
         echo "sccache already installed at $(command -v sccache), skipping download"
     else
