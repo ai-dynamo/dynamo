@@ -67,6 +67,7 @@ ci: &ci
   - '.github/actions/**'
   - '.github/scripts/parse_buildkit_output.py'
   - '.github/scripts/route_buildkit.sh'
+  - 'container/Dockerfile.test'
 
 core:
   # Exclude documentation files first, then include patterns override for specific paths
