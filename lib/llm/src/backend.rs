@@ -186,6 +186,13 @@ impl
                         Ok(result) => result,
                         Err(e) => {
                             tracing::error!("Failed to process token_ids: {e}");
+                            state.stream.context().stop_generating();
+                            state.finished = true;
+                            let mut output = output;
+                            if let Some(data) = &mut output.data {
+                                data.finish_reason =
+                                    Some(FinishReason::Error(format!("decode error: {e}")));
+                            }
                             return Some((output, state));
                         }
                     };
