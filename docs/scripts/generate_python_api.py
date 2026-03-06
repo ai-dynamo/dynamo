@@ -153,7 +153,7 @@ max-toc-depth: 2
 class RenderContext:
     """Mutable state passed through the rendering pipeline."""
 
-    seen_names: set[str] = field(default_factory=set)
+    seen_qualified: set[str] = field(default_factory=set)
 
 
 # ---------------------------------------------------------------------------
@@ -773,10 +773,10 @@ def _render_module_section(
     # Group members by kind (Enhancement 4)
     groups: dict[str, list[tuple[str, Any]]] = {k: [] for k in SUB_GROUP_ORDER}
     for full_path, member in members:
-        name = full_path.split(".")[-1]
-        if name in ctx.seen_names:
+        qual_key = full_path
+        if qual_key in ctx.seen_qualified:
             continue
-        ctx.seen_names.add(name)
+        ctx.seen_qualified.add(qual_key)
         category = _classify_member(member)
         groups[category].append((full_path, member))
 
@@ -789,8 +789,6 @@ def _render_module_section(
         if num_groups > 1:
             parts.append(f"### {SUB_GROUP_TITLES[group_key]}\n")
         for full_path, member in group_members:
-            name = full_path.split(".")[-1]
-            ctx.seen_names.add(name)
             kind = _safe_kind(member)
             if kind == "CLASS":
                 parts.append(_render_class_details(member))
@@ -835,13 +833,17 @@ def render_consolidated_page() -> str:
     print(f"Loading modules ({len(modules)} discovered)...")
 
     loader = _create_loader()
+    failures: list[str] = []
     for module_name in modules:
         try:
             loader.load(module_name)
         except Exception as exc:
-            print(f"  SKIP {module_name}: {exc}", file=sys.stderr)
+            failures.append(f"{module_name}: {exc}")
             continue
         print(f"  Loaded: {module_name}")
+
+    if failures:
+        raise RuntimeError("Failed to load API modules:\n" + "\n".join(failures))
 
     loader.resolve_aliases()
 
