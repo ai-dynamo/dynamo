@@ -29,7 +29,7 @@ USER root
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     mkdir -p /tmp/efa && \
     cd /tmp/efa && \
-    curl --retry 3 --retry-delay 2 -fsSL -o aws-efa-installer-${EFA_VERSION}.tar.gz \
+    curl --retry 3 --retry-delay 2 --retry-all-errors -fsSL -o aws-efa-installer-${EFA_VERSION}.tar.gz \
         https://efa-installer.amazonaws.com/aws-efa-installer-${EFA_VERSION}.tar.gz && \
     tar -xf aws-efa-installer-${EFA_VERSION}.tar.gz && \
     cd aws-efa-installer && \
