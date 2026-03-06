@@ -17,17 +17,17 @@ path = "src/bin/multiturn_bench.rs"
 
 [[bench]]
 name = "kv_indexer_bench"
-path = "benches/kv_router/kv_indexer_bench.rs"
+path = "kv_router/kv_indexer_bench.rs"
 harness = false
 
 [[bench]]
 name = "mooncake_bench"
-path = "benches/kv_router/mooncake_bench.rs"
+path = "kv_router/mooncake_bench.rs"
 harness = false
 
 [[bench]]
 name = "active_sequences_bench"
-path = "benches/kv_router/active_sequences_bench.rs"
+path = "kv_router/active_sequences_bench.rs"
 harness = false
 
 [dependencies]
