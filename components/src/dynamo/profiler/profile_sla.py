@@ -22,8 +22,6 @@ from typing import Any
 import yaml
 from aiconfigurator.generator.enumerate import check_model_hardware_support
 from aiconfigurator.sdk.utils import get_model_config_from_model_path
-
-from deploy.utils.dynamo_deployment import cleanup_remaining_deployments
 from dynamo.profiler.interpolation import run_interpolation
 from dynamo.profiler.rapid import run_rapid
 from dynamo.profiler.thorough import run_thorough
@@ -44,8 +42,6 @@ from dynamo.profiler.utils.dgdr_validate import (
 from dynamo.profiler.utils.profile_common import (
     ProfilerOperationalConfig,
     determine_picking_mode,
-    get_profiling_job_tolerations,
-    inject_tolerations_into_dgd,
     needs_profile_data,
     picked_config_from_row,
     resolve_model_path,
@@ -54,20 +50,32 @@ from dynamo.profiler.utils.profile_common import (
 )
 from dynamo.profiler.utils.profiler_status import ProfilerStatus, write_profiler_status
 
+from deploy.utils.dynamo_deployment import cleanup_remaining_deployments
+
 logger = logging.getLogger(__name__)
 
 _CONCRETE_BACKENDS = ["trtllm", "sglang", "vllm"]
+_AIC_INVALID_MODEL_SUBSTR = "not found or config unavailable"
 
 
-def _apply_tolerations_to_final_config(final_config: Any, tolerations: list) -> Any:
-    """Apply tolerations to a final DGD config (dict or multi-doc list)."""
-    if not tolerations or not final_config:
-        return final_config
-    if isinstance(final_config, list):
-        result = list(final_config)
-        result[-1] = inject_tolerations_into_dgd(result[-1], tolerations)
-        return result
-    return inject_tolerations_into_dgd(final_config, tolerations)
+def _is_invalid_model_error(exc: BaseException) -> bool:
+    """Return True if exc (or its direct cause) is an AIC 'model not found' RuntimeError."""
+    for candidate in (exc, getattr(exc, "__cause__", None)):
+        if candidate is None:
+            continue
+        if isinstance(candidate, RuntimeError) and _AIC_INVALID_MODEL_SUBSTR in str(candidate):
+            return True
+    return False
+
+
+def _user_message_for_profile_failure(exc: BaseException) -> tuple[str, str]:
+    """Return (status message, error detail) for a profiler failure exception."""
+    if _is_invalid_model_error(exc):
+        return (
+            "Invalid or inaccessible model: check the model name and ensure it is accessible on HuggingFace.",
+            str(exc),
+        )
+    return f"Profiler failed with exception: {type(exc).__name__}", str(exc)
 
 
 def _check_auto_backend_support(model: str, system: str) -> bool:
@@ -383,28 +391,17 @@ async def run_profile(
             elif isinstance(final_config, dict):
                 final_config = apply_dgd_overrides(final_config, dgdr.overrides.dgd)
             logger.info("Applied DGD overrides to the final config.")
-
-        # Propagate profiling-job tolerations to the final DGD
-        job_tolerations = get_profiling_job_tolerations(dgdr)
-        if job_tolerations and final_config:
-            final_config = _apply_tolerations_to_final_config(
-                final_config, job_tolerations
-            )
-            logger.debug(
-                "Propagated %d profiling-job toleration(s) to the final DGD config.",
-                len(job_tolerations),
-            )
-
         if not _write_final_output(ops, final_config):
             return
 
     except Exception as e:
         logger.exception("Profile job failed with error")
+        _message, _error = _user_message_for_profile_failure(e)
         write_profiler_status(
             ops.output_dir,
             status=ProfilerStatus.FAILED,
-            error=str(e),
-            message=f"Profiler failed with exception: {type(e).__name__}",
+            error=_error,
+            message=_message,
         )
         raise
     finally:

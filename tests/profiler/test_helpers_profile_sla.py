@@ -26,6 +26,8 @@ try:
     )
     from dynamo.profiler.profile_sla import (
         _extract_profiler_params,
+        _is_invalid_model_error,
+        _user_message_for_profile_failure,
         _write_final_output,
     )
     from dynamo.profiler.utils.config_modifiers.parallelization_mapping import (
@@ -581,3 +583,61 @@ class TestAssembleFinalConfig:
         mock_planner.assert_not_called()
         mock_profile.assert_called_once()
         assert result == [profile_cm, mocker_base]
+
+
+# ---------------------------------------------------------------------------
+# _is_invalid_model_error / _user_message_for_profile_failure (AIC invalid model)
+# ---------------------------------------------------------------------------
+
+
+class TestInvalidModelErrorDetection:
+    """Tests for profiler failure handling when AIC raises for invalid model (see aiconfigurator PR #528)."""
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_recognizes_runtime_error_from_aic(self):
+        """RuntimeError with 'not found or config unavailable' is treated as invalid model."""
+        exc = RuntimeError("Model 'nonexistent-org/fake-model' not found or config unavailable")
+        assert _is_invalid_model_error(exc) is True
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_recognizes_chained_cause(self):
+        """Exception with __cause__ containing the AIC message is recognized."""
+        cause = RuntimeError("Model 'x/y' not found or config unavailable")
+        exc = ValueError("something failed")
+        exc.__cause__ = cause
+        assert _is_invalid_model_error(exc) is True
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_rejects_generic_runtime_error(self):
+        """Generic RuntimeError without the AIC substring is not treated as invalid model."""
+        assert _is_invalid_model_error(RuntimeError("out of memory")) is False
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_rejects_other_exceptions(self):
+        """Other exceptions are not treated as invalid model."""
+        assert _is_invalid_model_error(ValueError("bad value")) is False
+
+
+class TestUserMessageForProfileFailure:
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_invalid_model_returns_actionable_message(self):
+        """Invalid model error yields short actionable message and full error in status."""
+        exc = RuntimeError("Model 'foo/bar' not found or config unavailable")
+        msg, err = _user_message_for_profile_failure(exc)
+        assert "Invalid or inaccessible model" in msg
+        assert "check the model name" in msg
+        assert err == str(exc)
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_generic_exception_returns_type_and_message(self):
+        """Generic exception yields Profiler failed with exception: <Type> and full str(e)."""
+        exc = ValueError("something went wrong")
+        msg, err = _user_message_for_profile_failure(exc)
+        assert "Profiler failed with exception: ValueError" in msg
+        assert err == "something went wrong"
