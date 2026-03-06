@@ -38,7 +38,22 @@ _KV_ROUTER_FIELDS: tuple[str, ...] = (
 
 
 class KvRouterConfigBase(ConfigBase):
-    """Mixin carrying the 16 KvRouterConfig fields."""
+    """Mixin carrying the 16 KvRouterConfig fields.
+
+    Examples:
+        >>> import argparse
+        >>> from dynamo.common.configuration.groups.kv_router_args import (
+        ...     KvRouterArgGroup,
+        ...     KvRouterConfigBase,
+        ... )
+        >>>
+        >>> class MyRouterConfig(KvRouterConfigBase):
+        ...     endpoint: str
+        >>>
+        >>> kwargs = my_config.kv_router_kwargs()
+        >>> kwargs["overlap_score_weight"]
+        1.0
+    """
 
     overlap_score_weight: float
     router_temperature: float
@@ -63,7 +78,21 @@ class KvRouterConfigBase(ConfigBase):
 
 
 class KvRouterArgGroup(ArgGroup):
-    """CLI arguments for the 16 KvRouterConfig parameters."""
+    """CLI arguments for the 16 KvRouterConfig parameters.
+
+    Examples:
+        >>> import argparse
+        >>> from dynamo.common.configuration.groups.kv_router_args import KvRouterArgGroup
+        >>>
+        >>> parser = argparse.ArgumentParser()
+        >>> KvRouterArgGroup().add_arguments(parser)
+        >>> args = parser.parse_args([
+        ...     "--router-kv-overlap-score-weight", "0.8",
+        ...     "--router-temperature", "0.5",
+        ... ])
+        >>> args.overlap_score_weight
+        0.8
+    """
 
     def add_arguments(self, parser) -> None:
         g = parser.add_argument_group("KV Router Options")
