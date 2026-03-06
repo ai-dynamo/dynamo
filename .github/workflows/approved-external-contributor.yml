@@ -95,6 +95,44 @@ jobs:
             echo "all_signed=false" >> "$GITHUB_OUTPUT"
             echo "unsigned_commits=$unsigned_commits" >> "$GITHUB_OUTPUT"
           fi
+      - name: Clean up previous unsigned-commits comments
+        if: steps.fork_check.outputs.is_fork == 'true' && steps.author_check.outputs.is_approved == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO_OWNER: ${{ github.repository_owner }}
+          REPO_NAME: ${{ github.event.repository.name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          gh api "repos/$REPO_OWNER/$REPO_NAME/issues/$PR_NUMBER/comments" \
+            --jq '.[] | select(.body | contains("<!-- dynamo-ext-contributor: unsigned -->")) | .id' \
+          | while read -r comment_id; do
+              echo "Deleting stale unsigned-commits comment $comment_id"
+              gh api --method DELETE "repos/$REPO_OWNER/$REPO_NAME/issues/comments/$comment_id"
+            done
+      - name: Comment unsigned commits
+        if: steps.fork_check.outputs.is_fork == 'true' && steps.author_check.outputs.is_approved == 'true' && steps.signature_check.outputs.all_signed == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO_OWNER: ${{ github.repository_owner }}
+          REPO_NAME: ${{ github.event.repository.name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          UNSIGNED_COMMITS: ${{ steps.signature_check.outputs.unsigned_commits }}
+        run: |
+          table=$(echo "$UNSIGNED_COMMITS" | jq -r '.[] | "| `\(.sha)` | \(.reason) |"')
+          body="<!-- dynamo-ext-contributor: unsigned -->
+          ## Unsigned Commits Detected
+
+          The following commits are not GPG-signed and must be signed before CI can run:
+
+          | Commit | Reason |
+          |--------|--------|
+          ${table}
+
+          Please sign your commits and push again. See the [GitHub docs on commit signature verification](https://docs.github.com/en/authentication/managing-commit-signature-verification/signing-commits) for help."
+
+          gh pr comment "$PR_NUMBER" \
+            --repo "$REPO_OWNER/$REPO_NAME" \
+            --body "$body"
       - name: Comment /ok to test
         if: steps.fork_check.outputs.is_fork == 'true' && steps.author_check.outputs.is_approved == 'true' && steps.signature_check.outputs.all_signed == 'true'
         env:
