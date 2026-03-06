@@ -107,28 +107,23 @@ class ServiceSpec:
             return
 
         args_list = self._spec["extraPodSpec"]["mainContainer"].get("args", [])
-        args_str = " ".join(args_list)
-        parts = shlex.split(args_str)
 
-        # Try to update --model first, then --model-path
+        # Scan the list directly for --model / --model-path and update its value.
+        # Do NOT join+shlex.split: shlex strips internal double-quotes, which
+        # corrupts any JSON args present in the list (e.g. --kv-transfer-config).
         model_index = None
-        for i, part in enumerate(parts):
-            if part in ["--model", "--model-path"]:
+        for i, arg in enumerate(args_list):
+            if arg in ["--model", "--model-path"]:
                 model_index = i
                 break
 
         if model_index is not None:
-            if model_index + 1 < len(parts):
-                parts[model_index + 1] = value
+            if model_index + 1 < len(args_list):
+                args_list[model_index + 1] = value
             else:
                 return
         else:
             return
-
-        # Store args as a list of separate strings for proper command-line parsing
-        # WRONG: [" ".join(parts)] creates ["--model Qwen/Qwen3-0.6B"] (single string)
-        # RIGHT: parts creates ["--model", "Qwen/Qwen3-0.6B"] (separate strings)
-        self._spec["extraPodSpec"]["mainContainer"]["args"] = parts
 
     # ----- GPUs -----
     @property
@@ -169,32 +164,26 @@ class ServiceSpec:
             return
 
         args_list = self._spec["extraPodSpec"]["mainContainer"].get("args", [])
-        args_str = " ".join(args_list)
-        parts = shlex.split(args_str)
 
-        # Find existing tensor-parallel-size argument
+        # Work directly on the list to avoid shlex.split stripping quotes from
+        # JSON argument values (e.g. --kv-transfer-config '{"k":"v"}').
         tp_index = None
-        for i, part in enumerate(parts):
-            if part == "--tensor-parallel-size":
+        for i, arg in enumerate(args_list):
+            if arg == "--tensor-parallel-size":
                 tp_index = i
                 break
 
         if tp_index is not None:
             # Update existing value
-            if tp_index + 1 < len(parts):
-                parts[tp_index + 1] = str(value)
+            if tp_index + 1 < len(args_list):
+                args_list[tp_index + 1] = str(value)
             else:
-                parts.append(str(value))
+                args_list.append(str(value))
         else:
             # Add new argument
-            parts.extend(["--tensor-parallel-size", str(value)])
+            args_list.extend(["--tensor-parallel-size", str(value)])
 
-        # Store args as a list of separate strings for proper command-line parsing
-        # When TP > 1, this setter is called and adds --tensor-parallel-size to args.
-        # WRONG: [" ".join(parts)] would create ["--model Qwen/Qwen3-0.6B --tensor-parallel-size 2"]
-        #        causing argparse to fail with "IndexError: list index out of range"
-        # RIGHT: parts creates ["--model", "Qwen/Qwen3-0.6B", "--tensor-parallel-size", "2"]
-        self._spec["extraPodSpec"]["mainContainer"]["args"] = parts
+        self._spec["extraPodSpec"]["mainContainer"]["args"] = args_list
 
         # Auto-adjust GPU count to match tensor parallel size
         self.gpus = value
