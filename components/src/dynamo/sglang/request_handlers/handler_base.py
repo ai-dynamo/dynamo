@@ -15,6 +15,7 @@ from sglang.srt.utils import get_local_ip_auto
 
 from dynamo._core import Context
 from dynamo.common.utils.input_params import InputParamManager
+from dynamo.runtime import DistributedRuntime
 from dynamo.sglang.args import Config
 from dynamo.sglang.publisher import DynamoSglangPublisher
 
@@ -371,7 +372,7 @@ class BaseWorkerHandler(BaseGenerativeHandler):
             result = {"status": "error", "message": f"Unknown action: {action}"}
         yield result
 
-    def register_engine_routes(self, runtime) -> None:
+    def register_engine_routes(self, runtime: DistributedRuntime) -> None:
         """Register all engine routes for this handler.
 
         Args:
@@ -483,6 +484,7 @@ class BaseWorkerHandler(BaseGenerativeHandler):
             bootstrap_host = get_local_ip_auto()
 
         # Wrap IPv6 literal with brackets so f"{host}:{port}" stays valid.
+        assert isinstance(bootstrap_host, str)
         if ":" in bootstrap_host and not bootstrap_host.startswith("["):
             bootstrap_host = f"[{bootstrap_host}]"
 
@@ -515,7 +517,7 @@ class BaseWorkerHandler(BaseGenerativeHandler):
             cancellation_future = context.async_killed_or_stopped()
 
             # Build list of futures/tasks to wait for
-            wait_for = [cancellation_future]
+            wait_for: list[asyncio.Future[Any]] = [cancellation_future]
             shutdown_task = None
 
             if self.shutdown_event:

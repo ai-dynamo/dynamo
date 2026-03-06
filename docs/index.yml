@@ -177,6 +177,8 @@ navigation:
             path: components/router/router-guide.md
           - page: Router Examples
             path: components/router/router-examples.md
+          - page: KV Event Replay — Dynamo vs vLLM
+            path: components/router/kv-event-replay-comparison.md
       - section: Planner
         path: components/planner/README.md
         contents:

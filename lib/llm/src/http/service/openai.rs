@@ -209,6 +209,20 @@ impl ErrorMessage {
             );
         }
 
+        // Check for DynamoError with InvalidArgument → HTTP 400
+        if let Some(dynamo_err) = err.downcast_ref::<dynamo_runtime::error::DynamoError>()
+            && dynamo_err.error_type() == dynamo_runtime::error::ErrorType::InvalidArgument
+        {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorMessage {
+                    message: dynamo_err.message().to_string(),
+                    error_type: map_error_code_to_error_type(StatusCode::BAD_REQUEST),
+                    code: StatusCode::BAD_REQUEST.as_u16(),
+                }),
+            );
+        }
+
         // Then check for HttpError
         match err.downcast::<HttpError>() {
             Ok(http_error) => ErrorMessage::from_http_error(http_error),
