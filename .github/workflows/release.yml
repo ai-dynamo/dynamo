@@ -72,7 +72,7 @@ jobs:
     name: Tag RC & Publish to NGC
     needs: [prepare-release]
     if: needs.prepare-release.result == 'success'
-    runs-on: cpu-amd-m5-4xlarge
+    runs-on: prod-builder-amd-v1
     environment: automated-release
     env:
       VERSION: ${{ needs.prepare-release.outputs.version }}
