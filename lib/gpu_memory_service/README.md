@@ -186,6 +186,9 @@ GMS uses epoch-scoped allocations and metadata:
 - Transition to `EMPTY` marks a new uncommitted epoch boundary.
 - On `RW_CONNECT`, prior committed visibility is invalidated immediately.
 - On `RW_COMMIT`, the active RW epoch becomes the committed epoch atomically.
+- `metadata_put` is validated against active-epoch allocations and offset bounds.
+- `free` cascades metadata cleanup for entries referencing the freed allocation.
+- Commit rejects dangling metadata references.
 
 ---
 
