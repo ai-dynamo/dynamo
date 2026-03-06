@@ -64,11 +64,6 @@ Repository = "https://github.com/ai-dynamo/dynamo.git"
 requires = ["setuptools>=42", "wheel"]
 build-backend = "setuptools.build_meta"
 
-[tool.uv]
-override-dependencies = [
-    "gradio==5.47.1"
-]
-
 [tool.setuptools]
 packages = ["prefix_data_generator"]
 
