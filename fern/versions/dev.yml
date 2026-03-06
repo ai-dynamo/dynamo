@@ -82,15 +82,26 @@ navigation:
         path: ../pages-dev/components/kvbm/kvbm-guide.md
       - page: Dynamo Benchmarking
         path: ../pages-dev/benchmarks/benchmarking.md
-      - section: Multimodality Support
-        path: ../pages-dev/features/multimodal/README.md
+      - section: Multimodal Model Serving
         contents:
-          - page: vLLM Multimodal
-            path: ../pages-dev/features/multimodal/multimodal-vllm.md
-          - page: TensorRT-LLM Multimodal
-            path: ../pages-dev/features/multimodal/multimodal-trtllm.md
-          - page: SGLang Multimodal
-            path: ../pages-dev/features/multimodal/multimodal-sglang.md
+          - section: Vision Language Models (VLMs)
+            path: ../pages-dev/features/multimodal/README.md
+            contents:
+              - page: Embedding Cache
+                path: ../pages-dev/features/multimodal/embedding-cache.md
+              - page: Encoder Disaggregation
+                path: ../pages-dev/features/multimodal/encoder-disaggregation.md
+              - page: Multimodal KV Routing
+                path: ../pages-dev/features/multimodal/multimodal-kv-routing.md
+          - section: Diffusion (Experimental)
+            path: ../pages-dev/features/multimodal/diffusion.md
+            contents:
+              - page: vLLM-Omni
+                path: ../pages-dev/backends/vllm/vllm-omni.md
+              - page: SGLang Diffusion
+                path: ../pages-dev/backends/sglang/sglang-diffusion.md
+              - page: TRT-LLM Diffusion
+                path: ../pages-dev/backends/trtllm/trtllm-video-diffusion.md
       - page: Tool Calling
         path: ../pages-dev/agents/tool-calling.md
       - page: LoRA Adapters
