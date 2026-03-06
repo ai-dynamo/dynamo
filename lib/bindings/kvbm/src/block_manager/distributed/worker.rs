@@ -412,3 +412,52 @@ impl PyNcclBootstrap {
         self.inner.world_size()
     }
 }
+
+// ---------------------------------------------------------------------------
+// Stub implementations when nccl feature is disabled (match .pyi; raise on use)
+// ---------------------------------------------------------------------------
+
+const NCCL_UNAVAILABLE_MSG: &str =
+    "kvbm was not built with the 'nccl' feature. Rebuild with --features nccl to use NcclBootstrap/NcclCommRef.";
+
+#[cfg(not(feature = "nccl"))]
+#[pyclass(name = "NcclCommRef")]
+pub struct PyNcclCommRef;
+
+#[cfg(not(feature = "nccl"))]
+#[pymethods]
+impl PyNcclCommRef {
+    fn as_raw(&self) -> PyResult<usize> {
+        Err(pyo3::exceptions::PyRuntimeError::new_err(NCCL_UNAVAILABLE_MSG))
+    }
+}
+
+#[cfg(not(feature = "nccl"))]
+#[pyclass(name = "NcclBootstrap")]
+pub struct PyNcclBootstrap;
+
+#[cfg(not(feature = "nccl"))]
+#[pymethods]
+impl PyNcclBootstrap {
+    #[staticmethod]
+    fn generate(_world_size: i32) -> PyResult<Self> {
+        Err(pyo3::exceptions::PyRuntimeError::new_err(NCCL_UNAVAILABLE_MSG))
+    }
+
+    fn serialize<'py>(&self, _py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyBytes>> {
+        Err(pyo3::exceptions::PyRuntimeError::new_err(NCCL_UNAVAILABLE_MSG))
+    }
+
+    #[staticmethod]
+    fn deserialize(_data: &[u8]) -> PyResult<Self> {
+        Err(pyo3::exceptions::PyRuntimeError::new_err(NCCL_UNAVAILABLE_MSG))
+    }
+
+    fn init_communicator(&self, _rank: i32) -> PyResult<PyNcclCommRef> {
+        Err(pyo3::exceptions::PyRuntimeError::new_err(NCCL_UNAVAILABLE_MSG))
+    }
+
+    fn world_size(&self) -> PyResult<i32> {
+        Err(pyo3::exceptions::PyRuntimeError::new_err(NCCL_UNAVAILABLE_MSG))
+    }
+}
