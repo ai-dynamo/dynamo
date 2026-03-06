@@ -124,12 +124,14 @@ impl KvEventPublisher {
     ///         so that routers can recover events directly from this worker.
     ///     zmq_endpoint: Optional ZMQ SUB endpoint to read raw engine events from.
     ///     zmq_topic: ZMQ topic filter (default "").
-    ///     batching_timeout_us: Maximum time (in **microseconds**) to accumulate
+    ///     batching_timeout_ms: Maximum time (in **milliseconds**) to accumulate
     ///         events into a single batch before flushing.
-    ///         ``None`` uses the default window of 10000 µs (10 ms).
-    ///         ``0`` disables batching: every event is published immediately.
+    ///         ``None`` disables batching: every event is published immediately.
+    ///         ``5`` (default, 5 ms) to enable batching with a 5 ms window.
+    ///         ``0`` is treated as ``None`` (also disables batching).
+    ///         Maximum allowed is 15_000 (15 seconds); larger values are capped.
     #[new]
-    #[pyo3(signature = (endpoint, worker_id=0, kv_block_size=0, dp_rank=0, enable_local_indexer=false, zmq_endpoint=None, zmq_topic=None, batching_timeout_us=None))]
+    #[pyo3(signature = (endpoint, worker_id=0, kv_block_size=0, dp_rank=0, enable_local_indexer=false, zmq_endpoint=None, zmq_topic=None, batching_timeout_ms=llm_rs::kv_router::publisher::DEFAULT_BATCHING_TIMEOUT_MS))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         endpoint: Endpoint,
@@ -139,7 +141,7 @@ impl KvEventPublisher {
         enable_local_indexer: bool,
         zmq_endpoint: Option<String>,
         zmq_topic: Option<String>,
-        batching_timeout_us: Option<u64>,
+        batching_timeout_ms: Option<u64>,
     ) -> PyResult<Self> {
         let _ = worker_id;
 
@@ -161,7 +163,7 @@ impl KvEventPublisher {
             source_config,
             enable_local_indexer,
             dp_rank,
-            batching_timeout_us,
+            batching_timeout_ms,
         )
         .map_err(to_pyerr)?;
 
