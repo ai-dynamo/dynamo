@@ -103,8 +103,10 @@ jobs:
           REPO_NAME: ${{ github.event.repository.name }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
+          bot_login=$(gh api user --jq '.login')
           gh api "repos/$REPO_OWNER/$REPO_NAME/issues/$PR_NUMBER/comments" \
-            --jq '.[] | select(.body | contains("<!-- dynamo-ext-contributor: unsigned -->")) | .id' \
+          | jq -r --arg login "$bot_login" \
+            '.[] | select(.user.login == $login and (.body | contains("<!-- dynamo-ext-contributor: unsigned -->"))) | .id' \
           | while read -r comment_id; do
               echo "Deleting stale unsigned-commits comment $comment_id"
               gh api --method DELETE "repos/$REPO_OWNER/$REPO_NAME/issues/comments/$comment_id"
