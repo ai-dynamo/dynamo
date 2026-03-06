@@ -553,11 +553,13 @@ async fn main() -> anyhow::Result<()> {
         return run_tests().await;
     }
 
-    let path = args
-        .common
-        .mooncake_trace_path
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("mooncake_trace_path is required for benchmarking"))?;
+    let path = match args.common.mooncake_trace_path.as_deref() {
+        Some(p) => p,
+        None => {
+            eprintln!("No mooncake_trace_path provided, skipping benchmark");
+            return Ok(());
+        }
+    };
     let traces = process_mooncake_trace(
         path,
         args.common.trace_length_factor,

@@ -55,6 +55,9 @@ axum = { workspace = true, optional = true }
 zeromq = { version = "0.4.1", optional = true }
 tracing-subscriber = { workspace = true, optional = true }
 
+[package.metadata.cargo-machete]
+ignored = ["indicatif", "plotters"]
+
 [dev-dependencies]
 rstest = "0.18.2"
 rstest_reuse = "0.7.0"

@@ -1484,7 +1484,13 @@ async fn run_stress_mode(args: StressArgs) {
 
 #[tokio::main]
 async fn main() {
-    let cli = Cli::parse();
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(_) => {
+            eprintln!("No valid arguments provided, skipping benchmark");
+            return;
+        }
+    };
 
     match cli.command {
         Command::Microbench(args) => run_microbench_mode(args).await,
