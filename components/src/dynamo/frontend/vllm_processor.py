@@ -36,7 +36,7 @@ from dynamo.llm import (
     RouterMode,
     fetch_model,
 )
-from dynamo.runtime import DistributedRuntime
+from dynamo.runtime import Client, DistributedRuntime
 
 from .prepost import (
     StreamingPostProcessor,
@@ -78,8 +78,6 @@ def map_finish_reason(raw_reason: str | None) -> FinishReason | None:
 _w_input_processor: InputProcessor | None = None
 _w_tokenizer: Any = None
 _w_tool_parser_class: type[ToolParser] | None = None
-_w_reasoning_parser_class: type[ReasoningParser] | None = None
-_w_stream_interval: int = 20
 
 
 @dataclass
@@ -100,12 +98,10 @@ def _init_worker(
     config_format: str,
     load_format: str,
     tool_parser_name: str | None,
-    reasoning_parser_name: str | None,
-    stream_interval: int,
 ) -> None:
     """Initialize a worker process with its own VllmConfig and InputProcessor."""
     global _w_input_processor, _w_tokenizer, _w_tool_parser_class
-    global _w_reasoning_parser_class, _w_stream_interval
+    global _w_reasoning_parser_class
 
     model_config = ModelConfig(
         model=model_path,
@@ -126,25 +122,14 @@ def _init_worker(
     else:
         _w_tool_parser_class = None
 
-    if reasoning_parser_name:
-        _w_reasoning_parser_class = ReasoningParserManager.get_reasoning_parser(
-            reasoning_parser_name
-        )
-    else:
-        _w_reasoning_parser_class = None
-    _w_stream_interval = max(1, stream_interval)
-
 
 def _preprocess_worker(
     request: dict[str, Any],
     request_id: str,
     model_name: str,
 ) -> PreprocessWorkerResult:
-    """Preprocess a request in a worker process and return a picklable result.
-
-    This replaces _request_handler's Phase A.  No queues — errors propagate
-    naturally via the Future.
-    """
+    """Preprocess a request in a worker process and return a picklable result."""
+    assert _w_input_processor is not None
     pre = preprocess_chat_request_sync(
         request,
         tokenizer=_w_tokenizer,
@@ -269,7 +254,7 @@ class VllmProcessor:
         self,
         tokenizer: TokenizerLike,
         input_processor: InputProcessor,
-        router,  # Client or KvRouter
+        router: Any,  # Client or KvRouter
         output_processor: OutputProcessor,
         tool_parser_class: type[ToolParser] | None,
         reasoning_parser_class: type[ReasoningParser] | None,
@@ -642,7 +627,9 @@ class VllmProcessor:
 
         # --- Phase 1: Preprocess (semaphore held) ---
         try:
+            assert self._worker_semaphore is not None
             async with self._worker_semaphore:
+                assert self.preprocess_pool is not None
                 future = self.preprocess_pool.submit(
                     _preprocess_worker, request, request_id, request["model"]
                 )
@@ -791,7 +778,7 @@ class EngineFactory:
         generate_endpoint = self.runtime.endpoint(
             f"{namespace_name}.{component_name}.{endpoint_name}"
         )
-
+        router: Client | KvRouter
         if self.router_config.router_mode == RouterMode.KV:
             router = KvRouter(
                 endpoint=generate_endpoint,
@@ -820,8 +807,6 @@ class EngineFactory:
                     config_format,
                     load_format,
                     tool_parser_name,
-                    reasoning_parser_name,
-                    self.stream_interval,
                 ),
             )
             # Warm up all workers to ensure initialization completes

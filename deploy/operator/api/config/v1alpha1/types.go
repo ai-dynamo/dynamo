@@ -102,6 +102,16 @@ type MetricsServer struct {
 	Secure bool `json:"secure"`
 }
 
+// CertProvisionMode controls how webhook TLS certificates are managed.
+type CertProvisionMode string
+
+const (
+	// CertProvisionModeAuto uses the built-in cert-controller to generate and rotate certificates.
+	CertProvisionModeAuto CertProvisionMode = "auto"
+	// CertProvisionModeManual expects certificates to be provided externally (e.g., cert-manager, admin).
+	CertProvisionModeManual CertProvisionMode = "manual"
+)
+
 // WebhookServer extends Server with host and certificate directory.
 type WebhookServer struct {
 	Server `json:",inline"`
@@ -109,6 +119,15 @@ type WebhookServer struct {
 	Host string `json:"host"`
 	// CertDir is the directory containing TLS certificates
 	CertDir string `json:"certDir"`
+	// CertProvisionMode controls certificate management: "auto" (built-in cert-controller) or "manual" (external)
+	// +kubebuilder:default="auto"
+	CertProvisionMode CertProvisionMode `json:"certProvisionMode"`
+	// SecretName is the name of the Kubernetes Secret holding webhook TLS certificates
+	// +kubebuilder:default="webhook-server-cert"
+	SecretName string `json:"secretName"`
+	// ServiceName is the name of the Kubernetes Service fronting the webhook server.
+	// Used to generate certificate SANs. Set by the Helm chart.
+	ServiceName string `json:"serviceName"`
 }
 
 // LeaderElectionConfiguration holds leader election settings.

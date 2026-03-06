@@ -103,11 +103,11 @@ struct WorkerTable {
 }
 
 impl WorkerTable {
-    fn new(block_size: usize, dp_sizes: &HashMap<u64, u32>) -> Self {
+    fn new(block_size: usize, dp_range: &HashMap<u64, (u32, u32)>) -> Self {
         let mut slots = Vec::new();
         let mut index = HashMap::new();
-        for (&worker_id, &dp_size) in dp_sizes {
-            for dp_rank in 0..dp_size {
+        for (&worker_id, &(dp_start, dp_size)) in dp_range {
+            for dp_rank in dp_start..dp_start + dp_size {
                 let worker = WorkerWithDpRank::new(worker_id, dp_rank);
                 let idx = slots.len();
                 slots.push((worker, RwLock::new(ActiveSequences::new(block_size))));
@@ -149,7 +149,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     pub fn new(
         publisher: P,
         block_size: usize,
-        dp_sizes: HashMap<u64, u32>,
+        dp_range: HashMap<u64, (u32, u32)>,
         replica_sync: bool,
         router_id: u64,
         worker_type: &'static str,
@@ -157,7 +157,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         assert!(block_size > 1, "block_size must be greater than 1");
 
         Self {
-            workers: RwLock::new(WorkerTable::new(block_size, &dp_sizes)),
+            workers: RwLock::new(WorkerTable::new(block_size, &dp_range)),
             request_to_worker: DashMap::new(),
             request_to_lora: DashMap::new(),
             block_size,
@@ -276,13 +276,13 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
 
     /// Update the set of workers, adding and removing as needed.
     ///
-    /// `new_dp_sizes` maps worker IDs to their data-parallel size.
-    pub fn update_workers(&self, new_dp_sizes: &HashMap<u64, u32>) {
+    /// `new_dp_range` maps worker IDs to their data-parallel range (start, size).
+    pub fn update_workers(&self, new_dp_range: &HashMap<u64, (u32, u32)>) {
         let mut table = self.workers.write();
 
         let mut target_workers: HashSet<WorkerWithDpRank> = HashSet::new();
-        for (&worker_id, &dp_size) in new_dp_sizes {
-            for dp_rank in 0..dp_size {
+        for (&worker_id, &(dp_start, dp_size)) in new_dp_range {
+            for dp_rank in dp_start..(dp_start + dp_size) {
                 target_workers.insert(WorkerWithDpRank::new(worker_id, dp_rank));
             }
         }

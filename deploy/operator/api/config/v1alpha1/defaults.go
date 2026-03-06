@@ -50,6 +50,12 @@ func SetDefaultsOperatorConfiguration(obj *OperatorConfiguration) {
 	if obj.Server.Webhook.CertDir == "" {
 		obj.Server.Webhook.CertDir = "/tmp/k8s-webhook-server/serving-certs"
 	}
+	if obj.Server.Webhook.CertProvisionMode == "" {
+		obj.Server.Webhook.CertProvisionMode = CertProvisionModeAuto
+	}
+	if obj.Server.Webhook.SecretName == "" {
+		obj.Server.Webhook.SecretName = "webhook-server-cert"
+	}
 
 	// Orchestrator defaults
 	if obj.Orchestrators.Grove.TerminationDelay.Duration == 0 {
