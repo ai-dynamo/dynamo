@@ -116,6 +116,27 @@ func TestEnrichHardwareFromDiscovery_FallsBackToModelForUnknownGPU(t *testing.T)
 		"Unknown GPU should fall back to raw model name")
 }
 
+// TestEnrichHardwareFromDiscovery_RejectsUnrecognizedGPUSKU verifies that a user-provided
+// gpuSku that InferHardwareSystem cannot map to any AIC identifier is rejected with an error.
+func TestEnrichHardwareFromDiscovery_RejectsUnrecognizedGPUSKU(t *testing.T) {
+	vram := float64(16384)
+	n := int32(8)
+	r := newFakeReconciler()
+	dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
+		Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
+			Hardware: &nvidiacomv1beta1.HardwareSpec{
+				GPUSKU:         "my-custom-gpu-xyz",
+				VRAMMB:         &vram,
+				NumGPUsPerNode: &n,
+			},
+		},
+	}
+
+	err := r.enrichHardwareFromDiscovery(context.Background(), dgdr)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "my-custom-gpu-xyz")
+}
+
 // TestEnrichHardwareFromDiscovery_NormalizesUserProvidedGPUSKU verifies that a raw product
 // name manually set by the user in the DGDR spec is normalized to AIC format.
 func TestEnrichHardwareFromDiscovery_NormalizesUserProvidedGPUSKU(t *testing.T) {

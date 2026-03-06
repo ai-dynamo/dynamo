@@ -326,7 +326,8 @@ type FeaturesSpec struct {
 type HardwareSpec struct {
 	// GPUSKU is the AIC hardware system identifier (e.g., "h100_sxm", "h200_sxm", "b200_sxm").
 	// When omitted, the operator auto-detects this from cluster GPU labels via InferHardwareSystem.
-	// The value must match an AIC system identifier, not a raw GPU product name (e.g., not "NVIDIA-B200").
+	// Recognized raw GPU product names (e.g., "NVIDIA-B200") are also accepted and automatically
+	// normalized to the AIC identifier; unrecognized values that cannot be mapped are rejected.
 	// +optional
 	GPUSKU string `json:"gpuSku,omitempty"`
 
