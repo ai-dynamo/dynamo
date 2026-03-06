@@ -97,6 +97,11 @@ navigation:
         path: agents/tool-calling.md
       - page: LoRA Adapters
         path: features/lora/README.md
+      - section: Agentic Workloads
+        path: features/agentic_workloads.md
+        contents:
+          - page: SGLang for Agentic Workloads
+            path: backends/sglang/agents.md
       - section: Observability (Local)
         path: observability/README.md
         contents:
