@@ -15,7 +15,7 @@ Use the embedding cache when your workload includes repeated images across reque
 
 - Product catalog queries where users ask about the same product images
 - Document processing pipelines that reference shared diagrams or figures
-- Chat sessions where the same image is discussed across multiple turns, like an architecture diagram in a code-gen use case. 
+- Chat sessions where the same image is discussed across multiple turns, like an architecture diagram in a code-gen use case.
 
 If your workload consists entirely of unique images, the cache provides no benefit.
 

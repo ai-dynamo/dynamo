@@ -1,7 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Multimodal Model Serving 
+title: Multimodal Model Serving
 subtitle: Deploy multimodal models with image, video, and audio support in Dynamo
 ---
 
@@ -28,7 +28,8 @@ flowchart TD
     C --> I[DECODE]
     H --> I
     I --> J[Response]
-Dynamo provides support for improving latency and throughput for vision-and-language workloads through the following features, that can be used together or separately, depending on your workload characteristics: 
+
+Dynamo provides support for improving latency and throughput for vision-and-language workloads through the following features, that can be used together or separately, depending on your workload characteristics:
 | Feature | Description |
 |---------|-------------|
 | **[Embedding Cache](embedding-cache.md)** | CPU-side LRU cache that skips re-encoding repeated images |
@@ -36,8 +37,6 @@ Dynamo provides support for improving latency and throughput for vision-and-lang
 | **[Multimodal KV Routing](multimodal-kv-routing.md)** | MM-aware KV cache routing for optimal worker selection |
 
 ## Support Matrix
-
-### Backend Capabilities
 
 | Stack | Image | Video | Audio |
 |-------|-------|-------|-------|
