@@ -32,6 +32,8 @@ pub fn add_to_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     #[cfg(feature = "nccl")]
     m.add_class::<distributed::PyNcclBootstrap>()?;
+    #[cfg(feature = "nccl")]
+    m.add_class::<distributed::PyNcclCommRef>()?;
 
     vllm::add_to_module(m)?;
 

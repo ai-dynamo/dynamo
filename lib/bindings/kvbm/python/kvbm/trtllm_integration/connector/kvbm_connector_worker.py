@@ -35,7 +35,7 @@ def _get_mpi_info() -> Tuple[Optional[int], Optional[int]]:
     return None, None
 
 
-def _create_kvbm_nccl_comm(rank: int, world_size: int) -> int:
+def _create_kvbm_nccl_comm(rank: int, world_size: int):
     """Create a dedicated NCCL communicator for KVBM using MPI for bootstrap.
 
     This function creates an NCCL communicator that is separate from any other
@@ -47,7 +47,8 @@ def _create_kvbm_nccl_comm(rank: int, world_size: int) -> int:
         world_size: Total number of ranks
 
     Returns:
-        The raw ncclComm_t pointer as an integer
+        NcclCommRef: Owning reference; pass to the worker so the comm is
+        kept alive and destroyed when the worker is done.
 
     Raises:
         ImportError: If mpi4py or NcclBootstrap is not available
@@ -117,11 +118,11 @@ def _create_kvbm_nccl_comm(rank: int, world_size: int) -> int:
     logger.info(f"KVBM: Rank {rank} passed barrier, calling ncclCommInitRank")
 
     # All ranks collectively initialize (must be called together)
-    # This is a blocking collective operation
-    nccl_comm_ptr = bootstrap.init_communicator(rank)
+    # This is a blocking collective operation; returns owning NcclCommRef.
+    nccl_comm_ref = bootstrap.init_communicator(rank)
 
     logger.info(f"KVBM: Rank {rank} created dedicated NCCL communicator")
-    return nccl_comm_ptr
+    return nccl_comm_ref
 
 
 class DynamoKVBMConnectorWorker(KvCacheConnectorWorker):
@@ -155,7 +156,7 @@ class DynamoKVBMConnectorWorker(KvCacheConnectorWorker):
 
         # NCCL replicated mode for MLA support - controlled by feature flag
         # Set DYN_KVBM_NCCL_MLA_MODE=true to enable NCCL broadcast optimization for MLA models
-        nccl_rank, nccl_world_size, nccl_comm_ptr = None, None, None
+        nccl_rank, nccl_world_size, nccl_comm_ref = None, None, None
         enable_nccl_mla = os.environ.get("DYN_KVBM_NCCL_MLA_MODE", "false").lower() in (
             "true",
             "1",
@@ -173,7 +174,7 @@ class DynamoKVBMConnectorWorker(KvCacheConnectorWorker):
 
         if enable_nccl_mla and nccl_rank is not None and nccl_world_size is not None:
             try:
-                nccl_comm_ptr = _create_kvbm_nccl_comm(nccl_rank, nccl_world_size)
+                nccl_comm_ref = _create_kvbm_nccl_comm(nccl_rank, nccl_world_size)
                 logger.info(
                     f"KVBM MLA support: NCCL broadcast optimization enabled. "
                     f"Rank {nccl_rank}/{nccl_world_size}: only rank 0 loads "
@@ -186,7 +187,7 @@ class DynamoKVBMConnectorWorker(KvCacheConnectorWorker):
                     "broadcast-based replication, rebuild with: "
                     "cargo build -p kvbm --features nccl"
                 )
-                nccl_rank, nccl_world_size, nccl_comm_ptr = None, None, None
+                nccl_rank, nccl_world_size, nccl_comm_ref = None, None, None
         elif enable_nccl_mla:
             logger.info(
                 "KVBM: MPI not available, using standard sharded mode. "
@@ -199,7 +200,7 @@ class DynamoKVBMConnectorWorker(KvCacheConnectorWorker):
             str(self.rank),
             rank=nccl_rank,
             world_size=nccl_world_size,
-            nccl_comm_ptr=nccl_comm_ptr,
+            nccl_comm_ref=nccl_comm_ref,
         )
         self.event = torch.cuda.Event()
 
