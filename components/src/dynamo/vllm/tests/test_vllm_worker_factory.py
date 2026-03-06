@@ -103,9 +103,7 @@ class TestCreate:
         factory._create_multimodal_worker.assert_called_once()  # type: ignore[union-attr]
 
     @pytest.mark.asyncio
-    async def test_passes_snapshot_engine(
-        self, factory: WorkerFactory
-    ) -> None:
+    async def test_passes_snapshot_engine(self, factory: WorkerFactory) -> None:
         config = _make_config(multimodal_worker=True)
         runtime = Mock()
         shutdown_event = asyncio.Event()
