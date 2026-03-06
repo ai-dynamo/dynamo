@@ -44,6 +44,8 @@ from dynamo.profiler.utils.dgdr_validate import (
 from dynamo.profiler.utils.profile_common import (
     ProfilerOperationalConfig,
     determine_picking_mode,
+    get_profiling_job_tolerations,
+    inject_tolerations_into_dgd,
     needs_profile_data,
     picked_config_from_row,
     resolve_model_path,
@@ -55,6 +57,17 @@ from dynamo.profiler.utils.profiler_status import ProfilerStatus, write_profiler
 logger = logging.getLogger(__name__)
 
 _CONCRETE_BACKENDS = ["trtllm", "sglang", "vllm"]
+
+
+def _apply_tolerations_to_final_config(final_config: Any, tolerations: list) -> Any:
+    """Apply tolerations to a final DGD config (dict or multi-doc list)."""
+    if not tolerations or not final_config:
+        return final_config
+    if isinstance(final_config, list):
+        result = list(final_config)
+        result[-1] = inject_tolerations_into_dgd(result[-1], tolerations)
+        return result
+    return inject_tolerations_into_dgd(final_config, tolerations)
 
 
 def _check_auto_backend_support(model: str, system: str) -> bool:
@@ -370,6 +383,18 @@ async def run_profile(
             elif isinstance(final_config, dict):
                 final_config = apply_dgd_overrides(final_config, dgdr.overrides.dgd)
             logger.info("Applied DGD overrides to the final config.")
+
+        # Propagate profiling-job tolerations to the final DGD
+        job_tolerations = get_profiling_job_tolerations(dgdr)
+        if job_tolerations and final_config:
+            final_config = _apply_tolerations_to_final_config(
+                final_config, job_tolerations
+            )
+            logger.debug(
+                "Propagated %d profiling-job toleration(s) to the final DGD config.",
+                len(job_tolerations),
+            )
+
         if not _write_final_output(ops, final_config):
             return
 
