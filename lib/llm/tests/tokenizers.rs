@@ -52,16 +52,16 @@ const MULTIBYTE_TEST_CASES: [&str; 14] = [
     "deep learning is awesome",
     "The quick brown fox jumps over the lazy dog.",
     "line1\nline2\nline3",
-    "你好世界",                    // CJK: 3-byte UTF-8 chars
-    "😀😃😄😁",                    // Emoji: 4-byte UTF-8 chars
-    "hello 你好 world 🌍",         // Mixed ASCII + CJK + emoji
-    "café résumé naïve",           // Latin with diacritics (2-byte UTF-8)
-    "こんにちは",                  // Japanese hiragana
-    "Привет мир",                  // Cyrillic
-    "مرحبا",                       // Arabic (RTL)
-    "🧑‍💻👨‍👩‍👧‍👦", // Emoji ZWJ sequences (complex multi-codepoint)
-    "a你b😀c",                     // Interleaved single-byte and multi-byte
-    "",                            // Empty string
+    "你好世界",            // CJK: 3-byte UTF-8 chars
+    "😀😃😄😁",            // Emoji: 4-byte UTF-8 chars
+    "hello 你好 world 🌍", // Mixed ASCII + CJK + emoji
+    "café résumé naïve",   // Latin with diacritics (2-byte UTF-8)
+    "こんにちは",          // Japanese hiragana
+    "Привет мир",          // Cyrillic
+    "مرحبا",               // Arabic (RTL)
+    "🧑‍💻👨‍👩‍👧‍👦",                // Emoji ZWJ sequences (complex multi-codepoint)
+    "a你b😀c",             // Interleaved single-byte and multi-byte
+    "",                    // Empty string
 ];
 
 const STREAM_TEST_CASES: [(&str, &str); 8] = [
@@ -233,8 +233,7 @@ fn test_decode_stream_with_prefill(#[case] tokenizer: Arc<dyn Tokenizer>) {
             .encode(output_text)
             .unwrap_or_else(|e| panic!("Failed to encode output '{output_text}': {e}"));
 
-        let mut stream =
-            DecodeStream::new(tokenizer.clone(), input_encoding.token_ids(), false);
+        let mut stream = DecodeStream::new(tokenizer.clone(), input_encoding.token_ids(), false);
 
         let mut output = String::new();
         for &token_id in output_encoding.token_ids() {
@@ -263,8 +262,7 @@ fn test_decode_stream_multibyte(#[case] tokenizer: Arc<dyn Tokenizer>) {
             .encode(output_text)
             .unwrap_or_else(|e| panic!("Failed to encode output '{output_text}': {e}"));
 
-        let mut stream =
-            DecodeStream::new(tokenizer.clone(), prompt_encoding.token_ids(), false);
+        let mut stream = DecodeStream::new(tokenizer.clone(), prompt_encoding.token_ids(), false);
 
         let mut reassembled = String::new();
         for &token_id in output_encoding.token_ids() {
@@ -277,7 +275,8 @@ fn test_decode_stream_multibyte(#[case] tokenizer: Arc<dyn Tokenizer>) {
         }
 
         assert_eq!(
-            reassembled.trim(), output_text,
+            reassembled.trim(),
+            output_text,
             "DecodeStream roundtrip failed for: '{output_text}'"
         );
     }
@@ -291,10 +290,7 @@ fn test_hash_determinism(#[case] tokenizer: Arc<dyn Tokenizer>) {
     let hashes1 = compute_hashes_for_tokenizer(tokenizer.as_ref(), prompts);
     let hashes2 = compute_hashes_for_tokenizer(tokenizer.as_ref(), prompts);
     assert_eq!(hashes1, hashes2, "Hashes should be deterministic");
-    assert!(
-        hashes1.iter().all(|&h| h != 0),
-        "Hashes should be non-zero"
-    );
+    assert!(hashes1.iter().all(|&h| h != 0), "Hashes should be non-zero");
 }
 
 // ---------------------------------------------------------------------------
