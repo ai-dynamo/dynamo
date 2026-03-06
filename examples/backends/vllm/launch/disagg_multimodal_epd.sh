@@ -4,6 +4,9 @@
 set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
+SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+source "$SCRIPT_DIR/../../../common/launch_utils.sh"
+
 # Default values
 MODEL_NAME="llava-hf/llava-1.5-7b-hf"
 
@@ -57,35 +60,12 @@ done
 
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
-echo "=========================================="
 if [[ "$SINGLE_GPU" == "true" ]]; then
     GPU_LABEL="1 GPU"
 else
     GPU_LABEL="3 GPUs"
 fi
-echo "Launching Disaggregated Multimodal E/P/D ($GPU_LABEL)"
-echo "=========================================="
-echo "Model:       $MODEL_NAME"
-echo "Frontend:    http://localhost:$HTTP_PORT"
-echo "=========================================="
-echo ""
-echo "Example test command:"
-echo ""
-echo "  curl http://localhost:${HTTP_PORT}/v1/chat/completions \\"
-echo "    -H 'Content-Type: application/json' \\"
-echo "    -d '{"
-echo "      \"model\": \"${MODEL_NAME}\","
-echo "      \"messages\": [{"
-echo "        \"role\": \"user\","
-echo "        \"content\": ["
-echo "          {\"type\": \"text\", \"text\": \"Describe the image.\"},"
-echo "          {\"type\": \"image_url\", \"image_url\": {\"url\": \"https://upload.wikimedia.org/wikipedia/commons/thumb/3/3a/Cat03.jpg/480px-Cat03.jpg\"}}"
-echo "        ]"
-echo "      }],"
-echo "      \"max_tokens\": 50"
-echo "    }'"
-echo ""
-echo "=========================================="
+print_launch_banner --multimodal "Launching Disaggregated Multimodal E/P/D ($GPU_LABEL)" "$MODEL_NAME" "$HTTP_PORT"
 
 
 # Start frontend (no router mode)
@@ -101,7 +81,11 @@ DYN_ENCODE_WORKER_GPU=${DYN_ENCODE_WORKER_GPU:-0}
 DYN_PREFILL_WORKER_GPU=${DYN_PREFILL_WORKER_GPU:-1}
 DYN_DECODE_WORKER_GPU=${DYN_DECODE_WORKER_GPU:-2}
 
-# GPU memory utilization for workers
+# GPU memory utilization for workers.
+# NOTE: --kv-cache-memory-bytes (set below for P/D workers) overrides
+# --gpu-memory-utilization for KV cache sizing. Per vLLM CacheConfig:
+# "kv_cache_memory_bytes (when not-None) ignores gpu_memory_utilization"
+# Ref: https://docs.vllm.ai/en/stable/api/vllm/config/cache/
 DYN_ENCODE_GPU_MEM=${DYN_ENCODE_GPU_MEM:-0.9}
 DYN_PREFILL_GPU_MEM=${DYN_PREFILL_GPU_MEM:-0.9}
 DYN_DECODE_GPU_MEM=${DYN_DECODE_GPU_MEM:-0.9}
@@ -135,5 +119,5 @@ echo "=================================================="
 echo "All components started. Waiting for initialization..."
 echo "=================================================="
 
-# Wait for all background processes to complete
-wait
+# Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
+wait_any_exit

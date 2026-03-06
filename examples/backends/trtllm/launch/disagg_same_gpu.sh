@@ -46,14 +46,10 @@ export DECODE_ENGINE_ARGS=${DECODE_ENGINE_ARGS:-"$DYNAMO_HOME/examples/backends/
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-"0"}
 export MODALITY=${MODALITY:-"text"}
 
-# Setup cleanup trap
-cleanup() {
-    echo "Cleaning up background processes..."
-    kill $DYNAMO_PID $PREFILL_PID 2>/dev/null || true
-    wait $DYNAMO_PID $PREFILL_PID 2>/dev/null || true
-    echo "Cleanup complete."
-}
-trap cleanup EXIT INT TERM
+set -e
+trap 'echo Cleaning up...; kill 0' EXIT
+
+source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
 ENABLE_OTEL=false
 while [[ $# -gt 0 ]]; do
@@ -91,20 +87,16 @@ if [ "$ENABLE_OTEL" = true ]; then
 fi
 OVERRIDE_ARGS=(--override-engine-args "{${OVERRIDE_PAIRS}}")
 
-echo "=========================================="
-echo "Launching Disaggregated on Same GPU (1 GPU)"
-echo "=========================================="
-echo "Model:       $MODEL"
-echo "Max seq len: $MAX_SEQ_LEN"
-echo "GPU Mem:     ${GPU_MEM_FRACTION} per worker (~${_EW_TOTAL_GIB} GiB each)"
-echo "  estimate:  weights=${_EW_WEIGHTS_GIB} + kv=${_EW_KV_GIB} + overhead=${_EW_OVERHEAD_GIB} GiB"
-echo "=========================================="
+HTTP_PORT="${DYN_HTTP_PORT:-8000}"
+print_launch_banner "Launching Disaggregated on Same GPU (1 GPU)" "$MODEL" "$HTTP_PORT" \
+    "Max seq len: $MAX_SEQ_LEN" \
+    "GPU Mem:     ${GPU_MEM_FRACTION} per worker (~${_EW_TOTAL_GIB} GiB each)" \
+    "  estimate:  weights=${_EW_WEIGHTS_GIB} + kv=${_EW_KV_GIB} + overhead=${_EW_OVERHEAD_GIB} GiB"
 
 # run frontend
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
 OTEL_SERVICE_NAME=dynamo-frontend \
 python3 -m dynamo.frontend &
-DYNAMO_PID=$!
 
 # run prefill worker (shares GPU with decode)
 OTEL_SERVICE_NAME=dynamo-worker-prefill \
@@ -118,9 +110,8 @@ python3 -m dynamo.trtllm \
   --publish-events-and-metrics \
   --disaggregation-mode prefill \
   "${OVERRIDE_ARGS[@]}" &
-PREFILL_PID=$!
 
-# run decode worker (shares GPU with prefill) - foreground
+# run decode worker (shares GPU with prefill)
 OTEL_SERVICE_NAME=dynamo-worker-decode \
 CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES \
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
@@ -131,4 +122,7 @@ python3 -m dynamo.trtllm \
   --modality "$MODALITY" \
   --publish-events-and-metrics \
   --disaggregation-mode decode \
-  "${OVERRIDE_ARGS[@]}"
+  "${OVERRIDE_ARGS[@]}" &
+
+# Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
+wait_any_exit

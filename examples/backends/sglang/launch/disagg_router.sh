@@ -5,6 +5,9 @@
 # Disaggregated serving with KV-aware routing: 2 prefill + 2 decode workers.
 # GPUs: 4
 
+SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+source "$SCRIPT_DIR/../../../common/launch_utils.sh"
+
 # Setup cleanup trap
 cleanup() {
     echo "Cleaning up background processes..."
@@ -51,24 +54,7 @@ fi
 
 MODEL="Qwen/Qwen3-0.6B"
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
-echo "=========================================="
-echo "Launching Disaggregated Router (2P + 2D)"
-echo "=========================================="
-echo "Model:       $MODEL"
-echo "Frontend:    http://localhost:$HTTP_PORT"
-echo "=========================================="
-echo ""
-echo "Example test command:"
-echo ""
-echo "  curl http://localhost:${HTTP_PORT}/v1/chat/completions \\"
-echo "    -H 'Content-Type: application/json' \\"
-echo "    -d '{"
-echo "      \"model\": \"${MODEL}\","
-echo "      \"messages\": [{\"role\": \"user\", \"content\": \"Explain why Roger Federer is considered one of the greatest tennis players of all time\"}],"
-echo "      \"max_tokens\": 32"
-echo "    }'"
-echo ""
-echo "=========================================="
+print_launch_banner "Launching Disaggregated Router (2P + 2D)" "$MODEL" "$HTTP_PORT"
 
 # Start frontend with KV routing
 # The frontend will automatically detect prefill workers and activate an internal prefill router
@@ -145,4 +131,5 @@ CUDA_VISIBLE_DEVICES=2 python3 -m dynamo.sglang \
 DECODE_PID2=$!
 
 # Wait for any worker to exit (keeps script running)
-wait
+# Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
+wait_any_exit

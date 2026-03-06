@@ -35,43 +35,20 @@ else
     GPU_MEM_FRACTION=$(gpu_worker_fraction sglang)
 fi
 
-# Setup cleanup trap
-cleanup() {
-    echo "Cleaning up background processes..."
-    kill $DYNAMO_PID $PREFILL_PID 2>/dev/null || true
-    wait $DYNAMO_PID $PREFILL_PID 2>/dev/null || true
-    echo "Cleanup complete."
-}
-trap cleanup EXIT INT TERM
+set -e
+trap 'echo Cleaning up...; kill 0' EXIT
 
+source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
-echo "=========================================="
-echo "Launching Disaggregated (same GPU)"
-echo "=========================================="
-echo "Model:       $MODEL"
-echo "Frontend:    http://localhost:$HTTP_PORT"
-echo "Context len: $CONTEXT_LENGTH"
-echo "GPU Mem:     ${GPU_MEM_FRACTION} per worker (~${_EW_TOTAL_GIB} GiB each)"
-echo "  estimate:  weights=${_EW_WEIGHTS_GIB} + kv=${_EW_KV_GIB} + overhead=${_EW_OVERHEAD_GIB} GiB"
-echo "=========================================="
-echo ""
-echo "Example test command:"
-echo ""
-echo "  curl http://localhost:${HTTP_PORT}/v1/chat/completions \\"
-echo "    -H 'Content-Type: application/json' \\"
-echo "    -d '{"
-echo "      \"model\": \"${MODEL}\","
-echo "      \"messages\": [{\"role\": \"user\", \"content\": \"Explain why Roger Federer is considered one of the greatest tennis players of all time\"}],"
-echo "      \"max_tokens\": 32"
-echo "    }'"
-echo ""
-echo "=========================================="
+print_launch_banner "Launching Disaggregated (same GPU)" "$MODEL" "$HTTP_PORT" \
+    "Context len: $CONTEXT_LENGTH" \
+    "GPU Mem:     ${GPU_MEM_FRACTION} per worker (~${_EW_TOTAL_GIB} GiB each)" \
+    "  estimate:  weights=${_EW_WEIGHTS_GIB} + kv=${_EW_KV_GIB} + overhead=${_EW_OVERHEAD_GIB} GiB"
 
 # run ingress with KV router mode for disaggregated setup
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
 python3 -m dynamo.frontend --router-mode kv &
-DYNAMO_PID=$!
 
 # run prefill worker with metrics on port 8081
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
@@ -93,7 +70,6 @@ python3 -m dynamo.sglang \
   --delete-ckpt-after-loading \
   --max-running-requests "$MAX_RUNNING_REQUESTS" \
   --enable-metrics &
-PREFILL_PID=$!
 
 # Wait for prefill worker to initialize before starting decode worker
 # This prevents both workers from competing for GPU memory simultaneously, which can cause OOM.
@@ -104,7 +80,7 @@ PREFILL_PID=$!
 echo "Waiting for prefill worker to initialize..."
 sleep 5
 
-# run decode worker with metrics on port 8082 (foreground)
+# run decode worker with metrics on port 8082
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
 python3 -m dynamo.sglang \
   --model-path "$MODEL" \
@@ -123,4 +99,7 @@ python3 -m dynamo.sglang \
   --enable-memory-saver \
   --delete-ckpt-after-loading \
   --max-running-requests "$MAX_RUNNING_REQUESTS" \
-  --enable-metrics
+  --enable-metrics &
+
+# Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
+wait_any_exit

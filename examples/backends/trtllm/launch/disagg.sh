@@ -2,6 +2,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+source "$SCRIPT_DIR/../../../common/launch_utils.sh"
+
+set -e
+trap 'echo Cleaning up...; kill 0' EXIT
+
 # Environment variables with defaults
 export DYNAMO_HOME=${DYNAMO_HOME:-"/workspace"}
 export MODEL_PATH=${MODEL_PATH:-"Qwen/Qwen3-0.6B"}
@@ -13,15 +19,6 @@ export DECODE_CUDA_VISIBLE_DEVICES=${DECODE_CUDA_VISIBLE_DEVICES:-"1"}
 export MODALITY=${MODALITY:-"text"}
 # If you want to use multimodal, set MODALITY to "multimodal"
 #export MODALITY=${MODALITY:-"multimodal"}
-
-# Setup cleanup trap
-cleanup() {
-    echo "Cleaning up background processes..."
-    kill $DYNAMO_PID $PREFILL_PID 2>/dev/null || true
-    wait $DYNAMO_PID $PREFILL_PID 2>/dev/null || true
-    echo "Cleanup complete."
-}
-trap cleanup EXIT INT TERM
 
 ENABLE_OTEL=false
 while [[ $# -gt 0 ]]; do
@@ -59,7 +56,6 @@ fi
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
 OTEL_SERVICE_NAME=dynamo-frontend \
 python3 -m dynamo.frontend &
-DYNAMO_PID=$!
 
 # run prefill worker
 OTEL_SERVICE_NAME=dynamo-worker-prefill CUDA_VISIBLE_DEVICES=$PREFILL_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
@@ -69,7 +65,6 @@ OTEL_SERVICE_NAME=dynamo-worker-prefill CUDA_VISIBLE_DEVICES=$PREFILL_CUDA_VISIB
   --modality "$MODALITY" \
   --disaggregation-mode prefill \
   "${TRACE_ARGS[@]}" &
-PREFILL_PID=$!
 
 # run decode worker
 OTEL_SERVICE_NAME=dynamo-worker-decode CUDA_VISIBLE_DEVICES=$DECODE_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
@@ -78,4 +73,7 @@ OTEL_SERVICE_NAME=dynamo-worker-decode CUDA_VISIBLE_DEVICES=$DECODE_CUDA_VISIBLE
   --extra-engine-args  "$DECODE_ENGINE_ARGS" \
   --modality "$MODALITY" \
   --disaggregation-mode decode \
-  "${TRACE_ARGS[@]}"
+  "${TRACE_ARGS[@]}" &
+
+# Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
+wait_any_exit

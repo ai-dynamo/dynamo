@@ -5,6 +5,9 @@
 # Diffusion language model (LLaDA2.0). Text generation via iterative refinement.
 # GPUs: 1
 
+SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+source "$SCRIPT_DIR/../../../common/launch_utils.sh"
+
 set -e
 
 # Setup cleanup trap
@@ -30,30 +33,23 @@ ENDPOINT="${ENDPOINT:-generate}"
 HTTP_PORT="${HTTP_PORT:-8001}"
 TP_SIZE="${TP_SIZE:-1}"
 
-echo "=========================================="
-echo "Launching Diffusion LM Worker (LLaDA2.0)"
-echo "=========================================="
-echo "Model: $MODEL_PATH"
-echo "Namespace: $NAMESPACE"
-echo "Component: $COMPONENT"
-echo "Frontend Port: $HTTP_PORT"
-echo "TP Size: $TP_SIZE"
-echo "Diffusion Algorithm: ${DLLM_ALGORITHM:-LowConfidence}"
-echo "Algorithm Config: ${DLLM_ALGORITHM_CONFIG:-default}"
-echo "=========================================="
-echo ""
-echo "Example test command:"
-echo ""
-echo "  curl http://localhost:${HTTP_PORT}/v1/chat/completions \\"
-echo "    -H 'Content-Type: application/json' \\"
-echo "    -d '{"
-echo "      \"model\": \"${MODEL_PATH}\","
-echo "      \"messages\": [{\"role\": \"user\", \"content\": \"Explain why Roger Federer is considered one of the greatest tennis players of all time\"}],"
-echo "      \"temperature\": 0.7,"
-echo "      \"max_tokens\": 512"
-echo "    }'"
-echo ""
-echo "=========================================="
+print_launch_banner --no-curl "Launching Diffusion LM Worker (LLaDA2.0)" "$MODEL_PATH" "$HTTP_PORT" \
+    "Namespace:   $NAMESPACE" \
+    "Component:   $COMPONENT" \
+    "TP Size:     $TP_SIZE" \
+    "Diffusion Algorithm: ${DLLM_ALGORITHM:-LowConfidence}" \
+    "Algorithm Config: ${DLLM_ALGORITHM_CONFIG:-default}"
+
+print_curl_footer <<CURL
+  curl http://localhost:${HTTP_PORT}/v1/chat/completions \\
+    -H 'Content-Type: application/json' \\
+    -d '{
+      "model": "${MODEL_PATH}",
+      "messages": [{"role": "user", "content": "${EXAMPLE_PROMPT}"}],
+      "temperature": 0.7,
+      "max_tokens": 512
+    }'
+CURL
 
 # Launch frontend (OpenAI-compatible API server)
 echo "Starting Dynamo Frontend on port $HTTP_PORT..."
@@ -88,4 +84,7 @@ if [ -n "$DLLM_ALGORITHM_CONFIG" ]; then
 fi
 
 # Execute the command
-eval $CMD
+eval $CMD &
+
+# Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
+wait_any_exit
