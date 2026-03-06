@@ -28,7 +28,9 @@ Agentic hints are per-request metadata that the agent client (e.g. Claude Code, 
 
 - **Flow:** Harness sets hints in the request → Dynamo frontend parses `nvext` into routing hints → KV router uses them for queue ordering and worker selection → backends use them for priority scheduling and cache eviction.
 
-![Agentic workflow: Harness → hints in request → Dynamo frontend → routing hints → KV router (queue order, worker choice) → backend](../diagrams/agentic-workflow.png)
+![Agentic workflow: Harness → hints in request → Dynamo frontend → routing hints → KV router (queue order, worker choice) → backend](../diagrams/agentic_workflow.png)
+
+The request body includes `nvext.agent_hints` (routing, scheduling) and `nvext.cache_control` (TTL-based pinning); the frontend passes the former to the KV router and the latter to the KV block manager for cache pinning, prefetching, and eviction.
 
 | Hint | Description |
 |------|-------------|
