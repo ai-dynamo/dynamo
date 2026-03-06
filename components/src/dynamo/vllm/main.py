@@ -231,6 +231,13 @@ def setup_metrics_collection(config: Config, generate_endpoint, logger):
         )
 
         multiproc_dir = os.environ.get("PROMETHEUS_MULTIPROC_DIR")
+        # After CRIU restore to another node, env still has the checkpoint pod's path
+        # but that directory exists only on the checkpoint node; create it here if missing.
+        if multiproc_dir and not os.path.isdir(multiproc_dir):
+            try:
+                os.makedirs(multiproc_dir, exist_ok=True)
+            except OSError:
+                pass
         if multiproc_dir and os.path.isdir(multiproc_dir):
             try:
                 # MultiProcessCollector reads metrics from .db files in PROMETHEUS_MULTIPROC_DIR

@@ -9,8 +9,6 @@ for importing, mapping, and unmapping GPU memory.
 
 from __future__ import annotations
 
-import os
-
 from cuda.bindings import driver as cuda
 from gpu_memory_service.common.cuda_vmm_utils import check_cuda_result
 from gpu_memory_service.common.types import GrantedLockType
@@ -19,25 +17,18 @@ from gpu_memory_service.common.types import GrantedLockType
 def import_handle_from_fd(fd: int) -> int:
     """Import a CUDA memory handle from a file descriptor.
 
-    Closes the FD after import — the imported handle holds its own reference
-    to the physical allocation. Leaving the FD open leaks a DMA-buf ref that
-    prevents cuMemRelease from freeing GPU memory.
-
     Args:
         fd: POSIX file descriptor received via SCM_RIGHTS.
 
     Returns:
         CUDA memory handle.
     """
-    try:
-        result, handle = cuda.cuMemImportFromShareableHandle(
-            fd,
-            cuda.CUmemAllocationHandleType.CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR,
-        )
-        check_cuda_result(result, "cuMemImportFromShareableHandle")
-        return int(handle)
-    finally:
-        os.close(fd)
+    result, handle = cuda.cuMemImportFromShareableHandle(
+        fd,
+        cuda.CUmemAllocationHandleType.CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR,
+    )
+    check_cuda_result(result, "cuMemImportFromShareableHandle")
+    return int(handle)
 
 
 def reserve_va(size: int, granularity: int) -> int:
@@ -120,31 +111,6 @@ def release_handle(handle: int) -> None:
     check_cuda_result(result, "cuMemRelease")
 
 
-def validate_pointer(va: int) -> bool:
-    """Validate that a mapped VA is accessible.
-
-    Returns True if the pointer is valid, False otherwise (logs a warning).
-    """
-    result, _dev_ptr = cuda.cuPointerGetAttribute(
-        cuda.CUpointer_attribute.CU_POINTER_ATTRIBUTE_DEVICE_POINTER, va
-    )
-    if result != cuda.CUresult.CUDA_SUCCESS:
-        err_result, err_str = cuda.cuGetErrorString(result)
-        err_msg = ""
-        if err_result == cuda.CUresult.CUDA_SUCCESS and err_str:
-            err_msg = err_str.decode() if isinstance(err_str, bytes) else str(err_str)
-        import logging
-
-        logging.getLogger(__name__).warning(
-            "cuPointerGetAttribute failed for VA 0x%x: %s (%s)",
-            va,
-            result,
-            err_msg,
-        )
-        return False
-    return True
-
-
 def synchronize() -> None:
     """Synchronize the current CUDA context.
 
@@ -164,17 +130,3 @@ def set_current_device(device: int) -> None:
     check_cuda_result(result, "cuDevicePrimaryCtxRetain")
     (result,) = cuda.cuCtxSetCurrent(ctx)
     check_cuda_result(result, "cuCtxSetCurrent")
-
-
-def get_context_device() -> int:
-    """Return the device ordinal bound to the current CUDA context.
-
-    After CRIU restore with cuda-checkpoint device remapping,
-    cuDevicePrimaryCtxRetain may succeed for the old ordinal (the context
-    was preserved), but the context is now bound to a different physical
-    device.  This function queries the actual ordinal so that VMM calls
-    like cuMemSetAccess use the correct location.id.
-    """
-    result, dev = cuda.cuCtxGetDevice()
-    check_cuda_result(result, "cuCtxGetDevice")
-    return int(dev)
