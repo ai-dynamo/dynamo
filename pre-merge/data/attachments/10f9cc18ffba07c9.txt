@@ -1,0 +1,43 @@
+INFO     NatsServer:managed_process.py:307 Running command: nats-server --trace -p 4258 in /workspace
+INFO     NatsServer:managed_process.py:473 Checking Port: 4258
+INFO     NatsServer:managed_process.py:481 SUCCESS: Check Port: 4258
+INFO     NatsServer:managed_process.py:586 Running custom health check '_nats_ready'
+DEBUG    asyncio:selector_events.py:64 Using selector: EpollSelector
+INFO     NatsServer:managed_process.py:606 SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+INFO     EtcdServer:managed_process.py:307 Running command: etcd --listen-client-urls http://0.0.0.0:2438 --advertise-client-urls http://0.0.0.0:2438 --listen-peer-urls http://0.0.0.0:2439 --initial-advertise-peer-urls http://localhost:2439 --initial-cluster default=http://localhost:2439 --data-dir /tmp/etcd_gt4ftmo_ in /workspace
+INFO     EtcdServer:managed_process.py:473 Checking Port: 2438
+INFO     EtcdServer:managed_process.py:481 SUCCESS: Check Port: 2438
+INFO     ManagedProcess:managed_process.py:307 Running command: vllm serve --block-size 16 --port 8019 --kv-transfer-config {"kv_connector":"DynamoConnector","kv_role":"kv_both", "kv_connector_module_path": "kvbm.vllm_integration.connector"} Qwen/Qwen3-0.6B --max-model-len 8000 --num-gpu-blocks-override 20 in /workspace
+INFO     ManagedProcess:managed_process.py:473 Checking Port: 8019
+INFO     ManagedProcess:managed_process.py:481 SUCCESS: Check Port: 8019
+INFO     ManagedProcess:managed_process.py:473 Checking Port: 6890
+INFO     ManagedProcess:managed_process.py:481 SUCCESS: Check Port: 6890
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8019
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8019 "POST /v1/chat/completions HTTP/1.1" 200 644
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:6890
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:6890 "GET /metrics HTTP/1.1" 200 1970
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8019
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8019 "POST /v1/chat/completions HTTP/1.1" 200 648
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:6890
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:6890 "GET /metrics HTTP/1.1" 200 1970
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8019
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8019 "POST /v1/chat/completions HTTP/1.1" 200 642
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:6890
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:6890 "GET /metrics HTTP/1.1" 200 1972
+INFO     ManagedProcess:managed_process.py:388 Terminating process group: 1497
+INFO     ManagedProcess:managed_process.py:31 Terminating PID: 1497 name: vllm
+INFO     ManagedProcess:managed_process.py:36 Sending SIGTERM (kill): 1497 vllm
+INFO     ManagedProcess:managed_process.py:31 Terminating PID: 1499 name: tee
+INFO     ManagedProcess:managed_process.py:36 Sending SIGTERM (kill): 1499 tee
+INFO     ManagedProcess:managed_process.py:31 Terminating PID: 1498 name: sed
+INFO     ManagedProcess:managed_process.py:36 Sending SIGTERM (kill): 1498 sed
+INFO     EtcdServer:managed_process.py:388 Terminating process group: 1484
+INFO     EtcdServer:managed_process.py:31 Terminating PID: 1484 name: etcd
+INFO     EtcdServer:managed_process.py:36 Sending SIGTERM (kill): 1484 etcd
+INFO     EtcdServer:managed_process.py:31 Terminating PID: 1485 name: sed
+INFO     EtcdServer:managed_process.py:36 Sending SIGTERM (kill): 1485 sed
+INFO     NatsServer:managed_process.py:388 Terminating process group: 1472
+INFO     NatsServer:managed_process.py:31 Terminating PID: 1472 name: nats-server
+INFO     NatsServer:managed_process.py:36 Sending SIGTERM (kill): 1472 nats-server
+INFO     NatsServer:managed_process.py:31 Terminating PID: 1473 name: sed
+INFO     NatsServer:managed_process.py:36 Sending SIGTERM (kill): 1473 sed

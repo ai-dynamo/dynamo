@@ -1,0 +1,132 @@
+INFO     NatsServer:managed_process.py:307 Running command: nats-server --trace -p 4296 in /workspace
+INFO     NatsServer:managed_process.py:473 Checking Port: 4296
+INFO     NatsServer:managed_process.py:481 SUCCESS: Check Port: 4296
+INFO     NatsServer:managed_process.py:586 Running custom health check '_nats_ready'
+DEBUG    asyncio:selector_events.py:64 Using selector: EpollSelector
+INFO     NatsServer:managed_process.py:606 SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+INFO     EtcdServer:managed_process.py:307 Running command: etcd --listen-client-urls http://0.0.0.0:2447 --advertise-client-urls http://0.0.0.0:2447 --listen-peer-urls http://0.0.0.0:2448 --initial-advertise-peer-urls http://localhost:2448 --initial-cluster default=http://localhost:2448 --data-dir /tmp/etcd_nm13wykb in /workspace
+INFO     EtcdServer:managed_process.py:473 Checking Port: 2447
+INFO     EtcdServer:managed_process.py:481 SUCCESS: Check Port: 2447
+INFO     tests.router.test_router_e2e_with_trtllm:test_router_e2e_with_trtllm.py:435 Starting TRT-LLM router prefix reuse test with two workers
+INFO     tests.router.test_router_e2e_with_trtllm:test_router_e2e_with_trtllm.py:221 Created TRT-LLM worker 0 on GPU 0 (gpu_mem_frac=0.4, system_port=8111) with endpoint: dyn://test-namespace-eqywivfuum.tensorrt_llm.generate
+INFO     tests.router.test_router_e2e_with_trtllm:test_router_e2e_with_trtllm.py:221 Created TRT-LLM worker 1 on GPU 0 (gpu_mem_frac=0.4, system_port=8112) with endpoint: dyn://test-namespace-eqywivfuum.tensorrt_llm.generate
+INFO     tests.router.test_router_e2e_with_trtllm:test_router_e2e_with_trtllm.py:235 [TRTLLMProcess] Starting 2 worker processes sequentially...
+INFO     tests.router.test_router_e2e_with_trtllm:test_router_e2e_with_trtllm.py:241 [TRTLLMProcess] Starting TRT-LLM worker 0...
+INFO     tests.router.test_router_e2e_with_trtllm:test_router_e2e_with_trtllm.py:255 [TRTLLMProcess] Launching process 0 (pid will be assigned)...
+INFO     ManagedProcess:managed_process.py:307 Running command: python3 -m dynamo.trtllm --model-path TinyLlama/TinyLlama-1.1B-Chat-v1.0 --kv-block-size 32 --publish-events-and-metrics --free-gpu-memory-fraction 0.4 --max-seq-len 1024 in /workspace
+INFO     tests.router.test_router_e2e_with_trtllm:test_router_e2e_with_trtllm.py:259 [TRTLLMProcess] Worker 0 launched with PID: 1768
+INFO     tests.router.test_router_e2e_with_trtllm:test_router_e2e_with_trtllm.py:268 [TRTLLMProcess] Waiting 5s for worker 0 to initialize before starting next worker...
+INFO     tests.router.test_router_e2e_with_trtllm:test_router_e2e_with_trtllm.py:241 [TRTLLMProcess] Starting TRT-LLM worker 1...
+INFO     tests.router.test_router_e2e_with_trtllm:test_router_e2e_with_trtllm.py:255 [TRTLLMProcess] Launching process 1 (pid will be assigned)...
+INFO     ManagedProcess:managed_process.py:307 Running command: python3 -m dynamo.trtllm --model-path TinyLlama/TinyLlama-1.1B-Chat-v1.0 --kv-block-size 32 --publish-events-and-metrics --free-gpu-memory-fraction 0.4 --max-seq-len 1024 in /workspace
+INFO     tests.router.test_router_e2e_with_trtllm:test_router_e2e_with_trtllm.py:259 [TRTLLMProcess] Worker 1 launched with PID: 1811
+INFO     tests.router.test_router_e2e_with_trtllm:test_router_e2e_with_trtllm.py:284 [TRTLLMProcess] All 2 workers launched with sequential initialization.
+INFO     tests.router.test_router_e2e_with_trtllm:test_router_e2e_with_trtllm.py:287 [TRTLLMProcess] Waiting for health checks to complete...
+INFO     tests.router.test_router_e2e_with_trtllm:test_router_e2e_with_trtllm.py:291 [TRTLLMProcess] Checking health for worker 0...
+INFO     tests.router.test_router_e2e_with_trtllm:test_router_e2e_with_trtllm.py:296 [TRTLLMProcess] Worker 0 health checks passed
+INFO     tests.router.test_router_e2e_with_trtllm:test_router_e2e_with_trtllm.py:291 [TRTLLMProcess] Checking health for worker 1...
+INFO     tests.router.test_router_e2e_with_trtllm:test_router_e2e_with_trtllm.py:296 [TRTLLMProcess] Worker 1 health checks passed
+INFO     tests.router.test_router_e2e_with_trtllm:test_router_e2e_with_trtllm.py:303 [TRTLLMProcess] All workers started successfully and passed health checks!
+INFO     tests.router.test_router_e2e_with_trtllm:test_router_e2e_with_trtllm.py:446 Starting 2 TRT-LLM worker processes on single GPU (gpu_mem_frac=0.4)
+INFO     tests.router.test_router_e2e_with_trtllm:test_router_e2e_with_trtllm.py:449 All TRT-LLM workers using namespace: test-namespace-eqywivfuum
+DEBUG    asyncio:selector_events.py:64 Using selector: EpollSelector
+DEBUG    asyncio:selector_events.py:64 Using selector: EpollSelector
+INFO     tests.router.common:common.py:342 Waiting for workers to be ready
+INFO     tests.router.common:common.py:354 Found 1 instance(s): [2479966901711983628]
+INFO     tests.router.common:common.py:354 Found 1 instance(s): [2479966901711983628]
+INFO     tests.router.common:common.py:354 Found 1 instance(s): [2479966901711983628]
+INFO     tests.router.common:common.py:354 Found 1 instance(s): [2479966901711983628]
+INFO     tests.router.common:common.py:354 Found 1 instance(s): [2479966901711983628]
+INFO     tests.router.common:common.py:354 Found 2 instance(s): [2479966901711983628, 2479966901711983630]
+INFO     tests.router.common:common.py:370 Sending warmup request with 4 tokens
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [313]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29950]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 2
+DEBUG    tests.router.common:common.py:658 Successfully verified 2 tokens generated as expected via KvRouter with ignore_eos=True
+INFO     tests.router.common:common.py:387 All 2 workers are ready
+INFO     tests.router.common:common.py:2021 Workers ready: [2479966901711983628, 2479966901711983630]
+INFO     tests.router.common:common.py:2039 Routing targets: worker_a=(id=2479966901711983628, dp_rank=None), worker_b=(id=2479966901711983630, dp_rank=None)
+INFO     tests.router.common:common.py:2082 Sending request 1/5 with 64 tokens - FORCING worker_id=2479966901711983628
+DEBUG    tests.router.common:common.py:575 Sending request to worker with worker_id=2479966901711983628 (attempt 1)
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29871]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29896]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 2
+DEBUG    tests.router.common:common.py:658 Successfully verified 2 tokens generated as expected via KvRouter with ignore_eos=True
+INFO     tests.router.common:common.py:2100 Request 1 response: prefill_worker_id=2479966901711983628, decode_worker_id=2479966901711983628, prefill_dp_rank=0, decode_dp_rank=0
+INFO     tests.router.common:common.py:2082 Sending request 2/5 with 96 tokens - FORCING worker_id=2479966901711983628
+DEBUG    tests.router.common:common.py:575 Sending request to worker with worker_id=2479966901711983628 (attempt 1)
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29879]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29871]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 2
+DEBUG    tests.router.common:common.py:658 Successfully verified 2 tokens generated as expected via KvRouter with ignore_eos=True
+INFO     tests.router.common:common.py:2100 Request 2 response: prefill_worker_id=2479966901711983628, decode_worker_id=2479966901711983628, prefill_dp_rank=0, decode_dp_rank=0
+INFO     tests.router.common:common.py:2082 Sending request 3/5 with 96 tokens - FORCING worker_id=2479966901711983630
+DEBUG    tests.router.common:common.py:575 Sending request to worker with worker_id=2479966901711983630 (attempt 1)
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29975]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [278]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 2
+DEBUG    tests.router.common:common.py:658 Successfully verified 2 tokens generated as expected via KvRouter with ignore_eos=True
+INFO     tests.router.common:common.py:2100 Request 3 response: prefill_worker_id=2479966901711983630, decode_worker_id=2479966901711983630, prefill_dp_rank=0, decode_dp_rank=0
+INFO     tests.router.common:common.py:2082 Sending request 4/5 with 128 tokens
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29871]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29900]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 2
+DEBUG    tests.router.common:common.py:658 Successfully verified 2 tokens generated as expected via KvRouter with ignore_eos=True
+INFO     tests.router.common:common.py:2100 Request 4 response: prefill_worker_id=2479966901711983628, decode_worker_id=2479966901711983628, prefill_dp_rank=0, decode_dp_rank=0
+INFO     tests.router.common:common.py:2082 Sending request 5/5 with 96 tokens
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [354]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29891]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 2
+DEBUG    tests.router.common:common.py:658 Successfully verified 2 tokens generated as expected via KvRouter with ignore_eos=True
+INFO     tests.router.common:common.py:2100 Request 5 response: prefill_worker_id=2479966901711983630, decode_worker_id=2479966901711983630, prefill_dp_rank=0, decode_dp_rank=0
+INFO     tests.router.common:common.py:2154 Response routing verified: req4 → worker_a (id=2479966901711983628, dp_rank=None), req5 → worker_b (id=2479966901711983630, dp_rank=None)
+INFO     tests.router.common:common.py:2172 Events by (worker_id, dp_rank): [((2479966901711983630, 0), 4), ((2479966901711983628, 0), 5)]
+INFO     tests.router.common:common.py:2192 Successfully verified cross-worker routing: worker_a (2479966901711983628, 0) has 5 events, worker_b (2479966901711983630, 0) has 4 events
+INFO     tests.router.test_router_e2e_with_trtllm:test_router_e2e_with_trtllm.py:311 Stopping TRT-LLM worker 0
+INFO     ManagedProcess:managed_process.py:388 Terminating process group: 1768
+INFO     ManagedProcess:managed_process.py:31 Terminating PID: 1768 name: python3
+INFO     ManagedProcess:managed_process.py:36 Sending SIGTERM (kill): 1768 python3
+INFO     ManagedProcess:managed_process.py:31 Terminating PID: 1770 name: tee
+INFO     ManagedProcess:managed_process.py:36 Sending SIGTERM (kill): 1770 tee
+INFO     ManagedProcess:managed_process.py:31 Terminating PID: 1769 name: sed
+INFO     ManagedProcess:managed_process.py:36 Sending SIGTERM (kill): 1769 sed
+INFO     tests.router.test_router_e2e_with_trtllm:test_router_e2e_with_trtllm.py:311 Stopping TRT-LLM worker 1
+INFO     ManagedProcess:managed_process.py:388 Terminating process group: 1811
+INFO     ManagedProcess:managed_process.py:31 Terminating PID: 1811 name: python3
+INFO     ManagedProcess:managed_process.py:36 Sending SIGTERM (kill): 1811 python3
+INFO     ManagedProcess:managed_process.py:31 Terminating PID: 1813 name: tee
+INFO     ManagedProcess:managed_process.py:36 Sending SIGTERM (kill): 1813 tee
+INFO     ManagedProcess:managed_process.py:31 Terminating PID: 1812 name: sed
+INFO     ManagedProcess:managed_process.py:36 Sending SIGTERM (kill): 1812 sed
+INFO     tests.router.test_router_e2e_with_trtllm:test_router_e2e_with_trtllm.py:316 Waiting for TRT-LLM worker resources to fully clean up...
+INFO     EtcdServer:managed_process.py:388 Terminating process group: 1755
+INFO     EtcdServer:managed_process.py:31 Terminating PID: 1755 name: etcd
+INFO     EtcdServer:managed_process.py:36 Sending SIGTERM (kill): 1755 etcd
+INFO     EtcdServer:managed_process.py:31 Terminating PID: 1756 name: sed
+INFO     EtcdServer:managed_process.py:36 Sending SIGTERM (kill): 1756 sed
+INFO     NatsServer:managed_process.py:388 Terminating process group: 1743
+INFO     NatsServer:managed_process.py:31 Terminating PID: 1743 name: nats-server
+INFO     NatsServer:managed_process.py:36 Sending SIGTERM (kill): 1743 nats-server
+INFO     NatsServer:managed_process.py:31 Terminating PID: 1744 name: sed
+INFO     NatsServer:managed_process.py:36 Sending SIGTERM (kill): 1744 sed

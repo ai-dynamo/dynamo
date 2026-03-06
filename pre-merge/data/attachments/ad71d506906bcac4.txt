@@ -1,0 +1,132 @@
+INFO     NatsServer:managed_process.py:307 Running command: nats-server --trace -p 4297 in /workspace
+INFO     NatsServer:managed_process.py:473 Checking Port: 4297
+INFO     NatsServer:managed_process.py:481 SUCCESS: Check Port: 4297
+INFO     NatsServer:managed_process.py:586 Running custom health check '_nats_ready'
+DEBUG    asyncio:selector_events.py:64 Using selector: EpollSelector
+INFO     NatsServer:managed_process.py:606 SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+INFO     EtcdServer:managed_process.py:307 Running command: etcd --listen-client-urls http://0.0.0.0:2387 --advertise-client-urls http://0.0.0.0:2387 --listen-peer-urls http://0.0.0.0:2388 --initial-advertise-peer-urls http://localhost:2388 --initial-cluster default=http://localhost:2388 --data-dir /tmp/etcd_sr5dswp1 in /workspace
+INFO     EtcdServer:managed_process.py:473 Checking Port: 2387
+INFO     EtcdServer:managed_process.py:481 SUCCESS: Check Port: 2387
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:398 Starting SGLang router prefix reuse test with two workers
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:240 Created SGLang worker 0 on GPU 0 (mem_frac=0.4, system_port=8146, kv_port=8145) with endpoint: dyn://test-namespace-tlnkvlhuyk.backend.generate
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:240 Created SGLang worker 1 on GPU 0 (mem_frac=0.4, system_port=8147, kv_port=8148) with endpoint: dyn://test-namespace-tlnkvlhuyk.backend.generate
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:254 [SGLangProcess] Starting 2 worker processes sequentially...
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:260 [SGLangProcess] Starting SGLang worker 0...
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:274 [SGLangProcess] Launching process 0 (pid will be assigned)...
+INFO     ManagedProcess:managed_process.py:307 Running command: python3 -m dynamo.sglang --model-path silence09/DeepSeek-R1-Small-2layers --page-size 16 --disable-cuda-graph --mem-fraction-static 0.4 --context-length 1024 --kv-events-config {"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:8145"} in /workspace
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:278 [SGLangProcess] Worker 0 launched with PID: 1358
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:287 [SGLangProcess] Waiting 5s for worker 0 to initialize before starting next worker...
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:260 [SGLangProcess] Starting SGLang worker 1...
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:274 [SGLangProcess] Launching process 1 (pid will be assigned)...
+INFO     ManagedProcess:managed_process.py:307 Running command: python3 -m dynamo.sglang --model-path silence09/DeepSeek-R1-Small-2layers --page-size 16 --disable-cuda-graph --mem-fraction-static 0.4 --context-length 1024 --kv-events-config {"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:8148"} in /workspace
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:278 [SGLangProcess] Worker 1 launched with PID: 1395
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:303 [SGLangProcess] All 2 workers launched with sequential initialization.
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:306 [SGLangProcess] Waiting for health checks to complete...
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:310 [SGLangProcess] Checking health for worker 0...
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:315 [SGLangProcess] Worker 0 health checks passed
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:310 [SGLangProcess] Checking health for worker 1...
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:315 [SGLangProcess] Worker 1 health checks passed
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:322 [SGLangProcess] All workers started successfully and passed health checks!
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:409 Starting 2 SGLang worker processes on single GPU (mem_frac=0.4)
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:410 All SGLang workers using namespace: test-namespace-tlnkvlhuyk
+DEBUG    asyncio:selector_events.py:64 Using selector: EpollSelector
+DEBUG    asyncio:selector_events.py:64 Using selector: EpollSelector
+INFO     tests.router.common:common.py:342 Waiting for workers to be ready
+INFO     tests.router.common:common.py:354 Found 1 instance(s): [1671289293585242380]
+INFO     tests.router.common:common.py:354 Found 1 instance(s): [1671289293585242380]
+INFO     tests.router.common:common.py:354 Found 1 instance(s): [1671289293585242380]
+INFO     tests.router.common:common.py:354 Found 1 instance(s): [1671289293585242380]
+INFO     tests.router.common:common.py:354 Found 1 instance(s): [1671289293585242380]
+INFO     tests.router.common:common.py:354 Found 2 instance(s): [1671289293585242382, 1671289293585242380]
+INFO     tests.router.common:common.py:370 Sending warmup request with 4 tokens
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [8722]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [93636]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 2
+DEBUG    tests.router.common:common.py:658 Successfully verified 2 tokens generated as expected via KvRouter with ignore_eos=True
+INFO     tests.router.common:common.py:387 All 2 workers are ready
+INFO     tests.router.common:common.py:2021 Workers ready: [1671289293585242380, 1671289293585242382]
+INFO     tests.router.common:common.py:2039 Routing targets: worker_a=(id=1671289293585242380, dp_rank=None), worker_b=(id=1671289293585242382, dp_rank=None)
+INFO     tests.router.common:common.py:2082 Sending request 1/5 with 32 tokens - FORCING worker_id=1671289293585242380
+DEBUG    tests.router.common:common.py:575 Sending request to worker with worker_id=1671289293585242380 (attempt 1)
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [89649]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [111960]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 2
+DEBUG    tests.router.common:common.py:658 Successfully verified 2 tokens generated as expected via KvRouter with ignore_eos=True
+INFO     tests.router.common:common.py:2100 Request 1 response: prefill_worker_id=1671289293585242380, decode_worker_id=1671289293585242380, prefill_dp_rank=0, decode_dp_rank=0
+INFO     tests.router.common:common.py:2082 Sending request 2/5 with 48 tokens - FORCING worker_id=1671289293585242380
+DEBUG    tests.router.common:common.py:575 Sending request to worker with worker_id=1671289293585242380 (attempt 1)
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [36175]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [31802]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 2
+DEBUG    tests.router.common:common.py:658 Successfully verified 2 tokens generated as expected via KvRouter with ignore_eos=True
+INFO     tests.router.common:common.py:2100 Request 2 response: prefill_worker_id=1671289293585242380, decode_worker_id=1671289293585242380, prefill_dp_rank=0, decode_dp_rank=0
+INFO     tests.router.common:common.py:2082 Sending request 3/5 with 48 tokens - FORCING worker_id=1671289293585242382
+DEBUG    tests.router.common:common.py:575 Sending request to worker with worker_id=1671289293585242382 (attempt 1)
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [103830]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [88389]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 2
+DEBUG    tests.router.common:common.py:658 Successfully verified 2 tokens generated as expected via KvRouter with ignore_eos=True
+INFO     tests.router.common:common.py:2100 Request 3 response: prefill_worker_id=1671289293585242382, decode_worker_id=1671289293585242382, prefill_dp_rank=0, decode_dp_rank=0
+INFO     tests.router.common:common.py:2082 Sending request 4/5 with 64 tokens
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [70385]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [107316]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 2
+DEBUG    tests.router.common:common.py:658 Successfully verified 2 tokens generated as expected via KvRouter with ignore_eos=True
+INFO     tests.router.common:common.py:2100 Request 4 response: prefill_worker_id=1671289293585242380, decode_worker_id=1671289293585242380, prefill_dp_rank=0, decode_dp_rank=0
+INFO     tests.router.common:common.py:2082 Sending request 5/5 with 48 tokens
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [47910]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [92202]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 2
+DEBUG    tests.router.common:common.py:658 Successfully verified 2 tokens generated as expected via KvRouter with ignore_eos=True
+INFO     tests.router.common:common.py:2100 Request 5 response: prefill_worker_id=1671289293585242382, decode_worker_id=1671289293585242382, prefill_dp_rank=0, decode_dp_rank=0
+INFO     tests.router.common:common.py:2154 Response routing verified: req4 → worker_a (id=1671289293585242380, dp_rank=None), req5 → worker_b (id=1671289293585242382, dp_rank=None)
+INFO     tests.router.common:common.py:2172 Events by (worker_id, dp_rank): [((1671289293585242380, 0), 5), ((1671289293585242382, 0), 4)]
+INFO     tests.router.common:common.py:2192 Successfully verified cross-worker routing: worker_a (1671289293585242380, 0) has 5 events, worker_b (1671289293585242382, 0) has 4 events
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:330 Stopping SGLang worker 0
+INFO     ManagedProcess:managed_process.py:388 Terminating process group: 1358
+INFO     ManagedProcess:managed_process.py:31 Terminating PID: 1358 name: python3
+INFO     ManagedProcess:managed_process.py:36 Sending SIGTERM (kill): 1358 python3
+INFO     ManagedProcess:managed_process.py:31 Terminating PID: 1360 name: tee
+INFO     ManagedProcess:managed_process.py:36 Sending SIGTERM (kill): 1360 tee
+INFO     ManagedProcess:managed_process.py:31 Terminating PID: 1359 name: sed
+INFO     ManagedProcess:managed_process.py:36 Sending SIGTERM (kill): 1359 sed
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:330 Stopping SGLang worker 1
+INFO     ManagedProcess:managed_process.py:388 Terminating process group: 1395
+INFO     ManagedProcess:managed_process.py:31 Terminating PID: 1395 name: python3
+INFO     ManagedProcess:managed_process.py:36 Sending SIGTERM (kill): 1395 python3
+INFO     ManagedProcess:managed_process.py:31 Terminating PID: 1397 name: tee
+INFO     ManagedProcess:managed_process.py:36 Sending SIGTERM (kill): 1397 tee
+INFO     ManagedProcess:managed_process.py:31 Terminating PID: 1396 name: sed
+INFO     ManagedProcess:managed_process.py:36 Sending SIGTERM (kill): 1396 sed
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:335 Waiting for SGLang worker resources to fully clean up...
+INFO     EtcdServer:managed_process.py:388 Terminating process group: 1344
+INFO     EtcdServer:managed_process.py:31 Terminating PID: 1344 name: etcd
+INFO     EtcdServer:managed_process.py:36 Sending SIGTERM (kill): 1344 etcd
+INFO     EtcdServer:managed_process.py:31 Terminating PID: 1345 name: sed
+INFO     EtcdServer:managed_process.py:36 Sending SIGTERM (kill): 1345 sed
+INFO     NatsServer:managed_process.py:388 Terminating process group: 1332
+INFO     NatsServer:managed_process.py:31 Terminating PID: 1332 name: nats-server
+INFO     NatsServer:managed_process.py:36 Sending SIGTERM (kill): 1332 nats-server
+INFO     NatsServer:managed_process.py:31 Terminating PID: 1333 name: sed
+INFO     NatsServer:managed_process.py:36 Sending SIGTERM (kill): 1333 sed

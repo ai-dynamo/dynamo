@@ -1,0 +1,35 @@
+[BASH] [2m2026-03-06T07:07:35.277796Z[0m [32m INFO[0m [2mmain.async_main[0m[2m:[0m Request migration disabled (limit: 0)
+[BASH] [2m2026-03-06T07:07:35.279916Z[0m [32m INFO[0m [2mdynamo_runtime::distributed[0m[2m:[0m Initializing KV store discovery backend: Etcd(http://localhost:2443)
+[BASH] [2m2026-03-06T07:07:35.540414Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::manager[0m[2m:[0m Initializing NetworkManager with TCP request plane [3mmode[0m[2m=[0mtcp [3mhost[0m[2m=[0m10.1.42.2 [3mport[0m[2m=[0mOS-assigned
+[BASH] [2m2026-03-06T07:07:35.544664Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m Starting HTTP(S) service [3mprotocol[0m[2m=[0m"HTTP" [3maddress[0m[2m=[0m"0.0.0.0:8041"
+[BASH] [2m2026-03-06T07:07:38.473590Z[0m [32m INFO[0m [2mdynamo_runtime::distributed[0m[2m:[0m Initializing KV store discovery backend: Etcd(http://localhost:2443)
+[BASH] [2m2026-03-06T07:07:38.476193Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::manager[0m[2m:[0m Initializing NetworkManager with TCP request plane [3mmode[0m[2m=[0mtcp [3mhost[0m[2m=[0m10.1.42.2 [3mport[0m[2m=[0mOS-assigned
+[BASH] [2m2026-03-06T07:07:38.476714Z[0m [32m INFO[0m [2mdynamo_runtime::system_status_server[0m[2m:[0m [spawn_system_status_server] binding to: 0.0.0.0:8097
+[BASH] [2m2026-03-06T07:07:38.476749Z[0m [32m INFO[0m [2mdynamo_runtime::system_status_server[0m[2m:[0m [spawn_system_status_server] system status server bound to: 0.0.0.0:8097
+[BASH] [2m2026-03-06T07:07:38.476768Z[0m [32m INFO[0m [2mdynamo_runtime::distributed[0m[2m:[0m System status server started successfully on 0.0.0.0:8097
+[BASH] [2m2026-03-06T07:07:38.477929Z[0m [32m INFO[0m [2mdynamo_llm::hub[0m[2m:[0m Found cached model 'Qwen/Qwen3-0.6B' at "/home/dynamo/.cache/huggingface/hub/models--Qwen--Qwen3-0.6B/snapshots/c1899de289a04d12100db370d81485cdf75e47ca", skipping download
+[BASH] [2m2026-03-06T07:07:38.477954Z[0m [32m INFO[0m [2mdynamo_llm::hub[0m[2m:[0m Offline mode: using cached model 'Qwen/Qwen3-0.6B' without API validation
+[BASH] [2m2026-03-06T07:07:38.480174Z[0m [32m INFO[0m [2mdynamo_llm::model_card[0m[2m:[0m Detected custom chat template. Ensure file exists in the same location on all hosts.
+[BASH] [2m2026-03-06T07:07:38.481633Z[0m [32m INFO[0m [2m_core[0m[2m:[0m Registered base model 'Qwen/Qwen3-0.6B' MDC
+[BASH] [2m2026-03-06T07:07:38.481807Z[0m [32m INFO[0m [2mdynamo_llm::hub[0m[2m:[0m Found cached model 'Qwen/Qwen3-0.6B' at "/home/dynamo/.cache/huggingface/hub/models--Qwen--Qwen3-0.6B/snapshots/c1899de289a04d12100db370d81485cdf75e47ca", skipping download
+[BASH] [2m2026-03-06T07:07:38.481825Z[0m [32m INFO[0m [2mdynamo_llm::hub[0m[2m:[0m Offline mode: using cached model 'Qwen/Qwen3-0.6B' without API validation
+[BASH] [2m2026-03-06T07:07:38.818131Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m chat endpoints enabled
+[BASH] [2m2026-03-06T07:07:38.818161Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m responses endpoints enabled
+[BASH] [2m2026-03-06T07:07:38.818804Z[0m [33m WARN[0m [2mdynamo_llm::discovery::worker_monitor[0m[2m:[0m KvWorkerMonitor: KV metrics subscriber not available (KV router's EventSubscriber requires NATS), skipping load metrics.
+[BASH] [2m2026-03-06T07:07:38.819091Z[0m [32m INFO[0m [2mdynamo_llm::discovery::watcher[0m[2m:[0m Chat completions is ready
+[BASH] [2m2026-03-06T07:07:38.819110Z[0m [32m INFO[0m [2mdynamo_llm::discovery::model[0m[2m:[0m Adding worker set to model [3mmodel[0m[2m=[0mQwen/Qwen3-0.6B [3mnamespace[0m[2m=[0mtest
+[BASH] [2m2026-03-06T07:07:38.819119Z[0m [32m INFO[0m [2mdynamo_llm::discovery::watcher[0m[2m:[0m added model [3mmodel_name[0m[2m=[0m"Qwen/Qwen3-0.6B" [3mnamespace[0m[2m=[0m"test"
+[BASH] [2m2026-03-06T07:07:38.836049Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::manager[0m[2m:[0m Creating TCP request plane server [3mbind_addr[0m[2m=[0m10.1.42.2:0 [3mport_source[0m[2m=[0m"OS-assigned"
+[BASH] [2m2026-03-06T07:07:38.836072Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::ingress::shared_tcp_endpoint[0m[2m:[0m Initializing TCP server with dispatcher (concurrency=1500, queue=6000)
+[BASH] [2m2026-03-06T07:07:38.836082Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::ingress::shared_tcp_endpoint[0m[2m:[0m Started TCP worker dispatcher with concurrency limit 1500
+[BASH] [2m2026-03-06T07:07:38.836089Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::ingress::shared_tcp_endpoint[0m[2m:[0m Binding TCP server to 10.1.42.2:0
+[BASH] [2m2026-03-06T07:07:38.836136Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::ingress::shared_tcp_endpoint[0m[2m:[0m TCP server bound successfully [3mrequested[0m[2m=[0m10.1.42.2:0 [3mactual[0m[2m=[0m10.1.42.2:34291
+[BASH] [2m2026-03-06T07:07:38.836151Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::manager[0m[2m:[0m TCP request plane server started [3mactual_addr[0m[2m=[0m10.1.42.2:34291 [3mactual_port[0m[2m=[0m34291
+[BASH] [2m2026-03-06T07:07:38.836167Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::ingress::shared_tcp_endpoint[0m[2m:[0m Registered endpoint 'generate' with shared TCP server on 10.1.42.2:34291
+[BASH] [2m2026-03-06T07:07:41.747635Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Runtime shutdown initiated
+[BASH] [2m2026-03-06T07:07:41.747880Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 1: Cancelling endpoint shutdown token
+[BASH] [2m2026-03-06T07:07:41.747912Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 2: Waiting for graceful endpoints to complete
+[BASH] [2m2026-03-06T07:07:41.747918Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Active graceful endpoints: 0
+[BASH] [2m2026-03-06T07:07:41.747923Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 3: All endpoints ended gracefully. Connections to backend services will now be disconnected
+[BASH] [2m2026-03-06T07:07:41.747953Z[0m [32m INFO[0m [2mdynamo_llm::discovery::worker_monitor[0m[2m:[0m Worker monitoring task exiting
+[BASH] [2m2026-03-06T07:07:41.747972Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m HTTP server shutdown requested

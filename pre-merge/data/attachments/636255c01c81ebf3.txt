@@ -1,0 +1,2 @@
+DEBUG    asyncio:selector_events.py:64 Using selector: EpollSelector
+WARNING  dynamo.trtllm.engine:engine.py:151 `cp_config` cannot be used with the `_autodeploy` backend. Ignoring.

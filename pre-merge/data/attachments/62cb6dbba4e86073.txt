@@ -1,8 +1,0 @@
-DEBUG    asyncio:selector_events.py:64 Using selector: EpollSelector
-INFO     dynamo.common.memory.multimodal_embedding_cache_manager:multimodal_embedding_cache_manager.py:63 MultimodalEmbeddingCacheManager initialized: capacity=0.00GB
-DEBUG    dynamo.common.memory.multimodal_embedding_cache_manager:multimodal_embedding_cache_manager.py:149 Cached key=20c988a1a0aa115f, size=0.00MB, total=0.000GB
-DEBUG    dynamo.vllm.multimodal_utils.prefill_worker_utils:prefill_worker_utils.py:240 [req-1] Cache hit for URL index 0
-INFO     dynamo.vllm.multimodal_utils.prefill_worker_utils:prefill_worker_utils.py:254 [req-1] Cache miss for 1/2 URLs, fetching from encode workers
-DEBUG    dynamo.common.memory.multimodal_embedding_cache_manager:multimodal_embedding_cache_manager.py:149 Cached key=b427c9d9e3ce0ccb, size=0.00MB, total=0.000GB
-INFO     dynamo.vllm.multimodal_utils.prefill_worker_utils:prefill_worker_utils.py:114 Get embedding of shape torch.Size([1, 10])
-INFO     dynamo.vllm.multimodal_utils.prefill_worker_utils:prefill_worker_utils.py:114 Get embedding of shape torch.Size([1, 10])

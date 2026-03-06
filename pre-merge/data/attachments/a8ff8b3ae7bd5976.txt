@@ -1,1 +1,0 @@
-INFO     dynamo.vllm.omni.omni_handler:omni_handler.py:304 Video diffusion request: prompt='a drone...', size=832x480, frames=32, fps=16

@@ -1,0 +1,11 @@
+[2m2026-03-06T07:02:25.902945Z[0m [32m INFO[0m [2mconftest.predownload_models[0m[2m:[0m Downloading 4 models needed for collected tests
+Models: {'silence09/DeepSeek-R1-Small-2layers', 'Qwen/Qwen2.5-VL-7B-Instruct', 'Qwen/Qwen3-Embedding-4B', 'Qwen/Qwen3-0.6B'}
+[2m2026-03-06T07:02:25.903041Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m HF_TOKEN found in environment
+[2m2026-03-06T07:02:25.903093Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: silence09/DeepSeek-R1-Small-2layers
+[2m2026-03-06T07:02:31.814494Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Successfully pre-downloaded: silence09/DeepSeek-R1-Small-2layers
+[2m2026-03-06T07:02:31.814554Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: Qwen/Qwen2.5-VL-7B-Instruct
+[2m2026-03-06T07:02:51.352295Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Successfully pre-downloaded: Qwen/Qwen2.5-VL-7B-Instruct
+[2m2026-03-06T07:02:51.352355Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: Qwen/Qwen3-Embedding-4B
+[2m2026-03-06T07:03:00.522434Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Successfully pre-downloaded: Qwen/Qwen3-Embedding-4B
+[2m2026-03-06T07:03:00.522499Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: Qwen/Qwen3-0.6B
+[2m2026-03-06T07:03:04.534841Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Successfully pre-downloaded: Qwen/Qwen3-0.6B

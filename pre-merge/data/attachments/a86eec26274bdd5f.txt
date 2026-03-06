@@ -1,0 +1,1997 @@
+INFO     NatsServer:managed_process.py:307 Running command: nats-server --trace -p 4224 in /workspace
+INFO     NatsServer:managed_process.py:473 Checking Port: 4224
+INFO     NatsServer:managed_process.py:481 SUCCESS: Check Port: 4224
+INFO     NatsServer:managed_process.py:586 Running custom health check '_nats_ready'
+DEBUG    asyncio:selector_events.py:64 Using selector: EpollSelector
+INFO     NatsServer:managed_process.py:606 SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+INFO     EtcdServer:managed_process.py:307 Running command: etcd --listen-client-urls http://0.0.0.0:2382 --advertise-client-urls http://0.0.0.0:2382 --listen-peer-urls http://0.0.0.0:2383 --initial-advertise-peer-urls http://localhost:2383 --initial-cluster default=http://localhost:2383 --data-dir /tmp/etcd_pbfsyfp6 in /workspace
+INFO     EtcdServer:managed_process.py:473 Checking Port: 2382
+INFO     EtcdServer:managed_process.py:481 SUCCESS: Check Port: 2382
+INFO     root:conftest.py:802 Set up file storage backend in: /tmp/tmp45w7t3d7
+INFO     tests.router.test_router_e2e_with_vllm:test_router_e2e_with_vllm.py:535 Starting vLLM indexers sync test: store_backend=etcd, durable_kv_events=False, request_plane=tcp
+INFO     tests.router.test_router_e2e_with_vllm:test_router_e2e_with_vllm.py:269 Created vLLM worker 0 on GPU 0 (gpu_mem=0.4, system_port=8180) with endpoint: dyn://test-namespace-xovjphkeyo.backend.generate
+INFO     tests.router.test_router_e2e_with_vllm:test_router_e2e_with_vllm.py:269 Created vLLM worker 1 on GPU 0 (gpu_mem=0.4, system_port=8181) with endpoint: dyn://test-namespace-xovjphkeyo.backend.generate
+INFO     tests.router.test_router_e2e_with_vllm:test_router_e2e_with_vllm.py:283 [VLLMProcess] Starting 2 worker processes sequentially...
+INFO     tests.router.test_router_e2e_with_vllm:test_router_e2e_with_vllm.py:289 [VLLMProcess] Starting vLLM worker 0...
+INFO     tests.router.test_router_e2e_with_vllm:test_router_e2e_with_vllm.py:303 [VLLMProcess] Launching process 0 (pid will be assigned)...
+INFO     ManagedProcess:managed_process.py:307 Running command: python3 -m dynamo.vllm --model TinyLlama/TinyLlama-1.1B-Chat-v1.0 --block-size 16 --enforce-eager --gpu-memory-utilization 0.4 --max-model-len 1024 --kv-events-config {"publisher": "zmq", "topic": "kv-events", "endpoint": "tcp://*:8083", "enable_kv_cache_events": true} in /workspace
+INFO     tests.router.test_router_e2e_with_vllm:test_router_e2e_with_vllm.py:307 [VLLMProcess] Worker 0 launched with PID: 3390
+INFO     tests.router.test_router_e2e_with_vllm:test_router_e2e_with_vllm.py:316 [VLLMProcess] Waiting 5s for worker 0 to initialize NIXL before starting next worker...
+INFO     tests.router.test_router_e2e_with_vllm:test_router_e2e_with_vllm.py:289 [VLLMProcess] Starting vLLM worker 1...
+INFO     tests.router.test_router_e2e_with_vllm:test_router_e2e_with_vllm.py:303 [VLLMProcess] Launching process 1 (pid will be assigned)...
+INFO     ManagedProcess:managed_process.py:307 Running command: python3 -m dynamo.vllm --model TinyLlama/TinyLlama-1.1B-Chat-v1.0 --block-size 16 --enforce-eager --gpu-memory-utilization 0.4 --max-model-len 1024 --kv-events-config {"publisher": "zmq", "topic": "kv-events", "endpoint": "tcp://*:8084", "enable_kv_cache_events": true} in /workspace
+INFO     tests.router.test_router_e2e_with_vllm:test_router_e2e_with_vllm.py:307 [VLLMProcess] Worker 1 launched with PID: 3443
+INFO     tests.router.test_router_e2e_with_vllm:test_router_e2e_with_vllm.py:330 [VLLMProcess] All 2 workers launched with sequential initialization.
+INFO     tests.router.test_router_e2e_with_vllm:test_router_e2e_with_vllm.py:333 [VLLMProcess] Waiting for health checks to complete...
+INFO     tests.router.test_router_e2e_with_vllm:test_router_e2e_with_vllm.py:337 [VLLMProcess] Checking health for worker 0...
+INFO     tests.router.test_router_e2e_with_vllm:test_router_e2e_with_vllm.py:342 [VLLMProcess] Worker 0 health checks passed
+INFO     tests.router.test_router_e2e_with_vllm:test_router_e2e_with_vllm.py:337 [VLLMProcess] Checking health for worker 1...
+INFO     tests.router.test_router_e2e_with_vllm:test_router_e2e_with_vllm.py:342 [VLLMProcess] Worker 1 health checks passed
+INFO     tests.router.test_router_e2e_with_vllm:test_router_e2e_with_vllm.py:349 [VLLMProcess] All workers started successfully and passed health checks!
+INFO     tests.router.test_router_e2e_with_vllm:test_router_e2e_with_vllm.py:552 Starting 2 vLLM workers
+INFO     tests.router.test_router_e2e_with_vllm:test_router_e2e_with_vllm.py:553 All vLLM workers using namespace: test-namespace-xovjphkeyo
+DEBUG    asyncio:selector_events.py:64 Using selector: EpollSelector
+INFO     tests.router.common:common.py:1449 Creating first KV router with its own runtime
+INFO     tests.router.common:common.py:342 Waiting for workers to be ready
+INFO     tests.router.common:common.py:354 Found 1 instance(s): [2772137927498337292]
+INFO     tests.router.common:common.py:354 Found 1 instance(s): [2772137927498337292]
+INFO     tests.router.common:common.py:354 Found 1 instance(s): [2772137927498337292]
+INFO     tests.router.common:common.py:354 Found 1 instance(s): [2772137927498337292]
+INFO     tests.router.common:common.py:354 Found 1 instance(s): [2772137927498337292]
+INFO     tests.router.common:common.py:354 Found 1 instance(s): [2772137927498337292]
+INFO     tests.router.common:common.py:354 Found 2 instance(s): [2772137927498337292, 2772137927498337294]
+INFO     tests.router.common:common.py:370 Sending warmup request with 4 tokens
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:621 Received 2 tokens: [850, 29906]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 2
+DEBUG    tests.router.common:common.py:658 Successfully verified 2 tokens generated as expected via KvRouter with ignore_eos=True
+INFO     tests.router.common:common.py:387 All 2 workers are ready
+INFO     tests.router.common:common.py:1465 Sending 25 requests to first router
+DEBUG    tests.router.common:common.py:1418 Sending request 1/25 to Router 1
+DEBUG    tests.router.common:common.py:1418 Sending request 2/25 to Router 1
+DEBUG    tests.router.common:common.py:1418 Sending request 3/25 to Router 1
+DEBUG    tests.router.common:common.py:1418 Sending request 4/25 to Router 1
+DEBUG    tests.router.common:common.py:1418 Sending request 5/25 to Router 1
+DEBUG    tests.router.common:common.py:1418 Sending request 6/25 to Router 1
+DEBUG    tests.router.common:common.py:1418 Sending request 7/25 to Router 1
+DEBUG    tests.router.common:common.py:1418 Sending request 8/25 to Router 1
+DEBUG    tests.router.common:common.py:1418 Sending request 9/25 to Router 1
+DEBUG    tests.router.common:common.py:1418 Sending request 10/25 to Router 1
+DEBUG    tests.router.common:common.py:1418 Sending request 11/25 to Router 1
+DEBUG    tests.router.common:common.py:1418 Sending request 12/25 to Router 1
+DEBUG    tests.router.common:common.py:1418 Sending request 13/25 to Router 1
+DEBUG    tests.router.common:common.py:1418 Sending request 14/25 to Router 1
+DEBUG    tests.router.common:common.py:1418 Sending request 15/25 to Router 1
+DEBUG    tests.router.common:common.py:1418 Sending request 16/25 to Router 1
+DEBUG    tests.router.common:common.py:1418 Sending request 17/25 to Router 1
+DEBUG    tests.router.common:common.py:1418 Sending request 18/25 to Router 1
+DEBUG    tests.router.common:common.py:1418 Sending request 19/25 to Router 1
+DEBUG    tests.router.common:common.py:1418 Sending request 20/25 to Router 1
+DEBUG    tests.router.common:common.py:1418 Sending request 21/25 to Router 1
+DEBUG    tests.router.common:common.py:1418 Sending request 22/25 to Router 1
+DEBUG    tests.router.common:common.py:1418 Sending request 23/25 to Router 1
+DEBUG    tests.router.common:common.py:1418 Sending request 24/25 to Router 1
+DEBUG    tests.router.common:common.py:1418 Sending request 25/25 to Router 1
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29923]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [287]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [21354]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [614]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29875]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [599]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [4423]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [3240]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [318]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29908]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29874]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [14467]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [1454]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [305]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [4569]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [8110]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [2656]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [14023]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [2606]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [327]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [12929]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [30006]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [13607]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [731]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [201]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [420]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29934]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [4373]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [310]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [16760]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [419]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [1218]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [392]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [8757]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [20871]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [9954]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [132]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [756]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [771]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [746]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [4137]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [303]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [284]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [26179]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [3413]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [6098]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [24450]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29967]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [294]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [16440]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [1141]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29885]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [267]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [403]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [15171]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29967]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [9202]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [16622]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29888]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [2002]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [8193]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [1983]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [1248]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [301]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [6270]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [4373]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29967]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [1094]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [30610]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [1679]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [9660]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [454]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [361]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [887]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [30044]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [8337]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29877]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [16907]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29892]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [301]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [347]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [26179]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [6411]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [8754]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [281]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [1166]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [3235]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29888]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [3097]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [6330]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [273]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [283]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [535]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [264]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [440]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29893]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [319]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [272]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [782]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [1171]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [586]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [321]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29920]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [26270]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [2397]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [397]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [6364]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [325]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29359]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [5464]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 10
+DEBUG    tests.router.common:common.py:658 Successfully verified 10 tokens generated as expected via KvRouter with ignore_eos=True
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [15197]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29871]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [346]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [2329]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [297]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29889]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29913]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29919]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29885]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [3677]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [31517]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [841]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [14390]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [15561]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [615]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [524]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [923]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [269]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29928]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [21147]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [377]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [549]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [7167]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29884]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 10
+DEBUG    tests.router.common:common.py:658 Successfully verified 10 tokens generated as expected via KvRouter with ignore_eos=True
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 10
+DEBUG    tests.router.common:common.py:658 Successfully verified 10 tokens generated as expected via KvRouter with ignore_eos=True
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 10
+DEBUG    tests.router.common:common.py:658 Successfully verified 10 tokens generated as expected via KvRouter with ignore_eos=True
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 10
+DEBUG    tests.router.common:common.py:658 Successfully verified 10 tokens generated as expected via KvRouter with ignore_eos=True
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 10
+DEBUG    tests.router.common:common.py:658 Successfully verified 10 tokens generated as expected via KvRouter with ignore_eos=True
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 10
+DEBUG    tests.router.common:common.py:658 Successfully verified 10 tokens generated as expected via KvRouter with ignore_eos=True
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 10
+DEBUG    tests.router.common:common.py:658 Successfully verified 10 tokens generated as expected via KvRouter with ignore_eos=True
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 10
+DEBUG    tests.router.common:common.py:658 Successfully verified 10 tokens generated as expected via KvRouter with ignore_eos=True
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 10
+DEBUG    tests.router.common:common.py:658 Successfully verified 10 tokens generated as expected via KvRouter with ignore_eos=True
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 10
+DEBUG    tests.router.common:common.py:658 Successfully verified 10 tokens generated as expected via KvRouter with ignore_eos=True
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 10
+DEBUG    tests.router.common:common.py:658 Successfully verified 10 tokens generated as expected via KvRouter with ignore_eos=True
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29875]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [4423]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29874]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [344]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [3754]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29906]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [751]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [424]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [22750]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [5363]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [521]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [2929]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [599]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [12929]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [345]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [4569]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [316]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29900]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [1778]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [21684]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [2315]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [261]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [305]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [731]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [13607]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [30006]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [16760]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29896]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [419]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [16257]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [263]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [20871]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [3763]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [14161]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [2593]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29875]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29932]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [1261]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [8757]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [294]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29913]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29955]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [296]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [746]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [24450]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [278]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [30005]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [6098]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [348]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [435]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29967]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [1427]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [8193]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [448]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29967]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [19083]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29194]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29871]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29967]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [305]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29885]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [2002]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [403]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [5238]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [339]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [1679]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [1424]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [5116]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29945]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [18462]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [454]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [18372]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [10088]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [267]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [27504]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [2239]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [12444]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29967]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [422]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29892]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [5477]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [301]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [10264]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [323]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [6411]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [4464]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [11189]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [8754]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [8337]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [537]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [13484]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [31993]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [3209]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [1540]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [273]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [5739]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [417]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [295]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [272]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [22157]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [733]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [27951]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [13636]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [264]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [319]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [12132]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [4311]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 10
+DEBUG    tests.router.common:common.py:658 Successfully verified 10 tokens generated as expected via KvRouter with ignore_eos=True
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 10
+DEBUG    tests.router.common:common.py:658 Successfully verified 10 tokens generated as expected via KvRouter with ignore_eos=True
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [2397]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [948]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [8576]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [1154]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [30040]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 10
+DEBUG    tests.router.common:common.py:658 Successfully verified 10 tokens generated as expected via KvRouter with ignore_eos=True
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 10
+DEBUG    tests.router.common:common.py:658 Successfully verified 10 tokens generated as expected via KvRouter with ignore_eos=True
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 10
+DEBUG    tests.router.common:common.py:658 Successfully verified 10 tokens generated as expected via KvRouter with ignore_eos=True
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [267]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [636]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 10
+DEBUG    tests.router.common:common.py:658 Successfully verified 10 tokens generated as expected via KvRouter with ignore_eos=True
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [30083]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 10
+DEBUG    tests.router.common:common.py:658 Successfully verified 10 tokens generated as expected via KvRouter with ignore_eos=True
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 10
+DEBUG    tests.router.common:common.py:658 Successfully verified 10 tokens generated as expected via KvRouter with ignore_eos=True
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 10
+DEBUG    tests.router.common:common.py:658 Successfully verified 10 tokens generated as expected via KvRouter with ignore_eos=True
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 10
+DEBUG    tests.router.common:common.py:658 Successfully verified 10 tokens generated as expected via KvRouter with ignore_eos=True
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 10
+DEBUG    tests.router.common:common.py:658 Successfully verified 10 tokens generated as expected via KvRouter with ignore_eos=True
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [2]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 10
+DEBUG    tests.router.common:common.py:658 Successfully verified 10 tokens generated as expected via KvRouter with ignore_eos=True
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 10
+DEBUG    tests.router.common:common.py:658 Successfully verified 10 tokens generated as expected via KvRouter with ignore_eos=True
+INFO     tests.router.common:common.py:1443 Completed 25/25 requests for Router 1
+INFO     tests.router.common:common.py:1480 === NATS INTERRUPTION TEST: Phase 1 ===
+INFO     tests.router.common:common.py:1481 Stopping NATS server
+INFO     tests.conftest:conftest.py:456 Stopping NATS server on port 4224
+INFO     NatsServer:managed_process.py:388 Terminating process group: 3364
+INFO     tests.router.common:common.py:1484 Sending 10 requests while NATS is down (via TCP)
+DEBUG    tests.router.common:common.py:1418 Sending request 1/10 to Router 1 (NATS down)
+DEBUG    tests.router.common:common.py:1418 Sending request 2/10 to Router 1 (NATS down)
+DEBUG    tests.router.common:common.py:1418 Sending request 3/10 to Router 1 (NATS down)
+DEBUG    tests.router.common:common.py:1418 Sending request 4/10 to Router 1 (NATS down)
+DEBUG    tests.router.common:common.py:1418 Sending request 5/10 to Router 1 (NATS down)
+DEBUG    tests.router.common:common.py:1418 Sending request 6/10 to Router 1 (NATS down)
+DEBUG    tests.router.common:common.py:1418 Sending request 7/10 to Router 1 (NATS down)
+DEBUG    tests.router.common:common.py:1418 Sending request 8/10 to Router 1 (NATS down)
+DEBUG    tests.router.common:common.py:1418 Sending request 9/10 to Router 1 (NATS down)
+DEBUG    tests.router.common:common.py:1418 Sending request 10/10 to Router 1 (NATS down)
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [654]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [15413]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [7263]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [21982]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [14751]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [859]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [11938]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [4056]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [275]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29871]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [278]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29878]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [6741]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [394]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29871]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [316]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [275]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29906]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [1527]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [18684]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [9283]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29872]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29906]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [274]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29872]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [5848]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [13629]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [1144]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [1050]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29913]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [4289]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [10225]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [6502]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [24528]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29900]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [1526]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [2986]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29920]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [3461]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29901]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [19016]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29871]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [1622]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29920]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [1193]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [3844]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29896]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [1667]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [20678]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [5833]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [13]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [24242]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29941]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [9303]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29894]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [2420]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [24242]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [4002]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29904]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [16670]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [5678]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [1667]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [521]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [521]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [16554]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [15755]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [3660]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [18304]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [261]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [10055]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [1039]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [1291]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [536]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [282]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [4528]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [18304]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [30007]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29889]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29889]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [26435]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29889]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [9310]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29889]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [2327]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [13261]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [295]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29889]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [28796]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 10
+DEBUG    tests.router.common:common.py:658 Successfully verified 10 tokens generated as expected via KvRouter with ignore_eos=True
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29903]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29999]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [24352]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29871]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 10
+DEBUG    tests.router.common:common.py:658 Successfully verified 10 tokens generated as expected via KvRouter with ignore_eos=True
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [359]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29871]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [24352]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [264]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 10
+DEBUG    tests.router.common:common.py:658 Successfully verified 10 tokens generated as expected via KvRouter with ignore_eos=True
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 10
+DEBUG    tests.router.common:common.py:658 Successfully verified 10 tokens generated as expected via KvRouter with ignore_eos=True
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 10
+DEBUG    tests.router.common:common.py:658 Successfully verified 10 tokens generated as expected via KvRouter with ignore_eos=True
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [19446]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29889]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [3904]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 10
+DEBUG    tests.router.common:common.py:658 Successfully verified 10 tokens generated as expected via KvRouter with ignore_eos=True
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29906]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 10
+DEBUG    tests.router.common:common.py:658 Successfully verified 10 tokens generated as expected via KvRouter with ignore_eos=True
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 10
+DEBUG    tests.router.common:common.py:658 Successfully verified 10 tokens generated as expected via KvRouter with ignore_eos=True
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 10
+DEBUG    tests.router.common:common.py:658 Successfully verified 10 tokens generated as expected via KvRouter with ignore_eos=True
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 10
+DEBUG    tests.router.common:common.py:658 Successfully verified 10 tokens generated as expected via KvRouter with ignore_eos=True
+INFO     tests.router.common:common.py:1443 Completed 10/10 requests for Router 1 (NATS down)
+INFO     tests.router.common:common.py:1492 Restarting NATS server (fresh state)
+INFO     tests.conftest:conftest.py:468 Starting NATS server on port 4224 with fresh state
+INFO     NatsServer:managed_process.py:307 Running command: nats-server --trace -p 4224 in /workspace
+INFO     NatsServer:managed_process.py:473 Checking Port: 4224
+INFO     NatsServer:managed_process.py:481 SUCCESS: Check Port: 4224
+INFO     NatsServer:managed_process.py:586 Running custom health check '_nats_ready'
+DEBUG    asyncio:selector_events.py:64 Using selector: EpollSelector
+INFO     NatsServer:managed_process.py:606 SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+INFO     tests.router.common:common.py:1529 Creating second KV router with its own runtime
+INFO     tests.router.common:common.py:1542 Sending 25 requests to second router
+DEBUG    tests.router.common:common.py:1418 Sending request 1/25 to Router 2
+DEBUG    tests.router.common:common.py:1418 Sending request 2/25 to Router 2
+DEBUG    tests.router.common:common.py:1418 Sending request 3/25 to Router 2
+DEBUG    tests.router.common:common.py:1418 Sending request 4/25 to Router 2
+DEBUG    tests.router.common:common.py:1418 Sending request 5/25 to Router 2
+DEBUG    tests.router.common:common.py:1418 Sending request 6/25 to Router 2
+DEBUG    tests.router.common:common.py:1418 Sending request 7/25 to Router 2
+DEBUG    tests.router.common:common.py:1418 Sending request 8/25 to Router 2
+DEBUG    tests.router.common:common.py:1418 Sending request 9/25 to Router 2
+DEBUG    tests.router.common:common.py:1418 Sending request 10/25 to Router 2
+DEBUG    tests.router.common:common.py:1418 Sending request 11/25 to Router 2
+DEBUG    tests.router.common:common.py:1418 Sending request 12/25 to Router 2
+DEBUG    tests.router.common:common.py:1418 Sending request 13/25 to Router 2
+DEBUG    tests.router.common:common.py:1418 Sending request 14/25 to Router 2
+DEBUG    tests.router.common:common.py:1418 Sending request 15/25 to Router 2
+DEBUG    tests.router.common:common.py:1418 Sending request 16/25 to Router 2
+DEBUG    tests.router.common:common.py:1418 Sending request 17/25 to Router 2
+DEBUG    tests.router.common:common.py:1418 Sending request 18/25 to Router 2
+DEBUG    tests.router.common:common.py:1418 Sending request 19/25 to Router 2
+DEBUG    tests.router.common:common.py:1418 Sending request 20/25 to Router 2
+DEBUG    tests.router.common:common.py:1418 Sending request 21/25 to Router 2
+DEBUG    tests.router.common:common.py:1418 Sending request 22/25 to Router 2
+DEBUG    tests.router.common:common.py:1418 Sending request 23/25 to Router 2
+DEBUG    tests.router.common:common.py:1418 Sending request 24/25 to Router 2
+DEBUG    tests.router.common:common.py:1418 Sending request 25/25 to Router 2
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [30697]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [22611]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29903]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [6360]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [322]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [3941]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [368]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [1627]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [302]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29879]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [7845]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [697]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [2760]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [579]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29877]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29909]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [989]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [16950]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [19347]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [292]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29881]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29876]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29950]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29956]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [9695]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [391]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [3233]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [8724]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [270]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [17530]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [445]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [19998]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [261]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [310]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [30027]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [299]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [385]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [5715]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [25682]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29871]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [398]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [874]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [17120]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [30011]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [2236]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [3996]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [270]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [6968]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [742]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [1538]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [278]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29886]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [450]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [13029]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [7058]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29920]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [298]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29876]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [967]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29886]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [2748]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [22375]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [577]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [2077]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [228]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [18270]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [2460]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [1434]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [1321]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [442]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [3896]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [5460]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [19423]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29958]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [474]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [7421]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [3268]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [8778]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [17604]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [3699]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [30062]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [615]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [902]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [384]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29918]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [22452]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29892]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [277]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [301]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [1054]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [310]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29989]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [7832]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [17311]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [3966]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [372]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29872]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29892]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [271]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [281]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [1097]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [185]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [267]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [12666]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [30048]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [1354]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [8408]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29895]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29890]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [16638]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29936]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [564]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [2223]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [570]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29963]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29996]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [165]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [8345]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [517]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [364]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [9399]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [263]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [5205]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [3731]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [22449]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [14076]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [1330]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [1919]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [4086]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [26933]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [508]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [435]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [5046]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [16311]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29914]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [2705]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29914]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [13612]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [2396]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29987]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29871]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [366]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [263]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29871]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29875]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29989]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [5162]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [531]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29973]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29877]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [364]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [4405]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [325]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [670]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [409]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [263]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29941]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [2512]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [297]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29894]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29874]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [14081]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [824]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [8403]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [31487]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29958]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [1183]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [1433]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29941]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [263]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29874]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29906]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29880]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [743]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [1720]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [715]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [941]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [525]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [1176]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [8577]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [1233]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [379]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [278]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [30189]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [11343]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [638]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29929]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [919]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [856]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [448]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [13]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [16958]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29913]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [396]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [297]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29871]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [847]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29876]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [264]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [22822]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [30027]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29966]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29936]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [15685]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [1450]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [826]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [1230]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [436]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29871]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [292]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [1572]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29955]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [7308]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [12509]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [6365]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29931]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [265]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29872]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [3198]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [11401]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29989]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [282]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [3186]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [266]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [1125]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [3309]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [669]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 10
+DEBUG    tests.router.common:common.py:658 Successfully verified 10 tokens generated as expected via KvRouter with ignore_eos=True
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 10
+DEBUG    tests.router.common:common.py:658 Successfully verified 10 tokens generated as expected via KvRouter with ignore_eos=True
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [344]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [12445]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [14073]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [860]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [11109]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [30340]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29985]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 10
+DEBUG    tests.router.common:common.py:658 Successfully verified 10 tokens generated as expected via KvRouter with ignore_eos=True
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [275]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 10
+DEBUG    tests.router.common:common.py:658 Successfully verified 10 tokens generated as expected via KvRouter with ignore_eos=True
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [15776]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [3903]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [2157]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29879]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [5381]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [2014]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [2013]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29884]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [5881]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [413]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [614]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [2655]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 10
+DEBUG    tests.router.common:common.py:658 Successfully verified 10 tokens generated as expected via KvRouter with ignore_eos=True
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 10
+DEBUG    tests.router.common:common.py:658 Successfully verified 10 tokens generated as expected via KvRouter with ignore_eos=True
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [3623]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 10
+DEBUG    tests.router.common:common.py:658 Successfully verified 10 tokens generated as expected via KvRouter with ignore_eos=True
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [4156]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 10
+DEBUG    tests.router.common:common.py:658 Successfully verified 10 tokens generated as expected via KvRouter with ignore_eos=True
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 10
+DEBUG    tests.router.common:common.py:658 Successfully verified 10 tokens generated as expected via KvRouter with ignore_eos=True
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 10
+DEBUG    tests.router.common:common.py:658 Successfully verified 10 tokens generated as expected via KvRouter with ignore_eos=True
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 10
+DEBUG    tests.router.common:common.py:658 Successfully verified 10 tokens generated as expected via KvRouter with ignore_eos=True
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 10
+DEBUG    tests.router.common:common.py:658 Successfully verified 10 tokens generated as expected via KvRouter with ignore_eos=True
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29880]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 10
+DEBUG    tests.router.common:common.py:658 Successfully verified 10 tokens generated as expected via KvRouter with ignore_eos=True
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 10
+DEBUG    tests.router.common:common.py:658 Successfully verified 10 tokens generated as expected via KvRouter with ignore_eos=True
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 10
+DEBUG    tests.router.common:common.py:658 Successfully verified 10 tokens generated as expected via KvRouter with ignore_eos=True
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 10
+DEBUG    tests.router.common:common.py:658 Successfully verified 10 tokens generated as expected via KvRouter with ignore_eos=True
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 10
+DEBUG    tests.router.common:common.py:658 Successfully verified 10 tokens generated as expected via KvRouter with ignore_eos=True
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 10
+DEBUG    tests.router.common:common.py:658 Successfully verified 10 tokens generated as expected via KvRouter with ignore_eos=True
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 10
+DEBUG    tests.router.common:common.py:658 Successfully verified 10 tokens generated as expected via KvRouter with ignore_eos=True
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 10
+DEBUG    tests.router.common:common.py:658 Successfully verified 10 tokens generated as expected via KvRouter with ignore_eos=True
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 10
+DEBUG    tests.router.common:common.py:658 Successfully verified 10 tokens generated as expected via KvRouter with ignore_eos=True
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 10
+DEBUG    tests.router.common:common.py:658 Successfully verified 10 tokens generated as expected via KvRouter with ignore_eos=True
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 10
+DEBUG    tests.router.common:common.py:658 Successfully verified 10 tokens generated as expected via KvRouter with ignore_eos=True
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 10
+DEBUG    tests.router.common:common.py:658 Successfully verified 10 tokens generated as expected via KvRouter with ignore_eos=True
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 10
+DEBUG    tests.router.common:common.py:658 Successfully verified 10 tokens generated as expected via KvRouter with ignore_eos=True
+INFO     tests.router.common:common.py:1443 Completed 25/25 requests for Router 2
+INFO     tests.router.common:common.py:1555 === NATS INTERRUPTION TEST: Phase 2 ===
+INFO     tests.router.common:common.py:1556 Stopping NATS server
+INFO     tests.conftest:conftest.py:456 Stopping NATS server on port 4224
+INFO     NatsServer:managed_process.py:388 Terminating process group: 3949
+INFO     tests.router.common:common.py:1559 Sending 10 requests while NATS is down (via TCP)
+DEBUG    tests.router.common:common.py:1418 Sending request 1/10 to Router 2 (NATS down)
+DEBUG    tests.router.common:common.py:1418 Sending request 2/10 to Router 2 (NATS down)
+DEBUG    tests.router.common:common.py:1418 Sending request 3/10 to Router 2 (NATS down)
+DEBUG    tests.router.common:common.py:1418 Sending request 4/10 to Router 2 (NATS down)
+DEBUG    tests.router.common:common.py:1418 Sending request 5/10 to Router 2 (NATS down)
+DEBUG    tests.router.common:common.py:1418 Sending request 6/10 to Router 2 (NATS down)
+DEBUG    tests.router.common:common.py:1418 Sending request 7/10 to Router 2 (NATS down)
+DEBUG    tests.router.common:common.py:1418 Sending request 8/10 to Router 2 (NATS down)
+DEBUG    tests.router.common:common.py:1418 Sending request 9/10 to Router 2 (NATS down)
+DEBUG    tests.router.common:common.py:1418 Sending request 10/10 to Router 2 (NATS down)
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [22993]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [262]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [13]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [292]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [182]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29874]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [277]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29315]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [2371]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [816]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [17196]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29896]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29973]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [448]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [5638]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29899]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [25545]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29925]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29993]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [883]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [8074]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [2915]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29871]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29871]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [4084]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [7293]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [2281]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [11248]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [1905]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [934]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [3697]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [1675]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [3082]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29953]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [11914]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [390]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29896]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [5638]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [25545]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [574]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29899]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [8045]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29889]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [3615]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29941]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [317]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [4124]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [30086]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [4084]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [495]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [2242]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [7293]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [6339]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [313]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [20103]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [311]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [16697]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [3082]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [368]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [390]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [455]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [1388]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [10781]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29871]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29888]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [14540]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [8076]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [12529]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [3615]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [18712]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [4124]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29931]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [518]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [1330]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29906]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [537]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [284]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29950]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29879]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [574]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [28631]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [360]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29900]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [1609]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [24654]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [10759]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [27895]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 10
+DEBUG    tests.router.common:common.py:658 Successfully verified 10 tokens generated as expected via KvRouter with ignore_eos=True
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [17234]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [3253]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [26067]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [766]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [15251]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 10
+DEBUG    tests.router.common:common.py:658 Successfully verified 10 tokens generated as expected via KvRouter with ignore_eos=True
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29896]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [275]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [21248]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [2305]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 10
+DEBUG    tests.router.common:common.py:658 Successfully verified 10 tokens generated as expected via KvRouter with ignore_eos=True
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [20621]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 10
+DEBUG    tests.router.common:common.py:658 Successfully verified 10 tokens generated as expected via KvRouter with ignore_eos=True
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 10
+DEBUG    tests.router.common:common.py:658 Successfully verified 10 tokens generated as expected via KvRouter with ignore_eos=True
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 10
+DEBUG    tests.router.common:common.py:658 Successfully verified 10 tokens generated as expected via KvRouter with ignore_eos=True
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [278]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [383]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 10
+DEBUG    tests.router.common:common.py:658 Successfully verified 10 tokens generated as expected via KvRouter with ignore_eos=True
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29874]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 10
+DEBUG    tests.router.common:common.py:658 Successfully verified 10 tokens generated as expected via KvRouter with ignore_eos=True
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 10
+DEBUG    tests.router.common:common.py:658 Successfully verified 10 tokens generated as expected via KvRouter with ignore_eos=True
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 10
+DEBUG    tests.router.common:common.py:658 Successfully verified 10 tokens generated as expected via KvRouter with ignore_eos=True
+INFO     tests.router.common:common.py:1443 Completed 10/10 requests for Router 2 (NATS down)
+INFO     tests.router.common:common.py:1567 Restarting NATS server (fresh state)
+INFO     tests.conftest:conftest.py:468 Starting NATS server on port 4224 with fresh state
+INFO     NatsServer:managed_process.py:307 Running command: nats-server --trace -p 4224 in /workspace
+INFO     NatsServer:managed_process.py:473 Checking Port: 4224
+INFO     NatsServer:managed_process.py:481 SUCCESS: Check Port: 4224
+INFO     NatsServer:managed_process.py:586 Running custom health check '_nats_ready'
+DEBUG    asyncio:selector_events.py:64 Using selector: EpollSelector
+INFO     NatsServer:managed_process.py:606 SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+INFO     tests.router.common:common.py:1571 Sending 5 more requests after NATS recovery
+DEBUG    tests.router.common:common.py:1418 Sending request 1/5 to Router 1 (post-recovery)
+DEBUG    tests.router.common:common.py:1418 Sending request 2/5 to Router 1 (post-recovery)
+DEBUG    tests.router.common:common.py:1418 Sending request 3/5 to Router 1 (post-recovery)
+DEBUG    tests.router.common:common.py:1418 Sending request 4/5 to Router 1 (post-recovery)
+DEBUG    tests.router.common:common.py:1418 Sending request 5/5 to Router 1 (post-recovery)
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:575 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:589 Request succeeded on attempt 1
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29887]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [1609]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [853]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [2311]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [1454]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29902]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [22137]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [2164]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [427]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [3961]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [7685]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [359]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [4018]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [1454]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [8517]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [304]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [552]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [359]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29871]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29874]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [607]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29879]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [552]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [30166]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [30022]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [1568]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [990]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29874]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [30166]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29878]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [2525]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [29873]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [30071]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [10274]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [861]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [289]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [2331]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [5295]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [28802]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [638]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [7193]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [16702]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [289]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [747]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 10
+DEBUG    tests.router.common:common.py:658 Successfully verified 10 tokens generated as expected via KvRouter with ignore_eos=True
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [10139]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [4149]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: None
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [309]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 10
+DEBUG    tests.router.common:common.py:658 Successfully verified 10 tokens generated as expected via KvRouter with ignore_eos=True
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [23340]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 10
+DEBUG    tests.router.common:common.py:658 Successfully verified 10 tokens generated as expected via KvRouter with ignore_eos=True
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [2183]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:621 Received 1 tokens: [849]
+DEBUG    tests.router.common:common.py:625 Stream finished with reason: length
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 10
+DEBUG    tests.router.common:common.py:658 Successfully verified 10 tokens generated as expected via KvRouter with ignore_eos=True
+DEBUG    tests.router.common:common.py:645 Total generated tokens: 10
+DEBUG    tests.router.common:common.py:658 Successfully verified 10 tokens generated as expected via KvRouter with ignore_eos=True
+INFO     tests.router.common:common.py:1443 Completed 5/5 requests for Router 1 (post-recovery)
+INFO     tests.router.common:common.py:1581 Waiting for final synchronization
+INFO     tests.router.common:common.py:1629 Skipping NATS object store verification (NATS was restarted fresh for interruption test)
+INFO     tests.router.common:common.py:1634 Dumping states from both routers
+INFO     tests.router.common:common.py:1656 Router 1 has 150 events
+INFO     tests.router.common:common.py:1657 Router 2 has 150 events
+INFO     tests.router.common:common.py:1660 Successfully verified that both router states are equal
+INFO     tests.router.common:common.py:1693 Skipping standalone indexer verification (no standalone_indexer_url)
+INFO     tests.router.common:common.py:1724 Skipping NATS consumers verification (local indexer uses NATS Core, not JetStream)
+INFO     tests.router.common:common.py:1731 Indexers sync test completed successfully
+INFO     tests.router.test_router_e2e_with_vllm:test_router_e2e_with_vllm.py:570 vLLM indexers sync test completed successfully
+INFO     tests.router.test_router_e2e_with_vllm:test_router_e2e_with_vllm.py:357 Stopping vLLM worker 0
+INFO     ManagedProcess:managed_process.py:388 Terminating process group: 3390
+INFO     ManagedProcess:managed_process.py:31 Terminating PID: 3390 name: python3
+INFO     ManagedProcess:managed_process.py:36 Sending SIGTERM (kill): 3390 python3
+INFO     ManagedProcess:managed_process.py:31 Terminating PID: 3392 name: tee
+INFO     ManagedProcess:managed_process.py:36 Sending SIGTERM (kill): 3392 tee
+INFO     ManagedProcess:managed_process.py:31 Terminating PID: 3391 name: sed
+INFO     ManagedProcess:managed_process.py:36 Sending SIGTERM (kill): 3391 sed
+INFO     tests.router.test_router_e2e_with_vllm:test_router_e2e_with_vllm.py:357 Stopping vLLM worker 1
+INFO     ManagedProcess:managed_process.py:388 Terminating process group: 3443
+INFO     ManagedProcess:managed_process.py:31 Terminating PID: 3443 name: python3
+INFO     ManagedProcess:managed_process.py:36 Sending SIGTERM (kill): 3443 python3
+INFO     ManagedProcess:managed_process.py:31 Terminating PID: 3445 name: tee
+INFO     ManagedProcess:managed_process.py:36 Sending SIGTERM (kill): 3445 tee
+INFO     ManagedProcess:managed_process.py:31 Terminating PID: 3444 name: sed
+INFO     ManagedProcess:managed_process.py:36 Sending SIGTERM (kill): 3444 sed
+INFO     tests.router.test_router_e2e_with_vllm:test_router_e2e_with_vllm.py:362 Waiting for vLLM worker resources to fully clean up...
+INFO     EtcdServer:managed_process.py:388 Terminating process group: 3377
+INFO     EtcdServer:managed_process.py:31 Terminating PID: 3377 name: etcd
+INFO     EtcdServer:managed_process.py:36 Sending SIGTERM (kill): 3377 etcd
+INFO     EtcdServer:managed_process.py:31 Terminating PID: 3378 name: sed
+INFO     EtcdServer:managed_process.py:36 Sending SIGTERM (kill): 3378 sed
+INFO     NatsServer:managed_process.py:388 Terminating process group: 4005
+INFO     NatsServer:managed_process.py:31 Terminating PID: 4005 name: nats-server
+INFO     NatsServer:managed_process.py:36 Sending SIGTERM (kill): 4005 nats-server
+INFO     NatsServer:managed_process.py:31 Terminating PID: 4006 name: sed
+INFO     NatsServer:managed_process.py:36 Sending SIGTERM (kill): 4006 sed

@@ -1,2 +1,0 @@
-DEBUG    asyncio:selector_events.py:64 Using selector: EpollSelector
-ERROR    dynamo.vllm.omni.omni_handler:omni_handler.py:476 Failed to encode video for request req-1: boom
