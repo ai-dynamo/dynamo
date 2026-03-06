@@ -65,7 +65,7 @@ The GMS server runs as an independent process that manages GPU memory without ev
 
 The server consists of three main components:
 
-1. **Memory Manager** - Allocates physical GPU memory via CUDA VMM (`cuMemCreate`) and exports shareable file descriptors (`cuMemExportToShareableHandle`). Critically, it never calls `cuMemMap` - clients handle all virtual address mapping.
+1. **Memory Manager** - Allocates physical GPU memory via CUDA VMM (`cuMemCreate`) and exports shareable file descriptors (`cuMemExportToShareableHandle`). Critically, it never calls `cuMemMap` - clients handle all virtual address mapping. Allocation requests apply backpressure on OOM: the server retries until allocation succeeds (or optional retry timeout is reached), instead of failing fast.
 
 2. **State Machine (FSM)** - Manages global lock state and committed visibility. Any RW session immediately invalidates committed visibility until a fresh commit. See [State Machine](#state-machine) below.
 
@@ -189,6 +189,19 @@ GMS uses epoch-scoped allocations and metadata:
 - `metadata_put` is validated against active-epoch allocations and offset bounds.
 - `free` cascades metadata cleanup for entries referencing the freed allocation.
 - Commit rejects dangling metadata references.
+
+### Allocation Backpressure on OOM
+
+When a writer requests a new allocation, GMS treats CUDA OOM as a transient condition:
+
+- `cuMemCreate` OOM does **not** immediately fail the request.
+- The server retries in a loop and only returns success after allocation is created.
+- Between retries, GMS performs best-effort device free-memory polling (NVML) for observability and logs progress.
+- Optional environment overrides:
+  - `GMS_ALLOC_RETRY_INTERVAL` (default `0.5`)
+  - `GMS_ALLOC_RETRY_TIMEOUT` (default unset = wait indefinitely)
+
+This ensures the "new epoch gets new allocations" workflow can wait for memory reclamation instead of racing into immediate OOM failures.
 
 ---
 

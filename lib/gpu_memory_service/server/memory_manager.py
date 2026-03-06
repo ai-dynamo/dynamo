@@ -12,6 +12,7 @@ synchronization (e.g., via LockManager ensuring single-writer access).
 """
 
 import logging
+import os
 import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional
@@ -78,8 +79,23 @@ class GMSServerMemoryManager:
         self._allocations: Dict[str, AllocationInfo] = {}
         ensure_cuda_initialized()
         self._granularity = get_allocation_granularity(device)
+        self._allocation_retry_interval_s = self._read_nonnegative_float_env(
+            "GMS_ALLOC_RETRY_INTERVAL", 0.5
+        )
+        self._allocation_retry_timeout_s = self._read_optional_positive_float_env(
+            "GMS_ALLOC_RETRY_TIMEOUT"
+        )
         logger.info(
-            f"GMSServerMemoryManager initialized: device={device}, granularity={self._granularity}"
+            "GMSServerMemoryManager initialized: device=%d, granularity=%d, "
+            "alloc_retry_interval_s=%.3f, alloc_retry_timeout_s=%s",
+            device,
+            self._granularity,
+            self._allocation_retry_interval_s,
+            (
+                f"{self._allocation_retry_timeout_s:.3f}"
+                if self._allocation_retry_timeout_s is not None
+                else "none"
+            ),
         )
 
     @property
@@ -115,6 +131,66 @@ class GMSServerMemoryManager:
         if result != cuda.CUresult.CUDA_SUCCESS:
             logger.warning(f"cuMemRelease failed for {info.allocation_id}: {result}")
 
+    @staticmethod
+    def _read_nonnegative_float_env(name: str, default: float) -> float:
+        raw = os.getenv(name)
+        if raw is None:
+            return default
+        try:
+            value = float(raw)
+        except ValueError:
+            logger.warning("Invalid %s=%r; using default %.3f", name, raw, default)
+            return default
+        if value < 0:
+            logger.warning(
+                "Invalid %s=%r (must be >= 0); using default %.3f",
+                name,
+                raw,
+                default,
+            )
+            return default
+        return value
+
+    @staticmethod
+    def _read_optional_positive_float_env(name: str) -> Optional[float]:
+        raw = os.getenv(name)
+        if raw is None or raw == "":
+            return None
+        try:
+            value = float(raw)
+        except ValueError:
+            logger.warning("Invalid %s=%r; ignoring timeout override", name, raw)
+            return None
+        if value <= 0:
+            logger.warning(
+                "Invalid %s=%r (must be > 0); ignoring timeout override", name, raw
+            )
+            return None
+        return value
+
+    def _query_device_free_memory_bytes(self) -> Optional[int]:
+        """Best-effort free-memory query via NVML for retry backoff decisions."""
+        try:
+            import pynvml
+
+            pynvml.nvmlInit()
+            try:
+                handle = pynvml.nvmlDeviceGetHandleByIndex(self._device)
+                info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                return int(info.free)
+            finally:
+                pynvml.nvmlShutdown()
+        except Exception as e:
+            logger.debug(
+                "NVML free-memory query failed for device %d: %s", self._device, e
+            )
+            return None
+
+    def _retry_timeout_exceeded(self, started_at: float) -> bool:
+        if self._allocation_retry_timeout_s is None:
+            return False
+        return (time.monotonic() - started_at) >= self._allocation_retry_timeout_s
+
     def allocate(
         self, size: int, tag: str = "default", epoch_id: str = ""
     ) -> AllocationInfo:
@@ -122,6 +198,9 @@ class GMSServerMemoryManager:
 
         Uses cuMemCreate to allocate physical GPU memory that can be exported
         as a file descriptor for sharing with other processes.
+
+        On CUDA OOM, this method blocks and retries until allocation succeeds
+        (or optional retry timeout is reached).
 
         Args:
             size: Requested size in bytes (will be aligned up to granularity)
@@ -147,8 +226,81 @@ class GMSServerMemoryManager:
             cuda.CUmemAllocationHandleType.CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR
         )
 
-        result, handle = cuda.cuMemCreate(aligned_size, prop, 0)
-        check_cuda_result(result, "cuMemCreate")
+        started_at = time.monotonic()
+        log_interval_s = 5.0
+        last_log_at = started_at - log_interval_s
+        attempts = 0
+
+        while True:
+            attempts += 1
+            now = time.monotonic()
+            free_bytes = self._query_device_free_memory_bytes()
+            if free_bytes is not None and free_bytes < aligned_size:
+                if self._retry_timeout_exceeded(started_at):
+                    raise RuntimeError(
+                        "Timed out waiting for GPU memory: "
+                        f"requested_size={size}, aligned_size={aligned_size}, tag={tag}, "
+                        f"epoch={epoch_id}, attempts={attempts}, "
+                        f"waited_s={time.monotonic() - started_at:.3f}"
+                    )
+                if now - last_log_at >= log_interval_s:
+                    logger.warning(
+                        "Insufficient free memory before allocation (attempt=%d): "
+                        "aligned_size=%d bytes, free_bytes=%d, tag=%s, epoch=%s; "
+                        "retrying in %.3fs",
+                        attempts,
+                        aligned_size,
+                        free_bytes,
+                        tag,
+                        epoch_id,
+                        self._allocation_retry_interval_s,
+                    )
+                    last_log_at = now
+                time.sleep(self._allocation_retry_interval_s)
+                continue
+
+            result, handle = cuda.cuMemCreate(aligned_size, prop, 0)
+            if result == cuda.CUresult.CUDA_SUCCESS:
+                break
+
+            if result != cuda.CUresult.CUDA_ERROR_OUT_OF_MEMORY:
+                check_cuda_result(result, "cuMemCreate")
+
+            if self._retry_timeout_exceeded(started_at):
+                raise RuntimeError(
+                    "Timed out waiting for GPU memory: "
+                    f"requested_size={size}, aligned_size={aligned_size}, tag={tag}, "
+                    f"epoch={epoch_id}, attempts={attempts}, "
+                    f"waited_s={time.monotonic() - started_at:.3f}"
+                )
+
+            now = time.monotonic()
+            if now - last_log_at >= log_interval_s:
+                if free_bytes is None:
+                    logger.warning(
+                        "cuMemCreate OOM (attempt=%d) for aligned_size=%d bytes, tag=%s, "
+                        "epoch=%s; retrying in %.3fs",
+                        attempts,
+                        aligned_size,
+                        tag,
+                        epoch_id,
+                        self._allocation_retry_interval_s,
+                    )
+                else:
+                    logger.warning(
+                        "cuMemCreate OOM (attempt=%d) for aligned_size=%d bytes, tag=%s, "
+                        "epoch=%s; free_bytes=%d; retrying in %.3fs",
+                        attempts,
+                        aligned_size,
+                        tag,
+                        epoch_id,
+                        free_bytes,
+                        self._allocation_retry_interval_s,
+                    )
+                last_log_at = now
+
+            # Fragmentation can still cause OOM even when free memory is high.
+            time.sleep(self._allocation_retry_interval_s)
 
         # epoch_id is immutable: assigned at allocation creation and never changes.
         info = AllocationInfo(
