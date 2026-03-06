@@ -334,22 +334,7 @@ func generateSingleDCD(
 		labels[commonconsts.KubeLabelDynamoWorkerHash] = rollingUpdateCtx.NewWorkerHash
 	}
 
-	// Propagate metrics annotation from parent deployment if present
-	if parentDGD.Annotations != nil {
-		if deployment.Spec.Annotations == nil {
-			deployment.Spec.Annotations = make(map[string]string)
-		}
-		if val, exists := parentDGD.Annotations[commonconsts.KubeAnnotationEnableMetrics]; exists {
-			deployment.Spec.Annotations[commonconsts.KubeAnnotationEnableMetrics] = val
-		}
-		if val, exists := parentDGD.Annotations[commonconsts.KubeAnnotationDynamoDiscoveryBackend]; exists {
-			deployment.Spec.Annotations[commonconsts.KubeAnnotationDynamoDiscoveryBackend] = val
-		}
-		// Propagate operator origin version for version-gated behavior in backends
-		if val, exists := parentDGD.Annotations[commonconsts.KubeAnnotationDynamoOperatorOriginVersion]; exists {
-			deployment.Spec.Annotations[commonconsts.KubeAnnotationDynamoOperatorOriginVersion] = val
-		}
-	}
+	propagateDGDAnnotations(parentDGD.GetAnnotations(), &deployment.Spec.DynamoComponentDeploymentSharedSpec)
 
 	// Apply restart annotation if this service should be restarted.
 	if restartState.ShouldAnnotateService(componentName) {
@@ -518,6 +503,18 @@ func GetDCDResourceName(dgd *v1alpha1.DynamoGraphDeployment, serviceName string,
 
 type SecretsRetriever interface {
 	GetSecrets(namespace, registry string) ([]string, error)
+}
+
+func resolveImagePullSecrets(retriever SecretsRetriever, namespace, image string) []corev1.LocalObjectReference {
+	names, err := retriever.GetSecrets(namespace, image)
+	if err != nil {
+		return nil
+	}
+	refs := make([]corev1.LocalObjectReference, 0, len(names))
+	for _, name := range names {
+		refs = append(refs, corev1.LocalObjectReference{Name: name})
+	}
+	return refs
 }
 
 // applyCliqueStartupDependencies configures StartsAfter dependencies for cliques in a PodCliqueSet
@@ -1064,12 +1061,7 @@ func GenerateBasePodSpec(
 
 	imagePullSecrets := []corev1.LocalObjectReference{}
 	if !shouldDisableImagePullSecret && secretsRetriever != nil && component.ExtraPodSpec != nil && component.ExtraPodSpec.MainContainer != nil && component.ExtraPodSpec.MainContainer.Image != "" {
-		secretsName, err := secretsRetriever.GetSecrets(namespace, component.ExtraPodSpec.MainContainer.Image)
-		if err == nil {
-			for _, secretName := range secretsName {
-				imagePullSecrets = append(imagePullSecrets, corev1.LocalObjectReference{Name: secretName})
-			}
-		}
+		imagePullSecrets = resolveImagePullSecrets(secretsRetriever, namespace, component.ExtraPodSpec.MainContainer.Image)
 	}
 	if component.EnvFromSecret != nil {
 		container.EnvFrom = append(container.EnvFrom, corev1.EnvFromSource{
@@ -1185,6 +1177,22 @@ func GenerateBasePodSpec(
 		return nil, fmt.Errorf("failed to inject checkpoint config: %w", err)
 	}
 
+	// Inject auto-generated frontend sidecar if configured
+	if component.FrontendSidecar != nil {
+		sidecar, err := generateFrontendSidecar(component.FrontendSidecar, componentContext, operatorConfig)
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate frontend sidecar: %w", err)
+		}
+		podSpec.Containers = append(podSpec.Containers, sidecar)
+
+		if !shouldDisableImagePullSecret && secretsRetriever != nil {
+			podSpec.ImagePullSecrets = controller_common.AppendUniqueImagePullSecrets(
+				podSpec.ImagePullSecrets,
+				resolveImagePullSecrets(secretsRetriever, namespace, component.FrontendSidecar.Image),
+			)
+		}
+	}
+
 	return &podSpec, nil
 }
 
@@ -1220,6 +1228,54 @@ func generateComponentContext(component *v1alpha1.DynamoComponentDeploymentShare
 	return componentContext
 }
 
+// generateFrontendSidecar builds a fully configured frontend sidecar container
+// using the same FrontendDefaults logic as standalone frontend services.
+// This eliminates the need for users to manually specify Dynamo env vars, probes,
+// and ports when running the frontend as a sidecar (e.g., GAIE deployments).
+func generateFrontendSidecar(
+	spec *v1alpha1.FrontendSidecarSpec,
+	parentContext ComponentContext,
+	operatorConfig *configv1alpha1.OperatorConfiguration,
+) (corev1.Container, error) {
+	frontendContext := ComponentContext{
+		numberOfNodes:                  1,
+		ComponentType:                  commonconsts.ComponentTypeFrontend,
+		ParentGraphDeploymentName:      parentContext.ParentGraphDeploymentName,
+		ParentGraphDeploymentNamespace: parentContext.ParentGraphDeploymentNamespace,
+		DiscoveryBackend:               parentContext.DiscoveryBackend,
+		DynamoNamespace:                parentContext.DynamoNamespace,
+	}
+
+	frontendDefaults := NewFrontendDefaults()
+	container, err := frontendDefaults.GetBaseContainer(frontendContext)
+	if err != nil {
+		return corev1.Container{}, fmt.Errorf("failed to get frontend base container: %w", err)
+	}
+
+	container.Name = commonconsts.FrontendSidecarContainerName
+	container.Image = spec.Image
+
+	if len(spec.Args) > 0 {
+		container.Args = spec.Args
+	}
+
+	if spec.EnvFromSecret != nil {
+		container.EnvFrom = append(container.EnvFrom, corev1.EnvFromSource{
+			SecretRef: &corev1.SecretEnvSource{
+				LocalObjectReference: corev1.LocalObjectReference{Name: *spec.EnvFromSecret},
+			},
+		})
+	}
+
+	if len(spec.Envs) > 0 {
+		container.Env = MergeEnvs(container.Env, spec.Envs)
+	}
+
+	addStandardEnvVars(&container, operatorConfig)
+
+	return container, nil
+}
+
 // GeneratePodSpecForComponent creates a PodSpec for Grove deployments (simplified wrapper)
 func GeneratePodSpecForComponent(
 	component *v1alpha1.DynamoComponentDeploymentSharedSpec,
@@ -1236,11 +1292,40 @@ func GeneratePodSpecForComponent(
 	if len(dynamoDeployment.Spec.Envs) > 0 {
 		component.Envs = MergeEnvs(dynamoDeployment.Spec.Envs, component.Envs)
 	}
+
+	propagateDGDAnnotations(dynamoDeployment.GetAnnotations(), component)
+
 	podSpec, err := GenerateBasePodSpec(component, backendFramework, secretsRetriever, dynamoDeployment.Name, dynamoDeployment.Namespace, role, numberOfNodes, operatorConfig, multinodeDeploymentType, serviceName, checkpointInfo)
 	if err != nil {
 		return nil, err
 	}
 	return podSpec, nil
+}
+
+// dgdPropagatedAnnotationKeys lists DGD metadata annotations that are propagated
+// to component-level annotations (for both the DCD/controller and Grove paths).
+// Service-level annotations take precedence (are never overwritten).
+var dgdPropagatedAnnotationKeys = []string{
+	commonconsts.KubeAnnotationEnableMetrics,
+	commonconsts.KubeAnnotationDynamoDiscoveryBackend,
+	commonconsts.KubeAnnotationDynamoOperatorOriginVersion,
+	commonconsts.KubeAnnotationVLLMDistributedExecutorBackend,
+}
+
+// propagateDGDAnnotations copies DGD-level annotations into the component
+// annotations so that downstream logic can read them uniformly.
+// Service-level annotations take precedence (are never overwritten).
+func propagateDGDAnnotations(dgdAnnotations map[string]string, component *v1alpha1.DynamoComponentDeploymentSharedSpec) {
+	for _, key := range dgdPropagatedAnnotationKeys {
+		if val, exists := dgdAnnotations[key]; exists {
+			if component.Annotations == nil {
+				component.Annotations = make(map[string]string)
+			}
+			if _, serviceHas := component.Annotations[key]; !serviceHas {
+				component.Annotations[key] = val
+			}
+		}
+	}
 }
 
 // GenerateGrovePodCliqueSet generates a Grove PodCliqueSet for the given deployment, supporting both single-node and multinode cases.
@@ -1293,14 +1378,6 @@ func GenerateGrovePodCliqueSet(
 				component.Annotations = make(map[string]string)
 			}
 			component.Annotations[commonconsts.KubeAnnotationDynamoDiscoveryBackend] = string(discoveryBackend)
-		}
-
-		// Propagate operator origin version for version-gated behavior in backends
-		if val, exists := dynamoDeployment.Annotations[commonconsts.KubeAnnotationDynamoOperatorOriginVersion]; exists {
-			if component.Annotations == nil {
-				component.Annotations = make(map[string]string)
-			}
-			component.Annotations[commonconsts.KubeAnnotationDynamoOperatorOriginVersion] = val
 		}
 
 		// Get checkpoint info for this service if available

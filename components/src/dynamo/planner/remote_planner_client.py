@@ -6,6 +6,7 @@
 import asyncio
 import logging
 
+from dynamo._core import Client
 from dynamo.planner.defaults import SubComponentType
 from dynamo.planner.scale_protocol import ScaleRequest, ScaleResponse
 from dynamo.runtime import DistributedRuntime
@@ -29,7 +30,7 @@ class RemotePlannerClient:
         self.central_component = central_component
         self.connection_timeout = connection_timeout
         self.max_retries = max_retries
-        self._client = None
+        self._client: Client | None = None
 
     async def _ensure_client(self):
         """Lazy initialization of endpoint client with retry mechanism"""
@@ -39,7 +40,7 @@ class RemotePlannerClient:
             )
 
             # Retry logic with exponential backoff
-            last_error = None
+            last_error: Exception | None = None
             for attempt in range(self.max_retries):
                 try:
                     logger.info(
@@ -101,6 +102,7 @@ class RemotePlannerClient:
         # Send request via the runtime client's generate method (the correct API for
         # calling any dynamo endpoint, regardless of its registered name)
         request_json = request.model_dump_json()
+        assert self._client is not None
         stream = await self._client.generate(request_json)
 
         response_data = None

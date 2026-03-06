@@ -2,12 +2,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-
+MODEL="Qwen/Qwen3-VL-30B-A3B-Instruct-FP8"
 CAPACITY_GB=10
 EXTRA_ARGS=()
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --model)
+            MODEL="$2"; shift 2 ;;
         --multimodal-embedding-cache-capacity-gb)
             CAPACITY_GB="$2"; shift 2 ;;
         *)
@@ -15,6 +17,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Need vLLM main or v0.17+
 EC_ARGS=()
 if [[ "$CAPACITY_GB" != "0" ]]; then
     EC_ARGS=(--ec-transfer-config "{
@@ -26,7 +29,7 @@ if [[ "$CAPACITY_GB" != "0" ]]; then
 fi
 
 CUDA_VISIBLE_DEVICES=2 \
-vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct-FP8 \
+vllm serve "$MODEL" \
     --enable-log-requests \
     --max-model-len 16384 \
     --gpu-memory-utilization .9 \

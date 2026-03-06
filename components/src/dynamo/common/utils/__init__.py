@@ -9,6 +9,7 @@ Dynamo backends and components.
 
 Submodules:
     - endpoint_types: Endpoint type parsing utilities
+    - nvtx_utils: NVTX profiling wrappers (enable with DYN_NVTX=1; no-ops by default)
     - otel_tracing: OpenTelemetry tracing header utilities
     - paths: Workspace directory detection and path utilities
     - prometheus: Prometheus metrics collection and logging utilities
@@ -18,6 +19,7 @@ from dynamo.common.utils import (
     endpoint_types,
     engine_response,
     namespace,
+    nvtx_utils,
     otel_tracing,
     paths,
     prometheus,
@@ -28,6 +30,7 @@ __all__ = [
     "endpoint_types",
     "engine_response",
     "namespace",
+    "nvtx_utils",
     "otel_tracing",
     "paths",
     "prometheus",
