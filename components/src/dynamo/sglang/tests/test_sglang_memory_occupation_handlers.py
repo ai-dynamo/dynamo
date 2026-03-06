@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import sys
+import types
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -18,6 +20,24 @@ pytestmark = [
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
 ]
+
+
+@pytest.fixture(autouse=True)
+def _stub_sglang_io_struct(monkeypatch):
+    """Keep unit tests independent from CUDA-only sglang imports."""
+
+    io_struct = types.ModuleType("sglang.srt.managers.io_struct")
+
+    class _Req:
+        def __init__(self, tags=None):
+            self.tags = tags
+
+    io_struct.PauseGenerationReqInput = _Req
+    io_struct.ReleaseMemoryOccupationReqInput = _Req
+    io_struct.ResumeMemoryOccupationReqInput = _Req
+    io_struct.ContinueGenerationReqInput = _Req
+
+    monkeypatch.setitem(sys.modules, "sglang.srt.managers.io_struct", io_struct)
 
 
 class _TestWorkerHandler(BaseWorkerHandler):
