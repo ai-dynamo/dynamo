@@ -13,36 +13,15 @@
 //! - First-touch page allocation ensures correct NUMA placement
 
 use super::get_current_cpu_numa_node;
-use cudarc::driver::CudaContext;
 use cudarc::driver::result::malloc_host;
 use cudarc::driver::sys::CU_MEMHOSTALLOC_DEVICEMAP;
 use nix::libc;
-use std::collections::HashMap;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use super::{NumaNode, get_device_numa_node};
-
-/// Get or create a CUDA context for the given device.
-fn cuda_context(device_id: u32) -> Result<Arc<CudaContext>, String> {
-    static CONTEXTS: OnceLock<Mutex<HashMap<u32, Arc<CudaContext>>>> = OnceLock::new();
-    let mut map = CONTEXTS.get_or_init(Default::default).lock().unwrap();
-
-    if let Some(existing) = map.get(&device_id) {
-        return Ok(existing.clone());
-    }
-
-    let ctx = CudaContext::new(device_id as usize).map_err(|e| {
-        format!(
-            "Failed to create CUDA context for device {}: {:?}",
-            device_id, e
-        )
-    })?;
-    map.insert(device_id, ctx.clone());
-    Ok(ctx)
-}
 
 /// Wrapper for raw pointer that can be sent between threads.
 ///
@@ -197,7 +176,8 @@ impl NumaWorker {
         }
 
         // Get or create CUDA context for this GPU
-        let ctx = cuda_context(gpu_id)?;
+        let ctx = crate::device::cuda_context(gpu_id)
+            .map_err(|e| format!("Failed to create CUDA context for device {}: {}", gpu_id, e))?;
 
         unsafe {
             // Bind CUDA context to this worker thread before allocation
@@ -370,7 +350,7 @@ impl NumaWorkerPool {
     /// Allocate CUDA pinned memory for a specific GPU (auto-detects NUMA node).
     ///
     /// This method:
-    /// 1. Determines the GPU's NUMA node via nvidia-smi
+    /// 1. Determines the GPU's NUMA node via CUDA driver PCI attributes + sysfs
     /// 2. Routes the allocation to a worker pinned to that node
     /// 3. The worker allocates and touches pages to ensure first-touch placement
     ///
@@ -399,23 +379,7 @@ impl NumaWorkerPool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::numa::{get_current_cpu_numa_node, get_device_numa_node};
-
-    /// Check if CUDA is available for testing.
-    fn is_cuda_available() -> bool {
-        // Check if nvidia-smi is available
-        if std::process::Command::new("nvidia-smi")
-            .arg("--query-gpu=count")
-            .arg("--format=csv,noheader")
-            .output()
-            .is_err()
-        {
-            return false;
-        }
-
-        // Try to initialize CUDA context for device 0
-        cuda_context(0).is_ok()
-    }
+    use crate::numa::get_current_cpu_numa_node;
 
     #[test]
     fn test_worker_spawn() {
@@ -425,93 +389,15 @@ mod tests {
     }
 
     #[test]
-    fn test_worker_allocate_pinned() {
-        if !is_cuda_available() {
-            eprintln!("Skipping test_worker_allocate_pinned: CUDA not available");
-            return;
-        }
-
-        let node = NumaNode(0);
-        let worker = NumaWorker::spawn(node).unwrap();
-
-        let send_ptr = worker.allocate(4096, 0).unwrap();
-        let ptr = send_ptr.0;
-        assert!(!ptr.is_null());
-
-        unsafe {
-            cudarc::driver::result::free_host(ptr as *mut std::ffi::c_void).unwrap();
-        }
-    }
-
-    #[test]
-    fn test_worker_pool() {
-        if !is_cuda_available() {
-            eprintln!("Skipping test_worker_pool: CUDA not available");
-            return;
-        }
-
-        let pool = NumaWorkerPool::new();
-
-        unsafe {
-            let ptr = pool.allocate_pinned_for_gpu(8192, 0).unwrap();
-            assert!(!ptr.is_null());
-
-            cudarc::driver::result::free_host(ptr as *mut std::ffi::c_void).unwrap();
-        }
-    }
-
-    #[test]
     fn test_worker_pool_singleton() {
-        // Verify that global() returns the same instance
         let pool1 = NumaWorkerPool::global();
         let pool2 = NumaWorkerPool::global();
-
-        // They should be the same static reference
         assert!(std::ptr::eq(pool1, pool2));
     }
 
     #[test]
-    fn test_worker_reuse() {
-        if !is_cuda_available() {
-            eprintln!("Skipping test_worker_reuse: CUDA not available");
-            return;
-        }
-
-        // Test that subsequent allocations for the same GPU reuse the same worker
-        let pool = NumaWorkerPool::new();
-
-        unsafe {
-            // First allocation spawns worker for GPU 0
-            let ptr1 = pool.allocate_pinned_for_gpu(1024, 0).unwrap();
-
-            // Second allocation should reuse worker for GPU 0
-            let ptr2 = pool.allocate_pinned_for_gpu(1024, 0).unwrap();
-
-            assert!(!ptr1.is_null());
-            assert!(!ptr2.is_null());
-            assert_ne!(ptr1, ptr2);
-
-            cudarc::driver::result::free_host(ptr1 as *mut std::ffi::c_void).unwrap();
-            cudarc::driver::result::free_host(ptr2 as *mut std::ffi::c_void).unwrap();
-        }
-    }
-
-    #[test]
-    fn test_zero_size_allocation() {
-        // Test that zero-size allocations are rejected
-        let pool = NumaWorkerPool::new();
-        let result = pool.allocate_pinned_for_gpu(0, 0);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("zero"));
-    }
-
-    #[test]
     fn test_get_current_cpu_numa_node() {
-        // Test that we can detect current CPU's NUMA node
         let node = get_current_cpu_numa_node();
-
-        // On a real NUMA system, should return a valid node
-        // On fake NUMA or single-node, might return 0 or UNKNOWN
         if !node.is_unknown() {
             println!("Current CPU on NUMA node: {}", node.0);
         } else {
@@ -520,23 +406,7 @@ mod tests {
     }
 
     #[test]
-    fn test_get_device_numa_node() {
-        // Test GPU NUMA node detection
-        // This will only work if nvidia-smi is available
-        let node = get_device_numa_node(0);
-
-        if !node.is_unknown() {
-            println!("GPU 0 on NUMA node: {}", node.0);
-            // Node should be 0 or 1 on typical dual-socket systems
-            assert!(node.0 <= 1 || node.0 == u32::MAX);
-        } else {
-            println!("GPU NUMA detection unavailable (no nvidia-smi or no GPU)");
-        }
-    }
-
-    #[test]
     fn test_numa_node_display() {
-        // Test Display implementation for NumaNode
         let node = NumaNode(0);
         assert_eq!(format!("{}", node), "NumaNode(0)");
 
@@ -552,39 +422,97 @@ mod tests {
         let unknown = NumaNode::UNKNOWN;
         assert!(unknown.is_unknown());
     }
+}
+
+#[cfg(all(test, feature = "testing-cuda"))]
+mod cuda_tests {
+    use super::*;
+    use crate::numa::get_device_numa_node;
 
     #[test]
-    fn test_pinned_allocation_api() {
-        // Verify the public API works for pinned allocation
+    fn test_worker_allocate_pinned() {
+        let node = NumaNode(0);
+        let worker = NumaWorker::spawn(node).unwrap();
+
+        let send_ptr = worker.allocate(4096, 0).unwrap();
+        let ptr = send_ptr.0;
+        assert!(!ptr.is_null());
+
+        unsafe {
+            cudarc::driver::result::free_host(ptr as *mut std::ffi::c_void).unwrap();
+        }
+    }
+
+    #[test]
+    fn test_worker_pool() {
         let pool = NumaWorkerPool::new();
 
         unsafe {
-            // Test that we can allocate pinned memory for a GPU
-            if let Ok(ptr) = pool.allocate_pinned_for_gpu(1024, 0) {
-                assert!(!ptr.is_null());
-                cudarc::driver::result::free_host(ptr as *mut std::ffi::c_void).unwrap();
-            }
+            let ptr = pool.allocate_pinned_for_gpu(8192, 0).unwrap();
+            assert!(!ptr.is_null());
+
+            cudarc::driver::result::free_host(ptr as *mut std::ffi::c_void).unwrap();
+        }
+    }
+
+    #[test]
+    fn test_worker_reuse() {
+        let pool = NumaWorkerPool::new();
+
+        unsafe {
+            let ptr1 = pool.allocate_pinned_for_gpu(1024, 0).unwrap();
+            let ptr2 = pool.allocate_pinned_for_gpu(1024, 0).unwrap();
+
+            assert!(!ptr1.is_null());
+            assert!(!ptr2.is_null());
+            assert_ne!(ptr1, ptr2);
+
+            cudarc::driver::result::free_host(ptr1 as *mut std::ffi::c_void).unwrap();
+            cudarc::driver::result::free_host(ptr2 as *mut std::ffi::c_void).unwrap();
+        }
+    }
+
+    #[test]
+    fn test_zero_size_allocation() {
+        let pool = NumaWorkerPool::new();
+        let result = pool.allocate_pinned_for_gpu(0, 0);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("zero"));
+    }
+
+    #[test]
+    fn test_get_device_numa_node() {
+        let node = get_device_numa_node(0);
+        println!("GPU 0 on NUMA node: {}", node.0);
+        assert!(
+            !node.is_unknown(),
+            "get_device_numa_node should never return UNKNOWN"
+        );
+        assert!(node.0 < 16, "NUMA node {} seems unreasonably high", node.0);
+    }
+
+    #[test]
+    fn test_pinned_allocation_api() {
+        let pool = NumaWorkerPool::new();
+
+        unsafe {
+            let ptr = pool.allocate_pinned_for_gpu(1024, 0).unwrap();
+            assert!(!ptr.is_null());
+            cudarc::driver::result::free_host(ptr as *mut std::ffi::c_void).unwrap();
         }
     }
 
     #[test]
     fn test_worker_channel_communication() {
-        // Test that worker receives and processes requests
         let node = NumaNode(0);
         let worker = NumaWorker::spawn(node).unwrap();
 
-        // Send allocation request
-        let result = worker.allocate(1024, 0);
+        let send_ptr = worker.allocate(1024, 0).unwrap();
+        let ptr = send_ptr.0;
+        assert!(!ptr.is_null());
 
-        // Should get a response (either success or timeout)
-        assert!(result.is_ok() || result.is_err());
-
-        if let Ok(send_ptr) = result {
-            unsafe {
-                let ptr = send_ptr.0;
-                assert!(!ptr.is_null());
-                cudarc::driver::result::free_host(ptr as *mut std::ffi::c_void).unwrap();
-            }
+        unsafe {
+            cudarc::driver::result::free_host(ptr as *mut std::ffi::c_void).unwrap();
         }
     }
 }

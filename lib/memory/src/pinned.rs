@@ -7,22 +7,7 @@ use super::{MemoryDescriptor, Result, StorageError, StorageKind, actions, nixl::
 use cudarc::driver::CudaContext;
 use cudarc::driver::sys;
 use std::any::Any;
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
-
-/// Get or create a CUDA context for the given device.
-fn cuda_context(device_id: u32) -> Result<Arc<CudaContext>> {
-    static CONTEXTS: OnceLock<Mutex<HashMap<u32, Arc<CudaContext>>>> = OnceLock::new();
-    let mut map = CONTEXTS.get_or_init(Default::default).lock().unwrap();
-
-    if let Some(existing) = map.get(&device_id) {
-        return Ok(existing.clone());
-    }
-
-    let ctx = CudaContext::new(device_id as usize)?;
-    map.insert(device_id, ctx.clone());
-    Ok(ctx)
-}
+use std::sync::Arc;
 
 /// CUDA pinned host memory allocated via cudaHostAlloc.
 #[derive(Debug)]
@@ -75,7 +60,7 @@ impl PinnedStorage {
         }
 
         let gpu_id = device_id.unwrap_or(0);
-        let ctx = cuda_context(gpu_id)?;
+        let ctx = crate::device::cuda_context(gpu_id)?;
 
         let ptr = match device_id {
             #[cfg(target_os = "linux")]
