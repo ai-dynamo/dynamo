@@ -412,7 +412,7 @@ class PyTrtllmKvConnectorWorker:
         self,
         py_drt: Optional[Any],
         trtllm_rank: str,
-        rank: Optional[int] = None,
+        nccl_rank: Optional[int] = None,
         world_size: Optional[int] = None,
         nccl_comm_ref: Optional["NcclCommRef"] = None,
     ) -> None:
@@ -425,8 +425,8 @@ class PyTrtllmKvConnectorWorker:
             The distributed runtime object (DistributedRuntime)
         trtllm_rank: str
             The TRT-LLM rank identifier
-        rank: Optional[int]
-            Rank for replicated mode (None = sharded mode).
+        nccl_rank: Optional[int]
+            NCCL rank for replicated mode (None = sharded mode).
             Required for MLA support optimization (replicated mode).
         world_size: Optional[int]
             World size for replicated mode.

@@ -7,9 +7,9 @@ Rust-based TensorRT-LLM integration loader.
 Uses objects from _vllm_integration module. Type stubs in kvbm/_core.pyi.
 
 KvConnectorWorker (PyTrtllmKvConnectorWorker) signature:
-    (py_drt, trtllm_rank, rank=None, world_size=None, nccl_comm_ref=None)
+    (py_drt, trtllm_rank, nccl_rank=None, world_size=None, nccl_comm_ref=None)
 
-The rank, world_size, and nccl_comm_ptr parameters enable NCCL replicated mode
+The nccl_rank, world_size, and nccl_comm_ref parameters enable NCCL replicated mode
 for MLA (Multi-head Latent Attention) support with broadcast-based KV cache transfers.
 """
 
@@ -25,7 +25,7 @@ try:
     SlotUpdate = getattr(_vllm_integration, "SlotUpdate")
 
     # TRT-LLM connector classes with NCCL replicated mode support
-    # KvConnectorWorker: optional rank, world_size, nccl_comm_ptr for MLA support
+    # KvConnectorWorker: optional nccl_rank, world_size, nccl_comm_ref for MLA support
     KvConnectorWorker = getattr(_vllm_integration, "PyTrtllmKvConnectorWorker")
     KvConnectorLeader = getattr(_vllm_integration, "PyTrtllmKvConnectorLeader")
     SchedulerOutput = getattr(_vllm_integration, "SchedulerOutput")
