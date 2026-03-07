@@ -40,7 +40,24 @@ def validate_model_path(value: str) -> str:
 
 
 class FrontendConfig(KvRouterConfigBase):
-    """Configuration for the Dynamo frontend."""
+    """Configuration for the Dynamo frontend.
+
+    Examples:
+        >>> import argparse
+        >>> from dynamo.frontend.frontend_args import FrontendArgGroup, FrontendConfig
+        >>>
+        >>> parser = argparse.ArgumentParser()
+        >>> FrontendArgGroup().add_arguments(parser)
+        >>> args = parser.parse_args([
+        ...     "--model-name", "Llama-3.2-1B-Instruct",
+        ...     "--http-port", "8080",
+        ... ])
+        >>> config = FrontendConfig.from_cli_args(args)
+        >>> config.model_name
+        'Llama-3.2-1B-Instruct'
+        >>> config.http_port
+        8080
+    """
 
     interactive: bool
     kv_cache_block_size: Optional[int]
@@ -52,7 +69,7 @@ class FrontendConfig(KvRouterConfigBase):
     router_mode: str
     namespace: Optional[str] = None
     namespace_prefix: Optional[str] = None
-    enforce_disagg: bool
+    decode_fallback: bool
 
     migration_limit: int
     active_decode_blocks_threshold: Optional[float]
@@ -71,6 +88,7 @@ class FrontendConfig(KvRouterConfigBase):
     event_plane: str
     chat_processor: str
     enable_anthropic_api: bool
+    debug_perf: bool
     preprocess_workers: int
 
     def validate(self) -> None:
@@ -93,7 +111,23 @@ def _preprocess_for_encode_config(config: FrontendConfig) -> Dict[str, Any]:
 
 
 class FrontendArgGroup(ArgGroup):
-    """Frontend configuration parameters."""
+    """Frontend configuration parameters.
+
+    Examples:
+        >>> import argparse
+        >>> from dynamo.frontend.frontend_args import FrontendArgGroup
+        >>>
+        >>> parser = argparse.ArgumentParser()
+        >>> group = FrontendArgGroup()
+        >>> group.add_arguments(parser)
+        >>> args = parser.parse_args([
+        ...     "--model-name", "Llama-3.2-1B-Instruct",
+        ...     "--router-mode", "kv",
+        ...     "--http-port", "8080",
+        ... ])
+        >>> args.model_name
+        'Llama-3.2-1B-Instruct'
+    """
 
     def add_arguments(self, parser) -> None:
         parser.add_argument(
@@ -190,15 +224,14 @@ class FrontendArgGroup(ArgGroup):
 
         add_negatable_bool_argument(
             g,
-            flag_name="--enforce-disagg",
-            env_var="DYN_ENFORCE_DISAGG",
+            flag_name="--decode-fallback",
+            env_var="DYN_DECODE_FALLBACK",
             default=False,
-            dest="enforce_disagg",
+            dest="decode_fallback",
             help=(
-                "Strictly enforce disaggregated mode. Requests will fail if the prefill router "
-                "has not activated yet (e.g., prefill workers still registering). This is stricter "
-                "than the default: without this flag, requests arriving before prefill workers are "
-                "discovered fall through to aggregated decode-only routing."
+                "Allow falling back to decode-only (aggregated) mode when prefill workers are "
+                "unavailable. By default, disaggregated prefill-decode is enforced and requests "
+                "fail if no prefill workers are found."
             ),
         )
 
@@ -354,6 +387,19 @@ class FrontendArgGroup(ArgGroup):
                 "processor."
             ),
             choices=["dynamo", "vllm"],
+        )
+
+        add_negatable_bool_argument(
+            g,
+            flag_name="--dyn-debug-perf",
+            env_var="DYN_DEBUG_PERF",
+            default=False,
+            dest="debug_perf",
+            help=(
+                "[EXPERIMENTAL] Enable performance instrumentation for diagnosing preprocessing bottlenecks. "
+                "Logs per-function timing, request concurrency, and hot-path section durations. "
+                "'--dyn-chat-processor vllm' only."
+            ),
         )
 
         add_argument(

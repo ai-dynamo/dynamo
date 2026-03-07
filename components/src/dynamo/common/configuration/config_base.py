@@ -5,7 +5,24 @@ from typing import Self
 
 
 class ConfigBase:
-    """Base configuration class that allows properties with and without defaults in arbitrary order."""
+    """Base configuration class that allows properties with and without defaults in arbitrary order.
+
+    Examples:
+        >>> import argparse
+        >>> from dynamo.common.configuration.config_base import ConfigBase
+        >>>
+        >>> class MyConfig(ConfigBase):
+        ...     model_name: str
+        ...     http_port: int = 8000
+        >>>
+        >>> parser = argparse.ArgumentParser()
+        >>> parser.add_argument("--model-name", default="llama")
+        >>> parser.add_argument("--http-port", type=int, default=8000)
+        >>> args = parser.parse_args([])
+        >>> config = MyConfig.from_cli_args(args)
+        >>> config.http_port
+        8000
+    """
 
     @classmethod
     def from_cli_args(cls, args: argparse.Namespace) -> Self:
