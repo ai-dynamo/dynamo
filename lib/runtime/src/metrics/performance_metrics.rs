@@ -248,7 +248,7 @@ struct RegistryInner {
 
 struct MetricLease {
     registry: Arc<RegistryInner>,
-    metric_name: String,
+    metric_name: Arc<str>,
 }
 
 struct WorkerState {
@@ -367,17 +367,17 @@ enum ControlMessage {
 
 enum DataMessage {
     Count {
-        name: String,
+        name: Arc<str>,
         count: u64,
         recorded_at: Instant,
     },
     Value {
-        name: String,
+        name: Arc<str>,
         value: f64,
         recorded_at: Instant,
     },
     Ratio {
-        name: String,
+        name: Arc<str>,
         numerator: f64,
         denominator: f64,
         recorded_at: Instant,
@@ -471,7 +471,7 @@ impl PerformanceMetricsRegistry {
             inner: PerformanceMetricHandle {
                 lease: Arc::new(MetricLease {
                     registry: Arc::clone(&self.inner),
-                    metric_name: name,
+                    metric_name: Arc::<str>::from(name),
                 }),
             },
         })
@@ -494,7 +494,7 @@ impl PerformanceMetricsRegistry {
             inner: PerformanceMetricHandle {
                 lease: Arc::new(MetricLease {
                     registry: Arc::clone(&self.inner),
-                    metric_name: name,
+                    metric_name: Arc::<str>::from(name),
                 }),
             },
         })
@@ -516,7 +516,7 @@ impl PerformanceMetricsRegistry {
             inner: PerformanceMetricHandle {
                 lease: Arc::new(MetricLease {
                     registry: Arc::clone(&self.inner),
-                    metric_name: name,
+                    metric_name: Arc::<str>::from(name),
                 }),
             },
         })
@@ -534,39 +534,41 @@ impl PerformanceMetricsRegistry {
 
 impl PerformanceMetricHandle {
     pub fn name(&self) -> &str {
-        &self.lease.metric_name
+        self.lease.metric_name.as_ref()
     }
 
     fn record_count(&self, count: u64) -> anyhow::Result<()> {
         self.lease
             .registry
-            .record_count(self.lease.metric_name.clone(), count)
+            .record_count(Arc::clone(&self.lease.metric_name), count)
     }
 
     fn record_value(&self, value: f64) -> anyhow::Result<()> {
         self.lease
             .registry
-            .record_value(self.lease.metric_name.clone(), value)
+            .record_value(Arc::clone(&self.lease.metric_name), value)
     }
 
     fn record_ratio(&self, numerator: f64, denominator: f64) -> anyhow::Result<()> {
-        self.lease
-            .registry
-            .record_ratio(self.lease.metric_name.clone(), numerator, denominator)
+        self.lease.registry.record_ratio(
+            Arc::clone(&self.lease.metric_name),
+            numerator,
+            denominator,
+        )
     }
 
     #[cfg(test)]
     fn snapshot_for_test(&self) -> Option<MetricSnapshot> {
         self.lease
             .registry
-            .snapshot_metric(self.lease.metric_name.clone())
+            .snapshot_metric(self.lease.metric_name.to_string())
     }
 }
 
 impl Drop for MetricLease {
     fn drop(&mut self) {
         self.registry
-            .try_unregister_metric(self.metric_name.clone());
+            .try_unregister_metric(self.metric_name.to_string());
     }
 }
 
@@ -737,22 +739,15 @@ impl RequestMetric {
             return Ok(());
         }
 
-        let Some(last_token_at) = self.last_token_at else {
-            self.last_token_at = Some(now);
-            self.last_total_tokens = total_tokens;
-            return Ok(());
-        };
+        let last_token_at = self.last_token_at.unwrap_or(now);
 
         let delta_tokens = total_tokens - self.last_total_tokens;
-        if delta_tokens > 0 {
-            let elapsed_ms = now.duration_since(last_token_at).as_secs_f64() * 1000.0;
-            if elapsed_ms > 0.0 {
-                let itl_ms = elapsed_ms / delta_tokens as f64;
-                let samples =
-                    sampled_count(delta_tokens, self.factory.itl_sample_rate, &mut self.rng);
-                for _ in 0..samples {
-                    self.factory.itl.record_value(itl_ms)?;
-                }
+        let elapsed_ms = now.duration_since(last_token_at).as_secs_f64() * 1000.0;
+        if elapsed_ms > 0.0 {
+            let itl_ms = elapsed_ms / delta_tokens as f64;
+            let samples = sampled_count(delta_tokens, self.factory.itl_sample_rate, &mut self.rng);
+            for _ in 0..samples {
+                self.factory.itl.record_value(itl_ms)?;
             }
         }
 
@@ -838,7 +833,7 @@ impl RegistryInner {
         });
     }
 
-    fn record_count(&self, name: String, count: u64) -> anyhow::Result<()> {
+    fn record_count(&self, name: Arc<str>, count: u64) -> anyhow::Result<()> {
         if count == 0 {
             return Ok(());
         }
@@ -858,7 +853,7 @@ impl RegistryInner {
         }
     }
 
-    fn record_value(&self, name: String, value: f64) -> anyhow::Result<()> {
+    fn record_value(&self, name: Arc<str>, value: f64) -> anyhow::Result<()> {
         if !value.is_finite() || value < 0.0 {
             anyhow::bail!("value must be a finite non-negative number");
         }
@@ -878,7 +873,7 @@ impl RegistryInner {
         }
     }
 
-    fn record_ratio(&self, name: String, numerator: f64, denominator: f64) -> anyhow::Result<()> {
+    fn record_ratio(&self, name: Arc<str>, numerator: f64, denominator: f64) -> anyhow::Result<()> {
         if !numerator.is_finite()
             || !denominator.is_finite()
             || numerator < 0.0
@@ -1092,7 +1087,7 @@ fn handle_data_message(msg: DataMessage, state: &mut WorkerState) {
             count,
             recorded_at,
         } => {
-            if let Some(entry) = state.metrics.get_mut(&name)
+            if let Some(entry) = state.metrics.get_mut(name.as_ref())
                 && let MetricState::Rate { counts } = &mut entry.state
             {
                 counts.push_back((recorded_at, count));
@@ -1111,7 +1106,7 @@ fn handle_data_message(msg: DataMessage, state: &mut WorkerState) {
             value,
             recorded_at,
         } => {
-            if let Some(entry) = state.metrics.get_mut(&name)
+            if let Some(entry) = state.metrics.get_mut(name.as_ref())
                 && let MetricState::Distribution { values } = &mut entry.state
             {
                 values.push_back((recorded_at, value));
@@ -1131,7 +1126,7 @@ fn handle_data_message(msg: DataMessage, state: &mut WorkerState) {
             denominator,
             recorded_at,
         } => {
-            if let Some(entry) = state.metrics.get_mut(&name)
+            if let Some(entry) = state.metrics.get_mut(name.as_ref())
                 && let MetricState::Ratio { pairs } = &mut entry.state
             {
                 pairs.push_back((recorded_at, numerator, denominator));
@@ -1394,28 +1389,28 @@ fn prune_entry(now: Instant, window_duration: Duration, entry: &mut MetricEntry)
         MetricState::Rate { counts } => {
             if counts.back().is_some_and(|(ts, _)| *ts < cutoff) {
                 counts.clear();
-                return;
-            }
-            while counts.front().is_some_and(|(ts, _)| *ts < cutoff) {
-                counts.pop_front();
+            } else {
+                while counts.front().is_some_and(|(ts, _)| *ts < cutoff) {
+                    counts.pop_front();
+                }
             }
         }
         MetricState::Distribution { values } => {
             if values.back().is_some_and(|(ts, _)| *ts < cutoff) {
                 values.clear();
-                return;
-            }
-            while values.front().is_some_and(|(ts, _)| *ts < cutoff) {
-                values.pop_front();
+            } else {
+                while values.front().is_some_and(|(ts, _)| *ts < cutoff) {
+                    values.pop_front();
+                }
             }
         }
         MetricState::Ratio { pairs } => {
             if pairs.back().is_some_and(|(ts, _, _)| *ts < cutoff) {
                 pairs.clear();
-                return;
-            }
-            while pairs.front().is_some_and(|(ts, _, _)| *ts < cutoff) {
-                pairs.pop_front();
+            } else {
+                while pairs.front().is_some_and(|(ts, _, _)| *ts < cutoff) {
+                    pairs.pop_front();
+                }
             }
         }
     }
@@ -1428,14 +1423,18 @@ fn snapshot_entry(now: Instant, window_duration: Duration, entry: &MetricEntry) 
             let total: u64 = counts.iter().map(|(_, c)| *c).sum();
             let sample_period = entry.spec.sample_period_seconds.unwrap_or(1.0);
             let samples = build_rate_samples(now, counts, window_seconds, sample_period);
-            let mut sorted = samples;
-            sorted.sort_by(f64::total_cmp);
-            let quantiles = entry
-                .spec
-                .quantiles
-                .iter()
-                .map(|q| (*q, percentile(&sorted, *q)))
-                .collect::<Vec<_>>();
+            let quantiles = if entry.spec.quantiles.is_empty() {
+                vec![]
+            } else {
+                let mut sorted = samples;
+                sorted.sort_by(f64::total_cmp);
+                entry
+                    .spec
+                    .quantiles
+                    .iter()
+                    .map(|q| (*q, percentile(&sorted, *q)))
+                    .collect::<Vec<_>>()
+            };
 
             MetricSnapshot {
                 name: entry.spec.name.clone(),
@@ -1449,19 +1448,24 @@ fn snapshot_entry(now: Instant, window_duration: Duration, entry: &MetricEntry) 
             }
         }
         MetricState::Distribution { values } => {
-            let mut series = values.iter().map(|(_, v)| *v).collect::<Vec<_>>();
-            series.sort_by(f64::total_cmp);
+            let series = values.iter().map(|(_, v)| *v).collect::<Vec<_>>();
             let average = if series.is_empty() {
                 0.0
             } else {
                 series.iter().sum::<f64>() / series.len() as f64
             };
-            let quantiles = entry
-                .spec
-                .quantiles
-                .iter()
-                .map(|q| (*q, percentile(&series, *q)))
-                .collect::<Vec<_>>();
+            let quantiles = if entry.spec.quantiles.is_empty() {
+                vec![]
+            } else {
+                let mut sorted = series.clone();
+                sorted.sort_by(f64::total_cmp);
+                entry
+                    .spec
+                    .quantiles
+                    .iter()
+                    .map(|q| (*q, percentile(&sorted, *q)))
+                    .collect::<Vec<_>>()
+            };
 
             MetricSnapshot {
                 name: entry.spec.name.clone(),
@@ -1482,17 +1486,22 @@ fn snapshot_entry(now: Instant, window_duration: Duration, entry: &MetricEntry) 
             } else {
                 0.0
             };
-            let mut sample_ratios = pairs
+            let sample_ratios = pairs
                 .iter()
                 .filter_map(|(_, n, d)| if *d > 0.0 { Some(*n / *d) } else { None })
                 .collect::<Vec<_>>();
-            sample_ratios.sort_by(f64::total_cmp);
-            let quantiles = entry
-                .spec
-                .quantiles
-                .iter()
-                .map(|q| (*q, percentile(&sample_ratios, *q)))
-                .collect::<Vec<_>>();
+            let quantiles = if entry.spec.quantiles.is_empty() {
+                vec![]
+            } else {
+                let mut sorted = sample_ratios;
+                sorted.sort_by(f64::total_cmp);
+                entry
+                    .spec
+                    .quantiles
+                    .iter()
+                    .map(|q| (*q, percentile(&sorted, *q)))
+                    .collect::<Vec<_>>()
+            };
 
             MetricSnapshot {
                 name: entry.spec.name.clone(),
