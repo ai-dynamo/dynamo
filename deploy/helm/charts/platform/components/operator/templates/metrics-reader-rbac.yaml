@@ -12,57 +12,46 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+# ClusterRole granting GET access to the /metrics non-resource URL.
+# Required by controller-runtime's WithAuthenticationAndAuthorization filter,
+# which performs a SubjectAccessReview for every metrics scrape request.
+# Prometheus's service account must be bound to this role to pass authorization.
+{{- if not (eq (toString .Values.metricsService.enabled) "false") }}
 apiVersion: rbac.authorization.k8s.io/v1
-{{- if .Values.namespaceRestriction.enabled }}
-kind: Role
-{{- else }}
 kind: ClusterRole
-{{- end }}
 metadata:
-  name: {{ include "dynamo-operator.fullname" . }}-proxy-role
-  {{- if .Values.namespaceRestriction.enabled }}
-  namespace: {{ default .Release.Namespace .Values.namespaceRestriction.targetNamespace }}
-  {{- end }}
+  name: {{ include "dynamo-operator.fullname" . }}-metrics-reader
   labels:
-    app.kubernetes.io/component: kube-rbac-proxy
+    app.kubernetes.io/component: metrics
     app.kubernetes.io/created-by: dynamo-operator
     app.kubernetes.io/part-of: dynamo-operator
   {{- include "dynamo-operator.labels" . | nindent 4 }}
 rules:
-- apiGroups:
-  - authentication.k8s.io
-  resources:
-  - tokenreviews
+- nonResourceURLs:
+  - "/metrics"
   verbs:
-  - create
-- apiGroups:
-  - authorization.k8s.io
-  resources:
-  - subjectaccessreviews
-  verbs:
-  - create
+  - get
 ---
+# Bind the metrics-reader ClusterRole to the operator's own service account
+# so that test case 5 (manual token-based scraping) works out of the box.
+# Prometheus typically gets this permission from kube-prometheus-stack's own RBAC,
+# but binding it here ensures the operator's SA can also access its own metrics.
 apiVersion: rbac.authorization.k8s.io/v1
-{{- if .Values.namespaceRestriction.enabled }}
-kind: RoleBinding
-{{- else }}
 kind: ClusterRoleBinding
-{{- end }}
 metadata:
-  name: {{ include "dynamo-operator.fullname" . }}-proxy-rolebinding
-  {{- if .Values.namespaceRestriction.enabled }}
-  namespace: {{ default .Release.Namespace .Values.namespaceRestriction.targetNamespace }}
-  {{- end }}
+  name: {{ include "dynamo-operator.fullname" . }}-metrics-reader-binding
   labels:
-    app.kubernetes.io/component: kube-rbac-proxy
+    app.kubernetes.io/component: metrics
     app.kubernetes.io/created-by: dynamo-operator
     app.kubernetes.io/part-of: dynamo-operator
   {{- include "dynamo-operator.labels" . | nindent 4 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: '{{ include "dynamo-operator.fullname" . }}-proxy-role'
+  name: {{ include "dynamo-operator.fullname" . }}-metrics-reader
 subjects:
 - kind: ServiceAccount
-  name: '{{ include "dynamo-operator.fullname" . }}-controller-manager'
-  namespace: '{{ .Release.Namespace }}'
+  name: {{ include "dynamo-operator.fullname" . }}-controller-manager
+  namespace: {{ .Release.Namespace }}
+{{- end }}

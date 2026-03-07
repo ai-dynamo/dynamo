@@ -25,7 +25,8 @@ data:
     kind: OperatorConfiguration
     server:
       metrics:
-        bindAddress: "127.0.0.1"
+        bindAddress: "0.0.0.0"
+        secure: true
       webhook:
         certProvisionMode: {{ if or .Values.webhook.certManager.enabled .Values.webhook.certificateSecret.external }}"manual"{{ else }}"auto"{{ end }}
         secretName: {{ .Values.webhook.certificateSecret.name | quote }}
