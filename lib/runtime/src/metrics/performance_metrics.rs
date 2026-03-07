@@ -1423,18 +1423,7 @@ fn snapshot_entry(now: Instant, window_duration: Duration, entry: &MetricEntry) 
             let total: u64 = counts.iter().map(|(_, c)| *c).sum();
             let sample_period = entry.spec.sample_period_seconds.unwrap_or(1.0);
             let samples = build_rate_samples(now, counts, window_seconds, sample_period);
-            let quantiles = if entry.spec.quantiles.is_empty() {
-                vec![]
-            } else {
-                let mut sorted = samples;
-                sorted.sort_by(f64::total_cmp);
-                entry
-                    .spec
-                    .quantiles
-                    .iter()
-                    .map(|q| (*q, percentile(&sorted, *q)))
-                    .collect::<Vec<_>>()
-            };
+            let quantiles = compute_quantiles(samples, entry.spec.quantiles.as_slice());
 
             MetricSnapshot {
                 name: entry.spec.name.clone(),
@@ -1454,18 +1443,7 @@ fn snapshot_entry(now: Instant, window_duration: Duration, entry: &MetricEntry) 
             } else {
                 series.iter().sum::<f64>() / series.len() as f64
             };
-            let quantiles = if entry.spec.quantiles.is_empty() {
-                vec![]
-            } else {
-                let mut sorted = series.clone();
-                sorted.sort_by(f64::total_cmp);
-                entry
-                    .spec
-                    .quantiles
-                    .iter()
-                    .map(|q| (*q, percentile(&sorted, *q)))
-                    .collect::<Vec<_>>()
-            };
+            let quantiles = compute_quantiles(series, entry.spec.quantiles.as_slice());
 
             MetricSnapshot {
                 name: entry.spec.name.clone(),
@@ -1490,18 +1468,7 @@ fn snapshot_entry(now: Instant, window_duration: Duration, entry: &MetricEntry) 
                 .iter()
                 .filter_map(|(_, n, d)| if *d > 0.0 { Some(*n / *d) } else { None })
                 .collect::<Vec<_>>();
-            let quantiles = if entry.spec.quantiles.is_empty() {
-                vec![]
-            } else {
-                let mut sorted = sample_ratios;
-                sorted.sort_by(f64::total_cmp);
-                entry
-                    .spec
-                    .quantiles
-                    .iter()
-                    .map(|q| (*q, percentile(&sorted, *q)))
-                    .collect::<Vec<_>>()
-            };
+            let quantiles = compute_quantiles(sample_ratios, entry.spec.quantiles.as_slice());
 
             MetricSnapshot {
                 name: entry.spec.name.clone(),
@@ -1557,6 +1524,52 @@ fn percentile(sorted_values: &[f64], p: f64) -> f64 {
     let clamped = p.clamp(0.0, 1.0);
     let idx = ((sorted_values.len() - 1) as f64 * clamped).round() as usize;
     sorted_values[idx.min(sorted_values.len() - 1)]
+}
+
+fn percentile_select(values: &mut [f64], p: f64) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    let clamped = p.clamp(0.0, 1.0);
+    let idx = ((values.len() - 1) as f64 * clamped).round() as usize;
+    let idx = idx.min(values.len() - 1);
+    let (_, nth, _) = values.select_nth_unstable_by(idx, f64::total_cmp);
+    *nth
+}
+
+fn compute_quantiles(mut values: Vec<f64>, quantiles: &[f64]) -> Vec<(f64, f64)> {
+    if quantiles.is_empty() {
+        return vec![];
+    }
+    if values.is_empty() {
+        return quantiles.iter().map(|q| (*q, 0.0)).collect::<Vec<_>>();
+    }
+
+    let should_use_select = {
+        let value_count = values.len();
+        let quantile_count = quantiles.len();
+        if quantile_count <= 1 {
+            true
+        } else {
+            // Empirical threshold: repeated select tends to win when the number of quantiles
+            // is lower than ~70% of log2(sample_count); otherwise a single sort is cheaper.
+            let threshold = ((value_count.max(2) as f64).log2() * 0.7).floor() as usize;
+            quantile_count <= threshold.max(1)
+        }
+    };
+
+    if should_use_select {
+        quantiles
+            .iter()
+            .map(|q| (*q, percentile_select(&mut values, *q)))
+            .collect::<Vec<_>>()
+    } else {
+        values.sort_unstable_by(f64::total_cmp);
+        quantiles
+            .iter()
+            .map(|q| (*q, percentile(&values, *q)))
+            .collect::<Vec<_>>()
+    }
 }
 
 fn quantile_suffix(q: f64) -> String {
