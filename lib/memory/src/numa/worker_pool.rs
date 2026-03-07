@@ -354,15 +354,31 @@ impl NumaWorkerPool {
     /// 2. Routes the allocation to a worker pinned to that node
     /// 3. The worker allocates and touches pages to ensure first-touch placement
     ///
+    /// Returns `None` if the GPU's NUMA node cannot be determined, signaling
+    /// the caller to fall back to non-NUMA allocation.
+    ///
     /// # Arguments
     /// * `size` - Number of bytes to allocate
     /// * `gpu_id` - CUDA device ID
     ///
     /// # Returns
-    /// Raw pointer to the allocated memory. Caller is responsible for freeing via
-    /// `cudarc::driver::result::free_host`.
-    pub fn allocate_pinned_for_gpu(&self, size: usize, gpu_id: u32) -> Result<*mut u8, String> {
-        let node = get_device_numa_node(gpu_id);
+    /// `Some(ptr)` on success, `None` if NUMA node is unknown (caller should
+    /// use non-NUMA allocation). Returns `Err` on allocation failure.
+    pub fn allocate_pinned_for_gpu(
+        &self,
+        size: usize,
+        gpu_id: u32,
+    ) -> Result<Option<*mut u8>, String> {
+        let node = match get_device_numa_node(gpu_id) {
+            Some(node) => node,
+            None => {
+                tracing::debug!(
+                    "NUMA node unknown for GPU {}, skipping NUMA-aware allocation",
+                    gpu_id
+                );
+                return Ok(None);
+            }
+        };
 
         tracing::debug!(
             "Allocating {} bytes pinned memory for GPU {} (NUMA node {})",
@@ -372,7 +388,9 @@ impl NumaWorkerPool {
         );
 
         let worker = self.get_or_spawn_worker(node)?;
-        worker.allocate(size, gpu_id).map(|send_ptr| send_ptr.0)
+        worker
+            .allocate(size, gpu_id)
+            .map(|send_ptr| Some(send_ptr.0))
     }
 }
 
@@ -447,11 +465,16 @@ mod cuda_tests {
     fn test_worker_pool() {
         let pool = NumaWorkerPool::new();
 
-        unsafe {
-            let ptr = pool.allocate_pinned_for_gpu(8192, 0).unwrap();
-            assert!(!ptr.is_null());
-
-            cudarc::driver::result::free_host(ptr as *mut std::ffi::c_void).unwrap();
+        match pool.allocate_pinned_for_gpu(8192, 0).unwrap() {
+            Some(ptr) => unsafe {
+                assert!(!ptr.is_null());
+                cudarc::driver::result::free_host(ptr as *mut std::ffi::c_void).unwrap();
+            },
+            None => {
+                println!(
+                    "NUMA node unknown for GPU 0, allocation skipped (expected on single-socket)"
+                );
+            }
         }
     }
 
@@ -459,46 +482,66 @@ mod cuda_tests {
     fn test_worker_reuse() {
         let pool = NumaWorkerPool::new();
 
-        unsafe {
-            let ptr1 = pool.allocate_pinned_for_gpu(1024, 0).unwrap();
-            let ptr2 = pool.allocate_pinned_for_gpu(1024, 0).unwrap();
+        // If NUMA node is unknown, both calls return None — that's fine
+        let r1 = pool.allocate_pinned_for_gpu(1024, 0).unwrap();
+        let r2 = pool.allocate_pinned_for_gpu(1024, 0).unwrap();
 
-            assert!(!ptr1.is_null());
-            assert!(!ptr2.is_null());
-            assert_ne!(ptr1, ptr2);
-
-            cudarc::driver::result::free_host(ptr1 as *mut std::ffi::c_void).unwrap();
-            cudarc::driver::result::free_host(ptr2 as *mut std::ffi::c_void).unwrap();
+        match (r1, r2) {
+            (Some(ptr1), Some(ptr2)) => unsafe {
+                assert!(!ptr1.is_null());
+                assert!(!ptr2.is_null());
+                assert_ne!(ptr1, ptr2);
+                cudarc::driver::result::free_host(ptr1 as *mut std::ffi::c_void).unwrap();
+                cudarc::driver::result::free_host(ptr2 as *mut std::ffi::c_void).unwrap();
+            },
+            (None, None) => {
+                println!("NUMA node unknown, both allocations skipped");
+            }
+            _ => panic!("inconsistent NUMA detection between two calls for same GPU"),
         }
     }
 
     #[test]
-    fn test_zero_size_allocation() {
+    fn test_zero_size_allocation_with_known_node() {
+        // Zero-size is rejected by the worker, but only if NUMA node is known.
+        // If NUMA node is unknown, allocate_pinned_for_gpu returns Ok(None) before
+        // reaching the worker.
         let pool = NumaWorkerPool::new();
         let result = pool.allocate_pinned_for_gpu(0, 0);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("zero"));
+        match result {
+            Ok(None) => {
+                println!("NUMA node unknown, zero-size check not reached");
+            }
+            Err(e) => {
+                assert!(e.contains("zero"));
+            }
+            Ok(Some(_)) => panic!("zero-size allocation should not succeed"),
+        }
     }
 
     #[test]
     fn test_get_device_numa_node() {
         let node = get_device_numa_node(0);
-        println!("GPU 0 on NUMA node: {}", node.0);
-        assert!(
-            !node.is_unknown(),
-            "get_device_numa_node should never return UNKNOWN"
-        );
-        assert!(node.0 < 16, "NUMA node {} seems unreasonably high", node.0);
+        match node {
+            Some(n) => {
+                assert!(n.0 < 16, "NUMA node {} seems unreasonably high", n.0);
+                println!("GPU 0 on NUMA node: {}", n.0);
+            }
+            None => {
+                println!("GPU 0 has no determinable NUMA node");
+            }
+        }
     }
 
     #[test]
     fn test_pinned_allocation_api() {
         let pool = NumaWorkerPool::new();
 
-        unsafe {
-            let ptr = pool.allocate_pinned_for_gpu(1024, 0).unwrap();
+        if let Some(ptr) = pool.allocate_pinned_for_gpu(1024, 0).unwrap() {
             assert!(!ptr.is_null());
-            cudarc::driver::result::free_host(ptr as *mut std::ffi::c_void).unwrap();
+            unsafe {
+                cudarc::driver::result::free_host(ptr as *mut std::ffi::c_void).unwrap();
+            }
         }
     }
 

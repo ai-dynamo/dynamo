@@ -36,10 +36,11 @@ impl PinnedStorage {
 
     /// Allocate pinned memory, optionally NUMA-aware for a specific GPU.
     ///
-    /// When `device_id` is `Some`, the allocation is performed on a worker thread
-    /// pinned to the GPU's NUMA node, ensuring optimal memory placement via
-    /// first-touch policy, However, NUMA is only used if enabled via the
-    /// `DYN_KVBM_ENABLE_NUMA=1` environment variable.
+    /// When `device_id` is `Some`, NUMA-aware allocation is attempted by default:
+    /// a worker thread pinned to the GPU's NUMA node performs the allocation,
+    /// ensuring optimal memory placement via first-touch policy. If the GPU's
+    /// NUMA node cannot be determined, allocation falls back to the direct path.
+    /// Set `DYN_MEMORY_DISABLE_NUMA=1` to skip NUMA optimization entirely.
     ///
     /// When `device_id` is `None`, a direct allocation is performed on device 0.
     ///
@@ -62,19 +63,38 @@ impl PinnedStorage {
         let gpu_id = device_id.unwrap_or(0);
         let ctx = crate::device::cuda_context(gpu_id)?;
 
-        let ptr = match device_id {
-            #[cfg(target_os = "linux")]
-            Some(gpu_id) if super::numa::is_numa_enabled() => {
-                tracing::debug!(
-                    "Using NUMA-aware allocation for {} bytes on GPU {}",
-                    len,
-                    gpu_id
-                );
-                super::numa::worker_pool::NumaWorkerPool::global()
+        // Try NUMA-aware allocation unless explicitly disabled
+        #[cfg(target_os = "linux")]
+        let numa_ptr = if let Some(gpu_id) = device_id {
+            if !super::numa::is_numa_disabled() {
+                match super::numa::worker_pool::NumaWorkerPool::global()
                     .allocate_pinned_for_gpu(len, gpu_id)
-                    .map_err(StorageError::AllocationFailed)? as usize
+                {
+                    Ok(Some(ptr)) => {
+                        tracing::debug!(
+                            "Using NUMA-aware allocation for {} bytes on GPU {}",
+                            len,
+                            gpu_id
+                        );
+                        Some(ptr as usize)
+                    }
+                    Ok(None) => None, // NUMA node unknown, fall through
+                    Err(e) => return Err(StorageError::AllocationFailed(e)),
+                }
+            } else {
+                None
             }
-            _ => unsafe {
+        } else {
+            None
+        };
+
+        #[cfg(not(target_os = "linux"))]
+        let numa_ptr: Option<usize> = None;
+
+        let ptr = if let Some(ptr) = numa_ptr {
+            ptr
+        } else {
+            unsafe {
                 ctx.bind_to_thread().map_err(StorageError::Cuda)?;
 
                 let ptr = cudarc::driver::result::malloc_host(len, sys::CU_MEMHOSTALLOC_DEVICEMAP)
@@ -86,7 +106,7 @@ impl PinnedStorage {
                 assert!(len < isize::MAX as usize);
 
                 ptr as usize
-            },
+            }
         };
 
         Ok(Self { ptr, len, ctx })

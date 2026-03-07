@@ -15,14 +15,15 @@
 //!
 //! ## Usage
 //!
-//! NUMA optimization is opt-in via environment variable:
+//! NUMA optimization is enabled by default. To disable it:
 //! ```bash
-//! export DYN_KVBM_ENABLE_NUMA=1
+//! export DYN_MEMORY_DISABLE_NUMA=1
 //! ```
 //!
 //! When enabled, pinned memory allocations are routed through NUMA workers
 //! that are pinned to the target GPU's NUMA node, ensuring first-touch policy
-//! places pages on the correct node.
+//! places pages on the correct node. If the GPU's NUMA node cannot be
+//! determined, allocation falls back to the non-NUMA path transparently.
 
 pub mod topology;
 pub mod worker_pool;
@@ -32,14 +33,12 @@ use nix::libc;
 use serde::{Deserialize, Serialize};
 use std::{fs, mem, process::Command};
 
-/// Check if NUMA optimization is enabled via environment variable
+/// Check if NUMA optimization is disabled via environment variable.
 ///
-/// Set `DYN_KVBM_ENABLE_NUMA=1` to enable NUMA-aware allocation.
-/// Default: disabled (opt-in)
-pub fn is_numa_enabled() -> bool {
-    std::env::var("DYN_KVBM_ENABLE_NUMA")
-        .map(|v| v == "1" || v.to_lowercase() == "true")
-        .unwrap_or(false)
+/// NUMA-aware allocation is enabled by default. Set `DYN_MEMORY_DISABLE_NUMA=1`
+/// (or any truthy value) to disable it.
+pub fn is_numa_disabled() -> bool {
+    dynamo_config::env_is_truthy("DYN_MEMORY_DISABLE_NUMA")
 }
 
 /// Represents a NUMA node identifier.
@@ -159,8 +158,9 @@ fn get_numa_node_from_nvidia_smi(pci_address: &str) -> Option<NumaNode> {
 /// Get NUMA node for a GPU device.
 ///
 /// Queries the PCI bus address from the CUDA driver API, then reads the NUMA
-/// node from sysfs. Falls back to nvidia-smi with the PCI address, then to
-/// `NumaNode(0)` as a last resort. Never returns `NumaNode::UNKNOWN`.
+/// node from sysfs. Falls back to nvidia-smi with the PCI address. Returns
+/// `None` if the NUMA node cannot be determined, signaling the caller to skip
+/// NUMA-aware allocation entirely rather than guessing wrong.
 ///
 /// `CUDA_VISIBLE_DEVICES` is handled transparently because `CudaContext::new(ordinal)`
 /// operates on the process-local device index.
@@ -169,17 +169,17 @@ fn get_numa_node_from_nvidia_smi(pci_address: &str) -> Option<NumaNode> {
 /// * `device_id` - CUDA device index (0, 1, 2, ...) as seen by the process
 ///
 /// # Returns
-/// The NUMA node closest to the specified GPU, or `NumaNode(0)` as a safe default.
-pub fn get_device_numa_node(device_id: u32) -> NumaNode {
+/// The NUMA node closest to the specified GPU, or `None` if it cannot be determined.
+pub fn get_device_numa_node(device_id: u32) -> Option<NumaNode> {
     // Step 1: Get PCI bus address from CUDA driver
     let pci_address = match get_pci_bus_address_from_cuda(device_id) {
         Some(addr) => addr,
         None => {
             tracing::warn!(
-                "Failed to get PCI address from CUDA for device {}, defaulting to NUMA node 0",
+                "Failed to get PCI address from CUDA for device {}, skipping NUMA optimization",
                 device_id
             );
-            return NumaNode(0);
+            return None;
         }
     };
 
@@ -191,7 +191,7 @@ pub fn get_device_numa_node(device_id: u32) -> NumaNode {
             pci_address,
             node.0
         );
-        return node;
+        return Some(node);
     }
 
     // Step 3: Fallback to nvidia-smi with PCI address
@@ -202,16 +202,16 @@ pub fn get_device_numa_node(device_id: u32) -> NumaNode {
             pci_address,
             node.0
         );
-        return node;
+        return Some(node);
     }
 
-    // Step 4: Last resort — node 0 always exists
+    // No NUMA info available — caller should skip NUMA optimization
     tracing::warn!(
-        "Could not determine NUMA node for GPU {} (PCI {}), defaulting to NUMA node 0",
+        "Could not determine NUMA node for GPU {} (PCI {}), skipping NUMA optimization",
         device_id,
         pci_address
     );
-    NumaNode(0)
+    None
 }
 
 /// Pin the current thread to a specific NUMA node's CPUs.
@@ -382,18 +382,20 @@ mod cuda_tests {
     }
 
     #[test]
-    fn test_get_device_numa_node_never_returns_unknown() {
-        let node = get_device_numa_node(0);
-        assert!(
-            !node.is_unknown(),
-            "get_device_numa_node should never return UNKNOWN"
-        );
-    }
-
-    #[test]
-    fn test_get_device_numa_node_returns_valid_node() {
-        let node = get_device_numa_node(0);
-        assert!(node.0 < 16, "NUMA node {} seems unreasonably high", node.0);
-        println!("GPU 0 detected on NUMA node: {}", node.0);
+    fn test_get_device_numa_node_returns_some_or_none() {
+        let result = get_device_numa_node(0);
+        match result {
+            Some(node) => {
+                assert!(node.0 < 16, "NUMA node {} seems unreasonably high", node.0);
+                assert!(
+                    !node.is_unknown(),
+                    "should never return UNKNOWN inside Some"
+                );
+                println!("GPU 0 detected on NUMA node: {}", node.0);
+            }
+            None => {
+                println!("GPU 0 has no determinable NUMA node (single-socket or no sysfs info)");
+            }
+        }
     }
 }
