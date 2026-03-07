@@ -10,13 +10,7 @@ class Layer:
 
     ...
 
-    def __dlpack__(
-        self,
-        stream: Optional[Any] = None,
-        max_version: Optional[Any] = None,
-        dl_device: Optional[Any] = None,
-        copy: Optional[bool] = None,
-    ) -> Any:
+    def __dlpack__(self, stream: Optional[Any] = None, max_version: Optional[Any] = None, dl_device: Optional[Any] = None, copy: Optional[bool] = None) -> Any:
         """
         Get a dlpack capsule of the layer
         """
@@ -47,7 +41,7 @@ class Block:
         """
         ...
 
-    def __iter__(self) -> "Block":
+    def __iter__(self) -> 'Block':
         """
         Get an iterator over the layers
         """
@@ -65,13 +59,7 @@ class Block:
         """
         ...
 
-    def __dlpack__(
-        self,
-        stream: Optional[Any] = None,
-        max_version: Optional[Any] = None,
-        dl_device: Optional[Any] = None,
-        copy: Optional[bool] = None,
-    ) -> Any:
+    def __dlpack__(self, stream: Optional[Any] = None, max_version: Optional[Any] = None, dl_device: Optional[Any] = None, copy: Optional[bool] = None) -> Any:
         """
         Get a dlpack capsule of the block
         Exception raised if the block is not contiguous
@@ -103,7 +91,7 @@ class BlockList:
         """
         ...
 
-    def __iter__(self) -> "BlockList":
+    def __iter__(self) -> 'BlockList':
         """
         Get an iterator over the blocks
         """
@@ -135,7 +123,7 @@ class BlockManager:
         dtype: Optional[str] = None,
         host_num_blocks: Optional[int] = None,
         device_num_blocks: Optional[int] = None,
-        device_id: int = 0,
+        device_id: int = 0
     ) -> None:
         """
         Create a `BlockManager` object
@@ -230,4 +218,5 @@ class KvbmRequest:
     A request for KV cache
     """
 
-    def __init__(self, request_id: int, tokens: List[int], block_size: int) -> None: ...
+    def __init__(self, request_id: int, tokens: List[int], block_size: int) -> None:
+        ...
