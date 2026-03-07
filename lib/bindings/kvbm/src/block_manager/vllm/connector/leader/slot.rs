@@ -1272,6 +1272,7 @@ impl VllmConnectorSlot {
             uuid: operation_id,
             transfer_type: TransferType::Store,
             request_type: RequestType::Scheduled,
+            block_ids: block_ids.iter().map(|b| *b as usize).collect(),
         };
 
         if let Err(e) = self.xfer_tx.send(xfer_req) {
@@ -1305,6 +1306,9 @@ impl VllmConnectorSlot {
         let src_storage_pool = src_blocks.storage_pool();
         let operation_id = uuid::Uuid::new_v4();
 
+        // Capture block_ids before moving dst_block_ids
+        let block_ids: Vec<usize> = dst_block_ids.iter().map(|b| *b as usize).collect();
+
         let xfer_req = LocalTransferRequest::Onboard(LocalOnboardRequest::new(
             self.request_id.clone(),
             src_blocks,
@@ -1317,6 +1321,7 @@ impl VllmConnectorSlot {
             uuid: operation_id,
             transfer_type: TransferType::Load,
             request_type: RequestType::Immediate,
+            block_ids,
         };
 
         if let Err(e) = self.xfer_tx.send(xfer_req) {
