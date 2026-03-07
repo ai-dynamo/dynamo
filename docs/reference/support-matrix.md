@@ -64,7 +64,7 @@ Dynamo container images include CUDA toolkit libraries. The host machine must ha
 | | **TensorRT-LLM** | 13.1 | 580.xx+ | |
 | | **vLLM** | 12.9 | 575.xx+ | |
 | | | 13.0 | 580.xx+ | |
-| **0.9.1** *(in progress)* | **SGLang** | 12.9 | 575.xx+ | |
+| **0.9.1** | **SGLang** | 12.9 | 575.xx+ | |
 | | **TensorRT-LLM** | 13.0 | 580.xx+ | |
 | | **vLLM** | 12.9 | 575.xx+ | |
 | **0.9.0** | **SGLang** | 12.9 | 575.xx+ | |
