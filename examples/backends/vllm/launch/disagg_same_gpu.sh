@@ -22,6 +22,12 @@ REQUIRED_GB_TOTAL=8
 # Calculate fraction needed per worker (4GB / total GPU memory)
 GPU_MEM_FRACTION=$(python3 -c "print(f'{$REQUIRED_GB_PER_WORKER / $TOTAL_GPU_GB:.3f}')")
 
+# DYN_GPU_MEMORY_FRACTION_OVERRIDE takes precedence (profiler binary search).
+# In single-GPU mode, split the override evenly between the two workers.
+if [[ -n "${DYN_GPU_MEMORY_FRACTION_OVERRIDE:-}" ]]; then
+    GPU_MEM_FRACTION=$(awk -v f="$DYN_GPU_MEMORY_FRACTION_OVERRIDE" 'BEGIN { printf "%.2f", f / 2 }')
+fi
+
 # Check if we have enough free memory
 if python3 -c "import sys; sys.exit(0 if float('$FREE_GPU_GB') >= $REQUIRED_GB_TOTAL else 1)"; then
   echo "GPU memory check passed: ${FREE_GPU_GB}GB free / ${TOTAL_GPU_GB}GB total (required: ${REQUIRED_GB_TOTAL}GB)"
@@ -104,4 +110,3 @@ python3 -m dynamo.vllm \
   --gpu-memory-utilization ${GPU_MEM_FRACTION} \
   --max-model-len 16384 \
   --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081","enable_kv_cache_events":true}'
-

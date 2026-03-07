@@ -12,6 +12,12 @@
 # GPU memory fraction to use per worker (default: 0.45 = 45% each = 90% total for both workers)
 GPU_MEM_FRACTION="${1:-0.45}"
 
+# DYN_GPU_MEMORY_FRACTION_OVERRIDE takes precedence (profiler binary search).
+# In single-GPU mode, split the override evenly between the two workers.
+if [[ -n "${DYN_GPU_MEMORY_FRACTION_OVERRIDE:-}" ]]; then
+    GPU_MEM_FRACTION=$(awk -v f="$DYN_GPU_MEMORY_FRACTION_OVERRIDE" 'BEGIN { printf "%.2f", f / 2 }')
+fi
+
 # Check GPU memory before starting disaggregated mode on single GPU
 FREE_GPU_GB=$(python3 -c "import torch; print(torch.cuda.mem_get_info()[0]/1024**3)" 2>/dev/null)
 if [ $? -ne 0 ]; then
@@ -115,4 +121,3 @@ python3 -m dynamo.sglang \
   --delete-ckpt-after-loading \
   --max-running-requests 2 \
   --enable-metrics
-

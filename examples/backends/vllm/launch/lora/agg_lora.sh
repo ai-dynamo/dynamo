@@ -62,7 +62,13 @@ python -m dynamo.frontend &
 
 # run worker
 # --enforce-eager is added for quick deployment. for production use, need to remove this flag
+GPU_MEM_ARGS=()
+if [[ -n "${DYN_GPU_MEMORY_FRACTION_OVERRIDE:-}" ]]; then
+    GPU_MEM_ARGS=("--gpu-memory-utilization" "$DYN_GPU_MEMORY_FRACTION_OVERRIDE")
+fi
+
 DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=${SYSTEM_PORT} \
     python -m dynamo.vllm --model "$MODEL" --enforce-eager \
+    "${GPU_MEM_ARGS[@]}" \
     --enable-lora \
     --max-lora-rank 64

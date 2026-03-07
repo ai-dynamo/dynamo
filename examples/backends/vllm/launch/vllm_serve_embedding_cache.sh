@@ -28,6 +28,10 @@ if [[ "$CAPACITY_GB" != "0" ]]; then
     }")
 fi
 
+# TODO: honor DYN_GPU_MEMORY_FRACTION_OVERRIDE env var for profiler binary search
+if [[ -n "${DYN_GPU_MEMORY_FRACTION_OVERRIDE:-}" ]]; then
+    echo "WARNING: DYN_GPU_MEMORY_FRACTION_OVERRIDE is set but vllm_serve_embedding_cache.sh does not support it yet." >&2
+fi
 CUDA_VISIBLE_DEVICES=2 \
 vllm serve "$MODEL" \
     --enable-log-requests \
