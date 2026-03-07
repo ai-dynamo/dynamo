@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
+import ipaddress
 import logging
 import os
 import socket
@@ -116,24 +117,84 @@ def get_kv_port() -> int:
 
 
 def ensure_side_channel_host():
-    """Ensure the NIXL side-channel host is available without overriding user settings."""
+    """Ensure the NIXL side-channel host is available without overriding user settings.
+
+    Uses hostname resolution with UDP connect fallback. Supports IPv4 and IPv6.
+    Raises RuntimeError if no routable IP can be determined.
+    """
     existing_host = os.getenv("VLLM_NIXL_SIDE_CHANNEL_HOST")
     if existing_host:
-        logger.debug(
-            "Preserving existing VLLM_NIXL_SIDE_CHANNEL_HOST=%s", existing_host
-        )
+        logger.info("Using existing VLLM_NIXL_SIDE_CHANNEL_HOST=%s", existing_host)
         return
 
+    def is_routable(ip_str: str) -> bool:
+        try:
+            addr = ipaddress.ip_address(ip_str)
+            return not (
+                addr.is_loopback
+                or addr.is_link_local
+                or addr.is_unspecified
+                or addr.is_multicast
+            )
+        except ValueError:
+            return False
+
+    # Strategy 1: hostname resolution (AF_UNSPEC for IPv4+IPv6)
+    host_ip = None
+    detection_method = None
     try:
         host_name = socket.gethostname()
-        host_ip = socket.gethostbyname(host_name)
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as test_socket:
-            test_socket.bind((host_ip, 0))
-        os.environ["VLLM_NIXL_SIDE_CHANNEL_HOST"] = host_ip
-        logger.debug("Set VLLM_NIXL_SIDE_CHANNEL_HOST to %s", host_ip)
-    except (socket.error, socket.gaierror):
-        logger.warning("Failed to get hostname, falling back to 127.0.0.1")
-        os.environ["VLLM_NIXL_SIDE_CHANNEL_HOST"] = "127.0.0.1"
+        infos = socket.getaddrinfo(
+            host_name, None, socket.AF_UNSPEC, socket.SOCK_STREAM
+        )
+        for family, socktype, _, _, sockaddr in infos:
+            candidate = sockaddr[0]
+            try:
+                with socket.socket(family, socktype) as s:
+                    s.bind((candidate, 0))
+                if is_routable(candidate):
+                    host_ip = candidate
+                    detection_method = "hostname resolution"
+                    break
+            except OSError:
+                continue
+    except OSError as exc:
+        logger.debug("Hostname resolution failed: %s", exc)
+
+    # Strategy 2: UDP connect trick (IPv4 then IPv6)
+    if not host_ip:
+        for family, target, label in [
+            (socket.AF_INET, ("8.8.8.8", 80), "outbound interface detection (IPv4)"),
+            (
+                socket.AF_INET6,
+                ("2001:4860:4860::8888", 80),
+                "outbound interface detection (IPv6)",
+            ),
+        ]:
+            try:
+                with socket.socket(family, socket.SOCK_DGRAM) as s:
+                    s.connect(target)
+                    candidate = s.getsockname()[0]
+                if is_routable(candidate):
+                    host_ip = candidate
+                    detection_method = label
+                    break
+            except OSError:
+                continue
+
+    if not host_ip:
+        raise RuntimeError(
+            "Unable to determine a routable host IP for NIXL side-channel. "
+            "Please set the VLLM_NIXL_SIDE_CHANNEL_HOST environment variable to "
+            "the IP address that peer nodes can reach this host on."
+        )
+
+    os.environ["VLLM_NIXL_SIDE_CHANNEL_HOST"] = host_ip
+    logger.info(
+        "Set VLLM_NIXL_SIDE_CHANNEL_HOST=%s (detected via %s)",
+        host_ip,
+        detection_method,
+    )
 
 
 def configure_ports(config: Config):
