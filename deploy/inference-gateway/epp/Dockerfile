@@ -30,7 +30,7 @@
 #     --build-context dynamo=../../.. \
 #     -t dynamo/dynamo-epp:dev .
 
-ARG RUST_IMAGE=rust:1.90
+ARG RUST_IMAGE=rust:1.93.1
 ARG BUILDER_IMAGE=golang:1.24
 ARG BASE_IMAGE=ubuntu:24.04
 
