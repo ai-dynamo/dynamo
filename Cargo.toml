@@ -10,7 +10,8 @@ members = [
     "lib/mocker",
     "lib/kv-router",
     "lib/memory",
-    "lib/kvbm-common",
+    "lib/kvbm-config",
+    "lib/kvbm-engine",
     "lib/kvbm-kernels",
     "lib/kvbm-logical",
     "lib/kvbm-physical",
@@ -46,14 +47,19 @@ dynamo-kv-router = { path = "lib/kv-router", version = "1.0.0", features = ["met
 dynamo-async-openai = { path = "lib/async-openai", version = "1.0.0", features = ["byot"] }
 dynamo-parsers = { path = "lib/parsers", version = "1.0.0" }
 
+
 # kvbm
 kvbm-common = { path = "lib/kvbm-common", version = "1.0.0" }
+kvbm-config = { path = "lib/kvbm-config", version = "1.0.0" }
+kvbm-engine = { path = "lib/kvbm-engine", version = "1.0.0" }
 kvbm-kernels = { path = "lib/kvbm-kernels", version = "1.0.0" }
 kvbm-logical = { path = "lib/kvbm-logical", version = "1.0.0" }
 kvbm-physical = { path = "lib/kvbm-physical", version = "1.0.0" }
 
 # velo
-velo-events = { path = "lib/velo-events", version = "1.0.0" }
+velo = { git = "https://github.com/ai-dynamo/dynamo", branch = "ryan/velo-messenger" }
+velo-discovery = { git = "https://github.com/ai-dynamo/dynamo", branch = "ryan/velo-messenger" }
+velo-events = { git = "https://github.com/ai-dynamo/dynamo.git", branch = "ryan/velo-backend" }
 
 # External dependencies
 anyhow = { version = "1" }
@@ -141,3 +147,12 @@ insta.opt-level = 3
 # These make the build much slower but shrink the binary, and could help performance
 codegen-units = 1
 lto = "thin"
+
+# Patch: velo's transitive deps (via ryan/velo-messenger) use ssh:// URLs for velo-events,
+# velo-common, and velo-backend, but kvbm-physical (via ryan/kvbm-physical) uses https:// URLs.
+# Cargo treats these as different crates even though they resolve to the same commit.
+# Redirect ssh:// sources to https:// so there's only one version of each in the graph.
+[patch."ssh://git@github.com/ai-dynamo/dynamo.git"]
+velo-events = { git = "https://github.com/ai-dynamo/dynamo", branch = "ryan/velo-events" }
+velo-common = { git = "https://github.com/ai-dynamo/dynamo", branch = "ryan/velo-backend" }
+velo-backend = { git = "https://github.com/ai-dynamo/dynamo", branch = "ryan/velo-backend" }
