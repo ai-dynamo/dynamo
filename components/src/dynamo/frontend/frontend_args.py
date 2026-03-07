@@ -40,7 +40,22 @@ def validate_model_path(value: str) -> str:
 
 
 class FrontendConfig(KvRouterConfigBase):
-    """Configuration for the Dynamo frontend."""
+    """Configuration for the Dynamo frontend.
+
+    Examples:
+        >>> import argparse
+        >>> from dynamo.frontend.frontend_args import FrontendArgGroup, FrontendConfig
+        >>>
+        >>> parser = argparse.ArgumentParser()
+        >>> FrontendArgGroup().add_arguments(parser)
+        >>> args = parser.parse_args([
+        ...     "--model-name", "Llama-3.2-1B-Instruct",
+        ...     "--http-port", "8080",
+        ... ])
+        >>> config = FrontendConfig.from_cli_args(args)  # doctest: +SKIP
+        >>> config.model_name  # doctest: +SKIP
+        'Llama-3.2-1B-Instruct'
+    """
 
     interactive: bool
     kv_cache_block_size: Optional[int]
@@ -93,7 +108,23 @@ def _preprocess_for_encode_config(config: FrontendConfig) -> Dict[str, Any]:
 
 
 class FrontendArgGroup(ArgGroup):
-    """Frontend configuration parameters."""
+    """Frontend configuration parameters.
+
+    Examples:
+        >>> import argparse
+        >>> from dynamo.frontend.frontend_args import FrontendArgGroup
+        >>>
+        >>> parser = argparse.ArgumentParser()
+        >>> group = FrontendArgGroup()
+        >>> group.add_arguments(parser)
+        >>> args = parser.parse_args([
+        ...     "--model-name", "Llama-3.2-1B-Instruct",
+        ...     "--router-mode", "kv",
+        ...     "--http-port", "8080",
+        ... ])
+        >>> args.model_name
+        'Llama-3.2-1B-Instruct'
+    """
 
     def add_arguments(self, parser) -> None:
         parser.add_argument(

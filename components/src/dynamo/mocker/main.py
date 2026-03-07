@@ -70,6 +70,15 @@ async def worker():
 
     Each mocker gets its own DistributedRuntime instance for true isolation,
     while still sharing the same event loop and tokio runtime.
+
+    Examples:
+        Launch via CLI (the standard invocation pattern):
+
+        >>> # python -m dynamo.mocker --model-path /data/models/Qwen3-0.6B
+        >>>
+        >>> import uvloop  # doctest: +SKIP
+        >>> from dynamo.mocker.main import worker  # doctest: +SKIP
+        >>> uvloop.run(worker())  # doctest: +SKIP
     """
     args = parse_args()
 

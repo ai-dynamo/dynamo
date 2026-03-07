@@ -24,6 +24,16 @@ def dynamo_worker(enable_nats: bool = True):
         enable_nats: Whether to enable NATS for KV events. Defaults to True.
                     If request_plane is "nats", NATS is always enabled.
                     Pass False (via --no-kv-events flag) to disable NATS initialization.
+
+    Examples:
+        >>> from dynamo.runtime import DistributedRuntime, dynamo_worker
+        >>>
+        >>> @dynamo_worker()
+        ... async def worker(runtime: DistributedRuntime):
+        ...     endpoint = runtime.endpoint("dynamo.backend.generate")
+        ...     await endpoint.serve_endpoint(handler.generate)
+        >>>
+        >>> asyncio.run(worker())
     """
 
     def decorator(func):
@@ -61,6 +71,33 @@ def dynamo_worker(enable_nats: bool = True):
 def dynamo_endpoint(
     request_model: Union[Type[BaseModel], Type[Any]], response_model: Type[BaseModel]
 ) -> Callable:
+    """
+    Decorator that parses incoming requests into Pydantic models on an async generator endpoint.
+
+    Currently validates and converts the *request* payload (JSON string or dict)
+    into ``request_model``.  ``response_model`` is accepted for forward
+    compatibility but response validation is not yet implemented.
+
+    Args:
+        request_model: Pydantic model class (or Any) for incoming requests.
+        response_model: Pydantic model class reserved for future response validation.
+
+    Examples:
+        >>> from pydantic import BaseModel
+        >>> from dynamo.runtime import dynamo_endpoint
+        >>>
+        >>> class Request(BaseModel):
+        ...     data: str
+        >>> class Response(BaseModel):
+        ...     char: str
+        >>>
+        >>> class RequestHandler:
+        ...     @dynamo_endpoint(Request, Response)
+        ...     async def generate(self, request):
+        ...         for char in request.data:
+        ...             yield char
+    """
+
     def decorator(
         func: Callable[..., AsyncGenerator[Any, None]],
     ) -> Callable[..., AsyncGenerator[Any, None]]:
