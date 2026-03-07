@@ -46,6 +46,7 @@ class EngineConfig:
     script_name: Optional[str] = None
     command: Optional[List[str]] = None
     script_args: Optional[List[str]] = None
+    model_revision: Optional[str] = None
     frontend_port: int = DefaultPort.FRONTEND.value
     timeout: int = 600
     delayed_start: int = 0
