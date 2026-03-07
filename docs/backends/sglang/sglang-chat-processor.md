@@ -37,56 +37,6 @@ CUDA_VISIBLE_DEVICES=0 python -m dynamo.sglang \
   --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}'
 ```
 
-## Architecture
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                        Dynamo Frontend                          │
-│                                                                 │
-│  HTTP Request ──► SglangProcessor                               │
-│                      │                                          │
-│            ┌─────────┼──────────┐                               │
-│            ▼         │          │                                │
-│     ┌────────────┐   │   ┌──────────────┐                       │
-│     │ Preprocess │   │   │ Postprocess  │                       │
-│     │            │   │   │              │                       │
-│     │ • Messages │   │   │ • Detokenize │                       │
-│     │ • Template │   │   │ • Reasoning  │                       │
-│     │ • Tokenize │   │   │ • Tool calls │                       │
-│     │ • Tools    │   │   │ • SSE format │                       │
-│     └─────┬──────┘   │   └──────▲───────┘                       │
-│           │          │          │                                │
-│           ▼          │          │                                │
-│     ┌────────────────┴──────────┴──┐                            │
-│     │    KvRouter / RoundRobin     │                            │
-│     └──────────┬───────────────────┘                            │
-│                │ token_ids                                       │
-└────────────────┼────────────────────────────────────────────────┘
-                 │
-                 ▼
-         ┌───────────────┐
-         │ SGLang Worker  │
-         │ (engine only)  │
-         └───────────────┘
-```
-
-### Request Flow
-
-1. **Preprocess** (`sglang_prepost.py`):
-   - Converts OpenAI tool definitions to SGLang `Tool` objects
-   - Applies the model's chat template via `tokenizer.apply_chat_template(tokenize=True, tools=...)`
-   - Creates `FunctionCallParser` and `ReasoningParser` instances for streaming
-
-2. **Route**: Token IDs are sent to a worker via `KvRouter` (KV-aware) or round-robin
-
-3. **Postprocess** (`SglangStreamingPostProcessor`):
-   - Incrementally detokenizes output token IDs using a 6-token sliding-window lookback
-   - Extracts reasoning content via `ReasoningParser.parse_stream_chunk()`
-   - Strips tool call markup and accumulates tool call deltas via `FunctionCallParser.parse_stream_chunk()`
-   - Emits complete tool calls on `finish_reason` with full `name` and `arguments`
-
-4. **SSE**: The Rust layer formats the Python output as Server-Sent Events and sends to the client. For non-streaming requests, the Rust `DeltaAggregator` folds SSE chunks into a single response.
-
 ## Frontend Arguments
 
 These arguments are passed to the **frontend** (not the worker) when using `--dyn-chat-processor sglang`:
