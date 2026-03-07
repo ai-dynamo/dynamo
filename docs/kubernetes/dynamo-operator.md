@@ -126,8 +126,8 @@ The Dynamo Operator uses **Kubernetes admission webhooks** for real-time validat
 
 **Key Features:**
 - ✅ Shared certificate infrastructure across all webhook types
-- ✅ Automatic certificate generation (for testing/development)
-- ✅ cert-manager integration (for production)
+- ✅ Automatic certificate generation and rotation (default, all environments)
+- ✅ cert-manager integration (optional, for custom PKI)
 - ✅ Multi-operator support with lease-based coordination
 - ✅ Immutability enforcement for critical fields
 

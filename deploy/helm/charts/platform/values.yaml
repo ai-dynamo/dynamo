@@ -175,10 +175,6 @@ dynamo-operator:
     mpiRun:
       # -- Name of the secret containing the SSH key for MPI Run
       secretName: "mpi-run-ssh-secret"
-      # SSH key generation configuration
-      sshKeygen:
-        # -- Whether to enable SSH key generation for MPI Run
-        enabled: true
 
   # Webhook configuration for admission control and validation
   webhook:
@@ -187,22 +183,8 @@ dynamo-operator:
       # -- Name of the Kubernetes secret containing webhook TLS certificates. The secret must contain three keys: tls.crt (server certificate), tls.key (server private key), and ca.crt (Certificate Authority certificate).
       name: webhook-server-cert
 
-      # -- Whether to manage the certificate secret externally. When false (default), certificates are automatically generated via Helm hooks during installation. When true, you must create the secret manually before installing the chart.
+      # -- Whether to manage the certificate secret externally. When false (default), the operator's built-in cert-controller generates and rotates certificates automatically. When true, you must create the secret manually before installing the chart.
       external: false
-
-    # -- Certificate validity duration in days for auto-generated certificates. Only used when certManager.enabled=false and certificateSecret.external=false. After this duration, certificates will expire and need to be regenerated.
-    certificateValidity: 365
-
-    # Container image for certificate generation and CA injection jobs
-    # Only used when certManager.enabled=false and certificateSecret.external=false
-    certGenerator:
-      image:
-        # -- Container image repository for certificate generation jobs. This image must contain both openssl and kubectl commands.
-        repository: bitnami/kubectl
-        # -- Container image tag for certificate generation jobs
-        tag: latest
-        # -- Image pull policy for certificate generation jobs
-        pullPolicy: IfNotPresent
 
     # -- CA bundle (base64 encoded) for webhook validation. Only used when certificateSecret.external=true. For automatic certificate generation or cert-manager integration, leave this empty as it will be injected automatically.
     caBundle: ""
@@ -219,7 +201,7 @@ dynamo-operator:
 
     # cert-manager integration for automated certificate lifecycle management
     certManager:
-      # -- Whether to use cert-manager for automatic certificate management. Requires cert-manager to be installed in the cluster. When enabled, cert-manager will automatically generate, renew, and rotate certificates, and the automatic certificate generation via Helm hooks will be disabled.
+      # -- Whether to use cert-manager for automatic certificate management. Requires cert-manager to be installed in the cluster. When enabled, cert-manager will provision and rotate certificates instead of the operator's built-in cert-controller.
       enabled: false
 
       # Certificate configuration for cert-manager

@@ -413,6 +413,8 @@ class OmniHandler(BaseOmniHandler):
 
             output = NvImagesResponse(created=int(time.time()), data=image_data_list)
             return output.model_dump()
+        else:
+            return None
 
     async def _format_video_chunk(
         self,
