@@ -803,7 +803,7 @@ def _render_module_section(
 # ---------------------------------------------------------------------------
 
 
-def _render_header() -> list[str]:
+def _render_header(modules: list[str]) -> list[str]:
     """Render the page header with frontmatter, title, and navigation table."""
     cards = [
         {
@@ -812,7 +812,7 @@ def _render_header() -> list[str]:
             "href": f"#{slugify(_module_display_name(m))}",
             "description": MODULE_DESCRIPTIONS.get(m, ""),
         }
-        for m in MODULE_ORDER
+        for m in modules
     ]
     intro = (
         "This page documents the public Python API for NVIDIA Dynamo. "
@@ -851,7 +851,7 @@ def render_consolidated_page() -> str:
     ordered.extend(m for m in modules if m not in ordered)
 
     ctx = RenderContext()
-    parts: list[str] = _render_header()
+    parts: list[str] = _render_header(ordered)
 
     total_items = 0
     for module_name in ordered:
