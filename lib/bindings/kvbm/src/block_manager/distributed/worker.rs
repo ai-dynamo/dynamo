@@ -200,6 +200,7 @@ impl KvbmWorker {
 impl KvbmWorker {
     #[new]
     #[pyo3(signature = (num_device_blocks, page_size, tensors, device_id=0, dtype_width_bytes=2, drt=None, layout_blocking=false, device_layout_type=None, host_layout_type=None, disk_layout_type=None, rank=None, world_size=None, nccl_comm_ref=None))]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         num_device_blocks: usize,
         page_size: usize,
