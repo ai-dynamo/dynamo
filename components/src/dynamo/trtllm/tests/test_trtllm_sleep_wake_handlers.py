@@ -177,15 +177,60 @@ async def test_resume_uses_configured_gms_lock_mode(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_release_succeeds_when_collective_rpc_is_unsupported():
+async def test_release_uses_local_fallback_when_collective_rpc_is_unsupported():
     handler = _make_handler()
     handler._call_collective_rpc = AsyncMock(
         side_effect=RuntimeError(
             "Executor type <class '...'> does not support collective RPC."
         )
     )
+    handler._can_use_local_kv_sleep_fallback = MagicMock(return_value=True)
+    handler._call_local_virtual_memory_method = MagicMock()
+
+    result = await handler.release_memory_occupation({"tags": ["kv_cache"]})
+
+    assert result["status"] == "ok"
+    assert "skipped_tags" not in result
+    handler._call_local_virtual_memory_method.assert_called_once_with(
+        "sleep", ["kv_cache"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_release_skips_kv_cache_when_collective_rpc_is_unsupported_in_multi_rank():
+    handler = _make_handler()
+    handler._call_collective_rpc = AsyncMock(
+        side_effect=RuntimeError(
+            "Executor type <class '...'> does not support collective RPC."
+        )
+    )
+    handler._can_use_local_kv_sleep_fallback = MagicMock(return_value=False)
+    handler._call_local_virtual_memory_method = MagicMock()
 
     result = await handler.release_memory_occupation({"tags": ["kv_cache"]})
 
     assert result["status"] == "ok"
     assert result["skipped_tags"] == ["kv_cache"]
+    handler._call_local_virtual_memory_method.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_resume_uses_local_fallback_when_collective_rpc_is_unsupported():
+    handler = _make_handler()
+    handler._memory_released = True
+    handler._reject_new_requests = True
+    handler._call_collective_rpc = AsyncMock(
+        side_effect=RuntimeError(
+            "Executor type <class '...'> does not support collective RPC."
+        )
+    )
+    handler._can_use_local_kv_sleep_fallback = MagicMock(return_value=True)
+    handler._call_local_virtual_memory_method = MagicMock()
+
+    result = await handler.resume_memory_occupation({"tags": ["kv_cache"]})
+
+    assert result["status"] == "ok"
+    assert "skipped_tags" not in result
+    handler._call_local_virtual_memory_method.assert_called_once_with(
+        "wakeup", ["kv_cache"]
+    )

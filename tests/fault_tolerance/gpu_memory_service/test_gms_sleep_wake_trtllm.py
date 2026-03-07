@@ -9,7 +9,12 @@ import pytest
 
 from tests.utils.managed_process import DynamoFrontendProcess
 
-from .utils.common import GMSServerProcess, get_gpu_memory_used, send_completion
+from .utils.common import (
+    GMSServerProcess,
+    get_gpu_memory_used,
+    send_completion,
+    wait_for_memory_drop,
+)
 from .utils.trtllm import (
     TRTLLM_GMS_MODEL_NAME,
     TRTLLM_GMS_READ_ONLY_CONFIG,
@@ -48,15 +53,9 @@ def test_gms_basic_sleep_wake(request, runtime_services, gms_ports, predownload_
                 sleep_result = engine.sleep()
                 assert sleep_result["status"] == "ok"
 
-                mem_after_sleep = get_gpu_memory_used()
+                mem_after_sleep = wait_for_memory_drop(mem_before)
                 logger.info("Memory after sleep: %.0f MB", mem_after_sleep / (1 << 20))
-                if "kv_cache" in sleep_result.get("skipped_tags", []):
-                    logger.info(
-                        "Skipping strict memory reduction assertion: "
-                        "kv_cache sleep is unsupported in this TRT-LLM runtime."
-                    )
-                else:
-                    assert mem_after_sleep < mem_before, "Sleep should reduce memory"
+                assert mem_after_sleep < mem_before, "Sleep should reduce memory"
 
                 wake_result = engine.wake()
                 assert wake_result["status"] == "ok"

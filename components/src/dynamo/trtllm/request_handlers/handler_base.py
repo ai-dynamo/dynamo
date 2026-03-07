@@ -15,6 +15,7 @@
 
 import asyncio
 import dataclasses
+import gc
 import logging
 import os
 import re
@@ -186,6 +187,44 @@ class HandlerBase(BaseGenerativeHandler):
     def _is_collective_rpc_unsupported(exc: Exception) -> bool:
         return "does not support collective rpc" in str(exc).lower()
 
+    def _can_use_local_kv_sleep_fallback(self) -> bool:
+        """Local tag-based sleep/wake fallback is safe for single-rank executors."""
+        try:
+            llm_args = getattr(self.engine.llm, "args", None)
+            parallel_config = getattr(llm_args, "parallel_config", None)
+            world_size = int(getattr(parallel_config, "world_size", 1))
+        except Exception:
+            return False
+        return world_size == 1
+
+    @staticmethod
+    def _call_local_virtual_memory_method(method: str, tags: list[str]) -> None:
+        from tensorrt_llm._torch.virtual_memory import (
+            materialize_with_tag,
+            release_with_tag,
+            verify_sleep_wakeup_tags,
+        )
+
+        normalized_tags = [
+            str(tag.value) if hasattr(tag, "value") else str(tag)
+            for tag in verify_sleep_wakeup_tags(tags)
+        ]
+        if not normalized_tags:
+            return
+
+        torch.cuda.synchronize()
+        if method == "sleep":
+            release_with_tag(*normalized_tags)
+            torch.cuda.synchronize()
+            gc.collect()
+            torch.cuda.empty_cache()
+            return
+        if method in {"wakeup", "wake_up"}:
+            materialize_with_tag(*normalized_tags)
+            torch.cuda.synchronize()
+            return
+        raise ValueError(f"Unsupported virtual memory method: {method}")
+
     async def _call_collective_rpc(self, method: str, tags: list[str]) -> None:
         rpc = getattr(self.engine.llm, "_collective_rpc", None)
         if rpc is None:
@@ -256,11 +295,19 @@ class HandlerBase(BaseGenerativeHandler):
                     except Exception as exc:
                         if not self._is_collective_rpc_unsupported(exc):
                             raise
-                        logging.warning(
-                            "Skipping kv_cache sleep because collective RPC is unsupported: %s",
-                            exc,
-                        )
-                        skipped_tags.append("kv_cache")
+                        if self._can_use_local_kv_sleep_fallback():
+                            logging.info(
+                                "Collective RPC is unsupported; using local kv_cache sleep fallback"
+                            )
+                            self._call_local_virtual_memory_method(
+                                "sleep", collective_tags
+                            )
+                        else:
+                            logging.warning(
+                                "Skipping kv_cache sleep because collective RPC is unsupported: %s",
+                                exc,
+                            )
+                            skipped_tags.append("kv_cache")
 
                 if handle_weights:
                     manager = self._get_gms_manager()
@@ -320,11 +367,19 @@ class HandlerBase(BaseGenerativeHandler):
                     except Exception as exc:
                         if not self._is_collective_rpc_unsupported(exc):
                             raise
-                        logging.warning(
-                            "Skipping kv_cache wakeup because collective RPC is unsupported: %s",
-                            exc,
-                        )
-                        skipped_tags.append("kv_cache")
+                        if self._can_use_local_kv_sleep_fallback():
+                            logging.info(
+                                "Collective RPC is unsupported; using local kv_cache wakeup fallback"
+                            )
+                            self._call_local_virtual_memory_method(
+                                "wakeup", collective_tags
+                            )
+                        else:
+                            logging.warning(
+                                "Skipping kv_cache wakeup because collective RPC is unsupported: %s",
+                                exc,
+                            )
+                            skipped_tags.append("kv_cache")
 
                 if self.generate_endpoint is not None:
                     await self.generate_endpoint.register_endpoint_instance()
