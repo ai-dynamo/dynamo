@@ -25,6 +25,7 @@ pub mod kv_router;
 pub mod local_model;
 pub mod lora;
 pub mod migration;
+pub mod mocker;
 pub mod model_card;
 pub mod model_type;
 pub mod namespace;
