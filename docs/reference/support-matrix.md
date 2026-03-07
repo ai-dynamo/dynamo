@@ -27,9 +27,9 @@ The following table shows the backend framework versions included with each Dyna
 
 | **Dynamo** | **SGLang** | **TensorRT-LLM** | **vLLM** | **NIXL** |
 | :--- | :--- | :--- | :--- | :--- |
-| **main (ToT)** | `0.5.9` | `1.3.0rc5` | `0.16.0` | `0.10.1` |
-| **v1.0.0** *(in progress)* | `0.5.9` | `1.3.0rc5` | `0.15.1` | `0.10.1` |
-| **v0.9.1** *(in progress)* | `0.5.8` | `1.3.0rc3` | `0.14.1` | `0.9.0` |
+| **main (ToT)** | `0.5.9` | `1.3.0rc5.post1` | `0.16.0` | `0.10.1` |
+| **v1.0.0** *(in progress)* | `0.5.9` | `1.3.0rc5.post1` | `0.16.0` | `0.10.1` |
+| **v0.9.1** | `0.5.8` | `1.3.0rc3` | `0.14.1` | `0.9.0` |
 | **v0.9.0** | `0.5.8` | `1.3.0rc1` | `0.14.1` | `0.9.0` |
 | **v0.8.1.post3** | `0.5.6.post2` | `1.2.0rc6.post3` | `0.12.0` | `0.8.0` |
 | **v0.8.1.post2** | `0.5.6.post2` | `1.2.0rc6.post2` | `0.12.0` | `0.8.0` |
@@ -64,7 +64,7 @@ Dynamo container images include CUDA toolkit libraries. The host machine must ha
 | | **TensorRT-LLM** | 13.1 | 580.xx+ | |
 | | **vLLM** | 12.9 | 575.xx+ | |
 | | | 13.0 | 580.xx+ | |
-| **0.9.1** *(in progress)* | **SGLang** | 12.9 | 575.xx+ | |
+| **0.9.1** | **SGLang** | 12.9 | 575.xx+ | |
 | | **TensorRT-LLM** | 13.0 | 580.xx+ | |
 | | **vLLM** | 12.9 | 575.xx+ | |
 | **0.9.0** | **SGLang** | 12.9 | 575.xx+ | |

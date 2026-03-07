@@ -464,7 +464,7 @@ impl WorkerSelector for DefaultWorkerSelector {
 
                 worker_logits.insert(worker, logit);
 
-                tracing::info!(
+                tracing::debug!(
                     "Formula for worker_id={} dp_rank={:?} with {overlap} cached blocks: {logit:.3} \
                      = {overlap_weight:.1} * prefill_blocks + decode_blocks \
                      = {overlap_weight:.1} * {potential_prefill_block:.3} + {decode_block:.3}",
@@ -486,7 +486,7 @@ impl WorkerSelector for DefaultWorkerSelector {
         // If multiple candidates (tied), use tree size as tie-breaker
         // If tree sizes are also equal, use random selection to avoid bias
         let best_worker = if candidates.len() > 1 {
-            tracing::info!(
+            tracing::debug!(
                 "Multiple workers tied with same logit, using tree size as tie-breaker"
             );
             let tree_sizes: Vec<(usize, &WorkerWithDpRank)> = candidates

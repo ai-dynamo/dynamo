@@ -1594,6 +1594,23 @@ _Appears in:_
 
 
 
+#### CertProvisionMode
+
+_Underlying type:_ _string_
+
+CertProvisionMode controls how webhook TLS certificates are managed.
+
+
+
+_Appears in:_
+- [WebhookServer](#webhookserver)
+
+| Field | Description |
+| --- | --- |
+| `auto` | CertProvisionModeAuto uses the built-in cert-controller to generate and rotate certificates.<br /> |
+| `manual` | CertProvisionModeManual expects certificates to be provided externally (e.g., cert-manager, admin).<br /> |
+
+
 #### CheckpointConfiguration
 
 
@@ -2057,6 +2074,9 @@ _Appears in:_
 | `port` _integer_ | Port is the port the server listens on |  |  |
 | `host` _string_ | Host is the address the webhook server binds to |  |  |
 | `certDir` _string_ | CertDir is the directory containing TLS certificates |  |  |
+| `certProvisionMode` _[CertProvisionMode](#certprovisionmode)_ | CertProvisionMode controls certificate management: "auto" (built-in cert-controller) or "manual" (external) | auto |  |
+| `secretName` _string_ | SecretName is the name of the Kubernetes Secret holding webhook TLS certificates | webhook-server-cert |  |
+| `serviceName` _string_ | ServiceName is the name of the Kubernetes Service fronting the webhook server.<br />Used to generate certificate SANs. Set by the Helm chart. |  |  |
 
 
 # Operator Default Values Injection

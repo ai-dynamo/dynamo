@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import asyncio
 import logging
 import time
 from io import BytesIO
@@ -23,7 +22,6 @@ from urllib.parse import urlparse
 from urllib.request import urlopen
 
 import torch
-from tensorrt_llm.inputs import default_multimodal_input_loader
 from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
 
 from dynamo.common.multimodal.image_loader import ImageLoader
@@ -190,10 +188,6 @@ class MultimodalRequestProcessor:
             "prompt_token_ids": List[int]
         }
 
-        -----------------------------------------------------------------------------
-        TODO: Revert default_multimodal_input_loader calls having fixed TRT-LLM's
-        token IDs & MM data path in generate_async() for the embeddings case.
-        -----------------------------------------------------------------------------
         """
         self.previous_decoded_text = ""
 
@@ -211,60 +205,35 @@ class MultimodalRequestProcessor:
                 logging.warning("MM: No prompt_token_ids from encoder")
             return result
 
-        # Get token_ids from request (already tokenized by Rust frontend)
-        token_ids = request.get("token_ids")
-        if not token_ids:
-            logging.warning("No token_ids in request")
-            return None
-
         # Initialize result in TokensPrompt format
         # mm_processor_kwargs must be a dict (not None) for TRT-LLM's processor
-        processed_inputs = {"prompt_token_ids": token_ids, "mm_processor_kwargs": {}}
+        processed_inputs: Dict[str, Any] = {"mm_processor_kwargs": {}}
 
-        # The aforementioned fallback to default_multimodal_input_loader:
-        messages = request.get("extra_args", {}).get(
-            "messages", request.get("messages", [])
-        )
-        text_prompt, _, embedding_paths = self.extract_prompt_and_media(messages)
-        loader_kwargs = {}
+        # TODO(TRTLLM-11294): Remove the fallback to text_prompt for EPD-NIXL and embeddings cases.
+        # This is a temporary workaround to bypass TRT-LLM's bug where token IDs & embeddings
+        # are not processed correctly.
+        extra_args = request.get("extra_args") or {}
+        formatted_prompt_from_frontend = extra_args.get("formatted_prompt")
 
-        # Two cases, both for the default_multimodal_input_loader fallback:
-        # 1) EPD Flow Case 2: Embeddings received via NIXL from encode worker
-        #   The encode worker computed vision embeddings and transferred them via RDMA/NIXL
-        #   We need to pass these embeddings directly to TRT-LLM's generate_async
-        # 2) PD flow with no NIXL and no encoder
-        if embeddings is not None or embedding_paths:
-            if embeddings is not None:
-                logging.info(
-                    f"Using NIXL embeddings from encoder: shape={embeddings.shape if hasattr(embeddings, 'shape') else 'N/A'}"
-                )
-                loader_kwargs["mm_embeddings"] = [embeddings]
-            elif embedding_paths:
-                # PD flow with no NIXL and no encoder
-                loader_kwargs["mm_embeddings"] = [
-                    self.load_tensor_from_path_or_url(path) for path in embedding_paths
-                ]
-                logging.info(f"Using embedding paths: {embedding_paths}")
-
-            # NOTE: default_multimodal_input_loader downloads images and preprocesses them
-            # synchronously. Wrap in asyncio.to_thread to allow concurrent image loading
-            # across multiple requests, improving throughput at high concurrency.
-            fallback_processed_inputs = await asyncio.to_thread(
-                lambda: default_multimodal_input_loader(
-                    tokenizer=self.tokenizer,
-                    model_dir=self.model_dir,
-                    model_type=self.model_type,
-                    modality=self.modality,
-                    prompts=[text_prompt],
-                    image_data_format="pt",
-                    device="cuda",
-                    **loader_kwargs,
-                )
+        # EPD Flow Case 2: Embeddings received via NIXL from encode worker
+        # The encode worker computed vision embeddings and transferred them via RDMA/NIXL
+        # We need to pass these embeddings directly to TRT-LLM's generate_async
+        if embeddings is not None:
+            logging.info(
+                f"Using NIXL embeddings from encoder: shape={embeddings.shape if hasattr(embeddings, 'shape') else 'N/A'}"
             )
-            # Return the first processed input if available
-            if fallback_processed_inputs:
-                return fallback_processed_inputs[0]
-            return None
+
+            # Same structure as PD flow (TRT-LLM expects dict with "image" key)
+            image_embeddings = (
+                embeddings if isinstance(embeddings, list) else [embeddings]
+            )
+            processed_inputs["multi_modal_embeddings"] = {"image": image_embeddings}
+            if formatted_prompt_from_frontend:
+                processed_inputs["prompt"] = formatted_prompt_from_frontend
+            else:
+                logging.warning("No formatted prompt from frontend")
+                return None
+            return processed_inputs
 
         # PD Flow: Pre-tokenized by Rust frontend with direct media loading
         # TODO: Add frontend decoding support
@@ -273,12 +242,14 @@ class MultimodalRequestProcessor:
         multi_modal_data = request.get("multi_modal_data")
         if multi_modal_data and isinstance(multi_modal_data, dict):
             processed_mm_data = {}
+            loaded_embeddings = []
 
             # Process images and embedding paths from image_url field
             image_items = multi_modal_data.get("image_url", [])
             if image_items and isinstance(image_items, list):
                 # Separate embedding paths from regular image URLs
                 # Items come from Rust in format: {"Url": "..."} or {"Decoded": ...}
+                embedding_paths = []
                 image_urls = []
 
                 for item in image_items:
@@ -299,7 +270,9 @@ class MultimodalRequestProcessor:
                         continue
 
                     # Check if this is an embedding file based on extension
-                    if not url.endswith((".pt", ".pth", ".bin")):
+                    if url.endswith((".pt", ".pth", ".bin")):
+                        embedding_paths.append(url)
+                    else:
                         # Keep original item format for load_image_batch
                         image_urls.append(
                             item if isinstance(item, dict) else {"Url": item}
@@ -321,10 +294,47 @@ class MultimodalRequestProcessor:
                         logging.error(f"Failed to load images: {e}")
                         return None
 
+                # Load embedding files (.pt, .pth, .bin) for PD flow
+                # These are pre-computed vision encoder outputs
+                if embedding_paths:
+                    try:
+                        loaded_embeddings = [
+                            self.load_tensor_from_path_or_url(path)
+                            for path in embedding_paths
+                        ]
+                        if loaded_embeddings:
+                            logging.info(
+                                f"Loaded {len(loaded_embeddings)} embedding file(s) from paths: {embedding_paths}"
+                            )
+                    except Exception as e:
+                        logging.error(f"Failed to load embeddings: {e}")
+                        return None
+
             # TODO: Add support for video_url, audio_url
+
+            if loaded_embeddings:
+                # For TRT-LLM MM embeddings, the currently
+                # supported modality is "image".
+                if formatted_prompt_from_frontend:
+                    processed_inputs["prompt"] = formatted_prompt_from_frontend
+                else:
+                    logging.warning("No formatted prompt from frontend")
+                    return None
+
+                processed_inputs["multi_modal_embeddings"] = {
+                    "image": loaded_embeddings
+                }
+                return processed_inputs
 
             if processed_mm_data:
                 processed_inputs["multi_modal_data"] = processed_mm_data
+
+        # Get token_ids from request (already tokenized by Rust frontend)
+        token_ids = request.get("token_ids")
+        if not token_ids:
+            logging.warning("No token_ids in request")
+            return None
+        processed_inputs["prompt_token_ids"] = token_ids
 
         return processed_inputs
 
