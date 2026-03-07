@@ -31,6 +31,7 @@ const WORKER_POLL: Duration = Duration::from_millis(100);
 // guard against unbounded memory growth (should not happen for reasonable metrics)
 const MAX_SAMPLES_PER_METRIC: usize = 100_000;
 const DEFAULT_METRIC_WINDOW_SECONDS: f64 = 60.0;
+const SAMPLE_OVERFLOW_LOG_INTERVAL: u64 = 5_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PerformanceMetricKind {
@@ -329,6 +330,7 @@ impl MetricHandles {
 struct MetricEntry {
     spec: PerformanceMetricSpec,
     state: MetricState,
+    overflow_drops: u64,
 }
 
 #[derive(Debug)]
@@ -1056,7 +1058,7 @@ fn handle_control_message(msg: ControlMessage, state: &mut WorkerState) -> bool 
         ControlMessage::SnapshotMetric { name, resp } => {
             let now = Instant::now();
             let snapshot = state.metrics.get_mut(&name).map(|entry| {
-                let window = Duration::from_secs_f64(entry.spec.window_seconds);
+                let window = effective_window_duration(entry);
                 prune_entry(now, window, entry);
                 snapshot_entry(now, window, entry)
             });
@@ -1069,7 +1071,7 @@ fn handle_control_message(msg: ControlMessage, state: &mut WorkerState) -> bool 
                 .metrics
                 .values_mut()
                 .map(|entry| {
-                    let window = Duration::from_secs_f64(entry.spec.window_seconds);
+                    let window = effective_window_duration(entry);
                     prune_entry(now, window, entry);
                     snapshot_entry(now, window, entry)
                 })
@@ -1089,17 +1091,30 @@ fn handle_data_message(msg: DataMessage, state: &mut WorkerState) {
             count,
             recorded_at,
         } => {
-            if let Some(entry) = state.metrics.get_mut(name.as_ref())
-                && let MetricState::Rate { counts } = &mut entry.state
-            {
-                counts.push_back((recorded_at, count));
-                while counts.len() > MAX_SAMPLES_PER_METRIC {
-                    tracing::warn!(
-                        metric = %name,
-                        max_samples = MAX_SAMPLES_PER_METRIC,
-                        "metric sample buffer exceeded capacity; dropping oldest rate sample"
-                    );
-                    counts.pop_front();
+            if let Some(entry) = state.metrics.get_mut(name.as_ref()) {
+                let MetricEntry {
+                    spec,
+                    state,
+                    overflow_drops,
+                } = entry;
+                if let MetricState::Rate { counts } = state {
+                    counts.push_back((recorded_at, count));
+                    let dropped = trim_to_sample_limit(counts);
+                    if dropped > 0 {
+                        *overflow_drops = overflow_drops.saturating_add(dropped as u64);
+                        if should_log_sample_overflow(*overflow_drops) {
+                            tracing::warn!(
+                                metric = %name,
+                                metric_kind = "rate",
+                                max_samples = MAX_SAMPLES_PER_METRIC,
+                                dropped_samples = *overflow_drops,
+                                configured_window_seconds = spec.window_seconds,
+                                retained_span_seconds = sample_span_from_rate(counts)
+                                    .map(|span| span.as_secs_f64()),
+                                "metric sample buffer exceeded capacity; dropping oldest samples"
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -1108,17 +1123,30 @@ fn handle_data_message(msg: DataMessage, state: &mut WorkerState) {
             value,
             recorded_at,
         } => {
-            if let Some(entry) = state.metrics.get_mut(name.as_ref())
-                && let MetricState::Distribution { values } = &mut entry.state
-            {
-                values.push_back((recorded_at, value));
-                while values.len() > MAX_SAMPLES_PER_METRIC {
-                    tracing::warn!(
-                        metric = %name,
-                        max_samples = MAX_SAMPLES_PER_METRIC,
-                        "metric sample buffer exceeded capacity; dropping oldest distribution sample"
-                    );
-                    values.pop_front();
+            if let Some(entry) = state.metrics.get_mut(name.as_ref()) {
+                let MetricEntry {
+                    spec,
+                    state,
+                    overflow_drops,
+                } = entry;
+                if let MetricState::Distribution { values } = state {
+                    values.push_back((recorded_at, value));
+                    let dropped = trim_to_sample_limit(values);
+                    if dropped > 0 {
+                        *overflow_drops = overflow_drops.saturating_add(dropped as u64);
+                        if should_log_sample_overflow(*overflow_drops) {
+                            tracing::warn!(
+                                metric = %name,
+                                metric_kind = "distribution",
+                                max_samples = MAX_SAMPLES_PER_METRIC,
+                                dropped_samples = *overflow_drops,
+                                configured_window_seconds = spec.window_seconds,
+                                retained_span_seconds = sample_span_from_distribution(values)
+                                    .map(|span| span.as_secs_f64()),
+                                "metric sample buffer exceeded capacity; dropping oldest samples"
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -1128,12 +1156,30 @@ fn handle_data_message(msg: DataMessage, state: &mut WorkerState) {
             denominator,
             recorded_at,
         } => {
-            if let Some(entry) = state.metrics.get_mut(name.as_ref())
-                && let MetricState::Ratio { pairs } = &mut entry.state
-            {
-                pairs.push_back((recorded_at, numerator, denominator));
-                while pairs.len() > MAX_SAMPLES_PER_METRIC {
-                    pairs.pop_front();
+            if let Some(entry) = state.metrics.get_mut(name.as_ref()) {
+                let MetricEntry {
+                    spec,
+                    state,
+                    overflow_drops,
+                } = entry;
+                if let MetricState::Ratio { pairs } = state {
+                    pairs.push_back((recorded_at, numerator, denominator));
+                    let dropped = trim_to_sample_limit(pairs);
+                    if dropped > 0 {
+                        *overflow_drops = overflow_drops.saturating_add(dropped as u64);
+                        if should_log_sample_overflow(*overflow_drops) {
+                            tracing::warn!(
+                                metric = %name,
+                                metric_kind = "ratio",
+                                max_samples = MAX_SAMPLES_PER_METRIC,
+                                dropped_samples = *overflow_drops,
+                                configured_window_seconds = spec.window_seconds,
+                                retained_span_seconds = sample_span_from_ratio(pairs)
+                                    .map(|span| span.as_secs_f64()),
+                                "metric sample buffer exceeded capacity; dropping oldest samples"
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -1178,6 +1224,7 @@ fn register_metric_in_state(
         MetricEntry {
             spec,
             state: state_variant,
+            overflow_drops: 0,
         },
     );
     Ok(())
@@ -1198,7 +1245,7 @@ fn publish_state(state: &mut WorkerState) -> anyhow::Result<()> {
 
     let now = Instant::now();
     for entry in state.metrics.values_mut() {
-        let window = Duration::from_secs_f64(entry.spec.window_seconds);
+        let window = effective_window_duration(entry);
         prune_entry(now, window, entry);
         let snapshot = snapshot_entry(now, window, entry);
 
@@ -1383,6 +1430,79 @@ fn normalize_quantiles(quantiles: Vec<f64>) -> Vec<f64> {
         .into_iter()
         .filter(|q| seen_suffixes.insert(quantile_suffix(*q)))
         .collect()
+}
+
+fn should_log_sample_overflow(overflow_count: u64) -> bool {
+    overflow_count == 1
+        || overflow_count.is_power_of_two()
+        || (overflow_count >= SAMPLE_OVERFLOW_LOG_INTERVAL
+            && overflow_count.is_multiple_of(SAMPLE_OVERFLOW_LOG_INTERVAL))
+}
+
+fn trim_to_sample_limit<T>(samples: &mut VecDeque<T>) -> usize {
+    if samples.len() <= MAX_SAMPLES_PER_METRIC {
+        return 0;
+    }
+    let overflow = samples.len() - MAX_SAMPLES_PER_METRIC;
+    for _ in 0..overflow {
+        samples.pop_front();
+    }
+    overflow
+}
+
+fn span_between(oldest: Option<Instant>, newest: Option<Instant>) -> Option<Duration> {
+    match (oldest, newest) {
+        (Some(oldest), Some(newest)) => {
+            Some(newest.checked_duration_since(oldest).unwrap_or_default())
+        }
+        _ => None,
+    }
+}
+
+fn sample_span_from_rate(samples: &VecDeque<(Instant, u64)>) -> Option<Duration> {
+    span_between(
+        samples.front().map(|(ts, _)| *ts),
+        samples.back().map(|(ts, _)| *ts),
+    )
+}
+
+fn sample_span_from_distribution(samples: &VecDeque<(Instant, f64)>) -> Option<Duration> {
+    span_between(
+        samples.front().map(|(ts, _)| *ts),
+        samples.back().map(|(ts, _)| *ts),
+    )
+}
+
+fn sample_span_from_ratio(samples: &VecDeque<(Instant, f64, f64)>) -> Option<Duration> {
+    span_between(
+        samples.front().map(|(ts, _, _)| *ts),
+        samples.back().map(|(ts, _, _)| *ts),
+    )
+}
+
+fn sample_span(state: &MetricState) -> Option<Duration> {
+    match state {
+        MetricState::Rate { counts } => sample_span_from_rate(counts),
+        MetricState::Distribution { values } => sample_span_from_distribution(values),
+        MetricState::Ratio { pairs } => sample_span_from_ratio(pairs),
+    }
+}
+
+fn effective_window_duration(entry: &MetricEntry) -> Duration {
+    let configured_window = Duration::from_secs_f64(entry.spec.window_seconds);
+    if !sample_buffer_is_saturated(&entry.state) {
+        return configured_window;
+    }
+    let span = sample_span(&entry.state).unwrap_or_default();
+    configured_window.max(span).max(Duration::from_millis(100))
+}
+
+fn sample_buffer_is_saturated(state: &MetricState) -> bool {
+    match state {
+        MetricState::Rate { counts } => counts.len() >= MAX_SAMPLES_PER_METRIC,
+        MetricState::Distribution { values } => values.len() >= MAX_SAMPLES_PER_METRIC,
+        MetricState::Ratio { pairs } => pairs.len() >= MAX_SAMPLES_PER_METRIC,
+    }
 }
 
 fn prune_entry(now: Instant, window_duration: Duration, entry: &mut MetricEntry) {
