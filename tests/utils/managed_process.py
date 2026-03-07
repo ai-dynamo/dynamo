@@ -210,7 +210,16 @@ class ManagedProcess:
             raise
 
     def _cleanup_stragglers(self):
-        """Clean up straggler processes - called during exit and signal handling"""
+        """Clean up straggler processes - called during exit and signal handling.
+
+        WARNING: NOT pytest-xdist safe! This does a system-wide sweep matching by
+        process name (self.stragglers) and command-line substring (self.straggler_commands),
+        similar to _terminate_all_matching_process_names. Skipped when
+        terminate_all_matching_process_names=False (i.e. xdist-safe mode) to avoid
+        killing other workers' processes.
+        """
+        if not self.terminate_all_matching_process_names:
+            return
         try:
             if self.stragglers or self.straggler_commands:
                 self._logger.info(
@@ -258,46 +267,55 @@ class ManagedProcess:
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Cleanup: Terminate launched processes.
 
-        Termination Strategy (Graceful → Escalate to Force):
-        =====================================================
-        1. Send SIGTERM to process group immediately (no delay before SIGTERM)
-        2. Wait up to 2s (poll every 0.1s) for processes to exit
-        3. If still alive after 2s: Send SIGKILL (force kill)
-        4. Terminate individual processes (self.proc, tee, sed):
-           - Send SIGTERM immediately (no delay)
-           - Wait up to 10s for exit
-           - If still alive after 10s: Send SIGKILL (force kill)
-        5. Clean up straggler processes (if configured)
-
-        Signal Details:
-        - SIGTERM (15): Graceful - allows cleanup handlers to run
-        - SIGKILL (9): Force kill - immediate, cannot be caught
-
-        Timeout Parameter:
-        - Controls how long to WAIT AFTER SIGTERM before escalating to SIGKILL
-        - NOT a delay before sending SIGTERM (SIGTERM is sent immediately)
-
-        This ALWAYS runs regardless of terminate_all_matching_process_names setting.
+        Termination Strategy:
+        =====================
+        1. _terminate_process_group handles the full kill lifecycle:
+           snapshot all child process groups, SIGTERM, wait, SIGKILL all groups.
+        2. Close stdio pipes on helper processes (tee, sed).
+        3. Wait for managed processes to finish.
+        4. Clean up data directory if configured.
+        5. Run name-based straggler cleanup (only when not in xdist-safe mode).
         """
         try:
             self._terminate_process_group()
 
-            process_list = [self.proc, self._tee_proc, self._sed_proc]
-            for process in process_list:
+            for process in [self.proc, self._tee_proc, self._sed_proc]:
                 if process:
                     try:
                         if process.stdout:
                             process.stdout.close()
                         if process.stdin:
                             process.stdin.close()
-                        terminate_process_tree(process.pid, self._logger)
-                        process.wait()
                     except Exception as e:
-                        self._logger.warning("Error terminating process: %s", e)
+                        self._logger.warning("Error closing process pipes: %s", e)
+
+            for process in [self.proc, self._tee_proc, self._sed_proc]:
+                if process:
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        self._logger.warning(
+                            "Process %s (pid=%s) did not exit within 5s, sending SIGKILL",
+                            process.args,
+                            process.pid,
+                        )
+                        process.kill()
+                        try:
+                            process.wait(timeout=3)
+                        except subprocess.TimeoutExpired:
+                            self._logger.error(
+                                "Process %s (pid=%s) still alive after SIGKILL",
+                                process.args,
+                                process.pid,
+                            )
+                    except OSError as e:
+                        self._logger.warning(
+                            "Error waiting for process pid=%s: %s", process.pid, e
+                        )
+
             if self.data_dir:
                 self._remove_directory(self.data_dir)
         finally:
-            # Always run straggler cleanup, even if interrupted
             self._cleanup_stragglers()
 
     def _start_process(self):
@@ -365,29 +383,63 @@ class ManagedProcess:
                 )
             self._tee_proc = None
 
-    def _terminate_process_group(self, timeout: float = 2.0):
+    def _terminate_process_group(self, timeout: float = 5.0):
         """Terminate the entire process group/session started for the child.
 
         Kill Sequence:
         ==============
-        1. Send SIGTERM to entire process group IMMEDIATELY (no delay)
-        2. Wait up to `timeout` seconds (default 2s), polling every 0.1s
-        3. If still alive after timeout: Send SIGKILL (force kill, immediate)
+        1. Snapshot all child process groups (the main pgid plus any distinct
+           child pgids) before sending any signals.
+        2. Send SIGTERM to the main process group IMMEDIATELY (no delay).
+           os.killpg delivers the signal atomically to every group member.
+        3. Wait up to `timeout` seconds (default 5s), polling every 0.1s.
+           5s gives engines (e.g. vLLM EngineCore) enough time to flush
+           in-flight work and release resources before we escalate.
+        4. SIGKILL ALL snapshotted process groups. This covers:
+           - The main group (if SIGTERM didn't finish it)
+           - Any child groups that a child created via setpgid()/setsid()
 
-        Timeout Parameter:
-        - Controls how long to WAIT AFTER SIGTERM before escalating to SIGKILL
-        - NOT a delay before sending SIGTERM (SIGTERM is sent immediately)
+        Limitation: if a child calls setsid()/setpgid() AFTER our snapshot,
+        its new group won't be in our set. This is rare — Python
+        multiprocessing and vLLM engine core inherit the parent's group.
 
-        Process groups catch cases where the launcher shell exits and its
-        children are reparented, leaving no parent PID to traverse, but they
-        remain in the same process group.
+        Post-SIGKILL resource cleanup notes:
+        - GPU memory: vLLM Engine releases VRAM on process death (driver-level
+          reclaim). No manual GPU cleanup needed after SIGKILL.
+        - Distributed state: NATS subscriptions, etcd leases, and KV cache
+          index entries are NOT cleaned up by SIGKILL. These persist until
+          TTL expiry or explicit purge.
+        - Shared memory: POSIX shm segments (/dev/shm/) survive process
+          death and must be unlinked separately if used.
+        - Network ports: TCP sockets enter TIME_WAIT (~60s); rebinding the
+          same port immediately may fail. Prefer dynamic (random) ports in
+          tests to avoid collisions.
         """
         if self._pgid is None:
             return
+
+        # Step 1: snapshot all process groups before signaling.
+        # Children typically share self._pgid, but collect all distinct pgids
+        # in case any child forked its own group.
+        all_pgids: set[int] = {self._pgid}
+        for process in [self.proc, self._tee_proc, self._sed_proc]:
+            if process and process.poll() is None:
+                try:
+                    parent = psutil.Process(process.pid)
+                    for child in parent.children(recursive=True):
+                        try:
+                            all_pgids.add(os.getpgid(child.pid))
+                        except (ProcessLookupError, OSError):
+                            pass
+                except psutil.NoSuchProcess:
+                    pass
+
+        # Step 2: SIGTERM the main process group (graceful shutdown)
         try:
             self._logger.info("Terminating process group: %s", self._pgid)
-            os.killpg(self._pgid, signal.SIGTERM)  # Step 1: Graceful SIGTERM
+            os.killpg(self._pgid, signal.SIGTERM)
         except ProcessLookupError:
+            # Process group already gone — nothing to do
             return
         except Exception as e:
             self._logger.warning(
@@ -395,31 +447,61 @@ class ManagedProcess:
             )
             return
 
-        # Step 2: Poll for process exit instead of fixed sleep to minimize teardown time
+        # Step 3: poll for process group exit instead of fixed sleep.
+        # self.proc.poll() reaps the zombie so os.killpg(pgid, 0) can
+        # detect an empty group; without this the zombie keeps the group
+        # "alive" and the loop burns the full timeout.
         poll_interval = 0.1
         elapsed = 0.0
         while elapsed < timeout:
+            if self.proc is not None:
+                self.proc.poll()
             try:
-                # Check if any process in the group is still alive
-                os.killpg(self._pgid, 0)  # Signal 0 = check existence (no kill)
+                os.killpg(self._pgid, 0)  # signal 0 = check existence
             except ProcessLookupError:
-                # Process group no longer exists - done
-                return
+                break  # Main group gone; fall through to SIGKILL snapshotted groups
             except Exception:
-                # Other errors (e.g., permission) - assume done
-                return
+                break  # Other errors (e.g., permission) — fall through to cleanup
             time.sleep(poll_interval)
             elapsed += poll_interval
 
-        # Step 3: Force kill if anything remains after timeout
-        try:
-            os.killpg(self._pgid, signal.SIGKILL)  # SIGKILL (kill -9) - immediate
-        except ProcessLookupError:
-            pass
-        except Exception as e:
-            self._logger.warning(
-                "Error sending SIGKILL to process group %s: %s", self._pgid, e
-            )
+        # Step 4: SIGKILL all snapshotted process groups to ensure nothing
+        # survives. Covers the main group (if SIGTERM didn't finish it) and
+        # any child groups that left the main group via setpgid()/setsid().
+        for pgid in all_pgids:
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except ProcessLookupError:
+                continue
+            except PermissionError:
+                continue
+            except Exception as e:
+                self._logger.warning(
+                    "Error sending SIGKILL to process group %s: %s", pgid, e
+                )
+                continue
+
+            # Verify group is gone after SIGKILL (bounded wait to avoid hangs
+            # if a process is stuck in uninterruptible I/O).
+            kill_wait = 0.0
+            while kill_wait < 2.0:
+                if self.proc is not None:
+                    self.proc.poll()
+                try:
+                    os.killpg(pgid, 0)
+                except ProcessLookupError:
+                    break  # Process group is gone
+                except Exception as e:
+                    self._logger.error(
+                        "Error checking if process group %s is gone: %s", pgid, e
+                    )
+                    break  # Can't check reliably, move on
+                time.sleep(0.1)
+                kill_wait += 0.1
+            else:
+                self._logger.warning(
+                    "Process group %s still exists 2s after SIGKILL", pgid
+                )
 
     def _remove_directory(self, path: str) -> None:
         """Remove a directory."""
