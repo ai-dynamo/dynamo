@@ -108,7 +108,7 @@ deploy:
   - *ci
   - 'deploy/helm/**'
   - 'deploy/utils/**'
-  - 'deploy/chrek/**'
+  - 'deploy/snapshot/**'
   - 'tests/deploy/**'
 
 planner:
