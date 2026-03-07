@@ -327,65 +327,6 @@ sequenceDiagram
     Frontend->>Client: Stream response
 ```
 
-## Multi-node Deployment (Slurm)
-
-This section demonstrates how to deploy large multimodal models that require a multi-node setup using Slurm.
-
-> **Note:** The `srun` commands in this section are maintained inline in the documentation. Adapt them to your cluster environment as needed.
-
-### Environment Setup
-
-Assuming you have allocated your nodes via `salloc` and are inside an interactive shell:
-
-```bash
-# Container image (build using docs/backends/trtllm/README.md#build-container)
-export IMAGE="<dynamo_trtllm_image>"
-
-# Host:container path pairs for mounting
-export MOUNTS="${PWD}/../../../../:/mnt"
-
-# Model configuration
-export MODEL_PATH="meta-llama/Llama-4-Maverick-17B-128E-Instruct"
-export SERVED_MODEL_NAME="meta-llama/Llama-4-Maverick-17B-128E-Instruct"
-export MODALITY=${MODALITY:-"multimodal"}
-```
-
-### Multi-node Disaggregated Launch
-
-For 4 4xGB200 nodes (2 for prefill, 2 for decode):
-
-```bash
-# Customize parallelism to match your engine configs
-# export PREFILL_ENGINE_CONFIG="/mnt/examples/backends/trtllm/engine_configs/llama4/multimodal/prefill.yaml"
-# export DECODE_ENGINE_CONFIG="/mnt/examples/backends/trtllm/engine_configs/llama4/multimodal/decode.yaml"
-# export NUM_PREFILL_NODES=2
-# export NUM_DECODE_NODES=2
-# export NUM_GPUS_PER_NODE=4
-
-# Launches frontend + etcd/nats on head node, plus prefill and decode workers
-./srun_disaggregated.sh
-```
-
-### Understanding the Output
-
-1. `srun_disaggregated.sh` launches three srun jobs: frontend, prefill worker, and decode worker
-2. The OpenAI frontend will dynamically discover workers as they register:
-   ```text
-   INFO dynamo_run::input::http: Watching for remote model at models
-   INFO dynamo_llm::http::service::service_v2: Starting HTTP service on: 0.0.0.0:8000
-   ```
-3. TRT-LLM workers output progress from each MPI rank while loading
-4. When ready, the frontend logs:
-   ```text
-   INFO dynamo_llm::discovery::watcher: added model model_name="meta-llama/Llama-4-Maverick-17B-128E-Instruct"
-   ```
-
-### Cleanup
-
-```bash
-pkill srun
-```
-
 ## Embedding Cache
 
 Dynamo supports embedding cache in both aggregated and disaggregated settings for TRT-LLM:
