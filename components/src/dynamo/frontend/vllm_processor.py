@@ -81,7 +81,6 @@ class VllmProcessor:
         output_processor: OutputProcessor,
         tool_parser_class: type[ToolParser] | None,
         reasoning_parser_class: type[ReasoningParser] | None,
-        debug_perf: bool = False,
     ):
         self.tokenizer = tokenizer
         self.input_processor = input_processor
@@ -90,7 +89,6 @@ class VllmProcessor:
         self.output_processor = output_processor
         self.tool_parser_class = tool_parser_class
         self.reasoning_parser_class = reasoning_parser_class
-        self.debug_perf = debug_perf
 
     # Ideally we would map NVCreateChatCompletionRequest into Python so it can be type checked, but
     # it has a lot of fields.
@@ -103,35 +101,13 @@ class VllmProcessor:
         model inference to a backend using the router.
         """
 
-        # ** VllmProcessor.generator called: {'messages': [{'role': 'user', 'content': 'What is the capital of Tuvalu?'}], 'model': '/home/grahamk/llms/Qwen3-0.6B', 'max_completion_tokens': 1000, 'stream': False}
-
-        if self.debug_perf:
-            from .perf_instrumentation import enter_generator, exit_generator
-
-            active = enter_generator()
-            t_start = time.monotonic()
-            logger.info("[perf] generator enter: active_requests=%d", active)
-
-        try:
-            async for item in self._generator_inner(request):
-                yield item
-        finally:
-            if self.debug_perf:
-                active = exit_generator()
-                elapsed_ms = (time.monotonic() - t_start) * 1000.0
-                logger.info(
-                    "[perf] generator exit: total=%.2fms active_requests=%d",
-                    elapsed_ms,
-                    active,
-                )
+        async for item in self._generator_inner(request):
+            yield item
 
     async def _generator_inner(
         self, request: dict[str, Any]
     ) -> AsyncGenerator[dict[str, Any], None]:
         request_id = random_uuid()
-
-        if self.debug_perf:
-            t0 = time.monotonic()
 
         pre = await preprocess_chat_request(
             request,
@@ -139,14 +115,6 @@ class VllmProcessor:
             renderer=self.input_processor.renderer,
             tool_parser_class=self.tool_parser_class,
         )
-
-        if self.debug_perf:
-            t1 = time.monotonic()
-            logger.info(
-                "[perf] preprocess_chat_request: %.2fms (request=%s)",
-                (t1 - t0) * 1000.0,
-                request_id,
-            )
 
         request_for_sampling = pre.request_for_sampling
         tool_parser = pre.tool_parser
@@ -207,9 +175,6 @@ class VllmProcessor:
                 "mm_processor_kwargs"
             ] = request_for_sampling.mm_processor_kwargs
 
-        if self.debug_perf:
-            t2 = time.monotonic()
-
         vllm_preproc: EngineCoreRequest = self.input_processor.process_inputs(
             request_id,
             prompt_inputs,
@@ -221,15 +186,6 @@ class VllmProcessor:
             # priority: int = 0,
             # data_parallel_rank: int | None = None,
         )
-
-        if self.debug_perf:
-            t3 = time.monotonic()
-            logger.info(
-                "[perf] input_processor.process_inputs: %.2fms (request=%s tokens=%d)",
-                (t3 - t2) * 1000.0,
-                request_id,
-                len(tokens),
-            )
 
         InputProcessor.assign_request_id(vllm_preproc)
 
@@ -315,10 +271,6 @@ class VllmProcessor:
     ) -> AsyncGenerator[dict[str, Any], None]:
         self.output_processor.add_request(vllm_preproc, None)
 
-        token_count = 0
-        output_proc_total_ms = 0.0
-        post_proc_total_ms = 0.0
-
         try:
             if self.is_kv_router:
                 dynamo_stream = await self.router.generate(
@@ -362,16 +314,9 @@ class VllmProcessor:
                     stop_reason=stop_reason,
                 )
 
-                if self.debug_perf:
-                    t_op0 = time.monotonic()
-
                 vllm_out: OutputProcessorOutput = self.output_processor.process_outputs(
                     [vllm_response]
                 )
-
-                if self.debug_perf:
-                    t_op1 = time.monotonic()
-                    output_proc_total_ms += (t_op1 - t_op0) * 1000.0
 
                 if vllm_out.reqs_to_abort:
                     pass
@@ -383,11 +328,6 @@ class VllmProcessor:
                     choice = post.process_output(output)
                     if choice:
                         choices.append(choice)
-
-                if self.debug_perf:
-                    t_op2 = time.monotonic()
-                    post_proc_total_ms += (t_op2 - t_op1) * 1000.0
-                    token_count += len(engine_response["token_ids"])
 
                 if choices:
                     dynamo_out = {
@@ -406,18 +346,6 @@ class VllmProcessor:
                 self.output_processor.abort_requests(
                     [vllm_preproc.request_id], internal=True
                 )
-            if self.debug_perf and token_count > 0:
-                logger.info(
-                    "[perf] stream done: request=%s tokens=%d "
-                    "output_processor_total=%.2fms (%.3fms/tok) "
-                    "post_processor_total=%.2fms (%.3fms/tok)",
-                    request_id,
-                    token_count,
-                    output_proc_total_ms,
-                    output_proc_total_ms / token_count,
-                    post_proc_total_ms,
-                    post_proc_total_ms / token_count,
-                )
 
 
 class EngineFactory:
@@ -427,7 +355,6 @@ class EngineFactory:
         router_config: RouterConfig,
         config: FrontendConfig,
         flags: Namespace,
-        debug_perf: bool = False,
     ):
         if config.preprocess_workers != 0:
             raise RuntimeError(
@@ -438,7 +365,6 @@ class EngineFactory:
         self.router_config = router_config
         self.config = config
         self.flags = flags
-        self.debug_perf = debug_perf
         self.stream_interval = 20
         raw_stream_interval = os.getenv("DYN_VLLM_STREAM_INTERVAL")
         if raw_stream_interval:
@@ -536,7 +462,6 @@ class EngineFactory:
             output_processor,
             tool_parser_class,
             reasoning_parser_class,
-            debug_perf=self.debug_perf,
         )
 
         return PythonAsyncEngine(gen.generator, loop)
