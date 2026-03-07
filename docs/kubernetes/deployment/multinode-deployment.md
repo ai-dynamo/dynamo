@@ -21,6 +21,8 @@ Dynamo supports multinode deployments through the `multinode` section in resourc
 - **GPU Nodes**: Multiple nodes with NVIDIA GPUs
 - **High-Speed Networking**: InfiniBand, RoCE, or high-bandwidth Ethernet (recommended for optimal performance)
 
+> **Responsibility and setup matrix:** For cluster-admin vs application-user ownership and exact Grove/KAI deployment modes, see [Detailed Installation Guide - Responsibility Split](../installation-guide.md#responsibility-split-admin-vs-user-vs-operator).
+
 
 ### Advanced Multinode Orchestration
 
@@ -74,6 +76,8 @@ Volcano is a Kubernetes native scheduler optimized for AI workloads at scale. It
 ### Orchestrator Selection Algorithm
 
 Dynamo automatically selects the best available orchestrator for multinode deployments using the following logic:
+
+Application users submit `DynamoGraphDeployment` resources. When the Grove pathway is active, the Dynamo operator creates and reconciles the underlying Grove objects.
 
 #### When Both Grove and LWS are Available:
 - **Grove is selected by default** (recommended for advanced AI workloads)
