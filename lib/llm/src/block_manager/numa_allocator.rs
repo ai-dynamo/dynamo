@@ -20,8 +20,6 @@ pub fn is_numa_enabled() -> bool {
 mod tests {
     use super::*;
 
-    // ── NumaNode tests ──────────────────────────────────────────────────
-
     #[test]
     fn test_numa_node_equality() {
         let node0a = NumaNode(0);
@@ -73,24 +71,33 @@ mod tests {
     #[test]
     fn test_numa_node_copy_clone() {
         let node1 = NumaNode(5);
-        let node2 = node1; // Copy
-        let node3 = node1; // Clone
+        let node2 = node1;
+        let node3 = node1;
 
         assert_eq!(node1, node2);
         assert_eq!(node1, node3);
         assert_eq!(node2, node3);
     }
 
-    // ── System detection tests ──────────────────────────────────────────
-
     #[test]
     fn test_get_current_cpu_numa_node() {
         let node = get_current_cpu_numa_node();
-
         if !node.is_unknown() {
             assert!(node.0 < 8, "NUMA node {} seems unreasonably high", node.0);
         }
     }
+
+    #[test]
+    fn test_worker_pool_singleton() {
+        let pool1 = worker_pool::NumaWorkerPool::global();
+        let pool2 = worker_pool::NumaWorkerPool::global();
+        assert!(std::ptr::eq(pool1, pool2));
+    }
+}
+
+#[cfg(all(test, feature = "testing-cuda"))]
+mod cuda_tests {
+    use super::*;
 
     #[test]
     fn test_get_device_numa_node_valid_gpu() {
@@ -100,39 +107,8 @@ mod tests {
         }
     }
 
-    // ── Worker pool tests ───────────────────────────────────────────────
-    //
-    // NumaWorker and NumaWorkerPool::new() are private in dynamo-memory,
-    // so these tests go through the public NumaWorkerPool::global() API.
-
-    /// Check if CUDA is available for testing
-    fn is_cuda_available() -> bool {
-        if std::process::Command::new("nvidia-smi")
-            .arg("--query-gpu=count")
-            .arg("--format=csv,noheader")
-            .output()
-            .is_err()
-        {
-            return false;
-        }
-
-        crate::block_manager::storage::cuda::Cuda::device_or_create(0).is_ok()
-    }
-
-    #[test]
-    fn test_worker_pool_singleton() {
-        let pool1 = worker_pool::NumaWorkerPool::global();
-        let pool2 = worker_pool::NumaWorkerPool::global();
-        assert!(std::ptr::eq(pool1, pool2));
-    }
-
     #[test]
     fn test_worker_pool_allocate() {
-        if !is_cuda_available() {
-            eprintln!("Skipping test_worker_pool_allocate: CUDA not available");
-            return;
-        }
-
         let pool = worker_pool::NumaWorkerPool::global();
 
         match pool.allocate_pinned_for_gpu(8192, 0).unwrap() {
@@ -141,18 +117,13 @@ mod tests {
                 cudarc::driver::result::free_host(ptr as *mut std::ffi::c_void).unwrap();
             },
             None => {
-                eprintln!("NUMA node unknown for GPU 0, allocation skipped");
+                println!("NUMA node unknown for GPU 0, allocation skipped");
             }
         }
     }
 
     #[test]
     fn test_worker_pool_reuse() {
-        if !is_cuda_available() {
-            eprintln!("Skipping test_worker_pool_reuse: CUDA not available");
-            return;
-        }
-
         let pool = worker_pool::NumaWorkerPool::global();
 
         let r1 = pool.allocate_pinned_for_gpu(1024, 0).unwrap();
@@ -167,7 +138,7 @@ mod tests {
                 cudarc::driver::result::free_host(ptr2 as *mut std::ffi::c_void).unwrap();
             },
             (None, None) => {
-                eprintln!("NUMA node unknown, both allocations skipped");
+                println!("NUMA node unknown, both allocations skipped");
             }
             _ => panic!("inconsistent NUMA detection between two calls for same GPU"),
         }
@@ -175,16 +146,11 @@ mod tests {
 
     #[test]
     fn test_zero_size_allocation() {
-        if !is_cuda_available() {
-            eprintln!("Skipping test_zero_size_allocation: CUDA not available");
-            return;
-        }
-
         let pool = worker_pool::NumaWorkerPool::global();
         let result = pool.allocate_pinned_for_gpu(0, 0);
         match result {
             Ok(None) => {
-                eprintln!("NUMA node unknown, zero-size check not reached");
+                println!("NUMA node unknown, zero-size check not reached");
             }
             Err(e) => {
                 assert!(e.contains("zero"));
