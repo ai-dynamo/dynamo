@@ -30,6 +30,10 @@ impl RuntimeMetrics {
             hierarchy: Arc::new(endpoint),
         }
     }
+
+    pub(crate) fn hierarchy(&self) -> Arc<dyn rs::metrics::MetricsHierarchy> {
+        self.hierarchy.clone()
+    }
 }
 
 #[pymethods]

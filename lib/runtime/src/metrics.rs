@@ -6,6 +6,7 @@
 //! This module provides a trait-based interface for creating and managing Prometheus metrics
 //! with automatic label injection and hierarchical naming support.
 
+pub mod performance_metrics;
 pub mod prometheus_names;
 
 use parking_lot::Mutex;
@@ -887,6 +888,18 @@ impl MetricsRegistry {
             .unwrap()
             .register(collector)
             .map_err(|e| anyhow::anyhow!("Failed to register metric: {}", e))
+    }
+
+    /// Remove a Prometheus metric collector from this registry
+    pub fn remove_metric(
+        &self,
+        collector: Box<dyn prometheus::core::Collector>,
+    ) -> anyhow::Result<()> {
+        self.prometheus_registry
+            .write()
+            .unwrap()
+            .unregister(collector)
+            .map_err(|e| anyhow::anyhow!("Failed to unregister metric: {}", e))
     }
 
     /// Get a read guard to the Prometheus registry for scraping
