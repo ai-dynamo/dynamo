@@ -10,6 +10,8 @@ use std::collections::HashSet;
 use std::sync::{Arc, OnceLock};
 
 use super::*;
+#[cfg(feature = "nccl")]
+use crate::block_manager::distributed::PyNcclCommRef;
 use crate::block_manager::distributed::{get_leader_zmq_ack_url, get_leader_zmq_pub_url};
 use crate::block_manager::vllm::connector::worker::event_sync_blocking;
 use crate::{block_manager::distributed::VllmTensor, to_pyerr};
@@ -19,7 +21,9 @@ use crate::{
     extract_distributed_runtime_from_obj, get_current_cancel_token, get_current_tokio_handle,
 };
 use anyhow;
-use dynamo_llm::block_manager::distributed::{KvbmWorker, KvbmWorkerConfig};
+#[cfg(feature = "nccl")]
+use dynamo_llm::block_manager::distributed::NcclCommOwned;
+use dynamo_llm::block_manager::distributed::{KvbmWorker, KvbmWorkerConfig, NcclConfig};
 use dynamo_llm::block_manager::layout::LayoutType;
 use dynamo_llm::block_manager::storage::torch::TorchTensor;
 use dynamo_runtime::utils::task::CriticalTaskExecutionHandle;
@@ -76,10 +80,26 @@ pub struct KvConnectorWorker {
 
     /// cuda events created by the python side
     layer_events: Vec<u64>,
+
+    /// NCCL rank for replicated mode (None = sharded mode)
+    nccl_rank: Option<i32>,
+
+    /// World size for NCCL replicated mode
+    world_size: Option<i32>,
+
+    /// Owned NCCL communicator; kept alive for worker lifetime, NcclConfig uses borrowed handle.
+    #[cfg(feature = "nccl")]
+    nccl_comm: Option<Arc<NcclCommOwned>>,
 }
 
 impl KvConnectorWorker {
-    fn new(drt: Option<Arc<DistributedRuntime>>, trtllm_rank: String) -> anyhow::Result<Self> {
+    fn new(
+        drt: Option<Arc<DistributedRuntime>>,
+        trtllm_rank: String,
+        nccl_rank: Option<i32>,
+        world_size: Option<i32>,
+        nccl_comm_ref: Option<pyo3::PyObject>,
+    ) -> anyhow::Result<Self> {
         let runtime = get_current_tokio_handle();
 
         let (scheduler, worker_client, transfer_client) =
@@ -96,9 +116,27 @@ impl KvConnectorWorker {
         )?
         .detach();
 
+        #[cfg(feature = "nccl")]
+        let nccl_comm = nccl_comm_ref.as_ref().and_then(|obj| {
+            pyo3::Python::with_gil(|py| {
+                obj.downcast_bound::<PyNcclCommRef>(py)
+                    .ok()
+                    .map(|r| r.borrow().get_arc())
+            })
+        });
+        #[cfg(not(feature = "nccl"))]
+        let _ = nccl_comm_ref;
+
         tracing::info!(
-            "KvConnectorWorker initialized with worker_rank: {}",
-            trtllm_rank
+            "KvConnectorWorker initialized with worker_rank: {}, nccl_rank: {:?}, world_size: {:?}, nccl_comm_ref: {}",
+            trtllm_rank,
+            nccl_rank,
+            world_size,
+            if nccl_comm_ref.is_some() {
+                "Some"
+            } else {
+                "None"
+            }
         );
 
         Ok(Self {
@@ -114,7 +152,49 @@ impl KvConnectorWorker {
             iteration: 0,
             layers_complete: 0,
             layer_events: Vec::new(),
+            nccl_rank,
+            world_size,
+            #[cfg(feature = "nccl")]
+            nccl_comm,
         })
+    }
+}
+
+/// Build NcclConfig from the provided parameters.
+/// Returns NcclConfig::disabled() if any required parameter is missing or if NCCL feature is not enabled.
+fn build_nccl_config(
+    nccl_rank: Option<i32>,
+    world_size: Option<i32>,
+    nccl_comm_ptr: Option<usize>,
+) -> NcclConfig {
+    #[cfg(feature = "nccl")]
+    {
+        match (nccl_rank, world_size, nccl_comm_ptr) {
+            (Some(r), Some(ws), Some(ptr)) if ptr != 0 => {
+                tracing::info!(
+                    "Creating NCCL config for replicated mode: rank={}, world_size={}, comm_ptr={:#x}",
+                    r,
+                    ws,
+                    ptr
+                );
+                // Safety: The caller (Python side) is responsible for ensuring the pointer
+                // is a valid NCCL communicator that outlives this config.
+                unsafe {
+                    use cudarc::nccl::sys::ncclComm_t;
+                    NcclConfig::enabled(ptr as ncclComm_t, r, ws)
+                }
+            }
+            _ => {
+                tracing::debug!("NCCL parameters incomplete, using sharded mode");
+                NcclConfig::disabled()
+            }
+        }
+    }
+    #[cfg(not(feature = "nccl"))]
+    {
+        let _ = (nccl_rank, world_size, nccl_comm_ptr); // suppress unused warnings
+        tracing::debug!("NCCL feature not enabled, using sharded mode");
+        NcclConfig::disabled()
     }
 }
 
@@ -135,6 +215,19 @@ impl Worker for KvConnectorWorker {
 
         let kv_cache_tensors = vec![kv_cache_tensor as Arc<dyn TorchTensor>];
 
+        // Build NCCL config from owned comm (borrowed handle only)
+        #[cfg(feature = "nccl")]
+        let nccl_comm_ptr = self.nccl_comm.as_ref().map(|a| a.as_raw() as usize);
+        #[cfg(not(feature = "nccl"))]
+        let nccl_comm_ptr: Option<usize> = None;
+        let nccl_config = build_nccl_config(self.nccl_rank, self.world_size, nccl_comm_ptr);
+        // When NCCL is disabled, pass None for rank/world_size so the worker is consistently in sharded mode.
+        let nccl_rank = if nccl_config.is_enabled() {
+            self.nccl_rank
+        } else {
+            None
+        };
+
         let config = KvbmWorkerConfig::builder()
             .cancel_token(get_current_cancel_token())
             .num_device_blocks(num_device_blocks)
@@ -148,6 +241,8 @@ impl Worker for KvConnectorWorker {
             .leader_pub_url(get_leader_zmq_pub_url())
             .leader_ack_url(get_leader_zmq_ack_url())
             .scheduler_client(Some(self.transfer_client.clone()))
+            .rank(nccl_rank)
+            .nccl_config(nccl_config)
             .build()?;
 
         self.layer_events = raw_event_handles;
@@ -444,8 +539,14 @@ pub struct PyTrtllmKvConnectorWorker {
 #[pymethods]
 impl PyTrtllmKvConnectorWorker {
     #[new]
-    #[pyo3(signature = (py_drt, trtllm_rank))]
-    pub fn new(py_drt: Option<PyObject>, trtllm_rank: String) -> PyResult<Self> {
+    #[pyo3(signature = (py_drt, trtllm_rank, nccl_rank=None, world_size=None, nccl_comm_ref=None))]
+    pub fn new(
+        py_drt: Option<PyObject>,
+        trtllm_rank: String,
+        nccl_rank: Option<i32>,
+        world_size: Option<i32>,
+        nccl_comm_ref: Option<PyObject>,
+    ) -> PyResult<Self> {
         let drt: Option<Arc<DistributedRuntime>> = Python::with_gil(|py| {
             if let Some(obj) = py_drt {
                 extract_distributed_runtime_from_obj(py, obj)
@@ -454,8 +555,10 @@ impl PyTrtllmKvConnectorWorker {
             }
         })?;
 
-        let connector_worker: Box<dyn Worker> =
-            Box::new(KvConnectorWorker::new(drt, trtllm_rank).map_err(to_pyerr)?);
+        let connector_worker: Box<dyn Worker> = Box::new(
+            KvConnectorWorker::new(drt, trtllm_rank, nccl_rank, world_size, nccl_comm_ref)
+                .map_err(to_pyerr)?,
+        );
         Ok(Self { connector_worker })
     }
 
