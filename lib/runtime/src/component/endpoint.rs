@@ -245,6 +245,7 @@ fn build_transport_type_inner(
             let http_port = std::env::var("DYN_HTTP_RPC_PORT")
                 .ok()
                 .and_then(|p| p.parse::<u16>().ok())
+                .filter(|&p| p != 0)
                 .unwrap_or(crate::pipeline::network::manager::get_actual_http_rpc_port()?);
             let rpc_root =
                 std::env::var("DYN_HTTP_RPC_ROOT_PATH").unwrap_or_else(|_| "/v1/rpc".to_string());
@@ -263,6 +264,7 @@ fn build_transport_type_inner(
             let tcp_port = std::env::var("DYN_TCP_RPC_PORT")
                 .ok()
                 .and_then(|p| p.parse::<u16>().ok())
+                .filter(|&p| p != 0)
                 .unwrap_or(crate::pipeline::network::manager::get_actual_tcp_rpc_port()?);
 
             // Include instance_id and endpoint name for proper TCP routing.
@@ -301,10 +303,12 @@ pub async fn build_transport_type(
         RequestPlaneMode::Tcp => std::env::var("DYN_TCP_RPC_PORT")
             .ok()
             .and_then(|p| p.parse::<u16>().ok())
+            .filter(|&p| p != 0)
             .is_some(),
         RequestPlaneMode::Http => std::env::var("DYN_HTTP_RPC_PORT")
             .ok()
             .and_then(|p| p.parse::<u16>().ok())
+            .filter(|&p| p != 0)
             .is_some(),
         RequestPlaneMode::Nats => true, // NATS doesn't need port init
     };
