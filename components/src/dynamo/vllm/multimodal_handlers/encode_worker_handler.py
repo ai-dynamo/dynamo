@@ -6,7 +6,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
 
 import torch
 from transformers import AutoImageProcessor
@@ -80,7 +80,7 @@ class EncodeWorkerHandler:
         self._connector: connect.Connector | None = None
         self._accumulated_time = 0.0
         self._processed_requests = 0
-        self.readables = []
+        self.readables: list[Any] = []
         self.embedding_cache = EmbeddingCache() if ENABLE_ENCODER_CACHE else None
         if embedding_transfer_mode == EmbeddingTransferMode.LOCAL:
             self.embedding_sender = LocalEmbeddingSender()
@@ -93,7 +93,7 @@ class EncodeWorkerHandler:
                 f"Invalid embedding transfer mode: {embedding_transfer_mode}"
             )
 
-        self.send_complete_queue = asyncio.Queue()
+        self.send_complete_queue: asyncio.Queue[tuple[Any, Any]] = asyncio.Queue()
         self.send_complete_checker_task = asyncio.create_task(
             self.check_complete(self.send_complete_queue)
         )
@@ -150,7 +150,9 @@ class EncodeWorkerHandler:
             with _nvtx.annotate("mm:enc:cache_check", color="cyan"):
                 # Before batch process images, check cache first
                 need_encode_indexes = []
-                embedding_lists = [None] * len(request.multimodal_inputs)
+                embedding_lists: list[EmbeddingItem | None] = [None] * len(
+                    request.multimodal_inputs
+                )
                 for idx in range(len(request.multimodal_inputs)):
                     if not request.multimodal_inputs[idx].multimodal_input.image_url:
                         raise ValueError("image_url is required for the encode worker.")
@@ -251,16 +253,16 @@ class EncodeWorkerHandler:
             for split_idx, (list_idx, key) in enumerate(need_encode_indexes):
                 embedding_lists[list_idx] = EmbeddingItem(
                     key,
-                    [image_grid_thw[split_idx]] if image_grid_thw else None,
+                    [image_grid_thw[split_idx]] if image_grid_thw else [],
                     splitted_embeddings[split_idx].unsqueeze(0),
                 )
                 # Cache the computed value for future use
                 if self.embedding_cache is not None:
                     self.embedding_cache.set(
-                        embedding_lists[list_idx].key,
+                        embedding_lists[list_idx].key,  # type: ignore
                         (
-                            embedding_lists[list_idx].image_grid_thw,
-                            embedding_lists[list_idx].embeddings,
+                            embedding_lists[list_idx].image_grid_thw,  # type: ignore
+                            embedding_lists[list_idx].embeddings,  # type: ignore
                         ),
                     )
 
@@ -275,6 +277,7 @@ class EncodeWorkerHandler:
                         )
                     )
                     for embedding_item in embedding_lists
+                    if embedding_item is not None
                 ]
                 transfer_requests = await asyncio.gather(*send_tasks)
 
@@ -282,6 +285,7 @@ class EncodeWorkerHandler:
 
                 for idx, item in enumerate(zip(embedding_lists, transfer_requests)):
                     embedding_item, transfer_request = item
+                    assert embedding_item is not None
                     logger.debug(
                         f"{embedding_item.embeddings.shape} prepared for transfer."
                     )
