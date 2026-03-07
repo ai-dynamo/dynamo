@@ -867,11 +867,13 @@ fn register_metric_in_state(
         },
     };
 
-    validate_metric_name_collision_for_spec(
-        spec.clone(),
-        &state.publisher.metric_prefix,
-        &state.publisher.handles,
-    )?;
+    let mut specs = state
+        .metrics
+        .values()
+        .map(|entry| entry.spec.clone())
+        .collect::<Vec<_>>();
+    specs.push(spec.clone());
+    validate_metric_name_collisions(&specs, &state.publisher.metric_prefix)?;
     let handles = build_metric_handles_for_spec(&spec, &state.publisher)?;
     state.publisher.handles.insert(spec.name.clone(), handles);
 
@@ -1056,21 +1058,6 @@ fn build_metric_handles_for_spec(
             })
         }
     }
-}
-
-fn validate_metric_name_collision_for_spec(
-    spec: PerformanceMetricSpec,
-    metric_prefix: &str,
-    existing: &HashMap<String, MetricHandles>,
-) -> anyhow::Result<()> {
-    let mut names = HashSet::new();
-    for key in existing.keys() {
-        names.insert(key.clone());
-    }
-    if names.contains(&spec.name) {
-        anyhow::bail!("metric '{}' already registered", spec.name);
-    }
-    validate_metric_name_collisions(&[spec], metric_prefix)
 }
 
 fn normalize_quantiles(quantiles: Vec<f64>) -> Vec<f64> {
@@ -1474,5 +1461,75 @@ mod tests {
                 .unwrap()
                 .contains("performance_ttft_avg")
         );
+    }
+
+    #[test]
+    fn register_validates_against_existing_suffixed_sanitized_names() {
+        let hierarchy = Arc::new(TestHierarchy::new());
+        let tracker = PerformanceMetricsRegistry::new_attached(
+            Duration::from_secs(60),
+            Duration::from_secs(5),
+            hierarchy.clone(),
+            "baseten_frontend",
+            &[] as &[(&str, &str)],
+        )
+        .unwrap();
+
+        let _dist = tracker
+            .new_distribution_metric("foo_per_second", vec![0.1, 0.5, 0.99, 0.999], None)
+            .unwrap();
+
+        let before = hierarchy.metrics().prometheus_expfmt().unwrap();
+        assert!(before.contains("baseten_frontend_foo_per_second_avg"));
+        assert!(before.contains("baseten_frontend_foo_per_second_p10"));
+        assert!(before.contains("baseten_frontend_foo_per_second_p50"));
+        assert!(before.contains("baseten_frontend_foo_per_second_p99"));
+        assert!(before.contains("baseten_frontend_foo_per_second_p99_9"));
+
+        let err = match tracker.new_rate_metric("foo", vec![0.1, 0.5, 0.99, 0.999], Some(1.0), None)
+        {
+            Ok(_) => panic!("expected collision error"),
+            Err(err) => err.to_string(),
+        };
+        assert!(
+            err.contains("prometheus metric name collision after sanitization"),
+            "{err}"
+        );
+
+        let after = hierarchy.metrics().prometheus_expfmt().unwrap();
+        assert!(after.contains("baseten_frontend_foo_per_second_avg"));
+        assert!(after.contains("baseten_frontend_foo_per_second_p10"));
+        assert!(after.contains("baseten_frontend_foo_per_second_p50"));
+        assert!(after.contains("baseten_frontend_foo_per_second_p99"));
+        assert!(after.contains("baseten_frontend_foo_per_second_p99_9"));
+        assert!(!after.contains("baseten_frontend_foo_per_second_per_second"));
+        assert!(!after.contains("baseten_frontend_foo_per_second_per_second_p10"));
+        assert!(!after.contains("baseten_frontend_foo_per_second_per_second_p50"));
+        assert!(!after.contains("baseten_frontend_foo_per_second_per_second_p99"));
+        assert!(!after.contains("baseten_frontend_foo_per_second_per_second_p99_9"));
+    }
+
+    #[test]
+    fn attached_metrics_export_expected_hierarchy_naming() {
+        let hierarchy = Arc::new(TestHierarchy::new());
+        let tracker = PerformanceMetricsRegistry::new_attached(
+            Duration::from_secs(60),
+            Duration::from_secs(5),
+            hierarchy.clone(),
+            "baseten_frontend",
+            &[] as &[(&str, &str)],
+        )
+        .unwrap();
+
+        let _requests = tracker
+            .new_rate_metric("requests", vec![0.1, 0.5, 0.99, 0.999], Some(1.0), None)
+            .unwrap();
+
+        let output = hierarchy.metrics().prometheus_expfmt().unwrap();
+        assert!(output.contains("component_baseten_frontend_requests_per_second"));
+        assert!(output.contains("component_baseten_frontend_requests_per_second_p10"));
+        assert!(output.contains("component_baseten_frontend_requests_per_second_p50"));
+        assert!(output.contains("component_baseten_frontend_requests_per_second_p99"));
+        assert!(output.contains("component_baseten_frontend_requests_per_second_p99_9"));
     }
 }
