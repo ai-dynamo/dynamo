@@ -23,11 +23,11 @@ use std::sync::Arc;
 use tokio_util::task::TaskTracker;
 use tracing::warn;
 
-use velo_backend::VeloBackend;
 use velo_common::{InstanceId, PeerInfo, WorkerId};
 use velo_events::{
     EventAwaiter, EventHandle, EventManager, EventPoison, EventStatus, EventSystemBase,
 };
+use velo_transports::VeloBackend;
 
 use crate::common::events::{EventType, Outcome, encode_event_header};
 use crate::common::responses::{ResponseAwaiter, ResponseId, ResponseManager};
@@ -820,7 +820,7 @@ impl VeloEvents {
             WorkerId::from_u64(response_id.worker_id()),
             header.to_vec(),
             vec![],
-            velo_backend::MessageType::Ack,
+            velo_transports::MessageType::Ack,
             get_event_ack_error_handler(),
         )?;
 
@@ -835,7 +835,7 @@ impl VeloEvents {
             WorkerId::from_u64(response_id.worker_id()),
             header.to_vec(),
             payload,
-            velo_backend::MessageType::Ack,
+            velo_transports::MessageType::Ack,
             get_event_nack_error_handler(),
         )?;
 
@@ -864,31 +864,33 @@ impl VeloEvents {
 // ── Error handlers for event system responses ───────────────────────
 
 struct EventAckErrorHandler;
-impl velo_backend::TransportErrorHandler for EventAckErrorHandler {
+impl velo_transports::TransportErrorHandler for EventAckErrorHandler {
     fn on_error(&self, _header: bytes::Bytes, _payload: bytes::Bytes, error: String) {
         warn!("Failed to send event ACK: {}", error);
     }
 }
 
 struct EventNackErrorHandler;
-impl velo_backend::TransportErrorHandler for EventNackErrorHandler {
+impl velo_transports::TransportErrorHandler for EventNackErrorHandler {
     fn on_error(&self, _header: bytes::Bytes, _payload: bytes::Bytes, error: String) {
         warn!("Failed to send event NACK: {}", error);
     }
 }
 
-static EVENT_ACK_ERROR_HANDLER: std::sync::OnceLock<Arc<dyn velo_backend::TransportErrorHandler>> =
-    std::sync::OnceLock::new();
-static EVENT_NACK_ERROR_HANDLER: std::sync::OnceLock<Arc<dyn velo_backend::TransportErrorHandler>> =
-    std::sync::OnceLock::new();
+static EVENT_ACK_ERROR_HANDLER: std::sync::OnceLock<
+    Arc<dyn velo_transports::TransportErrorHandler>,
+> = std::sync::OnceLock::new();
+static EVENT_NACK_ERROR_HANDLER: std::sync::OnceLock<
+    Arc<dyn velo_transports::TransportErrorHandler>,
+> = std::sync::OnceLock::new();
 
-fn get_event_ack_error_handler() -> Arc<dyn velo_backend::TransportErrorHandler> {
+fn get_event_ack_error_handler() -> Arc<dyn velo_transports::TransportErrorHandler> {
     EVENT_ACK_ERROR_HANDLER
         .get_or_init(|| Arc::new(EventAckErrorHandler))
         .clone()
 }
 
-fn get_event_nack_error_handler() -> Arc<dyn velo_backend::TransportErrorHandler> {
+fn get_event_nack_error_handler() -> Arc<dyn velo_transports::TransportErrorHandler> {
     EVENT_NACK_ERROR_HANDLER
         .get_or_init(|| Arc::new(EventNackErrorHandler))
         .clone()
@@ -1101,9 +1103,9 @@ mod tests {
     // ── Two-messenger integration tests ─────────────────────────────
 
     use crate::Messenger;
-    use velo_backend::tcp::TcpTransportBuilder;
+    use velo_transports::tcp::TcpTransportBuilder;
 
-    fn new_transport() -> Arc<velo_backend::tcp::TcpTransport> {
+    fn new_transport() -> Arc<velo_transports::tcp::TcpTransport> {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         Arc::new(
             TcpTransportBuilder::new()

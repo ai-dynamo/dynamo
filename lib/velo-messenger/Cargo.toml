@@ -13,15 +13,16 @@ repository.workspace = true
 
 [features]
 default = ["http", "nats", "grpc"]
-ucx = ["velo-backend/ucx"]
-http = ["velo-backend/http"]
-grpc = ["velo-backend/grpc"]
-nats = ["velo-backend/nats"]
+ucx = ["velo-transports/ucx"]
+http = ["velo-transports/http"]
+grpc = ["velo-transports/grpc"]
+nats = ["velo-transports/nats"]
 
 [dependencies]
-velo-backend = { workspace = true }
 velo-common = { workspace = true }
 velo-events = { workspace = true }
+velo-transports = { workspace = true }
+
 lru = "0.12"
 anyhow = { workspace = true }
 bs58 = "0.5"
@@ -39,7 +40,7 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 dashmap = "6.1.0"
 parking_lot = { workspace = true }
-flume = "0.11.1"
+flume = "0.12.0"
 
 [dev-dependencies]
 clap = { version = "4.5", features = ["derive"] }

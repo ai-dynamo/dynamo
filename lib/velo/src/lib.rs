@@ -11,7 +11,7 @@ use std::sync::Arc;
 use anyhow::Result;
 
 pub use backend::Transport;
-pub use velo_backend as backend;
+pub use velo_transports as backend;
 
 // Re-exports: Messaging (from velo-messenger)
 pub use velo_messenger::{

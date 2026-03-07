@@ -9,7 +9,7 @@
 use anyhow::Result;
 use bytes::Bytes;
 use clap::Parser;
-use velo_backend::tcp::TcpTransportBuilder;
+use velo_transports::tcp::TcpTransportBuilder;
 use velo_messenger::{Handler, Messenger};
 
 use std::sync::Arc;
@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use tokio::time::sleep;
 
 /// Create a TcpTransport bound to an OS-assigned port (no TOCTOU race).
-fn new_transport() -> Arc<velo_backend::tcp::TcpTransport> {
+fn new_transport() -> Arc<velo_transports::tcp::TcpTransport> {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     Arc::new(
         TcpTransportBuilder::new()

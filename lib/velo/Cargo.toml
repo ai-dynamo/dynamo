@@ -12,10 +12,10 @@ homepage.workspace = true
 repository.workspace = true
 
 [dependencies]
-velo-backend = { workspace = true }
 velo-common = { workspace = true }
 velo-events = { workspace = true }
 velo-messenger = { workspace = true }
+velo-transports = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }
 tokio = { workspace = true }

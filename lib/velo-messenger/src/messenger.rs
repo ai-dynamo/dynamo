@@ -7,9 +7,9 @@ use anyhow::Result;
 use std::num::NonZero;
 use std::sync::Arc;
 
-use velo_backend::{Transport, VeloBackend};
 use velo_common::{InstanceId, PeerInfo};
 use velo_events::DistributedEventFactory;
+use velo_transports::{Transport, VeloBackend};
 
 use crate::PeerDiscovery;
 use crate::client::ActiveMessageClient;
@@ -125,7 +125,7 @@ impl Messenger {
 
         // 4. Create client with error handler
         struct DefaultErrorHandler;
-        impl velo_backend::TransportErrorHandler for DefaultErrorHandler {
+        impl velo_transports::TransportErrorHandler for DefaultErrorHandler {
             fn on_error(&self, _header: bytes::Bytes, _payload: bytes::Bytes, error: String) {
                 tracing::error!("Transport error: {}", error);
             }

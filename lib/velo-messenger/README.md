@@ -1,15 +1,15 @@
 # velo-messenger
 
-Active messaging layer for Velo distributed systems. Sits between `velo-backend` (transport abstraction) and higher-level session/service crates, providing request-response and fire-and-forget messaging patterns over pluggable transports.
+Active messaging layer for Velo distributed systems. Sits between `` (transport abstraction) and higher-level session/service crates, providing request-response and fire-and-forget messaging patterns over pluggable transports.
 
 ## Architecture
 
 ```text
-velo-common  →  velo-backend  →  velo-messenger  →  (higher-level crates)
+velo-common  →    →  velo-messenger  →  (higher-level crates)
   (types)       (transports)     (messaging)
 ```
 
-`Messenger` is the central type. It owns a `velo-backend::VeloBackend`, wires up inbound message dispatch, and exposes a builder-based API for both registering handlers and sending messages.
+`Messenger` is the central type. It owns a `::VeloBackend`, wires up inbound message dispatch, and exposes a builder-based API for both registering handlers and sending messages.
 
 ### Modules
 
@@ -133,7 +133,7 @@ awaiter.await?;
 
 | Feature | Default | Description |
 |---------|---------|-------------|
-| `http`  | yes     | HTTP transport (via `velo-backend`) |
+| `http`  | yes     | HTTP transport (via ``) |
 | `grpc`  | yes     | gRPC transport |
 | `nats`  | yes     | NATS transport |
 | `ucx`   | no      | UCX transport (requires system libs) |

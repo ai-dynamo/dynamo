@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use tokio_util::task::TaskTracker;
-use velo_backend::{DataStreams, VeloBackend};
+use velo_transports::{DataStreams, VeloBackend};
 
 pub(crate) use dispatcher::{ControlMessage, DispatcherHub, HandlerContext};
 

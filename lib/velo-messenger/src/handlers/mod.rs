@@ -45,7 +45,7 @@ use crate::server::dispatcher::{
 };
 use derive_getters::Dissolve;
 use tokio_util::task::TaskTracker;
-use velo_backend::{MessageType, VeloBackend};
+use velo_transports::{MessageType, VeloBackend};
 
 // ============================================================================
 // Opaque Handles
@@ -535,49 +535,50 @@ where
 // ============================================================================
 
 struct AckErrorHandler;
-impl velo_backend::TransportErrorHandler for AckErrorHandler {
+impl velo_transports::TransportErrorHandler for AckErrorHandler {
     fn on_error(&self, _header: Bytes, _payload: Bytes, error: String) {
         error!("Failed to send ACK: {}", error);
     }
 }
 
 struct NackErrorHandler;
-impl velo_backend::TransportErrorHandler for NackErrorHandler {
+impl velo_transports::TransportErrorHandler for NackErrorHandler {
     fn on_error(&self, _header: Bytes, _payload: Bytes, error: String) {
         error!("Failed to send NACK: {}", error);
     }
 }
 
 struct ResponseErrorHandler;
-impl velo_backend::TransportErrorHandler for ResponseErrorHandler {
+impl velo_transports::TransportErrorHandler for ResponseErrorHandler {
     fn on_error(&self, _header: Bytes, _payload: Bytes, error: String) {
         error!("Failed to send response: {}", error);
     }
 }
 
-static ACK_ERROR_HANDLER: std::sync::OnceLock<Arc<dyn velo_backend::TransportErrorHandler>> =
+static ACK_ERROR_HANDLER: std::sync::OnceLock<Arc<dyn velo_transports::TransportErrorHandler>> =
     std::sync::OnceLock::new();
-static NACK_ERROR_HANDLER: std::sync::OnceLock<Arc<dyn velo_backend::TransportErrorHandler>> =
+static NACK_ERROR_HANDLER: std::sync::OnceLock<Arc<dyn velo_transports::TransportErrorHandler>> =
     std::sync::OnceLock::new();
-static RESPONSE_ERROR_HANDLER: std::sync::OnceLock<Arc<dyn velo_backend::TransportErrorHandler>> =
-    std::sync::OnceLock::new();
+static RESPONSE_ERROR_HANDLER: std::sync::OnceLock<
+    Arc<dyn velo_transports::TransportErrorHandler>,
+> = std::sync::OnceLock::new();
 
 #[inline(always)]
-fn get_ack_error_handler() -> Arc<dyn velo_backend::TransportErrorHandler> {
+fn get_ack_error_handler() -> Arc<dyn velo_transports::TransportErrorHandler> {
     ACK_ERROR_HANDLER
         .get_or_init(|| Arc::new(AckErrorHandler))
         .clone()
 }
 
 #[inline(always)]
-fn get_nack_error_handler() -> Arc<dyn velo_backend::TransportErrorHandler> {
+fn get_nack_error_handler() -> Arc<dyn velo_transports::TransportErrorHandler> {
     NACK_ERROR_HANDLER
         .get_or_init(|| Arc::new(NackErrorHandler))
         .clone()
 }
 
 #[inline(always)]
-fn get_response_error_handler() -> Arc<dyn velo_backend::TransportErrorHandler> {
+fn get_response_error_handler() -> Arc<dyn velo_transports::TransportErrorHandler> {
     RESPONSE_ERROR_HANDLER
         .get_or_init(|| Arc::new(ResponseErrorHandler))
         .clone()

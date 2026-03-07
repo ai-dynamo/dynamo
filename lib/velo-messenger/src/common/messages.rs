@@ -19,7 +19,9 @@ pub(crate) struct ActiveMessage {
 }
 
 impl ActiveMessage {
-    pub(crate) fn encode(self) -> Result<(Bytes, Bytes, velo_backend::MessageType), EncodeError> {
+    pub(crate) fn encode(
+        self,
+    ) -> Result<(Bytes, Bytes, velo_transports::MessageType), EncodeError> {
         encode_active_message(self)
     }
 }
@@ -118,10 +120,10 @@ impl TryFrom<u8> for ResponseType {
 
 impl ResponseType {
     /// Convert ResponseType to MessageType for routing
-    pub(crate) fn to_message_type(self) -> velo_backend::MessageType {
+    pub(crate) fn to_message_type(self) -> velo_transports::MessageType {
         // All active messages are requests, so they all map to MessageType::Message
         // The response will come back as MessageType::Response separately
-        velo_backend::MessageType::Message
+        velo_transports::MessageType::Message
     }
 }
 
@@ -166,7 +168,7 @@ pub(crate) enum EncodeError {
 
 pub(crate) fn encode_active_message(
     message: ActiveMessage,
-) -> Result<(Bytes, Bytes, velo_backend::MessageType), EncodeError> {
+) -> Result<(Bytes, Bytes, velo_transports::MessageType), EncodeError> {
     let handler_name_len = message.metadata.handler_name.len();
 
     // Validate handler name length fits in u16

@@ -9,8 +9,8 @@ use std::sync::{Arc, OnceLock};
 use tokio::sync::Semaphore;
 use tokio_util::task::TaskTracker;
 use tracing::{debug, error, trace, warn};
-use velo_backend::VeloBackend;
 use velo_common::WorkerId;
+use velo_transports::VeloBackend;
 
 use crate::Messenger;
 use crate::common::events::{EventType, Outcome, encode_event_header};
@@ -299,19 +299,19 @@ impl DispatcherHub {
         response_id: ResponseId,
         error_message: String,
     ) -> anyhow::Result<()> {
-        use velo_backend::MessageType;
+        use velo_transports::MessageType;
 
         let header = encode_event_header(EventType::Ack(response_id, Outcome::Error));
         let payload = Bytes::from(error_message.into_bytes());
 
         struct DispatcherErrorHandler;
-        impl velo_backend::TransportErrorHandler for DispatcherErrorHandler {
+        impl velo_transports::TransportErrorHandler for DispatcherErrorHandler {
             fn on_error(&self, _header: Bytes, _payload: Bytes, error: String) {
                 error!(target: "velo_messenger::dispatcher", "Failed to send error response: {}", error);
             }
         }
 
-        static ERROR_HANDLER: std::sync::OnceLock<Arc<dyn velo_backend::TransportErrorHandler>> =
+        static ERROR_HANDLER: std::sync::OnceLock<Arc<dyn velo_transports::TransportErrorHandler>> =
             std::sync::OnceLock::new();
         let error_handler = ERROR_HANDLER
             .get_or_init(|| Arc::new(DispatcherErrorHandler))

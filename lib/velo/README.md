@@ -10,7 +10,7 @@ velo              ← you are here (facade + re-exports)
 ├── velo-messenger   active messaging, handlers, distributed events
 ├── velo-events      generational event system
 ├── velo-common      shared types (InstanceId, PeerInfo, WorkerId)
-└── velo-backend     transport abstraction (TCP, gRPC, NATS, UCX)
+└──      transport abstraction (TCP, gRPC, NATS, UCX)
 ```
 
 Peer discovery backends (e.g. `velo-discovery`) are separate crates that
@@ -55,7 +55,7 @@ async fn main() -> anyhow::Result<()> {
 |---|---|
 | `velo-messenger` | `Messenger`, `Handler`, `Context`, `TypedContext`, send/unary/typed-unary builders, `VeloEvents`, `PeerDiscovery` |
 | `velo-events` | `Event`, `EventManager`, `EventHandle`, `EventAwaiter`, `EventStatus`, `EventPoison` |
-| `velo-backend` | `*` as `velo::backend` |
+| `` | `*` as `velo::backend` |
 | `velo-common` | `InstanceId`, `PeerInfo`, `WorkerId`, `WorkerAddress` |
 
 The `Velo` struct itself is a thin wrapper around `Arc<Messenger>` that

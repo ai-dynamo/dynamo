@@ -16,8 +16,8 @@ use crate::{
 };
 
 use peer_registry::PeerRegistry;
-use velo_backend::{TransportErrorHandler, VeloBackend};
 use velo_common::InstanceId;
+use velo_transports::{TransportErrorHandler, VeloBackend};
 
 const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 
