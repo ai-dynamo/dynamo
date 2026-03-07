@@ -98,8 +98,9 @@ type Server struct {
 // MetricsServer extends Server with secure serving option.
 type MetricsServer struct {
 	Server `json:",inline"`
-	// Secure enables secure serving for the metrics endpoint
-	Secure bool `json:"secure"`
+	// Secure enables secure serving for the metrics endpoint.
+	// nil = default to true (secure by default).
+	Secure *bool `json:"secure,omitempty"`
 }
 
 // CertProvisionMode controls how webhook TLS certificates are managed.

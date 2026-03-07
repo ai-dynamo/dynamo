@@ -244,7 +244,7 @@ func main() {
 		Scheme: crdScheme,
 		Metrics: metricsserver.Options{
 			BindAddress:    metricsBindAddr,
-			SecureServing:  operatorCfg.Server.Metrics.Secure,
+			SecureServing:  ptr.Deref(operatorCfg.Server.Metrics.Secure, true),
 			FilterProvider: metricsfilters.WithAuthenticationAndAuthorization,
 			TLSOpts:        tlsOpts,
 		},
