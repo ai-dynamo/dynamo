@@ -24,6 +24,8 @@ resources:
 - role_binding.yaml
 - leader_election_role.yaml
 - leader_election_role_binding.yaml
+# ClusterRole granting GET /metrics (required by WithAuthenticationAndAuthorization filter)
+- auth_proxy_client_clusterrole.yaml
 # For each CRD, "Editor" and "Viewer" roles are scaffolded by
 # default, aiding admins in cluster management. Those roles are
 # not used by the Project itself. You can comment the following lines
