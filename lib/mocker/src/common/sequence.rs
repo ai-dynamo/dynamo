@@ -55,7 +55,7 @@ pub struct ActiveSequence {
     num_input_tokens: usize,
 
     #[getter(copy)]
-    num_allocated_blocks: usize,
+    num_allocated_tokens: usize,
 
     #[getter(copy)]
     enable_prefix_caching: bool,
@@ -87,7 +87,7 @@ impl ActiveSequence {
             max_output_tokens,
             generated_tokens: 0,
             num_input_tokens,
-            num_allocated_blocks: 0,
+            num_allocated_tokens: 0,
             enable_prefix_caching,
             emit_token_ids,
         };
@@ -107,23 +107,27 @@ impl ActiveSequence {
         self.tokens.total_tokens() == 0
     }
 
-    /// Allocate KV blocks for tokens up to `cumulative_tokens`.
-    /// Returns a `MoveBlock::Use` signal for only the newly allocated blocks,
-    /// or `None` if no new blocks are needed.
-    pub fn allocate_blocks_for_chunk(&mut self, cumulative_tokens: usize) -> Option<MoveBlock> {
+    /// Build a `MoveBlock::Use` signal for blocks up to `cumulative_tokens`
+    /// without updating internal state. Returns `None` if no new blocks are needed.
+    /// Call `commit_allocation` after the signal is successfully processed.
+    pub fn prepare_allocation(&self, cumulative_tokens: usize) -> Option<MoveBlock> {
+        let prev_blocks = self
+            .num_allocated_tokens
+            .div_ceil(self.block_size)
+            .min(self.unique_blocks.len());
         let target_blocks = cumulative_tokens
             .div_ceil(self.block_size)
             .min(self.unique_blocks.len());
-        if target_blocks <= self.num_allocated_blocks {
+        if target_blocks <= prev_blocks {
             return None;
         }
 
-        let range = self.num_allocated_blocks..target_blocks;
+        let range = prev_blocks..target_blocks;
         let blocks = self.unique_blocks[range.clone()].to_vec();
 
         let all_hashes = self.block_hashes();
         let num_full = all_hashes.len();
-        let hash_start = self.num_allocated_blocks.min(num_full);
+        let hash_start = prev_blocks.min(num_full);
         let hash_end = target_blocks.min(num_full);
         let hashes = all_hashes[hash_start..hash_end].to_vec();
 
@@ -139,8 +143,19 @@ impl ActiveSequence {
             None
         };
 
-        self.num_allocated_blocks = target_blocks;
         Some(MoveBlock::Use(blocks, hashes, token_ids))
+    }
+
+    /// Commit a successful allocation by advancing `num_allocated_tokens`.
+    pub fn commit_allocation(&mut self, cumulative_tokens: usize) {
+        self.num_allocated_tokens = cumulative_tokens;
+    }
+
+    /// Prepare + commit in one call (convenience for paths where failure is impossible).
+    pub fn allocate_blocks_for_chunk(&mut self, cumulative_tokens: usize) -> Option<MoveBlock> {
+        let signal = self.prepare_allocation(cumulative_tokens);
+        self.commit_allocation(cumulative_tokens);
+        signal
     }
 
     /// Allocate all remaining blocks at once (backward compat).
@@ -283,10 +298,10 @@ impl ActiveSequence {
 
     /// Move the request to a preempted state and return the free signals from freeing current blocks.
     /// Upon preemption, the sequence retains the tokens generated during the decode phase (if any).
-    /// Resets `num_allocated_blocks` so re-admission will re-allocate from scratch.
+    /// Resets `num_allocated_tokens` so re-admission will re-allocate from scratch.
     pub fn reset_with_signal(&mut self) -> Vec<MoveBlock> {
         let free_signal = self.free_signal();
-        self.num_allocated_blocks = 0;
+        self.num_allocated_tokens = 0;
         free_signal
     }
 

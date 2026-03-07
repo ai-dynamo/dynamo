@@ -31,7 +31,7 @@
 use crate::common::perf_model::PerfModel;
 use crate::common::protocols::{
     DirectRequest, KvCacheEventSink, MockEngineArgs, MoveBlock, OutputSignal, PreemptionMode,
-    PrefillCost, WorkerType,
+    WorkerType,
 };
 use crate::common::running_mean::RunningMean;
 use crate::common::sequence::ActiveSequence;
@@ -67,7 +67,6 @@ struct SchedulerState {
     prefill: VecDeque<Uuid>,
     decode: VecDeque<Uuid>,
     requests: HashMap<Uuid, Request>,
-    prefill_costs: HashMap<Uuid, PrefillCost>,
 }
 
 impl SchedulerState {
@@ -132,7 +131,6 @@ impl SchedulerState {
         tracing::trace!("Request {uuid} will complete");
         self.decode.retain(|u| u != uuid);
         self.requests.remove(uuid);
-        self.prefill_costs.remove(uuid);
     }
 
     /// Preempt a running request by evicting it from decode, resetting the sequence,
@@ -149,7 +147,6 @@ impl SchedulerState {
             .requests
             .remove(&uuid)
             .expect("Request does not exist.");
-        self.prefill_costs.remove(&uuid);
         tracing::warn!("Request {uuid} will be preempted");
 
         // Reset the sequence and re-queue for prefill
@@ -334,80 +331,65 @@ async fn simulate_prefill(
         }
         let uuid = state.prefill[0];
 
-        // Compute PrefillCost on first encounter (fresh cache state)
-        if !state.prefill_costs.contains_key(&uuid) {
-            let Some(Request::Active(seq)) = state.requests.get(&uuid) else {
-                panic!("Request does not exist.");
-            };
-            state
-                .prefill_costs
-                .insert(uuid, kv_manager.get_prefill_cost(seq));
-        }
+        let Some(Request::Active(seq)) = state.requests.get(&uuid) else {
+            panic!("Request does not exist.");
+        };
+        let prefill_cost = kv_manager.get_prefill_cost(seq);
+        let sequence_len = seq.len();
+        let allocated_tokens = seq.num_allocated_tokens();
+        let remaining = prefill_cost.new_tokens;
 
-        // How many new tokens still need prefilling for this request
-        let remaining = state
-            .prefill_costs
-            .get(&uuid)
-            .expect("Expects valid prefill cost.")
-            .new_tokens;
-
-        // Without chunking, the whole request must fit in the budget
-        if !args.enable_chunked_prefill && remaining > token_budget {
+        // Token budget check
+        let tokens_left = sequence_len - allocated_tokens;
+        if !args.enable_chunked_prefill && tokens_left > token_budget {
             break;
         }
+        let chunk = tokens_left.min(token_budget);
+        let cumulative = allocated_tokens + chunk;
 
-        // Chunk size: all remaining tokens, or whatever the budget allows
-        let chunk = remaining.min(token_budget);
-
-        // Compute how many KV blocks this chunk requires (upper bound: assumes
-        // no cache hits, so we may preempt slightly more than necessary)
-        let (sequence_len, blocks_needed) = match state.requests.get(&uuid) {
-            Some(Request::Active(seq)) => {
-                let cumulative = seq.len() - (remaining - chunk);
-                let target = cumulative
+        // Allocate blocks. process() returns the number of blocks committed.
+        // On partial success, preempt a decode request and retry — the next
+        // loop iteration re-prepares from the updated num_allocated_tokens.
+        let Some(Request::Active(seq)) = state.requests.get_mut(&uuid) else {
+            panic!("Request does not exist.");
+        };
+        if let Some(signal) = seq.prepare_allocation(cumulative) {
+            let expected = match &signal {
+                MoveBlock::Use(blocks, ..) => blocks.len(),
+                _ => unreachable!(),
+            };
+            let allocated = kv_manager.process(&signal);
+            // Commit the blocks that were actually allocated
+            let committed_tokens = if allocated == expected {
+                cumulative
+            } else {
+                // Partial: compute token boundary from block count
+                let prev_blocks = allocated_tokens
                     .div_ceil(seq.block_size())
                     .min(seq.unique_blocks().len());
-                (seq.len(), target.saturating_sub(seq.num_allocated_blocks()))
-            }
-            _ => panic!("Request does not exist."),
-        };
+                (prev_blocks + allocated) * seq.block_size()
+            };
+            seq.commit_allocation(committed_tokens.min(cumulative));
 
-        let cumulative = sequence_len - (remaining - chunk);
-
-        // Preempt decode requests until we have enough free block capacity.
-        // Each preemption frees ≥1 block; loop terminates when decode is empty.
-        while kv_manager
-            .max_capacity()
-            .saturating_sub(kv_manager.num_active_blocks())
-            < blocks_needed
-        {
-            if state.decode.is_empty() {
-                break 'prefill;
+            if allocated < expected {
+                if state.decode.is_empty() {
+                    break;
+                }
+                for signal in state.preempt(args.preemption_mode) {
+                    kv_manager.process(&signal);
+                }
+                continue 'prefill; // retry with freed capacity
             }
-            for signal in state.preempt(args.preemption_mode) {
-                kv_manager.process(&signal);
-            }
+        } else {
+            seq.commit_allocation(cumulative);
         }
 
-        // Allocate blocks for this chunk — guaranteed to succeed after pre-check
-        if let Some(signal) = match state.requests.get_mut(&uuid) {
-            Some(Request::Active(seq)) => seq.allocate_blocks_for_chunk(cumulative),
-            _ => panic!("Request does not exist."),
-        } {
-            assert!(
-                kv_manager.process(&signal),
-                "Block allocation should not fail after capacity pre-check."
-            );
-        }
-
-        // Accumulate prefill compute time for this chunk
-        let prefill_cost = state
-            .prefill_costs
-            .get(&uuid)
-            .expect("Expects valid prefill cost.");
-        if args.worker_type != WorkerType::Decode {
+        // Accumulate prefill compute time (only for the new tokens in this chunk)
+        let new_tokens_in_chunk = chunk.min(remaining);
+        if args.worker_type != WorkerType::Decode && new_tokens_in_chunk > 0 {
             total_time += Duration::from_secs_f64(
-                prefill_cost.predict_prefill_compute(Some(chunk), &args.perf_model) / 1000.0,
+                prefill_cost.predict_prefill_compute(Some(new_tokens_in_chunk), &args.perf_model)
+                    / 1000.0,
             );
         }
 
@@ -421,18 +403,12 @@ async fn simulate_prefill(
 
         token_budget -= chunk;
 
-        if chunk == remaining {
+        if cumulative >= sequence_len {
             // Fully prefilled — promote to decode queue
             state.prefill.pop_front();
-            state.prefill_costs.remove(&uuid);
             state.decode.push_back(uuid);
         } else {
-            // Partially prefilled — update remaining, resume next iteration
-            state
-                .prefill_costs
-                .get_mut(&uuid)
-                .expect("Expects valid prefill cost.")
-                .new_tokens -= chunk;
+            // Partially prefilled — resume next iteration with updated allocated_tokens
             break;
         }
     }
@@ -564,7 +540,7 @@ async fn simulate_decode(
 /// indicate an unexpected state in the system.
 fn process_signals(kv_manager: &mut KvManager, signals: &[MoveBlock]) -> bool {
     for signal in signals {
-        if kv_manager.process(signal) {
+        if kv_manager.process(signal) > 0 {
             continue;
         }
 
