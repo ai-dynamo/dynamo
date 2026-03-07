@@ -80,6 +80,15 @@ func (f *FrontendDefaults) GetBaseContainer(context ComponentContext) (corev1.Co
 			Name:  commonconsts.DynamoNamespacePrefixEnvVar,
 			Value: context.DynamoNamespace,
 		},
+		{
+			// Frontend is a CPU-only component. Disable NVIDIA Container
+			// Toolkit GPU injection so the pod can run on nodes without
+			// GPU drivers installed. The base CUDA image sets
+			// NVIDIA_VISIBLE_DEVICES=all which triggers nvidia-container-cli
+			// initialization even when no GPU resources are requested.
+			Name:  "NVIDIA_VISIBLE_DEVICES",
+			Value: "void",
+		},
 	}...)
 
 	return container, nil

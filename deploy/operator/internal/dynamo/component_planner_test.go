@@ -71,6 +71,7 @@ func TestPlannerDefaults_GetBaseContainer(t *testing.T) {
 					}},
 					{Name: commonconsts.DynamoDiscoveryBackendEnvVar, Value: "kubernetes"},
 					{Name: "PLANNER_PROMETHEUS_PORT", Value: fmt.Sprintf("%d", commonconsts.DynamoPlannerMetricsPort)},
+					{Name: "NVIDIA_VISIBLE_DEVICES", Value: "void"},
 				},
 			},
 		},

@@ -35,6 +35,13 @@ func (p *PlannerDefaults) GetBaseContainer(context ComponentContext) (corev1.Con
 			Name:  "PLANNER_PROMETHEUS_PORT",
 			Value: fmt.Sprintf("%d", commonconsts.DynamoPlannerMetricsPort),
 		},
+		{
+			// Planner is a CPU-only component. Disable NVIDIA Container
+			// Toolkit GPU injection so the pod can run on nodes without
+			// GPU drivers installed.
+			Name:  "NVIDIA_VISIBLE_DEVICES",
+			Value: "void",
+		},
 	}...)
 	return container, nil
 }

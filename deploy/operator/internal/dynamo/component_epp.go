@@ -95,6 +95,13 @@ func (e *EPPDefaults) GetBaseContainer(context ComponentContext) (corev1.Contain
 			Name:  "RUST_LOG",
 			Value: "debug,dynamo_llm::kv_router=trace",
 		},
+		{
+			// EPP is a CPU-only component. Disable NVIDIA Container
+			// Toolkit GPU injection so the pod can run on nodes without
+			// GPU drivers installed.
+			Name:  "NVIDIA_VISIBLE_DEVICES",
+			Value: "void",
+		},
 	}...)
 
 	// EPP default args
