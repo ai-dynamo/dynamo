@@ -138,8 +138,14 @@ def _extract_description(text: str, resource_name: str) -> str:
     return ""
 
 
-def _resolve_meta(name: str, full_text: str) -> dict[str, str]:
+def _resolve_meta(
+    name: str,
+    full_text: str,
+    meta: dict[str, dict[str, str]] | None = None,
+) -> dict[str, str]:
     """Resolve icon, description, and source path for a resource."""
+    if meta and name in meta:
+        return meta[name]
     if name in RESOURCE_META:
         return RESOURCE_META[name]
     desc = (
@@ -174,7 +180,7 @@ def build_resource_cards(text: str, meta: dict[str, dict[str, str]]) -> str:
 
         cards: list[dict[str, str]] = []
         for name in resources:
-            info = _resolve_meta(name, text)
+            info = _resolve_meta(name, text, meta)
             src = info["src"]
             href = f"{OPERATOR_SRC}/{src}" if src else ""
             cards.append(

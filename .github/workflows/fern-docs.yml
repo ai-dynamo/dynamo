@@ -162,9 +162,6 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install API doc dependencies
-        run: pip install -r source-checkout/docs/scripts/requirements-apidocs.txt
-
       - name: Fernify API reference docs
         working-directory: source-checkout
         run: |

@@ -13,6 +13,7 @@ transforms that can be composed in a pipeline.
 
 from __future__ import annotations
 
+import html
 import re
 from pathlib import Path
 
@@ -75,9 +76,10 @@ def render_card_group(cards: list[dict[str, str]], cols: int) -> str:
         href = f' href="{escape_jsx_attr(card["href"])}"' if card.get("href") else ""
         if i > 0:
             parts.append("\n")
+        description = escape_mdx_prose(card["description"])
         parts.append(
             f'  <Card title="{title}" icon="{icon}"{href}>\n'
-            f'    {card["description"]}\n'
+            f"    {description}\n"
             f"  </Card>\n"
         )
     parts.append("</CardGroup>\n")
@@ -146,7 +148,7 @@ def fernify_details_to_accordion(text: str) -> str:
     """Convert all <details>/<summary> blocks to Fern <Accordion> components."""
 
     def _replace(m: re.Match) -> str:
-        title = m.group(1)
+        title = html.unescape(m.group(1))
         body = m.group(2).strip()
         return render_accordion(title, body)
 
