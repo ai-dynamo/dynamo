@@ -8,6 +8,7 @@
 
 use super::{MetricsHierarchy, create_metric, prometheus_names::build_component_metric_name};
 use parking_lot::Mutex;
+use rand::Rng;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -137,6 +138,94 @@ pub struct DistributionMetricHandle {
 #[derive(Clone)]
 pub struct RatioMetricHandle {
     inner: PerformanceMetricHandle,
+}
+
+struct RequestMetricsFactoryInner {
+    request: RateMetricHandle,
+    input_tokens: RateMetricHandle,
+    ttft: DistributionMetricHandle,
+    ttft_per_input_token: DistributionMetricHandle,
+    itl: DistributionMetricHandle,
+    pre_first_token_cancellation: RateMetricHandle,
+    mid_stream_cancellation: RateMetricHandle,
+    successful_request: RateMetricHandle,
+    itl_sample_rate: f64,
+}
+
+#[derive(Debug, Clone)]
+/// Configuration for [`RequestMetricsFactory`].
+///
+/// Use [`Default`] for sensible presets and override only the fields you care about.
+pub struct RequestMetricsOptions {
+    pub request_quantiles: Vec<f64>,
+    pub request_sample_period_seconds: Option<f64>,
+    pub request_window_seconds: Option<f64>,
+    pub input_tokens_quantiles: Vec<f64>,
+    pub input_tokens_sample_period_seconds: Option<f64>,
+    pub input_tokens_window_seconds: Option<f64>,
+    pub ttft_quantiles: Vec<f64>,
+    pub ttft_window_seconds: Option<f64>,
+    pub ttft_per_input_token_quantiles: Vec<f64>,
+    pub ttft_per_input_token_window_seconds: Option<f64>,
+    pub itl_quantiles: Vec<f64>,
+    pub itl_window_seconds: Option<f64>,
+    pub pre_first_token_cancellation_quantiles: Vec<f64>,
+    pub pre_first_token_cancellation_sample_period_seconds: Option<f64>,
+    pub pre_first_token_cancellation_window_seconds: Option<f64>,
+    pub mid_stream_cancellation_quantiles: Vec<f64>,
+    pub mid_stream_cancellation_sample_period_seconds: Option<f64>,
+    pub mid_stream_cancellation_window_seconds: Option<f64>,
+    pub successful_request_quantiles: Vec<f64>,
+    pub successful_request_sample_period_seconds: Option<f64>,
+    pub successful_request_window_seconds: Option<f64>,
+    pub itl_sample_rate: f64,
+}
+
+impl Default for RequestMetricsOptions {
+    fn default() -> Self {
+        Self {
+            request_quantiles: vec![0.1, 0.5, 0.9],
+            request_sample_period_seconds: Some(1.0),
+            request_window_seconds: None,
+            input_tokens_quantiles: vec![0.01, 0.1, 0.5, 0.9, 0.99],
+            input_tokens_sample_period_seconds: Some(1.0),
+            input_tokens_window_seconds: None,
+            ttft_quantiles: vec![0.1, 0.5, 0.9, 0.99],
+            ttft_window_seconds: None,
+            ttft_per_input_token_quantiles: vec![0.1, 0.5, 0.9, 0.99],
+            ttft_per_input_token_window_seconds: None,
+            itl_quantiles: vec![0.1, 0.5, 0.9, 0.99, 0.999],
+            itl_window_seconds: None,
+            pre_first_token_cancellation_quantiles: vec![],
+            pre_first_token_cancellation_sample_period_seconds: Some(1.0),
+            pre_first_token_cancellation_window_seconds: None,
+            mid_stream_cancellation_quantiles: vec![],
+            mid_stream_cancellation_sample_period_seconds: Some(1.0),
+            mid_stream_cancellation_window_seconds: None,
+            successful_request_quantiles: vec![],
+            successful_request_sample_period_seconds: Some(1.0),
+            successful_request_window_seconds: None,
+            itl_sample_rate: 0.05,
+        }
+    }
+}
+
+#[derive(Clone)]
+/// Factory that creates one [`RequestMetric`] per request.
+pub struct RequestMetricsFactory {
+    inner: Arc<RequestMetricsFactoryInner>,
+}
+
+/// Per-request recorder for TTFT/ITL and terminal outcomes.
+pub struct RequestMetric {
+    factory: Arc<RequestMetricsFactoryInner>,
+    input_tokens: u64,
+    started_at: Instant,
+    first_token_at: Option<Instant>,
+    last_token_at: Option<Instant>,
+    last_total_tokens: u64,
+    terminal: bool,
+    rng: rand::rngs::ThreadRng,
 }
 
 #[derive(Debug)]
@@ -527,6 +616,194 @@ impl RatioMetricHandle {
     #[cfg(test)]
     fn snapshot_for_test(&self) -> Option<MetricSnapshot> {
         self.inner.snapshot_for_test()
+    }
+}
+
+impl RequestMetricsFactory {
+    /// Create a factory from explicit options.
+    pub fn new(
+        registry: &PerformanceMetricsRegistry,
+        metric_prefix: impl AsRef<str>,
+        mut options: RequestMetricsOptions,
+    ) -> anyhow::Result<Self> {
+        options.itl_sample_rate = options.itl_sample_rate.clamp(0.0, 1.0);
+        let metric_prefix = metric_prefix.as_ref();
+
+        let request = registry.new_rate_metric(
+            format!("{metric_prefix}_request"),
+            options.request_quantiles.clone(),
+            options.request_sample_period_seconds,
+            options.request_window_seconds,
+        )?;
+        let input_tokens = registry.new_rate_metric(
+            format!("{metric_prefix}_input_tokens"),
+            options.input_tokens_quantiles.clone(),
+            options.input_tokens_sample_period_seconds,
+            options.input_tokens_window_seconds,
+        )?;
+        let ttft = registry.new_distribution_metric(
+            format!("{metric_prefix}_ttft_ms"),
+            options.ttft_quantiles.clone(),
+            options.ttft_window_seconds,
+        )?;
+        let ttft_per_input_token = registry.new_distribution_metric(
+            format!("{metric_prefix}_ttft_ms_per_input_token"),
+            options.ttft_per_input_token_quantiles.clone(),
+            options.ttft_per_input_token_window_seconds,
+        )?;
+        let itl = registry.new_distribution_metric(
+            format!("{metric_prefix}_itl_ms"),
+            options.itl_quantiles.clone(),
+            options.itl_window_seconds,
+        )?;
+        let pre_first_token_cancellation = registry.new_rate_metric(
+            format!("{metric_prefix}_pre_first_token_cancellation"),
+            options.pre_first_token_cancellation_quantiles.clone(),
+            options.pre_first_token_cancellation_sample_period_seconds,
+            options.pre_first_token_cancellation_window_seconds,
+        )?;
+        let mid_stream_cancellation = registry.new_rate_metric(
+            format!("{metric_prefix}_mid_stream_cancellation"),
+            options.mid_stream_cancellation_quantiles.clone(),
+            options.mid_stream_cancellation_sample_period_seconds,
+            options.mid_stream_cancellation_window_seconds,
+        )?;
+        let successful_request = registry.new_rate_metric(
+            format!("{metric_prefix}_successful_request"),
+            options.successful_request_quantiles.clone(),
+            options.successful_request_sample_period_seconds,
+            options.successful_request_window_seconds,
+        )?;
+
+        Ok(Self {
+            inner: Arc::new(RequestMetricsFactoryInner {
+                request,
+                input_tokens,
+                ttft,
+                ttft_per_input_token,
+                itl,
+                pre_first_token_cancellation,
+                mid_stream_cancellation,
+                successful_request,
+                itl_sample_rate: options.itl_sample_rate,
+            }),
+        })
+    }
+
+    /// Start tracking a single request.
+    ///
+    /// This records one request event immediately and optionally records input tokens.
+    pub fn new_request(&self, input_tokens: u64) -> RequestMetric {
+        if let Err(e) = self.inner.request.record_count(1) {
+            tracing::warn!(error = %e, "failed to record request rate metric");
+        }
+        if input_tokens > 0
+            && let Err(e) = self.inner.input_tokens.record_count(input_tokens)
+        {
+            tracing::warn!(error = %e, "failed to record input token metric");
+        }
+
+        RequestMetric {
+            factory: Arc::clone(&self.inner),
+            input_tokens,
+            started_at: Instant::now(),
+            first_token_at: None,
+            last_token_at: None,
+            last_total_tokens: 0,
+            terminal: false,
+            rng: rand::rng(),
+        }
+    }
+}
+
+impl RequestMetric {
+    /// Record cumulative output token count for the request.
+    ///
+    /// On the first token this records TTFT in milliseconds. On later updates this records
+    /// sampled ITL values in milliseconds per token.
+    pub fn record_tokens(&mut self, total_tokens: u64) -> anyhow::Result<()> {
+        if self.terminal || total_tokens <= self.last_total_tokens {
+            return Ok(());
+        }
+
+        let now = Instant::now();
+        if self.first_token_at.is_none() {
+            let ttft_ms = now.duration_since(self.started_at).as_secs_f64() * 1000.0;
+            self.factory.ttft.record_value(ttft_ms)?;
+            if self.input_tokens > 0 {
+                self.factory
+                    .ttft_per_input_token
+                    .record_value(ttft_ms / self.input_tokens as f64)?;
+            }
+            self.first_token_at = Some(now);
+            self.last_token_at = Some(now);
+            self.last_total_tokens = total_tokens;
+            return Ok(());
+        }
+
+        let Some(last_token_at) = self.last_token_at else {
+            self.last_token_at = Some(now);
+            self.last_total_tokens = total_tokens;
+            return Ok(());
+        };
+
+        let delta_tokens = total_tokens - self.last_total_tokens;
+        if delta_tokens > 0 {
+            let elapsed_ms = now.duration_since(last_token_at).as_secs_f64() * 1000.0;
+            if elapsed_ms > 0.0 {
+                let itl_ms = elapsed_ms / delta_tokens as f64;
+                let samples =
+                    sampled_count(delta_tokens, self.factory.itl_sample_rate, &mut self.rng);
+                for _ in 0..samples {
+                    self.factory.itl.record_value(itl_ms)?;
+                }
+            }
+        }
+
+        self.last_token_at = Some(now);
+        self.last_total_tokens = total_tokens;
+        Ok(())
+    }
+
+    /// Mark the request as cancelled.
+    pub fn cancel(&mut self) -> anyhow::Result<()> {
+        self.finalize_cancellation()
+    }
+
+    /// Mark the request as successful.
+    pub fn success(&mut self) -> anyhow::Result<()> {
+        if self.terminal {
+            return Ok(());
+        }
+        self.factory.successful_request.record_count(1)?;
+        self.terminal = true;
+        Ok(())
+    }
+
+    fn finalize_cancellation(&mut self) -> anyhow::Result<()> {
+        if self.terminal {
+            return Ok(());
+        }
+        if self.first_token_at.is_some() {
+            self.factory.mid_stream_cancellation.record_count(1)?;
+        } else {
+            self.factory.pre_first_token_cancellation.record_count(1)?;
+        }
+        self.terminal = true;
+        Ok(())
+    }
+}
+
+impl Drop for RequestMetric {
+    fn drop(&mut self) {
+        if !self.terminal
+            && let Err(e) = self.finalize_cancellation()
+        {
+            tracing::warn!(
+                error = %e,
+                "failed to record request lifecycle cancellation during drop"
+            );
+        }
     }
 }
 
@@ -1088,6 +1365,20 @@ fn build_metric_handles_for_spec(
     }
 }
 
+fn sampled_count(tokens: u64, sample_rate: f64, rng: &mut rand::rngs::ThreadRng) -> u64 {
+    if tokens == 0 || sample_rate <= 0.0 {
+        return 0;
+    }
+    let expected = (tokens as f64 * sample_rate).min(50.0);
+    let base = expected.floor() as u64;
+    let frac = expected - base as f64;
+    if frac > 0.0 && Rng::random::<f64>(rng) < frac {
+        base + 1
+    } else {
+        base
+    }
+}
+
 fn normalize_quantiles(quantiles: Vec<f64>) -> Vec<f64> {
     let mut normalized = quantiles
         .into_iter()
@@ -1428,6 +1719,23 @@ mod tests {
     }
 
     #[test]
+    fn build_rate_samples_includes_window_boundaries() {
+        let now = Instant::now();
+        let window_seconds = 2.0;
+        let sample_period_seconds = 1.0;
+        let start = now - Duration::from_secs_f64(window_seconds);
+
+        let mut counts = VecDeque::new();
+        counts.push_back((start, 1)); // include lower bound
+        counts.push_back((now, 1)); // include upper bound
+
+        let samples = build_rate_samples(now, &counts, window_seconds, sample_period_seconds);
+        assert_eq!(samples.len(), 2);
+        assert!((samples[0] - 1.0).abs() < 1e-9);
+        assert!((samples[1] - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
     fn quantiles_are_deduped_by_prometheus_suffix() {
         let spec = PerformanceMetricSpec::distribution("ttft", vec![0.994, 0.995, 0.999], None);
         let suffixes = spec
@@ -1559,5 +1867,62 @@ mod tests {
         assert!(output.contains("component_baseten_frontend_requests_per_second_p50"));
         assert!(output.contains("component_baseten_frontend_requests_per_second_p99"));
         assert!(output.contains("component_baseten_frontend_requests_per_second_p99_9"));
+    }
+
+    #[test]
+    fn request_metrics_new_request_records_request_and_input_tokens() {
+        let hierarchy = Arc::new(TestHierarchy::new());
+        let registry = PerformanceMetricsRegistry::new_attached(
+            Duration::from_secs(60),
+            Duration::from_secs(5),
+            hierarchy,
+            "baseten_frontend",
+            &[] as &[(&str, &str)],
+        )
+        .unwrap();
+
+        let factory = RequestMetricsFactory::new(
+            &registry,
+            "request_metrics",
+            RequestMetricsOptions::default(),
+        )
+        .unwrap();
+        let _request = factory.new_request(123);
+
+        let request_snapshot = factory.inner.request.snapshot_for_test().unwrap();
+        assert!(request_snapshot.rate_per_second.unwrap_or_default() > 0.0);
+        let input_tokens_snapshot = factory.inner.input_tokens.snapshot_for_test().unwrap();
+        assert!(input_tokens_snapshot.rate_per_second.unwrap_or_default() > 0.0);
+    }
+
+    #[test]
+    fn request_metrics_first_token_records_ttft_per_input_token() {
+        let hierarchy = Arc::new(TestHierarchy::new());
+        let registry = PerformanceMetricsRegistry::new_attached(
+            Duration::from_secs(60),
+            Duration::from_secs(5),
+            hierarchy,
+            "baseten_frontend",
+            &[] as &[(&str, &str)],
+        )
+        .unwrap();
+
+        let factory = RequestMetricsFactory::new(
+            &registry,
+            "request_metrics",
+            RequestMetricsOptions::default(),
+        )
+        .unwrap();
+        let mut request = factory.new_request(100);
+        std::thread::sleep(Duration::from_millis(1));
+        request.record_tokens(1).unwrap();
+
+        let s = factory
+            .inner
+            .ttft_per_input_token
+            .snapshot_for_test()
+            .unwrap();
+        assert_eq!(s.kind, PerformanceMetricKind::Distribution);
+        assert!(s.average.unwrap_or_default() >= 0.0);
     }
 }

@@ -27,6 +27,8 @@ from dynamo._core import PythonAsyncEngine as PythonAsyncEngine
 from dynamo._core import RadixTree as RadixTree
 from dynamo._core import RateMetric as RateMetric
 from dynamo._core import RatioMetric as RatioMetric
+from dynamo._core import RequestMetric as RequestMetric
+from dynamo._core import RequestMetricsFactory as RequestMetricsFactory
 from dynamo._core import RouterConfig as RouterConfig
 from dynamo._core import RouterMode as RouterMode
 from dynamo._core import WorkerMetricsPublisher as WorkerMetricsPublisher

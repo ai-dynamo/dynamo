@@ -177,6 +177,8 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<RouterMode>()?;
     m.add_class::<kserve_grpc::KserveGrpcService>()?;
     m.add_class::<performance_metrics::PyPerformanceMetricsRegistry>()?;
+    m.add_class::<performance_metrics::PyRequestMetricsFactory>()?;
+    m.add_class::<performance_metrics::PyRequestMetric>()?;
     m.add_class::<performance_metrics::PyRateMetric>()?;
     m.add_class::<performance_metrics::PyDistributionMetric>()?;
     m.add_class::<performance_metrics::PyRatioMetric>()?;

@@ -1712,3 +1712,75 @@ class PerformanceMetricsRegistry:
     def new_rate_metric(self, name: str, quantiles: Optional[List[float]] = None, sample_period_seconds: float = 1.0, window_seconds: Optional[float] = None) -> RateMetric: ...
     def new_distribution_metric(self, name: str, quantiles: Optional[List[float]] = None, window_seconds: Optional[float] = None) -> DistributionMetric: ...
     def new_ratio_metric(self, name: str, quantiles: Optional[List[float]] = None, window_seconds: Optional[float] = None) -> RatioMetric: ...
+
+class RequestMetric:
+    """Per-request recorder for TTFT/ITL and terminal outcomes."""
+    def record_tokens(self, total_tokens: int) -> None: ...
+    def success(self) -> None: ...
+    def cancel(self) -> None: ...
+
+class RequestMetricsFactory:
+    """Factory for per-request metrics.
+    Will record:
+
+    - Input tokens
+    - Time to first token (TTFT)
+    - Inter Token Latency (ITL)
+    - TTFT per input token (normalized ttft based on input size)
+
+    Request Rates:
+    - Started requests
+    - Pre-first token cancellation (cancellation before first token is received)
+    - Mid-stream cancellation (cancellation after first token is received)
+    - Successful request latency (terminal latency for successful requests)
+
+    Usage:
+        ```
+        def __init__(self, ...):
+            # init once.
+            self.factory = RequestMetricsFactory(performance_metrics_registry, metric_prefix="frontend_request_metrics")
+
+        async def handle_request(..):
+            req = self.factory.new_request(input_tokens=prompt_tokens)
+            try:
+                async for stream in engine.generate(...):
+                    req.record_tokens(stream.usage.total_tokens) # 10us per call.
+                    yield stream
+                req.success()
+            except:
+                pass # automatically marked as fail on garbage collection if not marked success or cancel.
+        ```
+    """
+    def __init__(
+        self,
+        performance_metrics_registry: PerformanceMetricsRegistry,
+        *,
+        metric_prefix: str = "request_metrics",
+        request_quantiles: Optional[List[float]] = None,
+        request_sample_period_seconds: Optional[float] = None,
+        request_window_seconds: Optional[float] = None,
+        input_tokens_quantiles: Optional[List[float]] = None,
+        input_tokens_sample_period_seconds: Optional[float] = None,
+        input_tokens_window_seconds: Optional[float] = None,
+        ttft_quantiles: Optional[List[float]] = None,
+        ttft_window_seconds: Optional[float] = None,
+        ttft_per_input_token_quantiles: Optional[List[float]] = None,
+        ttft_per_input_token_window_seconds: Optional[float] = None,
+        itl_quantiles: Optional[List[float]] = None,
+        itl_window_seconds: Optional[float] = None,
+        pre_first_token_cancellation_quantiles: Optional[List[float]] = None,
+        pre_first_token_cancellation_sample_period_seconds: Optional[float] = None,
+        pre_first_token_cancellation_window_seconds: Optional[float] = None,
+        mid_stream_cancellation_quantiles: Optional[List[float]] = None,
+        mid_stream_cancellation_sample_period_seconds: Optional[float] = None,
+        mid_stream_cancellation_window_seconds: Optional[float] = None,
+        successful_request_quantiles: Optional[List[float]] = None,
+        successful_request_sample_period_seconds: Optional[float] = None,
+        successful_request_window_seconds: Optional[float] = None,
+        itl_sample_rate: float = 0.05,
+    ) -> None: ...
+    """Create a request metrics factory.
+
+    All args after `performance_metrics_registry` are keyword-only.
+    """
+    def new_request(self, input_tokens: int = 0) -> RequestMetric: ...
