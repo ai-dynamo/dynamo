@@ -771,49 +771,66 @@ impl KvRouter {
         multi_modal_data: Option<PyObject>,
         mm_routing_info: Option<PyObject>,
     ) -> PyResult<Bound<'p, PyAny>> {
+        let t_total = std::time::Instant::now();
+
         // Depythonize the options with defaults
+        let t0 = std::time::Instant::now();
         let stop_conditions: StopConditions = if let Some(obj) = stop_conditions {
             depythonize(obj.bind(py)).map_err(to_pyerr)?
         } else {
             StopConditions::default()
         };
+        let dt_stop = t0.elapsed();
 
+        let t0 = std::time::Instant::now();
         let sampling_options: SamplingOptions = if let Some(obj) = sampling_options {
             depythonize(obj.bind(py)).map_err(to_pyerr)?
         } else {
             SamplingOptions::default()
         };
+        let dt_sampling = t0.elapsed();
 
+        let t0 = std::time::Instant::now();
         let output_options: OutputOptions = if let Some(obj) = output_options {
             depythonize(obj.bind(py)).map_err(to_pyerr)?
         } else {
             OutputOptions::default()
         };
+        let dt_output = t0.elapsed();
 
+        let t0 = std::time::Instant::now();
         let router_config_override: Option<llm_rs::kv_router::RouterConfigOverride> =
             if let Some(obj) = router_config_override {
                 Some(depythonize(obj.bind(py)).map_err(to_pyerr)?)
             } else {
                 None
             };
+        let dt_router_cfg = t0.elapsed();
 
+        let t0 = std::time::Instant::now();
         let extra_args: Option<serde_json::Value> = if let Some(obj) = extra_args {
             Some(depythonize(obj.bind(py)).map_err(to_pyerr)?)
         } else {
             None
         };
+        let dt_extra_args = t0.elapsed();
 
+        let t0 = std::time::Instant::now();
         let block_mm_infos = block_mm_infos
             .map(|obj| depythonize_block_mm_infos(obj.bind(py)))
             .transpose()?;
+        let dt_block_mm = t0.elapsed();
 
+        let t0 = std::time::Instant::now();
         let multi_modal_data: Option<llm_rs::protocols::common::preprocessor::MultimodalDataMap> =
             if let Some(obj) = multi_modal_data {
                 Some(depythonize(obj.bind(py)).map_err(to_pyerr)?)
             } else {
                 None
             };
+        let dt_mm_data = t0.elapsed();
 
+        let t0 = std::time::Instant::now();
         let mm_routing_info: Option<llm_rs::protocols::common::preprocessor::MmRoutingInfo> =
             if let Some(obj) = mm_routing_info {
                 Some(depythonize(obj.bind(py)).map_err(to_pyerr)?)
@@ -825,6 +842,24 @@ impl KvRouter {
                     },
                 )
             };
+        let dt_mm_routing = t0.elapsed();
+
+        let dt_depythonize_total = t_total.elapsed();
+        tracing::debug!(
+            "[perf][kv_binding] generate: depythonize_total={:.3}ms \
+             stop={:.3}ms sampling={:.3}ms output={:.3}ms \
+             router_cfg={:.3}ms extra_args={:.3}ms block_mm={:.3}ms \
+             mm_data={:.3}ms mm_routing={:.3}ms",
+            dt_depythonize_total.as_secs_f64() * 1000.0,
+            dt_stop.as_secs_f64() * 1000.0,
+            dt_sampling.as_secs_f64() * 1000.0,
+            dt_output.as_secs_f64() * 1000.0,
+            dt_router_cfg.as_secs_f64() * 1000.0,
+            dt_extra_args.as_secs_f64() * 1000.0,
+            dt_block_mm.as_secs_f64() * 1000.0,
+            dt_mm_data.as_secs_f64() * 1000.0,
+            dt_mm_routing.as_secs_f64() * 1000.0,
+        );
 
         // Create tracker to capture worker routing info from KvRouter
         let tracker = Arc::new(RequestTracker::new());

@@ -45,6 +45,7 @@ class ImageLoader:
         self._http_timeout = http_timeout
         self._image_cache: dict[str, Image.Image] = {}
         self._cache_queue: asyncio.Queue[str] = asyncio.Queue(maxsize=cache_size)
+        self._raw_bytes_cache: dict[str, bytes] = {}
 
     async def load_image(self, image_url: str) -> Image.Image:
         parsed_url = urlparse(image_url)
@@ -85,6 +86,10 @@ class ImageLoader:
             else:
                 raise ValueError(f"Invalid image source scheme: {parsed_url.scheme}")
 
+            # Save raw bytes for hash computation (before PIL processing)
+            raw_bytes = image_data.getvalue()
+            self._raw_bytes_cache[image_url.lower()] = raw_bytes
+
             # PIL is sync, so offload to a thread to avoid blocking the event loop
             # Restrict to supported formats to prevent PSD parsing (GHSA-cfh3-3jmp-rvhc)
             image = await asyncio.to_thread(
@@ -116,6 +121,10 @@ class ImageLoader:
         except Exception as e:
             logger.error(f"Error loading image: {e}")
             raise ValueError(f"Failed to load image: {e}")
+
+    def get_raw_bytes(self, image_url: str) -> Optional[bytes]:
+        """Get cached raw bytes for hash computation."""
+        return self._raw_bytes_cache.get(image_url.lower())
 
     async def load_image_batch(
         self,

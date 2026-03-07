@@ -366,11 +366,13 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             .map(|t| t.phase())
             .unwrap_or(RequestPhase::Aggregated);
 
+        let t_generate_start = std::time::Instant::now();
         let block_size = self.chooser.block_size() as usize;
         let selection = self
             .select_worker(&context_id, &request, phase, is_query_only)
             .instrument(tracing::info_span!("kv_router.select_worker"))
             .await?;
+        let dt_select_worker = t_generate_start.elapsed();
         let WorkerSelection {
             instance_id,
             dp_rank,
@@ -473,6 +475,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         }
         .await;
 
+        let t_pre_direct = std::time::Instant::now();
         let (mut backend_input, context) = request.into_parts();
         backend_input.routing_mut().dp_rank = Some(dp_rank);
         let updated_request = context.map(|_| backend_input);
@@ -495,6 +498,16 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 phase = ?phase,
             ))
             .await?;
+        let dt_direct = t_pre_direct.elapsed();
+        let dt_total = t_generate_start.elapsed();
+        tracing::debug!(
+            "[perf][kv_push_router] generate: total={:.3}ms select_worker={:.3}ms \
+             pre_direct={:.3}ms direct={:.3}ms",
+            dt_total.as_secs_f64() * 1000.0,
+            dt_select_worker.as_secs_f64() * 1000.0,
+            (t_pre_direct - t_generate_start).as_secs_f64() * 1000.0,
+            dt_direct.as_secs_f64() * 1000.0,
+        );
         let stream_context = response_stream.context();
         let context_for_monitoring = stream_context.clone();
 

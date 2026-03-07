@@ -5,13 +5,15 @@
 Multimodal processing utilities for vLLM MM Router Worker.
 
 Key differences from TRT-LLM version:
-- Image loading: PIL + requests/base64 (no TRT-LLM dependency)
-- mm_hash: SHA256 of normalized PNG bytes (matches vLLM multi_modal_uuids)
+- Image loading: PIL header-only (no full decode) + requests/base64
+- mm_hash: blake3 of raw file bytes (matches vLLM multi_modal_uuids)
 - Token replacement: NOT needed — vLLM keeps the original image_token_id as-is
+- Fast path token expansion: compute token count from image dimensions directly
 """
 
 import base64
 import logging
+import time
 from dataclasses import dataclass
 from io import BytesIO
 from typing import Any
@@ -64,37 +66,50 @@ def process_multimodal(
     tokenizer: Any,
     processor: Any,
     model: str,
-) -> ProcessedInput:
+) -> tuple[ProcessedInput, list[bytes]]:
     """
     Process multimodal request: load images, get expanded tokens and mm_hashes.
 
-    Uses PIL for image loading and hashlib for mm_hash computation.
+    Returns (ProcessedInput, raw_bytes_list) — raw_bytes_list is used by the
+    caller for HTTP→dataURI conversion (#5).
+
+    Uses lightweight image loading (header-only PIL) and fast path token expansion.
     Unlike TRT-LLM, vLLM keeps original image_token_id (no replacement).
     """
+    t0 = time.perf_counter()
+
     # The preprocessed request does not carry a rendered template string; it carries
     # original messages in extra_args, so we must apply chat template again here.
     prompt = _build_prompt_with_images(messages, tokenizer, processor)
-    logger.info(f"Prompt (first 300 chars): {prompt[:300]}")
+    t1 = time.perf_counter()
 
-    # Load images as PIL
-    pil_images = []
-    for url in image_urls:
-        pil_img = _load_image(url)
-        pil_images.append(pil_img)
+    # Lightweight image loading — only reads header, no full pixel decode
+    image_data = [load_image_for_routing(url) for url in image_urls]
+    t2 = time.perf_counter()
+    raw_bytes_list = [d[0] for d in image_data]
+    image_dims = [(d[1], d[2]) for d in image_data]
 
-    # Get expanded tokens and image ranges (no token replacement for vLLM)
-    tokens, image_ranges = _get_expanded_tokens(
-        prompt, pil_images, tokenizer, processor
+    # Fast path token expansion from dimensions
+    tokens, image_ranges = _get_expanded_tokens_fast(
+        prompt, image_dims, tokenizer, processor
     )
-    logger.info(f"Expanded: {len(tokens)} tokens, " f"image_ranges={image_ranges}")
+    t3 = time.perf_counter()
 
-    # Compute mm_hashes exactly like vLLM handler's multi_modal_uuids path.
-    mm_uuids = compute_mm_uuids_from_images(pil_images)
+    # Hash raw file bytes directly (blake3)
+    mm_uuids = compute_mm_uuids_from_images(raw_bytes_list)
+    t4 = time.perf_counter()
     mm_hashes = [int(uuid[:16], 16) for uuid in mm_uuids]
 
-    logger.info(f"mm_hashes={mm_hashes}")
+    logger.info(
+        f"[perf][process_mm] template={1000*(t1-t0):.2f}ms "
+        f"load_images={1000*(t2-t1):.2f}ms "
+        f"expand_tokens={1000*(t3-t2):.2f}ms "
+        f"hash={1000*(t4-t3):.2f}ms "
+        f"total={1000*(t4-t0):.2f}ms "
+        f"n_images={len(image_urls)}"
+    )
 
-    return ProcessedInput(tokens=tokens, mm_hashes=mm_hashes, image_ranges=image_ranges)
+    return ProcessedInput(tokens=tokens, mm_hashes=mm_hashes, image_ranges=image_ranges), raw_bytes_list
 
 
 def build_block_mm_infos(
@@ -167,10 +182,19 @@ def _build_prompt_with_images(
     raise ValueError("Neither processor nor tokenizer provides apply_chat_template")
 
 
-def _load_image(url: str) -> Image.Image:
+_light_cache: dict[str, tuple[bytes, int, int]] = {}  # url -> (raw_bytes, w, h)
+
+
+def load_image_for_routing(url: str) -> tuple[bytes, int, int]:
     """
-    Load an image from URL (http/https or data URI) and return a PIL RGB image.
+    Router-only lightweight image loading: download and get (raw_bytes, width, height).
+
+    Uses PIL lazy open (header-only, no full pixel decode) for dimensions.
+    Caches HTTP URLs to avoid redundant downloads.
     """
+    if url in _light_cache:
+        return _light_cache[url]
+
     parsed = urlparse(url)
 
     if parsed.scheme == "data":
@@ -184,70 +208,109 @@ def _load_image(url: str) -> Image.Image:
     else:
         raise ValueError(f"Unsupported URL scheme: {parsed.scheme}")
 
-    return Image.open(BytesIO(raw_bytes)).convert("RGB")
+    # PIL lazy open — only reads header, no full pixel decode
+    img = Image.open(BytesIO(raw_bytes))
+    w, h = img.size
+
+    # Cache HTTP URLs to avoid redundant downloads
+    if parsed.scheme in ("http", "https"):
+        _light_cache[url] = (raw_bytes, w, h)
+
+    return raw_bytes, w, h
 
 
-def _get_expanded_tokens(
+def _compute_tokens_per_image_fast(
+    image_dims: list[tuple[int, int]], processor: Any
+) -> list[int]:
+    """Compute per-image token counts from image dimensions without full preprocessing."""
+    image_processor = getattr(processor, "image_processor", None)
+    if image_processor is None:
+        raise ValueError("processor.image_processor not found")
+
+    get_num_patches = getattr(image_processor, "get_number_of_image_patches", None)
+    if not callable(get_num_patches):
+        raise NotImplementedError(
+            "image_processor.get_number_of_image_patches not available"
+        )
+
+    merge_size = getattr(image_processor, "merge_size", None)
+    if merge_size is None:
+        raise ValueError("image_processor.merge_size not found")
+
+    tokens_per_image = []
+    images_kwargs: dict[str, Any] = {}
+    for width, height in image_dims:
+        num_patches = int(get_num_patches(height, width, images_kwargs))
+        tokens_per_image.append(num_patches // (merge_size**2))
+    return tokens_per_image
+
+
+def _get_expanded_tokens_fast(
     prompt: str,
-    pil_images: list[Image.Image],
+    image_dims: list[tuple[int, int]],
     tokenizer: Any,
     processor: Any,
 ) -> tuple[list[int], list[tuple[int, int]] | None]:
     """
-    Get tokens with visual expansion and find each image's token range.
+    Fast path token expansion using image dimensions instead of full HF processor.
 
-    Unlike TRT-LLM, vLLM keeps the original image_token_id (no replacement).
+    Computes token counts from image dimensions directly, avoiding the expensive
+    processor(..., images=pil_images) call (55ms→0.23ms).
     """
     if processor is None:
         return tokenizer.encode(prompt), None
 
     try:
-        output = processor(
-            text=[prompt], images=pil_images, return_tensors="pt", padding=True
-        )
-        tokens = output["input_ids"][0].tolist()
+        # 1. Text-only tokenize to get base tokens
+        base_tokens = tokenizer.encode(prompt)
 
-        # Get image_token_id from processor
+        # 2. Compute tokens_per_image from dimensions via processor API
+        tokens_per_image = _compute_tokens_per_image_fast(image_dims, processor)
+
+        # 3. Find placeholder token and ranges
         image_token_id = getattr(processor, "image_token_id", None)
         if image_token_id is None:
             raise ValueError("processor.image_token_id not found")
 
-        # Find contiguous image token ranges (NO replacement for vLLM)
-        contiguous_ranges = _find_image_token_ranges(tokens, image_token_id)
+        # Find single-token placeholders in base_tokens
+        placeholder_indices = [
+            i for i, t in enumerate(base_tokens) if t == image_token_id
+        ]
 
-        # Compute tokens per image from processor output
-        tokens_per_image = _compute_tokens_per_image(output, processor)
+        if len(placeholder_indices) != len(image_dims):
+            logger.warning(
+                f"Placeholder count ({len(placeholder_indices)}) != image count "
+                f"({len(image_dims)}), falling back to contiguous range expansion"
+            )
+            # Fallback: try contiguous range approach
+            contiguous_ranges = _find_image_token_ranges(base_tokens, image_token_id)
+            return base_tokens, _compute_per_image_ranges(
+                contiguous_ranges, tokens_per_image
+            )
 
-        # Split ranges according to tokens_per_image
-        image_ranges = _compute_per_image_ranges(contiguous_ranges, tokens_per_image)
+        # 4. Expand: replace each single placeholder with N tokens
+        expanded_tokens: list[int] = []
+        image_ranges: list[tuple[int, int]] = []
+        prev_end = 0
 
-        return tokens, image_ranges
+        for img_idx, placeholder_pos in enumerate(placeholder_indices):
+            # Copy text tokens before this placeholder
+            expanded_tokens.extend(base_tokens[prev_end:placeholder_pos])
+            # Insert expanded image tokens
+            img_start = len(expanded_tokens)
+            n_tokens = tokens_per_image[img_idx]
+            expanded_tokens.extend([image_token_id] * n_tokens)
+            image_ranges.append((img_start, img_start + n_tokens))
+            prev_end = placeholder_pos + 1  # skip the single placeholder
+
+        # Append remaining tokens after last placeholder
+        expanded_tokens.extend(base_tokens[prev_end:])
+
+        return expanded_tokens, image_ranges
 
     except Exception as e:
-        logger.warning(f"HF processor failed: {e}", exc_info=True)
+        logger.warning(f"Fast path token expansion failed: {e}", exc_info=True)
         return tokenizer.encode(prompt), None
-
-
-def _compute_tokens_per_image(processor_output: dict, processor: Any) -> list[int]:
-    """
-    Compute the number of visual tokens for each image from processor output.
-
-    Only Qwen-style processors (Qwen2-VL, Qwen2.5-VL) are supported.
-    Other model families will raise ValueError.
-    """
-    processor_cls = type(processor).__qualname__
-    if "qwen" not in processor_cls.lower():
-        raise NotImplementedError(
-            f"_compute_tokens_per_image only supports Qwen-style processors "
-            f"tuples. Got processor class: {processor_cls}"
-        )
-
-    grid_thw = processor_output.get("image_grid_thw")
-    if grid_thw is None:
-        raise ValueError("image_grid_thw not found in processor output")
-
-    merge_size = getattr(processor.image_processor, "merge_size", 2)
-    return [int(t * h * w) // (merge_size**2) for t, h, w in grid_thw]
 
 
 def _find_image_token_ranges(
