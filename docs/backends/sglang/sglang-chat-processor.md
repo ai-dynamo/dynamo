@@ -9,13 +9,15 @@ The SGLang chat processor enables SGLang-native preprocessing and postprocessing
 
 ## When to Use
 
-Use `--dyn-chat-processor sglang` when you need:
+Use `--dyn-chat-processor sglang` when Dynamo's built-in Rust preprocessor does not yet support a tool call parser or reasoning parser you need. The SGLang processor delegates to SGLang's Python implementations, so any parser SGLang supports works immediately.
 
-- **Tool calling** with SGLang-supported parsers (hermes, llama3, qwen25, etc.)
-- **Reasoning parsing** for chain-of-thought models (qwen3, deepseek-r1, etc.)
-- **SGLang's chat template rendering** for models with complex templates that the Rust preprocessor doesn't handle
+Common cases:
 
-The default Rust preprocessor is faster (no Python GIL overhead) but does not support tool call parsing or reasoning content extraction.
+- A **tool call format** not yet in the Rust `tool_calling` library
+- A **reasoning parser** not yet supported natively
+- A **chat template** that the Rust preprocessor doesn't handle correctly
+
+If the parser you need is missing from the Rust preprocessor, consider [opening an issue or PR](https://github.com/ai-dynamo/dynamo/issues) to add native support -- native parsers avoid the Python GIL overhead entirely.
 
 ## Quick Start
 
@@ -92,8 +94,8 @@ These arguments are passed to the **frontend** (not the worker) when using `--dy
 | Argument | Default | Description |
 |----------|---------|-------------|
 | `--dyn-chat-processor sglang` | (none) | Enable the SGLang chat processor |
-| `--tool-call-parser` | `None` | Tool call parser name (`hermes`, `llama3`, `qwen25`, etc.) |
-| `--reasoning-parser` | `None` | Reasoning parser name (`qwen3`, `deepseek-r1`, etc.) |
+| `--tool-call-parser` | `None` | Tool call parser name (any SGLang-supported parser) |
+| `--reasoning-parser` | `None` | Reasoning parser name (any SGLang-supported parser) |
 
 ### Environment Variables
 
@@ -111,13 +113,7 @@ python -m dynamo.frontend \
   --tool-call-parser hermes
 ```
 
-### Supported Formats
-
-| Parser | Models | Format |
-|--------|--------|--------|
-| `hermes` | Qwen3, Hermes-based | `tool_call` tags with JSON name/arguments |
-| `llama3` | Llama 3.x | `python_tag` delimiter / JSON |
-| `qwen25` | Qwen 2.5 | `tool_call` tags with Qwen-specific wrapping |
+Any parser supported by SGLang can be used. See the [SGLang documentation](https://docs.sglang.ai/) for the full list of available tool call parsers.
 
 ### Example: Tool Call Request
 
@@ -176,30 +172,6 @@ python -m dynamo.frontend \
 ```
 
 The parser separates think tag content into the `reasoning_content` field and regular content into the `content` field.
-
-## Performance
-
-The SGLang processor adds Python overhead compared to the default Rust preprocessor. The `DYN_SGLANG_STREAM_INTERVAL` environment variable controls the trade-off:
-
-| `stream_interval` | Throughput vs Rust | TTFT Impact | Use Case |
-|-------------------|--------------------|-------------|----------|
-| 1 | ~50-60% | Minimal | Low-latency streaming |
-| 20 (default) | ~85-100% | Minimal | General use |
-| 50+ | ~95%+ | Moderate | Batch/throughput-oriented |
-
-Higher values reduce Python GIL contention by batching tokens before detokenization. The first chunk always emits immediately regardless of the interval, so TTFT is unaffected. The default of 20 balances throughput and responsiveness.
-
-### Preprocessing Offload
-
-For high-concurrency deployments, offload preprocessing to a process pool:
-
-```bash
-python -m dynamo.frontend \
-  --dyn-chat-processor sglang \
-  --dyn-preprocess-workers 4
-```
-
-This moves `apply_chat_template` + tokenization to worker processes, freeing the async event loop. The post-processor remains in the main process.
 
 ## Migration from `--use-sglang-tokenizer`
 
