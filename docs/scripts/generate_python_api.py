@@ -25,7 +25,7 @@ from typing import Any
 try:
     from griffe import DocstringSectionKind, GriffeLoader
 except ImportError:
-    sys.exit("griffe>=1.0 is required: pip install griffe")
+    sys.exit("griffe>=2.0 is required: pip install griffe")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _fern_helpers import (  # noqa: E402
