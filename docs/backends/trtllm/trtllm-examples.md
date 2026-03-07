@@ -106,7 +106,7 @@ For complete Kubernetes deployment instructions, configurations, and troubleshoo
 
 ### Performance Sweep
 
-For detailed instructions on running comprehensive performance sweeps across both aggregated and disaggregated serving configurations, see the [TensorRT-LLM Benchmark Scripts for DeepSeek R1 model](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm/performance_sweeps/README.md).
+For performance measurement guidance across serving configurations, see the [Benchmarking Guide](../../benchmarks/benchmarking.md).
 
 ## Client
 
