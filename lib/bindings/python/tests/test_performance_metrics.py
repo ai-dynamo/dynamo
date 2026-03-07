@@ -14,7 +14,7 @@ async def test_request_metrics_lifecycle_smoke(runtime: DistributedRuntime):
 
     factory = RequestMetricsFactory(registry, metric_prefix="test_request_metrics")
     request = factory.new_request(input_tokens=128)
-    request.record_tokens(1)   # first token: TTFT
+    request.record_tokens(1)  # first token: TTFT
     request.record_tokens(16)  # later update: ITL sampling
     request.success()
 
