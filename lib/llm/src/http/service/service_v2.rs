@@ -105,10 +105,11 @@ impl State {
         manager: Arc<ModelManager>,
         discovery_client: Arc<dyn Discovery>,
         cancel_token: CancellationToken,
+        dynamo_namespace: Option<&str>,
     ) -> Self {
         Self {
             manager,
-            metrics: Arc::new(Metrics::default()),
+            metrics: Arc::new(Metrics::with_namespace(dynamo_namespace)),
             discovery_client,
             flags: StateFlags {
                 chat_endpoints_enabled: AtomicBool::new(false),
@@ -223,6 +224,11 @@ pub struct HttpServiceConfig {
     /// are registered using discovery.instance_id() and exposed on /metrics.
     #[builder(default = "None")]
     drt_discovery: Option<Arc<dyn Discovery>>,
+
+    /// Dynamo namespace added as a `dynamo_namespace` const_label on all Frontend
+    /// Prometheus metrics. The Planner filters by this label.
+    #[builder(default = "None")]
+    dynamo_namespace: Option<String>,
 }
 
 impl HttpService {
@@ -394,7 +400,12 @@ impl HttpServiceConfigBuilder {
                 cancel_token.child_token(),
             )) as Arc<dyn Discovery>
         });
-        let state = Arc::new(State::new(model_manager, discovery_client, cancel_token));
+        let state = Arc::new(State::new(
+            model_manager,
+            discovery_client,
+            cancel_token,
+            config.dynamo_namespace.as_deref(),
+        ));
         state
             .flags
             .set(&EndpointType::Chat, config.enable_chat_endpoints);

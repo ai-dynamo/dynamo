@@ -11,7 +11,7 @@ use axum::{
 use dynamo_runtime::{
     config::environment_names::llm::metrics as env_metrics,
     metrics::prometheus_names::{
-        frontend_service, name_prefix, sanitize_frontend_prometheus_prefix,
+        frontend_service, labels, name_prefix, sanitize_frontend_prometheus_prefix,
     },
 };
 use prometheus::{
@@ -381,7 +381,7 @@ pub struct ResponseMetricCollector {
 
 impl Default for Metrics {
     fn default() -> Self {
-        Self::new()
+        Self::with_namespace(None)
     }
 }
 
@@ -432,6 +432,13 @@ impl Metrics {
     /// Metrics are never removed to preserve historical data. Runtime config and MDC
     /// metrics are updated when models are discovered and their configurations are available.
     pub fn new() -> Self {
+        Self::with_namespace(None)
+    }
+
+    /// Create Metrics with an explicit Dynamo namespace for the `dynamo_namespace` Prometheus label.
+    /// The Planner uses this label to filter metrics by deployment.
+    /// When `None` or empty, no label is added (backwards compatible).
+    pub fn with_namespace(dynamo_namespace: Option<&str>) -> Self {
         // TODO: Remove DYN_METRICS_PREFIX env-var override (added in PR #2432 for
         // NIM compatibility with the old "nv_llm_http_service_" prefix). No longer
         // needed — hardcode name_prefix::FRONTEND and drop the sanitize function.
@@ -448,35 +455,50 @@ impl Metrics {
         }
         let frontend_metric_name = |suffix: &str| format!("{}_{}", &prefix, suffix);
 
+        let dynamo_namespace = dynamo_namespace.unwrap_or_default();
+        let with_ns = |opts: Opts| -> Opts {
+            if dynamo_namespace.is_empty() {
+                opts
+            } else {
+                opts.const_label(labels::NAMESPACE, dynamo_namespace)
+            }
+        };
+        let with_ns_hist = |hopts: HistogramOpts| -> HistogramOpts {
+            HistogramOpts {
+                common_opts: with_ns(hopts.common_opts),
+                ..hopts
+            }
+        };
+
         let request_counter = IntCounterVec::new(
-            Opts::new(
+            with_ns(Opts::new(
                 frontend_metric_name(frontend_service::REQUESTS_TOTAL),
                 "Total number of LLM requests processed",
-            ),
+            )),
             &["model", "endpoint", "request_type", "status", "error_type"],
         )
         .unwrap();
 
         let inflight_gauge = IntGaugeVec::new(
-            Opts::new(
+            with_ns(Opts::new(
                 frontend_metric_name(frontend_service::INFLIGHT_REQUESTS),
                 "Number of inflight requests",
-            ),
+            )),
             &["model"],
         )
         .unwrap();
 
-        let client_disconnect_gauge = prometheus::IntGauge::new(
+        let client_disconnect_gauge = prometheus::IntGauge::with_opts(with_ns(Opts::new(
             frontend_metric_name(frontend_service::DISCONNECTED_CLIENTS),
             "Number of disconnected clients",
-        )
+        )))
         .unwrap();
 
         let http_queue_gauge = IntGaugeVec::new(
-            Opts::new(
+            with_ns(Opts::new(
                 frontend_metric_name(frontend_service::QUEUED_REQUESTS),
                 "Number of requests in HTTP processing queue",
-            ),
+            )),
             &["model"],
         )
         .unwrap();
@@ -488,11 +510,13 @@ impl Metrics {
             generate_log_buckets(req_dur_min, req_dur_max, req_dur_count);
 
         let request_duration = HistogramVec::new(
-            HistogramOpts::new(
-                frontend_metric_name(frontend_service::REQUEST_DURATION_SECONDS),
-                "Duration of LLM requests",
-            )
-            .buckets(request_duration_buckets),
+            with_ns_hist(
+                HistogramOpts::new(
+                    frontend_metric_name(frontend_service::REQUEST_DURATION_SECONDS),
+                    "Duration of LLM requests",
+                )
+                .buckets(request_duration_buckets),
+            ),
             &["model"],
         )
         .unwrap();
@@ -503,11 +527,13 @@ impl Metrics {
         let input_sequence_buckets = generate_log_buckets(isl_min, isl_max, isl_count);
 
         let input_sequence_length = HistogramVec::new(
-            HistogramOpts::new(
-                frontend_metric_name(frontend_service::INPUT_SEQUENCE_TOKENS),
-                "Input sequence length in tokens",
-            )
-            .buckets(input_sequence_buckets.clone()),
+            with_ns_hist(
+                HistogramOpts::new(
+                    frontend_metric_name(frontend_service::INPUT_SEQUENCE_TOKENS),
+                    "Input sequence length in tokens",
+                )
+                .buckets(input_sequence_buckets.clone()),
+            ),
             &["model"],
         )
         .unwrap();
@@ -518,20 +544,22 @@ impl Metrics {
         let output_sequence_buckets = generate_log_buckets(osl_min, osl_max, osl_count);
 
         let output_sequence_length = HistogramVec::new(
-            HistogramOpts::new(
-                frontend_metric_name(frontend_service::OUTPUT_SEQUENCE_TOKENS),
-                "Output sequence length in tokens",
-            )
-            .buckets(output_sequence_buckets),
+            with_ns_hist(
+                HistogramOpts::new(
+                    frontend_metric_name(frontend_service::OUTPUT_SEQUENCE_TOKENS),
+                    "Output sequence length in tokens",
+                )
+                .buckets(output_sequence_buckets),
+            ),
             &["model"],
         )
         .unwrap();
 
         let output_tokens_counter = IntCounterVec::new(
-            Opts::new(
+            with_ns(Opts::new(
                 frontend_metric_name(frontend_service::OUTPUT_TOKENS_TOTAL),
                 "Total number of output tokens generated (updates in real-time)",
-            ),
+            )),
             &["model"],
         )
         .unwrap();
@@ -542,11 +570,13 @@ impl Metrics {
         let time_to_first_token_buckets = generate_log_buckets(ttft_min, ttft_max, ttft_count);
 
         let time_to_first_token = HistogramVec::new(
-            HistogramOpts::new(
-                frontend_metric_name(frontend_service::TIME_TO_FIRST_TOKEN_SECONDS),
-                "Time to first token in seconds",
-            )
-            .buckets(time_to_first_token_buckets),
+            with_ns_hist(
+                HistogramOpts::new(
+                    frontend_metric_name(frontend_service::TIME_TO_FIRST_TOKEN_SECONDS),
+                    "Time to first token in seconds",
+                )
+                .buckets(time_to_first_token_buckets),
+            ),
             &["model"],
         )
         .unwrap();
@@ -556,33 +586,39 @@ impl Metrics {
         let inter_token_latency_buckets = generate_log_buckets(itl_min, itl_max, itl_count);
 
         let inter_token_latency = HistogramVec::new(
-            HistogramOpts::new(
-                frontend_metric_name(frontend_service::INTER_TOKEN_LATENCY_SECONDS),
-                "Inter-token latency in seconds",
-            )
-            .buckets(inter_token_latency_buckets),
+            with_ns_hist(
+                HistogramOpts::new(
+                    frontend_metric_name(frontend_service::INTER_TOKEN_LATENCY_SECONDS),
+                    "Inter-token latency in seconds",
+                )
+                .buckets(inter_token_latency_buckets),
+            ),
             &["model"],
         )
         .unwrap();
 
         let cached_tokens = HistogramVec::new(
-            HistogramOpts::new(
-                frontend_metric_name(frontend_service::CACHED_TOKENS),
-                "Number of cached tokens (prefix cache hits) per request",
-            )
-            .buckets(input_sequence_buckets.clone()),
+            with_ns_hist(
+                HistogramOpts::new(
+                    frontend_metric_name(frontend_service::CACHED_TOKENS),
+                    "Number of cached tokens (prefix cache hits) per request",
+                )
+                .buckets(input_sequence_buckets.clone()),
+            ),
             &["model"],
         )
         .unwrap();
 
         let tokenizer_latency = HistogramVec::new(
-            HistogramOpts::new(
-                frontend_metric_name(frontend_service::TOKENIZER_LATENCY_MS),
-                "Tokenizer latency in milliseconds",
-            )
-            .buckets(vec![
-                0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0,
-            ]),
+            with_ns_hist(
+                HistogramOpts::new(
+                    frontend_metric_name(frontend_service::TOKENIZER_LATENCY_MS),
+                    "Tokenizer latency in milliseconds",
+                )
+                .buckets(vec![
+                    0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0,
+                ]),
+            ),
             &[frontend_service::OPERATION_LABEL],
         )
         .unwrap();
@@ -592,64 +628,64 @@ impl Metrics {
         // but are implemented as gauges because they are copied/synchronized from upstream
         // counter values rather than being directly incremented.
         let model_total_kv_blocks = IntGaugeVec::new(
-            Opts::new(
+            with_ns(Opts::new(
                 frontend_metric_name(frontend_service::MODEL_TOTAL_KV_BLOCKS),
                 "Total KV cache blocks available for a worker serving the model",
-            ),
+            )),
             &["model"],
         )
         .unwrap();
 
         let model_max_num_seqs = IntGaugeVec::new(
-            Opts::new(
+            with_ns(Opts::new(
                 frontend_metric_name(frontend_service::MODEL_MAX_NUM_SEQS),
                 "Maximum number of sequences for a worker serving the model",
-            ),
+            )),
             &["model"],
         )
         .unwrap();
 
         let model_max_num_batched_tokens = IntGaugeVec::new(
-            Opts::new(
+            with_ns(Opts::new(
                 frontend_metric_name(frontend_service::MODEL_MAX_NUM_BATCHED_TOKENS),
                 "Maximum number of batched tokens for a worker serving the model",
-            ),
+            )),
             &["model"],
         )
         .unwrap();
 
         let model_context_length = IntGaugeVec::new(
-            Opts::new(
+            with_ns(Opts::new(
                 frontend_metric_name(frontend_service::MODEL_CONTEXT_LENGTH),
                 "Maximum context length in tokens for a worker serving the model",
-            ),
+            )),
             &["model"],
         )
         .unwrap();
 
         let model_kv_cache_block_size = IntGaugeVec::new(
-            Opts::new(
+            with_ns(Opts::new(
                 frontend_metric_name(frontend_service::MODEL_KV_CACHE_BLOCK_SIZE),
                 "KV cache block size in tokens for a worker serving the model",
-            ),
+            )),
             &["model"],
         )
         .unwrap();
 
         let model_migration_limit = IntGaugeVec::new(
-            Opts::new(
+            with_ns(Opts::new(
                 frontend_metric_name(frontend_service::MODEL_MIGRATION_LIMIT),
                 "Maximum number of request migrations allowed for the model",
-            ),
+            )),
             &["model"],
         )
         .unwrap();
 
         let model_migration_total = IntCounterVec::new(
-            Opts::new(
+            with_ns(Opts::new(
                 frontend_metric_name(frontend_service::MODEL_MIGRATION_TOTAL),
                 "Total number of request migrations due to worker unavailability",
-            ),
+            )),
             &["model", frontend_service::MIGRATION_TYPE_LABEL],
         )
         .unwrap();
