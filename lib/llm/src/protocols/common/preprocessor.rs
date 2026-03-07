@@ -152,14 +152,17 @@ pub struct PreprocessedRequest {
     /// Not every backend needs this, but those that do can find it here.
     /// TODO - refactor this to a better location
     #[builder(default)]
+    #[serde(default)]
     pub eos_token_ids: Vec<TokenIdType>,
 
     /// The computed checksum of the Model Deployment Card (MDC).
     #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mdc_sum: Option<String>,
 
     /// User requested annotations for the request
     #[builder(default)]
+    #[serde(default)]
     pub annotations: Vec<String>,
 
     /// Routing hints for worker targeting (backend_instance_id, prefill/decode worker IDs, dp_rank)
@@ -169,6 +172,7 @@ pub struct PreprocessedRequest {
 
     /// Router configuration overrides for this specific request
     #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub router_config_override: Option<RouterConfigOverride>,
 
     /// Structured prefill result
@@ -248,10 +252,12 @@ pub struct PreprocessedEmbeddingRequest {
 
     /// The computed checksum of the Model Deployment Card (MDC)
     #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mdc_sum: Option<String>,
 
     /// User requested annotations for the request
     #[builder(default)]
+    #[serde(default)]
     pub annotations: Vec<String>,
 }
 
