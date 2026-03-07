@@ -158,8 +158,8 @@ def _build_mocker_command(
             command.append("--enable-chunked-prefill")
         else:
             command.append("--no-enable-chunked-prefill")
-    if "watermark" in mocker_args:
-        command.extend(["--watermark", str(mocker_args["watermark"])])
+    if "preemption_mode" in mocker_args:
+        command.extend(["--preemption-mode", str(mocker_args["preemption_mode"])])
     if "dp_size" in mocker_args:
         command.extend(["--data-parallel-size", str(mocker_args["dp_size"])])
     # Use --durable-kv-events to enable JetStream mode (local indexer disabled)
