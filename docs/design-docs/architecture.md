@@ -4,94 +4,197 @@
 title: Overall Architecture
 ---
 
-Dynamo is NVIDIA's high-throughput, low-latency inference framework that's designed to serve generative AI and reasoning models in multi-node distributed environments. It's inference engine agnostic, supporting SGLang, TRT-LLM, vLLM and others, while capturing essential LLM capabilities:
+## Abstract
 
-- **Disaggregated prefill & decode inference**: Maximizes GPU throughput and helps you balance throughput and latency
-- **Dynamic GPU scheduling**: Optimizes performance based on real-time demand
-- **LLM-aware request routing**: Eliminates unnecessary KV cache recomputation
-- **Accelerated data transfer**: Reduces inference response time using NIXL
-- **KV cache offloading**: Uses multiple memory hierarchies for higher system throughput and lower latency
+Dynamo is a distributed inference runtime for generative AI systems that must operate at high throughput, low latency, and high reliability under changing traffic conditions. It is backend-agnostic (SGLang, TRT-LLM, vLLM, and others) and is built around three cooperating concerns:
 
-Built in Rust for performance and in Python for extensibility, Dynamo is fully open-source and driven by a transparent, Open Source Software (OSS)-first development approach
+- A fast **request path** for token generation
+- A responsive **control path** for scaling and placement
+- A resilient **state path** for KV reuse and failure recovery
 
-## Motivation behind Dynamo
+This document presents Dynamo as an architecture, not a feature list: what each plane owns, how requests move, how the system adapts, and how it remains correct under failure.
 
-Scaling inference for generative AI and reasoning models presents complex challenges in three key areas: performance, correctness, and efficiency. Here's what we're solving:
+## Design Goals
 
-There are multi-faceted challenges:
+Dynamo is designed to satisfy the following goals simultaneously:
 
-- *Difficult UX*: User experience is critical for distributed inference runtimes because managing large-scale inference systems is already complex, and poor usability further complicates matters. Developers need a clear, intuitive way to define, optimize, and update inference execution without wrestling with low-level infrastructure details. Without simple UX, inference runtimes remain inaccessible, prone to errors, and inefficient, hindering model deployment and innovation. A modern distributed inference stack must consider usability at its core—empowering developers to scale AI effortlessly for agentic workflows while ensuring correctness and performance.
+1. **Latency stability**: keep TTFT and ITL predictable under bursty and mixed-length traffic.
+2. **GPU efficiency**: disaggregate prefill and decode so each can scale independently.
+3. **Compute reuse**: minimize KV recomputation through KV-aware routing and cache lifecycle management.
+4. **Operational resilience**: treat worker crashes, restarts, and overload as normal operating events.
+5. **Deployment portability**: support Kubernetes-native control paths and non-Kubernetes runtime modes.
 
-- *GPU underutilization*: Traditional monolithic inference pipelines often leave GPUs idle due to the imbalance between prefill and decode stages. Prefill (which generates large prompt embeddings) is highly compute-intensive, while decode (which generates tokens) is latency-sensitive. A disaggregated approach that separate prefill and decode ensures optimal GPU utilization and increases overall throughput ([DistServe](https://arxiv.org/abs/2401.09670)).
+## Why This Architecture Exists
 
-- *Expensive KV cache re-computation*: When requests aren't efficiently routed, KV caches (intermediate states of transformer model) often get flushed and recomputed, leading to wasted computation cycles and increased latency. KV-aware request routing eliminates redundant KV cache regeneration, significantly boosting efficiency.([DeepSeek](https://arxiv.org/abs/2501.12948))
+Modern LLM serving hits recurring bottlenecks:
 
-- *Memory bottlenecks*: Large-scale inference workloads demand extensive KV cache storage, which can quickly overwhelm GPU memory capacity. KV cache offloading across memory hierarchies (HBM, DDR, NVMe or remote storage) enables models to scale beyond GPU memory limits and speeds up latency. ([Mooncake](https://kvcache-ai.github.io/Mooncake/design/mooncake-store.html), [AIBrix](https://blog.vllm.ai/2025/02/21/aibrix-release.html), [FlexKV](https://github.com/taco-project/FlexKV), [LMCache](https://lmcache.ai/))
+- **Prefill/decode imbalance** leaves GPUs underutilized when traffic mix shifts ([DistServe](https://arxiv.org/abs/2401.09670)).
+- **KV recomputation** increases TTFT and wastes compute when routing ignores cache overlap ([DeepSeek](https://arxiv.org/abs/2501.12948)).
+- **Memory pressure** from long contexts and concurrency exceeds HBM capacity without multi-tier cache management ([Mooncake](https://kvcache-ai.github.io/Mooncake/design/mooncake-store.html), [AIBrix](https://blog.vllm.ai/2025/02/21/aibrix-release.html), [FlexKV](https://github.com/taco-project/FlexKV), [LMCache](https://lmcache.ai/)).
+- **Dynamic demand** breaks static provisioning assumptions ([AzureTrace](https://github.com/Azure/AzurePublicDataset)).
+- **Real-world failures** (pod restart, partition, hot-spot overload) require first-class recovery behavior.
 
-- *Fluctuating demand and inefficient GPU allocation*: Inference workloads are use-case specific and dynamic—demand surges inherently cause unpredictably, yet traditional serving stacks allocate GPUs statically. Dynamic GPU scheduling ensures that resources are allocated based on real-time demand, preventing over-provisioning and improving utilization ([AzureTrace](https://github.com/Azure/AzurePublicDataset))
+Dynamo addresses these constraints by separating serving, control, and state propagation into explicit planes and control loops.
 
-- *Inefficient data transfer*: Distributed inference workloads introduce unique and highly dynamic communication patterns that differ fundamentally from training. Unlike training, where worker roles remain largely static, inference requires real-time worker scaling, dynamic load balancing, and adaptive memory management—necessitating a communication layer that can efficiently handle these evolving requirements. Contemporary libraries are built for static, synchronous operations and lack the dynamicity needed for inference serving. While UCX provides high-performance networking, it requires deep networking expertise to configure correctly, making it impractical for broad inference use cases. Developers need a library optimized for inference workloads that can abstract heterogeneous memory (remote memory or storage) and dynamically select the best transport mechanism via a unified API.
-
-To address the growing demands of distributed inference serving, NVIDIA introduces Dynamo. This innovative product tackles key challenges in scheduling, memory management, and data transfer. Dynamo employs KV-aware routing for optimized decoding, leveraging existing KV caches. For efficient global memory management at scale, it strategically stores and evicts KV caches across multiple memory tiers—GPU, CPU, SSD, and object storage—enhancing both time-to-first-token and overall throughput. Dynamo features NIXL (NVIDIA Inference tranXfer Library), a new data transfer engine designed for dynamic scaling and low-latency storage access.
-
-## Key benefits
-
-The following diagram outlines Dynamo's high-level architecture. To enable large-scale distributed and disaggregated inference serving, Dynamo includes five key features:
-
-- [Dynamo Disaggregated Serving](disagg-serving.md)
-- [Dynamo Smart Router](../components/router/README.md)
-- [Dynamo KV Cache Block Manager](../components/kvbm/README.md)
-- [Planner](../components/planner/README.md)
-- [NVIDIA Inference Transfer Library (NIXL)](https://github.com/ai-dynamo/nixl/blob/main/docs/nixl.md)
-
-Every component in the Dynamo architecture is independently scalable and portable. The API server can adapt to task-specific deployment. A smart router processes user requests to route them to the optimal worker for performance. Specifically, for Large Language Models (LLMs), Dynamo employs KV cache-aware routing, which directs requests to the worker with the highest cache hit rate while maintaining load balance, expediting decoding. This routing strategy leverages a KV cache manager that maintains a global radix tree registry for hit rate calculation. The KV cache manager also oversees a multi-tiered memory system, enabling rapid KV cache storage and eviction. This design results in substantial TTFT reductions, increased throughput, and the ability to process extensive context lengths.
+## Architecture Overview
 
 ![Diagram of the NVIDIA Dynamo architecture for distributed AI inference, including User Requests, Planner, API Server, Smart Router, and Disaggregated Serving](../assets/img/architecture.png "Dynamo Architecture")
 
-Dynamo enables dynamic worker scaling, responding to real-time deployment signals. These signals, captured and communicated through an event plane, empower the Planner to make intelligent, zero-downtime adjustments. For instance, if Dynamo detects an increase in requests with long input sequences, the Planner automatically scales up prefill workers to meet the heightened demand.
+## System Model
 
-Beyond efficient event communication, data transfer across multi-node deployments is crucial at scale. To address this, Dynamo utilizes NIXL, a technology designed to expedite transfers through reduced synchronization and intelligent batching. This acceleration is particularly vital for disaggregated serving, ensuring minimal latency when prefill workers pass KV cache data to decode workers.
+### Request Plane (critical data path)
 
-Dynamo prioritizes seamless integration. Its modular design enables it to work harmoniously with your existing infrastructure and preferred open-source components. To achieve optimal performance and extensibility, Dynamo leverages the strengths of both Rust and Python. We built critical performance-sensitive modules with Rust for speed, memory safety, and robust concurrency. Meanwhile, we used Python for its flexibility, enabling rapid prototyping and effortless customization.
+The request plane is responsible for request/response execution:
 
-## Performance benefits of key features
+- **Frontend** accepts and normalizes requests.
+- **Router** selects workers based on load and KV overlap.
+- **Prefill workers** compute prompt KV state.
+- **Decode workers** generate output tokens.
 
-### Disaggregated serving
+This path is optimized for low overhead and continuous token streaming.
 
-Disaggregating prefill and decode boosts performance, gaining efficiency when more GPUs are involved in inference. For example, for Llama 70B, single-node tests show a 30% throughput/GPU improvement, while two-node setups achieve over 2X gains due to better parallelization.
+### Control Plane (adaptation and orchestration path)
+
+The control plane is responsible for desired-state management:
+
+- **Planner** computes scaling targets from live metrics.
+- **Dynamo Operator** reconciles Kubernetes resources from Dynamo CRDs.
+- **Discovery + Endpoints/CRD** establish liveness and discoverability.
+- **Grove/KAI Scheduler path** provides topology-aware placement and grouped scaling in multinode Kubernetes deployments.
+- **Model Express** is an optional model-management endpoint when configured.
+
+This path is optimized for correctness and convergence to target capacity.
+
+### Storage & Events Plane (state propagation path)
+
+The storage/events plane is responsible for cache state visibility and movement:
+
+- **KV Events** publish cache lifecycle transitions.
+- **KVBM** manages block reuse, eviction, and offload/recall across memory tiers.
+- **NIXL** performs high-speed KV/data transfer across workers and memory domains.
+
+This path is optimized for cache reuse and cross-worker handoff efficiency.
+
+## End-to-End Request Narrative (Disaggregated Mode)
+
+1. Client sends request to **Frontend**.
+2. Frontend validates/preprocesses and forwards to **Router**.
+3. Router chooses a **Prefill worker**.
+4. Prefill computes KV and returns transfer metadata.
+5. Router chooses a **Decode worker**.
+6. Decode receives KV state (typically via **NIXL** transfer path).
+7. Decode streams tokens back through Frontend.
+8. **KV Events** update cache visibility for future routing decisions.
+9. **KVBM** may offload or recall KV blocks based on pressure and reuse potential.
+
+For flow-level detail, see [Architecture Flow](dynamo-flow.md).  
+For request transport options, see [Request Plane](request-plane.md).
+
+## Control Loops
+
+### Serving Loop
+
+Maintains low-latency request execution across frontend, router, prefill, and decode workers.
+
+### Planning Loop
+
+Maintains capacity alignment with demand:
+
+- Planner consumes runtime metrics.
+- Planner computes prefill/decode targets.
+- Connector layer applies targets to runtime resources.
+
+Planner supports throughput-based and load-based strategies. See [Planner Design](planner-design.md).
+
+### Resilience Loop
+
+Maintains system continuity under failure:
+
+- Health checks detect unhealthy workers.
+- Discovery liveness removes stale endpoints.
+- Graceful shutdown drains in-flight work.
+- Request migration/cancellation controls in-flight behavior.
+- Load shedding prevents cascading collapse under overload.
+
+See [Fault Tolerance](../fault-tolerance/README.md).
+
+## Kubernetes-Native Realization (CRD + Grove)
+
+In Kubernetes deployments, the same architecture maps to declarative resources:
+
+- Dynamo Operator reconciles `DynamoGraphDeployment`.
+- Discoverability is derived from `DynamoWorkerMetadata` + EndpointSlices.
+- Grove-backed multinode deployments model worker groups as `PodCliqueSet` and `PodClique`.
+- Independent prefill/decode elasticity is represented via `PodCliqueScalingGroup` with separate `replicas` and `min` targets.
+
+The diagram labels such as `PodClique A/B`, `ScalingGroup "Prefill"`, `ScalingGroup "Decode"`, and `(replicas, min)` represent this grouped scaling model.
+
+## Fault Tolerance Architecture
+
+Fault tolerance is embedded across layers:
+
+| Layer | Mechanism | Practical effect |
+|------|-----------|------------------|
+| Request | Migration, cancellation | In-flight work can continue or terminate intentionally |
+| Worker | Health checks, graceful shutdown, endpoint draining | Failed/terminating workers stop taking new traffic safely |
+| System | Request rejection/load shedding | Prevents overload from propagating across workers |
+| Infrastructure | Discovery lease expiry, event-path recovery | Stale membership is removed and traffic reroutes |
+
+This model assumes failures are routine, not exceptional.
+
+## Performance Rationale
+
+### Disaggregated Serving
+
+Separating prefill and decode improves utilization and enables phase-specific scaling.
 
 ![Two scatter plots comparing the performance of disagg and baseline configurations on one node versus two nodes](../assets/img/disagg-perf-benefit.png)
 
-* Tested on H100s with R1 Distilled Llama 70B model FP8 using vLLM. 3K ISL/ 150 OSL
+*Tested on H100 with R1 Distilled Llama 70B FP8 on vLLM. 3K ISL / 150 OSL.*
 
+### KV-Aware Routing
 
-The disaggregation of prefill and decode phases offers valuable flexibility. Since these phases directly correlate with time-to-first-token (TTFT) and inter-token latency (ITL) respectively, adjusting worker allocation can provide tailored performance. This enables optimization for specific service level agreements (SLAs), whether prioritizing faster TTFT, lower ITL, or higher throughput.
-
-### KV aware routing
+Routing with cache overlap + load signals reduces prefill recomputation and improves latency.
+For an external production case study, see [How Baseten achieved 2x faster inference with NVIDIA Dynamo](https://www.baseten.co/blog/how-baseten-achieved-2x-faster-inference-with-nvidia-dynamo/#how-baseten-uses-nvidia-dynamo).
 
 ![Two bar charts comparing Random routing and Dynamo with KV aware routing for Time To First Token (3x faster with Dynamo) and Avg request latency (2x faster with Dynamo).](../assets/img/kv-routing.png)
 
-* Tested with 100K requests to R1 using R1 Distilled Llama 70B FP8 on 2 nodes of H100s. Avg 4K ISL / 800 OSL
+*Tested with 100K requests to R1 using R1 Distilled Llama 70B FP8 on 2 H100 nodes. Avg 4K ISL / 800 OSL.*
 
+### KV Block Manager (KVBM)
 
-Existing routing methods, including load-based routing, overlook the specific properties of LLMs that could improve performance. Addressing this, routing user queries to workers with the highest KV cache hit rate (rather than simply the least busy node) allows for immediate processing, even under heavy load. The preceeding figures illustrate the effectiveness of KV aware routing on 100,000 real R1 user queries, achieving a 3x improvement in TTFT and a 2x reduction in average request latency. Depending on traffic, this approach can also enhance throughput.
+KVBM extends effective cache capacity using multi-tier memory offload/recall.
 
-### KV cache manager
-
-The Dynamo KV Block Manager (KVBM) enables KV cache offloading to system CPU memory, local SSDs, and network-attached storage, allowing more KV blocks to be reused instead of recomputed. In many cases, KV transfer is faster than recomputation, so KVBM helps reduce time-to-first-token (TTFT). The following plot highlights the performance gains achieved through CPU memory offloading. In a scenario involving 20 multi-turn conversations with 15 users, KVBM with CPU memory offloading achieved a 2.2×–12× improvement in TTFT (depending on QPS), demonstrating benefits that extend beyond basic prefix caching.
 ![Line graph comparing Pure GPU prefix caching with vLLM and KVBM host offloading for TTFT (Time To First Token)](../assets/img/kvbm-agg-performance.png)
 
-* Tested with different QPS using Qwen3-8B on H100. Avg 20K ISL / 100 OSL.
+*Tested across QPS values using Qwen3-8B on H100. Avg 20K ISL / 100 OSL.*
 
-### NVIDIA Inference Transfer Library (NIXL)
+### NIXL Data Transfer
 
-NIXL streamlines data transfer through simplified synchronization and batching and simplified source and destination abstractions. NIXL can abstract data movement across different types of memory and fast storage, whereas other data transfer libraries typically support a single tier of memory. These enhancements yield significant performance gains, accelerating both time-to-first-token (TTFT) and throughput.
+NIXL reduces KV handoff cost in distributed serving by optimizing cross-worker transfer behavior across heterogeneous memory.
+
+## Implementation Model
+
+- **Rust** for performance-sensitive runtime components.
+- **Python** for backend integration and extensibility.
+- Modular subsystem boundaries so routing, planning, memory, and transport can evolve independently.
+
+## Related Documentation
+
+- [Architecture Flow](dynamo-flow.md)
+- [Router Design](router-design.md)
+- [Planner Design](planner-design.md)
+- [Discovery Plane](discovery-plane.md)
+- [Event Plane](event-plane.md)
+- [Request Plane](request-plane.md)
+- [Fault Tolerance](../fault-tolerance/README.md)
+- [Grove](../kubernetes/grove.md)
 
 ## Acknowledgements
 
-We'd like to acknowledge several open source software stacks that motivated our creation Dynamo.
+Dynamo is informed by prior open-source work from:
 
-- vLLM and vLLM-project
+- vLLM
 - SGLang
 - DistServe
 - Mooncake
