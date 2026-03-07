@@ -331,7 +331,7 @@ sequenceDiagram
 
 This section demonstrates how to deploy large multimodal models that require a multi-node setup using Slurm.
 
-> **Note:** The scripts referenced in this section can be found in [`examples/basics/multinode/trtllm/`](https://github.com/ai-dynamo/dynamo/tree/main/examples/basics/multinode/trtllm/).
+> **Note:** The `srun` commands in this section are maintained inline in the documentation. Adapt them to your cluster environment as needed.
 
 ### Environment Setup
 
@@ -499,4 +499,3 @@ Common examples:
 | `components/src/dynamo/trtllm/request_handlers/handler_base.py` | Base handler with disaggregated params encoding/decoding |
 | `components/src/dynamo/trtllm/utils/disagg_utils.py` | DisaggregatedParamsCodec for network transfer |
 | `components/src/dynamo/trtllm/utils/trtllm_utils.py` | Command-line argument parsing |
-
