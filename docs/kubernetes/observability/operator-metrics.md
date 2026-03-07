@@ -27,7 +27,7 @@ The operator metrics feature requires the same monitoring infrastructure as appl
 
 Operator metrics are automatically collected via a ServiceMonitor, which is created by the Helm chart when `metricsService.enabled: true` (default).
 
-**Unlike application metrics** (which use PodMonitor), the operator uses ServiceMonitor and requires no manual RBAC configuration. The operator's kube-rbac-proxy sidecar is configured with `--ignore-paths=/metrics` to allow Prometheus access.
+**Unlike application metrics** (which use PodMonitor), the operator uses ServiceMonitor and requires no manual RBAC configuration. The operator's metrics endpoint uses controller-runtime's built-in `WithAuthenticationAndAuthorization` filter for secure serving.
 
 To verify the ServiceMonitor is created:
 

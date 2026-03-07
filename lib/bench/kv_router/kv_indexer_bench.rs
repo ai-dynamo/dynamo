@@ -10,8 +10,8 @@
 //! Supported indexer types: single, sharded, nested, all
 //!
 //! Run with:
-//!   cargo bench --package dynamo-kv-router --bench kv_indexer_bench --features bench -- microbench --help
-//!   cargo bench --package dynamo-kv-router --bench kv_indexer_bench --features bench -- stress --help
+//!   cargo bench --package dynamo-bench --bench kv_indexer_bench -- microbench --help
+//!   cargo bench --package dynamo-bench --bench kv_indexer_bench -- stress --help
 
 #[path = "common/mod.rs"]
 mod common;
@@ -1484,7 +1484,13 @@ async fn run_stress_mode(args: StressArgs) {
 
 #[tokio::main]
 async fn main() {
-    let cli = Cli::parse();
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(_) => {
+            eprintln!("No valid arguments provided, skipping benchmark");
+            return;
+        }
+    };
 
     match cli.command {
         Command::Microbench(args) => run_microbench_mode(args).await,
