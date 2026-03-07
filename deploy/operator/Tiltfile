@@ -1,0 +1,497 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Tiltfile for developing the Dynamo Kubernetes Operator.
+#
+# Usage:
+#   cd deploy/operator
+#   # edit tilt-settings.yaml as needed
+#   tilt up
+#
+# What it does:
+#   1. Compiles the Go manager binary locally (fast, native).
+#   2. Builds a minimal Docker image containing only the binary.
+#   3. Renders the production Helm chart (deploy/helm/charts/platform) with
+#      `helm template`, applies CRDs via kubectl, and deploys all rendered
+#      resources via k8s_yaml().
+#   4. On code change Tilt recompiles the binary and live-updates it into the
+#      running container — no full image rebuild needed.
+#
+# Prerequisites:
+#   - tilt (https://docs.tilt.dev/install.html)
+#   - kind, minikube, or any local cluster
+#   - helm v3
+#   - Go >= 1.25
+#   - The tilt restart_process extension (auto-fetched on first `tilt up`):
+#       tilt ext install restart_process
+
+load('ext://restart_process', 'docker_build_with_restart')
+
+# ---------------------------------------------------------------------------
+# Settings — defaults are defined here; tilt-settings.yaml overrides them.
+# ---------------------------------------------------------------------------
+settings = {
+    'namespace':            'dynamo-system',
+    'enable_nats':          True,       # required for DGD/DGDR workloads
+    'enable_etcd':          False,      # only if discoveryBackend is "etcd"
+    'enable_kai_scheduler': False,      # GPU-aware scheduling for multi-node
+    'enable_grove':         False,      # PodClique-based multi-node orchestration
+    'skip_codegen':         False,      # skip make generate/manifests for faster iteration
+    'webhook_cert_mode':    'auto',     # "auto", "cert-manager", or "external"
+    'webhook_ca_bundle':    '',         # required only for webhook_cert_mode=external
+    'image_pull_secret':    '',         # name of docker-registry Secret for private registries
+    'helm_values':          {},         # extra --set overrides passed to helm template
+}
+if os.path.exists('tilt-settings.yaml'):
+    data = read_yaml('tilt-settings.yaml', default={})
+    if data:
+        settings.update(data)
+
+if 'allowed_contexts' in settings:
+    allow_k8s_contexts(settings['allowed_contexts'])
+
+# Registry — resolved from (highest priority wins):
+#   1. REGISTRY env var          (e.g. REGISTRY=docker.io/myuser tilt up)
+#   2. "registry" in tilt-settings.yaml
+# When set the operator image is pushed as <registry>/controller:tilt-dev.
+REGISTRY = os.getenv('REGISTRY', settings.get('registry', ''))
+if REGISTRY:
+    REGISTRY = REGISTRY.rstrip('/')
+
+NAMESPACE            = settings['namespace']
+HELM_VALUES          = settings['helm_values']
+ENABLE_NATS          = settings['enable_nats']
+ENABLE_ETCD          = settings['enable_etcd']
+ENABLE_KAI_SCHEDULER = settings['enable_kai_scheduler']
+ENABLE_GROVE         = settings['enable_grove']
+IMAGE_PULL_SECRET    = settings['image_pull_secret']
+
+# ---------------------------------------------------------------------------
+# Webhook certificate mode — mirrors the Helm chart's three modes:
+#
+#   1. "auto"     (default) — Tilt generates a self-signed cert + injects CA
+#                  bundle into webhook configs.  Equivalent to the Helm chart's
+#                  default (certManager.enabled=false, certificateSecret.external=false).
+#
+#   2. "cert-manager" — cert-manager is already installed in the cluster.
+#                  Tilt lets the Helm-rendered Issuer/Certificate CRs + the
+#                  ca-injector handle everything.  Equivalent to
+#                  certManager.enabled=true.
+#
+#   3. "external" — you manage the webhook-server-cert Secret yourself.
+#                  Equivalent to certificateSecret.external=true.  You must
+#                  also set webhook_ca_bundle (base64) so the API server
+#                  trusts the cert.
+# ---------------------------------------------------------------------------
+WEBHOOK_CERT_MODE = settings['webhook_cert_mode']
+WEBHOOK_CA_BUNDLE = settings['webhook_ca_bundle']
+
+# ---------------------------------------------------------------------------
+# Operator version — passed as --operator-version to the manager binary.
+# The Helm chart uses .Chart.AppVersion; for Tilt dev we read it from the
+# operator subchart's Chart.yaml so it stays in sync automatically.
+# Override via tilt-settings.yaml if needed:
+#
+#   tilt-settings.yaml:
+#     operator_version: "1.2.3"
+# ---------------------------------------------------------------------------
+def _read_chart_app_version():
+    """Read appVersion from the operator subchart's Chart.yaml."""
+    chart_path = os.path.join(
+        os.getcwd(), '..', 'helm', 'charts', 'platform',
+        'components', 'operator', 'Chart.yaml')
+    if os.path.exists(chart_path):
+        chart = read_yaml(chart_path, default={})
+        if chart and 'appVersion' in chart:
+            return str(chart['appVersion'])
+    return '0.0.0-dev'
+
+OPERATOR_VERSION = settings.get('operator_version', _read_chart_app_version())
+
+# ---------------------------------------------------------------------------
+# Paths (relative to this Tiltfile, i.e. deploy/operator/)
+# ---------------------------------------------------------------------------
+OPERATOR_DIR = os.getcwd()                                     # deploy/operator
+HELM_CHART   = os.path.join(OPERATOR_DIR, '..', 'helm', 'charts', 'platform')  # deploy/helm/charts/platform
+CRD_DIR      = os.path.join(HELM_CHART, 'components', 'operator', 'crds')
+
+IMG_NAME = 'controller'
+IMG_TAG  = 'tilt-dev'
+IMG      = (REGISTRY + '/' + IMG_NAME) if REGISTRY else IMG_NAME
+IMG_REF  = IMG + ':' + IMG_TAG
+
+# ---------------------------------------------------------------------------
+# Compile the manager binary locally (much faster than building in Docker)
+# ---------------------------------------------------------------------------
+def compile_manager():
+    return 'CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o tilt_bin/manager ./cmd/main.go'
+
+local_resource(
+    'manager-build',
+    compile_manager(),
+    deps=[
+        'api/',
+        'cmd/',
+        'internal/',
+        'go.mod',
+        'go.sum',
+    ],
+    ignore=['*/*/zz_generated.deepcopy.go'],
+    labels=['operator'],
+)
+
+# ---------------------------------------------------------------------------
+# CRDs — regenerate & apply via server-side apply on change
+# ---------------------------------------------------------------------------
+SKIP_CODEGEN = settings['skip_codegen']
+_crd_cmd = 'kubectl apply --server-side --force-conflicts -f ' + CRD_DIR
+if not SKIP_CODEGEN:
+    _crd_cmd = 'make generate && make manifests && ' + _crd_cmd
+
+local_resource(
+    'crds',
+    _crd_cmd,
+    deps=['api/'],
+    ignore=['*/*/zz_generated.deepcopy.go'],
+    labels=['operator'],
+)
+
+# ---------------------------------------------------------------------------
+# Webhook TLS — the setup depends on WEBHOOK_CERT_MODE.
+#
+# "auto":         Generate a self-signed cert Secret; CA injection into webhook
+#                 configs happens post-deploy via webhook-ca-inject below.
+# "cert-manager": cert-manager owns the Secret + CA injection; we only need to
+#                 replicate the CRD-conversion-patch hook Job that --no-hooks
+#                 skips.
+# "external":     User-managed Secret; we patch the caBundle from settings.
+# ---------------------------------------------------------------------------
+WEBHOOK_SECRET = 'webhook-server-cert'
+
+if WEBHOOK_CERT_MODE == 'auto':
+    local_resource(
+        'webhook-cert',
+        cmd='''\
+set -e
+if kubectl -n {ns} get secret {s} >/dev/null 2>&1; then exit 0; fi
+echo "Generating self-signed webhook TLS cert..."
+TMPDIR=$(mktemp -d)
+openssl req -x509 -newkey rsa:2048 -nodes \\
+  -keyout "$TMPDIR/tls.key" -out "$TMPDIR/tls.crt" \\
+  -subj "/CN=dynamo-dynamo-operator-webhook-service.{ns}.svc" \\
+  -addext "subjectAltName=DNS:dynamo-dynamo-operator-webhook-service.{ns}.svc,DNS:dynamo-dynamo-operator-webhook-service.{ns}.svc.cluster.local" \\
+  -days 3650 2>/dev/null
+cp "$TMPDIR/tls.crt" "$TMPDIR/ca.crt"
+kubectl -n {ns} create secret generic {s} \\
+  --from-file=tls.crt="$TMPDIR/tls.crt" \\
+  --from-file=tls.key="$TMPDIR/tls.key" \\
+  --from-file=ca.crt="$TMPDIR/ca.crt"
+rm -rf "$TMPDIR"
+'''.format(ns=NAMESPACE, s=WEBHOOK_SECRET),
+        resource_deps=['crds'],
+        labels=['operator'],
+    )
+elif WEBHOOK_CERT_MODE == 'cert-manager':
+    # cert-manager handles cert generation and CA injection via Issuer/Certificate
+    # CRs rendered by helm template (certManager.enabled=true). No local cert
+    # generation needed — but we need a placeholder resource for dependency ordering.
+    local_resource(
+        'webhook-cert',
+        cmd='echo "Using cert-manager for webhook certificates."',
+        resource_deps=['crds'],
+        labels=['operator'],
+    )
+elif WEBHOOK_CERT_MODE == 'external':
+    # User manages the Secret externally. Validate that it exists.
+    local_resource(
+        'webhook-cert',
+        cmd='''\
+set -e
+if ! kubectl -n {ns} get secret {s} >/dev/null 2>&1; then
+  echo "ERROR: webhook_cert_mode=external but Secret '{s}' not found in namespace '{ns}'."
+  echo "Create it with tls.crt, tls.key, and ca.crt keys before running tilt up."
+  exit 1
+fi
+echo "Using externally managed webhook cert secret '{s}'."
+'''.format(ns=NAMESPACE, s=WEBHOOK_SECRET),
+        resource_deps=['crds'],
+        labels=['operator'],
+    )
+    if not WEBHOOK_CA_BUNDLE:
+        fail("webhook_cert_mode=external requires webhook_ca_bundle to be set in tilt-settings.yaml")
+else:
+    fail("Invalid webhook_cert_mode '%s'. Must be 'auto', 'cert-manager', or 'external'." % WEBHOOK_CERT_MODE)
+
+# ---------------------------------------------------------------------------
+# MPI SSH Secret — generate an SSH keypair for multi-node MPI communication.
+# The production chart handles this via the mpi-run-ssh-keygen-job Helm hook;
+# for local dev we generate the keypair inline.
+# ---------------------------------------------------------------------------
+MPI_SECRET = 'mpi-run-ssh-secret'
+
+local_resource(
+    'mpi-ssh-secret',
+    cmd='''\
+set -e
+if kubectl -n {ns} get secret {s} >/dev/null 2>&1; then exit 0; fi
+echo "Generating MPI SSH keypair..."
+TMPDIR=$(mktemp -d)
+ssh-keygen -t rsa -b 2048 -f "$TMPDIR/private.key" -N "" -q
+kubectl -n {ns} create secret generic {s} \\
+  --from-file=private.key="$TMPDIR/private.key" \\
+  --from-file=private.key.pub="$TMPDIR/private.key.pub"
+rm -rf "$TMPDIR"
+echo "MPI SSH secret created."
+'''.format(ns=NAMESPACE, s=MPI_SECRET),
+    resource_deps=['crds'],
+    labels=['operator'],
+)
+
+# ---------------------------------------------------------------------------
+# Helm template → k8s_yaml
+#
+# Renders the production Helm chart (deploy/helm/charts/platform) with the
+# operator and required infrastructure (NATS by default). This gives you a
+# fully working cluster where you can apply DGDR/DGD resources and have them
+# reconcile into real workloads on your GPU nodes — while live-reloading the
+# controller binary on every code change.
+#
+# Hook Jobs (cert-gen, ca-inject, ssh-keygen, crd-conversion-patch) are
+# excluded via --no-hooks since we handle them via local_resource steps.
+# ---------------------------------------------------------------------------
+def render_helm():
+    """Render the platform Helm chart with only the operator subchart enabled."""
+
+    helm_cmd = [
+        'helm', 'template', 'dynamo', HELM_CHART,
+        '--namespace', NAMESPACE,
+        '--set', 'dynamo-operator.enabled=true',
+        # Subcharts — NATS is on by default (workers need it)
+        '--set', 'nats.enabled=%s' % str(ENABLE_NATS).lower(),
+        '--set', 'dynamo-operator.nats.enabled=%s' % str(ENABLE_NATS).lower(),
+        '--set', 'global.etcd.install=%s' % str(ENABLE_ETCD).lower(),
+        '--set', 'global.kai-scheduler.install=%s' % str(ENABLE_KAI_SCHEDULER).lower(),
+        '--set', 'global.grove.install=%s' % str(ENABLE_GROVE).lower(),
+        # Point image at our Tilt-managed image
+        '--set', 'dynamo-operator.controllerManager.manager.image.repository=' + IMG,
+        '--set', 'dynamo-operator.controllerManager.manager.image.tag=' + IMG_TAG,
+        '--set', 'dynamo-operator.controllerManager.manager.image.pullPolicy=IfNotPresent',
+        # We apply CRDs ourselves in the local_resource above
+        '--set', 'dynamo-operator.upgradeCRD=false',
+        '--skip-crds',
+        # Skip hook Jobs — we handle them ourselves
+        '--no-hooks',
+    ]
+
+    # Webhook certificate mode
+    if WEBHOOK_CERT_MODE == 'cert-manager':
+        helm_cmd += [
+            '--set', 'dynamo-operator.webhook.certManager.enabled=true',
+        ]
+    elif WEBHOOK_CERT_MODE == 'external':
+        helm_cmd += [
+            '--set', 'dynamo-operator.webhook.certificateSecret.external=true',
+        ]
+        if WEBHOOK_CA_BUNDLE:
+            helm_cmd += [
+                '--set', 'dynamo-operator.webhook.caBundle=' + WEBHOOK_CA_BUNDLE,
+            ]
+
+    # Wire in imagePullSecrets when a pull secret is configured
+    if IMAGE_PULL_SECRET:
+        helm_cmd += ['--set', 'dynamo-operator.imagePullSecrets[0].name=' + IMAGE_PULL_SECRET]
+
+    # Append user-provided Helm overrides from tilt-settings
+    for k, v in HELM_VALUES.items():
+        helm_cmd += ['--set', '%s=%s' % (k, v)]
+
+    data = local(helm_cmd, quiet=True)
+
+    # Decode the YAML stream so we can patch individual documents
+    decoded = decode_yaml_stream(data)
+    patched = []
+    for doc in decoded:
+        if doc == None:
+            continue
+
+        # Ensure namespaced resources land in the target namespace.
+        # Cluster-scoped kinds must not have a namespace set.
+        _cluster_scoped_kinds = {
+            'ClusterRole', 'ClusterRoleBinding',
+            'ValidatingWebhookConfiguration', 'MutatingWebhookConfiguration',
+            'CustomResourceDefinition', 'Namespace',
+            'PriorityClass', 'StorageClass', 'IngressClass',
+        }
+        kind = doc.get('kind', '')
+        if 'metadata' in doc and 'namespace' not in doc['metadata'] and kind not in _cluster_scoped_kinds:
+            doc['metadata']['namespace'] = NAMESPACE
+
+        # Strip securityContext so Tilt's live_update (writing into the
+        # container as root) doesn't get blocked by non-root restrictions.
+        if doc.get('kind') == 'Deployment':
+            spec = doc.get('spec', {}).get('template', {}).get('spec', {})
+            spec.pop('securityContext', None)
+            for c in spec.get('containers', []):
+                c.pop('securityContext', None)
+
+        patched.append(doc)
+
+    return encode_yaml_stream(patched)
+
+# Create the namespace before applying anything else
+local('kubectl create namespace %s || true' % NAMESPACE, quiet=True)
+
+k8s_yaml(render_helm())
+
+# ---------------------------------------------------------------------------
+# Docker image — minimal container with just the compiled binary
+# ---------------------------------------------------------------------------
+DOCKERFILE = '''
+FROM alpine:3.20 AS base
+RUN apk add --no-cache ca-certificates
+FROM base
+WORKDIR /
+COPY ./tilt_bin/manager /manager
+COPY ./tilt_bin/manager /workspace/manager
+ENTRYPOINT ["/manager"]
+'''
+
+docker_build_with_restart(
+    IMG_REF,
+    context='.',
+    dockerfile_contents=DOCKERFILE,
+    entrypoint=['/manager', '--config=/etc/dynamo-operator/config.yaml',
+                '--operator-version=' + OPERATOR_VERSION],
+    only=['./tilt_bin/manager'],
+    live_update=[
+        sync('./tilt_bin/manager', '/manager'),
+    ],
+)
+
+if not REGISTRY:
+    print('WARNING: no registry configured — image will only be available locally.')
+    print('  Set "registry" in tilt-settings.yaml or pass REGISTRY env var.')
+
+# ---------------------------------------------------------------------------
+# Resource grouping — keep the Tilt UI tidy
+# ---------------------------------------------------------------------------
+k8s_resource(
+    workload='dynamo-dynamo-operator-controller-manager',
+    new_name='operator',
+    labels=['operator'],
+    port_forwards=['8081:8081'],  # health endpoint
+    resource_deps=['crds', 'manager-build', 'webhook-cert', 'mpi-ssh-secret'],
+)
+
+# ---------------------------------------------------------------------------
+# Post-deploy: webhook CA injection + CRD conversion patch
+#
+# What runs depends on WEBHOOK_CERT_MODE:
+#   "auto":         Patch webhook configs with the CA from our self-signed cert.
+#   "cert-manager": Patch DGDR CRD spec.conversion + cert-manager annotation
+#                   (replicates the webhook-crd-conversion-certmanager hook Job
+#                   that --no-hooks skips). CA injection into webhook configs is
+#                   handled by cert-manager's ca-injector via annotations
+#                   rendered by the Helm template.
+#   "external":     Patch webhook configs with the user-provided caBundle.
+# ---------------------------------------------------------------------------
+if WEBHOOK_CERT_MODE == 'auto':
+    local_resource(
+        'webhook-ca-inject',
+        cmd='''\
+set -e
+echo "Injecting CA bundle into webhook configurations..."
+CA_BUNDLE=$(kubectl -n {ns} get secret {s} -o jsonpath='{{.data.ca\\.crt}}')
+if [ -z "$CA_BUNDLE" ]; then
+  echo "ERROR: CA bundle not found in secret {s}"
+  exit 1
+fi
+PATCHED=0
+for wh in mutatingwebhookconfigurations validatingwebhookconfigurations; do
+  for name in $(kubectl get $wh -o name 2>/dev/null | grep dynamo-dynamo-operator); do
+    echo "  Patching $name ..."
+    PATCH=$(kubectl get "$name" -o json | jq --arg ca "$CA_BUNDLE" \\
+      '[.webhooks | to_entries[] | {{"op":"replace","path":"/webhooks/\\(.key)/clientConfig/caBundle","value":$ca}}]')
+    kubectl patch "$name" --type=json -p "$PATCH"
+    PATCHED=$((PATCHED+1))
+  done
+done
+if [ "$PATCHED" -eq 0 ]; then
+  echo "WARNING: no webhook configurations found to patch"
+else
+  echo "CA bundle injected into $PATCHED webhook configuration(s)."
+fi
+'''.format(ns=NAMESPACE, s=WEBHOOK_SECRET),
+        resource_deps=['operator'],
+        labels=['operator'],
+    )
+
+elif WEBHOOK_CERT_MODE == 'cert-manager':
+    # Replicate what webhook-crd-conversion-certmanager.yaml hook Job does:
+    # 1. Patch DGDR CRD with spec.conversion pointing to the webhook service
+    # 2. Annotate the CRD so cert-manager ca-injector populates the caBundle
+    local_resource(
+        'webhook-ca-inject',
+        cmd='''\
+set -e
+echo "Patching DGDR CRD with conversion webhook + cert-manager annotation..."
+kubectl patch crd dynamographdeploymentrequests.nvidia.com \\
+  --type merge --patch '{{
+    "spec": {{
+      "conversion": {{
+        "strategy": "Webhook",
+        "webhook": {{
+          "clientConfig": {{
+            "service": {{
+              "name": "dynamo-dynamo-operator-webhook-service",
+              "namespace": "{ns}",
+              "path": "/convert"
+            }}
+          }},
+          "conversionReviewVersions": ["v1"]
+        }}
+      }}
+    }}
+  }}'
+kubectl annotate crd dynamographdeploymentrequests.nvidia.com \\
+  --overwrite \\
+  cert-manager.io/inject-ca-from="{ns}/dynamo-dynamo-operator-serving-cert"
+echo "DGDR CRD conversion webhook configured; cert-manager ca-injector will populate caBundle."
+'''.format(ns=NAMESPACE),
+        resource_deps=['operator'],
+        labels=['operator'],
+    )
+
+elif WEBHOOK_CERT_MODE == 'external':
+    local_resource(
+        'webhook-ca-inject',
+        cmd='''\
+set -e
+echo "Injecting external CA bundle into webhook configurations..."
+CA_BUNDLE="{ca}"
+PATCHED=0
+for wh in mutatingwebhookconfigurations validatingwebhookconfigurations; do
+  for name in $(kubectl get $wh -o name 2>/dev/null | grep dynamo-dynamo-operator); do
+    echo "  Patching $name ..."
+    PATCH=$(kubectl get "$name" -o json | jq --arg ca "$CA_BUNDLE" \\
+      '[.webhooks | to_entries[] | {{"op":"replace","path":"/webhooks/\\(.key)/clientConfig/caBundle","value":$ca}}]')
+    kubectl patch "$name" --type=json -p "$PATCH"
+    PATCHED=$((PATCHED+1))
+  done
+done
+if [ "$PATCHED" -eq 0 ]; then
+  echo "WARNING: no webhook configurations found to patch"
+else
+  echo "CA bundle injected into $PATCHED webhook configuration(s)."
+fi
+'''.format(ca=WEBHOOK_CA_BUNDLE),
+        resource_deps=['operator'],
+        labels=['operator'],
+    )
+
+# Group subchart workloads in the Tilt UI
+if ENABLE_NATS:
+    k8s_resource(
+        workload='dynamo-nats',
+        labels=['infrastructure'],
+    )

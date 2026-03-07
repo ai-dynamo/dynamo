@@ -6,6 +6,7 @@
 *.so
 *.dylib
 bin/*
+tilt_bin/
 Dockerfile.cross
 
 #temp files
