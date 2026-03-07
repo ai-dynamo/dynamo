@@ -20,7 +20,7 @@ members = [
     "lib/bindings/c",
     "lib/bindings/python/codegen",
     "lib/velo-common",
-    "lib/velo-backend",
+    "lib/velo-transports",
     "lib/velo-events",
 ]
 resolver = "3"
@@ -55,7 +55,7 @@ kvbm-physical = { path = "lib/kvbm-physical", version = "1.0.0" }
 
 # velo
 velo-common = { path = "lib/velo-common", version = "1.0.0" }
-velo-backend = { path = "lib/velo-backend", version = "1.0.0" }
+velo-transports = { path = "lib/velo-transports", version = "1.0.0" }
 velo-events = { path = "lib/velo-events", version = "1.0.0" }
 
 # External dependencies

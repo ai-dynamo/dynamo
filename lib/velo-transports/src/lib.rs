@@ -5,7 +5,7 @@
 
 //! Multi-transport active message routing framework.
 //!
-//! `velo-backend` abstracts TCP, HTTP, NATS, gRPC, and UCX behind a unified
+//! `velo-transports` abstracts TCP, HTTP, NATS, gRPC, and UCX behind a unified
 //! [`Transport`] trait with zero-copy [`bytes::Bytes`], fire-and-forget error
 //! callbacks, priority-based peer routing, and 3-phase graceful shutdown.
 //!

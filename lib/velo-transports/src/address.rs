@@ -4,7 +4,7 @@
 //! Internal address builder for constructing WorkerAddress instances.
 //!
 //! This module provides the builder pattern for creating WorkerAddress instances
-//! from transport-specific endpoint data. It is internal to velo-backend.
+//! from transport-specific endpoint data. It is internal to velo-transports.
 
 use bytes::Bytes;
 use std::collections::HashMap;
@@ -227,7 +227,7 @@ mod tests {
     }
 
     // ========================================================================
-    // Integration tests: Verify WorkerAddressBuilder (velo-backend) produces
+    // Integration tests: Verify WorkerAddressBuilder (velo-transports) produces
     // addresses that WorkerAddress (velo-common) can correctly decode.
     // These tests ensure the two crates stay in sync on the wire format.
     // ========================================================================

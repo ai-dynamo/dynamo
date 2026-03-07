@@ -68,7 +68,7 @@ The derivation is always consistent—calling `worker_id()` multiple times retur
 use velo_common::WorkerAddress;
 use std::collections::HashMap;
 
-// Addresses are typically constructed by velo-backend transport builders,
+// Addresses are typically constructed by velo-transports transport builders,
 // but here we demonstrate the consumer API:
 let mut map = HashMap::new();
 map.insert("tcp".to_string(), b"tcp://127.0.0.1:5555".to_vec());
@@ -117,7 +117,7 @@ assert_eq!(peer_info.instance_id(), instance_id);
 
 ## Address Construction
 
-`WorkerAddress` instances are constructed by transport builders in `velo-backend`. Each transport (TCP, gRPC, NATS, UCX, etc.) contributes its endpoint data:
+`WorkerAddress` instances are constructed by transport builders in `velo-transports`. Each transport (TCP, gRPC, NATS, UCX, etc.) contributes its endpoint data:
 
 ```text
 ┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐

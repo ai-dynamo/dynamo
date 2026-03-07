@@ -1,10 +1,10 @@
-# velo-backend
+# velo-transports
 
 Multi-transport active message routing for distributed systems.
 
 ## Overview
 
-`velo-backend` abstracts TCP, HTTP, NATS, gRPC, and UCX behind a unified `Transport` trait. It provides:
+`velo-transports` abstracts TCP, HTTP, NATS, gRPC, and UCX behind a unified `Transport` trait. It provides:
 
 - **Zero-copy `Bytes`** — inbound frames share the receive buffer via `bytes::Bytes` slicing
 - **Fire-and-forget with error callbacks** — `send_message` is non-blocking; failures are reported through `TransportErrorHandler`
