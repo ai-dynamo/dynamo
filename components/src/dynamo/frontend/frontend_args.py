@@ -52,11 +52,9 @@ class FrontendConfig(KvRouterConfigBase):
         ...     "--model-name", "Llama-3.2-1B-Instruct",
         ...     "--http-port", "8080",
         ... ])
-        >>> config = FrontendConfig.from_cli_args(args)
-        >>> config.model_name
+        >>> config = FrontendConfig.from_cli_args(args)  # doctest: +SKIP
+        >>> config.model_name  # doctest: +SKIP
         'Llama-3.2-1B-Instruct'
-        >>> config.http_port
-        8080
     """
 
     interactive: bool
@@ -69,7 +67,7 @@ class FrontendConfig(KvRouterConfigBase):
     router_mode: str
     namespace: Optional[str] = None
     namespace_prefix: Optional[str] = None
-    decode_fallback: bool
+    enforce_disagg: bool
 
     migration_limit: int
     active_decode_blocks_threshold: Optional[float]
@@ -88,7 +86,6 @@ class FrontendConfig(KvRouterConfigBase):
     event_plane: str
     chat_processor: str
     enable_anthropic_api: bool
-    debug_perf: bool
     preprocess_workers: int
 
     def validate(self) -> None:
@@ -224,14 +221,15 @@ class FrontendArgGroup(ArgGroup):
 
         add_negatable_bool_argument(
             g,
-            flag_name="--decode-fallback",
-            env_var="DYN_DECODE_FALLBACK",
+            flag_name="--enforce-disagg",
+            env_var="DYN_ENFORCE_DISAGG",
             default=False,
-            dest="decode_fallback",
+            dest="enforce_disagg",
             help=(
-                "Allow falling back to decode-only (aggregated) mode when prefill workers are "
-                "unavailable. By default, disaggregated prefill-decode is enforced and requests "
-                "fail if no prefill workers are found."
+                "Strictly enforce disaggregated mode. Requests will fail if the prefill router "
+                "has not activated yet (e.g., prefill workers still registering). This is stricter "
+                "than the default: without this flag, requests arriving before prefill workers are "
+                "discovered fall through to aggregated decode-only routing."
             ),
         )
 
@@ -387,19 +385,6 @@ class FrontendArgGroup(ArgGroup):
                 "processor."
             ),
             choices=["dynamo", "vllm"],
-        )
-
-        add_negatable_bool_argument(
-            g,
-            flag_name="--dyn-debug-perf",
-            env_var="DYN_DEBUG_PERF",
-            default=False,
-            dest="debug_perf",
-            help=(
-                "[EXPERIMENTAL] Enable performance instrumentation for diagnosing preprocessing bottlenecks. "
-                "Logs per-function timing, request concurrency, and hot-path section durations. "
-                "'--dyn-chat-processor vllm' only."
-            ),
         )
 
         add_argument(

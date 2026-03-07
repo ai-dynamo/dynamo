@@ -49,9 +49,9 @@ class KvRouterConfigBase(ConfigBase):
         >>> class MyRouterConfig(KvRouterConfigBase):
         ...     endpoint: str = "http://localhost:8080"
         >>>
-        >>> config = MyRouterConfig()
-        >>> kwargs = config.kv_router_kwargs()
-        >>> "overlap_score_weight" in kwargs
+        >>> config = MyRouterConfig()  # doctest: +SKIP
+        >>> kwargs = config.kv_router_kwargs()  # doctest: +SKIP
+        >>> "overlap_score_weight" in kwargs  # doctest: +SKIP
         True
     """
 

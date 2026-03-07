@@ -504,11 +504,15 @@ class ModelRuntimeConfig:
     max_num_batched_tokens: int | None
     tool_call_parser: str | None
     reasoning_parser: str | None
+    data_parallel_start_rank: int
+    data_parallel_size: int
     enable_local_indexer: bool
     runtime_data: dict[str, Any]
     tensor_model_config: Any | None
     data_parallel_size: int
     data_parallel_start_rank: int
+    bootstrap_host: str | None
+    bootstrap_port: int | None
 
     def __init__(self) -> None: ...
 
@@ -526,6 +530,14 @@ class ModelRuntimeConfig:
             bootstrap_port: int | None = None,
         ) -> None:
         """Set the disaggregated endpoint for the model"""
+        ...
+
+    def set_tensor_model_config(self, tensor_model_config: Dict[str, Any]) -> None:
+        """Set the tensor model configuration from a dictionary."""
+        ...
+
+    def get_tensor_model_config(self) -> Any | None:
+        """Get the tensor model configuration."""
         ...
 
 class OverlapScores:
@@ -1100,7 +1112,7 @@ class ModelType:
     Audios: ModelType
     Videos: ModelType
 
-    def __or__(self, other: "ModelType") -> "ModelType":
+    def __or__(self, other: ModelType) -> ModelType:
         ...
 
     def supports_chat(self) -> bool:
@@ -1133,7 +1145,7 @@ class RouterConfig:
         ...     mode=RouterMode.KV,
         ...     config=kv_config,
         ...     active_decode_blocks_threshold=0.9,
-        ...     decode_fallback=True,
+        ...     enforce_disagg=True,
         ... )
     """
     router_mode: RouterMode
@@ -1146,7 +1158,7 @@ class RouterConfig:
         active_decode_blocks_threshold: Optional[float] = None,
         active_prefill_tokens_threshold: Optional[int] = None,
         active_prefill_tokens_threshold_frac: Optional[float] = None,
-        decode_fallback: bool = False,
+        enforce_disagg: bool = False,
     ) -> None:
         """
         Create a RouterConfig.
@@ -1157,7 +1169,7 @@ class RouterConfig:
             active_decode_blocks_threshold: Threshold percentage (0.0-1.0) for decode blocks busy detection
             active_prefill_tokens_threshold: Literal token count threshold for prefill busy detection
             active_prefill_tokens_threshold_frac: Fraction of max_num_batched_tokens for busy detection
-            decode_fallback: Allow falling back to decode-only mode when prefill workers are unavailable
+            enforce_disagg: Strictly enforce disaggregated mode, failing requests if no prefill workers are available
         """
         ...
 
@@ -1239,6 +1251,8 @@ async def register_model(
     runtime_config: Optional[ModelRuntimeConfig] = None,
     user_data: Optional[Dict[str, Any]] = None,
     custom_template_path: Optional[str] = None,
+    media_decoder: Optional[MediaDecoder] = None,
+    media_fetcher: Optional[MediaFetcher] = None,
     lora_name: Optional[str] = None,
     base_model_path: Optional[str] = None,
 ) -> None:
@@ -1834,7 +1848,9 @@ class EntrypointArgs:
         tls_cert_path: Optional[str] = None,
         tls_key_path: Optional[str] = None,
         extra_engine_args: Optional[str] = None,
+        runtime_config: Optional[ModelRuntimeConfig] = None,
         namespace: Optional[str] = None,
+        namespace_prefix: Optional[str] = None,
         is_prefill: bool = False,
         migration_limit: int = 0,
         chat_engine_factory: Optional[Callable] = None,
@@ -1857,7 +1873,9 @@ class EntrypointArgs:
             tls_cert_path: TLS certificate path (PEM format)
             tls_key_path: TLS key path (PEM format)
             extra_engine_args: Path to extra engine arguments file
+            runtime_config: Optional runtime configuration for discovery registration
             namespace: Dynamo namespace for model discovery scoping
+            namespace_prefix: Optional namespace prefix
             is_prefill: Whether this is a prefill worker
             migration_limit: Maximum number of request migrations (0=disabled)
             chat_engine_factory: Optional Python chat completions engine factory callback
@@ -1876,6 +1894,8 @@ class PlannerDecision:
         >>> print(decision.num_prefill_workers, decision.num_decode_workers)
         >>> await client.complete(decision)
     """
+    num_prefill_workers: int
+    num_decode_workers: int
     ...
 
 class VirtualConnectorCoordinator:

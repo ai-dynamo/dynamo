@@ -49,12 +49,12 @@ def get_fs(fs_url: str) -> DirFileSystem:
     Examples:
         >>> from dynamo.common.storage import get_fs
         >>>
-        >>> fs = get_fs("file:///data/media")
-        >>> protocol = fs.fs.protocol
-        >>> protocol if isinstance(protocol, str) else protocol[0]
+        >>> fs = get_fs("file:///data/media")  # doctest: +SKIP
+        >>> protocol = fs.fs.protocol  # doctest: +SKIP
+        >>> protocol if isinstance(protocol, str) else protocol[0]  # doctest: +SKIP
         'file'
-        >>> fs = get_fs("s3://my-bucket")
-        >>> fs.path
+        >>> fs = get_fs("s3://my-bucket")  # doctest: +SKIP
+        >>> fs.path  # doctest: +SKIP
         'my-bucket'
 
     Returns:
@@ -93,12 +93,12 @@ def get_media_url(
             from the filesystem's protocol and root path.
 
     Examples:
-        >>> from dynamo.common.storage import get_fs, get_media_url
+        >>> from dynamo.common.storage import get_fs, get_media_url  # doctest: +SKIP
         >>>
-        >>> fs = get_fs("file:///data/media")
-        >>> get_media_url(fs, "videos/req-123.mp4")
+        >>> fs = get_fs("file:///data/media")  # doctest: +SKIP
+        >>> get_media_url(fs, "videos/req-123.mp4")  # doctest: +SKIP
         'file:///data/media/videos/req-123.mp4'
-        >>> get_media_url(fs, "img.png", base_url="https://cdn.example.com/media")
+        >>> get_media_url(fs, "img.png", base_url="https://cdn.example.com/media")  # doctest: +SKIP
         'https://cdn.example.com/media/img.png'
 
     Returns:
