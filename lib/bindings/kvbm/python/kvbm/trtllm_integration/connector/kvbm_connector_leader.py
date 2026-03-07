@@ -42,9 +42,18 @@ class DynamoKVBMConnectorLeader(KvCacheConnectorScheduler):
 
         mappings = self._llm_args.parallel_config.to_mapping()
 
+        # Check enable_attention_dp from mappings first, fall back to llm_args
+        enable_attention_dp = getattr(
+            mappings,
+            "enable_attention_dp",
+            getattr(self._llm_args, "enable_attention_dp", False),
+        )
+
         # With attention DP, each rank is an independent DP domain with its
         # own leader + worker pair, so num_workers=1 per leader.
-        if mappings.enable_attention_dp:
+        # Each rank has its own per-rank ZMQ ports; the handshake expects
+        # num_workers replies, so we must use 1 (not world_size).
+        if enable_attention_dp:
             num_workers = 1
         else:
             num_workers = mappings.world_size
@@ -52,7 +61,7 @@ class DynamoKVBMConnectorLeader(KvCacheConnectorScheduler):
 
         # Determine the data parallel rank for this instance.
         # With attention DP, each rank is independent with its own KVBM/consolidator.
-        dp_rank = mappings.rank if mappings.enable_attention_dp else 0
+        dp_rank = mappings.rank if enable_attention_dp else 0
 
         # Set bytes_per_block to 0, because we will retrieve the actual value from the worker side.
         leader = KvbmLeader(num_workers, drt=self.drt, dp_rank=dp_rank)

@@ -43,6 +43,10 @@ pub struct LeaderSockets {
 }
 
 pub fn new_leader_sockets(pub_url: &str, ack_url: &str) -> Result<LeaderSockets> {
+    tracing::info!(
+        "ZMQ leader binding: pub_url={}, ack_url={}",
+        pub_url, ack_url
+    );
     let context = Context::new();
     let pub_socket = publish(&context).bind(pub_url)?;
     let pub_url = pub_socket

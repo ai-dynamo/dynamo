@@ -80,6 +80,12 @@ impl KvbmLeader {
         let leader_init_timeout_sec: u64 =
             get_leader_init_timeout_secs(env_kvbm_leader::DYN_KVBM_LEADER_WORKER_INIT_TIMEOUT_SECS);
 
+        let dp_rank_val = dp_rank.unwrap_or(0);
+        tracing::info!(
+            "KvbmLeader::new called: world_size={}, dp_rank={:?} (resolved={})",
+            world_size, dp_rank, dp_rank_val
+        );
+
         let config = KvbmLeaderConfig::builder()
             .world_size(world_size)
             .leader_init_timeout_secs(leader_init_timeout_sec)

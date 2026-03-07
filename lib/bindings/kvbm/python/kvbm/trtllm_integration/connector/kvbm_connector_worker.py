@@ -44,7 +44,12 @@ class DynamoKVBMConnectorWorker(KvCacheConnectorWorker):
         mappings = self._llm_args.parallel_config.to_mapping()
         self.rank = mappings.rank
 
-        dp_rank = self.rank if mappings.enable_attention_dp else 0
+        enable_attention_dp = getattr(
+            mappings,
+            "enable_attention_dp",
+            getattr(self._llm_args, "enable_attention_dp", False),
+        )
+        dp_rank = self.rank if enable_attention_dp else 0
         self._connector = RustKvConnectorWorker(
             self.drt, str(self.rank), dp_rank=dp_rank
         )
@@ -98,6 +103,11 @@ class DynamoKVBMConnectorWorker(KvCacheConnectorWorker):
             kv_cache_tensor,
             raw_event_handles,
         )
+
+        # Finalize registration to create ZMQ connection and complete leader handshake.
+        # DSA models that need register_indexer_k_caches() must override this method
+        # and call finalize_registration() after registering all cache groups.
+        self._connector.finalize_registration()
 
     @nvtx_annotate(category="worker")
     def bind_connector_meta(self, metadata: object):
