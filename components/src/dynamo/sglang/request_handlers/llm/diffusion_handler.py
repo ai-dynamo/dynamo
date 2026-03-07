@@ -88,7 +88,7 @@ class DiffusionWorkerHandler(DecodeWorkerHandler):
         )
 
         # Process stream output (token-based or text-based)
-        if self.skip_tokenizer_init:
+        if not self.use_sglang_tokenizer:
             async for out in self._process_token_stream(async_gen, context):
                 yield out
         else:
