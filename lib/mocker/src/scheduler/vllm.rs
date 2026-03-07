@@ -807,6 +807,186 @@ mod tests {
         println!("Test passed! Received {received_tokens} tokens");
     }
 
+    /// White-box unit test that directly creates SchedulerState + KvManager,
+    /// manually invokes simulate_prefill / simulate_decode, and asserts on
+    /// queue states and block counts after each step.
+    #[tokio::test]
+    async fn test_scheduler_internal_state_transitions() {
+        let args = MockEngineArgs::builder()
+            .block_size(4)
+            .num_gpu_blocks(6)
+            .max_num_batched_tokens(Some(12))
+            .max_num_seqs(Some(3))
+            .enable_chunked_prefill(true)
+            .enable_prefix_caching(false)
+            .speedup_ratio(0.0)
+            .build()
+            .unwrap();
+
+        let mut state = SchedulerState::default();
+        let mut kv_manager = KvManager::new(args.num_gpu_blocks, args.block_size);
+        let mut hit_rates = RunningMean::new(1000);
+        let output_tx: Option<mpsc::UnboundedSender<OutputSignal>> = None;
+
+        let r1_uuid = Uuid::from_u128(1);
+        let r2_uuid = Uuid::from_u128(2);
+        let r3_uuid = Uuid::from_u128(3);
+
+        // ── Step 1: Receive 3 requests ──
+        // R1: 8 input, 2 max_output → 2 blocks
+        // R2: 8 input, 2 max_output → 2 blocks
+        // R3: 12 input, 2 max_output → 3 blocks
+        state.receive(DirectRequest {
+            tokens: (0..8).collect(),
+            max_output_tokens: 2,
+            uuid: Some(r1_uuid),
+            dp_rank: 0,
+        });
+        state.receive(DirectRequest {
+            tokens: (100..108).collect(),
+            max_output_tokens: 2,
+            uuid: Some(r2_uuid),
+            dp_rank: 0,
+        });
+        state.receive(DirectRequest {
+            tokens: (200..212).collect(),
+            max_output_tokens: 2,
+            uuid: Some(r3_uuid),
+            dp_rank: 0,
+        });
+
+        assert_eq!(state.waiting.len(), 3);
+        assert_eq!(state.prefill.len(), 0);
+        assert_eq!(state.decode.len(), 0);
+        assert_eq!(kv_manager.num_active_blocks(), 0);
+
+        // ── Step 2: First simulate_prefill ──
+        // Budget=12. R1 takes 8 tokens (2 blocks), fully prefilled → decode.
+        // R2 takes 4 tokens (1 block, chunked), partially prefilled → stays in prefill.
+        simulate_prefill(&mut state, &mut kv_manager, &mut hit_rates, &args).await;
+
+        assert_eq!(state.waiting.len(), 1);
+        assert_eq!(state.prefill.len(), 1);
+        assert_eq!(state.decode.len(), 1);
+        assert_eq!(state.decode[0], r1_uuid);
+        assert_eq!(state.prefill[0], r2_uuid);
+        assert_eq!(state.waiting[0], r3_uuid);
+        assert_eq!(kv_manager.num_active_blocks(), 3); // 2 for R1 + 1 for R2
+
+        let seq = match state.requests.get(&r1_uuid).unwrap() {
+            Request::Active(s) => s,
+            _ => panic!("expected ActiveSequence"),
+        };
+        assert_eq!(seq.num_allocated_tokens(), 8);
+        assert_eq!(seq.generated_tokens(), 0);
+
+        let seq = match state.requests.get(&r2_uuid).unwrap() {
+            Request::Active(s) => s,
+            _ => panic!("expected ActiveSequence"),
+        };
+        assert_eq!(seq.num_allocated_tokens(), 4);
+        assert_eq!(seq.generated_tokens(), 0);
+
+        // ── Step 3: First simulate_decode ──
+        // R1 generates 1 token, gains a partial block.
+        simulate_decode(
+            &mut state,
+            &mut kv_manager,
+            &output_tx,
+            &args.perf_model,
+            args.block_size,
+            args.speedup_ratio,
+            args.preemption_mode,
+        )
+        .await;
+
+        assert_eq!(state.decode.len(), 1);
+        assert_eq!(state.decode[0], r1_uuid);
+        assert_eq!(kv_manager.num_active_blocks(), 4); // +1 partial for R1
+
+        let seq = match state.requests.get(&r1_uuid).unwrap() {
+            Request::Active(s) => s,
+            _ => panic!("expected ActiveSequence"),
+        };
+        assert_eq!(seq.generated_tokens(), 1);
+
+        // ── Step 4: Second simulate_prefill ──
+        // Budget=11. R2 finishes (4 more tokens, 1 block → active=5, decode).
+        // R3 admitted, needs 2 blocks for chunk of 7. Only 1 free slot → partial.
+        // Preempt R2 (LIFO) → R2 back to waiting. Retry R3 → evicts R2's
+        // inactive blocks, allocates 2 more → R3 allocated_tokens=11.
+        simulate_prefill(&mut state, &mut kv_manager, &mut hit_rates, &args).await;
+
+        assert_eq!(state.waiting.len(), 1, "R2 preempted back to waiting");
+        assert_eq!(state.waiting[0], r2_uuid);
+        assert_eq!(state.prefill.len(), 1, "R3 partially prefilled");
+        assert_eq!(state.prefill[0], r3_uuid);
+        assert_eq!(state.decode.len(), 1, "R1 still decoding");
+        assert_eq!(state.decode[0], r1_uuid);
+        assert_eq!(kv_manager.num_active_blocks(), 6); // at capacity
+
+        let seq = match state.requests.get(&r3_uuid).unwrap() {
+            Request::Active(s) => s,
+            _ => panic!("expected ActiveSequence"),
+        };
+        assert_eq!(seq.num_allocated_tokens(), 11);
+
+        // ── Step 5: Second simulate_decode ──
+        // R1 generates 2nd token → complete. Frees 3 blocks (1 destroyed, 2 deactivated).
+        simulate_decode(
+            &mut state,
+            &mut kv_manager,
+            &output_tx,
+            &args.perf_model,
+            args.block_size,
+            args.speedup_ratio,
+            args.preemption_mode,
+        )
+        .await;
+
+        assert!(!state.requests.contains_key(&r1_uuid), "R1 completed");
+        assert_eq!(state.decode.len(), 0);
+        assert_eq!(state.prefill.len(), 1);
+        assert_eq!(state.waiting.len(), 1);
+        assert_eq!(kv_manager.num_active_blocks(), 3); // only R3's 3 blocks
+
+        // ── Step 6: Third simulate_prefill ──
+        // R3 finishes prefill (1 token left, no new blocks) → decode.
+        // R2 re-admitted, fully prefilled (2 blocks via inactive eviction) → decode.
+        simulate_prefill(&mut state, &mut kv_manager, &mut hit_rates, &args).await;
+
+        assert_eq!(state.waiting.len(), 0);
+        assert_eq!(state.prefill.len(), 0);
+        assert_eq!(state.decode.len(), 2);
+        assert!(state.decode.contains(&r3_uuid));
+        assert!(state.decode.contains(&r2_uuid));
+        assert_eq!(kv_manager.num_active_blocks(), 5); // 3 for R3 + 2 for R2
+
+        // ── Steps 7+: Cycle until all requests complete ──
+        loop {
+            simulate_prefill(&mut state, &mut kv_manager, &mut hit_rates, &args).await;
+            simulate_decode(
+                &mut state,
+                &mut kv_manager,
+                &output_tx,
+                &args.perf_model,
+                args.block_size,
+                args.speedup_ratio,
+                args.preemption_mode,
+            )
+            .await;
+
+            if state.is_empty() {
+                break;
+            }
+        }
+
+        assert_eq!(state.waiting.len(), 0);
+        assert_eq!(state.prefill.len(), 0);
+        assert_eq!(state.decode.len(), 0);
+        assert_eq!(kv_manager.num_active_blocks(), 0);
+    }
+
     #[tokio::test]
     async fn test_receiver_drop_cleans_up_resources() {
         let block_size: usize = 64;
