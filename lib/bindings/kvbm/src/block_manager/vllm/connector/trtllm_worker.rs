@@ -10,7 +10,9 @@ use std::collections::HashSet;
 use std::sync::{Arc, OnceLock};
 
 use super::*;
-use crate::block_manager::distributed::{get_leader_zmq_ack_url, get_leader_zmq_pub_url};
+use crate::block_manager::distributed::{
+    get_leader_zmq_ack_url_for_rank, get_leader_zmq_pub_url_for_rank,
+};
 use crate::block_manager::vllm::connector::worker::event_sync_blocking;
 use crate::{block_manager::distributed::VllmTensor, to_pyerr};
 use dynamo_runtime::DistributedRuntime;
@@ -112,10 +114,13 @@ pub struct KvConnectorWorker {
 
     /// Pending indexer k cache registration (for DSA models)
     pending_indexer_k: Option<PendingIndexerConfig>,
+
+    /// DP rank for per-rank ZMQ port offsets (attention DP)
+    dp_rank: u16,
 }
 
 impl KvConnectorWorker {
-    fn new(drt: Option<Arc<DistributedRuntime>>, trtllm_rank: String) -> anyhow::Result<Self> {
+    fn new(drt: Option<Arc<DistributedRuntime>>, trtllm_rank: String, dp_rank: u16) -> anyhow::Result<Self> {
         let runtime = get_current_tokio_handle();
 
         let (scheduler, worker_client, transfer_client) =
@@ -152,6 +157,7 @@ impl KvConnectorWorker {
             layer_events: Vec::new(),
             pending_primary: None,
             pending_indexer_k: None,
+            dp_rank,
         })
     }
 }
@@ -514,8 +520,8 @@ impl Worker for KvConnectorWorker {
             .device_layout_type(LayoutType::FullyContiguous)
             .host_layout_type(LayoutType::FullyContiguous)
             .disk_layout_type(LayoutType::FullyContiguous)
-            .leader_pub_url(get_leader_zmq_pub_url())
-            .leader_ack_url(get_leader_zmq_ack_url())
+            .leader_pub_url(get_leader_zmq_pub_url_for_rank(self.dp_rank))
+            .leader_ack_url(get_leader_zmq_ack_url_for_rank(self.dp_rank))
             .scheduler_client(Some(self.transfer_client.clone()))
             .additional_cache_groups(additional_cache_groups)
             .build()?;
@@ -541,8 +547,8 @@ pub struct PyTrtllmKvConnectorWorker {
 #[pymethods]
 impl PyTrtllmKvConnectorWorker {
     #[new]
-    #[pyo3(signature = (py_drt, trtllm_rank))]
-    pub fn new(py_drt: Option<PyObject>, trtllm_rank: String) -> PyResult<Self> {
+    #[pyo3(signature = (py_drt, trtllm_rank, dp_rank=None))]
+    pub fn new(py_drt: Option<PyObject>, trtllm_rank: String, dp_rank: Option<u16>) -> PyResult<Self> {
         let drt: Option<Arc<DistributedRuntime>> = Python::with_gil(|py| {
             if let Some(obj) = py_drt {
                 extract_distributed_runtime_from_obj(py, obj)
@@ -552,7 +558,7 @@ impl PyTrtllmKvConnectorWorker {
         })?;
 
         let connector_worker: Box<dyn Worker> =
-            Box::new(KvConnectorWorker::new(drt, trtllm_rank).map_err(to_pyerr)?);
+            Box::new(KvConnectorWorker::new(drt, trtllm_rank, dp_rank.unwrap_or(0)).map_err(to_pyerr)?);
         Ok(Self { connector_worker })
     }
 

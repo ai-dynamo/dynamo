@@ -50,8 +50,12 @@ class DynamoKVBMConnectorLeader(KvCacheConnectorScheduler):
             num_workers = mappings.world_size
         self.block_size = self._llm_args.kv_cache_config.tokens_per_block
 
+        # Determine the data parallel rank for this instance.
+        # With attention DP, each rank is independent with its own KVBM/consolidator.
+        dp_rank = mappings.rank if mappings.enable_attention_dp else 0
+
         # Set bytes_per_block to 0, because we will retrieve the actual value from the worker side.
-        leader = KvbmLeader(num_workers, drt=self.drt)
+        leader = KvbmLeader(num_workers, drt=self.drt, dp_rank=dp_rank)
 
         # Check if consolidator is enabled first
         consolidator_enabled = is_truthy(
@@ -101,10 +105,6 @@ class DynamoKVBMConnectorLeader(KvCacheConnectorScheduler):
             logger.info(
                 "KV Event Consolidator disabled via DYN_KVBM_KV_EVENTS_ENABLE_CONSOLIDATOR"
             )
-
-        # Determine the data parallel rank for this consolidator instance.
-        # With attention DP, each rank is independent with its own KVBM/consolidator.
-        dp_rank = mappings.rank if mappings.enable_attention_dp else 0
 
         print(
             f"KvConnectorLeader initialized with rank: {mappings.rank}, dp_rank: {dp_rank}"

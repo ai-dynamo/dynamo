@@ -44,7 +44,10 @@ class DynamoKVBMConnectorWorker(KvCacheConnectorWorker):
         mappings = self._llm_args.parallel_config.to_mapping()
         self.rank = mappings.rank
 
-        self._connector = RustKvConnectorWorker(self.drt, str(self.rank))
+        dp_rank = self.rank if mappings.enable_attention_dp else 0
+        self._connector = RustKvConnectorWorker(
+            self.drt, str(self.rank), dp_rank=dp_rank
+        )
         self.event = torch.cuda.Event()
 
         # Default to old way of processing offload

@@ -7,7 +7,7 @@ use derive_getters::Dissolve;
 use llm_rs::block_manager::distributed::{
     KvbmLeader as KvbmLeaderImpl, KvbmLeaderConfig, KvbmLeaderNumBlocksConfig,
 };
-use utils::{get_leader_zmq_ack_url, get_leader_zmq_pub_url};
+use utils::{get_leader_zmq_ack_url_for_rank, get_leader_zmq_pub_url_for_rank};
 
 use dynamo_runtime::config::environment_names::kvbm::cpu_cache as env_cpu_cache;
 use dynamo_runtime::config::environment_names::kvbm::disk_cache as env_disk_cache;
@@ -67,8 +67,8 @@ impl KvbmLeader {
 #[pymethods]
 impl KvbmLeader {
     #[new]
-    #[pyo3(signature = (world_size, drt=None))]
-    fn new(world_size: usize, drt: Option<PyObject>) -> PyResult<Self> {
+    #[pyo3(signature = (world_size, drt=None, dp_rank=None))]
+    fn new(world_size: usize, drt: Option<PyObject>, dp_rank: Option<u16>) -> PyResult<Self> {
         let drt: Option<Arc<rs::DistributedRuntime>> = Python::with_gil(|py| {
             if let Some(obj) = drt {
                 extract_distributed_runtime_from_obj(py, obj)
@@ -91,8 +91,8 @@ impl KvbmLeader {
                 env_disk_cache::DYN_KVBM_DISK_CACHE_GB,
                 env_disk_cache::DYN_KVBM_DISK_CACHE_OVERRIDE_NUM_BLOCKS,
             ))
-            .leader_pub_url(get_leader_zmq_pub_url())
-            .leader_ack_url(get_leader_zmq_ack_url())
+            .leader_pub_url(get_leader_zmq_pub_url_for_rank(dp_rank.unwrap_or(0)))
+            .leader_ack_url(get_leader_zmq_ack_url_for_rank(dp_rank.unwrap_or(0)))
             .build()
             .map_err(to_pyerr)?;
 

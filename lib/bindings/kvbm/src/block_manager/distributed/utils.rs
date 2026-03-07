@@ -41,34 +41,35 @@ fn get_leader_zmq_host() -> String {
         .unwrap_or_else(|| DEFAULT_LEADER_ZMQ_HOST.to_string())
 }
 
-fn get_leader_zmq_pub_port() -> String {
-    validated_port_from_env(
-        env_kvbm_leader::DYN_KVBM_LEADER_ZMQ_PUB_PORT,
-        DEFAULT_LEADER_ZMQ_PUB_PORT,
-    )
-    .to_string()
-}
-
-fn get_leader_zmq_ack_port() -> String {
-    validated_port_from_env(
-        env_kvbm_leader::DYN_KVBM_LEADER_ZMQ_ACK_PORT,
-        DEFAULT_LEADER_ZMQ_ACK_PORT,
-    )
-    .to_string()
-}
-
 pub fn get_leader_zmq_pub_url() -> String {
-    format!(
-        "tcp://{}:{}",
-        get_leader_zmq_host(),
-        get_leader_zmq_pub_port()
-    )
+    get_leader_zmq_pub_url_for_rank(0)
 }
 
 pub fn get_leader_zmq_ack_url() -> String {
-    format!(
-        "tcp://{}:{}",
-        get_leader_zmq_host(),
-        get_leader_zmq_ack_port()
-    )
+    get_leader_zmq_ack_url_for_rank(0)
+}
+
+/// Return the ZMQ PUB URL for a specific DP rank.
+/// Each rank offsets the base port by `rank * 2` to avoid collisions
+/// when multiple DP ranks run in the same process (attention DP).
+/// rank 0 → base, rank 1 → base+2, rank 2 → base+4, etc.
+/// (offset by 2 because each rank uses two consecutive ports: pub and ack)
+pub fn get_leader_zmq_pub_url_for_rank(rank: u16) -> String {
+    let base_port: u16 = validated_port_from_env(
+        env_kvbm_leader::DYN_KVBM_LEADER_ZMQ_PUB_PORT,
+        DEFAULT_LEADER_ZMQ_PUB_PORT,
+    );
+    let port = base_port + rank * 2;
+    format!("tcp://{}:{}", get_leader_zmq_host(), port)
+}
+
+/// Return the ZMQ ACK URL for a specific DP rank.
+/// See [`get_leader_zmq_pub_url_for_rank`] for the port offset scheme.
+pub fn get_leader_zmq_ack_url_for_rank(rank: u16) -> String {
+    let base_port: u16 = validated_port_from_env(
+        env_kvbm_leader::DYN_KVBM_LEADER_ZMQ_ACK_PORT,
+        DEFAULT_LEADER_ZMQ_ACK_PORT,
+    );
+    let port = base_port + rank * 2;
+    format!("tcp://{}:{}", get_leader_zmq_host(), port)
 }
