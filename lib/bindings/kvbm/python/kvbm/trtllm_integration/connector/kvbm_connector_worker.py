@@ -208,7 +208,7 @@ class DynamoKVBMConnectorWorker(KvCacheConnectorWorker):
         self._connector = RustKvConnectorWorker(
             self.drt,
             str(self.rank),
-            rank=nccl_rank,
+            nccl_rank=nccl_rank,
             world_size=nccl_world_size,
             nccl_comm_ref=nccl_comm_ref,
         )

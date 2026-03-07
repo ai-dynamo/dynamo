@@ -81,8 +81,8 @@ pub struct KvConnectorWorker {
     /// cuda events created by the python side
     layer_events: Vec<u64>,
 
-    /// Rank for NCCL replicated mode (None = sharded mode)
-    rank: Option<i32>,
+    /// NCCL rank for replicated mode (None = sharded mode)
+    nccl_rank: Option<i32>,
 
     /// World size for NCCL replicated mode
     world_size: Option<i32>,
@@ -96,7 +96,7 @@ impl KvConnectorWorker {
     fn new(
         drt: Option<Arc<DistributedRuntime>>,
         trtllm_rank: String,
-        rank: Option<i32>,
+        nccl_rank: Option<i32>,
         world_size: Option<i32>,
         nccl_comm_ref: Option<pyo3::PyObject>,
     ) -> anyhow::Result<Self> {
@@ -130,7 +130,7 @@ impl KvConnectorWorker {
         tracing::info!(
             "KvConnectorWorker initialized with worker_rank: {}, nccl_rank: {:?}, world_size: {:?}, nccl_comm_ref: {}",
             trtllm_rank,
-            rank,
+            nccl_rank,
             world_size,
             if nccl_comm_ref.is_some() { "Some" } else { "None" }
         );
@@ -148,7 +148,7 @@ impl KvConnectorWorker {
             iteration: 0,
             layers_complete: 0,
             layer_events: Vec::new(),
-            rank,
+            nccl_rank,
             world_size,
             #[cfg(feature = "nccl")]
             nccl_comm,
@@ -159,13 +159,13 @@ impl KvConnectorWorker {
 /// Build NcclConfig from the provided parameters.
 /// Returns NcclConfig::disabled() if any required parameter is missing or if NCCL feature is not enabled.
 fn build_nccl_config(
-    rank: Option<i32>,
+    nccl_rank: Option<i32>,
     world_size: Option<i32>,
     nccl_comm_ptr: Option<usize>,
 ) -> NcclConfig {
     #[cfg(feature = "nccl")]
     {
-        match (rank, world_size, nccl_comm_ptr) {
+        match (nccl_rank, world_size, nccl_comm_ptr) {
             (Some(r), Some(ws), Some(ptr)) if ptr != 0 => {
                 tracing::info!(
                     "Creating NCCL config for replicated mode: rank={}, world_size={}, comm_ptr={:#x}",
@@ -188,7 +188,7 @@ fn build_nccl_config(
     }
     #[cfg(not(feature = "nccl"))]
     {
-        let _ = (rank, world_size, nccl_comm_ptr); // suppress unused warnings
+        let _ = (nccl_rank, world_size, nccl_comm_ptr); // suppress unused warnings
         tracing::debug!("NCCL feature not enabled, using sharded mode");
         NcclConfig::disabled()
     }
@@ -216,10 +216,10 @@ impl Worker for KvConnectorWorker {
         let nccl_comm_ptr = self.nccl_comm.as_ref().map(|a| a.as_raw() as usize);
         #[cfg(not(feature = "nccl"))]
         let nccl_comm_ptr: Option<usize> = None;
-        let nccl_config = build_nccl_config(self.rank, self.world_size, nccl_comm_ptr);
+        let nccl_config = build_nccl_config(self.nccl_rank, self.world_size, nccl_comm_ptr);
         // When NCCL is disabled, pass None for rank/world_size so the worker is consistently in sharded mode.
-        let (rank, world_size) = if nccl_config.is_enabled() {
-            (self.rank, self.world_size)
+        let (nccl_rank, world_size) = if nccl_config.is_enabled() {
+            (self.nccl_rank, self.world_size)
         } else {
             (None, None)
         };
@@ -237,7 +237,7 @@ impl Worker for KvConnectorWorker {
             .leader_pub_url(get_leader_zmq_pub_url())
             .leader_ack_url(get_leader_zmq_ack_url())
             .scheduler_client(Some(self.transfer_client.clone()))
-            .rank(rank)
+            .rank(nccl_rank)
             .world_size(world_size)
             .nccl_config(nccl_config)
             .build()?;
@@ -536,11 +536,11 @@ pub struct PyTrtllmKvConnectorWorker {
 #[pymethods]
 impl PyTrtllmKvConnectorWorker {
     #[new]
-    #[pyo3(signature = (py_drt, trtllm_rank, rank=None, world_size=None, nccl_comm_ref=None))]
+    #[pyo3(signature = (py_drt, trtllm_rank, nccl_rank=None, world_size=None, nccl_comm_ref=None))]
     pub fn new(
         py_drt: Option<PyObject>,
         trtllm_rank: String,
-        rank: Option<i32>,
+        nccl_rank: Option<i32>,
         world_size: Option<i32>,
         nccl_comm_ref: Option<PyObject>,
     ) -> PyResult<Self> {
@@ -553,7 +553,7 @@ impl PyTrtllmKvConnectorWorker {
         })?;
 
         let connector_worker: Box<dyn Worker> = Box::new(
-            KvConnectorWorker::new(drt, trtllm_rank, rank, world_size, nccl_comm_ref)
+            KvConnectorWorker::new(drt, trtllm_rank, nccl_rank, world_size, nccl_comm_ref)
                 .map_err(to_pyerr)?,
         );
         Ok(Self { connector_worker })
