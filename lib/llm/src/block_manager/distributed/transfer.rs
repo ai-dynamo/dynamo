@@ -110,21 +110,23 @@ impl NcclConfig {
     /// - `comm` is a valid NCCL communicator
     /// - The communicator will not be destroyed while this config exists
     #[cfg(feature = "nccl")]
-    pub unsafe fn enabled(comm: ncclComm_t, rank: i32, world_size: i32) -> Self { unsafe {
-        assert!(
-            world_size > 0 && (0..world_size).contains(&rank),
-            "NCCL topology invariant violated: required 0 <= rank < world_size, world_size > 0; got rank={}, world_size={}",
-            rank,
-            world_size
-        );
-        Self {
-            inner: Some(NcclConfigInner {
-                comm: NcclCommHandle::new(comm),
+    pub unsafe fn enabled(comm: ncclComm_t, rank: i32, world_size: i32) -> Self {
+        unsafe {
+            assert!(
+                world_size > 0 && (0..world_size).contains(&rank),
+                "NCCL topology invariant violated: required 0 <= rank < world_size, world_size > 0; got rank={}, world_size={}",
                 rank,
-                world_size,
-            }),
+                world_size
+            );
+            Self {
+                inner: Some(NcclConfigInner {
+                    comm: NcclCommHandle::new(comm),
+                    rank,
+                    world_size,
+                }),
+            }
         }
-    }}
+    }
 
     /// Returns true if NCCL is enabled and configured
     pub fn is_enabled(&self) -> bool {

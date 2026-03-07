@@ -13,7 +13,8 @@
 
 use anyhow::{Context, Result};
 use cudarc::nccl::sys::{
-    ncclComm_t, ncclCommDestroy, ncclCommInitRankConfig, ncclGetUniqueId, ncclResult_t, ncclUniqueId, ncclConfig_t
+    ncclComm_t, ncclCommDestroy, ncclCommInitRankConfig, ncclConfig_t, ncclGetUniqueId,
+    ncclResult_t, ncclUniqueId,
 };
 
 /// Check NCCL result and convert to anyhow::Result
@@ -34,7 +35,9 @@ fn check_nccl_result(result: ncclResult_t, operation: &str) -> Result<()> {
         };
         anyhow::bail!(
             "{} failed with error: {} ({:?}). Check NCCL_DEBUG=INFO for more details.",
-            operation, error_name, result
+            operation,
+            error_name,
+            result
         )
     }
 }
@@ -121,7 +124,8 @@ impl NcclBootstrap {
         // Copy bytes directly using transmute to handle both i8 and u8 internal arrays
         // (ARM64 uses u8, x86_64 uses i8 - same binary representation)
         let internal_bytes: &[u8; 128] = bytes[8..136].try_into().unwrap();
-        unique_id.internal = unsafe { *std::mem::transmute::<&[u8; 128], &[i8; 128]>(internal_bytes) };
+        unique_id.internal =
+            unsafe { *std::mem::transmute::<&[u8; 128], &[i8; 128]>(internal_bytes) };
 
         Ok(Self {
             unique_id,
@@ -188,8 +192,22 @@ impl NcclBootstrap {
             self.world_size
         );
 
-        let result = unsafe { ncclCommInitRankConfig(&mut comm, self.world_size, self.unique_id, rank, &mut config) };
-        check_nccl_result(result, &format!("ncclCommInitRank(rank={}, world_size={})", rank, self.world_size))?;
+        let result = unsafe {
+            ncclCommInitRankConfig(
+                &mut comm,
+                self.world_size,
+                self.unique_id,
+                rank,
+                &mut config,
+            )
+        };
+        check_nccl_result(
+            result,
+            &format!(
+                "ncclCommInitRank(rank={}, world_size={})",
+                rank, self.world_size
+            ),
+        )?;
         tracing::info!(
             "NCCL communicator initialized successfully: rank={}, world_size={}",
             rank,

@@ -36,13 +36,16 @@ fn build_nccl_config(
             (Some(r), Some(ws), Some(0)) => anyhow::bail!(
                 "NCCL replicated mode requires a valid communicator: rank={}, world_size={}, nccl_comm_ptr=0 (invalid). \
                  Provide a non-null nccl_comm_ptr or omit rank/world_size/nccl_comm_ptr for sharded mode.",
-                r, ws
+                r,
+                ws
             ),
             (r, ws, ptr) if wants_replicated => anyhow::bail!(
                 "NCCL replicated mode requires rank, world_size, and nccl_comm_ptr together; \
                  partial or invalid configuration is not allowed. Got rank={:?}, world_size={:?}, nccl_comm_ptr={:?}. \
                  Provide all three (with nccl_comm_ptr != 0) or omit all for sharded mode.",
-                r, ws, ptr
+                r,
+                ws,
+                ptr
             ),
             _ => Ok(NcclConfig::disabled()),
         }
@@ -248,11 +251,7 @@ impl KvbmWorker {
         // Build NcclConfig from owned comm (borrowed handle only)
         let nccl_config = build_nccl_config(rank, world_size, nccl_comm_ptr).map_err(to_pyerr)?;
         // When NCCL is disabled, pass None for rank/world_size so the worker is consistently in sharded mode.
-        let worker_rank = if nccl_config.is_enabled() {
-            rank
-        } else {
-            None
-        };
+        let worker_rank = if nccl_config.is_enabled() { rank } else { None };
 
         let config = KvbmWorkerConfig::builder()
             .cancel_token(get_current_cancel_token())
@@ -417,8 +416,7 @@ impl PyNcclBootstrap {
 // ---------------------------------------------------------------------------
 
 #[cfg(not(feature = "nccl"))]
-const NCCL_UNAVAILABLE_MSG: &str =
-    "kvbm was not built with the 'nccl' feature. Rebuild with --features nccl to use NcclBootstrap/NcclCommRef.";
+const NCCL_UNAVAILABLE_MSG: &str = "kvbm was not built with the 'nccl' feature. Rebuild with --features nccl to use NcclBootstrap/NcclCommRef.";
 
 #[cfg(not(feature = "nccl"))]
 #[pyclass(name = "NcclCommRef")]
@@ -428,7 +426,9 @@ pub struct PyNcclCommRef;
 #[pymethods]
 impl PyNcclCommRef {
     fn as_raw(&self) -> PyResult<usize> {
-        Err(pyo3::exceptions::PyRuntimeError::new_err(NCCL_UNAVAILABLE_MSG))
+        Err(pyo3::exceptions::PyRuntimeError::new_err(
+            NCCL_UNAVAILABLE_MSG,
+        ))
     }
 }
 
@@ -441,23 +441,33 @@ pub struct PyNcclBootstrap;
 impl PyNcclBootstrap {
     #[staticmethod]
     fn generate(_world_size: i32) -> PyResult<Self> {
-        Err(pyo3::exceptions::PyRuntimeError::new_err(NCCL_UNAVAILABLE_MSG))
+        Err(pyo3::exceptions::PyRuntimeError::new_err(
+            NCCL_UNAVAILABLE_MSG,
+        ))
     }
 
     fn serialize<'py>(&self, _py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyBytes>> {
-        Err(pyo3::exceptions::PyRuntimeError::new_err(NCCL_UNAVAILABLE_MSG))
+        Err(pyo3::exceptions::PyRuntimeError::new_err(
+            NCCL_UNAVAILABLE_MSG,
+        ))
     }
 
     #[staticmethod]
     fn deserialize(_data: &[u8]) -> PyResult<Self> {
-        Err(pyo3::exceptions::PyRuntimeError::new_err(NCCL_UNAVAILABLE_MSG))
+        Err(pyo3::exceptions::PyRuntimeError::new_err(
+            NCCL_UNAVAILABLE_MSG,
+        ))
     }
 
     fn init_communicator(&self, _rank: i32) -> PyResult<PyNcclCommRef> {
-        Err(pyo3::exceptions::PyRuntimeError::new_err(NCCL_UNAVAILABLE_MSG))
+        Err(pyo3::exceptions::PyRuntimeError::new_err(
+            NCCL_UNAVAILABLE_MSG,
+        ))
     }
 
     fn world_size(&self) -> PyResult<i32> {
-        Err(pyo3::exceptions::PyRuntimeError::new_err(NCCL_UNAVAILABLE_MSG))
+        Err(pyo3::exceptions::PyRuntimeError::new_err(
+            NCCL_UNAVAILABLE_MSG,
+        ))
     }
 }
