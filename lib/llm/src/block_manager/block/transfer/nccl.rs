@@ -98,7 +98,10 @@ impl Drop for NcclGroup {
         // Panic on error so we do not silently swallow ncclGroupEnd failures.
         let result = unsafe { ncclGroupEnd() };
         if result != ncclResult_t::ncclSuccess {
-            panic!("ncclGroupEnd failed in NcclGroup drop: {:?}. Call NcclGroup::end() before drop to handle errors.", result);
+            panic!(
+                "ncclGroupEnd failed in NcclGroup drop: {:?}. Call NcclGroup::end() before drop to handle errors.",
+                result
+            );
         }
     }
 }

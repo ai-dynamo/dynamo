@@ -10,9 +10,9 @@ use std::collections::HashSet;
 use std::sync::{Arc, OnceLock};
 
 use super::*;
-use crate::block_manager::distributed::{get_leader_zmq_ack_url, get_leader_zmq_pub_url};
 #[cfg(feature = "nccl")]
 use crate::block_manager::distributed::PyNcclCommRef;
+use crate::block_manager::distributed::{get_leader_zmq_ack_url, get_leader_zmq_pub_url};
 use crate::block_manager::vllm::connector::worker::event_sync_blocking;
 use crate::{block_manager::distributed::VllmTensor, to_pyerr};
 use dynamo_runtime::DistributedRuntime;
@@ -21,9 +21,9 @@ use crate::{
     extract_distributed_runtime_from_obj, get_current_cancel_token, get_current_tokio_handle,
 };
 use anyhow;
-use dynamo_llm::block_manager::distributed::{KvbmWorker, KvbmWorkerConfig, NcclConfig};
 #[cfg(feature = "nccl")]
 use dynamo_llm::block_manager::distributed::NcclCommOwned;
+use dynamo_llm::block_manager::distributed::{KvbmWorker, KvbmWorkerConfig, NcclConfig};
 use dynamo_llm::block_manager::layout::LayoutType;
 use dynamo_llm::block_manager::storage::torch::TorchTensor;
 use dynamo_runtime::utils::task::CriticalTaskExecutionHandle;
@@ -132,7 +132,11 @@ impl KvConnectorWorker {
             trtllm_rank,
             nccl_rank,
             world_size,
-            if nccl_comm_ref.is_some() { "Some" } else { "None" }
+            if nccl_comm_ref.is_some() {
+                "Some"
+            } else {
+                "None"
+            }
         );
 
         Ok(Self {
