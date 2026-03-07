@@ -9,19 +9,19 @@
 #![allow(dead_code)]
 
 // #[cfg(feature = "grpc")]
-// use velo_backend::grpc::{GrpcTransport, GrpcTransportBuilder};
+// use velo_transports::grpc::{GrpcTransport, GrpcTransportBuilder};
 // #[cfg(feature = "http")]
-// use velo_backend::http::{HttpTransport, HttpTransportBuilder};
+// use velo_transports::http::{HttpTransport, HttpTransportBuilder};
 // #[cfg(feature = "nats")]
-// use velo_backend::nats::{NatsTransport, NatsTransportBuilder};
+// use velo_transports::nats::{NatsTransport, NatsTransportBuilder};
 // #[cfg(feature = "ucx")]
-// use velo_backend::ucx::{UcxTransport, UcxTransportBuilder};
+// use velo_transports::ucx::{UcxTransport, UcxTransportBuilder};
 
 use bytes::Bytes;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::time::timeout;
-use velo_backend::{
+use velo_transports::{
     DataStreams, InstanceId, MessageType, PeerInfo, Transport, TransportErrorHandler,
     tcp::{TcpTransport, TcpTransportBuilder},
 };
@@ -109,7 +109,7 @@ impl<T: Transport> TestTransportHandle<T> {
         let error_handler = Arc::new(TestErrorHandler::new());
 
         // Create channels for this transport
-        let (adapter, streams) = velo_backend::make_channels();
+        let (adapter, streams) = velo_transports::make_channels();
 
         // Get runtime handle
         let runtime = tokio::runtime::Handle::current();
@@ -304,7 +304,7 @@ impl TestTransportHandle<TcpTransport> {
 //             .build()?;
 
 //         // Create channels for this transport
-//         let (adapter, streams) = velo_backend::make_channels();
+//         let (adapter, streams) = velo_transports::make_channels();
 
 //         // Get runtime handle
 //         let runtime = tokio::runtime::Handle::current();

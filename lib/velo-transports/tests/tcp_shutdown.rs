@@ -13,8 +13,8 @@ mod common;
 use bytes::Bytes;
 use std::time::Duration;
 use tokio::time::{sleep, timeout};
-use velo_backend::tcp::TcpFrameCodec;
-use velo_backend::{MessageType, Transport};
+use velo_transports::tcp::TcpFrameCodec;
+use velo_transports::{MessageType, Transport};
 
 use common::TestTransportHandle;
 
@@ -43,7 +43,7 @@ async fn read_one_frame(stream: &mut tokio::net::TcpStream) -> (MessageType, Byt
 
 /// Get the bind address from a TcpTransport by parsing its WorkerAddress.
 fn get_bind_addr(
-    handle: &TestTransportHandle<velo_backend::tcp::TcpTransport>,
+    handle: &TestTransportHandle<velo_transports::tcp::TcpTransport>,
 ) -> std::net::SocketAddr {
     let addr = handle.transport.address();
     let key = handle.transport.key();
