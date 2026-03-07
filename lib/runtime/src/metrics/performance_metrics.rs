@@ -12,6 +12,8 @@
 use super::{MetricsHierarchy, create_metric, prometheus_names::build_component_metric_name};
 use parking_lot::Mutex;
 use rand::Rng;
+use rand::SeedableRng;
+use rand::rngs::SmallRng;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -232,7 +234,7 @@ pub struct RequestMetric {
     last_token_at: Option<Instant>,
     last_total_tokens: u64,
     terminal: bool,
-    rng: rand::rngs::ThreadRng,
+    rng: SmallRng,
 }
 
 #[derive(Debug)]
@@ -705,7 +707,7 @@ impl RequestMetricsFactory {
             last_token_at: None,
             last_total_tokens: 0,
             terminal: false,
-            rng: rand::rng(),
+            rng: SmallRng::from_rng(&mut rand::rng()),
         }
     }
 }
@@ -1357,7 +1359,7 @@ fn build_metric_handles_for_spec(
     }
 }
 
-fn sampled_count(tokens: u64, sample_rate: f64, rng: &mut rand::rngs::ThreadRng) -> u64 {
+fn sampled_count(tokens: u64, sample_rate: f64, rng: &mut SmallRng) -> u64 {
     if tokens == 0 || sample_rate <= 0.0 {
         return 0;
     }

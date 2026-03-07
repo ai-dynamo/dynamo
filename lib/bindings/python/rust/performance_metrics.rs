@@ -308,8 +308,7 @@ impl PyRequestMetricsFactory {
 #[pymethods]
 impl PyRequestMetric {
     fn record_tokens(&mut self, py: Python<'_>, total_tokens: u64) -> PyResult<()> {
-        // This path can perform multiple Rust-side recordings per call (ITL sampling loop),
-        // so release the GIL while the lifecycle metric is updated.
+        // RequestMetric now uses a Send RNG, so this path can run without the GIL.
         py.allow_threads(|| self.inner.record_tokens(total_tokens))
             .map_err(|e| PyValueError::new_err(e.to_string()))
     }
