@@ -58,6 +58,7 @@ REQUIRED_CATEGORIES: Dict[str, Set[str]] = {
         "performance",
     },
     "Hardware": {"gpu_0", "gpu_1", "gpu_2", "gpu_4", "gpu_8", "h100", "k8s"},
+    "Framework": {"vllm", "trtllm", "sglang", "no_framework"},
 }
 
 STUB_MODULES = [

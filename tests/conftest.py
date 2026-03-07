@@ -1,8 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+from __future__ import annotations
+
+import csv
 import logging
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -25,50 +29,129 @@ from tests.utils.test_output import resolve_test_output_path
 
 _logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Marker Groups
+# ---------------------------------------------------------------------------
+# Grouped marker definitions for CI selection, hardware requirements, etc.
+# Each dict maps marker_name -> description. pytest_configure() registers
+# every marker from these groups plus the ungrouped list below.
+# IMPORTANT: Keep in sync with [tool.pytest.ini_options].markers in pyproject.toml.
+
+CI_WORKFLOW_MARKERS: dict[str, str] = {
+    "pre_merge": "marks tests to run before merging",
+    "post_merge": "marks tests to run after merge",
+    "nightly": "marks tests to run nightly",
+    "weekly": "marks tests to run weekly",
+}
+
+GPU_SCALE_MARKERS: dict[str, str] = {
+    "gpu_0": "marks tests that don't require GPU",
+    "gpu_1": "marks tests to run on GPU",
+    "gpu_2": "marks tests to run on 2GPUs",
+    "gpu_4": "marks tests to run on 4GPUs",
+    "gpu_8": "marks tests to run on 8GPUs",
+}
+
+TEST_SCOPE_MARKERS: dict[str, str] = {
+    "e2e": "marks tests as end-to-end tests",
+    "integration": "marks tests as integration tests",
+    "unit": "marks tests as unit tests",
+}
+
+TEST_TYPE_MARKERS: dict[str, str] = {
+    "stress": "marks tests as stress tests",
+    "performance": "marks tests as performance tests",
+}
+
+FRAMEWORK_MARKERS: dict[str, str] = {
+    "vllm": "marks tests as requiring vllm",
+    "trtllm": "marks tests as requiring trtllm",
+    "sglang": "marks tests as requiring sglang",
+    "no_framework": "marks tests that are framework-agnostic (no specific backend required)",
+}
+
+FEATURE_MARKERS: dict[str, str] = {
+    "multimodal": "marks tests as multimodal (image/video) tests",
+    "router": "marks tests for router component",
+    "planner": "marks tests for planner component",
+    "kvbm": "marks tests for KV behavior and model determinism",
+    "kvbm_v2": "marks tests using KVBM V2",
+    "kvbm_concurrency": "marks concurrency stress tests for KVBM (runs separately)",
+    "fault_tolerance": "marks tests as fault tolerance tests",
+    "aiconfigurator": "marks e2e tests that cover aiconfigurator functionality",
+}
+
+_UNGROUPED_MARKERS: list[str] = [
+    "parallel: marks tests that can run in parallel with pytest-xdist",
+    "slow: marks tests as known to be slow",
+    "h100: marks tests to run on H100",
+    "model: model id used by a test or parameter",
+    "custom_build: marks tests that require custom builds or special setup (e.g., MoE models)",
+    "k8s: marks tests as requiring Kubernetes",
+    "deploy: marks tests as deployment tests",
+    # Third-party plugin markers
+    "timeout: test timeout in seconds (pytest-timeout plugin)",
+]
+
+# ---------------------------------------------------------------------------
+# CSV Report Helpers
+# ---------------------------------------------------------------------------
+
+# HuggingFace model ID pattern: "org/model-name"
+_HF_MODEL_RE = re.compile(r"^[A-Za-z0-9_-]+/[A-Za-z0-9._-]+$")
+
+# Module-level config reference for hooks that don't receive config directly
+_config = None
+
+
+def _extract_model_name(item) -> str:
+    """Extract the LLM model name from a pytest Item.
+
+    Resolution order:
+    1. pytest.mark.model(...) marker args
+    2. Parametrize callspec values matching HuggingFace org/model pattern
+    3. Empty string
+    """
+    model_mark = item.get_closest_marker("model")
+    if model_mark and model_mark.args:
+        return str(model_mark.args[0])
+
+    callspec = getattr(item, "callspec", None)
+    if callspec is not None:
+        for value in callspec.params.values():
+            if isinstance(value, str) and _HF_MODEL_RE.match(value):
+                return value
+
+    return ""
+
+
+# Structural markers to exclude from CSV reports (not meaningful for coverage)
+_STRUCTURAL_MARKERS = {"parametrize", "usefixtures", "filterwarnings"}
+
 
 def pytest_configure(config):
-    # Defining markers to avoid `<marker> not found in 'markers' configuration option`
-    # errors when pyproject.toml is not available in the container (e.g. some CI jobs).
-    # IMPORTANT: Keep this marker list in sync with [tool.pytest.ini_options].markers
-    # in pyproject.toml. If you add or remove markers there, mirror the change here.
-    markers = [
-        "pre_merge: marks tests to run before merging",
-        "post_merge: marks tests to run after merge",
-        "parallel: marks tests that can run in parallel with pytest-xdist",
-        "nightly: marks tests to run nightly",
-        "weekly: marks tests to run weekly",
-        "gpu_0: marks tests that don't require GPU",
-        "gpu_1: marks tests to run on GPU",
-        "gpu_2: marks tests to run on 2GPUs",
-        "gpu_4: marks tests to run on 4GPUs",
-        "gpu_8: marks tests to run on 8GPUs",
-        "e2e: marks tests as end-to-end tests",
-        "integration: marks tests as integration tests",
-        "unit: marks tests as unit tests",
-        "stress: marks tests as stress tests",
-        "performance: marks tests as performance tests",
-        "vllm: marks tests as requiring vllm",
-        "trtllm: marks tests as requiring trtllm",
-        "sglang: marks tests as requiring sglang",
-        "multimodal: marks tests as multimodal (image/video) tests",
-        "slow: marks tests as known to be slow",
-        "h100: marks tests to run on H100",
-        "aiconfigurator: marks e2e tests that cover aiconfigurator functionality",
-        "router: marks tests for router component",
-        "planner: marks tests for planner component",
-        "kvbm: marks tests for KV behavior and model determinism",
-        "kvbm_v2: marks tests using KVBM V2",
-        "kvbm_concurrency: marks concurrency stress tests for KVBM (runs separately)",
-        "model: model id used by a test or parameter",
-        "custom_build: marks tests that require custom builds or special setup (e.g., MoE models)",
-        "k8s: marks tests as requiring Kubernetes",
-        "fault_tolerance: marks tests as fault tolerance tests",
-        "deploy: marks tests as deployment tests",
-        # Third-party plugin markers
-        "timeout: test timeout in seconds (pytest-timeout plugin)",
-    ]
-    for marker in markers:
+    global _config
+    _config = config
+
+    # Register grouped markers
+    for group in (
+        CI_WORKFLOW_MARKERS,
+        GPU_SCALE_MARKERS,
+        TEST_SCOPE_MARKERS,
+        TEST_TYPE_MARKERS,
+        FRAMEWORK_MARKERS,
+        FEATURE_MARKERS,
+    ):
+        for name, desc in group.items():
+            config.addinivalue_line("markers", f"{name}: {desc}")
+
+    # Register ungrouped markers
+    for marker in _UNGROUPED_MARKERS:
         config.addinivalue_line("markers", marker)
+
+    # Initialize CSV report storage
+    config._csv_collection_records = []
+    config._csv_run_results = {}
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
@@ -99,6 +182,26 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         default=None,  # None = use fixture's default behavior
         help="Skip restarting NATS and etcd services before deployment. "
         "Default: deploy tests skip (for speed), fault-tolerance tests restart (for clean state).",
+    )
+
+    # -------------------------------------------------------------------------
+    # CSV Report Options
+    # -------------------------------------------------------------------------
+    parser.addoption(
+        "--collect-report",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help="Write a CSV collection report (test_name, markers, model) to PATH. "
+        "Most useful with --collect-only.",
+    )
+    parser.addoption(
+        "--run-report",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help="Write a CSV execution report (test_name, markers, model, result, "
+        "duration_seconds) to PATH after a test run.",
     )
 
 
@@ -297,6 +400,99 @@ def pytest_collection_modifyitems(config, items):
     # Store models to download in pytest config for fixtures to access
     if models_to_download:
         config.models_to_download = models_to_download
+
+    # Build CSV collection records when either report option is active
+    collect_report = config.getoption("collect_report", default=None)
+    run_report = config.getoption("run_report", default=None)
+    if collect_report or run_report:
+        records = []
+        for item in items:
+            marker_names = sorted(
+                {m.name for m in item.iter_markers()} - _STRUCTURAL_MARKERS
+            )
+            records.append(
+                {
+                    "nodeid": item.nodeid,
+                    "markers": "|".join(marker_names),
+                    "model": _extract_model_name(item),
+                }
+            )
+        config._csv_collection_records = records
+
+
+def pytest_runtest_logreport(report):
+    """Capture test outcomes and durations for --run-report CSV."""
+    if _config is None:
+        return
+    run_report = _config.getoption("run_report", default=None)
+    if not run_report:
+        return
+
+    results = _config._csv_run_results
+
+    if report.when == "call":
+        outcome = report.outcome  # "passed", "failed", "skipped"
+        if hasattr(report, "wasxfail"):
+            outcome = "xpass" if report.passed else "xfail"
+        results[report.nodeid] = {
+            "result": outcome,
+            "duration": report.duration,
+        }
+    elif report.when == "setup" and report.failed:
+        results[report.nodeid] = {
+            "result": "error",
+            "duration": report.duration,
+        }
+    elif report.when == "setup" and report.skipped:
+        outcome = "xfail" if hasattr(report, "wasxfail") else "skipped"
+        results[report.nodeid] = {
+            "result": outcome,
+            "duration": report.duration,
+        }
+
+
+def pytest_terminal_summary(terminalreporter, exitstatus, config):
+    """Write CSV report files at the end of the test session."""
+    collect_report_path = config.getoption("collect_report", default=None)
+    run_report_path = config.getoption("run_report", default=None)
+    collection_records = config._csv_collection_records
+
+    if collect_report_path and collection_records:
+        p = Path(collect_report_path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with open(p, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f, quoting=csv.QUOTE_MINIMAL)
+            writer.writerow(["test_name", "markers", "model"])
+            for rec in collection_records:
+                writer.writerow([rec["nodeid"], rec["markers"], rec["model"]])
+        terminalreporter.write_line(
+            f"CSV collection report written to: {collect_report_path}"
+        )
+
+    if run_report_path and collection_records:
+        run_results = config._csv_run_results
+        p = Path(run_report_path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with open(p, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f, quoting=csv.QUOTE_MINIMAL)
+            writer.writerow(
+                ["test_name", "markers", "model", "result", "duration_seconds"]
+            )
+            for rec in collection_records:
+                nodeid = rec["nodeid"]
+                result_data = run_results.get(nodeid, {})
+                # Only include tests that were actually executed
+                if result_data:
+                    writer.writerow([
+                        nodeid,
+                        rec["markers"],
+                        rec["model"],
+                        result_data.get("result", "not_run"),
+                        f"{result_data.get('duration', 0.0):.3f}",
+                    ])
+        terminalreporter.write_line(
+            f"CSV execution report written to: {run_report_path}"
+        )
 
 
 class EtcdServer(ManagedProcess):
