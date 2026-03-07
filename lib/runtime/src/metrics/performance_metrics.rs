@@ -662,10 +662,7 @@ impl RegistryInner {
     fn note_dropped_event(&self) {
         let dropped = self.dropped_events.fetch_add(1, Ordering::Relaxed) + 1;
         if dropped == 1 || dropped.is_power_of_two() {
-            eprintln!(
-                "performance metrics queue full; dropped events total={}",
-                dropped
-            );
+            tracing::warn!(dropped_events = dropped, "performance metrics queue full");
         }
     }
 }
@@ -686,6 +683,7 @@ fn worker_loop(
     publish_interval: Duration,
     publisher: PublisherState,
 ) {
+    const MAX_DATA_DRAIN_PER_TICK: usize = 2_048; // ~200k metrics/min at 5s publish interval with default queue capacity; adjust as needed
     let mut state = WorkerState {
         window_duration,
         publish_interval,
@@ -698,6 +696,9 @@ fn worker_loop(
     loop {
         while let Ok(msg) = control_rx.try_recv() {
             if !handle_control_message(msg, &mut state) {
+                tracing::debug!(
+                    "performance metrics worker exiting after shutdown control message"
+                );
                 return;
             }
         }
@@ -705,24 +706,46 @@ fn worker_loop(
         match data_rx.recv_timeout(WORKER_POLL) {
             Ok(msg) => {
                 handle_data_message(msg, &mut state);
-                while let Ok(msg) = data_rx.try_recv() {
+                let mut drained = 1usize;
+                // Bound per-tick data draining so control/publish work cannot be starved
+                // when producers keep the queue continuously non-empty.
+                while drained < MAX_DATA_DRAIN_PER_TICK {
+                    let Ok(msg) = data_rx.try_recv() else {
+                        break;
+                    };
                     handle_data_message(msg, &mut state);
+                    drained += 1;
                 }
             }
             Err(RecvTimeoutError::Timeout) => {}
-            Err(RecvTimeoutError::Disconnected) => data_disconnected = true,
+            Err(RecvTimeoutError::Disconnected) => {
+                data_disconnected = true;
+                if !control_disconnected {
+                    tracing::warn!(
+                        "performance metrics worker data channel disconnected before shutdown"
+                    );
+                }
+            }
         }
 
         loop {
             match control_rx.try_recv() {
                 Ok(msg) => {
                     if !handle_control_message(msg, &mut state) {
+                        tracing::debug!(
+                            "performance metrics worker exiting after shutdown control message"
+                        );
                         return;
                     }
                 }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
                     control_disconnected = true;
+                    if !data_disconnected {
+                        tracing::warn!(
+                            "performance metrics worker control channel disconnected before shutdown"
+                        );
+                    }
                     break;
                 }
             }
@@ -730,6 +753,9 @@ fn worker_loop(
 
         maybe_auto_publish(&mut state);
         if control_disconnected && data_disconnected {
+            tracing::warn!(
+                "performance metrics worker exiting after both channels disconnected without explicit shutdown"
+            );
             return;
         }
     }
@@ -800,9 +826,10 @@ fn handle_data_message(msg: DataMessage, state: &mut WorkerState) {
             {
                 counts.push_back((recorded_at, count));
                 while counts.len() > MAX_SAMPLES_PER_METRIC {
-                    eprintln!(
-                        "warning: metric '{}' has more than {} samples; dropping oldest",
-                        name, MAX_SAMPLES_PER_METRIC
+                    tracing::warn!(
+                        metric = %name,
+                        max_samples = MAX_SAMPLES_PER_METRIC,
+                        "metric sample buffer exceeded capacity; dropping oldest rate sample"
                     );
                     counts.pop_front();
                 }
@@ -818,9 +845,10 @@ fn handle_data_message(msg: DataMessage, state: &mut WorkerState) {
             {
                 values.push_back((recorded_at, value));
                 while values.len() > MAX_SAMPLES_PER_METRIC {
-                    eprintln!(
-                        "warning: metric '{}' has more than {} samples; dropping oldest",
-                        name, MAX_SAMPLES_PER_METRIC
+                    tracing::warn!(
+                        metric = %name,
+                        max_samples = MAX_SAMPLES_PER_METRIC,
+                        "metric sample buffer exceeded capacity; dropping oldest distribution sample"
                     );
                     values.pop_front();
                 }

@@ -22,6 +22,9 @@ impl PyRateMetric {
 
     #[pyo3(signature = (count = 1))]
     fn record_count(&self, count: u64) -> PyResult<()> {
+        // Keep GIL on hot-path record calls: this path is typically sub-10us/record
+        // (Python->Rust boundary + non-blocking channel try_send), so allow_threads
+        // overhead is usually not worth it here.
         self.inner
             .record_count(count)
             .map_err(|e| PyValueError::new_err(e.to_string()))
@@ -74,9 +77,11 @@ pub struct PyPerformanceMetricsRegistry {
 #[pymethods]
 impl PyPerformanceMetricsRegistry {
     #[new]
-    fn new(runtime_metrics: &RuntimeMetrics) -> PyResult<Self> {
+    fn new(py: Python<'_>, runtime_metrics: &RuntimeMetrics) -> PyResult<Self> {
         let hierarchy = runtime_metrics.hierarchy();
-        let registry = PerformanceMetricsRegistry::new_attached_default(hierarchy)
+        // Control-path setup can block (thread spawn + registry wiring), so release GIL.
+        let registry = py
+            .allow_threads(move || PerformanceMetricsRegistry::new_attached_default(hierarchy))
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
         Ok(Self { registry })
@@ -89,19 +94,23 @@ impl PyPerformanceMetricsRegistry {
     #[pyo3(signature = (name, quantiles = None, sample_period_seconds = 1.0, window_seconds = None))]
     fn new_rate_metric(
         &self,
+        py: Python<'_>,
         name: String,
         quantiles: Option<Vec<f64>>,
         sample_period_seconds: f64,
         window_seconds: Option<f64>,
     ) -> PyResult<PyRateMetric> {
-        let handle = self
-            .registry
-            .new_rate_metric(
-                name,
-                quantiles.unwrap_or_default(),
-                Some(sample_period_seconds),
-                window_seconds,
-            )
+        let quantiles = quantiles.unwrap_or_default();
+        // Control-path registration can block on worker/registry operations; release GIL.
+        let handle = py
+            .allow_threads(move || {
+                self.registry.new_rate_metric(
+                    name,
+                    quantiles,
+                    Some(sample_period_seconds),
+                    window_seconds,
+                )
+            })
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok(PyRateMetric { inner: handle })
     }
@@ -109,13 +118,15 @@ impl PyPerformanceMetricsRegistry {
     #[pyo3(signature = (name, quantiles = None, window_seconds = None))]
     fn new_distribution_metric(
         &self,
+        py: Python<'_>,
         name: String,
         quantiles: Option<Vec<f64>>,
         window_seconds: Option<f64>,
     ) -> PyResult<PyDistributionMetric> {
-        let handle = self
-            .registry
-            .new_distribution_metric(name, quantiles.unwrap_or_default(), window_seconds)
+        let quantiles = quantiles.unwrap_or_default();
+        // Control-path registration can block on worker/registry operations; release GIL.
+        let handle = py
+            .allow_threads(move || self.registry.new_distribution_metric(name, quantiles, window_seconds))
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok(PyDistributionMetric { inner: handle })
     }
@@ -123,13 +134,15 @@ impl PyPerformanceMetricsRegistry {
     #[pyo3(signature = (name, quantiles = None, window_seconds = None))]
     fn new_ratio_metric(
         &self,
+        py: Python<'_>,
         name: String,
         quantiles: Option<Vec<f64>>,
         window_seconds: Option<f64>,
     ) -> PyResult<PyRatioMetric> {
-        let handle = self
-            .registry
-            .new_ratio_metric(name, quantiles.unwrap_or_default(), window_seconds)
+        let quantiles = quantiles.unwrap_or_default();
+        // Control-path registration can block on worker/registry operations; release GIL.
+        let handle = py
+            .allow_threads(move || self.registry.new_ratio_metric(name, quantiles, window_seconds))
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok(PyRatioMetric { inner: handle })
     }
