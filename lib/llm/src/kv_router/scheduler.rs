@@ -486,7 +486,9 @@ impl WorkerSelector for DefaultWorkerSelector {
         // If multiple candidates (tied), use tree size as tie-breaker
         // If tree sizes are also equal, use random selection to avoid bias
         let best_worker = if candidates.len() > 1 {
-            tracing::info!("Multiple workers tied with same logit, using tree size as tie-breaker");
+            tracing::info!(
+                "Multiple workers tied with same logit, using tree size as tie-breaker"
+            );
             let tree_sizes: Vec<(usize, &WorkerWithDpRank)> = candidates
                 .iter()
                 .map(|w| (request.overlaps.tree_sizes.get(w).copied().unwrap_or(0), w))
