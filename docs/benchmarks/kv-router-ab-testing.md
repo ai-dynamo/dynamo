@@ -431,7 +431,6 @@ apiVersion: batch/v1
 kind: Job
 metadata:
   name: aiperf-benchmark
-  namespace: dynamo-bench
 spec:
   backoffLimit: 1
   template:
@@ -440,23 +439,34 @@ spec:
       containers:
       - name: benchmark
         image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.9.0
-        command: ["/bin/sh", "-c", "sleep infinity"]
+        securityContext:
+          runAsUser: 0
+        command:
+          - /bin/bash
+          - -lc
+          - |
+            apt-get update -qq && apt-get install -y -qq tmux > /dev/null 2>&1
+            pip install -q aiperf==0.5.0
+            echo "Benchmark pod ready (tmux + aiperf installed)."
+            sleep infinity
         imagePullPolicy: IfNotPresent
         resources:
           limits:
             nvidia.com/gpu: 0
 ```
 
+This pod installs `tmux` and `aiperf` on startup so benchmarks can run inside a tmux session that survives `kubectl exec` disconnects.
+
 Deploy:
 
 ```bash
-kubectl apply -f benchmark-job.yaml
+kubectl apply -f benchmark-job.yaml -n dynamo-bench
 ```
 
-Wait for pod to be ready:
+Wait for pod to be ready (the init takes ~1-2 minutes to install packages):
 
 ```bash
-kubectl get pods -n dynamo-bench
+kubectl get pods -n dynamo-bench -l job-name=aiperf-benchmark -w
 ```
 
 ### Step 4.2: Copy Dataset to Benchmark Pod
@@ -466,45 +476,52 @@ POD_NAME=$(kubectl get pods -n dynamo-bench -l job-name=aiperf-benchmark -o json
 kubectl -n dynamo-bench cp toolagent_trace_080x.jsonl ${POD_NAME}:/tmp/toolagent_trace_080x.jsonl
 ```
 
-### Step 4.3: Install AIPerf
-
-```bash
-kubectl -n dynamo-bench exec ${POD_NAME} -- bash -lc '
-  . /opt/dynamo/venv/bin/activate
-  pip install -q aiperf==0.5.0
-'
-```
-
 ---
 
 ## Phase 5: Run Benchmarks
 
 ### Step 5.1: Benchmark Router-ON
 
-Run the benchmark against the **router-ON** deployment:
+Verify the frontend service is reachable (the operator creates a service named `{deployment-name}-frontend`):
 
 ```bash
-kubectl -n dynamo-bench exec ${POD_NAME} -- bash -lc '
-  . /opt/dynamo/venv/bin/activate
-  AIPERF_HTTP_CONNECTION_LIMIT=200 aiperf profile \
-    -m "Qwen/Qwen3-32B" \
-    --tokenizer "Qwen/Qwen3-32B" \
-    --input-file "/tmp/toolagent_trace_080x.jsonl" \
-    --custom-dataset-type "mooncake_trace" \
-    --fixed-schedule \
-    --url "http://vllm-agg-router-frontend.dynamo-bench.svc.cluster.local:8000" \
-    --streaming \
-    --random-seed 42 \
-    --workers-max 200 \
-    --request-timeout-seconds 1000 \
-    --profile-export-level "records" \
-    --record-processors 8 \
-    --artifact-dir "/tmp/aiperf_router_on" \
-    --goodput "time_to_first_token:5000 inter_token_latency:100"
+kubectl get svc -n dynamo-bench | grep frontend
+```
+
+Launch the benchmark inside a tmux session so it survives `kubectl exec` disconnects:
+
+```bash
+kubectl -n dynamo-bench exec ${POD_NAME} -- bash -c '
+  tmux new-session -d -s benchmark ". /opt/dynamo/venv/bin/activate && \
+    AIPERF_HTTP_CONNECTION_LIMIT=200 aiperf profile \
+      -m Qwen/Qwen3-32B \
+      --tokenizer Qwen/Qwen3-32B \
+      --input-file /tmp/toolagent_trace_080x.jsonl \
+      --custom-dataset-type mooncake_trace \
+      --fixed-schedule \
+      --url http://vllm-agg-router-frontend.dynamo-bench.svc.cluster.local:8000 \
+      --streaming \
+      --random-seed 42 \
+      --workers-max 200 \
+      --request-timeout-seconds 1000 \
+      --profile-export-level records \
+      --record-processors 8 \
+      --artifact-dir /tmp/aiperf_router_on \
+      --goodput \"time_to_first_token:5000 inter_token_latency:100\""
 '
 ```
 
 AIPerf writes the run to `/tmp/aiperf_router_on` on the pod (summary JSON and `profile_export.jsonl`).
+
+### Monitoring Benchmarks
+
+Benchmarks run inside a **tmux session** so they survive `kubectl exec` disconnects.
+
+Attach to the live TUI (detach with **Ctrl+B then D**):
+
+```bash
+kubectl -n dynamo-bench exec -it ${POD_NAME} -- tmux a -t benchmark
+```
 
 ### Step 5.2: Switch to Router-OFF and Benchmark
 
@@ -515,26 +532,28 @@ kubectl delete dynamographdeployment vllm-agg-router -n dynamo-bench
 kubectl apply -f router-off-deployment.yaml -n dynamo-bench
 ```
 
-Wait for 8/8 workers to be Ready again, then run the same benchmark against the baseline frontend:
+Wait for 8/8 workers to be Ready again (re-run the health check from [Step 2.4](#step-24-verify-workers-are-healthy)), then clean up the previous tmux session and launch the baseline benchmark:
 
 ```bash
-kubectl -n dynamo-bench exec ${POD_NAME} -- bash -lc '
-  . /opt/dynamo/venv/bin/activate
-  AIPERF_HTTP_CONNECTION_LIMIT=200 aiperf profile \
-    -m "Qwen/Qwen3-32B" \
-    --tokenizer "Qwen/Qwen3-32B" \
-    --input-file "/tmp/toolagent_trace_080x.jsonl" \
-    --custom-dataset-type "mooncake_trace" \
-    --fixed-schedule \
-    --url "http://vllm-agg-no-router-frontend.dynamo-bench.svc.cluster.local:8000" \
-    --streaming \
-    --random-seed 42 \
-    --workers-max 200 \
-    --request-timeout-seconds 1000 \
-    --profile-export-level "records" \
-    --record-processors 8 \
-    --artifact-dir "/tmp/aiperf_router_off" \
-    --goodput "time_to_first_token:5000 inter_token_latency:100"
+kubectl -n dynamo-bench exec ${POD_NAME} -- tmux kill-session -t benchmark 2>/dev/null
+
+kubectl -n dynamo-bench exec ${POD_NAME} -- bash -c '
+  tmux new-session -d -s benchmark ". /opt/dynamo/venv/bin/activate && \
+    AIPERF_HTTP_CONNECTION_LIMIT=200 aiperf profile \
+      -m Qwen/Qwen3-32B \
+      --tokenizer Qwen/Qwen3-32B \
+      --input-file /tmp/toolagent_trace_080x.jsonl \
+      --custom-dataset-type mooncake_trace \
+      --fixed-schedule \
+      --url http://vllm-agg-no-router-frontend.dynamo-bench.svc.cluster.local:8000 \
+      --streaming \
+      --random-seed 42 \
+      --workers-max 200 \
+      --request-timeout-seconds 1000 \
+      --profile-export-level records \
+      --record-processors 8 \
+      --artifact-dir /tmp/aiperf_router_off \
+      --goodput \"time_to_first_token:5000 inter_token_latency:100\""
 '
 ```
 
@@ -547,7 +566,43 @@ kubectl -n dynamo-bench cp ${POD_NAME}:/tmp/aiperf_router_on ./aiperf_router_on
 kubectl -n dynamo-bench cp ${POD_NAME}:/tmp/aiperf_router_off ./aiperf_router_off
 ```
 
-AIPerf writes a summary and per-request records; use these to compare TTFT, latency, and throughput between router-ON and router-OFF.
+Each artifact directory contains:
+- `profile_export_aiperf.json` — summary with aggregated metrics (TTFT, latency percentiles, throughput)
+- `profile_export.jsonl` — per-request records (one JSON object per completed request)
+
+### Step 5.4: Quick Comparison
+
+Extract and compare key metrics from the two summary files:
+
+```bash
+python3 -c "
+import json, pathlib
+
+def load(d):
+    return json.loads(pathlib.Path(d, 'profile_export_aiperf.json').read_text())
+
+on, off = load('aiperf_router_on'), load('aiperf_router_off')
+
+metrics = [
+    ('TTFT avg (ms)',             'time_to_first_token', 'avg'),
+    ('TTFT p99 (ms)',             'time_to_first_token', 'p99'),
+    ('E2E Latency avg (ms)',      'request_latency',     'avg'),
+    ('E2E Latency p99 (ms)',      'request_latency',     'p99'),
+    ('Output Throughput (tok/s)', 'output_token_throughput', 'avg'),
+]
+
+print(f\"{'Metric':<28} {'Router-OFF':>12} {'Router-ON':>12} {'Speedup':>10}\")
+print('-' * 66)
+for label, key, stat in metrics:
+    v_off = off.get(key, {}).get(stat, 0)
+    v_on  = on.get(key, {}).get(stat, 0)
+    if 'throughput' in key.lower():
+        speedup = v_on / v_off if v_off else 0
+    else:
+        speedup = v_off / v_on if v_on else 0
+    print(f'{label:<28} {v_off:>12.1f} {v_on:>12.1f} {speedup:>9.1f}x')
+"
+```
 
 ---
 
@@ -677,18 +732,16 @@ kubectl logs -n dynamo-bench <worker-pod-name>
 **Symptoms:**
 - Pods show "Container main failed startup probe, will be restarted"
 - Logs show model still downloading or loading when pod is killed
-- Large models (>30GB) take longer than default 22-minute timeout
 
 **Solution:**
-Increase the startup probe `failureThreshold`:
+The deployment YAMLs in this guide set `failureThreshold: 60`, allowing up to 32 minutes (`120s + 60×30s`). If you lowered this value or are using a larger model that needs more time, increase it:
 
 ```bash
-# Patch the deployment to allow 32 minutes instead of 22
 kubectl patch dynamographdeployment <deployment-name> -n dynamo-bench --type='json' \
-  -p='[{"op": "replace", "path": "/spec/services/VllmDecodeWorker/extraPodSpec/mainContainer/startupProbe/failureThreshold", "value": 60}]'
+  -p='[{"op": "replace", "path": "/spec/services/VllmDecodeWorker/extraPodSpec/mainContainer/startupProbe/failureThreshold", "value": 80}]'
 ```
 
-Or update your YAML before deploying:
+The relevant startup probe fields:
 ```yaml
 startupProbe:
   httpGet:
@@ -697,7 +750,7 @@ startupProbe:
   initialDelaySeconds: 120
   periodSeconds: 30
   timeoutSeconds: 10
-  failureThreshold: 60  # 32 minutes total (120s + 60*30s)
+  failureThreshold: 60  # 32 minutes total (120s + 60*30s); increase for larger models
 ```
 
 **Model Loading Times (approximate):**
