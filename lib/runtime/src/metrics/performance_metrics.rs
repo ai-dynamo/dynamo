@@ -1,10 +1,13 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+// Initially contributed by Baseten @michaelfeil, feel free to tag on maintance.
+
 //! Generic sliding-window performance metrics with a command-loop backend.
 //!
 //! All mutations and publishing are processed by a single worker thread via commands/events.
 //! Hot-path recording from metric handles is lock-free at call site (bounded `try_send`).
+//! Ideal for high-cardinatly metrics.
 
 use super::{MetricsHierarchy, create_metric, prometheus_names::build_component_metric_name};
 use parking_lot::Mutex;
@@ -25,6 +28,7 @@ const DEFAULT_QUEUE_CAPACITY: usize = 16_384;
 const WORKER_POLL: Duration = Duration::from_millis(100);
 // guard against unbounded memory growth (should not happen for reasonable metrics)
 const MAX_SAMPLES_PER_METRIC: usize = 100_000;
+const DEFAULT_METRIC_WINDOW_SECONDS: f64 = 60.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PerformanceMetricKind {
@@ -39,7 +43,7 @@ pub struct PerformanceMetricSpec {
     pub kind: PerformanceMetricKind,
     pub quantiles: Vec<f64>,
     pub sample_period_seconds: Option<f64>,
-    pub window_seconds: Option<f64>,
+    pub window_seconds: f64,
 }
 
 impl PerformanceMetricSpec {
@@ -58,7 +62,8 @@ impl PerformanceMetricSpec {
                 .map(|v| v.max(0.1)),
             window_seconds: window_seconds
                 .filter(|v| v.is_finite() && *v > 0.0)
-                .map(|v| v.max(0.1)),
+                .map(|v| v.max(0.1))
+                .unwrap_or(DEFAULT_METRIC_WINDOW_SECONDS),
         }
     }
 
@@ -74,7 +79,8 @@ impl PerformanceMetricSpec {
             sample_period_seconds: None,
             window_seconds: window_seconds
                 .filter(|v| v.is_finite() && *v > 0.0)
-                .map(|v| v.max(0.1)),
+                .map(|v| v.max(0.1))
+                .unwrap_or(DEFAULT_METRIC_WINDOW_SECONDS),
         }
     }
 
@@ -90,7 +96,8 @@ impl PerformanceMetricSpec {
             sample_period_seconds: None,
             window_seconds: window_seconds
                 .filter(|v| v.is_finite() && *v > 0.0)
-                .map(|v| v.max(0.1)),
+                .map(|v| v.max(0.1))
+                .unwrap_or(DEFAULT_METRIC_WINDOW_SECONDS),
         }
     }
 }
@@ -230,7 +237,6 @@ pub struct RequestMetric {
 
 #[derive(Debug)]
 struct RegistryInner {
-    window_duration: Duration,
     publish_interval: Duration,
     control_tx: Sender<ControlMessage>,
     data_tx: SyncSender<DataMessage>,
@@ -244,7 +250,6 @@ struct MetricLease {
 }
 
 struct WorkerState {
-    window_duration: Duration,
     publish_interval: Duration,
     metrics: HashMap<String, MetricEntry>,
     publisher: PublisherState,
@@ -379,13 +384,11 @@ enum DataMessage {
 
 impl PerformanceMetricsRegistry {
     fn new_attached_with(
-        window_duration: Duration,
         publish_interval: Duration,
         hierarchy: Arc<dyn MetricsHierarchy>,
         metric_prefix: String,
         labels: Vec<(String, String)>,
     ) -> Self {
-        let window_duration = window_duration.max(Duration::from_secs(1));
         let publish_interval = publish_interval
             .max(Duration::from_secs(2))
             .min(Duration::from_secs(60));
@@ -395,7 +398,6 @@ impl PerformanceMetricsRegistry {
             worker_loop(
                 control_rx,
                 data_rx,
-                window_duration,
                 publish_interval,
                 PublisherState {
                     hierarchy,
@@ -409,7 +411,6 @@ impl PerformanceMetricsRegistry {
 
         Self {
             inner: Arc::new(RegistryInner {
-                window_duration,
                 publish_interval,
                 control_tx,
                 data_tx,
@@ -420,7 +421,6 @@ impl PerformanceMetricsRegistry {
     }
 
     pub fn new_attached(
-        window_duration: Duration,
         publish_interval: Duration,
         hierarchy: Arc<dyn MetricsHierarchy>,
         metric_prefix: impl Into<String>,
@@ -431,7 +431,6 @@ impl PerformanceMetricsRegistry {
             .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
             .collect::<Vec<_>>();
         Ok(Self::new_attached_with(
-            window_duration,
             publish_interval,
             hierarchy,
             metric_prefix.into(),
@@ -441,7 +440,6 @@ impl PerformanceMetricsRegistry {
 
     pub fn new_attached_default(hierarchy: Arc<dyn MetricsHierarchy>) -> anyhow::Result<Self> {
         Self::new_attached(
-            Duration::from_secs(60),
             Duration::from_secs(5),
             hierarchy,
             "performance",
@@ -952,13 +950,11 @@ impl Drop for RegistryInner {
 fn worker_loop(
     control_rx: Receiver<ControlMessage>,
     data_rx: Receiver<DataMessage>,
-    window_duration: Duration,
     publish_interval: Duration,
     publisher: PublisherState,
 ) {
     const MAX_DATA_DRAIN_PER_TICK: usize = 2_048; // ~200k metrics/min at 5s publish interval with default queue capacity; adjust as needed
     let mut state = WorkerState {
-        window_duration,
         publish_interval,
         metrics: HashMap::new(),
         publisher,
@@ -1061,7 +1057,7 @@ fn handle_control_message(msg: ControlMessage, state: &mut WorkerState) -> bool 
         ControlMessage::SnapshotMetric { name, resp } => {
             let now = Instant::now();
             let snapshot = state.metrics.get_mut(&name).map(|entry| {
-                let window = metric_window_duration(entry, state.window_duration);
+                let window = Duration::from_secs_f64(entry.spec.window_seconds);
                 prune_entry(now, window, entry);
                 snapshot_entry(now, window, entry)
             });
@@ -1074,7 +1070,7 @@ fn handle_control_message(msg: ControlMessage, state: &mut WorkerState) -> bool 
                 .metrics
                 .values_mut()
                 .map(|entry| {
-                    let window = metric_window_duration(entry, state.window_duration);
+                    let window = Duration::from_secs_f64(entry.spec.window_seconds);
                     prune_entry(now, window, entry);
                     snapshot_entry(now, window, entry)
                 })
@@ -1203,7 +1199,7 @@ fn publish_state(state: &mut WorkerState) -> anyhow::Result<()> {
 
     let now = Instant::now();
     for entry in state.metrics.values_mut() {
-        let window = metric_window_duration(entry, state.window_duration);
+        let window = Duration::from_secs_f64(entry.spec.window_seconds);
         prune_entry(now, window, entry);
         let snapshot = snapshot_entry(now, window, entry);
 
@@ -1390,28 +1386,32 @@ fn normalize_quantiles(quantiles: Vec<f64>) -> Vec<f64> {
         .collect()
 }
 
-fn metric_window_duration(entry: &MetricEntry, default_window: Duration) -> Duration {
-    entry
-        .spec
-        .window_seconds
-        .map(Duration::from_secs_f64)
-        .unwrap_or(default_window)
-}
-
 fn prune_entry(now: Instant, window_duration: Duration, entry: &mut MetricEntry) {
     let cutoff = now.checked_sub(window_duration).unwrap_or(now);
     match &mut entry.state {
         MetricState::Rate { counts } => {
+            if counts.back().is_some_and(|(ts, _)| *ts < cutoff) {
+                counts.clear();
+                return;
+            }
             while counts.front().is_some_and(|(ts, _)| *ts < cutoff) {
                 counts.pop_front();
             }
         }
         MetricState::Distribution { values } => {
+            if values.back().is_some_and(|(ts, _)| *ts < cutoff) {
+                values.clear();
+                return;
+            }
             while values.front().is_some_and(|(ts, _)| *ts < cutoff) {
                 values.pop_front();
             }
         }
         MetricState::Ratio { pairs } => {
+            if pairs.back().is_some_and(|(ts, _, _)| *ts < cutoff) {
+                pairs.clear();
+                return;
+            }
             while pairs.front().is_some_and(|(ts, _, _)| *ts < cutoff) {
                 pairs.pop_front();
             }
@@ -1652,7 +1652,6 @@ mod tests {
     fn ratio_snapshot_has_absolute_and_relative() {
         let hierarchy = Arc::new(TestHierarchy::new());
         let tracker = PerformanceMetricsRegistry::new_attached(
-            Duration::from_secs(60),
             Duration::from_secs(5),
             hierarchy,
             "performance",
@@ -1677,7 +1676,6 @@ mod tests {
     fn rate_snapshot_has_quantiles() {
         let hierarchy = Arc::new(TestHierarchy::new());
         let tracker = PerformanceMetricsRegistry::new_attached(
-            Duration::from_secs(10),
             Duration::from_secs(5),
             hierarchy,
             "performance",
@@ -1746,7 +1744,6 @@ mod tests {
     fn attach_without_registered_metrics_succeeds() {
         let hierarchy = Arc::new(TestHierarchy::new());
         let tracker = PerformanceMetricsRegistry::new_attached(
-            Duration::from_secs(60),
             Duration::from_secs(5),
             hierarchy.clone(),
             "performance",
@@ -1760,7 +1757,6 @@ mod tests {
     fn register_after_attach_and_unregister_work() {
         let hierarchy = Arc::new(TestHierarchy::new());
         let tracker = PerformanceMetricsRegistry::new_attached(
-            Duration::from_secs(60),
             Duration::from_secs(5),
             hierarchy.clone(),
             "performance",
@@ -1799,7 +1795,6 @@ mod tests {
     fn register_validates_against_existing_suffixed_sanitized_names() {
         let hierarchy = Arc::new(TestHierarchy::new());
         let tracker = PerformanceMetricsRegistry::new_attached(
-            Duration::from_secs(60),
             Duration::from_secs(5),
             hierarchy.clone(),
             "baseten_frontend",
@@ -1845,7 +1840,6 @@ mod tests {
     fn attached_metrics_export_expected_hierarchy_naming() {
         let hierarchy = Arc::new(TestHierarchy::new());
         let tracker = PerformanceMetricsRegistry::new_attached(
-            Duration::from_secs(60),
             Duration::from_secs(5),
             hierarchy.clone(),
             "baseten_frontend",
@@ -1869,7 +1863,6 @@ mod tests {
     fn request_metrics_new_request_records_request_and_input_tokens() {
         let hierarchy = Arc::new(TestHierarchy::new());
         let registry = PerformanceMetricsRegistry::new_attached(
-            Duration::from_secs(60),
             Duration::from_secs(5),
             hierarchy,
             "baseten_frontend",
@@ -1895,7 +1888,6 @@ mod tests {
     fn request_metrics_first_token_records_ttft_per_input_token() {
         let hierarchy = Arc::new(TestHierarchy::new());
         let registry = PerformanceMetricsRegistry::new_attached(
-            Duration::from_secs(60),
             Duration::from_secs(5),
             hierarchy,
             "baseten_frontend",

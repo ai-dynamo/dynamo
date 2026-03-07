@@ -1,5 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
+// Initially contributed by Baseten @michaelfeil, feel free to tag on maintance.
 
 use dynamo_runtime::metrics::performance_metrics::{
     DistributionMetricHandle as RsDistributionMetricHandle,
