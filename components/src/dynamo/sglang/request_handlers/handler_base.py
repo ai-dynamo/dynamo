@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import dataclasses
+import importlib
 import inspect
 import logging
 import random
@@ -350,6 +352,91 @@ class BaseWorkerHandler(BaseGenerativeHandler):
             "new_version": req.new_version,
         }
 
+    def _resolve_arg(self, arg: Any) -> Any:
+        """Resolve a single argument from the generic call body.
+
+        If ``arg`` is a dict with exactly one key starting with ``"io_struct."``,
+        treat it as a typed constructor: import the class from
+        ``sglang.srt.managers.io_struct`` and construct it with the nested kwargs.
+        Otherwise return the value as-is.
+        """
+        if isinstance(arg, dict) and len(arg) == 1:
+            key = next(iter(arg))
+            if isinstance(key, str) and key.startswith("io_struct."):
+                class_name = key[len("io_struct.") :]
+                module = importlib.import_module("sglang.srt.managers.io_struct")
+                cls = getattr(module, class_name)
+                return cls(**arg[key])
+        return arg
+
+    def _normalize_result(self, result: Any) -> dict:
+        """Convert a tokenizer_manager method return value to a JSON-safe dict."""
+        if result is None:
+            return {"status": "ok"}
+        if isinstance(result, tuple):
+            if len(result) == 2:
+                return {"success": result[0], "message": result[1]}
+            if len(result) == 3:
+                return {
+                    "success": result[0],
+                    "message": result[1],
+                    "num_paused_requests": result[2],
+                }
+        if isinstance(result, list):
+            return {
+                "result": [
+                    dataclasses.asdict(item)
+                    if dataclasses.is_dataclass(item) and not isinstance(item, type)
+                    else item
+                    for item in result
+                ]
+            }
+        if dataclasses.is_dataclass(result) and not isinstance(result, type):
+            return dataclasses.asdict(result)
+        if isinstance(result, dict):
+            return result
+        if isinstance(result, (str, int, float, bool)):
+            return {"result": result}
+        return {"result": str(result)}
+
+    async def call_tokenizer_manager(self, body: dict) -> dict:
+        """Generic passthrough to any tokenizer_manager method.
+
+        Body format::
+
+            {
+                "method": "method_name",
+                "args": [arg1, arg2, ...],
+                "kwargs": {"key": value, ...}
+            }
+
+        Each element in args/kwargs is either a plain value or a typed
+        constructor ``{"io_struct.ClassName": {kwargs}}``.
+        """
+        method_name = body["method"]
+        raw_args = body.get("args", [])
+        raw_kwargs = body.get("kwargs", {})
+
+        args = [self._resolve_arg(a) for a in raw_args]
+        kwargs = {k: self._resolve_arg(v) for k, v in raw_kwargs.items()}
+
+        tm = self.engine.tokenizer_manager
+        # Ensure the handle_loop task is running so communicator responses
+        # are received.  Several tokenizer_manager methods call this
+        # internally, but not all of them (e.g. flush_cache does not).
+        if hasattr(tm, "auto_create_handle_loop"):
+            tm.auto_create_handle_loop()
+
+        method = getattr(tm, method_name)
+        result = await method(*args, **kwargs)
+        return self._normalize_result(result)
+
+    async def get_weight_version(self, _body: dict) -> dict:
+        """Get the current weight version."""
+        return {
+            "weight_version": self.engine.tokenizer_manager.server_args.weight_version,
+        }
+
     async def pin_prefix(self, body: dict) -> dict:
         """Pin a prefix by token_ids to resist eviction.
 
@@ -421,6 +508,10 @@ class BaseWorkerHandler(BaseGenerativeHandler):
         runtime.register_engine_route(
             "update_weight_version", self.update_weight_version
         )
+        runtime.register_engine_route(
+            "call_tokenizer_manager", self.call_tokenizer_manager
+        )
+        runtime.register_engine_route("get_weight_version", self.get_weight_version)
 
     @abstractmethod
     async def generate(self, request: Dict[str, Any], context: Context):

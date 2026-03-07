@@ -131,6 +131,34 @@ init_decode():
   )
 ```
 
+## Engine Routes
+
+`BaseWorkerHandler.register_engine_routes(runtime)` registers HTTP endpoints on the
+Dynamo system status server (Rust/Axum). These are exposed at `POST /engine/<route_name>`.
+
+**Built-in routes:**
+
+- `get_weight_version` — Returns `{"weight_version": "..."}`. Dedicated route (no passthrough).
+- `call_tokenizer_manager` — Generic passthrough to any `tokenizer_manager` method.
+
+**Generic passthrough protocol** (`call_tokenizer_manager`):
+
+```json
+{"method": "flush_cache", "args": [], "kwargs": {}}
+```
+
+- `method`: Name of the method on `engine.tokenizer_manager`
+- `args`: Positional arguments. Supports `io_struct.*` typed constructors:
+  `{"io_struct.FlushCacheReq": {"field": "value"}}` → constructs `sglang.srt.managers.io_struct.FlushCacheReq(field="value")`
+- `kwargs`: Keyword arguments (same `io_struct.*` resolution)
+
+**Key internals:**
+
+- `_resolve_arg()` detects `io_struct.*` dict keys and constructs typed objects
+- `_normalize_result()` converts return values to JSON-safe dicts (handles None,
+  tuples, dataclasses, lists, dicts, primitives; falls back to `str()`)
+- `auto_create_handle_loop()` is called before dispatch — see Common Pitfalls
+
 ## Disaggregated Serving
 
 Prefill and decode workers coordinate via a bootstrap mechanism:
@@ -226,6 +254,13 @@ text-to-video-diffusion.sh  # 1-2 GPUs - Text-to-video (Wan2.1)
 - **output_modalities default**: Global default is `["text"]`. Image/video diffusion
   workers must override to `["image"]`/`["video"]` or the Rust registration path tries
   to load `config.json` (which doesn't exist for diffusers models).
+- **auto_create_handle_loop**: SGLang's `tokenizer_manager` uses a ZMQ communicator
+  to talk to the scheduler. Responses are received by a `handle_loop` asyncio task.
+  Some methods (e.g. `flush_cache`, `get_load`, `get_internal_state`) do NOT call
+  `auto_create_handle_loop()` internally, so calling them without it causes hangs.
+  `call_tokenizer_manager` calls it before every dispatch. If adding a new dedicated
+  engine route that calls tokenizer_manager methods, ensure `auto_create_handle_loop()`
+  is called first.
 - **Zombie GPU processes**: `sgl_diffusion::scheduler` spawns a child process that
   survives parent kill. Always check `nvidia-smi` after teardown.
 
@@ -259,6 +294,10 @@ Checklist for adding a new worker (e.g., a new modality or serving mode):
   modifying handler or registration code. The inheritance chain matters.
 - **Test with launch scripts**: The fastest way to validate changes is to run the
   corresponding launch script in `examples/backends/sglang/launch/`.
+- **Engine route smoke test**: `examples/backends/sglang/test_call_tokenizer_manager.py`
+  starts a real backend and tests engine routes end-to-end. Requires etcd + NATS running.
+- **Engine route unit tests**: `tests/test_call_tokenizer_manager.py` tests `_resolve_arg`,
+  `_normalize_result`, and `call_tokenizer_manager` with mocks (no GPU needed).
 - **Kill zombies between tests**: `pkill -9 -f sglang; sleep 3` before relaunching.
   Diffusion workers spawn child processes (`sgl_diffusion::scheduler`) that survive kills.
 - **Check nvidia-smi**: If a launch OOMs, check for orphaned GPU processes from prior runs.
