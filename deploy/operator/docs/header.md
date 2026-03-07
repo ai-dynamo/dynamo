@@ -1,6 +1,8 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+sidebar-title: Kubernetes CRD
+max-toc-depth: 3
 ---
 
 > **⚠️ Important**: This documentation is automatically generated from source code.
