@@ -4,33 +4,33 @@
 use crate::common::protocols::MoveBlock;
 use derive_getters::Getters;
 use dynamo_tokens::blocks::UniqueBlock;
-use dynamo_tokens::{TokenBlockSequence, Tokens};
+use dynamo_tokens::{PositionalLineageHash, TokenBlockSequence, Tokens};
 use rand::random;
 use validator::Validate;
 
-/// Create unique blocks from a TokenBlockSequence
+/// Create unique blocks and positional lineage hashes from a TokenBlockSequence
 fn create_unique_blocks_from_sequence(
     tokens: &TokenBlockSequence,
     block_size: usize,
     enable_prefix_caching: bool,
-) -> Vec<UniqueBlock> {
-    let mut unique_blocks: Vec<UniqueBlock> = tokens
-        .blocks()
-        .iter()
-        .map(|block| {
-            if enable_prefix_caching {
-                UniqueBlock::FullBlock(block.sequence_hash())
-            } else {
-                UniqueBlock::FullBlock(random::<u64>())
-            }
-        })
-        .collect();
+) -> (Vec<UniqueBlock>, Vec<PositionalLineageHash>) {
+    let mut unique_blocks: Vec<UniqueBlock> = Vec::with_capacity(tokens.blocks().len() + 1);
+    let mut plhs: Vec<PositionalLineageHash> = Vec::with_capacity(tokens.blocks().len());
+
+    for block in tokens.blocks().iter() {
+        if enable_prefix_caching {
+            unique_blocks.push(UniqueBlock::FullBlock(block.sequence_hash()));
+        } else {
+            unique_blocks.push(UniqueBlock::FullBlock(random::<u64>()));
+        }
+        plhs.push(block.positional_lineage_hash());
+    }
 
     // Only push the partial block if tokens count isn't a multiple of block_size
     if !tokens.total_tokens().is_multiple_of(block_size) {
         unique_blocks.push(UniqueBlock::default());
     }
-    unique_blocks
+    (unique_blocks, plhs)
 }
 
 /// A sequence that is actively being built, with the ability to add tokens and commit to hashes
@@ -89,12 +89,13 @@ impl ActiveSequence {
         };
 
         let tokens = Tokens::from(tokens).into_sequence(block_size as u32, Some(1337));
-        let unique_blocks =
+        let (unique_blocks, plhs) =
             create_unique_blocks_from_sequence(&tokens, block_size, enable_prefix_caching);
         let block_hashes = tokens.blocks().iter().map(|b| b.block_hash()).collect();
         let creation_signal = Some(MoveBlock::Use(
             unique_blocks.clone(),
             block_hashes,
+            plhs,
             block_token_ids,
         ));
 
@@ -134,6 +135,14 @@ impl ActiveSequence {
             .blocks()
             .iter()
             .map(|block| block.block_hash())
+            .collect()
+    }
+
+    pub fn positional_lineage_hashes(&self) -> Vec<PositionalLineageHash> {
+        self.tokens
+            .blocks()
+            .iter()
+            .map(|block| block.positional_lineage_hash())
             .collect()
     }
 
@@ -177,6 +186,7 @@ impl ActiveSequence {
                 random::<u64>()
             };
             let last_block_hash = last_complete.block_hash();
+            let last_plh = last_complete.positional_lineage_hash();
             let promote_token_ids = if self.emit_token_ids {
                 Some(last_complete.tokens().to_vec())
             } else {
@@ -197,13 +207,19 @@ impl ActiveSequence {
                 last_seq_hash,
                 second_to_last_hash,
                 last_block_hash,
+                last_plh,
                 promote_token_ids,
             ));
         }
 
         let new_partial_block = UniqueBlock::default();
         self.unique_blocks.push(new_partial_block.clone());
-        signals.push(MoveBlock::Use(vec![new_partial_block], vec![], None));
+        signals.push(MoveBlock::Use(
+            vec![new_partial_block],
+            vec![],
+            vec![],
+            None,
+        ));
         Some(signals)
     }
 
@@ -284,6 +300,7 @@ impl ActiveSequence {
         self.creation_signal = Some(MoveBlock::Use(
             self.unique_blocks.clone(),
             self.block_hashes(),
+            self.positional_lineage_hashes(),
             block_token_ids,
         ));
 
