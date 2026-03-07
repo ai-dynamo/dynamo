@@ -164,6 +164,11 @@ fn build_agent(worker_id: usize, use_gds: bool) -> anyhow::Result<NixlAgent> {
                     );
                 }
 
+                // OBJ backend requires checksum validation for S3-compatible stores
+                params.set("req_checksum", "required").map_err(|e| {
+                    anyhow::anyhow!("Failed to set req_checksum param: {}", e)
+                })?;
+
                 match agent.create_backend("OBJ", &params) {
                     Ok(_) => {
                         tracing::info!(
