@@ -421,6 +421,143 @@ jobs:
           platform_arch: amd64
 
   # ============================================================================
+  # ALLURE REPORT
+  # Generate Allure test report and deploy to GitHub Pages
+  # ============================================================================
+
+  allure-report:
+    runs-on: ubuntu-latest
+    needs: [vllm-pipeline, sglang-pipeline, trtllm-pipeline, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm]
+    if: ${{ !cancelled() }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Allure Results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: allure-results-*
+          path: allure-results
+          merge-multiple: true
+
+      - name: Check for Allure results
+        id: check-results
+        run: |
+          if [ -d allure-results ] && [ "$(ls -A allure-results 2>/dev/null)" ]; then
+            echo "has_results=true" >> $GITHUB_OUTPUT
+            echo "Found allure results:"
+            ls -la allure-results/
+          else
+            echo "has_results=false" >> $GITHUB_OUTPUT
+            echo "No allure results found. Skipping report generation."
+          fi
+
+      - name: Install Allure 2 CLI
+        if: steps.check-results.outputs.has_results == 'true'
+        run: |
+          ALLURE_VERSION="2.32.0"
+          wget -q "https://github.com/allure-framework/allure2/releases/download/${ALLURE_VERSION}/allure-${ALLURE_VERSION}.tgz"
+          tar -xzf "allure-${ALLURE_VERSION}.tgz"
+          mv "allure-${ALLURE_VERSION}" allure2-cli
+
+      - name: Install Allure 3 CLI
+        if: steps.check-results.outputs.has_results == 'true'
+        run: |
+          npm install -g allure
+
+      - name: Get Allure history from gh-pages
+        if: steps.check-results.outputs.has_results == 'true'
+        run: |
+          git fetch origin gh-pages:gh-pages 2>/dev/null || echo "No gh-pages branch yet"
+
+          # Restore history for Allure 2 report
+          if git show gh-pages:pre-merge/history 2>/dev/null; then
+            mkdir -p allure-results/history
+            for f in history.json history-trend.json duration-trend.json categories-trend.json retry-trend.json; do
+              git show "gh-pages:pre-merge/history/$f" > "allure-results/history/$f" 2>/dev/null || true
+            done
+            echo "Restored Allure 2 history from gh-pages/pre-merge"
+          else
+            echo "No previous Allure 2 history found"
+          fi
+
+          # Restore history for Allure 3 report
+          if git show gh-pages:pre-merge-v3/history 2>/dev/null; then
+            mkdir -p allure-results-v3-history
+            for f in history.json history-trend.json duration-trend.json categories-trend.json retry-trend.json; do
+              git show "gh-pages:pre-merge-v3/history/$f" > "allure-results-v3-history/$f" 2>/dev/null || true
+            done
+            echo "Restored Allure 3 history from gh-pages/pre-merge-v3"
+          else
+            echo "No previous Allure 3 history found"
+          fi
+
+      - name: Generate Allure 2 Report
+        if: steps.check-results.outputs.has_results == 'true'
+        run: |
+          ./allure2-cli/bin/allure generate allure-results -o allure-report --clean
+
+      - name: Generate Allure 3 Report
+        if: steps.check-results.outputs.has_results == 'true'
+        run: |
+          # Copy results so we don't mix v2 and v3 history
+          mkdir -p allure-v3-workspace/allure-results
+          cp -r allure-results/* allure-v3-workspace/allure-results/
+          if [ -d allure-results-v3-history ]; then
+            mkdir -p allure-v3-workspace/allure-results/history
+            cp allure-results-v3-history/* allure-v3-workspace/allure-results/history/ 2>/dev/null || true
+          fi
+          # Allure 3 uses --cwd to find allure-results/ and has no --clean flag
+          allure generate --cwd allure-v3-workspace -o allure-report-v3
+
+      - name: Deploy to GitHub Pages
+        if: steps.check-results.outputs.has_results == 'true'
+        run: |
+          DEPLOY_DIR=$(mktemp -d)
+          cd "$DEPLOY_DIR"
+          git init
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Reuse the checkout token for push access
+          git config http.https://github.com/.extraheader "AUTHORIZATION: basic $(echo -n "x-access-token:${{ github.token }}" | base64)"
+
+          # Pull existing gh-pages content or start fresh
+          if git ls-remote --exit-code origin gh-pages &>/dev/null; then
+            git fetch origin gh-pages
+            git checkout gh-pages
+          else
+            git checkout --orphan gh-pages
+          fi
+
+          # Deploy Allure 2 report
+          mkdir -p pre-merge
+          rm -rf pre-merge/*
+          cp -r "${GITHUB_WORKSPACE}/allure-report/"* pre-merge/
+
+          # Deploy Allure 3 report
+          mkdir -p pre-merge-v3
+          rm -rf pre-merge-v3/*
+          cp -r "${GITHUB_WORKSPACE}/allure-report-v3/"* pre-merge-v3/
+
+          # Commit and push
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No changes to deploy"
+          else
+            git commit -m "Deploy Allure reports for pre-merge (run ${{ github.run_id }})"
+            git push origin gh-pages
+          fi
+
+      - name: Print report URLs
+        if: steps.check-results.outputs.has_results == 'true'
+        run: |
+          echo "## Allure Reports" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- [Allure 2 Report](https://ai-dynamo.github.io/dynamo/pre-merge/)" >> $GITHUB_STEP_SUMMARY
+          echo "- [Allure 3 Report](https://ai-dynamo.github.io/dynamo/pre-merge-v3/)" >> $GITHUB_STEP_SUMMARY
+
+  # ============================================================================
   # CLEANUP JOBS
   # Clean up ephemeral Kubernetes namespace and resources
   # ============================================================================
