@@ -103,7 +103,7 @@ These arguments are passed to the **frontend** (not the worker) when using `--dy
 
 ## Tool Calling
 
-The processor supports all SGLang tool call formats. Pass `--tool-call-parser <format>` on the frontend:
+The processor supports all SGLang tool call formats. Pass `--tool-call-parser` on the frontend:
 
 ```bash
 python -m dynamo.frontend \
@@ -115,9 +115,9 @@ python -m dynamo.frontend \
 
 | Parser | Models | Format |
 |--------|--------|--------|
-| `hermes` | Qwen3, Hermes-based | `<tool_call>{"name": ..., "arguments": ...}</tool_call>` |
-| `llama3` | Llama 3.x | `<|python_tag|>` / JSON |
-| `qwen25` | Qwen 2.5 | `<tool_call>` with Qwen-specific wrapping |
+| `hermes` | Qwen3, Hermes-based | `tool_call` tags with JSON name/arguments |
+| `llama3` | Llama 3.x | `python_tag` delimiter / JSON |
+| `qwen25` | Qwen 2.5 | `tool_call` tags with Qwen-specific wrapping |
 
 ### Example: Tool Call Request
 
@@ -175,7 +175,7 @@ python -m dynamo.frontend \
   --reasoning-parser qwen3
 ```
 
-The parser separates `<think>...</think>` content into the `reasoning_content` field and regular content into the `content` field.
+The parser separates think tag content into the `reasoning_content` field and regular content into the `content` field.
 
 ## Performance
 
