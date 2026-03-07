@@ -270,17 +270,17 @@ enum ControlMessage {
 }
 
 enum DataMessage {
-    RecordCount {
+    Count {
         name: String,
         count: u64,
         recorded_at: Instant,
     },
-    RecordValue {
+    Value {
         name: String,
         value: f64,
         recorded_at: Instant,
     },
-    RecordRatio {
+    Ratio {
         name: String,
         numerator: f64,
         denominator: f64,
@@ -569,7 +569,7 @@ impl RegistryInner {
         if count == 0 {
             return Ok(());
         }
-        match self.data_tx.try_send(DataMessage::RecordCount {
+        match self.data_tx.try_send(DataMessage::Count {
             name,
             count,
             recorded_at: Instant::now(),
@@ -589,7 +589,7 @@ impl RegistryInner {
         if !value.is_finite() || value < 0.0 {
             anyhow::bail!("value must be a finite non-negative number");
         }
-        match self.data_tx.try_send(DataMessage::RecordValue {
+        match self.data_tx.try_send(DataMessage::Value {
             name,
             value,
             recorded_at: Instant::now(),
@@ -613,7 +613,7 @@ impl RegistryInner {
         {
             anyhow::bail!("numerator/denominator must be finite non-negative numbers");
         }
-        match self.data_tx.try_send(DataMessage::RecordRatio {
+        match self.data_tx.try_send(DataMessage::Ratio {
             name,
             numerator,
             denominator,
@@ -790,7 +790,7 @@ fn handle_control_message(msg: ControlMessage, state: &mut WorkerState) -> bool 
 
 fn handle_data_message(msg: DataMessage, state: &mut WorkerState) {
     match msg {
-        DataMessage::RecordCount {
+        DataMessage::Count {
             name,
             count,
             recorded_at,
@@ -808,7 +808,7 @@ fn handle_data_message(msg: DataMessage, state: &mut WorkerState) {
                 }
             }
         }
-        DataMessage::RecordValue {
+        DataMessage::Value {
             name,
             value,
             recorded_at,
@@ -826,7 +826,7 @@ fn handle_data_message(msg: DataMessage, state: &mut WorkerState) {
                 }
             }
         }
-        DataMessage::RecordRatio {
+        DataMessage::Ratio {
             name,
             numerator,
             denominator,
