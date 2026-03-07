@@ -20,6 +20,21 @@ class BaseLogitsProcessor(Protocol):
 
     All logits processors must implement this interface to be compatible
     with backend adapters (TRT-LLM, vLLM, SGLang).
+
+    Examples:
+        >>> import torch
+        >>> from typing import Sequence
+        >>> from dynamo.logits_processing import BaseLogitsProcessor
+        >>>
+        >>> class TemperatureProcessor:
+        ...     def __init__(self, temperature: float = 0.7):
+        ...         self.temperature = temperature
+        ...     def __call__(
+        ...         self, input_ids: Sequence[int], logits: torch.Tensor
+        ...     ) -> None:
+        ...         logits.div_(self.temperature)
+        >>>
+        >>> assert isinstance(TemperatureProcessor(), BaseLogitsProcessor)
     """
 
     def __call__(

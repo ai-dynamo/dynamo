@@ -246,15 +246,15 @@ navigation:
       - page: Planner Design
         path: design-docs/planner-design.md
 
-  # ==================== Blog ====================
-  - section: Blog
-    hidden: true
-    path: blogs/index.mdx
-    slug: blog
+  # ==================== API Reference ====================
+  - section: API Reference
     contents:
-      - page: "Flash Indexer: Inter-Galactic KV Routing"
-        path: blogs/flash-indexer/flash-indexer.md
-        slug: flash-indexer
+      - page: Python API
+        path: api/python/README.md
+      - page: Rust API
+        path: api/rust/README.md
+      - page: Kubernetes CRD
+        path: kubernetes/api-reference.md
 
   # ==================== Documentation ====================
   - section: Documentation
@@ -269,6 +269,14 @@ navigation:
   - section: Additional Resources
     hidden: true
     contents:
+      # -- Blog --
+      - section: Blog
+        path: blogs/index.mdx
+        slug: blog
+        contents:
+          - page: "Flash Indexer: Inter-Galactic KV Routing"
+            path: blogs/flash-indexer/flash-indexer.md
+            slug: flash-indexer
       # -- Development --
       - page: Runtime Guide
         path: development/runtime-guide.md
@@ -299,8 +307,6 @@ navigation:
           - page: RDMA Metadata
             path: api/nixl-connect/rdma-metadata.md
       # -- Kubernetes (hidden sub-pages) --
-      - page: API Reference (K8s)
-        path: kubernetes/api-reference.md
       - page: Creating Deployments
         path: kubernetes/deployment/create-deployment.md
       - page: FluxCD
