@@ -29,3 +29,4 @@ pub mod local_model;
 pub mod lora;
 pub mod model_card;
 pub mod preprocessor;
+pub mod protocols;
