@@ -82,26 +82,12 @@ Each backend has deployment examples and configuration options:
 
 ## 3. Deploy Your First Model
 
-```bash
-export NAMESPACE=dynamo-system
-kubectl create namespace ${NAMESPACE}
+Follow the **[Deploying Your First Model](dgdr.md)** guide for a complete end-to-end
+walkthrough using `DynamoGraphDeploymentRequest` (DGDR) — Dynamo's recommended path that
+handles profiling and configuration automatically.
 
-# to pull model from HF
-export HF_TOKEN=<Token-Here>
-kubectl create secret generic hf-token-secret \
-  --from-literal=HF_TOKEN="$HF_TOKEN" \
-  -n ${NAMESPACE};
-
-# Deploy any example (this uses vLLM with Qwen model using aggregated serving)
-kubectl apply -f examples/backends/vllm/deploy/agg.yaml -n ${NAMESPACE}
-
-# Check status
-kubectl get dynamoGraphDeployment -n ${NAMESPACE}
-
-# Test it
-kubectl port-forward svc/vllm-agg-frontend 8000:8000 -n ${NAMESPACE}
-curl http://localhost:8000/v1/models
-```
+The tutorial deploys `Qwen/Qwen3-0.6B` with vLLM and walks you through every step: creating
+the DGDR, watching the profiling lifecycle, and sending your first inference request.
 
 For SLA-based autoscaling, see [SLA Planner Guide](../components/planner/planner-guide.md).
 
