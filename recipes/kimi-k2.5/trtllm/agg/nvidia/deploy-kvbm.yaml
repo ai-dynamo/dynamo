@@ -127,9 +127,6 @@ spec:
             value: "true"
           - name: DYN_KVBM_METRICS_PORT
             value: "6880"
-          # Disable KV Event Consolidator to avoid conflict with KVBM leader ZMQ (56001/56002)
-          - name: DYN_KVBM_KV_EVENTS_ENABLE_CONSOLIDATOR
-            value: "false"
           volumeMounts:
           - mountPath: /opt/dynamo/configs
             name: llm-config-kimi-agg-kvbm
