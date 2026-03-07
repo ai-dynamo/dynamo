@@ -7,7 +7,12 @@
 ##### Wheel Build Image ##########
 ##################################
 
-FROM ${WHEEL_BUILDER_IMAGE} AS wheel_builder
+##################################
+##### wheel_builder_base #########
+##################################
+# Shared base for all wheel builds: tools, system deps, and native libraries (except nixl).
+
+FROM ${WHEEL_BUILDER_IMAGE} AS wheel_builder_base
 
 # Redeclare ARGs for this stage
 ARG ARCH
@@ -190,7 +195,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --upgrade meson pybind11 patchelf maturin[patchelf] tomlkit
 
 ARG NIXL_UCX_REF
-ARG NIXL_REF
 
 {% if device == "cuda" %}
 ARG NIXL_GDRCOPY_REF
@@ -352,7 +356,7 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
 
 {% if framework == "vllm" and device == "cuda" %}
 # Build and install AWS SDK C++ (required for NIXL OBJ backend / S3 support)
-ARG AWS_SDK_CPP_VERSION=1.11.581
+ARG AWS_SDK_CPP_VERSION=1.11.760
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
     export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${ARCH}}" && \
@@ -377,7 +381,89 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     /tmp/use-sccache.sh show-stats "AWS SDK C++"
 {% endif %}
 
-# build and install nixl
+
+##################################
+##### runtime_wheel_builder ######
+##################################
+# Builds ai-dynamo, ai-dynamo-runtime, and gpu_memory_service wheels, sans nixl.
+
+FROM wheel_builder_base AS runtime_wheel_builder
+
+{% if target not in ("dev", "local-dev") %}
+# Copy source code (order matters for layer caching)
+COPY pyproject.toml README.md LICENSE Cargo.toml Cargo.lock rust-toolchain.toml hatch_build.py /opt/dynamo/
+COPY lib/ /opt/dynamo/lib/
+COPY components/ /opt/dynamo/components/
+
+# Build ai-dynamo (pure Python) and ai-dynamo-runtime (maturin) wheels
+ARG ARCH
+ARG USE_SCCACHE
+ARG ENABLE_MEDIA_FFMPEG
+RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
+    --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
+    --mount=type=cache,target=/root/.cargo/registry \
+    --mount=type=cache,target=/root/.cargo/git \
+    --mount=type=cache,target=/root/.cache/uv \
+    export UV_CACHE_DIR=/root/.cache/uv && \
+    export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${ARCH}} && \
+    if [ "$USE_SCCACHE" = "true" ]; then \
+        eval $(/tmp/use-sccache.sh setup-env cmake); \
+    fi && \
+    mkdir -p ${CARGO_TARGET_DIR} && \
+    source ${VIRTUAL_ENV}/bin/activate && \
+    cd /opt/dynamo && \
+    uv build --wheel --out-dir /opt/dynamo/dist && \
+    cd /opt/dynamo/lib/bindings/python && \
+    if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
+        maturin build --release --features "media-ffmpeg" --out /opt/dynamo/dist; \
+    else \
+        maturin build --release --out /opt/dynamo/dist; \
+    fi && \
+    /tmp/use-sccache.sh show-stats "Dynamo Runtime"
+
+{% else %}
+# Dev/local-dev targets do not have pre-built wheels or /workspace source code.
+# After you start the local-dev/dev container, you will need to build from source:
+#   cargo build --features dynamo-llm/block-manager
+#   cd /workspace/lib/bindings/python && maturin develop --uv && cd /workspace
+#   uv pip install --no-deps -e /workspace
+# See container/launch_message/dev.txt for the full setup steps.
+
+# Create dist dir with a placeholder so downstream COPY --from=wheel_builder /opt/dynamo/dist/*.whl always has a match.
+RUN mkdir -p /opt/dynamo/dist ${CARGO_TARGET_DIR} && \
+    touch /opt/dynamo/dist/.placeholder.whl
+
+# Dev/local-dev skip the full COPY lib/ above, so copy gpu_memory_service source explicitly for the wheel build below
+COPY lib/gpu_memory_service/ /opt/dynamo/lib/gpu_memory_service/
+{% endif %}
+
+# Build gpu-memory-service wheel → /opt/dynamo/dist/gpu_memory_service*.whl (small C++ extension, fast build -- all targets, all frameworks)
+{% if device == "cuda" %}
+# Build gpu_memory_service wheel (C++ extension only needs Python headers, no CUDA/torch)
+ARG ENABLE_GPU_MEMORY_SERVICE
+RUN --mount=type=cache,target=/root/.cache/uv \
+    if [ "$ENABLE_GPU_MEMORY_SERVICE" = "true" ]; then \
+        export UV_CACHE_DIR=/root/.cache/uv && \
+        source ${VIRTUAL_ENV}/bin/activate && \
+        uv build --wheel --out-dir /opt/dynamo/dist /opt/dynamo/lib/gpu_memory_service; \
+    fi
+{% endif %}
+
+
+##################################
+##### wheel_builder ##############
+##################################
+# Builds nixl (native + Python wheel) and kvbm wheel, then consolidates all wheels.
+# Runtime templates COPY from this stage.
+
+FROM wheel_builder_base AS wheel_builder
+
+# Build and install nixl
+ARG ARCH
+ARG ARCH_ALT
+ARG DEVICE
+ARG NIXL_REF
+ARG USE_SCCACHE
 {% if device == "cuda" %}
 ARG CUDA_MAJOR
 {% endif %}
@@ -431,6 +517,7 @@ RUN echo "$NIXL_LIB_DIR" > /etc/ld.so.conf.d/nixl.conf && \
     ldconfig
 
 # Build NIXL wheel → /opt/dynamo/dist/nixl/nixl*.whl (C++ transport library, all targets)
+ARG PYTHON_VERSION
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
     --mount=type=cache,target=/root/.cache/uv \
@@ -448,13 +535,8 @@ COPY pyproject.toml README.md LICENSE Cargo.toml Cargo.lock rust-toolchain.toml 
 COPY lib/ /opt/dynamo/lib/
 COPY components/ /opt/dynamo/components/
 
-# Build dynamo wheels → /opt/dynamo/dist/:
-#   uv build        → ai_dynamo*any.whl          (main Python package)
-#   maturin build   → ai_dynamo_runtime*.whl     (Rust bindings)
-#   maturin build   → kvbm*.whl                  (KV block manager, conditional on ENABLE_KVBM)
-# The caches do not need the "shared" lock because Cargo has its own locking mechanism.
+# Build kvbm wheel (with nixl linkage via auditwheel repair)
 ARG ENABLE_KVBM
-ARG ENABLE_MEDIA_FFMPEG
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
     --mount=type=cache,target=/root/.cargo/registry \
@@ -467,14 +549,6 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     fi && \
     mkdir -p ${CARGO_TARGET_DIR} && \
     source ${VIRTUAL_ENV}/bin/activate && \
-    cd /opt/dynamo && \
-    uv build --wheel --out-dir /opt/dynamo/dist && \
-    cd /opt/dynamo/lib/bindings/python && \
-    if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
-        maturin build --release --features "media-ffmpeg" --out /opt/dynamo/dist; \
-    else \
-        maturin build --release --out /opt/dynamo/dist; \
-    fi && \
     if [ "$ENABLE_KVBM" = "true" ]; then \
         cd /opt/dynamo/lib/bindings/kvbm && \
         maturin build --release --out target/wheels && \
@@ -491,32 +565,8 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
             cp target/wheels/*.whl /opt/dynamo/dist/; \
         fi; \
     fi && \
-    /tmp/use-sccache.sh show-stats "Dynamo"
-
-{% else %}
-# Dev/local-dev targets do not have pre-built wheels or /workspace source code.
-# After you start the local-dev/dev container, you will need to build from source:
-#   cargo build --features dynamo-llm/block-manager
-#   cd /workspace/lib/bindings/python && maturin develop --uv && cd /workspace
-#   uv pip install --no-deps -e /workspace
-# See container/launch_message/dev.txt for the full setup steps.
-
-# Create dist dir with a placeholder so downstream COPY --from=wheel_builder /opt/dynamo/dist/*.whl always has a match.
-RUN mkdir -p /opt/dynamo/dist ${CARGO_TARGET_DIR} && \
-    touch /opt/dynamo/dist/.placeholder.whl
-
-# Dev/local-dev skip the full COPY lib/ above, so copy gpu_memory_service source explicitly for the wheel build below
-COPY lib/gpu_memory_service/ /opt/dynamo/lib/gpu_memory_service/
+    /tmp/use-sccache.sh show-stats "Dynamo KVBM"
 {% endif %}
 
-# Build gpu-memory-service wheel → /opt/dynamo/dist/gpu_memory_service*.whl (small C++ extension, fast build -- all targets, all frameworks)
-{% if device == "cuda" %}
-# Build gpu_memory_service wheel (C++ extension only needs Python headers, no CUDA/torch)
-ARG ENABLE_GPU_MEMORY_SERVICE
-RUN --mount=type=cache,target=/root/.cache/uv \
-    if [ "$ENABLE_GPU_MEMORY_SERVICE" = "true" ]; then \
-        export UV_CACHE_DIR=/root/.cache/uv && \
-        source ${VIRTUAL_ENV}/bin/activate && \
-        uv build --wheel --out-dir /opt/dynamo/dist /opt/dynamo/lib/gpu_memory_service; \
-    fi
-{% endif %}
+# Consolidate all wheels from the runtime wheel builder stage
+COPY --from=runtime_wheel_builder /opt/dynamo/dist/ /opt/dynamo/dist/

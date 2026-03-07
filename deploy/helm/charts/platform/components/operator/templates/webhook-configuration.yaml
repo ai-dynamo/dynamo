@@ -26,6 +26,7 @@ metadata:
     app.kubernetes.io/component: webhook
     app.kubernetes.io/created-by: dynamo-operator
     app.kubernetes.io/part-of: dynamo-operator
+    nvidia.com/dynamo-operator-namespace: {{ .Release.Namespace }}
   {{- include "dynamo-operator.labels" . | nindent 4 }}
   {{- if .Values.webhook.certManager.enabled }}
   annotations:
@@ -181,6 +182,7 @@ metadata:
     app.kubernetes.io/component: webhook
     app.kubernetes.io/created-by: dynamo-operator
     app.kubernetes.io/part-of: dynamo-operator
+    nvidia.com/dynamo-operator-namespace: {{ .Release.Namespace }}
   {{- include "dynamo-operator.labels" . | nindent 4 }}
   {{- if .Values.webhook.certManager.enabled }}
   annotations:

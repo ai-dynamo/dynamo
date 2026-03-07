@@ -29,7 +29,7 @@ class VllmEngineMonitor:
         self,
         runtime: DistributedRuntime,
         engine_client: AsyncLLM,
-        shutdown_event: asyncio.Event = None,
+        shutdown_event: asyncio.Event | None = None,
     ):
         if not isinstance(runtime, DistributedRuntime):
             raise ValueError(
