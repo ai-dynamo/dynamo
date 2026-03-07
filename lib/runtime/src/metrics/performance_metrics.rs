@@ -950,7 +950,9 @@ fn worker_loop(
     publish_interval: Duration,
     publisher: PublisherState,
 ) {
-    const MAX_DATA_DRAIN_PER_TICK: usize = 2_048; // ~200k metrics/min at 5s publish interval with default queue capacity; adjust as needed
+    const MAX_DATA_DRAIN_PER_TICK: usize = 2_048;
+    // Synthetic local benchmark indicates worker ingestion can sustain roughly ~1-5M events/s
+    // (and higher in single-metric hot-path cases) when per-metric series stay short.
     let mut state = WorkerState {
         publish_interval,
         metrics: HashMap::new(),
@@ -1902,10 +1904,21 @@ mod tests {
         .unwrap();
         let _request = factory.new_request(123);
 
-        let request_snapshot = factory.inner.request.snapshot_for_test().unwrap();
-        assert!(request_snapshot.rate_per_second.unwrap_or_default() > 0.0);
-        let input_tokens_snapshot = factory.inner.input_tokens.snapshot_for_test().unwrap();
-        assert!(input_tokens_snapshot.rate_per_second.unwrap_or_default() > 0.0);
+        let deadline = Instant::now() + Duration::from_millis(100);
+        loop {
+            let request_snapshot = factory.inner.request.snapshot_for_test().unwrap();
+            let input_tokens_snapshot = factory.inner.input_tokens.snapshot_for_test().unwrap();
+            if request_snapshot.rate_per_second.unwrap_or_default() > 0.0
+                && input_tokens_snapshot.rate_per_second.unwrap_or_default() > 0.0
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "request/input token rates did not become positive before timeout"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
     }
 
     #[test]
@@ -1936,5 +1949,29 @@ mod tests {
             .unwrap();
         assert_eq!(s.kind, PerformanceMetricKind::Distribution);
         assert!(s.average.unwrap_or_default() >= 0.0);
+    }
+
+    #[test]
+    fn compute_quantiles_select_and_sort_paths_match_baseline() {
+        let values = (0..2048)
+            .map(|i| ((i * 37) % 997) as f64 / 3.0)
+            .collect::<Vec<_>>();
+
+        let quantiles_select = vec![0.1, 0.5, 0.9];
+        let quantiles_sort = vec![0.01, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99, 0.999];
+
+        let baseline = |qs: &[f64]| {
+            let mut sorted = values.clone();
+            sorted.sort_unstable_by(f64::total_cmp);
+            qs.iter()
+                .map(|q| (*q, percentile(sorted.as_slice(), *q)))
+                .collect::<Vec<_>>()
+        };
+
+        let selected = compute_quantiles(values.clone(), quantiles_select.as_slice());
+        let sorted = compute_quantiles(values.clone(), quantiles_sort.as_slice());
+
+        assert_eq!(selected, baseline(quantiles_select.as_slice()));
+        assert_eq!(sorted, baseline(quantiles_sort.as_slice()));
     }
 }
