@@ -101,10 +101,6 @@ impl PyPerformanceMetricsRegistry {
         Ok(Self { registry })
     }
 
-    fn window_seconds(&self) -> u64 {
-        self.registry.window_duration().as_secs()
-    }
-
     #[pyo3(signature = (name, quantiles = None, sample_period_seconds = 1.0, window_seconds = None))]
     fn new_rate_metric(
         &self,

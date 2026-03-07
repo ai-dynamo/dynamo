@@ -449,10 +449,6 @@ impl PerformanceMetricsRegistry {
         )
     }
 
-    pub fn window_duration(&self) -> Duration {
-        self.inner.window_duration
-    }
-
     pub fn dropped_events(&self) -> u64 {
         self.inner.dropped_events.load(Ordering::Relaxed)
     }
