@@ -379,8 +379,6 @@ For Slurm or other distributed deployments (and KV-aware routing):
 
 To quickly setup both: `docker compose -f deploy/docker-compose.yml up -d`
 
-See [TRT-LLM on Slurm](docs/backends/trtllm/multinode/trtllm-multinode-examples.md) for deployment examples.
-
 ## More News
 
 - [11/20] [Dell integrates PowerScale with Dynamo's NIXL for 19x faster TTFT](https://www.dell.com/en-us/dt/corporate/newsroom/announcements/detailpage.press-releases~usa~2025~11~dell-technologies-and-nvidia-advance-enterprise-ai-innovation.htm)
