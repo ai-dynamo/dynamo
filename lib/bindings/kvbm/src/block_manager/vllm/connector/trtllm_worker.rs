@@ -218,10 +218,10 @@ impl Worker for KvConnectorWorker {
         let nccl_comm_ptr: Option<usize> = None;
         let nccl_config = build_nccl_config(self.nccl_rank, self.world_size, nccl_comm_ptr);
         // When NCCL is disabled, pass None for rank/world_size so the worker is consistently in sharded mode.
-        let (nccl_rank, world_size) = if nccl_config.is_enabled() {
-            (self.nccl_rank, self.world_size)
+        let nccl_rank = if nccl_config.is_enabled() {
+            self.nccl_rank
         } else {
-            (None, None)
+            None
         };
 
         let config = KvbmWorkerConfig::builder()
@@ -238,7 +238,6 @@ impl Worker for KvConnectorWorker {
             .leader_ack_url(get_leader_zmq_ack_url())
             .scheduler_client(Some(self.transfer_client.clone()))
             .rank(nccl_rank)
-            .world_size(world_size)
             .nccl_config(nccl_config)
             .build()?;
 

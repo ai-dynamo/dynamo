@@ -248,10 +248,10 @@ impl KvbmWorker {
         // Build NcclConfig from owned comm (borrowed handle only)
         let nccl_config = build_nccl_config(rank, world_size, nccl_comm_ptr).map_err(to_pyerr)?;
         // When NCCL is disabled, pass None for rank/world_size so the worker is consistently in sharded mode.
-        let (worker_rank, worker_world_size) = if nccl_config.is_enabled() {
-            (rank, world_size)
+        let worker_rank = if nccl_config.is_enabled() {
+            rank
         } else {
-            (None, None)
+            None
         };
 
         let config = KvbmWorkerConfig::builder()
@@ -279,7 +279,6 @@ impl KvbmWorker {
             .leader_pub_url(get_leader_zmq_pub_url())
             .leader_ack_url(get_leader_zmq_ack_url())
             .rank(worker_rank)
-            .world_size(worker_world_size)
             .nccl_config(nccl_config)
             .build()
             .map_err(to_pyerr)?;
@@ -417,6 +416,7 @@ impl PyNcclBootstrap {
 // Stub implementations when nccl feature is disabled (match .pyi; raise on use)
 // ---------------------------------------------------------------------------
 
+#[cfg(not(feature = "nccl"))]
 const NCCL_UNAVAILABLE_MSG: &str =
     "kvbm was not built with the 'nccl' feature. Rebuild with --features nccl to use NcclBootstrap/NcclCommRef.";
 

@@ -121,7 +121,7 @@ impl NcclBootstrap {
         // Copy bytes directly using transmute to handle both i8 and u8 internal arrays
         // (ARM64 uses u8, x86_64 uses i8 - same binary representation)
         let internal_bytes: &[u8; 128] = bytes[8..136].try_into().unwrap();
-        unique_id.internal = unsafe { std::mem::transmute(*internal_bytes) };
+        unique_id.internal = unsafe { *std::mem::transmute::<&[u8; 128], &[i8; 128]>(internal_bytes) };
 
         Ok(Self {
             unique_id,
@@ -161,27 +161,25 @@ impl NcclBootstrap {
             .and_then(|val| val.parse::<i32>().ok())
             .unwrap_or(8);
 
-        unsafe {
-            config = ncclConfig_t {
-                size: std::mem::size_of::<ncclConfig_t>(),
-                magic: 0xcafebeef, // Required Magic Number
-                version: 22800, // NOTE: This needs to be updated whenever we update the NCCL version.
-                blocking: 1,
-                cgaClusterSize: std::i32::MIN,
-                minCTAs: 1,
-                maxCTAs: max_ctas,
-                netName: std::ptr::null_mut(),
-                splitShare: std::i32::MIN,
-                trafficClass: std::i32::MIN,
-                commName: std::ptr::null_mut(),
-                collnetEnable: 0,
-                CTAPolicy: std::i32::MIN,
-                shrinkShare: std::i32::MIN,
-                nvlsCTAs: std::i32::MIN,
-                nChannelsPerNetPeer: std::i32::MIN,
-                nvlinkCentricSched: std::i32::MIN,
-            }
-        }
+        config = ncclConfig_t {
+            size: std::mem::size_of::<ncclConfig_t>(),
+            magic: 0xcafebeef, // Required Magic Number
+            version: 22800, // NOTE: This needs to be updated whenever we update the NCCL version.
+            blocking: 1,
+            cgaClusterSize: i32::MIN,
+            minCTAs: 1,
+            maxCTAs: max_ctas,
+            netName: std::ptr::null_mut(),
+            splitShare: i32::MIN,
+            trafficClass: i32::MIN,
+            commName: std::ptr::null_mut(),
+            collnetEnable: 0,
+            CTAPolicy: i32::MIN,
+            shrinkShare: i32::MIN,
+            nvlsCTAs: i32::MIN,
+            nChannelsPerNetPeer: i32::MIN,
+            nvlinkCentricSched: i32::MIN,
+        };
 
         let mut comm: ncclComm_t = std::ptr::null_mut();
         tracing::debug!(
@@ -211,6 +209,11 @@ impl NcclBootstrap {
 pub struct NcclCommOwned {
     comm: ncclComm_t,
 }
+
+// Safety: NCCL communicators are internally thread-safe.
+// NCCL serializes operations on the same communicator.
+unsafe impl Send for NcclCommOwned {}
+unsafe impl Sync for NcclCommOwned {}
 
 impl NcclCommOwned {
     /// Create a new owned communicator from a raw handle.
