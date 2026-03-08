@@ -543,6 +543,12 @@ class HandlerBase(BaseGenerativeHandler):
                 processed_input["multi_modal_data"] = None
             return processed_input
 
+        if self.multimodal_processor is None and self._request_has_multimodal(request):
+            raise RuntimeError(
+                "Multimodal input received but worker started without --modality multimodal. "
+                "Restart the worker with --modality multimodal or remove image_url content."
+            )
+
         # PREFILL/ENCODE/AGGREGATED: Process multimodal content if available
         if self.multimodal_processor:
             processed_input = await self.multimodal_processor.process_openai_request(
@@ -562,6 +568,20 @@ class HandlerBase(BaseGenerativeHandler):
 
         # Fallback: text-only flow (no multimodal processor or no multimodal data)
         return request.get("token_ids")
+
+    def _request_has_multimodal(self, request: dict) -> bool:
+        if request.get("multi_modal_data"):
+            return True
+
+        extra_args = request.get("extra_args") or {}
+        messages = extra_args.get("messages") or request.get("messages") or []
+        for message in messages:
+            content = message.get("content", [])
+            if isinstance(content, list):
+                for part in content:
+                    if isinstance(part, dict) and part.get("type") == "image_url":
+                        return True
+        return False
 
     def _normalize_request_format(self, request: dict) -> None:
         """

@@ -17,13 +17,14 @@ if not torch.cuda.is_available():
         "CUDA/GPU not available, but tensorrt_llm import and the test require GPU.",
         allow_module_level=True,
     )
+from dynamo.trtllm.constants import DisaggregationMode
 from dynamo.trtllm.request_handlers.handler_base import HandlerBase
 
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.trtllm,
     pytest.mark.pre_merge,
-    pytest.mark.gpu_0,
+    pytest.mark.gpu_1,
 ]
 
 
@@ -375,3 +376,67 @@ class TestHandleCancellationAbortToggle:
         await handler._handle_cancellation(generation_result, context)
 
         generation_result.abort.assert_not_called()
+
+
+class TestMultimodalGuard:
+    """Tests for multimodal guard when --modality multimodal is not configured."""
+
+    IMAGE_MESSAGE = {
+        "role": "user",
+        "content": [
+            {"type": "image_url", "image_url": {"url": "http://example.com/a.jpg"}},
+            {"type": "text", "text": "describe image"},
+        ],
+    }
+
+    def _make_handler(self, multimodal_processor=None) -> HandlerBase:
+        config = MagicMock()
+        config.multimodal_processor = multimodal_processor
+        config.shutdown_event = None
+        return _ConcreteHandler(config)
+
+    async def _prepare(self, handler, request, epd_metadata=None):
+        return await handler._prepare_input_for_generation(
+            request=request,
+            embeddings=None,
+            ep_disaggregated_params=None,
+            epd_metadata=epd_metadata or {},
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "request_factory",
+        [
+            lambda msg: {"token_ids": [1, 2, 3], "extra_args": {"messages": [msg]}},
+            lambda msg: {"token_ids": [1, 2, 3], "messages": [msg]},
+        ],
+        ids=["extra_args_messages", "top_level_messages"],
+    )
+    async def test_raises_for_image_url(self, request_factory):
+        handler = self._make_handler(multimodal_processor=None)
+        request = request_factory(self.IMAGE_MESSAGE)
+
+        with pytest.raises(RuntimeError, match="--modality multimodal"):
+            await self._prepare(handler, request)
+
+    @pytest.mark.asyncio
+    async def test_text_only_request_falls_back_to_token_ids(self):
+        handler = self._make_handler(multimodal_processor=None)
+        result = await self._prepare(handler, {"token_ids": [10, 20, 30]})
+        assert result == [10, 20, 30]
+
+    @pytest.mark.asyncio
+    async def test_decode_with_prefill_metadata_bypasses_guard(self):
+        handler = self._make_handler(multimodal_processor=None)
+        handler.disaggregation_mode = DisaggregationMode.DECODE
+
+        request = {"token_ids": [1, 2, 3], "messages": [self.IMAGE_MESSAGE]}
+        epd_metadata = {
+            "_prefill_prompt": "describe image",
+            "_prefill_prompt_token_ids": [1, 2, 3],
+        }
+
+        result = await self._prepare(handler, request, epd_metadata)
+        assert result["prompt"] == "describe image"
+        assert result["prompt_token_ids"] == [1, 2, 3]
+        assert result["multi_modal_data"] is None
