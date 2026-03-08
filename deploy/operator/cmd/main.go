@@ -53,6 +53,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	metricsfilters "sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
@@ -165,6 +166,9 @@ func initConfigScheme() {
 	utilruntime.Must(configv1alpha1.AddToScheme(configScheme))
 }
 
+// +kubebuilder:rbac:groups=authentication.k8s.io,resources=tokenreviews,verbs=create
+// +kubebuilder:rbac:groups=authorization.k8s.io,resources=subjectaccessreviews,verbs=create
+
 //nolint:gocyclo
 func main() {
 	initCRDSchemes()
@@ -239,9 +243,10 @@ func main() {
 	mgrOpts := ctrl.Options{
 		Scheme: crdScheme,
 		Metrics: metricsserver.Options{
-			BindAddress:   metricsBindAddr,
-			SecureServing: operatorCfg.Server.Metrics.Secure,
-			TLSOpts:       tlsOpts,
+			BindAddress:    metricsBindAddr,
+			SecureServing:  ptr.Deref(operatorCfg.Server.Metrics.Secure, true),
+			FilterProvider: metricsfilters.WithAuthenticationAndAuthorization,
+			TLSOpts:        tlsOpts,
 		},
 		WebhookServer:           webhookServer,
 		HealthProbeBindAddress:  healthProbeAddr,
