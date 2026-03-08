@@ -392,7 +392,99 @@ def generate_plots(
         log_scale_x=True,
     )
 
-    # 5. Efficiency plot: tok/s/gpu vs tok/s/user
+    # 5. P90 Time to First Token vs Concurrency
+    p90_ttft_data = []
+    for deployment_type, results in deployment_results.items():
+        concurrencies, ttfts = extract_metric_series(
+            results, "time_to_first_token", "p90"
+        )
+        if concurrencies:
+            p90_ttft_data.append((deployment_type.title(), concurrencies, ttfts))
+
+    create_plot(
+        title="P90 Time to First Token vs Concurrency",
+        xlabel="Concurrency Level",
+        ylabel="P90 Time to First Token (ms)",
+        data_series=p90_ttft_data,
+        output_path=output_dir / "p90_time_to_first_token_vs_concurrency.png",
+        log_scale_x=True,
+    )
+
+    # 6. P99 Inter-token Latency vs Concurrency
+    p99_itl_data = []
+    for deployment_type, results in deployment_results.items():
+        concurrencies, latencies = extract_metric_series(
+            results, "inter_token_latency", "p99"
+        )
+        if concurrencies:
+            p99_itl_data.append((deployment_type.title(), concurrencies, latencies))
+
+    create_plot(
+        title="P99 Inter-Token Latency vs Concurrency",
+        xlabel="Concurrency Level",
+        ylabel="P99 Inter-Token Latency (ms)",
+        data_series=p99_itl_data,
+        output_path=output_dir / "p99_inter_token_latency_vs_concurrency.png",
+        log_scale_x=True,
+    )
+
+    # 7. Output Token Throughput vs Concurrency
+    output_tok_data = []
+    for deployment_type, results in deployment_results.items():
+        concurrencies, throughputs = extract_metric_series(
+            results, "output_token_throughput", "avg"
+        )
+        if concurrencies:
+            output_tok_data.append(
+                (deployment_type.title(), concurrencies, throughputs)
+            )
+
+    create_plot(
+        title="Output Token Throughput vs Concurrency",
+        xlabel="Concurrency Level",
+        ylabel="Output Token Throughput (tok/s)",
+        data_series=output_tok_data,
+        output_path=output_dir / "output_token_throughput_vs_concurrency.png",
+        log_scale_x=True,
+    )
+
+    # 8. Average Input Sequence Length vs Concurrency
+    isl_data = []
+    for deployment_type, results in deployment_results.items():
+        concurrencies, isls = extract_metric_series(
+            results, "input_sequence_length", "avg"
+        )
+        if concurrencies:
+            isl_data.append((deployment_type.title(), concurrencies, isls))
+
+    create_plot(
+        title="Average Input Sequence Length vs Concurrency",
+        xlabel="Concurrency Level",
+        ylabel="Average ISL (tokens)",
+        data_series=isl_data,
+        output_path=output_dir / "avg_input_sequence_length_vs_concurrency.png",
+        log_scale_x=True,
+    )
+
+    # 9. Average Output Sequence Length vs Concurrency
+    osl_data = []
+    for deployment_type, results in deployment_results.items():
+        concurrencies, osls = extract_metric_series(
+            results, "output_sequence_length", "avg"
+        )
+        if concurrencies:
+            osl_data.append((deployment_type.title(), concurrencies, osls))
+
+    create_plot(
+        title="Average Output Sequence Length vs Concurrency",
+        xlabel="Concurrency Level",
+        ylabel="Average OSL (tokens)",
+        data_series=osl_data,
+        output_path=output_dir / "avg_output_sequence_length_vs_concurrency.png",
+        log_scale_x=True,
+    )
+
+    # 10. Efficiency plot: tok/s/gpu vs tok/s/user
     create_efficiency_plot(deployment_results, output_dir)
 
     # Generate summary
@@ -420,6 +512,11 @@ def generate_plots(
             "  - avg_inter_token_latency_vs_concurrency.png",
             "  - request_throughput_vs_concurrency.png",
             "  - avg_time_to_first_token_vs_concurrency.png",
+            "  - p90_time_to_first_token_vs_concurrency.png",
+            "  - p99_inter_token_latency_vs_concurrency.png",
+            "  - output_token_throughput_vs_concurrency.png",
+            "  - avg_input_sequence_length_vs_concurrency.png",
+            "  - avg_output_sequence_length_vs_concurrency.png",
             "  - efficiency_tok_s_gpu_vs_user.png",
         ]
     )
