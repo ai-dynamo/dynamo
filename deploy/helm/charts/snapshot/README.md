@@ -64,6 +64,7 @@ See `values.yaml` for all configuration options.
 | `storage.pvc.size` | PVC size | `100Gi` |
 | `storage.pvc.storageClass` | Storage class name | `""` (default) |
 | `daemonset.image.repository` | DaemonSet image repository | `nvcr.io/nvidian/dynamo-dev/snapshot-agent` |
+| `daemonset.snapshotLogLevel` | Snapshot agent and nsrestore log level (`trace`, `debug`, `info`, `warn`, `error`) | `info` |
 | `daemonset.nodeSelector` | Node selector for GPU nodes | `nvidia.com/gpu.present: "true"` |
 | `config.checkpoint.criu.ghostLimit` | CRIU ghost file size limit in bytes | `536870912` (512MB) |
 | `config.checkpoint.criu.logLevel` | CRIU logging verbosity (0-4) | `4` |

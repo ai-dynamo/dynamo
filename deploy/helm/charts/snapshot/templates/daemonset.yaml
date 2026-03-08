@@ -76,6 +76,8 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
+            - name: SNAPSHOT_LOG_LEVEL
+              value: {{ .Values.daemonset.snapshotLogLevel | quote }}
             {{- if .Values.rbac.namespaceRestricted }}
             # Restrict pod watching to this namespace (namespace-scoped RBAC)
             - name: RESTRICTED_NAMESPACE

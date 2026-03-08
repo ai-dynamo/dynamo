@@ -153,6 +153,8 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 	}
 
 	cmd := exec.CommandContext(ctx, "nsenter", args...)
+	// Inherit the agent environment so nsrestore uses the same logger settings.
+	cmd.Env = os.Environ()
 	log.V(1).Info("Executing nsenter + nsrestore", "cmd", cmd.String())
 
 	var stdout bytes.Buffer
@@ -175,4 +177,3 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 
 	return result.RestoredPID, nil
 }
-

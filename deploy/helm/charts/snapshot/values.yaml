@@ -56,6 +56,9 @@ daemonset:
     tag: 1.0.0
     pullPolicy: Always
 
+  # Snapshot agent and nsrestore log level (trace, debug, info, warn, error)
+  snapshotLogLevel: info
+
   # Image pull secrets
   imagePullSecrets:
     - name: ngc-secret
