@@ -855,7 +855,13 @@ fn format_duration_ns(ns: u64) -> String {
 }
 
 fn main() {
-    let args = Args::parse();
+    let args = match Args::try_parse() {
+        Ok(args) => args,
+        Err(_) => {
+            eprintln!("No valid arguments provided, skipping benchmark");
+            return;
+        }
+    };
 
     // Validate arguments to prevent panics
     if args.size == 0
