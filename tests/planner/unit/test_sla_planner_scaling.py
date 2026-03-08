@@ -14,6 +14,7 @@ from dynamo.planner.utils.exceptions import DeploymentValidationError
 from dynamo.planner.utils.planner_config import PlannerConfig
 from dynamo.planner.utils.planner_core import PlannerSharedState, _initialize_gpu_counts
 from dynamo.planner.utils.prefill_planner import PrefillPlanner
+from dynamo.planner.utils.prometheus import Metrics
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -206,6 +207,62 @@ def test_disagg_scale_down():
     assert low_d == _expected_decode(config, decode_planner, samples[1])
     assert low_p < high_p
     assert low_d < high_d
+
+
+def test_invalid_metrics_scale_down_after_threshold():
+    config = _build_config()
+    config.nan_scaledown_threshold = 2
+    prefill_planner, _, shared_state = _build_planners(config, Mock())
+
+    shared_state.last_metrics = Metrics(
+        num_req=0,
+        isl=math.nan,
+        osl=math.nan,
+        ttft=math.nan,
+        itl=math.nan,
+        request_duration=math.nan,
+    )
+
+    assert prefill_planner.plan_adjustment() is None
+    assert prefill_planner.plan_adjustment() == config.min_endpoint
+
+
+def test_invalid_metrics_counter_resets_after_valid_interval():
+    config = _build_config()
+    config.nan_scaledown_threshold = 2
+    prefill_planner, _, shared_state = _build_planners(config, Mock())
+
+    shared_state.last_metrics = Metrics(
+        num_req=0,
+        isl=math.nan,
+        osl=math.nan,
+        ttft=math.nan,
+        itl=math.nan,
+        request_duration=math.nan,
+    )
+    assert prefill_planner.plan_adjustment() is None
+
+    shared_state.last_metrics = Metrics(
+        num_req=1,
+        isl=128,
+        osl=64,
+        ttft=10.0,
+        itl=10.0,
+        request_duration=1.0,
+    )
+    prefill_planner.predict_load = Mock(return_value=(None, None, None))
+    assert prefill_planner.plan_adjustment() is None
+
+    shared_state.last_metrics = Metrics(
+        num_req=0,
+        isl=math.nan,
+        osl=math.nan,
+        ttft=math.nan,
+        itl=math.nan,
+        request_duration=math.nan,
+    )
+    assert prefill_planner.plan_adjustment() is None
+    assert prefill_planner.plan_adjustment() == config.min_endpoint
 
 
 # Tests for _initialize_gpu_counts

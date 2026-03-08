@@ -416,6 +416,7 @@ class BasePlanner:
 
         self.p_correction_factor = 1.0
         self.d_correction_factor = 1.0
+        self._consecutive_invalid_metrics_count = 0
         if self.dryrun:
             self.no_correction = True
         else:
@@ -688,12 +689,28 @@ class BasePlanner:
         self.osl_predictor.add_data_point(osl_avg)
 
     def plan_adjustment(self) -> Optional[int]:
-        # Skip adjustment if no traffic
+        # Invalid metrics often happen during zero-traffic intervals (Prometheus
+        # histogram avg division by zero). After a few consecutive invalid intervals,
+        # force a safe scale-down to min_endpoint to avoid lingering at peak replicas.
         if not self.last_metrics.is_valid():
+            self._consecutive_invalid_metrics_count += 1
+            threshold = getattr(self.config, "nan_scaledown_threshold", 3)
+            if self._consecutive_invalid_metrics_count >= threshold:
+                logger.info(
+                    "Metrics contain None or NaN values for %d consecutive intervals; "
+                    "forcing scale-down to min_endpoint=%d",
+                    self._consecutive_invalid_metrics_count,
+                    self.config.min_endpoint,
+                )
+                self._consecutive_invalid_metrics_count = 0
+                return self.config.min_endpoint
             logger.info(
-                "Metrics contain None or NaN values (no active requests), skipping adjustment"
+                "Metrics contain None or NaN values (%d/%d); skipping adjustment",
+                self._consecutive_invalid_metrics_count,
+                threshold,
             )
             return None
+        self._consecutive_invalid_metrics_count = 0
 
         if not self.no_correction:
             try:

@@ -87,3 +87,15 @@ def test_throughput_metrics_source_invalid():
     """throughput_metrics_source rejects invalid values."""
     with pytest.raises(ValidationError):
         PlannerConfig(namespace="test-ns", throughput_metrics_source="invalid")
+
+
+def test_nan_scaledown_threshold_default():
+    """nan_scaledown_threshold defaults to 3 intervals."""
+    config = PlannerConfig(namespace="test-ns")
+    assert config.nan_scaledown_threshold == 3
+
+
+def test_nan_scaledown_threshold_must_be_positive():
+    """nan_scaledown_threshold rejects non-positive values."""
+    with pytest.raises(ValidationError):
+        PlannerConfig(namespace="test-ns", nan_scaledown_threshold=0)
