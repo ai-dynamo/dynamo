@@ -21,6 +21,7 @@ package v1alpha1
 
 import (
 	"fmt"
+	"strings"
 
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
@@ -344,7 +345,11 @@ func ComputeDynamoNamespace(globalDynamoNamespace bool, k8sNamespace, dgdName st
 	if globalDynamoNamespace {
 		return commonconsts.GlobalDynamoNamespace
 	}
-	return fmt.Sprintf("%s-%s", k8sNamespace, dgdName)
+	// The dynamo namespace is used as the first segment of endpoint paths
+	// (e.g. "namespace.component.endpoint"). Dots in resource names (from model
+	// version strings like "Qwen3-0.6B") would break that parsing, so replace them.
+	sanitized := strings.ReplaceAll(dgdName, ".", "-")
+	return fmt.Sprintf("%s-%s", k8sNamespace, sanitized)
 }
 
 // ModelReference identifies a model served by this component
