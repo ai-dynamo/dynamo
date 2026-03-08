@@ -4,7 +4,7 @@
 # Agg vs EPD benchmark sweep on 4xB200 with Qwen3-VL-30B-A3B-Instruct.
 #
 # Compares aggregated (single-GPU) against EPD with 1/2/4/6 encoders
-# across concurrency levels 1–256, with ISL=1000 and ISL=400 input files.
+# across concurrency levels 1–256, ISL=400, OSL=500.
 # Each encoder gets its own GPU (max 6 on 8 GPUs with prefill+decode).
 #
 # Usage:
@@ -20,7 +20,6 @@ timeout: 900
 output_dir: benchmarks/results/qwen3_vl_30b_b200/agg_vs_epd
 
 input_files:
-  - benchmarks/multimodal/jsonl/1000req_1img_200pool_1000word_http.jsonl
   - benchmarks/multimodal/jsonl/1000req_1img_200pool_400word_http.jsonl
 
 configs:
