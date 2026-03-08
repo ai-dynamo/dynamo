@@ -82,6 +82,7 @@ def run_sweep(
                         model=config.model,
                         extra_args=bench_cfg.extra_args,
                         env_overrides=env_overrides,
+                        log_dir=sweep_dir,
                     )
                     try:
                         run_concurrency_sweep(
@@ -122,11 +123,13 @@ def _sweep_with_restart(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     for c in sorted(config.concurrencies):
+        artifact_dir = output_dir / f"c{c}"
         server.start(
             workflow_script=workflow_script,
             model=config.model,
             extra_args=bench_cfg.extra_args,
             env_overrides=env_overrides,
+            log_dir=artifact_dir,
         )
         try:
             run_aiperf_single(
@@ -137,7 +140,7 @@ def _sweep_with_restart(
                 warmup_count=config.warmup_count,
                 input_file=input_file,
                 osl=config.osl,
-                artifact_dir=output_dir / f"c{c}",
+                artifact_dir=artifact_dir,
             )
         finally:
             server.stop()
