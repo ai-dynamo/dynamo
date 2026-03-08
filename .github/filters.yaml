@@ -107,7 +107,7 @@ deploy:
   - '!**/*.rst'
   - 'deploy/helm/**'
   - 'deploy/utils/**'
-  - 'deploy/chrek/**'
+  - 'deploy/snapshot/**'
 
 planner:
   - 'components/src/dynamo/planner/**'

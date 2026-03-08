@@ -1659,7 +1659,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `pvcName` _string_ | PVCName is the name of the PVC | chrek-pvc |  |
+| `pvcName` _string_ | PVCName is the name of the PVC | snapshot-pvc |  |
 | `basePath` _string_ | BasePath is the base directory within the PVC | /checkpoints |  |
 
 
