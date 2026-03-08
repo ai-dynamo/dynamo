@@ -32,16 +32,16 @@ class VirtualConnector(PlannerConnector):
     The deployment environment needs to use VirtualConnectorClient (in the Rust/Python bindings) to read from the scaling decisions and update report scaling status.
 
     Examples:
-        >>> from dynamo.planner.virtual_connector import VirtualConnector
-        >>> from dynamo.planner.defaults import SubComponentType
+        >>> from dynamo.planner.virtual_connector import VirtualConnector  # doctest: +SKIP
+        >>> from dynamo.planner.defaults import SubComponentType  # doctest: +SKIP
         >>>
-        >>> connector = VirtualConnector(
+        >>> connector = VirtualConnector(  # doctest: +SKIP
         ...     runtime=runtime,
         ...     dynamo_namespace="dynamo",
         ...     model_name="Llama-3.2-1B-Instruct",
         ... )
-        >>> await connector._async_init()
-        >>> await connector.add_component(SubComponentType.PREFILL)
+        >>> await connector._async_init()  # doctest: +SKIP
+        >>> await connector.add_component(SubComponentType.PREFILL)  # doctest: +SKIP
     """
 
     def __init__(

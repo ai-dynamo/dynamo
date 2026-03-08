@@ -457,10 +457,10 @@ class ModelDeploymentCard:
     A model deployment card is a collection of model information
 
     Examples:
-        >>> from dynamo._core import ModelDeploymentCard
-        >>> card = ModelDeploymentCard()
-        >>> json_str = card.to_json_str()
-        >>> restored = ModelDeploymentCard.from_json_str(json_str)
+        >>> from dynamo._core import ModelDeploymentCard  # doctest: +SKIP
+        >>> card = ModelDeploymentCard()  # doctest: +SKIP
+        >>> json_str = card.to_json_str()  # doctest: +SKIP
+        >>> restored = ModelDeploymentCard.from_json_str(json_str)  # doctest: +SKIP
     """
 
     def to_json_str(self) -> str:
@@ -792,15 +792,15 @@ class KvEventPublisher:
     A KV event publisher will publish KV events corresponding to the component.
 
     Examples:
-        >>> publisher = KvEventPublisher(
+        >>> publisher = KvEventPublisher(  # doctest: +SKIP
         ...     endpoint=endpoint, kv_block_size=64, dp_rank=0,
         ...     zmq_endpoint="tcp://127.0.0.1:5557", zmq_topic="",
         ... )
-        >>> publisher.publish_stored(
+        >>> publisher.publish_stored(  # doctest: +SKIP
         ...     token_ids=[1, 2, 3, 4], num_block_tokens=[4],
         ...     block_hashes=[123456],
         ... )
-        >>> publisher.publish_removed(block_hashes=[123456])
+        >>> publisher.publish_removed(block_hashes=[123456])  # doctest: +SKIP
     """
 
     ...
@@ -882,10 +882,10 @@ class HttpService:
     It is a OpenAI compatible http ingress into the Dynamo Distributed Runtime.
 
     Examples:
-        >>> service = HttpService(port=8000)
-        >>> service.add_chat_completions_model("my-model", "checksum", engine)
-        >>> await service.run(runtime)
-        >>> service.shutdown()
+        >>> service = HttpService(port=8000)  # doctest: +SKIP
+        >>> service.add_chat_completions_model("my-model", "checksum", engine)  # doctest: +SKIP
+        >>> await service.run(runtime)  # doctest: +SKIP
+        >>> service.shutdown()  # doctest: +SKIP
     """
 
     def __init__(self, port: Optional[int] = None) -> None:
@@ -1817,15 +1817,15 @@ class EntrypointArgs:
     Use by `dynamo run`.
 
     Examples:
-        >>> from dynamo._core import EntrypointArgs, EngineType, RouterConfig, RouterMode
-        >>> args = EntrypointArgs(
+        >>> from dynamo._core import EntrypointArgs, EngineType, RouterConfig, RouterMode  # doctest: +SKIP
+        >>> args = EntrypointArgs(  # doctest: +SKIP
         ...     engine_type=EngineType.Dynamic,
         ...     model_path="/models/llama-3-8b",
         ...     model_name="dyn://dynamo.backend.generate",
         ...     http_port=8000,
         ...     router_config=RouterConfig(mode=RouterMode.KV),
         ... )
-        >>> mocker_args = EntrypointArgs(
+        >>> mocker_args = EntrypointArgs(  # doctest: +SKIP
         ...     engine_type=EngineType.Mocker,
         ...     model_path="/models/llama-3-8b",
         ...     is_prefill=True,

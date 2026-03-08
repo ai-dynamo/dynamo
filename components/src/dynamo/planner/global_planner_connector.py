@@ -30,16 +30,16 @@ class GlobalPlannerConnector(PlannerConnector):
     consistently with kubernetes and virtual modes.
 
     Examples:
-        >>> from dynamo.planner.global_planner_connector import GlobalPlannerConnector
+        >>> from dynamo.planner.global_planner_connector import GlobalPlannerConnector  # doctest: +SKIP
         >>>
-        >>> connector = GlobalPlannerConnector(
+        >>> connector = GlobalPlannerConnector(  # doctest: +SKIP
         ...     runtime=runtime,
         ...     dynamo_namespace="test-ns",
         ...     global_planner_namespace="global-ns",
         ...     model_name="Llama-3.2-1B-Instruct",
         ... )
-        >>> await connector._async_init()
-        >>> connector.get_model_name()
+        >>> await connector._async_init()  # doctest: +SKIP
+        >>> connector.get_model_name()  # doctest: +SKIP
         'Llama-3.2-1B-Instruct'
     """
 

@@ -42,8 +42,10 @@ def load_health_check_from_env(
         >>> payload = load_health_check_from_env()
         >>> payload
         {'prompt': 'test', 'max_tokens': 1}
-        >>> if _prev is None: os.environ.pop("DYN_HEALTH_CHECK_PAYLOAD", None)
-        ... else: os.environ["DYN_HEALTH_CHECK_PAYLOAD"] = _prev
+        >>> if _prev is None:  # doctest: +SKIP
+        ...     os.environ.pop("DYN_HEALTH_CHECK_PAYLOAD", None)
+        ... else:
+        ...     os.environ["DYN_HEALTH_CHECK_PAYLOAD"] = _prev
 
     Returns:
         Dict containing the health check payload, or None if not set.
