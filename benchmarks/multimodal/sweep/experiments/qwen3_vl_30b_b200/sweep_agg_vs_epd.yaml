@@ -10,7 +10,7 @@
 #   python -m benchmarks.multimodal.sweep \
 #     --config benchmarks/multimodal/sweep/experiments/qwen3_vl_30b_b200/sweep_agg_vs_epd.yaml
 
-model: Qwen/Qwen3-VL-30B-A3B-Instruct-FP8
+model: Qwen/Qwen3-VL-2B-Instruct
 concurrencies: [1, 8, 16, 32, 64, 128, 256]
 osl: 500
 request_count: 1000
