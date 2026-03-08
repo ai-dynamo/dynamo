@@ -2,30 +2,37 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# EPD (Encode-Prefill-Decode) multimodal launch for Qwen3-VL-30B on 4xB200.
+# EPD (Encode-Prefill-Decode) multimodal launch for Qwen3-VL-30B on 8xB200.
 #
-# Supports configurable encoder count via first positional argument.
-# Encoders are split evenly across GPU 0 and GPU 3.
-# Prefill always on GPU 1, Decode always on GPU 2.
+# Each encoder gets its own GPU. Prefill on GPU 1, Decode on GPU 2.
+# Available encoder GPUs: 0, 3, 4, 5, 6, 7 (max 6 encoders on 8 GPUs).
 #
 # GPU layout:
-#   1E:  GPU 0: 1 encoder  | GPU 1: prefill | GPU 2: decode | GPU 3: —
-#   2E:  GPU 0: 1 encoder  | GPU 1: prefill | GPU 2: decode | GPU 3: 1 encoder
-#   4E:  GPU 0: 2 encoders | GPU 1: prefill | GPU 2: decode | GPU 3: 2 encoders
-#   6E:  GPU 0: 3 encoders | GPU 1: prefill | GPU 2: decode | GPU 3: 3 encoders
+#   1E:  GPU 0: encoder  | GPU 1: prefill | GPU 2: decode
+#   2E:  GPU 0: encoder  | GPU 1: prefill | GPU 2: decode | GPU 3: encoder
+#   4E:  GPU 0,3,4,5: encoders | GPU 1: prefill | GPU 2: decode
+#   6E:  GPU 0,3,4,5,6,7: encoders | GPU 1: prefill | GPU 2: decode
 #
 # Usage:
-#   bash launch_epd.sh <num_encoders> --model-path Qwen/Qwen3-VL-2B-Instruct
+#   bash launch_epd.sh <num_encoders> --model-path Qwen/Qwen3-VL-30B-A3B-Instruct
 
 NUM_ENCODERS=${1:-1}
 shift
 
+# GPUs available for encoders (GPU 1=prefill, GPU 2=decode)
+ENCODER_GPUS=(0 3 4 5 6 7)
+
+if (( NUM_ENCODERS > ${#ENCODER_GPUS[@]} )); then
+    echo "ERROR: Requested ${NUM_ENCODERS} encoders but only ${#ENCODER_GPUS[@]} encoder GPUs available (${ENCODER_GPUS[*]})"
+    exit 1
+fi
+
 export DYNAMO_HOME=${DYNAMO_HOME:-"/workspace"}
-export MODEL_PATH=${MODEL_PATH:-"Qwen/Qwen3-VL-2B-Instruct"}
-export SERVED_MODEL_NAME=${SERVED_MODEL_NAME:-"Qwen/Qwen3-VL-2B-Instruct"}
-export PREFILL_ENGINE_ARGS=${PREFILL_ENGINE_ARGS:-"$DYNAMO_HOME/examples/backends/trtllm/engine_configs/qwen3-vl-2b-instruct/prefill.yaml"}
-export DECODE_ENGINE_ARGS=${DECODE_ENGINE_ARGS:-"$DYNAMO_HOME/examples/backends/trtllm/engine_configs/qwen3-vl-2b-instruct/decode.yaml"}
-export ENCODE_ENGINE_ARGS=${ENCODE_ENGINE_ARGS:-"$DYNAMO_HOME/examples/backends/trtllm/engine_configs/qwen3-vl-2b-instruct/encode.yaml"}
+export MODEL_PATH=${MODEL_PATH:-"Qwen/Qwen3-VL-30B-A3B-Instruct"}
+export SERVED_MODEL_NAME=${SERVED_MODEL_NAME:-"Qwen/Qwen3-VL-30B-A3B-Instruct"}
+export PREFILL_ENGINE_ARGS=${PREFILL_ENGINE_ARGS:-"$DYNAMO_HOME/examples/backends/trtllm/engine_configs/qwen3-vl-30b-a3b-instruct/prefill.yaml"}
+export DECODE_ENGINE_ARGS=${DECODE_ENGINE_ARGS:-"$DYNAMO_HOME/examples/backends/trtllm/engine_configs/qwen3-vl-30b-a3b-instruct/decode.yaml"}
+export ENCODE_ENGINE_ARGS=${ENCODE_ENGINE_ARGS:-"$DYNAMO_HOME/examples/backends/trtllm/engine_configs/qwen3-vl-30b-a3b-instruct/encode.yaml"}
 export ENCODE_ENDPOINT=${ENCODE_ENDPOINT:-"dyn://dynamo.tensorrt_llm_encode.generate"}
 export MODALITY=${MODALITY:-"multimodal"}
 export ALLOWED_LOCAL_MEDIA_PATH=${ALLOWED_LOCAL_MEDIA_PATH:-"/tmp"}
@@ -34,11 +41,7 @@ export MAX_FILE_SIZE_MB=${MAX_FILE_SIZE_MB:-50}
 # Remaining arguments forwarded from sweep orchestrator
 EXTRA_ARGS=("$@")
 
-# Compute encoder distribution across GPU 0 and GPU 3
-GPU0_ENCODERS=$(( (NUM_ENCODERS + 1) / 2 ))  # ceil(N/2)
-GPU3_ENCODERS=$(( NUM_ENCODERS / 2 ))         # floor(N/2)
-
-echo "EPD config: ${NUM_ENCODERS} encoder(s) — GPU 0: ${GPU0_ENCODERS}, GPU 3: ${GPU3_ENCODERS}"
+echo "EPD config: ${NUM_ENCODERS} encoder(s) — 1 per GPU"
 
 # Collect PIDs for cleanup
 PIDS=()
@@ -56,9 +59,10 @@ python3 -m dynamo.frontend &
 PIDS+=($!)
 DYNAMO_PID=$!
 
-# spawn encoders on GPU 0
-for i in $(seq 1 "$GPU0_ENCODERS"); do
-    CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.trtllm \
+# spawn encoders — one per GPU
+for (( i=0; i<NUM_ENCODERS; i++ )); do
+    gpu=${ENCODER_GPUS[$i]}
+    CUDA_VISIBLE_DEVICES=$gpu python3 -m dynamo.trtllm \
       --model-path "$MODEL_PATH" \
       --served-model-name "$SERVED_MODEL_NAME" \
       --extra-engine-args "$ENCODE_ENGINE_ARGS" \
@@ -68,22 +72,7 @@ for i in $(seq 1 "$GPU0_ENCODERS"); do
       --disaggregation-mode encode \
       "${EXTRA_ARGS[@]}" &
     PIDS+=($!)
-    echo "  Encoder $i on GPU 0 (PID $!)"
-done
-
-# spawn encoders on GPU 3
-for i in $(seq 1 "$GPU3_ENCODERS"); do
-    CUDA_VISIBLE_DEVICES=3 python3 -m dynamo.trtllm \
-      --model-path "$MODEL_PATH" \
-      --served-model-name "$SERVED_MODEL_NAME" \
-      --extra-engine-args "$ENCODE_ENGINE_ARGS" \
-      --modality "$MODALITY" \
-      --allowed-local-media-path "$ALLOWED_LOCAL_MEDIA_PATH" \
-      --max-file-size-mb "$MAX_FILE_SIZE_MB" \
-      --disaggregation-mode encode \
-      "${EXTRA_ARGS[@]}" &
-    PIDS+=($!)
-    echo "  Encoder $((GPU0_ENCODERS + i)) on GPU 3 (PID $!)"
+    echo "  Encoder $((i+1)) on GPU $gpu (PID $!)"
 done
 
 # run prefill worker on GPU 1

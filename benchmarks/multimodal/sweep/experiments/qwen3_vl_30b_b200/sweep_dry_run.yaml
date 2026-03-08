@@ -8,7 +8,7 @@
 #   python -m benchmarks.multimodal.sweep \
 #     --config benchmarks/multimodal/sweep/experiments/qwen3_vl_30b_b200/sweep_dry_run.yaml
 
-model: Qwen/Qwen3-VL-2B-Instruct
+model: Qwen/Qwen3-VL-30B-A3B-Instruct
 concurrencies: [1]
 osl: 50
 request_count: 3

@@ -1,16 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Agg vs EPD benchmark sweep on 4xB200 with Qwen3-VL-30B-A3B-Instruct-FP8.
+# Agg vs EPD benchmark sweep on 4xB200 with Qwen3-VL-30B-A3B-Instruct.
 #
 # Compares aggregated (single-GPU) against EPD with 1/2/4/6 encoders
 # across concurrency levels 1–256, with ISL=1000 and ISL=400 input files.
+# Each encoder gets its own GPU (max 6 on 8 GPUs with prefill+decode).
 #
 # Usage:
 #   python -m benchmarks.multimodal.sweep \
 #     --config benchmarks/multimodal/sweep/experiments/qwen3_vl_30b_b200/sweep_agg_vs_epd.yaml
 
-model: Qwen/Qwen3-VL-2B-Instruct
+model: Qwen/Qwen3-VL-30B-A3B-Instruct
 concurrencies: [1, 8, 16, 32, 64, 128, 256]
 osl: 500
 request_count: 1000

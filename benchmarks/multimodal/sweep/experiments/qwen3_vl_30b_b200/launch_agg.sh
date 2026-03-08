@@ -5,12 +5,12 @@
 # Aggregated (single-GPU) multimodal worker for Qwen3-VL-30B on B200.
 #
 # Usage:
-#   bash launch_agg.sh --model-path Qwen/Qwen3-VL-2B-Instruct
+#   bash launch_agg.sh --model-path Qwen/Qwen3-VL-30B-A3B-Instruct
 
 export DYNAMO_HOME=${DYNAMO_HOME:-"/workspace"}
-export MODEL_PATH=${MODEL_PATH:-"Qwen/Qwen3-VL-2B-Instruct"}
-export SERVED_MODEL_NAME=${SERVED_MODEL_NAME:-"Qwen/Qwen3-VL-2B-Instruct"}
-export AGG_ENGINE_ARGS=${AGG_ENGINE_ARGS:-"$DYNAMO_HOME/examples/backends/trtllm/engine_configs/qwen3-vl-2b-instruct/agg.yaml"}
+export MODEL_PATH=${MODEL_PATH:-"Qwen/Qwen3-VL-30B-A3B-Instruct"}
+export SERVED_MODEL_NAME=${SERVED_MODEL_NAME:-"Qwen/Qwen3-VL-30B-A3B-Instruct"}
+export AGG_ENGINE_ARGS=${AGG_ENGINE_ARGS:-"$DYNAMO_HOME/examples/backends/trtllm/engine_configs/qwen3-vl-30b-a3b-instruct/agg.yaml"}
 export MODALITY=${MODALITY:-"multimodal"}
 
 # Extra arguments forwarded from sweep orchestrator (e.g. --model-path <model>)
