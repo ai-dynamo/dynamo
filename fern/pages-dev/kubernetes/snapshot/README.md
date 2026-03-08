@@ -4,13 +4,13 @@
 title: Checkpointing
 ---
 
-> ⚠️ **Experimental Feature**: ChReK is currently in **beta/preview**. The ChReK DaemonSet runs in privileged mode to perform CRIU operations. See [Limitations](#limitations) for details.
+> ⚠️ **Experimental Feature**: Dynamo Snapshot is currently in **beta/preview**. The Dynamo Snapshot DaemonSet runs in privileged mode to perform CRIU operations. See [Limitations](#limitations) for details.
 
-**ChReK** (Checkpoint/Restore in Kubernetes) is an experimental infrastructure for fast-starting GPU applications using CRIU (Checkpoint/Restore in User-space). ChReK dramatically reduces cold-start times for large models from minutes to seconds by capturing initialized application state and restoring it on-demand.
+**Dynamo Snapshot** (Checkpoint/Restore in Kubernetes) is an experimental infrastructure for fast-starting GPU applications using CRIU (Checkpoint/Restore in User-space). Dynamo Snapshot dramatically reduces cold-start times for large models from minutes to seconds by capturing initialized application state and restoring it on-demand.
 
-## What is ChReK?
+## What is Dynamo Snapshot?
 
-ChReK provides:
+Dynamo Snapshot provides:
 - **Fast cold starts**: Restore GPU-accelerated applications in seconds instead of minutes
 - **CUDA state preservation**: Checkpoint and restore GPU memory and CUDA contexts
 - **Kubernetes-native**: Integrates seamlessly with Kubernetes primitives
@@ -21,7 +21,7 @@ ChReK provides:
 
 ### 1. With NVIDIA Dynamo Platform (Recommended)
 
-Use ChReK as part of the Dynamo platform for automatic checkpoint management:
+Use Dynamo Snapshot as part of the Dynamo platform for automatic checkpoint management:
 - Automatic checkpoint creation and lifecycle management
 - Seamless integration with DynamoGraphDeployment CRDs
 - Built-in autoscaling with fast restore
@@ -30,9 +30,9 @@ Use ChReK as part of the Dynamo platform for automatic checkpoint management:
 
 ## Architecture
 
-ChReK consists of two main components:
+Dynamo Snapshot consists of two main components:
 
-### 1. ChReK Helm Chart
+### 1. Dynamo Snapshot Helm Chart
 Deploys the checkpoint/restore infrastructure:
 - **DaemonSet**: Runs on GPU nodes to perform CRIU checkpoint operations
 - **PVC**: Stores checkpoint data (rootfs diffs, CUDA memory state)
@@ -46,10 +46,10 @@ The DaemonSet performs checkpoint/restore externally using `nsenter` to enter po
 
 ## Quick Start
 
-To install the ChReK DaemonSet in your cluster, run the following:
+To install the Dynamo Snapshot DaemonSet in your cluster, run the following:
 
 ```bash
-helm install chrek nvidia/chrek \
+helm install snapshot nvidia/snapshot \
   --namespace my-team \
   --create-namespace \
   --set storage.pvc.size=100Gi
@@ -77,10 +77,10 @@ helm install chrek nvidia/chrek \
 
 ## Limitations
 
-⚠️ **Important**: ChReK has significant limitations that may impact production readiness:
+⚠️ **Important**: Dynamo Snapshot has significant limitations that may impact production readiness:
 
 ### Security Considerations
-- **🔴 Privileged DaemonSet**: The ChReK DaemonSet runs in privileged mode with `hostPID`, `hostIPC`, and `hostNetwork` to perform CRIU operations. Workload pods do **not** need privileged mode — all CRIU privilege lives in the DaemonSet.
+- **🔴 Privileged DaemonSet**: The Dynamo Snapshot DaemonSet runs in privileged mode with `hostPID`, `hostIPC`, and `hostNetwork` to perform CRIU operations. Workload pods do **not** need privileged mode — all CRIU privilege lives in the DaemonSet.
 - **Security Impact**: The privileged DaemonSet can:
   - Access all host devices and processes
   - Bypass most security restrictions
@@ -95,7 +95,7 @@ helm install chrek nvidia/chrek \
 - **Storage**: Only PVC storage is currently implemented (S3/OCI planned)
 
 ### Recommendation
-ChReK is best suited for:
+Dynamo Snapshot is best suited for:
 - ✅ Development and testing environments
 - ✅ Research and experimentation
 - ✅ Controlled production environments with appropriate security controls
@@ -104,8 +104,8 @@ ChReK is best suited for:
 ## Documentation
 
 ### Getting Started
-- [Dynamo Integration Guide](dynamo.md) - Using ChReK with Dynamo Platform
-- [ChReK Helm Chart README](https://github.com/ai-dynamo/dynamo/tree/main/deploy/helm/charts/chrek/README.md) - Helm chart configuration
+- [Dynamo Integration Guide](dynamo.md) - Using Dynamo Snapshot with Dynamo Platform
+- [Dynamo Snapshot Helm Chart README](https://github.com/ai-dynamo/dynamo/tree/main/deploy/helm/charts/snapshot/README.md) - Helm chart configuration
 
 ### Related Documentation
 - [CRIU Documentation](https://criu.org/Main_Page) - Upstream CRIU docs
@@ -114,13 +114,13 @@ ChReK is best suited for:
 
 - Kubernetes 1.21+
 - GPU nodes with NVIDIA runtime (`nvidia` runtime class)
-- containerd runtime (for container inspection; CRIU is bundled in ChReK images)
+- containerd runtime (for container inspection; CRIU is bundled in Dynamo Snapshot images)
 - RWX storage class (for multi-node deployments)
-- **Security clearance for privileged DaemonSet** (the ChReK agent runs privileged with hostPID/hostIPC/hostNetwork)
+- **Security clearance for privileged DaemonSet** (the Dynamo Snapshot agent runs privileged with hostPID/hostIPC/hostNetwork)
 
 ## Contributing
 
-ChReK is part of the NVIDIA Dynamo project. Contributions are welcome!
+Dynamo Snapshot is part of the NVIDIA Dynamo project. Contributions are welcome!
 
 ## License
 

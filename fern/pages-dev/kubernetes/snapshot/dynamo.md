@@ -4,7 +4,7 @@
 title: Integration with Dynamo
 ---
 
-> ⚠️ **Experimental Feature**: ChReK is currently in **beta/preview**. The ChReK DaemonSet runs in privileged mode to perform CRIU operations. See [Limitations](#limitations) for details.
+> ⚠️ **Experimental Feature**: Dynamo Snapshot is currently in **beta/preview**. The Dynamo Snapshot DaemonSet runs in privileged mode to perform CRIU operations. See [Limitations](#limitations) for details.
 
 Checkpointing captures the complete state of a running worker pod (including GPU memory) and saves it to storage. New pods can restore from this checkpoint instead of performing a full cold start.
 
@@ -16,30 +16,30 @@ Checkpointing captures the complete state of a running worker pod (including GPU
 ## Prerequisites
 
 - Dynamo Platform installed (v0.4.0+) on k8s cluster with GPU nodes
-- ChReK Helm chart installed (separate from platform)
+- Dynamo Snapshot Helm chart installed (separate from platform)
 - RWX PVC storage (PVC is currently the only supported backend)
 
 ## Quick Start
 
-### 1. Install ChReK Infrastructure
+### 1. Install Dynamo Snapshot Infrastructure
 
-First, install the ChReK Helm chart in each namespace where you need checkpointing:
+First, install the Dynamo Snapshot Helm chart in each namespace where you need checkpointing:
 
 ```bash
-# Install ChReK infrastructure
-helm install chrek nvidia/chrek \
+# Install Dynamo Snapshot infrastructure
+helm install snapshot nvidia/snapshot \
   --namespace my-team \
   --create-namespace \
   --set storage.pvc.size=100Gi
 ```
 
 This creates:
-- A PVC for checkpoint storage (`chrek-pvc`)
-- A DaemonSet for CRIU operations (`chrek-agent`)
+- A PVC for checkpoint storage (`snapshot-pvc`)
+- A DaemonSet for CRIU operations (`snapshot-agent`)
 
 ### 2. Configure Operator Values
 
-Update your Helm values to point to the ChReK infrastructure:
+Update your Helm values to point to the Dynamo Snapshot infrastructure:
 
 ```yaml
 # values.yaml
@@ -49,9 +49,9 @@ dynamo-operator:
     storage:
       type: pvc  # Only PVC is currently supported (S3/OCI planned)
       pvc:
-        pvcName: "chrek-pvc"  # Must match ChReK chart
+        pvcName: "snapshot-pvc"  # Must match Dynamo Snapshot chart
         basePath: "/checkpoints"
-      signalHostPath: "/var/lib/chrek/signals"  # Must match ChReK chart
+      signalHostPath: "/var/lib/snapshot/signals"  # Must match Dynamo Snapshot chart
 ```
 
 ### 2. Configure Your DGD
@@ -361,7 +361,7 @@ Or use `auto` mode and the operator will find/create it automatically.
 - **Single-GPU only**: Multi-GPU configurations are not yet supported (planned)
 - **Network state**: Active TCP connections are closed during restore (handled with `tcp-close` CRIU option)
 - **Storage**: Only PVC backend currently implemented (S3/OCI planned)
-- **Security**: ChReK runs as a **privileged DaemonSet** which is required to run CRIU
+- **Security**: Dynamo Snapshot runs as a **privileged DaemonSet** which is required to run CRIU
 
 ## Troubleshooting
 
@@ -369,13 +369,13 @@ Or use `auto` mode and the operator will find/create it automatically.
 
 1. Check the checkpoint job:
    ```bash
-   kubectl get jobs -l nvidia.com/chrek-is-checkpoint-source=true -n dynamo-system
+   kubectl get jobs -l nvidia.com/snapshot-is-checkpoint-source=true -n dynamo-system
    kubectl logs job/checkpoint-<name> -n dynamo-system
    ```
 
 2. Check the DaemonSet:
    ```bash
-   kubectl logs daemonset/chrek-agent -n dynamo-system
+   kubectl logs daemonset/snapshot-agent -n dynamo-system
    ```
 
 3. Verify storage access:
@@ -510,8 +510,8 @@ spec:
 
 ## Related Documentation
 
-- [ChReK Overview](README.md) - ChReK architecture and use cases
-- [ChReK Helm Chart README](https://github.com/ai-dynamo/dynamo/tree/main/deploy/helm/charts/chrek/README.md) - Chart configuration
+- [Dynamo Snapshot Overview](README.md) - Dynamo Snapshot architecture and use cases
+- [Dynamo Snapshot Helm Chart README](https://github.com/ai-dynamo/dynamo/tree/main/deploy/helm/charts/snapshot/README.md) - Chart configuration
 - [Installation Guide](../installation-guide.md) - Platform installation
 - [API Reference](../api-reference.md) - Complete CRD specifications
 
