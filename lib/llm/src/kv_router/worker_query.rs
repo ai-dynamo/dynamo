@@ -117,7 +117,7 @@ impl WorkerQueryClient {
                             .recover_from_worker(worker_id, dp_rank, None, None)
                             .await
                         {
-                            Ok(count) => {
+                            Ok((count, _)) => {
                                 if count > 0 {
                                     tracing::info!(
                                         "Recovered {count} events from worker {worker_id} dp_rank {dp_rank}"
@@ -278,6 +278,10 @@ impl WorkerQueryClient {
 
     /// Recover missed KV events from a specific worker's dp_rank with retry logic.
     ///
+    /// Returns `(event_count, last_event_id)` where `last_event_id` is:
+    /// - For `Events`: the last event's real event ID (or `None` if empty)
+    /// - For `TreeDump`: the worker's latest real event ID at time of dump
+    ///
     /// Called both by the internal discovery loop (initial recovery) and by the
     /// event plane task in subscriber.rs (gap recovery).
     pub async fn recover_from_worker(
@@ -286,7 +290,7 @@ impl WorkerQueryClient {
         dp_rank: DpRank,
         start_event_id: Option<u64>,
         end_event_id: Option<u64>,
-    ) -> Result<usize> {
+    ) -> Result<(usize, Option<u64>)> {
         tracing::debug!(
             "Attempting recovery from worker {worker_id} dp_rank {dp_rank}, \
              start_event_id: {start_event_id:?}, end_event_id: {end_event_id:?}"
@@ -296,21 +300,25 @@ impl WorkerQueryClient {
             .query_worker_with_retry(worker_id, dp_rank, start_event_id, end_event_id)
             .await?;
 
-        let events = match response {
+        let (events, last_event_id) = match response {
             WorkerKvQueryResponse::Events(events) => {
                 tracing::debug!(
                     "Got {count} buffered events from worker {worker_id} dp_rank {dp_rank}",
                     count = events.len()
                 );
-                events
+                let last_id = events.last().map(|e| e.event.event_id);
+                (events, last_id)
             }
-            WorkerKvQueryResponse::TreeDump(events) => {
+            WorkerKvQueryResponse::TreeDump {
+                events,
+                last_event_id,
+            } => {
                 tracing::info!(
                     "Got tree dump from worker {worker_id} dp_rank {dp_rank} \
-                     (range too old or unspecified), count: {count}",
+                     (range too old or unspecified), count: {count}, last_event_id: {last_event_id}",
                     count = events.len()
                 );
-                events
+                (events, Some(last_event_id))
             }
             WorkerKvQueryResponse::TooNew {
                 requested_start,
@@ -321,7 +329,7 @@ impl WorkerQueryClient {
                     "Requested range [{requested_start:?}, {requested_end:?}] is newer than \
                      available (newest: {newest_available}) for worker {worker_id} dp_rank {dp_rank}"
                 );
-                return Ok(0);
+                return Ok((0, None));
             }
             WorkerKvQueryResponse::InvalidRange { start_id, end_id } => {
                 anyhow::bail!(
@@ -337,7 +345,7 @@ impl WorkerQueryClient {
         let count = events.len();
         if count == 0 {
             tracing::debug!("No events to recover from worker {worker_id} dp_rank {dp_rank}");
-            return Ok(0);
+            return Ok((0, last_event_id));
         }
 
         tracing::info!("Recovered {count} events from worker {worker_id} dp_rank {dp_rank}");
@@ -346,7 +354,7 @@ impl WorkerQueryClient {
             self.indexer.apply_event(event).await;
         }
 
-        Ok(count)
+        Ok((count, last_event_id))
     }
 }
 

@@ -100,7 +100,6 @@ async fn start_kv_router_background_event_plane(
                     );
 
                     // Gap detection: check if event ID is monotonically increasing per (worker, dp_rank)
-                    // Note: event_id <= last_id is duplicate/out-of-order, apply anyway (idempotent)
                     if let Some(&last_id) = last_event_ids.get(&event_key)
                         && event_id > last_id + 1
                     {
@@ -111,24 +110,41 @@ async fn start_kv_router_background_event_plane(
                             "Event ID gap detected for worker {worker_id} dp_rank {dp_rank}, recovering events [{gap_start}, {gap_end}], gap_size: {gap_size}"
                         );
 
-                        if let Err(e) = worker_query_client
+                        match worker_query_client
                             .recover_from_worker(worker_id, dp_rank, Some(gap_start), Some(gap_end))
                             .await
                         {
-                            tracing::error!(
-                                "Failed to recover gap events for worker {worker_id} dp_rank {dp_rank} (gap_start: {gap_start}, gap_end: {gap_end}); proceeding with current event anyway: {e}"
-                            );
+                            Ok((_count, Some(last_recovered_id))) => {
+                                // Update tracking to the recovery's last event ID.
+                                // For tree dumps, this is the worker's real latest event ID,
+                                // which prevents re-triggering gap recovery for events the
+                                // tree dump already covers.
+                                last_event_ids.insert(event_key, last_recovered_id.max(event_id));
+                            }
+                            Ok((_count, None)) => {
+                                // No last_event_id returned (e.g. TooNew with 0 events).
+                                // Normal tracking below will handle it.
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    "Failed to recover gap events for worker {worker_id} dp_rank {dp_rank} (gap_start: {gap_start}, gap_end: {gap_end}); proceeding with current event anyway: {e}"
+                                );
+                            }
                         }
                     }
 
-                    // Update last seen event ID (use max to handle out-of-order)
-                    last_event_ids
-                        .entry(event_key)
-                        .and_modify(|id| *id = (*id).max(event_id))
-                        .or_insert(event_id);
+                    if last_event_ids.get(&event_key).map_or(true, |id| event_id > *id) {
+                        // Update last seen event ID (use max to handle out-of-order)
+                        last_event_ids
+                            .entry(event_key)
+                            .and_modify(|id| *id = (*id).max(event_id))
+                            .or_insert(event_id);
 
-                    // Forward the RouterEvent to the indexer
-                    indexer.apply_event(event).await;
+                        // Forward the RouterEvent to the indexer
+                        indexer.apply_event(event).await;
+                    }
+
+
                 }
             }
         }

@@ -61,8 +61,13 @@ pub struct WorkerKvQueryRequest {
 pub enum WorkerKvQueryResponse {
     /// Events served from the circular buffer (with original event IDs)
     Events(Vec<RouterEvent>),
-    /// Full tree dump (with synthetic 0-indexed event IDs)
-    TreeDump(Vec<RouterEvent>),
+    /// Full tree dump (with synthetic 0-indexed event IDs).
+    /// Includes `last_event_id`: the newest real event ID in the worker's buffer
+    /// at the time of the dump, so the caller can set its tracking cursor correctly.
+    TreeDump {
+        events: Vec<RouterEvent>,
+        last_event_id: u64,
+    },
     /// Requested range is newer than available data
     TooNew {
         requested_start: Option<u64>,
