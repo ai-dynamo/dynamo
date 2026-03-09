@@ -29,7 +29,10 @@ from aiconfigurator.sdk.task import TaskConfig, TaskRunner
 
 from dynamo.profiler.utils.config_modifiers import CONFIG_MODIFIERS
 from dynamo.profiler.utils.dgdr_v1beta1_types import DynamoGraphDeploymentRequestSpec
-from dynamo.profiler.utils.profile_common import derive_backend_image
+from dynamo.profiler.utils.profile_common import (
+    derive_backend_image,
+    needs_profile_data,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -234,6 +237,28 @@ def _run_default_sim(
         top_n=5,
         **load_kwargs,
     )
+
+    # When interpolation data is needed (mocker or throughput-scaling), a
+    # disaggregated config is required.  If AIC picked an aggregated config,
+    # override to the best available disaggregated alternative so that
+    # run_interpolation() can run successfully downstream.
+    if chosen == "agg" and needs_profile_data(dgdr):
+        disagg_key = next(
+            (k for k in best_configs if "disagg" in k and not best_configs[k].empty),
+            None,
+        )
+        if disagg_key:
+            logger.info(
+                "AIC picked aggregated config but interpolation data is required — "
+                "overriding to '%s' to support mocker/throughput-scaling.",
+                disagg_key,
+            )
+            chosen = disagg_key
+        else:
+            logger.warning(
+                "AIC picked aggregated config and no disaggregated alternative "
+                "is available; interpolation data will be skipped."
+            )
 
     best_config_df = best_configs.get(chosen, pd.DataFrame())
     best_latencies = best_latencies_map.get(
