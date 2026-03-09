@@ -7,6 +7,19 @@ trap 'echo Cleaning up...; kill 0' EXIT
 # Common configuration
 MODEL="Qwen/Qwen3-0.6B"
 
+# Parse command line arguments
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --model)
+            MODEL="$2"
+            shift 2
+            ;;
+        *)
+            shift
+            ;;
+    esac
+done
+
 # Enable tracing -- requires the observability stack (Prometheus, Grafana, Tempo).
 # See docs/observability/README.md for setup instructions.
 export DYN_LOGGING_JSONL=true

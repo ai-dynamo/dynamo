@@ -10,7 +10,7 @@ kind: DynamoGraphDeployment
 metadata:
   name: vllm-agg-tracing
 spec:
-  env:
+  envs:
     - name: DYN_LOGGING_JSONL
       value: "true"
     - name: OTEL_EXPORT_ENABLED
