@@ -3,7 +3,7 @@
 
 //! NIXL notification-based completion handler.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -63,6 +63,7 @@ pub async fn process_nixl_notification_events(
     system: Arc<EventManager>,
 ) {
     let mut outstanding: HashMap<Uuid, OutstandingTransfer> = HashMap::new();
+    let mut early_arrivals: HashSet<Uuid> = HashSet::new();
     let mut check_interval = interval(Duration::from_millis(1));
 
     loop {
@@ -71,12 +72,23 @@ pub async fn process_nixl_notification_events(
             notification = rx.recv() => {
                 match notification {
                     Some(notif) => {
-                        outstanding.insert(notif.uuid, OutstandingTransfer {
-                            xfer_req: notif.xfer_req,
-                            event_handle: notif.event_handle,
-                            arrived_at: Instant::now(),
-                            last_warned_at: None,
-                        });
+                        if early_arrivals.remove(&notif.uuid) {
+                            // Notification arrived before registration — complete immediately
+                            if let Err(e) = system.trigger(notif.event_handle) {
+                                error!(
+                                    uuid = %notif.uuid,
+                                    error = %e,
+                                    "Failed to trigger completion event for early arrival"
+                                );
+                            }
+                        } else {
+                            outstanding.insert(notif.uuid, OutstandingTransfer {
+                                xfer_req: notif.xfer_req,
+                                event_handle: notif.event_handle,
+                                arrived_at: Instant::now(),
+                                last_warned_at: None,
+                            });
+                        }
                     }
                     None => {
                         // Channel closed, finish processing outstanding transfers then exit
@@ -123,12 +135,7 @@ pub async fn process_nixl_notification_events(
                             if outstanding.contains_key(&notif_uuid) {
                                 completed.push(notif_uuid);
                             } else {
-                                // Notification arrived before we started waiting for it
-                                // This is the race condition we need to handle
-                                warn!(
-                                    uuid = %notif_uuid,
-                                    "Received notification for transfer not in outstanding map (early arrival)"
-                                );
+                                early_arrivals.insert(notif_uuid);
                             }
                         }
                     }
