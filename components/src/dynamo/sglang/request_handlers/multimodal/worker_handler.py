@@ -12,8 +12,8 @@ import torch
 import dynamo.nixl_connect as connect
 from dynamo._core import Client, Context
 from dynamo.common.constants import DisaggregationMode
-from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.common.utils import nvtx_utils as _nvtx
+from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.sglang.args import Config
 from dynamo.sglang.protocol import (
     DisaggSglangMultimodalRequest,
@@ -337,7 +337,9 @@ class MultimodalWorkerHandler(BaseWorkerHandler):
             if self.serving_mode == DisaggregationMode.DECODE:
                 rng_disagg = _nvtx.start_range("mm:pd:generate_disagg", color="red")
                 try:
-                    async for output in self._generate_disaggregated(request, _end_ttft):
+                    async for output in self._generate_disaggregated(
+                        request, _end_ttft
+                    ):
                         yield output
                 finally:
                     _nvtx.end_range(rng_disagg)

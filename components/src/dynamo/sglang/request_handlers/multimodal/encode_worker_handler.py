@@ -245,22 +245,22 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler):
                 )
                 search_start = image_token_id_index + num_image_tokens
 
-            with _nvtx.annotate("mm:enc:embedding_transfer", color="purple"):
-                descriptor = connect.Descriptor(precomputed_embeddings)
-                with await self._connector.create_readable(descriptor) as readable:
-                    request.serialized_request = readable.metadata()
-                    logger.debug(f"Request: {request.model_dump_json()}")
+            descriptor = connect.Descriptor(precomputed_embeddings)
+            with await self._connector.create_readable(descriptor) as readable:
+                request.serialized_request = readable.metadata()
+                logger.debug(f"Request: {request.model_dump_json()}")
 
+                with _nvtx.annotate("mm:enc:embedding_transfer", color="purple"):
                     # Get the response generator from downstream worker
                     response_generator = await self.pd_worker_client.round_robin(
                         request.model_dump_json()
                     )
                     await readable.wait_for_completion()
 
-                    async for response in response_generator:
-                        yield response.data() if hasattr(response, "data") else str(
-                            response
-                        )
+                async for response in response_generator:
+                    yield response.data() if hasattr(response, "data") else str(
+                        response
+                    )
 
         except Exception as e:
             logger.error(f"Error processing request: {e}")

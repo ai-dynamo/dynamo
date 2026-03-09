@@ -424,14 +424,14 @@ Key NVTX ranges emitted:
 | `mm:encode_worker_generate` | Encode | Full encode request lifetime |
 | `mm:enc:vision_encode` | Encode | Vision encode call (`MMEncoder._encode`) |
 | `mm:enc:embedding_transfer` | Encode | Embedding handoff to downstream worker |
-| `mm:nixl:begin_read` | PD/Prefill/Decode | Begin NIXL read operation for embeddings |
-| `mm:nixl:wait_completion` | PD/Prefill/Decode | Wait for NIXL embedding transfer completion |
-| `mm:pd_worker_generate` | PD/Prefill/Decode | Full worker-side request lifetime |
-| `mm:pd:ttft` | PD/Prefill/Decode | Worker-side TTFT: from request arrival at PD worker to first output token (excludes client->frontend->worker network transit) |
+| `mm:nixl:begin_read` | PD (agg) / Prefill | Begin NIXL read operation for embeddings |
+| `mm:nixl:wait_completion` | PD (agg) / Prefill | Wait for NIXL embedding transfer completion |
+| `mm:pd_worker_generate` | Aggregated worker / Decode worker (`MultimodalWorkerHandler`) | Full worker-side request lifetime |
+| `mm:pd:ttft` | Aggregated worker / Decode worker (`MultimodalWorkerHandler`) | Worker-entry TTFT: from request arrival at this worker to first output token (excludes client->frontend->worker network transit) |
 | `mm:pd:generate_agg` | PD (agg) | Aggregated generation path |
-| `mm:pd:generate_disagg` | PD (disagg) | Disaggregated generation path |
+| `mm:pd:generate_disagg` | Decode worker (disagg entrypoint) | Disaggregated generation path |
 | `mm:pd:load_multimodal` | PD (agg) | Build multimodal items from transferred embeddings |
-| `mm:decode:first_token` | PD/Prefill/Decode | Time to first output token from worker entry |
+| `mm:decode:first_token` | Aggregated worker / Decode worker (`MultimodalWorkerHandler`) | Decode-stage first-token range (starts when decode stream is launched; not worker-entry TTFT) |
 
 ## Known Limitations
 
