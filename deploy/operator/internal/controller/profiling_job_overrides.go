@@ -166,17 +166,8 @@ func applyPodSpecOverrides(spec *corev1.PodSpec, overrides *corev1.PodSpec) {
 	if len(overrides.TopologySpreadConstraints) > 0 {
 		spec.TopologySpreadConstraints = overrides.TopologySpreadConstraints
 	}
-	if overrides.NodeName != "" && isProfilingOverrideAllowed("NodeName") {
-		spec.NodeName = overrides.NodeName
-	}
-	if overrides.SchedulerName != "" && isProfilingOverrideAllowed("SchedulerName") {
-		spec.SchedulerName = overrides.SchedulerName
-	}
 	if overrides.AutomountServiceAccountToken != nil {
 		spec.AutomountServiceAccountToken = overrides.AutomountServiceAccountToken
-	}
-	if len(overrides.HostAliases) > 0 && isProfilingOverrideAllowed("HostAliases") {
-		spec.HostAliases = overrides.HostAliases
 	}
 
 	spec.Volumes = mergeNamedSlice(spec.Volumes, overrides.Volumes, func(v corev1.Volume) string { return v.Name })
@@ -206,19 +197,6 @@ func applyContainerOverrides(container *corev1.Container, overrides *corev1.Cont
 	if len(overrides.EnvFrom) > 0 {
 		container.EnvFrom = append(container.EnvFrom, overrides.EnvFrom...)
 	}
-}
-
-// allowedPrivilegedPodSpecFields is the explicit allowlist of privileged PodSpec
-// fields that profiling-job overrides may set. Fields absent from this set are
-// controller-owned and will not be overwritten by user overrides.
-var allowedPrivilegedPodSpecFields = map[string]struct{}{}
-
-// isProfilingOverrideAllowed reports whether the named privileged PodSpec field
-// is permitted for profiling-job overrides. Add a field name to
-// allowedPrivilegedPodSpecFields to enable it.
-func isProfilingOverrideAllowed(field string) bool {
-	_, ok := allowedPrivilegedPodSpecFields[field]
-	return ok
 }
 
 // mergePodSecurityContext copies non-nil fields from src into dst, preserving
