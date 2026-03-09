@@ -268,7 +268,7 @@ args:
 - **Quickstart**: [Deployment Quickstart](../../../../docs/kubernetes/README.md)
 - **Platform Setup**: [Dynamo Kubernetes Platform Installation](../../../../docs/kubernetes/installation-guide.md)
 - **SLA Planner**: [SLA Planner Quickstart Guide](../../../../docs/components/planner/planner-guide.md)
-- **Global Planner Single-Endpoint Pattern**: [Global Planner Single-Endpoint Deployment Guide](../../../../docs/components/planner/global-planner-single-endpoint-guide.md)
+- **Global Planner**: [Global Planner Deployment Guide](../../../../docs/components/planner/global-planner.md)
 - **Examples**: [Deployment Examples](../../../../docs/getting-started/examples.md)
 - **Architecture Docs**: [Disaggregated Serving](../../../../docs/design-docs/disagg-serving.md), [KV-Aware Routing](../../../../docs/components/router/README.md)
 

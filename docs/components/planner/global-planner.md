@@ -1,31 +1,59 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Global Planner Single-Endpoint Deployment Guide
+title: Global Planner Deployment Guide
 ---
 
-This guide shows how to expose a single model endpoint backed by multiple DynamoGraphDeployments (DGDs) that are specialized for different request shapes. It covers the current Dynamo workflow for combining per-pool profiling, `GlobalRouter`, and `GlobalPlanner` into one single-endpoint serving stack.
+This guide explains how to deploy `GlobalPlanner` and when to use it. `GlobalPlanner` is the centralized scaling execution layer for deployments where multiple DGDs should delegate scaling through one component, whether those DGDs expose separate endpoints or sit behind one shared endpoint.
 
 ## What Problem This Solves
 
-Use this pattern when one model should be reachable through one public endpoint, but one worker configuration is not a good fit for every request shape.
+Without `GlobalPlanner`, each DGD's local planner scales only its own deployment directly. That is fine for isolated deployments, but it becomes awkward when you want one place to:
 
-Typical examples:
+- apply centralized scaling policy across multiple DGDs
+- enforce shared constraints such as authorization or total GPU budget
+- coordinate scaling for a single-endpoint, multi-pool deployment
 
-- short-input requests are cheaper on a smaller prefill pool
-- long-input requests need a larger prefill pool
-- decode capacity should scale independently from prefill capacity
-
-This guide covers the **single-endpoint multi-pool** pattern only. If you want multiple independent DGDs or models to share centralized scaling policy without a shared endpoint, you can use `GlobalPlanner` without `GlobalRouter`. See [Global Planner README](../../../components/src/dynamo/global_planner/README.md).
+`GlobalPlanner` solves that by becoming the common scale-execution endpoint for multiple local planners.
 
 ## Terminology
 
 - **SLA Planner**: The normal `dynamo.planner` component that computes desired replica counts.
 - **Local planner**: A pool-local instance of that planner inside one DGD.
 - **GlobalPlanner**: The centralized execution and policy layer that receives scale requests from local planners.
-- **"Hierarchical planner"**: Older shorthand for the architecture where multiple local planners feed one `GlobalPlanner`, usually together with `GlobalRouter` for a single public endpoint. In this guide, we use the more explicit term **single-endpoint GlobalPlanner deployment**.
+- **Single-endpoint multi-pool deployment**: One model endpoint backed by multiple DGDs for the same model. This pattern uses both `GlobalRouter` and `GlobalPlanner`.
+- **"Hierarchical planner"**: Older shorthand for the architecture where multiple local planners feed one `GlobalPlanner`. In practice, teams often used this phrase for the single-endpoint multi-pool pattern above.
 
-## When To Use This Pattern
+## Deployment Patterns
+
+Use `GlobalPlanner` in one of these two patterns:
+
+| Pattern | Use when | Needs `GlobalRouter` | Public endpoint shape |
+|---------|----------|----------------------|-----------------------|
+| Multiple model endpoints or independent DGDs | Separate DGDs should share centralized scaling policy, such as authorization or total GPU budget | No | One endpoint per DGD, or however each DGD is exposed |
+| One model endpoint, multiple DGDs | One model should be reachable through one public endpoint, but different request classes should land on different DGDs | Yes | One shared endpoint |
+
+## Pattern 1: Multiple Model Endpoints Or Independent DGDs
+
+Use this pattern when you have multiple DGDs, often for different models, and you want them to share centralized scaling policy without collapsing them into one endpoint.
+
+Typical examples:
+
+- DGD A: `qwen-0.6b` disaggregated deployment with its own local planner
+- DGD B: `qwen-32b` disaggregated deployment with its own local planner
+- one shared `GlobalPlanner` that all local planners delegate to
+
+In this pattern:
+
+- each DGD keeps its own normal local planner
+- each local planner is configured with `environment: "global-planner"`
+- all those planners point at the same `global_planner_namespace`
+- each DGD keeps its own endpoint or frontend as needed
+- you do **not** need `GlobalRouter`
+
+This is the pattern to use when the goal is centralized scaling control across multiple deployments or models.
+
+## Pattern 2: One Model Endpoint, Multiple DGDs
 
 Use this pattern when all of the following are true:
 
@@ -34,11 +62,17 @@ Use this pattern when all of the following are true:
 - You want each pool to autoscale independently.
 - You want routing and scale execution to be centralized instead of exposing multiple endpoints to clients.
 
-If you only need one pool for one model, use a single DGD or a single `DynamoGraphDeploymentRequest` (DGDR) instead. If you need multiple DGDs to share centralized scaling policy but do not need one shared endpoint, start with [Global Planner README](../../../components/src/dynamo/global_planner/README.md).
+Typical examples:
+
+- short-input requests are cheaper on a smaller prefill pool
+- long-input requests need a larger prefill pool
+- decode capacity should scale independently from prefill capacity
+
+If you only need one pool for one model, use a single DGD or a single `DynamoGraphDeploymentRequest` (DGDR) instead.
 
 ## What You Deploy
 
-In the current implementation, a single-endpoint `GlobalPlanner` deployment is composed from multiple resources:
+In the current implementation, the single-endpoint pattern is composed from multiple resources:
 
 | Resource | Purpose | Typical contents |
 |----------|---------|------------------|
@@ -346,7 +380,7 @@ This keeps profiling and pool selection simple while still giving you one public
 
 - Single-endpoint `GlobalPlanner` deployments are assembled manually today. One DGDR does not emit the full control DGD plus pool DGDs topology.
 - `GlobalRouter` routes by ISL/TTFT and context-length/ITL grids, not directly by OSL.
-- All pools in one hierarchy are expected to serve the same model.
+- In the single-endpoint pattern, all pools are expected to serve the same model.
 
 ## See Also
 

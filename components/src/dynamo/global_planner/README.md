@@ -135,7 +135,7 @@ Response fields:
 ## Related Documentation
 
 - [Planner Guide](../../../../docs/components/planner/planner-guide.md) — Planner configuration and deployment workflow
-- [Global Planner Single-Endpoint Deployment Guide](../../../../docs/components/planner/global-planner-single-endpoint-guide.md) — Single-endpoint multi-pool workflow using `GlobalRouter` and `GlobalPlanner`
+- [Global Planner Deployment Guide](../../../../docs/components/planner/global-planner.md) — Deployment patterns for `GlobalPlanner`, including multi-model coordination and single-endpoint multi-pool workflows
 - [Planner Design](../../../../docs/design-docs/planner-design.md) — Planner architecture and algorithms
 
 Planners delegate to this service when planner config uses `environment: "global-planner"` and sets `global_planner_namespace`.
