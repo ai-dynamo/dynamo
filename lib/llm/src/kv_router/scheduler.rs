@@ -109,9 +109,12 @@ impl KvScheduler {
                     "External worker discovery mode: worker set will be provided per-request"
                 );
 
+                let slots_monitor = slots.clone();
                 let mut monitor_rx = workers_with_configs.clone();
                 let monitor_cancel_token = component.drt().child_token();
                 tokio::spawn(async move {
+                    let mut last_workers: HashMap<WorkerId, ModelRuntimeConfig> = HashMap::new();
+
                     loop {
                         tokio::select! {
                             _ = monitor_cancel_token.cancelled() => break,
@@ -119,13 +122,26 @@ impl KvScheduler {
                                 if result.is_err() { break; }
                             }
                         }
-                        let current = monitor_rx.borrow_and_update();
-                        let worker_ids: Vec<u64> = current.keys().copied().collect();
-                        tracing::debug!(
-                            ?worker_ids,
-                            count = worker_ids.len(),
-                            "External mode: discovery-registered workers updated (used for RuntimeConfig lookup)"
-                        );
+
+                        let current_workers = monitor_rx.borrow_and_update().clone();
+
+                        if current_workers != last_workers {
+                            let worker_ids: Vec<u64> = current_workers.keys().copied().collect();
+                            tracing::debug!(
+                                ?worker_ids,
+                                count = worker_ids.len(),
+                                "External mode: registering discovery workers in sequence tracker"
+                            );
+
+                            let dp_range: HashMap<u64, (u32, u32)> = current_workers
+                                .iter()
+                                .map(|(&id, c)| {
+                                    (id, (c.data_parallel_start_rank, c.data_parallel_size))
+                                })
+                                .collect();
+                            slots_monitor.update_workers(&dp_range);
+                            last_workers = current_workers;
+                        }
                     }
                 });
             }
