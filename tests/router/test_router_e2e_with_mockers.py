@@ -649,6 +649,7 @@ def test_mocker_two_kv_router(
             skip_consumer_verification=not durable_kv_events,  # Skip JetStream checks in NATS Core mode
         )
 
+
 @pytest.mark.skip(reason="Flaky, temporarily disabled")
 @pytest.mark.parametrize(
     "durable_kv_events", [False], indirect=True
