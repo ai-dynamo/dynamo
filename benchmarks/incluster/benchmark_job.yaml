@@ -17,7 +17,7 @@ spec:
       containers:
       - name: benchmark-runner
         # TODO: update to latest public image in next release
-        image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+        image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:
@@ -37,22 +37,29 @@ spec:
               secretKeyRef:
                 name: hf-token-secret
                 key: HF_TOKEN
-        command: ["python3", "-m", "benchmarks.utils.benchmark"]
+        command: ["/bin/bash", "-c"]
         args:
-          - --model
-          - "Qwen/Qwen3-0.6B"
-          - --isl
-          - "2000"
-          - --std
-          - "10"
-          - --osl
-          - "256"
-          - --output-dir
-          - /data/results
-          - --benchmark-name
-          - "qwen3-0p6b-vllm-agg"
-          - --endpoint-url
-          - "vllm-agg-frontend:8000"
+          - |
+            set -euo pipefail
+            MODEL="Qwen/Qwen3-0.6B"
+            URL="http://vllm-agg-frontend:8000"
+            OUTPUT_DIR="/data/results/qwen3-0p6b-vllm-agg"
+
+            for c in 1 2 5 10 50 100; do
+                echo "=== Concurrency $c ==="
+                aiperf profile \
+                    --model "$MODEL" \
+                    --url "$URL" \
+                    --endpoint-type chat \
+                    --streaming \
+                    --concurrency $c \
+                    --request-count $(( c * 3 > 10 ? c * 3 : 10 )) \
+                    --synthetic-input-tokens-mean 2000 \
+                    --output-tokens-mean 256 \
+                    --artifact-dir "$OUTPUT_DIR/c$c" \
+                    --ui none
+            done
+            echo "=== Benchmark complete ==="
         volumeMounts:
           - name: data-volume
             mountPath: /data

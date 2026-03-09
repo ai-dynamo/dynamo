@@ -5,13 +5,15 @@ title: Dynamo Benchmarking
 subtitle: Benchmark and compare performance across Dynamo deployment configurations
 ---
 
-This benchmarking framework lets you compare performance across any combination of:
+This guide shows how to benchmark Dynamo deployments using [AIPerf](https://github.com/ai-dynamo/aiperf), a comprehensive tool for measuring generative AI inference performance. AIPerf provides detailed metrics, real-time dashboards, and automatic visualization — you call it directly against your endpoints.
+
+You can benchmark any combination of:
 - **DynamoGraphDeployments**
-- **External HTTP endpoints** (existing services deployed following standard documentation from vLLM, llm-d, AIBrix, etc.)
+- **External HTTP endpoints** (vLLM, llm-d, AIBrix, etc.)
 
 ## Choosing Your Benchmarking Approach
 
-Dynamo provides two benchmarking approaches to suit different use cases: **client-side** and **server-side**. Client-side refers to running benchmarks on your local machine and connecting to Kubernetes deployments via port-forwarding, while server-side refers to running benchmarks directly within the Kubernetes cluster using internal service URLs. Which method to use depends on your use case.
+**Client-side** runs benchmarks on your local machine via port-forwarding. **Server-side** runs benchmarks directly within the Kubernetes cluster using internal service URLs.
 
 **TLDR:**
 Need high performance/load testing? Server-side.
@@ -32,7 +34,6 @@ Just quick testing/comparison? Client-side.
 - You want optimal network performance (no port-forwarding overhead)
 - You're running automated CI/CD pipelines
 - You need isolated execution environments
-- You're doing resource-intensive benchmarking
 - You want persistent result storage in the cluster
 
 → **[Go to Server-Side Benchmarking (In-Cluster)](#server-side-benchmarking-in-cluster)**
@@ -49,18 +50,20 @@ Just quick testing/comparison? Client-side.
 | **Results** | Local filesystem | Persistent volumes |
 | **Best for** | Light load | High load |
 
-## What This Tool Does
+## AIPerf Overview
 
-The framework is a Python-based wrapper around `aiperf` that:
-- Benchmarks any HTTP endpoints
-- Runs concurrency sweeps across configurable load levels
-- Generates comparison plots with your custom labels
-- Works with any HuggingFace-compatible model on NVIDIA GPUs (H200, H100, A100, etc.)
-- Provides direct Python script execution for maximum flexibility
+[AIPerf](https://github.com/ai-dynamo/aiperf) is a standalone benchmarking tool available on [PyPI](https://pypi.org/project/aiperf/). It is pre-installed in Dynamo container images. Key features:
 
-**Default sequence lengths**: Input: 2000 tokens, Output: 256 tokens (configurable with `--isl` and `--osl`)
+- Measures latency, throughput, TTFT, inter-token latency, and more
+- Multiple load modes: concurrency, request-rate, trace replay
+- Automatic visualization with `aiperf plot` (Pareto curves, time series, GPU telemetry)
+- Interactive dashboard mode for real-time exploration
+- Arrival patterns (Poisson, constant, gamma) for realistic traffic simulation
+- Warmup phases, gradual ramping, and multi-URL load balancing
 
-**Important**: The `--model` parameter configures AIPerf for benchmarking and provides logging context. The default `--model` value in the benchmarking script is `Qwen/Qwen3-0.6B`, but it must match the model deployed at the endpoint(s).
+**Important**: The `--model` parameter must match the model deployed at the endpoint.
+
+For full documentation, see the [AIPerf docs](https://github.com/ai-dynamo/aiperf/tree/main/docs).
 
 ---
 
@@ -70,314 +73,255 @@ Client-side benchmarking runs on your local machine and connects to Kubernetes d
 
 ## Prerequisites
 
-1. **Dynamo container environment** - You must be running inside a Dynamo container with the benchmarking tools pre-installed.
+1. **Dynamo container environment** - You must be running inside a Dynamo container with AIPerf pre-installed, or install it locally:
+   ```bash
+   pip install aiperf
+   ```
 
 2. **HTTP endpoints** - Ensure you have HTTP endpoints available for benchmarking. These can be:
    - DynamoGraphDeployments exposed via HTTP endpoints
    - External services (vLLM, llm-d, AIBrix, etc.)
-   - Any HTTP endpoint serving HuggingFace-compatible models
-
-3. **Benchmark dependencies** - Since benchmarks run locally, you need to install the required Python dependencies. Install them using:
-   ```bash
-   pip install -r deploy/utils/requirements.txt
-   ```
+   - Any HTTP endpoint serving OpenAI-compatible models
 
 ## User Workflow
 
-Follow these steps to benchmark Dynamo deployments using client-side benchmarking:
+### Step 1: Set Up Cluster and Deploy
 
-### Step 1: Establish Kubernetes Cluster and Install Dynamo
-Set up your Kubernetes cluster with NVIDIA GPUs and install the Dynamo Kubernetes Platform. First follow the [installation guide](../kubernetes/installation-guide.md) to install Dynamo Kubernetes Platform, then use [deploy/utils/README](https://github.com/ai-dynamo/dynamo/blob/main/deploy/utils/README.md) to set up benchmarking resources.
+Set up your Kubernetes cluster with NVIDIA GPUs and install the Dynamo Kubernetes Platform following the [installation guide](../kubernetes/installation-guide.md). Then deploy your DynamoGraphDeployments using the [deployment documentation](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends).
 
-### Step 2: Deploy DynamoGraphDeployments
-Deploy your DynamoGraphDeployments separately using the [deployment documentation](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends). Each deployment should have a frontend service exposed.
+### Step 2: Port-Forward and Run a Single Benchmark
 
-### Step 3: Port-Forward and Benchmark Deployment A
 ```bash
-# Port-forward the frontend service for deployment A
+# Port-forward the frontend service
 kubectl port-forward -n <namespace> svc/<frontend-service-name> 8000:8000 > /dev/null 2>&1 &
-# Note: remember to stop the port-forward process after benchmarking.
 
-# Benchmark deployment A using Python scripts
-python3 -m benchmarks.utils.benchmark \
-   --benchmark-name deployment-a \
-   --endpoint-url http://localhost:8000 \
-   --model "your-model-name" \
-   --output-dir ./benchmarks/results
+# Run a single benchmark
+aiperf profile \
+    --model <your-model-name> \
+    --url http://localhost:8000 \
+    --endpoint-type chat \
+    --streaming \
+    --concurrency 10 \
+    --request-count 100 \
+    --synthetic-input-tokens-mean 2000 \
+    --output-tokens-mean 256
 ```
 
-### Step 4: [If Comparative] Teardown Deployment A and Establish Deployment B
-If comparing multiple deployments, teardown deployment A and deploy deployment B with a different configuration.
+This produces results in `artifacts/` and prints a summary table to the console:
 
-### Step 5: [If Comparative] Port-Forward and Benchmark Deployment B
+```
+                                NVIDIA AIPerf | LLM Metrics
+┏━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━┓
+┃              Metric ┃     avg ┃     min ┃     max ┃     p99 ┃     p90 ┃     p50 ┃     std ┃
+┡━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━┩
+│ Time to First Token │  234.56 │  189.23 │  298.45 │  289.34 │  267.12 │  231.12 │   28.45 │
+│                (ms) │         │         │         │         │         │         │         │
+│     Request Latency │ 1234.56 │  987.34 │ 1567.89 │ 1534.23 │ 1456.78 │ 1223.45 │  156.78 │
+│                (ms) │         │         │         │         │         │         │         │
+│ Inter Token Latency │   15.67 │   12.34 │   19.45 │   19.01 │   18.23 │   15.45 │    1.89 │
+│                (ms) │         │         │         │         │         │         │         │
+│  Request Throughput │   31.45 │     N/A │     N/A │     N/A │     N/A │     N/A │     N/A │
+│      (requests/sec) │         │         │         │         │         │         │         │
+└─────────────────────┴─────────┴─────────┴─────────┴─────────┴─────────┴─────────┴─────────┘
+```
+
+*Actual numbers will vary based on model size, hardware, batch size, and network conditions. Client-side benchmarks include port-forwarding overhead — use [server-side benchmarking](#server-side-benchmarking-in-cluster) for accurate performance measurement.*
+
+To stop the port-forward when done: `kill %1` (or `kill <PID>`).
+
+### Step 3: Concurrency Sweep for Pareto Analysis
+
+To understand how your deployment behaves across load levels, run a concurrency sweep. Each concurrency level sends enough requests for stable measurements (`max(c*3, 10)`):
+
 ```bash
-# Port-forward the frontend service for deployment B
-kubectl port-forward -n <namespace> svc/<frontend-service-name> 8001:8000 > /dev/null 2>&1 &
+MODEL="<your-model-name>"
+URL="http://localhost:8000"
 
-# Benchmark deployment B using Python scripts
-python3 -m benchmarks.utils.benchmark \
-   --benchmark-name deployment-b \
-   --endpoint-url http://localhost:8001 \
-   --model "your-model-name" \
-   --output-dir ./benchmarks/results
+for c in 1 2 5 10 50 100; do
+    aiperf profile \
+        --model "$MODEL" \
+        --url "$URL" \
+        --endpoint-type chat \
+        --streaming \
+        --concurrency $c \
+        --request-count $(( c * 3 > 10 ? c * 3 : 10 )) \
+        --synthetic-input-tokens-mean 2000 \
+        --output-tokens-mean 256 \
+        --artifact-dir "artifacts/deployment-a/c$c"
+done
 ```
 
-### Step 6: Generate Summary and Visualization
+**Note**: Adjust concurrency levels to match your deployment's capacity. Very high concurrency on a small deployment (e.g., c250 on a single GPU) will cause server errors. Start with lower values and increase until you find the saturation point.
+
+### Step 4: [If Comparative] Benchmark a Second Deployment
+
+Teardown deployment A and deploy deployment B with a different configuration. Kill the previous port-forward (`kill %1`), then repeat:
+
 ```bash
-# Generate plots and summary using Python plotting script
-python3 -m benchmarks.utils.plot --data-dir ./benchmarks/results
+kubectl port-forward -n <namespace> svc/<frontend-service-b> 8000:8000 > /dev/null 2>&1 &
 
-# Or plot only specific benchmark experiments
-python3 -m benchmarks.utils.plot --data-dir ./benchmarks/results --benchmark-name experiment-a --benchmark-name experiment-b
+for c in 1 2 5 10 50 100; do
+    aiperf profile \
+        --model "$MODEL" \
+        --url "$URL" \
+        --endpoint-type chat \
+        --streaming \
+        --concurrency $c \
+        --request-count $(( c * 3 > 10 ? c * 3 : 10 )) \
+        --synthetic-input-tokens-mean 2000 \
+        --output-tokens-mean 256 \
+        --artifact-dir "artifacts/deployment-b/c$c"
+done
 ```
+
+### Step 5: Generate Visualizations
+
+```bash
+# Compare all runs — auto-detects multi-run directories
+aiperf plot artifacts/deployment-a artifacts/deployment-b
+
+# Or compare all subdirectories under a parent
+aiperf plot artifacts/
+
+# Launch interactive dashboard for exploration
+aiperf plot artifacts/ --dashboard
+```
+
+AIPerf automatically generates plots based on available data:
+- **TTFT vs Throughput** — find the sweet spot between responsiveness and capacity (always generated for multi-run comparisons)
+- **Pareto Curves** — throughput per GPU vs latency and interactivity (only generated when GPU telemetry data is available — add `--gpu-telemetry` during profiling if DCGM is running)
+- **Time series** — per-request TTFT, ITL, and latency over time (generated for single-run analysis)
+
+See the [AIPerf Visualization Guide](https://github.com/ai-dynamo/aiperf/blob/main/docs/tutorials/plot.md) for full details on plot customization, experiment classification, and themes.
 
 ## Use Cases
 
-The benchmarking framework supports various comparative analysis scenarios:
-
-- **Compare multiple DynamoGraphDeployments of a single backend** (e.g., aggregated vs disaggregated configurations)
+- **Compare DynamoGraphDeployments** (e.g., aggregated vs disaggregated configurations)
 - **Compare different backends** (e.g., SGLang vs TensorRT-LLM vs vLLM)
 - **Compare Dynamo vs other platforms** (e.g., Dynamo vs llm-d vs AIBrix)
 - **Compare different models** (e.g., Llama-3-8B vs Llama-3-70B vs Qwen-3-0.6B)
 - **Compare different hardware configurations** (e.g., H100 vs A100 vs H200)
 - **Compare different parallelization strategies** (e.g., different GPU counts or memory configurations)
 
-## Configuration and Usage
+## AIPerf Quick Reference
 
-### Command Line Options
+### Commonly Used Options
 
-```bash
-python3 -m benchmarks.utils.benchmark --benchmark-name <name> --endpoint-url <endpoint_url> [OPTIONS]
+```
+aiperf profile [OPTIONS]
 
 REQUIRED:
-  --benchmark-name NAME           Name/label for this benchmark (used in plots and results)
-  --endpoint-url URL              HTTP endpoint URL to benchmark (e.g., http://localhost:8000)
+  --model MODEL               Model name (must match the deployed model)
+  --url URL                   Endpoint URL (e.g., http://localhost:8000)
 
-OPTIONS:
-  -h, --help                    Show help message and examples
-  -m, --model MODEL             Model name for AIPerf configuration and logging (default: Qwen/Qwen3-0.6B)
-                                NOTE: This must match the model deployed at the endpoint
-  -i, --isl LENGTH              Input sequence length (default: 2000)
-  -s, --std STDDEV              Input sequence standard deviation (default: 10)
-  -o, --osl LENGTH              Output sequence length (default: 256)
-  -d, --output-dir DIR          Output directory (default: ./benchmarks/results)
-  --verbose                     Enable verbose output
+COMMON OPTIONS:
+  --endpoint-type TYPE        Endpoint type: chat, completions, embeddings (default: chat)
+  --streaming                 Enable streaming responses
+  --concurrency N             Number of concurrent requests
+  --request-rate N            Target requests per second (alternative to --concurrency)
+  --request-count N           Total number of requests to send
+  --benchmark-duration N      Run for N seconds instead of a fixed request count
+  --synthetic-input-tokens-mean N   Average input sequence length in tokens
+  --output-tokens-mean N      Average output sequence length in tokens
+  --artifact-dir DIR          Output directory for results (default: artifacts/)
+  --warmup-request-count N    Warmup requests before measurement
+  --ui TYPE                   UI mode: dashboard, simple, none (default: dashboard)
 ```
 
-### Important Notes
+For the complete CLI reference, see `aiperf profile --help` or the [CLI docs](https://github.com/ai-dynamo/aiperf/blob/main/docs/cli-options.md).
 
-- **Benchmark Name**: The benchmark name becomes the label in plots and results
-- **Name Restrictions**: Names can only contain letters, numbers, hyphens, and underscores. The name `plots` is reserved.
-- **Port-Forwarding**: You must have an exposed endpoint before benchmarking
-- **Model Parameter**: The `--model` parameter configures AIPerf for testing and logging, and must match the model deployed at the endpoint
-- **Sequential Benchmarking**: For comparative benchmarks, deploy and benchmark each configuration separately
+### Output Sequence Length
 
-### What Happens During Benchmarking
-
-The Python benchmarking module:
-1. **Connects** to your port-forwarded endpoint
-2. **Benchmarks** using AIPerf at various concurrency levels (default: 1, 2, 5, 10, 50, 100, 250)
-3. **Measures** key metrics: latency, throughput, time-to-first-token
-4. **Saves** results to an output directory organized by benchmark name
-
-The Python plotting module:
-1. **Generates** comparison plots using your benchmark name in `<OUTPUT_DIR>/plots/`
-2. **Creates** summary statistics and visualizations
-
-### Plotting Options
-
-The plotting script supports several options for customizing which experiments to visualize:
+To enforce a specific output length, pass `ignore_eos` and `min_tokens` via `--extra-inputs`:
 
 ```bash
-# Plot all benchmark experiments in the data directory
-python3 -m benchmarks.utils.plot --data-dir ./benchmarks/results
-
-# Plot only specific benchmark experiments
-python3 -m benchmarks.utils.plot --data-dir ./benchmarks/results --benchmark-name experiment-a --benchmark-name experiment-b
-
-# Specify custom output directory for plots
-python3 -m benchmarks.utils.plot --data-dir ./benchmarks/results --output-dir ./custom-plots
+aiperf profile \
+    --model <model> \
+    --url http://localhost:8000 \
+    --endpoint-type chat \
+    --streaming \
+    --concurrency 10 \
+    --output-tokens-mean 256 \
+    --extra-inputs max_tokens:256 \
+    --extra-inputs min_tokens:256 \
+    --extra-inputs ignore_eos:true
 ```
 
-**Available Options:**
-- `--data-dir`: Directory containing benchmark results (required)
-- `--benchmark-name`: Specific benchmark experiment name to plot (can be specified multiple times). Names must match subdirectory names under the data dir.
-- `--output-dir`: Custom output directory for plots (defaults to data-dir/plots)
+### Understanding Results
 
-**Note**: If `--benchmark-name` is not specified, the script will plot all subdirectories found in the data directory.
+Each `aiperf profile` run produces an artifact directory containing:
+- **`profile_export_aiperf.json`** — Structured metrics (latency, throughput, TTFT, ITL, etc.)
+- **`profile_export.jsonl`** — Per-request raw data
+- **`profile_export_aiperf.csv`** — CSV format metrics
 
-### Using Your Own Models and Configuration
-
-The benchmarking framework supports any HuggingFace-compatible LLM model. Specify your model in the benchmark script's `--model` parameter. It must match the model name of the deployment. You can override the default sequence lengths (2000/256 tokens) with `--isl` and `--osl` flags if needed for your specific workload.
-
-The benchmarking framework is built around Python modules that provide direct control over the benchmark workflow. The Python benchmarking module connects to your existing endpoints, runs the benchmarks, and can generate plots. Deployment is user-managed and out of scope for this tool.
-
-### Comparison Limitations
-
-The plotting system supports up to 12 different benchmarks in a single comparison.
-
-### Concurrency Configuration
-
-You can customize the concurrency levels using the CONCURRENCIES environment variable:
-
-```bash
-# Custom concurrency levels
-CONCURRENCIES="1,5,20,50" python3 -m benchmarks.utils.benchmark \
-    --benchmark-name my-test \
-    --endpoint-url http://localhost:8000
-
-# Or set permanently
-export CONCURRENCIES="1,2,5,10,25,50,100"
-python3 -m benchmarks.utils.benchmark \
-    --benchmark-name test \
-    --endpoint-url http://localhost:8000
-```
-
-### Request Count Configuration
-
-The number of requests sent per concurrency level is auto-computed as `max(concurrency * 3, 10)` by default. This ensures each concurrency slot runs enough requests for stable measurements. You can override this with the `REQUEST_COUNT` environment variable:
-
-```bash
-# Fixed request count for all concurrency levels
-REQUEST_COUNT=500 python3 -m benchmarks.utils.benchmark \
-    --benchmark-name my-test \
-    --endpoint-url http://localhost:8000
-
-# Combined with custom concurrency levels
-CONCURRENCIES="1,10,50,200" REQUEST_COUNT=1000 python3 -m benchmarks.utils.benchmark \
-    --benchmark-name high-load-test \
-    --endpoint-url http://localhost:8000
-```
-
-**Important**: The request count must be greater than or equal to the concurrency level. If the request count is too low, the actual in-flight concurrency will be capped at the request count, leading to inaccurate results at higher concurrency levels.
-
-## Understanding Your Results
-
-After benchmarking completes, check `./benchmarks/results/` (or your custom output directory):
-
-### Plot Labels and Organization
-
-The plotting script uses the `--benchmark-name` as the experiment name in all generated plots. For example:
-- `--benchmark-name aggregated` → plots will show "aggregated" as the label
-- `--benchmark-name vllm-disagg` → plots will show "vllm-disagg" as the label
-
-This allows you to easily identify and compare different configurations in the visualization plots.
-
-### Summary and Plots
+Results are organized by the `--artifact-dir` you specify. For concurrency sweeps, a common pattern is:
 
 ```text
-benchmarks/results/plots
-├── SUMMARY.txt                                     # Quick overview of all results
-├── p50_inter_token_latency_vs_concurrency.png      # Token generation speed
-├── avg_time_to_first_token_vs_concurrency.png      # Response time
-├── request_throughput_vs_concurrency.png           # Requests per second
-├── efficiency_tok_s_gpu_vs_user.png                # GPU efficiency
-└── avg_inter_token_latency_vs_concurrency.png      # Average latency
+artifacts/
+├── deployment-a/
+│   ├── c1/
+│   │   ├── profile_export_aiperf.json
+│   │   └── profile_export.jsonl
+│   ├── c10/
+│   ├── c50/
+│   └── c100/
+├── deployment-b/
+│   ├── c1/
+│   ├── c10/
+│   ├── c50/
+│   └── c100/
+└── plots/                    # Generated by aiperf plot
+    ├── ttft_vs_throughput.png
+    ├── pareto_curve_throughput_per_gpu_vs_latency.png      # If GPU telemetry available
+    └── pareto_curve_throughput_per_gpu_vs_interactivity.png # If GPU telemetry available
 ```
-
-### Data Files
-
-Raw data is organized by deployment/benchmark type and concurrency level:
-
-**For Any Benchmarking (uses your custom benchmark name):**
-```text
-results/                         # Client-side: ./benchmarks/results/ or custom dir
-├── plots/                       # Server-side: /data/results/
-│   ├── SUMMARY.txt              # Performance visualization plots
-│   ├── p50_inter_token_latency_vs_concurrency.png
-│   ├── avg_inter_token_latency_vs_concurrency.png
-│   ├── request_throughput_vs_concurrency.png
-│   ├── efficiency_tok_s_gpu_vs_user.png
-│   └── avg_time_to_first_token_vs_concurrency.png
-├── <your-benchmark-name>/       # Results for your benchmark (uses your custom name)
-│   ├── c1/                      # Concurrency level 1
-│   │   └── profile_export_aiperf.json
-│   ├── c2/                      # Concurrency level 2
-│   ├── c5/                      # Concurrency level 5
-│   └── ...                      # Other concurrency levels (10, 50, 100, 250)
-└── <your-benchmark-name-N>/     # Results for additional benchmarking runs
-    └── c*/                      # Same structure as above
-```
-
-**Example with actual benchmark names:**
-```text
-results/
-├── plots/
-├── experiment-a/                  # --benchmark-name experiment-a
-├── experiment-b/                  # --benchmark-name experiment-b
-└── experiment-c/                  # --benchmark-name experiment-c
-```
-
-Each concurrency directory contains:
-- **`profile_export_aiperf.json`** - Structured metrics from AIPerf
-- **`profile_export_aiperf.csv`** - CSV format metrics from AIPerf
-- **`profile_export.json`** - Raw AIPerf results
-- **`inputs.json`** - Generated test inputs
 
 ---
 
 # Server-Side Benchmarking (In-Cluster)
 
-Server-side benchmarking runs directly within the Kubernetes cluster, eliminating the need for port forwarding and providing better resource utilization.
-
-## What Server-Side Benchmarking Does
-
-The server-side benchmarking solution:
-- Runs benchmarks directly within the Kubernetes cluster using internal service URLs
-- Uses Kubernetes service DNS for direct communication (no port forwarding required)
-- Leverages the existing benchmarking infrastructure (`benchmarks.utils.benchmark`)
-- Stores results persistently using `dynamo-pvc`
-- Provides isolated execution environment with configurable resources
-- Handles high load/speed requirements without timeout issues
-- **Note**: Each benchmark job runs within a single Kubernetes namespace, but can benchmark services across multiple namespaces using the full DNS format `svc_name.namespace.svc.cluster.local`
+Server-side benchmarking runs directly within the Kubernetes cluster, eliminating port-forwarding overhead and enabling high-load testing.
 
 ## Prerequisites
 
 1. **Kubernetes cluster** with NVIDIA GPUs and Dynamo namespace setup (see [Dynamo Kubernetes Platform docs](../kubernetes/README.md))
-2. **Storage** PersistentVolumeClaim configured with appropriate permissions (see [deploy/utils README](https://github.com/ai-dynamo/dynamo/blob/main/deploy/utils/README.md))
-3. **Docker image** containing the Dynamo benchmarking tools
+2. **Storage**: PersistentVolumeClaim configured with appropriate permissions (see [deploy/utils README](https://github.com/ai-dynamo/dynamo/blob/main/deploy/utils/README.md))
+3. **Docker image** containing AIPerf (Dynamo runtime images include it)
 
 ## Quick Start
 
 ### Step 1: Deploy Your DynamoGraphDeployment
-Deploy your DynamoGraphDeployment using the [deployment documentation](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends). Ensure it has a frontend service exposed.
+Deploy using the [deployment documentation](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends). Ensure it has a frontend service exposed.
 
-### Step 2: Deploy and Run Benchmark Job
+### Step 2: Configure and Run Benchmark Job
 
-**Note**: The server-side benchmarking job requires a Docker image containing the Dynamo benchmarking tools. Before the 0.5.1 release, you must build your own Docker image using the [container build instructions](https://github.com/ai-dynamo/dynamo/blob/main/container/README.md), push it to your container registry, then update the `image` field in `benchmarks/incluster/benchmark_job.yaml` to use your built image tag.
+First, edit `benchmarks/incluster/benchmark_job.yaml` to match your deployment:
+
+- **Model name**: Update the `MODEL` variable
+- **Service URL**: Update the `URL` variable (use `<svc_name>.<namespace>.svc.cluster.local:port` for cross-namespace access)
+- **Concurrency levels**: Adjust the `for c in ...` loop
+- **Docker image**: Update the `image` field if needed
+
+Then deploy:
 
 ```bash
 export NAMESPACE=benchmarking
 
-# Deploy the benchmark job with default settings
+# Deploy the benchmark job
 kubectl apply -f benchmarks/incluster/benchmark_job.yaml -n $NAMESPACE
 
-# Monitor the job, wait for it to complete
+# Monitor the job
 kubectl logs -f job/dynamo-benchmark -n $NAMESPACE
-```
-
-#### Customize the job configuration
-
-To customize the benchmark parameters, edit the `benchmarks/incluster/benchmark_job.yaml` file and modify:
-
-- **Model name**: Change `"Qwen/Qwen3-0.6B"` in the args section
-- **Benchmark name**: Change `"qwen3-0p6b-vllm-agg"` to your desired benchmark name
-- **Service URL**: Change `"vllm-agg-frontend:8000"` so the service URL matches your deployed service
-- **Docker image**: Change the image field if needed
-
-Then deploy:
-```bash
-kubectl apply -f benchmarks/incluster/benchmark_job.yaml -n $NAMESPACE
 ```
 
 ### Step 3: Retrieve Results
 ```bash
-# Create access pod (skip this step if access pod is already running)
+# Create access pod (skip if already running)
 kubectl apply -f deploy/utils/manifests/pvc-access-pod.yaml -n $NAMESPACE
 kubectl wait --for=condition=Ready pod/pvc-access-pod -n $NAMESPACE --timeout=60s
 
 # Download the results
-kubectl cp $NAMESPACE/pvc-access-pod:/data/results/<benchmark-name> ./benchmarks/results/<benchmark-name>
+kubectl cp $NAMESPACE/pvc-access-pod:/data/results ./results
 
 # Cleanup
 kubectl delete pod pvc-access-pod -n $NAMESPACE
@@ -385,153 +329,52 @@ kubectl delete pod pvc-access-pod -n $NAMESPACE
 
 ### Step 4: Generate Plots
 ```bash
-# Generate performance plots from the downloaded results
-python3 -m benchmarks.utils.plot \
-  --data-dir ./benchmarks/results
+aiperf plot ./results
 ```
-
-This will create visualization plots. For more details on interpreting these plots, see the [Summary and Plots](#summary-and-plots) section above.
 
 ## Cross-Namespace Service Access
 
-Server-side benchmarking can benchmark services across multiple namespaces from a single job using Kubernetes DNS. When referencing services in other namespaces, use the full DNS format:
+When referencing services in other namespaces, use full Kubernetes DNS:
 
 ```bash
-# Access service in same namespace
-SERVICE_URL=vllm-agg-frontend:8000
+# Same namespace
+--url http://vllm-agg-frontend:8000
 
-# Access service in different namespace
-SERVICE_URL=vllm-agg-frontend.production.svc.cluster.local:8000
-```
-
-**DNS Format**: `<service-name>.<namespace>.svc.cluster.local:port`
-
-This allows you to:
-- Benchmark multiple services across different namespaces in a single job
-- Compare services running in different environments (dev, staging, production)
-- Test cross-namespace integrations without port-forwarding
-- Run comprehensive cross-namespace performance comparisons
-
-## Configuration
-
-The benchmark job is configured directly in the YAML file.
-
-### Default Configuration
-
-- **Model**: `Qwen/Qwen3-0.6B`
-- **Benchmark Name**: `qwen3-0p6b-vllm-agg`
-- **Service**: `vllm-agg-frontend:8000`
-- **Docker Image**: `nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag`
-
-### Customizing the Job
-
-To customize the benchmark, edit `benchmarks/incluster/benchmark_job.yaml`:
-
-1. **Change the model**: Update the `--model` argument
-2. **Change the benchmark name**: Update the `--benchmark-name` argument
-3. **Change the service URL**: Update the `--endpoint-url` argument (use `<svc_name>.<namespace>.svc.cluster.local:port` for cross-namespace access)
-4. **Change Docker image**: Update the image field if needed
-
-### Example: Multi-Namespace Benchmarking
-
-To benchmark services across multiple namespaces, you would need to run separate benchmark jobs for each service since the format supports one benchmark per job. However, the results are stored in the same PVC and may be accessed together.
-
-```yaml
-# Job 1: Production service
-args:
-  - --model
-  - "Qwen/Qwen3-0.6B"
-  - --benchmark-name
-  - "prod-vllm"
-  - --endpoint-url
-  - "vllm-agg-frontend.production.svc.cluster.local:8000"
-  - --output-dir
-  - /data/results
-
-# Job 2: Staging service
-args:
-  - --model
-  - "Qwen/Qwen3-0.6B"
-  - --benchmark-name
-  - "staging-vllm"
-  - --endpoint-url
-  - "vllm-agg-frontend.staging.svc.cluster.local:8000"
-  - --output-dir
-  - /data/results
-```
-
-## Understanding Your Results
-
-Results are stored in `/data/results` and follow the same structure as client-side benchmarking:
-
-```text
-/data/results/
-└── <benchmark-name>/                # Results for your benchmark name
-    ├── c1/                          # Concurrency level 1
-    │   └── profile_export_aiperf.json
-    ├── c2/                          # Concurrency level 2
-    └── ...                          # Other concurrency levels
+# Different namespace
+--url http://vllm-agg-frontend.production.svc.cluster.local:8000
 ```
 
 ## Monitoring and Debugging
 
-### Check Job Status
 ```bash
+# Check job status
 kubectl describe job dynamo-benchmark -n $NAMESPACE
-```
 
-### View Logs
-```bash
-# Follow logs in real-time
+# Follow logs
 kubectl logs -f job/dynamo-benchmark -n $NAMESPACE
-```
 
-### Debug Failed Jobs
-```bash
 # Check pod status
 kubectl get pods -n $NAMESPACE -l job-name=dynamo-benchmark
 
-# Describe failed pod
+# Debug failed pod
 kubectl describe pod <pod-name> -n $NAMESPACE
 ```
 
-## Troubleshooting
-
-### Common Issues
+### Troubleshooting
 
 1. **Service not found**: Ensure your DynamoGraphDeployment frontend service is running
-3. **PVC access**: Check that `dynamo-pvc` is properly configured and accessible
-4. **Image pull issues**: Ensure the Docker image is accessible from the cluster
-5. **Resource constraints**: Adjust resource limits if the job is being evicted
-
-### Debug Commands
+2. **PVC access**: Check that `dynamo-pvc` is properly configured and accessible
+3. **Image pull issues**: Ensure the Docker image is accessible from the cluster
+4. **Resource constraints**: Adjust resource limits if the job is being evicted
 
 ```bash
 # Check PVC status
 kubectl get pvc dynamo-pvc -n $NAMESPACE
 
-# Check service endpoints
+# Verify service exists and has endpoints
 kubectl get svc -n $NAMESPACE
-
-# Verify your service exists and has endpoints
-SVC_NAME="${SERVICE_URL%%:*}"
-kubectl get svc "$SVC_NAME" -n "$NAMESPACE"
-kubectl get endpoints "$SVC_NAME" -n "$NAMESPACE"
+kubectl get endpoints <service-name> -n $NAMESPACE
 ```
-
----
-
-## Customize Benchmarking Behavior
-
-The built-in Python workflow connects to endpoints, benchmarks with aiperf, and generates plots. If you want to modify the behavior:
-
-1. **Extend the workflow**: Modify `benchmarks/utils/workflow.py` to add custom deployment types or metrics collection
-
-2. **Generate different plots**: Modify `benchmarks/utils/plot.py` to generate a different set of plots for whatever you wish to visualize.
-
-3. **Direct module usage**: Use individual Python modules (`benchmarks.utils.benchmark`, `benchmarks.utils.plot`) for granular control over each step of the benchmarking process.
-
-The Python benchmarking module provides a complete end-to-end benchmarking experience with full control over the workflow.
 
 ---
 
@@ -547,3 +390,22 @@ For development and testing purposes, Dynamo provides a [mocker backend](https:/
 The mocker backend mimics the API and behavior of real backends (SGLang, TensorRT-LLM, vLLM) but generates mock responses instead of running actual inference.
 
 See the [mocker directory](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker) for usage examples and configuration options.
+
+---
+
+## Advanced AIPerf Features
+
+AIPerf has many capabilities beyond basic profiling. Here are some particularly useful for Dynamo benchmarking:
+
+| Feature | Description | Docs |
+|---------|-------------|------|
+| Trace Replay | Replay production traces for deterministic benchmarking | [Trace Replay](https://github.com/ai-dynamo/aiperf/blob/main/docs/benchmark-modes/trace-replay.md) |
+| Arrival Patterns | Poisson, constant, gamma traffic distributions | [Arrival Patterns](https://github.com/ai-dynamo/aiperf/blob/main/docs/tutorials/arrival-patterns.md) |
+| Gradual Ramping | Smooth ramp-up of concurrency and request rate | [Ramping](https://github.com/ai-dynamo/aiperf/blob/main/docs/tutorials/ramping.md) |
+| Warmup Phase | Eliminate cold-start effects from measurements | [Warmup](https://github.com/ai-dynamo/aiperf/blob/main/docs/tutorials/warmup.md) |
+| Multi-URL Load Balancing | Distribute requests across multiple endpoints | [Multi-URL](https://github.com/ai-dynamo/aiperf/blob/main/docs/tutorials/multi-url-load-balancing.md) |
+| GPU Telemetry | Collect DCGM metrics during benchmarking | [GPU Telemetry](https://github.com/ai-dynamo/aiperf/blob/main/docs/tutorials/gpu-telemetry.md) |
+| Goodput Analysis | SLO-based throughput measurement | [Goodput](https://github.com/ai-dynamo/aiperf/blob/main/docs/tutorials/goodput.md) |
+| Timeslice Analysis | Per-timeslice performance breakdown | [Timeslices](https://github.com/ai-dynamo/aiperf/blob/main/docs/tutorials/timeslices.md) |
+| Multi-Turn Conversations | Benchmark multi-turn chat workloads | [Multi-Turn](https://github.com/ai-dynamo/aiperf/blob/main/docs/tutorials/multi-turn.md) |
+| Experiment Classification | Baseline vs treatment semantic colors in plots | [Plotting](https://github.com/ai-dynamo/aiperf/blob/main/docs/tutorials/plot.md) |
