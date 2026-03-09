@@ -50,13 +50,12 @@ jobs:
 
           BRANCH_NAME="${GITHUB_REF#refs/heads/}"
 
-          if [[ "$BRANCH_NAME" =~ ^release/[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            VERSION="${BRANCH_NAME#release/}"
-          else
-            # TEMPORARY: allow testing from non-release branches -- remove before merging to main
-            echo "Warning: Not a release branch ($BRANCH_NAME), using test version 0.0.0-test"
-            VERSION="0.0.0-test"
+          if [[ ! "$BRANCH_NAME" =~ ^release/[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Error: workflow_dispatch must be triggered from a release/* branch"
+            echo "Current branch: $BRANCH_NAME"
+            exit 1
           fi
+          VERSION="${BRANCH_NAME#release/}"
 
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
           echo "commit_sha=${COMMIT_SHA}" >> $GITHUB_OUTPUT
@@ -134,12 +133,8 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git tag -a "${RC_TAG}" -m "Release candidate ${RC_TAG}"
-          if git push origin "${RC_TAG}"; then
-            echo "Created and pushed tag: ${RC_TAG}"
-          else
-            echo "Warning: Failed to push tag ${RC_TAG} (may require workflows permission on branches with workflow changes)"
-            echo "Tag was created locally but not pushed to remote"
-          fi
+          git push origin "${RC_TAG}"
+          echo "Created and pushed tag: ${RC_TAG}"
 
       - name: Setup crane
         env:
@@ -332,21 +327,10 @@ jobs:
 
           helm plugin install https://github.com/chartmuseum/helm-push || true
 
-          echo "NGC_USERNAME is set: $([ -n "${NGC_USERNAME}" ] && echo 'yes' || echo 'no')"
-          echo "NGC_TOKEN is set: $([ -n "${NGC_TOKEN}" ] && echo 'yes' || echo 'no')"
-          echo "NGC_HELM_REPO is set: $([ -n "${NGC_HELM_REPO}" ] && echo 'yes' || echo 'no')"
-
-          HELM_ERR=$(mktemp)
-          if ! echo "${NGC_TOKEN}" | helm repo add "${REPO_ALIAS}" \
+          echo "${NGC_TOKEN}" | helm repo add "${REPO_ALIAS}" \
             --username="${NGC_USERNAME}" \
             --password-stdin \
-            "${NGC_HELM_REPO}" > /dev/null 2>"${HELM_ERR}"; then
-            echo "Error: Failed to add NGC Helm repo"
-            sed 's|http[^ ]*|[REDACTED_URL]|g' "${HELM_ERR}" >&2
-            rm -f "${HELM_ERR}"
-            exit 1
-          fi
-          rm -f "${HELM_ERR}"
+            "${NGC_HELM_REPO}" > /dev/null 2>&1
 
           helm repo add nats https://nats-io.github.io/k8s/helm/charts/ || true
           helm repo add bitnami https://charts.bitnami.com/bitnami || true
