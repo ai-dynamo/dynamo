@@ -18,9 +18,10 @@ import dataclasses
 import logging
 import os
 import re
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
-from typing import Any, AsyncGenerator, Optional, Union
+from typing import TYPE_CHECKING, Any, Optional, Union
 
 import torch
 from tensorrt_llm.executor.result import GenerationResult
@@ -39,6 +40,7 @@ from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.trtllm.constants import DisaggregationMode
 from dynamo.trtllm.engine import TensorRTLLMEngine
 from dynamo.trtllm.logits_processing.adapter import create_trtllm_adapters
+from dynamo.trtllm.metrics import AdditionalMetricsCollector
 from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
 from dynamo.trtllm.publisher import Publisher
 from dynamo.trtllm.request_handlers.base_generative_handler import BaseGenerativeHandler
@@ -46,6 +48,11 @@ from dynamo.trtllm.utils.disagg_utils import (
     DisaggregatedParams,
     DisaggregatedParamsCodec,
 )
+
+if TYPE_CHECKING:
+    # tensorrt_llm may use a different version that doesn't have MetricsCollector,
+    # so guard this import inside TYPE_CHECKING to avoid runtime import errors.
+    from tensorrt_llm.metrics import MetricsCollector
 
 configure_dynamo_logging()
 
@@ -68,11 +75,12 @@ class RequestHandlerConfig:
     runtime: Optional[
         DistributedRuntime
     ] = None  # DistributedRuntime reference for graceful shutdown
-    metrics_collector: Optional[Any] = None  # TensorRT-LLM MetricsCollector
+    metrics_collector: Optional["MetricsCollector"] = None
     kv_block_size: int = 32
     shutdown_event: Optional[asyncio.Event] = None
     encoder_cache_capacity_gb: float = 0  # Encoder cache capacity in GB
     disable_request_abort: bool = True
+    additional_metrics: Optional["AdditionalMetricsCollector"] = None
 
 
 class HandlerBase(BaseGenerativeHandler):
@@ -102,8 +110,9 @@ class HandlerBase(BaseGenerativeHandler):
         self.kv_block_size: int = config.kv_block_size
         self.shutdown_event = config.shutdown_event
         self.disable_request_abort = config.disable_request_abort
+        self.additional_metrics = config.additional_metrics
 
-    def check_error(self, result: dict):
+    def check_error(self, result: dict) -> bool:
         """
         Check if there is an error in the result.
         """
@@ -194,7 +203,7 @@ class HandlerBase(BaseGenerativeHandler):
         Raise GeneratorExit if shutdown event is triggered.
         """
         try:
-            cancellation_triggers = [
+            cancellation_triggers: list[asyncio.Future[Any]] = [
                 context.async_killed_or_stopped(),  # Request cancellation
             ]
             # Shutdown cancellation
@@ -437,7 +446,7 @@ class HandlerBase(BaseGenerativeHandler):
             Tuple of (disaggregated_params, ep_disaggregated_params, epd_metadata)
         """
         disaggregated_params = None
-        epd_metadata = {}
+        epd_metadata: dict[str, Any] = {}
 
         # PREFILL mode: setup context_only params
         if self.disaggregation_mode == DisaggregationMode.PREFILL:
@@ -608,7 +617,7 @@ class HandlerBase(BaseGenerativeHandler):
         context: Context,
         embeddings: Optional[Union[torch.Tensor, dict]] = None,
         ep_disaggregated_params: Optional[DisaggregatedParams] = None,
-    ):
+    ) -> AsyncGenerator[dict, None]:
         """
         Generate responses based on the disaggregation mode in the request.
 
@@ -619,6 +628,36 @@ class HandlerBase(BaseGenerativeHandler):
             ep_disaggregated_params: Optional DisaggregatedParams from encode worker (full EPD flow)
         """
         logging.debug(f"Request: {request}")
+
+        # Additional metrics: request type detection
+        metrics_collector = self.additional_metrics
+
+        if metrics_collector:
+            try:
+                # Detect request types for metrics
+                sampling_options = request.get("sampling_options", {})
+                guided = sampling_options.get("guided_decoding")
+                if guided and isinstance(guided, dict):
+                    has_structured_guidance = any(
+                        guided.get(k) is not None
+                        for k in (
+                            "json",
+                            "regex",
+                            "grammar",
+                            "json_object",
+                            "structural_tag",
+                        )
+                    ) or bool(guided.get("choice"))
+                    if has_structured_guidance:
+                        metrics_collector.record_request_type_structured_output()
+                if (
+                    request.get("multi_modal_data")
+                    or embeddings is not None
+                    or request.get("_epd_processed_prompt") is not None
+                ):
+                    metrics_collector.record_request_type_image()
+            except Exception as e:
+                logging.warning("Additional metrics (request type): %s", e)
 
         # Normalize OpenAI format to TRT-LLM internal format
         self._normalize_request_format(request)
@@ -821,6 +860,29 @@ class HandlerBase(BaseGenerativeHandler):
                             "Request finished with no finish reason set - this indicates a possible bug"
                         )
 
+                    # Record additional metrics on request finish
+                    if res.finished and metrics_collector and out.get("finish_reason"):
+                        try:
+                            # KV transfer metrics from request_perf_metrics
+                            if output.request_perf_metrics is not None:
+                                # Record KV transfer latency/bytes/speed from timing_metrics
+                                tm = output.request_perf_metrics.timing_metrics
+                                if tm is not None:
+                                    recorded = (
+                                        metrics_collector.record_kv_transfer_perf(tm)
+                                    )
+                                    # Only count success if a transfer actually occurred
+                                    if (
+                                        recorded
+                                        and self.disaggregation_mode
+                                        == DisaggregationMode.PREFILL
+                                    ):
+                                        metrics_collector.record_kv_transfer_success()
+                        except Exception as e:
+                            logging.warning(
+                                "Additional metrics (request finish): %s", e
+                            )
+
                     # Log metrics to TensorRT-LLM MetricsCollector when request finishes
                     # NOTE: TRT-LLM 1.3.0rc5 (PR #11243) renamed log_metrics_dict → log_request_metrics_dict
                     if (
@@ -851,6 +913,11 @@ class HandlerBase(BaseGenerativeHandler):
         except asyncio.CancelledError:
             logging.debug(f"Request {request_id}: Client cancelled")
             # _cancellation_monitor already called abort_request
+            try:
+                if metrics_collector:
+                    metrics_collector.record_request_abort()
+            except Exception as e:
+                logging.debug("Additional metrics (request abort): %s", e)
             return  # Just stop, no error response
 
         # 2. Per-request errors - send to client, don't shutdown

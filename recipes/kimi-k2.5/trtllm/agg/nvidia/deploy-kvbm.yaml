@@ -76,6 +76,13 @@ spec:
                   values:
                   - "true"
         mainContainer:
+          ports:
+          - name: system
+            containerPort: 9090
+          - name: nixl
+            containerPort: 19090
+          - name: kvbm
+            containerPort: 6880
           args:
           - |
             python3 -m dynamo.trtllm \
@@ -98,9 +105,14 @@ spec:
             value: /opt/dynamo/configs/config.yaml
           - name: HF_HOME
             value: /opt/models
-          # Adjust CPU cache size as needed
+          # Adjust CPU cache size as needed; start small for faster startup
           - name: DYN_KVBM_CPU_CACHE_GB
-            value: "100"
+            value: "10"
+          # Enable KVBM metrics
+          - name: DYN_KVBM_METRICS
+            value: "true"
+          - name: DYN_KVBM_METRICS_PORT
+            value: "6880"
           volumeMounts:
           - mountPath: /opt/dynamo/configs
             name: llm-config-kimi-agg-kvbm

@@ -107,6 +107,7 @@ const (
 
 	// Messages
 	MessageInitialized               = "DGDR initialized successfully"
+	MessageDiscoveringHardware       = "Discovering GPU hardware and preparing profiling job"
 	MessageProfilingJobCreated       = "Profiling job created"
 	MessageAICProfilingJobCreated    = "AIC profiling job created"
 	MessageProfilingInProgress       = "Profiling is in progress"
@@ -360,9 +361,11 @@ func (r *DynamoGraphDeploymentRequestReconciler) handlePendingPhase(ctx context.
 		// Set observedGeneration to track the spec we're processing
 		dgdr.Status.ObservedGeneration = dgdr.Generation
 
-		// Initialize status
+		// Initialize status — next reconcile will discover hardware and create the profiling job.
 		r.Recorder.Event(dgdr, corev1.EventTypeNormal, nvidiacomv1beta1.EventReasonInitialized, MessageInitialized)
-		return r.updatePhaseAndRequeue(ctx, dgdr, nvidiacomv1beta1.DGDRPhasePending, MessageInitialized)
+		return r.updatePhaseWithCondition(ctx, dgdr, nvidiacomv1beta1.DGDRPhasePending,
+			nvidiacomv1beta1.ConditionTypeProfiling, metav1.ConditionFalse,
+			"DiscoveringHardware", MessageDiscoveringHardware)
 	}
 
 	logger.Info("Handling pending phase", "name", dgdr.Name)
@@ -380,9 +383,9 @@ func (r *DynamoGraphDeploymentRequestReconciler) handlePendingPhase(ctx context.
 		r.Recorder.Event(dgdr, corev1.EventTypeNormal, nvidiacomv1beta1.EventReasonProfilingJobCreated, MessageAICProfilingJobCreated)
 	}
 
-	// Update to Profiling phase with Running status
+	// Update to Profiling phase — show DiscoveringHardware until the job is confirmed running.
 	dgdr.SetProfilingPhase(nvidiacomv1beta1.ProfilingPhaseInitializing)
-	return r.updatePhaseWithCondition(ctx, dgdr, nvidiacomv1beta1.DGDRPhaseProfiling, nvidiacomv1beta1.ConditionTypeProfiling, metav1.ConditionFalse, "ProfilingRunning", MessageProfilingInProgress)
+	return r.updatePhaseWithCondition(ctx, dgdr, nvidiacomv1beta1.DGDRPhaseProfiling, nvidiacomv1beta1.ConditionTypeProfiling, metav1.ConditionFalse, "DiscoveringHardware", MessageDiscoveringHardware)
 }
 
 // handleProfilingPhase monitors profiling progress and generates spec when complete
@@ -402,6 +405,11 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleProfilingPhase(ctx contex
 
 	if !completed {
 		logger.Info("Profiling job still running", "name", dgdr.Name)
+		// Transition from DiscoveringHardware to ProfilingRunning once the job is confirmed active.
+		cond := meta.FindStatusCondition(dgdr.Status.Conditions, nvidiacomv1beta1.ConditionTypeProfiling)
+		if cond != nil && cond.Reason == "DiscoveringHardware" {
+			return r.updatePhaseWithCondition(ctx, dgdr, nvidiacomv1beta1.DGDRPhaseProfiling, nvidiacomv1beta1.ConditionTypeProfiling, metav1.ConditionFalse, "ProfilingRunning", MessageProfilingInProgress)
+		}
 		// Don't requeue - we'll be triggered when the Job completes/fails
 		return ctrl.Result{}, nil
 	}
@@ -1261,7 +1269,15 @@ func (r *DynamoGraphDeploymentRequestReconciler) enrichHardwareFromDiscovery(ctx
 		hw.NumGPUsPerNode = &n
 	}
 	if hw.TotalGPUs == nil {
+		// TODO: This is a temporary limit to prevent the profiler from using too many GPUs.
+		// Will be removed once a fix is in the Profiler/AIC.
+		const defaultMaxAutoGPUs = int32(32)
 		total := int32(gpuInfo.GPUsPerNode * gpuInfo.NodesWithGPUs)
+		if total > defaultMaxAutoGPUs {
+			logger.Info("Capping auto-discovered TotalGPUs at default limit; set hardware.totalGpus to override",
+				"discovered", total, "cap", defaultMaxAutoGPUs)
+			total = defaultMaxAutoGPUs
+		}
 		hw.TotalGPUs = &total
 	}
 	return nil

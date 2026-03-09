@@ -1701,6 +1701,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "dynamo-llm",
+ "dynamo-mocker",
  "dynamo-parsers",
  "dynamo-runtime",
  "futures",
