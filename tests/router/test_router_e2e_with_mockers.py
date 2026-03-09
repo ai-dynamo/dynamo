@@ -46,7 +46,6 @@ pytestmark = [
     pytest.mark.gpu_0,
     pytest.mark.integration,
     pytest.mark.model(MODEL_NAME),
-    pytest.mark.skip(reason="DYN-2365 - Flaky, temporarily disabled"),
 ]
 NUM_MOCKERS = 2
 SPEEDUP_RATIO = 10.0
@@ -650,7 +649,7 @@ def test_mocker_two_kv_router(
             skip_consumer_verification=not durable_kv_events,  # Skip JetStream checks in NATS Core mode
         )
 
-
+@pytest.mark.skip(reason="Flaky, temporarily disabled")
 @pytest.mark.parametrize(
     "durable_kv_events", [False], indirect=True
 )  # Use NATS Core (local indexer)
