@@ -6,6 +6,25 @@ title: Hierarchical Planner Deployment Guide
 
 This guide shows how to expose a single model endpoint backed by multiple DynamoGraphDeployments (DGDs) that are specialized for different request shapes. It covers the current Dynamo workflow for combining per-pool profiling, `GlobalRouter`, and `GlobalPlanner` into one hierarchical serving stack.
 
+## What Problem This Solves
+
+Use this pattern when one model should be reachable through one public endpoint, but one worker configuration is not a good fit for every request shape.
+
+Typical examples:
+
+- short-input requests are cheaper on a smaller prefill pool
+- long-input requests need a larger prefill pool
+- decode capacity should scale independently from prefill capacity
+
+This guide covers the **single-endpoint hierarchical** pattern only. If you want multiple independent DGDs or models to share centralized scaling policy without a shared endpoint, you can use `GlobalPlanner` without `GlobalRouter`. See [Global Planner README](../../../components/src/dynamo/global_planner/README.md).
+
+## Terminology
+
+- **SLA Planner**: The normal `dynamo.planner` component that computes desired replica counts.
+- **Local planner**: A pool-local instance of that planner inside one DGD.
+- **GlobalPlanner**: The centralized execution and policy layer that receives scale requests from local planners.
+- **Hierarchical planner**: The architecture where multiple local planners feed one `GlobalPlanner`, usually together with `GlobalRouter` for a single public endpoint.
+
 ## When To Use This Pattern
 
 Use a hierarchical deployment when all of the following are true:
@@ -15,7 +34,7 @@ Use a hierarchical deployment when all of the following are true:
 - You want each pool to autoscale independently.
 - You want routing and scale execution to be centralized instead of exposing multiple endpoints to clients.
 
-If you only need one pool for one model, use a single DGD or a single `DynamoGraphDeploymentRequest` (DGDR) instead. See [Planner Guide](planner-guide.md).
+If you only need one pool for one model, use a single DGD or a single `DynamoGraphDeploymentRequest` (DGDR) instead. If you need multiple DGDs to share centralized scaling policy but do not need one shared endpoint, start with [Global Planner README](../../../components/src/dynamo/global_planner/README.md).
 
 ## What You Deploy
 

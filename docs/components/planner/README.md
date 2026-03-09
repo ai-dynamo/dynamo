@@ -15,7 +15,7 @@ When both modes are enabled, throughput-based scaling provides a lower bound on 
 
 > **New to the Planner?** Start with the [SLA Planner Quick Start Guide](planner-guide.md) for a complete workflow including profiling and deployment.
 
-> **Building a single endpoint backed by multiple pool DGDs?** See [Hierarchical Planner Deployment Guide](hierarchical-planner-guide.md).
+> **Need multi-DGD coordination?** Use [Global Planner README](../../../components/src/dynamo/global_planner/README.md) for terminology and deployment patterns. If you need one shared endpoint across multiple pools, see [Hierarchical Planner Deployment Guide](hierarchical-planner-guide.md).
 
 ## Feature Matrix
 

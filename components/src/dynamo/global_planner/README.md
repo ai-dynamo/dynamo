@@ -3,10 +3,39 @@
 
 # Global Planner
 
-Centralized scaling execution service for hierarchical planner deployments.
+Centralized scaling execution service for multi-DGD planner deployments.
 
-The Global Planner receives scaling decisions from distributed planners and executes
-replica updates against Kubernetes `DynamoGraphDeployment` resources.
+The Global Planner receives scaling decisions from local planners and executes
+replica updates against Kubernetes `DynamoGraphDeployment` resources. It is useful
+whenever multiple DGDs should delegate scaling through one centralized component,
+whether or not those DGDs sit behind a single shared endpoint.
+
+## What Problem This Solves
+
+Without `GlobalPlanner`, each DGD's local planner scales only its own deployment directly.
+That is fine for isolated deployments, but it becomes awkward when you want one place to:
+
+- apply centralized scaling policies across multiple DGDs
+- enforce shared constraints such as authorization or total GPU budget
+- coordinate scaling for a single-endpoint, multi-pool deployment
+
+`GlobalPlanner` solves that by becoming the common scale-execution endpoint for multiple local planners.
+
+## Deployment Patterns
+
+`GlobalPlanner` is used in two common patterns:
+
+1. **Centralized scaling across independent DGDs**
+   Each DGD keeps its own normal local planner, but the local planners delegate scale execution to one `GlobalPlanner`. This is useful when separate deployments or models should share a global policy such as a total GPU budget. You do **not** need `GlobalRouter` or a single shared endpoint for this pattern.
+2. **Hierarchical single-endpoint deployment**
+   Multiple pool DGDs for one model sit behind one public `Frontend` and one `GlobalRouter`. Each pool still has its own local planner, and those local planners delegate scaling to `GlobalPlanner`.
+
+## Terminology
+
+- **SLA Planner**: The normal `dynamo.planner` component that computes desired replica counts from SLA targets, profiles, and/or metrics.
+- **Local planner**: An instance of that planner running inside one DGD or one pool.
+- **GlobalPlanner**: The centralized execution and policy layer that receives scale requests from local planners and applies them to target DGDs.
+- **Hierarchical planner**: An architecture term, not a separate binary. In practice it means multiple local planners feeding one `GlobalPlanner`, often together with `GlobalRouter`.
 
 ## Overview
 
@@ -106,7 +135,7 @@ Response fields:
 ## Related Documentation
 
 - [Planner Guide](../../../../docs/components/planner/planner-guide.md) — Planner configuration and deployment workflow
-- [Hierarchical Planner Deployment Guide](../../../../docs/components/planner/hierarchical-planner-guide.md) — Single-endpoint multi-pool deployment workflow
+- [Hierarchical Planner Deployment Guide](../../../../docs/components/planner/hierarchical-planner-guide.md) — Single-endpoint multi-pool workflow using `GlobalRouter` and `GlobalPlanner`
 - [Planner Design](../../../../docs/design-docs/planner-design.md) — Planner architecture and algorithms
 
 Planners delegate to this service when planner config uses `environment: "global-planner"` and sets `global_planner_namespace`.
