@@ -236,6 +236,8 @@ sequenceDiagram
     end
 
     W->>C: mgr.commit()
+    C->>GPU: synchronize()
+    C->>GPU: set_access(..., RO)
     C->>S: CommitRequest()
     S->>S: FSM: RW → COMMITTED
     S-->>C: CommitResponse(success=true)
@@ -296,7 +298,7 @@ sequenceDiagram
     S->>S: FSM: RO → COMMITTED (if last reader)
 
     Note over R,GPU: GPU memory released, VA preserved
-    Note over R,GPU: Another writer could modify weights here
+    Note over R,GPU: Another writer could publish a new epoch here
 
     R->>C: mgr.connect(RO)
     C->>S: HandshakeRequest(lock_type=RO)
@@ -317,7 +319,7 @@ sequenceDiagram
         end
     else hash != saved_hash
         C-->>R: StaleMemoryLayoutError
-        Note over R: Must re-import from scratch
+        Note over R: Old epoch is gone or layout changed; re-import from scratch
     end
 ```
 
@@ -331,7 +333,7 @@ sequenceDiagram
     participant C as GMSClientMemoryManager
     participant S as GMS Server
 
-    Note over P,S: Auto-mode: Writer if first, Reader if weights exist
+    Note over P,S: Auto-mode: try RW only when no committed epoch exists
 
     P->>C: mgr = GMSClientMemoryManager(socket_path, device=0)
     P->>C: mgr.connect(RW_OR_RO)
@@ -348,10 +350,10 @@ sequenceDiagram
         S-->>C: HandshakeResponse(granted=RO, committed=true)
         Note over P: Subsequent process - import from GMS
     else RW held by another
-        S->>S: Wait for RO availability
-        S->>S: FSM: COMMITTED → RO
+        S->>S: Wait until a committed epoch becomes available
+        S->>S: Then grant RO from COMMITTED
         S-->>C: HandshakeResponse(granted=RO, committed=true)
-        Note over P: Wait for writer to finish
+        Note over P: Wait for writer to publish committed weights
     end
 ```
 
@@ -453,10 +455,10 @@ class GMSClientMemoryManager:
     # --- Tier 1: Handle ops (server-side, RW only) ---
     def allocate_handle(size: int, tag: str = "default") -> str     # Returns allocation_id
     def export_handle(allocation_id: str) -> int                     # Returns FD
-    def get_handle_info(allocation_id: str) -> AllocationInfo
+    def get_handle_info(allocation_id: str) -> GetAllocationResponse
     def free_handle(allocation_id: str) -> bool
     def clear_all_handles() -> int                                   # Returns count cleared
-    def commit() -> bool                                             # Transition to COMMITTED
+    def commit() -> bool                                             # Sync + publish; closes RW on success
     def get_memory_layout_hash() -> str
     def list_handles(tag: Optional[str] = None) -> List[Dict]
 
@@ -467,7 +469,7 @@ class GMSClientMemoryManager:
     def free_va(va: int) -> None                                     # Releases VA reservation
 
     # --- Tier 1: Metadata ---
-    def metadata_put(key: str, allocation_id: str, offset: int, value: bytes) -> bool
+    def metadata_put(key: str, allocation_id: str, offset_bytes: int, value: bytes) -> bool
     def metadata_get(key: str) -> Optional[Tuple[str, int, bytes]]
     def metadata_list(prefix: str = "") -> List[str]
     def metadata_delete(key: str) -> bool
@@ -498,7 +500,7 @@ GMS provides pre-built integrations for vLLM and SGLang. Enable GMS by passing `
 When `--load-format gms` is set:
 
 1. **A GMS server must already be running** for the target GPU device. The engine connects to it via a Unix socket derived from the GPU UUID.
-2. The engine uses `RW_OR_RO` mode by default: the **first** process gets RW (loads weights from disk, commits to GMS), and **subsequent** processes get RO (import weights from GMS metadata).
+2. The engine uses `RW_OR_RO` mode by default: if no committed epoch exists and no writer holds the lock, the first process gets RW and loads weights from disk. Otherwise clients wait for a committed epoch and then get RO to import published weights.
 3. Weights are managed by GMS; KV cache is managed by the framework's own allocator (e.g., vLLM's `CuMemAllocator`).
 
 #### vLLM
@@ -507,6 +509,7 @@ When `--load-format gms` is set:
 python -m dynamo.vllm \
   --model <model> \
   --load-format gms \
+  --worker-cls gpu_memory_service.integrations.vllm.worker:GMSWorker \
   --enable-sleep-mode \
   --gpu-memory-utilization 0.9
 ```
