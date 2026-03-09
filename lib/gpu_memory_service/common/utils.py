@@ -16,8 +16,7 @@ def _resolve_physical_device(device: int) -> int:
 
     NVML always enumerates physical GPUs regardless of CUDA_VISIBLE_DEVICES.
     When CUDA_VISIBLE_DEVICES is set, CUDA device 0 may correspond to a
-    different NVML device index. This function resolves the mapping by
-    comparing UUIDs.
+    different NVML device index. This function resolves the mapping.
 
     If CUDA_VISIBLE_DEVICES is not set, the device index is returned as-is.
     """
@@ -25,7 +24,6 @@ def _resolve_physical_device(device: int) -> int:
     if cvd is None or cvd == "":
         return device
 
-    # Parse CUDA_VISIBLE_DEVICES (supports comma-separated indices or UUIDs)
     entries = [e.strip() for e in cvd.split(",") if e.strip()]
     if device >= len(entries):
         return device
@@ -34,7 +32,6 @@ def _resolve_physical_device(device: int) -> int:
     try:
         return int(entry)
     except ValueError:
-        # Could be a UUID — fall back to identity mapping
         return device
 
 
@@ -44,7 +41,7 @@ def get_socket_path(device: int) -> str:
     The socket path is based on GPU UUID, making it stable across different
     CUDA_VISIBLE_DEVICES configurations. When CUDA_VISIBLE_DEVICES is set,
     the device index is remapped to the physical GPU index before looking
-    up the UUID.
+    up the UUID via NVML.
 
     Args:
         device: CUDA device index (runtime-visible).

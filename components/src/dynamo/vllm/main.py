@@ -102,8 +102,8 @@ def run_dynamo_headless(config: Config) -> None:
     Secondary nodes spawn vLLM workers only — no engine core, no scheduler,
     no Dynamo endpoints. Bypasses DistributedRuntime entirely (no NATS/etcd).
     """
-    # Propagate worker_cls for custom load formats (GMS, ModelExpress) so that
-    # headless worker processes use the same model loader as the leader node.
+    # Propagate worker_cls for custom load formats so headless workers use
+    # the same model loader and patches as the leader node.
     if config.engine_args.load_format == "gms":
         config.engine_args.worker_cls = (
             "gpu_memory_service.integrations.vllm.worker.GMSWorker"
@@ -113,10 +113,9 @@ def run_dynamo_headless(config: Config) -> None:
             "modelexpress.vllm_worker.ModelExpressWorker"
         )
 
-    # Shadow mode: force PIECEWISE cudagraph mode on headless workers to match
-    # the leader's override (set in setup_vllm_engine). Without this, the
-    # headless worker's cudagraph_dispatcher may include FULL mode captures
-    # that the leader doesn't do, causing NCCL collective mismatches.
+    # Shadow mode: force PIECEWISE cudagraph mode to match the leader's
+    # override. Without this, the headless worker's backend resolution may
+    # escalate to FULL_AND_PIECEWISE, causing NCCL collective mismatches.
     if os.environ.get("SHADOW_SKIP_KV_CACHE") == "1":
         import json as _json
 
