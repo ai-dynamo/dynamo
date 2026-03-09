@@ -45,6 +45,13 @@ cd $DYNAMO_HOME/examples/backends/vllm
 bash launch/agg.sh
 ```
 
+For XPU deployments, use a larger block size and set it to at least `64` (`>= 64`):
+
+```bash
+cd $DYNAMO_HOME/examples/backends/vllm
+bash launch/agg.sh --block-size 64
+```
+
 ### Aggregated Serving with KV Routing
 
 Two workers behind a [KV-aware router](../../components/router/README.md) that maximizes cache reuse. Requires 2 GPUs.
