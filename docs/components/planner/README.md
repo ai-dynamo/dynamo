@@ -15,7 +15,7 @@ When both modes are enabled, throughput-based scaling provides a lower bound on 
 
 > **New to the Planner?** Start with the [SLA Planner Quick Start Guide](planner-guide.md) for a complete workflow including profiling and deployment.
 
-> **Need multi-DGD coordination?** Use [Global Planner README](../../../components/src/dynamo/global_planner/README.md) for terminology and deployment patterns. If you need one shared endpoint across multiple pools, see [Hierarchical Planner Deployment Guide](hierarchical-planner-guide.md).
+> **Need multi-DGD coordination?** Use [Global Planner README](../../../components/src/dynamo/global_planner/README.md) for terminology and deployment patterns. If you need one shared endpoint across multiple pools, see [Global Planner Single-Endpoint Deployment Guide](global-planner-single-endpoint-guide.md).
 
 ## Feature Matrix
 
@@ -86,7 +86,7 @@ kubectl apply -f examples/backends/vllm/deploy/disagg_planner.yaml -n $NAMESPACE
 | Document | Description |
 |----------|-------------|
 | [Planner Guide](planner-guide.md) | Deployment, configuration, integration, troubleshooting |
-| [Hierarchical Planner Deployment Guide](hierarchical-planner-guide.md) | Single-endpoint, multi-pool deployment with `GlobalRouter` and `GlobalPlanner` |
+| [Global Planner Single-Endpoint Deployment Guide](global-planner-single-endpoint-guide.md) | Single-endpoint, multi-pool deployment with `GlobalRouter` and `GlobalPlanner` |
 | [Planner Examples](planner-examples.md) | DGDR YAML examples, sample configurations, advanced patterns |
 | [SLA-Driven Profiling](../profiler/profiler-guide.md) | Pre-deployment profiling process and configuration |
 | [Planner Design](../../design-docs/planner-design.md) | Architecture deep-dive for contributors |

@@ -122,11 +122,11 @@ If you want one public endpoint for a model but multiple private DGDs optimized 
 - one or more prefill pool DGDs
 - one or more decode pool DGDs
 
-In the current workflow, run profiling independently for each intended pool, then compose the final control DGD plus pool DGDs manually. See [Hierarchical Planner Deployment Guide](hierarchical-planner-guide.md).
+In the current workflow, run profiling independently for each intended pool, then compose the final control DGD plus pool DGDs manually. See [Global Planner Single-Endpoint Deployment Guide](global-planner-single-endpoint-guide.md).
 
 ## See Also
 
 - [Planner README](README.md) — Quick overview
-- [Hierarchical Planner Deployment Guide](hierarchical-planner-guide.md) — Single-endpoint multi-pool workflow
+- [Global Planner Single-Endpoint Deployment Guide](global-planner-single-endpoint-guide.md) — Single-endpoint multi-pool workflow
 - [Planner Design](../../design-docs/planner-design.md) — Architecture internals
 - [Profiler Guide](../profiler/profiler-guide.md) — How profiling data is generated

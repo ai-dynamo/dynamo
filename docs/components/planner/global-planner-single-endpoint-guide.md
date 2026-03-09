@@ -1,10 +1,10 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Hierarchical Planner Deployment Guide
+title: Global Planner Single-Endpoint Deployment Guide
 ---
 
-This guide shows how to expose a single model endpoint backed by multiple DynamoGraphDeployments (DGDs) that are specialized for different request shapes. It covers the current Dynamo workflow for combining per-pool profiling, `GlobalRouter`, and `GlobalPlanner` into one hierarchical serving stack.
+This guide shows how to expose a single model endpoint backed by multiple DynamoGraphDeployments (DGDs) that are specialized for different request shapes. It covers the current Dynamo workflow for combining per-pool profiling, `GlobalRouter`, and `GlobalPlanner` into one single-endpoint serving stack.
 
 ## What Problem This Solves
 
@@ -16,18 +16,18 @@ Typical examples:
 - long-input requests need a larger prefill pool
 - decode capacity should scale independently from prefill capacity
 
-This guide covers the **single-endpoint hierarchical** pattern only. If you want multiple independent DGDs or models to share centralized scaling policy without a shared endpoint, you can use `GlobalPlanner` without `GlobalRouter`. See [Global Planner README](../../../components/src/dynamo/global_planner/README.md).
+This guide covers the **single-endpoint multi-pool** pattern only. If you want multiple independent DGDs or models to share centralized scaling policy without a shared endpoint, you can use `GlobalPlanner` without `GlobalRouter`. See [Global Planner README](../../../components/src/dynamo/global_planner/README.md).
 
 ## Terminology
 
 - **SLA Planner**: The normal `dynamo.planner` component that computes desired replica counts.
 - **Local planner**: A pool-local instance of that planner inside one DGD.
 - **GlobalPlanner**: The centralized execution and policy layer that receives scale requests from local planners.
-- **Hierarchical planner**: The architecture where multiple local planners feed one `GlobalPlanner`, usually together with `GlobalRouter` for a single public endpoint.
+- **"Hierarchical planner"**: Older shorthand for the architecture where multiple local planners feed one `GlobalPlanner`, usually together with `GlobalRouter` for a single public endpoint. In this guide, we use the more explicit term **single-endpoint GlobalPlanner deployment**.
 
 ## When To Use This Pattern
 
-Use a hierarchical deployment when all of the following are true:
+Use this pattern when all of the following are true:
 
 - You want one public endpoint for a single model.
 - You want different private pools for different request classes, such as short-input vs. long-input requests or different latency targets.
@@ -38,7 +38,7 @@ If you only need one pool for one model, use a single DGD or a single `DynamoGra
 
 ## What You Deploy
 
-In the current implementation, a hierarchical deployment is composed from multiple resources:
+In the current implementation, a single-endpoint `GlobalPlanner` deployment is composed from multiple resources:
 
 | Resource | Purpose | Typical contents |
 |----------|---------|------------------|
@@ -49,7 +49,7 @@ In the current implementation, a hierarchical deployment is composed from multip
 
 > **Current workflow**
 >
-> A single DGDR does **not** generate the full hierarchical topology today. Instead, run one DGDR or profiling job per intended pool, then compose the final control DGD plus pool DGDs manually.
+> A single DGDR does **not** generate the full single-endpoint multi-pool topology today. Instead, run one DGDR or profiling job per intended pool, then compose the final control DGD plus pool DGDs manually.
 
 ## Architecture
 
@@ -332,7 +332,7 @@ If you use Prometheus and Grafana, also inspect:
 
 ## Recommended Workflow For New Deployments
 
-For most teams, the easiest way to build a hierarchical deployment is:
+For most teams, the easiest way to build this deployment is:
 
 1. Design your pool classes from expected traffic patterns.
 2. Run one DGDR per pool class to generate or validate the pool configuration.
@@ -344,7 +344,7 @@ This keeps profiling and pool selection simple while still giving you one public
 
 ## Current Limitations
 
-- Hierarchical deployments are assembled manually today. One DGDR does not emit the full control DGD plus pool DGDs topology.
+- Single-endpoint `GlobalPlanner` deployments are assembled manually today. One DGDR does not emit the full control DGD plus pool DGDs topology.
 - `GlobalRouter` routes by ISL/TTFT and context-length/ITL grids, not directly by OSL.
 - All pools in one hierarchy are expected to serve the same model.
 
