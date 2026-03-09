@@ -18,7 +18,7 @@ data:
       free_gpu_memory_fraction: 0.7
       dtype: fp8
     cache_transceiver_config:
-      backend: DEFAULT
+      backend: NIXL
     cuda_graph_config:
       enable_padding: true
       max_batch_size: 2
@@ -43,7 +43,7 @@ data:
       free_gpu_memory_fraction: 0.95
       dtype: fp8
     cache_transceiver_config:
-      backend: DEFAULT
+      backend: NIXL
     cuda_graph_config:
       enable_padding: true
       max_batch_size: 512

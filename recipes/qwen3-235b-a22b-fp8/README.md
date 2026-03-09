@@ -75,3 +75,4 @@ This is a large MoE model requiring significant GPU resources:
 - Model download may take 30-60 minutes
 - Uses KV-aware routing for efficient cache utilization
 - Chunked prefill enabled for aggregated mode (disabled for disaggregated)
+- **Disaggregated mode requires InfiniBand (NIXL/RDMA).** The disagg recipe sets `cache_transceiver_config.backend: NIXL` for KV cache transfer. Clusters without InfiniBand must override this to `TCP` or `DEFAULT` via a cluster-specific overlay.
