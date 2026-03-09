@@ -304,6 +304,11 @@ class BaseWorkerHandler(ABC):
         self.model_max_len = model_max_len
         self.enable_multimodal = enable_multimodal
         self.enable_frontend_decoding = enable_frontend_decoding
+        self.enable_mm_router = os.environ.get("DYN_ENABLE_MM_ROUTER", "").lower() in (
+            "1",
+            "true",
+            "yes",
+        )
         # NIXL connector for frontend decoding - lazy initialized
         self._nixl_connector: nixl_connect.Connector | None = None
         self._nixl_connector_lock = asyncio.Lock()
@@ -984,12 +989,15 @@ class BaseWorkerHandler(ABC):
                 enable_frontend_decoding=True,
                 nixl_connector=self._nixl_connector,
             )
-        else:
-            # URL path: get both PIL images and raw bytes for hash computation
+        elif self.enable_mm_router:
+            # MM router path: get both PIL images and raw bytes for hash computation
             (
                 images,
                 raw_bytes_list,
             ) = await self.image_loader.load_image_batch_with_raw_bytes(image_mm_items)
+        else:
+            # Legacy path: load images only and compute hashes from decoded image objects
+            images = await self.image_loader.load_image_batch(image_mm_items)
 
         if images:
             # vLLM expects single image or list
