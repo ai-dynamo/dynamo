@@ -104,7 +104,7 @@ def run_concurrency_sweep(
     """Run aiperf across all concurrency levels, writing results under output_dir/c{N}/."""
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    for c in sorted(concurrencies):
+    for c in concurrencies:
         run_aiperf_single(
             model=model,
             port=port,

@@ -122,7 +122,7 @@ def _sweep_with_restart(
     """Run each concurrency level with a fresh server to avoid warm-cache effects."""
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    for c in sorted(config.concurrencies):
+    for c in config.concurrencies:
         artifact_dir = output_dir / f"c{c}"
         server.start(
             workflow_script=workflow_script,
