@@ -177,23 +177,27 @@ The socket connection **is** the lock:
 
 ### Epoch Model
 
-GMS uses epoch-scoped allocations and metadata:
+Epoch creation and publication work like this:
 
-- A new `epoch_id` is created on `RW_CONNECT`.
-- `RW_COMMIT` does **not** create a new epoch; it publishes the already-active RW epoch as the committed epoch.
-- `RW_ABORT` does **not** create a new epoch; it discards the active RW epoch and returns the system to `EMPTY`.
-- The next writer connection after `EMPTY` or `COMMITTED` creates the next epoch.
-- Every allocation is assigned an `epoch_id` at allocation time.
-- `epoch_id` is write-once and never mutated.
-- RO requests are served only from the current committed epoch.
-- RW requests mutate only the active RW epoch.
+```mermaid
+flowchart LR
+    A[EMPTY or COMMITTED] --> B[RW_CONNECT]
+    B --> C[Create new active epoch N]
+    C --> D[Allocate memory and write metadata in epoch N]
+    D --> E{Writer outcome}
+    E -->|RW_COMMIT| F[Publish epoch N as committed]
+    E -->|RW_ABORT| G[Discard epoch N]
+    F --> H[Next RW_CONNECT creates epoch N+1]
+    G --> H
+```
+
+- `RW_CONNECT` creates a new active epoch.
+- `RW_COMMIT` publishes the current active epoch; it does not create another epoch.
+- `RW_ABORT` discards the current active epoch and returns the system to `EMPTY`.
+- Every allocation gets an immutable `epoch_id` at creation time.
+- RO requests are served only from the committed epoch, while RW requests mutate only the active epoch.
 - Read RPCs (`export`, allocation lookup/listing, metadata lookup/listing) are scoped to the committed epoch for RO clients and to the active epoch for RW clients.
-- Transition to `EMPTY` marks a new uncommitted epoch boundary.
-- On `RW_CONNECT`, prior committed visibility is invalidated immediately.
-- On `RW_COMMIT`, the active RW epoch becomes the committed epoch atomically.
-- `metadata_put` is validated against active-epoch allocations and offset bounds.
-- `free` cascades metadata cleanup for entries referencing the freed allocation.
-- Commit rejects dangling metadata references.
+- `metadata_put` validates allocation ownership and offset bounds, `free` cascades metadata cleanup, and `commit` rejects dangling metadata references.
 
 ### Allocation Backpressure on OOM
 
@@ -307,22 +311,15 @@ sequenceDiagram
     Note over R,GPU: Another writer could publish a new epoch here
 
     R->>C: mgr.connect(RO)
-    C->>S: HandshakeRequest(lock_type=RO)
-    S->>S: FSM: COMMITTED → RO
-    S-->>C: HandshakeResponse(success=true)
-
     R->>C: mgr.remap_all_vas()
     C->>S: GetStateHashRequest()
     S-->>C: GetStateHashResponse(hash)
 
     alt hash == saved_hash
-        loop For each preserved VA
-            C->>S: ExportRequest(allocation_id)
-            S-->>C: Response + fd
-            C->>GPU: cuMemImportFromShareableHandle(fd)
-            C->>GPU: cuMemMap(same_va, handle)
-            Note over C: Tensors valid at same addresses!
-        end
+        C->>S: Export preserved allocations from committed epoch
+        S-->>C: Response + FDs
+        C->>GPU: Import handles and remap at preserved VAs
+        Note over C: Tensor pointers stay valid
     else hash != saved_hash
         C-->>R: StaleMemoryLayoutError
         Note over R: Old epoch is gone or layout changed; re-import from scratch
