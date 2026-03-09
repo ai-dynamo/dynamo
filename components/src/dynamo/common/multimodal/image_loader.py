@@ -52,6 +52,7 @@ class ImageLoader:
     @_nvtx.annotate("mm:img:load_image", color="lime")
     async def load_image(self, image_url: str) -> Image.Image:
         parsed_url = urlparse(image_url)
+        raw_bytes: bytes | None = None
 
         # For HTTP(S) URLs, check cache first
         if parsed_url.scheme in ("http", "https"):
@@ -73,8 +74,8 @@ class ImageLoader:
                         raise ValueError("Data URL must be base64 encoded")
 
                     try:
-                        image_bytes = base64.b64decode(data)
-                        image_data = BytesIO(image_bytes)
+                        raw_bytes = base64.b64decode(data)
+                        image_data = BytesIO(raw_bytes)
                     except binascii.Error as e:
                         raise ValueError(f"Invalid base64 encoding: {e}")
             elif parsed_url.scheme in ("http", "https"):
@@ -87,7 +88,8 @@ class ImageLoader:
                     if not response.content:
                         raise ValueError("Empty response content from image URL")
 
-                    image_data = BytesIO(response.content)
+                    raw_bytes = response.content
+                    image_data = BytesIO(raw_bytes)
             else:
                 raise ValueError(f"Invalid image source scheme: {parsed_url.scheme}")
 
@@ -112,6 +114,7 @@ class ImageLoader:
                     oldest_image_url = await self._cache_queue.get()
                     del self._image_cache[oldest_image_url]
 
+                assert raw_bytes is not None
                 self._image_cache[image_url_lower] = (image_converted, raw_bytes)
                 await self._cache_queue.put(image_url_lower)
 
