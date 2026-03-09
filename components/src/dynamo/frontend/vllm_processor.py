@@ -233,9 +233,9 @@ def _preprocess_worker(
             "prompt_logprobs": sp.prompt_logprobs,
             "skip_special_tokens": sp.skip_special_tokens,
         },
-        "eos_token_ids": [vllm_preproc.eos_token_id]
-        if vllm_preproc.eos_token_id is not None
-        else [],
+        "eos_token_ids": (
+            [vllm_preproc.eos_token_id] if vllm_preproc.eos_token_id is not None else []
+        ),
         "annotations": [],
     }
 
@@ -247,7 +247,6 @@ def _preprocess_worker(
         request_for_sampling=request_for_sampling,
         chat_template_kwargs=pre.chat_template_kwargs,
     )
-
 
 
 class VllmProcessor:
@@ -349,9 +348,9 @@ class VllmProcessor:
         if request_for_sampling.cache_salt is not None:
             prompt_inputs["cache_salt"] = request_for_sampling.cache_salt
         if request_for_sampling.mm_processor_kwargs is not None:
-            prompt_inputs[
-                "mm_processor_kwargs"
-            ] = request_for_sampling.mm_processor_kwargs
+            prompt_inputs["mm_processor_kwargs"] = (
+                request_for_sampling.mm_processor_kwargs
+            )
 
         vllm_preproc: EngineCoreRequest = self.input_processor.process_inputs(
             request_id,
@@ -412,9 +411,11 @@ class VllmProcessor:
                 "prompt_logprobs": sp.prompt_logprobs,
                 "skip_special_tokens": sp.skip_special_tokens,
             },
-            "eos_token_ids": [vllm_preproc.eos_token_id]
-            if vllm_preproc.eos_token_id is not None
-            else [],
+            "eos_token_ids": (
+                [vllm_preproc.eos_token_id]
+                if vllm_preproc.eos_token_id is not None
+                else []
+            ),
             "annotations": [],
         }
 
@@ -523,18 +524,6 @@ class VllmProcessor:
             if vllm_preproc.request_id in self.output_processor.request_states:
                 self.output_processor.abort_requests(
                     [vllm_preproc.request_id], internal=True
-                )
-            if self.debug_perf and token_count > 0:
-                logger.info(
-                    "[perf] stream done: request=%s tokens=%d "
-                    "output_processor_total=%.2fms (%.3fms/tok) "
-                    "post_processor_total=%.2fms (%.3fms/tok)",
-                    request_id,
-                    token_count,
-                    output_proc_total_ms,
-                    output_proc_total_ms / token_count,
-                    post_proc_total_ms,
-                    post_proc_total_ms / token_count,
                 )
 
     async def _generator_inner_pool(
@@ -700,7 +689,7 @@ class EngineFactory:
         else:
             reasoning_parser_class = None
 
-        (namespace_name, component_name, endpoint_name) = instance_id.triple()
+        namespace_name, component_name, endpoint_name = instance_id.triple()
         generate_endpoint = self.runtime.endpoint(
             f"{namespace_name}.{component_name}.{endpoint_name}"
         )
