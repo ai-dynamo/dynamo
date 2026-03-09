@@ -74,8 +74,8 @@ class ImageLoader:
                         raise ValueError("Data URL must be base64 encoded")
 
                     try:
-                        raw_bytes = base64.b64decode(data)
-                        image_data = BytesIO(raw_bytes)
+                        image_bytes = base64.b64decode(data)
+                        image_image_data = BytesIO(image_bytes)
                     except binascii.Error as e:
                         raise ValueError(f"Invalid base64 encoding: {e}")
             elif parsed_url.scheme in ("http", "https"):
