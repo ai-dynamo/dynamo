@@ -137,7 +137,7 @@ modelExpressURL: ""
 
 # Checkpoint configuration for fast pod restore
 # NOTE: The checkpoint infrastructure (PVC + DaemonSet) must be installed separately
-# using the chrek Helm chart in each namespace where checkpointing is needed.
+# using the snapshot Helm chart in each namespace where checkpointing is needed.
 checkpoint:
   # Enable checkpoint/restore functionality
   enabled: false
@@ -148,16 +148,16 @@ checkpoint:
 
   # Storage configuration
   # These settings tell the operator where to find checkpoint storage
-  # Must match the configuration in the chrek chart
+  # Must match the configuration in the snapshot chart
   storage:
     # Storage backend type: pvc, s3, or oci
     type: pvc
 
     # PVC configuration (used when type=pvc)
     pvc:
-      # Name of the PVC created by the chrek chart
-      # Must match the PVC name in the chrek chart
-      pvcName: "chrek-pvc"
+      # Name of the PVC created by the snapshot chart
+      # Must match the PVC name in the snapshot chart
+      pvcName: "snapshot-pvc"
       # Base path within the PVC for storing checkpoints
       basePath: "/checkpoints"
 
