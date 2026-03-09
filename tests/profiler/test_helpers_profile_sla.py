@@ -209,7 +209,7 @@ class TestValidDgdrSpec:
     @pytest.mark.gpu_0
     def test_missing_gpu_sku_raises(self):
         """hardware.gpuSku is required."""
-        dgdr = _make_dgdr(hardware=HardwareSpec(gpuSku="", numGpusPerNode=8))
+        dgdr = _make_dgdr(hardware=HardwareSpec(gpuSku=None, numGpusPerNode=8))
         with pytest.raises(ValueError, match="gpuSku.*required"):
             valid_dgdr_spec(dgdr)
 
