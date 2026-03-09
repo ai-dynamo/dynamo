@@ -32,6 +32,7 @@ class ScaleRequestHandler:
         managed_namespaces: list,
         k8s_namespace: str,
         no_operation: bool = False,
+        max_total_gpus: int = -1,
     ):
         """Initialize the scale request handler.
 
@@ -40,6 +41,7 @@ class ScaleRequestHandler:
             managed_namespaces: List of authorized namespaces (None = accept all)
             k8s_namespace: Kubernetes namespace where GlobalPlanner is running
             no_operation: If True, log scale requests without executing K8s scaling
+            max_total_gpus: Maximum total GPUs across all managed pools (-1 = unlimited)
         """
         self.runtime = runtime
         # If managed_namespaces is None, accept all namespaces
@@ -48,6 +50,7 @@ class ScaleRequestHandler:
         )
         self.k8s_namespace = k8s_namespace
         self.no_operation = no_operation
+        self.max_total_gpus = max_total_gpus
         self.connectors = {}  # Cache of KubernetesConnector per DGD
 
         if self.managed_namespaces:
@@ -62,6 +65,57 @@ class ScaleRequestHandler:
                 "ScaleRequestHandler running in NO-OPERATION mode: "
                 "scale requests will be logged but not executed"
             )
+
+        if self.max_total_gpus > 0:
+            logger.info(
+                f"GPU budget enforcement ENABLED: max {self.max_total_gpus} total GPUs"
+            )
+        else:
+            logger.info("GPU budget enforcement DISABLED (unlimited)")
+
+    def _calculate_total_gpus_after_request(self, request: ScaleRequest) -> int:
+        """Calculate total GPUs across all managed DGDs if this request is granted.
+
+        For the requesting DGD, uses the desired replica counts from the request.
+        For all other known DGDs, uses their current replica counts.
+        """
+        total_gpus = 0
+        requesting_key = f"{request.k8s_namespace}/{request.graph_deployment_name}"
+
+        for key, connector in self.connectors.items():
+            try:
+                deployment = connector.kube_api.get_graph_deployment(
+                    connector.parent_dgd_name
+                )
+            except Exception as e:
+                logger.warning(f"Failed to read DGD for {key}: {e}")
+                continue
+
+            services = deployment.get("spec", {}).get("services", {})
+
+            for svc_spec in services.values():
+                sub_type = svc_spec.get("subComponentType", "")
+                if not sub_type:
+                    continue
+
+                gpu_per_replica = int(
+                    svc_spec.get("resources", {}).get("limits", {}).get("gpu", 0)
+                )
+                if gpu_per_replica == 0:
+                    continue
+
+                replicas = svc_spec.get("replicas", 0)
+
+                # For the requesting DGD, use desired replicas from the request
+                if key == requesting_key:
+                    for target in request.target_replicas:
+                        if target.sub_component_type.value == sub_type:
+                            replicas = target.desired_replicas
+                            break
+
+                total_gpus += replicas * gpu_per_replica
+
+        return total_gpus
 
     @dynamo_endpoint(ScaleRequest, ScaleResponse)
     async def scale_request(self, request: ScaleRequest):
@@ -124,6 +178,27 @@ class ScaleRequestHandler:
             else:
                 connector = self.connectors[connector_key]
                 logger.debug(f"Reusing cached connector for {connector_key}")
+
+            # Check GPU budget before scaling
+            if self.max_total_gpus > 0:
+                total_gpus = self._calculate_total_gpus_after_request(request)
+                if total_gpus > self.max_total_gpus:
+                    logger.warning(
+                        f"Rejecting scale request from {request.caller_namespace}: "
+                        f"would use {total_gpus} GPUs, exceeding max of {self.max_total_gpus}"
+                    )
+                    yield {
+                        "status": ScaleStatus.ERROR.value,
+                        "message": (
+                            f"GPU budget exceeded: request would use {total_gpus} total GPUs, "
+                            f"max allowed is {self.max_total_gpus}"
+                        ),
+                        "current_replicas": {},
+                    }
+                    return
+                logger.info(
+                    f"GPU budget check passed: {total_gpus}/{self.max_total_gpus} GPUs"
+                )
 
             # Execute scaling (request.target_replicas is already List[TargetReplica])
             await connector.set_component_replicas(
