@@ -19,6 +19,9 @@ use serde::{Deserialize, Serialize};
 
 use super::TokenIdType;
 
+/// Maximum nesting depth allowed in guided_grammar EBNF strings.
+const MAX_GRAMMAR_NESTING_DEPTH: usize = 500;
+
 pub mod llm_backend;
 pub mod postprocessor;
 pub mod preprocessor;
@@ -422,8 +425,6 @@ impl GuidedDecodingOptions {
         Ok(Some(instance))
     }
 
-    const MAX_GRAMMAR_NESTING_DEPTH: usize = 500;
-
     /// Validate that only one guided decoding option is set, and that
     /// grammar nesting depth is bounded.
     pub fn validate(&self) -> Result<()> {
@@ -467,10 +468,10 @@ impl GuidedDecodingOptions {
                     _ => {}
                 }
             }
-            if max > Self::MAX_GRAMMAR_NESTING_DEPTH {
+            if max > MAX_GRAMMAR_NESTING_DEPTH {
                 return Err(anyhow::anyhow!(
                     "guided_grammar exceeds maximum nesting depth of {} (got {})",
-                    Self::MAX_GRAMMAR_NESTING_DEPTH,
+                    MAX_GRAMMAR_NESTING_DEPTH,
                     max
                 ));
             }
