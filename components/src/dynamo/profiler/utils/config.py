@@ -100,7 +100,7 @@ class DgdPlannerServiceConfig(BaseModel):
         mainContainer=Container(
             image="nvcr.io/nvidia/ai-dynamo/dynamo-runtime:1.0.0",  # placeholder
             workingDir=f"{get_workspace_dir()}/components/src/dynamo/planner",
-            command=["python3", "-m", "dynamo.planner.planner_sla"],
+            command=["python3", "-m", "dynamo.planner"],
             args=[],
         )
     )
