@@ -15,7 +15,7 @@ Checkpointing captures the complete state of a running worker pod (including GPU
 
 ## Prerequisites
 
-- Dynamo Platform installed (v0.4.0+) on k8s cluster with **x86_64 (amd64)** GPU nodes
+- Dynamo Platform installed on a k8s cluster with **x86_64 (amd64)** GPU nodes
 - Dynamo Snapshot Helm chart installed (separate from platform)
 - RWX PVC storage (PVC is currently the only supported backend)
 - vLLM or SGLang backend (TensorRT-LLM is not supported)
@@ -222,7 +222,7 @@ Checkpoints are uniquely identified by a **16-character SHA256 hash** (64 bits) 
 | Field | Required | Affects Hash | Example |
 |-------|----------|-------------|---------|
 | `model` | ✓ | ✓ | `meta-llama/Llama-3-8B` |
-| `framework` | ✓ | ✓ | `sglang`, `trtllm`, `vllm` |
+| `backendFramework` | ✓ | ✓ | `sglang`, `vllm` |
 | `dynamoVersion` | | ✓ | `0.9.0`, `1.0.0` |
 | `tensorParallelSize` | | ✓ | `1`, `2`, `4`, `8` (default: 1) |
 | `pipelineParallelSize` | | ✓ | `1`, `2` (default: 1) |
@@ -516,4 +516,3 @@ spec:
 - [Dynamo Snapshot Helm Chart README](https://github.com/ai-dynamo/dynamo/tree/main/deploy/helm/charts/snapshot/README.md) - Chart configuration
 - [Installation Guide](../installation-guide.md) - Platform installation
 - [API Reference](../api-reference.md) - Complete CRD specifications
-

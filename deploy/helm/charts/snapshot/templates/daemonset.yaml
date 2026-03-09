@@ -38,6 +38,9 @@ spec:
         {{- with .Values.daemonset.tolerations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
+      {{- if and .Values.daemonset.affinity (hasKey .Values.daemonset.affinity "nodeAffinity") }}
+      {{- fail "daemonset.affinity.nodeAffinity is not supported because the chart already enforces kubernetes.io/arch=amd64; use daemonset.nodeSelector or daemonset.affinity.podAffinity/podAntiAffinity instead" }}
+      {{- end }}
       affinity:
         # cuda-checkpoint only supports x86_64 — never schedule on arm64 nodes
         nodeAffinity:

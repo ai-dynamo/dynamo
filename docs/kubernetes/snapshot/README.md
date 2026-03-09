@@ -60,7 +60,7 @@ helm install snapshot nvidia/snapshot \
 ### ✅ Currently Supported
 - ✅ **vLLM and SGLang backends** (TensorRT-LLM planned)
 - ✅ **LLM decode/prefill workers only** (multimodal, embedding, and diffusion workers are not supported)
-- ✅ Cross-node, single-GPU checkpoints
+- ✅ Cross-node, single-GPU checkpoints (requires RWX storage)
 - ✅ PVC storage backend (RWX for multi-node)
 - ✅ CUDA checkpoint/restore
 - ✅ PyTorch distributed state (with `GLOO_SOCKET_IFNAME=lo`)
@@ -90,7 +90,6 @@ helm install snapshot nvidia/snapshot \
 - **x86_64 (amd64) only**: `cuda-checkpoint` does not support ARM64. The snapshot agent and placeholder images are built for x86_64 only.
 - **vLLM and SGLang backends only**: TensorRT-LLM is not supported.
 - **LLM workers only**: Checkpoint/restore supports LLM decode and prefill workers. Specialized workers (multimodal, embedding, diffusion) are not supported.
-- **Single-node only**: Checkpoints must be created and restored on the same node
 - **Single-GPU only**: Multi-GPU configurations not yet supported
 - **Network state limitations**: Active TCP connections are closed during restore (use `tcp-close` CRIU option)
 - **Storage**: Only PVC storage is currently implemented (S3/OCI planned)
