@@ -208,6 +208,9 @@ filterwarnings = [
     ################################################################################################
     # vLLM tokenizer deprecation warning (AnyTokenizer moved to vllm.tokenizers.TokenizerLike)
     "ignore:.*vllm\\.transformers_utils\\.tokenizer\\.AnyTokenizer.*has been moved.*:DeprecationWarning",
+    # sentencepiece emits this SWIG deprecation warning at import time on Python 3.12
+    "ignore:builtin type SwigPyObject has no __module__ attribute:DeprecationWarning",
+    "ignore:builtin type swigvarlink has no __module__ attribute:DeprecationWarning",
 
     ################################################################################################
     # TRT-LLM
@@ -334,4 +337,3 @@ extra_content_footer = [
    <script type="text/javascript">if (typeof _satellite !== "undefined") {_satellite.pageBottom();}</script>
    ''',
 ]
-
