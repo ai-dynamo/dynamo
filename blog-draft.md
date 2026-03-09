@@ -28,7 +28,7 @@ Background coding agents have crossed from experiment to production infrastructu
 
 Today, inference servers see anonymous tokenized requests. They don’t have the global context about which agent is blocked on a tool call, which one is about to resume, or which work is urgent. That context lives only in the harness.
 
-Dynamo’s new `nvext.agent_hints` extension bridges this gap. It attaches structured hints to each request across all three API endpoints, giving the router and engine the context they need to make agent aware scheduling and caching decisions. This is a v1 API that we are actively co-designing with the community and would love feedback from teams building agent harnesses on what signals are most useful. 
+Dynamo’s new `nvext.agent_hints` extension bridges this gap. It attaches structured hints to each request across all three API endpoints, giving the router and engine the context they need to make agent aware scheduling and caching decisions. This is a v1 API that we are actively co-designing with the community and would love feedback from teams building agent harnesses on what signals are most useful. If you have ideas for new signals, [open an issue](https://github.com/ai-dynamo/dynamo/issues) or start a discussion.
 
 ```json
 {
@@ -121,7 +121,7 @@ Agentic workloads produce blocks with vastly different reuse value but default L
 | Thinking/reasoning tokens | Zero reuse after reasoning loop closes (~40% of output) | Near-zero |
 | Subagent KV | 1-3 turns then agent dies. No need to retain | Near-zero |
 
-LRU sees only recency. In a high traffic environment, a tool-call pause (2-30 seconds while the agent waits for an external API) might cause the agent's blocks to age out and when the agent resumes, the entire prefix must be recomputed. To solve this, we need to provide the harness a granular API to control which blocks should be retained, where they should live, and for how long.
+LRU sees only recency. In a high traffic environment, a wait for the completion of a called tool (2-30 seconds while the agent waits for an external API) might cause the agent's blocks to age out and when the agent resumes, the entire prefix must be recomputed. To solve this, we need to provide the harness a granular API to control which blocks should be retained, where they should live, and for how long.
 
 ### Distributed KV Cache with Multi-Tier Storage
 
@@ -154,7 +154,7 @@ RetentionDirective:
     duration: float   # seconds; null = persist until explicit release
 ```
 
-A request carries zero or more directives. Blocks without directives follow the default LRU path with zero overhead. The evictor becomes a two-structure system: an LRU free list for unprioritized blocks (O(1), unchanged) and a priority queue for annotated blocks. The harness can express "system prompt blocks are evicted last; conversation context survives a 30-second tool call; decode tokens are first to go" without the engine needing to understand why.
+A request carries zero or more directives. Blocks without directives follow the default LRU path with zero overhead. The evictor becomes a two-structure system: an LRU free list for unprioritized blocks (O(1), unchanged) and a priority queue for annotated blocks. The harness can express "system prompt blocks are evicted last (priority: 100); conversation context survives a 30-second tool call (duration: 45s); decode tokens are first to go (priority: 1)" without the engine needing to understand why.
 
 When we studied how Anthropic's prompt caching works in practice, we wanted to bring the same semantics to open-source inference. In Claude Code, the caching hierarchy has a specific structure: base system instructions and tool definitions are marked with `scope: "global"` and cached across all users, CLAUDE.md files and memory are cached per-project, and conversation history is cached per-session. The prefix is always the highest-value region, reused on every turn. Dynamo's `cache_control` API applies this to self-hosted inference. When a request includes `cache_control: { type: "ephemeral", ttl: "1h" }`, the router fires a `pin_prefix` RPC to the worker after generation completes. The worker walks its radix tree and sets a `pin_expiry` TTL on matching nodes.
 
