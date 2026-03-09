@@ -7,7 +7,10 @@ use super::{NvCreateCompletionRequest, NvCreateCompletionResponse};
 use crate::{
     protocols::{
         common::{self, timing::RequestTracker},
-        openai::nvext::{NvExtProvider, NvExtResponse, TimingInfo},
+        openai::{
+            convert_backend_top_logprobs,
+            nvext::{NvExtProvider, NvExtResponse, TimingInfo},
+        },
     },
     types::TokenIdType,
 };
@@ -172,7 +175,7 @@ impl DeltaGenerator {
                 .zip(tok_lps.iter())
                 .zip(top_logprobs.iter())
                 .map(|(((t, tid), lp), top_lps)| {
-                    let converted = super::convert_backend_top_logprobs(top_lps, t, *tid, *lp);
+                    let converted = convert_backend_top_logprobs(top_lps, t, *tid, *lp);
                     serde_json::to_value(converted).unwrap()
                 })
                 .collect()

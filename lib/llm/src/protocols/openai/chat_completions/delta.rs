@@ -8,7 +8,11 @@ use crate::{
     local_model::runtime_config::ModelRuntimeConfig,
     protocols::{
         common::{self, timing::RequestTracker},
-        openai::nvext::{NvExtProvider, NvExtResponse, TimingInfo},
+        openai::{
+            convert_backend_top_logprobs,
+            nvext::{NvExtProvider, NvExtResponse, TimingInfo},
+            token_to_utf8_bytes,
+        },
     },
     types::TokenIdType,
 };
@@ -211,11 +215,11 @@ impl DeltaGenerator {
                 .zip(tok_lps)
                 .zip(top_logprobs)
                 .map(|(((t, tid), lp), top_lps)| {
-                    let converted = super::convert_backend_top_logprobs(&top_lps, t, *tid, lp);
+                    let converted = convert_backend_top_logprobs(&top_lps, t, *tid, lp);
                     dynamo_async_openai::types::ChatCompletionTokenLogprob {
                         token: t.clone(),
                         logprob: lp,
-                        bytes: super::token_to_utf8_bytes(t),
+                        bytes: token_to_utf8_bytes(t),
                         top_logprobs: converted,
                     }
                 })

@@ -818,8 +818,9 @@ class HandlerBase(BaseGenerativeHandler):
                     out = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
 
                     # Extract logprobs from the output
+                    tokenizer = getattr(self.engine.llm, "tokenizer", None)
                     log_probs, top_logprobs = self._extract_logprobs(
-                        output, num_output_tokens_so_far
+                        output, num_output_tokens_so_far, tokenizer=tokenizer
                     )
                     if log_probs:
                         out["log_probs"] = log_probs
