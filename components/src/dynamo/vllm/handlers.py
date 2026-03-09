@@ -60,10 +60,25 @@ class LoRAInfo:
 
 
 def _compute_mm_uuids(
-    images_or_bytes: list,
-) -> Dict[str, list[str]]:
-    """Compute multi_modal_uuids from a list of PIL Images or raw bytes."""
-    return {"image": compute_mm_uuids_from_images(images_or_bytes)}
+    multi_modal_data_or_images: Dict[str, Any] | list | None,
+) -> Dict[str, list[str]] | None:
+    """Compute multi_modal_uuids from multi_modal_data, PIL images, or raw bytes."""
+    if multi_modal_data_or_images is None:
+        return None
+
+    if isinstance(multi_modal_data_or_images, dict):
+        if "image" not in multi_modal_data_or_images:
+            return None
+        images = multi_modal_data_or_images["image"]
+        if not isinstance(images, list):
+            images = [images]
+    else:
+        images = multi_modal_data_or_images
+
+    if not images:
+        return None
+
+    return {"image": compute_mm_uuids_from_images(images)}
 
 
 # LoRAManager singleton - initialized lazily when DYN_LORA_ENABLED is set
@@ -978,26 +993,32 @@ class BaseWorkerHandler(ABC):
                     self._nixl_connector = nixl_connect.Connector()
                     await self._nixl_connector.initialize()
 
-        image_mm_items = mm_map.get(IMAGE_URL_KEY, [])
-
-        # Process image_url entries
-        raw_bytes_list: list[bytes] | None = None
-        if self.enable_frontend_decoding:
-            # NIXL path: no raw bytes available
-            images = await self.image_loader.load_image_batch(
-                image_mm_items,
-                enable_frontend_decoding=True,
-                nixl_connector=self._nixl_connector,
-            )
-        elif self.enable_mm_router:
-            # MM router path: get both PIL images and raw bytes for hash computation
+        if self.enable_mm_router and not self.enable_frontend_decoding:
+            image_mm_items = mm_map.get(IMAGE_URL_KEY, [])
             (
                 images,
                 raw_bytes_list,
             ) = await self.image_loader.load_image_batch_with_raw_bytes(image_mm_items)
-        else:
-            # Legacy path: load images only and compute hashes from decoded image objects
-            images = await self.image_loader.load_image_batch(image_mm_items)
+
+            if images:
+                # vLLM expects single image or list
+                vllm_mm_data["image"] = images[0] if len(images) == 1 else images
+                logger.debug(
+                    f"Extracted {len(images)} image(s) for multimodal processing"
+                )
+
+            # Handle video_url entries (future expansion)
+            if VIDEO_URL_KEY in mm_map:
+                logger.warning("Video multimodal data not yet supported in standard worker")
+
+            return (vllm_mm_data if vllm_mm_data else None), raw_bytes_list
+
+        # Process image_url entries
+        images = await self.image_loader.load_image_batch(
+            mm_map.get(IMAGE_URL_KEY, []),
+            enable_frontend_decoding=self.enable_frontend_decoding,
+            nixl_connector=self._nixl_connector,
+        )
 
         if images:
             # vLLM expects single image or list
@@ -1008,7 +1029,7 @@ class BaseWorkerHandler(ABC):
         if VIDEO_URL_KEY in mm_map:
             logger.warning("Video multimodal data not yet supported in standard worker")
 
-        return (vllm_mm_data if vllm_mm_data else None), raw_bytes_list
+        return (vllm_mm_data if vllm_mm_data else None), None
 
     def _build_prompt_from_request(
         self,
@@ -1066,16 +1087,12 @@ class BaseWorkerHandler(ABC):
             prompt_token_ids=request["token_ids"],
             multi_modal_data=multi_modal_data,
         )
-        # Compute mm_uuids: prefer raw_bytes (matches MM Router hash),
-        # fall back to PIL images from multi_modal_data
         if raw_bytes_list:
-            prompt_kwargs["multi_modal_uuids"] = _compute_mm_uuids(raw_bytes_list)
-        elif multi_modal_data and "image" in multi_modal_data:
-            images = multi_modal_data["image"]
-            if not isinstance(images, list):
-                images = [images]
-            if images:
-                prompt_kwargs["multi_modal_uuids"] = _compute_mm_uuids(images)
+            mm_uuids = _compute_mm_uuids(raw_bytes_list)
+        else:
+            mm_uuids = _compute_mm_uuids(multi_modal_data)
+        if mm_uuids is not None:
+            prompt_kwargs["multi_modal_uuids"] = mm_uuids
 
         prompt = TokensPrompt(**prompt_kwargs)
         return prompt, embedding_sequence_length, None
