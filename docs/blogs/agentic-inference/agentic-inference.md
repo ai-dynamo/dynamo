@@ -1,14 +1,10 @@
 # Full Stack Optimizations for Agentic Inference with Dynamo
 
-## Handling Stateful Inference for Agentic Workloads
-
-Agentic systems are the most cache-intensive workloads in production LLM inference today. As an example, Claude Code makes hundreds of API calls per coding session. Each call carries the full conversation history: system prompt, tool definitions, prior turns, tool results. After one cold call that writes the prefix to cache, every subsequent call in the session hits somewhere between 85-97% cache based on our studies. Agent teams (where a lead agent spawns multiple teammates) push this further: 97.2% aggregate cache rate, because teammates share the same system prefix structure and fire frequently enough to keep their prefixes warm.
+Agentic systems are the most cache-intensive workloads in production LLM inference today. Claude Code makes hundreds of API calls per coding session, each carrying the full conversation history. After one cold call that writes the prefix to cache, every subsequent call hits 85-97% cache. Agent teams push this further: 97.2% aggregate cache rate across 4 Opus teammates. An 11.7x read/write ratio means the system reads from cache nearly 12 times for every token it writes.
 
 ![Cumulative cache reads vs writes across a 42-call Claude Code session. Cache reads (891K tokens) grow steeply while writes (76K) and uncached input stay flat -- an 11.7x read/write ratio.](./cumulative-reads-writes.png)
 
-Without prompt caching, a 42-call session with 100K tokens of accumulated context would cost roughly 4.2M input tokens at full price. With 90% cache hit rates and 0.1x read pricing, that drops to ~500K token-equivalents. Cache hits are also significantly faster: restoring KV state from cache avoids the full prefill computation, directly reducing time-to-first-token on every turn. These numbers come from managed API infrastructure where the underlying provider controls prefix matching, cache placement, and eviction. How do we enable the same sort of cache efficiency for teams running SOTA agentic models on their own GPU fleets, with fully open-source tooling?
-
-Dynamo is NVIDIA's open-source inference orchestration stack with first-class support for techniques like cache-aware routing, prefill/decode disaggregation, and multi-tier cache offloading; all of which are critical for agentic workloads. Over the last few months, we have been building on top of Dynamo's core primitives to ensure that teams serving agentic workloads can achieve the same level of performance and efficiency as closed-source inference infrastructure. This post walks through how Dynamo approaches agentic inference at three layers: the frontend API, the router, and KV cache management.
+These numbers come from managed API infrastructure where the provider controls prefix matching, cache placement, and eviction. For teams running open-source models on their own GPUs, none of this exists out of the box. Dynamo is NVIDIA's open-source inference stack built to close that gap. This post walks through how we are making Dynamo agent-native at three layers: the frontend API, the router, and KV cache management.
 
 Throughout this post, we use three terms consistently:
 - **Harness**: the agent framework that drives the workflow (Claude Code, Codex, LangChain, etc.)
