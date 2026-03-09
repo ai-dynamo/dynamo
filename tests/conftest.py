@@ -7,7 +7,7 @@ import shutil
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Generator, Optional
+from typing import Generator, List, NamedTuple, Optional
 
 import pytest
 from filelock import FileLock
@@ -131,15 +131,22 @@ def set_ucx_tls_no_mm():
     mp.undo()
 
 
-def download_models(model_list=None, ignore_weights=False):
+class ModelSpec(NamedTuple):
+    repo_id: str
+    revision: Optional[str] = None
+
+
+def download_models(
+    model_list: Optional[List[ModelSpec]] = None, ignore_weights: bool = False
+):
     """Download models - can be called directly or via fixture
 
     Args:
-        model_list: List of model IDs to download. If None, downloads TEST_MODELS.
+        model_list: List of ModelSpec to download. If None, downloads TEST_MODELS.
         ignore_weights: If True, skips downloading model weight files. Default is False.
     """
     if model_list is None:
-        model_list = TEST_MODELS
+        model_list = [ModelSpec(m) for m in TEST_MODELS]
 
     # Check for HF_TOKEN in environment
     hf_token = os.environ.get("HF_TOKEN")
@@ -155,12 +162,17 @@ def download_models(model_list=None, ignore_weights=False):
     try:
         from huggingface_hub import snapshot_download
 
-        for model_id in model_list:
+        for spec in model_list:
+            rev_info = f" (revision={spec.revision})" if spec.revision else ""
             logging.info(
-                f"Pre-downloading {'model (no weights)' if ignore_weights else 'model'}: {model_id}"
+                f"Pre-downloading {'model (no weights)' if ignore_weights else 'model'}: {spec.repo_id}{rev_info}"
             )
 
             try:
+                dl_kwargs = {"repo_id": spec.repo_id, "token": hf_token}
+                if spec.revision:
+                    dl_kwargs["revision"] = spec.revision
+
                 if ignore_weights:
                     # Weight file patterns to exclude (based on hub.rs implementation)
                     weight_patterns = [
@@ -171,22 +183,16 @@ def download_models(model_list=None, ignore_weights=False):
                         "*.ckpt.index",
                     ]
 
-                    # Download everything except weight files
                     snapshot_download(
-                        repo_id=model_id,
-                        token=hf_token,
                         ignore_patterns=weight_patterns,
+                        **dl_kwargs,
                     )
                 else:
-                    # Download the full model snapshot (includes all files)
-                    snapshot_download(
-                        repo_id=model_id,
-                        token=hf_token,
-                    )
-                logging.info(f"Successfully pre-downloaded: {model_id}")
+                    snapshot_download(**dl_kwargs)
+                logging.info(f"Successfully pre-downloaded: {spec.repo_id}{rev_info}")
 
             except Exception as e:
-                logging.error(f"Failed to pre-download {model_id}: {e}")
+                logging.error(f"Failed to pre-download {spec.repo_id}: {e}")
                 # Don't fail the fixture - let individual tests handle missing models
 
     except ImportError:
@@ -282,8 +288,8 @@ def pytest_collection_modifyitems(config, items):
     """
     This function is called to modify the list of tests to run.
     """
-    # Collect models via explicit pytest mark from final filtered items only
-    models_to_download = set()
+    # Collect models via explicit pytest mark from final filtered items only.
+    models_to_download: set[ModelSpec] = set()
     for item in items:
         # Only collect from items that are not skipped
         if any(
@@ -292,7 +298,9 @@ def pytest_collection_modifyitems(config, items):
             continue
         model_mark = item.get_closest_marker("model")
         if model_mark and model_mark.args:
-            models_to_download.add(model_mark.args[0])
+            models_to_download.add(
+                ModelSpec(model_mark.args[0], model_mark.kwargs.get("revision"))
+            )
 
     # Store models to download in pytest config for fixtures to access
     if models_to_download:
