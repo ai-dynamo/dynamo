@@ -50,6 +50,8 @@ navigation:
             path: ../pages-dev/kubernetes/deployment/dynamomodel-guide.md
           - page: Autoscaling
             path: ../pages-dev/kubernetes/autoscaling.md
+          - page: Rolling Update
+            path: ../pages-dev/kubernetes/rolling-update.md
           - page: Inference Gateway (GAIE)
             path: ../pages-dev/kubernetes/inference-gateway.md
           - section: Checkpointing
