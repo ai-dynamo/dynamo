@@ -319,10 +319,10 @@ sequenceDiagram
         C->>S: Export preserved allocations from committed epoch
         S-->>C: Response + FDs
         C->>GPU: Import handles and remap at preserved VAs
-        Note over C: Tensor pointers stay valid
+        C-->>R: Remap succeeds and tensor pointers stay valid
     else hash != saved_hash
         C-->>R: StaleMemoryLayoutError
-        Note over R: Old epoch is gone or layout changed; re-import from scratch
+        C-->>R: Re-import from scratch
     end
 ```
 
