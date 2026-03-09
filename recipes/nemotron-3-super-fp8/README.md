@@ -1,6 +1,9 @@
 # Nemotron-Super-RL FP8 Recipes
 
-Production-ready deployments for **nvidia/nemotron-super-rl-030326-FP8** (~124B hybrid Mamba/Attention/MoE) across multiple backends.
+Functional deployments for **nvidia/nemotron-super-rl-030326-FP8** (~124B hybrid Mamba/Attention/MoE) across multiple backends.
+
+> [!Note]
+> Uses internal checkpoint, must change to public URL before publishing
 
 These recipes target **Dynamo 1.0**. See [Dynamo 0.9.1 Compatibility](#dynamo-091-compatibility) for notes on running with older containers.
 
@@ -41,13 +44,23 @@ kubectl apply -f vllm/agg/deploy.yaml -n ${NAMESPACE}
 # OR: kubectl apply -f trtllm/agg/deploy.yaml -n ${NAMESPACE}
 # OR: kubectl apply -f trtllm/disagg/deploy.yaml -n ${NAMESPACE}
 # OR: kubectl apply -f sglang/agg/deploy.yaml -n ${NAMESPACE}
+# OR: kubectl apply -f sglang/disagg/deploy.yaml -n ${NAMESPACE}
 ```
 
 ## Test the Deployment
 
 ```bash
 # Port-forward the frontend
+# If deployed vllm/agg:
 kubectl port-forward svc/nemotron-super-fp8-vllm-agg-frontend 8000:8000 -n ${NAMESPACE}
+# If deployed trtllm/agg:
+# kubectl port-forward svc/nemotron-super-fp8-trtllm-agg-frontend 8000:8000 -n ${NAMESPACE}
+# If deployed trtllm/disagg:
+# kubectl port-forward svc/nemotron-super-fp8-trtllm-disagg-frontend 8000:8000 -n ${NAMESPACE}
+# If deployed sglang/agg:
+# kubectl port-forward svc/nemotron-super-fp8-sglang-agg-frontend 8000:8000 -n ${NAMESPACE}
+# If deployed sglang/disagg:
+# kubectl port-forward svc/nemotron-super-fp8-sglang-disagg-frontend 8000:8000 -n ${NAMESPACE}
 
 # Basic chat (with reasoning)
 curl http://localhost:8000/v1/chat/completions \
@@ -85,14 +98,6 @@ curl http://localhost:8000/v1/chat/completions \
 - **Architecture**: Nemotron-H (hybrid Mamba/Attention/MoE, 88 layers)
 - **Parameters**: ~124B total (~119B FP8, ~4.7B BF16)
 - **Quantization**: ModelOpt FP8 (F8_E4M3) with FP8 KV cache
-- **Features**: Reasoning (`<think>` blocks) and tool calling (`<tool_call>` format)
-
-## Hardware Requirements
-
-| Configuration | GPU Memory | Notes |
-|--------------|------------|-------|
-| 4x H100 80GB | ~29 GiB weights + ~36 GiB KV cache | Recommended minimum |
-| 4x H200 141GB | ~29 GiB weights + ~100 GiB KV cache | Higher throughput |
 
 ## Parser Configuration
 
@@ -107,7 +112,7 @@ To disable reasoning at request time, pass `"chat_template_kwargs": {"enable_thi
 
 All recipes use **approximate KV-aware routing** (`--router-mode kv --no-kv-events` on the frontend). The frontend uses prefix hashing to route requests to workers most likely to have relevant KV cache blocks, improving cache hit rates. This is especially beneficial for workloads with shared system prompts or multi-turn conversations.
 
-Approximate (hash-based) routing is used because none of the backends currently support publishing KV cache events for hybrid Mamba+Attention models. Exact KV-aware routing, which relies on real-time event streams from workers (`--kv-events-config` for vLLM/SGLang, `--publish-events-and-metrics` for TRT-LLM), would provide more accurate cache-aware decisions but is not yet available for this architecture.
+Approximate (hash-based) routing is used because none of the backends currently support publishing KV cache events (`--kv-events-config` for vLLM/SGLang, `--publish-events-and-metrics` for TRT-LLM) for hybrid Mamba+Attention models.
 
 ## Backend-Specific Notes
 
@@ -117,22 +122,15 @@ Approximate (hash-based) routing is used because none of the backends currently 
 - Requires `--mamba-cache-mode align` to work around [vllm#34865](https://github.com/vllm-project/vllm/issues/34865): prefix caching with the default `mamba_cache_mode="all"` produces NaN logprobs and garbage tokens for Nemotron-H. Fixed in vLLM 0.17.0 ([vllm#34874](https://github.com/vllm-project/vllm/pull/34874)); the 1.0 container ships vLLM 0.16.0, so the workaround is needed.
 - **Attention backend**: On Hopper the default (`FLASH_ATTN`) is safe. On Blackwell, vLLM defaults to FlashInfer, which has a [stale NaN bug](https://github.com/vllm-project/vllm/issues/35138) with hybrid Mamba models ([vllm#35219](https://github.com/vllm-project/vllm/pull/35219)). For Blackwell, specify `--attention-backend FLASH_ATTN` or `--attention-backend TRITON_ATTN` to avoid the issue.
 - Sets `VLLM_FLASHINFER_ALLREDUCE_BACKEND=trtllm` to avoid a [hang during CUDA graph capture](https://github.com/vllm-project/vllm/issues/35772) with TP>1. This is the [new default](https://github.com/vllm-project/vllm/pull/35793) in later vLLM versions but must be set explicitly in 0.16.0.
-- Load time: ~2 minutes
-- Attention KV cache: ~3.1M tokens per GPU
+
 
 ### TensorRT-LLM
 - Uses PyTorch backend (`backend: pytorch` in engine config)
 - 1.0 supports block reuse for Mamba hybrid cache (enabled by default). In 0.9.1, block reuse is not supported and `enable_block_reuse: false` must be set explicitly.
 - **Disaggregated mode** requires `cache_transceiver_config: backend: UCX`. NIXL and MOONCAKE backends do not support hybrid models with Mamba SSM state — only UCX (or MPI) can transfer both attention KV cache and Mamba conv/SSM state between workers.
-- Load time: ~7 minutes (CUDA graph compilation for 16 batch sizes)
-- Attention KV cache: ~19.7M tokens per GPU
 
 ### SGLang
 - Requires sglang >= v0.5.9 (1.0 ships v0.5.9; 0.9.1 ships v0.5.8 which has blocking bugs)
-- Load time: ~1 minute (~31s weight load + ~25s CUDA graph capture for 21 batch sizes)
-- Attention KV cache: ~9.4M tokens per GPU (aggregated)
-- Mamba state cache: ~16 GiB per GPU, max 407 concurrent sequences (aggregated)
-- No special flags needed for aggregated -- simplest configuration of the three backends
 - **Disaggregated mode works** with nixl KV transfer (TP=2 per worker, 2 GPUs each). Mooncake (`--disaggregation-transfer-backend mooncake`) is also supported as an alternative transfer backend.
 - Known issue: prefill warmup logs `Prefill warmup failed: 'SamplingParams' object is not subscriptable` -- non-blocking, does not affect functionality
 
