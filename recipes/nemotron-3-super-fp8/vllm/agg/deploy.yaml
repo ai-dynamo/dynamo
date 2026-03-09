@@ -36,6 +36,14 @@ spec:
             timeoutSeconds: 1800
             failureThreshold: 60
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0
+          # Approximate KV-aware routing: uses prefix hashing to route
+          # requests to workers likely to have relevant KV cache, without
+          # requiring KV events from the backend.
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - python3 -m dynamo.frontend --router-mode kv --no-kv-events --http-port 8000
     VllmWorker:
       componentType: worker
       envFromSecret: hf-token-secret
@@ -78,6 +86,9 @@ spec:
             - --enforce-eager
             # --connector none is no longer needed in 1.0 (default is no connector).
             # In 0.9.1, you must add: --connector none
+            #
+            # --is-decode-worker also automatically disables KV event publishing,
+            # which pairs with --no-kv-events on the frontend for approximate routing.
             - --is-decode-worker
             - --dyn-tool-call-parser
             - nemotron_nano

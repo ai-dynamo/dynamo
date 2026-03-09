@@ -49,8 +49,11 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
+          # Approximate KV-aware routing: uses prefix hashing to route
+          # requests to workers likely to have relevant KV cache, without
+          # requiring KV events from the backend.
           args:
-          - python3 -m dynamo.frontend --http-port 8000
+          - python3 -m dynamo.frontend --router-mode kv --no-kv-events --http-port 8000
           command:
           - /bin/sh
           - -c

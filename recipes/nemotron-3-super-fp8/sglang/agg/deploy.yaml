@@ -35,6 +35,14 @@ spec:
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.0.0
+          # Approximate KV-aware routing: uses prefix hashing to route
+          # requests to workers likely to have relevant KV cache, without
+          # requiring KV events from the backend.
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - python3 -m dynamo.frontend --router-mode kv --no-kv-events --http-port 8000
     SglangWorker:
       componentType: worker
       envFromSecret: hf-token-secret
