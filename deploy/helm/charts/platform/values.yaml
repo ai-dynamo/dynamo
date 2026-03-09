@@ -222,7 +222,7 @@ dynamo-operator:
 
   # Checkpoint configuration for fast pod restore using CRIU/cuda-checkpoint
   # NOTE: The checkpoint infrastructure (PVC + DaemonSet) must be installed separately
-  # using the chrek Helm chart in each namespace where checkpointing is needed.
+  # using the snapshot Helm chart in each namespace where checkpointing is needed.
   checkpoint:
     # -- Whether to enable checkpoint/restore functionality
     enabled: false
@@ -232,15 +232,15 @@ dynamo-operator:
 
     # Storage configuration
     # These settings tell the operator where to find checkpoint storage
-    # Must match the configuration in the chrek chart
+    # Must match the configuration in the snapshot chart
     storage:
       # -- Storage backend type: pvc, s3, or oci
       type: pvc
 
       # PVC storage configuration (used when type=pvc)
       pvc:
-        # -- Name of the PVC created by the chrek chart
-        pvcName: "chrek-pvc"
+        # -- Name of the PVC created by the snapshot chart
+        pvcName: "snapshot-pvc"
         # -- Base path within the PVC for storing checkpoints
         basePath: "/checkpoints"
 
