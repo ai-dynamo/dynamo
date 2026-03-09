@@ -80,13 +80,14 @@ impl<T: BlockMetadata> InactivePoolBackend<T> for HashMapBackend<T> {
         allocated
     }
 
-    fn insert(&mut self, block: Block<T, Registered>) {
+    fn insert(&mut self, block: Block<T, Registered>) -> bool {
         let seq_hash = block.sequence_hash();
         let _ = self.reuse_policy.insert(InactiveBlock {
             block_id: block.block_id(),
             seq_hash,
         });
         self.blocks.insert(seq_hash, block);
+        true
     }
 
     fn len(&self) -> usize {

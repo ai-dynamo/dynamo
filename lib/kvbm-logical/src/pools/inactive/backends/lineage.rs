@@ -88,7 +88,7 @@ impl<T: BlockMetadata> LineageBackend<T> {
 
     /// Inserts a block into the lineage graph.
     /// Panics on collision or duplicate insertion.
-    pub fn insert(&mut self, block: Block<T, Registered>) {
+    pub fn insert(&mut self, block: Block<T, Registered>) -> bool {
         let lineage_hash = block.sequence_hash();
         let position = lineage_hash.position();
         let fragment = lineage_hash.current_hash_fragment();
@@ -183,6 +183,8 @@ impl<T: BlockMetadata> LineageBackend<T> {
         {
             self.leaf_queue.insert((last_used, position, fragment), ());
         }
+
+        true
     }
 
     /// Allocates (removes) a block from the pool, preferring leaves in LRU order.
@@ -372,7 +374,7 @@ impl<T: BlockMetadata> InactivePoolBackend<T> for LineageBackend<T> {
         LineageBackend::allocate(self, count)
     }
 
-    fn insert(&mut self, block: Block<T, Registered>) {
+    fn insert(&mut self, block: Block<T, Registered>) -> bool {
         // Delegate to the inherent method
         LineageBackend::insert(self, block)
     }

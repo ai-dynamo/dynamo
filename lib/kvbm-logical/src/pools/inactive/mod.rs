@@ -39,7 +39,7 @@ pub trait InactivePoolBackend<T: BlockMetadata>: Send + Sync {
 
     fn allocate(&mut self, count: usize) -> Vec<Block<T, Registered>>;
 
-    fn insert(&mut self, block: Block<T, Registered>);
+    fn insert(&mut self, block: Block<T, Registered>) -> bool;
 
     fn len(&self) -> usize;
 
@@ -109,13 +109,14 @@ impl<T: BlockMetadata + Sync> InactivePool<T> {
             match Arc::try_unwrap(block) {
                 Ok(block) => {
                     let block_id = block.block_id();
-                    if inner.backend.should_reset(&block) {
+                    let should_inc = if inner.backend.should_reset(&block) {
                         let reset_block = block.reset();
                         reset_return_fn(reset_block);
+                        false
                     } else {
-                        inner.backend.insert(block);
-                    }
-                    if let Some(ref m) = metrics_clone {
+                        inner.backend.insert(block)
+                    };
+                    if should_inc && let Some(ref m) = metrics_clone {
                         m.inc_inactive_pool_size();
                     }
                     tracing::trace!(?seq_hash, block_id, "Block stored in inactive pool");

@@ -147,7 +147,7 @@ impl<T: BlockMetadata> InactivePoolBackend<T> for MultiLruBackend<T> {
         allocated
     }
 
-    fn insert(&mut self, block: Block<T, Registered>) {
+    fn insert(&mut self, block: Block<T, Registered>) -> bool {
         let seq_hash = block.sequence_hash();
         let level = self.calculate_priority_level(seq_hash);
 
@@ -162,6 +162,7 @@ impl<T: BlockMetadata> InactivePoolBackend<T> for MultiLruBackend<T> {
         );
 
         self.priority_pools[level].put(seq_hash, block);
+        true
     }
 
     fn len(&self) -> usize {

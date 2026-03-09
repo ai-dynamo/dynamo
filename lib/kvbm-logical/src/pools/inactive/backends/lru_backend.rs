@@ -67,7 +67,7 @@ impl<T: BlockMetadata> InactivePoolBackend<T> for LruBackend<T> {
         allocated
     }
 
-    fn insert(&mut self, block: Block<T, Registered>) {
+    fn insert(&mut self, block: Block<T, Registered>) -> bool {
         let seq_hash = block.sequence_hash();
 
         // Assert we're not causing an eviction
@@ -80,6 +80,7 @@ impl<T: BlockMetadata> InactivePoolBackend<T> for LruBackend<T> {
         );
 
         self.cache.put(seq_hash, block);
+        true
     }
 
     fn len(&self) -> usize {

@@ -33,7 +33,11 @@ use super::super::{Block, BlockMetadata, InactivePoolBackend, Registered, Sequen
 pub struct ResetInactiveBlocksBackend;
 
 impl<T: BlockMetadata> InactivePoolBackend<T> for ResetInactiveBlocksBackend {
-    fn find_matches(&mut self, _hashes: &[SequenceHash], _touch: bool) -> Vec<Block<T, Registered>> {
+    fn find_matches(
+        &mut self,
+        _hashes: &[SequenceHash],
+        _touch: bool,
+    ) -> Vec<Block<T, Registered>> {
         Vec::new()
     }
 
@@ -49,8 +53,10 @@ impl<T: BlockMetadata> InactivePoolBackend<T> for ResetInactiveBlocksBackend {
         Vec::new()
     }
 
-    fn insert(&mut self, _block: Block<T, Registered>) {
-        unreachable!("ResetInactiveBlocksBackend::should_reset always returns true; insert should never be called")
+    fn insert(&mut self, _block: Block<T, Registered>) -> bool {
+        unreachable!(
+            "ResetInactiveBlocksBackend::should_reset always returns true; insert should never be called"
+        )
     }
 
     fn len(&self) -> usize {
