@@ -9,7 +9,7 @@ subtitle: Hardware, software, and build compatibility for Dynamo
 
 ## At a Glance
 
-**Latest stable release:** [v0.9.0](https://github.com/ai-dynamo/dynamo/releases/tag/v0.9.0) -- SGLang `0.5.8` | TensorRT-LLM `1.3.0rc1` | vLLM `0.14.1` | NIXL `0.9.0`
+**Latest stable release:** [v0.9.1](https://github.com/ai-dynamo/dynamo/releases/tag/v0.9.1) -- SGLang `0.5.8` | TensorRT-LLM `1.3.0rc3` | vLLM `0.14.1` | NIXL `0.9.0`
 
 | Requirement | Supported |
 | :--- | :--- |
