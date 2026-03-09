@@ -348,9 +348,9 @@ class VllmProcessor:
         if request_for_sampling.cache_salt is not None:
             prompt_inputs["cache_salt"] = request_for_sampling.cache_salt
         if request_for_sampling.mm_processor_kwargs is not None:
-            prompt_inputs["mm_processor_kwargs"] = (
-                request_for_sampling.mm_processor_kwargs
-            )
+            prompt_inputs[
+                "mm_processor_kwargs"
+            ] = request_for_sampling.mm_processor_kwargs
 
         vllm_preproc: EngineCoreRequest = self.input_processor.process_inputs(
             request_id,
