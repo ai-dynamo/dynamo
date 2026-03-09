@@ -284,6 +284,62 @@ jobs:
       image_prefix: ${{ needs.prepare-release.outputs.image_prefix }}
     secrets: inherit
 
+  snapshot-agent-build:
+    name: Build Snapshot Agent Image
+    needs: [prepare-release, manual-approval]
+    if: |
+      always() &&
+      needs.prepare-release.result == 'success' &&
+      (github.event_name == 'push' || needs.manual-approval.result == 'success')
+    runs-on: prod-default-v2
+    env:
+      IMAGE_REGISTRY: ai-dynamo
+      IMAGE_REPOSITORY: dynamo
+      ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      - name: Initialize Dynamo Builder
+        uses: ./.github/actions/init-dynamo-builder
+        with:
+          builder_name: ${{ env.BUILDER_NAME }}
+          flavor: general
+      - name: Docker Login
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+      - name: Linter
+        working-directory: ./deploy/snapshot
+        run: docker buildx build --platform linux/amd64 --target linter --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
+      - name: Tester
+        working-directory: ./deploy/snapshot
+        run: docker buildx build --platform linux/amd64 --target tester --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
+      - name: Build and push Container
+        id: build-and-push
+        working-directory: ./deploy/snapshot
+        run: |
+          ECR_BASE="${ECR_HOSTNAME}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}"
+          SHA_TAG="${{ github.sha }}-snapshot-agent"
+          PREFIX_TAG="${{ needs.prepare-release.outputs.image_prefix }}-snapshot-agent"
+          IMAGE_URIS=(
+            "${ECR_BASE}:${SHA_TAG}"
+            "${ECR_BASE}:${PREFIX_TAG}"
+          )
+          TAGGING_FLAGS=$(printf -- '-t %s ' "${IMAGE_URIS[@]}")
+          docker buildx build --push --platform linux/amd64 \
+              --target agent \
+              --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
+              ${TAGGING_FLAGS} -f Dockerfile .
+
+          echo "### 🐳 Snapshot Agent Container Images" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Image URI |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----|" >> $GITHUB_STEP_SUMMARY
+          for image_uri in "${IMAGE_URIS[@]}"; do
+            echo "| \`${image_uri}\` |" >> $GITHUB_STEP_SUMMARY
+          done
+
   # ============================================================================
   # BUILDER CLEANUP
   # ============================================================================
@@ -292,7 +348,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [vllm-pipeline, sglang-pipeline, trtllm-pipeline, vllm-efa-pipeline, trtllm-efa-pipeline]
+    needs: [vllm-pipeline, sglang-pipeline, trtllm-pipeline, vllm-efa-pipeline, trtllm-efa-pipeline, snapshot-agent-build]
     steps:
     - uses: actions/checkout@v4
     - name: Create K8s builders (skip bootstrap)
@@ -460,7 +516,7 @@ jobs:
 
   release-publish:
     name: Tag RC & Publish to NGC
-    needs: [prepare-release, vllm-pipeline, sglang-pipeline, trtllm-pipeline, vllm-efa-pipeline, trtllm-efa-pipeline, operator-build, frontend-build]
+    needs: [prepare-release, vllm-pipeline, sglang-pipeline, trtllm-pipeline, vllm-efa-pipeline, trtllm-efa-pipeline, operator-build, frontend-build, snapshot-agent-build]
     if: |
       always() && !cancelled() &&
       needs.prepare-release.result == 'success'
