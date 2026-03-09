@@ -19,6 +19,7 @@ This Helm chart deploys the checkpoint/restore infrastructure for NVIDIA Dynamo,
 - Kubernetes 1.21+
 - **x86_64 (amd64) nodes only** for the snapshot agent and placeholder images
 - GPU nodes with NVIDIA runtime (`nvidia` runtime class)
+- NVIDIA driver 580.xx or newer on the target GPU nodes
 - containerd runtime (for container inspection; CRIU is bundled in Dynamo Snapshot images)
 - NVIDIA Dynamo operator installed (cluster-wide or namespace-scoped)
 - RWX (ReadWriteMany) storage class for multi-node deployments

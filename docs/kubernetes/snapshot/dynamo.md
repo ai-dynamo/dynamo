@@ -18,6 +18,7 @@ Checkpointing captures the complete state of a running worker pod (including GPU
 - Dynamo Platform installed on a k8s cluster with **x86_64 (amd64)** GPU nodes
 - Dynamo Snapshot Helm chart installed (separate from platform)
 - RWX PVC storage (PVC is currently the only supported backend)
+- NVIDIA driver 580.xx or newer on the target GPU nodes
 - vLLM or SGLang backend (TensorRT-LLM is not supported)
 
 ## Quick Start
@@ -358,6 +359,7 @@ Or use `auto` mode and the operator will find/create it automatically.
 ## Limitations
 
 - **x86_64 (amd64) only**: `cuda-checkpoint` does not support ARM64. The snapshot agent and placeholder images are built for x86_64 only.
+- **NVIDIA driver 580.xx or newer required**: Dynamo Snapshot depends on `cuda-checkpoint`, which requires R580+ drivers.
 - **vLLM and SGLang backends only**: TensorRT-LLM is not supported.
 - **LLM workers only**: Checkpoint/restore supports LLM decode and prefill workers. Specialized workers (multimodal, embedding, diffusion) are not supported.
 - **Single-GPU only**: Multi-GPU configurations are not yet supported (planned)
