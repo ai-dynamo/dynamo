@@ -54,10 +54,10 @@ navigation:
           - page: Inference Gateway (GAIE)
             path: kubernetes/inference-gateway.md
           - section: Checkpointing
-            path: kubernetes/chrek/README.md
+            path: kubernetes/snapshot/README.md
             contents:
               - page: Integration with Dynamo
-                path: kubernetes/chrek/dynamo.md
+                path: kubernetes/snapshot/dynamo.md
       - section: Observability (K8s)
         contents:
           - page: Metrics
