@@ -598,6 +598,7 @@ class TestNaiveFallbackResolvedBackend:
 
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
+    @pytest.mark.parallel
     def test_naive_fallback_resolved_backend_auto(self):
         """_run_naive_fallback sets 'resolved_backend' to the concrete backend
         when the input backend is 'auto'."""
@@ -609,12 +610,15 @@ class TestNaiveFallbackResolvedBackend:
             pytest.skip(f"Missing dependency: {e}")
 
         dgdr = _make_dgdr(backend="auto")
-        mock_naive_result = {"artifacts": {}}
 
         with (
             patch(
-                "dynamo.profiler.rapid.generate_naive_config",
-                return_value=mock_naive_result,
+                "dynamo.profiler.rapid.build_naive_generator_params",
+                return_value={},
+            ),
+            patch(
+                "dynamo.profiler.rapid.generate_backend_artifacts",
+                return_value={},
             ),
         ):
             result = _run_naive_fallback(
@@ -641,6 +645,7 @@ class TestNaiveFallbackResolvedBackend:
 
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
+    @pytest.mark.parallel
     def test_naive_fallback_resolved_backend_concrete(self):
         """_run_naive_fallback preserves the concrete backend in 'resolved_backend'
         when a concrete backend (e.g. 'vllm') is passed directly."""
@@ -652,11 +657,16 @@ class TestNaiveFallbackResolvedBackend:
             pytest.skip(f"Missing dependency: {e}")
 
         dgdr = _make_dgdr(backend="vllm")
-        mock_naive_result = {"artifacts": {}}
 
-        with patch(
-            "dynamo.profiler.rapid.generate_naive_config",
-            return_value=mock_naive_result,
+        with (
+            patch(
+                "dynamo.profiler.rapid.build_naive_generator_params",
+                return_value={},
+            ),
+            patch(
+                "dynamo.profiler.rapid.generate_backend_artifacts",
+                return_value={},
+            ),
         ):
             result = _run_naive_fallback(
                 dgdr,
@@ -670,6 +680,7 @@ class TestNaiveFallbackResolvedBackend:
 
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
+    @pytest.mark.parallel
     def test_naive_fallback_chosen_exp_is_agg(self):
         """_run_naive_fallback always returns chosen_exp='agg' (aggregated config)."""
         try:
@@ -680,9 +691,15 @@ class TestNaiveFallbackResolvedBackend:
             pytest.skip(f"Missing dependency: {e}")
 
         dgdr = _make_dgdr(backend="vllm")
-        with patch(
-            "dynamo.profiler.rapid.generate_naive_config",
-            return_value={"artifacts": {}},
+        with (
+            patch(
+                "dynamo.profiler.rapid.build_naive_generator_params",
+                return_value={},
+            ),
+            patch(
+                "dynamo.profiler.rapid.generate_backend_artifacts",
+                return_value={},
+            ),
         ):
             result = _run_naive_fallback(
                 dgdr,
