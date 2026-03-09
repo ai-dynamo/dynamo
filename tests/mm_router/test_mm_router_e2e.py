@@ -122,6 +122,7 @@ class TRTLLMWorkerProcess(ManagedProcess):
                 (f"http://localhost:{system_port}/health", _check_ready)
             ],
             timeout=900,
+            stragglers=["TRTLLM:EngineCore"],
             straggler_commands=["-m dynamo.trtllm"],
             log_dir=_prepare_log_dir(request, "trtllm-worker"),
             **_COMMON_PROCESS_KWARGS,
