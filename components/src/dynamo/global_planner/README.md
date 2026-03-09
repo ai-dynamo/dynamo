@@ -50,6 +50,11 @@ DYN_NAMESPACE=global-infra python -m dynamo.global_planner \
 DYN_NAMESPACE=global-infra python -m dynamo.global_planner --no-operation
 ```
 
+```bash
+# Enforce a maximum total GPU budget across managed pools
+DYN_NAMESPACE=global-infra python -m dynamo.global_planner --max-total-gpus 16
+```
+
 ### Arguments
 
 Required environment variables:
@@ -65,6 +70,7 @@ CLI arguments:
 - `--managed-namespaces <ns1> <ns2> ...`: Allowlist for `caller_namespace`. If omitted, accepts all namespaces.
 - `--environment kubernetes`: Execution environment (currently only `kubernetes` is supported).
 - `--no-operation`: Log incoming scale requests and return success without applying Kubernetes scaling.
+- `--max-total-gpus <n>`: Reject scale requests that would push the managed pools above the configured total GPU cap.
 
 ## Scale Request Contract
 
@@ -100,6 +106,7 @@ Response fields:
 ## Related Documentation
 
 - [Planner Guide](../../../../docs/components/planner/planner-guide.md) — Planner configuration and deployment workflow
+- [Hierarchical Planner Deployment Guide](../../../../docs/components/planner/hierarchical-planner-guide.md) — Single-endpoint multi-pool deployment workflow
 - [Planner Design](../../../../docs/design-docs/planner-design.md) — Planner architecture and algorithms
 
 Planners delegate to this service when planner config uses `environment: "global-planner"` and sets `global_planner_namespace`.

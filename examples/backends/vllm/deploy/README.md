@@ -35,6 +35,23 @@ Advanced disaggregated deployment with KV cache routing capabilities.
 - `VLLMDecodeWorker`: Specialized decode-only worker
 - `VLLMPrefillWorker`: Specialized prefill-only worker (`--disaggregation-mode prefill`)
 
+### 5. **Hierarchical Planner Deployment** (`hplanner-vllm-test.yaml`)
+Single public endpoint backed by multiple specialized private pools.
+
+**Architecture:**
+- `gp-ctrl`: `Frontend` + `GlobalRouter` + `GlobalPlanner`
+- `gp-prefill-*`: one or more prefill pools with `LocalRouter` + prefill worker + `Planner`
+- `gp-decode-*`: one or more decode pools with `LocalRouter` + decode worker + `Planner`
+
+Use this pattern when one model should be exposed through one endpoint, but different request classes should be routed to different DGDs.
+
+### 6. **Hierarchical Planner With GPU Budget** (`hplanner-gpu-budget.yaml`)
+Minimal hierarchical deployment with a centralized GPU budget.
+
+**Architecture:**
+- Same control-and-pools pattern as the hierarchical deployment above
+- `GlobalPlanner` started with `--max-total-gpus`
+
 ## CRD Structure
 
 All templates use the **DynamoGraphDeployment** CRD:
@@ -121,6 +138,8 @@ Select the deployment pattern that matches your requirements:
 - Use `disagg.yaml` for maximum performance
 - Use `disagg_router.yaml` for high-performance with KV cache routing
 - Use `disagg_planner.yaml` for SLA-optimized performance
+- Use `hplanner-vllm-test.yaml` for one-endpoint hierarchical routing across multiple DGDs
+- Use `hplanner-gpu-budget.yaml` for the same pattern with centralized GPU budget enforcement
 
 ### 2. Customize Configuration
 Edit the template to match your environment:
@@ -249,6 +268,7 @@ args:
 - **Quickstart**: [Deployment Quickstart](../../../../docs/kubernetes/README.md)
 - **Platform Setup**: [Dynamo Kubernetes Platform Installation](../../../../docs/kubernetes/installation-guide.md)
 - **SLA Planner**: [SLA Planner Quickstart Guide](../../../../docs/components/planner/planner-guide.md)
+- **Hierarchical Planner**: [Hierarchical Planner Deployment Guide](../../../../docs/components/planner/hierarchical-planner-guide.md)
 - **Examples**: [Deployment Examples](../../../../docs/getting-started/examples.md)
 - **Architecture Docs**: [Disaggregated Serving](../../../../docs/design-docs/disagg-serving.md), [KV-Aware Routing](../../../../docs/components/router/README.md)
 
