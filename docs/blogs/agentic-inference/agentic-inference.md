@@ -17,7 +17,24 @@ Throughout this post, we use three terms consistently:
 
 Over the last few months, we have seen teams start moving from a "stateless" `v1/chat/completions` API to "stateful" APIs like `v1/responses` and `v1/messages` to cleanly handle new patterns including interleaved thinking and tool calls. Dynamo now supports both APIs and we are actively developing a reference architecture for a stateful server-side backend for `v1/responses`. Dynamo serves all three through a common internal representation, so a single deployment can act as the inference backend for Claude Code, Codex, or any OpenAI-compatible agent. Our team has internally been running a Dynamo deployment of GLM-5 and Minimax2.5 and optimizing our backend to match closed-source inference performance. We'll be sharing a full write-up and some optimized recipes for deploying both models in the upcoming weeks.
 
-<todo - add video emebds showing dynamo serving CC and codex>
+<table>
+<tr>
+<td width="50%">
+
+**Serving Claude Code with Dynamo**
+
+https://github.com/user-attachments/assets/5fa8a224-44e8-4acb-943b-9b8af84815e6
+
+</td>
+<td width="50%">
+
+**Serving Codex with Dynamo**
+
+https://github.com/user-attachments/assets/8694b544-3fd1-4931-9fd0-7d9a3a2fb78f
+
+</td>
+</tr>
+</table>
 
 We have also invested in day-0 tool call and reasoning parsing support for various open-source models. If you find that a model is not supported, please [open an issue](https://github.com/ai-dynamo/dynamo/issues) or use our [tool-parser-generator skill](https://github.com/ai-dynamo/dynamo/tree/main/lib/parsers) to have your harness of choice implement it.
 
