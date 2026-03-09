@@ -274,6 +274,28 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         Ok(())
     }
 
+    /// Ensure that the given workers exist in the table, adding any that are missing.
+    ///
+    /// Unlike [`update_workers`], this never removes existing workers — it only
+    /// adds new ones. Used in External discovery mode where the worker set is
+    /// supplied per-request via `allowed_worker_ids`.
+    pub fn ensure_workers_exist(&self, dp_range: &HashMap<u64, (u32, u32)>) {
+        let mut table = self.workers.write();
+        for (&worker_id, &(dp_start, dp_size)) in dp_range {
+            for dp_rank in dp_start..(dp_start + dp_size) {
+                let worker = WorkerWithDpRank::new(worker_id, dp_rank);
+                if !table.index.contains_key(&worker) {
+                    tracing::debug!("Lazily registering external worker {:?}", worker);
+                    let idx = table.slots.len();
+                    table
+                        .slots
+                        .push((worker, RwLock::new(ActiveSequences::new(self.block_size))));
+                    table.index.insert(worker, idx);
+                }
+            }
+        }
+    }
+
     /// Update the set of workers, adding and removing as needed.
     ///
     /// `new_dp_range` maps worker IDs to their data-parallel range (start, size).

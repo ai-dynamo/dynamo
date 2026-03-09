@@ -96,8 +96,8 @@ func (e *EPPDefaults) GetBaseContainer(context ComponentContext) (corev1.Contain
 			Value: "debug,dynamo_llm::kv_router=trace",
 		},
 		{
-			Name:  "DYN_DECODE_FALLBACK",
-			Value: "true",
+			Name:  "DYN_ENFORCE_DISAGG",
+			Value: "false",
 		},
 	}...)
 

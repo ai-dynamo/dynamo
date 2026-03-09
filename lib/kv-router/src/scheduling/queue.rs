@@ -151,6 +151,25 @@ impl<P: SequencePublisher + 'static, C: WorkerConfigLike + Default + Clone> Sche
     /// Run the full scheduling pipeline for a single request:
     /// compute potential load -> select worker -> respond -> book via add_request.
     async fn schedule(&self, mut request: SchedulingRequest) {
+        // When externally-provided worker IDs are present, lazily register any
+        // that the sequence tracker hasn't seen yet so that load data and
+        // subsequent bookkeeping calls (add_request, mark_prefill_complete,
+        // free_request) work correctly.
+        if let Some(ids) = &request.allowed_worker_ids {
+            let discovery_workers = self.workers_with_configs.borrow();
+            let dp_range: std::collections::HashMap<u64, (u32, u32)> = ids
+                .iter()
+                .map(|&id| {
+                    let (dp_start, dp_size) = discovery_workers
+                        .get(&id)
+                        .map(|c| (c.data_parallel_start_rank(), c.data_parallel_size()))
+                        .unwrap_or((0, 1));
+                    (id, (dp_start, dp_size))
+                })
+                .collect();
+            self.slots.ensure_workers_exist(&dp_range);
+        }
+
         let (decode_blocks, prefill_tokens) = self.slots.potential_blocks_and_tokens(
             request.token_seq.as_deref(),
             request.isl_tokens,

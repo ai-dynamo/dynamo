@@ -48,6 +48,8 @@ impl KvScheduler {
         let selector = selector.unwrap_or(Box::new(DefaultWorkerSelector::default()));
         let discovery_mode = worker_discovery_mode;
 
+        // Get initial workers from watch receiver.
+        // Caller must ensure at least one worker is present (via wait_for) in the Dynamo (non external) mode.
         let initial_workers: HashMap<WorkerId, ModelRuntimeConfig> = match discovery_mode {
             WorkerDiscoveryMode::External => HashMap::new(),
             WorkerDiscoveryMode::Dynamo => workers_with_configs.borrow().clone(),
@@ -105,16 +107,17 @@ impl KvScheduler {
                 });
             }
             WorkerDiscoveryMode::External => {
+                // In External mode, workers are lazily registered in the sequence
+                // tracker when they first appear via allowed_worker_ids in a routing
+                // call (see SchedulerQueue::schedule). The discovery watch is only
+                // consumed here to keep it drained and log worker appearances.
                 tracing::info!(
                     "External worker discovery mode: worker set will be provided per-request"
                 );
 
-                let slots_monitor = slots.clone();
                 let mut monitor_rx = workers_with_configs.clone();
                 let monitor_cancel_token = component.drt().child_token();
                 tokio::spawn(async move {
-                    let mut last_workers: HashMap<WorkerId, ModelRuntimeConfig> = HashMap::new();
-
                     loop {
                         tokio::select! {
                             _ = monitor_cancel_token.cancelled() => break,
@@ -122,26 +125,13 @@ impl KvScheduler {
                                 if result.is_err() { break; }
                             }
                         }
-
-                        let current_workers = monitor_rx.borrow_and_update().clone();
-
-                        if current_workers != last_workers {
-                            let worker_ids: Vec<u64> = current_workers.keys().copied().collect();
-                            tracing::debug!(
-                                ?worker_ids,
-                                count = worker_ids.len(),
-                                "External mode: registering discovery workers in sequence tracker"
-                            );
-
-                            let dp_range: HashMap<u64, (u32, u32)> = current_workers
-                                .iter()
-                                .map(|(&id, c)| {
-                                    (id, (c.data_parallel_start_rank, c.data_parallel_size))
-                                })
-                                .collect();
-                            slots_monitor.update_workers(&dp_range);
-                            last_workers = current_workers;
-                        }
+                        let current = monitor_rx.borrow_and_update();
+                        let worker_ids: Vec<u64> = current.keys().copied().collect();
+                        tracing::debug!(
+                            ?worker_ids,
+                            count = worker_ids.len(),
+                            "External mode: discovery workers updated (used for RuntimeConfig lookup only)"
+                        );
                     }
                 });
             }
