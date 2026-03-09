@@ -125,7 +125,7 @@ async fn start_kv_router_background_event_plane(
                                 // For tree dumps, this is the worker's real latest event ID,
                                 // which prevents re-triggering gap recovery for events the
                                 // tree dump already covers.
-                                last_event_ids.insert(event_key, last_recovered_id.max(event_id));
+                                last_event_ids.insert(event_key, last_recovered_id);
                             }
                             Ok((_count, None)) => {
                                 // No last_event_id returned (e.g. TooNew with 0 events).
