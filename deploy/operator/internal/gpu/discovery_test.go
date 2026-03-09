@@ -439,11 +439,32 @@ func TestScrapeMetricsEndpoint(t *testing.T) {
 
 	// Prepare a fake HTTP server to simulate Prometheus metrics
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, err := fmt.Fprintln(w, `# HELP gpu_usage GPU usage`)
+		_, err := fmt.Fprintln(w, `# HELP DCGM_FI_DEV_GPU_TEMP GPU temperature`)
 		require.NoError(t, err)
-		_, err = fmt.Fprintln(w, `# TYPE gpu_usage gauge`)
+		_, err = fmt.Fprintln(w, `# TYPE DCGM_FI_DEV_GPU_TEMP gauge`)
 		require.NoError(t, err)
-		_, err = fmt.Fprintln(w, `gpu_usage{gpu="0"} 42`)
+		_, err = fmt.Fprintln(w, `DCGM_FI_DEV_GPU_TEMP{gpu="0",modelName="NVIDIA A100",Hostname="test-node"} 50`)
+		require.NoError(t, err)
+
+		_, err = fmt.Fprintln(w, `# HELP DCGM_FI_DEV_FB_FREE Framebuffer free`)
+		require.NoError(t, err)
+		_, err = fmt.Fprintln(w, `# TYPE DCGM_FI_DEV_FB_FREE gauge`)
+		require.NoError(t, err)
+		_, err = fmt.Fprintln(w, `DCGM_FI_DEV_FB_FREE{gpu="0",Hostname="test-node"} 10000`)
+		require.NoError(t, err)
+
+		_, err = fmt.Fprintln(w, `# HELP DCGM_FI_DEV_FB_USED Framebuffer used`)
+		require.NoError(t, err)
+		_, err = fmt.Fprintln(w, `# TYPE DCGM_FI_DEV_FB_USED gauge`)
+		require.NoError(t, err)
+		_, err = fmt.Fprintln(w, `DCGM_FI_DEV_FB_USED{gpu="0",Hostname="test-node"} 2000`)
+		require.NoError(t, err)
+
+		_, err = fmt.Fprintln(w, `# HELP DCGM_FI_DEV_FB_RESERVED Framebuffer reserved`)
+		require.NoError(t, err)
+		_, err = fmt.Fprintln(w, `# TYPE DCGM_FI_DEV_FB_RESERVED gauge`)
+		require.NoError(t, err)
+		_, err = fmt.Fprintln(w, `DCGM_FI_DEV_FB_RESERVED{gpu="0",Hostname="test-node"} 500`)
 		require.NoError(t, err)
 	}))
 	defer server.Close()
@@ -608,7 +629,7 @@ func TestDiscoverGPUsFromDCGM_NoGPUOperator_NoDCGM(t *testing.T) {
 
 	require.True(
 		t,
-		strings.Contains(err.Error(), "no DCGM exporter pods found"),
+		strings.Contains(err.Error(), "gpu operator is not installed"),
 	)
 }
 
