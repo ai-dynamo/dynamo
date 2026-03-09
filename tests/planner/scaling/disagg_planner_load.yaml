@@ -31,14 +31,10 @@ spec:
           command:
           - python3
           - -m
-          - planner_sla
+          - dynamo.planner
           args:
-            - --environment=kubernetes
-            - --backend=vllm
-            - --enable-loadbased-scaling
-            - --disable-throughput-scaling
-            - --loadbased-adjustment-interval=5
-            - --loadbased-min-observations=5
+            - --config
+            - '{"environment": "kubernetes", "backend": "vllm", "enable_load_scaling": true, "enable_throughput_scaling": false, "pre_deployment_sweeping_mode": "none", "load_adjustment_interval": 5, "load_min_observations": 5}'
     VllmDecodeWorker:
       envFromSecret: hf-token-secret
       componentType: worker

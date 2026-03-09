@@ -25,7 +25,12 @@ data:
     kind: OperatorConfiguration
     server:
       metrics:
-        bindAddress: "127.0.0.1"
+        bindAddress: "0.0.0.0"
+        secure: true
+      webhook:
+        certProvisionMode: {{ if or .Values.webhook.certManager.enabled .Values.webhook.certificateSecret.external }}"manual"{{ else }}"auto"{{ end }}
+        secretName: {{ .Values.webhook.certificateSecret.name | quote }}
+        serviceName: {{ include "dynamo-operator.fullname" . }}-webhook-service
     leaderElection:
       enabled: true
       id: {{ default "dynamo.nvidia.com" .Values.controllerManager.leaderElection.id | quote }}
@@ -49,11 +54,14 @@ data:
       {{- end }}
       {{- end }}
     {{- end }}
-    {{- if and .Values.dynamo.groveTerminationDelay (ne (.Values.dynamo.groveTerminationDelay | toString) "15m") }}
     orchestrators:
+      kaiScheduler:
+        enabled: {{ or (and .Values.global (index .Values.global "kai-scheduler") (index .Values.global "kai-scheduler").enabled) (and .Values.global (index .Values.global "kai-scheduler") (index .Values.global "kai-scheduler").install) }}
       grove:
+        enabled: {{ or (and .Values.global .Values.global.grove .Values.global.grove.enabled) (and .Values.global .Values.global.grove .Values.global.grove.install) }}
+        {{- if and .Values.dynamo.groveTerminationDelay (ne (.Values.dynamo.groveTerminationDelay | toString) "15m") }}
         terminationDelay: {{ .Values.dynamo.groveTerminationDelay | quote }}
-    {{- end }}
+        {{- end }}
     {{- $natsAddr := "" }}
     {{- if .Values.natsAddr }}
       {{- $natsAddr = .Values.natsAddr }}
@@ -133,7 +141,7 @@ data:
         {{- end }}
         {{- if or (eq (.Values.checkpoint.storage.type | toString) "pvc") (not .Values.checkpoint.storage.type) }}
         pvc:
-          pvcName: {{ (.Values.checkpoint.storage.pvc.pvcName | default "chrek-pvc") | quote }}
+          pvcName: {{ (.Values.checkpoint.storage.pvc.pvcName | default "snapshot-pvc") | quote }}
           basePath: {{ (.Values.checkpoint.storage.pvc.basePath | default "/checkpoints") | quote }}
         {{- end }}
         {{- if eq .Values.checkpoint.storage.type "s3" }}
