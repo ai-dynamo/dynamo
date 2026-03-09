@@ -31,7 +31,10 @@ data:
       # In 0.9.1, block reuse was not supported and enable_block_reuse: false
       # must be set explicitly, otherwise startup fails with:
       #   "mamba hybrid cache requires block reuse to be disabled"
+    moe_config:
+      backend: TRTLLM
     cuda_graph_config:
+      enable_padding: true
       max_batch_size: 16
 ---
 apiVersion: nvidia.com/v1alpha1

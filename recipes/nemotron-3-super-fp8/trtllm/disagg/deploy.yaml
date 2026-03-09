@@ -37,11 +37,14 @@ data:
       free_gpu_memory_fraction: 0.85
       # Block reuse is supported for Mamba hybrid cache in 1.0.
       # In 0.9.1, add enable_block_reuse: false here.
+    moe_config:
+      backend: TRTLLM
     cache_transceiver_config:
       # UCX is required for hybrid Mamba+Attention models.
       # NIXL/MOONCAKE do not support Mamba SSM state transfer.
       backend: UCX
     cuda_graph_config:
+      enable_padding: true
       max_batch_size: 16
     disable_overlap_scheduler: true
 ---
@@ -63,11 +66,14 @@ data:
       free_gpu_memory_fraction: 0.85
       # Block reuse is supported for Mamba hybrid cache in 1.0.
       # In 0.9.1, add enable_block_reuse: false here.
+    moe_config:
+      backend: TRTLLM
     cache_transceiver_config:
       # UCX is required for hybrid Mamba+Attention models.
       # NIXL/MOONCAKE do not support Mamba SSM state transfer.
       backend: UCX
     cuda_graph_config:
+      enable_padding: true
       max_batch_size: 16
     disable_overlap_scheduler: false
 ---
