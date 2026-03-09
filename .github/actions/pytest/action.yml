@@ -151,6 +151,7 @@ runs:
         if [[ -n "${HF_TOKEN:-}" ]]; then
           DOCKER_ENV_FLAGS+=(--env "HF_TOKEN=${HF_TOKEN}")
         fi
+        DOCKER_ENV_FLAGS+=(--env "PYTHONFAULTHANDLER=1")
 
         docker run ${GPU_FLAGS} --rm -w /workspace \
           --cpus=${NUM_CPUS} \
@@ -247,6 +248,7 @@ runs:
         if [[ -n "${HF_TOKEN:-}" ]]; then
           DOCKER_ENV_FLAGS+=(--env "HF_TOKEN=${HF_TOKEN}")
         fi
+        DOCKER_ENV_FLAGS+=(--env "PYTHONFAULTHANDLER=1")
 
         docker run ${GPU_FLAGS} ${DOCKER_OPTS} --rm -w /workspace \
           --network host \
