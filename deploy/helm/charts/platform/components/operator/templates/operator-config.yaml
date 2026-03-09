@@ -141,7 +141,7 @@ data:
         {{- end }}
         {{- if or (eq (.Values.checkpoint.storage.type | toString) "pvc") (not .Values.checkpoint.storage.type) }}
         pvc:
-          pvcName: {{ (.Values.checkpoint.storage.pvc.pvcName | default "chrek-pvc") | quote }}
+          pvcName: {{ (.Values.checkpoint.storage.pvc.pvcName | default "snapshot-pvc") | quote }}
           basePath: {{ (.Values.checkpoint.storage.pvc.basePath | default "/checkpoints") | quote }}
         {{- end }}
         {{- if eq .Values.checkpoint.storage.type "s3" }}
