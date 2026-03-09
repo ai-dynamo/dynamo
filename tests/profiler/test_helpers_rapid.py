@@ -8,9 +8,10 @@ helpers (_run_autoscale_sim) require the full AIC stack and are covered by
 the end-to-end test suite.
 """
 
+import copy
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pandas as pd
 import pytest
@@ -51,27 +52,35 @@ def _make_dgdr(**overrides) -> DynamoGraphDeploymentRequestSpec:
     return DynamoGraphDeploymentRequestSpec(**base)
 
 
-def _fake_modifier(update_image_return=None):
-    m = MagicMock()
-    m.update_image.return_value = update_image_return or {"kind": "DGD"}
-    m.update_model_from_pvc.return_value = {"kind": "DGD"}
-    return m
-
-
 # ---------------------------------------------------------------------------
 # _run_naive_fallback
 # ---------------------------------------------------------------------------
 
+_FAKE_GENERATOR_PARAMS: dict = {"params": {"agg": {}}, "K8sConfig": {}}
+
 
 class TestRunNaiveFallback:
+    """Tests for the naive fallback path.
+
+    The naive path calls build_naive_generator_params to compute CLI args /
+    parallelism, then generate_backend_artifacts(use_dynamo_generator=True)
+    to assemble the DGD via the config modifier system.
+    """
+
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
     def test_returns_expected_structure(self):
         """Result always has the four required keys with zeroed latencies."""
         dgdr = _make_dgdr()
-        with patch(
-            "dynamo.profiler.rapid.generate_naive_config",
-            return_value={"artifacts": {}},
+        with (
+            patch(
+                "dynamo.profiler.rapid.build_naive_generator_params",
+                return_value=copy.deepcopy(_FAKE_GENERATOR_PARAMS),
+            ),
+            patch(
+                "dynamo.profiler.rapid.generate_backend_artifacts",
+                return_value={},
+            ),
         ):
             result = _run_naive_fallback(dgdr, "Qwen/Qwen3-32B", 4, "l40s", "vllm")
 
@@ -95,17 +104,23 @@ class TestRunNaiveFallback:
     def test_empty_artifacts_yields_none_dgd_config(self):
         """No k8s_deploy.yaml in artifacts → dgd_config is None."""
         dgdr = _make_dgdr()
-        with patch(
-            "dynamo.profiler.rapid.generate_naive_config",
-            return_value={"artifacts": {}},
+        with (
+            patch(
+                "dynamo.profiler.rapid.build_naive_generator_params",
+                return_value=copy.deepcopy(_FAKE_GENERATOR_PARAMS),
+            ),
+            patch(
+                "dynamo.profiler.rapid.generate_backend_artifacts",
+                return_value={},
+            ),
         ):
             result = _run_naive_fallback(dgdr, "Qwen/Qwen3-32B", 4, "l40s", "vllm")
         assert result["dgd_config"] is None
 
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
-    def test_with_pvc_calls_update_model_from_pvc(self):
-        """When modelCache.pvcName is set, update_model_from_pvc is called."""
+    def test_with_pvc_passes_pvc_overrides(self):
+        """When modelCache.pvcName is set, PVC overrides are injected into generator params."""
         dgdr = _make_dgdr(
             modelCache=ModelCacheSpec(
                 pvcName="model-cache",
@@ -113,34 +128,59 @@ class TestRunNaiveFallback:
                 pvcMountPath="/opt/model-cache",
             )
         )
-        fake_modifier = _fake_modifier()
+        captured_params = {}
+
+        def fake_generate(params, backend, use_dynamo_generator=False):
+            captured_params.update(params)
+            return {
+                "k8s_deploy.yaml": "kind: DGD\nmetadata:\n  name: test\nspec:\n  services: {}"
+            }
+
         with (
             patch(
-                "dynamo.profiler.rapid.generate_naive_config",
-                return_value={"artifacts": {"k8s_deploy.yaml": "kind: DGD"}},
+                "dynamo.profiler.rapid.build_naive_generator_params",
+                return_value=copy.deepcopy(_FAKE_GENERATOR_PARAMS),
             ),
-            patch("dynamo.profiler.rapid.CONFIG_MODIFIERS", {"vllm": fake_modifier}),
+            patch(
+                "dynamo.profiler.rapid.generate_backend_artifacts",
+                side_effect=fake_generate,
+            ),
         ):
             _run_naive_fallback(dgdr, "Qwen/Qwen3-32B", 4, "l40s", "vllm")
 
-        fake_modifier.update_model_from_pvc.assert_called_once()
+        k8s = captured_params.get("K8sConfig", {})
+        assert k8s.get("k8s_pvc_name") == "model-cache"
+        assert k8s.get("k8s_pvc_mount_path") == "/opt/model-cache"
+        assert k8s.get("k8s_model_path_in_pvc") == "/model/qwen"
 
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
-    def test_without_pvc_skips_update_model_from_pvc(self):
-        """When no modelCache, update_model_from_pvc is not called."""
+    def test_without_pvc_has_no_pvc_overrides(self):
+        """When no modelCache, PVC keys are absent from generator params."""
         dgdr = _make_dgdr()
-        fake_modifier = _fake_modifier()
+        captured_params = {}
+
+        def fake_generate(params, backend, use_dynamo_generator=False):
+            captured_params.update(params)
+            return {
+                "k8s_deploy.yaml": "kind: DGD\nmetadata:\n  name: test\nspec:\n  services: {}"
+            }
+
         with (
             patch(
-                "dynamo.profiler.rapid.generate_naive_config",
-                return_value={"artifacts": {"k8s_deploy.yaml": "kind: DGD"}},
+                "dynamo.profiler.rapid.build_naive_generator_params",
+                return_value=copy.deepcopy(_FAKE_GENERATOR_PARAMS),
             ),
-            patch("dynamo.profiler.rapid.CONFIG_MODIFIERS", {"vllm": fake_modifier}),
+            patch(
+                "dynamo.profiler.rapid.generate_backend_artifacts",
+                side_effect=fake_generate,
+            ),
         ):
             _run_naive_fallback(dgdr, "Qwen/Qwen3-32B", 4, "l40s", "vllm")
 
-        fake_modifier.update_model_from_pvc.assert_not_called()
+        k8s = captured_params.get("K8sConfig", {})
+        assert "k8s_pvc_name" not in k8s
+        assert "k8s_pvc_mount_path" not in k8s
 
 
 # ---------------------------------------------------------------------------
