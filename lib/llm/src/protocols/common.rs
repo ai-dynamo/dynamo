@@ -446,6 +446,11 @@ impl GuidedDecodingOptions {
         }
 
         if let Some(ref grammar) = self.grammar {
+            // NOTE: This intentionally scans raw bytes without tracking quoted
+            // regions. Delimiters inside quoted terminals (e.g. "(") are counted
+            // but balanced quotes contribute net-zero depth, and the 500 limit is
+            // generous enough that false positives from unbalanced quoted
+            // delimiters are not a practical concern.
             let mut depth: usize = 0;
             let mut max: usize = 0;
             for ch in grammar.bytes() {
