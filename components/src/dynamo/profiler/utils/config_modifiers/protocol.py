@@ -723,43 +723,5 @@ def apply_dgd_overrides(dgd_config: dict, overrides: dict) -> dict:
         A new dict with the overrides applied (the original is not mutated).
     """
     result = copy.deepcopy(dgd_config)
-    # Strip K8s envelope fields — these are controlled by the template and must
-    # not be overwritten by user-supplied overrides (e.g. apiVersion from a
-    # DGDR spec would change v1alpha1 → v1beta1 causing a 400 Bad Request).
-    stripped_top = [k for k in ("apiVersion", "kind") if k in overrides]
-    if stripped_top:
-        logger.warning(
-            "Ignoring envelope field(s) %s from overrides.dgd — these are "
-            "controlled by the deployment template and cannot be overridden.",
-            stripped_top,
-        )
-    filtered = {
-        k: v
-        for k, v in overrides.items()
-        if k not in ("apiVersion", "kind", "metadata")
-    }
-    # For metadata: strip identity/owner keys (name, namespace, uid,
-    # resourceVersion) which are template-controlled, but preserve safe fields
-    # such as labels and annotations supplied by the user.
-    if "metadata" in overrides and isinstance(overrides["metadata"], dict):
-        _METADATA_IDENTITY_KEYS = frozenset(
-            {"name", "namespace", "uid", "resourceVersion"}
-        )
-        stripped_meta = [
-            k for k in overrides["metadata"] if k in _METADATA_IDENTITY_KEYS
-        ]
-        if stripped_meta:
-            logger.warning(
-                "Ignoring metadata identity field(s) %s from overrides.dgd — "
-                "use the DGD template to set these.",
-                stripped_meta,
-            )
-        sanitized_metadata = {
-            k: v
-            for k, v in overrides["metadata"].items()
-            if k not in _METADATA_IDENTITY_KEYS
-        }
-        if sanitized_metadata:
-            filtered["metadata"] = sanitized_metadata
-    _deep_merge_overrides(result, filtered, path=[])
+    _deep_merge_overrides(result, overrides, path=[])
     return result
