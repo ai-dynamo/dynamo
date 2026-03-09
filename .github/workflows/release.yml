@@ -361,7 +361,7 @@ jobs:
         timeout 300s kubectl rollout status deployment -n $NAMESPACE --watch
 
   deploy-test-vllm:
-    if: always() && needs.deploy-operator.result == 'success'
+    if: always() && needs.deploy-operator.result == 'success' && needs.vllm-pipeline.result == 'success'
     runs-on: prod-default-small-v2
     needs: [deploy-operator, vllm-pipeline]
     strategy:
@@ -383,7 +383,7 @@ jobs:
           platform_arch: amd64
 
   deploy-test-sglang:
-    if: always() && needs.deploy-operator.result == 'success'
+    if: always() && needs.deploy-operator.result == 'success' && needs.sglang-pipeline.result == 'success'
     runs-on: prod-default-small-v2
     needs: [deploy-operator, sglang-pipeline]
     strategy:
@@ -405,7 +405,7 @@ jobs:
           platform_arch: amd64
 
   deploy-test-trtllm:
-    if: always() && needs.deploy-operator.result == 'success'
+    if: always() && needs.deploy-operator.result == 'success' && needs.trtllm-pipeline.result == 'success'
     runs-on: prod-default-small-v2
     needs: [deploy-operator, trtllm-pipeline]
     strategy:
