@@ -710,6 +710,7 @@ class TestRunProfileSkipsInterpolationForAggConfig:
 
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
+    @pytest.mark.parallel
     def test_run_profile_skips_interpolation_when_agg(self, tmp_path):
         """run_profile skips run_interpolation when chosen_exp='agg'."""
         try:
@@ -797,13 +798,14 @@ class TestRunProfileSkipsInterpolationForAggConfig:
             ),
             patch(f"{_PROFILE_SLA}.valid_dgdr_spec"),
         ):
-            asyncio.get_event_loop().run_until_complete(run_profile(dgdr, ops))
+            asyncio.run(run_profile(dgdr, ops))
 
         # run_interpolation must NOT have been called for agg configs
         mock_interp.assert_not_called()
 
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
+    @pytest.mark.parallel
     def test_run_profile_calls_interpolation_with_resolved_backend_for_disagg(
         self, tmp_path
     ):
@@ -900,7 +902,7 @@ class TestRunProfileSkipsInterpolationForAggConfig:
             ),
             patch(f"{_PROFILE_SLA}.valid_dgdr_spec"),
         ):
-            asyncio.get_event_loop().run_until_complete(run_profile(dgdr, ops))
+            asyncio.run(run_profile(dgdr, ops))
 
         # run_interpolation must be called, and with the resolved 'vllm' backend, not 'auto'
         mock_interp.assert_called_once()
