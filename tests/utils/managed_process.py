@@ -289,7 +289,7 @@ class ManagedProcess:
             # reparented to init, so psutil can no longer find them via the parent
             # PID. We must capture them now while the parent is still alive.
             orphan_candidates = []
-            if self.proc and self.proc.poll() is None:
+            if self.proc:
                 try:
                     parent = psutil.Process(self.proc.pid)
                     orphan_candidates = parent.children(recursive=True)
