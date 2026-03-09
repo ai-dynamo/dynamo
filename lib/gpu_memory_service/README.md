@@ -161,8 +161,8 @@ stateDiagram-v2
 
 | Event | Trigger | Description |
 |-------|---------|-------------|
-| `RW_CONNECT` | Writer connects | Acquires exclusive write lock and invalidates previous committed visibility immediately |
-| `RW_COMMIT` | Writer calls `commit()` | Publishes weights, releases lock |
+| `RW_CONNECT` | Writer connects | Acquires exclusive write lock, invalidates previous committed visibility immediately, and opens a new active RW epoch |
+| `RW_COMMIT` | Writer calls `commit()` | Publishes the current active RW epoch as the committed epoch and releases the lock |
 | `RW_ABORT` | Writer disconnects without commit | Drops active RW epoch and returns to `EMPTY` |
 | `RO_CONNECT` | Reader connects | Acquires shared read lock |
 | `RO_DISCONNECT` | Reader disconnects | Releases shared lock; if last reader, returns to COMMITTED |
@@ -179,6 +179,10 @@ The socket connection **is** the lock:
 
 GMS uses epoch-scoped allocations and metadata:
 
+- A new `epoch_id` is created on `RW_CONNECT`.
+- `RW_COMMIT` does **not** create a new epoch; it publishes the already-active RW epoch as the committed epoch.
+- `RW_ABORT` does **not** create a new epoch; it discards the active RW epoch and returns the system to `EMPTY`.
+- The next writer connection after `EMPTY` or `COMMITTED` creates the next epoch.
 - Every allocation is assigned an `epoch_id` at allocation time.
 - `epoch_id` is write-once and never mutated.
 - RO requests are served only from the current committed epoch.
@@ -227,6 +231,7 @@ sequenceDiagram
     W->>C: mgr.connect(RW)
     C->>S: HandshakeRequest(lock_type=RW)
     S->>S: Invalidate prior committed epoch visibility
+    S->>S: Create new active epoch
     S-->>C: HandshakeResponse(success=true)
 
     loop For each tensor
@@ -239,6 +244,7 @@ sequenceDiagram
     C->>GPU: synchronize()
     C->>GPU: set_access(..., RO)
     C->>S: CommitRequest()
+    S->>S: Publish active epoch as committed
     S->>S: FSM: RW → COMMITTED
     S-->>C: CommitResponse(success=true)
 ```
