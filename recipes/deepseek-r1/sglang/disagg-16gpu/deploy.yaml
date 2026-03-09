@@ -16,6 +16,13 @@ spec:
     Frontend:
       componentType: frontend
       replicas: 1
+      livenessProbe:
+        httpGet:
+          path: /live
+          port: 8000
+        periodSeconds: 600
+        timeoutSeconds: 30
+        failureThreshold: 3
       volumeMounts:
         - name: model-cache
           mountPoint: /opt/model
@@ -60,6 +67,8 @@ spec:
             - --skip-tokenizer-init
             - --disaggregation-mode
             - decode
+            - --disaggregation-transfer-backend
+            - nixl
             - --disaggregation-bootstrap-port
             - "30001"
             - --mem-fraction-static
@@ -104,6 +113,8 @@ spec:
             - --skip-tokenizer-init
             - --disaggregation-mode
             - prefill
+            - --disaggregation-transfer-backend
+            - nixl
             - --disaggregation-bootstrap-port
             - "30001"
             - --mem-fraction-static
