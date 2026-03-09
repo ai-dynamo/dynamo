@@ -101,7 +101,7 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 					AutoApply: ptr.To(true),
 					Hardware: &nvidiacomv1beta1.HardwareSpec{
 						NumGPUsPerNode: ptr.To[int32](8),
-						GPUSKU:         "H100-SXM5-80GB",
+						GPUSKU:         nvidiacomv1beta1.GPUSKUTypeH100SXM,
 						VRAMMB:         ptr.To(81920.0),
 						TotalGPUs:      ptr.To[int32](128),
 					},
@@ -153,7 +153,7 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 					Image:   "test-profiler:latest",
 					Hardware: &nvidiacomv1beta1.HardwareSpec{
 						NumGPUsPerNode: ptr.To[int32](8),
-						GPUSKU:         "H100-SXM5-80GB",
+						GPUSKU:         nvidiacomv1beta1.GPUSKUTypeH100SXM,
 						VRAMMB:         ptr.To(81920.0),
 						TotalGPUs:      ptr.To[int32](128),
 					},
@@ -228,7 +228,7 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 					Image:   "test-profiler:latest",
 					Hardware: &nvidiacomv1beta1.HardwareSpec{
 						NumGPUsPerNode: ptr.To[int32](8),
-						GPUSKU:         "H100-SXM5-80GB",
+						GPUSKU:         nvidiacomv1beta1.GPUSKUTypeH100SXM,
 						VRAMMB:         ptr.To(81920.0),
 						TotalGPUs:      ptr.To[int32](128),
 					},
@@ -315,7 +315,7 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 					SearchStrategy: "rapid",
 					Hardware: &nvidiacomv1beta1.HardwareSpec{
 						NumGPUsPerNode: ptr.To[int32](8),
-						GPUSKU:         "H100-SXM5-80GB",
+						GPUSKU:         nvidiacomv1beta1.GPUSKUTypeH100SXM,
 						VRAMMB:         ptr.To(81920.0),
 						TotalGPUs:      ptr.To[int32](128),
 					},
@@ -376,7 +376,7 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 					Image:   "test-profiler:latest",
 					Hardware: &nvidiacomv1beta1.HardwareSpec{
 						NumGPUsPerNode: ptr.To[int32](8),
-						GPUSKU:         "H100-SXM5-80GB",
+						GPUSKU:         nvidiacomv1beta1.GPUSKUTypeH100SXM,
 						VRAMMB:         ptr.To(81920.0),
 						TotalGPUs:      ptr.To[int32](128),
 					},
@@ -487,7 +487,7 @@ spec:
 					Image:   "test-profiler:latest",
 					Hardware: &nvidiacomv1beta1.HardwareSpec{
 						NumGPUsPerNode: ptr.To[int32](8),
-						GPUSKU:         "H100-SXM5-80GB",
+						GPUSKU:         nvidiacomv1beta1.GPUSKUTypeH100SXM,
 						VRAMMB:         ptr.To(81920.0),
 						TotalGPUs:      ptr.To[int32](128),
 					},
@@ -612,7 +612,7 @@ spec:
 					Image:   "test-profiler:latest",
 					Hardware: &nvidiacomv1beta1.HardwareSpec{
 						NumGPUsPerNode: ptr.To[int32](8),
-						GPUSKU:         "H100-SXM5-80GB",
+						GPUSKU:         nvidiacomv1beta1.GPUSKUTypeH100SXM,
 						VRAMMB:         ptr.To(81920.0),
 						TotalGPUs:      ptr.To[int32](128),
 					},
@@ -688,7 +688,7 @@ spec:
 					Image:   "test-profiler:latest",
 					Hardware: &nvidiacomv1beta1.HardwareSpec{
 						NumGPUsPerNode: ptr.To[int32](8),
-						GPUSKU:         "H100-SXM5-80GB",
+						GPUSKU:         nvidiacomv1beta1.GPUSKUTypeH100SXM,
 						VRAMMB:         ptr.To(81920.0),
 						TotalGPUs:      ptr.To[int32](128),
 					},
@@ -808,7 +808,7 @@ var _ = Describe("DGDR Validation", func() {
 					Image:   "test-profiler:latest",
 					Hardware: &nvidiacomv1beta1.HardwareSpec{
 						NumGPUsPerNode: ptr.To[int32](8),
-						GPUSKU:         "H100-SXM5-80GB",
+						GPUSKU:         nvidiacomv1beta1.GPUSKUTypeH100SXM,
 						VRAMMB:         ptr.To(81920.0),
 						TotalGPUs:      ptr.To[int32](128),
 					},
@@ -832,7 +832,7 @@ var _ = Describe("DGDR Validation", func() {
 					Image:   "test-profiler:latest",
 					Hardware: &nvidiacomv1beta1.HardwareSpec{
 						NumGPUsPerNode: ptr.To[int32](8),
-						GPUSKU:         "H100-SXM5-80GB",
+						GPUSKU:         nvidiacomv1beta1.GPUSKUTypeH100SXM,
 						VRAMMB:         ptr.To(81920.0),
 						TotalGPUs:      ptr.To[int32](128),
 					},
@@ -893,7 +893,7 @@ var _ = Describe("DGDR Profiler Arguments", func() {
 					Backend: "trtllm",
 					Image:   "test-profiler:latest",
 					Hardware: &nvidiacomv1beta1.HardwareSpec{
-						GPUSKU:         "H200-SXM",
+						GPUSKU:         nvidiacomv1beta1.GPUSKUTypeH200SXM,
 						NumGPUsPerNode: ptr.To[int32](8),
 						VRAMMB:         ptr.To(81920.0),
 						TotalGPUs:      ptr.To[int32](128),
@@ -958,7 +958,7 @@ var _ = Describe("DGDR Profiler Arguments", func() {
 					Image:          "test-profiler:latest",
 					SearchStrategy: "rapid",
 					Hardware: &nvidiacomv1beta1.HardwareSpec{
-						GPUSKU:         "H200-SXM",
+						GPUSKU:         nvidiacomv1beta1.GPUSKUTypeH200SXM,
 						NumGPUsPerNode: ptr.To[int32](8),
 						VRAMMB:         ptr.To(81920.0),
 						TotalGPUs:      ptr.To[int32](128),
@@ -1023,7 +1023,7 @@ var _ = Describe("DGDR Profiler Arguments", func() {
 					Image:   "test-profiler:latest",
 					Hardware: &nvidiacomv1beta1.HardwareSpec{
 						NumGPUsPerNode: ptr.To[int32](8),
-						GPUSKU:         "H100-SXM5-80GB",
+						GPUSKU:         nvidiacomv1beta1.GPUSKUTypeH100SXM,
 						VRAMMB:         ptr.To(81920.0),
 						TotalGPUs:      ptr.To[int32](128),
 					},
@@ -1105,7 +1105,7 @@ var _ = Describe("DGDR Error Handling", func() {
 					Image:   "test-profiler:latest",
 					Hardware: &nvidiacomv1beta1.HardwareSpec{
 						NumGPUsPerNode: ptr.To[int32](8),
-						GPUSKU:         "H100-SXM5-80GB",
+						GPUSKU:         nvidiacomv1beta1.GPUSKUTypeH100SXM,
 						VRAMMB:         ptr.To(81920.0),
 						TotalGPUs:      ptr.To[int32](128),
 					},
@@ -1481,7 +1481,7 @@ spec:
 					Image:   "test-profiler:latest",
 					Hardware: &nvidiacomv1beta1.HardwareSpec{
 						NumGPUsPerNode: ptr.To[int32](4),
-						GPUSKU:         "A100-SXM4-40GB",
+						GPUSKU:         nvidiacomv1beta1.GPUSKUTypeA100SXM,
 						VRAMMB:         ptr.To(40960.0),
 					},
 					SLA: &nvidiacomv1beta1.SLASpec{
@@ -1716,7 +1716,7 @@ spec:
 					Image:   "test-profiler:latest",
 					Hardware: &nvidiacomv1beta1.HardwareSpec{
 						NumGPUsPerNode: ptr.To[int32](8),
-						GPUSKU:         "H100-SXM5-80GB",
+						GPUSKU:         nvidiacomv1beta1.GPUSKUTypeH100SXM,
 						VRAMMB:         ptr.To(81920.0),
 						TotalGPUs:      ptr.To[int32](128),
 					},
@@ -1781,7 +1781,7 @@ spec:
 					Image:   "test-profiler:latest",
 					Hardware: &nvidiacomv1beta1.HardwareSpec{
 						NumGPUsPerNode: ptr.To[int32](8),
-						GPUSKU:         "H100-SXM5-80GB",
+						GPUSKU:         nvidiacomv1beta1.GPUSKUTypeH100SXM,
 						VRAMMB:         ptr.To(81920.0),
 						TotalGPUs:      ptr.To[int32](128),
 					},
@@ -1826,7 +1826,7 @@ spec:
 					Image:   "test-profiler:latest",
 					Hardware: &nvidiacomv1beta1.HardwareSpec{
 						NumGPUsPerNode: ptr.To[int32](8),
-						GPUSKU:         "H100-SXM5-80GB",
+						GPUSKU:         nvidiacomv1beta1.GPUSKUTypeH100SXM,
 						VRAMMB:         ptr.To(81920.0),
 						TotalGPUs:      ptr.To[int32](128),
 					},
@@ -1920,7 +1920,7 @@ spec:
 					AutoApply: ptr.To(true),
 					Hardware: &nvidiacomv1beta1.HardwareSpec{
 						NumGPUsPerNode: ptr.To[int32](8),
-						GPUSKU:         "H100-SXM5-80GB",
+						GPUSKU:         nvidiacomv1beta1.GPUSKUTypeH100SXM,
 						VRAMMB:         ptr.To(81920.0),
 						TotalGPUs:      ptr.To[int32](128),
 					},
@@ -2013,7 +2013,7 @@ spec:
 					Image:   "test-profiler:latest",
 					Hardware: &nvidiacomv1beta1.HardwareSpec{
 						NumGPUsPerNode: ptr.To[int32](8),
-						GPUSKU:         "H100-SXM5-80GB",
+						GPUSKU:         nvidiacomv1beta1.GPUSKUTypeH100SXM,
 						VRAMMB:         ptr.To(81920.0),
 						TotalGPUs:      ptr.To[int32](128),
 					},
@@ -2065,7 +2065,7 @@ spec:
 					Backend: "vllm",
 					Image:   "test-profiler:latest",
 					Hardware: &nvidiacomv1beta1.HardwareSpec{
-						GPUSKU: "A100-SXM4-40GB",
+						GPUSKU: nvidiacomv1beta1.GPUSKUTypeA100SXM,
 					},
 					SLA: &nvidiacomv1beta1.SLASpec{
 						TTFT: ptr.To(100.0),

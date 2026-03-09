@@ -31,6 +31,7 @@ import (
 	"github.com/prometheus/common/expfmt"
 	"github.com/prometheus/common/model"
 
+	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -67,7 +68,7 @@ type GPUInfo struct {
 	NodesWithGPUs int            // Number of nodes that have GPUs
 	Model         string         // GPU product name (e.g., "H100-SXM5-80GB")
 	VRAMPerGPU    int            // VRAM in MiB per GPU
-	System        string         // AIC hardware system identifier (e.g., "h100_sxm", "h200_sxm"), empty if unknown
+	System        nvidiacomv1beta1.GPUSKUType         // AIC hardware system identifier (e.g., "h100_sxm", "h200_sxm"), empty if unknown
 	MIGEnabled    bool           // True if MIG is enabled (inferred from model or additional labels, not implemented in this version)
 	MIGProfiles   map[string]int // Optional: map of MIG profile name to count (requires additional label parsing, not implemented in this version)
 	CloudProvider string         // NEW: aws | gcp | aks | other | unknown
@@ -693,7 +694,7 @@ func extractGPUInfoFromNode(node *corev1.Node) (*GPUInfo, error) {
 //
 // Users can manually override the system in their profiling config (hardware.system)
 // if auto-detection is incorrect or unavailable.
-func InferHardwareSystem(gpuProduct string) string {
+func InferHardwareSystem(gpuProduct string) nvidiacomv1beta1.GPUSKUType {
 	if gpuProduct == "" {
 		return ""
 	}
@@ -702,17 +703,17 @@ func InferHardwareSystem(gpuProduct string) string {
 	normalized := strings.ToUpper(strings.ReplaceAll(gpuProduct, "-", ""))
 	normalized = strings.ReplaceAll(normalized, " ", "")
 
-	// Map common NVIDIA datacenter GPU products to hardware system identifiers
+	// Map common NVIDIA datacenter GPU products to AIC hardware system identifiers.
 	patterns := []struct {
 		pattern string
-		system  string
+		system  nvidiacomv1beta1.GPUSKUType
 	}{
-		{"GB200", "gb200_sxm"},
-		{"H200", "h200_sxm"},
-		{"H100", "h100_sxm"},
-		{"B200", "b200_sxm"},
-		{"A100", "a100_sxm"},
-		{"L40S", "l40s"},
+		{"GB200", nvidiacomv1beta1.GPUSKUTypeGB200SXM},
+		{"H200", nvidiacomv1beta1.GPUSKUTypeH200SXM},
+		{"H100", nvidiacomv1beta1.GPUSKUTypeH100SXM},
+		{"B200", nvidiacomv1beta1.GPUSKUTypeB200SXM},
+		{"A100", nvidiacomv1beta1.GPUSKUTypeA100SXM},
+		{"L40S", nvidiacomv1beta1.GPUSKUTypeL40S},
 	}
 
 	for _, p := range patterns {
@@ -721,8 +722,8 @@ func InferHardwareSystem(gpuProduct string) string {
 		}
 	}
 
-	// Unknown GPU type, return empty string
-	// User must specify system manually in profiling config (hardware.system)
+	// Unknown GPU type, return empty value.
+	// User must specify gpuSku explicitly in spec.hardware.
 	return ""
 }
 
