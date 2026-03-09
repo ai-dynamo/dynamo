@@ -2,11 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-Multimodal processing for vLLM MM Router Worker.
+Multimodal processing utilities for vLLM MM Router Worker.
 
-Handles image loading, token expansion, and mm_hash computation for
-KV-cache-aware routing. Unlike TRT-LLM, vLLM keeps the original
-image_token_id as-is (no token replacement needed).
+Key differences from the TRT-LLM version:
+- Image loading uses RoutingImageLoader to fetch raw bytes and dimensions.
+- mm_hash is computed from raw image bytes to match vLLM multi_modal_uuids.
+- Token replacement is not needed - vLLM keeps the original image_token_id.
 """
 
 import logging
@@ -25,13 +26,15 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class ProcessedInput:
+    """Processed multimodal input."""
+
     tokens: list[int]
     mm_hashes: list[int] | None
-    image_ranges: list[tuple[int, int]] | None
+    image_ranges: list[tuple[int, int]] | None  # [(start, end), ...] per image
 
 
 # =============================================================================
-# Public API
+# Public functions
 # =============================================================================
 
 
@@ -57,20 +60,27 @@ async def process_multimodal(
     model: str,
     image_loader: RoutingImageLoader,
 ) -> tuple[ProcessedInput, list[bytes]]:
-    """Process multimodal request: load images, expand tokens, compute mm_hashes.
+    """
+    Process multimodal request: load images, get expanded tokens and mm_hashes.
 
     Returns (ProcessedInput, raw_bytes_list).
     """
+    # The preprocessed request does not carry a rendered template string; it carries
+    # original messages in extra_args, so we must apply the chat template again here.
     prompt = _apply_chat_template(messages, tokenizer, processor)
 
+    # Load images as raw bytes plus dimensions. The router only needs metadata here;
+    # full PIL decode is deferred to the processor fallback path if necessary.
     image_data = await image_loader.load_batch(image_urls)
     raw_bytes_list = [d[0] for d in image_data]
     image_dims = [(d[1], d[2]) for d in image_data]
 
+    # Get expanded tokens and image ranges (no token replacement for vLLM).
     tokens, image_ranges = _get_expanded_tokens(
         prompt, image_dims, raw_bytes_list, tokenizer, processor
     )
 
+    # Compute mm_hashes exactly like the vLLM handler's multi_modal_uuids path.
     mm_uuids = compute_mm_uuids_from_images(raw_bytes_list)
     mm_hashes = [int(uuid[:16], 16) for uuid in mm_uuids]
 
@@ -86,8 +96,12 @@ def build_block_mm_infos(
     mm_hashes: list[int] | None,
     image_ranges: list[tuple[int, int]] | None,
 ) -> list[dict | None] | None:
-    """Build per-block mm_info for KV-cache-aware routing.
+    """
+    Build per-block mm_info for routing.
 
+    For each block, check which images overlap with it and add their mm_hash.
+    Assumption: mm_hashes and image_ranges are in the same order as images appear
+    in the request (which matches their order in the token sequence).
     Uses a two-pointer scan over sorted image_ranges for O(num_blocks + num_images)
     instead of O(num_blocks × num_images).
     """
@@ -122,7 +136,7 @@ def build_block_mm_infos(
 
 
 # =============================================================================
-# Token expansion: fast path (dimensions) → slow path (HF processor)
+# Internal functions
 # =============================================================================
 
 
@@ -149,7 +163,12 @@ def _get_expanded_tokens(
     tokenizer: Any,
     processor: Any,
 ) -> tuple[list[int], list[tuple[int, int]] | None]:
-    """Expand image placeholder tokens. Fast path from dims, slow path via processor."""
+    """
+    Get tokens with visual expansion and find each image's token range.
+
+    Unlike the TRT-LLM version, vLLM keeps the original image_token_id
+    as-is in the routing token sequence.
+    """
     if processor is None:
         return tokenizer.encode(prompt), None
 

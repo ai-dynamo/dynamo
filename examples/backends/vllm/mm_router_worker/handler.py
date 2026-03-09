@@ -1,7 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""MM Router Handler — routes multimodal requests via KV-cache-aware worker selection."""
+"""
+MM Router Handler - Routes requests to best vLLM worker based on KV cache overlap.
+"""
 
 import base64
 import logging
@@ -19,7 +21,10 @@ logger = logging.getLogger(__name__)
 
 
 class MMRouterHandler:
-    """Routes requests to the vLLM worker with the best KV cache overlap."""
+    """
+    Handler that computes mm_hash for multimodal requests and routes
+    to the best vLLM worker based on KV cache overlap.
+    """
 
     def __init__(
         self,
@@ -29,6 +34,16 @@ class MMRouterHandler:
         model: str,
         block_size: int,
     ):
+        """
+        Initialize the MM Router Handler.
+
+        Args:
+            kv_router: KvRouter for KV-aware worker selection and routing
+            tokenizer: HuggingFace AutoTokenizer
+            processor: HuggingFace AutoProcessor (optional)
+            model: Model path/name
+            block_size: KV cache block size
+        """
         self.kv_router = kv_router
         self.tokenizer = tokenizer
         self.processor = processor
@@ -46,22 +61,50 @@ class MMRouterHandler:
         logger.info("MM image transport mode: %s", mode)
 
     async def generate(self, request: dict) -> AsyncGenerator[dict, None]:
-        """Main entry point: process request, compute routing, forward to best worker."""
+        """
+        Main entry point - receives request, computes routing, forwards to best worker.
+
+        The request format (after Frontend preprocessing with ModelInput.Tokens):
+        {
+            "token_ids": [...],
+            "sampling_options": {...},
+            "stop_conditions": {...},
+            "extra_args": {"messages": [...]}
+        }
+
+        Args:
+            request: Preprocessed request from Frontend
+
+        Yields:
+            Response chunks from the downstream vLLM worker
+        """
+        # Extract messages from extra_args (set by Frontend preprocessor)
         messages = request.get("extra_args", {}).get("messages", [])
         image_urls = extract_image_urls(messages)
 
         if image_urls:
+            # Process multimodal: load images, compute mm_hashes, and build routing tokens.
+            # Do not reuse request["token_ids"] for MM routing: those are placeholder-level
+            # tokens from Frontend. We need processor-expanded tokens to build block_mm_infos.
+            # Request payload does not include a rendered template string; extra_args carries
+            # original messages, so mm_processor reapplies the chat template locally.
             routing_tokens, block_mm_infos = await self._process_mm_request(
                 request, messages, image_urls
             )
         else:
+            # Text-only: rely on frontend-preprocessed token_ids (ModelInput.Tokens contract).
             routing_tokens = request.get("token_ids")
             if not routing_tokens:
                 raise ValueError("Missing token_ids in preprocessed request")
             n_blocks = (len(routing_tokens) + self.block_size - 1) // self.block_size
+            # Text-only routing has no multimodal objects; provide per-block None entries.
             block_mm_infos = [None] * n_blocks
 
-        # Forward to backend via KvRouter
+        # Route and generate through KvRouter with explicit fields.
+        # We pass:
+        # - execution payload (token_ids + multi_modal_data)
+        # - routing payload (mm_routing_info: routing_token_ids + block_mm_infos)
+        # so generate() can select a worker internally while preserving MM correctness.
         stream = await self.kv_router.generate(
             token_ids=request.get("token_ids"),
             model=request["model"],
@@ -85,7 +128,12 @@ class MMRouterHandler:
         messages: list[dict],
         image_urls: list[str],
     ) -> tuple[list[int], list[dict | None]]:
-        """Handle multimodal: load images, expand tokens, rewrite URLs, build routing info."""
+        """
+        Process a multimodal request into routing-only metadata.
+
+        This loads image bytes for hashing, expands the routing token sequence,
+        rewrites transport URLs when requested, and builds per-block MM metadata.
+        """
         processed, raw_bytes_list = await process_multimodal(
             messages=messages,
             image_urls=image_urls,
