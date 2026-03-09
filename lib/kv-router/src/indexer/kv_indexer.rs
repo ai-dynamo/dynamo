@@ -194,6 +194,10 @@ impl KvIndexer {
                         }
 
                         Some(dump_req) = dump_rx.recv() => {
+                            // Flush pending events so tree is consistent with buffer
+                            while let Ok(event) = event_rx.try_recv() {
+                                let _ = trie.apply_event(event);
+                            }
                             let events = trie.dump_tree_as_events();
                             let _ = dump_req.resp.send(events);
                         }

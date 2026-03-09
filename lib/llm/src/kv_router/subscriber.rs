@@ -140,11 +140,7 @@ async fn start_kv_router_background_event_plane(
                     }
 
                     if last_event_ids.get(&event_key).map_or(true, |id| event_id > *id) {
-                        // Update last seen event ID (use max to handle out-of-order)
-                        last_event_ids
-                            .entry(event_key)
-                            .and_modify(|id| *id = (*id).max(event_id))
-                            .or_insert(event_id);
+                        last_event_ids.insert(event_key, event_id);
 
                         // Forward the RouterEvent to the indexer
                         indexer.apply_event(event).await;
