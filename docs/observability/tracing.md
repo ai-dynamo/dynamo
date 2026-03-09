@@ -108,15 +108,17 @@ For Kubernetes deployments, ensure you have a Tempo instance deployed and access
 
 ### Modify DynamoGraphDeployment for Tracing
 
-Start from an existing deployment YAML (e.g., `examples/backends/vllm/deploy/disagg.yaml` or `agg.yaml`) and add the tracing environment variables from the [Environment Variables](#environment-variables) table:
+Tracing-enabled variants of the example deployments are provided:
 
-1. Add `DYN_LOGGING_JSONL`, `OTEL_EXPORT_ENABLED`, and `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` under `spec.env` (applies to all services).
-2. Add `OTEL_SERVICE_NAME` under each service's `extraPodSpec.mainContainer.env` with a unique value per component (e.g., `dynamo-frontend`, `dynamo-worker-decode`, `dynamo-worker-prefill`).
+- **Aggregated:** `examples/backends/vllm/deploy/agg_tracing.yaml`
+- **Disaggregated:** `examples/backends/vllm/deploy/disagg_tracing.yaml`
 
-Apply the updated deployment:
+These add the [Environment Variables](#environment-variables) to the base `agg.yaml` / `disagg.yaml` deployments. To override the Tempo endpoint, edit `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` in the YAML.
+
+Apply a tracing-enabled deployment:
 
 ```bash
-kubectl apply -f examples/backends/vllm/deploy/disagg.yaml
+kubectl apply -f examples/backends/vllm/deploy/disagg_tracing.yaml
 ```
 
 Traces will now be exported to Tempo and can be viewed in Grafana.
