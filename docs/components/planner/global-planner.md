@@ -6,7 +6,7 @@ title: Global Planner Deployment Guide
 
 This guide explains how to deploy `GlobalPlanner` and when to use it. `GlobalPlanner` is the centralized scaling execution layer for deployments where multiple DGDs should delegate scaling through one component, whether those DGDs expose separate endpoints or sit behind one shared endpoint.
 
-## What Problem This Solves
+## Why Global Planner?
 
 Without `GlobalPlanner`, each DGD's local planner scales only its own deployment directly. That is fine for isolated deployments, but it becomes awkward when you want one place to:
 
@@ -18,11 +18,10 @@ Without `GlobalPlanner`, each DGD's local planner scales only its own deployment
 
 ## Terminology
 
-- **SLA Planner**: The normal `dynamo.planner` component that computes desired replica counts.
-- **Local planner**: A pool-local instance of that planner inside one DGD.
-- **GlobalPlanner**: The centralized execution and policy layer that receives scale requests from local planners.
+- **SLA Planner**: The normal `dynamo.planner` component that computes desired replica counts to maintain SLAs.
+- **Local Planner**: A pool-local instance of a SLA planner inside one DGD.
+- **Global Planner**: The centralized execution and policy layer that receives scale requests from local planners.
 - **Single-endpoint multi-pool deployment**: One model endpoint backed by multiple DGDs for the same model. This pattern uses both `GlobalRouter` and `GlobalPlanner`.
-- **"Hierarchical planner"**: Older shorthand for the architecture where multiple local planners feed one `GlobalPlanner`. In practice, teams often used this phrase for the single-endpoint multi-pool pattern above.
 
 ## Deployment Patterns
 
@@ -58,7 +57,7 @@ This is the pattern to use when the goal is centralized scaling control across m
 Use this pattern when all of the following are true:
 
 - You want one public endpoint for a single model.
-- You want different private pools for different request classes, such as short-input vs. long-input requests or different latency targets.
+- You want different private pools for different request classes, such as short ISL vs. long ISL requests, or different latency targets.
 - You want each pool to autoscale independently.
 - You want routing and scale execution to be centralized instead of exposing multiple endpoints to clients.
 
@@ -68,7 +67,7 @@ Typical examples:
 - long-input requests need a larger prefill pool
 - decode capacity should scale independently from prefill capacity
 
-If you only need one pool for one model, use a single DGD or a single `DynamoGraphDeploymentRequest` (DGDR) instead.
+If you only need one pool for one model, use a single Local Planner and DGD/DGDR instead.
 
 ## What You Deploy
 
