@@ -109,31 +109,11 @@ impl KvScheduler {
             WorkerDiscoveryMode::External => {
                 // In External mode, workers are lazily registered in the sequence
                 // tracker when they first appear via allowed_worker_ids in a routing
-                // call (see SchedulerQueue::schedule). The discovery watch is only
-                // consumed here to keep it drained and log worker appearances.
+                // call (see SchedulerQueue::schedule). No discovery-driven
+                // update_workers() is needed here.
                 tracing::info!(
                     "External worker discovery mode: worker set will be provided per-request"
                 );
-
-                let mut monitor_rx = workers_with_configs.clone();
-                let monitor_cancel_token = component.drt().child_token();
-                tokio::spawn(async move {
-                    loop {
-                        tokio::select! {
-                            _ = monitor_cancel_token.cancelled() => break,
-                            result = monitor_rx.changed() => {
-                                if result.is_err() { break; }
-                            }
-                        }
-                        let current = monitor_rx.borrow_and_update();
-                        let worker_ids: Vec<u64> = current.keys().copied().collect();
-                        tracing::debug!(
-                            ?worker_ids,
-                            count = worker_ids.len(),
-                            "External mode: discovery workers updated (used for RuntimeConfig lookup only)"
-                        );
-                    }
-                });
             }
         }
 
