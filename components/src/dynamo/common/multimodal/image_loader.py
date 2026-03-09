@@ -194,19 +194,36 @@ class ImageLoader:
     async def load_image_with_raw_bytes(
         self, image_url: str
     ) -> tuple[Image.Image, bytes]:
-        """Load image, returning both PIL Image and raw file bytes for hashing."""
-        image = await self.load_image(image_url)
-        parsed = urlparse(image_url)
-        if parsed.scheme == "data":
-            _, data = parsed.path.split(",", 1)
+        """Load image returning (PIL Image, raw file bytes) in a single fetch.
+
+        Unlike load_image(), does not use the image cache — each call fetches
+        fresh data. This avoids double-download and keeps raw bytes available
+        for hash computation.
+        """
+        parsed_url = urlparse(image_url)
+
+        if parsed_url.scheme == "data":
+            if not parsed_url.path.startswith("image/"):
+                raise ValueError("Data URL must be an image type")
+            media_type, data = parsed_url.path.split(",", 1)
+            if ";base64" not in media_type:
+                raise ValueError("Data URL must be base64 encoded")
             raw_bytes = base64.b64decode(data)
-        elif parsed.scheme in ("http", "https"):
+        elif parsed_url.scheme in ("http", "https"):
             http_client = get_http_client(self._http_timeout)
             response = await http_client.get(image_url)
+            response.raise_for_status()
+            if not response.content:
+                raise ValueError("Empty response content from image URL")
             raw_bytes = response.content
         else:
-            raise ValueError(f"Unsupported scheme: {parsed.scheme}")
-        return image, raw_bytes
+            raise ValueError(f"Invalid image source scheme: {parsed_url.scheme}")
+
+        image = await asyncio.to_thread(
+            Image.open, BytesIO(raw_bytes), formats=["JPEG", "PNG", "WEBP"]
+        )
+        image_rgb = image.convert("RGB")
+        return image_rgb, raw_bytes
 
     async def load_image_batch_with_raw_bytes(
         self, image_mm_items: List[Dict[str, Any]]
