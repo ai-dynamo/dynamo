@@ -15,6 +15,8 @@ endif
 
 # CONTAINER_TOOL defines the container tool to be used for building images.
 CONTAINER_TOOL ?= docker
+# Snapshot runtime images ship cuda-checkpoint and are amd64-only.
+RUNTIME_IMAGE_PLATFORM ?= linux/amd64
 
 # Setting SHELL to bash allows bash commands to be executed by recipes.
 SHELL = /usr/bin/env bash -o pipefail
@@ -69,8 +71,8 @@ clean: ## Remove build artifacts.
 ##@ Docker
 
 .PHONY: docker-build-agent
-docker-build-agent: ## Build snapshot-agent docker image.
-	$(CONTAINER_TOOL) build --target agent -t ${IMG} .
+docker-build-agent: ## Build snapshot-agent docker image (linux/amd64 only).
+	$(CONTAINER_TOOL) build --platform ${RUNTIME_IMAGE_PLATFORM} --target agent -t ${IMG} .
 
 .PHONY: docker-build-agent-lint
 docker-build-agent-lint: ## Build snapshot-agent docker image up to lint stage.
@@ -81,7 +83,7 @@ docker-build-agent-test: ## Build snapshot-agent docker image up to test stage.
 	$(CONTAINER_TOOL) build --target tester -t ${IMG}-test .
 
 .PHONY: docker-build-placeholder
-docker-build-placeholder: ## Build placeholder image for checkpoint restore. Requires PLACEHOLDER_BASE_IMG.
+docker-build-placeholder: ## Build placeholder image for checkpoint restore (linux/amd64 only). Requires PLACEHOLDER_BASE_IMG.
 ifndef PLACEHOLDER_BASE_IMG
 	$(error PLACEHOLDER_BASE_IMG is required. Example: make docker-build-placeholder PLACEHOLDER_BASE_IMG=nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.1-cuda13)
 endif
@@ -91,7 +93,7 @@ endif
 		BASE_IMAGE_USER="$$( $(CONTAINER_TOOL) image inspect --format '{{.Config.User}}' ${PLACEHOLDER_BASE_IMG} 2>/dev/null || true )"; \
 	fi; \
 	if [ -z "$$BASE_IMAGE_USER" ]; then BASE_IMAGE_USER=root; fi; \
-	$(CONTAINER_TOOL) build --target placeholder \
+	$(CONTAINER_TOOL) build --platform ${RUNTIME_IMAGE_PLATFORM} --target placeholder \
 		--build-arg BASE_IMAGE=${PLACEHOLDER_BASE_IMG} \
 		--build-arg BASE_IMAGE_USER=$$BASE_IMAGE_USER \
 		-t ${PLACEHOLDER_IMG} .
