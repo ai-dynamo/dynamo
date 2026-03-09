@@ -178,9 +178,9 @@ func TestDGDDefaulter_DefaultsNilReplicas(t *testing.T) {
 			name: "CREATE defaults nil replicas to 1",
 			op:   admissionv1.Create,
 			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				"Frontend":    {Replicas: nil},
-				"VllmWorker":  {Replicas: ptr.To(int32(3))},
-				"NilService":  {Replicas: nil},
+				"Frontend":   {Replicas: nil},
+				"VllmWorker": {Replicas: ptr.To(int32(3))},
+				"NilService": {Replicas: nil},
 			},
 			wantReplicas: map[string]int32{
 				"Frontend":   1,
