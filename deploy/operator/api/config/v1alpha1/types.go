@@ -265,7 +265,7 @@ type CheckpointStorageConfiguration struct {
 // CheckpointPVCConfig holds PVC storage configuration.
 type CheckpointPVCConfig struct {
 	// PVCName is the name of the PVC
-	// +kubebuilder:default="chrek-pvc"
+	// +kubebuilder:default="snapshot-pvc"
 	PVCName string `json:"pvcName"`
 	// BasePath is the base directory within the PVC
 	// +kubebuilder:default="/checkpoints"
