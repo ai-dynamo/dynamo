@@ -7,7 +7,7 @@ subtitle: Priority scheduling, KV cache eviction policies, and cache pinning for
 
 # SGLang for Agentic Workloads
 
-This guide covers SGLang-specific configuration for agentic serving with Dynamo. It explains which SGLang engine flags to enable, how Dynamo's [agent hints](../../components/router/agent-hints.md) map to SGLang behavior, and how to use experimental cache pinning to protect KV cache for high-value conversations.
+This guide covers SGLang-specific configuration for agentic serving with Dynamo. It explains which SGLang engine flags to enable, how Dynamo's [agent hints](../../components/frontend/nvext.md#agent-hints) map to SGLang behavior, and how to use experimental cache pinning to protect KV cache for high-value conversations.
 
 ## Overview
 
@@ -301,7 +301,6 @@ A high `cached_tokens / prompt_tokens` ratio on subsequent turns confirms that t
 
 ## See Also
 
-- **[Agent Hints](../../components/router/agent-hints.md)**: Per-request hint reference
-- **[NVIDIA Request Extensions (nvext)](../../components/frontend/nvext.md)**: Full `nvext` field reference
+- **[NVIDIA Request Extensions (nvext)](../../components/frontend/nvext.md)**: Full `nvext` field reference including agent hints
 - **[Router Guide](../../components/router/router-guide.md)**: Router configuration and CLI arguments
 - **[SGLang HiCache](../../integrations/sglang-hicache.md)**: Enabling hierarchical KV cache
