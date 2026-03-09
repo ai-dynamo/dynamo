@@ -71,6 +71,11 @@ spec:
           env:
             - name: HF_HOME
               value: "/opt/models"
+            # Workaround for vllm/vllm#35772: FlashInfer allreduce can hang during
+            # CUDA graph capture with TP>1. Fixed in vllm/vllm#35793 (default changed
+            # to trtllm). The 1.0 container ships vLLM 0.16.0, so set explicitly.
+            - name: VLLM_FLASHINFER_ALLREDUCE_BACKEND
+              value: "trtllm"
           command:
             - python3
             - -m
@@ -83,7 +88,20 @@ spec:
             - --tensor-parallel-size
             - "4"
             - --trust-remote-code
-            - --enforce-eager
+            # On Blackwell, vLLM defaults to FlashInfer, which has a stale NaN bug
+            # with hybrid Mamba models (vllm/vllm#35138). FlashInfer's multiply-by-zero
+            # masking doesn't clear NaN from stale Mamba fp32 blocks reused by attention
+            # layers, causing progressive accuracy degradation.
+            # On Hopper, the default (FLASH_ATTN) is safe and this can be omitted.
+            # On Blackwell, use FLASH_ATTN or TRITON_ATTN to avoid the bug:
+            #   --attention-backend FLASH_ATTN
+            # or:
+            #   --attention-backend TRITON_ATTN
+            # Workaround for vllm/vllm#34865: prefix caching with mamba_cache_mode="all"
+            # (the default for Nemotron-H) produces NaN logprobs and garbage tokens.
+            # Fixed in vLLM 0.17.0 (vllm/vllm#34874). Use "align" until then.
+            - --mamba-cache-mode
+            - align
             # --connector none is no longer needed in 1.0 (default is no connector).
             # In 0.9.1, you must add: --connector none
             #
