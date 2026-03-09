@@ -1484,7 +1484,7 @@ func extractParetoFromWebUIData(data []byte) ([]nvidiacomv1beta1.ParetoConfig, e
 	const minColumns = 7
 	const actionColumnIndex = 6
 
-	var pareto []nvidiacomv1beta1.ParetoConfig
+	pareto := make([]nvidiacomv1beta1.ParetoConfig, 0, len(rows))
 	for _, row := range rows {
 		if len(row) < minColumns {
 			continue
