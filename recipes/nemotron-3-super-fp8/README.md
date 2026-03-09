@@ -8,9 +8,10 @@ These recipes target **Dynamo 1.0**. See [Dynamo 0.9.1 Compatibility](#dynamo-09
 
 | Configuration | GPUs | Backend | Mode | Description |
 |--------------|------|---------|------|-------------|
-| [**vllm/agg**](vllm/agg/) | 4x H100 | vLLM | Aggregated | TP=4, single-node |
-| [**trtllm/agg**](trtllm/agg/) | 4x H100 | TensorRT-LLM | Aggregated | TP=4, PyTorch backend |
-| [**sglang/agg**](sglang/agg/) | 4x H100 | SGLang | Aggregated | TP=4, single-node (not working on 0.9.1) |
+| [**vllm/agg**](vllm/agg/) | 4x H100 | vLLM | Aggregated | TP=4, KV-aware routing |
+| [**trtllm/agg**](trtllm/agg/) | 4x H100 | TensorRT-LLM | Aggregated | TP=4, KV-aware routing |
+| [**sglang/agg**](sglang/agg/) | 4x H100 | SGLang | Aggregated | TP=4, KV-aware routing (not working on 0.9.1) |
+| [**sglang/disagg**](sglang/disagg/) | 4x H100 | SGLang | Disaggregated | TP=2 P/D split, nixl KV transfer (not working on 0.9.1) |
 
 ## Prerequisites
 
@@ -100,6 +101,12 @@ All recipes include tool call and reasoning parsers:
 
 To disable reasoning at request time, pass `"chat_template_kwargs": {"enable_thinking": false}`. The model also supports `"chat_template_kwargs": {"low_effort": true}` for lighter-weight reasoning.
 
+## Routing
+
+All recipes use **approximate KV-aware routing** (`--router-mode kv --no-kv-events` on the frontend). The frontend uses prefix hashing to route requests to workers most likely to have relevant KV cache blocks, improving cache hit rates. This is especially beneficial for workloads with shared system prompts or multi-turn conversations.
+
+Approximate (hash-based) routing is used because none of the backends currently support publishing KV cache events for hybrid Mamba+Attention models. Exact KV-aware routing, which relies on real-time event streams from workers (`--kv-events-config` for vLLM/SGLang, `--publish-events-and-metrics` for TRT-LLM), would provide more accurate cache-aware decisions but is not yet available for this architecture.
+
 ## Backend-Specific Notes
 
 ### vLLM
@@ -117,9 +124,11 @@ To disable reasoning at request time, pass `"chat_template_kwargs": {"enable_thi
 ### SGLang
 - Requires sglang >= v0.5.9 (1.0 ships v0.5.9; 0.9.1 ships v0.5.8 which has blocking bugs)
 - Load time: ~1 minute (~31s weight load + ~25s CUDA graph capture for 21 batch sizes)
-- Attention KV cache: ~9.4M tokens per GPU
-- Mamba state cache: ~16 GiB per GPU, max 407 concurrent sequences
-- No special flags needed -- simplest configuration of the three backends
+- Attention KV cache: ~9.4M tokens per GPU (aggregated)
+- Mamba state cache: ~16 GiB per GPU, max 407 concurrent sequences (aggregated)
+- No special flags needed for aggregated -- simplest configuration of the three backends
+- **Disaggregated mode works** with nixl KV transfer (TP=2 per worker, 2 GPUs each). This is the only backend that supports disagg for this model.
+- Known issue: prefill warmup logs `Prefill warmup failed: 'SamplingParams' object is not subscriptable` -- non-blocking, does not affect functionality
 
 ## Dynamo 0.9.1 Compatibility
 
@@ -145,6 +154,6 @@ These recipes target Dynamo 1.0. To run on 0.9.1 containers, the following chang
 
 ## Notes
 
-- **Disaggregated mode**: Not supported for this model. The hybrid Mamba+Attention KV cache cannot be transferred via nixl.
+- **Disaggregated mode**: Supported with SGLang via nixl KV transfer (`sglang/disagg`). Not supported with vLLM or TRT-LLM due to hybrid KV cache incompatibilities.
 - **Storage class**: Update `storageClassName` in `model-cache/model-cache.yaml` before deploying.
 - **Model size**: ~240GB download; expect 30-60 minutes depending on bandwidth.

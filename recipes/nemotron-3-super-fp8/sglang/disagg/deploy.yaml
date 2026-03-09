@@ -1,0 +1,128 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Disaggregated SGLang deployment: prefill/decode split with nixl KV transfer.
+# Tested with dynamo 1.0 (SGLang 0.5.9).
+#
+# Uses TP=2 per worker (prefill: 2 GPUs, decode: 2 GPUs) for a total of 4 GPUs.
+# KV cache is transferred between workers via nixl (GPU-direct).
+#
+# NOT working on dynamo 0.9.1 — same blocking bugs as sglang/agg.
+#
+# Known issue: Prefill warmup logs a non-blocking warning:
+#   "Prefill warmup failed: 'SamplingParams' object is not subscriptable"
+# This does not affect functionality.
+#
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: nemotron-super-fp8-sglang-disagg
+spec:
+  backendFramework: sglang
+  envs:
+    - name: HF_HOME
+      value: /opt/models
+  pvcs:
+    - name: model-cache
+      create: false
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /opt/models
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.0.0
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - python3 -m dynamo.frontend --router-mode kv --no-kv-events --http-port 8000
+    prefill:
+      componentType: worker
+      subComponentType: prefill
+      envFromSecret: hf-token-secret
+      replicas: 1
+      resources:
+        limits:
+          gpu: "2"
+        requests:
+          gpu: "2"
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /opt/models
+      sharedMemory:
+        size: 16Gi
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.0.0
+          workingDir: /workspace
+          command:
+            - python3
+            - -m
+            - dynamo.sglang
+          args:
+            - --model-path
+            - nvidia/nemotron-super-rl-030326-FP8
+            - --served-model-name
+            - nvidia/nemotron-super-rl-030326-FP8
+            - --tp
+            - "2"
+            - --trust-remote-code
+            - --disaggregation-mode
+            - prefill
+            - --disaggregation-bootstrap-port
+            - "12345"
+            - --disaggregation-transfer-backend
+            - nixl
+            - --host
+            - 0.0.0.0
+            - --dyn-tool-call-parser
+            - nemotron_nano
+            - --dyn-reasoning-parser
+            - nemotron_nano
+    decode:
+      componentType: worker
+      subComponentType: decode
+      envFromSecret: hf-token-secret
+      replicas: 1
+      resources:
+        limits:
+          gpu: "2"
+        requests:
+          gpu: "2"
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /opt/models
+      sharedMemory:
+        size: 16Gi
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.0.0
+          workingDir: /workspace
+          command:
+            - python3
+            - -m
+            - dynamo.sglang
+          args:
+            - --model-path
+            - nvidia/nemotron-super-rl-030326-FP8
+            - --served-model-name
+            - nvidia/nemotron-super-rl-030326-FP8
+            - --tp
+            - "2"
+            - --trust-remote-code
+            - --disaggregation-mode
+            - decode
+            - --disaggregation-bootstrap-port
+            - "12345"
+            - --disaggregation-transfer-backend
+            - nixl
+            - --host
+            - 0.0.0.0
+            - --dyn-tool-call-parser
+            - nemotron_nano
+            - --dyn-reasoning-parser
+            - nemotron_nano
