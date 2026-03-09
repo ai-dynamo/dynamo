@@ -28,11 +28,9 @@ func GetPodGPUUUIDs(ctx context.Context, podName, podNamespace, containerName st
 		return nil, nil
 	}
 
-	conn, err := grpc.DialContext(
-		ctx,
+	conn, err := grpc.NewClient(
 		"unix://"+podResourcesSocket,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithBlock(),
 	)
 	if err != nil {
 		return nil, err

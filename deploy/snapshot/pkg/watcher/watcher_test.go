@@ -27,7 +27,7 @@ func makeTestWatcher(t *testing.T) *Watcher {
 			NodeName: testNodeName,
 			BasePath: t.TempDir(),
 		},
-		clientset: fake.NewSimpleClientset(),
+		clientset: fake.NewClientset(),
 		log:       testr.New(t),
 		inFlight:  make(map[string]struct{}),
 		stopCh:    make(chan struct{}),

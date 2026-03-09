@@ -70,8 +70,8 @@ func NewWatcher(
 		clientset:  clientset,
 		containerd: containerd,
 		log:        log,
-		inFlight:        make(map[string]struct{}),
-		stopCh:          make(chan struct{}),
+		inFlight:   make(map[string]struct{}),
+		stopCh:     make(chan struct{}),
 	}, nil
 }
 
@@ -109,7 +109,7 @@ func (w *Watcher) Start(ctx context.Context) error {
 	)
 
 	ckptInformer := ckptFactory.Core().V1().Pods().Informer()
-	ckptInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+	if _, err := ckptInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
 			pod, ok := podFromInformerObj(obj)
 			if !ok {
@@ -124,7 +124,9 @@ func (w *Watcher) Start(ctx context.Context) error {
 			}
 			w.handleCheckpointPodEvent(ctx, pod)
 		},
-	})
+	}); err != nil {
+		return fmt.Errorf("failed to add checkpoint informer handler: %w", err)
+	}
 	go ckptFactory.Start(w.stopCh)
 	syncFuncs = append(syncFuncs, ckptInformer.HasSynced)
 
@@ -144,7 +146,7 @@ func (w *Watcher) Start(ctx context.Context) error {
 	)
 
 	restoreInformer := restoreFactory.Core().V1().Pods().Informer()
-	restoreInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+	if _, err := restoreInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
 			pod, ok := podFromInformerObj(obj)
 			if !ok {
@@ -159,7 +161,9 @@ func (w *Watcher) Start(ctx context.Context) error {
 			}
 			w.handleRestorePodEvent(ctx, pod)
 		},
-	})
+	}); err != nil {
+		return fmt.Errorf("failed to add restore informer handler: %w", err)
+	}
 	go restoreFactory.Start(w.stopCh)
 	syncFuncs = append(syncFuncs, restoreInformer.HasSynced)
 
@@ -203,7 +207,6 @@ func (w *Watcher) handleCheckpointPodEvent(ctx context.Context, pod *corev1.Pod)
 
 	go w.doCheckpoint(ctx, pod, checkpointHash, podKey)
 }
-
 
 func (w *Watcher) handleRestorePodEvent(ctx context.Context, pod *corev1.Pod) {
 	if pod.Spec.NodeName != w.config.NodeName {
@@ -263,6 +266,13 @@ func (w *Watcher) handleRestorePodEvent(ctx context.Context, pod *corev1.Pod) {
 func (w *Watcher) doCheckpoint(ctx context.Context, pod *corev1.Pod, checkpointHash, podKey string) {
 	defer w.release(podKey)
 	log := w.log.WithValues("pod", podKey, "checkpoint_hash", checkpointHash)
+	setCheckpointStatus := func(value string) {
+		if err := annotatePod(ctx, w.clientset, log, pod, map[string]string{
+			kubeAnnotationCheckpointStatus: value,
+		}); err != nil {
+			log.Error(err, "Failed to update checkpoint status", "status", value)
+		}
+	}
 
 	if err := annotatePod(ctx, w.clientset, log, pod, map[string]string{
 		kubeAnnotationCheckpointStatus: "in_progress",
@@ -277,7 +287,7 @@ func (w *Watcher) doCheckpoint(ctx context.Context, pod *corev1.Pod, checkpointH
 		err := fmt.Errorf("no containers found in pod spec")
 		log.Error(err, "Checkpoint failed")
 		emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, "CheckpointFailed", err.Error())
-		annotatePod(ctx, w.clientset, log, pod, map[string]string{kubeAnnotationCheckpointStatus: "failed"})
+		setCheckpointStatus("failed")
 		return
 	}
 	var containerID string
@@ -289,7 +299,7 @@ func (w *Watcher) doCheckpoint(ctx context.Context, pod *corev1.Pod, checkpointH
 	}
 	if containerID == "" {
 		emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, "CheckpointFailed", "Could not resolve target container ID")
-		annotatePod(ctx, w.clientset, log, pod, map[string]string{kubeAnnotationCheckpointStatus: "failed"})
+		setCheckpointStatus("failed")
 		return
 	}
 
@@ -298,7 +308,7 @@ func (w *Watcher) doCheckpoint(ctx context.Context, pod *corev1.Pod, checkpointH
 	if err != nil {
 		log.Error(err, "Failed to resolve container")
 		emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, "CheckpointFailed", fmt.Sprintf("Container resolve failed: %v", err))
-		annotatePod(ctx, w.clientset, log, pod, map[string]string{kubeAnnotationCheckpointStatus: "failed"})
+		setCheckpointStatus("failed")
 		return
 	}
 
@@ -319,7 +329,7 @@ func (w *Watcher) doCheckpoint(ctx context.Context, pod *corev1.Pod, checkpointH
 		if signalErr := common.SendSignalToPID(log, containerPID, syscall.SIGKILL, "checkpoint failed"); signalErr != nil {
 			log.Error(signalErr, "Failed to signal checkpoint failure to runtime process")
 		}
-		annotatePod(ctx, w.clientset, log, pod, map[string]string{kubeAnnotationCheckpointStatus: "failed"})
+		setCheckpointStatus("failed")
 		return
 	}
 
@@ -328,11 +338,11 @@ func (w *Watcher) doCheckpoint(ctx context.Context, pod *corev1.Pod, checkpointH
 	if err := common.SendSignalToPID(log, containerPID, syscall.SIGUSR1, "checkpoint complete"); err != nil {
 		log.Error(err, "Failed to signal checkpoint completion to runtime process")
 		emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, "CheckpointFailed", err.Error())
-		annotatePod(ctx, w.clientset, log, pod, map[string]string{kubeAnnotationCheckpointStatus: "failed"})
+		setCheckpointStatus("failed")
 		return
 	}
 
-	annotatePod(ctx, w.clientset, log, pod, map[string]string{kubeAnnotationCheckpointStatus: "completed"})
+	setCheckpointStatus("completed")
 }
 
 // doRestore runs the full restore workflow for a pod:
@@ -344,6 +354,13 @@ func (w *Watcher) doCheckpoint(ctx context.Context, pod *corev1.Pod, checkpointH
 func (w *Watcher) doRestore(ctx context.Context, pod *corev1.Pod, checkpointHash, podKey string) {
 	defer w.release(podKey)
 	log := w.log.WithValues("pod", podKey, "checkpoint_hash", checkpointHash)
+	setRestoreStatus := func(value string) {
+		if err := annotatePod(ctx, w.clientset, log, pod, map[string]string{
+			kubeAnnotationRestoreStatus: value,
+		}); err != nil {
+			log.Error(err, "Failed to update restore status", "status", value)
+		}
+	}
 
 	if err := annotatePod(ctx, w.clientset, log, pod, map[string]string{
 		kubeAnnotationRestoreStatus: "in_progress",
@@ -357,7 +374,7 @@ func (w *Watcher) doRestore(ctx context.Context, pod *corev1.Pod, checkpointHash
 		err := fmt.Errorf("no containers found in pod spec")
 		log.Error(err, "Restore failed")
 		emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, "RestoreFailed", err.Error())
-		annotatePod(ctx, w.clientset, log, pod, map[string]string{kubeAnnotationRestoreStatus: "failed"})
+		setRestoreStatus("failed")
 		return
 	}
 
@@ -374,7 +391,7 @@ func (w *Watcher) doRestore(ctx context.Context, pod *corev1.Pod, checkpointHash
 	if err != nil {
 		log.Error(err, "External restore failed")
 		emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, "RestoreFailed", err.Error())
-		annotatePod(ctx, w.clientset, log, pod, map[string]string{kubeAnnotationRestoreStatus: "failed"})
+		setRestoreStatus("failed")
 		return
 	}
 
@@ -383,13 +400,13 @@ func (w *Watcher) doRestore(ctx context.Context, pod *corev1.Pod, checkpointHash
 	if err != nil {
 		log.Error(err, "Failed to resolve placeholder host PID for signaling")
 		emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, "RestoreFailed", err.Error())
-		annotatePod(ctx, w.clientset, log, pod, map[string]string{kubeAnnotationRestoreStatus: "failed"})
+		setRestoreStatus("failed")
 		return
 	}
 	if err := common.SendSignalViaPIDNamespace(ctx, log, placeholderHostPID, restoredPID, syscall.SIGCONT, "restore complete"); err != nil {
 		log.Error(err, "Failed to signal restored runtime process")
 		emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, "RestoreFailed", err.Error())
-		annotatePod(ctx, w.clientset, log, pod, map[string]string{kubeAnnotationRestoreStatus: "failed"})
+		setRestoreStatus("failed")
 		return
 	}
 
@@ -403,12 +420,12 @@ func (w *Watcher) doRestore(ctx context.Context, pod *corev1.Pod, checkpointHash
 	if err := waitForPodReady(readyCtx, w.clientset, pod.Namespace, pod.Name, containerName); err != nil {
 		log.Error(err, "Restore post-signal readiness check failed")
 		emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, "RestoreFailed", err.Error())
-		annotatePod(ctx, w.clientset, log, pod, map[string]string{kubeAnnotationRestoreStatus: "failed"})
+		setRestoreStatus("failed")
 		return
 	}
 
 	emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeNormal, "RestoreSucceeded", fmt.Sprintf("Restore completed from checkpoint %s", checkpointHash))
-	annotatePod(ctx, w.clientset, log, pod, map[string]string{kubeAnnotationRestoreStatus: "completed"})
+	setRestoreStatus("completed")
 }
 
 func (w *Watcher) tryAcquire(podKey string) bool {
@@ -426,6 +443,3 @@ func (w *Watcher) release(podKey string) {
 	defer w.inFlightMu.Unlock()
 	delete(w.inFlight, podKey)
 }
-
-
-
