@@ -6,7 +6,7 @@ name: NVIDIA Dynamo Github Validation
 on:
   push:
     branches:
-    - main
+    - anants/router-debug
     - release/*.*.*
     - "pull-request/[0-9]+"
 
@@ -26,9 +26,9 @@ jobs:
   changed-files:
     runs-on: ubuntu-latest
     outputs:
-      core: ${{ github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || steps.changes.outputs.core == 'true' }}
-      planner: ${{ github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || steps.changes.outputs.planner == 'true' }}
-      frontend: ${{ github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || steps.changes.outputs.frontend == 'true' }}
+      core: ${{ github.ref_name == 'anants/router-debug' || startsWith(github.ref_name, 'release/') || steps.changes.outputs.core == 'true' }}
+      planner: ${{ github.ref_name == 'anants/router-debug' || startsWith(github.ref_name, 'release/') || steps.changes.outputs.planner == 'true' }}
+      frontend: ${{ github.ref_name == 'anants/router-debug' || startsWith(github.ref_name, 'release/') || steps.changes.outputs.frontend == 'true' }}
       builder_name: ${{ steps.export-builder-name.outputs.builder_name }}
     steps:
       - name: Checkout code
