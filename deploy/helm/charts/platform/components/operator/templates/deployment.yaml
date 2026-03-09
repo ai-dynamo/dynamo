@@ -76,11 +76,13 @@ spec:
         command:
         - /manager
         env:
+        {{- with .Values.env }}
+          {{- toYaml . | nindent 8 }}
+        {{- end }}
         - name: KUBERNETES_CLUSTER_DOMAIN
           value: {{ quote .Values.kubernetesClusterDomain }}
         imagePullPolicy: {{ .Values.controllerManager.manager.image.pullPolicy | quote }}
-        image: {{ .Values.controllerManager.manager.image.repository }}:{{ .Values.controllerManager.manager.image.tag
-| default .Chart.AppVersion }}
+        image: {{ .Values.controllerManager.manager.image.repository }}:{{ .Values.controllerManager.manager.image.tag | default .Chart.AppVersion }}
         livenessProbe:
           httpGet:
             path: /healthz
