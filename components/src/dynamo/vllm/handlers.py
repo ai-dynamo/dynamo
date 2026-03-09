@@ -1009,7 +1009,9 @@ class BaseWorkerHandler(ABC):
 
             # Handle video_url entries (future expansion)
             if VIDEO_URL_KEY in mm_map:
-                logger.warning("Video multimodal data not yet supported in standard worker")
+                logger.warning(
+                    "Video multimodal data not yet supported in standard worker"
+                )
 
             return (vllm_mm_data if vllm_mm_data else None), raw_bytes_list
 
