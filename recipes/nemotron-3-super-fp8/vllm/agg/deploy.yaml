@@ -1,0 +1,88 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Tested with dynamo 1.0 (vLLM 0.16.0).
+#
+# Dynamo 0.9.1 compatibility notes:
+#   - Change image tags from :1.0.0 to :0.9.1
+#   - Add `--connector none` to args (required in 0.9.1, rejected in 1.0)
+#   - Change --dyn-reasoning-parser from nemotron_nano to deepseek_r1
+#     (nemotron_nano reasoning parser is broken in 0.9.1)
+#   - With deepseek_r1 parser, enable_thinking: false will not work correctly
+#
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: nemotron-super-fp8-vllm-agg
+spec:
+  backendFramework: vllm
+  pvcs:
+    - name: model-cache
+      create: false
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /opt/models
+      extraPodSpec:
+        mainContainer:
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 10
+            timeoutSeconds: 1800
+            failureThreshold: 60
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0
+    VllmWorker:
+      componentType: worker
+      envFromSecret: hf-token-secret
+      replicas: 1
+      resources:
+        limits:
+          gpu: "4"
+        requests:
+          gpu: "4"
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /opt/models
+      sharedMemory:
+        size: 16Gi
+      extraPodSpec:
+        mainContainer:
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 120
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0
+          env:
+            - name: HF_HOME
+              value: "/opt/models"
+          command:
+            - python3
+            - -m
+            - dynamo.vllm
+          args:
+            - --model
+            - nvidia/nemotron-super-rl-030326-FP8
+            - --served-model-name
+            - nvidia/nemotron-super-rl-030326-FP8
+            - --tensor-parallel-size
+            - "4"
+            - --trust-remote-code
+            - --enforce-eager
+            # --connector none is no longer needed in 1.0 (default is no connector).
+            # In 0.9.1, you must add: --connector none
+            - --is-decode-worker
+            - --dyn-tool-call-parser
+            - nemotron_nano
+            # nemotron_nano reasoning parser handles both enable_thinking: true and false.
+            # In 0.9.1, use deepseek_r1 instead (nemotron_nano reasoning parser is broken),
+            # but note that enable_thinking: false will not work with deepseek_r1.
+            - --dyn-reasoning-parser
+            - nemotron_nano

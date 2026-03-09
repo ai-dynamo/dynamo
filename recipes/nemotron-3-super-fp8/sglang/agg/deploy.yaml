@@ -1,0 +1,71 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# NOTE: This recipe requires dynamo 1.0+ with sglang >= v0.5.9.
+#
+# NOT working on dynamo 0.9.1 (sglang v0.5.8) due to two blocking bugs:
+#
+# 1. FP8 quantization bug: ModelOptFp8LinearMethod.create_weights() missing
+#    input_size/output_size parameters, causing TypeError on model load.
+#    Fixed in sglang v0.5.9 (commit 0ff24159a5).
+#
+# 2. Config format mismatch: sglang expects hybrid_override_pattern (string)
+#    but the model provides layers_block_type (list). Workaround: patch the
+#    model's config.json to add a hybrid_override_pattern field.
+#
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: nemotron-super-fp8-sglang-agg
+spec:
+  backendFramework: sglang
+  envs:
+    - name: HF_HOME
+      value: /opt/models
+  pvcs:
+    - name: model-cache
+      create: false
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /opt/models
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.0.0
+    SglangWorker:
+      componentType: worker
+      envFromSecret: hf-token-secret
+      replicas: 1
+      resources:
+        limits:
+          gpu: "4"
+        requests:
+          gpu: "4"
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /opt/models
+      sharedMemory:
+        size: 16Gi
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.0.0
+          workingDir: /workspace
+          command:
+            - python3
+            - -m
+            - dynamo.sglang
+          args:
+            - --model-path
+            - nvidia/nemotron-super-rl-030326-FP8
+            - --served-model-name
+            - nvidia/nemotron-super-rl-030326-FP8
+            - --tp
+            - "4"
+            - --trust-remote-code
+            - --dyn-tool-call-parser
+            - nemotron_nano
+            - --dyn-reasoning-parser
+            - nemotron_nano
