@@ -534,7 +534,7 @@ impl LayoutRegistry {
             // Only export host and device layouts
             if matches!(
                 location,
-                StorageKind::System | StorageKind::Device(_) | StorageKind::Pinned
+                StorageKind::System | StorageKind::Device(_) | StorageKind::XpuDevice(_) | StorageKind::Pinned
             ) {
                 let serialized = local_layout
                     .layout()

@@ -142,6 +142,11 @@ fn compute_single_block_checksum(
                     }
                     hasher.update(system_region.as_slice());
                 }
+                StorageKind::XpuDevice(_) => {
+                    // TODO: Use Level Zero memcpy D2H for XPU device memory.
+                    // For now, treat as unsupported (XPU checksum not yet implemented).
+                    return Err(anyhow!("checksum not yet implemented for XPU device memory"));
+                }
                 StorageKind::Disk(fd) => {
                     let mut system_region: AVec<u8, _> = avec![[4096]| 0; region.size()];
 

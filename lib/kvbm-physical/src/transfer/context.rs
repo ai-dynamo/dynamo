@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Transfer context.
+//!
+//! Supports dual-backend operation: CUDA (NVIDIA GPUs) and Level Zero (Intel XPU).
+//! Either or both backends may be active depending on the hardware available.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -41,8 +44,14 @@ pub struct TransferConfig {
     #[builder(default = "NixlBackendConfig::default()")]
     nixl_backend_config: NixlBackendConfig,
 
-    #[builder(default = "0")]
-    cuda_device_id: usize,
+    #[builder(default = "Some(0)")]
+    cuda_device_id: Option<usize>,
+
+    /// Level Zero device ordinal for XPU transfers (e.g., 0 for first Intel GPU).
+    /// Set to Some(id) to enable the Level Zero transfer backend.
+    #[builder(default = "None", setter(strip_option))]
+    #[cfg(feature = "level-zero")]
+    xpu_device_id: Option<u32>,
 
     #[builder(default = "get_tokio_runtime()")]
     tokio_runtime: TokioRuntime,
@@ -111,6 +120,15 @@ impl TransferConfigBuilder {
         Ok(self)
     }
 
+    /// Disable the CUDA backend entirely.
+    ///
+    /// When CUDA is disabled, the context will not create any CUDA resources.
+    /// This is useful for XPU-only deployments where no NVIDIA GPU is present.
+    pub fn no_cuda(mut self) -> Self {
+        self.cuda_device_id = Some(None);
+        self
+    }
+
     pub fn build(self) -> Result<TransferManager> {
         let mut config = self.build_internal()?;
 
@@ -129,7 +147,12 @@ impl TransferConfigBuilder {
         let nixl_agent =
             NixlAgent::from_nixl_backend_config(&agent_name, config.nixl_backend_config)?;
 
-        let cuda_context = CudaContext::new(config.cuda_device_id)?;
+        // Create CUDA context if a CUDA device was requested
+        let cuda_context = match config.cuda_device_id {
+            Some(device_id) => Some(CudaContext::new(device_id)?),
+            None => None,
+        };
+
         let context = TransferContext::new(
             nixl_agent,
             config.event_system,
@@ -138,6 +161,8 @@ impl TransferConfigBuilder {
             config.capabilities,
             config.cuda_pool_reserve_size,
             config.cuda_pool_release_threshold,
+            #[cfg(feature = "level-zero")]
+            config.xpu_device_id,
         )?;
         Ok(TransferManager::from_context(context))
     }
@@ -156,7 +181,13 @@ impl TransferConfigBuilderWithAgent {
     /// Build the TransferManager using the pre-configured agent.
     pub fn build(self) -> Result<TransferManager> {
         let config = self.builder.build_internal()?;
-        let cuda_context = CudaContext::new(config.cuda_device_id)?;
+
+        // Create CUDA context if a CUDA device was requested
+        let cuda_context = match config.cuda_device_id {
+            Some(device_id) => Some(CudaContext::new(device_id)?),
+            None => None,
+        };
+
         let context = TransferContext::new(
             self.agent,
             config.event_system,
@@ -165,12 +196,27 @@ impl TransferConfigBuilderWithAgent {
             config.capabilities,
             config.cuda_pool_reserve_size,
             config.cuda_pool_release_threshold,
+            #[cfg(feature = "level-zero")]
+            config.xpu_device_id,
         )?;
         Ok(TransferManager::from_context(context))
     }
 
     pub fn cuda_device_id(mut self, cuda_device_id: usize) -> Self {
-        self.builder = self.builder.cuda_device_id(cuda_device_id);
+        self.builder = self.builder.cuda_device_id(Some(cuda_device_id));
+        self
+    }
+
+    /// Disable the CUDA backend entirely.
+    pub fn no_cuda(mut self) -> Self {
+        self.builder = self.builder.no_cuda();
+        self
+    }
+
+    /// Set the Level Zero device ordinal for XPU transfers.
+    #[cfg(feature = "level-zero")]
+    pub fn xpu_device_id(mut self, xpu_device_id: u32) -> Self {
+        self.builder = self.builder.xpu_device_id(xpu_device_id);
         self
     }
 }
@@ -212,23 +258,35 @@ impl TokioRuntime {
 pub struct TransferContext {
     worker_id: u64,
     nixl_agent: NixlAgent,
+
+    // -- CUDA backend (optional) --
     #[allow(dead_code)]
-    cuda_context: Arc<CudaContext>,
-    d2h_stream: Arc<CudaStream>,
-    h2d_stream: Arc<CudaStream>,
+    cuda_context: Option<Arc<CudaContext>>,
+    d2h_stream: Option<Arc<CudaStream>>,
+    h2d_stream: Option<Arc<CudaStream>>,
     d2h_streams: Vec<Arc<CudaStream>>,
     h2d_streams: Vec<Arc<CudaStream>>,
     current_d2h_stream: Arc<AtomicUsize>,
     current_h2d_stream: Arc<AtomicUsize>,
+    cuda_pool: Option<Arc<CudaMemPool>>,
+    tx_cuda_event:
+        Option<mpsc::Sender<RegisterPollingNotification<notifications::CudaEventChecker>>>,
+
+    // -- Level Zero backend (optional) --
+    #[cfg(feature = "level-zero")]
+    #[allow(dead_code)]
+    xpu_device_id: Option<u32>,
+    #[cfg(feature = "level-zero")]
+    tx_ze_event:
+        Option<mpsc::Sender<RegisterPollingNotification<notifications::ZeEventChecker>>>,
+
+    // -- Shared infrastructure --
     #[allow(dead_code)]
     tokio_runtime: TokioRuntime,
     capabilities: TransferCapabilities,
     event_system: Arc<EventManager>,
-    // CUDA memory pool for kernel allocations
-    cuda_pool: Arc<CudaMemPool>,
     // Channels for background notification handlers
     tx_nixl_status: mpsc::Sender<RegisterPollingNotification<notifications::NixlStatusChecker>>,
-    tx_cuda_event: mpsc::Sender<RegisterPollingNotification<notifications::CudaEventChecker>>,
     #[allow(dead_code)]
     tx_nixl_events: mpsc::Sender<notifications::RegisterNixlNotification>,
 }
@@ -241,113 +299,174 @@ impl TransferContext {
     pub(crate) fn new(
         nixl_agent: NixlAgent,
         event_system: Arc<EventManager>,
-        cuda_context: Arc<CudaContext>,
+        cuda_context: Option<Arc<CudaContext>>,
         tokio_runtime: TokioRuntime,
         capabilities: TransferCapabilities,
         cuda_pool_reserve_size: usize,
         cuda_pool_release_threshold: Option<u64>,
+        #[cfg(feature = "level-zero")] xpu_device_id: Option<u32>,
     ) -> Result<Self> {
-        unsafe { cuda_context.disable_event_tracking() };
-
-        // Create CUDA memory pool for kernel allocations
-        let mut pool_builder = CudaMemPool::builder(cuda_context.clone(), cuda_pool_reserve_size);
-        if let Some(threshold) = cuda_pool_release_threshold {
-            pool_builder = pool_builder.release_threshold(threshold);
-        }
-        let cuda_pool = Arc::new(pool_builder.build()?);
-
-        // Create channels for background notification handlers
-        let (tx_nixl_status, rx_nixl_status) = mpsc::channel(64);
-        let (tx_cuda_event, rx_cuda_event) = mpsc::channel(64);
-        let (tx_nixl_events, rx_nixl_events) = mpsc::channel(64);
-
-        // Spawn background handlers
+        // Spawn background handlers on the tokio runtime
         let handle = tokio_runtime.handle();
 
-        // Spawn NIXL status polling handler
+        // -- NIXL channels (always created) --
+        let (tx_nixl_status, rx_nixl_status) = mpsc::channel(64);
+        let (tx_nixl_events, rx_nixl_events) = mpsc::channel(64);
+
         handle.spawn(notifications::process_polling_notifications(
             rx_nixl_status,
             event_system.clone(),
         ));
 
-        // Spawn CUDA event polling handler
-        handle.spawn(notifications::process_polling_notifications(
-            rx_cuda_event,
-            event_system.clone(),
-        ));
-
-        // Spawn NIXL notification events handler
         handle.spawn(notifications::process_nixl_notification_events(
             nixl_agent.raw_agent().clone(),
             rx_nixl_events,
             event_system.clone(),
         ));
 
-        let d2h_streams: Vec<Arc<CudaStream>> = (0..4)
-            .map(|_| cuda_context.new_stream())
-            .collect::<Result<Vec<_>, _>>()?;
+        // -- CUDA backend setup (optional) --
+        let (cuda_pool, tx_cuda_event, d2h_stream, h2d_stream, d2h_streams, h2d_streams) =
+            if let Some(ref ctx) = cuda_context {
+                unsafe { ctx.disable_event_tracking() };
 
-        let h2d_streams: Vec<Arc<CudaStream>> = (0..4)
-            .map(|_| cuda_context.new_stream())
-            .collect::<Result<Vec<_>, _>>()?;
+                // CUDA memory pool
+                let mut pool_builder =
+                    CudaMemPool::builder(ctx.clone(), cuda_pool_reserve_size);
+                if let Some(threshold) = cuda_pool_release_threshold {
+                    pool_builder = pool_builder.release_threshold(threshold);
+                }
+                let pool = Arc::new(pool_builder.build()?);
 
-        let d2h_stream = d2h_streams[0].clone();
-        let h2d_stream = h2d_streams[0].clone();
+                // CUDA event polling channel
+                let (tx, rx) = mpsc::channel(64);
+                handle.spawn(notifications::process_polling_notifications(
+                    rx,
+                    event_system.clone(),
+                ));
 
-        let current_d2h_stream = Arc::new(AtomicUsize::new(0));
-        let current_h2d_stream = Arc::new(AtomicUsize::new(0));
+                // CUDA streams (4 D2H + 4 H2D)
+                let d2h: Vec<Arc<CudaStream>> = (0..4)
+                    .map(|_| ctx.new_stream())
+                    .collect::<Result<Vec<_>, _>>()?;
+                let h2d: Vec<Arc<CudaStream>> = (0..4)
+                    .map(|_| ctx.new_stream())
+                    .collect::<Result<Vec<_>, _>>()?;
+                let d2h_s = d2h[0].clone();
+                let h2d_s = h2d[0].clone();
+
+                (Some(pool), Some(tx), Some(d2h_s), Some(h2d_s), d2h, h2d)
+            } else {
+                (None, None, None, None, Vec::new(), Vec::new())
+            };
+
+        // -- Level Zero backend setup (optional) --
+        #[cfg(feature = "level-zero")]
+        let tx_ze_event = if xpu_device_id.is_some() {
+            let (tx, rx) = mpsc::channel(64);
+            handle.spawn(notifications::process_polling_notifications(
+                rx,
+                event_system.clone(),
+            ));
+            Some(tx)
+        } else {
+            None
+        };
 
         Ok(Self {
             worker_id: event_system.system_id(),
             nixl_agent,
-            cuda_context: cuda_context.clone(),
+            cuda_context,
             d2h_stream,
             h2d_stream,
             d2h_streams,
             h2d_streams,
-            current_d2h_stream,
-            current_h2d_stream,
+            current_d2h_stream: Arc::new(AtomicUsize::new(0)),
+            current_h2d_stream: Arc::new(AtomicUsize::new(0)),
+            cuda_pool,
+            tx_cuda_event,
+            #[cfg(feature = "level-zero")]
+            xpu_device_id,
+            #[cfg(feature = "level-zero")]
+            tx_ze_event,
             tokio_runtime,
             capabilities,
             event_system,
-            cuda_pool,
             tx_nixl_status,
-            tx_cuda_event,
             tx_nixl_events,
         })
     }
+
+    // ---- Shared accessors ----
 
     pub(crate) fn nixl_agent(&self) -> &NixlAgent {
         &self.nixl_agent
     }
 
     #[allow(dead_code)]
+    #[doc(hidden)]
+    pub fn tokio(&self) -> &tokio::runtime::Handle {
+        self.tokio_runtime.handle()
+    }
+
+    pub(crate) fn capabilities(&self) -> &TransferCapabilities {
+        &self.capabilities
+    }
+
+    #[doc(hidden)]
+    pub fn event_system(&self) -> &Arc<EventManager> {
+        &self.event_system
+    }
+
+    /// Get the worker ID for this context.
+    pub(crate) fn worker_id(&self) -> u64 {
+        self.worker_id
+    }
+
+    // ---- CUDA accessors ----
+    // These panic if the CUDA backend was not initialised.
+    // Callers using ZeAsync strategies never reach these paths.
+
+    #[allow(dead_code)]
     pub(crate) fn cuda_context(&self) -> &Arc<CudaContext> {
-        &self.cuda_context
+        self.cuda_context
+            .as_ref()
+            .expect("cuda_context() called but CUDA backend is not initialised")
     }
 
     // Provides the same d2h stream per invocation
     #[allow(dead_code)]
     pub(crate) fn d2h_stream(&self) -> &Arc<CudaStream> {
-        &self.d2h_stream
+        self.d2h_stream
+            .as_ref()
+            .expect("d2h_stream() called but CUDA backend is not initialised")
     }
 
     // Provides the same h2d stream per invocation
     #[allow(dead_code)]
     pub(crate) fn h2d_stream(&self) -> &Arc<CudaStream> {
-        &self.h2d_stream
+        self.h2d_stream
+            .as_ref()
+            .expect("h2d_stream() called but CUDA backend is not initialised")
     }
 
     // Provides the next d2h stream in a round-robin fashion
     pub(crate) fn next_d2h_streams(&self) -> Arc<CudaStream> {
-        let current_d2h_stream = self.current_d2h_stream.fetch_add(1, Ordering::Relaxed);
-        self.d2h_streams[current_d2h_stream % self.d2h_streams.len()].clone()
+        assert!(
+            !self.d2h_streams.is_empty(),
+            "next_d2h_streams() called but CUDA backend is not initialised"
+        );
+        let idx = self.current_d2h_stream.fetch_add(1, Ordering::Relaxed);
+        self.d2h_streams[idx % self.d2h_streams.len()].clone()
     }
 
     // Provides the next h2d stream in a round-robin fashion
     pub(crate) fn next_h2d_streams(&self) -> Arc<CudaStream> {
-        let current_h2d_stream = self.current_h2d_stream.fetch_add(1, Ordering::Relaxed);
-        self.h2d_streams[current_h2d_stream % self.h2d_streams.len()].clone()
+        assert!(
+            !self.h2d_streams.is_empty(),
+            "next_h2d_streams() called but CUDA backend is not initialised"
+        );
+        let idx = self.current_h2d_stream.fetch_add(1, Ordering::Relaxed);
+        self.h2d_streams[idx % self.h2d_streams.len()].clone()
     }
 
     /// Acquire an H2D stream for use by caller.
@@ -372,25 +491,14 @@ impl TransferContext {
         self.next_d2h_streams()
     }
 
-    #[allow(dead_code)]
-    #[doc(hidden)]
-    pub fn tokio(&self) -> &tokio::runtime::Handle {
-        self.tokio_runtime.handle()
-    }
-
-    pub(crate) fn capabilities(&self) -> &TransferCapabilities {
-        &self.capabilities
-    }
-
-    #[doc(hidden)]
-    pub fn event_system(&self) -> &Arc<EventManager> {
-        &self.event_system
-    }
-
     /// Get the CUDA memory pool for kernel allocations.
     pub(crate) fn cuda_pool(&self) -> &Arc<CudaMemPool> {
-        &self.cuda_pool
+        self.cuda_pool
+            .as_ref()
+            .expect("cuda_pool() called but CUDA backend is not initialised")
     }
+
+    // ---- NIXL notification registration ----
 
     /// Register a NIXL transfer request for status polling completion.
     ///
@@ -431,11 +539,18 @@ impl TransferContext {
         TransferCompleteNotification::from_awaiter(awaiter)
     }
 
+    // ---- CUDA event notification ----
+
     /// Register a CUDA event for polling completion.
     ///
     /// This method enqueues the CUDA event to be polled for completion.
     /// Returns a notification object that can be awaited for completion.
     pub(crate) fn register_cuda_event(&self, event: CudaEvent) -> TransferCompleteNotification {
+        let tx = self
+            .tx_cuda_event
+            .as_ref()
+            .expect("register_cuda_event() called but CUDA backend is not initialised");
+
         let new_event = self
             .event_system
             .new_event()
@@ -453,7 +568,7 @@ impl TransferContext {
         };
 
         // Send to background handler — log error if channel is full or closed
-        if let Err(e) = self.tx_cuda_event.try_send(notification) {
+        if let Err(e) = tx.try_send(notification) {
             tracing::error!(
                 "Failed to enqueue CUDA event notification: channel full or closed: {}",
                 e
@@ -462,6 +577,52 @@ impl TransferContext {
 
         TransferCompleteNotification::from_awaiter(awaiter)
     }
+
+    // ---- Level Zero event notification ----
+
+    /// Register a Level Zero event for polling completion.
+    ///
+    /// This method enqueues the ZeEvent to be polled for completion via
+    /// `ZeEvent::query_status()`. Returns a notification object that
+    /// can be awaited for completion.
+    #[cfg(feature = "level-zero")]
+    pub(crate) fn register_ze_event(
+        &self,
+        event: syclrc::ZeEvent,
+    ) -> TransferCompleteNotification {
+        let tx = self
+            .tx_ze_event
+            .as_ref()
+            .expect("register_ze_event() called but Level Zero backend is not initialised");
+
+        let new_event = self
+            .event_system
+            .new_event()
+            .expect("Failed to allocate event");
+        let handle = new_event.into_handle();
+        let awaiter = self
+            .event_system
+            .awaiter(handle)
+            .expect("Failed to get awaiter");
+
+        let notification = notifications::RegisterPollingNotification {
+            uuid: Uuid::new_v4(),
+            checker: notifications::ZeEventChecker::new(event),
+            event_handle: handle,
+        };
+
+        // Send to background handler — log error if channel is full or closed
+        if let Err(e) = tx.try_send(notification) {
+            tracing::error!(
+                "Failed to enqueue Ze event notification: channel full or closed: {}",
+                e
+            );
+        }
+
+        TransferCompleteNotification::from_awaiter(awaiter)
+    }
+
+    // ---- NIXL notification events ----
 
     /// Register a NIXL transfer request for notification-based completion.
     ///
@@ -498,10 +659,5 @@ impl TransferContext {
         }
 
         TransferCompleteNotification::from_awaiter(awaiter)
-    }
-
-    /// Get the worker ID for this context.
-    pub(crate) fn worker_id(&self) -> u64 {
-        self.worker_id
     }
 }
