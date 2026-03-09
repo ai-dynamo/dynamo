@@ -63,7 +63,7 @@ func TestDiscoverGPUs_SingleNode(t *testing.T) {
 	assert.Equal(t, 8, gpuInfo.GPUsPerNode)
 	assert.Equal(t, "H100-SXM5-80GB", gpuInfo.Model)
 	assert.Equal(t, 81920, gpuInfo.VRAMPerGPU)
-	assert.Equal(t, "h100_sxm", gpuInfo.System)
+	assert.Equal(t, "h100_sxm", string(gpuInfo.System))
 }
 
 func TestDiscoverGPUs_MultipleNodesHomogeneous(t *testing.T) {
@@ -333,12 +333,15 @@ func TestInferHardwareSystem(t *testing.T) {
 		{"RTX 4090", "", "Consumer GPU (not in mapping)"},
 		{"Unknown-GPU", "", "Unknown GPU"},
 		{"", "", "Empty string"},
+		// GFD product names as seen in real cluster labels (regression for GPUSKU bug)
+		{"NVIDIA-B200", "b200_sxm", "B200 with NVIDIA prefix (GFD label format)"},
+		{"NVIDIA-H200-SXM5-141GB", "h200_sxm", "H200 with NVIDIA prefix (GFD label format)"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.description, func(t *testing.T) {
 			result := InferHardwareSystem(tt.gpuProduct)
-			assert.Equal(t, tt.expectedSystem, result, "Failed for GPU: %s", tt.gpuProduct)
+			assert.Equal(t, tt.expectedSystem, string(result), "Failed for GPU: %s", tt.gpuProduct)
 		})
 	}
 }
@@ -354,7 +357,7 @@ func TestInferHardwareSystem_CaseInsensitive(t *testing.T) {
 
 	for _, variant := range variants {
 		result := InferHardwareSystem(variant)
-		assert.Equal(t, "h100_sxm", result, "Should handle case variations: %s", variant)
+		assert.Equal(t, "h100_sxm", string(result), "Should handle case variations: %s", variant)
 	}
 }
 
@@ -369,6 +372,6 @@ func TestInferHardwareSystem_SpacesAndDashes(t *testing.T) {
 
 	for _, variant := range variants {
 		result := InferHardwareSystem(variant)
-		assert.Equal(t, "h100_sxm", result, "Should normalize spaces/dashes: %s", variant)
+		assert.Equal(t, "h100_sxm", string(result), "Should normalize spaces/dashes: %s", variant)
 	}
 }
