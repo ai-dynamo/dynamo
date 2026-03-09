@@ -58,7 +58,7 @@ pub enum BlockHashValue {
 impl BlockHashValue {
     pub fn into_u64(self) -> u64 {
         match self {
-            BlockHashValue::Signed(v) => v as u64,
+            BlockHashValue::Signed(v) => v.cast_unsigned(),
             BlockHashValue::Unsigned(v) => v,
         }
     }
