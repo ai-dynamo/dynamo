@@ -34,7 +34,6 @@ Before starting, confirm:
 
 - Platform installed: `kubectl get pods -n ${NAMESPACE}` shows operator pods `Running`
 - CRDs present: `kubectl get crd | grep dynamo` shows `dynamographdeploymentrequests.nvidia.com`
-- NGC credentials configured (for pulling runtime images)
 - `kubectl` and `helm` available in your shell
 
 Set these variables once — they are referenced throughout the guide:
@@ -80,14 +79,15 @@ spec:
   # Model to profile and deploy
   model: Qwen/Qwen3-0.6B
 
-  # Profiling job container image — must match your installed platform version
+  # Container image for the profiling job — must match your installed platform version.
+  # This is the same dynamo-frontend image used by the deployed inference service.
   image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:${RELEASE_VERSION}"
 ```
 
-Apply it:
+Apply it (uses `envsubst` to substitute the `RELEASE_VERSION` shell variable into the YAML):
 
 ```bash
-kubectl apply -f qwen3-first-model.yaml -n ${NAMESPACE}
+envsubst < qwen3-first-model.yaml | kubectl apply -f - -n ${NAMESPACE}
 ```
 
 ### Field reference
@@ -124,6 +124,8 @@ For the full spec reference, see the [DGDR API Reference](api-reference.md) and
 
 ## Step 3: Monitor Profiling Progress
 
+Profiling is the automated step where Dynamo sweeps across candidate configurations (parallelism, batching, scheduling strategies) to find the one that best meets your SLA and hardware — so you don't have to tune it manually.
+
 Watch the DGDR status in real time:
 
 ```bash
@@ -136,7 +138,8 @@ The `PHASE` column progresses through:
 |---|---|
 | `Pending` (condition: `DiscoveringHardware`) | Spec validated; operator is discovering GPU hardware and preparing the profiling job |
 | `Profiling` | Profiling job is running (AIC simulation or real-GPU sweep) |
-| `Deploying` | Profiling complete; creating the `DynamoGraphDeployment` |
+| `Ready` | Profiling complete; optimal config stored in `.status`. Terminal state when `autoApply: false` |
+| `Deploying` | Creating the `DynamoGraphDeployment` (only when `autoApply: true`) |
 | `Deployed` | DGD is running and healthy |
 | `Failed` | Unrecoverable error — check events for details |
 
@@ -178,7 +181,7 @@ kubectl logs -f <profiling-pod-name> -n ${NAMESPACE}
 
 ## Step 4: Verify the Deployment
 
-Once the DGDR reaches `Ready`, the `DynamoGraphDeployment` has been created automatically.
+Once the DGDR reaches `Deployed`, the `DynamoGraphDeployment` has been created automatically.
 Check that everything is running:
 
 ```bash
@@ -264,8 +267,9 @@ kubectl describe dynamographdeploymentrequest qwen3-first-model -n ${NAMESPACE}
 # Check the Events section at the bottom
 ```
 
-Common causes: no available GPU nodes, image pull failure (check NGC credentials or image tag),
-missing `hardware` config for a namespace-scoped operator.
+Common causes: no available GPU nodes, image pull failure (check image tag; NGC credentials are
+optional but may be needed if you hit rate limits pulling from public NGC), missing `hardware`
+config for a namespace-scoped operator.
 
 > [!TIP]
 > **GPU node taints** are a frequent cause of pods staying `Pending`. Many clusters (including
