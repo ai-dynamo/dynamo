@@ -210,6 +210,7 @@ filterwarnings = [
     "ignore:.*vllm\\.transformers_utils\\.tokenizer\\.AnyTokenizer.*has been moved.*:DeprecationWarning",
     # sentencepiece emits this SWIG deprecation warning at import time on Python 3.12
     "ignore:builtin type SwigPyObject has no __module__ attribute:DeprecationWarning",
+    "ignore:builtin type swigvarlink has no __module__ attribute:DeprecationWarning",
 
     ################################################################################################
     # TRT-LLM
