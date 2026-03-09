@@ -1,19 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""
-MM Router Handler - Routes requests to best vLLM worker based on KV cache overlap.
-"""
+"""MM Router Handler — routes multimodal requests via KV-cache-aware worker selection."""
 
-import base64
 import logging
-import os
 from typing import Any, AsyncGenerator
 
 from dynamo.llm import KvRouter
 from dynamo.runtime.logging import configure_dynamo_logging
 
-from .image_loader import RoutingImageLoader
 from .mm_processor import build_block_mm_infos, extract_image_urls, process_multimodal
 
 configure_dynamo_logging()
@@ -21,10 +16,7 @@ logger = logging.getLogger(__name__)
 
 
 class MMRouterHandler:
-    """
-    Handler that computes mm_hash for multimodal requests and routes
-    to the best vLLM worker based on KV cache overlap.
-    """
+    """Routes requests to the vLLM worker with the best KV cache overlap."""
 
     def __init__(
         self,
@@ -34,77 +26,28 @@ class MMRouterHandler:
         model: str,
         block_size: int,
     ):
-        """
-        Initialize the MM Router Handler.
-
-        Args:
-            kv_router: KvRouter for KV-aware worker selection and routing
-            tokenizer: HuggingFace AutoTokenizer
-            processor: HuggingFace AutoProcessor (optional)
-            model: Model path/name
-            block_size: KV cache block size
-        """
         self.kv_router = kv_router
         self.tokenizer = tokenizer
         self.processor = processor
         self.model = model
         self.block_size = block_size
-        self._image_loader = RoutingImageLoader()
-
-        mode = os.getenv("DYN_MM_ROUTER_IMAGE_TRANSPORT_MODE", "url").strip().lower()
-        if mode not in ("data_uri", "url"):
-            logger.warning(
-                "Invalid DYN_MM_ROUTER_IMAGE_TRANSPORT_MODE=%r, using 'url'", mode
-            )
-            mode = "url"
-        self.transport_mode = mode
-        logger.info("MM image transport mode: %s", mode)
 
     async def generate(self, request: dict) -> AsyncGenerator[dict, None]:
-        """
-        Main entry point - receives request, computes routing, forwards to best worker.
-
-        The request format (after Frontend preprocessing with ModelInput.Tokens):
-        {
-            "token_ids": [...],
-            "sampling_options": {...},
-            "stop_conditions": {...},
-            "extra_args": {"messages": [...]}
-        }
-
-        Args:
-            request: Preprocessed request from Frontend
-
-        Yields:
-            Response chunks from the downstream vLLM worker
-        """
-        # Extract messages from extra_args (set by Frontend preprocessor)
+        """Main entry point: process request, compute routing, forward to best worker."""
         messages = request.get("extra_args", {}).get("messages", [])
         image_urls = extract_image_urls(messages)
 
         if image_urls:
-            # Process multimodal: load images, compute mm_hashes, and build routing tokens.
-            # Do not reuse request["token_ids"] for MM routing: those are placeholder-level
-            # tokens from Frontend. We need processor-expanded tokens to build block_mm_infos.
-            # Request payload does not include a rendered template string; extra_args carries
-            # original messages, so mm_processor reapplies the chat template locally.
-            routing_tokens, block_mm_infos = await self._process_mm_request(
+            routing_tokens, block_mm_infos = self._process_mm_request(
                 request, messages, image_urls
             )
         else:
-            # Text-only: rely on frontend-preprocessed token_ids (ModelInput.Tokens contract).
             routing_tokens = request.get("token_ids")
             if not routing_tokens:
                 raise ValueError("Missing token_ids in preprocessed request")
             n_blocks = (len(routing_tokens) + self.block_size - 1) // self.block_size
-            # Text-only routing has no multimodal objects; provide per-block None entries.
             block_mm_infos = [None] * n_blocks
 
-        # Route and generate through KvRouter with explicit fields.
-        # We pass:
-        # - execution payload (token_ids + multi_modal_data)
-        # - routing payload (mm_routing_info: routing_token_ids + block_mm_infos)
-        # so generate() can select a worker internally while preserving MM correctness.
         stream = await self.kv_router.generate(
             token_ids=request.get("token_ids"),
             model=request["model"],
@@ -122,28 +65,22 @@ class MMRouterHandler:
         async for response in stream:
             yield response
 
-    async def _process_mm_request(
+    def _process_mm_request(
         self,
         request: dict,
         messages: list[dict],
         image_urls: list[str],
     ) -> tuple[list[int], list[dict | None]]:
-        """
-        Process a multimodal request into routing-only metadata.
-
-        This loads image bytes for hashing, expands the routing token sequence,
-        rewrites transport URLs when requested, and builds per-block MM metadata.
-        """
-        processed, raw_bytes_list = await process_multimodal(
+        """Process multimodal: load images, expand tokens, build routing info."""
+        processed = process_multimodal(
             messages=messages,
             image_urls=image_urls,
             tokenizer=self.tokenizer,
             processor=self.processor,
             model=self.model,
-            image_loader=self._image_loader,
         )
 
-        # Strip image content from messages to reduce payload
+        # Strip image content from messages to reduce serialization payload
         for msg in messages:
             content = msg.get("content", [])
             if isinstance(content, list):
@@ -151,16 +88,12 @@ class MMRouterHandler:
                     if part.get("type") == "image_url":
                         part["image_url"]["url"] = "<stripped>"
 
-        # Rewrite multi_modal_data URLs: Url → RawUrl (skips url::Url::parse in Rust)
+        # Rewrite Url → RawUrl to skip url::Url::parse in Rust depythonize
         mm_data = request.get("multi_modal_data", {})
         if isinstance(mm_data, dict):
-            for i, item in enumerate(mm_data.get("image_url", [])):
-                if not isinstance(item, dict) or "Url" not in item:
-                    continue
-                raw = raw_bytes_list[i] if i < len(raw_bytes_list) else None
-                value = self._rewrite_url(item["Url"], raw)
-                del item["Url"]
-                item["RawUrl"] = value
+            for item in mm_data.get("image_url", []):
+                if isinstance(item, dict) and "Url" in item:
+                    item["RawUrl"] = item.pop("Url")
 
         block_mm_infos = build_block_mm_infos(
             num_tokens=len(processed.tokens),
@@ -172,25 +105,3 @@ class MMRouterHandler:
             raise ValueError("Failed to build block_mm_infos")
 
         return processed.tokens, block_mm_infos
-
-    def _rewrite_url(self, url: str, raw_bytes: bytes | None) -> str:
-        """Rewrite URL for backend transport. Non-HTTP and 'url' mode pass through."""
-        if self.transport_mode == "url" or not url.startswith(("http://", "https://")):
-            return url
-        if raw_bytes is None:
-            logger.warning("Missing raw bytes for %s; keeping URL", url[:80])
-            return url
-        mime = _detect_mime(raw_bytes)
-        b64 = base64.b64encode(raw_bytes).decode("ascii")
-        return f"data:{mime};base64,{b64}"
-
-
-def _detect_mime(raw_bytes: bytes) -> str:
-    """Detect MIME type from magic bytes."""
-    if raw_bytes[:8] == b"\x89PNG\r\n\x1a\n":
-        return "image/png"
-    if raw_bytes[:2] == b"\xff\xd8":
-        return "image/jpeg"
-    if raw_bytes[:4] == b"RIFF" and raw_bytes[8:12] == b"WEBP":
-        return "image/webp"
-    return "application/octet-stream"

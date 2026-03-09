@@ -5,36 +5,35 @@
 Multimodal processing utilities for vLLM MM Router Worker.
 
 Key differences from the TRT-LLM version:
-- Image loading uses RoutingImageLoader to fetch raw bytes and dimensions.
-- mm_hash is computed from raw image bytes to match vLLM multi_modal_uuids.
-- Token replacement is not needed - vLLM keeps the original image_token_id.
+- mm_hash uses PIL image bytes to match the vLLM backend's multi_modal_uuids.
+- Token replacement is not needed — vLLM keeps the original image_token_id.
+- Fast path token expansion computes token counts from image dimensions directly.
 """
 
+import base64
 import logging
 from dataclasses import dataclass
 from io import BytesIO
 from typing import Any, Sequence
+from urllib.parse import urlparse
 
+import requests
 from PIL import Image
 
 from dynamo.vllm.multimodal_utils.hash_utils import compute_mm_uuids_from_images
-
-from .image_loader import RoutingImageLoader
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass
 class ProcessedInput:
-    """Processed multimodal input."""
-
     tokens: list[int]
     mm_hashes: list[int] | None
-    image_ranges: list[tuple[int, int]] | None  # [(start, end), ...] per image
+    image_ranges: list[tuple[int, int]] | None
 
 
 # =============================================================================
-# Public functions
+# Public API
 # =============================================================================
 
 
@@ -52,42 +51,31 @@ def extract_image_urls(messages: list[dict]) -> list[str]:
     return urls
 
 
-async def process_multimodal(
+def process_multimodal(
     messages: list[dict],
     image_urls: list[str],
     tokenizer: Any,
     processor: Any,
     model: str,
-    image_loader: RoutingImageLoader,
-) -> tuple[ProcessedInput, list[bytes]]:
-    """
-    Process multimodal request: load images, get expanded tokens and mm_hashes.
+) -> ProcessedInput:
+    """Process multimodal request: load images, expand tokens, compute mm_hashes.
 
-    Returns (ProcessedInput, raw_bytes_list).
+    Uses PIL images for hash computation to natively match the vLLM backend's
+    multi_modal_uuids — no backend changes needed.
     """
-    # The preprocessed request does not carry a rendered template string; it carries
-    # original messages in extra_args, so we must apply the chat template again here.
     prompt = _apply_chat_template(messages, tokenizer, processor)
 
-    # Load images as raw bytes plus dimensions. The router only needs metadata here;
-    # full PIL decode is deferred to the processor fallback path if necessary.
-    image_data = await image_loader.load_batch(image_urls)
-    raw_bytes_list = [d[0] for d in image_data]
-    image_dims = [(d[1], d[2]) for d in image_data]
+    pil_images = [_load_image(url) for url in image_urls]
+    image_dims = [(img.width, img.height) for img in pil_images]
 
-    # Get expanded tokens and image ranges (no token replacement for vLLM).
     tokens, image_ranges = _get_expanded_tokens(
-        prompt, image_dims, raw_bytes_list, tokenizer, processor
+        prompt, image_dims, pil_images, tokenizer, processor
     )
 
-    # Compute mm_hashes exactly like the vLLM handler's multi_modal_uuids path.
-    mm_uuids = compute_mm_uuids_from_images(raw_bytes_list)
+    mm_uuids = compute_mm_uuids_from_images(pil_images)
     mm_hashes = [int(uuid[:16], 16) for uuid in mm_uuids]
 
-    return (
-        ProcessedInput(tokens=tokens, mm_hashes=mm_hashes, image_ranges=image_ranges),
-        raw_bytes_list,
-    )
+    return ProcessedInput(tokens=tokens, mm_hashes=mm_hashes, image_ranges=image_ranges)
 
 
 def build_block_mm_infos(
@@ -96,39 +84,27 @@ def build_block_mm_infos(
     mm_hashes: list[int] | None,
     image_ranges: list[tuple[int, int]] | None,
 ) -> list[dict | None] | None:
-    """
-    Build per-block mm_info for routing.
-
-    For each block, check which images overlap with it and add their mm_hash.
-    Assumption: mm_hashes and image_ranges are in the same order as images appear
-    in the request (which matches their order in the token sequence).
-    Uses a two-pointer scan over sorted image_ranges for O(num_blocks + num_images)
-    instead of O(num_blocks × num_images).
-    """
+    """Build per-block mm_info for KV-cache-aware routing."""
     if not mm_hashes or not image_ranges or len(mm_hashes) != len(image_ranges):
         return None
 
     num_blocks = (num_tokens + block_size - 1) // block_size
-
-    # Sort images by start position (they should already be sorted, but be safe)
     sorted_imgs = sorted(zip(image_ranges, mm_hashes), key=lambda x: x[0][0])
 
     result: list[dict | None] = []
-    img_ptr = 0  # first image that hasn't ended before current block
+    img_ptr = 0
     for block_idx in range(num_blocks):
         block_start = block_idx * block_size
         block_end = block_start + block_size
 
-        # Advance past images that ended before this block
         while img_ptr < len(sorted_imgs) and sorted_imgs[img_ptr][0][1] <= block_start:
             img_ptr += 1
 
-        # Collect overlapping images (scan forward from img_ptr)
         mm_objects = []
         for j in range(img_ptr, len(sorted_imgs)):
             img_start, img_end = sorted_imgs[j][0]
             if img_start >= block_end:
-                break  # no more images can overlap
+                break
             mm_objects.append({"mm_hash": sorted_imgs[j][1], "offsets": []})
 
         result.append({"mm_objects": mm_objects} if mm_objects else None)
@@ -136,7 +112,7 @@ def build_block_mm_infos(
 
 
 # =============================================================================
-# Internal functions
+# Token expansion: fast path (dimensions) -> slow path (HF processor)
 # =============================================================================
 
 
@@ -156,19 +132,29 @@ def _apply_chat_template(messages: list[dict], tokenizer: Any, processor: Any) -
     raise ValueError("Neither processor nor tokenizer provides apply_chat_template")
 
 
+def _load_image(url: str) -> Image.Image:
+    """Load image from URL or data URI, returning PIL RGB image."""
+    parsed = urlparse(url)
+    if parsed.scheme == "data":
+        _, data = parsed.path.split(",", 1)
+        raw_bytes = base64.b64decode(data)
+    elif parsed.scheme in ("http", "https"):
+        response = requests.get(url, timeout=30)
+        response.raise_for_status()
+        raw_bytes = response.content
+    else:
+        raise ValueError(f"Unsupported URL scheme: {parsed.scheme}")
+    return Image.open(BytesIO(raw_bytes)).convert("RGB")
+
+
 def _get_expanded_tokens(
     prompt: str,
     image_dims: list[tuple[int, int]],
-    raw_bytes_list: list[bytes],
+    pil_images: list[Image.Image],
     tokenizer: Any,
     processor: Any,
 ) -> tuple[list[int], list[tuple[int, int]] | None]:
-    """
-    Get tokens with visual expansion and find each image's token range.
-
-    Unlike the TRT-LLM version, vLLM keeps the original image_token_id
-    as-is in the routing token sequence.
-    """
+    """Expand image placeholder tokens. Fast path from dims, slow path via processor."""
     if processor is None:
         return tokenizer.encode(prompt), None
 
@@ -178,7 +164,6 @@ def _get_expanded_tokens(
         logger.info("Fast path failed (%s), falling back to processor", e)
 
     try:
-        pil_images = [Image.open(BytesIO(raw)) for raw in raw_bytes_list]
         return _expand_with_processor(prompt, pil_images, tokenizer, processor)
     except Exception as e:
         logger.warning("Slow path also failed: %s", e, exc_info=True)
@@ -246,14 +231,12 @@ def _expand_with_processor(
     if image_token_id is None:
         return tokens, None
 
-    # Find contiguous image token regions, then split by per-image token counts
     merge_size = getattr(processor.image_processor, "merge_size", 2)
     grid_thw = output.get("image_grid_thw")
     if grid_thw is None:
         return tokens, None
     tokens_per_image = [int(t * h * w) // (merge_size**2) for t, h, w in grid_thw]
 
-    # Find contiguous ranges of image_token_id
     contiguous: list[tuple[int, int]] = []
     run_start = None
     for i, t in enumerate(tokens):
@@ -266,7 +249,6 @@ def _expand_with_processor(
     if run_start is not None:
         contiguous.append((run_start, len(tokens)))
 
-    # Split contiguous ranges into per-image ranges
     result: list[tuple[int, int]] = []
     img_idx = 0
     for rng_start, rng_end in contiguous:

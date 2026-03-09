@@ -60,25 +60,23 @@ class LoRAInfo:
 
 
 def _compute_mm_uuids(
-    multi_modal_data_or_images: Dict[str, Any] | list | None,
+    multi_modal_data: Dict[str, Any] | None
 ) -> Dict[str, list[str]] | None:
-    """Compute multi_modal_uuids from multi_modal_data, PIL images, or raw bytes."""
-    if multi_modal_data_or_images is None:
+    """
+    Compute multi_modal_uuids from multi_modal_data.
+
+    Each image gets a SHA256 hex digest as its UUID, ensuring consistent
+    hashing across the MM Router, vLLM handler, and Rust KV publisher.
+    """
+    if not multi_modal_data or "image" not in multi_modal_data:
         return None
-
-    if isinstance(multi_modal_data_or_images, dict):
-        if "image" not in multi_modal_data_or_images:
-            return None
-        images = multi_modal_data_or_images["image"]
-        if not isinstance(images, list):
-            images = [images]
-    else:
-        images = multi_modal_data_or_images
-
+    images = multi_modal_data["image"]
+    if not isinstance(images, list):
+        images = [images]
     if not images:
         return None
-
-    return {"image": compute_mm_uuids_from_images(images)}
+    uuids = compute_mm_uuids_from_images(images)
+    return {"image": uuids}
 
 
 # LoRAManager singleton - initialized lazily when DYN_LORA_ENABLED is set
@@ -319,11 +317,6 @@ class BaseWorkerHandler(ABC):
         self.model_max_len = model_max_len
         self.enable_multimodal = enable_multimodal
         self.enable_frontend_decoding = enable_frontend_decoding
-        self.enable_mm_router = os.environ.get("DYN_ENABLE_MM_ROUTER", "").lower() in (
-            "1",
-            "true",
-            "yes",
-        )
         # NIXL connector for frontend decoding - lazy initialized
         self._nixl_connector: nixl_connect.Connector | None = None
         self._nixl_connector_lock = asyncio.Lock()
@@ -966,15 +959,12 @@ class BaseWorkerHandler(ABC):
 
     async def _extract_multimodal_data(
         self, request: Dict[str, Any]
-    ) -> tuple[Dict[str, Any] | None, list[bytes] | None]:
+    ) -> Dict[str, Any] | None:
         """
         Extract and decode multimodal data from PreprocessedRequest.
-
-        Returns (vllm_mm_data, raw_bytes_list) where raw_bytes_list contains
-        the raw file bytes for each image (used for hash computation).
         """
         if "multi_modal_data" not in request or request["multi_modal_data"] is None:
-            return None, None
+            return None
 
         # Security check: reject multimodal data if not explicitly enabled
         if not self.enable_multimodal:
@@ -993,28 +983,6 @@ class BaseWorkerHandler(ABC):
                     self._nixl_connector = nixl_connect.Connector()
                     await self._nixl_connector.initialize()
 
-        if self.enable_mm_router and not self.enable_frontend_decoding:
-            image_mm_items = mm_map.get(IMAGE_URL_KEY, [])
-            (
-                images,
-                raw_bytes_list,
-            ) = await self.image_loader.load_image_batch_with_raw_bytes(image_mm_items)
-
-            if images:
-                # vLLM expects single image or list
-                vllm_mm_data["image"] = images[0] if len(images) == 1 else images
-                logger.debug(
-                    f"Extracted {len(images)} image(s) for multimodal processing"
-                )
-
-            # Handle video_url entries (future expansion)
-            if VIDEO_URL_KEY in mm_map:
-                logger.warning(
-                    "Video multimodal data not yet supported in standard worker"
-                )
-
-            return (vllm_mm_data if vllm_mm_data else None), raw_bytes_list
-
         # Process image_url entries
         images = await self.image_loader.load_image_batch(
             mm_map.get(IMAGE_URL_KEY, []),
@@ -1031,7 +999,7 @@ class BaseWorkerHandler(ABC):
         if VIDEO_URL_KEY in mm_map:
             logger.warning("Video multimodal data not yet supported in standard worker")
 
-        return (vllm_mm_data if vllm_mm_data else None), None
+        return vllm_mm_data if vllm_mm_data else None
 
     def _build_prompt_from_request(
         self,
@@ -1039,7 +1007,6 @@ class BaseWorkerHandler(ABC):
         request_id: str,
         multi_modal_data: Dict[str, Any] | None,
         log_prefix: str = "",
-        raw_bytes_list: list[bytes] | None = None,
     ) -> tuple[TokensPrompt | EmbedsPrompt | None, int | None, Dict[str, Any] | None]:
         """
         Build a prompt from request, handling both prompt_embeds and token_ids.
@@ -1049,7 +1016,6 @@ class BaseWorkerHandler(ABC):
             request_id: Request ID for logging
             multi_modal_data: Optional multimodal data to attach to TokensPrompt
             log_prefix: Prefix for log messages (e.g., "Prefill " for prefill requests)
-            raw_bytes_list: Optional raw file bytes for hash computation
 
         Returns:
             Tuple of (prompt, embedding_sequence_length, error_dict) where:
@@ -1085,14 +1051,11 @@ class BaseWorkerHandler(ABC):
                     },
                 )
         # Normal path: use token IDs
+        mm_uuids = _compute_mm_uuids(multi_modal_data)
         prompt_kwargs = dict[str, Any](
             prompt_token_ids=request["token_ids"],
             multi_modal_data=multi_modal_data,
         )
-        if raw_bytes_list:
-            mm_uuids = _compute_mm_uuids(raw_bytes_list)
-        else:
-            mm_uuids = _compute_mm_uuids(multi_modal_data)
         if mm_uuids is not None:
             prompt_kwargs["multi_modal_uuids"] = mm_uuids
 
@@ -1364,11 +1327,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
     async def _generate_token_mode(self, request, context, request_id):
         """Generate tokens using internal protocol format (token-in-token-out)."""
         # Extract and decode multimodal data if present
-        multi_modal_data, raw_bytes_list = await self._extract_multimodal_data(request)
+        multi_modal_data = await self._extract_multimodal_data(request)
 
         # Build prompt from request (handles both prompt_embeds and token_ids)
         prompt, embedding_sequence_length, error = self._build_prompt_from_request(
-            request, request_id, multi_modal_data, raw_bytes_list=raw_bytes_list
+            request, request_id, multi_modal_data
         )
         if error is not None:
             yield error
@@ -1567,15 +1530,11 @@ class PrefillWorkerHandler(BaseWorkerHandler):
     async def _generate_token_mode(self, request, context, request_id):
         """Generate prefill using internal protocol format (token-in-token-out)."""
         # Extract and decode multimodal data if present
-        multi_modal_data, raw_bytes_list = await self._extract_multimodal_data(request)
+        multi_modal_data = await self._extract_multimodal_data(request)
 
         # Build prompt from request (handles both prompt_embeds and token_ids)
         prompt, embedding_sequence_length, error = self._build_prompt_from_request(
-            request,
-            request_id,
-            multi_modal_data,
-            log_prefix="Prefill ",
-            raw_bytes_list=raw_bytes_list,
+            request, request_id, multi_modal_data, log_prefix="Prefill "
         )
         if error is not None:
             # Prefill errors need disaggregated_params field
