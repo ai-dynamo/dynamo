@@ -154,7 +154,7 @@ stateDiagram-v2
 |-------|-------------|:--------------:|:--------------:|
 | `EMPTY` | No connections, no committed epoch visible | ✓ | ✗ |
 | `RW` | Writer connected (exclusive access) | ✗ | ✗ |
-| `COMMITTED` | Published immutable epoch visible to readers, no active connections | ✓ | ✓ |
+| `COMMITTED` | Committed epoch visible to readers, no active connections | ✓ | ✓ |
 | `RO` | One or more readers connected (shared access) | ✗ | ✓ |
 
 ### Events
@@ -183,6 +183,7 @@ GMS uses epoch-scoped allocations and metadata:
 - `epoch_id` is write-once and never mutated.
 - RO requests are served only from the current committed epoch.
 - RW requests mutate only the active RW epoch.
+- Read RPCs (`export`, allocation lookup/listing, metadata lookup/listing) are scoped to the committed epoch for RO clients and to the active epoch for RW clients.
 - Transition to `EMPTY` marks a new uncommitted epoch boundary.
 - On `RW_CONNECT`, prior committed visibility is invalidated immediately.
 - On `RW_COMMIT`, the active RW epoch becomes the committed epoch atomically.
@@ -202,6 +203,11 @@ When a writer requests a new allocation, GMS treats CUDA OOM as a transient cond
   - `--alloc-retry-timeout` (default unset = wait indefinitely)
 
 This ensures the "new epoch gets new allocations" workflow can wait for memory reclamation instead of racing into immediate OOM failures.
+
+### Scope
+
+- GMS now guarantees that its own RPCs do not mix committed and active generations, and that client-side `commit()` performs a CUDA synchronize before publish.
+- GMS does not prove that a disconnected or already-submitted writer has no in-flight GPU work left on the device. The mitigation in this design is that new RW epochs use fresh allocations and may wait for memory reclamation before allocation succeeds.
 
 ---
 
