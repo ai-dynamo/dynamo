@@ -1859,12 +1859,10 @@ spec:
 			})
 			Expect(err).NotTo(HaveOccurred())
 
-			// ProfilingPhase should be cleared after profiling completes
-			// Note: Due to the r.Update/r.Status().Update ordering in generateDGDSpec,
-			// ProfilingPhase may not be cleared in a single reconcile. Verify the phase
-			// transition happened correctly.
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &updated)).Should(Succeed())
-			Expect(updated.Status.Phase).ShouldNot(Equal(nvidiacomv1beta1.DGDRPhaseProfiling))
+			Expect(updated.Status.ProfilingPhase).Should(BeEmpty(), "profilingPhase must be cleared after profiling completes")
+			Expect(updated.Status.Phase).Should(Equal(nvidiacomv1beta1.DGDRPhaseDeploying),
+				"phase must be Deploying after profiling completes with autoApply=true")
 		})
 
 		It("Should use spec.features.mocker.enabled to select mocker output", func() {
@@ -2012,6 +2010,251 @@ spec:
 			job := &batchv1.Job{}
 			_ = k8sClient.Get(ctx, types.NamespacedName{Name: updated.Status.ProfilingJobName, Namespace: namespace}, job)
 			_ = k8sClient.Delete(ctx, job)
+		})
+
+		It("Should clear profilingPhase, set ProfilingCompleted condition, and populate profilingResults.selectedConfig after profiling completes", func() {
+			// Regression test for: profilingPhase staying "Initializing", Profiling condition
+			// not updated to ProfilingCompleted, and profilingResults never populated.
+			// Root cause was that generateDGDSpec called r.Get() before r.Status().Update(),
+			// overwriting the in-memory status changes made by handleProfilingPhase.
+			ctx := context.Background()
+			dgdrName := "test-dgdr-status-regression"
+			namespace := defaultNamespace
+
+			dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      dgdrName,
+					Namespace: namespace,
+				},
+				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
+					Model:     "test-model",
+					Backend:   "vllm",
+					Image:     "test-profiler:latest",
+					AutoApply: ptr.To(false),
+					Hardware: &nvidiacomv1beta1.HardwareSpec{
+						NumGPUsPerNode: ptr.To[int32](8),
+						GPUSKU:         nvidiacomv1beta1.GPUSKUTypeH100SXM,
+						VRAMMB:         ptr.To(81920.0),
+						TotalGPUs:      ptr.To[int32](8),
+					},
+					SLA: &nvidiacomv1beta1.SLASpec{
+						TTFT: ptr.To(200.0),
+						ITL:  ptr.To(30.0),
+					},
+				},
+			}
+
+			Expect(k8sClient.Create(ctx, dgdr)).Should(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, dgdr) }()
+
+			// Reconcile: initial validation → Pending
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: dgdrName, Namespace: namespace},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Reconcile: create profiling job → Profiling + ProfilingPhase=Initializing
+			_, err = reconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: dgdrName, Namespace: namespace},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			var updated nvidiacomv1beta1.DynamoGraphDeploymentRequest
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &updated)).Should(Succeed())
+			Expect(updated.Status.Phase).Should(Equal(nvidiacomv1beta1.DGDRPhaseProfiling))
+			Expect(updated.Status.ProfilingPhase).Should(Equal(nvidiacomv1beta1.ProfilingPhaseInitializing))
+
+			// Mark profiling job as complete
+			jobName := getProfilingJobName(&updated)
+			job := &batchv1.Job{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: jobName, Namespace: namespace}, job)).Should(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, job) }()
+			job.Status.Conditions = []batchv1.JobCondition{{
+				Type:   batchv1.JobComplete,
+				Status: corev1.ConditionTrue,
+			}}
+			Expect(k8sClient.Status().Update(ctx, job)).Should(Succeed())
+
+			// Create the output ConfigMap that the sidecar would have created
+			dgdYAML := `apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: test-status-regression-dgd
+spec:
+  services:
+    Frontend:
+      replicas: 1
+    VllmWorker:
+      replicas: 2`
+
+			cm := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      getOutputConfigMapName(&updated),
+					Namespace: namespace,
+				},
+				Data: map[string]string{
+					ProfilingOutputFile: dgdYAML,
+				},
+			}
+			Expect(k8sClient.Create(ctx, cm)).Should(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, cm) }()
+
+			// Reconcile: profiling complete → should clear profilingPhase, set
+			// ProfilingCompleted condition, populate profilingResults.selectedConfig
+			_, err = reconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: dgdrName, Namespace: namespace},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &updated)).Should(Succeed())
+
+			// profilingPhase must be cleared (was staying "Initializing" before fix)
+			Expect(updated.Status.ProfilingPhase).Should(BeEmpty(),
+				"profilingPhase should be cleared after profiling completes")
+
+			// Profiling condition must be ProfilingCompleted (was never set before fix)
+			profilingCond := meta.FindStatusCondition(updated.Status.Conditions, nvidiacomv1beta1.ConditionTypeProfiling)
+			Expect(profilingCond).ShouldNot(BeNil(), "Profiling condition must exist")
+			Expect(profilingCond.Status).Should(Equal(metav1.ConditionTrue),
+				"Profiling condition status must be True")
+			Expect(profilingCond.Reason).Should(Equal("ProfilingCompleted"),
+				"Profiling condition reason must be ProfilingCompleted")
+
+			// profilingResults.selectedConfig must be populated (was nil before fix)
+			Expect(updated.Status.ProfilingResults).ShouldNot(BeNil(),
+				"profilingResults must be populated after profiling")
+			Expect(updated.Status.ProfilingResults.SelectedConfig).ShouldNot(BeNil(),
+				"profilingResults.selectedConfig must be set")
+			Expect(updated.Status.ProfilingResults.SelectedConfig.Raw).ShouldNot(BeEmpty(),
+				"profilingResults.selectedConfig must not be empty JSON")
+
+			// Phase must be Ready (autoApply=false → profiling complete, spec available)
+			Expect(updated.Status.Phase).Should(Equal(nvidiacomv1beta1.DGDRPhaseReady),
+				"phase must be Ready after profiling completes with autoApply=false")
+		})
+
+		It("Should populate profilingResults.pareto from webui_data.json in output ConfigMap", func() {
+			// Regression test for profilingResults.pareto never being populated.
+			// The sidecar now includes webui_data.json in the output ConfigMap;
+			// the controller reads it to populate status.profilingResults.pareto.
+			ctx := context.Background()
+			dgdrName := "test-dgdr-pareto"
+			namespace := defaultNamespace
+
+			dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      dgdrName,
+					Namespace: namespace,
+				},
+				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
+					Model:     "test-model",
+					Backend:   "vllm",
+					Image:     "test-profiler:latest",
+					AutoApply: ptr.To(false),
+					Hardware: &nvidiacomv1beta1.HardwareSpec{
+						NumGPUsPerNode: ptr.To[int32](8),
+						GPUSKU:         nvidiacomv1beta1.GPUSKUTypeH100SXM,
+						VRAMMB:         ptr.To(81920.0),
+						TotalGPUs:      ptr.To[int32](8),
+					},
+					SLA: &nvidiacomv1beta1.SLASpec{
+						TTFT: ptr.To(200.0),
+						ITL:  ptr.To(30.0),
+					},
+				},
+			}
+
+			Expect(k8sClient.Create(ctx, dgdr)).Should(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, dgdr) }()
+
+			// Drive to Profiling phase
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: dgdrName, Namespace: namespace},
+			})
+			Expect(err).NotTo(HaveOccurred())
+			_, err = reconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: dgdrName, Namespace: namespace},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			var updated nvidiacomv1beta1.DynamoGraphDeploymentRequest
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &updated)).Should(Succeed())
+			Expect(updated.Status.Phase).Should(Equal(nvidiacomv1beta1.DGDRPhaseProfiling))
+
+			// Mark job complete
+			jobName := getProfilingJobName(&updated)
+			job := &batchv1.Job{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: jobName, Namespace: namespace}, job)).Should(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, job) }()
+			job.Status.Conditions = []batchv1.JobCondition{{
+				Type:   batchv1.JobComplete,
+				Status: corev1.ConditionTrue,
+			}}
+			Expect(k8sClient.Status().Update(ctx, job)).Should(Succeed())
+
+			// Create output ConfigMap that includes both final_config.yaml and webui_data.json.
+			// The webui_data.json format mirrors what the profiler writes; two rows in cost.table
+			// represent two Pareto-optimal configurations.
+			dgdYAML := `apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: test-pareto-dgd
+spec:
+  services:
+    Frontend:
+      replicas: 1`
+
+			webUIDataJSON := `{
+  "settings": {},
+  "prefill": {"chart": {}, "table": {"columns": [], "data": []}},
+  "decode":  {"chart": {}, "table": {"columns": [], "data": []}},
+  "cost": {
+    "chart": {},
+    "index_mapping": {"0": [0, 0], "1": [0, 1]},
+    "table": {
+      "columns": ["TTFT (ms)", "Prefill Thpt", "ITL (ms)", "Decode Thpt", "Tokens/User", "GPU Hours", "Action"],
+      "data": [
+        [94.38, 7946.85, 7.09, 35.26, 141.04, 16.17,
+          "# Prefill: 4 GPU(s), TP=4\n# Decode: 4 GPU(s), TP=4\napiVersion: nvidia.com/v1alpha1\nkind: DynamoGraphDeployment\nspec:\n  services:\n    PrefillWorker:\n      replicas: 1\n    DecodeWorker:\n      replicas: 1\n"],
+        [94.38, 7946.85, 10.69, 46.77, 93.54, 6.36,
+          "# Prefill: 4 GPU(s), TP=4\n# Decode: 2 GPU(s), TP=2\napiVersion: nvidia.com/v1alpha1\nkind: DynamoGraphDeployment\nspec:\n  services:\n    PrefillWorker:\n      replicas: 1\n    DecodeWorker:\n      replicas: 1\n"]
+      ]
+    }
+  }
+}`
+
+			cm := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      getOutputConfigMapName(&updated),
+					Namespace: namespace,
+				},
+				Data: map[string]string{
+					ProfilingOutputFile: dgdYAML,
+					"webui_data.json":   webUIDataJSON,
+				},
+			}
+			Expect(k8sClient.Create(ctx, cm)).Should(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, cm) }()
+
+			// Reconcile to complete profiling and populate profilingResults
+			_, err = reconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: dgdrName, Namespace: namespace},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &updated)).Should(Succeed())
+
+			// profilingResults.pareto must contain both Pareto-optimal configurations
+			Expect(updated.Status.ProfilingResults).ShouldNot(BeNil(),
+				"profilingResults must be populated")
+			Expect(updated.Status.ProfilingResults.Pareto).Should(HaveLen(2),
+				"profilingResults.pareto should contain 2 entries from webui_data.json")
+
+			// Each pareto entry must have non-empty Config
+			for i, p := range updated.Status.ProfilingResults.Pareto {
+				Expect(p.Config.Raw).ShouldNot(BeEmpty(),
+					"pareto[%d].config must not be empty", i)
+			}
 		})
 
 		It("Should validate typed hardware fields without blob parsing", func() {
