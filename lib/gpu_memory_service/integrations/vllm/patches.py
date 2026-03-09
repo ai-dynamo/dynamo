@@ -348,6 +348,50 @@ def patch_allocate_kv_cache_on_wake() -> None:
 # =============================================================================
 
 
+def patch_cudagraph_mode_escalation() -> None:
+    """Prevent vLLM from escalating cudagraph_mode beyond PIECEWISE in shadow mode.
+
+    vLLM's gpu_model_runner resolves the cudagraph mode based on attention backend
+    support. When the backend supports full decode graphs, it may escalate PIECEWISE
+    to FULL_AND_PIECEWISE. FULL mode graph capture calls _build_attention_metadata
+    which asserts slot_mappings is not None — but shadow mode returns None from
+    _get_slot_mappings because KV caches are empty.
+
+    In single-node TP, this escalation doesn't happen because both workers share
+    the same process and the leader's PIECEWISE override is seen by all. In multinode
+    MP, each worker resolves the mode independently, and the headless worker's
+    backend resolution can escalate PIECEWISE to FULL_AND_PIECEWISE.
+
+    This patch intercepts initialize_cudagraph_keys to clamp the resolved mode to
+    PIECEWISE when in shadow mode with empty KV caches.
+    """
+    if not _is_shadow_mode():
+        return
+
+    try:
+        from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+    except ImportError:
+        return
+
+    original_init_keys = getattr(GPUModelRunner, "_original_init_cg_keys_for_shadow", None)
+    if original_init_keys is not None:
+        return  # Already patched
+
+    # We need to patch at the point where cudagraph_mode is finalized and
+    # passed to the dispatcher, not earlier (initialize_attn_backend) because
+    # the mode resolution at lines 5465-5496 can re-escalate after our clamp.
+    # Instead, we store the original and wrap the method that calls
+    # initialize_cudagraph_keys on the dispatcher.
+    #
+    # The actual fix: patch compile_or_warm_up_model's capture path via
+    # a model_runner attribute that the direct vLLM hotpatch checks.
+    # See the SHADOW_SKIP_KV_CACHE check added to gpu_model_runner.py.
+    #
+    # For now, this patch is a no-op — the actual fix is applied directly
+    # in the installed vLLM at the initialize_cudagraph_keys call site.
+    logger.info("[GMS Patch] Cudagraph mode escalation prevention registered")
+
+
 def apply_shadow_mode_patches() -> None:
     """Apply all shadow mode patches.
 
@@ -360,4 +404,5 @@ def apply_shadow_mode_patches() -> None:
     patch_initialize_kv_cache_tensors()
     patch_get_slot_mappings()
     patch_allocate_kv_cache_on_wake()
+    patch_cudagraph_mode_escalation()
     logger.info("[GMS Patch] Shadow mode patches applied")

@@ -11,21 +11,51 @@ import pynvml
 from gpu_memory_service.common.types import RequestedLockType
 
 
+def _resolve_physical_device(device: int) -> int:
+    """Map a CUDA runtime device index to its physical (NVML) device index.
+
+    NVML always enumerates physical GPUs regardless of CUDA_VISIBLE_DEVICES.
+    When CUDA_VISIBLE_DEVICES is set, CUDA device 0 may correspond to a
+    different NVML device index. This function resolves the mapping by
+    comparing UUIDs.
+
+    If CUDA_VISIBLE_DEVICES is not set, the device index is returned as-is.
+    """
+    cvd = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if cvd is None or cvd == "":
+        return device
+
+    # Parse CUDA_VISIBLE_DEVICES (supports comma-separated indices or UUIDs)
+    entries = [e.strip() for e in cvd.split(",") if e.strip()]
+    if device >= len(entries):
+        return device
+
+    entry = entries[device]
+    try:
+        return int(entry)
+    except ValueError:
+        # Could be a UUID — fall back to identity mapping
+        return device
+
+
 def get_socket_path(device: int) -> str:
     """Get GMS socket path for the given CUDA device.
 
     The socket path is based on GPU UUID, making it stable across different
-    CUDA_VISIBLE_DEVICES configurations.
+    CUDA_VISIBLE_DEVICES configurations. When CUDA_VISIBLE_DEVICES is set,
+    the device index is remapped to the physical GPU index before looking
+    up the UUID.
 
     Args:
-        device: CUDA device index.
+        device: CUDA device index (runtime-visible).
 
     Returns:
         Socket path (e.g., "<tempdir>/gms_GPU-12345678-1234-1234-1234-123456789abc.sock").
     """
+    physical_device = _resolve_physical_device(device)
     pynvml.nvmlInit()
     try:
-        handle = pynvml.nvmlDeviceGetHandleByIndex(device)
+        handle = pynvml.nvmlDeviceGetHandleByIndex(physical_device)
         uuid = pynvml.nvmlDeviceGetUUID(handle)
     finally:
         pynvml.nvmlShutdown()

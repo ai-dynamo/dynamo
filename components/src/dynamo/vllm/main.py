@@ -102,6 +102,40 @@ def run_dynamo_headless(config: Config) -> None:
     Secondary nodes spawn vLLM workers only — no engine core, no scheduler,
     no Dynamo endpoints. Bypasses DistributedRuntime entirely (no NATS/etcd).
     """
+    # Propagate worker_cls for custom load formats (GMS, ModelExpress) so that
+    # headless worker processes use the same model loader as the leader node.
+    if config.engine_args.load_format == "gms":
+        config.engine_args.worker_cls = (
+            "gpu_memory_service.integrations.vllm.worker.GMSWorker"
+        )
+    elif config.engine_args.load_format in ("mx-source", "mx-target"):
+        config.engine_args.worker_cls = (
+            "modelexpress.vllm_worker.ModelExpressWorker"
+        )
+
+    # Shadow mode: force PIECEWISE cudagraph mode on headless workers to match
+    # the leader's override (set in setup_vllm_engine). Without this, the
+    # headless worker's cudagraph_dispatcher may include FULL mode captures
+    # that the leader doesn't do, causing NCCL collective mismatches.
+    if os.environ.get("SHADOW_SKIP_KV_CACHE") == "1":
+        import json as _json
+
+        cc = config.engine_args.compilation_config
+        if cc is None:
+            config.engine_args.compilation_config = {"cudagraph_mode": "PIECEWISE"}
+        elif isinstance(cc, dict):
+            cc["cudagraph_mode"] = "PIECEWISE"
+        elif isinstance(cc, str):
+            try:
+                parsed = _json.loads(cc)
+                parsed["cudagraph_mode"] = "PIECEWISE"
+                config.engine_args.compilation_config = _json.dumps(parsed)
+            except _json.JSONDecodeError:
+                pass
+        logger.info(
+            "[Headless Shadow] Forced cudagraph_mode=PIECEWISE to match leader"
+        )
+
     args = build_headless_namespace(config)
     run_headless(args)
 
