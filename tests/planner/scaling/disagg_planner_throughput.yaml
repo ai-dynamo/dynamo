@@ -23,13 +23,10 @@ spec:
           command:
           - python3
           - -m
-          - planner_sla
+          - dynamo.planner
           args:
-            - --environment=kubernetes
-            - --backend=vllm
-            - --adjustment-interval=60
-            - --profile-results-dir=/workspace/tests/planner/profiling_results/H200_TP1P_TP1D
-            - --no-correction
+            - --config
+            - '{"environment": "kubernetes", "backend": "vllm", "throughput_adjustment_interval": 60, "profile_results_dir": "/workspace/tests/planner/profiling_results/H200_TP1P_TP1D", "no_correction": true}'
     VllmDecodeWorker:
       envFromSecret: hf-token-secret
       componentType: worker

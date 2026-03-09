@@ -1326,6 +1326,7 @@ async fn responses(
     // Extract request parameters before into_parts() consumes the request.
     // These are echoed back in the Response object per the OpenAI spec.
     let response_params = ResponseParams {
+        model: request.inner.model.clone(),
         temperature: request.inner.temperature,
         top_p: request.inner.top_p,
         max_output_tokens: request.inner.max_output_tokens,
@@ -1333,6 +1334,11 @@ async fn responses(
         tools: request.inner.tools.clone(),
         tool_choice: request.inner.tool_choice.clone(),
         instructions: request.inner.instructions.clone(),
+        reasoning: request.inner.reasoning.clone(),
+        text: request.inner.text.clone(),
+        service_tier: request.inner.service_tier,
+        include: request.inner.include.clone(),
+        truncation: request.inner.truncation,
     };
     let request_id = request.id().to_string();
     let (orig_request, context) = request.into_parts();
@@ -1353,11 +1359,14 @@ async fn responses(
             err_response
         })?;
 
-    // For non-streaming responses, we still use internal streaming for aggregation,
-    // but we set the chat completion stream flag appropriately.
-    if !streaming {
-        chat_request.inner.stream = Some(true); // Internal streaming for aggregation
-    }
+    // Always use internal streaming for aggregation.
+    // Set stream_options.include_usage so the backend sends token counts in the final chunk.
+    chat_request.inner.stream = Some(true);
+    chat_request.inner.stream_options =
+        Some(dynamo_async_openai::types::ChatCompletionStreamOptions {
+            include_usage: true,
+            continuous_usage_stats: false,
+        });
 
     let request = context.map(|mut _req| chat_request);
 
@@ -1542,11 +1551,6 @@ pub fn validate_response_unsupported_fields(
             VALIDATION_PREFIX.to_string() + "`background: true` is not supported.",
         ));
     }
-    if inner.include.is_some() {
-        return Some(ErrorMessage::not_implemented_error(
-            VALIDATION_PREFIX.to_string() + "`include` is not supported.",
-        ));
-    }
     if inner.previous_response_id.is_some() {
         return Some(ErrorMessage::not_implemented_error(
             VALIDATION_PREFIX.to_string() + "`previous_response_id` is not supported.",
@@ -1557,29 +1561,9 @@ pub fn validate_response_unsupported_fields(
             VALIDATION_PREFIX.to_string() + "`prompt` is not supported.",
         ));
     }
-    if inner.reasoning.is_some() {
-        return Some(ErrorMessage::not_implemented_error(
-            VALIDATION_PREFIX.to_string() + "`reasoning` is not supported.",
-        ));
-    }
-    if inner.service_tier.is_some() {
-        return Some(ErrorMessage::not_implemented_error(
-            VALIDATION_PREFIX.to_string() + "`service_tier` is not supported.",
-        ));
-    }
     if inner.store == Some(true) {
         return Some(ErrorMessage::not_implemented_error(
             VALIDATION_PREFIX.to_string() + "`store: true` is not supported.",
-        ));
-    }
-    if inner.text.is_some() {
-        return Some(ErrorMessage::not_implemented_error(
-            VALIDATION_PREFIX.to_string() + "`text` is not supported.",
-        ));
-    }
-    if inner.truncation.is_some() {
-        return Some(ErrorMessage::not_implemented_error(
-            VALIDATION_PREFIX.to_string() + "`truncation` is not supported.",
         ));
     }
     None
@@ -2049,10 +2033,7 @@ mod tests {
     use crate::protocols::openai::common_ext::CommonExt;
     use crate::protocols::openai::completions::NvCreateCompletionRequest;
     use crate::protocols::openai::responses::NvCreateResponse;
-    use dynamo_async_openai::types::responses::{
-        CreateResponse, IncludeEnum, Input, PromptConfig, ServiceTier, TextConfig,
-        TextResponseFormat, Truncation,
-    };
+    use dynamo_async_openai::types::responses::{CreateResponse, Input, PromptConfig};
     use dynamo_async_openai::types::{
         ChatCompletionRequestMessage, ChatCompletionRequestUserMessage,
         ChatCompletionRequestUserMessageContent, CreateChatCompletionRequest,
@@ -2161,10 +2142,6 @@ mod tests {
         let unsupported_cases: Vec<(&str, Box<dyn FnOnce(&mut CreateResponse)>)> = vec![
             ("background", Box::new(|r| r.background = Some(true))),
             (
-                "include",
-                Box::new(|r| r.include = Some(vec![IncludeEnum::FileSearchCallResults])),
-            ),
-            (
                 "previous_response_id",
                 Box::new(|r| r.previous_response_id = Some("prev-id".into())),
             ),
@@ -2178,28 +2155,7 @@ mod tests {
                     })
                 }),
             ),
-            (
-                "reasoning",
-                Box::new(|r| r.reasoning = Some(Default::default())),
-            ),
-            (
-                "service_tier",
-                Box::new(|r| r.service_tier = Some(ServiceTier::Auto)),
-            ),
             ("store", Box::new(|r| r.store = Some(true))),
-            (
-                "text",
-                Box::new(|r| {
-                    r.text = Some(TextConfig {
-                        format: TextResponseFormat::Text,
-                        verbosity: None,
-                    })
-                }),
-            ),
-            (
-                "truncation",
-                Box::new(|r| r.truncation = Some(Truncation::Auto)),
-            ),
         ];
 
         for (field, set_field) in unsupported_cases {
