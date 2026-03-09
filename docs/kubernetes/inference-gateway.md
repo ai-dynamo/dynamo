@@ -12,7 +12,7 @@ Integrate Dynamo with the Gateway API Inference Extension for intelligent KV-awa
 
 EPP's default kv-routing approach is not token-aware because the prompt is not tokenized. But the Dynamo plugin uses a token-aware KV algorithm. It employs the dynamo router which implements kv routing by running your model's tokenizer inline. The EPP plugin configuration lives in [`helm/dynamo-gaie/epp-config-dynamo.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/inference-gateway/standalone/helm/dynamo-gaie/epp-config-dynamo.yaml) per EPP [convention](https://gateway-api-inference-extension.sigs.k8s.io/guides/epp-configuration/config-text/).
 
-Dynamo Integration with the Inference Gateway supports Aggregated and Disaggregated Serving. The epp config is the same for both. If no prefill workers found the service degrades gracefully to perform aggregated serving.
+Dynamo Integration with the Inference Gateway supports Aggregated and Disaggregated Serving. A request only exercises disaggregated routing when the EPP config defines a `prefill` profile and prefill workers are available. The shipped [`epp-config-dynamo.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/inference-gateway/standalone/helm/dynamo-gaie/epp-config-dynamo.yaml) currently only defines a `decode` profile, so the default path behaves as decode-only / aggregated fallback. If no prefill profile or workers are present, the service degrades gracefully to perform aggregated serving.
 If you want to use LoRA deploy Dynamo without the Inference Gateway.
 
 Currently, these setups are only supported with the kGateway based Inference Gateway.
@@ -44,6 +44,7 @@ Currently, these setups are only supported with the kGateway based Inference Gat
 ### 1. Install Dynamo Platform ###
 
 [See Quickstart Guide](./README.md) to install Dynamo Kubernetes Platform.
+If you are installing from the source tree rather than a release chart, follow [Path B: Custom Build from Source](./installation-guide.md#path-b-custom-build-from-source) and run `helm dep build ./platform/` before `helm install` so the vendored subcharts match the local chart contents.
 
 ### 2. Deploy Inference Gateway ###
 

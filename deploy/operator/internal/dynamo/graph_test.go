@@ -6875,6 +6875,74 @@ func TestGenerateSingleDCD_RollingUpdateContext(t *testing.T) {
 	assert.Equal(t, int32(1), *frontendDCD.Spec.Replicas)
 }
 
+func TestGenerateSingleDCD_EPPWorkerNamespaceOverride(t *testing.T) {
+	tests := []struct {
+		name             string
+		eppEnvs          []corev1.EnvVar
+		newWorkerHash    string
+		wantNamespace    string
+		wantNamespaceEnv bool
+	}{
+		{
+			name:             "hashed worker namespace is injected for EPP",
+			newWorkerHash:    "aabb1122",
+			wantNamespace:    "ns-my-dgd-aabb1122",
+			wantNamespaceEnv: true,
+		},
+		{
+			name: "explicit EPP namespace override is preserved",
+			eppEnvs: []corev1.EnvVar{
+				{Name: commonconsts.DynamoNamespaceEnvVar, Value: "custom-epp-namespace"},
+			},
+			newWorkerHash:    "aabb1122",
+			wantNamespace:    "custom-epp-namespace",
+			wantNamespaceEnv: true,
+		},
+		{
+			name:             "legacy worker hash does not inject hashed namespace",
+			newWorkerHash:    commonconsts.LegacyWorkerHash,
+			wantNamespaceEnv: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dgd := &v1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "my-dgd", Namespace: "ns"},
+				Spec: v1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+						"decode": {
+							ComponentType: commonconsts.ComponentTypeDecode,
+							Replicas:      ptr.To(int32(1)),
+						},
+						"epp": {
+							ComponentType: commonconsts.ComponentTypeEPP,
+							Envs:          tt.eppEnvs,
+						},
+					},
+				},
+			}
+
+			dcds, err := GenerateDynamoComponentsDeployments(context.Background(), dgd, nil, &RestartState{}, nil, RollingUpdateContext{
+				NewWorkerHash:     tt.newWorkerHash,
+				OldWorkerReplicas: map[string]int32{},
+				NewWorkerReplicas: map[string]int32{},
+			})
+			assert.NoError(t, err)
+
+			eppDCD := dcds["epp"]
+			found := false
+			for _, env := range eppDCD.Spec.Envs {
+				if env.Name == commonconsts.DynamoNamespaceEnvVar {
+					found = true
+					assert.Equal(t, tt.wantNamespace, env.Value)
+				}
+			}
+			assert.Equal(t, tt.wantNamespaceEnv, found)
+		})
+	}
+}
+
 func TestGenerateSingleDCD_NoRollingUpdate(t *testing.T) {
 	dgd := &v1alpha1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "my-dgd", Namespace: "ns"},

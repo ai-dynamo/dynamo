@@ -368,6 +368,13 @@ func generateSingleDCD(
 	if len(parentDGD.Spec.Envs) > 0 {
 		deployment.Spec.Envs = MergeEnvs(parentDGD.Spec.Envs, deployment.Spec.Envs)
 	}
+	if workerNamespace, ok := getEPPWorkerNamespaceOverride(component.ComponentType, dynamoNamespace, rollingUpdateCtx.NewWorkerHash); ok &&
+		!hasEnvVar(component.Envs, commonconsts.DynamoNamespaceEnvVar) {
+		deployment.Spec.Envs = append(deployment.Spec.Envs, corev1.EnvVar{
+			Name:  commonconsts.DynamoNamespaceEnvVar,
+			Value: workerNamespace,
+		})
+	}
 
 	if err := updateDynDeploymentConfig(deployment, commonconsts.DynamoServicePort); err != nil {
 		return nil, err
@@ -488,6 +495,22 @@ func MergeEnvs(common, specific []corev1.EnvVar) []corev1.EnvVar {
 		return merged[i].Name < merged[j].Name
 	})
 	return merged
+}
+
+func getEPPWorkerNamespaceOverride(componentType, dynamoNamespace, workerHash string) (string, bool) {
+	if componentType != commonconsts.ComponentTypeEPP || workerHash == "" || workerHash == commonconsts.LegacyWorkerHash {
+		return "", false
+	}
+	return dynamoNamespace + "-" + workerHash, true
+}
+
+func hasEnvVar(envs []corev1.EnvVar, name string) bool {
+	for _, env := range envs {
+		if env.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // GetDCDResourceName returns the Kubernetes resource name for a DynamoComponentDeployment.
