@@ -276,9 +276,13 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
 
     /// Ensure that the given workers exist in the table, adding any that are missing.
     ///
-    /// Unlike [`update_workers`], this never removes existing workers — it only
-    /// adds new ones. Used in External discovery mode where the worker set is
-    /// supplied per-request via `allowed_worker_ids`.
+    /// Unlike [`update_workers`], this does not remove workers absent from the
+    /// input — it only adds new ones.  This is intentional: in External mode the
+    /// EPP may send different subsets of workers on different requests, and one
+    /// routing call must not evict workers registered by another.
+    ///
+    /// Worker removal in External mode will be handled separately via GAIE
+    /// lifecycle events (not yet implemented). TODO (atchernych) once we upgate to GAIE latest.
     pub fn ensure_workers_exist(&self, dp_range: &HashMap<u64, (u32, u32)>) {
         let mut table = self.workers.write();
         for (&worker_id, &(dp_start, dp_size)) in dp_range {
