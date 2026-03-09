@@ -146,6 +146,8 @@ navigation:
         contents:
           - page: Reference Guide
             path: ../pages-dev/backends/sglang/sglang-reference-guide.md
+          - page: Chat Processor
+            path: ../pages-dev/backends/sglang/sglang-chat-processor.md
           - page: Examples
             path: ../pages-dev/backends/sglang/sglang-examples.md
           - page: Disaggregation
