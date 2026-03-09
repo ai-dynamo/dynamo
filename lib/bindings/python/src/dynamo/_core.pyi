@@ -1611,7 +1611,6 @@ class EntrypointArgs:
         tls_cert_path: Optional[str] = None,
         tls_key_path: Optional[str] = None,
         extra_engine_args: Optional[str] = None,
-        runtime_config: Optional[ModelRuntimeConfig] = None,
         namespace: Optional[str] = None,
         namespace_prefix: Optional[str] = None,
         is_prefill: bool = False,
@@ -1636,7 +1635,6 @@ class EntrypointArgs:
             tls_cert_path: TLS certificate path (PEM format)
             tls_key_path: TLS key path (PEM format)
             extra_engine_args: Path to extra engine arguments file
-            runtime_config: Optional runtime configuration for discovery registration
             namespace: Dynamo namespace for model discovery scoping
             namespace_prefix: Optional namespace prefix
             is_prefill: Whether this is a prefill worker

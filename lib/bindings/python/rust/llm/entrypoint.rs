@@ -21,11 +21,14 @@ use dynamo_llm::local_model::{LocalModel, LocalModelBuilder};
 use dynamo_llm::mocker::make_mocker_engine;
 use dynamo_llm::model_card::ModelDeploymentCard as RsModelDeploymentCard;
 use dynamo_llm::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine;
-use dynamo_mocker::common::protocols::MockEngineArgs;
+use dynamo_mocker::common::protocols::{MockEngineArgs, WorkerType};
 use dynamo_runtime::discovery::ModelCardInstanceId as RsModelCardInstanceId;
 use dynamo_runtime::protocols::EndpointId;
+use dynamo_runtime::utils::get_http_rpc_host_from_env;
+use dynamo_llm::local_model::runtime_config::{
+    DisaggregatedEndpoint, ModelRuntimeConfig as RsModelRuntimeConfig,
+};
 
-use super::local_model::ModelRuntimeConfig;
 use super::model_card::ModelDeploymentCard;
 use crate::RouterMode;
 use crate::engine::PythonAsyncEngine;
@@ -185,7 +188,6 @@ pub(crate) struct EntrypointArgs {
     tls_cert_path: Option<PathBuf>,
     tls_key_path: Option<PathBuf>,
     extra_engine_args: Option<PathBuf>,
-    runtime_config: Option<ModelRuntimeConfig>,
     namespace: Option<String>,
     namespace_prefix: Option<String>,
     is_prefill: bool,
@@ -197,7 +199,7 @@ pub(crate) struct EntrypointArgs {
 impl EntrypointArgs {
     #[allow(clippy::too_many_arguments)]
     #[new]
-    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, context_length=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, runtime_config=None, namespace=None, namespace_prefix=None, is_prefill=false, migration_limit=0, chat_engine_factory=None))]
+    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, context_length=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, namespace=None, namespace_prefix=None, is_prefill=false, migration_limit=0, chat_engine_factory=None))]
     pub fn new(
         py: Python<'_>,
         engine_type: EngineType,
@@ -214,7 +216,6 @@ impl EntrypointArgs {
         tls_cert_path: Option<PathBuf>,
         tls_key_path: Option<PathBuf>,
         extra_engine_args: Option<PathBuf>,
-        runtime_config: Option<ModelRuntimeConfig>,
         namespace: Option<String>,
         namespace_prefix: Option<String>,
         is_prefill: bool,
@@ -261,7 +262,6 @@ impl EntrypointArgs {
             tls_cert_path,
             tls_key_path,
             extra_engine_args,
-            runtime_config,
             namespace,
             namespace_prefix,
             is_prefill,
@@ -306,9 +306,37 @@ pub fn make_engine<'p>(
         .tls_key_path(args.tls_key_path.clone())
         .is_mocker(matches!(args.engine_type, EngineType::Mocker))
         .extra_engine_args(args.extra_engine_args.clone())
-        .runtime_config(args.runtime_config.clone().unwrap_or_default().inner)
         .namespace(args.namespace.clone())
         .namespace_prefix(args.namespace_prefix.clone());
+
+    // For mocker engines, override runtime config from the engine args JSON
+    if matches!(args.engine_type, EngineType::Mocker) {
+        if let Some(ref path) = args.extra_engine_args {
+            if let Ok(mocker_args) = MockEngineArgs::from_json_file(path) {
+                builder.kv_cache_block_size(Some(mocker_args.block_size as u32));
+
+                let mut rc = RsModelRuntimeConfig::default();
+                rc.total_kv_blocks = Some(mocker_args.num_gpu_blocks as u64);
+                rc.max_num_seqs = mocker_args.max_num_seqs.map(|v| v as u64);
+                rc.max_num_batched_tokens =
+                    mocker_args.max_num_batched_tokens.map(|v| v as u64);
+                rc.enable_local_indexer =
+                    mocker_args.enable_local_indexer && mocker_args.worker_type != WorkerType::Decode;
+                rc.data_parallel_size = mocker_args.dp_size;
+
+                if mocker_args.worker_type == WorkerType::Prefill {
+                    if let Some(port) = mocker_args.bootstrap_port {
+                        rc.disaggregated_endpoint = Some(DisaggregatedEndpoint {
+                            bootstrap_host: Some(get_http_rpc_host_from_env()),
+                            bootstrap_port: Some(port),
+                        });
+                    }
+                }
+
+                builder.runtime_config(rc);
+            }
+        }
+    }
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         if let Some(model_path) = args.model_path.clone() {
             let local_path = if model_path.exists() {
