@@ -346,13 +346,14 @@ def patch_allocate_kv_cache_on_wake() -> None:
 def patch_cudagraph_mode_escalation() -> None:
     """Prevent vLLM from escalating cudagraph_mode beyond PIECEWISE in shadow mode.
 
-    vLLM's initialize_attn_backend may escalate PIECEWISE to FULL_AND_PIECEWISE
-    based on hardware capabilities. FULL mode graph capture requires slot_mappings
-    which don't exist when KV cache is skipped. This patch clamps the resolved
-    mode back to PIECEWISE after backend resolution.
+    vLLM's _check_and_update_cudagraph_mode resolves cudagraph_mode based on
+    attention backend capabilities and may escalate PIECEWISE to
+    FULL_AND_PIECEWISE. This escalation happens after initialize_attn_backend
+    and right before initialize_cudagraph_keys. FULL mode graph capture
+    requires slot_mappings which don't exist when KV cache is skipped.
 
-    In single-node TP, this isn't needed because both workers inherit the leader's
-    config. In multinode MP, each worker resolves independently and may escalate.
+    This patch wraps _check_and_update_cudagraph_mode to clamp the resolved
+    mode back to PIECEWISE when in shadow init with empty KV caches.
     """
     if not _is_shadow_mode():
         return
@@ -365,28 +366,24 @@ def patch_cudagraph_mode_escalation() -> None:
     if getattr(GPUModelRunner, "_shadow_cg_escalation_patched", False):
         return
 
-    original_initialize_attn_backend = GPUModelRunner.initialize_attn_backend
+    from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 
-    def patched_initialize_attn_backend(self, kv_cache_config):
-        result = original_initialize_attn_backend(self, kv_cache_config)
+    original_init_keys = CudagraphDispatcher.initialize_cudagraph_keys
 
-        if getattr(self, "_shadow_init_phase", False):
+    def patched_initialize_cudagraph_keys(self, cudagraph_mode, *args, **kwargs):
+        if _is_shadow_mode():
             from vllm.config import CUDAGraphMode
 
-            mode = self.compilation_config.cudagraph_mode
-            if mode is not None and mode not in (
-                CUDAGraphMode.PIECEWISE,
-                CUDAGraphMode.NONE,
-            ):
+            if cudagraph_mode not in (CUDAGraphMode.PIECEWISE, CUDAGraphMode.NONE):
                 logger.info(
                     "[Shadow] Clamping cudagraph_mode from %s to PIECEWISE "
                     "(FULL captures require KV cache)",
-                    mode.name,
+                    cudagraph_mode.name,
                 )
-                self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
-        return result
+                cudagraph_mode = CUDAGraphMode.PIECEWISE
+        return original_init_keys(self, cudagraph_mode, *args, **kwargs)
 
-    GPUModelRunner.initialize_attn_backend = patched_initialize_attn_backend
+    CudagraphDispatcher.initialize_cudagraph_keys = patched_initialize_cudagraph_keys
     GPUModelRunner._shadow_cg_escalation_patched = True
     logger.info("[GMS Patch] Patched cudagraph mode escalation for shadow mode")
 
