@@ -403,6 +403,36 @@ export SGLANG_ENCODER_MM_LOAD_WORKERS=16
 
 Only applies to the EPD encode worker (which uses [SGLang's MMEncoder](https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/disaggregation/encode_server.py) internally).
 
+## Profiling
+
+Dynamo's SGLang multimodal workers include NVTX markers for `nsys` profiling. They are disabled by default (zero overhead) and enabled by setting `DYN_NVTX=1`.
+
+```bash
+cd $DYNAMO_HOME/examples/backends/sglang
+DYN_NVTX=1 nsys profile --trace=cuda,nvtx -o profile.nsys-rep \
+  bash launch/multimodal_epd.sh ...
+```
+
+| ENV Variable | Default | Description |
+|---|---|---|
+| `DYN_NVTX` | `0` | Set to `1` to enable NVTX range/mark annotations in multimodal encode/prefill/decode worker paths for `nsys` profiling |
+
+Key NVTX ranges emitted:
+
+| Range | Worker | Description |
+|-------|--------|-------------|
+| `mm:encode_worker_generate` | Encode | Full encode request lifetime |
+| `mm:enc:vision_encode` | Encode | Vision encode call (`MMEncoder._encode`) |
+| `mm:enc:embedding_transfer` | Encode | Embedding handoff to downstream worker |
+| `mm:nixl:begin_read` | PD/Prefill/Decode | Begin NIXL read operation for embeddings |
+| `mm:nixl:wait_completion` | PD/Prefill/Decode | Wait for NIXL embedding transfer completion |
+| `mm:pd_worker_generate` | PD/Prefill/Decode | Full worker-side request lifetime |
+| `mm:pd:ttft` | PD/Prefill/Decode | Worker-side TTFT: from request arrival at PD worker to first output token (excludes client->frontend->worker network transit) |
+| `mm:pd:generate_agg` | PD (agg) | Aggregated generation path |
+| `mm:pd:generate_disagg` | PD (disagg) | Disaggregated generation path |
+| `mm:pd:load_multimodal` | PD (agg) | Build multimodal items from transferred embeddings |
+| `mm:decode:first_token` | PD/Prefill/Decode | Time to first output token from worker entry |
+
 ## Known Limitations
 
 - **No Data URL support** - Only HTTP/HTTPS URLs supported; `data:image/...` base64 URLs not supported

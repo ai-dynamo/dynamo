@@ -4,7 +4,7 @@
 import asyncio
 import json
 import logging
-from typing import Any, AsyncIterator, Optional
+from typing import Any, AsyncIterator, Callable, Optional
 
 import sglang as sgl
 import torch
@@ -13,6 +13,7 @@ import dynamo.nixl_connect as connect
 from dynamo._core import Client, Context
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.engine_response import normalize_finish_reason
+from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.sglang.args import Config
 from dynamo.sglang.protocol import (
     DisaggSglangMultimodalRequest,
@@ -113,8 +114,10 @@ class EmbeddingsProcessor:
             )
             self._connector = connect.Connector()
 
-        read_op = await self._connector.begin_read(serialized_request, descriptor)
-        await read_op.wait_for_completion()
+        with _nvtx.annotate("mm:nixl:begin_read", color="blue"):
+            read_op = await self._connector.begin_read(serialized_request, descriptor)
+        with _nvtx.annotate("mm:nixl:wait_completion", color="cyan"):
+            await read_op.wait_for_completion()
 
         return embeddings, descriptor
 
@@ -317,23 +320,47 @@ class MultimodalWorkerHandler(BaseWorkerHandler):
             request: Multimodal request with input and parameters.
             context: Context object for cancellation handling.
         """
+        rng_pd = _nvtx.start_range("mm:pd_worker_generate", color="green")
+        rng_ttft = _nvtx.start_range("mm:pd:ttft", color="yellow")
+        ttft_ended = False
+
+        def _end_ttft() -> None:
+            nonlocal ttft_ended
+            if not ttft_ended:
+                _nvtx.end_range(rng_ttft)
+                ttft_ended = True
+
         try:
             request = self._validate_and_parse_request(request)
 
             # Route to appropriate generation method based on serving mode
             if self.serving_mode == DisaggregationMode.DECODE:
-                async for output in self._generate_disaggregated(request):
-                    yield output
+                rng_disagg = _nvtx.start_range("mm:pd:generate_disagg", color="red")
+                try:
+                    async for output in self._generate_disaggregated(request, _end_ttft):
+                        yield output
+                finally:
+                    _nvtx.end_range(rng_disagg)
             else:
-                async for output in self._generate_aggregated(request):
-                    yield output
+                rng_agg = _nvtx.start_range("mm:pd:generate_agg", color="red")
+                try:
+                    async for output in self._generate_aggregated(request, _end_ttft):
+                        yield output
+                finally:
+                    _nvtx.end_range(rng_agg)
 
         except Exception as e:
+            _end_ttft()
             logger.error(f"Error in multimodal generation: {e}", exc_info=True)
             yield ErrorResponseBuilder.build_error_response(e)
+        finally:
+            _end_ttft()
+            _nvtx.end_range(rng_pd)
 
     async def _generate_disaggregated(
-        self, request: SglangMultimodalRequest
+        self,
+        request: SglangMultimodalRequest,
+        end_ttft: Callable[[], None],
     ) -> AsyncIterator[str]:
         """Handle disaggregated mode generation"""
         input_ids = request.request.token_ids
@@ -357,11 +384,24 @@ class MultimodalWorkerHandler(BaseWorkerHandler):
             bootstrap_room=bootstrap_info["bootstrap_room"],
         )
 
-        async for output in StreamProcessor.process_sglang_stream(decode_stream):
-            yield output
+        rng_first = _nvtx.start_range("mm:decode:first_token", color="purple")
+        first_token = True
+        try:
+            async for output in StreamProcessor.process_sglang_stream(decode_stream):
+                if first_token:
+                    end_ttft()
+                    _nvtx.end_range(rng_first)
+                    first_token = False
+                yield output
+        finally:
+            if first_token:
+                end_ttft()
+                _nvtx.end_range(rng_first)
 
     async def _generate_aggregated(
-        self, request: SglangMultimodalRequest
+        self,
+        request: SglangMultimodalRequest,
+        end_ttft: Callable[[], None],
     ) -> AsyncIterator[str]:
         """Handle aggregated mode generation"""
         input_ids = request.request.token_ids
@@ -370,9 +410,10 @@ class MultimodalWorkerHandler(BaseWorkerHandler):
 
         try:
             sampling_params = SglangUtils.build_sampling_params(request)
-            mm_items, combined_embeddings = await _build_mm_items(
-                request, self.embeddings_processor
-            )
+            with _nvtx.annotate("mm:pd:load_multimodal", color="cyan"):
+                mm_items, combined_embeddings = await _build_mm_items(
+                    request, self.embeddings_processor
+                )
 
             logger.debug(
                 "Generated combined multimodal item with embeddings shape: "
@@ -387,8 +428,19 @@ class MultimodalWorkerHandler(BaseWorkerHandler):
                 stream=True,
             )
 
-            async for output in StreamProcessor.process_sglang_stream(agg_stream):
-                yield output
+            rng_first = _nvtx.start_range("mm:decode:first_token", color="purple")
+            first_token = True
+            try:
+                async for output in StreamProcessor.process_sglang_stream(agg_stream):
+                    if first_token:
+                        end_ttft()
+                        _nvtx.end_range(rng_first)
+                        first_token = False
+                    yield output
+            finally:
+                if first_token:
+                    end_ttft()
+                    _nvtx.end_range(rng_first)
 
         except RuntimeError as e:
             if "shape mismatch" in str(e):

@@ -17,6 +17,7 @@ from transformers import AutoTokenizer
 
 import dynamo.nixl_connect as connect
 from dynamo._core import Client, Context
+from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.runtime import DistributedRuntime
 from dynamo.sglang.args import Config
 from dynamo.sglang.protocol import SglangMultimodalRequest
@@ -96,6 +97,7 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler):
     def cleanup(self) -> None:
         pass
 
+    @_nvtx.range_decorator("mm:encode_worker_generate", color="blue")
     async def generate(
         self, request: SglangMultimodalRequest, context: Context
     ) -> AsyncIterator[str]:
@@ -138,9 +140,10 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler):
                     )
                 image_urls.append(mm_input.image_url)
 
-            image_grid_dim, precomputed_embeddings = await self.encoder._encode(
-                image_urls
-            )
+            with _nvtx.annotate("mm:enc:vision_encode", color="red"):
+                image_grid_dim, precomputed_embeddings = await self.encoder._encode(
+                    image_urls
+                )
 
             image_grid_thw_list = (
                 image_grid_dim.tolist()
@@ -242,21 +245,22 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler):
                 )
                 search_start = image_token_id_index + num_image_tokens
 
-            descriptor = connect.Descriptor(precomputed_embeddings)
-            with await self._connector.create_readable(descriptor) as readable:
-                request.serialized_request = readable.metadata()
-                logger.debug(f"Request: {request.model_dump_json()}")
+            with _nvtx.annotate("mm:enc:embedding_transfer", color="purple"):
+                descriptor = connect.Descriptor(precomputed_embeddings)
+                with await self._connector.create_readable(descriptor) as readable:
+                    request.serialized_request = readable.metadata()
+                    logger.debug(f"Request: {request.model_dump_json()}")
 
-                # Get the response generator from downstream worker
-                response_generator = await self.pd_worker_client.round_robin(
-                    request.model_dump_json()
-                )
-                await readable.wait_for_completion()
-
-                async for response in response_generator:
-                    yield response.data() if hasattr(response, "data") else str(
-                        response
+                    # Get the response generator from downstream worker
+                    response_generator = await self.pd_worker_client.round_robin(
+                        request.model_dump_json()
                     )
+                    await readable.wait_for_completion()
+
+                    async for response in response_generator:
+                        yield response.data() if hasattr(response, "data") else str(
+                            response
+                        )
 
         except Exception as e:
             logger.error(f"Error processing request: {e}")
