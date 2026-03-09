@@ -192,6 +192,10 @@ AIPerf automatically generates plots based on available data:
 - **Pareto Curves** — throughput per GPU vs latency and interactivity (only generated when GPU telemetry data is available — add `--gpu-telemetry` during profiling if DCGM is running)
 - **Time series** — per-request TTFT, ITL, and latency over time (generated for single-run analysis)
 
+Here is an example Pareto frontier from a concurrency sweep of Qwen3-0.6B on 8x H200 with vLLM, showing the tradeoff between user experience (tokens/sec per user) and resource efficiency (tokens/sec per GPU):
+
+![AIPerf Pareto Frontier](../assets/img/aiperf-pareto-frontier.png)
+
 See the [AIPerf Visualization Guide](https://github.com/ai-dynamo/aiperf/blob/main/docs/tutorials/plot.md) for full details on plot customization, experiment classification, and themes.
 
 ## Use Cases
