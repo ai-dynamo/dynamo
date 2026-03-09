@@ -421,6 +421,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleProfilingPhase(ctx contex
 
 	profilingResults, dgdName, err := r.generateDGDSpec(ctx, dgdr)
 	if err != nil {
+		dgdr.ClearProfilingPhase()
 		r.Recorder.Event(dgdr, corev1.EventTypeWarning, MessageGenerationFailed, err.Error())
 		return r.updatePhaseWithCondition(ctx, dgdr, nvidiacomv1beta1.DGDRPhaseFailed, nvidiacomv1beta1.ConditionTypeSpecGenerated, metav1.ConditionFalse, MessageGenerationFailed, err.Error())
 	}
@@ -675,11 +676,10 @@ func (r *DynamoGraphDeploymentRequestReconciler) createDGD(ctx context.Context, 
 	if err := r.Create(ctx, dgd); err != nil {
 		if apierrors.IsAlreadyExists(err) {
 			logger.Info("DGD already exists, updating status")
-			// Best-effort annotation cleanup: the DGD exists, so the annotation is stale.
-			// If this fails, the annotation lingers but is harmless as long as the DGD exists.
 			delete(dgdr.Annotations, "nvidia.com/generated-dgd-spec")
 			if updateErr := r.Update(ctx, dgdr); updateErr != nil {
 				logger.Error(updateErr, "Failed to remove generated-dgd-spec annotation on IsAlreadyExists path")
+				return ctrl.Result{}, updateErr
 			}
 			dgdr.Status.DGDName = dgdName
 			return ctrl.Result{}, r.Status().Update(ctx, dgdr)

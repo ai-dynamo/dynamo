@@ -2131,6 +2131,9 @@ spec:
 			// Phase must be Ready (autoApply=false → profiling complete, spec available)
 			Expect(updated.Status.Phase).Should(Equal(nvidiacomv1beta1.DGDRPhaseReady),
 				"phase must be Ready after profiling completes with autoApply=false")
+
+			// status.dgdName must be preserved after profiling
+			Expect(updated.Status.DGDName).ShouldNot(BeEmpty(), "status.dgdName must be preserved after profiling")
 		})
 
 		It("Should populate profilingResults.pareto from webui_data.json in output ConfigMap", func() {
