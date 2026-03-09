@@ -153,6 +153,10 @@ impl Model {
     }
 
     /// Whether this model should be visible in /v1/models.
+    /// A model is displayable if any WorkerSet has a serving engine or is a prefill set.
+    /// We don't gate on worker_count() here because the instance watcher starts empty
+    /// and populates asynchronously — a WorkerSet exists only because a worker registered
+    /// its MDC, so there is always at least one worker even if the count hasn't propagated.
     pub fn is_displayable(&self) -> bool {
         let has_serving_engine = |ws: &WorkerSet| {
             ws.has_chat_engine()
@@ -170,9 +174,6 @@ impl Model {
 
         self.worker_sets.iter().any(|entry| {
             let ws = entry.value();
-            if ws.worker_count() == 0 {
-                return false;
-            }
             has_serving_engine(ws.as_ref()) || (!has_any_serving_engine && ws.is_prefill_set())
         })
     }
