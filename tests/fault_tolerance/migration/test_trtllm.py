@@ -237,7 +237,7 @@ def test_request_migration_trtllm_aggregated(
                 )
 
 
-@pytest.mark.skip(strict=False, reason="Prefill migration not yet supported, XFail eats up CI time due to timeout")
+@pytest.mark.skip(reason="Prefill migration not yet supported, XFail eats up CI time due to timeout")
 @pytest.mark.timeout(350)  # 3x average
 @pytest.mark.nightly
 def test_request_migration_trtllm_prefill(
