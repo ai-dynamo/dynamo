@@ -60,11 +60,11 @@ Without cache-aware routing, turn 2 of a conversation has a ~1/N chance of landi
 
 ### Priority Scheduling
 
-Agent hints flow from the frontend into the router's scheduling queue: a `BinaryHeap<QueueEntry>` ordered by effective arrival time. When a request arrives, the queue computes `effective_offset = arrival_offset.saturating_sub(priority_jump)`, where `priority_jump` is the `latency_sensitivity` value from `agent_hints`, interpreted as seconds. A request with `latency_sensitivity: 5.0` is treated as if it arrived 5 seconds earlier than it actually did. The heap uses reversed `Ord` to implement min-heap semantics, so lower effective offsets (higher priority) are dequeued first.
+Two fields in `agent_hints` control scheduling, and they operate at different layers. `latency_sensitivity` affects router queue ordering: higher values move a request ahead in the queue. `priority` passes through to the engine, where it influences request scheduling order and KV cache eviction.
 
-Requests only enter the queue when all workers exceed a configurable load threshold. Below that threshold, they bypass the queue entirely and go straight to worker selection. When capacity frees up (prefill completes or a request finishes), the queue drains highest-priority entries first.
+At the router, incoming requests enter a `BinaryHeap<QueueEntry>` ordered by effective arrival time. The queue computes `effective_offset = arrival_offset.saturating_sub(priority_jump)`, where `priority_jump` is derived from `latency_sensitivity`. A higher `latency_sensitivity` produces a larger jump, making the request appear as if it arrived earlier and placing it ahead of lower-priority work. Requests only enter the queue when all workers exceed a configurable load threshold. Below that threshold, they bypass the queue entirely and go straight to worker selection. When capacity frees up (prefill completes or a request finishes), the queue drains highest-priority entries first.
 
-The `priority` value does not stop at the router. SGLang, vLLM, and TRT-LLM already support priority-based request scheduling. Dynamo passes priority through to the engine, where it influences both request scheduling order and KV cache eviction.
+The `priority` value does not stop at the router. SGLang, vLLM, and TRT-LLM already support priority-based request scheduling. Dynamo passes `priority` through to the engine directly, where it controls both request scheduling order and KV cache eviction policy.
 
 ```mermaid
 sequenceDiagram
@@ -93,13 +93,18 @@ A coding agent follows a sequential pattern: long prefill, tool call, extend pre
 ```python
 # Query per-worker load and overlap for custom routing logic
 loads = await router.get_potential_loads(token_ids)
+
+# Override routing config based on request properties
+# Long contexts benefit from heavier overlap weighting
+config = {"overlap_score_weight": 2.0} if len(token_ids) > 8192 else {}
 worker_id, dp_rank, overlap = await router.best_worker(
     token_ids,
     request_id="req-123",
-    router_config_override={"overlap_score_weight": 2.0}
+    router_config_override=config
 )
 
-# Or bypass the default selector entirely
+# Or bypass the default selector entirely when the harness
+# has its own worker selection logic (e.g., session affinity)
 stream = await router.generate(
     token_ids, model=model, worker_id=chosen_worker
 )
@@ -127,7 +132,7 @@ LRU sees only recency. In a high traffic environment, a wait for the completion 
 
 Today, KV cache is treated as a local, ephemeral resource on each worker. An agent's 20K-token system prompt is computed independently on every worker that serves one of its requests. When a lead agent spawns 4 subagents, each with overlapping tool definitions, that shared prefix is recomputed 4 times if the subagents land on different workers. In our analysis of Claude Code team sessions, we measured this directly: teammates averaged 79.4% cache rate vs. 91.3% for the lead agent's explore subagents (5.0x vs. 11.7x read/write ratio), with the gap driven almost entirely by cold-start writes on each teammate's first call. The goal is to make high value KV cache blocks available to all workers in the cluster. Essentially, they are written once during cold start and then read by any worker at all times. 
 
-Solutions like SGLang's HiCache and Dynamo's KV Block Manager (KVBM) implement a 4-tier memory hierarchy to make this possible:
+Solutions like SGLang's HiCache (which already supports distributed KV cache) and Dynamo's KV Block Manager (KVBM) are building toward a 4-tier memory hierarchy:
 
 ```
 GPU (HBM)  ->  CPU (pinned DRAM)  ->  Local NVMe  ->  Remote Storage (NIXL)
@@ -138,7 +143,7 @@ Blocks follow a write-through path: when a worker computes KV for a prefix, the 
 
 This directly solves the subagent cold-start problem. When the lead agent computes tool definitions and system prompt, those blocks write through to shared storage. When subagent 1 spawns on a different worker, the router queries the Flash Indexer, finds the blocks in shared storage, and the worker loads them via NIXL (RDMA read) instead of recomputing from scratch. Subagent 2 does the same. Four redundant prefill computations become one compute and three loads. The same mechanism addresses cache coherence in disaggregated prefill-decode serving. In disagg mode, the prefill worker computes KV and transfers it to the decode worker via NIXL. The decode worker generates tokens, producing new KV state. On the next turn, a prefill worker needs both the original prefix and the generated tokens from turn 1, but those live only on the decode worker. With shared storage, the decode worker writes its new blocks to the common tier and any prefill worker can fetch them on the next turn. 
 
-The missing piece is prefetch: the harness knows when an agent's tool call is about to return, which means it knows which blocks will be needed and when. We are building prefetch hooks so the harness can signal "bring these blocks from storage to GPU ahead of the next request." Combined with the retention APIs (below), this gives the harness full lifecycle control: pin blocks to prevent eviction, set priority to control eviction ordering, and prefetch blocks proactively before they are needed.
+Multi-tier storage solves sharing and persistence, but blocks still arrive on GPU only after the request hits the worker. The missing piece for agentic systems is prefetch: the harness knows when an agent's tool call is about to return, which means it knows which blocks will be needed and when. We are building prefetch hooks so the harness can signal "bring these blocks from storage to GPU ahead of the next request." Combined with the retention APIs (below), this gives the harness full lifecycle control: pin blocks to prevent eviction, set priority to control eviction ordering, and prefetch blocks proactively before they are needed.
 
 Looking further out, NVIDIA's CMX (Context Memory Storage) platform extends this hierarchy to datacenter scale. Built on BlueField-4 DPUs and NIXL, CMX provides RDMA-speed access to networked KV storage. At [VAST Forward 2026](https://www.hpcwire.com/2026/03/02/blasting-through-the-gpu-memory-wall-with-nvidias-new-cmx-platform/), NVIDIA and VAST demonstrated 20x TTFT improvement by fetching KV cache from VAST storage via CMX instead of recomputing. For agentic workloads where context persists across sessions and spans hundreds of workers, treating storage as a first-class cache tier changes the economics entirely. The KVBM already achieves 2.2x-12x TTFT improvement depending on the tier hit. CMX will extend this to shared storage with hardware-accelerated data movement.
 
@@ -156,7 +161,7 @@ RetentionDirective:
 
 A request carries zero or more directives. Blocks without directives follow the default LRU path with zero overhead. The evictor becomes a two-structure system: an LRU free list for unprioritized blocks (O(1), unchanged) and a priority queue for annotated blocks. The harness can express "system prompt blocks are evicted last (priority: 100); conversation context survives a 30-second tool call (duration: 45s); decode tokens are first to go (priority: 1)" without the engine needing to understand why.
 
-When we studied how Anthropic's prompt caching works in practice, we wanted to bring the same semantics to open-source inference. In Claude Code, the caching hierarchy has a specific structure: base system instructions and tool definitions are marked with `scope: "global"` and cached across all users, CLAUDE.md files and memory are cached per-project, and conversation history is cached per-session. The prefix is always the highest-value region, reused on every turn. Dynamo's `cache_control` API applies this to self-hosted inference. When a request includes `cache_control: { type: "ephemeral", ttl: "1h" }`, the router fires a `pin_prefix` RPC to the worker after generation completes. The worker walks its radix tree and sets a `pin_expiry` TTL on matching nodes.
+Anthropic's prompt caching lets you mark prefixes as cacheable on their infrastructure. Dynamo's `cache_control` API brings the same semantics to self-hosted inference. When a request includes `cache_control: { type: "ephemeral", ttl: "1h" }`, the router pins the matching prefix nodes in the worker's radix tree for that TTL, protecting them from eviction.
 
 The next step is connecting retention with the distributed cache. Today, retention directives apply to a single worker's local cache. When a block is pinned on worker A but the next request routes to worker B, the pin does not follow. Extending retention semantics across the KVBM's shared storage tier means the harness can pin a block once and have it survive across workers: the priority and TTL metadata travel with the block through the write-through path, and any worker that loads the block from shared storage inherits the retention policy. Combined with the prefetch hooks described above, this gives the harness end-to-end lifecycle control across the full memory hierarchy.
 
