@@ -140,13 +140,13 @@ const (
 	ResourceStateUnknown  = "unknown"
 
 	// Checkpoint/restore constants
-	// CROSS-REFERENCE: Some constants below are duplicated in the chrek package at
-	// deploy/chrek/pkg/config/constants.go. If you change a value here, update there too.
+	// CROSS-REFERENCE: Some constants below are duplicated in the snapshot package at
+	// deploy/snapshot/pkg/config/constants.go. If you change a value here, update there too.
 
 	// Kubernetes labels
-	KubeLabelIsCheckpointSource = "nvidia.com/chrek-is-checkpoint-source" // Pod label that triggers DaemonSet auto-checkpoint
-	KubeLabelCheckpointHash     = "nvidia.com/chrek-checkpoint-hash"      // Checkpoint identity hash (= DynamoCheckpoint CR name)
-	KubeLabelIsRestoreTarget    = "nvidia.com/chrek-is-restore-target"    // Pod label that triggers DaemonSet auto-restore
+	KubeLabelIsCheckpointSource = "nvidia.com/snapshot-is-checkpoint-source" // Pod label that triggers DaemonSet auto-checkpoint
+	KubeLabelCheckpointHash     = "nvidia.com/snapshot-checkpoint-hash"      // Checkpoint identity hash (= DynamoCheckpoint CR name)
+	KubeLabelIsRestoreTarget    = "nvidia.com/snapshot-is-restore-target"    // Pod label that triggers DaemonSet auto-restore
 
 	// Environment variables injected into pods
 	EnvCheckpointStorageType  = "DYN_CHECKPOINT_STORAGE_TYPE"   // Storage backend (pvc, s3, oci) — checkpoint job pods only
@@ -159,7 +159,7 @@ const (
 	CheckpointVolumeName = "checkpoint-storage" // Pod-internal volume name for checkpoint PVC
 
 	// SeccompProfilePath is the localhost seccomp profile that blocks io_uring syscalls.
-	// Deployed to nodes by the chrek DaemonSet init container.
+	// Deployed to nodes by the snapshot DaemonSet init container.
 	SeccompProfilePath = "profiles/block-iouring.json"
 
 	// Pod identity (Downward API) ---

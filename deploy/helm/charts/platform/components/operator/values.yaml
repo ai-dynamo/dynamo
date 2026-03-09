@@ -59,28 +59,6 @@ controllerManager:
     # All cluster-wide operators should use the SAME namespace for proper leader election
     namespace: ""
 
-  kubeRbacProxy:
-    args:
-    - --secure-listen-address=0.0.0.0:8443
-    - --upstream=http://127.0.0.1:8080/
-    - --logtostderr=true
-    - --v=0
-    - --ignore-paths=/metrics
-    containerSecurityContext:
-      allowPrivilegeEscalation: false
-      capabilities:
-        drop:
-        - ALL
-    image:
-      repository: gcr.io/kubebuilder/kube-rbac-proxy
-      tag: v0.15.0
-    resources:
-      limits:
-        cpu: 500m
-        memory: 128Mi
-      requests:
-        cpu: 5m
-        memory: 64Mi
   manager:
     containerSecurityContext:
       allowPrivilegeEscalation: false
@@ -130,8 +108,6 @@ dynamo:
 
   mpiRun:
     secretName: "mpi-run-ssh-secret"
-    sshKeygen:
-      enabled: true
 
 
 #imagePullSecrets: []
@@ -144,10 +120,10 @@ metricsService:
   # false=never create either
   enabled: null
   ports:
-  - name: https
-    port: 8443
+  - name: metrics
+    port: 8080
     protocol: TCP
-    targetPort: https
+    targetPort: metrics
   type: ClusterIP
 
 natsAddr: ""
@@ -161,7 +137,7 @@ modelExpressURL: ""
 
 # Checkpoint configuration for fast pod restore
 # NOTE: The checkpoint infrastructure (PVC + DaemonSet) must be installed separately
-# using the chrek Helm chart in each namespace where checkpointing is needed.
+# using the snapshot Helm chart in each namespace where checkpointing is needed.
 checkpoint:
   # Enable checkpoint/restore functionality
   enabled: false
@@ -172,16 +148,16 @@ checkpoint:
 
   # Storage configuration
   # These settings tell the operator where to find checkpoint storage
-  # Must match the configuration in the chrek chart
+  # Must match the configuration in the snapshot chart
   storage:
     # Storage backend type: pvc, s3, or oci
     type: pvc
 
     # PVC configuration (used when type=pvc)
     pvc:
-      # Name of the PVC created by the chrek chart
-      # Must match the PVC name in the chrek chart
-      pvcName: "chrek-pvc"
+      # Name of the PVC created by the snapshot chart
+      # Must match the PVC name in the snapshot chart
+      pvcName: "snapshot-pvc"
       # Base path within the PVC for storing checkpoints
       basePath: "/checkpoints"
 
