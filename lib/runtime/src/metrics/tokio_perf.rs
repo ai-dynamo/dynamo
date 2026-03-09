@@ -252,9 +252,6 @@ pub async fn tokio_metrics_and_canary_loop() {
     let collect_interval = Duration::from_secs(1);
     let mut next_collect = Instant::now() + collect_interval;
     let mut prev_counters = PrevWorkerCounters::new();
-    let mut stall_count: u64 = 0;
-    let mut worst_delay = Duration::ZERO;
-
     loop {
         let start = Instant::now();
         tokio::time::sleep(canary_interval).await;
@@ -262,20 +259,9 @@ pub async fn tokio_metrics_and_canary_loop() {
         EVENT_LOOP_DELAY_SECONDS.observe(delay.as_secs_f64());
         if delay > stall_threshold {
             EVENT_LOOP_STALL_TOTAL.inc();
-            stall_count += 1;
-            worst_delay = worst_delay.max(delay);
         }
         if Instant::now() >= next_collect {
             next_collect = Instant::now() + collect_interval;
-            if stall_count > 0 {
-                tracing::warn!(
-                    stalls = stall_count,
-                    worst_delay_ms = worst_delay.as_millis(),
-                    "event loop congestion in last collection interval"
-                );
-                stall_count = 0;
-                worst_delay = Duration::ZERO;
-            }
             sample_tokio_metrics(&mut prev_counters);
         }
     }
