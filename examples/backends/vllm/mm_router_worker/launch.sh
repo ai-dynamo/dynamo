@@ -116,6 +116,7 @@ echo "=== Starting vLLM backend worker ==="
 # (which registers the public model name) instead of directly to the backend.
 env "${COMMON_ENV[@]}" \
     "DYN_SYSTEM_PORT=${VLLM_SYSTEM_PORT}" \
+    "DYN_ENABLE_MM_ROUTER=1" \
     python -m dynamo.vllm \
         --model "${MODEL}" \
         --enable-multimodal \

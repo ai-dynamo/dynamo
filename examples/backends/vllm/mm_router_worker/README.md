@@ -148,6 +148,7 @@ export NATS_SERVER=nats://127.0.0.1:4222
 export ETCD_ENDPOINTS=http://127.0.0.1:2379
 export DYN_SYSTEM_PORT=18081
 export DYN_VLLM_KV_EVENT_PORT=20080
+export DYN_ENABLE_MM_ROUTER=1
 
 python -m dynamo.vllm \
   --model "$MODEL_NAME" \
@@ -161,6 +162,7 @@ python -m dynamo.vllm \
 Notes:
 - Current `dynamo.vllm` default component name is `backend` (used below by the MM router).
 - MM-aware routing depends on KV events from the vLLM worker. In current Dynamo builds, KV events are auto-configured when prefix caching is enabled.
+- Set `DYN_ENABLE_MM_ROUTER=1` on the vLLM backend worker when using the MM router. This enables backend-side multimodal UUID hashing that matches the MM router's routing hashes.
 - When running multiple vLLM workers on the same host, each worker must use a unique KV events port (for example `20080`, `20081`) via `DYN_VLLM_KV_EVENT_PORT`; otherwise the second worker can fail with `Address already in use (addr='tcp://*:20080')`.
 
 ### Terminal 3: Start vLLM Worker #2 (backend)
@@ -177,6 +179,7 @@ export NATS_SERVER=nats://127.0.0.1:4222
 export ETCD_ENDPOINTS=http://127.0.0.1:2379
 export DYN_SYSTEM_PORT=18083
 export DYN_VLLM_KV_EVENT_PORT=20081
+export DYN_ENABLE_MM_ROUTER=1
 
 python -m dynamo.vllm \
   --model "$MODEL_NAME" \
