@@ -232,7 +232,7 @@ def _construct_qwen_image_data(
 def construct_qwen_decode_mm_data(
     image_grid_thw: Optional[List[Any]],
     embeddings_shape: Optional[Any],
-    _request_id: str,
+    request_id: str,
     *,
     dtype: torch.dtype = torch.float16,
 ) -> Dict[str, Dict[str, torch.Tensor]]:
