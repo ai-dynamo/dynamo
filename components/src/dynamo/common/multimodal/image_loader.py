@@ -17,8 +17,6 @@ import asyncio
 import base64
 import binascii
 import logging
-import os
-
 from io import BytesIO
 from typing import Any, Dict, Final, List, Optional
 from urllib.parse import urlparse
@@ -27,7 +25,6 @@ import httpx
 from PIL import Image
 
 import dynamo.nixl_connect as nixl_connect
-from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.media_nixl import read_decoded_media_via_nixl
 
 from .http_client import get_http_client
@@ -40,71 +37,65 @@ DECODED_VARIANT_KEY: Final = "Decoded"
 
 
 class ImageLoader:
-    CACHE_SIZE_MAXIMUM = int(os.environ.get("DYN_MM_IMAGE_LOADER_CACHE_SIZE", 8))
+    CACHE_SIZE_MAXIMUM = 8
 
     def __init__(
         self, cache_size: int = CACHE_SIZE_MAXIMUM, http_timeout: float = 30.0
     ):
         self._http_timeout = http_timeout
-        self._image_cache: dict[str, tuple[Image.Image, bytes]] = {}
+        self._image_cache: dict[str, Image.Image] = {}
         self._cache_queue: asyncio.Queue[str] = asyncio.Queue(maxsize=cache_size)
 
-    @_nvtx.annotate("mm:img:load_image", color="lime")
     async def load_image(self, image_url: str) -> Image.Image:
         parsed_url = urlparse(image_url)
-        raw_bytes: bytes | None = None
 
         # For HTTP(S) URLs, check cache first
         if parsed_url.scheme in ("http", "https"):
             image_url_lower = image_url.lower()
             if image_url_lower in self._image_cache:
                 logger.debug(f"Image found in cache for URL: {image_url}")
-                return self._image_cache[image_url_lower][0]
+                return self._image_cache[image_url_lower]
 
         try:
             if parsed_url.scheme == "data":
-                with _nvtx.annotate("mm:img:base64_decode", color="lime"):
-                    # Parse data URL format: data:[<media type>][;base64],<data>
-                    if not parsed_url.path.startswith("image/"):
-                        raise ValueError("Data URL must be an image type")
+                # Parse data URL format: data:[<media type>][;base64],<data>
+                if not parsed_url.path.startswith("image/"):
+                    raise ValueError("Data URL must be an image type")
 
-                    # Split the path into media type and data
-                    media_type, data = parsed_url.path.split(",", 1)
-                    if ";base64" not in media_type:
-                        raise ValueError("Data URL must be base64 encoded")
+                # Split the path into media type and data
+                media_type, data = parsed_url.path.split(",", 1)
+                if ";base64" not in media_type:
+                    raise ValueError("Data URL must be base64 encoded")
 
-                    try:
-                        image_bytes = base64.b64decode(data)
-                        image_data = BytesIO(image_bytes)
-                    except binascii.Error as e:
-                        raise ValueError(f"Invalid base64 encoding: {e}")
+                try:
+                    image_bytes = base64.b64decode(data)
+                    image_data = BytesIO(image_bytes)
+                except binascii.Error as e:
+                    raise ValueError(f"Invalid base64 encoding: {e}")
             elif parsed_url.scheme in ("http", "https"):
-                with _nvtx.annotate("mm:img:http_fetch", color="lime"):
-                    http_client = get_http_client(self._http_timeout)
+                http_client = get_http_client(self._http_timeout)
 
-                    response = await http_client.get(image_url)
-                    response.raise_for_status()
+                response = await http_client.get(image_url)
+                response.raise_for_status()
 
-                    if not response.content:
-                        raise ValueError("Empty response content from image URL")
+                if not response.content:
+                    raise ValueError("Empty response content from image URL")
 
-                    raw_bytes = response.content
-                    image_data = BytesIO(raw_bytes)
+                image_data = BytesIO(response.content)
             else:
                 raise ValueError(f"Invalid image source scheme: {parsed_url.scheme}")
 
-            with _nvtx.annotate("mm:img:pil_open_convert", color="lime"):
-                # PIL is sync, so offload to a thread to avoid blocking the event loop
-                # Restrict to supported formats to prevent PSD parsing (GHSA-cfh3-3jmp-rvhc)
-                image = await asyncio.to_thread(
-                    Image.open, image_data, formats=["JPEG", "PNG", "WEBP"]
-                )
+            # PIL is sync, so offload to a thread to avoid blocking the event loop
+            # Restrict to supported formats to prevent PSD parsing (GHSA-cfh3-3jmp-rvhc)
+            image = await asyncio.to_thread(
+                Image.open, image_data, formats=["JPEG", "PNG", "WEBP"]
+            )
 
-                # Validate image format and convert to RGB
-                if image.format not in ("JPEG", "PNG", "WEBP"):
-                    raise ValueError(f"Unsupported image format: {image.format}")
+            # Validate image format and convert to RGB
+            if image.format not in ("JPEG", "PNG", "WEBP"):
+                raise ValueError(f"Unsupported image format: {image.format}")
 
-                image_converted = image.convert("RGB")
+            image_converted = image.convert("RGB")
 
             # Cache HTTP(S) URLs
             if parsed_url.scheme in ("http", "https"):
@@ -114,8 +105,7 @@ class ImageLoader:
                     oldest_image_url = await self._cache_queue.get()
                     del self._image_cache[oldest_image_url]
 
-                assert raw_bytes is not None
-                self._image_cache[image_url_lower] = (image_converted, raw_bytes)
+                self._image_cache[image_url_lower] = image_converted
                 await self._cache_queue.put(image_url_lower)
 
             return image_converted
@@ -126,48 +116,6 @@ class ImageLoader:
         except Exception as e:
             logger.error(f"Error loading image: {e}")
             raise ValueError(f"Failed to load image: {e}")
-
-    async def load_image_with_raw_bytes(
-        self, image_url: str
-    ) -> tuple[Image.Image, bytes]:
-        """Load image, returning both PIL Image and raw file bytes.
-
-        For HTTP URLs with cache hit, returns cached (Image, bytes).
-        For data URIs and cache misses, loads fresh and returns both.
-        """
-        parsed_url = urlparse(image_url)
-
-        # Cache hit for HTTP URLs
-        if parsed_url.scheme in ("http", "https"):
-            image_url_lower = image_url.lower()
-            if image_url_lower in self._image_cache:
-                return self._image_cache[image_url_lower]
-
-        # Cache miss — load_image does the work and caches the tuple
-        image = await self.load_image(image_url)
-        # For HTTP URLs, tuple is now in cache; for data URIs, reconstruct
-        if parsed_url.scheme in ("http", "https"):
-            return self._image_cache[image_url.lower()]
-        # Data URI: raw_bytes not cached, re-extract from image_url
-        _, data = parsed_url.path.split(",", 1)
-        return image, base64.b64decode(data)
-
-    async def load_image_batch_with_raw_bytes(
-        self, image_mm_items: List[Dict[str, Any]]
-    ) -> tuple[List[Image.Image], List[bytes]]:
-        """Load a batch of URL images, returning (images, raw_bytes_list)."""
-        futures = []
-        for item in image_mm_items:
-            if isinstance(item, dict) and URL_VARIANT_KEY in item:
-                futures.append(self.load_image_with_raw_bytes(item[URL_VARIANT_KEY]))
-
-        results = await asyncio.gather(*futures)
-        images = []
-        raw_bytes_list = []
-        for img, raw in results:
-            images.append(img)
-            raw_bytes_list.append(raw)
-        return images, raw_bytes_list
 
     async def load_image_batch(
         self,
@@ -242,3 +190,33 @@ class ImageLoader:
             raise Exception(collective_exceptions)
 
         return loaded_images
+
+    async def load_image_with_raw_bytes(
+        self, image_url: str
+    ) -> tuple[Image.Image, bytes]:
+        """Load image, returning both PIL Image and raw file bytes for hashing."""
+        image = await self.load_image(image_url)
+        parsed = urlparse(image_url)
+        if parsed.scheme == "data":
+            _, data = parsed.path.split(",", 1)
+            raw_bytes = base64.b64decode(data)
+        elif parsed.scheme in ("http", "https"):
+            http_client = get_http_client(self._http_timeout)
+            response = await http_client.get(image_url)
+            raw_bytes = response.content
+        else:
+            raise ValueError(f"Unsupported scheme: {parsed.scheme}")
+        return image, raw_bytes
+
+    async def load_image_batch_with_raw_bytes(
+        self, image_mm_items: List[Dict[str, Any]]
+    ) -> tuple[List[Image.Image], List[bytes]]:
+        """Load a batch of URL images, returning (images, raw_bytes_list)."""
+        futures = []
+        for item in image_mm_items:
+            if isinstance(item, dict) and URL_VARIANT_KEY in item:
+                futures.append(self.load_image_with_raw_bytes(item[URL_VARIANT_KEY]))
+        results = await asyncio.gather(*futures)
+        images = [r[0] for r in results]
+        raw_bytes_list = [r[1] for r in results]
+        return images, raw_bytes_list
