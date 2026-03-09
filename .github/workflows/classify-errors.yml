@@ -1,0 +1,79 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Classify CI Errors
+
+on:
+  workflow_run:
+    workflows:
+      - "PR"
+      - "Nightly CI Pipeline"
+      - "Post-Merge CI Pipeline"
+      - "Release Pipeline"
+    types:
+      - completed
+
+jobs:
+  classify:
+    if: ${{ github.event.workflow_run.conclusion == 'failure' }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Detect workflow type and PR number
+        id: detect
+        run: |
+          WORKFLOW_NAME="${{ github.event.workflow_run.name }}"
+          HEAD_BRANCH="${{ github.event.workflow_run.head_branch }}"
+
+          case "$WORKFLOW_NAME" in
+            "PR") WORKFLOW_TYPE="pr" ;;
+            "Nightly CI Pipeline") WORKFLOW_TYPE="nightly" ;;
+            "Post-Merge CI Pipeline") WORKFLOW_TYPE="post-merge" ;;
+            "Release Pipeline") WORKFLOW_TYPE="release" ;;
+            *) echo "Unknown workflow: $WORKFLOW_NAME"; exit 1 ;;
+          esac
+          echo "workflow_type=$WORKFLOW_TYPE" >> "$GITHUB_OUTPUT"
+
+          # Extract PR number from branch name (pull-request/NNN) or workflow_run context
+          PR_NUMBER=""
+          if [[ "$HEAD_BRANCH" =~ ^pull-request/([0-9]+)$ ]]; then
+            PR_NUMBER="${BASH_REMATCH[1]}"
+          elif [ -n "${{ github.event.workflow_run.pull_requests[0].number }}" ]; then
+            PR_NUMBER="${{ github.event.workflow_run.pull_requests[0].number }}"
+          fi
+          echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+
+      - name: Classify errors
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          API_KEY: ${{ secrets.CI_CLASSIFIER_API_KEY }}
+          API_BASE_URL: ${{ secrets.CI_CLASSIFIER_API_BASE_URL }}
+          MODEL: ${{ secrets.CI_CLASSIFIER_MODEL }}
+        run: |
+          PR_ARGS=""
+          if [ -n "${{ steps.detect.outputs.pr_number }}" ]; then
+            PR_ARGS="--pr-number ${{ steps.detect.outputs.pr_number }}"
+          fi
+
+          python .github/scripts/classify_errors.py \
+            --run-id ${{ github.event.workflow_run.id }} \
+            --repo ${{ github.repository }} \
+            --workflow-type ${{ steps.detect.outputs.workflow_type }} \
+            $PR_ARGS \
+            --output-json /tmp/classification.json
+
+      - name: Upload classification artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: error-classification-${{ github.event.workflow_run.id }}
+          path: /tmp/classification.json
+          retention-days: 90
