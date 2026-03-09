@@ -10,7 +10,6 @@ image_token_id as-is (no token replacement needed).
 """
 
 import logging
-import time
 from dataclasses import dataclass
 from io import BytesIO
 from typing import Any, Sequence
@@ -62,35 +61,18 @@ async def process_multimodal(
 
     Returns (ProcessedInput, raw_bytes_list).
     """
-    t0 = time.perf_counter()
-
     prompt = _apply_chat_template(messages, tokenizer, processor)
-    t1 = time.perf_counter()
 
     image_data = await image_loader.load_batch(image_urls)
-    t2 = time.perf_counter()
     raw_bytes_list = [d[0] for d in image_data]
     image_dims = [(d[1], d[2]) for d in image_data]
 
     tokens, image_ranges = _get_expanded_tokens(
         prompt, image_dims, raw_bytes_list, tokenizer, processor
     )
-    t3 = time.perf_counter()
 
     mm_uuids = compute_mm_uuids_from_images(raw_bytes_list)
-    t4 = time.perf_counter()
     mm_hashes = [int(uuid[:16], 16) for uuid in mm_uuids]
-
-    logger.info(
-        "[perf][process_mm] template=%.2fms load_images=%.2fms "
-        "expand_tokens=%.2fms hash=%.2fms total=%.2fms n_images=%d",
-        1000 * (t1 - t0),
-        1000 * (t2 - t1),
-        1000 * (t3 - t2),
-        1000 * (t4 - t3),
-        1000 * (t4 - t0),
-        len(image_urls),
-    )
 
     return (
         ProcessedInput(tokens=tokens, mm_hashes=mm_hashes, image_ranges=image_ranges),

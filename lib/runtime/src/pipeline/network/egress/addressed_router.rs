@@ -135,10 +135,8 @@ where
         // next build the two part message where we package the connection info and the request into
         // a single Vec<u8> that can be sent over the wire.
         // --- package this up in the WorkQueuePublisher ---
-        let t_serialize = std::time::Instant::now();
         let ctrl = serde_json::to_vec(&control_message)?;
         let data = serde_json::to_vec(&request)?;
-        let dt_serialize = t_serialize.elapsed();
 
         tracing::trace!(
             request_id,
@@ -147,16 +145,13 @@ where
             data.len()
         );
 
-        let data_len = data.len();
         let msg = TwoPartMessage::from_parts(ctrl.into(), data.into());
 
         // the request plane / work queue should provide a two part message codec that can be used
         // or it should take a two part message directly
         // todo - update this
-        let t_encode = std::time::Instant::now();
         let codec = TwoPartCodec::default();
         let buffer = codec.encode_message(msg)?;
-        let dt_encode = t_encode.elapsed();
 
         // TRANSPORT ABSTRACT REQUIRED - END HERE
 
@@ -173,30 +168,16 @@ where
         inject_trace_headers_into_map(&mut headers);
 
         // Send request (works for all transport types)
-        let t_send = std::time::Instant::now();
         let _response = self
             .req_client
             .send_request(address, buffer, headers)
             .await?;
-        let dt_send = t_send.elapsed();
 
         tracing::trace!(request_id, "awaiting transport handshake");
-        let t_handshake = std::time::Instant::now();
         let response_stream = response_stream_provider
             .await
             .map_err(|_| PipelineError::DetachedStreamReceiver)?
             .map_err(PipelineError::ConnectionFailed)?;
-        let dt_handshake = t_handshake.elapsed();
-
-        tracing::debug!(
-            "[perf][addressed_router] serialize={:.3}ms encode={:.3}ms \
-             send={:.3}ms handshake={:.3}ms payload={}bytes",
-            dt_serialize.as_secs_f64() * 1000.0,
-            dt_encode.as_secs_f64() * 1000.0,
-            dt_send.as_secs_f64() * 1000.0,
-            dt_handshake.as_secs_f64() * 1000.0,
-            data_len,
-        );
 
         // TODO: Detect end-of-stream using Server-Sent Events (SSE)
         let mut is_complete_final = false;
