@@ -2,7 +2,6 @@
 
 Agentic systems are the most cache-intensive workloads in production LLM inference today. Agentic coding tools like Claude Code and Codex make hundreds of API calls per coding session, each carrying the full conversation history. After one cold call that writes the prefix to cache, every subsequent call hits 85-97% cache. Agent teams push this further: 97.2% aggregate cache rate across 4 Opus teammates. An 11.7x read/write ratio means the system reads from cache nearly 12 times for every token it writes.
 
-<!-- TODO: regenerate cumulative-reads-writes.png to align with Flash Indexer visual color scheme -->
 ![Cumulative cache reads vs writes across a 42-call Claude Code session. Cache reads (891K tokens) grow steeply while writes (76K) and uncached input stay flat -- an 11.7x read/write ratio.](./blog-help/cumulative-reads-writes.png)
 
 These numbers come from managed API infrastructure where the provider controls prefix matching, cache placement, and eviction. For teams running open-source models on their own GPUs, none of this exists out of the box. Dynamo is NVIDIA's open-source inference stack built to close that gap. This post walks through how we are making Dynamo agent-native at three layers: the frontend API, the router, and KV cache management.
