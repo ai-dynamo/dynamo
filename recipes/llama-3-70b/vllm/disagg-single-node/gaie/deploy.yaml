@@ -16,7 +16,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: docker.io/lambda108/epp-inference-extension-dynamo:fix-header
+          image: nvcr.io/nvidia/ai-dynamo/epp-image:my-tag
           imagePullPolicy: Always
           env:
             - name: DYN_KV_CACHE_BLOCK_SIZE

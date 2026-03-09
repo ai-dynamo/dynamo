@@ -758,27 +758,6 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 								Containers: []corev1.Container{
 									{
 										Image: "another-image:latest",
-										Env: []corev1.EnvVar{
-											{Name: commonconsts.DynamoDiscoveryBackendEnvVar, Value: "kubernetes"},
-											{Name: commonconsts.DynamoNamespaceEnvVar, Value: "default-test-lws-deploy"},
-											{Name: "DYN_PARENT_DGD_K8S_NAME", Value: "test-lws-deploy"},
-											{Name: "DYN_PARENT_DGD_K8S_NAMESPACE", Value: "default"},
-											{Name: "POD_NAME", ValueFrom: &corev1.EnvVarSource{
-												FieldRef: &corev1.ObjectFieldSelector{
-													FieldPath: "metadata.name",
-												},
-											}},
-											{Name: "POD_NAMESPACE", ValueFrom: &corev1.EnvVarSource{
-												FieldRef: &corev1.ObjectFieldSelector{
-													FieldPath: "metadata.namespace",
-												},
-											}},
-											{Name: "POD_UID", ValueFrom: &corev1.EnvVarSource{
-												FieldRef: &corev1.ObjectFieldSelector{
-													FieldPath: "metadata.uid",
-												},
-											}},
-										},
 									},
 									{
 										Name:    commonconsts.MainContainerName,
@@ -920,27 +899,6 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 								Containers: []corev1.Container{
 									{
 										Image: "another-image:latest",
-										Env: []corev1.EnvVar{
-											{Name: commonconsts.DynamoDiscoveryBackendEnvVar, Value: "kubernetes"},
-											{Name: commonconsts.DynamoNamespaceEnvVar, Value: "default-test-lws-deploy"},
-											{Name: "DYN_PARENT_DGD_K8S_NAME", Value: "test-lws-deploy"},
-											{Name: "DYN_PARENT_DGD_K8S_NAMESPACE", Value: "default"},
-											{Name: "POD_NAME", ValueFrom: &corev1.EnvVarSource{
-												FieldRef: &corev1.ObjectFieldSelector{
-													FieldPath: "metadata.name",
-												},
-											}},
-											{Name: "POD_NAMESPACE", ValueFrom: &corev1.EnvVarSource{
-												FieldRef: &corev1.ObjectFieldSelector{
-													FieldPath: "metadata.namespace",
-												},
-											}},
-											{Name: "POD_UID", ValueFrom: &corev1.EnvVarSource{
-												FieldRef: &corev1.ObjectFieldSelector{
-													FieldPath: "metadata.uid",
-												},
-											}},
-										},
 									},
 									{
 										Name:    commonconsts.MainContainerName,
