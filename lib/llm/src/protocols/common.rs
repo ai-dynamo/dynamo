@@ -422,7 +422,10 @@ impl GuidedDecodingOptions {
         Ok(Some(instance))
     }
 
-    /// Validate that only one guided decoding option is set
+    const MAX_GRAMMAR_NESTING_DEPTH: usize = 500;
+
+    /// Validate that only one guided decoding option is set, and that
+    /// grammar nesting depth is bounded.
     pub fn validate(&self) -> Result<()> {
         let count = [
             self.json.is_some(),
@@ -436,13 +439,39 @@ impl GuidedDecodingOptions {
         .count();
 
         if count > 1 {
-            Err(anyhow::anyhow!(
+            return Err(anyhow::anyhow!(
                 "Only one of json, regex, choice, or grammar can be set, but multiple are specified: {:?}",
                 self
-            ))
-        } else {
-            Ok(())
+            ));
         }
+
+        if let Some(ref grammar) = self.grammar {
+            let mut depth: usize = 0;
+            let mut max: usize = 0;
+            for ch in grammar.bytes() {
+                match ch {
+                    b'(' | b'[' | b'{' => {
+                        depth += 1;
+                        if depth > max {
+                            max = depth;
+                        }
+                    }
+                    b')' | b']' | b'}' => {
+                        depth = depth.saturating_sub(1);
+                    }
+                    _ => {}
+                }
+            }
+            if max > Self::MAX_GRAMMAR_NESTING_DEPTH {
+                return Err(anyhow::anyhow!(
+                    "guided_grammar exceeds maximum nesting depth of {} (got {})",
+                    Self::MAX_GRAMMAR_NESTING_DEPTH,
+                    max
+                ));
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -842,5 +871,20 @@ mod tests {
         assert!(val.is_some());
         let val = val.unwrap();
         assert_eq!(val.choice, Some(vec!["A".to_string()]));
+    }
+
+    #[test]
+    fn test_guided_grammar_deep_nesting_rejected() {
+        let grammar = "(".repeat(501) + "a" + &")".repeat(501);
+        let result = GuidedDecodingOptions::validated(None, None, None, Some(grammar), None, None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("nesting depth"));
+    }
+
+    #[test]
+    fn test_guided_grammar_acceptable_nesting_ok() {
+        let grammar = "(".repeat(500) + "a" + &")".repeat(500);
+        let result = GuidedDecodingOptions::validated(None, None, None, Some(grammar), None, None);
+        assert!(result.is_ok());
     }
 }
