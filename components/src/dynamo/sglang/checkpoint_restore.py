@@ -75,6 +75,18 @@ class SGLangCheckpointAdapter:
             ResumeMemoryOccupationReqInput,
         )
 
+        # After CRIU restore, CUDA context may not be fully ready. Synchronize
+        # so resume_memory_occupation (and _import_static_state inside SGLang)
+        # see a consistent device state. Required for SGLang fix in PR #7733
+        # when using tensor parallel; harmless otherwise.
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+        except Exception as e:
+            logger.warning("CUDA sync before resume_memory_occupation failed: %s", e)
+
         await self._engine.tokenizer_manager.resume_memory_occupation(
             ResumeMemoryOccupationReqInput(tags=_MEMORY_TAGS), None
         )
@@ -236,6 +248,9 @@ async def handle_checkpoint_mode(server_args) -> tuple[bool, Optional[sgl.Engine
     # Enable memory_saver so GPU memory can be released for CRIU.
     # When using GMS, weights use VA-stable unmap/remap (no CPU backup); GMS
     # forbids enable_weights_cpu_backup. Otherwise use CPU backup for weights.
+    # SGLang runtime must include the barrier-before-_import_static_state fix
+    # (sgl-project/sglang#7733) to avoid CUDA invalid argument on resume in
+    # TP or multi-process setups.
     server_args.enable_memory_saver = True
     _using_gms = getattr(server_args, "load_format", None) == "gms" or (
         isinstance(getattr(server_args, "load_format", None), type)
