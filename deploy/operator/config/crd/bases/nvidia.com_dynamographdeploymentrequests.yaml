@@ -94,6 +94,7 @@ spec:
                     The controller automatically sets this value in profilingConfig.config.engine.backend.
                     Profiling runs on real GPUs or via AIC simulation to collect performance data.
                   enum:
+                    - auto
                     - vllm
                     - sglang
                     - trtllm
@@ -577,7 +578,24 @@ spec:
                     Typically auto-filled by the operator from cluster discovery.
                   properties:
                     gpuSku:
-                      description: GPUSKU is the GPU SKU identifier (e.g., "H100_SXM", "A100_80GB").
+                      allOf:
+                        - enum:
+                            - gb200_sxm
+                            - h200_sxm
+                            - h100_sxm
+                            - b200_sxm
+                            - a100_sxm
+                            - l40s
+                        - enum:
+                            - gb200_sxm
+                            - h200_sxm
+                            - h100_sxm
+                            - b200_sxm
+                            - a100_sxm
+                            - l40s
+                      description: |-
+                        GPUSKU is the AIC hardware system identifier for the GPU.
+                        When omitted, the operator auto-detects this via InferHardwareSystem from cluster GPU node labels.
                       type: string
                     numGpusPerNode:
                       description: NumGPUsPerNode is the number of GPUs per node.

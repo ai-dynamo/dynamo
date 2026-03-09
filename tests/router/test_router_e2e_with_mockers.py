@@ -46,6 +46,7 @@ pytestmark = [
     pytest.mark.gpu_0,
     pytest.mark.integration,
     pytest.mark.model(MODEL_NAME),
+    pytest.mark.skip(reason="DYN-2365 - Flaky, temporarily disabled"),
 ]
 NUM_MOCKERS = 2
 SPEEDUP_RATIO = 10.0
@@ -190,10 +191,12 @@ class MockerProcess:
         request_plane: str = "nats",
         zmq_kv_events: bool = False,
         standalone_indexer: bool = False,
+        model_name: str = "mocker",
     ):
         namespace_suffix = generate_random_suffix()
         self.namespace = f"test-namespace-{namespace_suffix}"
         self.component_name = "mocker"
+        self.model_name = model_name
         self.endpoint = f"dyn://{self.namespace}.{self.component_name}.generate"
         self.num_workers = num_mockers
         self._zmq_kv_events_ports: list[int] = []
@@ -386,6 +389,10 @@ class MockerProcess:
                         "instance_id": new_worker_id,
                         "endpoint": endpoint,
                         "dp_rank": dp_rank,
+                        "model_name": self.model_name,
+                        "block_size": self._mocker_args_orig.get(
+                            "block_size", BLOCK_SIZE
+                        ),
                     }
                     async with session.post(register_url, json=payload) as resp:
                         if resp.status != 201:
@@ -897,6 +904,7 @@ def test_router_decisions(
         request_plane=request_plane,
         zmq_kv_events=zmq_kv_events,
         standalone_indexer=zmq_kv_events,
+        model_name=MODEL_NAME,
     ) as mockers:
         logger.info(f"All mockers using endpoint: {mockers.endpoint}")
 

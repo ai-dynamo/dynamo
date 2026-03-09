@@ -129,8 +129,10 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
             .filter(|(wid, _)| allowed_ids.is_none_or(|ids| ids.contains(wid)))
         {
             let data_parallel_size = config.data_parallel_size();
+            let data_parallel_start_rank = config.data_parallel_start_rank();
 
-            for dp_rank in 0..data_parallel_size {
+            for dp_rank in data_parallel_start_rank..(data_parallel_start_rank + data_parallel_size)
+            {
                 let worker = WorkerWithDpRank::new(*worker_id, dp_rank);
 
                 let overlap = *overlaps.get(&worker).unwrap_or(&0);
@@ -147,7 +149,7 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
 
                 worker_logits.insert(worker, logit);
 
-                tracing::info!(
+                tracing::debug!(
                     "Formula for worker_id={} dp_rank={:?} with {overlap} cached blocks: {logit:.3} \
                      = {overlap_weight:.1} * prefill_blocks + decode_blocks \
                      = {overlap_weight:.1} * {potential_prefill_block:.3} + {decode_block:.3}",
@@ -165,7 +167,9 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
         let candidates = softmax_sample(&worker_logits, temperature);
 
         let best_worker = if candidates.len() > 1 {
-            tracing::info!("Multiple workers tied with same logit, using tree size as tie-breaker");
+            tracing::debug!(
+                "Multiple workers tied with same logit, using tree size as tie-breaker"
+            );
             let tree_sizes: Vec<(usize, &WorkerWithDpRank)> = candidates
                 .iter()
                 .map(|w| (request.overlaps.tree_sizes.get(w).copied().unwrap_or(0), w))

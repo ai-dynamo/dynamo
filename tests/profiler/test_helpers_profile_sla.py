@@ -25,7 +25,6 @@ try:
         PlannerPreDeploymentSweepMode,
     )
     from dynamo.profiler.profile_sla import (
-        _assemble_final_config,
         _extract_profiler_params,
         _write_final_output,
     )
@@ -33,6 +32,7 @@ try:
         PickedParallelConfig,
     )
     from dynamo.profiler.utils.defaults import SearchStrategy
+    from dynamo.profiler.utils.dgd_generation import assemble_final_config
     from dynamo.profiler.utils.dgdr_v1beta1_types import (
         DynamoGraphDeploymentRequestSpec,
         FeaturesSpec,
@@ -41,7 +41,10 @@ try:
         SLASpec,
         WorkloadSpec,
     )
-    from dynamo.profiler.utils.dgdr_validate import run_gate_checks
+    from dynamo.profiler.utils.dgdr_validate import (
+        valid_dgdr_spec,
+        validate_dgdr_dynamo_features,
+    )
     from dynamo.profiler.utils.profile_common import ProfilerOperationalConfig
 except ImportError as e:
     pytest.skip(f"Skip (missing dependency): {e}", allow_module_level=True)
@@ -159,86 +162,165 @@ class TestExtractProfilerParams:
 
 
 # ---------------------------------------------------------------------------
-# run_gate_checks
+# valid_dgdr_spec
 # ---------------------------------------------------------------------------
 
 
-class TestRunGateChecks:
+class TestValidDgdrSpec:
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
     def test_thorough_auto_backend_raises(self):
         """THOROUGH + 'auto' backend is rejected."""
-        dgdr = _make_dgdr()
+        dgdr = _make_dgdr(searchStrategy="thorough", backend="auto")
         with pytest.raises(ValueError, match="does not support 'auto' backend"):
-            run_gate_checks(
-                dgdr,
-                aic_supported=True,
-                search_strategy=SearchStrategy.THOROUGH,
-                backend="auto",
-            )
+            valid_dgdr_spec(dgdr)
 
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
     def test_thorough_concrete_backend_passes(self):
         """THOROUGH + concrete backend is fine."""
-        dgdr = _make_dgdr()
-        run_gate_checks(
-            dgdr,
-            aic_supported=True,
-            search_strategy=SearchStrategy.THOROUGH,
-            backend="trtllm",
-        )
+        dgdr = _make_dgdr(searchStrategy="thorough", backend="trtllm")
+        valid_dgdr_spec(dgdr)
 
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
     def test_rapid_auto_backend_passes(self):
         """RAPID allows 'auto' backend."""
-        dgdr = _make_dgdr()
-        run_gate_checks(
-            dgdr,
-            aic_supported=False,
-            search_strategy=SearchStrategy.RAPID,
-            backend="auto",
-        )
+        dgdr = _make_dgdr(backend="auto")
+        valid_dgdr_spec(dgdr)
 
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
-    def test_no_planner_aic_unsupported_passes(self):
-        """No planner, AIC unsupported — no error."""
-        dgdr = _make_dgdr()
-        run_gate_checks(
-            dgdr,
-            aic_supported=False,
-            search_strategy=SearchStrategy.RAPID,
-            backend="vllm",
-        )
+    def test_missing_image_raises(self):
+        """image is required."""
+        dgdr = _make_dgdr(image="")
+        with pytest.raises(ValueError, match="image.*required"):
+            valid_dgdr_spec(dgdr)
 
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
-    def test_planner_throughput_scaling_aic_unsupported_raises(self):
-        """Throughput-based planner scaling requires AIC support."""
+    def test_missing_hardware_raises(self):
+        """hardware is required."""
+        dgdr = _make_dgdr(hardware=None)
+        with pytest.raises(ValueError, match="hardware.*required"):
+            valid_dgdr_spec(dgdr)
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_missing_gpu_sku_raises(self):
+        """hardware.gpuSku is required."""
+        dgdr = _make_dgdr(hardware=HardwareSpec(gpuSku=None, numGpusPerNode=8))
+        with pytest.raises(ValueError, match="gpuSku.*required"):
+            valid_dgdr_spec(dgdr)
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_zero_gpus_per_node_raises(self):
+        """hardware.numGpusPerNode must be positive."""
+        dgdr = _make_dgdr(hardware=HardwareSpec(gpuSku="h200_sxm", numGpusPerNode=0))
+        with pytest.raises(ValueError, match="numGpusPerNode.*positive"):
+            valid_dgdr_spec(dgdr)
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_none_workload_gets_default(self):
+        """None workload is populated with a default WorkloadSpec."""
+        dgdr = _make_dgdr(workload=None)
+        valid_dgdr_spec(dgdr)
+        assert dgdr.workload is not None
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_none_sla_gets_default(self):
+        """None sla is populated with a default SLASpec."""
+        dgdr = _make_dgdr(sla=None)
+        valid_dgdr_spec(dgdr)
+        assert dgdr.sla is not None
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_both_concurrency_and_rate_raises(self):
+        """concurrency and requestRate are mutually exclusive."""
+        dgdr = _make_dgdr(
+            workload=WorkloadSpec(isl=4000, osl=1000, concurrency=10, requestRate=5.0)
+        )
+        with pytest.raises(ValueError, match="concurrency.*requestRate"):
+            valid_dgdr_spec(dgdr)
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_negative_sla_ttft_raises(self):
+        """Negative SLA ttft must be rejected."""
+        dgdr = _make_dgdr(sla=SLASpec(ttft=-1.0, itl=30.0))
+        with pytest.raises(ValueError, match="ttft.*positive"):
+            valid_dgdr_spec(dgdr)
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_e2e_latency_clears_ttft_itl(self):
+        """e2eLatency takes precedence and nulls out ttft/itl."""
+        dgdr = _make_dgdr(sla=SLASpec(ttft=None, itl=None, e2eLatency=35000.0))
+        valid_dgdr_spec(dgdr)
+        assert dgdr.sla.ttft is None
+        assert dgdr.sla.itl is None
+        assert dgdr.sla.e2eLatency == 35000.0
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_missing_ttft_and_itl_and_e2e_raises(self):
+        """At least ttft+itl or e2eLatency must be provided."""
+        dgdr = _make_dgdr(sla=SLASpec(ttft=None, itl=None, e2eLatency=None))
+        with pytest.raises(ValueError, match="ttft.*itl.*e2eLatency"):
+            valid_dgdr_spec(dgdr)
+
+
+# ---------------------------------------------------------------------------
+# validate_dgdr_dynamo_features
+# ---------------------------------------------------------------------------
+
+
+class TestValidateDgdrDynamoFeatures:
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_no_features_passes(self):
+        """No features → no error."""
+        dgdr = _make_dgdr()
+        validate_dgdr_dynamo_features(dgdr, aic_supported=False)
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_planner_throughput_scaling_aic_unsupported_rapid_sweep_raises(self):
+        """Throughput scaling + rapid sweep + AIC unsupported is rejected."""
         dgdr = _make_dgdr(
             features=FeaturesSpec(
                 planner=_make_planner(
                     enable_throughput_scaling=True,
+                    pre_deployment_sweeping_mode=PlannerPreDeploymentSweepMode.Rapid,
                     backend="vllm",
                 )
             )
         )
-        with pytest.raises(
-            ValueError, match="Throughput-based planner scaling requires AIC support"
-        ):
-            run_gate_checks(
-                dgdr,
-                aic_supported=False,
-                search_strategy=SearchStrategy.RAPID,
-                backend="vllm",
-            )
+        with pytest.raises(ValueError, match="AIC does not support"):
+            validate_dgdr_dynamo_features(dgdr, aic_supported=False)
 
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
-    def test_planner_rapid_sweep_aic_unsupported_mutates_to_none(self):
-        """Rapid pre-deployment sweep falls back to None when AIC is unsupported."""
+    def test_planner_throughput_scaling_aic_supported_passes(self):
+        """Throughput scaling + rapid sweep + AIC supported is fine."""
+        planner = _make_planner(
+            pre_deployment_sweeping_mode=PlannerPreDeploymentSweepMode.Rapid,
+        )
+        dgdr = _make_dgdr(features=FeaturesSpec(planner=planner))
+        validate_dgdr_dynamo_features(dgdr, aic_supported=True)
+        assert (
+            dgdr.features.planner.pre_deployment_sweeping_mode
+            == PlannerPreDeploymentSweepMode.Rapid
+        )
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_planner_load_scaling_only_aic_unsupported_passes(self):
+        """Load scaling only (no throughput scaling) + AIC unsupported passes."""
         planner = _make_planner(
             enable_throughput_scaling=False,
             enable_load_scaling=True,
@@ -246,35 +328,44 @@ class TestRunGateChecks:
             backend="vllm",
         )
         dgdr = _make_dgdr(features=FeaturesSpec(planner=planner))
-        run_gate_checks(
-            dgdr,
-            aic_supported=False,
-            search_strategy=SearchStrategy.RAPID,
-            backend="vllm",
-        )
-        assert (
-            dgdr.features.planner.pre_deployment_sweeping_mode
-            == PlannerPreDeploymentSweepMode.None_
-        )
-
-    @pytest.mark.pre_merge
-    @pytest.mark.gpu_0
-    def test_planner_aic_supported_no_mutation(self):
-        """When AIC is supported, planner config is left unchanged."""
-        planner = _make_planner(
-            pre_deployment_sweeping_mode=PlannerPreDeploymentSweepMode.Rapid,
-        )
-        dgdr = _make_dgdr(features=FeaturesSpec(planner=planner))
-        run_gate_checks(
-            dgdr,
-            aic_supported=True,
-            search_strategy=SearchStrategy.RAPID,
-            backend="trtllm",
-        )
+        validate_dgdr_dynamo_features(dgdr, aic_supported=False)
         assert (
             dgdr.features.planner.pre_deployment_sweeping_mode
             == PlannerPreDeploymentSweepMode.Rapid
         )
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_mocker_enabled_sweep_none_raises(self):
+        """Mocker enabled + sweep mode None_ is rejected."""
+        dgdr = _make_dgdr(
+            features=FeaturesSpec(
+                planner=_make_planner(
+                    enable_throughput_scaling=False,
+                    enable_load_scaling=True,
+                    pre_deployment_sweeping_mode=PlannerPreDeploymentSweepMode.None_,
+                ),
+                mocker=MockerSpec(enabled=True),
+            )
+        )
+        with pytest.raises(ValueError, match="cannot be 'none'.*mocker"):
+            validate_dgdr_dynamo_features(dgdr, aic_supported=True)
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_mocker_enabled_sweep_rapid_passes(self):
+        """Mocker enabled + sweep mode Rapid is fine."""
+        dgdr = _make_dgdr(
+            features=FeaturesSpec(
+                planner=_make_planner(
+                    enable_throughput_scaling=False,
+                    enable_load_scaling=True,
+                    pre_deployment_sweeping_mode=PlannerPreDeploymentSweepMode.Rapid,
+                ),
+                mocker=MockerSpec(enabled=True),
+            )
+        )
+        validate_dgdr_dynamo_features(dgdr, aic_supported=True)
 
 
 # ---------------------------------------------------------------------------
@@ -336,8 +427,10 @@ class TestWriteFinalOutput:
 
 
 # ---------------------------------------------------------------------------
-# _assemble_final_config
+# assemble_final_config
 # ---------------------------------------------------------------------------
+
+_DGD_GEN = "dynamo.profiler.utils.dgd_generation"
 
 
 class TestAssembleFinalConfig:
@@ -348,7 +441,7 @@ class TestAssembleFinalConfig:
         ops = _make_ops(tmp_path)
         dgd_config = {"kind": "DynamoGraphDeployment"}
 
-        result = _assemble_final_config(
+        result = assemble_final_config(
             dgdr,
             ops,
             dgd_config,
@@ -364,7 +457,7 @@ class TestAssembleFinalConfig:
         dgdr = _make_dgdr()
         ops = _make_ops(tmp_path)
 
-        result = _assemble_final_config(
+        result = assemble_final_config(
             dgdr,
             ops,
             None,
@@ -376,19 +469,26 @@ class TestAssembleFinalConfig:
 
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
-    def test_planner_no_mocker_returns_real_config(self, tmp_path):
+    def test_planner_no_mocker_returns_config_with_planner_cm(self, tmp_path):
+        """Planner enabled, no mocker: result is [planner_cm, profile_cm, dgd_config]."""
         dgdr = _make_dgdr(features=FeaturesSpec(planner=_make_planner()))
         ops = _make_ops(tmp_path)
         os.makedirs(ops.output_dir, exist_ok=True)
-        dgd_config = {"kind": "DGD"}
-        real_cfg = {"kind": "real"}
-        mocker_cfg = {"kind": "mocker"}
+        dgd_config = {"kind": "DGD", "spec": {"services": {}}}
+        planner_cm = {"kind": "ConfigMap", "metadata": {"name": "planner-cm"}}
+        profile_cm = {"kind": "ConfigMap", "metadata": {"name": "profile-cm"}}
 
-        with patch(
-            "dynamo.profiler.profile_sla.generate_dgd_config_with_planner",
-            return_value=(real_cfg, mocker_cfg),
+        with (
+            patch(
+                f"{_DGD_GEN}.add_planner_to_config",
+                return_value=planner_cm,
+            ) as mock_planner,
+            patch(
+                f"{_DGD_GEN}.add_profile_data_to_config",
+                return_value=profile_cm,
+            ) as mock_profile,
         ):
-            result = _assemble_final_config(
+            result = assemble_final_config(
                 dgdr,
                 ops,
                 dgd_config,
@@ -396,11 +496,14 @@ class TestAssembleFinalConfig:
                 PickedParallelConfig(tp=1),
             )
 
-        assert result is real_cfg
+        mock_planner.assert_called_once()
+        mock_profile.assert_called_once()
+        assert result == [planner_cm, profile_cm, dgd_config]
 
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
-    def test_mocker_enabled_returns_mocker_config(self, tmp_path):
+    def test_mocker_plus_planner_uses_mocker_base(self, tmp_path):
+        """Mocker + planner: mocker base is created first, then planner layered."""
         dgdr = _make_dgdr(
             features=FeaturesSpec(
                 planner=_make_planner(),
@@ -410,14 +513,25 @@ class TestAssembleFinalConfig:
         ops = _make_ops(tmp_path)
         os.makedirs(ops.output_dir, exist_ok=True)
         dgd_config = {"kind": "DGD"}
-        real_cfg = {"kind": "real"}
-        mocker_cfg = {"kind": "mocker"}
+        mocker_base = {"kind": "MockerDGD", "spec": {"services": {}}}
+        planner_cm = {"kind": "ConfigMap", "metadata": {"name": "planner-cm"}}
+        profile_cm = {"kind": "ConfigMap", "metadata": {"name": "profile-cm"}}
 
-        with patch(
-            "dynamo.profiler.profile_sla.generate_dgd_config_with_planner",
-            return_value=(real_cfg, mocker_cfg),
+        with (
+            patch(
+                f"{_DGD_GEN}.generate_mocker_config",
+                return_value=mocker_base,
+            ) as mock_mocker,
+            patch(
+                f"{_DGD_GEN}.add_planner_to_config",
+                return_value=planner_cm,
+            ) as mock_planner,
+            patch(
+                f"{_DGD_GEN}.add_profile_data_to_config",
+                return_value=profile_cm,
+            ),
         ):
-            result = _assemble_final_config(
+            result = assemble_final_config(
                 dgdr,
                 ops,
                 dgd_config,
@@ -425,4 +539,45 @@ class TestAssembleFinalConfig:
                 PickedParallelConfig(tp=1),
             )
 
-        assert result is mocker_cfg
+        mock_mocker.assert_called_once()
+        mock_planner.assert_called_once()
+        assert mock_planner.call_args.args[1] is mocker_base
+        assert result == [planner_cm, profile_cm, mocker_base]
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_mocker_only_no_planner_returns_mocker_config(self, tmp_path):
+        """Mocker-only (no planner): generate_mocker_config is called,
+        add_planner_to_config is not, profile data is still attached."""
+        dgdr = _make_dgdr(features=FeaturesSpec(mocker=MockerSpec(enabled=True)))
+        ops = _make_ops(tmp_path)
+        os.makedirs(ops.output_dir, exist_ok=True)
+        dgd_config = {"kind": "DGD"}
+        mocker_base = {"kind": "MockerDGD", "spec": {"services": {}}}
+        profile_cm = {"kind": "ConfigMap", "metadata": {"name": "profile-cm"}}
+
+        with (
+            patch(
+                f"{_DGD_GEN}.generate_mocker_config",
+                return_value=mocker_base,
+            ) as mock_mocker,
+            patch(
+                f"{_DGD_GEN}.add_planner_to_config",
+            ) as mock_planner,
+            patch(
+                f"{_DGD_GEN}.add_profile_data_to_config",
+                return_value=profile_cm,
+            ) as mock_profile,
+        ):
+            result = assemble_final_config(
+                dgdr,
+                ops,
+                dgd_config,
+                PickedParallelConfig(tp=1),
+                PickedParallelConfig(tp=1),
+            )
+
+        mock_mocker.assert_called_once()
+        mock_planner.assert_not_called()
+        mock_profile.assert_called_once()
+        assert result == [profile_cm, mocker_base]

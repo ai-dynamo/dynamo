@@ -107,6 +107,8 @@ class frontend_service:
     # Last observed inter-token latency per worker (in seconds)
     # Gauge metric tracking the most recent ITL for each worker
     WORKER_LAST_INTER_TOKEN_LATENCY_SECONDS = "worker_last_inter_token_latency_seconds"
+    # Number of requests pending in the router's scheduler queue (gauge per worker_type)
+    ROUTER_QUEUE_PENDING_REQUESTS = "router_queue_pending_requests"
     # Label name for the type of migration
     MIGRATION_TYPE_LABEL = "migration_type"
     # Label name for tokenizer operation
@@ -206,25 +208,8 @@ class name_prefix:
     ROUTER = "dynamo_router"
 
 
-class router_request:
-    """Router per-request metrics (component-scoped via `MetricsHierarchy`)."""
-
-    # Prefix prepended to `frontend_service::*` names to form router metric names.
-    # e.g. `"router_"` + `frontend_service::REQUESTS_TOTAL` → `"router_requests_total"`.
-    METRIC_PREFIX = "router_"
-
-
 class router:
-    """Router request metrics (dynamo_component_router_* with dynamo_namespace label).
-
-    These constants are the full suffix portions combined with name_prefix.COMPONENT
-    ("dynamo_component") to form the complete metric name, e.g.
-    dynamo_component_router_requests_total.
-
-    Registered via MetricsHierarchy (from_component()) which auto-injects
-    dynamo_namespace (underscores) and dynamo_component labels and registers
-    with the component's registry (port 9090).
-    """
+    """Router request metrics (component-scoped aggregate histograms + counter)"""
 
     # Total number of requests processed by the router
     REQUESTS_TOTAL = "router_requests_total"
@@ -236,11 +221,14 @@ class router:
     INPUT_SEQUENCE_TOKENS = "router_input_sequence_tokens"
     # Output sequence length in tokens observed at the router
     OUTPUT_SEQUENCE_TOKENS = "router_output_sequence_tokens"
-    # TODO: Add REQUEST_DURATION_SECONDS = "router_request_duration_seconds" once
-    #       RouterRequestMetrics in lib/llm/src/kv_router/metrics.rs registers a
-    #       dynamo_component_router_request_duration_seconds histogram. Until then,
-    #       get_avg_request_duration (router path) falls back to the work_handler
-    #       constant and queries a non-existent metric, silently returning 0.
+
+
+class router_request:
+    """Router per-request metrics (component-scoped via `MetricsHierarchy`)."""
+
+    # Prefix prepended to `frontend_service::*` names to form router metric names.
+    # e.g. `"router_"` + `frontend_service::REQUESTS_TOTAL` → `"router_requests_total"`.
+    METRIC_PREFIX = "router_"
 
 
 class routing_overhead:
@@ -256,6 +244,25 @@ class routing_overhead:
     SCHEDULING_MS = "overhead_scheduling_ms"
     # Total routing overhead per request
     TOTAL_MS = "overhead_total_ms"
+
+
+class trtllm_additional:
+    """Additional TRT-LLM worker metrics beyond what the engine natively provides."""
+
+    # Total number of aborted/cancelled requests
+    NUM_ABORTED_REQUESTS_TOTAL = "trtllm_num_aborted_requests_total"
+    # Total number of requests containing image content
+    REQUEST_TYPE_IMAGE_TOTAL = "trtllm_request_type_image_total"
+    # Total number of requests using guided/structured decoding
+    REQUEST_TYPE_STRUCTURED_OUTPUT_TOTAL = "trtllm_request_type_structured_output_total"
+    # Total number of successful KV cache transfers
+    KV_TRANSFER_SUCCESS_TOTAL = "trtllm_kv_transfer_success_total"
+    # KV cache transfer latency per request in seconds
+    KV_TRANSFER_LATENCY_SECONDS = "trtllm_kv_transfer_latency_seconds"
+    # KV cache transfer size per request in bytes
+    KV_TRANSFER_BYTES = "trtllm_kv_transfer_bytes"
+    # KV cache transfer speed per request in GB/s
+    KV_TRANSFER_SPEED_GB_S = "trtllm_kv_transfer_speed_gb_s"
 
 
 class task_tracker:

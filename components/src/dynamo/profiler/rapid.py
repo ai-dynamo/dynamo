@@ -132,6 +132,8 @@ def _run_naive_fallback(
                 pvc_mount_path=dgdr.modelCache.pvcMountPath,
                 pvc_path=dgdr.modelCache.pvcModelPath or "",
             )
+        else:
+            dgd_config = config_modifier.update_model(dgd_config, model_name=model)
 
     return {
         "best_config_df": pd.DataFrame(),

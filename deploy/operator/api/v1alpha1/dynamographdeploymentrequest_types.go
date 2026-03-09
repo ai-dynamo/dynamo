@@ -151,7 +151,7 @@ type DynamoGraphDeploymentRequestSpec struct {
 	// The controller automatically sets this value in profilingConfig.config.engine.backend.
 	// Profiling runs on real GPUs or via AIC simulation to collect performance data.
 	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:Enum=vllm;sglang;trtllm
+	// +kubebuilder:validation:Enum=auto;vllm;sglang;trtllm
 	Backend string `json:"backend"`
 
 	// UseMocker indicates whether to deploy a mocker DynamoGraphDeployment instead of
