@@ -22,7 +22,7 @@ async def init_embedding(
     shutdown_event: asyncio.Event,
     shutdown_endpoints: list,
     run_deferred_handlers: Callable[[], Awaitable[None]] | None = None,
-):
+) -> None:
     """Initialize embedding worker component"""
     server_args, dynamo_args = config.server_args, config.dynamo_args
 

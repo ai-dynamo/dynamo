@@ -25,8 +25,7 @@ use super::BlockManager;
 
 /// Capacity settings for the TinyLFU frequency tracker used by
 /// [`BlockRegistry`] and the multi-level LRU backend.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FrequencyTrackingCapacity {
     /// Small capacity: 2^18 (262,144) entries
     Small,
@@ -52,7 +51,6 @@ impl FrequencyTrackingCapacity {
         Arc::new(TinyLFUTracker::new(self.size()))
     }
 }
-
 
 /// Configuration for the inactive pool backend.
 pub enum InactiveBackendConfig {
@@ -291,10 +289,7 @@ impl<T: BlockMetadata> BlockManagerConfigBuilder<T> {
     /// plug in a custom [`InactivePoolBackend`] implementation.
     ///
     /// See [`crate::ext`] for the types needed to implement a custom backend.
-    pub fn with_inactive_backend(
-        mut self,
-        backend: impl InactivePoolBackend<T> + 'static,
-    ) -> Self {
+    pub fn with_inactive_backend(mut self, backend: impl InactivePoolBackend<T> + 'static) -> Self {
         self.custom_inactive_backend = Some(Box::new(backend));
         self
     }
@@ -379,57 +374,62 @@ impl<T: BlockMetadata> BlockManagerConfigBuilder<T> {
         metrics.set_reset_pool_size(block_count as i64);
 
         // Create backend based on configuration (custom backend takes priority)
-        let backend: Box<dyn InactivePoolBackend<T>> = if let Some(custom) = self.custom_inactive_backend.take() {
+        let backend: Box<dyn InactivePoolBackend<T>> = if let Some(custom) =
+            self.custom_inactive_backend.take()
+        {
             tracing::info!("Using custom inactive pool backend");
             custom
-        } else { match self.inactive_backend.take() {
-            Some(InactiveBackendConfig::HashMap { reuse_policy }) => {
-                tracing::info!("Using HashMap for inactive pool");
-                Box::new(HashMapBackend::new(reuse_policy))
-            }
-            Some(InactiveBackendConfig::Lru) => {
-                // Capacity automatically set to block_count
-                let capacity = NonZeroUsize::new(block_count).expect("block_count must be > 0");
-                tracing::info!("Using LRU for inactive pool");
-                Box::new(LruBackend::new(capacity))
-            }
-            Some(InactiveBackendConfig::MultiLru {
-                frequency_thresholds,
-            }) => {
-                // Require frequency tracker for MultiLRU
-                let frequency_tracker = registry.frequency_tracker().ok_or_else(|| {
-                    BlockManagerBuilderError::InvalidBackend(
-                        "MultiLRU backend requires a registry with frequency tracking".to_string(),
-                    )
-                })?;
+        } else {
+            match self.inactive_backend.take() {
+                Some(InactiveBackendConfig::HashMap { reuse_policy }) => {
+                    tracing::info!("Using HashMap for inactive pool");
+                    Box::new(HashMapBackend::new(reuse_policy))
+                }
+                Some(InactiveBackendConfig::Lru) => {
+                    // Capacity automatically set to block_count
+                    let capacity = NonZeroUsize::new(block_count).expect("block_count must be > 0");
+                    tracing::info!("Using LRU for inactive pool");
+                    Box::new(LruBackend::new(capacity))
+                }
+                Some(InactiveBackendConfig::MultiLru {
+                    frequency_thresholds,
+                }) => {
+                    // Require frequency tracker for MultiLRU
+                    let frequency_tracker = registry.frequency_tracker().ok_or_else(|| {
+                        BlockManagerBuilderError::InvalidBackend(
+                            "MultiLRU backend requires a registry with frequency tracking"
+                                .to_string(),
+                        )
+                    })?;
 
-                // Each level needs capacity for all blocks since the frequency
-                // distribution is unpredictable — all blocks could land in one level.
-                let level_capacity =
-                    NonZeroUsize::new(block_count).expect("block_count must be > 0");
+                    // Each level needs capacity for all blocks since the frequency
+                    // distribution is unpredictable — all blocks could land in one level.
+                    let level_capacity =
+                        NonZeroUsize::new(block_count).expect("block_count must be > 0");
 
-                tracing::info!(
-                    "Using MultiLRU inactive backend with thresholds: {:?}",
-                    frequency_thresholds
-                );
-                Box::new(
-                    MultiLruBackend::new_with_thresholds(
-                        level_capacity,
-                        &frequency_thresholds,
-                        frequency_tracker,
+                    tracing::info!(
+                        "Using MultiLRU inactive backend with thresholds: {:?}",
+                        frequency_thresholds
+                    );
+                    Box::new(
+                        MultiLruBackend::new_with_thresholds(
+                            level_capacity,
+                            &frequency_thresholds,
+                            frequency_tracker,
+                        )
+                        .map_err(|e| BlockManagerBuilderError::InvalidBackend(e.to_string()))?,
                     )
-                    .map_err(|e| BlockManagerBuilderError::InvalidBackend(e.to_string()))?,
-                )
+                }
+                Some(InactiveBackendConfig::Lineage) => {
+                    tracing::info!("Using Lineage inactive backend");
+                    Box::new(LineageBackend::default())
+                }
+                None => {
+                    tracing::info!("Using default inactive backend: Lineage");
+                    Box::new(LineageBackend::default())
+                }
             }
-            Some(InactiveBackendConfig::Lineage) => {
-                tracing::info!("Using Lineage inactive backend");
-                Box::new(LineageBackend::default())
-            }
-            None => {
-                tracing::info!("Using default inactive backend: Lineage");
-                Box::new(LineageBackend::default())
-            }
-        } };
+        };
 
         // Create pools
         let inactive_pool = InactivePool::new(backend, &reset_pool, Some(metrics.clone()));

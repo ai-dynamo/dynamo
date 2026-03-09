@@ -11,6 +11,9 @@ pub use transfer::{TransferConfig, TransferOptions};
 pub use kvbm_common::BlockId;
 pub type SequenceHash = kvbm_common::SequenceHash;
 
+#[cfg(any(test, feature = "testing"))]
+pub mod testing;
+
 #[cfg(test)]
 #[cfg(not(feature = "testing-kvbm"))]
 mod sentinel {

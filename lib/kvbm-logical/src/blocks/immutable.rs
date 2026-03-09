@@ -112,10 +112,10 @@ impl<T: BlockMetadata> ImmutableBlock<T> {
         self.block.sequence_hash()
     }
 
-    /// Returns a clone of the [`BlockRegistrationHandle`] for this block.
-    pub fn registration_handle(&self) -> BlockRegistrationHandle {
-        self.block.registration_handle().clone()
-    }
+    // /// Returns a clone of the [`BlockRegistrationHandle`] for this block.
+    // pub fn registration_handle(&self) -> BlockRegistrationHandle {
+    //     self.block.registration_handle().clone()
+    // }
 
     /// Returns the number of strong (`Arc`) references to the underlying
     /// registered block, including internal pool references.

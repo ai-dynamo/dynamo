@@ -229,6 +229,9 @@ pub mod frontend_service {
     pub const WORKER_LAST_INTER_TOKEN_LATENCY_SECONDS: &str =
         "worker_last_inter_token_latency_seconds";
 
+    /// Number of requests pending in the router's scheduler queue (gauge per worker_type)
+    pub const ROUTER_QUEUE_PENDING_REQUESTS: &str = "router_queue_pending_requests";
+
     /// Label name for the type of migration
     pub const MIGRATION_TYPE_LABEL: &str = "migration_type";
 
@@ -479,6 +482,36 @@ pub mod router {
 pub mod kvrouter {
     /// Number of KV cache events applied to the index (including status)
     pub const KV_CACHE_EVENTS_APPLIED: &str = "kv_cache_events_applied";
+}
+
+/// Additional TRT-LLM worker metrics beyond what the engine natively provides.
+///
+/// These metrics are Python-only (registered via `prometheus_client`) and share the
+/// `trtllm_` prefix so they are captured by the same prefix filter as engine metrics.
+///
+/// ⚠️  Python codegen: Run gen-python-prometheus-names after changes
+pub mod trtllm_additional {
+    /// Total number of aborted/cancelled requests
+    pub const NUM_ABORTED_REQUESTS_TOTAL: &str = "trtllm_num_aborted_requests_total";
+
+    /// Total number of requests containing image content
+    pub const REQUEST_TYPE_IMAGE_TOTAL: &str = "trtllm_request_type_image_total";
+
+    /// Total number of requests using guided/structured decoding
+    pub const REQUEST_TYPE_STRUCTURED_OUTPUT_TOTAL: &str =
+        "trtllm_request_type_structured_output_total";
+
+    /// Total number of successful KV cache transfers
+    pub const KV_TRANSFER_SUCCESS_TOTAL: &str = "trtllm_kv_transfer_success_total";
+
+    /// KV cache transfer latency per request in seconds
+    pub const KV_TRANSFER_LATENCY_SECONDS: &str = "trtllm_kv_transfer_latency_seconds";
+
+    /// KV cache transfer size per request in bytes
+    pub const KV_TRANSFER_BYTES: &str = "trtllm_kv_transfer_bytes";
+
+    /// KV cache transfer speed per request in GB/s
+    pub const KV_TRANSFER_SPEED_GB_S: &str = "trtllm_kv_transfer_speed_gb_s";
 }
 
 // KV cache statistics metrics

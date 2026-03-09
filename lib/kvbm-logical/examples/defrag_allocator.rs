@@ -21,8 +21,8 @@
 
 use std::any::TypeId;
 use std::collections::{BTreeMap, HashMap};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use kvbm_logical::ext::{
     Block, BlockAllocator, BlockId, BlockMetadata, InactivePoolBackend, PresenceDelegate,
@@ -215,13 +215,14 @@ impl<T: BlockMetadata> InactivePoolBackend<T> for LoggingInactiveBackend<T> {
         result
     }
 
-    fn insert(&mut self, block: Block<T, Registered>) {
+    fn insert(&mut self, block: Block<T, Registered>) -> bool {
         let block_id = block.block_id();
         self.inner.insert(block);
         eprintln!(
             "  [LoggingBackend] insert(block={block_id}) (pool now {})",
             self.inner.len(),
         );
+        true
     }
 
     fn len(&self) -> usize {
@@ -273,17 +274,14 @@ fn main() {
         "GPU",
     ));
 
-    let registry = BlockRegistry::builder()
-        .presence_delegate(delegate)
-        .build();
+    let registry = BlockRegistry::builder().presence_delegate(delegate).build();
 
     // 3. Build BlockManager with DefragAllocator + LoggingInactiveBackend --------
     let allocator = DefragAllocator::<GpuTier>::new(Arc::clone(&shared));
 
     // Wrap the default LineageBackend in a logging decorator
-    let logging_backend = LoggingInactiveBackend::<GpuTier>::new(
-        Box::new(LineageBackend::default()),
-    );
+    let logging_backend =
+        LoggingInactiveBackend::<GpuTier>::new(Box::new(LineageBackend::default()));
 
     let manager = BlockManager::<GpuTier>::builder()
         .block_count(BLOCK_COUNT)
@@ -379,7 +377,10 @@ fn main() {
         let sh = make_seq_hash(200 + i as u64);
         let complete = mb.stage(sh, BLOCK_SIZE).expect("stage failed");
         let immutable = manager.register_block(complete);
-        println!("  Registered block {} with seq_hash {sh}", immutable.block_id());
+        println!(
+            "  Registered block {} with seq_hash {sh}",
+            immutable.block_id()
+        );
         immutable_blocks.push(immutable);
     }
 
@@ -391,8 +392,6 @@ fn main() {
     );
     let final_ids: Vec<BlockId> = immutable_blocks.iter().map(|b| b.block_id()).collect();
     println!("  Active block IDs: {final_ids:?}");
-    println!(
-        "  Defrag effect: evicted IDs were re-sorted by DefragAllocator (lowest first)"
-    );
+    println!("  Defrag effect: evicted IDs were re-sorted by DefragAllocator (lowest first)");
     println!("\n=== Done ===");
 }
