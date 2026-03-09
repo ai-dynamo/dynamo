@@ -651,7 +651,6 @@ def test_mocker_two_kv_router(
         )
 
 
-@pytest.mark.skip(reason="Flaky, temporarily disabled")
 @pytest.mark.parametrize(
     "durable_kv_events", [False], indirect=True
 )  # Use NATS Core (local indexer)
