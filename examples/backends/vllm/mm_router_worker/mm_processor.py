@@ -84,12 +84,18 @@ async def process_multimodal(
     logger.info(
         "[perf][process_mm] template=%.2fms load_images=%.2fms "
         "expand_tokens=%.2fms hash=%.2fms total=%.2fms n_images=%d",
-        1000 * (t1 - t0), 1000 * (t2 - t1),
-        1000 * (t3 - t2), 1000 * (t4 - t3),
-        1000 * (t4 - t0), len(image_urls),
+        1000 * (t1 - t0),
+        1000 * (t2 - t1),
+        1000 * (t3 - t2),
+        1000 * (t4 - t3),
+        1000 * (t4 - t0),
+        len(image_urls),
     )
 
-    return ProcessedInput(tokens=tokens, mm_hashes=mm_hashes, image_ranges=image_ranges), raw_bytes_list
+    return (
+        ProcessedInput(tokens=tokens, mm_hashes=mm_hashes, image_ranges=image_ranges),
+        raw_bytes_list,
+    )
 
 
 def build_block_mm_infos(
@@ -109,9 +115,7 @@ def build_block_mm_infos(
     num_blocks = (num_tokens + block_size - 1) // block_size
 
     # Sort images by start position (they should already be sorted, but be safe)
-    sorted_imgs = sorted(
-        zip(image_ranges, mm_hashes), key=lambda x: x[0][0]
-    )
+    sorted_imgs = sorted(zip(image_ranges, mm_hashes), key=lambda x: x[0][0])
 
     result: list[dict | None] = []
     img_ptr = 0  # first image that hasn't ended before current block
@@ -198,7 +202,7 @@ def _expand_from_dims(
     tokens_per_image = []
     for w, h in image_dims:
         n_patches: int = int(get_num_patches(h, w, {}))  # type: ignore[arg-type]
-        tokens_per_image.append(n_patches // (merge_size ** 2))
+        tokens_per_image.append(n_patches // (merge_size**2))
 
     base_tokens = tokenizer.encode(prompt)
     placeholders = [i for i, t in enumerate(base_tokens) if t == image_token_id]
@@ -246,7 +250,7 @@ def _expand_with_processor(
     grid_thw = output.get("image_grid_thw")
     if grid_thw is None:
         return tokens, None
-    tokens_per_image = [int(t * h * w) // (merge_size ** 2) for t, h, w in grid_thw]
+    tokens_per_image = [int(t * h * w) // (merge_size**2) for t, h, w in grid_thw]
 
     # Find contiguous ranges of image_token_id
     contiguous: list[tuple[int, int]] = []

@@ -39,7 +39,9 @@ class MMRouterHandler:
 
         mode = os.getenv("MM_ROUTER_IMAGE_TRANSPORT_MODE", "url").strip().lower()
         if mode not in ("data_uri", "url"):
-            logger.warning("Invalid MM_ROUTER_IMAGE_TRANSPORT_MODE=%r, using 'url'", mode)
+            logger.warning(
+                "Invalid MM_ROUTER_IMAGE_TRANSPORT_MODE=%r, using 'url'", mode
+            )
             mode = "url"
         self.transport_mode = mode
         logger.info("MM image transport mode: %s", mode)

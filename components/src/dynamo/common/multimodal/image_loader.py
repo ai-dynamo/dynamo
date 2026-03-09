@@ -43,9 +43,8 @@ class ImageLoader:
         self, cache_size: int = CACHE_SIZE_MAXIMUM, http_timeout: float = 30.0
     ):
         self._http_timeout = http_timeout
-        self._image_cache: dict[str, Image.Image] = {}
+        self._image_cache: dict[str, tuple[Image.Image, bytes]] = {}
         self._cache_queue: asyncio.Queue[str] = asyncio.Queue(maxsize=cache_size)
-        self._raw_bytes_cache: dict[str, bytes] = {}
 
     async def load_image(self, image_url: str) -> Image.Image:
         parsed_url = urlparse(image_url)
@@ -55,7 +54,7 @@ class ImageLoader:
             image_url_lower = image_url.lower()
             if image_url_lower in self._image_cache:
                 logger.debug(f"Image found in cache for URL: {image_url}")
-                return self._image_cache[image_url_lower]
+                return self._image_cache[image_url_lower][0]
 
         try:
             if parsed_url.scheme == "data":
@@ -86,9 +85,7 @@ class ImageLoader:
             else:
                 raise ValueError(f"Invalid image source scheme: {parsed_url.scheme}")
 
-            # Save raw bytes for hash computation (before PIL processing)
             raw_bytes = image_data.getvalue()
-            self._raw_bytes_cache[image_url.lower()] = raw_bytes
 
             # PIL is sync, so offload to a thread to avoid blocking the event loop
             # Restrict to supported formats to prevent PSD parsing (GHSA-cfh3-3jmp-rvhc)
@@ -110,7 +107,7 @@ class ImageLoader:
                     oldest_image_url = await self._cache_queue.get()
                     del self._image_cache[oldest_image_url]
 
-                self._image_cache[image_url_lower] = image_converted
+                self._image_cache[image_url_lower] = (image_converted, raw_bytes)
                 await self._cache_queue.put(image_url_lower)
 
             return image_converted
@@ -122,9 +119,47 @@ class ImageLoader:
             logger.error(f"Error loading image: {e}")
             raise ValueError(f"Failed to load image: {e}")
 
-    def get_raw_bytes(self, image_url: str) -> Optional[bytes]:
-        """Get cached raw bytes for hash computation."""
-        return self._raw_bytes_cache.get(image_url.lower())
+    async def load_image_with_raw_bytes(
+        self, image_url: str
+    ) -> tuple[Image.Image, bytes]:
+        """Load image, returning both PIL Image and raw file bytes.
+
+        For HTTP URLs with cache hit, returns cached (Image, bytes).
+        For data URIs and cache misses, loads fresh and returns both.
+        """
+        parsed_url = urlparse(image_url)
+
+        # Cache hit for HTTP URLs
+        if parsed_url.scheme in ("http", "https"):
+            image_url_lower = image_url.lower()
+            if image_url_lower in self._image_cache:
+                return self._image_cache[image_url_lower]
+
+        # Cache miss — load_image does the work and caches the tuple
+        image = await self.load_image(image_url)
+        # For HTTP URLs, tuple is now in cache; for data URIs, reconstruct
+        if parsed_url.scheme in ("http", "https"):
+            return self._image_cache[image_url.lower()]
+        # Data URI: raw_bytes not cached, re-extract from image_url
+        _, data = parsed_url.path.split(",", 1)
+        return image, base64.b64decode(data)
+
+    async def load_image_batch_with_raw_bytes(
+        self, image_mm_items: List[Dict[str, Any]]
+    ) -> tuple[List[Image.Image], List[bytes]]:
+        """Load a batch of URL images, returning (images, raw_bytes_list)."""
+        futures = []
+        for item in image_mm_items:
+            if isinstance(item, dict) and URL_VARIANT_KEY in item:
+                futures.append(self.load_image_with_raw_bytes(item[URL_VARIANT_KEY]))
+
+        results = await asyncio.gather(*futures)
+        images = []
+        raw_bytes_list = []
+        for img, raw in results:
+            images.append(img)
+            raw_bytes_list.append(raw)
+        return images, raw_bytes_list
 
     async def load_image_batch(
         self,

@@ -59,28 +59,10 @@ class LoRAInfo:
 
 
 def _compute_mm_uuids(
-    multi_modal_data: Dict[str, Any] | None,
-    raw_bytes_list: list[bytes] | None = None,
-) -> Dict[str, list[str]] | None:
-    """
-    Compute multi_modal_uuids from multi_modal_data.
-
-    Prefers raw_bytes_list (raw file bytes) for hashing when available,
-    to match the MM Router's blake3(raw_bytes) hash path.
-    Falls back to PIL image hashing if raw_bytes_list is not provided.
-    """
-    if not multi_modal_data or "image" not in multi_modal_data:
-        return None
-    if raw_bytes_list:
-        uuids = compute_mm_uuids_from_images(raw_bytes_list)
-    else:
-        images = multi_modal_data["image"]
-        if not isinstance(images, list):
-            images = [images]
-        if not images:
-            return None
-        uuids = compute_mm_uuids_from_images(images)
-    return {"image": uuids}
+    images_or_bytes: list,
+) -> Dict[str, list[str]]:
+    """Compute multi_modal_uuids from a list of PIL Images or raw bytes."""
+    return {"image": compute_mm_uuids_from_images(images_or_bytes)}
 
 
 # LoRAManager singleton - initialized lazily when DYN_LORA_ENABLED is set
@@ -938,25 +920,20 @@ class BaseWorkerHandler(ABC):
         image_mm_items = mm_map.get(IMAGE_URL_KEY, [])
 
         # Process image_url entries
-        images = await self.image_loader.load_image_batch(
-            image_mm_items,
-            enable_frontend_decoding=self.enable_frontend_decoding,
-            nixl_connector=self._nixl_connector,
-        )
-
-        # Collect raw bytes from image_loader cache for hash computation
         raw_bytes_list: list[bytes] | None = None
-        if images and image_mm_items:
-            raw_bytes_list = []
-            for item in image_mm_items:
-                url = item.get(URL_VARIANT_KEY) if isinstance(item, dict) else None
-                if url:
-                    raw = self.image_loader.get_raw_bytes(url)
-                    if raw is not None:
-                        raw_bytes_list.append(raw)
-            if len(raw_bytes_list) != len(images):
-                # Incomplete raw bytes (e.g., NIXL decoded path) — fall back
-                raw_bytes_list = None
+        if self.enable_frontend_decoding:
+            # NIXL path: no raw bytes available
+            images = await self.image_loader.load_image_batch(
+                image_mm_items,
+                enable_frontend_decoding=True,
+                nixl_connector=self._nixl_connector,
+            )
+        else:
+            # URL path: get both PIL images and raw bytes for hash computation
+            (
+                images,
+                raw_bytes_list,
+            ) = await self.image_loader.load_image_batch_with_raw_bytes(image_mm_items)
 
         if images:
             # vLLM expects single image or list
@@ -1021,13 +998,20 @@ class BaseWorkerHandler(ABC):
                     },
                 )
         # Normal path: use token IDs
-        mm_uuids = _compute_mm_uuids(multi_modal_data, raw_bytes_list=raw_bytes_list)
         prompt_kwargs = dict[str, Any](
             prompt_token_ids=request["token_ids"],
             multi_modal_data=multi_modal_data,
         )
-        if mm_uuids is not None:
-            prompt_kwargs["multi_modal_uuids"] = mm_uuids
+        # Compute mm_uuids: prefer raw_bytes (matches MM Router hash),
+        # fall back to PIL images from multi_modal_data
+        if raw_bytes_list:
+            prompt_kwargs["multi_modal_uuids"] = _compute_mm_uuids(raw_bytes_list)
+        elif multi_modal_data and "image" in multi_modal_data:
+            images = multi_modal_data["image"]
+            if not isinstance(images, list):
+                images = [images]
+            if images:
+                prompt_kwargs["multi_modal_uuids"] = _compute_mm_uuids(images)
 
         prompt = TokensPrompt(**prompt_kwargs)
         return prompt, embedding_sequence_length, None
@@ -1504,8 +1488,11 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
         # Build prompt from request (handles both prompt_embeds and token_ids)
         prompt, embedding_sequence_length, error = self._build_prompt_from_request(
-            request, request_id, multi_modal_data, log_prefix="Prefill ",
-            raw_bytes_list=raw_bytes_list
+            request,
+            request_id,
+            multi_modal_data,
+            log_prefix="Prefill ",
+            raw_bytes_list=raw_bytes_list,
         )
         if error is not None:
             # Prefill errors need disaggregated_params field
