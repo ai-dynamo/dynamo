@@ -695,11 +695,7 @@ mod tests {
             "test_agent".to_string(),
             vec![uuid.to_string(), Uuid::new_v4().to_string()],
         );
-        control
-            .queue
-            .lock()
-            .unwrap()
-            .push_back(Ok(map));
+        control.queue.lock().unwrap().push_back(Ok(map));
         tick().await;
 
         assert_eq!(system.poll(handle)?, EventStatus::Ready);
