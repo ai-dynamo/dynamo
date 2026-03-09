@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Transfer context.
+//!
+//! Supports dual-backend operation: CUDA (NVIDIA GPUs) and Level Zero (Intel XPU).
+//! Either or both backends may be active depending on the hardware available.
 
 use std::sync::Arc;
 
@@ -37,8 +40,14 @@ pub(crate) struct TransferConfig {
     #[builder(default = "NixlBackendConfig::new()")]
     nixl_backend_config: NixlBackendConfig,
 
-    #[builder(default = "0")]
-    cuda_device_id: usize,
+    #[builder(default = "Some(0)")]
+    cuda_device_id: Option<usize>,
+
+    /// Level Zero device ordinal for XPU transfers.
+    /// Set to Some(id) to enable the Level Zero transfer backend.
+    #[builder(default = "None", setter(strip_option))]
+    #[cfg(feature = "level-zero")]
+    xpu_device_id: Option<u32>,
 
     #[builder(default = "get_tokio_runtime()")]
     tokio_runtime: TokioRuntime,
@@ -85,6 +94,12 @@ impl TransferConfigBuilder {
         Ok(self)
     }
 
+    /// Disable the CUDA backend entirely.
+    pub fn no_cuda(mut self) -> Self {
+        self.cuda_device_id = Some(None);
+        self
+    }
+
     pub fn build(self) -> Result<TransportManager> {
         let mut config = self.build_internal()?;
 
@@ -114,7 +129,12 @@ impl TransferConfigBuilder {
             NixlAgent::new_with_backends(&agent_name, &backend_names)?
         };
 
-        let cuda_context = CudaContext::new(config.cuda_device_id)?;
+        // Create CUDA context if a CUDA device was requested
+        let cuda_context = match config.cuda_device_id {
+            Some(device_id) => Some(CudaContext::new(device_id)?),
+            None => None,
+        };
+
         let context = TransferContext::new(
             config.worker_id,
             nixl_agent,
@@ -122,6 +142,8 @@ impl TransferConfigBuilder {
             config.tokio_runtime,
             config.capabilities,
             config.operational_backend,
+            #[cfg(feature = "level-zero")]
+            config.xpu_device_id,
         )?;
         Ok(TransportManager::from_context(context))
     }
@@ -140,7 +162,13 @@ impl TransferConfigBuilderWithAgent {
     /// Build the TransportManager using the pre-configured agent.
     pub fn build(self) -> Result<TransportManager> {
         let config = self.builder.build_internal()?;
-        let cuda_context = CudaContext::new(config.cuda_device_id)?;
+
+        // Create CUDA context if a CUDA device was requested
+        let cuda_context = match config.cuda_device_id {
+            Some(device_id) => Some(CudaContext::new(device_id)?),
+            None => None,
+        };
+
         let context = TransferContext::new(
             config.worker_id,
             self.agent,
@@ -148,6 +176,8 @@ impl TransferConfigBuilderWithAgent {
             config.tokio_runtime,
             config.capabilities,
             config.operational_backend,
+            #[cfg(feature = "level-zero")]
+            config.xpu_device_id,
         )?;
         Ok(TransportManager::from_context(context))
     }
@@ -159,7 +189,20 @@ impl TransferConfigBuilderWithAgent {
     }
 
     pub fn cuda_device_id(mut self, cuda_device_id: usize) -> Self {
-        self.builder = self.builder.cuda_device_id(cuda_device_id);
+        self.builder = self.builder.cuda_device_id(Some(cuda_device_id));
+        self
+    }
+
+    /// Disable the CUDA backend entirely.
+    pub fn no_cuda(mut self) -> Self {
+        self.builder = self.builder.no_cuda();
+        self
+    }
+
+    /// Set the Level Zero device ordinal for XPU transfers.
+    #[cfg(feature = "level-zero")]
+    pub fn xpu_device_id(mut self, xpu_device_id: u32) -> Self {
+        self.builder = self.builder.xpu_device_id(xpu_device_id);
         self
     }
 }
@@ -199,10 +242,22 @@ impl TokioRuntime {
 pub struct TransferContext {
     worker_id: u64,
     nixl_agent: NixlAgent,
+
+    // -- CUDA backend (optional) --
     #[allow(dead_code)]
-    cuda_context: Arc<CudaContext>,
-    d2h_stream: Arc<CudaStream>,
-    h2d_stream: Arc<CudaStream>,
+    cuda_context: Option<Arc<CudaContext>>,
+    d2h_stream: Option<Arc<CudaStream>>,
+    h2d_stream: Option<Arc<CudaStream>>,
+
+    // -- Level Zero backend (optional) --
+    #[cfg(feature = "level-zero")]
+    #[allow(dead_code)]
+    xpu_device_id: Option<u32>,
+    #[cfg(feature = "level-zero")]
+    tx_ze_event:
+        Option<mpsc::Sender<notifications::RegisterPollingNotification<notifications::ZeEventChecker>>>,
+
+    // -- Shared infrastructure --
     #[allow(dead_code)]
     tokio_runtime: TokioRuntime,
     capabilities: TransferCapabilities,
@@ -211,7 +266,7 @@ pub struct TransferContext {
     tx_nixl_status:
         mpsc::Sender<notifications::RegisterPollingNotification<notifications::NixlStatusChecker>>,
     tx_cuda_event:
-        mpsc::Sender<notifications::RegisterPollingNotification<notifications::CudaEventChecker>>,
+        Option<mpsc::Sender<notifications::RegisterPollingNotification<notifications::CudaEventChecker>>>,
     #[allow(dead_code)]
     tx_nixl_events: mpsc::Sender<notifications::RegisterNixlNotification>,
 }
@@ -224,39 +279,62 @@ impl TransferContext {
     pub(crate) fn new(
         worker_id: u64,
         nixl_agent: NixlAgent,
-        cuda_context: Arc<CudaContext>,
+        cuda_context: Option<Arc<CudaContext>>,
         tokio_runtime: TokioRuntime,
         capabilities: TransferCapabilities,
         operational_backend: OperationalCopyBackend,
+        #[cfg(feature = "level-zero")] xpu_device_id: Option<u32>,
     ) -> Result<Self> {
-        unsafe { cuda_context.disable_event_tracking() };
-
-        // Create channels for background notification handlers
-        let (tx_nixl_status, rx_nixl_status) = mpsc::channel(64);
-        let (tx_cuda_event, rx_cuda_event) = mpsc::channel(64);
-        let (tx_nixl_events, rx_nixl_events) = mpsc::channel(64);
-
-        // Spawn background handlers
+        // Spawn background handlers on the tokio runtime
         let handle = tokio_runtime.handle();
 
-        // Spawn NIXL status polling handler
+        // -- NIXL channels (always created) --
+        let (tx_nixl_status, rx_nixl_status) = mpsc::channel(64);
+        let (tx_nixl_events, rx_nixl_events) = mpsc::channel(64);
+
         handle.spawn(notifications::process_polling_notifications(rx_nixl_status));
 
-        // Spawn CUDA event polling handler
-        handle.spawn(notifications::process_polling_notifications(rx_cuda_event));
-
-        // Spawn NIXL notification events handler
         handle.spawn(notifications::process_nixl_notification_events(
             nixl_agent.raw_agent().clone(),
             rx_nixl_events,
         ));
 
+        // -- CUDA backend setup (optional) --
+        let (tx_cuda_event, d2h_stream, h2d_stream) = if let Some(ref ctx) = cuda_context {
+            unsafe { ctx.disable_event_tracking() };
+
+            // CUDA event polling channel
+            let (tx, rx) = mpsc::channel(64);
+            handle.spawn(notifications::process_polling_notifications(rx));
+
+            let d2h = ctx.new_stream()?;
+            let h2d = ctx.new_stream()?;
+
+            (Some(tx), Some(d2h), Some(h2d))
+        } else {
+            (None, None, None)
+        };
+
+        // -- Level Zero backend setup (optional) --
+        #[cfg(feature = "level-zero")]
+        let tx_ze_event = if xpu_device_id.is_some() {
+            let (tx, rx) = mpsc::channel(64);
+            handle.spawn(notifications::process_polling_notifications(rx));
+            Some(tx)
+        } else {
+            None
+        };
+
         Ok(Self {
             worker_id,
             nixl_agent,
-            cuda_context: cuda_context.clone(),
-            d2h_stream: cuda_context.new_stream()?,
-            h2d_stream: cuda_context.new_stream()?,
+            cuda_context,
+            d2h_stream,
+            h2d_stream,
+            #[cfg(feature = "level-zero")]
+            xpu_device_id,
+            #[cfg(feature = "level-zero")]
+            tx_ze_event,
             tokio_runtime,
             capabilities,
             operational_backend,
@@ -266,21 +344,10 @@ impl TransferContext {
         })
     }
 
+    // ---- Shared accessors ----
+
     pub(crate) fn nixl_agent(&self) -> &NixlAgent {
         &self.nixl_agent
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn cuda_context(&self) -> &Arc<CudaContext> {
-        &self.cuda_context
-    }
-
-    pub(crate) fn d2h_stream(&self) -> &Arc<CudaStream> {
-        &self.d2h_stream
-    }
-
-    pub(crate) fn h2d_stream(&self) -> &Arc<CudaStream> {
-        &self.h2d_stream
     }
 
     #[allow(dead_code)]
@@ -296,11 +363,35 @@ impl TransferContext {
         self.operational_backend
     }
 
+    /// Get the worker ID for this context.
+    pub(crate) fn worker_id(&self) -> u64 {
+        self.worker_id
+    }
+
+    // ---- CUDA accessors ----
+
+    #[allow(dead_code)]
+    pub(crate) fn cuda_context(&self) -> &Arc<CudaContext> {
+        self.cuda_context
+            .as_ref()
+            .expect("cuda_context() called but CUDA backend is not initialised")
+    }
+
+    pub(crate) fn d2h_stream(&self) -> &Arc<CudaStream> {
+        self.d2h_stream
+            .as_ref()
+            .expect("d2h_stream() called but CUDA backend is not initialised")
+    }
+
+    pub(crate) fn h2d_stream(&self) -> &Arc<CudaStream> {
+        self.h2d_stream
+            .as_ref()
+            .expect("h2d_stream() called but CUDA backend is not initialised")
+    }
+
+    // ---- NIXL notification registration ----
+
     /// Register a NIXL transfer request for status polling completion.
-    ///
-    /// This method enqueues the transfer request to be polled for completion
-    /// using `agent.get_xfer_status()`. Returns a notification object that
-    /// can be awaited for completion.
     pub(crate) fn register_nixl_status(
         &self,
         xfer_req: XferRequest,
@@ -322,11 +413,15 @@ impl TransferContext {
         TransferCompleteNotification { status: done_rx }
     }
 
+    // ---- CUDA event notification ----
+
     /// Register a CUDA event for polling completion.
-    ///
-    /// This method enqueues the CUDA event to be polled for completion.
-    /// Returns a notification object that can be awaited for completion.
     pub(crate) fn register_cuda_event(&self, event: CudaEvent) -> TransferCompleteNotification {
+        let tx = self
+            .tx_cuda_event
+            .as_ref()
+            .expect("register_cuda_event() called but CUDA backend is not initialised");
+
         let (done_tx, done_rx) = oneshot::channel();
 
         let notification = notifications::RegisterPollingNotification {
@@ -336,16 +431,41 @@ impl TransferContext {
         };
 
         // Send to background handler (ignore error if receiver dropped)
-        let _ = self.tx_cuda_event.try_send(notification);
+        let _ = tx.try_send(notification);
 
         TransferCompleteNotification { status: done_rx }
     }
 
+    // ---- Level Zero event notification ----
+
+    /// Register a Level Zero event for polling completion.
+    #[cfg(feature = "level-zero")]
+    pub(crate) fn register_ze_event(
+        &self,
+        event: syclrc::ZeEvent,
+    ) -> TransferCompleteNotification {
+        let tx = self
+            .tx_ze_event
+            .as_ref()
+            .expect("register_ze_event() called but Level Zero backend is not initialised");
+
+        let (done_tx, done_rx) = oneshot::channel();
+
+        let notification = notifications::RegisterPollingNotification {
+            uuid: Uuid::new_v4(),
+            checker: notifications::ZeEventChecker::new(event),
+            done: done_tx,
+        };
+
+        // Send to background handler (ignore error if receiver dropped)
+        let _ = tx.try_send(notification);
+
+        TransferCompleteNotification { status: done_rx }
+    }
+
+    // ---- NIXL notification events ----
+
     /// Register a NIXL transfer request for notification-based completion.
-    ///
-    /// This method enqueues the transfer request to be completed via NIXL
-    /// notification events. Returns a notification object that can be awaited
-    /// for completion.
     #[allow(dead_code)]
     pub(crate) fn register_nixl_event(
         &self,
@@ -363,10 +483,5 @@ impl TransferContext {
         let _ = self.tx_nixl_events.try_send(notification);
 
         TransferCompleteNotification { status: done_rx }
-    }
-
-    /// Get the worker ID for this context.
-    pub(crate) fn worker_id(&self) -> u64 {
-        self.worker_id
     }
 }

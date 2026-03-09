@@ -6,6 +6,8 @@
 pub(super) mod cuda;
 mod memcpy;
 mod nixl;
+#[cfg(feature = "level-zero")]
+mod ze;
 
 use super::strategy::select_strategy;
 use super::strategy::{TransferPlan, TransferStrategy};
@@ -309,6 +311,28 @@ fn execute_direct_transfer(
             cuda_stream,
             ctx,
         )?),
+        #[cfg(feature = "level-zero")]
+        TransferStrategy::ZeAsyncH2D
+        | TransferStrategy::ZeAsyncD2H
+        | TransferStrategy::ZeAsyncD2D => ze::execute_ze_transfer(
+            src,
+            dst,
+            src_block_ids,
+            dst_block_ids,
+            layer_range,
+            strategy,
+            ctx,
+        ),
+        #[cfg(not(feature = "level-zero"))]
+        TransferStrategy::ZeAsyncH2D
+        | TransferStrategy::ZeAsyncD2H
+        | TransferStrategy::ZeAsyncD2D => {
+            Err(anyhow::anyhow!(
+                "ZeAsync transfer requires the level-zero feature, src={:?}, dst={:?}",
+                src.location(),
+                dst.location()
+            ))
+        }
         TransferStrategy::NixlRead
         | TransferStrategy::NixlWrite
         | TransferStrategy::NixlReadFlipped

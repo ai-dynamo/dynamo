@@ -47,6 +47,15 @@ pub enum TransferStrategy {
     /// NIXL read (flipped local and remote order)
     NixlReadFlipped,
 
+    /// Level Zero async host-to-device transfer
+    ZeAsyncH2D,
+
+    /// Level Zero async device-to-host transfer
+    ZeAsyncD2H,
+
+    /// Level Zero async device-to-device transfer
+    ZeAsyncD2D,
+
     /// Invalid/unsupported transfer
     Invalid,
 }
@@ -209,6 +218,31 @@ fn select_direct_strategy(
                 }
             }
         }
+        // Host -> XPU Device
+        (System, XpuDevice(_)) | (Pinned, XpuDevice(_)) => TransferPlan::Direct(ZeAsyncH2D),
+
+        // XPU Device -> Host
+        (XpuDevice(_), System) | (XpuDevice(_), Pinned) => TransferPlan::Direct(ZeAsyncD2H),
+
+        // XPU Device <-> XPU Device
+        (XpuDevice(_), XpuDevice(_)) => TransferPlan::Direct(ZeAsyncD2D),
+
+        // XPU Device <-> Disk: stage through Pinned
+        (XpuDevice(_), Disk(_)) => TransferPlan::TwoHop {
+            first: ZeAsyncD2H,
+            bounce_location: Pinned,
+            second: NixlWrite,
+        },
+        (Disk(_), XpuDevice(_)) => TransferPlan::TwoHop {
+            first: NixlReadFlipped,
+            bounce_location: Pinned,
+            second: ZeAsyncH2D,
+        },
+
+        // Cross-vendor Device <-> XpuDevice: not supported
+        (Device(_), XpuDevice(_)) | (XpuDevice(_), Device(_)) => {
+            panic!("cross-vendor CUDA<->XPU transfer not supported")
+        }
     }
 }
 
@@ -236,6 +270,13 @@ fn select_remote_strategy(src: StorageKind, capabilities: &TransferCapabilities)
             }
         }
 
+        // XPU Device → Remote - stage through host
+        XpuDevice(_) => TransferPlan::TwoHop {
+            first: ZeAsyncD2H,
+            bounce_location: Pinned,
+            second: NixlWrite,
+        },
+
         // Disk → Remote - always stage through host
         Disk(_) => TransferPlan::TwoHop {
             first: NixlWrite,
@@ -262,7 +303,7 @@ fn select_remote_strategy_v2(
     }
 
     if !capabilities.allow_gpu_rdma
-        && (matches!(src, StorageKind::Device(_)) || matches!(dst, StorageKind::Device(_)))
+        && (matches!(src, StorageKind::Device(_) | StorageKind::XpuDevice(_)) || matches!(dst, StorageKind::Device(_) | StorageKind::XpuDevice(_)))
     {
         return Err(anyhow::anyhow!(
             "GPU RDMA is disabled - this transfer requires GPU RDMA."

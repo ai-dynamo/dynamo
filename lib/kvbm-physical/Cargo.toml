@@ -31,6 +31,7 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 validator = { workspace = true }
+syclrc = { path = "../../../zxue2_syclrc", optional = true }
 
 [features]
 default = []
@@ -38,6 +39,7 @@ collectives = []
 testing = []
 testing-kvbm = []
 testing-nixl-gds = []
+level-zero = ["dynamo-memory/level-zero", "dep:syclrc"]
 
 [dev-dependencies]
 dynamo-memory = { workspace = true, features = ["unsafe-slices"] }

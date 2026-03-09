@@ -94,6 +94,8 @@ pub fn fill_blocks(
                             );
                         }
                     }
+                    StorageKind::XpuDevice(_) => {
+                    }
                     StorageKind::Disk(fd) => {
                         let system_region: AVec<u8, _> = avec![[4096]| 0; region.size()];
                         fill_memory_region(

@@ -139,6 +139,8 @@ fn compute_single_block_checksum(
                     }
                     hasher.update(system_region.as_slice());
                 }
+                StorageKind::XpuDevice(_) => {
+                }
                 StorageKind::Disk(fd) => {
                     let mut system_region: AVec<u8, _> = avec![[4096]| 0; region.size()];
 

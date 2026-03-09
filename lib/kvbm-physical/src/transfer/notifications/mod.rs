@@ -21,8 +21,12 @@ pub mod cuda_event;
 pub mod nixl_events;
 pub mod nixl_status;
 pub mod notification;
+#[cfg(feature = "level-zero")]
+pub mod ze_event;
 
 pub use cuda_event::CudaEventChecker;
+#[cfg(feature = "level-zero")]
+pub use ze_event::ZeEventChecker;
 pub use nixl_events::{RegisterNixlNotification, process_nixl_notification_events};
 pub use nixl_status::NixlStatusChecker;
 pub use notification::TransferCompleteNotification;

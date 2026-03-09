@@ -99,6 +99,10 @@ pub fn fill_blocks(
                             return Err(anyhow!("cudaMemcpy H2D failed in fill_blocks: {:?}", err));
                         }
                     }
+                    StorageKind::XpuDevice(_) => {
+                        // TODO: Use Level Zero memcpy H2D for XPU device memory.
+                        return Err(anyhow!("fill_blocks not yet implemented for XPU device memory"));
+                    }
                     StorageKind::Disk(fd) => {
                         let system_region: AVec<u8, _> = avec![[4096]| 0; region.size()];
                         fill_memory_region(
@@ -169,7 +173,7 @@ pub fn fill_layers(
                             pattern,
                         )?;
                     }
-                    StorageKind::Device(_) | StorageKind::Disk(_) => {
+                    StorageKind::Device(_) | StorageKind::XpuDevice(_) | StorageKind::Disk(_) => {
                         return Err(anyhow!(
                             "fill_layers only supports host-accessible storage (System/Pinned)"
                         ));

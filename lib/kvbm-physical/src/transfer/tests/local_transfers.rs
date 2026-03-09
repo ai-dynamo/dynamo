@@ -92,6 +92,9 @@ fn build_agent_for_kinds(kinds: &[StorageKind]) -> Result<NixlAgent> {
                     added_backends.push("POSIX");
                 }
             }
+            StorageKind::XpuDevice(_) => {
+                // XPU uses Level Zero, no NIXL backend needed for local transfers
+            }
         }
     }
 
