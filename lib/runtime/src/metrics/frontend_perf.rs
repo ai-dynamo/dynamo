@@ -71,7 +71,13 @@ pub static DETOKENIZE_PER_TOKEN_US: Lazy<Histogram> = Lazy::new(|| {
     .expect("detokenize_per_token_us histogram")
 });
 
+/// Guards idempotency for the `MetricsRegistry` registration path.
 static REGISTERED: OnceCell<()> = OnceCell::new();
+
+/// Guards idempotency for the raw `prometheus::Registry` registration path.
+/// Kept separate from `REGISTERED` so that calling `ensure_frontend_perf_metrics_registered`
+/// first does not silently prevent the metrics from being registered in the prometheus registry.
+static PROMETHEUS_REGISTERED: OnceCell<()> = OnceCell::new();
 
 /// Register frontend perf metrics with the given registry. Idempotent.
 pub fn ensure_frontend_perf_metrics_registered(registry: &MetricsRegistry) {
@@ -92,13 +98,13 @@ pub fn ensure_frontend_perf_metrics_registered(registry: &MetricsRegistry) {
 pub fn ensure_frontend_perf_metrics_registered_prometheus(
     registry: &Registry,
 ) -> Result<(), prometheus::Error> {
-    if REGISTERED.get().is_some() {
+    if PROMETHEUS_REGISTERED.get().is_some() {
         return Ok(());
     }
     registry.register(Box::new(STAGE_DURATION_SECONDS.clone()))?;
     registry.register(Box::new(TOKENIZE_SECONDS.clone()))?;
     registry.register(Box::new(TEMPLATE_SECONDS.clone()))?;
     registry.register(Box::new(DETOKENIZE_PER_TOKEN_US.clone()))?;
-    let _ = REGISTERED.set(());
+    let _ = PROMETHEUS_REGISTERED.set(());
     Ok(())
 }

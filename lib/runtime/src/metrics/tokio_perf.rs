@@ -4,7 +4,7 @@
 //! Tokio runtime metrics and event-loop canary
 
 use once_cell::sync::{Lazy, OnceCell};
-use prometheus::{Counter, Gauge, Histogram, HistogramOpts, IntGaugeVec, Opts};
+use prometheus::{Counter, Gauge, Histogram, HistogramOpts, IntCounterVec, IntGaugeVec, Opts};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tokio::runtime::Handle;
@@ -89,8 +89,8 @@ pub static TOKIO_WORKER_BUSY_RATIO_VEC: Lazy<IntGaugeVec> = Lazy::new(|| {
     .expect("tokio worker_busy_ratio vec")
 });
 
-pub static TOKIO_WORKER_PARK_COUNT_TOTAL: Lazy<IntGaugeVec> = Lazy::new(|| {
-    IntGaugeVec::new(
+pub static TOKIO_WORKER_PARK_COUNT_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    IntCounterVec::new(
         Opts::new(
             tokio_metric_name(names::WORKER_PARK_COUNT_TOTAL),
             "Total number of times worker has parked",
@@ -111,8 +111,8 @@ pub static TOKIO_WORKER_LOCAL_QUEUE_DEPTH: Lazy<IntGaugeVec> = Lazy::new(|| {
     .expect("tokio worker_local_queue_depth")
 });
 
-pub static TOKIO_WORKER_STEAL_COUNT_TOTAL: Lazy<IntGaugeVec> = Lazy::new(|| {
-    IntGaugeVec::new(
+pub static TOKIO_WORKER_STEAL_COUNT_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    IntCounterVec::new(
         Opts::new(
             tokio_metric_name(names::WORKER_STEAL_COUNT_TOTAL),
             "Total number of tasks stolen by worker",
@@ -122,8 +122,8 @@ pub static TOKIO_WORKER_STEAL_COUNT_TOTAL: Lazy<IntGaugeVec> = Lazy::new(|| {
     .expect("tokio worker_steal_count_total")
 });
 
-pub static TOKIO_WORKER_OVERFLOW_COUNT_TOTAL: Lazy<IntGaugeVec> = Lazy::new(|| {
-    IntGaugeVec::new(
+pub static TOKIO_WORKER_OVERFLOW_COUNT_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    IntCounterVec::new(
         Opts::new(
             tokio_metric_name(names::WORKER_OVERFLOW_COUNT_TOTAL),
             "Total number of times worker local queue overflowed",
@@ -163,7 +163,13 @@ pub static EVENT_LOOP_STALL_TOTAL: Lazy<Counter> = Lazy::new(|| {
     .expect("event_loop_stall_total counter")
 });
 
+/// Guards idempotency for the `MetricsRegistry` registration path.
 static REGISTERED: OnceCell<()> = OnceCell::new();
+
+/// Guards idempotency for the raw `prometheus::Registry` registration path.
+/// Kept separate from `REGISTERED` so that calling `ensure_tokio_perf_metrics_registered`
+/// first does not silently prevent the metrics from being registered in the prometheus registry.
+static PROMETHEUS_REGISTERED: OnceCell<()> = OnceCell::new();
 
 /// Register tokio perf and canary metrics with the given registry. Idempotent.
 pub fn ensure_tokio_perf_metrics_registered(registry: &MetricsRegistry) {
@@ -217,7 +223,7 @@ pub fn ensure_tokio_perf_metrics_registered(registry: &MetricsRegistry) {
 pub fn ensure_tokio_perf_metrics_registered_prometheus(
     registry: &prometheus::Registry,
 ) -> Result<(), prometheus::Error> {
-    if REGISTERED.get().is_some() {
+    if PROMETHEUS_REGISTERED.get().is_some() {
         return Ok(());
     }
     registry.register(Box::new(TOKIO_GLOBAL_QUEUE_DEPTH.clone()))?;
@@ -234,7 +240,7 @@ pub fn ensure_tokio_perf_metrics_registered_prometheus(
     registry.register(Box::new(TOKIO_WORKER_OVERFLOW_COUNT_TOTAL.clone()))?;
     registry.register(Box::new(EVENT_LOOP_DELAY_SECONDS.clone()))?;
     registry.register(Box::new(EVENT_LOOP_STALL_TOTAL.clone()))?;
-    let _ = REGISTERED.set(());
+    let _ = PROMETHEUS_REGISTERED.set(());
     Ok(())
 }
 
@@ -245,6 +251,7 @@ pub async fn tokio_metrics_and_canary_loop() {
     let stall_threshold = Duration::from_millis(5);
     let collect_interval = Duration::from_secs(1);
     let mut next_collect = Instant::now() + collect_interval;
+    let mut prev_counters = PrevWorkerCounters::new();
 
     loop {
         let start = Instant::now();
@@ -257,7 +264,7 @@ pub async fn tokio_metrics_and_canary_loop() {
         }
         if Instant::now() >= next_collect {
             next_collect += collect_interval;
-            if let Err(e) = sample_tokio_metrics() {
+            if let Err(e) = sample_tokio_metrics(&mut prev_counters) {
                 tracing::debug!("tokio metrics sample skipped: {}", e);
             }
         }
@@ -266,37 +273,78 @@ pub async fn tokio_metrics_and_canary_loop() {
 
 static PREV_BUDGET_FORCED_YIELD: AtomicU64 = AtomicU64::new(0);
 
-fn sample_tokio_metrics() -> Result<(), String> {
+/// Per-worker previous samples for the monotonic _TOTAL counters.
+/// Owned by the single `tokio_metrics_and_canary_loop` task — no locks needed.
+struct PrevWorkerCounters {
+    park: Vec<u64>,
+    steal: Vec<u64>,
+    overflow: Vec<u64>,
+}
+
+impl PrevWorkerCounters {
+    fn new() -> Self {
+        Self {
+            park: Vec::new(),
+            steal: Vec::new(),
+            overflow: Vec::new(),
+        }
+    }
+
+    fn ensure_capacity(&mut self, num_workers: usize) {
+        if self.park.len() < num_workers {
+            self.park.resize(num_workers, 0);
+            self.steal.resize(num_workers, 0);
+            self.overflow.resize(num_workers, 0);
+        }
+    }
+}
+
+fn sample_tokio_metrics(prev: &mut PrevWorkerCounters) -> Result<(), String> {
     let metrics = Handle::current().metrics();
 
     TOKIO_GLOBAL_QUEUE_DEPTH.set(metrics.global_queue_depth() as f64);
     let budget = metrics.budget_forced_yield_count();
-    let prev = PREV_BUDGET_FORCED_YIELD.swap(budget, Ordering::Relaxed);
-    TOKIO_BUDGET_FORCED_YIELD_TOTAL.inc_by((budget.saturating_sub(prev)) as f64);
+    let prev_budget = PREV_BUDGET_FORCED_YIELD.swap(budget, Ordering::Relaxed);
+    TOKIO_BUDGET_FORCED_YIELD_TOTAL.inc_by((budget.saturating_sub(prev_budget)) as f64);
     TOKIO_BLOCKING_THREADS.set(metrics.num_blocking_threads() as f64);
     TOKIO_BLOCKING_IDLE_THREADS.set(metrics.num_idle_blocking_threads() as f64);
     TOKIO_BLOCKING_QUEUE_DEPTH.set(metrics.blocking_queue_depth() as f64);
     TOKIO_ALIVE_TASKS.set(metrics.num_alive_tasks() as f64);
 
     let num_workers = metrics.num_workers();
+    prev.ensure_capacity(num_workers);
+
     for w in 0..num_workers {
         let worker_label = w.to_string();
         let mean_poll = metrics.worker_mean_poll_time(w);
+
         TOKIO_WORKER_MEAN_POLL_TIME_NS
             .with_label_values(&[&worker_label])
             .set(mean_poll.as_nanos() as i64);
-        TOKIO_WORKER_PARK_COUNT_TOTAL
-            .with_label_values(&[&worker_label])
-            .set(metrics.worker_park_count(w) as i64);
+
         TOKIO_WORKER_LOCAL_QUEUE_DEPTH
             .with_label_values(&[&worker_label])
             .set(metrics.worker_local_queue_depth(w) as i64);
+
+        // Monotonically increasing totals: track deltas so we use inc_by on a Counter.
+        let park = metrics.worker_park_count(w);
+        TOKIO_WORKER_PARK_COUNT_TOTAL
+            .with_label_values(&[&worker_label])
+            .inc_by(park.saturating_sub(prev.park[w]));
+        prev.park[w] = park;
+
+        let steal = metrics.worker_steal_count(w);
         TOKIO_WORKER_STEAL_COUNT_TOTAL
             .with_label_values(&[&worker_label])
-            .set(metrics.worker_steal_count(w) as i64);
+            .inc_by(steal.saturating_sub(prev.steal[w]));
+        prev.steal[w] = steal;
+
+        let overflow = metrics.worker_overflow_count(w);
         TOKIO_WORKER_OVERFLOW_COUNT_TOTAL
             .with_label_values(&[&worker_label])
-            .set(metrics.worker_overflow_count(w) as i64);
+            .inc_by(overflow.saturating_sub(prev.overflow[w]));
+        prev.overflow[w] = overflow;
+
         // Busy ratio: total_busy_duration over 1s interval -> ratio. We don't have delta here;
         // use mean_poll_time as proxy: if high, worker is busy. Store as 0-1000 (per mille).
         let busy_proxy = (mean_poll.as_secs_f64() / 0.001).min(1.0); // 1ms = saturated
