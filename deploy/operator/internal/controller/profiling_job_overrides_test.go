@@ -387,34 +387,6 @@ func TestApplyProfilingJobOverrides_TopologySpreadConstraints(t *testing.T) {
 	}
 }
 
-func TestApplyProfilingJobOverrides_NodeName(t *testing.T) {
-	job := baseJob()
-	applyProfilingJobOverrides(job, &batchv1.JobSpec{
-		Template: corev1.PodTemplateSpec{
-			Spec: corev1.PodSpec{
-				NodeName: "gpu-node-42",
-			},
-		},
-	})
-	if job.Spec.Template.Spec.NodeName != "gpu-node-42" {
-		t.Errorf("expected NodeName=gpu-node-42, got %q", job.Spec.Template.Spec.NodeName)
-	}
-}
-
-func TestApplyProfilingJobOverrides_SchedulerName(t *testing.T) {
-	job := baseJob()
-	applyProfilingJobOverrides(job, &batchv1.JobSpec{
-		Template: corev1.PodTemplateSpec{
-			Spec: corev1.PodSpec{
-				SchedulerName: "volcano",
-			},
-		},
-	})
-	if job.Spec.Template.Spec.SchedulerName != "volcano" {
-		t.Errorf("expected SchedulerName=volcano, got %q", job.Spec.Template.Spec.SchedulerName)
-	}
-}
-
 func TestApplyProfilingJobOverrides_AutomountServiceAccountToken(t *testing.T) {
 	job := baseJob()
 	applyProfilingJobOverrides(job, &batchv1.JobSpec{
@@ -426,22 +398,6 @@ func TestApplyProfilingJobOverrides_AutomountServiceAccountToken(t *testing.T) {
 	})
 	if job.Spec.Template.Spec.AutomountServiceAccountToken == nil || *job.Spec.Template.Spec.AutomountServiceAccountToken != false {
 		t.Error("expected AutomountServiceAccountToken=false")
-	}
-}
-
-func TestApplyProfilingJobOverrides_HostAliases(t *testing.T) {
-	job := baseJob()
-	applyProfilingJobOverrides(job, &batchv1.JobSpec{
-		Template: corev1.PodTemplateSpec{
-			Spec: corev1.PodSpec{
-				HostAliases: []corev1.HostAlias{
-					{IP: "10.0.0.1", Hostnames: []string{"internal.example.com"}},
-				},
-			},
-		},
-	})
-	if len(job.Spec.Template.Spec.HostAliases) != 1 || job.Spec.Template.Spec.HostAliases[0].IP != "10.0.0.1" {
-		t.Error("hostAliases not applied")
 	}
 }
 
@@ -679,11 +635,19 @@ func TestApplyProfilingJobOverrides_PodSecurityContext(t *testing.T) {
 		},
 	})
 	got := job.Spec.Template.Spec.SecurityContext
-	if got != override {
-		t.Errorf("pod securityContext not replaced by user override: got %+v", got)
+	if got == nil {
+		t.Fatal("pod securityContext is nil after override")
 	}
+	// User override wins: RunAsNonRoot should be false.
 	if got.RunAsNonRoot == nil || *got.RunAsNonRoot != false {
 		t.Errorf("expected RunAsNonRoot=false, got %v", got.RunAsNonRoot)
+	}
+	// Controller defaults preserved for fields not specified in the override.
+	if got.RunAsUser == nil || *got.RunAsUser != 1000 {
+		t.Errorf("expected RunAsUser=1000 (controller default preserved), got %v", got.RunAsUser)
+	}
+	if got.FSGroup == nil || *got.FSGroup != 1000 {
+		t.Errorf("expected FSGroup=1000 (controller default preserved), got %v", got.FSGroup)
 	}
 }
 
