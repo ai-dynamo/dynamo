@@ -252,6 +252,8 @@ pub async fn tokio_metrics_and_canary_loop() {
     let collect_interval = Duration::from_secs(1);
     let mut next_collect = Instant::now() + collect_interval;
     let mut prev_counters = PrevWorkerCounters::new();
+    let mut stall_count: u64 = 0;
+    let mut worst_delay = Duration::ZERO;
 
     loop {
         let start = Instant::now();
@@ -260,13 +262,21 @@ pub async fn tokio_metrics_and_canary_loop() {
         EVENT_LOOP_DELAY_SECONDS.observe(delay.as_secs_f64());
         if delay > stall_threshold {
             EVENT_LOOP_STALL_TOTAL.inc();
-            tracing::warn!(delay_ms = delay.as_millis(), "event loop congestion");
+            stall_count += 1;
+            worst_delay = worst_delay.max(delay);
         }
         if Instant::now() >= next_collect {
-            next_collect += collect_interval;
-            if let Err(e) = sample_tokio_metrics(&mut prev_counters) {
-                tracing::debug!("tokio metrics sample skipped: {}", e);
+            next_collect = Instant::now() + collect_interval;
+            if stall_count > 0 {
+                tracing::warn!(
+                    stalls = stall_count,
+                    worst_delay_ms = worst_delay.as_millis(),
+                    "event loop congestion in last collection interval"
+                );
+                stall_count = 0;
+                worst_delay = Duration::ZERO;
             }
+            sample_tokio_metrics(&mut prev_counters);
         }
     }
 }
@@ -299,7 +309,7 @@ impl PrevWorkerCounters {
     }
 }
 
-fn sample_tokio_metrics(prev: &mut PrevWorkerCounters) -> Result<(), String> {
+fn sample_tokio_metrics(prev: &mut PrevWorkerCounters) {
     let metrics = Handle::current().metrics();
 
     TOKIO_GLOBAL_QUEUE_DEPTH.set(metrics.global_queue_depth() as f64);
@@ -352,6 +362,4 @@ fn sample_tokio_metrics(prev: &mut PrevWorkerCounters) -> Result<(), String> {
             .with_label_values(&[&worker_label])
             .set((busy_proxy * 1000.0) as i64);
     }
-
-    Ok(())
 }
