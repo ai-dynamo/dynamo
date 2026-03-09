@@ -197,7 +197,7 @@ impl KvScheduler {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub async fn schedule(
         &self,
         maybe_request_id: Option<String>,

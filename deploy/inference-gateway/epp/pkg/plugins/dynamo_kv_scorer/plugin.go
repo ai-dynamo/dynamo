@@ -59,7 +59,7 @@ typedef struct {
 // Router bindings API
 query_router_result_t create_routers(const char *namespace_c_str,
                                      const char *component_c_str,
-                                     bool decode_fallback,
+                                     bool enforce_disagg,
                                      RouterHandles **out_handle);
 
 query_router_result_t route_prefill_request(RouterHandles *handle,
@@ -111,9 +111,9 @@ var (
 	ffiOnce sync.Once
 	ffiErr  error
 
-	ffiNamespace      string
-	ffiComponent      string
-	ffiDecodeFallback bool
+	ffiNamespace     string
+	ffiComponent     string
+	ffiEnforceDisagg bool
 
 	routerInitialized bool
 
@@ -125,14 +125,12 @@ var (
 func loadDynamoConfig() {
 	ffiNamespace = getEnvOrDefault("DYN_NAMESPACE", "vllm-agg")
 	ffiComponent = "backend" // This is not the same as DYN_COMPONENT=epp (in this case)
-	ffiDecodeFallback = getEnvBoolOrDefault("DYN_DECODE_FALLBACK", false)
-	// DYN_KV_CACHE_BLOCK_SIZE and DYN_MODEL_NAME are read by the Rust router (lib.rs)
-	// at create_routers time. They replace the values from the model card discovery.
-	// Set these in the EPP pod env to match the worker configuration.
-	logger.Info("Dynamo KV Scorer configuration loaded",
+	ffiEnforceDisagg = getEnvBoolOrDefault("DYN_ENFORCE_DISAGG", false)
+	// Note: model name and kv_cache_block_size are now auto-discovered from the model card
+	logger.Info("Dynamo KV Scorer config loaded",
 		"namespace", ffiNamespace,
 		"component", ffiComponent,
-		"decodeFallback", ffiDecodeFallback,
+		"enforce_disagg", ffiEnforceDisagg,
 		"kvCacheBlockSize", getEnvOrDefault("DYN_KV_CACHE_BLOCK_SIZE", "(from discovery)"),
 		"modelName", getEnvOrDefault("DYN_MODEL_NAME", "(from discovery)"))
 }
@@ -173,15 +171,15 @@ func initFFI() error {
 		rc := C.create_routers(
 			ns,
 			cm,
-			C.bool(ffiDecodeFallback),
+			C.bool(ffiEnforceDisagg),
 			&routerHandles,
 		)
 		if rc != C.QUERY_ROUTER_OK {
 			switch rc {
 			case C.QUERY_ROUTER_ERR_DISAGG_ENFORCED:
 				ffiErr = fmt.Errorf(
-					"create_routers failed: no prefill workers found. " +
-						"If running in aggregated mode, set DYN_DECODE_FALLBACK=true to allow decode-only routing. " +
+					"create_routers failed: no prefill workers found. "+
+						"If running in aggregated mode, set DYN_DECODE_FALLBACK=true to allow decode-only routing. "+
 						"If running in disaggregated mode, ensure prefill workers are deployed and discoverable in namespace %q",
 					ffiNamespace)
 			default:

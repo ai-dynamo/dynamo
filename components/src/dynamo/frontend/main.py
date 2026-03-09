@@ -22,7 +22,7 @@ import os
 import signal
 import sys
 from argparse import Namespace
-from typing import Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import uvloop
 
@@ -41,6 +41,9 @@ from dynamo.runtime.logging import configure_dynamo_logging
 
 from .frontend_args import FrontendArgGroup, FrontendConfig
 
+if TYPE_CHECKING:
+    from .vllm_processor import EngineFactory
+
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
@@ -50,14 +53,14 @@ def setup_engine_factory(
     router_config: RouterConfig,
     config: FrontendConfig,
     vllm_flags: Namespace,
-):
+) -> "EngineFactory":
     """
     When using vllm pre and post processor, create the EngineFactory that
     creates the engines that run requests.
     """
     from .vllm_processor import EngineFactory
 
-    return EngineFactory(runtime, router_config, config, vllm_flags, config.debug_perf)
+    return EngineFactory(runtime, router_config, config, vllm_flags)
 
 
 def parse_args() -> tuple[FrontendConfig, Optional[Namespace]]:
@@ -194,9 +197,9 @@ async def async_main():
         active_decode_blocks_threshold=config.active_decode_blocks_threshold,
         active_prefill_tokens_threshold=config.active_prefill_tokens_threshold,
         active_prefill_tokens_threshold_frac=config.active_prefill_tokens_threshold_frac,
-        decode_fallback=config.decode_fallback,
+        enforce_disagg=config.enforce_disagg,
     )
-    kwargs = {
+    kwargs: dict[str, Any] = {
         "http_host": config.http_host,
         "http_port": config.http_port,
         "kv_cache_block_size": config.kv_cache_block_size,
@@ -225,7 +228,7 @@ async def async_main():
     if config.chat_processor == "vllm":
         assert (
             vllm_flags is not None
-        ), "vllm_flags is required when chat_processor is vllm"
+        ), "vllm_flags is required when chat processor is vllm"
         chat_engine_factory = setup_engine_factory(
             runtime, router_config, config, vllm_flags
         ).chat_engine_factory
@@ -245,7 +248,7 @@ async def async_main():
         pass
 
 
-async def graceful_shutdown(runtime):
+async def graceful_shutdown(runtime: DistributedRuntime) -> None:
     """Handle graceful shutdown of the distributed runtime.
 
     Args:
@@ -254,7 +257,7 @@ async def graceful_shutdown(runtime):
     runtime.shutdown()
 
 
-def main():
+def main() -> None:
     """Entry point for the Dynamo frontend CLI."""
     uvloop.run(async_main())
 

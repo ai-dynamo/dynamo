@@ -303,7 +303,9 @@ pub(crate) async fn start_kv_router_background(
         let jitter_ms =
             rand::rng().random_range(-CHECK_INTERVAL_JITTER_MS..=CHECK_INTERVAL_JITTER_MS);
         let interval_duration = Duration::from_millis(
-            (CHECK_INTERVAL_BASE.as_millis() as i64 + jitter_ms).max(1) as u64,
+            (CHECK_INTERVAL_BASE.as_millis() as i64 + jitter_ms)
+                .max(1)
+                .cast_unsigned(),
         );
         let mut check_interval = tokio::time::interval(interval_duration);
         check_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);

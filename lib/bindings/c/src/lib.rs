@@ -577,7 +577,7 @@ fn kv_router_config_from_env() -> KvRouterConfig {
 /// # Arguments
 /// - `namespace`: Namespace for the model
 /// - `component`: Component name (defaults to "backend" if NULL or empty)
-/// - `decode_fallback`: If true, allows falling back to decode-only mode when no prefill workers are found
+/// - `enforce_disagg`: If true, requires prefill workers to be present at init time
 /// - `out_handle`: Output handle
 ///
 /// # Safety
@@ -587,7 +587,7 @@ fn kv_router_config_from_env() -> KvRouterConfig {
 pub unsafe extern "C" fn create_routers(
     namespace: *const c_char,
     component: *const c_char,
-    decode_fallback: bool,
+    enforce_disagg: bool,
     out_handle: *mut RouterHandlesPtr,
 ) -> QueryRouterResult {
     initialize_tracing();
@@ -699,22 +699,20 @@ pub unsafe extern "C" fn create_routers(
                     RouterMode::KV,
                     block_size,
                     Some(prefill_config),
-                    decode_fallback,
+                    enforce_disagg,
                     model_name.clone(),
                     namespace_str.clone(),
                 )
             }
-            None if !decode_fallback => {
+            None if enforce_disagg => {
                 tracing::error!(
-                    "No prefill workers found and decode_fallback is disabled. \
-                     If running in aggregated mode, set DYN_DECODE_FALLBACK=true. \
-                     If running in disaggregated mode, ensure prefill workers are deployed."
+                    "Prefill workers required but none found (enforce_disagg is enabled)"
                 );
                 return Err(QueryRouterResult::ErrDisaggEnforced);
             }
             None => {
                 tracing::info!("No prefill workers found, running in aggregated mode");
-                PrefillRouter::disabled(model_manager.clone(), RouterMode::KV, decode_fallback)
+                PrefillRouter::disabled(model_manager.clone(), RouterMode::KV, enforce_disagg)
             }
         };
 
