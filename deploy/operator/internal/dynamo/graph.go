@@ -673,7 +673,9 @@ func GenerateComponentService(params ComponentServiceParams) (*corev1.Service, e
 
 	service := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:        params.ServiceName,
+			// Service names must be DNS-1035 labels (no dots). Replace dots with
+			// hyphens so model names like "Qwen3-0.6B" don't cause rejections.
+			Name:        strings.ReplaceAll(params.ServiceName, ".", "-"),
 			Namespace:   params.Namespace,
 			Labels:      labels,
 			Annotations: annotations,
