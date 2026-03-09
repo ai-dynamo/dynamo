@@ -140,6 +140,7 @@ def _run_naive_fallback(
         "best_latencies": {"ttft": 0.0, "tpot": 0.0, "request_latency": 0.0},
         "dgd_config": dgd_config,
         "chosen_exp": "agg",  # AIC's naive route always generate agg config
+        "resolved_backend": backend,
     }
 
 
