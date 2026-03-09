@@ -180,6 +180,7 @@ env "${COMMON_ENV[@]}" \
     "PYTHONPATH=${PYTHONPATH_VALUE}" \
     "DYN_LOG=debug" \
     "DYN_SYSTEM_PORT=${MM_ROUTER_SYSTEM_PORT}" \
+    "MM_ROUTER_IMAGE_TRANSPORT_MODE=${MM_ROUTER_IMAGE_TRANSPORT_MODE:-data_uri}" \
     'DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS=["generate"]' \
     "${PYTHON_BIN}" -m examples.backends.vllm.mm_router_worker \
         --model "${MODEL}" \
