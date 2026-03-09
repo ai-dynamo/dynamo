@@ -365,18 +365,21 @@ class ManagedProcess:
                 )
             self._tee_proc = None
 
-    def _terminate_process_group(self, timeout: float = 2.0):
+    def _terminate_process_group(self, timeout: float = 8.0):
         """Terminate the entire process group/session started for the child.
 
         Kill Sequence:
         ==============
         1. Send SIGTERM to entire process group IMMEDIATELY (no delay)
-        2. Wait up to `timeout` seconds (default 2s), polling every 0.1s
+        2. Wait up to `timeout` seconds (default 8s), polling every 0.1s
         3. If still alive after timeout: Send SIGKILL (force kill, immediate)
 
         Timeout Parameter:
         - Controls how long to WAIT AFTER SIGTERM before escalating to SIGKILL
         - NOT a delay before sending SIGTERM (SIGTERM is sent immediately)
+        - 8s gives engines (TRT-LLM, vLLM, etc.) enough time to gracefully
+          shut down MPI workers, release GPU memory, and drain pending requests
+        - Polling at 0.1s intervals means fast exits are not penalized
 
         Process groups catch cases where the launcher shell exits and its
         children are reparented, leaving no parent PID to traverse, but they
