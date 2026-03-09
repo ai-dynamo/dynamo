@@ -30,7 +30,7 @@
 //	──────────────────────────────────────────  ──────────────────────────────────────
 //	Spec.Model              (string)           Spec.Model                    (string)
 //	Spec.Backend            (string)           Spec.Backend              (BackendType)
-//	Spec.AutoApply          (bool)             Spec.AutoApply                  (bool)
+//	Spec.AutoApply          (bool)             Spec.AutoApply                 (*bool)
 //	Spec.UseMocker          (bool)             Spec.Features.Mocker.Enabled    (bool)
 //	Spec.ProfilingConfig.ProfilerImage         Spec.Image                    (string)
 //	Spec.DeploymentOverrides.WorkersImage      (no v1beta1 equivalent yet — TODO: overrides.dgd)
@@ -72,10 +72,16 @@
 //	Spec.DeploymentOverrides.{Name,            nvidia.com/dgdr-deployment-overrides
 //	  Namespace,Labels,Annotations}
 //
+// Planner config (opaque blob stored verbatim under blob["planner"]):
+//
+//	v1beta1                                    blob key
+//	──────────────────────────────────────────  ──────────────────────────────────────
+//	Features.Planner (*runtime.RawExtension)   planner.*  (JSON fields written directly)
+//
 // v1beta1-only fields with no v1alpha1 equivalent (omitted / TODO):
 //
 //	Hardware.*, Workload.{Concurrency,RequestRate}, SLA.{E2ELatency,OptimizationType},
-//	Features.{Planner.*,KVRouter}, SearchStrategy
+//	Features.{KVRouter}, SearchStrategy
 //
 // # Status field mapping
 //
@@ -146,6 +152,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/conversion"
 )
 
@@ -214,7 +221,7 @@ func setAnnotation(obj *v1beta1.DynamoGraphDeploymentRequest, key, value string)
 // convertDGDRSpecTo converts the v1alpha1 Spec into the v1beta1 Spec.
 func convertDGDRSpecTo(src *DynamoGraphDeploymentRequestSpec, dst *v1beta1.DynamoGraphDeploymentRequestSpec, dstObj *v1beta1.DynamoGraphDeploymentRequest) error {
 	dst.Model = src.Model
-	dst.AutoApply = src.AutoApply
+	dst.AutoApply = &src.AutoApply
 
 	if src.Backend != "" {
 		dst.Backend = v1beta1.BackendType(src.Backend)
@@ -239,6 +246,7 @@ func convertDGDRSpecTo(src *DynamoGraphDeploymentRequestSpec, dst *v1beta1.Dynam
 		}
 		applySLAAndWorkloadFromBlob(blob, dst)
 		applyModelCacheFromBlob(blob, dst)
+		applyPlannerFromBlob(blob, dst)
 		setAnnotation(dstObj, annDGDRProfilingConfig, string(src.ProfilingConfig.Config.Raw))
 	}
 
@@ -390,7 +398,11 @@ func convertDeploymentOverridesToAnnotation(src *DeploymentOverridesSpec, dstObj
 // convertDGDRSpecFrom converts the v1beta1 Spec back into the v1alpha1 Spec.
 func convertDGDRSpecFrom(src *v1beta1.DynamoGraphDeploymentRequestSpec, dst *DynamoGraphDeploymentRequestSpec, srcObj *v1beta1.DynamoGraphDeploymentRequest) {
 	dst.Model = src.Model
-	dst.AutoApply = src.AutoApply
+	if src.AutoApply != nil {
+		dst.AutoApply = *src.AutoApply
+	} else {
+		dst.AutoApply = true // v1beta1 default
+	}
 
 	if src.Backend != "" {
 		dst.Backend = string(src.Backend)
@@ -425,6 +437,12 @@ func convertDGDRSpecFrom(src *v1beta1.DynamoGraphDeploymentRequestSpec, dst *Dyn
 			blob = make(map[string]interface{})
 		}
 		mergeModelCacheIntoBlob(src.ModelCache, blob)
+	}
+	if src.Features != nil && src.Features.Planner != nil {
+		if blob == nil {
+			blob = make(map[string]interface{})
+		}
+		mergePlannerIntoBlob(src.Features.Planner, blob)
 	}
 	if blob != nil {
 		if data, err := json.Marshal(blob); err == nil {
@@ -489,6 +507,39 @@ func mergeModelCacheIntoBlob(mc *v1beta1.ModelCacheSpec, blob map[string]interfa
 		deployMap["modelCache"] = mcMap
 		blob["deployment"] = deployMap
 	}
+}
+
+// mergePlannerIntoBlob writes the planner RawExtension into blob["planner"].
+// The RawExtension is the full PlannerConfig JSON blob (opaque to Go).
+func mergePlannerIntoBlob(planner *runtime.RawExtension, blob map[string]interface{}) {
+	if planner == nil || planner.Raw == nil {
+		return
+	}
+	var plannerMap map[string]interface{}
+	if err := json.Unmarshal(planner.Raw, &plannerMap); err != nil || len(plannerMap) == 0 {
+		return
+	}
+	blob["planner"] = plannerMap
+}
+
+// applyPlannerFromBlob extracts blob["planner"] and populates v1beta1 Features.Planner.
+func applyPlannerFromBlob(blob map[string]interface{}, dst *v1beta1.DynamoGraphDeploymentRequestSpec) {
+	plannerRaw, ok := blob["planner"]
+	if !ok {
+		return
+	}
+	plannerMap, ok := plannerRaw.(map[string]interface{})
+	if !ok || len(plannerMap) == 0 {
+		return
+	}
+	raw, err := json.Marshal(plannerMap)
+	if err != nil {
+		return
+	}
+	if dst.Features == nil {
+		dst.Features = &v1beta1.FeaturesSpec{}
+	}
+	dst.Features.Planner = &runtime.RawExtension{Raw: raw}
 }
 
 // restoreAnnotationFields restores v1alpha1 spec fields that were annotation-preserved

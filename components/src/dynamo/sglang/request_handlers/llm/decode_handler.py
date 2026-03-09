@@ -6,11 +6,13 @@ import logging
 import time
 from typing import Any, AsyncGenerator, Dict, Optional
 
+import pybase64
 import sglang as sgl
 
-from dynamo._core import Component, Context
+from dynamo._core import Context
+from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.engine_response import normalize_finish_reason
-from dynamo.sglang.args import Config, DisaggregationMode
+from dynamo.sglang.args import Config
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 
@@ -20,7 +22,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
     def __init__(
         self,
-        component: Component,
         engine: sgl.Engine,
         config: Config,
         publisher: DynamoSglangPublisher,
@@ -30,7 +31,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         """Initialize decode worker handler.
 
         Args:
-            component: The Dynamo runtime component.
             engine: The SGLang engine instance.
             config: SGLang and Dynamo configuration.
             publisher: Metrics publisher for the worker.
@@ -38,7 +38,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             generate_endpoint: The endpoint handle for discovery registration.
         """
         super().__init__(
-            component,
             engine,
             config,
             publisher,
@@ -109,6 +108,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         trace_id = context.trace_id
         sampling_params = self._build_sampling_params(request)
         input_param = self._get_input_param(request)
+        return_routed_experts = getattr(
+            self.config.server_args, "enable_return_routed_experts", False
+        )
         priority = (request.get("routing") or {}).get("priority")
 
         if self.serving_mode == DisaggregationMode.DECODE:
@@ -139,6 +141,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 **input_param,
                 sampling_params=sampling_params,
                 stream=True,
+                return_routed_experts=return_routed_experts,
                 bootstrap_host=bootstrap_info["bootstrap_host"],
                 bootstrap_port=bootstrap_info["bootstrap_port"],
                 bootstrap_room=bootstrap_info["bootstrap_room"],
@@ -157,7 +160,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         else:
             # Extract image URLs for multimodal requests. SGLang's mm_data_processor
             # handles loading/preprocessing, and the scheduler does vision encoding.
-            image_data = None
+            image_data: list[str] | None = None
             image_items = request.get("multi_modal_data", {}).get("image_url")
             if image_items:
                 image_data = []
@@ -181,6 +184,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 image_data=image_data,
                 sampling_params=sampling_params,
                 stream=True,
+                return_routed_experts=return_routed_experts,
                 external_trace_header=trace_header,
                 rid=trace_id,
                 data_parallel_rank=dp_rank,
@@ -211,7 +215,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             Dict with token_ids and optional finish_reason.
         """
         # Use Future pattern for request ID - will be set when first response arrives
-        request_id_future = asyncio.Future()
+        request_id_future: asyncio.Future[str] = asyncio.Future()
         async with self._cancellation_monitor(request_id_future, context):
             async for res in stream_source:
                 # Extract SGLang request ID from the first response and set the future
@@ -244,6 +248,14 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
                 # Pass through disjoint token segments directly
                 out["token_ids"] = output_ids
+                routed_experts = res["meta_info"].get("routed_experts")
+                if routed_experts is not None:
+                    # Base64-encode tensor bytes to match sglang's output format.
+                    routed_experts = pybase64.b64encode(
+                        routed_experts.numpy().tobytes()
+                    ).decode("utf-8")
+                    # Internal transport field consumed by frontend nvext mapping.
+                    out["disaggregated_params"] = {"routed_experts": routed_experts}
                 if finish_reason:
                     input_tokens = res["meta_info"]["prompt_tokens"]
                     completion_tokens = res["meta_info"]["completion_tokens"]
@@ -277,7 +289,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         count = 0
 
         # Use Future pattern for request ID - will be set when first response arrives
-        request_id_future = asyncio.Future()
+        request_id_future: asyncio.Future[str] = asyncio.Future()
         async with self._cancellation_monitor(request_id_future, context):
             async for res in stream_source:
                 # Extract SGLang request ID from the first response and set the future
@@ -318,6 +330,13 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     "model": self.config.server_args.served_model_name,
                     "object": "chat.completion.chunk",
                 }
+                routed_experts = res["meta_info"].get("routed_experts")
+                if routed_experts is not None:
+                    # Base64-encode tensor bytes to match sglang's output format.
+                    routed_experts = pybase64.b64encode(
+                        routed_experts.numpy().tobytes()
+                    ).decode("utf-8")
+                    response["nvext"] = {"routed_experts": routed_experts}
                 if not context.is_stopped():
                     yield response
                 count = next_count

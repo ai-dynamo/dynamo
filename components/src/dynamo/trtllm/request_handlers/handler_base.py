@@ -17,9 +17,11 @@ import asyncio
 import dataclasses
 import logging
 import os
+import re
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
-from typing import Any, AsyncGenerator, Optional, Union
+from typing import TYPE_CHECKING, Any, Optional, Union
 
 import torch
 from tensorrt_llm.executor.result import GenerationResult
@@ -38,6 +40,7 @@ from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.trtllm.constants import DisaggregationMode
 from dynamo.trtllm.engine import TensorRTLLMEngine
 from dynamo.trtllm.logits_processing.adapter import create_trtllm_adapters
+from dynamo.trtllm.metrics import AdditionalMetricsCollector
 from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
 from dynamo.trtllm.publisher import Publisher
 from dynamo.trtllm.request_handlers.base_generative_handler import BaseGenerativeHandler
@@ -45,6 +48,11 @@ from dynamo.trtllm.utils.disagg_utils import (
     DisaggregatedParams,
     DisaggregatedParamsCodec,
 )
+
+if TYPE_CHECKING:
+    # tensorrt_llm may use a different version that doesn't have MetricsCollector,
+    # so guard this import inside TYPE_CHECKING to avoid runtime import errors.
+    from tensorrt_llm.metrics import MetricsCollector
 
 configure_dynamo_logging()
 
@@ -55,7 +63,6 @@ class RequestHandlerConfig:
     Configuration for the request handler
     """
 
-    component: object
     engine: TensorRTLLMEngine
     default_sampling_params: SamplingParams
     publisher: Publisher
@@ -68,11 +75,12 @@ class RequestHandlerConfig:
     runtime: Optional[
         DistributedRuntime
     ] = None  # DistributedRuntime reference for graceful shutdown
-    metrics_collector: Optional[Any] = None  # TensorRT-LLM MetricsCollector
+    metrics_collector: Optional["MetricsCollector"] = None
     kv_block_size: int = 32
     shutdown_event: Optional[asyncio.Event] = None
     encoder_cache_capacity_gb: float = 0  # Encoder cache capacity in GB
     disable_request_abort: bool = True
+    additional_metrics: Optional["AdditionalMetricsCollector"] = None
 
 
 class HandlerBase(BaseGenerativeHandler):
@@ -89,7 +97,6 @@ class HandlerBase(BaseGenerativeHandler):
 
     def __init__(self, config: RequestHandlerConfig):
         self.engine = config.engine
-        self.component = config.component
         self.default_sampling_params = config.default_sampling_params
         self.publisher = config.publisher
         self.metrics_collector = config.metrics_collector
@@ -103,8 +110,9 @@ class HandlerBase(BaseGenerativeHandler):
         self.kv_block_size: int = config.kv_block_size
         self.shutdown_event = config.shutdown_event
         self.disable_request_abort = config.disable_request_abort
+        self.additional_metrics = config.additional_metrics
 
-    def check_error(self, result: dict):
+    def check_error(self, result: dict) -> bool:
         """
         Check if there is an error in the result.
         """
@@ -195,7 +203,7 @@ class HandlerBase(BaseGenerativeHandler):
         Raise GeneratorExit if shutdown event is triggered.
         """
         try:
-            cancellation_triggers = [
+            cancellation_triggers: list[asyncio.Future[Any]] = [
                 context.async_killed_or_stopped(),  # Request cancellation
             ]
             # Shutdown cancellation
@@ -415,7 +423,7 @@ class HandlerBase(BaseGenerativeHandler):
         ep_disaggregated_params: Optional[Any],
     ) -> tuple[Any, Any, dict]:
         """
-        Setup disaggregated_params based on PREFILL/DECODE mode.
+        Setup disaggregated_params based on disaggregation mode.
 
         For PREFILL mode:
         - Uses ep_disaggregated_params from encode worker if available
@@ -425,6 +433,11 @@ class HandlerBase(BaseGenerativeHandler):
         - Decodes disaggregated_params from prefill_result
         - Extracts EPD metadata for prompt optimization
 
+        For PREFILL_AND_DECODE (aggregated) mode:
+        - Uses ep_disaggregated_params from encode worker if available
+          (passes multimodal_embedding_handles to TRT-LLM and sets
+          request_type="context_and_generation" for full prefill + decode)
+
         Args:
             request: Request dictionary (may contain prefill_result)
             ep_disaggregated_params: Optional params from encode worker (EPD flow)
@@ -433,7 +446,7 @@ class HandlerBase(BaseGenerativeHandler):
             Tuple of (disaggregated_params, ep_disaggregated_params, epd_metadata)
         """
         disaggregated_params = None
-        epd_metadata = {}
+        epd_metadata: dict[str, Any] = {}
 
         # PREFILL mode: setup context_only params
         if self.disaggregation_mode == DisaggregationMode.PREFILL:
@@ -444,6 +457,20 @@ class HandlerBase(BaseGenerativeHandler):
                 disaggregated_params = LlmDisaggregatedParams(
                     request_type="context_only"
                 )
+
+        # AGGREGATED (prefill_and_decode) mode with encoder disaggregation:
+        # Pass the encode worker's DisaggregatedParams (containing
+        # multimodal_embedding_handles) directly so TRT-LLM can import
+        # the vision embeddings.  Use "context_and_generation" so the
+        # engine runs a full prefill + decode cycle.
+        elif (
+            self.disaggregation_mode == DisaggregationMode.AGGREGATED
+            and ep_disaggregated_params is not None
+        ):
+            disaggregated_params = DisaggregatedParamsCodec.decode(
+                ep_disaggregated_params
+            )
+            disaggregated_params.request_type = "context_and_generation"
 
         # DECODE mode: decode params from prefill_result
         prefill_result = request.get("prefill_result")
@@ -590,7 +617,7 @@ class HandlerBase(BaseGenerativeHandler):
         context: Context,
         embeddings: Optional[Union[torch.Tensor, dict]] = None,
         ep_disaggregated_params: Optional[DisaggregatedParams] = None,
-    ):
+    ) -> AsyncGenerator[dict, None]:
         """
         Generate responses based on the disaggregation mode in the request.
 
@@ -601,6 +628,36 @@ class HandlerBase(BaseGenerativeHandler):
             ep_disaggregated_params: Optional DisaggregatedParams from encode worker (full EPD flow)
         """
         logging.debug(f"Request: {request}")
+
+        # Additional metrics: request type detection
+        metrics_collector = self.additional_metrics
+
+        if metrics_collector:
+            try:
+                # Detect request types for metrics
+                sampling_options = request.get("sampling_options", {})
+                guided = sampling_options.get("guided_decoding")
+                if guided and isinstance(guided, dict):
+                    has_structured_guidance = any(
+                        guided.get(k) is not None
+                        for k in (
+                            "json",
+                            "regex",
+                            "grammar",
+                            "json_object",
+                            "structural_tag",
+                        )
+                    ) or bool(guided.get("choice"))
+                    if has_structured_guidance:
+                        metrics_collector.record_request_type_structured_output()
+                if (
+                    request.get("multi_modal_data")
+                    or embeddings is not None
+                    or request.get("_epd_processed_prompt") is not None
+                ):
+                    metrics_collector.record_request_type_image()
+            except Exception as e:
+                logging.warning("Additional metrics (request type): %s", e)
 
         # Normalize OpenAI format to TRT-LLM internal format
         self._normalize_request_format(request)
@@ -803,14 +860,48 @@ class HandlerBase(BaseGenerativeHandler):
                             "Request finished with no finish reason set - this indicates a possible bug"
                         )
 
+                    # Record additional metrics on request finish
+                    if res.finished and metrics_collector and out.get("finish_reason"):
+                        try:
+                            # KV transfer metrics from request_perf_metrics
+                            if output.request_perf_metrics is not None:
+                                # Record KV transfer latency/bytes/speed from timing_metrics
+                                tm = output.request_perf_metrics.timing_metrics
+                                if tm is not None:
+                                    recorded = (
+                                        metrics_collector.record_kv_transfer_perf(tm)
+                                    )
+                                    # Only count success if a transfer actually occurred
+                                    if (
+                                        recorded
+                                        and self.disaggregation_mode
+                                        == DisaggregationMode.PREFILL
+                                    ):
+                                        metrics_collector.record_kv_transfer_success()
+                        except Exception as e:
+                            logging.warning(
+                                "Additional metrics (request finish): %s", e
+                            )
+
                     # Log metrics to TensorRT-LLM MetricsCollector when request finishes
+                    # NOTE: TRT-LLM 1.3.0rc5 (PR #11243) renamed log_metrics_dict → log_request_metrics_dict
                     if (
                         res.finished
                         and self.metrics_collector
                         and hasattr(res, "metrics_dict")
                     ):
                         try:
-                            self.metrics_collector.log_metrics_dict(res.metrics_dict)
+                            if hasattr(
+                                self.metrics_collector,
+                                "log_request_metrics_dict",
+                            ):
+                                self.metrics_collector.log_request_metrics_dict(
+                                    res.metrics_dict
+                                )
+                            else:
+                                self.metrics_collector.log_metrics_dict(
+                                    res.metrics_dict
+                                )
                         except Exception as e:
                             logging.warning(f"Failed to log TensorRT-LLM metrics: {e}")
 
@@ -822,6 +913,11 @@ class HandlerBase(BaseGenerativeHandler):
         except asyncio.CancelledError:
             logging.debug(f"Request {request_id}: Client cancelled")
             # _cancellation_monitor already called abort_request
+            try:
+                if metrics_collector:
+                    metrics_collector.record_request_abort()
+            except Exception as e:
+                logging.debug("Additional metrics (request abort): %s", e)
             return  # Just stop, no error response
 
         # 2. Per-request errors - send to client, don't shutdown
@@ -867,9 +963,19 @@ class HandlerBase(BaseGenerativeHandler):
         # doesn't know about (e.g. Rust's "backend"/"choice" vs TRT-LLM's fields).
         guided_decoding = overrides.pop("guided_decoding", None)
         if guided_decoding is not None and isinstance(guided_decoding, dict):
+            # TRT-LLM's GuidedDecodingParams doesn't have a "choice" field.
+            # Convert choice list to a regex pattern: (choice1|choice2|...)
+            # This matches the approach used by vLLM's outlines backend.
+            regex = guided_decoding.get("regex")
+            choice = guided_decoding.get("choice")
+            if choice and not regex:
+                valid_choices = [c for c in choice if c is not None]
+                if valid_choices:
+                    regex = "(" + "|".join(re.escape(c) for c in valid_choices) + ")"
+
             overrides["guided_decoding"] = GuidedDecodingParams(
                 json=guided_decoding.get("json"),
-                regex=guided_decoding.get("regex"),
+                regex=regex,
                 grammar=guided_decoding.get("grammar"),
                 json_object=guided_decoding.get("json_object", False),
                 structural_tag=guided_decoding.get("structural_tag"),

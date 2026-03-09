@@ -13,10 +13,15 @@ from typing import Any, AsyncGenerator, Dict, Optional, Tuple
 import sglang as sgl
 from sglang.srt.utils import get_local_ip_auto
 
-from dynamo._core import Component, Context
+from dynamo._core import Context
 from dynamo.common.utils.input_params import InputParamManager
+from dynamo.runtime import DistributedRuntime
 from dynamo.sglang.args import Config
 from dynamo.sglang.publisher import DynamoSglangPublisher
+
+# Keep default tags minimal and safe for general use.
+# "cuda_graph" can still be requested explicitly, but it requires LD_PRELOAD setup.
+DEFAULT_MEMORY_OCCUPATION_TAGS = ["kv_cache", "weights"]
 
 
 class BaseGenerativeHandler(ABC):
@@ -30,18 +35,15 @@ class BaseGenerativeHandler(ABC):
 
     def __init__(
         self,
-        component: Component,
         config: Config,
         publisher: Optional[DynamoSglangPublisher] = None,
     ) -> None:
         """Initialize base generative handler.
 
         Args:
-            component: The Dynamo runtime component.
             config: SGLang and Dynamo configuration.
             publisher: Optional metrics publisher for the worker.
         """
-        self.component = component
         self.config = config
 
         # Set up metrics and KV publishers
@@ -98,7 +100,6 @@ class BaseWorkerHandler(BaseGenerativeHandler):
 
     def __init__(
         self,
-        component: Component,
         engine: sgl.Engine,
         config: Config,
         publisher: Optional[DynamoSglangPublisher] = None,
@@ -108,7 +109,6 @@ class BaseWorkerHandler(BaseGenerativeHandler):
         """Initialize base worker handler.
 
         Args:
-            component: The Dynamo runtime component.
             engine: The SGLang engine instance.
             config: SGLang and Dynamo configuration.
             publisher: Optional metrics publisher for the worker.
@@ -116,7 +116,7 @@ class BaseWorkerHandler(BaseGenerativeHandler):
             shutdown_event: Optional event to signal shutdown.
         """
         # Call parent constructor
-        super().__init__(component, config, publisher)
+        super().__init__(config, publisher)
 
         # LLM-specific initialization
         self.engine = engine
@@ -134,15 +134,22 @@ class BaseWorkerHandler(BaseGenerativeHandler):
         self.skip_tokenizer_init = config.server_args.skip_tokenizer_init
         self.enable_trace = config.server_args.enable_trace
 
-        self.input_param_manager = InputParamManager(
-            self.engine.tokenizer_manager.tokenizer
-            if not self.skip_tokenizer_init
-            else None
-        )
-
-        self._engine_supports_priority = (
-            "priority" in inspect.signature(engine.async_generate).parameters
-        )
+        if engine is not None:
+            self.input_param_manager = InputParamManager(
+                self.engine.tokenizer_manager.tokenizer
+                if not self.skip_tokenizer_init
+                else None
+            )
+            self._engine_supports_priority = (
+                "priority" in inspect.signature(engine.async_generate).parameters
+            )
+        else:
+            # Encode-only workers (e.g. MultimodalEncodeWorkerHandler) don't
+            # have an sgl.Engine.
+            self.input_param_manager = InputParamManager(None)
+            self._engine_supports_priority = False
+        self._memory_occupation_lock = asyncio.Lock()
+        self._memory_released = False
 
     def _priority_kwargs(self, priority: Any) -> Dict[str, Any]:
         if priority is not None and self._engine_supports_priority:
@@ -153,8 +160,7 @@ class BaseWorkerHandler(BaseGenerativeHandler):
         """Release GPU memory occupation and unregister from discovery.
 
         Args:
-            body: Dict with optional 'tags' key for which memory to release.
-                  Default: ["kv_cache", "weights", "cuda_graph"]
+            body: Unused. Release always targets default tags.
 
         Order of operations:
         1. Unregister from discovery - stop accepting new requests
@@ -166,43 +172,50 @@ class BaseWorkerHandler(BaseGenerativeHandler):
             ReleaseMemoryOccupationReqInput,
         )
 
-        tags = body.get("tags", body.get("tag", None))
-        if tags is None:
-            tags = ["kv_cache", "weights", "cuda_graph"]
-
-        try:
-            # Step 1: Unregister endpoint from discovery FIRST
-            try:
-                await self.generate_endpoint.unregister_endpoint_instance()
-            except Exception as unreg_err:
-                logging.warning(
-                    f"Failed to unregister endpoint from discovery: {unreg_err}"
-                )
-
-            # Step 2: Pause generation to drain in-flight requests
-            pause_req = PauseGenerationReqInput()
-            await self.engine.tokenizer_manager.pause_generation(pause_req)
-
-            # Step 3: Release memory now that it's safe
-            release_req = ReleaseMemoryOccupationReqInput(tags=tags)
-            await self.engine.tokenizer_manager.release_memory_occupation(
-                release_req, None
-            )
-
+        tags = list(DEFAULT_MEMORY_OCCUPATION_TAGS)
+        tokenizer_manager = (
+            getattr(self.engine, "tokenizer_manager", None)
+            if self.engine is not None
+            else None
+        )
+        if tokenizer_manager is None:
             return {
-                "status": "ok",
-                "message": f"Memory released for tags: {tags}",
+                "status": "error",
+                "message": "memory control not supported on this worker",
             }
-        except Exception as e:
-            logging.error(f"Failed to release memory occupation: {e}")
-            return {"status": "error", "message": str(e)}
+
+        async with self._memory_occupation_lock:
+            if self._memory_released:
+                return {
+                    "status": "ok",
+                    "message": "Memory already released",
+                }
+
+            try:
+                # Stop new requests and drain in-flight work before releasing memory.
+                if self.generate_endpoint is not None:
+                    await self.generate_endpoint.unregister_endpoint_instance()
+
+                pause_req = PauseGenerationReqInput()
+                await tokenizer_manager.pause_generation(pause_req)
+
+                release_req = ReleaseMemoryOccupationReqInput(tags=tags)
+                await tokenizer_manager.release_memory_occupation(release_req, None)
+                self._memory_released = True
+
+                return {
+                    "status": "ok",
+                    "message": f"Memory released for tags: {tags}",
+                }
+            except Exception as e:
+                logging.error(f"Failed to release memory occupation: {e}")
+                return {"status": "error", "message": str(e)}
 
     async def resume_memory_occupation(self, body: dict) -> dict:
         """Resume GPU memory occupation and re-register to discovery.
 
         Args:
-            body: Dict with optional 'tags' key for which memory to resume.
-                  Default: ["kv_cache", "weights", "cuda_graph"]
+            body: Unused. Resume always targets default tags.
 
         Order of operations:
         1. Resume memory - restore GPU allocations
@@ -214,36 +227,43 @@ class BaseWorkerHandler(BaseGenerativeHandler):
             ResumeMemoryOccupationReqInput,
         )
 
-        tags = body.get("tags", body.get("tag", None))
-        if tags is None:
-            tags = ["kv_cache", "weights", "cuda_graph"]
-
-        try:
-            # Step 1: Resume memory first - must be ready before accepting requests
-            resume_req = ResumeMemoryOccupationReqInput(tags=tags)
-            await self.engine.tokenizer_manager.resume_memory_occupation(
-                resume_req, None
-            )
-
-            # Step 2: Continue generation
-            continue_req = ContinueGenerationReqInput()
-            await self.engine.tokenizer_manager.continue_generation(continue_req)
-
-            # Step 3: Re-register to discovery so frontend can route to us
-            try:
-                await self.generate_endpoint.register_endpoint_instance()
-            except Exception as reg_err:
-                logging.warning(
-                    f"Failed to re-register endpoint to discovery: {reg_err}"
-                )
-
+        tags = list(DEFAULT_MEMORY_OCCUPATION_TAGS)
+        tokenizer_manager = (
+            getattr(self.engine, "tokenizer_manager", None)
+            if self.engine is not None
+            else None
+        )
+        if tokenizer_manager is None:
             return {
-                "status": "ok",
-                "message": f"Memory resumed for tags: {tags}",
+                "status": "error",
+                "message": "memory control not supported on this worker",
             }
-        except Exception as e:
-            logging.error(f"Failed to resume memory occupation: {e}")
-            return {"status": "error", "message": str(e)}
+
+        async with self._memory_occupation_lock:
+            if not self._memory_released:
+                return {
+                    "status": "ok",
+                    "message": "Memory already resumed",
+                }
+
+            try:
+                resume_req = ResumeMemoryOccupationReqInput(tags=tags)
+                await tokenizer_manager.resume_memory_occupation(resume_req, None)
+                continue_req = ContinueGenerationReqInput()
+                await tokenizer_manager.continue_generation(continue_req)
+
+                if self.generate_endpoint is not None:
+                    await self.generate_endpoint.register_endpoint_instance()
+
+                self._memory_released = False
+
+                return {
+                    "status": "ok",
+                    "message": f"Memory resumed for tags: {tags}",
+                }
+            except Exception as e:
+                logging.error(f"Failed to resume memory occupation: {e}")
+                return {"status": "error", "message": str(e)}
 
     async def start_profile(self, body: dict) -> dict:
         """Start profiling on the engine.
@@ -330,7 +350,48 @@ class BaseWorkerHandler(BaseGenerativeHandler):
             "new_version": req.new_version,
         }
 
-    def register_engine_routes(self, runtime) -> None:
+    async def pin_prefix(self, body: dict) -> dict:
+        """Pin a prefix by token_ids to resist eviction.
+
+        Args:
+            body: Dict with "token_ids" list of token IDs and optional
+                  "ttl_seconds" (default 300).
+        """
+        token_ids = body.get("token_ids", [])
+        ttl_seconds = body.get("ttl_seconds", 300)
+        if not token_ids:
+            return {"status": "error", "message": "token_ids required"}
+        try:
+            result = await self.engine.tokenizer_manager.pin_prefix(
+                token_ids, ttl_seconds
+            )
+            return {
+                "status": "ok" if result.success else "error",
+                "nodes_pinned": result.nodes_pinned,
+                "message": result.message,
+            }
+        except Exception as e:
+            logging.error(f"Failed to pin prefix: {e}")
+            return {"status": "error", "message": str(e)}
+
+    async def cache_control(self, request, context=None):
+        """Service mesh endpoint for cache control operations.
+
+        Args:
+            request: Dict with "action" key and action-specific parameters.
+            context: Optional Dynamo context (unused but required by protocol).
+
+        Yields:
+            Single dict with operation result.
+        """
+        action = request.get("action")
+        if action == "pin_prefix":
+            result = await self.pin_prefix(request)
+        else:
+            result = {"status": "error", "message": f"Unknown action: {action}"}
+        yield result
+
+    def register_engine_routes(self, runtime: DistributedRuntime) -> None:
         """Register all engine routes for this handler.
 
         Args:
@@ -344,6 +405,7 @@ class BaseWorkerHandler(BaseGenerativeHandler):
         runtime.register_engine_route(
             "resume_memory_occupation", self.resume_memory_occupation
         )
+        runtime.register_engine_route("pin_prefix", self.pin_prefix)
         runtime.register_engine_route(
             "update_weights_from_disk", self.update_weights_from_disk
         )
@@ -441,6 +503,7 @@ class BaseWorkerHandler(BaseGenerativeHandler):
             bootstrap_host = get_local_ip_auto()
 
         # Wrap IPv6 literal with brackets so f"{host}:{port}" stays valid.
+        assert isinstance(bootstrap_host, str)
         if ":" in bootstrap_host and not bootstrap_host.startswith("["):
             bootstrap_host = f"[{bootstrap_host}]"
 
@@ -473,7 +536,7 @@ class BaseWorkerHandler(BaseGenerativeHandler):
             cancellation_future = context.async_killed_or_stopped()
 
             # Build list of futures/tasks to wait for
-            wait_for = [cancellation_future]
+            wait_for: list[asyncio.Future[Any]] = [cancellation_future]
             shutdown_task = None
 
             if self.shutdown_event:

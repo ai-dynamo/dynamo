@@ -113,7 +113,8 @@ core
 /.cursor/instructions.md
 /.cursor/instructions.md.bak
 /.cursor
-/.claude
+/.claude/*
+!/.claude/skills/
 /CLAUDE.md
 /CLAUDE.md.bak
 

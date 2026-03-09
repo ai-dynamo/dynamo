@@ -25,6 +25,7 @@ from dynamo.common.protocols.video_protocol import (
     VideoData,
 )
 from dynamo.common.storage import upload_to_fs
+from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.common.utils.output_modalities import RequestType, parse_request_type
 from dynamo.common.utils.video_utils import (
     compute_num_frames,
@@ -68,7 +69,6 @@ class OmniHandler(BaseOmniHandler):
     def __init__(
         self,
         runtime,
-        component,
         config,
         default_sampling_params: Dict[str, Any],
         shutdown_event: asyncio.Event | None = None,
@@ -88,7 +88,6 @@ class OmniHandler(BaseOmniHandler):
         """
         super().__init__(
             runtime=runtime,
-            component=component,
             config=config,
             default_sampling_params=default_sampling_params,
             shutdown_event=shutdown_event,
@@ -414,6 +413,8 @@ class OmniHandler(BaseOmniHandler):
 
             output = NvImagesResponse(created=int(time.time()), data=image_data_list)
             return output.model_dump()
+        else:
+            return None
 
     async def _format_video_chunk(
         self,
@@ -515,7 +516,7 @@ class OmniHandler(BaseOmniHandler):
                         "role": "assistant",
                         "content": delta_text,
                     },
-                    "finish_reason": self._normalize_finish_reason(output.finish_reason)
+                    "finish_reason": normalize_finish_reason(output.finish_reason)
                     if output.finish_reason
                     else None,
                 }
