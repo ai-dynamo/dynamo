@@ -51,13 +51,15 @@ navigation:
             path: kubernetes/deployment/dynamomodel-guide.md
           - page: Autoscaling
             path: kubernetes/autoscaling.md
+          - page: Rolling Update
+            path: kubernetes/rolling-update.md
           - page: Inference Gateway (GAIE)
             path: kubernetes/inference-gateway.md
           - section: Checkpointing
-            path: kubernetes/chrek/README.md
+            path: kubernetes/snapshot/README.md
             contents:
               - page: Integration with Dynamo
-                path: kubernetes/chrek/dynamo.md
+                path: kubernetes/snapshot/dynamo.md
       - section: Observability (K8s)
         contents:
           - page: Metrics
@@ -84,15 +86,26 @@ navigation:
         path: components/kvbm/kvbm-guide.md
       - page: Dynamo Benchmarking
         path: benchmarks/benchmarking.md
-      - section: Multimodality Support
-        path: features/multimodal/README.md
+      - section: Multimodal Model Serving
         contents:
-          - page: vLLM Multimodal
-            path: features/multimodal/multimodal-vllm.md
-          - page: TensorRT-LLM Multimodal
-            path: features/multimodal/multimodal-trtllm.md
-          - page: SGLang Multimodal
-            path: features/multimodal/multimodal-sglang.md
+          - section: Vision Language Models (VLMs)
+            path: features/multimodal/README.md
+            contents:
+              - page: Embedding Cache
+                path: features/multimodal/embedding-cache.md
+              - page: Encoder Disaggregation
+                path: features/multimodal/encoder-disaggregation.md
+              - page: Multimodal KV Routing
+                path: features/multimodal/multimodal-kv-routing.md
+          - section: Diffusion (Experimental)
+            path: features/multimodal/diffusion.md
+            contents:
+              - page: vLLM-Omni
+                path: backends/vllm/vllm-omni.md
+              - page: SGLang Diffusion
+                path: backends/sglang/sglang-diffusion.md
+              - page: TRT-LLM Diffusion
+                path: backends/trtllm/trtllm-video-diffusion.md
       - page: Tool Calling
         path: agents/tool-calling.md
       - page: LoRA Adapters

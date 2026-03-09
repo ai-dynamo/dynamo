@@ -70,35 +70,19 @@ spec:
           - "--version={{ .Chart.AppVersion }}"
       {{- end }}
       containers:
-      - args: {{- toYaml .Values.controllerManager.kubeRbacProxy.args | nindent
-          8 }}
-        env:
-        - name: KUBERNETES_CLUSTER_DOMAIN
-          value: {{ quote .Values.kubernetesClusterDomain }}
-        imagePullPolicy: {{ .Values.controllerManager.kubeRbacProxy.image.pullPolicy | quote }}
-        image: {{ .Values.controllerManager.kubeRbacProxy.image.repository }}:{{
-          .Values.controllerManager.kubeRbacProxy.image.tag | default .Chart.AppVersion
-          }}
-        name: kube-rbac-proxy
-        ports:
-        - containerPort: 8443
-          name: https
-          protocol: TCP
-        resources: {{- toYaml .Values.controllerManager.kubeRbacProxy.resources
-          | nindent 10 }}
-        securityContext: {{- toYaml .Values.controllerManager.kubeRbacProxy.containerSecurityContext
-          | nindent 10 }}
       - args:
         - --config=/etc/dynamo-operator/config.yaml
         - --operator-version={{ .Chart.AppVersion }}
         command:
         - /manager
         env:
+        {{- with .Values.env }}
+          {{- toYaml . | nindent 8 }}
+        {{- end }}
         - name: KUBERNETES_CLUSTER_DOMAIN
           value: {{ quote .Values.kubernetesClusterDomain }}
         imagePullPolicy: {{ .Values.controllerManager.manager.image.pullPolicy | quote }}
-        image: {{ .Values.controllerManager.manager.image.repository }}:{{ .Values.controllerManager.manager.image.tag
-| default .Chart.AppVersion }}
+        image: {{ .Values.controllerManager.manager.image.repository }}:{{ .Values.controllerManager.manager.image.tag | default .Chart.AppVersion }}
         livenessProbe:
           httpGet:
             path: /healthz
@@ -107,6 +91,9 @@ spec:
           periodSeconds: 20
         name: manager
         ports:
+        - containerPort: 8080
+          name: metrics
+          protocol: TCP
         - containerPort: 9443
           name: webhook-server
           protocol: TCP

@@ -317,8 +317,8 @@ class TRTLLMProcess:
         time.sleep(2)
 
 
-@pytest.mark.pre_merge
 @pytest.mark.gpu_1
+@pytest.mark.nightly
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 @pytest.mark.timeout(300)
 def test_trtllm_kv_router_basic(
@@ -420,8 +420,8 @@ def test_router_decisions_trtllm_attention_dp(
         )
 
 
-@pytest.mark.pre_merge
 @pytest.mark.gpu_1
+@pytest.mark.nightly
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 @pytest.mark.timeout(150)  # ~3x average (~45s/test), rounded up
 def test_router_decisions_trtllm_multiple_workers(
@@ -461,8 +461,8 @@ def test_router_decisions_trtllm_multiple_workers(
         )
 
 
-@pytest.mark.pre_merge
 @pytest.mark.gpu_1
+@pytest.mark.nightly
 @pytest.mark.timeout(150)  # ~3x average (~45s/test), rounded up
 @pytest.mark.parametrize(
     "store_backend,durable_kv_events,request_plane",
