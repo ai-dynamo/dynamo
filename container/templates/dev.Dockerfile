@@ -206,6 +206,11 @@ RUN --mount=from=wheel_builder,target=/wheel_builder \
         fi; \
     fi
 
+{% if device == "xpu" %}
+ENV NIXL_LIB_DIR=/opt/intel/intel_nixl/lib/x86_64-linux-gnu  \
+    NIXL_PLUGIN_DIR=/opt/intel/intel_nixl/lib/x86_64-linux-gnu/plugins \
+    NIXL_PREFIX=/opt/intel/intel_nixl
+{% else %}
 # NIXL is installed under lib64 (manylinux/AlmaLinux convention used by the wheel_builder).
 # All frameworks reference NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib64.
 # For vllm/trtllm/none: This resets the same values already set in runtime (no harm).
@@ -213,6 +218,7 @@ RUN --mount=from=wheel_builder,target=/wheel_builder \
 ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl \
     NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib64 \
     NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib64/plugins
+{% endif %}
 
 # Set universal CUDA development environment variables (all frameworks)
 # vLLM: Dockerfile.vllm line 533, 597
@@ -362,5 +368,10 @@ RUN --mount=type=bind,source=./container/launch_message/dev.txt,target=/opt/dyna
     chmod 755 /opt/dynamo/.launch_screen && \
     echo 'cat /opt/dynamo/.launch_screen' >> /etc/bash.bashrc
 
+{% if device == "xpu" %}
+SHELL ["bash", "-c"]
+CMD ["bash", "-c", "source /root/.bashrc && exec bash"]
+{% else %}
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
+{% endif %}
