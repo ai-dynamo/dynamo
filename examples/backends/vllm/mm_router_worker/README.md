@@ -204,6 +204,7 @@ Important:
 - If you customize backend/MM router component names, update the MM router CLI args to match.
 - `--block-size` defaults to `16`; if your vLLM backend uses a different KV cache block size,
   pass the same value to the MM router.
+- `DYN_MM_ROUTER_IMAGE_TRANSPORT_MODE` is optional. If unset, the MM router uses `url`.
 
 ```bash
 cd "$DYNAMO_ROOT"
@@ -217,6 +218,22 @@ export DYN_LOG=debug
 python -m examples.backends.vllm.mm_router_worker \
   --model "$MODEL_NAME"
 ```
+
+Image transport setting:
+
+```bash
+export DYN_MM_ROUTER_IMAGE_TRANSPORT_MODE=url      # default
+# or
+export DYN_MM_ROUTER_IMAGE_TRANSPORT_MODE=data_uri
+```
+
+How to choose:
+- Leave it unset or set it to `url` when external image download HTTP latency is low. This keeps the request payload between the MM router and backend smaller, and lets the backend fetch the image URL directly.
+- Set it to `data_uri` when external image download HTTP latency is high. This makes the MM router inline the downloaded image bytes into the forwarded request so the backend does not need to pay the slow external HTTP fetch again.
+
+Tradeoff summary:
+- `url`: smaller internal payloads, lower serialization overhead, but the backend still performs the external download.
+- `data_uri`: larger internal payloads, higher serialization overhead, but avoids repeating a slow external HTTP fetch on the backend side.
 
 ### Terminal 5: Start Frontend
 

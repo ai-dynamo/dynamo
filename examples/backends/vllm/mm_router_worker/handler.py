@@ -51,10 +51,10 @@ class MMRouterHandler:
         self.block_size = block_size
         self._image_loader = RoutingImageLoader()
 
-        mode = os.getenv("MM_ROUTER_IMAGE_TRANSPORT_MODE", "url").strip().lower()
+        mode = os.getenv("DYN_MM_ROUTER_IMAGE_TRANSPORT_MODE", "url").strip().lower()
         if mode not in ("data_uri", "url"):
             logger.warning(
-                "Invalid MM_ROUTER_IMAGE_TRANSPORT_MODE=%r, using 'url'", mode
+                "Invalid DYN_MM_ROUTER_IMAGE_TRANSPORT_MODE=%r, using 'url'", mode
             )
             mode = "url"
         self.transport_mode = mode
