@@ -77,7 +77,7 @@ def validate_args(args):
                 "wheel_builder",
                 "base",
             ],
-            "cuda_version": ["13.1"],
+            "cuda_version": ["13.0", "13.1"],
         },
         "sglang": {
             "target": [
