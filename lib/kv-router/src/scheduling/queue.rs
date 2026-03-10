@@ -65,7 +65,7 @@ pub struct SchedulerQueue<P: SequencePublisher, C: WorkerConfigLike> {
     selector: Box<dyn WorkerSelector<C> + Send + Sync>,
 }
 
-impl<P: SequencePublisher + 'static, C: WorkerConfigLike + Default + Clone> SchedulerQueue<P, C> {
+impl<P: SequencePublisher + 'static, C: WorkerConfigLike> SchedulerQueue<P, C> {
     pub fn new(
         slots: Arc<ActiveSequencesMultiWorker<P>>,
         workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
@@ -178,15 +178,9 @@ impl<P: SequencePublisher + 'static, C: WorkerConfigLike + Default + Clone> Sche
         request.prefill_tokens = prefill_tokens;
 
         let selection = {
-            let discovery_workers = self.workers_with_configs.borrow();
-            if let Some(ids) = &request.allowed_worker_ids {
-                let effective = build_effective_workers(ids, &discovery_workers);
-                self.selector
-                    .select_worker(&effective, &request, self.block_size)
-            } else {
-                self.selector
-                    .select_worker(&discovery_workers, &request, self.block_size)
-            }
+            let workers = self.workers_with_configs.borrow();
+            self.selector
+                .select_worker(&workers, &request, self.block_size)
         };
 
         let selection = match selection {
@@ -257,22 +251,6 @@ impl<P: SequencePublisher + 'static, C: WorkerConfigLike + Default + Clone> Sche
         }
         true
     }
-}
-
-/// Build a worker map from externally-provided worker IDs.
-///
-/// Each worker's config is looked up from `discovery_workers`; if a worker
-/// hasn't registered yet (e.g. startup race), `C::default()` is used.
-fn build_effective_workers<C: WorkerConfigLike + Default + Clone>(
-    allowed_ids: &std::collections::HashSet<WorkerId>,
-    discovery_workers: &HashMap<WorkerId, C>,
-) -> HashMap<WorkerId, C> {
-    let mut workers = HashMap::with_capacity(allowed_ids.len());
-    for &id in allowed_ids {
-        let config = discovery_workers.get(&id).cloned().unwrap_or_default();
-        workers.insert(id, config);
-    }
-    workers
 }
 
 #[cfg(test)]
