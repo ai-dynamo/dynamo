@@ -48,7 +48,7 @@ kubectl apply -f data-gen/generate-datasets-job.yaml -n ${NAMESPACE}
 
 1. Exact cache hit rates cannot be explicitly controlled via dataset due to potential LRU embedding cache eviction policies; however, decreasing the image pool relative to the number of requests allows for proportionally higher probabilities of seeing duplicate images and cache hits. Increasing the embedding cache capacity also allows for higher cache hit rate because it will evict less.
 
-**2. Agg embedding cache requires `ec_both` ECConnector role in vLLM, but that functionality was merged post 1.0.0 release. If you see an error such as `Input should be 'ec_producer' or 'ec_consumer' [type=literal_error, input_value='ec_both', input_type=str]`, you can use the `patch_vllm_agg_embedding_cache.sh` script to re-tag your dynamo image with the patch applied. See [multimodal-vllm.md](https://github.com/ai-dynamo/dynamo/blob/main/docs/features/multimodal/multimodal-vllm.md#embedding-cache) for more details.**
+**2. Agg embedding cache requires `ec_both` ECConnector role in vLLM, but that functionality was merged post 1.0.0 release. The worker startup in `vllm/agg-embedding-cache/deploy.yaml` applies the required upstream vLLM patches inline at runtime. See [multimodal-vllm.md](https://github.com/ai-dynamo/dynamo/blob/main/docs/features/multimodal/multimodal-vllm.md#embedding-cache) for more details.**
 
 3. Replace placeholders in `*.yaml` before running:
    - `storageClassName: "your-storage-class-name"` in `model-cache/model-cache.yaml`
@@ -69,7 +69,6 @@ qwen3-vl-30b/
 └── vllm/
     └── agg-embedding-cache/
         ├── deploy.yaml
-        ├── patch_vllm_agg_embedding_cache.sh
         ├── perf.yaml
         └── run-benchmark.sh
 ```
@@ -99,19 +98,7 @@ kubectl wait --for=condition=Complete job/qwen3-vl-30b-generate-datasets -n ${NA
 kubectl logs job/qwen3-vl-30b-generate-datasets -n ${NAMESPACE}
 ```
 
-### 3. Build Patched Image
-
-```bash
-# Build a patched runtime image outside the cluster.
-# This applies the required vLLM diffs and produces a new image tag.
-./vllm/agg-embedding-cache/patch_vllm_agg_embedding_cache.sh \
-  --base-image <your-dynamo-image>:<tag> \
-  --output-image <your-dynamo-image>:<tag>-agg-ec-patched
-```
-
-Then set `image: <your-dynamo-image>` in `vllm/agg-embedding-cache/deploy.yaml` to your patched output image tag.
-
-### 4. Deploy and Benchmark (`agg-embedding-cache`)
+### 3. Deploy and Benchmark (`agg-embedding-cache`)
 
 ```bash
 # deploy.yaml defaults to cache ON (DYN_MULTIMODAL_EMBEDDING_CACHE_GB=10)
@@ -124,7 +111,7 @@ kubectl wait --for=condition=Ready pod/qwen3-vl-agg-benchmark -n ${NAMESPACE} --
 
 Optional: to run cache OFF, change `DYN_MULTIMODAL_EMBEDDING_CACHE_GB` to `0` in `vllm/agg-embedding-cache/deploy.yaml` and set `CACHE_MODE=cache_off` in `vllm/agg-embedding-cache/perf.yaml` before applying.
 
-### 5. Monitor Benchmark Progress
+### 4. Monitor Benchmark Progress
 
 ```bash
 kubectl get pods -n ${NAMESPACE} -l app=benchmark
