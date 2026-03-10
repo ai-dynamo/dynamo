@@ -48,9 +48,9 @@ The request body includes `nvext.agent_hints` (routing, scheduling) and `nvext.c
 
 | Feature | vLLM | SGLang | TensorRT-LLM |
 |---------|:----:|:------:|:-------------:|
-| Priority-based cache eviction | | ✅ | 🚧 |
-| Cache pinning | | ✅ | |
-| Cache prefetching | | | |
+| Priority-based cache eviction | 🚧 | ✅ | 🚧 |
+| Cache pinning | | ✅ | 🚧  |
+| Cache prefetching | | 🚧 | |
 | Subagent / thinking-aware cache eviction | | 🚧 | |
 | Speculative prefill | ✅ | ✅ | ✅ |
 | Latency-sensitivity–aware routing | ✅ | ✅ | ✅ |
