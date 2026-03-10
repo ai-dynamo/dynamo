@@ -18,7 +18,7 @@ Dynamo provides built-in metrics capabilities through the Dynamo metrics API, wh
 |----------|-------------|---------|---------|
 | `DYN_SYSTEM_PORT` | Backend component metrics/health port | `-1` (disabled) | `8081` |
 | `DYN_HTTP_PORT` | Frontend HTTP port (also configurable via `--http-port` flag) | `8000` | `8000` |
-| `NIXL_TELEMETRY_ENABLE` | Enable NIXL telemetry (see [NIXL Telemetry Metrics](#nixl-telemetry-metrics)) | Disabled | `y` |
+| `NIXL_TELEMETRY_ENABLE` | Enable NIXL telemetry (see [NIXL Telemetry Metrics](#nixl-telemetry-metrics)). Options: `y`, `n` | `n` (disabled) | `y` |
 
 ## Getting Started Quickly
 
@@ -288,12 +288,12 @@ To enable, set these environment variables on your worker process:
 # Prefill worker
 NIXL_TELEMETRY_ENABLE=y NIXL_TELEMETRY_EXPORTER=prometheus \
   NIXL_TELEMETRY_PROMETHEUS_PORT=19090 DYN_SYSTEM_PORT=8081 \
-  python -m dynamo.vllm --model <model> --is-prefill-worker
+  python -m dynamo.vllm --model <model> --disaggregation-mode prefill
 
 # Decode worker (different NIXL port to avoid collision)
 NIXL_TELEMETRY_ENABLE=y NIXL_TELEMETRY_EXPORTER=prometheus \
   NIXL_TELEMETRY_PROMETHEUS_PORT=19091 DYN_SYSTEM_PORT=8082 \
-  python -m dynamo.vllm --model <model>
+  python -m dynamo.vllm --model <model> --disaggregation-mode decode
 
 # Scrape NIXL metrics (separate from Dynamo metrics on 8081/8082)
 curl http://localhost:19090/metrics
