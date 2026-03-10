@@ -36,6 +36,23 @@ This script will:
 6. Deploy Grafana disaggregated dashboard ConfigMap (auto-imported by Grafana sidecar)
 7. Provide Grafana credentials
 
+### Remote write (optional)
+
+To push scraped metrics to an external Prometheus (or any remote-write–compatible endpoint), set these environment variables before running the script:
+
+| Variable              | Description                          | Default |
+|-----------------------|--------------------------------------|--------|
+| `REMOTE_WRITE_HOST`    | Host of the remote write endpoint    | — (disabled if unset) |
+| `REMOTE_WRITE_PORT`    | Port of the remote write endpoint   | `9091` |
+
+Metrics are sent only when `REMOTE_WRITE_HOST` is set. The script configures Prometheus with a single `remote_write` target: `http://<host>:<port>/api/v1/write`. Only metrics whose name has the `nixl_` prefix are sent to the remote endpoint; all others are filtered out.
+
+Example:
+
+```bash
+REMOTE_WRITE_HOST=prom.example.com REMOTE_WRITE_PORT=9091 ./setup-monitoring.sh
+```
+
 ## Verification
 
 Check that GPU metrics are flowing:
