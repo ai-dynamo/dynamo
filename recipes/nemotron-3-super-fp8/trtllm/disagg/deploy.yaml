@@ -17,7 +17,8 @@
 #   - Change image tags from :1.0.0 to :0.9.1
 #   - Change --dyn-reasoning-parser from nemotron_nano to deepseek_r1
 #   - With deepseek_r1 parser, enable_thinking: false will not work correctly
-#   - Add enable_block_reuse: false to kv_cache_config in both ConfigMaps
+#   - Keep enable_block_reuse: false in both kv_cache_config blocks. Current
+#     TRT-LLM builds still disable block reuse for Nemotron-H / Mamba hybrid cache.
 #
 apiVersion: v1
 kind: ConfigMap
@@ -35,8 +36,11 @@ data:
     trust_remote_code: true
     kv_cache_config:
       free_gpu_memory_fraction: 0.85
-      # Block reuse is supported for Mamba hybrid cache in 1.0.
-      # In 0.9.1, add enable_block_reuse: false here.
+      # Nemotron-H uses a Mamba hybrid cache. Block reuse is still unsupported,
+      # and explicit true still trips:
+      #   "mamba hybrid cache requires block reuse to be disabled"
+      # Keep this explicit instead of relying on TRT-LLM's silent model default.
+      enable_block_reuse: false
     moe_config:
       backend: TRTLLM
     cache_transceiver_config:
@@ -64,8 +68,11 @@ data:
     trust_remote_code: true
     kv_cache_config:
       free_gpu_memory_fraction: 0.85
-      # Block reuse is supported for Mamba hybrid cache in 1.0.
-      # In 0.9.1, add enable_block_reuse: false here.
+      # Nemotron-H uses a Mamba hybrid cache. Block reuse is still unsupported,
+      # and explicit true still trips:
+      #   "mamba hybrid cache requires block reuse to be disabled"
+      # Keep this explicit instead of relying on TRT-LLM's silent model default.
+      enable_block_reuse: false
     moe_config:
       backend: TRTLLM
     cache_transceiver_config:

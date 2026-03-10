@@ -126,7 +126,7 @@ Approximate (hash-based) routing is used because none of the backends currently 
 
 ### TensorRT-LLM
 - Uses PyTorch backend (`backend: pytorch` in engine config)
-- 1.0 supports block reuse for Mamba hybrid cache (enabled by default). In 0.9.1, block reuse is not supported and `enable_block_reuse: false` must be set explicitly.
+- Block reuse is still not supported for Nemotron-H / Mamba hybrid cache. Set `enable_block_reuse: false` explicitly in all TRT-LLM Nemotron configs. If the field is omitted, current TRT-LLM builds may still start only because the Nemotron model class silently applies a model default of `enable_block_reuse: false`; block reuse is not actually active.
 - **Disaggregated mode** requires `cache_transceiver_config: backend: UCX`. NIXL and MOONCAKE backends do not support hybrid models with Mamba SSM state — only UCX (or MPI) can transfer both attention KV cache and Mamba conv/SSM state between workers.
 
 ### SGLang
@@ -149,7 +149,7 @@ These recipes target Dynamo 1.0. To run on 0.9.1 containers, the following chang
 - Change image tags from `:1.0.0` to `:0.9.1`
 - Change `--dyn-reasoning-parser` from `nemotron_nano` to `deepseek_r1`
 - Same `enable_thinking: false` caveat as vLLM above
-- **Add** `enable_block_reuse: false` to `kv_cache_config` in the ConfigMap (required in 0.9.1; 1.0 supports block reuse natively)
+- Keep `enable_block_reuse: false` in `kv_cache_config` in the ConfigMap. This is still the effective setting for Nemotron-H on current TRT-LLM builds; omitting the field can appear to work only because TRT-LLM silently applies the same model default later.
 
 ### SGLang (`sglang-runtime:0.9.1`)
 - **Not supported.** The bundled sglang v0.5.8 has two blocking bugs:
