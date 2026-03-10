@@ -903,30 +903,61 @@ mod tests {
 
         // 1. Reasoning tokens → thinking block starts
         let ev = conv.process_chunk_tagged(&reasoning_chunk("Let me think..."));
-        assert_eq!(event_types(&ev), vec!["content_block_start", "content_block_delta"]);
-        assert!(matches!(&ev[0].data, AnthropicStreamEvent::ContentBlockStart {
-            index: 0, content_block: AnthropicResponseContentBlock::Thinking { .. }
-        }));
+        assert_eq!(
+            event_types(&ev),
+            vec!["content_block_start", "content_block_delta"]
+        );
+        assert!(matches!(
+            &ev[0].data,
+            AnthropicStreamEvent::ContentBlockStart {
+                index: 0,
+                content_block: AnthropicResponseContentBlock::Thinking { .. }
+            }
+        ));
 
         // 2. Text arrives → thinking block closes (signature + stop), text block opens
         let ev = conv.process_chunk_tagged(&text_chunk("Hello!"));
         assert_eq!(
             event_types(&ev),
-            vec!["content_block_delta", "content_block_stop", "content_block_start", "content_block_delta"]
+            vec![
+                "content_block_delta",
+                "content_block_stop",
+                "content_block_start",
+                "content_block_delta"
+            ]
         );
-        assert!(matches!(&ev[1].data, AnthropicStreamEvent::ContentBlockStop { index: 0 }));
-        assert!(matches!(&ev[2].data, AnthropicStreamEvent::ContentBlockStart { index: 1, .. }));
+        assert!(matches!(
+            &ev[1].data,
+            AnthropicStreamEvent::ContentBlockStop { index: 0 }
+        ));
+        assert!(matches!(
+            &ev[2].data,
+            AnthropicStreamEvent::ContentBlockStart { index: 1, .. }
+        ));
 
         // 3. Tool call → text block closes, tool block opens at index 2
         let ev = conv.process_chunk_tagged(&tool_call_chunk(
-            0, Some("call-1"), Some("Read"), Some("{\"path\":\"/tmp/test.txt\"}"),
+            0,
+            Some("call-1"),
+            Some("Read"),
+            Some("{\"path\":\"/tmp/test.txt\"}"),
         ));
         assert_eq!(
             event_types(&ev),
-            vec!["content_block_stop", "content_block_start", "content_block_delta"]
+            vec![
+                "content_block_stop",
+                "content_block_start",
+                "content_block_delta"
+            ]
         );
-        assert!(matches!(&ev[0].data, AnthropicStreamEvent::ContentBlockStop { index: 1 }));
-        assert!(matches!(&ev[1].data, AnthropicStreamEvent::ContentBlockStart { index: 2, .. }));
+        assert!(matches!(
+            &ev[0].data,
+            AnthropicStreamEvent::ContentBlockStop { index: 1 }
+        ));
+        assert!(matches!(
+            &ev[1].data,
+            AnthropicStreamEvent::ContentBlockStart { index: 2, .. }
+        ));
     }
 
     /// Thinking-only response (no text/tool follows): thinking block closed in end events.
@@ -938,7 +969,12 @@ mod tests {
         let ev = conv.emit_end_events_tagged();
         assert_eq!(
             event_types(&ev),
-            vec!["content_block_delta", "content_block_stop", "message_delta", "message_stop"]
+            vec![
+                "content_block_delta",
+                "content_block_stop",
+                "message_delta",
+                "message_stop"
+            ]
         );
     }
 }

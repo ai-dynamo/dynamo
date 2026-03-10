@@ -21,7 +21,7 @@ use axum::{
     },
     routing::post,
 };
-use dynamo_runtime::config::{environment_names::llm as env_llm, env_is_truthy};
+use dynamo_runtime::config::{env_is_truthy, environment_names::llm as env_llm};
 use dynamo_runtime::pipeline::{AsyncEngineContextProvider, Context};
 use futures::{StreamExt, stream};
 use tracing::Instrument;
@@ -231,8 +231,8 @@ async fn anthropic_messages(
     // bypassed by the Anthropic endpoint, so we apply the same stream
     // transform here.  This populates `delta.reasoning_content` which the
     // AnthropicStreamConverter translates into thinking content blocks.
-    use std::pin::Pin;
     use crate::types::Annotated;
+    use std::pin::Pin;
     let engine_stream: Pin<
         Box<dyn futures::Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>,
     > = if let Some(ref reasoning_parser_name) = parsing_options.reasoning_parser {
