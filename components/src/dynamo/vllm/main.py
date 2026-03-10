@@ -370,7 +370,9 @@ def setup_kv_event_publisher(
 
 
 def setup_vllm_engine(
-    config: Config, stat_logger: Optional[StatLoggerFactory] = None
+    config: Config,
+    stat_logger: Optional[StatLoggerFactory] = None,
+    fpm_worker_id: Optional[str] = None,
 ) -> tuple[AsyncLLM, VllmConfig, Any, Any, LLMBackendMetrics]:
     # vLLM v0.11.0 bug: vllm/v1.metrics/prometheus.py:79 passes TemporaryDirectory object
     # instead of .name string, causing false error on exit. Set PROMETHEUS_MULTIPROC_DIR
@@ -484,6 +486,9 @@ def setup_vllm_engine(
     # Store consolidator endpoints in additional_config (vLLM 0.16+ uses strict
     # dataclass fields; monkey-patching attributes onto VllmConfig is no longer safe).
     vllm_config.additional_config["consolidator_endpoints"] = consolidator_endpoints
+
+    # Pass worker identity to InstrumentedScheduler via additional_config.
+    vllm_config.additional_config["fpm_worker_id"] = fpm_worker_id
 
     factory = []
     if stat_logger:
@@ -627,7 +632,9 @@ async def init_prefill(
             default_sampling_params,
             prometheus_temp_dir,
             _component_gauges,
-        ) = setup_vllm_engine(config)
+        ) = setup_vllm_engine(
+            config, fpm_worker_id=str(generate_endpoint.connection_id())
+        )
 
     handler = PrefillWorkerHandler(
         runtime,
@@ -808,7 +815,9 @@ async def init(
             default_sampling_params,
             prometheus_temp_dir,
             component_gauges,
-        ) = setup_vllm_engine(config, factory)
+        ) = setup_vllm_engine(
+            config, factory, fpm_worker_id=str(generate_endpoint.connection_id())
+        )
 
     # TODO Hack to get data, move this to registering in TBD
     factory.set_num_gpu_blocks_all(vllm_config.cache_config.num_gpu_blocks)
