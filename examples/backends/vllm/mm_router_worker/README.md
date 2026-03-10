@@ -364,13 +364,13 @@ For repeated identical images, multiple entries may appear in the same block whe
 
 ### 8× B200, Qwen3-VL-30B-A3B-FP8, HTTP Image Transport
 
-On an 8-GPU B200 node serving 8 replicas of `Qwen/Qwen3-VL-30B-A3B-Instruct-FP8` with concurrent HTTP image requests and moderate (~50%) image reuse across workers, MM-aware routing delivers significant throughput and latency improvements over round-robin (default router mode). The benchmark uses a fixed text prompt and `--osl 1` to ensure the workload is dominated by image tokens, isolating the performance effect of MM router's image-aware KV cache routing:
+On an 8-GPU B200 node serving 8 replicas of `Qwen/Qwen3-VL-30B-A3B-Instruct-FP8` with concurrent HTTP image requests and moderate (~50%) image reuse across workers, MM-aware routing delivers significant throughput and latency improvements over round-robin (default router mode). The benchmark uses a fixed text prompt and `--osl 1` to ensure the workload is dominated by image tokens, isolating the performance effect of MM router's image-aware KV cache routing on prefill:
 
 - **~1.6× higher throughput** — repeated image requests are steered to the worker that already holds the relevant KV cache blocks, avoiding redundant image downloads and prefill recomputation
 - **~1.6× lower average latency** and **~3× lower median (p50) latency** — cache-warm requests complete substantially faster
 - **p99 trade-off** — tail latency can increase under skewed workloads due to load imbalance when hot KV blocks are concentrated on a small number of workers
 
-To reproduce, prepare an `aiperf`-compatible JSONL dataset with ~50% image reuse — each line contains a text prompt and one image URLs, with some URLs repeated across requests. The dataset used in the benchmarks above was generated using the [multimodal JSONL generator](../../../../benchmarks/multimodal/jsonl/README.md).
+To reproduce, prepare an `aiperf`-compatible JSONL dataset with ~50% image reuse — each line contains a text prompt and one image URL for simplicity, with some URLs repeated across requests. The dataset used in the benchmarks above was generated using the [multimodal JSONL generator](../../../../benchmarks/multimodal/jsonl/README.md).
 
 Example dataset format:
 
