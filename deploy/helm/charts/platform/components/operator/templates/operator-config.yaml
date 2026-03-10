@@ -25,7 +25,12 @@ data:
     kind: OperatorConfiguration
     server:
       metrics:
-        bindAddress: "127.0.0.1"
+        bindAddress: "0.0.0.0"
+        secure: true
+      webhook:
+        certProvisionMode: {{ if or .Values.webhook.certManager.enabled .Values.webhook.certificateSecret.external }}"manual"{{ else }}"auto"{{ end }}
+        secretName: {{ .Values.webhook.certificateSecret.name | quote }}
+        serviceName: {{ include "dynamo-operator.fullname" . }}-webhook-service
     leaderElection:
       enabled: true
       id: {{ default "dynamo.nvidia.com" .Values.controllerManager.leaderElection.id | quote }}
@@ -136,7 +141,7 @@ data:
         {{- end }}
         {{- if or (eq (.Values.checkpoint.storage.type | toString) "pvc") (not .Values.checkpoint.storage.type) }}
         pvc:
-          pvcName: {{ (.Values.checkpoint.storage.pvc.pvcName | default "chrek-pvc") | quote }}
+          pvcName: {{ (.Values.checkpoint.storage.pvc.pvcName | default "snapshot-pvc") | quote }}
           basePath: {{ (.Values.checkpoint.storage.pvc.basePath | default "/checkpoints") | quote }}
         {{- end }}
         {{- if eq .Values.checkpoint.storage.type "s3" }}

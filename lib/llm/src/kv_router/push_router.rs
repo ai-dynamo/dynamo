@@ -252,6 +252,7 @@ impl KvPushRouter {
                     !is_query_only,
                     lora_name,
                     priority_jump,
+                    expected_output_tokens,
                     allowed_worker_ids,
                 )
                 .await?;

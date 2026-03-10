@@ -505,6 +505,18 @@ type SecretsRetriever interface {
 	GetSecrets(namespace, registry string) ([]string, error)
 }
 
+func resolveImagePullSecrets(retriever SecretsRetriever, namespace, image string) []corev1.LocalObjectReference {
+	names, err := retriever.GetSecrets(namespace, image)
+	if err != nil {
+		return nil
+	}
+	refs := make([]corev1.LocalObjectReference, 0, len(names))
+	for _, name := range names {
+		refs = append(refs, corev1.LocalObjectReference{Name: name})
+	}
+	return refs
+}
+
 // applyCliqueStartupDependencies configures StartsAfter dependencies for cliques in a PodCliqueSet
 // based on the backend framework and multinode deployment patterns.
 //
@@ -661,7 +673,9 @@ func GenerateComponentService(params ComponentServiceParams) (*corev1.Service, e
 
 	service := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:        params.ServiceName,
+			// Service names must be DNS-1035 labels (no dots). Replace dots with
+			// hyphens so model names like "Qwen3-0.6B" don't cause rejections.
+			Name:        strings.ReplaceAll(params.ServiceName, ".", "-"),
 			Namespace:   params.Namespace,
 			Labels:      labels,
 			Annotations: annotations,
@@ -1049,12 +1063,7 @@ func GenerateBasePodSpec(
 
 	imagePullSecrets := []corev1.LocalObjectReference{}
 	if !shouldDisableImagePullSecret && secretsRetriever != nil && component.ExtraPodSpec != nil && component.ExtraPodSpec.MainContainer != nil && component.ExtraPodSpec.MainContainer.Image != "" {
-		secretsName, err := secretsRetriever.GetSecrets(namespace, component.ExtraPodSpec.MainContainer.Image)
-		if err == nil {
-			for _, secretName := range secretsName {
-				imagePullSecrets = append(imagePullSecrets, corev1.LocalObjectReference{Name: secretName})
-			}
-		}
+		imagePullSecrets = resolveImagePullSecrets(secretsRetriever, namespace, component.ExtraPodSpec.MainContainer.Image)
 	}
 	if component.EnvFromSecret != nil {
 		container.EnvFrom = append(container.EnvFrom, corev1.EnvFromSource{
@@ -1170,6 +1179,22 @@ func GenerateBasePodSpec(
 		return nil, fmt.Errorf("failed to inject checkpoint config: %w", err)
 	}
 
+	// Inject auto-generated frontend sidecar if configured
+	if component.FrontendSidecar != nil {
+		sidecar, err := generateFrontendSidecar(component.FrontendSidecar, componentContext, operatorConfig)
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate frontend sidecar: %w", err)
+		}
+		podSpec.Containers = append(podSpec.Containers, sidecar)
+
+		if !shouldDisableImagePullSecret && secretsRetriever != nil {
+			podSpec.ImagePullSecrets = controller_common.AppendUniqueImagePullSecrets(
+				podSpec.ImagePullSecrets,
+				resolveImagePullSecrets(secretsRetriever, namespace, component.FrontendSidecar.Image),
+			)
+		}
+	}
+
 	return &podSpec, nil
 }
 
@@ -1203,6 +1228,54 @@ func generateComponentContext(component *v1alpha1.DynamoComponentDeploymentShare
 		WorkerHashSuffix:               workerHashSuffix,
 	}
 	return componentContext
+}
+
+// generateFrontendSidecar builds a fully configured frontend sidecar container
+// using the same FrontendDefaults logic as standalone frontend services.
+// This eliminates the need for users to manually specify Dynamo env vars, probes,
+// and ports when running the frontend as a sidecar (e.g., GAIE deployments).
+func generateFrontendSidecar(
+	spec *v1alpha1.FrontendSidecarSpec,
+	parentContext ComponentContext,
+	operatorConfig *configv1alpha1.OperatorConfiguration,
+) (corev1.Container, error) {
+	frontendContext := ComponentContext{
+		numberOfNodes:                  1,
+		ComponentType:                  commonconsts.ComponentTypeFrontend,
+		ParentGraphDeploymentName:      parentContext.ParentGraphDeploymentName,
+		ParentGraphDeploymentNamespace: parentContext.ParentGraphDeploymentNamespace,
+		DiscoveryBackend:               parentContext.DiscoveryBackend,
+		DynamoNamespace:                parentContext.DynamoNamespace,
+	}
+
+	frontendDefaults := NewFrontendDefaults()
+	container, err := frontendDefaults.GetBaseContainer(frontendContext)
+	if err != nil {
+		return corev1.Container{}, fmt.Errorf("failed to get frontend base container: %w", err)
+	}
+
+	container.Name = commonconsts.FrontendSidecarContainerName
+	container.Image = spec.Image
+
+	if len(spec.Args) > 0 {
+		container.Args = spec.Args
+	}
+
+	if spec.EnvFromSecret != nil {
+		container.EnvFrom = append(container.EnvFrom, corev1.EnvFromSource{
+			SecretRef: &corev1.SecretEnvSource{
+				LocalObjectReference: corev1.LocalObjectReference{Name: *spec.EnvFromSecret},
+			},
+		})
+	}
+
+	if len(spec.Envs) > 0 {
+		container.Env = MergeEnvs(container.Env, spec.Envs)
+	}
+
+	addStandardEnvVars(&container, operatorConfig)
+
+	return container, nil
 }
 
 // GeneratePodSpecForComponent creates a PodSpec for Grove deployments (simplified wrapper)

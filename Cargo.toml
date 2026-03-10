@@ -19,11 +19,12 @@ members = [
     "lib/bench",
     "lib/bindings/c",
     "lib/bindings/python/codegen",
-    "lib/config",
     "lib/velo",
+    "lib/velo-common",
     "lib/velo-discovery",
     "lib/velo-events",
     "lib/velo-messenger",
+    "lib/velo-transports",
 ]
 resolver = "3"
 
@@ -53,13 +54,15 @@ dynamo-parsers = { path = "lib/parsers", version = "1.0.0" }
 kvbm-common = { path = "lib/kvbm-common", version = "1.0.0" }
 kvbm-kernels = { path = "lib/kvbm-kernels", version = "1.0.0" }
 kvbm-logical = { path = "lib/kvbm-logical", version = "1.0.0" }
+kvbm-physical = { path = "lib/kvbm-physical", version = "1.0.0" }
 
-velo = { path = "lib/velo", version = "1.0.0" }
-velo-common = { git = "https://github.com/ai-dynamo/dynamo.git", branch = "ryan/velo-backend" }
-velo-discovery = { path = "lib/velo-discovery", version = "1.0.0" }
-velo-events = { git = "https://github.com/ai-dynamo/dynamo.git", branch = "ryan/velo-backend" }
-velo-messenger = { path = "lib/velo-messenger", version = "1.0.0" }
-velo-transports = { git = "https://github.com/ai-dynamo/dynamo.git", branch = "ryan/velo-backend" }
+# velo
+velo = { path = "lib/velo", version = "0.1.0" }
+velo-common = { path = "lib/velo-common", version = "0.1.0" }
+velo-discovery = { path = "lib/velo-discovery", version = "0.1.0" }
+velo-events = { path = "lib/velo-events", version = "0.1.0" }
+velo-messenger = { path = "lib/velo-messenger", version = "0.1.0" }
+velo-transports = { path = "lib/velo-transports", version = "0.1.0" }
 
 # External dependencies
 anyhow = { version = "1" }
@@ -105,6 +108,7 @@ reqwest = { version = "0.12.24", default-features = false, features = [
     "rustls-tls",
 ] }
 rmp-serde = { version = "1" }
+serde_bytes = { version = "0.11" }
 # "rc" is for async-openai. Allows serializing Rc and Arc. Generally avoid doing that.
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = { version = "1" }

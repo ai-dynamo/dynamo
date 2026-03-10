@@ -83,6 +83,7 @@ Leave this terminal running - it will show Decode Worker logs.
 export DYN_LOG=debug # Increase log verbosity to see disaggregation
 VLLM_NIXL_SIDE_CHANNEL_PORT=20097 \
 CUDA_VISIBLE_DEVICES=1 python -m dynamo.vllm --model Qwen/Qwen3-0.6B --disaggregation-mode prefill \
+  --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
   --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081","enable_kv_cache_events":true}'
 ```
 

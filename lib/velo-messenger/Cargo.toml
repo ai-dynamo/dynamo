@@ -3,7 +3,7 @@
 
 [package]
 name = "velo-messenger"
-version.workspace = true
+version = "0.1.0"
 edition.workspace = true
 description = "Active messaging layer for Velo distributed systems"
 authors.workspace = true

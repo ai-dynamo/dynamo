@@ -62,6 +62,15 @@ class SearchStrategy(str, Enum):
     Thorough = "thorough"
 
 
+class GPUSKUType(str, Enum):
+    GB200SXM = "gb200_sxm"
+    H200SXM = "h200_sxm"
+    H100SXM = "h100_sxm"
+    B200SXM = "b200_sxm"
+    A100SXM = "a100_sxm"
+    L40S = "l40s"
+
+
 class BackendType(str, Enum):
     Auto = "auto"
     Sglang = "sglang"
@@ -117,9 +126,14 @@ class SLASpec(BaseModel):
     @model_validator(mode="after")
     def _validate_sla_options(self) -> "SLASpec":
         """Ensure at most one SLA mode is active."""
-        has_ttft_itl = self.ttft is not None and self.itl is not None
         has_e2e = self.e2eLatency is not None
         has_opt = self.optimizationType is not None
+        ttft_itl_touched = (
+            "ttft" in self.model_fields_set or "itl" in self.model_fields_set
+        )
+        has_ttft_itl = (self.ttft is not None and self.itl is not None) and (
+            ttft_itl_touched or (not has_e2e and not has_opt)
+        )
         options_count = sum([has_ttft_itl, has_e2e, has_opt])
         if options_count > 1:
             raise ValueError(
@@ -195,9 +209,9 @@ class FeaturesSpec(BaseModel):
 class HardwareSpec(BaseModel):
     """HardwareSpec describes the hardware resources available for profiling and deployment. These fields are typically auto-filled by the operator from cluster discovery."""
 
-    gpuSku: Optional[str] = Field(
+    gpuSku: Optional[GPUSKUType] = Field(
         default=None,
-        description='GPUSKU is the GPU SKU identifier (e.g., "H100_SXM", "A100_80GB").',
+        description="GPUSKU is the AIC hardware system identifier for the GPU. When omitted, the operator auto-detects this via InferHardwareSystem from cluster GPU node labels.",
     )
     vramMb: Optional[float] = Field(
         default=None, description="VRAMMB is the VRAM per GPU in MiB."

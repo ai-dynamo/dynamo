@@ -3,7 +3,7 @@
 
 [package]
 name = "velo-discovery"
-version.workspace = true
+version = "0.1.0"
 edition.workspace = true
 description = "Filesystem-based peer discovery for Velo distributed systems"
 authors.workspace = true
