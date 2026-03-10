@@ -9,9 +9,11 @@ import asyncio
 import logging
 import os
 import time
-import uuid
 from argparse import Namespace
 from collections.abc import AsyncGenerator
+from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import wait as _futures_wait
+from dataclasses import dataclass
 from typing import Any
 
 from vllm.config import CacheConfig, LoadConfig, ModelConfig, VllmConfig
@@ -36,12 +38,16 @@ from dynamo.llm import (
 )
 from dynamo.runtime import Client, DistributedRuntime
 
-from .prepost import StreamingPostProcessor, preprocess_chat_request
+from .prepost import (
+    StreamingPostProcessor,
+    preprocess_chat_request,
+    preprocess_chat_request_sync,
+)
+from .utils import PreprocessError, random_uuid, worker_warmup
 
 logger = logging.getLogger(__name__)
 
 
-_MASK_64_BITS = (1 << 64) - 1
 _FINISH_REASON_MAP: dict[str, FinishReason] = {
     "eos": FinishReason.STOP,
     "stop": FinishReason.STOP,
@@ -50,10 +56,6 @@ _FINISH_REASON_MAP: dict[str, FinishReason] = {
     "cancelled": FinishReason.ABORT,
     "content_filter": FinishReason.STOP,
 }
-
-
-def random_uuid() -> str:
-    return f"{uuid.uuid4().int & _MASK_64_BITS:016x}"  # 16 hex chars
 
 
 def map_finish_reason(raw_reason: str | None) -> FinishReason | None:
@@ -70,6 +72,181 @@ def map_finish_reason(raw_reason: str | None) -> FinishReason | None:
     if mapped is None:
         logger.warning("Unknown finish_reason from router: %s", raw_reason)
     return mapped
+
+
+# --- Worker process globals (initialized once per process by _init_worker) ---
+_w_input_processor: InputProcessor | None = None
+_w_tokenizer: Any = None
+_w_tool_parser_class: type[ToolParser] | None = None
+
+
+@dataclass
+class PreprocessWorkerResult:
+    """Picklable return value from the preprocess worker."""
+
+    dynamo_preproc: dict[str, Any]
+    tokens: list[int]
+    vllm_preproc: EngineCoreRequest
+    sampling_params: SamplingParams
+    request_for_sampling: Any  # ChatCompletionRequest (Pydantic model, picklable)
+    chat_template_kwargs: dict[str, Any]
+
+
+def _init_worker(
+    model_path: str,
+    tokenizer_mode: str,
+    config_format: str,
+    load_format: str,
+    tool_parser_name: str | None,
+) -> None:
+    """Initialize a worker process with its own VllmConfig and InputProcessor."""
+    global _w_input_processor, _w_tokenizer, _w_tool_parser_class
+    global _w_reasoning_parser_class
+
+    model_config = ModelConfig(
+        model=model_path,
+        tokenizer_mode=tokenizer_mode,
+        config_format=config_format,
+    )
+    vllm_config = VllmConfig(
+        model_config=model_config,
+        load_config=LoadConfig(load_format=load_format),
+        cache_config=CacheConfig(),
+    )
+
+    _w_input_processor = InputProcessor(vllm_config)
+    _w_tokenizer = _w_input_processor.get_tokenizer()
+
+    if tool_parser_name:
+        _w_tool_parser_class = ToolParserManager.get_tool_parser(tool_parser_name)
+    else:
+        _w_tool_parser_class = None
+
+
+def _preprocess_worker(
+    request: dict[str, Any],
+    request_id: str,
+    model_name: str,
+) -> PreprocessWorkerResult:
+    """Preprocess a request in a worker process and return a picklable result."""
+    assert _w_input_processor is not None
+    pre = preprocess_chat_request_sync(
+        request,
+        tokenizer=_w_tokenizer,
+        renderer=_w_input_processor.renderer,
+        tool_parser_class=_w_tool_parser_class,
+    )
+
+    request_for_sampling = pre.request_for_sampling
+    engine_prompt = pre.engine_prompt
+    tokens = pre.prompt_token_ids
+
+    if request_for_sampling.max_completion_tokens is not None:
+        max_tokens = request_for_sampling.max_completion_tokens
+    elif request_for_sampling.max_tokens is not None:
+        max_tokens = request_for_sampling.max_tokens
+    else:
+        max_tokens = None
+
+    sampling_params = SamplingParams(
+        output_kind=RequestOutputKind.DELTA,
+        max_tokens=max_tokens,
+    )
+    for k, v in _w_input_processor.generation_config_fields.items():
+        if hasattr(sampling_params, k):
+            setattr(sampling_params, k, v)
+
+    sampling_fields = (
+        set(getattr(SamplingParams, "__annotations__", ()))
+        & set(type(request_for_sampling).model_fields)
+    ) - {"max_tokens", "logprobs", "output_kind"}
+    for k in sorted(sampling_fields):
+        v = getattr(request_for_sampling, k, None)
+        if v is not None:
+            setattr(sampling_params, k, v)
+
+    logprobs = request_for_sampling.logprobs
+    top_logprobs = request_for_sampling.top_logprobs
+    if logprobs is True:
+        sampling_params.logprobs = top_logprobs or 1
+    elif isinstance(logprobs, int) and not isinstance(logprobs, bool):
+        sampling_params.logprobs = logprobs
+    elif top_logprobs not in (None, 0):
+        sampling_params.logprobs = top_logprobs
+
+    prompt_inputs = TokensPrompt(prompt_token_ids=tokens)
+    if "multi_modal_data" in engine_prompt:
+        prompt_inputs["multi_modal_data"] = engine_prompt["multi_modal_data"]
+    if "multi_modal_uuids" in engine_prompt:
+        prompt_inputs["multi_modal_uuids"] = engine_prompt["multi_modal_uuids"]
+    if request_for_sampling.cache_salt is not None:
+        prompt_inputs["cache_salt"] = request_for_sampling.cache_salt
+    if request_for_sampling.mm_processor_kwargs is not None:
+        prompt_inputs["mm_processor_kwargs"] = request_for_sampling.mm_processor_kwargs
+
+    vllm_preproc: EngineCoreRequest = _w_input_processor.process_inputs(
+        request_id,
+        prompt_inputs,
+        sampling_params,
+    )
+    InputProcessor.assign_request_id(vllm_preproc)
+
+    sp = vllm_preproc.sampling_params
+    if sp.n != 1:
+        raise PreprocessError(
+            {
+                "error": {
+                    "message": (
+                        f"Unsupported value: 'n={sp.n}'. "
+                        "This endpoint currently supports only n=1."
+                    ),
+                    "type": "invalid_request_error",
+                    "param": "n",
+                    "code": "unsupported_value",
+                }
+            }
+        )
+
+    dynamo_preproc = {
+        "model": model_name,
+        "token_ids": tokens,
+        "stop_conditions": {
+            "max_tokens": sp.max_tokens,
+            "stop": sp.stop,
+            "stop_token_ids": sp.stop_token_ids,
+            "min_tokens": sp.min_tokens,
+            "ignore_eos": sp.ignore_eos,
+        },
+        "sampling_options": {
+            "n": sp.n,
+            "presence_penalty": sp.presence_penalty,
+            "frequency_penalty": sp.frequency_penalty,
+            "repetition_penalty": sp.repetition_penalty,
+            "temperature": sp.temperature,
+            "top_p": sp.top_p,
+            "top_k": sp.top_k,
+            "min_p": sp.min_p,
+            "seed": sp.seed,
+        },
+        "output_options": {
+            "logprobs": sp.logprobs,
+            "prompt_logprobs": sp.prompt_logprobs,
+            "skip_special_tokens": sp.skip_special_tokens,
+        },
+        "eos_token_ids": (
+            [vllm_preproc.eos_token_id] if vllm_preproc.eos_token_id is not None else []
+        ),
+        "annotations": [],
+    }
+
+    return PreprocessWorkerResult(
+        dynamo_preproc=dynamo_preproc,
+        tokens=tokens,
+        vllm_preproc=vllm_preproc,
+        sampling_params=sampling_params,
+        request_for_sampling=request_for_sampling,
+        chat_template_kwargs=pre.chat_template_kwargs,
+    )
 
 
 class VllmProcessor:
@@ -234,9 +411,11 @@ class VllmProcessor:
                 "prompt_logprobs": sp.prompt_logprobs,
                 "skip_special_tokens": sp.skip_special_tokens,
             },
-            "eos_token_ids": [vllm_preproc.eos_token_id]
-            if vllm_preproc.eos_token_id is not None
-            else [],
+            "eos_token_ids": (
+                [vllm_preproc.eos_token_id]
+                if vllm_preproc.eos_token_id is not None
+                else []
+            ),
             "annotations": [],
         }
 
@@ -347,6 +526,77 @@ class VllmProcessor:
                     [vllm_preproc.request_id], internal=True
                 )
 
+    async def _generator_inner_pool(
+        self, request: dict[str, Any]
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        """Process a request using the worker pool.
+
+        Phase 1: Preprocess in a worker process (semaphore held).
+        Phase 2: Remote inference via router (no worker held).
+        Phase 3: Post-process tokens in the main process.
+        """
+        request_id = random_uuid()
+
+        # --- Phase 1: Preprocess (semaphore held) ---
+        try:
+            assert self._worker_semaphore is not None
+            async with self._worker_semaphore:
+                assert self.preprocess_pool is not None
+                future = self.preprocess_pool.submit(
+                    _preprocess_worker, request, request_id, request["model"]
+                )
+                preproc_result: PreprocessWorkerResult = await asyncio.wrap_future(
+                    future
+                )
+            # Semaphore + worker released here
+        except PreprocessError as exc:
+            yield exc.error_dict
+            return
+        except Exception as exc:
+            logger.exception("Worker preprocessing failed for request %s", request_id)
+            yield {
+                "error": {
+                    "message": f"Worker error: {exc}",
+                    "type": "internal_error",
+                }
+            }
+            return
+
+        # --- Between phases: reconstruct main-process objects ---
+        dynamo_preproc = preproc_result.dynamo_preproc
+        tokens = preproc_result.tokens
+        vllm_preproc = preproc_result.vllm_preproc
+        sampling_params = preproc_result.sampling_params
+
+        request_for_sampling = preproc_result.request_for_sampling
+        tool_parser = None
+        if (
+            self.tool_parser_class
+            and request_for_sampling.tools
+            and request_for_sampling.tool_choice != "none"
+        ):
+            tool_parser = self.tool_parser_class(self.tokenizer)
+
+        post = StreamingPostProcessor(
+            tokenizer=self.tokenizer,
+            request_for_sampling=request_for_sampling,
+            sampling_params=sampling_params,
+            prompt_token_ids=tokens,
+            tool_parser=tool_parser,
+            reasoning_parser_class=self.reasoning_parser_class,
+            chat_template_kwargs=preproc_result.chat_template_kwargs,
+        )
+
+        async for item in self._generate_and_stream(
+            request_id,
+            request,
+            dynamo_preproc,
+            tokens,
+            vllm_preproc,
+            post,
+        ):
+            yield item
+
 
 class EngineFactory:
     def __init__(
@@ -439,7 +689,7 @@ class EngineFactory:
         else:
             reasoning_parser_class = None
 
-        (namespace_name, component_name, endpoint_name) = instance_id.triple()
+        namespace_name, component_name, endpoint_name = instance_id.triple()
         generate_endpoint = self.runtime.endpoint(
             f"{namespace_name}.{component_name}.{endpoint_name}"
         )
@@ -454,6 +704,45 @@ class EngineFactory:
             router = await generate_endpoint.client(
                 router_mode=self.router_config.router_mode
             )
+
+        preprocess_pool = None
+        preprocess_workers = self.config.preprocess_workers
+        if preprocess_workers > 0:
+            logger.info(
+                "Creating preprocess worker pool with %d workers for model %s",
+                preprocess_workers,
+                source_path,
+            )
+            preprocess_pool = ProcessPoolExecutor(
+                max_workers=preprocess_workers,
+                initializer=_init_worker,
+                initargs=(
+                    source_path,
+                    tokenizer_mode,
+                    config_format,
+                    load_format,
+                    tool_parser_name,
+                ),
+            )
+            # Warm up all workers to ensure initialization completes
+            futures = [
+                preprocess_pool.submit(worker_warmup) for _ in range(preprocess_workers)
+            ]
+            done, not_done = _futures_wait(futures, timeout=120)
+            if not_done:
+                for f in not_done:
+                    f.cancel()
+                preprocess_pool.shutdown(wait=False, cancel_futures=True)
+                raise RuntimeError(
+                    "Timed out waiting for preprocess worker pool warmup"
+                )
+            try:
+                for f in done:
+                    f.result()  # Raises if initializer failed
+            except Exception:
+                preprocess_pool.shutdown(wait=False, cancel_futures=True)
+                raise
+            logger.info("Preprocess worker pool ready (%d workers)", preprocess_workers)
 
         gen = VllmProcessor(
             tokenizer,
