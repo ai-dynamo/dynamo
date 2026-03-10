@@ -38,14 +38,14 @@ def main():
 
     github_token = os.environ.get("GITHUB_TOKEN", "")
     api_key = os.environ.get("API_KEY", "")
-    base_url = os.environ.get("API_BASE_URL", "")
-    model = os.environ.get("MODEL", "")
+    base_url = os.environ.get("API_BASE_URL", "https://inference-api.nvidia.com/v1")
+    model = os.environ.get("MODEL", "aws/anthropic/claude-sonnet-4-5-20250929")
 
     if not github_token:
         print("Error: GITHUB_TOKEN not set", file=sys.stderr)
         sys.exit(1)
-    if not api_key or not base_url or not model:
-        print("Error: API_KEY, API_BASE_URL, and MODEL must be set", file=sys.stderr)
+    if not api_key:
+        print("Error: API_KEY must be set", file=sys.stderr)
         sys.exit(1)
 
     system_prompt = load_prompt(args.prompt_file)

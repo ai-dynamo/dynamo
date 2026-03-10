@@ -474,6 +474,4 @@ jobs:
       workflow_type: pr
       enable_pr_comments: 'true'
     secrets:
-      CI_CLASSIFIER_API_KEY: ${{ secrets.CI_CLASSIFIER_API_KEY }}
-      CI_CLASSIFIER_API_BASE_URL: ${{ secrets.CI_CLASSIFIER_API_BASE_URL }}
-      CI_CLASSIFIER_MODEL: ${{ secrets.CI_CLASSIFIER_MODEL }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
