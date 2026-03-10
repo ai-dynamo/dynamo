@@ -66,7 +66,7 @@ impl fmt::Display for ErrorType {
             ErrorType::Disconnected => write!(f, "Disconnected"),
             ErrorType::ConnectionTimeout => write!(f, "ConnectionTimeout"),
             ErrorType::Cancelled => write!(f, "Cancelled"),
-            ErrorType::Backend(sub) => write!(f, "Backend.{sub}"),
+            ErrorType::Backend(sub) => write!(f, "Backend{sub}"),
         }
     }
 }
@@ -461,35 +461,35 @@ mod tests {
         assert_eq!(ErrorType::Cancelled.to_string(), "Cancelled");
         assert_eq!(
             ErrorType::Backend(BackendError::Unknown).to_string(),
-            "Backend.Unknown"
+            "BackendUnknown"
         );
         assert_eq!(
             ErrorType::Backend(BackendError::InvalidArgument).to_string(),
-            "Backend.InvalidArgument"
+            "BackendInvalidArgument"
         );
         assert_eq!(
             ErrorType::Backend(BackendError::CannotConnect).to_string(),
-            "Backend.CannotConnect"
+            "BackendCannotConnect"
         );
         assert_eq!(
             ErrorType::Backend(BackendError::Disconnected).to_string(),
-            "Backend.Disconnected"
+            "BackendDisconnected"
         );
         assert_eq!(
             ErrorType::Backend(BackendError::ConnectionTimeout).to_string(),
-            "Backend.ConnectionTimeout"
+            "BackendConnectionTimeout"
         );
         assert_eq!(
             ErrorType::Backend(BackendError::Cancelled).to_string(),
-            "Backend.Cancelled"
+            "BackendCancelled"
         );
         assert_eq!(
             ErrorType::Backend(BackendError::EngineShutdown).to_string(),
-            "Backend.EngineShutdown"
+            "BackendEngineShutdown"
         );
         assert_eq!(
             ErrorType::Backend(BackendError::StreamIncomplete).to_string(),
-            "Backend.StreamIncomplete"
+            "BackendStreamIncomplete"
         );
     }
 }

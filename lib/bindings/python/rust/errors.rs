@@ -85,8 +85,8 @@ macro_rules! define_dynamo_exceptions {
 // Exception definitions — one entry per BackendError variant.
 //
 // All error types are exposed to Python as exception classes. When raised by
-// Python backend code, they are interpreted as Backend.<*> errors in Rust
-// (e.g., raising `InvalidArgument` in Python becomes `Backend.InvalidArgument`
+// Python backend code, they are interpreted as Backend* errors in Rust
+// (e.g., raising `InvalidArgument` in Python becomes `BackendInvalidArgument`
 // on the Rust side).
 //
 // When a new variant is added to BackendError in error.rs, add a

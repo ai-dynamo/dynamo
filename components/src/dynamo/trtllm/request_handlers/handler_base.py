@@ -930,7 +930,11 @@ class HandlerBase(BaseGenerativeHandler):
                 "token_ids": [],
             }
 
-        # 3. ALL OTHER ERRORS - graceful shutdown
+        # 3. EngineShutdown - let it propagate to the Rust bridge
+        except EngineShutdown:
+            raise
+
+        # 4. ALL OTHER ERRORS - graceful shutdown
         except Exception as e:
             error_type = type(e).__name__
             error_msg = str(e)

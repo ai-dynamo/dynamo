@@ -300,7 +300,7 @@ where
             e.display(py);
 
             // Check if the Python exception is a Dynamo error type.
-            // Wrap as Backend.<*> since this is the backend engine context.
+            // Wrap as Backend* since this is the backend engine context.
             if let Some((backend_err, message)) = py_exception_to_backend_error(py, &e) {
                 return ResponseProcessingError::DynamoError(
                     DynamoError::builder()
