@@ -158,7 +158,7 @@ jobs:
   # ============================================================================
   build:
     if: inputs.build_image
-    name: build
+    name: Build cuda${{ inputs.cuda_version }}-${{ inputs.platform }}
     runs-on: prod-builder-v3
     outputs:
       target_tag_plain: ${{ steps.calculate-target-tag.outputs.target_tag_plain }}
@@ -312,7 +312,7 @@ jobs:
         ( inputs.run_cpu_only_tests || inputs.run_single_gpu_tests ) &&
         inputs.build_image
     needs: [build]
-    name: test
+    name: Test cuda${{ inputs.cuda_version }}-${{ inputs.platform }}
     runs-on: ${{ inputs.platform == 'amd64' && 'prod-tester-amd-gpu-v1' || 'prod-tester-arm-v1' }}
     env:
       FRAMEWORK: ${{ inputs.framework }}
@@ -412,7 +412,7 @@ jobs:
         inputs.build_image &&
         ( inputs.platform != 'arm64' )
     needs: [build]
-    name: multi-gpu test
+    name: Multi-gpu test cuda${{ inputs.cuda_version }}-${{ inputs.platform }}
     runs-on: prod-tester-amd-gpu-4-v1
     env:
       FRAMEWORK: ${{ inputs.framework }}
@@ -475,7 +475,7 @@ jobs:
       inputs.copy_to_acr &&
       needs.build.result == 'success' &&
       (needs.test.result == 'success' || needs.test.result == 'skipped')
-    name: copy-to-acr
+    name: copy-to-acr cuda${{ inputs.cuda_version }}-${{ inputs.platform }}
     runs-on: prod-default-small-v2
     outputs:
       target_tag_plain: ${{ needs.build.outputs.target_tag_plain }}
