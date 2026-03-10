@@ -89,6 +89,55 @@ jobs:
     secrets: inherit
 
   # ============================================================================
+  # DEV PIPELINES
+  # ============================================================================
+  vllm-pipeline:
+    needs: [changed-files]
+    uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
+    with:
+      framework: vllm
+      target: dev
+      platforms: '["amd64", "arm64"]'
+      cuda_versions: '["12.9", "13.0"]'
+      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      build_timeout_minutes: 60
+      run_cpu_only_tests: false
+      run_single_gpu_tests: false
+      run_multi_gpu_tests: false
+    secrets: inherit
+
+  sglang-pipeline:
+    needs: [changed-files]
+    uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
+    with:
+      framework: sglang
+      target: dev
+      platforms: '["amd64", "arm64"]'
+      cuda_versions: '["12.9", "13.0"]'
+      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      build_timeout_minutes: 60
+      run_cpu_only_tests: false
+      run_single_gpu_tests: false
+      run_multi_gpu_tests: false
+    secrets: inherit
+
+  trtllm-dev-pipeline:
+    needs: [changed-files]
+    uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
+    with:
+      framework: trtllm
+      target: dev
+      platforms: '["amd64", "arm64"]'
+      cuda_versions: '["13.1"]'
+      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      build_timeout_minutes: 60
+      push_image: false # Only push dev images on main
+      run_cpu_only_tests: false
+      run_single_gpu_tests: false
+      run_multi_gpu_tests: false
+    secrets: inherit
+
+  # ============================================================================
   # EFA PIPELINES (Build only, amd64)
   # ============================================================================
   # ============================================================================
