@@ -64,10 +64,19 @@ impl KvScheduler {
         .await
         .map_err(|e| KvSchedulerError::InitFailed(e.to_string()))?;
 
-        // Spawn background task to sync slots when the watch value changes.
-        // In external-routing mode the discovery watch may never fire, which is
-        // fine — the task simply idles until cancellation.
-        {
+        // Spawn background task to sync the slot tracker's worker set from discovery.
+        //
+        // In Dynamo mode the discovery watch is the source of truth for which
+        // workers exist — update_workers() adds newcomers and removes departed ones.
+        //
+        // In EPP mode (skip_initial_worker_wait=true) the per-request
+        // allowed_worker_ids is the source of truth; workers are lazily registered
+        // via ensure_workers_exist() in SchedulerQueue::schedule(). We must NOT
+        // run update_workers() here because it would remove workers that EPP knows
+        // about but discovery hasn't seen yet.
+        // Worker removal in External mode will be handled separately via GAIE
+        // lifecycle events (not yet implemented). TODO (atchernych) once we upgrade to GAIE latest.
+        if !kv_router_config.skip_initial_worker_wait {
             let slots_monitor = slots.clone();
             let mut monitor_rx = workers_with_configs.clone();
             let monitor_cancel_token = component.drt().child_token();
