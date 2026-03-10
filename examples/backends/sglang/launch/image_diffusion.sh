@@ -9,15 +9,7 @@ SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
 set -e
-
-# Setup cleanup trap
-cleanup() {
-    echo "Cleaning up background processes..."
-    kill $FRONTEND_PID 2>/dev/null || true
-    wait $FRONTEND_PID 2>/dev/null || true
-    echo "Cleanup complete."
-}
-trap cleanup EXIT INT TERM
+trap 'echo Cleaning up...; kill 0' EXIT
 
 # Defaults
 MODEL_PATH="black-forest-labs/FLUX.1-dev"
@@ -103,7 +95,6 @@ fi
 echo "Starting Dynamo Frontend on port $HTTP_PORT..."
 python3 -m dynamo.frontend \
     --http-port "$HTTP_PORT" &
-FRONTEND_PID=$!
 
 sleep 2
 

@@ -5,17 +5,11 @@
 # Aggregated embedding model serving.
 # GPUs: 1
 
+set -e
+trap 'echo Cleaning up...; kill 0' EXIT
+
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
-
-# Setup cleanup trap
-cleanup() {
-    echo "Cleaning up background processes..."
-    kill $DYNAMO_PID 2>/dev/null || true
-    wait $DYNAMO_PID 2>/dev/null || true
-    echo "Cleanup complete."
-}
-trap cleanup EXIT INT TERM
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -53,7 +47,6 @@ CURL
 # run ingress
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
 python3 -m dynamo.frontend &
-DYNAMO_PID=$!
 
 # run worker
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \

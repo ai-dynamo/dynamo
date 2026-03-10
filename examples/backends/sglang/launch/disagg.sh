@@ -5,17 +5,11 @@
 # Disaggregated serving: prefill on GPU 0, decode on GPU 1.
 # GPUs: 2
 
+set -e
+trap 'echo Cleaning up...; kill 0' EXIT
+
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
-
-# Setup cleanup trap
-cleanup() {
-    echo "Cleaning up background processes..."
-    kill $DYNAMO_PID $PREFILL_PID 2>/dev/null || true
-    wait $DYNAMO_PID $PREFILL_PID 2>/dev/null || true
-    echo "Cleanup complete."
-}
-trap cleanup EXIT INT TERM
 
 # Parse command line arguments
 ENABLE_OTEL=false
@@ -59,7 +53,6 @@ print_launch_banner "Launching Disaggregated Workers (P/D)" "$MODEL" "$HTTP_PORT
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
 OTEL_SERVICE_NAME=dynamo-frontend \
 python3 -m dynamo.frontend &
-DYNAMO_PID=$!
 
 #AssertionError: Prefill round robin balance is required when dp size > 1. Please make sure that the prefill instance is launched with `--load-balance-method round_robin` and `--prefill-round-robin-balance` is set for decode server.
 
@@ -80,7 +73,6 @@ python3 -m dynamo.sglang \
   --disaggregation-transfer-backend nixl \
   --enable-metrics \
   "${TRACE_ARGS[@]}" &
-PREFILL_PID=$!
 
 # run decode worker
 OTEL_SERVICE_NAME=dynamo-worker-decode DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \

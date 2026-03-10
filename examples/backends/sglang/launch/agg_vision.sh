@@ -5,17 +5,11 @@
 # Aggregated multimodal (vision + LLM) serving.
 # GPUs: 1
 
+set -e
+trap 'echo Cleaning up...; kill 0' EXIT
+
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
-
-# Setup cleanup trap
-cleanup() {
-    echo "Cleaning up background processes..."
-    kill $DYNAMO_PID 2>/dev/null || true
-    wait $DYNAMO_PID 2>/dev/null || true
-    echo "Cleanup complete."
-}
-trap cleanup EXIT INT TERM
 
 # Default values
 MODEL="Qwen/Qwen3-VL-8B-Instruct"
@@ -73,7 +67,6 @@ print_launch_banner --multimodal "Launching Aggregated Vision Worker" "$MODEL" "
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
 OTEL_SERVICE_NAME=dynamo-frontend \
 python3 -m dynamo.frontend &
-DYNAMO_PID=$!
 
 # Build chat template args (only if explicitly set)
 TEMPLATE_ARGS=()

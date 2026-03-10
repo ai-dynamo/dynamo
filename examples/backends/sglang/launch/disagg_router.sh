@@ -5,17 +5,11 @@
 # Disaggregated serving with KV-aware routing: 2 prefill + 2 decode workers.
 # GPUs: 4
 
+set -e
+trap 'echo Cleaning up...; kill 0' EXIT
+
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
-
-# Setup cleanup trap
-cleanup() {
-    echo "Cleaning up background processes..."
-    kill $DYNAMO_PID $PREFILL_PID1 $PREFILL_PID2 $DECODE_PID1 $DECODE_PID2 2>/dev/null || true
-    wait $DYNAMO_PID $PREFILL_PID1 $PREFILL_PID2 $DECODE_PID1 $DECODE_PID2 2>/dev/null || true
-    echo "Cleanup complete."
-}
-trap cleanup EXIT INT TERM
 
 # Parse command line arguments
 ENABLE_OTEL=false
@@ -64,7 +58,6 @@ OTEL_SERVICE_NAME=dynamo-frontend \
 python3 -m dynamo.frontend \
     --router-mode kv \
     --router-reset-states &
-DYNAMO_PID=$!
 
 # run prefill worker
 OTEL_SERVICE_NAME=dynamo-worker-prefill-1 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
@@ -80,7 +73,6 @@ python3 -m dynamo.sglang \
   --disaggregation-transfer-backend nixl \
   --enable-metrics \
   "${TRACE_ARGS[@]}" &
-PREFILL_PID1=$!
 
 # run prefill worker
 OTEL_SERVICE_NAME=dynamo-worker-prefill-2 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
@@ -96,7 +88,6 @@ CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.sglang \
   --disaggregation-transfer-backend nixl \
   --enable-metrics \
   "${TRACE_ARGS[@]}" &
-PREFILL_PID2=$!
 
 # run decode worker
 OTEL_SERVICE_NAME=dynamo-worker-decode-1 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT3:-8083} \
@@ -112,7 +103,6 @@ CUDA_VISIBLE_DEVICES=3 python3 -m dynamo.sglang \
   --disaggregation-transfer-backend nixl \
   --enable-metrics \
   "${TRACE_ARGS[@]}" &
-DECODE_PID1=$!
 
 # run decode worker
 OTEL_SERVICE_NAME=dynamo-worker-decode-2 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT4:-8084} \
@@ -128,7 +118,6 @@ CUDA_VISIBLE_DEVICES=2 python3 -m dynamo.sglang \
   --disaggregation-transfer-backend nixl \
   --enable-metrics \
   "${TRACE_ARGS[@]}" &
-DECODE_PID2=$!
 
 # Wait for any worker to exit (keeps script running)
 # Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
