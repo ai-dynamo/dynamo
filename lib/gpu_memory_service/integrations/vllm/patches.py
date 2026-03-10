@@ -295,6 +295,10 @@ def patch_allocate_kv_cache_on_wake() -> None:
 
     def allocate_kv_cache_on_wake(self) -> dict:
         """Allocate KV cache tensors on wake using stored config."""
+        import time
+
+        import torch
+
         assert hasattr(self, "_shadow_kv_cache_config"), (
             "_shadow_kv_cache_config not set. "
             "Was _shadow_init_phase=True during initialize_kv_cache?"
@@ -304,6 +308,33 @@ def patch_allocate_kv_cache_on_wake() -> None:
             "Was _shadow_init_phase=True during initialize_kv_cache?"
         )
 
+        config = self._shadow_kv_cache_config
+
+        # Estimate memory needed for KV cache allocation
+        needed_bytes = sum(
+            group.kv_cache_spec.page_size_bytes * config.num_blocks
+            for group in config.kv_cache_groups
+        )
+
+        # Poll until enough GPU memory is free. This handles the case where
+        # the previous engine's processes haven't fully released GPU memory
+        # yet (e.g., NCCL timeout, container termination delay).
+        free_bytes = torch.cuda.mem_get_info()[0]
+        if free_bytes < needed_bytes:
+            logger.info(
+                "[Shadow] Waiting for GPU memory before KV cache allocation "
+                "(need %.2f GiB, free %.2f GiB)",
+                needed_bytes / (1 << 30),
+                free_bytes / (1 << 30),
+            )
+            while free_bytes < needed_bytes:
+                time.sleep(0.5)
+                free_bytes = torch.cuda.mem_get_info()[0]
+            logger.info(
+                "[Shadow] GPU memory available (free %.2f GiB), proceeding",
+                free_bytes / (1 << 30),
+            )
+
         logger.info("[Shadow] Allocating KV cache on wake")
 
         # vLLM 0.16+ requires the config context for internal operations
@@ -312,7 +343,7 @@ def patch_allocate_kv_cache_on_wake() -> None:
 
         with set_current_vllm_config(self.vllm_config):
             kv_caches = self.initialize_kv_cache_tensors(
-                self._shadow_kv_cache_config,
+                config,
                 self._shadow_kernel_block_sizes,
             )
 
