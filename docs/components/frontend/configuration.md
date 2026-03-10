@@ -149,7 +149,7 @@ All endpoint paths can be overridden via environment variables:
 | `DYN_HTTP_SVC_MODELS_PATH_ENV` | `/v1/models` |
 | `DYN_HTTP_SVC_ANTHROPIC_PATH_ENV` | `/v1/messages` |
 | `DYN_HTTP_SVC_HEALTH_PATH_ENV` | `/health` |
-| `DYN_HTTP_SVC_LIVE_PATH_PATH_ENV` | `/live` |
+| `DYN_HTTP_SVC_LIVE_PATH_ENV` | `/live` |
 | `DYN_HTTP_SVC_METRICS_PATH_ENV` | `/metrics` |
 
 ## Deprecated

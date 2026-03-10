@@ -89,7 +89,7 @@ spec:
           mountPoint: /home/dynamo/.cache/huggingface
 ```
 
-All worker pods now read from the shared cache — no per-pod downloads.
+All `VllmWorker` pods that mount `model-cache` now read from the shared cache, avoiding per-pod worker downloads. If you also want the frontend to reuse tokenizer and config files, mount the same PVC there too.
 
 ### Compilation cache
 

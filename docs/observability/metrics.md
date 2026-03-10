@@ -194,11 +194,11 @@ sequenceDiagram
     participant Backend as Backend (SGLang/TRT/vLLM)
 
     Client->>Frontend: Request start
-    Note over Frontend: HTTP queue begins
+    Note over Frontend,Backend: HTTP queue begins
     Frontend->>Backend: Forward request
     Note over Backend: Start prefill
     Backend-->>Frontend: First token
-    Note over Frontend: HTTP queue ends
+    Note over Frontend,Backend: HTTP queue ends
     loop Token generation
         Backend-->>Frontend: Tokens
     end

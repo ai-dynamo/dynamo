@@ -27,7 +27,7 @@ Backend workers register themselves using the `register_model` API, after which 
 
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `--router-mode kv` | `round_robin` | Enable KV cache-aware routing |
+| `--router-mode kv` | `round-robin` | Enable KV cache-aware routing |
 | `--router-temperature <float>` | `0.0` | Controls routing randomness (0.0 = deterministic, higher = more random) |
 | `--kv-cache-block-size <size>` | Backend-specific | KV cache block size (should match backend config) |
 | `--router-kv-events` / `--no-router-kv-events` | `--router-kv-events` | Enable/disable real-time KV event tracking |

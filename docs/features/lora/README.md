@@ -32,7 +32,7 @@ Dynamo's LoRA implementation provides:
 
 ```mermaid
 flowchart TD
-    Frontend["/v1/models<br/>Frontend"] --> Router["Router<br/>(LoRA-aware)"]
+    Frontend["Frontend"] --> Router["Router<br/>(LoRA-aware)"]
     Router --> Workers["Workers<br/>(LoRA-loaded)"]
     Workers --> Manager["LoRA Manager"]
 
