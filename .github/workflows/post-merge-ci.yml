@@ -96,7 +96,6 @@ jobs:
   # ============================================================================
   vllm-dev-pipeline:
     name: vllm-dev
-    needs: [changed-files]
     uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
     with:
       framework: vllm
@@ -112,7 +111,6 @@ jobs:
 
   sglang-dev-pipeline:
     name: sglang-dev
-    needs: [changed-files]
     uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
     with:
       framework: sglang
@@ -128,7 +126,6 @@ jobs:
 
   trtllm-dev-pipeline:
     name: trtllm-dev
-    needs: [changed-files]
     uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
     with:
       framework: trtllm
