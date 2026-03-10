@@ -19,24 +19,6 @@ from dynamo.runtime import Endpoint
 DYNAMO_COMPONENT_REGISTRY = CollectorRegistry()
 
 
-class NullStatLogger(StatLoggerBase):
-    def __init__(self):
-        pass
-
-    def record(
-        self,
-        scheduler_stats: Optional[SchedulerStats],
-        iteration_stats: Optional[IterationStats],
-        engine_idx: int = 0,
-        *args,
-        **kwargs,
-    ):
-        pass
-
-    def log_engine_initialized(self):
-        pass
-
-
 class DynamoStatLoggerPublisher(StatLoggerBase):
     """Stat logger publisher. Wrapper for the WorkerMetricsPublisher to match the StatLoggerBase interface."""
 
@@ -64,7 +46,7 @@ class DynamoStatLoggerPublisher(StatLoggerBase):
             raise
 
     # TODO: Remove this and pass as metadata through shared storage
-    def set_num_gpu_block(self, num_blocks):
+    def set_num_gpu_block(self, num_blocks: int) -> None:
         self.num_gpu_block = num_blocks
 
     def record(
@@ -72,9 +54,9 @@ class DynamoStatLoggerPublisher(StatLoggerBase):
         scheduler_stats: SchedulerStats,
         iteration_stats: Optional[IterationStats],
         engine_idx: int = 0,
-        *args,
-        **kwargs,
-    ):
+        *args: object,
+        **kwargs: object,
+    ) -> None:
         active_decode_blocks = int(self.num_gpu_block * scheduler_stats.kv_cache_usage)
         self.inner.publish(self.dp_rank, active_decode_blocks)
 
@@ -89,7 +71,7 @@ class DynamoStatLoggerPublisher(StatLoggerBase):
             dp_rank_str, scheduler_stats.kv_cache_usage
         )
 
-    def init_publish(self):
+    def init_publish(self) -> None:
         self.inner.publish(self.dp_rank, 0)
         dp_rank_str = str(self.dp_rank)
         self.component_gauges.set_total_blocks(dp_rank_str, 0)
@@ -106,22 +88,17 @@ class StatLoggerFactory:
         self,
         endpoint: Endpoint,
         component_gauges: Optional[LLMBackendMetrics] = None,
-        dp_rank: int = 0,
     ) -> None:
         self.endpoint = endpoint
         self.component_gauges = component_gauges
         self.created_logger: Optional[DynamoStatLoggerPublisher] = None
-        self.dp_rank = dp_rank
 
     def create_stat_logger(self, dp_rank: int) -> StatLoggerBase:
-        if self.dp_rank != dp_rank:
-            return NullStatLogger()
         # component_gauges must be set by setup_vllm_engine() before vLLM
         # calls create_stat_logger() during engine initialization.
         assert (
             self.component_gauges is not None
         ), "component_gauges must be set before creating stat loggers"
-
         logger = DynamoStatLoggerPublisher(
             endpoint=self.endpoint,
             dp_rank=dp_rank,
@@ -135,10 +112,10 @@ class StatLoggerFactory:
         return self.create_stat_logger(dp_rank=dp_rank)
 
     # TODO Remove once we publish metadata to shared storage
-    def set_num_gpu_blocks_all(self, num_blocks):
+    def set_num_gpu_blocks_all(self, num_blocks: int) -> None:
         if self.created_logger:
             self.created_logger.set_num_gpu_block(num_blocks)
 
-    def init_publish(self):
+    def init_publish(self) -> None:
         if self.created_logger:
             self.created_logger.init_publish()

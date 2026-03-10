@@ -26,9 +26,9 @@ jobs:
   changed-files:
     runs-on: ubuntu-latest
     outputs:
-      core: ${{ steps.changes.outputs.core }}
-      planner: ${{ steps.changes.outputs.planner }}
-      frontend: ${{ steps.changes.outputs.frontend }}
+      core: ${{ github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || steps.changes.outputs.core == 'true' }}
+      planner: ${{ github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || steps.changes.outputs.planner == 'true' }}
+      frontend: ${{ github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || steps.changes.outputs.frontend == 'true' }}
       builder_name: ${{ steps.export-builder-name.outputs.builder_name }}
     steps:
       - name: Checkout code
@@ -138,7 +138,9 @@ jobs:
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
       - name: Pull image
-        run: docker pull ${{ env.IMAGE_TAG }}
+        run: |
+          source ./.github/scripts/retry_docker.sh
+          retry_pull ${{ env.IMAGE_TAG }}
       - name: Run Rust checks (block-manager + media-ffmpeg + integration tests)
         run: |
           docker run --rm --runtime=nvidia --gpus all --user root -w /workspace/lib/llm \
@@ -175,7 +177,9 @@ jobs:
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
       - name: Pull image
-        run: docker pull ${{ env.IMAGE_TAG }}
+        run: |
+          source ./.github/scripts/retry_docker.sh
+          retry_pull ${{ env.IMAGE_TAG }}
       - name: Run pytest (parallel tests with xdist)
         uses: ./.github/actions/pytest
         with:
@@ -185,6 +189,7 @@ jobs:
           test_type: "pre_merge_parallel"
           platform_arch: amd64
           enable_mypy: 'true'
+          hf_token: ${{ secrets.HF_TOKEN }}
           parallel_mode: '4'
           dind_as_sidecar: 'false'
 
@@ -205,7 +210,9 @@ jobs:
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
       - name: Pull image
-        run: docker pull ${{ env.IMAGE_TAG }}
+        run: |
+          source ./.github/scripts/retry_docker.sh
+          retry_pull ${{ env.IMAGE_TAG }}
       - name: Run pytest (sequential tests)
         uses: ./.github/actions/pytest
         with:
@@ -215,5 +222,6 @@ jobs:
           test_type: "pre_merge_sequential"
           platform_arch: amd64
           enable_mypy: 'false'
+          hf_token: ${{ secrets.HF_TOKEN }}
           parallel_mode: 'none'
           dind_as_sidecar: 'false'

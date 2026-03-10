@@ -2,13 +2,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-
 MODEL="Qwen/Qwen3-VL-30B-A3B-Instruct-FP8"
 CAPACITY_GB=10
 EXTRA_ARGS=()
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --model)
+            MODEL="$2"; shift 2 ;;
         --multimodal-embedding-cache-capacity-gb)
             CAPACITY_GB="$2"; shift 2 ;;
         *)
@@ -16,6 +17,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Need vLLM main or v0.17+
 EC_ARGS=()
 if [[ "$CAPACITY_GB" != "0" ]]; then
     EC_ARGS=(--ec-transfer-config "{
@@ -26,35 +28,8 @@ if [[ "$CAPACITY_GB" != "0" ]]; then
     }")
 fi
 
-HTTP_PORT="${DYN_HTTP_PORT:-8000}"
-echo "=========================================="
-echo "Launching vLLM Serve + Embedding Cache (1 GPU)"
-echo "=========================================="
-echo "Model:       $MODEL"
-echo "Server:      http://localhost:$HTTP_PORT"
-echo "=========================================="
-echo ""
-echo "Example test command:"
-echo ""
-echo "  curl http://localhost:${HTTP_PORT}/v1/chat/completions \\"
-echo "    -H 'Content-Type: application/json' \\"
-echo "    -d '{"
-echo "      \"model\": \"${MODEL}\","
-echo "      \"messages\": [{"
-echo "        \"role\": \"user\","
-echo "        \"content\": ["
-echo "          {\"type\": \"text\", \"text\": \"Describe the image.\"},"
-echo "          {\"type\": \"image_url\", \"image_url\": {\"url\": \"https://upload.wikimedia.org/wikipedia/commons/thumb/3/3a/Cat03.jpg/480px-Cat03.jpg\"}}"
-echo "        ]"
-echo "      }],"
-echo "      \"max_tokens\": 50"
-echo "    }'"
-echo ""
-echo "=========================================="
-
 CUDA_VISIBLE_DEVICES=2 \
-vllm serve $MODEL \
-    --port "$HTTP_PORT" \
+vllm serve "$MODEL" \
     --enable-log-requests \
     --max-model-len 16384 \
     --gpu-memory-utilization .9 \

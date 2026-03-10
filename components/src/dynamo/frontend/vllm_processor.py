@@ -9,7 +9,6 @@ import asyncio
 import logging
 import os
 import time
-import uuid
 from argparse import Namespace
 from collections.abc import AsyncGenerator
 from concurrent.futures import ProcessPoolExecutor
@@ -37,18 +36,18 @@ from dynamo.llm import (
     RouterMode,
     fetch_model,
 )
-from dynamo.runtime import DistributedRuntime
+from dynamo.runtime import Client, DistributedRuntime
 
 from .prepost import (
     StreamingPostProcessor,
     preprocess_chat_request,
     preprocess_chat_request_sync,
 )
+from .utils import PreprocessError, random_uuid, worker_warmup
 
 logger = logging.getLogger(__name__)
 
 
-_MASK_64_BITS = (1 << 64) - 1
 _FINISH_REASON_MAP: dict[str, FinishReason] = {
     "eos": FinishReason.STOP,
     "stop": FinishReason.STOP,
@@ -57,10 +56,6 @@ _FINISH_REASON_MAP: dict[str, FinishReason] = {
     "cancelled": FinishReason.ABORT,
     "content_filter": FinishReason.STOP,
 }
-
-
-def random_uuid() -> str:
-    return f"{uuid.uuid4().int & _MASK_64_BITS:016x}"  # 16 hex chars
 
 
 def map_finish_reason(raw_reason: str | None) -> FinishReason | None:
@@ -85,14 +80,6 @@ _w_tokenizer: Any = None
 _w_tool_parser_class: type[ToolParser] | None = None
 
 
-class _PreprocessError(Exception):
-    """Raised by _preprocess_worker for user-facing errors (e.g., n!=1)."""
-
-    def __init__(self, error_dict: dict[str, Any]):
-        self.error_dict = error_dict
-        super().__init__(str(error_dict))
-
-
 @dataclass
 class PreprocessWorkerResult:
     """Picklable return value from the preprocess worker."""
@@ -114,6 +101,7 @@ def _init_worker(
 ) -> None:
     """Initialize a worker process with its own VllmConfig and InputProcessor."""
     global _w_input_processor, _w_tokenizer, _w_tool_parser_class
+    global _w_reasoning_parser_class
 
     model_config = ModelConfig(
         model=model_path,
@@ -135,17 +123,13 @@ def _init_worker(
         _w_tool_parser_class = None
 
 
-def _worker_warmup() -> bool:
-    """Dummy task to ensure worker process is fully initialized."""
-    return True
-
-
 def _preprocess_worker(
     request: dict[str, Any],
     request_id: str,
     model_name: str,
 ) -> PreprocessWorkerResult:
     """Preprocess a request in a worker process and return a picklable result."""
+    assert _w_input_processor is not None
     pre = preprocess_chat_request_sync(
         request,
         tokenizer=_w_tokenizer,
@@ -209,7 +193,7 @@ def _preprocess_worker(
 
     sp = vllm_preproc.sampling_params
     if sp.n != 1:
-        raise _PreprocessError(
+        raise PreprocessError(
             {
                 "error": {
                     "message": (
@@ -249,9 +233,9 @@ def _preprocess_worker(
             "prompt_logprobs": sp.prompt_logprobs,
             "skip_special_tokens": sp.skip_special_tokens,
         },
-        "eos_token_ids": [vllm_preproc.eos_token_id]
-        if vllm_preproc.eos_token_id is not None
-        else [],
+        "eos_token_ids": (
+            [vllm_preproc.eos_token_id] if vllm_preproc.eos_token_id is not None else []
+        ),
         "annotations": [],
     }
 
@@ -270,13 +254,10 @@ class VllmProcessor:
         self,
         tokenizer: TokenizerLike,
         input_processor: InputProcessor,
-        router,  # Client or KvRouter
+        router: Any,  # Client or KvRouter
         output_processor: OutputProcessor,
         tool_parser_class: type[ToolParser] | None,
         reasoning_parser_class: type[ReasoningParser] | None,
-        debug_perf: bool = False,
-        preprocess_pool: ProcessPoolExecutor | None = None,
-        preprocess_workers: int = 0,
     ):
         self.tokenizer = tokenizer
         self.input_processor = input_processor
@@ -285,16 +266,6 @@ class VllmProcessor:
         self.output_processor = output_processor
         self.tool_parser_class = tool_parser_class
         self.reasoning_parser_class = reasoning_parser_class
-        self.debug_perf = debug_perf
-        self.preprocess_pool = preprocess_pool
-        if preprocess_pool is not None:
-            # Allow a small buffer beyond the worker count so the pool's
-            # internal queue always has work ready when a worker finishes.
-            self._worker_semaphore: asyncio.Semaphore | None = asyncio.Semaphore(
-                preprocess_workers + 2
-            )
-        else:
-            self._worker_semaphore = None
 
     # Ideally we would map NVCreateChatCompletionRequest into Python so it can be type checked, but
     # it has a lot of fields.
@@ -304,44 +275,16 @@ class VllmProcessor:
     ) -> AsyncGenerator[dict[str, Any], None]:
         """
         Run a single request through the engine. Does pre and post processing on this machine, delegates
-        model inference to a worker using the router.
+        model inference to a backend using the router.
         """
 
-        # ** VllmProcessor.generator called: {'messages': [{'role': 'user', 'content': 'What is the capital of Tuvalu?'}], 'model': '/home/grahamk/llms/Qwen3-0.6B', 'max_completion_tokens': 1000, 'stream': False}
-
-        if self.debug_perf:
-            from .perf_instrumentation import enter_generator, exit_generator
-
-            active = enter_generator()
-            t_start = time.monotonic()
-            logger.info("[perf] generator enter: active_requests=%d", active)
-
-        try:
-            if self.preprocess_pool is None:
-                # Single process
-                async for item in self._generator_inner(request):
-                    yield item
-            else:
-                # Multi process
-                async for item in self._generator_inner_pool(request):
-                    yield item
-        finally:
-            if self.debug_perf:
-                active = exit_generator()
-                elapsed_ms = (time.monotonic() - t_start) * 1000.0
-                logger.info(
-                    "[perf] generator exit: total=%.2fms active_requests=%d",
-                    elapsed_ms,
-                    active,
-                )
+        async for item in self._generator_inner(request):
+            yield item
 
     async def _generator_inner(
         self, request: dict[str, Any]
     ) -> AsyncGenerator[dict[str, Any], None]:
         request_id = random_uuid()
-
-        if self.debug_perf:
-            t0 = time.monotonic()
 
         pre = await preprocess_chat_request(
             request,
@@ -349,14 +292,6 @@ class VllmProcessor:
             renderer=self.input_processor.renderer,
             tool_parser_class=self.tool_parser_class,
         )
-
-        if self.debug_perf:
-            t1 = time.monotonic()
-            logger.info(
-                "[perf] preprocess_chat_request: %.2fms (request=%s)",
-                (t1 - t0) * 1000.0,
-                request_id,
-            )
 
         request_for_sampling = pre.request_for_sampling
         tool_parser = pre.tool_parser
@@ -417,9 +352,6 @@ class VllmProcessor:
                 "mm_processor_kwargs"
             ] = request_for_sampling.mm_processor_kwargs
 
-        if self.debug_perf:
-            t2 = time.monotonic()
-
         vllm_preproc: EngineCoreRequest = self.input_processor.process_inputs(
             request_id,
             prompt_inputs,
@@ -431,15 +363,6 @@ class VllmProcessor:
             # priority: int = 0,
             # data_parallel_rank: int | None = None,
         )
-
-        if self.debug_perf:
-            t3 = time.monotonic()
-            logger.info(
-                "[perf] input_processor.process_inputs: %.2fms (request=%s tokens=%d)",
-                (t3 - t2) * 1000.0,
-                request_id,
-                len(tokens),
-            )
 
         InputProcessor.assign_request_id(vllm_preproc)
 
@@ -488,9 +411,11 @@ class VllmProcessor:
                 "prompt_logprobs": sp.prompt_logprobs,
                 "skip_special_tokens": sp.skip_special_tokens,
             },
-            "eos_token_ids": [vllm_preproc.eos_token_id]
-            if vllm_preproc.eos_token_id is not None
-            else [],
+            "eos_token_ids": (
+                [vllm_preproc.eos_token_id]
+                if vllm_preproc.eos_token_id is not None
+                else []
+            ),
             "annotations": [],
         }
 
@@ -523,12 +448,7 @@ class VllmProcessor:
         vllm_preproc: EngineCoreRequest,
         post: StreamingPostProcessor,
     ) -> AsyncGenerator[dict[str, Any], None]:
-        """Shared streaming logic for both single-process and pool paths."""
         self.output_processor.add_request(vllm_preproc, None)
-
-        token_count = 0
-        output_proc_total_ms = 0.0
-        post_proc_total_ms = 0.0
 
         try:
             if self.is_kv_router:
@@ -573,16 +493,9 @@ class VllmProcessor:
                     stop_reason=stop_reason,
                 )
 
-                if self.debug_perf:
-                    t_op0 = time.monotonic()
-
                 vllm_out: OutputProcessorOutput = self.output_processor.process_outputs(
                     [vllm_response]
                 )
-
-                if self.debug_perf:
-                    t_op1 = time.monotonic()
-                    output_proc_total_ms += (t_op1 - t_op0) * 1000.0
 
                 if vllm_out.reqs_to_abort:
                     pass
@@ -594,11 +507,6 @@ class VllmProcessor:
                     choice = post.process_output(output)
                     if choice:
                         choices.append(choice)
-
-                if self.debug_perf:
-                    t_op2 = time.monotonic()
-                    post_proc_total_ms += (t_op2 - t_op1) * 1000.0
-                    token_count += len(engine_response["token_ids"])
 
                 if choices:
                     dynamo_out = {
@@ -617,18 +525,6 @@ class VllmProcessor:
                 self.output_processor.abort_requests(
                     [vllm_preproc.request_id], internal=True
                 )
-            if self.debug_perf and token_count > 0:
-                logger.info(
-                    "[perf] stream done: request=%s tokens=%d "
-                    "output_processor_total=%.2fms (%.3fms/tok) "
-                    "post_processor_total=%.2fms (%.3fms/tok)",
-                    request_id,
-                    token_count,
-                    output_proc_total_ms,
-                    output_proc_total_ms / token_count,
-                    post_proc_total_ms,
-                    post_proc_total_ms / token_count,
-                )
 
     async def _generator_inner_pool(
         self, request: dict[str, Any]
@@ -643,7 +539,9 @@ class VllmProcessor:
 
         # --- Phase 1: Preprocess (semaphore held) ---
         try:
+            assert self._worker_semaphore is not None
             async with self._worker_semaphore:
+                assert self.preprocess_pool is not None
                 future = self.preprocess_pool.submit(
                     _preprocess_worker, request, request_id, request["model"]
                 )
@@ -651,7 +549,7 @@ class VllmProcessor:
                     future
                 )
             # Semaphore + worker released here
-        except _PreprocessError as exc:
+        except PreprocessError as exc:
             yield exc.error_dict
             return
         except Exception as exc:
@@ -707,13 +605,16 @@ class EngineFactory:
         router_config: RouterConfig,
         config: FrontendConfig,
         flags: Namespace,
-        debug_perf: bool = False,
     ):
+        if config.preprocess_workers != 0:
+            raise RuntimeError(
+                "preprocess_workers > 0 is not supported by vllm preprocessor"
+            )
+
         self.runtime = runtime
         self.router_config = router_config
         self.config = config
         self.flags = flags
-        self.debug_perf = debug_perf
         self.stream_interval = 20
         raw_stream_interval = os.getenv("DYN_VLLM_STREAM_INTERVAL")
         if raw_stream_interval:
@@ -788,11 +689,11 @@ class EngineFactory:
         else:
             reasoning_parser_class = None
 
-        (namespace_name, component_name, endpoint_name) = instance_id.triple()
+        namespace_name, component_name, endpoint_name = instance_id.triple()
         generate_endpoint = self.runtime.endpoint(
             f"{namespace_name}.{component_name}.{endpoint_name}"
         )
-
+        router: Client | KvRouter
         if self.router_config.router_mode == RouterMode.KV:
             router = KvRouter(
                 endpoint=generate_endpoint,
@@ -825,8 +726,7 @@ class EngineFactory:
             )
             # Warm up all workers to ensure initialization completes
             futures = [
-                preprocess_pool.submit(_worker_warmup)
-                for _ in range(preprocess_workers)
+                preprocess_pool.submit(worker_warmup) for _ in range(preprocess_workers)
             ]
             done, not_done = _futures_wait(futures, timeout=120)
             if not_done:
@@ -851,9 +751,6 @@ class EngineFactory:
             output_processor,
             tool_parser_class,
             reasoning_parser_class,
-            debug_perf=self.debug_perf,
-            preprocess_pool=preprocess_pool,
-            preprocess_workers=preprocess_workers,
         )
 
         return PythonAsyncEngine(gen.generator, loop)

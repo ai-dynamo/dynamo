@@ -17,7 +17,6 @@ enable_attention_dp: false
 max_num_tokens: 2048
 max_batch_size: 8
 max_seq_len: 8192
-trust_remote_code: true
 backend: pytorch
 enable_chunked_prefill: true
 
