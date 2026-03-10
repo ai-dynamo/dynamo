@@ -261,7 +261,7 @@ def build_sampling_params_openai(
     return sampling_params
 
 
-def get_dp_range_for_worker(vllm_config: VllmConfig) -> range:
+def get_dp_range_for_worker(vllm_config: VllmConfig) -> tuple[int, int]:
     """
     Get the global DP rank range that this worker is responsible for based on vLLM config.
     Note that the 'vllm_config' is normalized so the load balancing flags are set properly.
@@ -318,7 +318,7 @@ class BaseWorkerHandler(ABC):
         self.enable_multimodal = enable_multimodal
         self.enable_frontend_decoding = enable_frontend_decoding
         # NIXL connector for frontend decoding - lazy initialized
-        self._nixl_connector = None
+        self._nixl_connector: nixl_connect.Connector | None = None
         self._nixl_connector_lock = asyncio.Lock()
         # LoRA tracking: name -> LoRAInfo(id, path)
         self.loaded_loras: dict[str, LoRAInfo] = {}
@@ -330,6 +330,8 @@ class BaseWorkerHandler(ABC):
         self.use_vllm_tokenizer = use_vllm_tokenizer
 
         self.dp_range = get_dp_range_for_worker(self.engine_client.vllm_config)
+        self._sleep_wake_lock = asyncio.Lock()
+        self._engine_is_sleeping = False
 
         # Initialize InputParamManager for text-in-text-out mode
         tokenizer = None
@@ -351,64 +353,74 @@ class BaseWorkerHandler(ABC):
         2. Abort and drain in-flight requests
         3. Sleep engine - safe now that GPU is quiesced
         """
+        body = body or {}
         level = body.get("level", 1)
-        try:
-            # Step 1: Unregister endpoint instance FIRST to stop new requests from arriving
+        async with self._sleep_wake_lock:
+            if self._engine_is_sleeping:
+                return {
+                    "status": "ok",
+                    "message": "Engine already sleeping",
+                }
+
             try:
-                await self.generate_endpoint.unregister_endpoint_instance()
-                logger.info(
-                    "[Sleep] Unregistered endpoint from discovery - worker removed from routing pool"
-                )
-            except Exception as unreg_err:
-                logger.warning(
-                    f"[Sleep] Failed to unregister endpoint from discovery: {unreg_err}"
-                )
+                # Step 1: Unregister endpoint instance before memory transitions.
+                if self.generate_endpoint is not None:
+                    await self.generate_endpoint.unregister_endpoint_instance()
+                    logger.info(
+                        "[Sleep] Unregistered endpoint from discovery - worker removed from routing pool"
+                    )
 
-            # Step 2: Abort in-flight requests and wait for them to drain so the
-            # GPU is fully quiesced before unmapping memory.
-            await self.engine_client.pause_generation()
+                # Step 2: Abort in-flight requests and wait for them to drain so the
+                # GPU is fully quiesced before unmapping memory.
+                await self.engine_client.pause_generation()
 
-            # Step 3: Now safe to sleep - no in-flight GPU work
-            await self.engine_client.sleep(level)
+                # Step 3: Now safe to sleep - no in-flight GPU work
+                await self.engine_client.sleep(level)
+                self._engine_is_sleeping = True
 
-            return {"status": "ok", "message": f"Engine slept (level={level})"}
-        except Exception as e:
-            logger.error(f"Failed to sleep engine: {e}")
-            return {"status": "error", "message": str(e)}
+                return {
+                    "status": "ok",
+                    "message": f"Engine slept (level={level})",
+                }
+            except Exception as e:
+                logger.error(f"Failed to sleep engine: {e}")
+                return {"status": "error", "message": str(e)}
 
     async def wake_up(self, body: dict) -> dict:
         """Wake the engine to restore GPU memory and re-register to discovery.
 
         Args:
-            body: Dict with optional 'tags' key (e.g., ["weights", "kv_cache"]). None wakes all.
+            body: Unused. Wake always restores all sleep-managed memory.
 
         Order of operations:
         1. Wake engine - restore GPU memory
         2. Re-register endpoint instance - allow frontend to route requests here again
         """
-        tags = body.get("tags")
-        try:
-            # Step 1: Wake engine first - must be ready before accepting requests
-            await self.engine_client.wake_up(tags)
+        async with self._sleep_wake_lock:
+            if not self._engine_is_sleeping:
+                return {"status": "ok", "message": "Engine already awake"}
 
-            # Step 2: Resume generation so new requests can be processed
-            await self.engine_client.resume_generation()
-
-            # Step 3: Re-register endpoint instance to discovery so frontend can route to us again
             try:
-                await self.generate_endpoint.register_endpoint_instance()
-                logger.info(
-                    "[Wake] Re-registered endpoint to discovery - worker added back to routing pool"
-                )
-            except Exception as reg_err:
-                logger.warning(
-                    f"[Wake] Failed to re-register endpoint to discovery: {reg_err}"
-                )
+                # Step 1: Wake engine first - must be ready before accepting requests
+                await self.engine_client.wake_up()
 
-            return {"status": "ok", "message": f"Engine woke (tags={tags})"}
-        except Exception as e:
-            logger.error(f"Failed to wake up engine: {e}")
-            return {"status": "error", "message": str(e)}
+                # Step 2: Resume generation and re-register.
+                await self.engine_client.resume_generation()
+                if self.generate_endpoint is not None:
+                    await self.generate_endpoint.register_endpoint_instance()
+                    logger.info(
+                        "[Wake] Re-registered endpoint to discovery - worker added back to routing pool"
+                    )
+
+                self._engine_is_sleeping = False
+
+                return {
+                    "status": "ok",
+                    "message": "Engine woke",
+                }
+            except Exception as e:
+                logger.error(f"Failed to wake up engine: {e}")
+                return {"status": "error", "message": str(e)}
 
     @abstractmethod
     async def generate(self, request, context) -> AsyncGenerator[dict, None]:
