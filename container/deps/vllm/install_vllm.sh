@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# test: validate deploy test cancellation (revert after validation)
 
 # This script installs vLLM and its dependencies from PyPI (release versions only).
 # Installation order:
