@@ -53,6 +53,7 @@ dynamo-mocker = { workspace = true }
 
 # workspace
 aho-corasick = "1.1"
+arc-swap = { version = "1" }
 anyhow = { workspace = true }
 dynamo-async-openai = { workspace = true }
 dynamo-parsers = { workspace = true }

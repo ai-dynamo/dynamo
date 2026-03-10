@@ -710,6 +710,18 @@ impl ModelManager {
         }
     }
 
+    /// Deactivate the live prefill router on the decode WorkerSet for a (model, namespace).
+    /// Called when the prefill WorkerSet is removed so the decode side falls back to
+    /// aggregated mode (or fails cleanly with enforce_disagg).
+    pub fn deactivate_prefill_router_for_decode(&self, model_name: &str, namespace: &str) {
+        if let Some(model) = self.get_model(model_name)
+            && let Some(ws) = model.get_worker_set(namespace)
+            && let Some(ref pr) = ws.prefill_router
+        {
+            pr.deactivate();
+        }
+    }
+
     /// Remove the prefill router activator for a (model, namespace) pair.
     /// Called when a WorkerSet is removed to prevent stale activators.
     pub fn remove_prefill_activator(&self, model_name: &str, namespace: &str) {
@@ -1139,6 +1151,68 @@ mod tests {
         assert_eq!(
             ModelManager::model_namespace_key("gpt-4", "default-abc"),
             "gpt-4:default-abc"
+        );
+    }
+
+    // -- deactivate_prefill_router_for_decode tests --
+
+    /// Calling deactivate_prefill_router_for_decode on a non-existent model must not panic.
+    #[test]
+    fn test_deactivate_prefill_router_for_decode_noop_missing_model() {
+        let mm = ModelManager::new();
+        // No model registered — must be a no-op
+        mm.deactivate_prefill_router_for_decode("nonexistent", "ns1");
+    }
+
+    /// Calling deactivate_prefill_router_for_decode on a WorkerSet that has no
+    /// prefill_router must not panic (pure aggregated deployment).
+    #[test]
+    fn test_deactivate_prefill_router_for_decode_noop_no_router() {
+        let mm = ModelManager::new();
+        mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc"))
+            .unwrap();
+        // WorkerSet.prefill_router is None — must be a no-op
+        mm.deactivate_prefill_router_for_decode("llama", "ns1");
+    }
+
+    /// Full pipeline test: deactivate_prefill_router_for_decode finds the right
+    /// WorkerSet, calls deactivate() on its PrefillRouter, and the model is
+    /// correctly hidden from model_display_names() when enforce_disagg=true.
+    ///
+    /// The WorkerSet is seeded with a router already in the "was activated, now
+    /// deactivated" state (simulating a prefill engine that has just died).
+    /// After calling deactivate_prefill_router_for_decode the model must remain
+    /// hidden and the call must be idempotent.
+    ///
+    /// Guards the same `!ws.can_serve_requests()` check in `is_displayable()` as
+    /// `test_is_displayable_false_when_prefill_dies_enforce_disagg`, but exercises
+    /// the full ModelManager → Model → WorkerSet → PrefillRouter chain.
+    /// Removing the guard causes this test to fail — `model_display_names()`
+    /// returns the model even though prefill is dead and enforce_disagg is set.
+    #[test]
+    fn test_deactivate_prefill_router_for_decode_hides_model() {
+        use crate::kv_router::PrefillRouter;
+
+        let mm = ModelManager::new();
+
+        // Build a WorkerSet whose prefill_router simulates "was active, now dead"
+        // with enforce_disagg=true → can_serve_requests()=false → model hidden.
+        let mut ws = make_worker_set("ns1", "abc");
+        ws.prefill_router = Some(PrefillRouter::make_deactivated_for_test(true));
+        mm.add_worker_set("llama", "ns1", ws).unwrap();
+
+        // Model must already be absent (enforce_disagg + dead prefill).
+        assert!(
+            !mm.model_display_names().contains("llama"),
+            "model with dead prefill+enforce_disagg must not appear in display names"
+        );
+
+        // Calling deactivate again must be idempotent and must not panic.
+        mm.deactivate_prefill_router_for_decode("llama", "ns1");
+
+        assert!(
+            !mm.model_display_names().contains("llama"),
+            "model must remain hidden after re-deactivation"
         );
     }
 }

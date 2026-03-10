@@ -1547,6 +1547,7 @@ dependencies = [
  "aho-corasick",
  "aligned-vec",
  "anyhow",
+ "arc-swap",
  "async-nats",
  "async-stream",
  "async-trait",

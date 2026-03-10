@@ -320,6 +320,15 @@ impl ModelWatcher {
                 // remove_prefill_activator uses deployment namespace (not ws_key)
                 self.manager
                     .remove_prefill_activator(&model_name, worker_namespace);
+
+                // If a prefill WorkerSet was removed, deactivate the live prefill router
+                // on the decode WorkerSet so requests fall back to aggregated mode
+                // (or fail cleanly when enforce_disagg is set).
+                if card.model_type.supports_prefill() {
+                    self.manager
+                        .deactivate_prefill_router_for_decode(&model_name, worker_namespace);
+                }
+
                 tracing::info!(
                     model_name,
                     namespace = %worker_namespace,
@@ -506,9 +515,10 @@ impl ModelWatcher {
                 self.router_config.load_threshold_config.clone(),
             ));
 
-            // Store KV router and worker monitor on the WorkerSet
+            // Store KV router, worker monitor, and prefill router on the WorkerSet
             worker_set.kv_router = kv_chooser.clone();
             worker_set.worker_monitor = worker_monitor.clone();
+            worker_set.prefill_router = prefill_chooser.clone();
 
             // Add chat engine only if the model supports chat
             if card.model_type.supports_chat() {

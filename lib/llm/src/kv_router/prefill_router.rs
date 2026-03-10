@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashSet;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
+
+use arc_swap::ArcSwap;
 
 use anyhow::Result;
 use futures::StreamExt;
@@ -95,6 +97,29 @@ impl InnerPrefillRouter {
     }
 }
 
+/// Lifecycle state of the prefill router in a disaggregated deployment.
+///
+/// Encoded as a single enum inside an `ArcSwap` so the full state machine is
+/// visible at one glance — no need for a separate `AtomicBool` flag.
+#[derive(Clone)]
+enum PrefillState {
+    /// Disagg not configured; the router is a permanent passthrough.
+    /// Created by [`PrefillRouter::disabled()`].
+    Passthrough,
+
+    /// Decode worker registered, waiting for its prefill partner to appear.
+    /// Created by [`PrefillRouter::new()`] before activation.
+    AwaitingPrefill,
+
+    /// Prefill workers discovered and healthy; disagg inference is active.
+    /// Transitions from `AwaitingPrefill` when [`PrefillRouter::activate()`] succeeds.
+    Active(InnerPrefillRouter),
+
+    /// Prefill workers were discovered then removed; disagg is broken.
+    /// Transitions from `Active` when [`PrefillRouter::deactivate()`] is called.
+    Deactivated,
+}
+
 /// PrefillRouter is a forward-only operator that sits between Migration and the decode router.
 /// It optionally calls a prefill worker before routing to decode, extracting disaggregated_params
 /// from the prefill response and injecting them into the decode request.
@@ -104,9 +129,9 @@ impl InnerPrefillRouter {
 /// - Pre-routed: `prefill_worker_id`/`decode_worker_id` set → routes to specified workers
 /// - Normal: Worker IDs determined by router based on KV cache state
 pub struct PrefillRouter {
-    prefill_router: OnceLock<InnerPrefillRouter>,
+    state: ArcSwap<PrefillState>,
     model_manager: Arc<ModelManager>,
-    endpoint_id: OnceLock<EndpointId>,
+    endpoint_id: ArcSwap<Option<EndpointId>>,
     cancel_token: CancellationToken,
     router_mode: RouterMode,
     enforce_disagg: bool,
@@ -124,14 +149,14 @@ impl PrefillRouter {
         enforce_disagg: bool,
     ) -> Arc<Self> {
         Arc::new(Self {
-            prefill_router: OnceLock::new(),
+            state: ArcSwap::from_pointee(PrefillState::Passthrough),
             model_manager,
-            endpoint_id: OnceLock::new(),
+            endpoint_id: ArcSwap::from_pointee(None),
             cancel_token: CancellationToken::new(),
             router_mode,
             enforce_disagg,
-            model_name: String::new(), // Not used for disabled router
-            namespace: String::new(),  // Not used for disabled router
+            model_name: String::new(),
+            namespace: String::new(),
         })
     }
 
@@ -146,13 +171,12 @@ impl PrefillRouter {
         model_name: String,
         namespace: String,
     ) -> Arc<Self> {
-        let prefill_router = OnceLock::new();
         let cancel_token = CancellationToken::new();
 
         let router = Arc::new(Self {
-            prefill_router,
+            state: ArcSwap::from_pointee(PrefillState::AwaitingPrefill),
             model_manager: model_manager.clone(),
-            endpoint_id: OnceLock::new(),
+            endpoint_id: ArcSwap::from_pointee(None),
             cancel_token: cancel_token.clone(),
             router_mode,
             enforce_disagg,
@@ -201,8 +225,7 @@ impl PrefillRouter {
             "Activating prefill router"
         );
 
-        // Store endpoint_id for later use in resolve_prefill_worker
-        let _ = self.endpoint_id.set(endpoint.id());
+        self.endpoint_id.store(Arc::new(Some(endpoint.id())));
 
         // Start runtime config watcher for this endpoint (needed for get_disaggregated_endpoint)
         // This must be done before creating the router so bootstrap info is available
@@ -267,8 +290,8 @@ impl PrefillRouter {
             InnerPrefillRouter::SimpleRouter(Arc::new(push_router))
         };
 
-        // Set the router (ignore error if already set)
-        let _ = self.prefill_router.set(inner_router);
+        self.state
+            .store(Arc::new(PrefillState::Active(inner_router)));
 
         tracing::info!(
             router_mode = ?self.router_mode,
@@ -276,6 +299,47 @@ impl PrefillRouter {
         );
 
         Ok(())
+    }
+
+    /// Deactivate the prefill router. Called when all prefill workers are removed.
+    /// After deactivation, requests fall back to aggregated mode (or fail if enforce_disagg).
+    pub fn deactivate(&self) {
+        self.state.store(Arc::new(PrefillState::Deactivated));
+        self.endpoint_id.store(Arc::new(None));
+        tracing::info!(
+            model_name = %self.model_name,
+            namespace = %self.namespace,
+            enforce_disagg = self.enforce_disagg,
+            "Prefill router deactivated (prefill workers removed)"
+        );
+    }
+
+    /// Whether this router can serve requests in its current state.
+    /// - Passthrough / AwaitingPrefill / Active: true
+    /// - Deactivated + enforce_disagg: false (disagg required but prefill is dead)
+    /// - Deactivated + !enforce_disagg: true (falls back to aggregated)
+    pub fn can_serve_requests(&self) -> bool {
+        match &**self.state.load() {
+            PrefillState::Passthrough | PrefillState::AwaitingPrefill | PrefillState::Active(_) => {
+                true
+            }
+            PrefillState::Deactivated => !self.enforce_disagg,
+        }
+    }
+
+    /// Return a snapshot of the current inner prefill router, if in the `Active` state.
+    /// Cheap: `InnerPrefillRouter` holds `Arc`s internally, so the clone only bumps
+    /// reference counts.
+    fn current_router(&self) -> Option<InnerPrefillRouter> {
+        match &**self.state.load() {
+            PrefillState::Active(router) => Some(router.clone()),
+            _ => None,
+        }
+    }
+
+    /// Return a snapshot of the current endpoint ID, if set.
+    fn current_endpoint_id(&self) -> Option<EndpointId> {
+        (*self.endpoint_id.load_full()).clone()
     }
 
     /// Select a prefill worker and resolve its bootstrap connection info.
@@ -286,8 +350,10 @@ impl PrefillRouter {
         req: &PreprocessedRequest,
         preselected_worker: Option<u64>,
     ) -> Option<(u64, u32, BootstrapInfo)> {
-        let endpoint_id = self.endpoint_id.get()?;
-        self.prefill_router.get()?;
+        let endpoint_id = self.current_endpoint_id()?;
+        if !self.is_activated() {
+            return None;
+        }
 
         // Worker selection
         let (worker_id, dp_rank) = if let Some(id) = preselected_worker {
@@ -331,7 +397,7 @@ impl PrefillRouter {
         // Get bootstrap info from ModelManager (works for ANY mode)
         let endpoint = self
             .model_manager
-            .get_disaggregated_endpoint(endpoint_id, worker_id)?;
+            .get_disaggregated_endpoint(&endpoint_id, worker_id)?;
         let host = endpoint.bootstrap_host?;
         let port = endpoint.bootstrap_port?;
 
@@ -467,7 +533,7 @@ impl PrefillRouter {
         target_worker: Option<u64>,
         phase_permit: OwnedSemaphorePermit,
     ) {
-        let router = self.prefill_router.get().cloned();
+        let router = self.current_router();
         // Capture current span to propagate trace context to the spawned task
         let span = tracing::Span::current();
 
@@ -508,11 +574,10 @@ impl PrefillRouter {
         allowed_worker_ids: Option<HashSet<WorkerId>>,
     ) -> Result<(u64, u32)> {
         let prefill_router = self
-            .prefill_router
-            .get()
+            .current_router()
             .ok_or_else(|| anyhow::anyhow!(PrefillError::NotActivated))?;
 
-        match prefill_router {
+        match &prefill_router {
             InnerPrefillRouter::KvRouter(r) => {
                 let (worker, _overlap) = r
                     .chooser
@@ -544,7 +609,15 @@ impl PrefillRouter {
 
     /// Check if disaggregated mode is currently active (prefill router activated)
     pub fn is_activated(&self) -> bool {
-        self.prefill_router.get().is_some()
+        matches!(&**self.state.load(), PrefillState::Active(_))
+    }
+
+    /// Whether this router was ever activated (prefill workers were discovered at some point)
+    pub fn was_ever_activated(&self) -> bool {
+        matches!(
+            &**self.state.load(),
+            PrefillState::Active(_) | PrefillState::Deactivated
+        )
     }
 }
 
@@ -577,10 +650,10 @@ impl
         // Save original max_tokens for decode
         let original_max_tokens = req.stop_conditions.max_tokens;
 
-        // If prefill router is not activated (no prefill workers discovered),
-        // this is aggregated mode — route directly to decode.
+        // If prefill router is not activated (no prefill workers discovered or
+        // prefill died), route directly to decode in aggregated mode.
         // With --enforce-disagg, fail instead of falling back.
-        if self.prefill_router.get().is_none() {
+        if !self.is_activated() {
             if self.enforce_disagg {
                 return Err(anyhow::anyhow!(PrefillError::NotActivated));
             }
@@ -615,7 +688,7 @@ impl
                 // We successfully used the peeked worker, so we must now advance the router state
                 // to ensure the next request gets a different worker.
                 if !self.router_mode.is_kv_routing()
-                    && let Some(router) = self.prefill_router.get()
+                    && let Some(ref router) = self.current_router()
                 {
                     router.select_next_worker();
                 }
@@ -647,7 +720,7 @@ impl
                 // In Direct mode, pass preselected_worker so execute_prefill uses
                 // router.direct() instead of router.generate() (which bails in Direct mode).
                 let (result, _worker_info) = Self::execute_prefill(
-                    self.prefill_router.get().cloned(),
+                    self.current_router(),
                     prefill_context,
                     preselected_worker,
                     None,
@@ -719,5 +792,107 @@ impl
                 Err(anyhow::anyhow!(e))
             }
         }
+    }
+}
+
+#[cfg(test)]
+impl PrefillRouter {
+    /// Test helper: create a router that simulates "was activated (prefill workers appeared)
+    /// but is now deactivated (prefill engine died)".  Used by tests in this crate.
+    pub fn make_deactivated_for_test(enforce_disagg: bool) -> Arc<Self> {
+        Arc::new(Self {
+            state: ArcSwap::from_pointee(PrefillState::Deactivated),
+            model_manager: Arc::new(crate::discovery::ModelManager::new()),
+            endpoint_id: ArcSwap::from_pointee(None),
+            cancel_token: CancellationToken::new(),
+            router_mode: dynamo_runtime::pipeline::RouterMode::RoundRobin,
+            enforce_disagg,
+            model_name: "test-model".to_string(),
+            namespace: "test-ns".to_string(),
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── can_serve_requests ────────────────────────────────────────────────────
+
+    /// A brand-new router that was never activated should always allow serving
+    /// (the deployment may be purely aggregated).
+    #[test]
+    fn test_can_serve_requests_never_activated() {
+        let mm = Arc::new(crate::discovery::ModelManager::new());
+
+        // enforce_disagg=true: even strict mode allows serving when router never activated
+        let router = PrefillRouter::disabled(mm.clone(), RouterMode::RoundRobin, true);
+        assert!(
+            router.can_serve_requests(),
+            "never-activated router must allow serving regardless of enforce_disagg"
+        );
+
+        // enforce_disagg=false: same expectation
+        let router = PrefillRouter::disabled(mm, RouterMode::RoundRobin, false);
+        assert!(router.can_serve_requests());
+    }
+
+    /// A router that was once active but has since been deactivated must refuse
+    /// serving when enforce_disagg is true (no fallback to aggregated mode).
+    #[test]
+    fn test_can_serve_requests_deactivated_enforce_disagg() {
+        let router = PrefillRouter::make_deactivated_for_test(true);
+        assert!(
+            !router.can_serve_requests(),
+            "deactivated router with enforce_disagg must not allow serving"
+        );
+    }
+
+    /// When enforce_disagg is false the router should still allow serving after
+    /// deactivation — requests fall back to aggregated (decode-only) mode.
+    #[test]
+    fn test_can_serve_requests_deactivated_no_enforce() {
+        let router = PrefillRouter::make_deactivated_for_test(false);
+        assert!(
+            router.can_serve_requests(),
+            "deactivated router without enforce_disagg must allow serving (fallback)"
+        );
+    }
+
+    // ── deactivate ────────────────────────────────────────────────────────────
+
+    /// deactivate() transitions to `PrefillState::Deactivated` so
+    /// is_activated() returns false, but was_ever_activated() keeps returning
+    /// true so subsequent can_serve_requests() calls honour enforce_disagg.
+    #[test]
+    fn test_deactivate_clears_inner_router() {
+        // Build a router in the Deactivated state and call deactivate() again
+        // to verify it is idempotent and produces the right state.
+        let router = PrefillRouter::make_deactivated_for_test(true);
+
+        // Already deactivated (state = Deactivated).
+        assert!(!router.is_activated(), "should not be activated");
+        assert!(
+            router.was_ever_activated(),
+            "should record prior activation"
+        );
+
+        // Calling deactivate() again must not panic and must preserve state.
+        router.deactivate();
+        assert!(!router.is_activated());
+        assert!(router.was_ever_activated());
+    }
+
+    // ── was_ever_activated ────────────────────────────────────────────────────
+
+    /// A freshly-created disabled router should report was_ever_activated()=false.
+    #[test]
+    fn test_was_ever_activated_false_on_fresh_router() {
+        let mm = Arc::new(crate::discovery::ModelManager::new());
+        let router = PrefillRouter::disabled(mm, RouterMode::RoundRobin, false);
+        assert!(
+            !router.was_ever_activated(),
+            "fresh disabled router must not claim prior activation"
+        );
     }
 }

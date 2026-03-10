@@ -153,6 +153,10 @@ impl Model {
     }
 
     /// Whether this model should be visible in /v1/models.
+    ///
+    /// A model is hidden when:
+    /// - It has no WorkerSets with live workers
+    /// - Its decode WorkerSet lost its prefill workers and enforce_disagg is set
     pub fn is_displayable(&self) -> bool {
         let has_serving_engine = |ws: &WorkerSet| {
             ws.has_chat_engine()
@@ -171,6 +175,9 @@ impl Model {
         self.worker_sets.iter().any(|entry| {
             let ws = entry.value();
             if ws.worker_count() == 0 {
+                return false;
+            }
+            if !ws.can_serve_requests() {
                 return false;
             }
             has_serving_engine(ws.as_ref()) || (!has_any_serving_engine && ws.is_prefill_set())
@@ -616,5 +623,75 @@ mod tests {
 
         // Both have 0 workers → all filtered → Err
         assert!(model.get_chat_engine().is_err());
+    }
+
+    // ── is_displayable with disaggregated prefill ─────────────────────────────
+
+    use crate::kv_router::PrefillRouter;
+
+    /// Build a WorkerSet that has a PrefillRouter simulating "was activated, now dead".
+    /// worker_count defaults to 1 (no instance_count_rx → in-process default).
+    fn make_worker_set_with_dead_prefill(namespace: &str, enforce_disagg: bool) -> Arc<WorkerSet> {
+        let mut ws = WorkerSet::new(
+            namespace.to_string(),
+            "abc".to_string(),
+            crate::model_card::ModelDeploymentCard::default(),
+        );
+        ws.prefill_router = Some(PrefillRouter::make_deactivated_for_test(enforce_disagg));
+        Arc::new(ws)
+    }
+
+    /// Baseline: a WorkerSet without a PrefillRouter constraint should be displayable
+    /// (worker_count=1 by default, is_prefill_set()=true, no can_serve_requests block).
+    #[test]
+    fn test_is_displayable_true_basic() {
+        let model = Model::new("llama".to_string());
+        model
+            .add_worker_set("ns1".to_string(), make_worker_set("ns1", "abc"))
+            .unwrap();
+        assert!(
+            model.is_displayable(),
+            "model with an unconstrained WorkerSet must be displayable"
+        );
+    }
+
+    /// Core regression test: when the prefill engine dies and enforce_disagg is set,
+    /// the model must be hidden from /v1/models.
+    ///
+    /// Guards the `!ws.can_serve_requests()` check in `Model::is_displayable()`.
+    /// Removing that guard causes this test to fail — the model stays visible
+    /// even though no prefill engine is available to fulfil disaggregated requests.
+    #[test]
+    fn test_is_displayable_false_when_prefill_dies_enforce_disagg() {
+        let model = Model::new("llama".to_string());
+        model
+            .add_worker_set(
+                "ns1".to_string(),
+                make_worker_set_with_dead_prefill("ns1", true),
+            )
+            .unwrap();
+
+        assert!(
+            !model.is_displayable(),
+            "model must be hidden when prefill died and enforce_disagg=true"
+        );
+    }
+
+    /// When enforce_disagg is false the deployment can fall back to aggregated mode,
+    /// so the model should remain visible in /v1/models.
+    #[test]
+    fn test_is_displayable_true_when_prefill_dies_no_enforce() {
+        let model = Model::new("llama".to_string());
+        model
+            .add_worker_set(
+                "ns1".to_string(),
+                make_worker_set_with_dead_prefill("ns1", false),
+            )
+            .unwrap();
+
+        assert!(
+            model.is_displayable(),
+            "model must remain visible when prefill died but enforce_disagg=false (fallback)"
+        );
     }
 }
