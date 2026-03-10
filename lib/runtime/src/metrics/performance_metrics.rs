@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 // Initially contributed by Baseten @michaelfeil, feel free to tag on maintance.
@@ -7,7 +7,7 @@
 //!
 //! All mutations and publishing are processed by a single worker thread via commands/events.
 //! Hot-path recording from metric handles is lock-free at call site (bounded `try_send`).
-//! Ideal for high-cardinatly metrics.
+//! Ideal for high-cardinality metrics.
 
 use super::{MetricsHierarchy, create_metric, prometheus_names::build_component_metric_name};
 use parking_lot::Mutex;
@@ -26,6 +26,8 @@ const SUFFIX_AVG: &str = "avg";
 const SUFFIX_NUMERATOR: &str = "numerator";
 const SUFFIX_DENOMINATOR: &str = "denominator";
 const SUFFIX_RATIO: &str = "ratio";
+const SUFFIX_QUANTILE: &str = "quantile";
+const LABEL_QUANTILE: &str = "quantile";
 const DEFAULT_QUEUE_CAPACITY: usize = 16_384;
 const WORKER_POLL: Duration = Duration::from_millis(100);
 // guard against unbounded memory growth (should not happen for reasonable metrics)
@@ -1311,11 +1313,14 @@ fn build_metric_handles_for_spec(
                 .quantiles
                 .iter()
                 .map(|q| {
+                    let quantile_value = quantile_label_value(*q);
+                    let mut quantile_labels = label_refs.clone();
+                    quantile_labels.push((LABEL_QUANTILE, quantile_value.as_str()));
                     create_metric::<prometheus::Gauge, dyn MetricsHierarchy>(
                         publisher.hierarchy.as_ref(),
-                        &format!("{}_{}_{}", base, SUFFIX_PER_SECOND, quantile_suffix(*q)),
+                        &format!("{}_{}_{}", base, SUFFIX_PER_SECOND, SUFFIX_QUANTILE),
                         "Sliding-window throughput quantile",
-                        &label_refs,
+                        &quantile_labels,
                         None,
                         None,
                     )
@@ -1340,11 +1345,14 @@ fn build_metric_handles_for_spec(
                 .quantiles
                 .iter()
                 .map(|q| {
+                    let quantile_value = quantile_label_value(*q);
+                    let mut quantile_labels = label_refs.clone();
+                    quantile_labels.push((LABEL_QUANTILE, quantile_value.as_str()));
                     create_metric::<prometheus::Gauge, dyn MetricsHierarchy>(
                         publisher.hierarchy.as_ref(),
-                        &format!("{}_{}", base, quantile_suffix(*q)),
+                        &base,
                         "Sliding-window quantile value",
-                        &label_refs,
+                        &quantile_labels,
                         None,
                         None,
                     )
@@ -1382,11 +1390,14 @@ fn build_metric_handles_for_spec(
                 .quantiles
                 .iter()
                 .map(|q| {
+                    let quantile_value = quantile_label_value(*q);
+                    let mut quantile_labels = label_refs.clone();
+                    quantile_labels.push((LABEL_QUANTILE, quantile_value.as_str()));
                     create_metric::<prometheus::Gauge, dyn MetricsHierarchy>(
                         publisher.hierarchy.as_ref(),
-                        &format!("{}_{}_{}", base, SUFFIX_RATIO, quantile_suffix(*q)),
+                        &format!("{}_{}_{}", base, SUFFIX_RATIO, SUFFIX_QUANTILE),
                         "Sliding-window ratio quantile",
-                        &label_refs,
+                        &quantile_labels,
                         None,
                         None,
                     )
@@ -1424,12 +1435,7 @@ fn normalize_quantiles(quantiles: Vec<f64>) -> Vec<f64> {
         .collect::<Vec<_>>();
     normalized.sort_by(f64::total_cmp);
     normalized.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
-
-    let mut seen_suffixes = HashSet::new();
     normalized
-        .into_iter()
-        .filter(|q| seen_suffixes.insert(quantile_suffix(*q)))
-        .collect()
 }
 
 fn should_log_sample_overflow(overflow_count: u64) -> bool {
@@ -1694,15 +1700,15 @@ fn compute_quantiles(mut values: Vec<f64>, quantiles: &[f64]) -> Vec<(f64, f64)>
     }
 }
 
-fn quantile_suffix(q: f64) -> String {
-    let mut pct = format!("{:.6}", q.clamp(0.0, 1.0) * 100.0);
-    while pct.ends_with('0') {
-        pct.pop();
+fn quantile_label_value(q: f64) -> String {
+    let mut value = format!("{:.6}", q.clamp(0.0, 1.0));
+    while value.ends_with('0') {
+        value.pop();
     }
-    if pct.ends_with('.') {
-        pct.pop();
+    if value.ends_with('.') {
+        value.push('0');
     }
-    format!("p{}", pct.replace('.', "_"))
+    value
 }
 
 fn find_quantile(values: &[(f64, f64)], q: f64) -> f64 {
@@ -1724,29 +1730,26 @@ fn validate_metric_name_collisions(
         match spec.kind {
             PerformanceMetricKind::Rate => {
                 names.push(format!("{}_{}", base, SUFFIX_PER_SECOND));
-                names.extend(
-                    spec.quantiles
-                        .iter()
-                        .map(|q| format!("{}_{}_{}", base, SUFFIX_PER_SECOND, quantile_suffix(*q))),
-                );
+                if !spec.quantiles.is_empty() {
+                    names.push(format!(
+                        "{}_{}_{}",
+                        base, SUFFIX_PER_SECOND, SUFFIX_QUANTILE
+                    ));
+                }
             }
             PerformanceMetricKind::Distribution => {
                 names.push(format!("{}_{}", base, SUFFIX_AVG));
-                names.extend(
-                    spec.quantiles
-                        .iter()
-                        .map(|q| format!("{}_{}", base, quantile_suffix(*q))),
-                );
+                if !spec.quantiles.is_empty() {
+                    names.push(base.clone());
+                }
             }
             PerformanceMetricKind::Ratio => {
                 names.push(format!("{}_{}", base, SUFFIX_NUMERATOR));
                 names.push(format!("{}_{}", base, SUFFIX_DENOMINATOR));
                 names.push(format!("{}_{}", base, SUFFIX_RATIO));
-                names.extend(
-                    spec.quantiles
-                        .iter()
-                        .map(|q| format!("{}_{}_{}", base, SUFFIX_RATIO, quantile_suffix(*q))),
-                );
+                if !spec.quantiles.is_empty() {
+                    names.push(format!("{}_{}_{}", base, SUFFIX_RATIO, SUFFIX_QUANTILE));
+                }
             }
         }
 
@@ -1833,11 +1836,20 @@ mod tests {
             .unwrap();
         request_gps.record_count(8).unwrap();
         request_gps.record_count(12).unwrap();
-
-        let s = request_gps.snapshot_for_test().unwrap();
-        assert_eq!(s.kind, PerformanceMetricKind::Rate);
-        assert!(s.rate_per_second.unwrap_or_default() >= 0.0);
-        assert_eq!(s.quantiles.len(), 3);
+        let deadline = Instant::now() + Duration::from_millis(100);
+        loop {
+            let s = request_gps.snapshot_for_test().unwrap();
+            assert_eq!(s.kind, PerformanceMetricKind::Rate);
+            assert_eq!(s.quantiles.len(), 3);
+            if s.rate_per_second.unwrap_or_default() > 0.0 {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "rate_per_second did not become positive before timeout"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
     }
 
     #[test]
@@ -1876,14 +1888,14 @@ mod tests {
     }
 
     #[test]
-    fn quantiles_are_deduped_by_prometheus_suffix() {
+    fn quantiles_preserve_distinct_values() {
         let spec = PerformanceMetricSpec::distribution("ttft", vec![0.994, 0.995, 0.999], None);
-        let suffixes = spec
+        let labels = spec
             .quantiles
             .iter()
-            .map(|q| quantile_suffix(*q))
+            .map(|q| quantile_label_value(*q))
             .collect::<HashSet<_>>();
-        assert_eq!(suffixes.len(), spec.quantiles.len());
+        assert_eq!(labels.len(), spec.quantiles.len());
     }
 
     #[test]
@@ -1954,10 +1966,11 @@ mod tests {
 
         let before = hierarchy.metrics().prometheus_expfmt().unwrap();
         assert!(before.contains("baseten_frontend_foo_per_second_avg"));
-        assert!(before.contains("baseten_frontend_foo_per_second_p10"));
-        assert!(before.contains("baseten_frontend_foo_per_second_p50"));
-        assert!(before.contains("baseten_frontend_foo_per_second_p99"));
-        assert!(before.contains("baseten_frontend_foo_per_second_p99_9"));
+        assert!(before.contains("baseten_frontend_foo_per_second{"));
+        assert!(before.contains("quantile=\"0.1\""));
+        assert!(before.contains("quantile=\"0.5\""));
+        assert!(before.contains("quantile=\"0.99\""));
+        assert!(before.contains("quantile=\"0.999\""));
 
         let err = match tracker.new_rate_metric("foo", vec![0.1, 0.5, 0.99, 0.999], Some(1.0), None)
         {
@@ -1971,15 +1984,13 @@ mod tests {
 
         let after = hierarchy.metrics().prometheus_expfmt().unwrap();
         assert!(after.contains("baseten_frontend_foo_per_second_avg"));
-        assert!(after.contains("baseten_frontend_foo_per_second_p10"));
-        assert!(after.contains("baseten_frontend_foo_per_second_p50"));
-        assert!(after.contains("baseten_frontend_foo_per_second_p99"));
-        assert!(after.contains("baseten_frontend_foo_per_second_p99_9"));
+        assert!(after.contains("baseten_frontend_foo_per_second{"));
+        assert!(after.contains("quantile=\"0.1\""));
+        assert!(after.contains("quantile=\"0.5\""));
+        assert!(after.contains("quantile=\"0.99\""));
+        assert!(after.contains("quantile=\"0.999\""));
         assert!(!after.contains("baseten_frontend_foo_per_second_per_second"));
-        assert!(!after.contains("baseten_frontend_foo_per_second_per_second_p10"));
-        assert!(!after.contains("baseten_frontend_foo_per_second_per_second_p50"));
-        assert!(!after.contains("baseten_frontend_foo_per_second_per_second_p99"));
-        assert!(!after.contains("baseten_frontend_foo_per_second_per_second_p99_9"));
+        assert!(!after.contains("baseten_frontend_foo_per_second_per_second_quantile"));
     }
 
     #[test]
@@ -1999,10 +2010,11 @@ mod tests {
 
         let output = hierarchy.metrics().prometheus_expfmt().unwrap();
         assert!(output.contains("component_baseten_frontend_requests_per_second"));
-        assert!(output.contains("component_baseten_frontend_requests_per_second_p10"));
-        assert!(output.contains("component_baseten_frontend_requests_per_second_p50"));
-        assert!(output.contains("component_baseten_frontend_requests_per_second_p99"));
-        assert!(output.contains("component_baseten_frontend_requests_per_second_p99_9"));
+        assert!(output.contains("component_baseten_frontend_requests_per_second_quantile{"));
+        assert!(output.contains("quantile=\"0.1\""));
+        assert!(output.contains("quantile=\"0.5\""));
+        assert!(output.contains("quantile=\"0.99\""));
+        assert!(output.contains("quantile=\"0.999\""));
     }
 
     #[test]
