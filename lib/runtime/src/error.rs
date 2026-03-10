@@ -454,7 +454,10 @@ mod tests {
         assert_eq!(ErrorType::InvalidArgument.to_string(), "InvalidArgument");
         assert_eq!(ErrorType::CannotConnect.to_string(), "CannotConnect");
         assert_eq!(ErrorType::Disconnected.to_string(), "Disconnected");
-        assert_eq!(ErrorType::ConnectionTimeout.to_string(), "ConnectionTimeout");
+        assert_eq!(
+            ErrorType::ConnectionTimeout.to_string(),
+            "ConnectionTimeout"
+        );
         assert_eq!(ErrorType::Cancelled.to_string(), "Cancelled");
         assert_eq!(
             ErrorType::Backend(BackendError::Unknown).to_string(),
