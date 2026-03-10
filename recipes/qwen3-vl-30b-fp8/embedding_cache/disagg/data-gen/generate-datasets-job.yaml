@@ -3,7 +3,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: qwen3-vl-30b-fp8-generate-datasets
+  name: qwen3-vl-30b-fp8-generate-datasets-http
 spec:
   backoffLimit: 1
   completions: 1
@@ -48,15 +48,14 @@ spec:
               mkdir -p "${OUTPUT_DIR}"
 
               for POOL_SIZE in 200; do  # 500 800
-                OUTPUT_FILE="${OUTPUT_DIR}/1000req_1img_${POOL_SIZE}pool_400word_base64.jsonl"
+                OUTPUT_FILE="${OUTPUT_DIR}/1000req_1img_${POOL_SIZE}pool_400word_http.jsonl"
                 echo "Generating ${OUTPUT_FILE} (images-pool=${POOL_SIZE})"
                 python3 "${GENERATOR_MAIN}" \
                   -n 1000 \
                   --images-per-request 1 \
                   --images-pool "${POOL_SIZE}" \
                   --user-text-tokens 400 \
-                  --image-mode base64 \
-                  --image-dir /perf-cache/images \
+                  --image-mode http \
                   -o "${OUTPUT_FILE}"
               done
 

@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Runs cache_on vs cache_off with a concurrency sweep (32, 64, 128) across all datasets.
-# cache_on: restarts worker between runs (deployment already has cache enabled).
+# cache_on: restarts prefill worker between runs (deployment already has cache enabled).
 # cache_off: patches DynamoGraphDeployment CRD to set cache=0, then sweeps.
 #
 # Requires: ServiceAccount with permissions to restart deployments and patch the CRD.
@@ -17,9 +17,12 @@ kind: Role
 metadata:
   name: benchmark-restart-role
 rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "patch"]
   - apiGroups: [""]
     resources: ["pods"]
-    verbs: ["get", "list", "delete"]
+    verbs: ["get", "list"]
   - apiGroups: ["nvidia.com"]
     resources: ["dynamographdeployments"]
     verbs: ["get", "patch"]
@@ -39,7 +42,7 @@ roleRef:
 apiVersion: v1
 kind: Pod
 metadata:
-  name: qwen3-vl-agg-gb200-benchmark
+  name: qwen3-vl-disagg-gb200-benchmark
   labels:
     app: benchmark
 spec:
@@ -53,18 +56,15 @@ spec:
       effect: "NoExecute"
   containers:
     - name: benchmark
-      image: nvcr.io/nvstaging/ai-dynamo/vllm-runtime:1.0.0rc8-arm64
-      imagePullPolicy: IfNotPresent
+      image: bitnami/kubectl:1.31.0
       command:
         - /bin/bash
         - -lc
         - |
           set -euo pipefail
 
-          apt update && apt install -y curl jq
-          pip install aiperf
-          curl -LO "https://dl.k8s.io/release/v1.31.0/bin/linux/arm64/kubectl" \
-            && chmod +x kubectl && mv kubectl /opt/dynamo/venv/bin/
+          apt update && apt install -y curl jq python3 python3-pip
+          pip install --break-system-packages aiperf
 
           wait_for_model() {
             echo "Waiting for model '${MODEL_NAME}' at http://${FRONTEND}:8000/v1/models..."
@@ -77,9 +77,12 @@ spec:
           }
 
           restart_worker() {
-            echo "Restarting worker by deleting pod (PodClique will recreate)..."
-            kubectl delete pod -l nvidia.com/dynamo-component=VllmWorker,nvidia.com/dynamo-graph-deployment-name=${GRAPH_DEPLOYMENT} --wait=true
-            sleep 10
+            echo "Restarting prefill worker deployment..."
+            kubectl rollout restart deployment/${PREFILL_DEPLOYMENT}
+            kubectl rollout status deployment/${PREFILL_DEPLOYMENT} --timeout=600s
+            echo "Restarting decode worker deployment..."
+            kubectl rollout restart deployment/${DECODE_DEPLOYMENT}
+            kubectl rollout status deployment/${DECODE_DEPLOYMENT} --timeout=600s
             wait_for_model
           }
 
@@ -87,8 +90,9 @@ spec:
             local gb=$1
             echo "Patching DynamoGraphDeployment: DYN_MULTIMODAL_EMBEDDING_CACHE_GB=${gb}"
             kubectl patch dynamographdeployment/${GRAPH_DEPLOYMENT} --type=json \
-              -p "[{\"op\":\"replace\",\"path\":\"/spec/services/VllmWorker/extraPodSpec/mainContainer/env/${CACHE_ENV_INDEX}/value\",\"value\":\"${gb}\"}]"
-            sleep 10
+              -p "[{\"op\":\"replace\",\"path\":\"/spec/services/VllmPrefillWorker/extraPodSpec/mainContainer/env/${CACHE_ENV_INDEX}/value\",\"value\":\"${gb}\"}]"
+            kubectl rollout status deployment/${PREFILL_DEPLOYMENT} --timeout=600s
+            kubectl rollout status deployment/${DECODE_DEPLOYMENT} --timeout=600s
             wait_for_model
           }
 
@@ -123,9 +127,9 @@ spec:
           }
 
           DATASETS=(
-            "1000req_1img_200pool_400word_base64"
-            # "1000req_1img_500pool_400word_base64"
-            # "1000req_1img_800pool_400word_base64"
+            "1000req_1img_200pool_400word_http"
+            # "1000req_1img_500pool_400word_http"
+            # "1000req_1img_800pool_400word_http"
           )
           CONCURRENCIES=(32 64 128)
 
@@ -154,11 +158,15 @@ spec:
         - name: MODEL_NAME
           value: Qwen/Qwen3-VL-30B-A3B-Instruct-FP8
         - name: FRONTEND
-          value: qwen3-vl-agg-gb200-frontend
+          value: qwen3-vl-disagg-gb200-0-frontend
         - name: GRAPH_DEPLOYMENT
-          value: qwen3-vl-agg-gb200
+          value: qwen3-vl-disagg-gb200
+        - name: PREFILL_DEPLOYMENT
+          value: qwen3-vl-disagg-gb200-0-vllmprefillworker
+        - name: DECODE_DEPLOYMENT
+          value: qwen3-vl-disagg-gb200-0-vllmdecodeworker
         - name: CACHE_ENV_INDEX
-          value: "3"  # index of DYN_MULTIMODAL_EMBEDDING_CACHE_GB in deploy.yaml env array
+          value: "3"  # index of DYN_MULTIMODAL_EMBEDDING_CACHE_GB in deploy.yaml prefill env array
         - name: CACHE_GB
           value: "10"
         - name: MAX_TOKENS
@@ -170,7 +178,7 @@ spec:
         - name: DATASET_DIR
           value: /perf-cache/datasets
         - name: ARTIFACT_BASE_DIR
-          value: /perf-cache/artifacts/fp8/gb200/agg
+          value: /perf-cache/artifacts/fp8/gb200/disagg
       resources:
         requests:
           cpu: "8"
