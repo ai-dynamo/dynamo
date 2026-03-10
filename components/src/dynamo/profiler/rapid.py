@@ -94,10 +94,6 @@ def _generate_dgd_from_pick(
     return None
 
 
-# in naive mode, use vllm as the default backend
-_DEFAULT_NAIVE_BACKEND = "vllm"
-
-
 def _run_naive_fallback(
     dgdr: DynamoGraphDeploymentRequestSpec,
     model: str,
@@ -106,12 +102,6 @@ def _run_naive_fallback(
     backend: str,
 ) -> dict:
     """Handle the AIC-unsupported path via naive config generation."""
-    if backend == "auto":
-        backend = _DEFAULT_NAIVE_BACKEND
-        logger.info(
-            "Auto backend resolved to '%s' for naive fallback.",
-            backend,
-        )
     logger.info(
         "AIC does not support this combo — falling back to naive config generation."
     )
