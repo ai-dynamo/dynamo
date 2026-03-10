@@ -127,7 +127,7 @@ runs:
 
         # Find pods that are not fully ready (covers CrashLoopBackOff, ImagePull errors,
         # AND pods in Running state with 0/N ready containers)
-        NOT_READY=$(kubectl get pods -n ${NAMESPACE} --no-headers | awk '$2 !~ /^([0-9]+)\/\1$/ || $3 == "Error"' || true)
+        NOT_READY=$(kubectl get pods -n ${NAMESPACE} --no-headers | awk -F'[/ ]+' '$2 != $3 || $4 == "Error"' || true)
         if [ -n "$NOT_READY" ]; then
           echo "$NOT_READY" | awk '{print "- **" $1 "** | Ready: `" $2 "` | Status: `" $3 "`"}' >> $GITHUB_STEP_SUMMARY
 
