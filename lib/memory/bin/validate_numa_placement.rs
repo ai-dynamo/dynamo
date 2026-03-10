@@ -31,7 +31,7 @@ fn query_page_nodes(ptr: *const u8, size: usize) -> Vec<i32> {
         if ps > 0 { ps as usize } else { 4096 }
     };
 
-    let num_pages = (size + page_size - 1) / page_size;
+    let num_pages = size.div_ceil(page_size);
     if num_pages == 0 {
         return Vec::new();
     }
@@ -48,7 +48,7 @@ fn query_page_nodes(ptr: *const u8, size: usize) -> Vec<i32> {
             libc::SYS_move_pages,
             0i32,                                      // pid = 0 (self)
             num_pages as libc::c_ulong,                // count
-            pages.as_ptr() as *const *const libc::c_void, // pages
+            pages.as_ptr(),                                 // pages
             std::ptr::null::<i32>(),                    // nodes = NULL (query mode)
             status.as_mut_ptr(),                        // status (output)
             0i32,                                       // flags
