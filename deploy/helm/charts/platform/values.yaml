@@ -54,6 +54,9 @@ dynamo-operator:
   # The Job runs the operator image with the crd-apply tool to apply CRDs via server-side apply.
   upgradeCRD: true
 
+  # Environment variables to pass to operator Deployment.
+  env: []
+
   # -- NATS server address for operator communication (leave empty to use the bundled NATS chart). Format: "nats://hostname:port"
   natsAddr: ""
 
