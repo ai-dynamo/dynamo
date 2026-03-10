@@ -32,6 +32,47 @@ The standalone indexer works with any engine that publishes KV cache events over
 - **Custom routing**: Build external routing logic that queries the indexer for overlap scores and makes its own worker selection decisions.
 - **Monitoring**: Observe KV cache distribution across workers without running a full router.
 
+## P2P Recovery
+
+Multiple indexer replicas can subscribe to the same ZMQ worker endpoints for fault tolerance. When a replica starts (or restarts after a crash), it bootstraps its radix tree state from a healthy peer before processing live events.
+
+### How It Works
+
+1. Workers are registered via `--workers` CLI, which connects ZMQ SUB sockets immediately.
+2. A 1-second delay ensures the peer's tree state has advanced past the ZMQ connection point, so the dump covers any events that would otherwise be lost to the slow-joiner window.
+3. The indexer fetches a `/dump` from the first reachable peer in `--peers`.
+4. Dump events are applied to populate the radix tree.
+5. ZMQ listeners are unblocked and begin draining any events that buffered during recovery.
+
+If no peers are reachable, the indexer starts with an empty state.
+
+### Example: Two-Replica Setup
+
+```bash
+# Replica A (first instance, no peers)
+dynamo-kv-indexer --port 8090 --block-size 16 \
+  --workers "1=tcp://worker1:5557,2=tcp://worker2:5558"
+
+# Replica B (recovers from A on startup)
+dynamo-kv-indexer --port 8091 --block-size 16 \
+  --workers "1=tcp://worker1:5557,2=tcp://worker2:5558" \
+  --peers "http://localhost:8090"
+```
+
+Both replicas subscribe to the same workers. Replica B recovers A's tree state on startup, then both independently process live ZMQ events going forward.
+
+### Consistency
+
+The dump is a weakly consistent BFS snapshot of the radix tree — concurrent writes may race with the traversal. This is acceptable because:
+
+- **Stale blocks** (partially removed branches): live `Remove` events will clean them up.
+- **Missing blocks** (partially added branches): live `Stored` events will add them.
+- The tree converges to the correct state after live events catch up.
+
+### Peer Management
+
+Peers can be registered at startup via `--peers` or dynamically via the HTTP API. The peer list is used for recovery only — peers do not synchronize state in real time.
+
 ## Building
 
 The binary is a feature-gated target in the `dynamo-kv-router` crate:
@@ -43,17 +84,18 @@ cargo build -p dynamo-kv-router --features indexer-bin --bin dynamo-kv-indexer
 ## CLI
 
 ```bash
-dynamo-kv-indexer --port 8090 [--threads 1] [--block-size 16 --model-name my-model --tenant-id default --workers "1=tcp://host:5557,2=tcp://host:5558"]
+dynamo-kv-indexer --port 8090 [--threads 4] [--block-size 16 --model-name my-model --tenant-id default --workers "1=tcp://host:5557,2:1=tcp://host:5558"] [--peers "http://peer1:8090,http://peer2:8091"]
 ```
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--block-size` | (none) | KV cache block size for initial `--workers` (required when `--workers` is set) |
 | `--port` | `8090` | HTTP server listen port |
-| `--threads` | `1` | Number of indexer threads (1 = single-threaded, >1 = thread pool) |
-| `--workers` | (none) | Initial workers as `instance_id=zmq_address,...` pairs |
+| `--threads` | `4` | Number of indexer threads (1 = single-threaded, >1 = thread pool) |
+| `--workers` | (none) | Initial workers as `instance_id[:dp_rank]=zmq_address,...` pairs (dp_rank defaults to 0) |
 | `--model-name` | `default` | Model name for initial `--workers` |
 | `--tenant-id` | `default` | Tenant ID for initial `--workers` |
+| `--peers` | (none) | Comma-separated peer indexer URLs for P2P recovery on startup |
 
 ## HTTP API
 
@@ -188,12 +230,45 @@ curl http://localhost:8090/dump
 Returns:
 ```json
 {
-  "llama-3-8b:default": [<RouterEvent>, ...],
-  "mistral-7b:customer-a": [<RouterEvent>, ...]
+  "llama-3-8b:default": {
+    "block_size": 16,
+    "events": [<RouterEvent>, ...]
+  },
+  "mistral-7b:customer-a": {
+    "block_size": 16,
+    "events": [<RouterEvent>, ...]
+  }
 }
 ```
 
-Each indexer is dumped concurrently.
+Each indexer is dumped concurrently. The `block_size` field lets recovering peers create indexers with the correct block size without requiring `--block-size` on every replica.
+
+### `POST /register_peer` — Register a peer indexer
+
+```bash
+curl -X POST http://localhost:8090/register_peer \
+  -H 'Content-Type: application/json' \
+  -d '{"url": "http://peer:8091"}'
+```
+
+### `POST /deregister_peer` — Remove a peer indexer
+
+```bash
+curl -X POST http://localhost:8090/deregister_peer \
+  -H 'Content-Type: application/json' \
+  -d '{"url": "http://peer:8091"}'
+```
+
+### `GET /peers` — List registered peers
+
+```bash
+curl http://localhost:8090/peers
+```
+
+Returns:
+```json
+["http://peer:8091"]
+```
 
 ## Limitations
 
@@ -233,6 +308,24 @@ graph TD
     style REG fill:#2e8b57,stroke:#333,color:#fff
     style HTTP fill:#2e8b57,stroke:#333,color:#fff
     style CLIENT fill:#fff3e0,stroke:#333,color:#333
+```
+
+### P2P Recovery Flow
+
+```mermaid
+sequenceDiagram
+    participant B as Replica B (new)
+    participant A as Replica A (healthy)
+    participant W as Workers (ZMQ PUB)
+
+    B->>W: Connect ZMQ SUB sockets
+    Note over B,W: 1s delay for peer tree to advance past connection point
+    B->>A: GET /dump
+    A-->>B: Radix tree snapshot + block sizes
+    Note over B: Apply dump events
+    Note over B: Unblock ZMQ listeners
+    B->>W: Start draining buffered events
+    Note over B: Ready to serve queries
 ```
 
 ## See Also
