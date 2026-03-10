@@ -115,10 +115,7 @@ class VLLMWorkerProcess(ManagedProcess):
                 "--served-model-name",
                 f"{VLLM_MM_MODEL}__internal",
             ],
-            env=_make_process_env(
-                DYN_SYSTEM_PORT=str(system_port),
-                DYN_ENABLE_MM_ROUTER="1",
-            ),
+            env=_make_process_env(DYN_SYSTEM_PORT=str(system_port)),
             health_check_urls=[
                 (f"http://localhost:{system_port}/health", _check_ready)
             ],
