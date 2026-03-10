@@ -58,25 +58,18 @@ spec:
       affinity:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- if .Values.upgradeCRD }}
+      initContainers:
+      - name: crd-apply
+        image: {{ .Values.controllerManager.manager.image.repository }}:{{ .Values.controllerManager.manager.image.tag | default .Chart.AppVersion }}
+        imagePullPolicy: {{ .Values.controllerManager.manager.image.pullPolicy | default "IfNotPresent" }}
+        securityContext: {{- toYaml .Values.controllerManager.manager.containerSecurityContext | nindent 10 }}
+        command: ["/crd-apply"]
+        args:
+          - "--crds-dir=/opt/dynamo-operator/crds/"
+          - "--version={{ .Chart.AppVersion }}"
+      {{- end }}
       containers:
-      - args: {{- toYaml .Values.controllerManager.kubeRbacProxy.args | nindent
-          8 }}
-        env:
-        - name: KUBERNETES_CLUSTER_DOMAIN
-          value: {{ quote .Values.kubernetesClusterDomain }}
-        imagePullPolicy: {{ .Values.controllerManager.kubeRbacProxy.image.pullPolicy | quote }}
-        image: {{ .Values.controllerManager.kubeRbacProxy.image.repository }}:{{
-          .Values.controllerManager.kubeRbacProxy.image.tag | default .Chart.AppVersion
-          }}
-        name: kube-rbac-proxy
-        ports:
-        - containerPort: 8443
-          name: https
-          protocol: TCP
-        resources: {{- toYaml .Values.controllerManager.kubeRbacProxy.resources
-          | nindent 10 }}
-        securityContext: {{- toYaml .Values.controllerManager.kubeRbacProxy.containerSecurityContext
-          | nindent 10 }}
       - args:
         - --config=/etc/dynamo-operator/config.yaml
         - --operator-version={{ .Chart.AppVersion }}
@@ -96,6 +89,9 @@ spec:
           periodSeconds: 20
         name: manager
         ports:
+        - containerPort: 8080
+          name: metrics
+          protocol: TCP
         - containerPort: 9443
           name: webhook-server
           protocol: TCP
@@ -128,3 +124,6 @@ spec:
         secret:
           defaultMode: 420
           secretName: {{ .Values.webhook.certificateSecret.name }}
+          # Allow the pod to start before the secret exists so the
+          # in-operator cert-controller can bootstrap it at runtime.
+          optional: true
