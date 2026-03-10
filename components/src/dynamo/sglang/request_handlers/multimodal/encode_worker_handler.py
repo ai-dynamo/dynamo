@@ -97,7 +97,7 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler):
     def cleanup(self) -> None:
         pass
 
-    @_nvtx.range_decorator("mm:encode_worker_generate", color="blue")
+    @_nvtx.range_decorator("mm:enc:generate", color="blue")
     async def generate(
         self, request: SglangMultimodalRequest, context: Context
     ) -> AsyncIterator[str]:

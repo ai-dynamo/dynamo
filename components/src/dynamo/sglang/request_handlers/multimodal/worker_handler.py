@@ -320,7 +320,7 @@ class MultimodalWorkerHandler(BaseWorkerHandler):
             request: Multimodal request with input and parameters.
             context: Context object for cancellation handling.
         """
-        rng_pd = _nvtx.start_range("mm:pd_worker_generate", color="green")
+        rng_pd = _nvtx.start_range("mm:pd::generate", color="green")
         rng_ttft = _nvtx.start_range("mm:pd:ttft", color="yellow")
         ttft_ended = False
 
@@ -386,7 +386,7 @@ class MultimodalWorkerHandler(BaseWorkerHandler):
             bootstrap_room=bootstrap_info["bootstrap_room"],
         )
 
-        rng_first = _nvtx.start_range("mm:decode:first_token", color="purple")
+        rng_first = _nvtx.start_range("mm:dec:first_token", color="purple")
         first_token = True
         try:
             async for output in StreamProcessor.process_sglang_stream(decode_stream):
@@ -430,7 +430,7 @@ class MultimodalWorkerHandler(BaseWorkerHandler):
                 stream=True,
             )
 
-            rng_first = _nvtx.start_range("mm:decode:first_token", color="purple")
+            rng_first = _nvtx.start_range("mm:dec:first_token", color="purple")
             first_token = True
             try:
                 async for output in StreamProcessor.process_sglang_stream(agg_stream):
