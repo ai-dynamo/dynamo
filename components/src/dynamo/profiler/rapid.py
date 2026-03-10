@@ -29,6 +29,7 @@ from dynamo.profiler.utils.dgdr_v1beta1_types import DynamoGraphDeploymentReques
 from dynamo.profiler.utils.profile_common import (
     derive_backend_image,
     needs_profile_data,
+    rerank_by_optimization_type,
 )
 
 logger = logging.getLogger(__name__)
@@ -270,6 +271,7 @@ def _run_default_sim(
             )
 
     best_config_df = best_configs.get(chosen, pd.DataFrame())
+    best_config_df = rerank_by_optimization_type(best_config_df, dgdr)
     best_latencies = best_latencies_map.get(
         chosen, {"ttft": 0.0, "tpot": 0.0, "request_latency": 0.0}
     )

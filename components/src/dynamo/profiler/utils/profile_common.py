@@ -234,6 +234,35 @@ def warn_gpu_shortage(
         )
 
 
+def rerank_by_optimization_type(
+    df: pd.DataFrame,
+    dgdr: DynamoGraphDeploymentRequestSpec,
+) -> pd.DataFrame:
+    """
+    Sort a picked-config DataFrame based on throughput (default) or latency.
+    """
+    from dynamo.profiler.utils.dgdr_v1beta1_types import OptimizationType
+
+    if df is None or df.empty:
+        return df
+    opt = dgdr.sla.optimizationType if dgdr.sla else None
+    if opt != OptimizationType.Latency:
+        return df
+    sort_cols = [c for c in ("ttft", "tpot", "request_latency") if c in df.columns]
+    if not sort_cols:
+        logger.debug(
+            "optimizationType=latency requested but no latency columns found in "
+            "best_config_df; keeping AIC ordering."
+        )
+        return df
+    logger.info(
+        "optimizationType=latency: re-ranking %d configs by %s ascending.",
+        len(df),
+        sort_cols,
+    )
+    return df.sort_values(sort_cols, ascending=True).reset_index(drop=True)
+
+
 def get_profiling_job_tolerations(dgdr: DynamoGraphDeploymentRequestSpec) -> list:
     """Return tolerations from overrides.profilingJob.template.spec.tolerations."""
     try:

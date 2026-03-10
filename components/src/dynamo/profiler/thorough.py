@@ -49,6 +49,7 @@ from dynamo.profiler.utils.profile_common import (
     derive_backend_image,
     get_profiling_job_tolerations,
     inject_tolerations_into_dgd,
+    rerank_by_optimization_type,
 )
 from dynamo.profiler.utils.profile_decode import get_num_request_range
 
@@ -430,6 +431,7 @@ async def run_thorough(
     )
 
     best_config_df = result.get("best_config_df", pd.DataFrame())
+    best_config_df = rerank_by_optimization_type(best_config_df, dgdr)
 
     # --- Stage 4: DGD generation ---
     task = TaskConfig(

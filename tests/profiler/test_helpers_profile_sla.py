@@ -273,6 +273,24 @@ class TestValidDgdrSpec:
         with pytest.raises(ValueError, match="ttft.*itl.*e2eLatency"):
             valid_dgdr_spec(dgdr)
 
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_optimization_type_with_ttft_itl_accepted(self):
+        """optimizationType + ttft/itl is a valid combination (regression: TC-21.4)."""
+        sla = SLASpec(optimizationType="latency", ttft=300.0, itl=25.0)
+        dgdr = _make_dgdr(sla=sla)
+        valid_dgdr_spec(dgdr)
+        assert dgdr.sla.optimizationType == "latency"
+        assert dgdr.sla.ttft == 300.0
+        assert dgdr.sla.itl == 25.0
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_e2e_latency_with_ttft_itl_raises(self):
+        """e2eLatency and ttft/itl together must be rejected."""
+        with pytest.raises(ValueError, match="e2eLatency"):
+            SLASpec(ttft=300.0, itl=25.0, e2eLatency=500.0)
+
 
 # ---------------------------------------------------------------------------
 # validate_dgdr_dynamo_features
