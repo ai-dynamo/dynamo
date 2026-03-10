@@ -58,7 +58,7 @@ Examples:
         type=int,
         default=-1,
         dest="max_total_gpus",
-        help="Maximum total GPUs across all managed pools. Requests that would exceed this are rejected. (-1 = unlimited, default: -1)",
+        help="Maximum total GPUs across all managed pools. Requests that would exceed this limit are rejected. 0 means no GPU scaling is allowed. -1 (default) disables enforcement entirely.",
     )
 
     return parser

@@ -76,7 +76,7 @@ async def main(runtime: DistributedRuntime, args):
     else:
         logger.info("No-operation mode: DISABLED")
 
-    if args.max_total_gpus > 0:
+    if args.max_total_gpus >= 0:
         logger.info(f"Max total GPUs: {args.max_total_gpus}")
     else:
         logger.info("Max total GPUs: UNLIMITED")
