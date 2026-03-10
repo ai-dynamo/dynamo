@@ -110,12 +110,17 @@ impl<P: SequencePublisher + 'static, C: WorkerConfigLike> SchedulerQueue<P, C> {
             .map(|&id| {
                 let (dp_start, dp_size) = discovery_workers
                     .get(&id)
-                    .map(|c| (c.data_parallel_start_rank(), c.data_parallel_size()))
+                    .map(|runtime_config| {
+                        (
+                            runtime_config.data_parallel_start_rank(),
+                            runtime_config.data_parallel_size(),
+                        )
+                    })
                     .unwrap_or((0, 1));
                 (id, (dp_start, dp_size))
             })
             .collect();
-        self.slots.ensure_workers_exist(&dp_range);
+        self.slots.register_external_workers(&dp_range);
     }
 
     /// Enqueue a new request.

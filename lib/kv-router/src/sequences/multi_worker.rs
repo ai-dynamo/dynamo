@@ -274,16 +274,17 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         Ok(())
     }
 
-    /// Ensure that the given workers exist in the table, adding any that are missing.
+    /// Register externally-provided workers (e.g. from EPP) in the slot tracker,
+    /// adding any that are missing.
     ///
     /// Unlike [`update_workers`], this does not remove workers absent from the
-    /// input — it only adds new ones.  This is intentional: in External mode the
-    /// EPP may send different subsets of workers on different requests, and one
-    /// routing call must not evict workers registered by another.
+    /// input — it only adds new ones.  This is intentional: the EPP may send
+    /// different subsets of workers on different requests, and one routing call
+    /// must not evict workers registered by another.
     ///
     /// Worker removal in External mode will be handled separately via GAIE
-    /// lifecycle events (not yet implemented). TODO (atchernych) once we upgate to GAIE latest.
-    pub fn ensure_workers_exist(&self, dp_range: &HashMap<u64, (u32, u32)>) {
+    /// lifecycle events (not yet implemented). TODO (atchernych) once we upgrade to GAIE latest.
+    pub fn register_external_workers(&self, dp_range: &HashMap<u64, (u32, u32)>) {
         let mut table = self.workers.write();
         for (&worker_id, &(dp_start, dp_size)) in dp_range {
             for dp_rank in dp_start..(dp_start + dp_size) {
