@@ -11,7 +11,7 @@
 
 ## Additional Model Assets
 
-`deploy-eagle-specdec.yaml` uses a separate EAGLE draft-head checkpoint in addition to the base Kimi weights. By default, the deployment recipe file loads the EAGLE checkpoint from path `/opt/models/kimi-eagle-layers` mounted from the `model-cache` PVC, so you should populate this path before deploying. 
+`deploy-eagle-specdec.yaml` uses a separate EAGLE draft-head checkpoint in addition to the base Kimi weights. By default, the deployment recipe file loads the EAGLE checkpoint from path `/opt/models/kimi-eagle-layers` mounted from the `model-cache` PVC, so you should populate this path before deploying.
 
 Expected contents under this folder:
 - `config.json`
