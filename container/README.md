@@ -248,7 +248,7 @@ The frontend image is a specialized container that includes the Dynamo component
 **Build EPP Image**
 ```bash
 sudo apt-get update && sudo apt-get install -y git build-essential protobuf-compiler libclang-dev
-curl --retry 5 --retry-delay 3 --retry-all-errors -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+curl --retry 5 --retry-delay 3 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
 . "$HOME/.cargo/env"
 cargo install cbindgen
 
