@@ -138,7 +138,7 @@ navigation:
             path: fault-tolerance/request-rejection.md
           - page: Testing
             path: fault-tolerance/testing.md
-      - page: Writing Python Workers in Dynamo
+      - page: Writing Python Workers
         path: development/backend-guide.md
 
   # ==================== Backends ====================
@@ -237,18 +237,22 @@ navigation:
         path: design-docs/disagg-serving.md
       - page: Distributed Runtime
         path: design-docs/distributed-runtime.md
-      - page: Discovery Plane
-        path: design-docs/discovery-plane.md
-      - page: Request Plane
-        path: design-docs/request-plane.md
-      - page: Event Plane
-        path: design-docs/event-plane.md
-      - page: Router Design
-        path: design-docs/router-design.md
-      - page: KVBM Design
-        path: design-docs/kvbm-design.md
-      - page: Planner Design
-        path: design-docs/planner-design.md
+      - section: Communication Planes
+        contents:
+          - page: Discovery Plane
+            path: design-docs/discovery-plane.md
+          - page: Request Plane
+            path: design-docs/request-plane.md
+          - page: Event Plane
+            path: design-docs/event-plane.md
+      - section: Component Design
+        contents:
+          - page: Router Design
+            path: design-docs/router-design.md
+          - page: KVBM Design
+            path: design-docs/kvbm-design.md
+          - page: Planner Design
+            path: design-docs/planner-design.md
 
   # ==================== Blog ====================
   - section: Blog
