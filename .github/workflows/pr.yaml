@@ -302,7 +302,8 @@ jobs:
    # ============================================================================
   deploy-test-vllm:
     if: |
-      needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
+      !cancelled() && !failure() &&
+      (needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true')
     runs-on: prod-default-small-v2
     needs: [changed-files, deploy-operator, vllm-pipeline]
     timeout-minutes: 25
@@ -340,7 +341,8 @@ jobs:
   deploy-test-sglang:
     runs-on: prod-default-small-v2
     if: |
-      needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true'
+      !cancelled() && !failure() &&
+      (needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true')
     needs: [changed-files, deploy-operator, sglang-pipeline]
     timeout-minutes: 25
     permissions:
@@ -375,7 +377,8 @@ jobs:
   deploy-test-trtllm:
     runs-on: prod-default-small-v2
     if: |
-      needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true'
+      !cancelled() && !failure() &&
+      (needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true')
     needs: [changed-files, deploy-operator, trtllm-pipeline]
     timeout-minutes: 25
     permissions:
