@@ -7,6 +7,7 @@
 //! chat completions, processed by the existing engine, and responses/streams
 //! are converted back to Anthropic format.
 
+use std::pin::Pin;
 use std::sync::Arc;
 
 use axum::{
@@ -44,6 +45,7 @@ use crate::protocols::openai::chat_completions::{
     NvCreateChatCompletionStreamResponse, aggregator::ChatCompletionAggregator,
 };
 use crate::request_template::RequestTemplate;
+use crate::types::Annotated;
 
 // Re-use helpers from the openai module (sibling under service/)
 use super::openai::{get_body_limit, get_or_create_request_id};
@@ -232,8 +234,6 @@ async fn anthropic_messages(
     // bypassed by the Anthropic endpoint, so we apply the same stream
     // transform here.  This populates `delta.reasoning_content` which the
     // AnthropicStreamConverter translates into thinking content blocks.
-    use crate::types::Annotated;
-    use std::pin::Pin;
     let engine_stream: Pin<
         Box<dyn futures::Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>,
     > = if let Some(ref reasoning_parser_name) = parsing_options.reasoning_parser {
