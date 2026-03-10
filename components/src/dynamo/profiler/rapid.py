@@ -99,6 +99,10 @@ def _generate_dgd_from_pick(
     return None
 
 
+# Fallback backend when AIC simulation is unavailable and no concrete backend is specified.
+_DEFAULT_NAIVE_BACKEND = "vllm"
+
+
 def _run_naive_fallback(
     dgdr: DynamoGraphDeploymentRequestSpec,
     model: str,
@@ -107,6 +111,9 @@ def _run_naive_fallback(
     backend: str,
 ) -> dict:
     """Handle the AIC-unsupported path via naive config generation."""
+    if backend == "auto":
+        backend = _DEFAULT_NAIVE_BACKEND
+        logger.info("Auto backend resolved to '%s' for naive fallback.", backend)
     logger.info(
         "AIC does not support this combo — falling back to naive config generation."
     )
@@ -153,6 +160,13 @@ def _run_autoscale_sim(
     request_latency: float | None,
 ) -> dict:
     """Build a TaskConfig, run autoscale simulation, collect latencies, generate DGD."""
+    # TODO(AIC): the autoscale path constructs TaskConfig directly; BackendName("auto")
+    # is not a valid enum value, so resolve "auto" to a concrete backend here.
+    # AIC should add native auto-backend support in the autoscale path.
+    if backend == "auto":
+        backend = _DEFAULT_NAIVE_BACKEND
+        logger.info("Auto backend resolved to '%s' for autoscale simulation.", backend)
+
     planner_cfg = dgdr.features.planner if dgdr.features else None
     if planner_cfg and planner_cfg.enable_throughput_scaling:
         logger.warning(
@@ -189,6 +203,7 @@ def _run_autoscale_sim(
         "dgd_config": dgd_config,
         "chosen_exp": "disagg",
         "task_configs": task_configs,
+        "resolved_backend": backend,
     }
 
 
@@ -260,12 +275,24 @@ def _run_default_sim(
 
     dgd_config = _generate_dgd_from_pick(dgdr, best_config_df, chosen, task_configs)
 
+    # When backend="auto" AIC expands to per-backend task configs; the winning
+    # row carries the concrete backend name so downstream consumers (e.g.
+    # run_interpolation) can use it without re-encountering "auto".
+    resolved_backend = backend
+    if (
+        backend == "auto"
+        and not best_config_df.empty
+        and "backend" in best_config_df.columns
+    ):
+        resolved_backend = best_config_df.iloc[0]["backend"]
+
     return {
         "best_config_df": best_config_df,
         "best_latencies": best_latencies,
         "dgd_config": dgd_config,
         "chosen_exp": chosen,
         "task_configs": task_configs,
+        "resolved_backend": resolved_backend,
     }
 
 

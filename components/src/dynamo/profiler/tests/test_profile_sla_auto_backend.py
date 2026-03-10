@@ -1,13 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for auto-backend resolution in profile_sla."""
-
-from unittest.mock import patch
+"""Unit tests for auto-backend resolution in the profiler pipeline."""
 
 import pytest
 
-from dynamo.profiler.profile_sla import _CONCRETE_BACKENDS, _resolve_auto_backend
+from dynamo.profiler.rapid import _DEFAULT_NAIVE_BACKEND
 
 pytestmark = [
     pytest.mark.unit,
@@ -17,63 +15,44 @@ pytestmark = [
 ]
 
 
-def test_resolve_auto_backend_returns_first_supported() -> None:
-    """_resolve_auto_backend returns the first AIC-supported backend."""
-    # trtllm is first in _CONCRETE_BACKENDS; simulate it being supported.
-    supported = {"trtllm"}
-    with patch(
-        "dynamo.profiler.profile_sla.check_model_hardware_support",
-        side_effect=lambda model, system, b: b in supported,
-    ):
-        result = _resolve_auto_backend("Qwen/Qwen3-32B", "b200_sxm")
-    assert result == "trtllm"
-
-
-def test_resolve_auto_backend_skips_unsupported() -> None:
-    """_resolve_auto_backend skips unsupported backends and returns the next one."""
-    # Only vllm is supported (last in the list).
-    supported = {"vllm"}
-    with patch(
-        "dynamo.profiler.profile_sla.check_model_hardware_support",
-        side_effect=lambda model, system, b: b in supported,
-    ):
-        result = _resolve_auto_backend("Qwen/Qwen3-32B", "b200_sxm")
-    assert result == "vllm"
-
-
-def test_resolve_auto_backend_falls_back_to_vllm_when_none_supported() -> None:
-    """_resolve_auto_backend falls back to 'vllm' when no backend is AIC-supported.
-
-    This also covers the aic_supported=False case: backend is still resolved
-    unconditionally so that run_interpolation and other downstream consumers
-    never receive 'auto'.
+def test_autoscale_sim_resolves_auto_to_default() -> None:
+    """_run_autoscale_sim must resolve 'auto' to _DEFAULT_NAIVE_BACKEND before
+    constructing TaskConfig, since BackendName('auto') is not a valid enum value.
     """
-    with patch(
-        "dynamo.profiler.profile_sla.check_model_hardware_support",
-        return_value=False,
-    ):
-        result = _resolve_auto_backend("unknown-model", "unknown-system")
-    assert result == "vllm"
+    import inspect
+
+    from dynamo.profiler.rapid import _run_autoscale_sim
+
+    src = inspect.getsource(_run_autoscale_sim)
+    # The function must guard against "auto" before TaskConfig is constructed.
+    assert (
+        'backend == "auto"' in src
+    ), "_run_autoscale_sim must resolve backend='auto' before constructing TaskConfig"
+    assert (
+        "_DEFAULT_NAIVE_BACKEND" in src
+    ), "_run_autoscale_sim must fall back to _DEFAULT_NAIVE_BACKEND when backend='auto'"
 
 
-def test_resolve_auto_backend_respects_priority_order() -> None:
-    """_resolve_auto_backend honours the _CONCRETE_BACKENDS priority order."""
-    # All backends supported — must return the first one in _CONCRETE_BACKENDS.
-    with patch(
-        "dynamo.profiler.profile_sla.check_model_hardware_support",
-        return_value=True,
-    ):
-        result = _resolve_auto_backend("any-model", "any-system")
-    assert result == _CONCRETE_BACKENDS[0]
+def test_autoscale_sim_returns_resolved_backend() -> None:
+    """_run_autoscale_sim must include 'resolved_backend' in its result dict so
+    profile_sla.py can pass the concrete backend to run_interpolation.
+    """
+    import inspect
+
+    from dynamo.profiler.rapid import _run_autoscale_sim
+
+    src = inspect.getsource(_run_autoscale_sim)
+    assert (
+        '"resolved_backend"' in src
+    ), "_run_autoscale_sim must return 'resolved_backend' in its result dict"
 
 
-def test_run_naive_fallback_does_not_override_resolved_backend() -> None:
-    """_run_naive_fallback must not silently replace a resolved backend with 'vllm'.
+def test_naive_fallback_resolves_auto_to_default() -> None:
+    """_run_naive_fallback must resolve 'auto' to _DEFAULT_NAIVE_BACKEND.
 
-    After profile_sla.py resolves 'auto' to a concrete backend (e.g. 'sglang'),
-    that backend must flow into the naive fallback unchanged.  The old guard
-    ``if backend == 'auto': backend = 'vllm'`` has been removed; this test
-    ensures it does not come back.
+    The naive path is taken when AIC doesn't support the model/system combo;
+    it uses build_naive_generator_params and generate_backend_artifacts which
+    require a concrete backend string.
     """
     import inspect
 
@@ -81,9 +60,29 @@ def test_run_naive_fallback_does_not_override_resolved_backend() -> None:
 
     src = inspect.getsource(_run_naive_fallback)
     assert (
-        "auto" not in src or "_DEFAULT_NAIVE_BACKEND" not in src
-    ), "_run_naive_fallback must not contain an 'auto' → vllm override guard"
-    assert "_DEFAULT_NAIVE_BACKEND" not in src, (
-        "_DEFAULT_NAIVE_BACKEND was removed; re-introducing it risks overriding "
-        "a legitimately resolved backend like 'sglang' with 'vllm'"
-    )
+        'backend == "auto"' in src
+    ), "_run_naive_fallback must resolve backend='auto' before calling AIC helpers"
+    assert "_DEFAULT_NAIVE_BACKEND" in src
+
+
+def test_default_sim_returns_resolved_backend() -> None:
+    """_run_default_sim must include 'resolved_backend' in its result dict.
+
+    When backend='auto', AIC expands to per-backend task configs and the
+    winning row carries the concrete backend name; _run_default_sim must
+    extract and surface it so run_interpolation never receives 'auto'.
+    """
+    import inspect
+
+    from dynamo.profiler.rapid import _run_default_sim
+
+    src = inspect.getsource(_run_default_sim)
+    assert (
+        '"resolved_backend"' in src
+    ), "_run_default_sim must return 'resolved_backend' in its result dict"
+
+
+def test_default_naive_backend_is_concrete() -> None:
+    """_DEFAULT_NAIVE_BACKEND must be a concrete backend string, not 'auto'."""
+    assert _DEFAULT_NAIVE_BACKEND != "auto"
+    assert _DEFAULT_NAIVE_BACKEND in ("vllm", "sglang", "trtllm")

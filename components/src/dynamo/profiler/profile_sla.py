@@ -80,14 +80,6 @@ def _check_auto_backend_support(model: str, system: str) -> bool:
     )
 
 
-def _resolve_auto_backend(model: str, system: str) -> str:
-    """Resolve 'auto' to the first AIC-supported concrete backend, falling back to vllm."""
-    for b in _CONCRETE_BACKENDS:
-        if check_model_hardware_support(model, system, b):
-            return b
-    return "vllm"
-
-
 def _extract_profiler_params(dgdr: DynamoGraphDeploymentRequestSpec) -> tuple:
     """Pull all profiler parameters from dgdr and log them."""
     model = dgdr.model
@@ -315,8 +307,6 @@ async def run_profile(
         ) = _extract_profiler_params(dgdr)
         if backend == "auto":
             aic_supported = _check_auto_backend_support(model, system)
-            backend = _resolve_auto_backend(model, system)
-            logger.info("Auto backend resolved to '%s'.", backend)
         else:
             aic_supported = check_model_hardware_support(model, system, backend)
         # then validate DGDR features based on AIC support
