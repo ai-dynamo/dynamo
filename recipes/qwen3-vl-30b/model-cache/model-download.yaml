@@ -23,7 +23,7 @@ spec:
                 name: hf-token-secret
           env:
             - name: MODEL_NAME
-              value: "Qwen/Qwen3-VL-30B-A3B-Instruct"
+              value: "Qwen/Qwen3-VL-30B-A3B-Instruct-FP8"  # Remove FP8 for BF16 variant
             - name: HF_HOME
               value: /home/dynamo/.cache/huggingface
             - name: HF_HUB_ENABLE_HF_TRANSFER
