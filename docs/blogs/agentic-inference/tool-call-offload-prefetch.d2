@@ -1,0 +1,65 @@
+direction: down
+
+gpu: "GPU Timeline" {
+  style.font-size: 28
+  direction: right
+
+  call1: "LLM Call 1" {
+    shape: rectangle
+    style.font-size: 24
+  }
+
+  tool: "Tool Call (30s)" {
+    shape: rectangle
+    style.font-size: 24
+    style.fill: "#f5f5f5"
+    style.stroke: "#999999"
+  }
+
+  call2: "LLM Call 2" {
+    shape: rectangle
+    style.font-size: 24
+  }
+
+  call1 -> tool: {
+    style.stroke-width: 2
+  }
+
+  tool -> call2: {
+    style.stroke-width: 2
+  }
+}
+
+storage: "Storage Tiers" {
+  style.font-size: 28
+  direction: right
+
+  host: "Host Memory" {
+    shape: rectangle
+    style.font-size: 24
+  }
+
+  disk: "NVMe / Remote Storage" {
+    shape: cylinder
+    style.font-size: 24
+  }
+
+  host -> disk: "write-through" {
+    style.stroke-width: 2
+    style.font-size: 22
+  }
+}
+
+gpu.call1 -> storage.host: "KV offload" {
+  style.stroke-width: 2
+  style.font-size: 22
+  style.stroke: "#cc8800"
+  style.font-color: "#cc8800"
+}
+
+storage.host -> gpu.call2: "KV prefetch" {
+  style.stroke-width: 2
+  style.font-size: 22
+  style.stroke: "#4a9e4a"
+  style.font-color: "#4a9e4a"
+}
