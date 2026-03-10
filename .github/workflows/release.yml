@@ -150,9 +150,9 @@ jobs:
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       build_timeout_minutes: 120
       cpu_only_test_markers: '(pre_merge or post_merge) and trtllm and gpu_0'
-      cpu_only_test_timeout_minutes: 60
+      cpu_only_test_timeout_minutes: 10
       single_gpu_test_markers: '(pre_merge or post_merge) and trtllm and gpu_1'
-      single_gpu_test_timeout_minutes: 60
+      single_gpu_test_timeout_minutes: 90
       multi_gpu_test_markers: '(pre_merge or post_merge) and trtllm and (gpu_2 or gpu_4)'
       multi_gpu_test_timeout_minutes: 60
     secrets: inherit
