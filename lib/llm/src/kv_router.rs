@@ -600,7 +600,10 @@ impl AsyncEngine<SingleIn<RouterRequest>, ManyOut<Annotated<RouterResponse>>, Er
                 success: self.mark_prefill_completed(&context_id).await.is_ok(),
             },
             RouterRequest::MarkFree { request_id } => {
-                let request_id = request_id.as_deref().unwrap_or(&context_id);
+                let request_id = match request_id.as_deref() {
+                    Some(request_id) if !request_id.trim().is_empty() => request_id,
+                    _ => &context_id,
+                };
                 RouterResponse::FreeMarked {
                     success: self.free(request_id).await.is_ok(),
                 }
