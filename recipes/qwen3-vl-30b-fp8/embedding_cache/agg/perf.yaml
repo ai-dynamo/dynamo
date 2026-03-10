@@ -136,7 +136,7 @@ spec:
             # "1000req_1img_500pool_400word_base64"
             # "1000req_1img_800pool_400word_base64"
           )
-          CONCURRENCIES=(32 64 128)
+          CONCURRENCIES=(4 8 16 32 64 128)
 
           # Wait for datasets
           for ds in "${DATASETS[@]}"; do
