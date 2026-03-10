@@ -63,11 +63,36 @@ def setup_engine_factory(
     return EngineFactory(runtime, router_config, config, vllm_flags)
 
 
-def parse_args() -> tuple[FrontendConfig, Optional[Namespace]]:
+def setup_sglang_engine_factory(
+    runtime: DistributedRuntime,
+    router_config: RouterConfig,
+    config: FrontendConfig,
+    sglang_flags: Optional[Namespace] = None,
+):
+    """
+    When using sglang pre and post processor, create the SglangEngineFactory
+    that creates the engines that run requests.
+    """
+    from .sglang_processor import SglangEngineFactory
+
+    tool_call_parser = getattr(sglang_flags, "tool_call_parser", None)
+    reasoning_parser = getattr(sglang_flags, "reasoning_parser", None)
+
+    return SglangEngineFactory(
+        runtime,
+        router_config,
+        config,
+        debug_perf=config.debug_perf,
+        tool_call_parser_name=tool_call_parser,
+        reasoning_parser_name=reasoning_parser,
+    )
+
+
+def parse_args() -> tuple[FrontendConfig, Optional[Namespace], Optional[Namespace]]:
     """Parse command-line arguments for the Dynamo frontend.
 
     Returns:
-        FrontendConfig: Parsed configuration object.
+        Tuple of (FrontendConfig, vllm_flags, sglang_flags).
     """
 
     parser = argparse.ArgumentParser(
@@ -83,6 +108,7 @@ def parse_args() -> tuple[FrontendConfig, Optional[Namespace]]:
     config.validate()
 
     vllm_flags = None
+    sglang_flags = None
 
     # parse extra vllm flags using vllm native parser.
     if config.chat_processor == "vllm":
@@ -108,11 +134,19 @@ def parse_args() -> tuple[FrontendConfig, Optional[Namespace]]:
         vllm_parser = AsyncEngineArgs.add_cli_args(vllm_parser)
         # the result is returned as Namespace object rather than AsyncEngineArgs object to avoid import error for non-vllm users.
         vllm_flags = vllm_parser.parse_args(unknown)
+    elif config.chat_processor == "sglang":
+        sglang_parser = argparse.ArgumentParser(add_help=False)
+        sglang_parser.add_argument("--tool-call-parser", default=None)
+        sglang_parser.add_argument("--reasoning-parser", default=None)
+        sglang_flags, remaining = sglang_parser.parse_known_args(unknown)
+        if remaining:
+            logger.error(f"Unknown arguments specified: {remaining}")
+            sys.exit(1)
     else:
         if unknown:
             logger.error(f"Unknown arguments specified: {unknown}")
             sys.exit(1)
-    return config, vllm_flags
+    return config, vllm_flags, sglang_flags
 
 
 async def async_main():
@@ -128,7 +162,7 @@ async def async_main():
     # bind that port before the worker, causing port conflicts and/or scraping the
     # wrong metrics endpoint.
     os.environ.pop("DYN_SYSTEM_PORT", None)
-    config, vllm_flags = parse_args()
+    config, vllm_flags, sglang_flags = parse_args()
     dump_config(config.dump_config_to, config)
     os.environ["DYN_EVENT_PLANE"] = config.event_plane
     logger.info(
@@ -231,6 +265,11 @@ async def async_main():
         ), "vllm_flags is required when chat processor is vllm"
         chat_engine_factory = setup_engine_factory(
             runtime, router_config, config, vllm_flags
+        ).chat_engine_factory
+        kwargs["chat_engine_factory"] = chat_engine_factory
+    elif config.chat_processor == "sglang":
+        chat_engine_factory = setup_sglang_engine_factory(
+            runtime, router_config, config, sglang_flags
         ).chat_engine_factory
         kwargs["chat_engine_factory"] = chat_engine_factory
 
