@@ -39,6 +39,38 @@ Failing immediately on a missing dependency is better than hiding the problem
 until a user hits an obscure code path in production. If a package is required,
 add it to `requirements.txt` or `pyproject.toml` so it's installed upfront.
 
+**Exception: optional dependencies and pytest collection.** This repo has multiple
+optional backends (vLLM, SGLang, TRT-LLM, cupy, etc.) that are not installed in
+every environment. Using `try/except ImportError` is the correct pattern when:
+
+- An optional backend dependency (e.g. `tritonclient.grpc`, `vllm_omni`,
+  `torch_memory_saver`) may not be installed, and the code provides a
+  fallback or sets the import to `None`.
+- A test file needs to skip collection when optional packages are absent
+  (e.g. `except ImportError: pytest.skip(..., allow_module_level=True)`).
+- A stdlib module has version-dependent availability
+  (e.g. `tomllib` on Python 3.11+ vs `tomli` fallback).
+
+```python
+# OK -- optional backend, graceful fallback to None
+try:
+    from vllm_omni.diffusion.data import DiffusionParallelConfig
+except ImportError:
+    DiffusionParallelConfig = None
+
+# OK -- skip test collection when optional deps are missing
+try:
+    from dynamo.profiler.rapid import WorkloadSpec
+except ImportError as e:
+    pytest.skip(f"Skip (missing dependency): {e}", allow_module_level=True)
+
+# OK -- stdlib version compatibility
+try:
+    import tomllib
+except ImportError:
+    import tomli as tomllib
+```
+
 ### Prefer failing fast over hiding errors
 
 From PEP 20 (The Zen of Python):
