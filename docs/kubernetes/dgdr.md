@@ -324,7 +324,8 @@ kubectl logs <frontend-pod-name> -n ${NAMESPACE}
 - **Tune for production SLAs**: Add `sla` (TTFT, ITL) and `workload` (ISL, OSL) targets to
   your DGDR so the profiler optimizes for your specific traffic. See the
   [Profiler Guide](../components/profiler/profiler-guide.md) for the full configuration
-  reference and picking modes.
+  reference and picking modes. For ready-to-use YAML — including SLA targets, private models,
+  MoE, and overrides — see [DGDR Examples](../components/profiler/profiler-examples.md).
 - **Scale the deployment**: [Autoscaling guide](autoscaling.md)
 - **SLA-aware autoscaling**: Enable the Planner via `features.planner` in the DGDR —
   see the [Planner Guide](../components/planner/planner-guide.md).
