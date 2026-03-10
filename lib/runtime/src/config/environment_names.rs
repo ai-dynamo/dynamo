@@ -42,16 +42,19 @@ pub mod logging {
     /// Enable span event logging (create/close events)
     pub const DYN_LOGGING_SPAN_EVENTS: &str = "DYN_LOGGING_SPAN_EVENTS";
 
-    /// OTLP (OpenTelemetry Protocol) tracing configuration
+    /// OTLP (OpenTelemetry Protocol) tracing and logging configuration
     pub mod otlp {
-        /// Enable OTLP trace exporting (set to "1" to enable)
+        /// Enable OTLP export for traces and logs (set to "1" to enable)
         pub const OTEL_EXPORT_ENABLED: &str = "OTEL_EXPORT_ENABLED";
 
-        /// OTLP exporter endpoint URL
+        /// OTLP exporter endpoint URL for traces
         /// Spec: https://opentelemetry.io/docs/specs/otel/protocol/exporter/
         pub const OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: &str = "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT";
 
-        /// Service name for OTLP traces
+        /// OTLP exporter endpoint URL for logs (defaults to traces endpoint if unset)
+        pub const OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: &str = "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT";
+
+        /// Service name for OTLP traces and logs
         pub const OTEL_SERVICE_NAME: &str = "OTEL_SERVICE_NAME";
     }
 }
@@ -65,6 +68,10 @@ pub mod runtime {
 
     /// Maximum number of blocking threads for Tokio runtime
     pub const DYN_RUNTIME_MAX_BLOCKING_THREADS: &str = "DYN_RUNTIME_MAX_BLOCKING_THREADS";
+
+    /// Enable Tokio task poll-time histogram (calls enable_metrics_poll_time_histogram on builder).
+    /// Set to "1", "true", or "yes" to enable. Adds ~2× overhead of Instant::now() per task poll.
+    pub const DYN_ENABLE_POLL_HISTOGRAM: &str = "DYN_ENABLE_POLL_HISTOGRAM";
 
     /// System status server configuration
     pub mod system {
@@ -404,6 +411,7 @@ mod tests {
             logging::otlp::OTEL_EXPORT_ENABLED,
             logging::otlp::OTEL_EXPORTER_OTLP_TRACES_ENDPOINT,
             logging::otlp::OTEL_SERVICE_NAME,
+            logging::otlp::OTEL_EXPORTER_OTLP_LOGS_ENDPOINT,
             // Runtime
             runtime::DYN_RUNTIME_NUM_WORKER_THREADS,
             runtime::DYN_RUNTIME_MAX_BLOCKING_THREADS,

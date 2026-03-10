@@ -313,12 +313,12 @@ RUN if [ ! -d /opt/dynamo/venv ]; then \
 # Initialize Git LFS for the dynamo user (required for requirements with lfs=true)
 RUN git lfs install
 
-# Install common and test dependencies (matches main Dockerfile dev stage)
-# This installs pytest-benchmark and other test dependencies required for CI
-# TRT-LLM specific: Also installs cupy-cuda13x with special index strategy (Dockerfile.trtllm lines 768-776)
+# Install only the ADDITIONAL dev/test dependencies.
+# Runtime deps (common, framework, planner, benchmark) are already installed
+# in the parent runtime image — re-resolving them here would risk version drift.
 # SGLang specific: Reinstall pytest to ensure venv has pytest executable with correct shebang
 ARG FRAMEWORK
-RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
+RUN --mount=type=bind,source=./container/deps/requirements.dev.txt,target=/tmp/requirements.dev.txt \
     --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
     # Cache uv downloads; uv handles its own locking for this cache.
     --mount=type=cache,target=/root/.cache/uv \
@@ -326,7 +326,7 @@ RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requi
     uv pip install \
         --index-strategy unsafe-best-match \
         --extra-index-url https://download.pytorch.org/whl/cu130 \
-        --requirement /tmp/requirements.txt \
+        --requirement /tmp/requirements.dev.txt \
         --requirement /tmp/requirements.test.txt && \
     if [ "${FRAMEWORK}" = "sglang" ]; then \
         uv pip install --force-reinstall --no-deps pytest; \

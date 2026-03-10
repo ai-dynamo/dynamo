@@ -122,7 +122,13 @@ docker build -t dynamo:latest-vllm-runtime -f container/rendered.Dockerfile .
 container/run.sh --image dynamo:latest-vllm-runtime -it
 ```
 
-### 2. local-dev + `run.sh` (runs as dynamo user with matched host UID/GID):
+### 2. test image (layers test deps on top of runtime):
+```bash
+# Build test image from a runtime image (for running tests locally)
+docker build -f container/Dockerfile.test --build-arg BASE_IMAGE=dynamo:latest-vllm-runtime -t dynamo:latest-vllm-test .
+```
+
+### 3. local-dev + `run.sh` (runs as dynamo user with matched host UID/GID):
 ```bash
 run.sh --mount-workspace -it --image dynamo:latest-vllm-local-dev ...
 ```
