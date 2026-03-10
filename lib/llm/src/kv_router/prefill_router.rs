@@ -109,7 +109,7 @@ pub struct PrefillRouter {
     endpoint_id: OnceLock<EndpointId>,
     cancel_token: CancellationToken,
     router_mode: RouterMode,
-    decode_fallback: bool,
+    enforce_disagg: bool,
     /// Model name used to look up the worker monitor for prefill client registration
     model_name: String,
     /// Namespace used to look up the correct WorkerSet's worker monitor
@@ -121,7 +121,7 @@ impl PrefillRouter {
     pub fn disabled(
         model_manager: Arc<ModelManager>,
         router_mode: RouterMode,
-        decode_fallback: bool,
+        enforce_disagg: bool,
     ) -> Arc<Self> {
         Arc::new(Self {
             prefill_router: OnceLock::new(),
@@ -129,20 +129,20 @@ impl PrefillRouter {
             endpoint_id: OnceLock::new(),
             cancel_token: CancellationToken::new(),
             router_mode,
-            decode_fallback,
+            enforce_disagg,
             model_name: String::new(), // Not used for disabled router
             namespace: String::new(),  // Not used for disabled router
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub fn new(
         activation_rx: oneshot::Receiver<Endpoint>,
         model_manager: Arc<ModelManager>,
         router_mode: RouterMode,
         kv_cache_block_size: u32,
         kv_router_config: Option<KvRouterConfig>,
-        decode_fallback: bool,
+        enforce_disagg: bool,
         model_name: String,
         namespace: String,
     ) -> Arc<Self> {
@@ -155,7 +155,7 @@ impl PrefillRouter {
             endpoint_id: OnceLock::new(),
             cancel_token: cancel_token.clone(),
             router_mode,
-            decode_fallback,
+            enforce_disagg,
             model_name,
             namespace,
         });
@@ -335,7 +335,7 @@ impl PrefillRouter {
         let host = endpoint.bootstrap_host?;
         let port = endpoint.bootstrap_port?;
 
-        let bootstrap_room: u64 = rand::random_range(0..=i64::MAX as u64);
+        let bootstrap_room: u64 = rand::random_range(0..=i64::MAX.cast_unsigned());
 
         tracing::debug!(
             worker_id = worker_id,
@@ -493,21 +493,6 @@ impl PrefillRouter {
         );
     }
 
-    /// Call the prefill router and extract structured prefill result, worker ID, and dp_rank.
-    ///
-    /// This is the synchronous prefill path - we wait for prefill to complete before proceeding.
-    /// No phase permit is needed since `record_worker` completes before we return.
-    ///
-    /// Returns (PrefillResult, Option<(worker_id, dp_rank)>).
-    async fn call_prefill(
-        &self,
-        request: SingleIn<PreprocessedRequest>,
-    ) -> Result<(PrefillResult, Option<(u64, u32)>), PrefillError> {
-        // For call_prefill path, routing is handled by the router itself (no direct routing needed)
-        // No phase permit needed - we wait for completion before changing phase
-        Self::execute_prefill(self.prefill_router.get().cloned(), request, None, None).await
-    }
-
     /// Query the best prefill worker without executing a request.
     /// Returns (worker_id, dp_rank).
     ///
@@ -594,7 +579,11 @@ impl
 
         // If prefill router is not activated (no prefill workers discovered),
         // this is aggregated mode — route directly to decode.
+        // With --enforce-disagg, fail instead of falling back.
         if self.prefill_router.get().is_none() {
+            if self.enforce_disagg {
+                return Err(anyhow::anyhow!(PrefillError::NotActivated));
+            }
             return next.generate(context.map(|_| req)).await;
         }
 
@@ -648,14 +637,22 @@ impl
                 // Original prefill path: wait for prefill to complete
                 tracing::debug!("Using original prefill path");
 
-                // Drop the phase permit before calling call_prefill - we wait for completion
+                // Drop the phase permit - we wait for completion
                 // so there's no race with set_phase(Decode) below
                 drop(prefill_phase_permit);
 
                 let prefill_context = Context::with_id(prefill_req, request_id.clone());
                 engine_ctx.link_child(prefill_context.context());
 
-                let (result, _worker_info) = self.call_prefill(prefill_context).await?;
+                // In Direct mode, pass preselected_worker so execute_prefill uses
+                // router.direct() instead of router.generate() (which bails in Direct mode).
+                let (result, _worker_info) = Self::execute_prefill(
+                    self.prefill_router.get().cloned(),
+                    prefill_context,
+                    preselected_worker,
+                    None,
+                )
+                .await?;
 
                 Ok(PrefillOutcome::Completed(result))
             }
@@ -714,28 +711,12 @@ impl
                 next.generate(decode_request).await
             }
             Err(PrefillError::NotActivated) => {
-                if !self.decode_fallback {
-                    tracing::error!(
-                        "No prefill workers discovered yet and decode fallback is disabled. Failing request."
-                    );
-                    return Err(anyhow::anyhow!(PrefillError::NotActivated));
-                }
-                tracing::debug!("No prefill workers discovered yet, falling back to decode-only");
-                next.generate(context.map(|_| req)).await
+                tracing::error!("Prefill router not activated, failing request");
+                Err(anyhow::anyhow!(PrefillError::NotActivated))
             }
             Err(e) => {
-                if !self.decode_fallback {
-                    tracing::error!(
-                        error = %e,
-                        "Remote prefill failed and decode fallback is disabled. Failing request."
-                    );
-                    return Err(anyhow::anyhow!(e));
-                }
-                tracing::warn!(
-                    error = %e,
-                    "Remote prefill failed, falling back to decode-only. This may impact performance in disaggregated deployments. Verify prefill workers are healthy and accessible."
-                );
-                next.generate(context.map(|_| req)).await
+                tracing::error!(error = %e, "Remote prefill failed, failing request");
+                Err(anyhow::anyhow!(e))
             }
         }
     }

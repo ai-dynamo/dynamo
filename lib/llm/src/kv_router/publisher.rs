@@ -646,7 +646,7 @@ pub async fn start_zmq_listener(
     }
 
     let mut consecutive_errors = 0u32;
-    #[allow(unused_assignments)]
+    #[expect(unused_assignments)]
     let mut exit_reason = "unknown";
     let mut messages_processed = 0u64;
 
@@ -730,7 +730,7 @@ pub async fn start_zmq_listener(
                     batch.data_parallel_rank.unwrap_or(0)
                 );
 
-                let dp_rank = batch.data_parallel_rank.unwrap_or(0) as u32;
+                let dp_rank = batch.data_parallel_rank.unwrap_or(0).cast_unsigned();
                 for raw_event in batch.events.into_iter() {
                     // Use shared monotonic event_id counter instead of engine's sequence number
                     let event_id = next_event_id.fetch_add(1, Ordering::SeqCst);
@@ -1964,7 +1964,7 @@ mod test_exponential_backoff {
     }
 
     #[test]
-    #[allow(clippy::assertions_on_constants)]
+    #[expect(clippy::assertions_on_constants)]
     fn test_backoff_constants_are_sane() {
         // Verify our constants make sense together
         assert!(INITIAL_BACKOFF_MS > 0);

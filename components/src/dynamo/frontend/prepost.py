@@ -187,43 +187,6 @@ async def preprocess_chat_request(
     )
 
 
-def preprocess_chat_request_sync(
-    request: dict[str, Any] | ChatCompletionRequest,
-    *,
-    tokenizer: TokenizerLike,
-    renderer,
-    tool_parser_class: type[ToolParser] | None,
-) -> PreprocessResult:
-    """Sync version of preprocess_chat_request for worker processes."""
-    (
-        request_for_sampling,
-        tool_parser,
-        chat_template_kwargs,
-        messages,
-        chat_params,
-    ) = _prepare_request(
-        request, tokenizer=tokenizer, tool_parser_class=tool_parser_class
-    )
-
-    _, engine_prompt = renderer.render_messages(messages, chat_params)
-
-    if "prompt_token_ids" in engine_prompt:
-        tokens = list(engine_prompt["prompt_token_ids"])
-    else:
-        tokens = tokenizer.encode(
-            engine_prompt["prompt"],
-            add_special_tokens=request_for_sampling.add_special_tokens,
-        )
-
-    return PreprocessResult(
-        request_for_sampling=request_for_sampling,
-        tool_parser=tool_parser,
-        chat_template_kwargs=chat_template_kwargs,
-        engine_prompt=engine_prompt,
-        prompt_token_ids=tokens,
-    )
-
-
 class StreamingPostProcessor:
     def __init__(
         self,
@@ -401,10 +364,10 @@ class StreamingPostProcessor:
         # vLLM output_processor already applies stop-token/stop-string trimming
         # to text. Re-detokenizing from token_ids can reintroduce stop markers.
         delta_text = output.text or ""
-
+        delta: dict[str, Any] = {}
         if self._fast_plain_text:
             if delta_text:
-                delta: dict[str, Any] = {
+                delta = {
                     "role": "assistant",
                     "content": delta_text,
                 }
@@ -542,7 +505,7 @@ class StreamingPostProcessor:
                 # to drain the buffer.
                 choice = self._emit_tool_calls_choice(output)
         elif delta_message.content or delta_message.reasoning:
-            delta: dict[str, Any] = {"role": "assistant"}
+            delta = {"role": "assistant"}
             content = delta_message.content
             if self.in_progress_tool_calls and self._is_control_only_content(content):
                 content = None
