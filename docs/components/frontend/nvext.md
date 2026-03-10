@@ -64,7 +64,7 @@ The `agent_hints` sub-object carries per-request hints that the router uses for 
 
 ### `latency_sensitivity`
 
-When `--router-queue-threshold` is set and the queue is active, this value shifts the request's effective arrival time earlier in the queue, giving it priority over requests with lower (or no) `latency_sensitivity`. A value of `5.0` means the request is treated as if it arrived 5 seconds earlier than it actually did. Has no effect when queueing is disabled.
+When `--router-queue-threshold` is set and the queue is active, this value shifts the request's effective arrival time earlier in the queue, giving it priority over requests with lower (or no) `latency_sensitivity`. A value of `5.0` means the request is treated as if it arrived 5 seconds earlier than it actually did. A recommended default is `1.2` for latency-sensitive agentic requests. Has no effect when queueing is disabled.
 
 ```json
 {
@@ -195,3 +195,4 @@ When the client requests response metadata via `extra_fields`, the response incl
 |----------|-------------|
 | [Frontend Guide](frontend-guide.md) | KServe gRPC configuration and integration |
 | [Router Guide](../router/router-guide.md) | Full router configuration and CLI arguments |
+| [SGLang for Agentic Workloads](../../backends/sglang/agents.md) | SGLang engine flags for priority scheduling, eviction policies, and cache pinning |

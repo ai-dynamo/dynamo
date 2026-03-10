@@ -240,10 +240,13 @@ fn build_transport_type_inner(
     match mode {
         RequestPlaneMode::Http => {
             let http_host = crate::utils::get_http_rpc_host_from_env();
+            // If a fixed port is explicitly configured, use it directly.
+            // Otherwise, use the actual bound port (set by HTTP server after binding when port 0 is used).
             let http_port = std::env::var("DYN_HTTP_RPC_PORT")
                 .ok()
                 .and_then(|p| p.parse::<u16>().ok())
-                .unwrap_or(8888);
+                .filter(|&p| p != 0)
+                .unwrap_or(crate::pipeline::network::manager::get_actual_http_rpc_port()?);
             let rpc_root =
                 std::env::var("DYN_HTTP_RPC_ROOT_PATH").unwrap_or_else(|_| "/v1/rpc".to_string());
 
@@ -261,6 +264,7 @@ fn build_transport_type_inner(
             let tcp_port = std::env::var("DYN_TCP_RPC_PORT")
                 .ok()
                 .and_then(|p| p.parse::<u16>().ok())
+                .filter(|&p| p != 0)
                 .unwrap_or(crate::pipeline::network::manager::get_actual_tcp_rpc_port()?);
 
             // Include instance_id and endpoint name for proper TCP routing.
@@ -293,17 +297,25 @@ pub async fn build_transport_type(
 ) -> Result<TransportType> {
     let mode = endpoint.drt().request_plane();
 
-    if mode == RequestPlaneMode::Tcp {
-        // Only force server init when we *don't* have a valid explicit port.
-        let has_fixed_port = std::env::var("DYN_TCP_RPC_PORT")
+    // For TCP and HTTP with OS-assigned ports, we must ensure the server is initialized
+    // (bound to a port) before we can construct a correct transport address.
+    let has_fixed_port = match mode {
+        RequestPlaneMode::Tcp => std::env::var("DYN_TCP_RPC_PORT")
             .ok()
             .and_then(|p| p.parse::<u16>().ok())
-            .is_some();
+            .filter(|&p| p != 0)
+            .is_some(),
+        RequestPlaneMode::Http => std::env::var("DYN_HTTP_RPC_PORT")
+            .ok()
+            .and_then(|p| p.parse::<u16>().ok())
+            .filter(|&p| p != 0)
+            .is_some(),
+        RequestPlaneMode::Nats => true, // NATS doesn't need port init
+    };
 
-        if !has_fixed_port {
-            // Ensure request plane server is initialized before building transport.
-            let _ = endpoint.drt().request_plane_server().await?;
-        }
+    if !has_fixed_port {
+        // Ensure request plane server is initialized before building transport.
+        let _ = endpoint.drt().request_plane_server().await?;
     }
 
     build_transport_type_inner(mode, endpoint_id, connection_id)

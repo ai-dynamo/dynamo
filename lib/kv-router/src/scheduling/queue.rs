@@ -186,7 +186,7 @@ impl<P: SequencePublisher + 'static, C: WorkerConfigLike> SchedulerQueue<P, C> {
                 token_sequence: request.token_seq,
                 isl: request.isl_tokens,
                 overlap: selection.overlap_blocks,
-                expected_output_tokens: None,
+                expected_output_tokens: request.expected_output_tokens,
                 worker: selection.worker,
                 lora_name: request.lora_name.clone(),
             })
@@ -209,11 +209,12 @@ impl<P: SequencePublisher + 'static, C: WorkerConfigLike> SchedulerQueue<P, C> {
 
         for (&worker_id, config) in configs.iter() {
             let dp_size = config.data_parallel_size();
+            let dp_start_rank = config.data_parallel_start_rank();
             let max_batched = config
                 .max_num_batched_tokens()
                 .unwrap_or(DEFAULT_MAX_BATCHED_TOKENS);
 
-            for dp_rank in 0..dp_size {
+            for dp_rank in dp_start_rank..dp_start_rank + dp_size {
                 let worker = WorkerWithDpRank::new(worker_id, dp_rank);
                 let tokens = active_tokens.get(&worker).copied().unwrap_or(0);
                 if (tokens as f64) <= threshold * (max_batched as f64) {
@@ -247,11 +248,12 @@ mod tests {
         Arc<SchedulerQueue<NoopSequencePublisher, SimpleWorkerConfig>>,
         Arc<ActiveSequencesMultiWorker<NoopSequencePublisher>>,
     ) {
-        let dp_sizes: HashMap<u64, u32> = (0..num_workers as u64).map(|id| (id, 1)).collect();
+        let dp_range: HashMap<u64, (u32, u32)> =
+            (0..num_workers as u64).map(|id| (id, (0, 1))).collect();
         let slots = Arc::new(ActiveSequencesMultiWorker::new(
             NoopSequencePublisher,
             block_size as usize,
-            dp_sizes,
+            dp_range,
             false,
             0,
             "test",
@@ -303,6 +305,7 @@ mod tests {
             update_states: true,
             lora_name: None,
             priority_jump: 0.0,
+            expected_output_tokens: None,
             allowed_worker_ids: None,
             resp_tx: Some(tx),
         };

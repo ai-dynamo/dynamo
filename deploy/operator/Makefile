@@ -87,6 +87,10 @@ manifests: controller-gen ensure-yq ## Generate WebhookConfiguration, ClusterRol
 	for file in config/crd/bases/*.yaml; do \
 		yq eval '(.. | select(has("parameters")) | .parameters | select(has("format") and .format == "byte")) |= (del(.format) | del(.type) | .x-kubernetes-preserve-unknown-fields = true)' -i --indent 2 $$file || exit 1; \
 	done
+	echo "Fixing profilingJob template metadata: controller-gen emits bare type: object for metav1.ObjectMeta, add x-kubernetes-preserve-unknown-fields so labels/annotations are accepted"
+	for file in config/crd/bases/*.yaml; do \
+		yq eval '(.. | select(has("profilingJob")) | .profilingJob.properties.template.properties.metadata)."x-kubernetes-preserve-unknown-fields" = true' -i --indent 2 $$file || exit 1; \
+	done
 	echo "Adding NVIDIA header to CRD files"
 	for file in config/crd/bases/*.yaml; do \
 		if ! head -20 "$$file" | grep -q "NVIDIA CORPORATION"; then \
@@ -293,7 +297,7 @@ helm: manifests kustomize helmify
 	$(KUSTOMIZE) build config/default | $(HELMIFY) -image-pull-secrets charts/dynamo-kubernetes-operator
 
 ######################### CRD Reference Docs
-CRD_REF_DOCS_VERSION ?= latest
+CRD_REF_DOCS_VERSION ?= v0.3.0
 CRD_REF_DOCS ?= $(LOCALBIN)/crd-ref-docs
 
 .PHONY: crd-ref-docs

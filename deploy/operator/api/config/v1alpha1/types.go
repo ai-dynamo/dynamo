@@ -77,7 +77,7 @@ type OperatorConfiguration struct {
 // ServerConfiguration holds server bind addresses and ports.
 type ServerConfiguration struct {
 	// Metrics server configuration
-	// +kubebuilder:default={bindAddress: "127.0.0.1", port: 8080}
+	// +kubebuilder:default={bindAddress: "0.0.0.0", port: 8080, secure: true}
 	Metrics MetricsServer `json:"metrics"`
 	// Health probe server configuration
 	// +kubebuilder:default={bindAddress: "0.0.0.0", port: 8081}
@@ -98,9 +98,20 @@ type Server struct {
 // MetricsServer extends Server with secure serving option.
 type MetricsServer struct {
 	Server `json:",inline"`
-	// Secure enables secure serving for the metrics endpoint
-	Secure bool `json:"secure"`
+	// Secure enables secure serving for the metrics endpoint.
+	// nil = default to true (secure by default).
+	Secure *bool `json:"secure,omitempty"`
 }
+
+// CertProvisionMode controls how webhook TLS certificates are managed.
+type CertProvisionMode string
+
+const (
+	// CertProvisionModeAuto uses the built-in cert-controller to generate and rotate certificates.
+	CertProvisionModeAuto CertProvisionMode = "auto"
+	// CertProvisionModeManual expects certificates to be provided externally (e.g., cert-manager, admin).
+	CertProvisionModeManual CertProvisionMode = "manual"
+)
 
 // WebhookServer extends Server with host and certificate directory.
 type WebhookServer struct {
@@ -109,6 +120,15 @@ type WebhookServer struct {
 	Host string `json:"host"`
 	// CertDir is the directory containing TLS certificates
 	CertDir string `json:"certDir"`
+	// CertProvisionMode controls certificate management: "auto" (built-in cert-controller) or "manual" (external)
+	// +kubebuilder:default="auto"
+	CertProvisionMode CertProvisionMode `json:"certProvisionMode"`
+	// SecretName is the name of the Kubernetes Secret holding webhook TLS certificates
+	// +kubebuilder:default="webhook-server-cert"
+	SecretName string `json:"secretName"`
+	// ServiceName is the name of the Kubernetes Service fronting the webhook server.
+	// Used to generate certificate SANs. Set by the Helm chart.
+	ServiceName string `json:"serviceName"`
 }
 
 // LeaderElectionConfiguration holds leader election settings.
@@ -245,7 +265,7 @@ type CheckpointStorageConfiguration struct {
 // CheckpointPVCConfig holds PVC storage configuration.
 type CheckpointPVCConfig struct {
 	// PVCName is the name of the PVC
-	// +kubebuilder:default="chrek-pvc"
+	// +kubebuilder:default="snapshot-pvc"
 	PVCName string `json:"pvcName"`
 	// BasePath is the base directory within the PVC
 	// +kubebuilder:default="/checkpoints"
