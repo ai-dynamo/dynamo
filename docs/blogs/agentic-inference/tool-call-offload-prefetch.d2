@@ -1,58 +1,83 @@
-grid-rows: 3
-grid-gap: 80
+direction: right
 
-# Row 1: GPU timeline
-timeline: {
-  direction: right
-  grid-columns: 4
-  grid-gap: 0
+vars: {
+  d2-config: {
+    theme-overrides: {
+      N1: "#e0e0e0"
+      N2: "#a0a0a0"
+      N3: "#707070"
+      N4: "#404040"
+      N5: "#5d5d5d"
+      N6: "#151515"
+      N7: "#0a0a0a"
 
-  prefill1: "LLM Prefill 1" {
-    shape: rectangle
-    style.font-size: 24
-  }
+      B1: "#0a0a0a"
+      B2: "#111111"
+      B3: "#181818"
+      B4: "#222222"
+      B5: "#5d5d5d"
+      B6: "#404040"
 
-  call1: "LLM Call 1" {
-    shape: rectangle
-    style.font-size: 24
-  }
+      AA2: "#76b900"
+      AA4: "#3d7ab5"
+      AA5: "#c4a035"
 
-  tool: "Tool Call (30s)" {
-    shape: rectangle
-    style.font-size: 24
-    style.fill: "#f5f5f5"
-    style.stroke: "#999999"
-  }
-
-  call2: "LLM Call 2" {
-    shape: rectangle
-    style.font-size: 24
+      AB4: "#7a3050"
+      AB5: "#2a6b55"
+    }
   }
 }
 
-# Row 2: Host Memory
-host: "Host Memory" {
-  shape: rectangle
-  style.font-size: 24
+call1: "LLM Call 1" {
+  style: {
+    fill: "#2a4a10"
+    stroke: "#76b900"
+    stroke-width: 2
+    font-color: "#e0e0e0"
+    font-size: 20
+    bold: true
+    border-radius: 0
+  }
 }
 
-# Row 3: Storage
-storage: "Storage" {
-  shape: cylinder
-  style.font-size: 24
+storage: "Host Memory / Storage" {
+  style: {
+    fill: "#0f1e30"
+    stroke: "#3d7ab5"
+    stroke-width: 2
+    font-color: "#e0e0e0"
+    font-size: 20
+    bold: true
+    border-radius: 0
+  }
 }
 
-# Connections
-timeline.call1 -> host: "KV Offload" {
-  style.stroke-width: 2
-  style.font-size: 22
+call2: "LLM Call 2" {
+  style: {
+    fill: "#2a4a10"
+    stroke: "#76b900"
+    stroke-width: 2
+    font-color: "#e0e0e0"
+    font-size: 20
+    bold: true
+    border-radius: 0
+  }
 }
 
-host -> timeline.call2: "KV Prefetch" {
-  style.stroke-width: 2
-  style.font-size: 22
+call1 -> storage: "KV offload during tool call" {
+  style: {
+    stroke: "#c4a035"
+    stroke-width: 2
+    font-color: "#c4a035"
+    font-size: 16
+  }
 }
 
-host -> storage: {
-  style.stroke-width: 2
+storage -> call2: "KV prefetch before next call" {
+  style: {
+    stroke: "#76b900"
+    stroke-width: 2
+    font-color: "#76b900"
+    font-size: 16
+  }
 }
