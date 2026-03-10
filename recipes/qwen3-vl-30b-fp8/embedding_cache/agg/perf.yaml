@@ -1,0 +1,113 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Toggle CACHE_MODE to match deploy.yaml:
+#   cache ON:  CACHE_MODE = "cache_on"
+#   cache OFF: CACHE_MODE = "cache_off"
+#
+apiVersion: v1
+kind: Pod
+metadata:
+  name: qwen3-vl-agg-gb200-benchmark
+  labels:
+    app: benchmark
+spec:
+  tolerations:
+    - key: "dedicated"
+      value: "user-workload"
+      effect: "NoSchedule"
+    - key: "dedicated"
+      value: "user-workload"
+      effect: "NoExecute"
+  containers:
+    - name: benchmark
+      image: python:3.11
+      command:
+        - /bin/bash
+        - -lc
+        - |
+          set -euo pipefail
+          ulimit -n 1048576
+          ulimit -u 65536
+
+          apt update && apt install -y tmux curl jq
+          pip install aiperf
+
+          echo "Waiting for model '${MODEL_NAME}' at http://${FRONTEND}:8000/v1/models..."
+          until curl -s "http://${FRONTEND}:8000/v1/models" | jq -e --arg model "${MODEL_NAME}" '.data[]? | select(.id == $model)' >/dev/null 2>&1; do
+            echo "[$(date '+%H:%M:%S')] Model not ready, retrying in 5s..."
+            sleep 5
+          done
+          echo "Model '${MODEL_NAME}' is ready."
+
+          INPUT_FILE="${DATASET_DIR}/qwen3_vl_1000req_1img_pool200.jsonl"
+          if [ ! -f "${INPUT_FILE}" ]; then
+            echo "Dataset not found: ${INPUT_FILE}"
+            exit 1
+          fi
+
+          RUN_DIR="${ARTIFACT_BASE_DIR}/${CACHE_MODE}"
+          mkdir -p "${RUN_DIR}"
+
+          echo "Running benchmark ..."
+          aiperf profile \
+            --model "${MODEL_NAME}" \
+            --input-file "${INPUT_FILE}" \
+            --custom-dataset-type single_turn \
+            --shared-system-prompt-length "${SYSTEM_PROMPT_TOKENS}" \
+            --url "http://${FRONTEND}:8000" \
+            --streaming \
+            --ui-type none \
+            --request-count "${REQUEST_COUNT}" \
+            --concurrency "${CONCURRENCY}" \
+            --request-rate "${REQUEST_RATE}" \
+            --request-rate-mode constant \
+            --warmup-request-count "${WARMUP_REQUEST_COUNT}" \
+            --warmup-duration "${WARMUP_DURATION}" \
+            --artifact-dir "${RUN_DIR}" \
+            --extra-inputs "max_tokens:${MAX_TOKENS}" \
+            --extra-inputs "min_tokens:${MAX_TOKENS}" \
+            --extra-inputs "ignore_eos:true"
+
+          echo "Run complete. Artifacts in ${RUN_DIR}"
+          sleep 3600
+      env:
+        - name: MODEL_NAME
+          value: Qwen/Qwen3-VL-30B-A3B-Instruct-FP8
+        - name: FRONTEND
+          value: qwen3-vl-agg-gb200-frontend
+        - name: CACHE_MODE
+          value: cache_on
+        - name: SYSTEM_PROMPT_TOKENS
+          value: "160"
+        - name: MAX_TOKENS
+          value: "500"
+        - name: REQUEST_COUNT
+          value: "1000"
+        - name: CONCURRENCY
+          value: "32"
+        - name: REQUEST_RATE
+          value: "32"
+        - name: WARMUP_REQUEST_COUNT
+          value: "50"
+        - name: WARMUP_DURATION
+          value: "60"
+        - name: DATASET_DIR
+          value: /perf-cache/datasets
+        - name: ARTIFACT_BASE_DIR
+          value: /perf-cache/artifacts/qwen3_vl_30b_encoder_cache/agg_gb200
+      resources:
+        requests:
+          cpu: "8"
+          memory: 16Gi
+        limits:
+          cpu: "16"
+          memory: 32Gi
+      volumeMounts:
+        - name: perf-cache
+          mountPath: /perf-cache
+  volumes:
+    - name: perf-cache
+      persistentVolumeClaim:
+        claimName: perf-cache
+  restartPolicy: Never
