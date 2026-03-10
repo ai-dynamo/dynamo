@@ -99,11 +99,11 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          # Approximate KV-aware routing: uses prefix hashing to route
-          # requests to workers likely to have relevant KV cache, without
-          # requiring KV events from the backend.
+          # Round-robin routing is the simplest correct choice here.
+          # Nemotron-H on TRT-LLM has block reuse disabled, so KV-overlap
+          # routing does not provide a real cache reuse benefit.
           args:
-          - python3 -m dynamo.frontend --router-mode kv --no-kv-events --http-port 8000
+          - python3 -m dynamo.frontend --router-mode round-robin --http-port 8000
           command:
           - /bin/sh
           - -c

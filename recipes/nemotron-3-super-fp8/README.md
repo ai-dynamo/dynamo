@@ -12,7 +12,7 @@ These recipes target **Dynamo 1.0**. See [Dynamo 0.9.1 Compatibility](#dynamo-09
 | Configuration | GPUs | Backend | Mode | Description |
 |--------------|------|---------|------|-------------|
 | [**vllm/agg**](vllm/agg/) | 4x H100 | vLLM | Aggregated | TP=4, KV-aware routing |
-| [**trtllm/agg**](trtllm/agg/) | 4x H100 | TensorRT-LLM | Aggregated | TP=4, KV-aware routing |
+| [**trtllm/agg**](trtllm/agg/) | 4x H100 | TensorRT-LLM | Aggregated | TP=4, round-robin routing |
 | [**sglang/agg**](sglang/agg/) | 4x H100 | SGLang | Aggregated | TP=4, KV-aware routing (not working on 0.9.1) |
 | [**trtllm/disagg**](trtllm/disagg/) | 4x H100 | TensorRT-LLM | Disaggregated | TP=2 P/D split, UCX KV transfer |
 | [**sglang/disagg**](sglang/disagg/) | 4x H100 | SGLang | Disaggregated | TP=2 P/D split, nixl KV transfer (not working on 0.9.1) |
@@ -110,9 +110,10 @@ To disable reasoning at request time, pass `"chat_template_kwargs": {"enable_thi
 
 ## Routing
 
-All recipes use **approximate KV-aware routing** (`--router-mode kv --no-kv-events` on the frontend). The frontend uses prefix hashing to route requests to workers most likely to have relevant KV cache blocks, improving cache hit rates. This is especially beneficial for workloads with shared system prompts or multi-turn conversations.
+- **vLLM** and **SGLang** recipes use **approximate KV-aware routing** (`--router-mode kv --no-kv-events` on the frontend). The frontend uses prefix hashing to route requests to workers most likely to have relevant KV cache blocks, which helps workloads with shared system prompts or multi-turn conversations.
+- **TensorRT-LLM** recipes use **round-robin routing**. Nemotron-H on TRT-LLM still requires `enable_block_reuse: false`, so KV overlap routing does not provide a real cache-reuse benefit here and only adds misleading overlap bookkeeping.
 
-Approximate (hash-based) routing is used because none of the backends currently support publishing KV cache events (`--kv-events-config` for vLLM/SGLang, `--publish-events-and-metrics` for TRT-LLM) for hybrid Mamba+Attention models.
+Approximate (hash-based) routing is used for the vLLM and SGLang variants because hybrid Mamba+Attention models do not yet have a reliable KV-event path in these recipes (`--kv-events-config` for vLLM/SGLang, `--publish-events-and-metrics` for TRT-LLM).
 
 ## Backend-Specific Notes
 
@@ -127,6 +128,7 @@ Approximate (hash-based) routing is used because none of the backends currently 
 ### TensorRT-LLM
 - Uses PyTorch backend (`backend: pytorch` in engine config)
 - Block reuse is still not supported for Nemotron-H / Mamba hybrid cache. Set `enable_block_reuse: false` explicitly in all TRT-LLM Nemotron configs. If the field is omitted, current TRT-LLM builds may still start only because the Nemotron model class silently applies a model default of `enable_block_reuse: false`; block reuse is not actually active.
+- The TRT-LLM recipes use `--router-mode round-robin` rather than KV routing. With block reuse disabled, KV-overlap scoring does not correspond to a real runtime win for Nemotron-H.
 - **Disaggregated mode** requires `cache_transceiver_config: backend: UCX`. NIXL and MOONCAKE backends do not support hybrid models with Mamba SSM state — only UCX (or MPI) can transfer both attention KV cache and Mamba conv/SSM state between workers.
 
 ### SGLang
