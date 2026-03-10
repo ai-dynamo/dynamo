@@ -19,7 +19,7 @@ use crate::block_manager::{
         transfer::{TransferContext, WriteTo, WriteToStrategy},
     },
     connector::scheduler::{SchedulingDecision, TransferSchedulerClient},
-    offload::MAX_TRANSFER_BATCH_SIZE,
+    offload::max_transfer_batch_size,
     storage::{DeviceStorage, DiskStorage, Local, PinnedStorage},
 };
 
@@ -40,7 +40,7 @@ pub struct ConnectorTransferBatcher {
 impl ConnectorTransferBatcher {
     pub fn new() -> Self {
         Self {
-            max_batch_size: MAX_TRANSFER_BATCH_SIZE,
+            max_batch_size: max_transfer_batch_size(),
         }
     }
 
