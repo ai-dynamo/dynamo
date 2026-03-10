@@ -8811,7 +8811,7 @@ dependencies = [
  "reqwest 0.12.28",
  "rmp-serde",
  "serde_json",
- "socket2 0.6.2",
+ "socket2 0.6.3",
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
