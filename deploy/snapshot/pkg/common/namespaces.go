@@ -58,4 +58,3 @@ func SendSignalViaPIDNamespace(ctx context.Context, log logr.Logger, referenceHo
 	)
 	return nil
 }
-

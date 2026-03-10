@@ -19,7 +19,8 @@ members = [
     "lib/bench",
     "lib/bindings/c",
     "lib/bindings/python/codegen",
-    "lib/config",
+    "lib/velo-common",
+    "lib/velo-transports",
     "lib/velo-events",
 ]
 resolver = "3"
@@ -53,6 +54,8 @@ kvbm-logical = { path = "lib/kvbm-logical", version = "1.0.0" }
 kvbm-physical = { path = "lib/kvbm-physical", version = "1.0.0" }
 
 # velo
+velo-common = { path = "lib/velo-common", version = "1.0.0" }
+velo-transports = { path = "lib/velo-transports", version = "1.0.0" }
 velo-events = { path = "lib/velo-events", version = "1.0.0" }
 
 # External dependencies
@@ -99,6 +102,7 @@ reqwest = { version = "0.12.24", default-features = false, features = [
     "rustls-tls",
 ] }
 rmp-serde = { version = "1" }
+serde_bytes = { version = "0.11" }
 # "rc" is for async-openai. Allows serializing Rc and Arc. Generally avoid doing that.
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = { version = "1" }
