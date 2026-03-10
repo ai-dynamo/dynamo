@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 
 
 class TargetReplica(BaseModel):
-    sub_component_type: Optional[SubComponentType] = None
+    sub_component_type: SubComponentType
     component_name: Optional[str] = None
     desired_replicas: int
 
@@ -76,20 +76,14 @@ class KubernetesConnector(PlannerConnector):
         self.graph_deployment_name = self.parent_dgd_name
 
     async def add_component(
-        self,
-        sub_component_type: Optional[SubComponentType] = None,
-        blocking: bool = True,
-        component_name: Optional[str] = None,
+        self, sub_component_type: SubComponentType, blocking: bool = True
     ):
-        """Add a component by increasing its replica count by 1.
-
-        Target the service by sub_component_type, component_name, or both.
-        """
+        """Add a component by increasing its replica count by 1"""
 
         deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
 
         service = get_service_from_sub_component_type_or_name(
-            deployment, sub_component_type, component_name=component_name
+            deployment, sub_component_type
         )
         self.kube_api.update_graph_replicas(
             self.graph_deployment_name,
@@ -102,20 +96,14 @@ class KubernetesConnector(PlannerConnector):
             )
 
     async def remove_component(
-        self,
-        sub_component_type: Optional[SubComponentType] = None,
-        blocking: bool = True,
-        component_name: Optional[str] = None,
+        self, sub_component_type: SubComponentType, blocking: bool = True
     ):
-        """Remove a component by decreasing its replica count by 1.
-
-        Target the service by sub_component_type, component_name, or both.
-        """
+        """Remove a component by decreasing its replica count by 1"""
 
         deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
 
         service = get_service_from_sub_component_type_or_name(
-            deployment, sub_component_type, component_name=component_name
+            deployment, sub_component_type
         )
         if service.number_replicas() > 0:
             self.kube_api.update_graph_replicas(
@@ -172,8 +160,6 @@ class KubernetesConnector(PlannerConnector):
                 deployment,
                 require_prefill=require_prefill,
                 require_decode=require_decode,
-                prefill_component_name=prefill_component_name,
-                decode_component_name=decode_component_name,
             )
         except PlannerError as e:
             errors.append(str(e))
@@ -187,8 +173,6 @@ class KubernetesConnector(PlannerConnector):
         deployment: Optional[dict] = None,
         require_prefill: bool = True,
         require_decode: bool = True,
-        prefill_component_name: Optional[str] = None,
-        decode_component_name: Optional[str] = None,
     ) -> str:
         """Get the model name from the deployment"""
         try:
@@ -205,14 +189,12 @@ class KubernetesConnector(PlannerConnector):
                 prefill_service = get_service_from_sub_component_type_or_name(
                     deployment,
                     SubComponentType.PREFILL,
-                    component_name=prefill_component_name,
                 )
                 prefill_model_name = prefill_service.get_model_name()
             if require_decode:
                 decode_service = get_service_from_sub_component_type_or_name(
                     deployment,
                     SubComponentType.DECODE,
-                    component_name=decode_component_name,
                 )
                 decode_model_name = decode_service.get_model_name()
 
@@ -257,8 +239,6 @@ class KubernetesConnector(PlannerConnector):
         deployment: Optional[dict] = None,
         require_prefill: bool = True,
         require_decode: bool = True,
-        prefill_component_name: Optional[str] = None,
-        decode_component_name: Optional[str] = None,
     ) -> tuple[int, int]:
         """Get the GPU counts for prefill and decode services from the deployment.
 
@@ -266,8 +246,6 @@ class KubernetesConnector(PlannerConnector):
             deployment: Optional deployment dict, fetched if not provided
             require_prefill: Whether to require prefill service
             require_decode: Whether to require decode service
-            prefill_component_name: Optional fallback service name for prefill
-            decode_component_name: Optional fallback service name for decode
 
         Returns:
             Tuple of (prefill_gpu_count, decode_gpu_count)
@@ -287,7 +265,6 @@ class KubernetesConnector(PlannerConnector):
                 prefill_service = get_service_from_sub_component_type_or_name(
                     deployment,
                     SubComponentType.PREFILL,
-                    component_name=prefill_component_name,
                 )
                 prefill_gpu_count = prefill_service.get_gpu_count()
             except (PlannerError, ValueError) as e:
@@ -298,7 +275,6 @@ class KubernetesConnector(PlannerConnector):
                 decode_service = get_service_from_sub_component_type_or_name(
                     deployment,
                     SubComponentType.DECODE,
-                    component_name=decode_component_name,
                 )
                 decode_gpu_count = decode_service.get_gpu_count()
             except (PlannerError, ValueError) as e:
@@ -406,13 +382,8 @@ class KubernetesConnector(PlannerConnector):
             )
             current_replicas = service.number_replicas()
             if current_replicas != target_replica.desired_replicas:
-                label = (
-                    target_replica.sub_component_type.value
-                    if target_replica.sub_component_type
-                    else service.name
-                )
                 logger.info(
-                    f"Updating {label} component {service.name} to desired replica count {target_replica.desired_replicas}"
+                    f"Updating {target_replica.sub_component_type.value} component {service.name} to desired replica count {target_replica.desired_replicas}"
                 )
                 self.kube_api.update_graph_replicas(
                     self.graph_deployment_name,
@@ -421,7 +392,7 @@ class KubernetesConnector(PlannerConnector):
                 )
             else:
                 logger.info(
-                    f"{label} component {service.name} already at desired replica count {target_replica.desired_replicas}, skipping"
+                    f"{target_replica.sub_component_type.value} component {service.name} already at desired replica count {target_replica.desired_replicas}, skipping"
                 )
 
         if blocking:
@@ -435,60 +406,26 @@ if __name__ == "__main__":
     import asyncio
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--dynamo-namespace", type=str, default="dynamo")
-    parser.add_argument("--k8s-namespace", type=str, default="default")
-    parser.add_argument(
-        "--action",
-        type=str,
-        choices=["add", "remove", "set"],
-        required=True,
-        help="add/remove: adjust by 1 replica. set: scale to --replicas.",
-    )
+    parser.add_argument("--dynamo_namespace", type=str, default="dynamo")
+    parser.add_argument("--k8s_namespace", type=str, default="default")
+    parser.add_argument("--action", type=str, choices=["add", "remove"])
     parser.add_argument(
         "--component",
         type=str,
         choices=[t.value for t in SubComponentType],
-        default=None,
-        help="Target sub-component type (prefill/decode)",
-    )
-    parser.add_argument(
-        "--component-name",
-        type=str,
-        default=None,
-        help="Target service by DGD service name (for services without subComponentType)",
-    )
-    parser.add_argument(
-        "--replicas",
-        type=int,
-        default=None,
-        help="Desired replica count (required for 'set' action)",
+        default=SubComponentType.PREFILL.value,
+        help="Target sub-component to scale",
     )
     parser.add_argument("--blocking", action="store_true")
     args = parser.parse_args()
-
-    if not args.component and not args.component_name:
-        parser.error("At least one of --component or --component-name is required")
-    if args.action == "set" and args.replicas is None:
-        parser.error("--replicas is required for 'set' action")
-
-    sub_component_type = SubComponentType(args.component) if args.component else None
     connector = KubernetesConnector(
         args.dynamo_namespace, k8s_namespace=args.k8s_namespace
     )
 
     if args.action == "add":
-        task = connector.add_component(
-            sub_component_type, args.blocking, component_name=args.component_name
-        )
+        task = connector.add_component(SubComponentType(args.component), args.blocking)
     elif args.action == "remove":
         task = connector.remove_component(
-            sub_component_type, args.blocking, component_name=args.component_name
+            SubComponentType(args.component), args.blocking
         )
-    elif args.action == "set":
-        target = TargetReplica(
-            sub_component_type=sub_component_type,
-            component_name=args.component_name,
-            desired_replicas=args.replicas,
-        )
-        task = connector.set_component_replicas([target], blocking=args.blocking)
     asyncio.run(task)
