@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Multi-DGD deployment for hierarchical planner example with vLLM workers
+# Multi-DGD deployment for global planner example with vLLM workers
 # Architecture:
-#   DGD 1 (hierarchical): Frontend + GlobalRouter
+#   DGD 1 (global-planner): Frontend + GlobalRouter
 #   DGD 2 (prefill-pool-0): Local Router + vLLM Prefill Worker (1 GPU)
 #   DGD 3 (prefill-pool-1): Local Router + vLLM Prefill Worker (1 GPU)
 #   DGD 4 (decode-pool-0): Local Router + vLLM Decode Worker (1 GPU)

@@ -3,9 +3,9 @@ SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES.
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Hierarchical Planner Example
+# Global Planner Example
 
-This example demonstrates a hierarchical routing setup with:
+This example demonstrates a global planner routing setup with:
 - A **Global Router** that routes to different pools based on request characteristics
 - **Local Routers** in each pool namespace
 - **Workers** (Mocker for local testing, vLLM for Kubernetes deployment)
@@ -49,7 +49,7 @@ Pool selection is based on a 2x2 grid:
 For local testing without GPUs, use the mocker-based script:
 
 ```bash
-cd examples/hierarchical_planner
+cd examples/global_planner
 ./run_example.sh
 ```
 
@@ -130,7 +130,7 @@ curl -X POST http://localhost:8000/v1/chat/completions \
 For Kubernetes, port-forward the frontend service first:
 
 ```bash
-kubectl port-forward -n ${K8S_NAMESPACE} svc/hierarchical-frontend-frontend 8000:8000
+kubectl port-forward -n ${K8S_NAMESPACE} svc/global-planner-frontend-frontend 8000:8000
 ```
 
 ## Request Flow
@@ -237,7 +237,7 @@ Complete end-to-end examples are in `examples/backends/`:
 
 | File | Description |
 |---|---|
-| `mocker/deploy/hplanner-mocker-test.yaml` | 2 prefill + 2 decode pools with Mocker workers; GlobalPlanner in no-op mode |
-| `vllm/deploy/hplanner-vllm-test.yaml` | 2 prefill (TP1, TP2) + 1 decode pool with real vLLM workers |
+| `mocker/deploy/global-planner-mocker-test.yaml` | 2 prefill + 2 decode pools with Mocker workers; GlobalPlanner in no-op mode |
+| `vllm/deploy/global-planner-vllm-test.yaml` | 2 prefill (TP1, TP2) + 1 decode pool with real vLLM workers |
 
 Both use `envsubst` for substituting `${K8S_NAMESPACE}`, `${DYNAMO_IMAGE}`, etc.

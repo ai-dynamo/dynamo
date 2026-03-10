@@ -115,7 +115,7 @@ The `Frontend` exposes a single model endpoint. `GlobalRouter` selects the best 
 ## Prerequisites
 
 - Dynamo Kubernetes Platform installed. See [Kubernetes Quickstart](../../kubernetes/README.md).
-- Prometheus deployed and scraping router metrics. The hierarchical examples assume cluster Prometheus is available.
+- Prometheus deployed and scraping router metrics. The global planner examples assume cluster Prometheus is available.
 - Backend images available for your chosen framework (`vllm`, `sglang`, or `trtllm`).
 - Secrets for model access, such as a Hugging Face token secret.
 - A storage strategy for model weights if your workers should share a model cache PVC.
@@ -187,7 +187,7 @@ Deploy one control DGD that contains:
 - `GlobalRouter`: chooses which pool receives each request.
 - `GlobalPlanner`: receives scale requests from pool planners and applies replica changes.
 
-The vLLM example topology is in [examples/backends/vllm/deploy/hplanner-vllm-test.yaml](../../../examples/backends/vllm/deploy/hplanner-vllm-test.yaml).
+The vLLM example topology is in [examples/backends/vllm/deploy/global-planner-vllm-test.yaml](../../../examples/backends/vllm/deploy/global-planner-vllm-test.yaml).
 
 The `GlobalPlanner` section is minimal:
 
@@ -211,7 +211,7 @@ GlobalPlanner:
 
 The values passed to `--managed-namespaces` are the pool planners' **Dynamo namespaces** (`caller_namespace`), not raw Kubernetes namespaces. In many examples they share the same string prefix, but they are logically different identifiers.
 
-If you want the central executor to reject scale requests that exceed a total GPU budget, add `--max-total-gpus`. See [examples/backends/vllm/deploy/hplanner-gpu-budget.yaml](../../../examples/backends/vllm/deploy/hplanner-gpu-budget.yaml).
+If you want the central executor to reject scale requests that exceed a total GPU budget, add `--max-total-gpus`. See [examples/backends/vllm/deploy/global-planner-gpu-budget.yaml](../../../examples/backends/vllm/deploy/global-planner-gpu-budget.yaml).
 
 ## Step 3: Create One DGD Per Pool
 
@@ -254,7 +254,7 @@ In the reference vLLM example:
 - `gp-prefill-1` uses a 2-GPU TP2 prefill worker
 - `gp-decode-0` uses a 1-GPU TP1 decode worker
 
-See [hplanner-vllm-test.yaml](../../../examples/backends/vllm/deploy/hplanner-vllm-test.yaml).
+See [global-planner-vllm-test.yaml](../../../examples/backends/vllm/deploy/global-planner-vllm-test.yaml).
 
 ## Step 4: Configure GlobalRouter To Select Pools
 
@@ -340,7 +340,7 @@ kubectl create secret generic hf-token-secret \
   --from-literal=HF_TOKEN=${HF_TOKEN} \
   -n ${K8S_NAMESPACE}
 
-envsubst < examples/backends/vllm/deploy/hplanner-vllm-test.yaml | \
+envsubst < examples/backends/vllm/deploy/global-planner-vllm-test.yaml | \
   kubectl apply -n ${K8S_NAMESPACE} -f -
 ```
 
@@ -389,4 +389,4 @@ This keeps profiling and pool selection simple while still giving you one public
 - [Profiler Guide](../profiler/profiler-guide.md) — Pre-deployment profiling workflow
 - [Global Planner README](../../../components/src/dynamo/global_planner/README.md) — Centralized scale execution
 - [Global Router README](../../../components/src/dynamo/global_router/README.md) — Cross-pool request routing
-- [vLLM hierarchical example](../../../examples/backends/vllm/deploy/hplanner-vllm-test.yaml) — End-to-end reference manifest
+- [vLLM global planner example](../../../examples/backends/vllm/deploy/global-planner-vllm-test.yaml) — End-to-end reference manifest

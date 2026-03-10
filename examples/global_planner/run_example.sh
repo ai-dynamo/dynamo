@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Hierarchical Planner Example
+# Global Planner Example
 # Run each command in a separate terminal, in order from bottom to top.
 # Wait a few seconds between starting each component.
 
@@ -16,7 +16,7 @@ python -m dynamo.frontend \
   --namespace hierarchical &
 
 python -m dynamo.global_router \
-  --config examples/hierarchical_planner/global_router_config.json \
+  --config examples/global_planner/global_router_config.json \
   --model-name Qwen/Qwen3-0.6B \
   --default-ttft-target 100 \
   --default-itl-target 10 \

@@ -1,0 +1,260 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Minimal GlobalPlanner GPU budget example: 2 independent model DGDs sharing a
+# cluster-wide GPU cap enforced by a central GlobalPlanner.
+#
+# Each model DGD is self-contained (Frontend + Workers + Planner) and serves a
+# different model. The GlobalPlanner in the ctrl DGD rejects any scale request
+# that would push the total GPU count across both DGDs above MAX_TOTAL_GPUS.
+#
+# Architecture:
+#   DGD gp-ctrl:    GlobalPlanner (--max-total-gpus)
+#   DGD model-a:    Frontend + VllmPrefillWorker + VllmDecodeWorker + Planner  (MODEL_A)
+#   DGD model-b:    Frontend + VllmPrefillWorker + VllmDecodeWorker + Planner  (MODEL_B)
+#
+# Prerequisites:
+#   - Cluster Prometheus deployed and scraping pods via PodMonitor
+#   - HuggingFace token secret: kubectl create secret generic hf-token-secret \
+#       --from-literal=HF_TOKEN=<your-token> -n ${K8S_NAMESPACE}
+#
+# Usage:
+#   export K8S_NAMESPACE=... DYNAMO_IMAGE=... DYNAMO_VLLM_IMAGE=... STORAGE_CLASS_NAME=...
+#   export MODEL_A=meta-llama/Llama-3.1-8B-Instruct MODEL_B=Qwen/Qwen3-8B MAX_TOTAL_GPUS=8
+#   envsubst < global-planner-gpu-budget.yaml | kubectl apply  -n ${K8S_NAMESPACE} -f -
+#   envsubst < global-planner-gpu-budget.yaml | kubectl delete -n ${K8S_NAMESPACE} -f -
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ${K8S_NAMESPACE}-planner
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: dynamo-platform-dynamo-operator-planner
+subjects:
+  - kind: ServiceAccount
+    name: default
+    namespace: ${K8S_NAMESPACE}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: hf-model-cache
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: ${STORAGE_CLASS_NAME}
+  resources:
+    requests:
+      storage: 50Gi
+---
+# ── Control plane: GlobalPlanner only ────────────────────────────────────────
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: gp-ctrl
+spec:
+  services:
+    GlobalPlanner:
+      componentType: default
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: ${DYNAMO_IMAGE}
+          command:
+            - python3
+            - -m
+            - dynamo.global_planner
+          args:
+            - --max-total-gpus
+            - "${MAX_TOTAL_GPUS}"
+---
+# ── Model A: self-contained disagg serving DGD ──────────────────────────────
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: model-a
+spec:
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: ${DYNAMO_IMAGE}
+          workingDir: /workspace
+          command:
+            - python3
+            - -m
+            - dynamo.frontend
+          args:
+            - --model-name
+            - ${MODEL_A}
+
+    VllmPrefillWorker:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      subComponentType: prefill
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+      extraPodSpec:
+        volumes:
+          - name: hf-model-cache
+            persistentVolumeClaim:
+              claimName: hf-model-cache
+        mainContainer:
+          image: ${DYNAMO_VLLM_IMAGE}
+          workingDir: /workspace/examples/backends/vllm
+          command:
+            - python3
+            - -m
+            - dynamo.vllm
+          args:
+            - --model
+            - ${MODEL_A}
+            - --tensor-parallel-size
+            - "1"
+            - --is-prefill-worker
+          volumeMounts:
+            - name: hf-model-cache
+              mountPath: /home/dynamo/.cache/huggingface/hub
+
+    VllmDecodeWorker:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      subComponentType: decode
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+      extraPodSpec:
+        volumes:
+          - name: hf-model-cache
+            persistentVolumeClaim:
+              claimName: hf-model-cache
+        mainContainer:
+          image: ${DYNAMO_VLLM_IMAGE}
+          workingDir: /workspace/examples/backends/vllm
+          command:
+            - python3
+            - -m
+            - dynamo.vllm
+          args:
+            - --model
+            - ${MODEL_A}
+            - --tensor-parallel-size
+            - "1"
+          volumeMounts:
+            - name: hf-model-cache
+              mountPath: /home/dynamo/.cache/huggingface/hub
+
+    Planner:
+      componentType: planner
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: ${DYNAMO_IMAGE}
+          command:
+            - python3
+            - -m
+            - dynamo.planner
+          args:
+            - --config
+            - '{"environment":"global-planner","global_planner_namespace":"${K8S_NAMESPACE}-gp-ctrl","backend":"vllm","mode":"disagg","enable_load_scaling":false,"enable_throughput_scaling":true,"throughput_metrics_source":"router","ttft":2000,"itl":200,"max_gpu_budget":-1,"prefill_engine_num_gpu":1,"decode_engine_num_gpu":1,"model_name":"${MODEL_A}","profile_results_dir":"/workspace/tests/planner/profiling_results/H200_TP1P_TP1D"}'
+---
+# ── Model B: self-contained disagg serving DGD ──────────────────────────────
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: model-b
+spec:
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: ${DYNAMO_IMAGE}
+          workingDir: /workspace
+          command:
+            - python3
+            - -m
+            - dynamo.frontend
+          args:
+            - --model-name
+            - ${MODEL_B}
+
+    VllmPrefillWorker:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      subComponentType: prefill
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+      extraPodSpec:
+        volumes:
+          - name: hf-model-cache
+            persistentVolumeClaim:
+              claimName: hf-model-cache
+        mainContainer:
+          image: ${DYNAMO_VLLM_IMAGE}
+          workingDir: /workspace/examples/backends/vllm
+          command:
+            - python3
+            - -m
+            - dynamo.vllm
+          args:
+            - --model
+            - ${MODEL_B}
+            - --tensor-parallel-size
+            - "1"
+            - --is-prefill-worker
+          volumeMounts:
+            - name: hf-model-cache
+              mountPath: /home/dynamo/.cache/huggingface/hub
+
+    VllmDecodeWorker:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      subComponentType: decode
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+      extraPodSpec:
+        volumes:
+          - name: hf-model-cache
+            persistentVolumeClaim:
+              claimName: hf-model-cache
+        mainContainer:
+          image: ${DYNAMO_VLLM_IMAGE}
+          workingDir: /workspace/examples/backends/vllm
+          command:
+            - python3
+            - -m
+            - dynamo.vllm
+          args:
+            - --model
+            - ${MODEL_B}
+            - --tensor-parallel-size
+            - "1"
+          volumeMounts:
+            - name: hf-model-cache
+              mountPath: /home/dynamo/.cache/huggingface/hub
+
+    Planner:
+      componentType: planner
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: ${DYNAMO_IMAGE}
+          command:
+            - python3
+            - -m
+            - dynamo.planner
+          args:
+            - --config
+            - '{"environment":"global-planner","global_planner_namespace":"${K8S_NAMESPACE}-gp-ctrl","backend":"vllm","mode":"disagg","enable_load_scaling":false,"enable_throughput_scaling":true,"throughput_metrics_source":"router","ttft":2000,"itl":200,"max_gpu_budget":-1,"prefill_engine_num_gpu":1,"decode_engine_num_gpu":1,"model_name":"${MODEL_B}","profile_results_dir":"/workspace/tests/planner/profiling_results/H200_TP1P_TP1D"}'

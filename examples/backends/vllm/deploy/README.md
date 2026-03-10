@@ -35,7 +35,7 @@ Advanced disaggregated deployment with KV cache routing capabilities.
 - `VLLMDecodeWorker`: Specialized decode-only worker
 - `VLLMPrefillWorker`: Specialized prefill-only worker (`--disaggregation-mode prefill`)
 
-### 5. **Hierarchical Planner Deployment** (`hplanner-vllm-test.yaml`)
+### 5. **Global Planner Deployment** (`global-planner-vllm-test.yaml`)
 Single public endpoint backed by multiple specialized private pools.
 
 **Architecture:**
@@ -45,7 +45,7 @@ Single public endpoint backed by multiple specialized private pools.
 
 Use this pattern when one model should be exposed through one endpoint, but different request classes should be routed to different DGDs.
 
-### 6. **Hierarchical Planner With GPU Budget** (`hplanner-gpu-budget.yaml`)
+### 6. **Global Planner With GPU Budget** (`global-planner-gpu-budget.yaml`)
 Minimal hierarchical deployment with a centralized GPU budget.
 
 **Architecture:**
@@ -138,8 +138,8 @@ Select the deployment pattern that matches your requirements:
 - Use `disagg.yaml` for maximum performance
 - Use `disagg_router.yaml` for high-performance with KV cache routing
 - Use `disagg_planner.yaml` for SLA-optimized performance
-- Use `hplanner-vllm-test.yaml` for one-endpoint hierarchical routing across multiple DGDs
-- Use `hplanner-gpu-budget.yaml` for the same pattern with centralized GPU budget enforcement
+- Use `global-planner-vllm-test.yaml` for one-endpoint global planner routing across multiple DGDs
+- Use `global-planner-gpu-budget.yaml` for the same pattern with centralized GPU budget enforcement
 
 ### 2. Customize Configuration
 Edit the template to match your environment:
