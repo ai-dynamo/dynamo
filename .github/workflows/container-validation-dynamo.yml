@@ -139,7 +139,7 @@ jobs:
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
       - name: Pull image
         run: |
-          source ./.github/scripts/retry_docker.sh
+          source ./.github/scripts/retry.sh
           retry_pull ${{ env.IMAGE_TAG }}
       - name: Run Rust checks (block-manager + media-ffmpeg + integration tests)
         run: |
@@ -178,7 +178,7 @@ jobs:
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
       - name: Pull image
         run: |
-          source ./.github/scripts/retry_docker.sh
+          source ./.github/scripts/retry.sh
           retry_pull ${{ env.IMAGE_TAG }}
       - name: Run pytest (parallel tests with xdist)
         uses: ./.github/actions/pytest
@@ -211,7 +211,7 @@ jobs:
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
       - name: Pull image
         run: |
-          source ./.github/scripts/retry_docker.sh
+          source ./.github/scripts/retry.sh
           retry_pull ${{ env.IMAGE_TAG }}
       - name: Run pytest (sequential tests)
         uses: ./.github/actions/pytest
