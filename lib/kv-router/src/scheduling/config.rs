@@ -94,7 +94,7 @@ pub struct KvRouterConfig {
 
     /// Skip blocking for workers at init time (default: false).
     /// When true, the router starts immediately without waiting for discovery-based
-    /// workers. Used when workers are provided externally per-request (e.g., EPP).
+    /// workers and workers are provided externally per-request (e.g., EPP).
     pub skip_initial_worker_wait: bool,
 }
 

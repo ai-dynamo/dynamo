@@ -520,6 +520,13 @@ impl PrefillRouter {
     ///
     /// This is the shared worker selection logic used by both `resolve_prefill_worker`
     /// and `query_route`.
+    /// Register externally-provided workers in the prefill router's slot tracker.
+    pub fn register_workers(&self, worker_ids: &HashSet<WorkerId>) {
+        if let Some(InnerPrefillRouter::KvRouter(r)) = self.prefill_router.get() {
+            r.chooser.register_workers(worker_ids);
+        }
+    }
+
     pub async fn query_prefill_worker(
         &self,
         token_ids: &[u32],

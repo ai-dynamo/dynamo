@@ -223,6 +223,11 @@ impl KvScheduler {
         Ok(response)
     }
 
+    /// Register externally-provided workers in the slot tracker.
+    pub fn register_workers(&self, worker_ids: &HashSet<WorkerId>) {
+        self.queue.register_workers(worker_ids);
+    }
+
     pub async fn add_request(&self, req: SequenceRequest) -> Result<(), SequenceError> {
         self.slots.add_request(req).await
     }

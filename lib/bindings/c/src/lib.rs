@@ -439,6 +439,10 @@ impl RouterHandles {
         priority_jump: f64,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
     ) -> Result<u64, QueryRouterResult> {
+        if let Some(ref ids) = allowed_worker_ids {
+            self.prefill_router.register_workers(ids);
+        }
+
         self.prefill_router
             .query_prefill_worker(
                 tokens,
@@ -473,6 +477,10 @@ impl RouterHandles {
         is_disaggregated: bool,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
     ) -> Result<(WorkerWithDpRank, u32), QueryRouterResult> {
+        if let Some(ref ids) = allowed_worker_ids {
+            self.decode_router.register_workers(ids);
+        }
+
         // For decode phase in disaggregated mode, use overlap_score_weight=0
         // This matches prefill_router.rs
         let config_override = if is_disaggregated {
