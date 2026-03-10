@@ -130,9 +130,6 @@ impl PythonServerStreamingEngine {
 
 #[derive(Debug, thiserror::Error)]
 enum ResponseProcessingError {
-    #[error("python exception: {0}")]
-    PythonException(String),
-
     #[error("dynamo error")]
     DynamoError(DynamoError),
 
@@ -253,14 +250,6 @@ where
                             ResponseProcessingError::DynamoError(dynamo_err) => {
                                 Annotated::from_err(dynamo_err)
                             }
-                            ResponseProcessingError::PythonException(e) => {
-                                Annotated::from_err(
-                                    DynamoError::builder()
-                                        .error_type(ErrorType::Backend(BackendError::Unknown))
-                                        .message(e)
-                                        .build(),
-                                )
-                            }
                             ResponseProcessingError::OffloadError(e) => {
                                 Annotated::from_error(format!(
                                     "critical error: failed to offload the python async generator to a new thread: {}",
@@ -332,7 +321,34 @@ where
                 );
             }
 
-            ResponseProcessingError::PythonException(e.to_string())
+            // Map well-known Python exceptions to specific Backend error types.
+            // Order matters: check subclasses before their parents
+            // (e.g., ConnectionRefusedError before ConnectionError).
+            let backend_err = if e.is_instance_of::<pyo3::exceptions::PyValueError>(py)
+                || e.is_instance_of::<pyo3::exceptions::PyTypeError>(py)
+            {
+                BackendError::InvalidArgument
+            } else if e.is_instance_of::<pyo3::exceptions::PyTimeoutError>(py) {
+                BackendError::ConnectionTimeout
+            } else if e.is_instance_of::<pyo3::exceptions::PyConnectionRefusedError>(py) {
+                BackendError::CannotConnect
+            } else if e.is_instance_of::<pyo3::exceptions::PyConnectionResetError>(py)
+                || e.is_instance_of::<pyo3::exceptions::PyBrokenPipeError>(py)
+                || e.is_instance_of::<pyo3::exceptions::PyConnectionError>(py)
+            {
+                BackendError::Disconnected
+            } else if e.is_instance_of::<pyo3::exceptions::asyncio::CancelledError>(py) {
+                BackendError::Cancelled
+            } else {
+                BackendError::Unknown
+            };
+
+            ResponseProcessingError::DynamoError(
+                DynamoError::builder()
+                    .error_type(ErrorType::Backend(backend_err))
+                    .message(e.to_string())
+                    .build(),
+            )
         })
     })?;
     let response = tokio::task::spawn_blocking(move || {
