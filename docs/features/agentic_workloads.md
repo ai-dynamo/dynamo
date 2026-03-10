@@ -7,12 +7,12 @@ subtitle: Workload-aware inference with agentic hints for routing, scheduling, a
 
 ### Gaps with workload-agnostic inference
 
-Agentic LLM inference is [dominated by KV-cache storage and I/O](https://arxiv.org/abs/2602.21548) rather than computation; without leveraging the predictable structure of agent lifecycles, we leave significant optimizations on the table. 
+Agentic LLM inference is [dominated by KV-cache storage and I/O](https://arxiv.org/abs/2602.21548) rather than computation; without leveraging the predictable structure of agent lifecycles, we leave significant optimizations on the table.
 Three gaps stand out with current workflows:
 
 1. **Reactive vs. proactive:** Current runtimes do not use signals from the harness about what will happen next—e.g. that a "Plan" step is done and "Execute" steps are coming—so they cannot prefetch, pin, or schedule proactively.
 
-2. **All KV-cache blocks treated equally:** Generic eviction (e.g. LRU) does not distinguish high-value, long-lived context (system prompt, tool definitions) from ephemeral context (chain-of-thought, scratchpad). 
+2. **All KV-cache blocks treated equally:** Generic eviction (e.g. LRU) does not distinguish high-value, long-lived context (system prompt, tool definitions) from ephemeral context (chain-of-thought, scratchpad).
 
 3. **Workload-agnostic scheduling:** Agents have predictable structure. Tools and system prompts repeat across turns, shallow vs. deep research have different latency needs, and the orchestrator knows which phase comes next.
 
@@ -49,7 +49,7 @@ The request body includes `nvext.agent_hints` (routing, scheduling) and `nvext.c
 | Feature | vLLM | SGLang | TensorRT-LLM |
 |---------|:----:|:------:|:-------------:|
 | Priority-based cache eviction | 🚧 | ✅ | 🚧 |
-| Cache pinning | | ✅ | 🚧  |
+| Cache pinning | | ✅ | 🚧 |
 | Cache prefetching | | 🚧 | |
 | Subagent / thinking-aware cache eviction | | 🚧 | |
 | Speculative prefill | ✅ | ✅ | ✅ |
@@ -65,18 +65,18 @@ Dynamo is now supported directly in LangChain using the [NVIDIA AI Endpoints int
 
 ## Features (experimental)
 
-### KV cache optimizations 
+### KV cache optimizations
 
 - **Priority-based KV cache eviction:** Instead of evicting by LRU alone, the backend can evict **low-priority** cache entries first when the GPU (and, with HiCache, host) cache is full. The `priority` value in `nvext.agent_hints` is forwarded to the engine; with SGLang, enable `--enable-priority-scheduling` and `--radix-eviction-policy priority`.
 
-- **Cache pinning (experimental):** [Anthropic's v1/messages](https://docs.anthropic.com/en/docs/build-with-claude/caching) includes a `cache_control` field that tells servers how long to keep KV cache for specific blocks. Dynamo implements an OSS version with SGLang's HiCache: users can set `cache_control` via the same API as Anthropic or as an `nvext` field on chat completions. When set, the Dynamo router calls a hook in HiCache after the request completes to **pin** the blocks created by those tokens for the user-specified TTL. Pinned nodes resist eviction (demoting to host memory rather than being deleted).  
-    In the Nemo Agentic toolkit and Dynamo integration, TTL is dynamically computed as the product of how many times a block is expected to be reused and the time between those requests; the NAT profiler pre-computes these expectations during agent evaluations and stores them in a data structure per agent, then injects `nvext.cache_control` with the derived TTL (see [dynamo_llm.py](https://github.com/NVIDIA/NeMo-Agent-Toolkit/blob/develop/packages/nvidia_nat_core/src/nat/llm/dynamo_llm.py)). 
+- **Cache pinning (experimental):** [Anthropic's v1/messages](https://docs.anthropic.com/en/docs/build-with-claude/caching) includes a `cache_control` field that tells servers how long to keep KV cache for specific blocks. Dynamo implements an OSS version with SGLang's HiCache: users can set `cache_control` via the same API as Anthropic or as an `nvext` field on chat completions. When set, the Dynamo router calls a hook in HiCache after the request completes to **pin** the blocks created by those tokens for the user-specified TTL. Pinned nodes resist eviction (demoting to host memory rather than being deleted).
+    In the Nemo Agentic toolkit and Dynamo integration, TTL is dynamically computed as the product of how many times a block is expected to be reused and the time between those requests; the NAT profiler pre-computes these expectations during agent evaluations and stores them in a data structure per agent, then injects `nvext.cache_control` with the derived TTL (see [dynamo_llm.py](https://github.com/NVIDIA/NeMo-Agent-Toolkit/blob/develop/packages/nvidia_nat_core/src/nat/llm/dynamo_llm.py)).
 
-    **Future work:** TTL could be determined dynamically by context type—e.g. think tokens or scratchpad content could use a lower TTL than system prompt or tool definitions, so high-value static context is retained longer while ephemeral context expires sooner. 
+    **Future work:** TTL could be determined dynamically by context type—e.g. think tokens or scratchpad content could use a lower TTL than system prompt or tool definitions, so high-value static context is retained longer while ephemeral context expires sooner.
 
-- **Cache prefetching (future work):** Using the predictable agentic lifecycle (e.g. parent-child subagents, known next turn), Dynamo could proactively prefetch or move KV cache to a different worker so that the next request hits warm cache. 
+- **Cache prefetching (future work):** Using the predictable agentic lifecycle (e.g. parent-child subagents, known next turn), Dynamo could proactively prefetch or move KV cache to a different worker so that the next request hits warm cache.
 
-### Speculative prefill 
+### Speculative prefill
 
 After a turn finishes, the system can send a **speculative** `max_tokens=1` prefill with the **predicted next-turn prefix** (conversation history + assistant text, e.g. thinking stripped) to the same worker. When the real next request arrives, it hits a warm KV cache. Per-turn TTFT on turns 2+ can drop significantly (e.g. up to ~3× in [multiturn benchmarks](https://github.com/ai-dynamo/dynamo/blob/main/lib/bench/src/bin/README.md)). This can be extended so that Dynamo automatically sends tools and system prompt for subagents to a worker in advance, so subagent requests always hit warm cache.
 
