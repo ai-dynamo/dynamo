@@ -51,13 +51,15 @@ navigation:
             path: kubernetes/deployment/dynamomodel-guide.md
           - page: Autoscaling
             path: kubernetes/autoscaling.md
+          - page: Rolling Update
+            path: kubernetes/rolling-update.md
           - page: Inference Gateway (GAIE)
             path: kubernetes/inference-gateway.md
           - section: Checkpointing
-            path: kubernetes/chrek/README.md
+            path: kubernetes/snapshot/README.md
             contents:
               - page: Integration with Dynamo
-                path: kubernetes/chrek/dynamo.md
+                path: kubernetes/snapshot/dynamo.md
       - section: Observability (K8s)
         contents:
           - page: Metrics
@@ -147,6 +149,8 @@ navigation:
         contents:
           - page: Reference Guide
             path: backends/sglang/sglang-reference-guide.md
+          - page: Chat Processor
+            path: backends/sglang/sglang-chat-processor.md
           - page: Examples
             path: backends/sglang/sglang-examples.md
           - page: Disaggregation
