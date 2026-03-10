@@ -30,7 +30,7 @@ Modern LLM serving hits recurring bottlenecks:
 
 - **Prefill/decode imbalance** leaves GPUs underutilized when traffic mix shifts ([DistServe](https://arxiv.org/abs/2401.09670)).
 - **KV recomputation** increases TTFT and wastes compute when routing ignores cache overlap ([DeepSeek](https://arxiv.org/abs/2501.12948)).
-- **Memory pressure** from long contexts and concurrency exceeds HBM capacity without multi-tier cache management ([Mooncake](https://kvcache-ai.github.io/Mooncake/design/mooncake-store.html), [AIBrix](https://blog.vllm.ai/2025/02/21/aibrix-release.html), [FlexKV](https://github.com/taco-project/FlexKV), [LMCache](https://lmcache.ai/)).
+- **Memory pressure** from long contexts and concurrency exceeds HBM capacity without multi-tier cache management ([KVBM](https://docs.nvidia.com/dynamo/components/kvbm), [Mooncake](https://kvcache-ai.github.io/Mooncake/design/mooncake-store.html), [AIBrix](https://blog.vllm.ai/2025/02/21/aibrix-release.html), [FlexKV](https://github.com/taco-project/FlexKV), [LMCache](https://lmcache.ai/)).
 - **Dynamic demand** breaks static provisioning assumptions ([AzureTrace](https://github.com/Azure/AzurePublicDataset)).
 - **Real-world failures** (pod restart, partition, hot-spot overload) require first-class recovery behavior.
 
