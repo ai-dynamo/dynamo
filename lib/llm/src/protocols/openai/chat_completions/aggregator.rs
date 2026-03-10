@@ -381,6 +381,7 @@ impl ChatCompletionAggregator for dynamo_async_openai::types::CreateChatCompleti
 mod tests {
 
     use super::*;
+    use crate::protocols::openai::token_to_utf8_bytes;
     use futures::stream;
 
     #[allow(deprecated)]
@@ -428,7 +429,7 @@ mod tests {
                     dynamo_async_openai::types::ChatCompletionTokenLogprob {
                         token: token.clone(),
                         logprob: lp,
-                        bytes: super::super::token_to_utf8_bytes(&token),
+                        bytes: token_to_utf8_bytes(&token),
                         top_logprobs: vec![],
                     },
                 ]),

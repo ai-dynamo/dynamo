@@ -112,6 +112,13 @@ class HandlerBase(BaseGenerativeHandler):
         self.disable_request_abort = config.disable_request_abort
         self.additional_metrics = config.additional_metrics
 
+    @property
+    def tokenizer(self):
+        if self.multimodal_processor is not None:
+            return getattr(self.multimodal_processor, "tokenizer", None)
+        llm = getattr(self.engine, "llm", None)
+        return getattr(llm, "tokenizer", None)
+
     def check_error(self, result: dict) -> bool:
         """
         Check if there is an error in the result.
@@ -818,9 +825,8 @@ class HandlerBase(BaseGenerativeHandler):
                     out = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
 
                     # Extract logprobs from the output
-                    tokenizer = getattr(self.engine.llm, "tokenizer", None)
                     log_probs, top_logprobs = self._extract_logprobs(
-                        output, num_output_tokens_so_far, tokenizer=tokenizer
+                        output, num_output_tokens_so_far, tokenizer=self.tokenizer
                     )
                     if log_probs:
                         out["log_probs"] = log_probs
