@@ -288,8 +288,7 @@ For TensorRT-LLM multinode deployments, the operator configures MPI-based commun
 #### Additional Configuration
 - **Environment Variable**: `OMPI_MCA_orte_keep_fqdn_hostnames=1` is added to all nodes
 - **SSH Volume**: Automatically mounts the SSH keypair secret (typically named `mpirun-ssh-key-<deployment-name>`)
-
-**Important:** TensorRT-LLM requires an SSH keypair secret to be created before deployment. The secret name follows the pattern `mpirun-ssh-key-<component-name>`.
+- **Automatic SSH key generation**: The operator automatically generates the SSH keypair secret when it detects a multi-node `DynamoGraphDeployment`. No manual secret creation is required.
 
 ### Compilation Cache Configuration
 
