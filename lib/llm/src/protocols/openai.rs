@@ -9,6 +9,7 @@ use super::{
     common::{self, OutputOptionsProvider, SamplingOptionsProvider, StopConditionsProvider},
 };
 use crate::protocols::openai::common_ext::CommonExtProvider;
+use crate::types::TokenIdType;
 
 pub mod chat_completions;
 pub mod common_ext;
@@ -226,7 +227,7 @@ pub(crate) fn token_to_utf8_bytes(token: &str) -> Option<Vec<u8>> {
 pub(crate) fn convert_backend_top_logprobs(
     top_lps: &[common::llm_backend::TopLogprob],
     selected_token: &str,
-    selected_token_id: crate::types::TokenIdType,
+    selected_token_id: TokenIdType,
     selected_logprob: f32,
 ) -> Vec<dynamo_async_openai::types::TopLogprobs> {
     let mut found_selected = false;
