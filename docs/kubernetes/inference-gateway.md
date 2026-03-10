@@ -17,23 +17,6 @@ If you want to use LoRA deploy Dynamo without the Inference Gateway.
 
 Currently, these setups are only supported with the kGateway based Inference Gateway.
 
-## Table of Contents
-
-- [Prerequisites](#prerequisites)
-- [Installation Steps](#installation-steps)
-  - [1. Install Dynamo Platform](#1-install-dynamo-platform)
-  - [2. Deploy Inference Gateway](#2-deploy-inference-gateway)
-  - [3. Deploy Your Model](#3-deploy-your-model)
-  - [4. Build EPP image (Optional)](#4-build-epp-image-optional)
-  - [5. Deploy](#5-deploy)
-  - [6. Verify Installation](#6-verify-installation)
-  - [7. Usage](#7-usage)
-  - [8. Deleting the installation](#8-deleting-the-installation)
-- [Gateway API Inference Extension Details](#gateway-api-inference-extension-integration)
-  - [Router bookkeeping operations](#router-bookkeeping-operations)
-  - [Header Routing Hints](#header-routing-hints)
-
-
 ## Prerequisites
 
 - Kubernetes cluster with kubectl configured

@@ -10,7 +10,7 @@ subtitle: Enable KV-aware routing using Router for Dynamo deployments
 The Dynamo KV Router intelligently routes requests by evaluating their computational costs across different workers. It considers both decoding costs (from active blocks) and prefill costs (from newly computed blocks), using KV cache overlap to minimize redundant computation. Optimizing the KV Router is critical for achieving maximum throughput and minimum latency in distributed inference setups.
 This guide helps you get started with using the Dynamo router, with further details on configuration, disaggregated serving setup, and parameter tuning.
 
-## Quick start
+## Quick Start
 
 ### Python / CLI Deployment
 
@@ -31,7 +31,7 @@ Backend workers register themselves using the `register_model` API, after which 
 
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `--router-mode kv` | `round_robin` | Enable KV cache-aware routing |
+| `--router-mode kv` | `round-robin` | Enable KV cache-aware routing |
 | `--router-temperature <float>` | `0.0` | Controls routing randomness (0.0 = deterministic, higher = more random) |
 | `--kv-cache-block-size <size>` | Backend-specific | KV cache block size (should match backend config) |
 | `--router-kv-events` / `--no-router-kv-events` | `--router-kv-events` | Enable/disable real-time KV event tracking |
@@ -73,7 +73,7 @@ All CLI arguments can be configured via environment variables using the `DYN_` p
 
 | CLI Argument | Environment Variable | Default |
 |--------------|---------------------|---------|
-| `--router-mode kv` | `DYN_ROUTER_MODE=kv` | `round_robin` |
+| `--router-mode kv` | `DYN_ROUTER_MODE=kv` | `round-robin` |
 | `--router-temperature` | `DYN_ROUTER_TEMPERATURE` | `0.0` |
 | `--kv-cache-block-size` | `DYN_KV_CACHE_BLOCK_SIZE` | Backend-specific |
 | `--no-router-kv-events` | `DYN_ROUTER_USE_KV_EVENTS=false` | `true` |
@@ -352,7 +352,7 @@ graph TD
 
 ## Serving Multiple Router Replicas
 
-For improved fault tolerance, you can launch multiple frontend + router replicas. Since the frontend and router are currently tied together, you'll need to use different HTTP ports for each instance. (The separation of the frontend and Router is WIP.)
+For improved fault tolerance, you can launch multiple frontend + router replicas. If multiple `dynamo.frontend` processes share the same host or network namespace, give each instance a different HTTP port. In Kubernetes or on separate hosts, replicas can usually reuse the same container port. Alternatively, you can deploy the router separately as the standalone `python -m dynamo.router` service; see the [Standalone Router README](../../../components/src/dynamo/router/README.md).
 
 ### Router State Management
 
