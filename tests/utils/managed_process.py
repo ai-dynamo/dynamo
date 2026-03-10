@@ -434,6 +434,11 @@ class ManagedProcess:
         poll_interval = 0.1
         elapsed = 0.0
         while elapsed < timeout:
+            # Reap the launched child if it has already exited. Without this,
+            # the child can remain as a zombie and keep killpg(..., 0) reporting
+            # the process group as alive until the timeout expires.
+            if self.proc is not None:
+                self.proc.poll()
             try:
                 # Check if any process in the group is still alive
                 os.killpg(self._pgid, 0)  # Signal 0 = check existence (no kill)
