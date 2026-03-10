@@ -93,6 +93,56 @@ fn check_and_warn_slow_transfer(
     last_warned_at
 }
 
+// ── Shared helpers ──────────────────────────────────────────────────
+
+/// Parse notification UUIDs and collect those matching outstanding transfers.
+/// Unknown UUIDs are optionally routed to `early_arrivals` with a warning.
+fn collect_completed<T>(
+    notifications: HashMap<String, Vec<String>>,
+    outstanding: &HashMap<Uuid, OutstandingTransfer<T>>,
+    mut early_arrivals: Option<&mut HashSet<Uuid>>,
+) -> Vec<Uuid> {
+    let mut completed = Vec::new();
+    for (_agent_name, notif_strings) in notifications {
+        for notif_str in notif_strings {
+            if let Ok(notif_uuid) = Uuid::parse_str(&notif_str) {
+                if outstanding.contains_key(&notif_uuid) {
+                    completed.push(notif_uuid);
+                } else if let Some(early) = early_arrivals.as_deref_mut() {
+                    warn!(
+                        uuid = %notif_uuid,
+                        "Notification arrived for transfer not in outstanding map (early arrival)"
+                    );
+                    early.insert(notif_uuid);
+
+                    #[cfg(all(not(test), debug_assertions))]
+                    panic!("Notification arrived for transfer not in outstanding map (early arrival); ensure all transfers are registered the NIXL notification can be triggered");
+                }
+            }
+        }
+    }
+    completed
+}
+
+/// Remove completed transfers from the outstanding map and trigger their events.
+fn complete_transfers<T>(
+    completed: Vec<Uuid>,
+    outstanding: &mut HashMap<Uuid, OutstandingTransfer<T>>,
+    system: &EventManager,
+) {
+    for uuid in completed {
+        if let Some(transfer) = outstanding.remove(&uuid)
+            && let Err(e) = system.trigger(transfer.event_handle)
+        {
+            error!(
+                uuid = %uuid,
+                error = %e,
+                "Failed to trigger completion event"
+            );
+        }
+    }
+}
+
 // ── Core processing loop ────────────────────────────────────────────
 
 /// Generic notification event loop, parameterized over the notification source
@@ -104,6 +154,7 @@ async fn process_events_core<S: NotificationSource, R: Registration>(
 ) {
     let mut outstanding: HashMap<Uuid, OutstandingTransfer<R::Payload>> = HashMap::new();
     let mut early_arrivals: HashSet<Uuid> = HashSet::new();
+    let mut last_early_arrival_warn: Option<Instant> = None;
     let mut check_interval = interval(Duration::from_millis(1));
 
     loop {
@@ -150,23 +201,11 @@ async fn process_events_core<S: NotificationSource, R: Registration>(
                     }
                 };
 
-                let mut completed = Vec::new();
-
-                // Iterate through all notifications
-                for (_agent_name, notif_strings) in notifications {
-                    for notif_str in notif_strings {
-                        // Try to parse notification as UUID
-                        // NOTE: This assumes notifications contain UUIDs.
-                        // The actual format may be different and may need adjustment.
-                        if let Ok(notif_uuid) = Uuid::parse_str(&notif_str) {
-                            if outstanding.contains_key(&notif_uuid) {
-                                completed.push(notif_uuid);
-                            } else {
-                                early_arrivals.insert(notif_uuid);
-                            }
-                        }
-                    }
-                }
+                let completed = collect_completed(
+                    notifications,
+                    &outstanding,
+                    Some(&mut early_arrivals),
+                );
 
                 // Check for slow transfers and update warnings
                 for (uuid, transfer) in outstanding.iter_mut() {
@@ -179,17 +218,21 @@ async fn process_events_core<S: NotificationSource, R: Registration>(
                     }
                 }
 
-                // Remove completed transfers and signal completion
-                for uuid in completed {
-                    if let Some(transfer) = outstanding.remove(&uuid)
-                        && let Err(e) = system.trigger(transfer.event_handle) {
-                            error!(
-                                uuid = %uuid,
-                                error = %e,
-                                "Failed to trigger completion event"
-                            );
-                        }
+                // Warn periodically if early_arrivals has unmatched entries
+                if !early_arrivals.is_empty() {
+                    let should_warn = last_early_arrival_warn
+                        .map(|t| t.elapsed() > Duration::from_secs(30))
+                        .unwrap_or(true);
+                    if should_warn {
+                        warn!(
+                            count = early_arrivals.len(),
+                            "early_arrivals buffer has unmatched entries"
+                        );
+                        last_early_arrival_warn = Some(Instant::now());
+                    }
                 }
+
+                complete_transfers(completed, &mut outstanding, &system);
             }
         }
     }
@@ -199,23 +242,13 @@ async fn process_events_core<S: NotificationSource, R: Registration>(
     while !outstanding.is_empty() {
         check_interval.tick().await;
 
-        if let Ok(notifications) = source.poll_notifications() {
-            let mut completed = Vec::new();
-
-            for (_agent_name, notif_strings) in notifications {
-                for notif_str in notif_strings {
-                    if let Ok(notif_uuid) = Uuid::parse_str(&notif_str)
-                        && outstanding.contains_key(&notif_uuid)
-                    {
-                        completed.push(notif_uuid);
-                    }
-                }
+        match source.poll_notifications() {
+            Ok(notifications) => {
+                let completed = collect_completed(notifications, &outstanding, None);
+                complete_transfers(completed, &mut outstanding, &system);
             }
-
-            for uuid in completed {
-                if let Some(transfer) = outstanding.remove(&uuid) {
-                    let _ = system.trigger(transfer.event_handle);
-                }
+            Err(e) => {
+                warn!(error = %e, "Failed to fetch notifications during shutdown drain");
             }
         }
     }
