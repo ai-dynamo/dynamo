@@ -1,61 +1,59 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Full cache_on vs cache_off sweep for disaggregated E+PD deployment.
-# Matches vllm_e_pd.yaml: concurrencies [16,32,64,128,256], 6 datasets.
+# Runs cache_on vs cache_off with a concurrency sweep (32, 64, 128) across all datasets.
+# cache_on: restarts deployment between runs (already has cache enabled).
+# cache_off: sets DYN_MULTIMODAL_EMBEDDING_CACHE_GB=0 on the deployment, then sweeps.
 #
-# cache_on: restarts workers between runs (deployment already has cache=10).
-# cache_off: patches DynamoGraphDeployment CRD to set cache=0, then sweeps.
-#
-# Requires: ServiceAccount with permissions to restart deployments and patch the CRD.
+# Requires: ServiceAccount with permissions to patch and restart the vllm-serve deployment.
 #
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: benchmark-sa
+  name: benchmark-vllm-serve-sa
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: benchmark-restart-role
+  name: benchmark-vllm-serve-role
 rules:
   - apiGroups: ["apps"]
     resources: ["deployments"]
     verbs: ["get", "list", "patch"]
   - apiGroups: [""]
     resources: ["pods"]
-    verbs: ["get", "list", "delete"]
-  - apiGroups: ["nvidia.com"]
-    resources: ["dynamographdeployments"]
-    verbs: ["get", "patch"]
+    verbs: ["get", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: benchmark-restart-binding
+  name: benchmark-vllm-serve-binding
 subjects:
   - kind: ServiceAccount
-    name: benchmark-sa
+    name: benchmark-vllm-serve-sa
 roleRef:
   kind: Role
-  name: benchmark-restart-role
+  name: benchmark-vllm-serve-role
   apiGroup: rbac.authorization.k8s.io
 ---
 apiVersion: v1
 kind: Pod
 metadata:
-  name: qwen3-vl-disagg-gb200-benchmark
+  name: qwen3-vl-vllm-serve-benchmark
   labels:
     app: benchmark
 spec:
-  serviceAccountName: benchmark-sa
+  serviceAccountName: benchmark-vllm-serve-sa
+  securityContext:
+    runAsUser: 0
+    runAsGroup: 0
+    fsGroup: 0
   affinity:
     podAffinity:
       requiredDuringSchedulingIgnoredDuringExecution:
         - labelSelector:
             matchLabels:
-              nvidia.com/dynamo-component: VllmPDWorker
-              nvidia.com/dynamo-graph-deployment-name: qwen3-vl-disagg-gb200
+              app: qwen3-vl-agg-vllm-serve
           topologyKey: kubernetes.io/hostname
   tolerations:
     - key: "dedicated"
@@ -66,7 +64,8 @@ spec:
       effect: "NoExecute"
   containers:
     - name: benchmark
-      image: python:3.11
+      image: nvcr.io/nvstaging/ai-dynamo/vllm-runtime:1.0.0rc8-arm64
+      imagePullPolicy: IfNotPresent
       command:
         - /bin/bash
         - -lc
@@ -75,8 +74,8 @@ spec:
 
           apt update && apt install -y curl jq
           pip install aiperf
-          curl -sLO "https://dl.k8s.io/release/v1.31.0/bin/linux/arm64/kubectl" \
-            && chmod +x kubectl && mv kubectl /usr/local/bin/
+          curl -LO "https://dl.k8s.io/release/v1.31.0/bin/linux/arm64/kubectl" \
+            && chmod +x kubectl && mv kubectl /opt/dynamo/venv/bin/
 
           wait_for_model() {
             echo "Waiting for model '${MODEL_NAME}' at http://${FRONTEND}:8000/v1/models..."
@@ -88,32 +87,18 @@ spec:
             echo "Model '${MODEL_NAME}' is ready."
           }
 
-          wait_for_pod_ready() {
-            local label=$1
-            echo "Waiting for pod with label ${label} to be ready..."
-            until kubectl get pod -l "${label}" -o jsonpath='{.items[0].status.containerStatuses[0].ready}' 2>/dev/null | grep -q true; do
-              sleep 5
-            done
-            echo "Pod ${label} is ready."
-          }
-
-          restart_workers() {
-            echo "Restarting encode worker pod..."
-            kubectl delete pod -l nvidia.com/dynamo-component=${ENCODE_COMPONENT} --wait=true
-            echo "Restarting PD worker pod..."
-            kubectl delete pod -l nvidia.com/dynamo-component=${PD_COMPONENT} --wait=true
-            wait_for_pod_ready "nvidia.com/dynamo-component=${ENCODE_COMPONENT}"
-            wait_for_pod_ready "nvidia.com/dynamo-component=${PD_COMPONENT}"
+          restart_deployment() {
+            echo "Restarting deployment to clear embedding cache..."
+            kubectl rollout restart deployment/${DEPLOYMENT}
+            kubectl rollout status deployment/${DEPLOYMENT} --timeout=600s
             wait_for_model
           }
 
-          set_cache_gb() {
+          set_cache_and_restart() {
             local gb=$1
-            echo "Patching DynamoGraphDeployment: DYN_MULTIMODAL_EMBEDDING_CACHE_GB=${gb}"
-            kubectl patch dynamographdeployment/${GRAPH_DEPLOYMENT} --type=json \
-              -p "[{\"op\":\"replace\",\"path\":\"/spec/services/VllmPDWorker/extraPodSpec/mainContainer/env/${CACHE_ENV_INDEX}/value\",\"value\":\"${gb}\"}]"
-            sleep 10
-            wait_for_pod_ready "nvidia.com/dynamo-component=${PD_COMPONENT}"
+            echo "Setting DYN_MULTIMODAL_EMBEDDING_CACHE_GB=${gb} on deployment..."
+            kubectl set env deployment/${DEPLOYMENT} DYN_MULTIMODAL_EMBEDDING_CACHE_GB="${gb}"
+            kubectl rollout status deployment/${DEPLOYMENT} --timeout=600s
             wait_for_model
           }
 
@@ -124,7 +109,7 @@ spec:
                 RUN_DIR="${ARTIFACT_BASE_DIR}/${mode}/${ds}/c${conc}"
                 mkdir -p "${RUN_DIR}"
 
-                restart_workers
+                restart_deployment
 
                 echo "=== Running: ${mode} ${ds} concurrency=${conc} ==="
                 aiperf profile \
@@ -148,12 +133,11 @@ spec:
           }
 
           DATASETS=(
-            # "1000req_1img_200pool_400word_http"
-            # "1000req_3img_200pool_400word_http"
             "1000req_1img_200pool_400word_base64"
-            "1000req_3img_200pool_400word_base64"
+            # "1000req_1img_500pool_400word_base64"
+            # "1000req_1img_800pool_400word_base64"
           )
-          CONCURRENCIES=(32)
+          CONCURRENCIES=(32 64 128)
 
           # Wait for datasets
           for ds in "${DATASETS[@]}"; do
@@ -163,9 +147,16 @@ spec:
             done
           done
 
-          # cache_on only (deploy.yaml already has cache=10)
+          # Phase 1: cache_on (deployment already has cache enabled)
           wait_for_model
           run_sweep cache_on
+
+          # Phase 2: cache_off (set cache=0, triggers rollout)
+          set_cache_and_restart 0
+          run_sweep cache_off
+
+          # Restore cache setting
+          set_cache_and_restart "${CACHE_GB}"
 
           echo "All runs complete. Artifacts in ${ARTIFACT_BASE_DIR}"
           sleep 3600
@@ -173,15 +164,9 @@ spec:
         - name: MODEL_NAME
           value: Qwen/Qwen3-VL-30B-A3B-Instruct-FP8
         - name: FRONTEND
-          value: qwen3-vl-disagg-gb200-frontend
-        - name: GRAPH_DEPLOYMENT
-          value: qwen3-vl-disagg-gb200
-        - name: ENCODE_COMPONENT
-          value: VllmEncodeWorker
-        - name: PD_COMPONENT
-          value: VllmPDWorker
-        - name: CACHE_ENV_INDEX
-          value: "3"  # index of DYN_MULTIMODAL_EMBEDDING_CACHE_GB in deploy.yaml PD worker env array
+          value: qwen3-vl-agg-vllm-serve
+        - name: DEPLOYMENT
+          value: qwen3-vl-agg-vllm-serve
         - name: CACHE_GB
           value: "10"
         - name: MAX_TOKENS
@@ -189,11 +174,11 @@ spec:
         - name: REQUEST_COUNT
           value: "1000"
         - name: WARMUP_REQUEST_COUNT
-          value: "5"
+          value: "3"
         - name: DATASET_DIR
           value: /perf-cache-tmp/datasets
         - name: ARTIFACT_BASE_DIR
-          value: /perf-cache-tmp/artifacts/fp8/gb200/disagg
+          value: /perf-cache-tmp/artifacts/fp8/gb200/agg-vllm-serve
       resources:
         requests:
           cpu: "8"

@@ -1,0 +1,116 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Plain vllm serve with Dynamo's embedding cache connector (no Dynamo graph).
+#
+# Toggle embedding cache:
+#   cache ON:  DYN_MULTIMODAL_EMBEDDING_CACHE_GB = "10" (or any non-zero value)
+#   cache OFF: DYN_MULTIMODAL_EMBEDDING_CACHE_GB = "0"
+#
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: qwen3-vl-agg-vllm-serve
+  labels:
+    app: qwen3-vl-agg-vllm-serve
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: qwen3-vl-agg-vllm-serve
+  template:
+    metadata:
+      labels:
+        app: qwen3-vl-agg-vllm-serve
+    spec:
+      tolerations:
+        - key: "dedicated"
+          value: "user-workload"
+          effect: "NoSchedule"
+          operator: "Equal"
+        - key: "dedicated"
+          value: "user-workload"
+          effect: "NoExecute"
+          operator: "Equal"
+        - key: "nvidia.com/gpu"
+          operator: "Exists"
+          effect: "NoSchedule"
+      securityContext:
+        runAsUser: 0
+        runAsGroup: 0
+        fsGroup: 0
+      imagePullSecrets:
+        - name: nvcrimagepullsecret
+      containers:
+        - name: vllm
+          image: nvcr.io/nvstaging/ai-dynamo/vllm-runtime:1.0.0rc8-arm64
+          imagePullPolicy: IfNotPresent
+          workingDir: /workspace
+          command:
+            - /bin/bash
+            - -lc
+          args:
+            - |
+              set -euo pipefail
+
+              SITE_PACKAGES="$(python3 -c 'import pathlib, vllm; print(pathlib.Path(vllm.__file__).resolve().parent.parent)')"
+              cd "${SITE_PACKAGES}"
+              curl -sL https://github.com/vllm-project/vllm/pull/34182.diff | patch -p1
+              curl -sL https://github.com/vllm-project/vllm/pull/34783.diff | python3 -c "
+              import sys
+              chunks = sys.stdin.read().split('diff --git ')
+              filtered = [c for c in chunks if c.startswith('a/vllm/')]
+              print(''.join('diff --git ' + c for c in filtered))
+              " | patch -p1
+              cd /workspace
+
+              EC_ARGS=""
+              if [ "${DYN_MULTIMODAL_EMBEDDING_CACHE_GB}" != "0" ]; then
+                EC_ARGS="--ec-transfer-config {
+                  \"ec_role\": \"ec_both\",
+                  \"ec_connector\": \"DynamoMultimodalEmbeddingCacheConnector\",
+                  \"ec_connector_module_path\": \"dynamo.vllm.multimodal_utils.multimodal_embedding_cache_connector\",
+                  \"ec_connector_extra_config\": {\"multimodal_embedding_cache_capacity_gb\": ${DYN_MULTIMODAL_EMBEDDING_CACHE_GB}}
+                }"
+              fi
+
+              vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct-FP8 \
+                --tensor-parallel-size 1 \
+                --gpu-memory-utilization 0.85 \
+                --max-model-len 16384 \
+                --disable-log-requests \
+                --enable-prefix-caching \
+                --enable-mm-embeds \
+                ${EC_ARGS}
+          env:
+            - name: HF_HOME
+              value: /home/dynamo/.cache/huggingface
+            - name: DYN_MULTIMODAL_EMBEDDING_CACHE_GB
+              value: "10"  # DYN_MULTIMODAL_EMBEDDING_CACHE_GB
+          ports:
+            - containerPort: 8000
+              name: http
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+            requests:
+              nvidia.com/gpu: "1"
+          volumeMounts:
+            - name: model-cache-tmp
+              mountPath: /home/dynamo/.cache/huggingface
+      volumes:
+        - name: model-cache-tmp
+          persistentVolumeClaim:
+            claimName: model-cache-tmp
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: qwen3-vl-agg-vllm-serve
+spec:
+  selector:
+    app: qwen3-vl-agg-vllm-serve
+  ports:
+    - port: 8000
+      targetPort: 8000
+      name: http

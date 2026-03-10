@@ -3,7 +3,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: model-download
+  name: model-download-tmp
 spec:
   backoffLimit: 3
   completions: 1
@@ -11,7 +11,7 @@ spec:
   template:
     metadata:
       labels:
-        app: model-download
+        app: model-download-tmp
     spec:
       restartPolicy: Never
       tolerations:
@@ -43,9 +43,9 @@ spec:
               pip install --no-cache-dir huggingface_hub hf_transfer
               hf download "$MODEL_NAME" --revision "$MODEL_REVISION"
           volumeMounts:
-            - name: model-cache
+            - name: model-cache-tmp
               mountPath: /home/dynamo/.cache/huggingface
       volumes:
-        - name: model-cache
+        - name: model-cache-tmp
           persistentVolumeClaim:
-            claimName: model-cache
+            claimName: model-cache-tmp

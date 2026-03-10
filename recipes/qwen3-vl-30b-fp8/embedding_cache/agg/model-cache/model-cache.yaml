@@ -3,35 +3,23 @@
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: model-cache
+  name: model-cache-tmp
 spec:
   accessModes:
-    - ReadWriteOnce
+    - ReadWriteMany
   resources:
     requests:
       storage: 100Gi
-  storageClassName: "ebs"
+  storageClassName: "dgxc-enterprise-file"
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: compilation-cache
+  name: perf-cache-tmp
 spec:
   accessModes:
-    - ReadWriteOnce
-  resources:
-    requests:
-      storage: 10Gi
-  storageClassName: "ebs"
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: perf-cache
-spec:
-  accessModes:
-    - ReadWriteOnce
+    - ReadWriteMany
   resources:
     requests:
       storage: 50Gi
-  storageClassName: "ebs"
+  storageClassName: "dgxc-enterprise-file"

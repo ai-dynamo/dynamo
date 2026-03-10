@@ -44,6 +44,14 @@ metadata:
     app: benchmark
 spec:
   serviceAccountName: benchmark-sa
+  affinity:
+    podAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchLabels:
+              nvidia.com/dynamo-component: VllmWorker
+              nvidia.com/dynamo-graph-deployment-name: qwen3-vl-agg-gb200
+          topologyKey: kubernetes.io/hostname
   tolerations:
     - key: "dedicated"
       value: "user-workload"
@@ -124,6 +132,7 @@ spec:
 
           DATASETS=(
             "1000req_1img_200pool_400word_base64"
+            "1000req_1img_200pool_400word_http"
             # "1000req_1img_500pool_400word_base64"
             # "1000req_1img_800pool_400word_base64"
           )

@@ -38,7 +38,7 @@ spec:
               set -euo pipefail
 
               GENERATOR_MAIN="/workspace/benchmarks/multimodal/jsonl/main.py"
-              OUTPUT_DIR="/perf-cache/datasets"
+              OUTPUT_DIR="/perf-cache-tmp/datasets"
 
               if [[ ! -f "${GENERATOR_MAIN}" ]]; then
                 echo "Generator not found at ${GENERATOR_MAIN}"
@@ -47,23 +47,34 @@ spec:
 
               mkdir -p "${OUTPUT_DIR}"
 
-              for POOL_SIZE in 200; do  # 500 800
-                OUTPUT_FILE="${OUTPUT_DIR}/1000req_1img_${POOL_SIZE}pool_400word_http.jsonl"
-                echo "Generating ${OUTPUT_FILE} (images-pool=${POOL_SIZE})"
-                python3 "${GENERATOR_MAIN}" \
-                  -n 1000 \
-                  --images-per-request 1 \
-                  --images-pool "${POOL_SIZE}" \
-                  --user-text-tokens 400 \
-                  --image-mode http \
-                  -o "${OUTPUT_FILE}"
+              for MODE in http base64; do
+                for IMGS in 1 3; do
+                  OUTPUT_FILE="${OUTPUT_DIR}/1000req_${IMGS}img_200pool_400word_${MODE}.jsonl"
+                  if [[ -f "${OUTPUT_FILE}" ]]; then
+                    echo "Skipping ${OUTPUT_FILE} (already exists)"
+                    continue
+                  fi
+                  EXTRA_ARGS=""
+                  if [[ "${MODE}" == "base64" ]]; then
+                    EXTRA_ARGS="--image-dir /perf-cache-tmp/images"
+                  fi
+                  echo "Generating ${OUTPUT_FILE} (images=${IMGS}, pool=200, mode=${MODE})"
+                  python3 "${GENERATOR_MAIN}" \
+                    -n 1000 \
+                    --images-per-request "${IMGS}" \
+                    --images-pool 200 \
+                    --user-text-tokens 400 \
+                    --image-mode "${MODE}" \
+                    ${EXTRA_ARGS} \
+                    -o "${OUTPUT_FILE}"
+                done
               done
 
               echo "Dataset generation complete in ${OUTPUT_DIR}"
           volumeMounts:
             - name: perf-cache
-              mountPath: /perf-cache
+              mountPath: /perf-cache-tmp
       volumes:
         - name: perf-cache
           persistentVolumeClaim:
-            claimName: perf-cache
+            claimName: perf-cache-tmp
