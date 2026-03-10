@@ -110,6 +110,26 @@ unsafe fn malloc_host_prefer_writecombined(size: usize) -> Result<*mut u8, Stora
     }
 }
 
+/// Allocates pinned host memory with `CU_MEMHOSTALLOC_DEVICEMAP`.
+///
+/// This flag maps the allocation into the device address space, enabling
+/// direct GPU access without write-combined semantics (better for CPU reads).
+///
+/// # Safety
+///
+/// Caller must ensure a valid CUDA context is bound to the current thread.
+unsafe fn malloc_host_devicemap(size: usize) -> Result<*mut u8, StorageError> {
+    // SAFETY: Caller guarantees a valid CUDA context is bound to the current thread
+    unsafe {
+        cudarc::driver::result::malloc_host(
+            size,
+            cudarc::driver::sys::CU_MEMHOSTALLOC_DEVICEMAP,
+        )
+    }
+    .map(|ptr| ptr as *mut u8)
+    .map_err(StorageError::Cuda)
+}
+
 /// Trait for [Storage] types that can be accessed by CUDA
 pub trait CudaAccessible: Storage {}
 
@@ -205,7 +225,10 @@ impl SystemAccessible for PinnedStorage {}
 impl CudaAccessible for PinnedStorage {}
 
 impl PinnedStorage {
-    /// Create a new pinned storage with the given size
+    /// Create a new pinned storage with the given size.
+    ///
+    /// Uses write-combined allocation with NUMA-awareness when enabled.
+    /// Prefer [`new_for_device`](Self::new_for_device) for new code.
     pub fn new(ctx: &Arc<CudaContext>, size: usize) -> Result<Self, StorageError> {
         unsafe {
             ctx.bind_to_thread().map_err(StorageError::Cuda)?;
@@ -243,6 +266,64 @@ impl PinnedStorage {
                 size,
                 handles: RegistrationHandles::new(),
                 ctx: ctx.clone(),
+            })
+        }
+    }
+
+    /// Create a new pinned storage, optionally NUMA-aware for a specific GPU.
+    ///
+    /// Creates a [`CudaContext`] internally. When `device_id` is `Some`, tries
+    /// NUMA-aware allocation on the GPU's NUMA node (gated by
+    /// [`numa_allocator::is_numa_enabled`]). Uses `CU_MEMHOSTALLOC_DEVICEMAP`
+    /// (not write-combined) for the fallback/default path.
+    ///
+    /// When `device_id` is `None`, allocates on device 0 without NUMA awareness.
+    pub fn new_for_device(size: usize, device_id: Option<u32>) -> Result<Self, StorageError> {
+        let gpu_id = device_id.unwrap_or(0) as usize;
+        let ctx = Cuda::device_or_create(gpu_id)?;
+
+        unsafe {
+            ctx.bind_to_thread().map_err(StorageError::Cuda)?;
+
+            // Try NUMA-aware allocation when a device_id is provided and NUMA is enabled.
+            let ptr = if let Some(gpu_id) = device_id {
+                if numa_allocator::is_numa_enabled() {
+                    match numa_allocator::worker_pool::NumaWorkerPool::global()
+                        .allocate_pinned_for_gpu(size, gpu_id)
+                    {
+                        Ok(Some(ptr)) => ptr,
+                        Ok(None) => {
+                            tracing::debug!(
+                                "NUMA node unknown for GPU {}, using direct allocation",
+                                gpu_id
+                            );
+                            malloc_host_devicemap(size)?
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "NUMA allocation failed: {}, using direct allocation",
+                                e
+                            );
+                            malloc_host_devicemap(size)?
+                        }
+                    }
+                } else {
+                    malloc_host_devicemap(size)?
+                }
+            } else {
+                malloc_host_devicemap(size)?
+            };
+
+            assert!(!ptr.is_null(), "Failed to allocate pinned memory");
+            assert!(ptr.is_aligned(), "Pinned memory is not aligned");
+            assert!(size < isize::MAX as usize);
+
+            let ptr = ptr as u64;
+            Ok(Self {
+                ptr,
+                size,
+                handles: RegistrationHandles::new(),
+                ctx,
             })
         }
     }
