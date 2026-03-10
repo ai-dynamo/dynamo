@@ -312,7 +312,7 @@ jobs:
     runs-on: prod-default-small-v2
     # Run when any deploy test will run: if any framework or deploy files changed
     if: |
-      always() &&
+      always() && !cancelled() &&
       (needs.changed-files.outputs.vllm == 'true' ||
        needs.changed-files.outputs.sglang == 'true' ||
        needs.changed-files.outputs.trtllm == 'true' ||
@@ -365,7 +365,7 @@ jobs:
     # (e.g. multi-gpu tests, arm64 copy) cause GitHub Actions to skip dependent
     # jobs unless always() is present. !failure() ensures we still skip on real failures.
     if: |
-      always() && !failure() &&
+      always() && !failure() && !cancelled() &&
       (needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true')
     runs-on: prod-default-small-v2
     needs: [changed-files, deploy-operator, vllm-pipeline]
@@ -405,7 +405,7 @@ jobs:
     runs-on: prod-default-small-v2
     # Run if core, sglang, or deploy is changed (see deploy-test-vllm for always() rationale)
     if: |
-      always() && !failure() &&
+      always() && !failure() && !cancelled() &&
       (needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true')
     needs: [changed-files, deploy-operator, sglang-pipeline]
     timeout-minutes: 25
@@ -442,7 +442,7 @@ jobs:
     runs-on: prod-default-small-v2
     # Run if core, trtllm, or deploy is changed (see deploy-test-vllm for always() rationale)
     if: |
-      always() && !failure() &&
+      always() && !failure() && !cancelled() &&
       (needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true')
     needs: [changed-files, deploy-operator, trtllm-pipeline]
     timeout-minutes: 25
