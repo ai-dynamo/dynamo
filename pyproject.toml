@@ -15,10 +15,6 @@ requires-python = ">=3.10"
 dependencies = [
     "ai-dynamo-runtime==1.0.0",
     "transformers>=4.56.0",
-    "pytest>=8.3.4",
-    "types-aiofiles>=24.1.0",
-    "types-psutil>=7.0.0.20250218",
-    "types-requests>=2.32.4.20260107",
     "kubernetes>=32.0.1,<33.0.0",
     "fastapi>=0.115.0",
     "distro",
@@ -28,6 +24,7 @@ dependencies = [
     "click<8.2.0",
     "setuptools",
     "prometheus_client>=0.23.1,<1.0",
+    "msgpack==1.1.2",
 ]
 
 classifiers = [
@@ -52,8 +49,7 @@ Repository = "https://github.com/ai-dynamo/dynamo.git"
 [project.optional-dependencies]
 trtllm =[
     "uvloop",
-    "msgpack==1.1.2",
-    "tensorrt-llm==1.3.0rc5",
+    "tensorrt-llm==1.3.0rc5.post1",
 ]
 
 vllm = [
