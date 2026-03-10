@@ -119,29 +119,29 @@ runs:
       env:
         NAMESPACE: ${{ inputs.namespace }}
       run: |
+        set +eo pipefail
+
         echo "### OPERATOR DEPLOYMENT FAILED" | tee -a $GITHUB_STEP_SUMMARY
 
         echo "::group::Pod status"
-        kubectl get pods -n ${NAMESPACE} -o wide || true
+        kubectl get pods -n ${NAMESPACE} -o wide
         echo "::endgroup::"
 
-        # Find pods that are not fully ready (covers CrashLoopBackOff, ImagePull errors,
-        # AND pods in Running state with 0/N ready containers)
-        NOT_READY=$(kubectl get pods -n ${NAMESPACE} --no-headers | awk -F'[/ ]+' '$2 != $3 || $4 == "Error"' || true)
+        NOT_READY=$(kubectl get pods -n ${NAMESPACE} --no-headers | awk -F'[/ ]+' '$2 != $3 || $4 == "Error"')
         if [ -n "$NOT_READY" ]; then
           echo "$NOT_READY" | awk '{print "- **" $1 "** | Ready: `" $2 "` | Status: `" $3 "`"}' >> $GITHUB_STEP_SUMMARY
 
           echo "$NOT_READY" | awk '{print $1}' | while read POD; do
             echo "::group::describe pod/$POD"
-            kubectl describe pod "$POD" -n ${NAMESPACE} 2>&1 | tail -50 || true
+            kubectl describe pod "$POD" -n ${NAMESPACE} 2>&1
             echo "::endgroup::"
 
             echo "::group::logs pod/$POD"
-            kubectl logs "$POD" -n ${NAMESPACE} --all-containers --tail=80 2>&1 || true
+            kubectl logs "$POD" -n ${NAMESPACE} --all-containers --tail=80 2>&1
             echo "::endgroup::"
           done
         fi
 
         echo "::group::Namespace events (recent)"
-        kubectl get events -n ${NAMESPACE} --sort-by='.lastTimestamp' 2>&1 | tail -30 || true
+        kubectl get events -n ${NAMESPACE} --sort-by='.lastTimestamp' 2>&1
         echo "::endgroup::"
