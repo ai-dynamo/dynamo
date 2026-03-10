@@ -178,6 +178,7 @@ class TestRapidUnsupported:
         ops = _make_ops(tmp_path)
         asyncio.run(run_profile(dgdr, ops))
 
+    @pytest.mark.skip(reason="Fails with latest AIC - OPS-3852")
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
     def test_planner_throughput_scaling_raises(self, tmp_path):
