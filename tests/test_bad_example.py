@@ -17,6 +17,7 @@ _shared_results = {}
 
 # 1. Hardcoded port
 # Rule: pytest-guidelines > DO NOT hardcode ports
+@pytest.mark.xfail(reason="nothing listening on hardcoded port 8000", raises=requests.ConnectionError)
 @pytest.mark.pre_merge
 @pytest.mark.gpu_0
 @pytest.mark.unit
@@ -163,15 +164,17 @@ def test_slow_no_timeout():
     assert True
 
 
-# 11. Reusing component name across tests
+# 11. Reusing namespace/component/endpoint names across tests
 # Rule: pytest-guidelines > Hermetic Testing > Reusing namespace/component/endpoint names
 @pytest.mark.pre_merge
 @pytest.mark.gpu_0
 @pytest.mark.unit
 def test_reused_component_name():
-    """Re-register worker-1 with new metadata."""
-    _shared_results["worker-1"] = "overwritten"
-    assert _shared_results["worker-1"] == "overwritten"
+    """Register a worker under a hardcoded namespace that will collide with other tests."""
+    namespace = "dynamo"
+    component = "backend"
+    endpoint = f"dyn://{namespace}.{component}.generate"
+    assert endpoint == "dyn://dynamo.backend.generate"
 
 
 # 12. Missing markers
@@ -279,6 +282,7 @@ def test_equality_instead_of_identity():
 
 # 19. Modifying a collection while iterating
 # Rule: python-guidelines > Do not modify a collection while iterating
+@pytest.mark.xfail(reason="dict mutation during iteration raises RuntimeError", raises=RuntimeError)
 @pytest.mark.pre_merge
 @pytest.mark.gpu_0
 @pytest.mark.unit
@@ -309,6 +313,7 @@ def test_string_concat_in_loop():
 
 # 21. Late-binding closure in a loop
 # Rule: python-guidelines > Watch out for late-binding closures in loops
+@pytest.mark.xfail(reason="late-binding closure captures final gpu_id=3 for all lambdas", raises=AssertionError)
 @pytest.mark.pre_merge
 @pytest.mark.gpu_0
 @pytest.mark.unit
