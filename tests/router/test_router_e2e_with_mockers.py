@@ -46,7 +46,6 @@ pytestmark = [
     pytest.mark.gpu_0,
     pytest.mark.integration,
     pytest.mark.model(MODEL_NAME),
-    pytest.mark.skip(reason="DYN-2365 - Flaky, temporarily disabled"),
 ]
 NUM_MOCKERS = 2
 SPEEDUP_RATIO = 10.0
