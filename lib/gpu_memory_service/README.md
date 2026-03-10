@@ -181,12 +181,12 @@ Epoch creation and publication work like this:
 
 ```mermaid
 flowchart LR
-    A[EMPTY or COMMITTED] -->|RW_CONNECT| B[Create new active epoch N]
+    A[EMPTY or COMMITTED] -->|RW_CONNECT| B[New epoch N]
     B -->|Allocate memory and write metadata in epoch N| C{Writer outcome}
     C -->|RW_COMMIT| D[Publish epoch N as committed]
     C -->|RW_ABORT| E[Discard epoch N]
-    D -->|Next RW_CONNECT| B
-    E -->|Next RW_CONNECT| B
+    D -->|Next RW_CONNECT| F[New epoch N + 1]
+    E -->|Next RW_CONNECT| F
 ```
 
 - `RW_CONNECT` creates a new active epoch.
