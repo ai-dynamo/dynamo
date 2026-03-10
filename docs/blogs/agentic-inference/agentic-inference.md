@@ -36,7 +36,7 @@ https://github.com/user-attachments/assets/8694b544-3fd1-4931-9fd0-7d9a3a2fb78f
 </tr>
 </table>
 
-We have also invested in day-0 tool call and reasoning parsing support for various open-source models. If you find that a model is not supported, please [open an issue](https://github.com/ai-dynamo/dynamo/issues) or use our [tool-parser-generator skill](https://github.com/ai-dynamo/dynamo/tree/main/lib/parsers) to have your harness of choice implement it.
+We have also invested in day-0 tool call and reasoning parsing support for various open-source models. If you find that a model is not supported, please [open an issue](https://github.com/ai-dynamo/dynamo/issues).
 
 ### Agent Hints: The Harness-Orchestrator Interface
 
@@ -76,11 +76,17 @@ Without cache-aware routing, turn 2 of a conversation has a ~1/N chance of landi
 
 ### Priority Scheduling
 
-Two fields in `agent_hints` control scheduling, and they operate at different layers. `latency_sensitivity` affects router queue ordering: higher values move a request ahead in the queue. `priority` passes through to the engine, where it influences request scheduling order and KV cache eviction.
+Two fields in `agent_hints` control scheduling. They are separate knobs because they solve different problems at different layers:
+
+- **`latency_sensitivity`** (0.0-1.0) controls **how soon the request gets dispatched** from the router queue. It answers: "how urgently does this request need to reach a worker?" A user-facing interactive turn (e.g., a lead agent responding to the developer) needs low latency; a background subagent doing a code search does not. The harness knows the difference and sets accordingly.
+
+- **`priority`** (integer) controls **how the engine treats the request once it arrives**: scheduling order within the engine's batch and KV cache eviction policy. It answers: "how important is this request's compute and cache relative to other active requests on this worker?" A long-running synthesis request whose KV cache should survive memory pressure gets a high priority; a short lookup whose cache is disposable gets a low one.
+
+A request can be high on one axis and low on the other. For example, a background agent doing speculative work might have low `latency_sensitivity` (no rush to dispatch) but high `priority` (once it starts, its cache is expensive to recompute and should not be evicted). Conversely, a quick interactive lookup might have high `latency_sensitivity` (user is waiting) but low `priority` (small context, cheap to recompute if evicted).
 
 At the router, incoming requests enter a `BinaryHeap<QueueEntry>` ordered by effective arrival time. A higher `latency_sensitivity` makes the request appear as if it arrived earlier, placing it ahead of lower-priority work. Requests only enter the queue when all workers exceed a configurable load threshold. Below that threshold, they bypass the queue entirely and go straight to worker selection. When capacity frees up (prefill completes or a request finishes), the queue drains highest-priority entries first.
 
-The `priority` value does not stop at the router. SGLang, vLLM, and TRT-LLM already support priority-based request scheduling. Dynamo passes `priority` through to the engine directly, where it controls both request scheduling order and KV cache eviction policy.
+Once dispatched, Dynamo passes `priority` through to the engine directly. SGLang, vLLM, and TRT-LLM all support priority-based request scheduling, and engines like SGLang support priority-based radix cache eviction where lower-priority blocks are evicted first under memory pressure.
 
 ```mermaid
 sequenceDiagram
@@ -152,13 +158,10 @@ Solutions like SGLang's HiCache (which already supports distributed KV cache) an
 
 ![KV cache memory hierarchy: GPU (HBM) at ~ns, CPU (pinned DRAM) at ~us, Local NVMe at ~ms, Remote Storage (NIXL) at ~ms via RDMA](./kv-memory-hierarchy.svg)
 
-Blocks follow a write-through path: when a worker computes KV for a prefix, the blocks flow from GPU to CPU to disk automatically. Each block is deduplicated by sequence hash in a global registry. Once a block is registered, it is immutable and addressable by any worker that can reach the storage tier. The KVBM uses a frequency-based offload filter (double on hit, decay by 1 per time step) to protect SSD lifespan by only offloading blocks with demonstrated reuse.
-
+Blocks follow a write-through path: when a worker computes KV for a prefix, the blocks flow from GPU to CPU to disk automatically. Each block is deduplicated by sequence hash in a global registry. Once a block is registered, it is immutable and addressable by any worker that can reach the storage tier.
 This directly solves the subagent cold-start problem. When the lead agent computes tool definitions and system prompt, those blocks write through to shared storage. When subagent 1 spawns on a different worker, the router queries the Flash Indexer, finds the blocks in shared storage, and the worker loads them via NIXL (RDMA read) instead of recomputing from scratch. Subagent 2 does the same. Four redundant prefill computations become one compute and three loads. The same mechanism addresses cache coherence in disaggregated prefill-decode serving. In disagg mode, the prefill worker computes KV and transfers it to the decode worker via NIXL. The decode worker generates tokens, producing new KV state. On the next turn, a prefill worker needs both the original prefix and the generated tokens from turn 1, but those live only on the decode worker. With shared storage, the decode worker writes its new blocks to the common tier and any prefill worker can fetch them on the next turn.
 
 Multi-tier storage solves sharing and persistence, but blocks still arrive on GPU only after the request hits the worker. The missing piece for agentic systems is prefetch: the harness knows when an agent's tool call is about to return, which means it knows which blocks will be needed and when. We are building prefetch hooks so the harness can signal "bring these blocks from storage to GPU ahead of the next request." Combined with the retention APIs (below), this gives the harness full lifecycle control: pin blocks to prevent eviction, set priority to control eviction ordering, and prefetch blocks proactively before they are needed.
-
-Looking further out, NVIDIA's CMX (Context Memory Storage) platform extends this hierarchy to datacenter scale. Built on BlueField-4 DPUs and NIXL, CMX provides RDMA-speed access to networked KV storage. At [VAST Forward 2026](https://www.hpcwire.com/2026/03/02/blasting-through-the-gpu-memory-wall-with-nvidias-new-cmx-platform/), NVIDIA and VAST demonstrated 20x TTFT improvement by fetching KV cache from VAST storage via CMX instead of recomputing. For agentic workloads where context persists across sessions and spans hundreds of workers, treating storage as a first-class cache tier changes the economics entirely. The KVBM already achieves 2.2x-12x TTFT improvement depending on the tier hit. CMX will extend this to shared storage with hardware-accelerated data movement.
 
 ### Cache Retention
 
@@ -201,6 +204,9 @@ Today, blocks are identified by sequence hash. They have no type information. We
 
 ### Engine-level optimizations
 Dynamo integrates with SGLang, vLLM, and TRT-LLM, and we are working with all three teams on runtime-level improvements for agentic workloads. One example: we prototyped a decode-side radix cache in SGLang ([PR #19746](https://github.com/sgl-project/sglang/pull/19746)) that matches cached prefixes on the decode worker and transfers only delta KV in disaggregated serving. With ~91% prefix reuse on Qwen3-32B (3P1D on B200), this achieved 8.1x p50 TTFT improvement and 1.32x throughput.
+
+### CMX: Datacenter-Scale KV Storage
+Looking further out, NVIDIA's CMX (Context Memory Storage) platform extends this hierarchy to datacenter scale. Built on BlueField-4 DPUs and NIXL, CMX provides RDMA-speed access to networked KV storage. At [VAST Forward 2026](https://www.hpcwire.com/2026/03/02/blasting-through-the-gpu-memory-wall-with-nvidias-new-cmx-platform/), NVIDIA and VAST demonstrated 20x TTFT improvement by fetching KV cache from VAST storage via CMX instead of recomputing. For agentic workloads where context persists across sessions and spans hundreds of workers, treating storage as a first-class cache tier changes the economics entirely. The KVBM already achieves 2.2x-12x TTFT improvement depending on the tier hit. CMX will extend this to shared storage with hardware-accelerated data movement.
 
 ### `nvext` API co-design
 The `agent_hints` and `cache_control` fields are a v1 API. We want input from teams building agent harnesses on what signals matter most. If you are building on top of Dynamo or thinking about cache-aware inference for your workloads, we would love to collaborate. Reach out on [GitHub](https://github.com/ai-dynamo/dynamo) or tag us on X: [@0xishand](https://x.com/0xishand), [@KranenKyle](https://x.com/KranenKyle), [@flowpow123](https://x.com/flowpow123).
