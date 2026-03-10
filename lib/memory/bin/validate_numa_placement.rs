@@ -110,7 +110,8 @@ fn main() {
 
     let alloc_size = size_mib * 1024 * 1024;
 
-    // Detect GPU count
+    cudarc::driver::result::init().expect("Failed to initialize CUDA driver");
+
     let gpu_count = match cudarc::driver::result::device::get_count() {
         Ok(n) => n,
         Err(e) => {

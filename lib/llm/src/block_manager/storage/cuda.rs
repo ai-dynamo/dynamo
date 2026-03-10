@@ -433,7 +433,7 @@ impl PinnedAllocator {
 
 impl StorageAllocator<PinnedStorage> for PinnedAllocator {
     fn allocate(&self, size: usize) -> Result<PinnedStorage, StorageError> {
-        PinnedStorage::new(&self.ctx, size)
+        PinnedStorage::new_for_device(size, Some(self.ctx.cu_device() as u32))
     }
 }
 
