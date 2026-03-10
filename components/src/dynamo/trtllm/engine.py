@@ -3,6 +3,7 @@
 
 import enum
 import logging
+import os
 import time
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator, Optional
@@ -87,12 +88,17 @@ class TensorRTLLMEngine:
                 # (model path, backend settings, KV cache config, disaggregation settings, etc.)
                 self._llm = self._llm_cls(**self.engine_args)
 
-            # After LLM init: if source role, register weights with NIXL and publish
+            # After LLM init: verify workers published weights to MX server.
+            # With TP>1, the torch model lives in executor worker processes.
+            # _setup_modelexpress_source() set MODEL_EXPRESS_SOURCE=1 before LLM init,
+            # so each worker called publish_from_worker() during setup_engine().
+            # By the time LLM.__init__() returns, all workers have finished setup.
+            # We poll MX server to confirm all ranks published their metadata.
             if (
                 self._model_express_url
                 and self._model_express_role == "source"
             ):
-                self._publish_modelexpress_source()
+                self._verify_workers_published()
 
     async def cleanup(self):
         if self._llm:
@@ -122,83 +128,88 @@ class TensorRTLLMEngine:
     def _setup_modelexpress_source(self) -> None:
         """Prepare source environment before LLM init.
 
-        Source loads weights from disk normally. After LLM init,
-        _publish_modelexpress_source() registers them with NIXL and publishes.
+        Sets env vars that worker processes inherit. Each worker's
+        setup_engine() calls publish_from_worker() when MODEL_EXPRESS_SOURCE=1,
+        publishing its own rank's params to the MX server.
         """
-        import os
-
         os.environ["MODEL_EXPRESS_URL"] = self._model_express_url
+        os.environ["MODEL_EXPRESS_SOURCE"] = "1"
         os.environ.setdefault(
             "MODEL_NAME",
             self.engine_args.get("model", "unknown"),
         )
         logger.info(
-            "ModelExpress source mode: will publish weights after loading from %s",
+            "ModelExpress source mode: workers will publish weights after loading from %s",
             self.engine_args.get("model", "unknown"),
         )
 
-    def _publish_modelexpress_source(self) -> None:
-        """Register model params with NIXL and publish to MX server.
+    def _verify_workers_published(self) -> None:
+        """Verify that worker processes published their metadata to ModelExpress.
 
-        Called after LLM init when role=source. At this point weights are
-        loaded and compiled. We register the PyTorch model parameters with
-        NIXL for RDMA reads by targets.
-        
-        Note: The model may still be loading weights when this is called.
-        We retry with exponential backoff to wait for the model to be ready.
+        With TP>1 and the RPC/MPI executor, the torch model lives in worker
+        processes. publish_from_worker() runs inside each worker's setup_engine()
+        (triggered by MODEL_EXPRESS_SOURCE=1). By the time LLM.__init__()
+        returns, all workers have completed setup_engine and published.
+
+        This method polls ModelExpress to confirm metadata is present.
         """
-        try:
-            from modelexpress.trtllm_live_transfer import MxLiveSource
-        except ImportError:
-            raise ImportError(
-                "ModelExpress source mode requires the 'modelexpress' package. "
-                "Install with: pip install modelexpress"
-            )
-
-        import os
         import time
 
         model_name = os.environ.get(
             "MODEL_NAME", self.engine_args.get("model", "unknown")
         )
-        model_path = self.engine_args.get("model", "")
+        world_size = int(os.environ.get("WORLD_SIZE", "1"))
 
-        source = MxLiveSource(
-            self._llm,
-            model_name=model_name,
-            mx_server=self._model_express_url,
-            model_path=model_path,
-        )
-        
-        # Retry with exponential backoff - model may still be loading weights
-        max_retries = 10
-        retry_delay = 5  # Start with 5 seconds
-        for attempt in range(max_retries):
+        try:
+            import grpc
+            from modelexpress import p2p_pb2, p2p_pb2_grpc
+        except ImportError:
+            logger.warning(
+                "ModelExpress packages not available in orchestrator — "
+                "cannot verify worker publish. Assuming workers published."
+            )
+            return
+
+        options = [
+            ("grpc.max_receive_message_length", 200 * 1024 * 1024),
+        ]
+        channel = grpc.insecure_channel(self._model_express_url, options=options)
+        stub = p2p_pb2_grpc.P2pServiceStub(channel)
+
+        max_wait = 300
+        poll_interval = 5
+        elapsed = 0
+        while elapsed < max_wait:
             try:
-                source.publish()
-                logger.info(
-                    "ModelExpress source: published weights for '%s' — serving inference AND RDMA",
-                    model_name,
+                response = stub.GetMetadata(
+                    p2p_pb2.GetMetadataRequest(model_name=model_name)
                 )
-                return
-            except RuntimeError as e:
-                if "Cannot access underlying torch model" in str(e):
-                    if attempt < max_retries - 1:
-                        logger.info(
-                            "Model not ready yet (attempt %d/%d), waiting %ds before retry...",
-                            attempt + 1, max_retries, retry_delay
-                        )
-                        time.sleep(retry_delay)
-                        retry_delay = min(retry_delay * 2, 60)  # Exponential backoff, max 60s
-                    else:
-                        logger.error("Failed to publish after %d attempts: %s", max_retries, e)
-                        raise
-                else:
-                    # Other RuntimeError - don't retry
-                    raise
+                published_ranks = len(response.workers)
+                if published_ranks >= world_size:
+                    logger.info(
+                        "ModelExpress source: all %d workers published for '%s'",
+                        published_ranks, model_name,
+                    )
+                    channel.close()
+                    return
+                logger.info(
+                    "ModelExpress source: %d/%d workers published, waiting...",
+                    published_ranks, world_size,
+                )
             except Exception as e:
-                logger.error("Unexpected error during publish: %s", e)
-                raise
+                logger.info(
+                    "ModelExpress source: waiting for metadata (elapsed=%ds): %s",
+                    elapsed, e,
+                )
+            time.sleep(poll_interval)
+            elapsed += poll_interval
+
+        channel.close()
+        logger.warning(
+            "ModelExpress source: only %d/%d workers published after %ds. "
+            "Target may fail — check worker logs for publish_from_worker errors.",
+            published_ranks, world_size, max_wait,
+        )
 
     def _setup_modelexpress_loader(self) -> None:
         """Configure ModelExpress live checkpoint loader for P2P weight transfer.
@@ -216,7 +227,6 @@ class TensorRTLLMEngine:
                 "Install with: pip install modelexpress"
             )
 
-        import os
         from tensorrt_llm.llmapi.llm_args import LoadFormat
 
         os.environ["MODEL_EXPRESS_URL"] = self._model_express_url

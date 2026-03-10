@@ -71,7 +71,7 @@ controllerManager:
         drop:
         - ALL
     image:
-      repository: gcr.io/kubebuilder/kube-rbac-proxy
+      repository: registry.k8s.io/kubebuilder/kube-rbac-proxy
       tag: v0.15.0
     resources:
       limits:
