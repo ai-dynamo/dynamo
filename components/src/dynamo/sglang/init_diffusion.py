@@ -36,7 +36,7 @@ async def init_llm_diffusion(
     shutdown_event: asyncio.Event,
     shutdown_endpoints: list,
     run_deferred_handlers: Callable[[], Awaitable[None]] | None = None,
-):
+) -> None:
     """Initialize diffusion language model worker component"""
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
@@ -120,7 +120,7 @@ async def init_image_diffusion(
     config: Config,
     shutdown_endpoints: list,
     run_deferred_handlers: Callable[[], Awaitable[None]] | None = None,
-):
+) -> None:
     """Initialize image diffusion worker component"""
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
@@ -206,7 +206,7 @@ async def init_video_diffusion(
     config: Config,
     shutdown_endpoints: list,
     run_deferred_handlers: Callable[[], Awaitable[None]] | None = None,
-):
+) -> None:
     """Initialize video generation worker component"""
     server_args, dynamo_args = config.server_args, config.dynamo_args
 

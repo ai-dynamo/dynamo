@@ -69,6 +69,13 @@ class DecodePlanner(BasePlanner):
                 m.get("active_decode_blocks", 0.0) < boundary for m in recent.values()
             )
             if all_below:
+                if num_workers - 1 < self.config.min_endpoint:
+                    logger.info(
+                        f"Load-based decode: ALL workers below boundary ({boundary:.1f}), "
+                        f"but cannot scale down below min_endpoint ({self.config.min_endpoint}); "
+                        f"maintaining {num_workers} decode workers"
+                    )
+                    return num_workers
                 logger.info(
                     f"Load-based decode: ALL workers below boundary ({boundary:.1f}), "
                     f"scaling down to {num_workers - 1}"
