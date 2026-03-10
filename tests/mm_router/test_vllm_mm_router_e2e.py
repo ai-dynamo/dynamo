@@ -249,6 +249,27 @@ def _extract_routing_records(log_text: str) -> list[tuple[int, int]]:
     ]
 
 
+def _count_recorded_router_events(log_text: str) -> int:
+    """Count KV events that have been recorded by router indexer."""
+    return log_text.count("Recorded event RouterEvent")
+
+
+def _wait_for_router_event_progress(
+    router_proc: ManagedProcess,
+    previous_count: int,
+    timeout_s: float = 20.0,
+) -> int:
+    """Wait until router indexer records at least one more KV event."""
+    deadline = time.time() + timeout_s
+    current = previous_count
+    while time.time() < deadline:
+        current = _count_recorded_router_events(router_proc.read_logs())
+        if current > previous_count:
+            return current
+        time.sleep(0.5)
+    return current
+
+
 def _wait_for_new_routing_score(
     router_proc: ManagedProcess,
     start_offset: int,
@@ -317,13 +338,16 @@ def test_vllm_text_only_overlap_repeated_prompt(
         "Repeat this sentence to force multiple KV blocks. "
     ) * 80
     payload = _build_payload([], prompt=prompt)
+    event_count = _count_recorded_router_events(router_proc.read_logs())
 
     overlap_1, total_1, _ = _send_request_get_overlap(
         frontend_port, router_proc, payload, "text_only_req1"
     )
+    event_count = _wait_for_router_event_progress(router_proc, event_count)
     overlap_2, total_2, _ = _send_request_get_overlap(
         frontend_port, router_proc, payload, "text_only_req2"
     )
+    event_count = _wait_for_router_event_progress(router_proc, event_count)
     overlap_3, total_3, segment_3 = _send_request_get_overlap(
         frontend_port, router_proc, payload, "text_only_req3"
     )
@@ -361,12 +385,16 @@ def test_vllm_mm_overlap_repeated_three_images(
     payload = _build_payload(
         image_uris, prompt="MM routing e2e: repeated same 3-image request."
     )
+    event_count = _count_recorded_router_events(router_proc.read_logs())
+
     overlap_1, total_1, _ = _send_request_get_overlap(
         frontend_port, router_proc, payload, "same_3_images_req1"
     )
+    event_count = _wait_for_router_event_progress(router_proc, event_count)
     overlap_2, total_2, _ = _send_request_get_overlap(
         frontend_port, router_proc, payload, "same_3_images_req2"
     )
+    event_count = _wait_for_router_event_progress(router_proc, event_count)
     overlap_3, total_3, segment_3 = _send_request_get_overlap(
         frontend_port, router_proc, payload, "same_3_images_req3"
     )
@@ -401,12 +429,16 @@ def test_vllm_mm_overlap_repeated_single_image(
         [_make_data_uri(_SINGLE_IMAGE_FRESH_COLOR)],
         prompt="MM routing e2e: repeated same single-image request.",
     )
+    event_count = _count_recorded_router_events(router_proc.read_logs())
+
     overlap_1, total_1, _ = _send_request_get_overlap(
         frontend_port, router_proc, payload, "same_single_image_req1"
     )
+    event_count = _wait_for_router_event_progress(router_proc, event_count)
     overlap_2, total_2, _ = _send_request_get_overlap(
         frontend_port, router_proc, payload, "same_single_image_req2"
     )
+    event_count = _wait_for_router_event_progress(router_proc, event_count)
     overlap_3, total_3, segment_3 = _send_request_get_overlap(
         frontend_port, router_proc, payload, "same_single_image_req3"
     )
@@ -442,12 +474,16 @@ def test_vllm_mm_overlap_repeated_two_identical_images(
         [image_uri, image_uri],
         prompt="MM routing e2e: repeated same two-identical-image request.",
     )
+    event_count = _count_recorded_router_events(router_proc.read_logs())
+
     overlap_1, total_1, _ = _send_request_get_overlap(
         frontend_port, router_proc, payload, "same_two_identical_images_req1"
     )
+    event_count = _wait_for_router_event_progress(router_proc, event_count)
     overlap_2, total_2, _ = _send_request_get_overlap(
         frontend_port, router_proc, payload, "same_two_identical_images_req2"
     )
+    event_count = _wait_for_router_event_progress(router_proc, event_count)
     overlap_3, total_3, segment_3 = _send_request_get_overlap(
         frontend_port, router_proc, payload, "same_two_identical_images_req3"
     )
@@ -480,15 +516,16 @@ def test_vllm_mm_overlap_staircase_single_to_double_to_triple_identical_image(
     payload_triple = _build_payload(
         [image_uri, image_uri, image_uri], prompt=staircase_prompt
     )
+    event_count = _count_recorded_router_events(router_proc.read_logs())
 
     overlap_1, total_1, _ = _send_request_get_overlap(
         frontend_port, router_proc, payload_single, "staircase_1x_image"
     )
-    time.sleep(1)
+    event_count = _wait_for_router_event_progress(router_proc, event_count)
     overlap_2, total_2, segment_2 = _send_request_get_overlap(
         frontend_port, router_proc, payload_double, "staircase_2x_image"
     )
-    time.sleep(1)
+    event_count = _wait_for_router_event_progress(router_proc, event_count)
     overlap_3, total_3, segment_3 = _send_request_get_overlap(
         frontend_port, router_proc, payload_triple, "staircase_3x_image"
     )
@@ -531,9 +568,12 @@ def test_vllm_mm_overlap_diff_images_less_than_same(
         [_make_data_uri(c) for c in _COLORS],
         prompt="MM routing e2e: baseline same-images overlap.",
     )
+    event_count = _count_recorded_router_events(router_proc.read_logs())
+
     overlap_baseline_1, total_baseline_1, _ = _send_request_get_overlap(
         frontend_port, router_proc, baseline_payload, "baseline_same_images_req1"
     )
+    event_count = _wait_for_router_event_progress(router_proc, event_count)
     overlap_baseline_2, total_baseline_2, segment_baseline = _send_request_get_overlap(
         frontend_port, router_proc, baseline_payload, "baseline_same_images_req2"
     )
@@ -585,12 +625,15 @@ def test_vllm_mm_overlap_same_images_different_prompt_less_than_same_prompt(
         [_make_data_uri(c) for c in _COLORS],
         prompt="MM routing e2e: prompt-sensitive baseline alpha.",
     )
+    event_count = _count_recorded_router_events(router_proc.read_logs())
+
     overlap_baseline_1, total_baseline_1, _ = _send_request_get_overlap(
         frontend_port,
         router_proc,
         baseline_payload,
         "baseline_same_images_prompt_a_req1",
     )
+    event_count = _wait_for_router_event_progress(router_proc, event_count)
     overlap_baseline_2, total_baseline_2, segment_baseline = _send_request_get_overlap(
         frontend_port,
         router_proc,
@@ -649,6 +692,7 @@ def test_vllm_mm_overlap_swapped_order_less_than_same_order(
         list(reversed(ordered_uris)),
         prompt="MM routing e2e: order sensitivity ordered baseline.",
     )
+    event_count = _count_recorded_router_events(router_proc.read_logs())
 
     overlap_ordered_1, total_ordered_1, _ = _send_request_get_overlap(
         frontend_port,
@@ -656,12 +700,14 @@ def test_vllm_mm_overlap_swapped_order_less_than_same_order(
         ordered_payload,
         "ordered_distinct_images_req1",
     )
+    event_count = _wait_for_router_event_progress(router_proc, event_count)
     overlap_ordered_2, total_ordered_2, segment_ordered_2 = _send_request_get_overlap(
         frontend_port,
         router_proc,
         ordered_payload,
         "ordered_distinct_images_req2",
     )
+    event_count = _wait_for_router_event_progress(router_proc, event_count)
     overlap_swapped, total_swapped, segment_swapped = _send_request_get_overlap(
         frontend_port,
         router_proc,
@@ -739,14 +785,16 @@ def test_vllm_mm_overlap_repeated_http_images(
     payload = _build_payload(
         http_image_server, prompt="MM routing e2e: repeated same 3 HTTP images."
     )
+    event_count = _count_recorded_router_events(router_proc.read_logs())
+
     overlap_1, total_1, _ = _send_request_get_overlap(
         frontend_port, router_proc, payload, "http_3_images_req1"
     )
-    time.sleep(1)
+    event_count = _wait_for_router_event_progress(router_proc, event_count)
     overlap_2, total_2, _ = _send_request_get_overlap(
         frontend_port, router_proc, payload, "http_3_images_req2"
     )
-    time.sleep(1)
+    event_count = _wait_for_router_event_progress(router_proc, event_count)
     overlap_3, total_3, segment_3 = _send_request_get_overlap(
         frontend_port, router_proc, payload, "http_3_images_req3"
     )
@@ -786,11 +834,11 @@ def test_vllm_mm_overlap_http_vs_data_uri_same_image(
     data_uri_payload = _build_payload(
         [data_uri], prompt="MM routing e2e: HTTP vs data URI same image."
     )
+    event_count = _count_recorded_router_events(router_proc.read_logs())
     overlap_data, total_data, _ = _send_request_get_overlap(
         frontend_port, router_proc, data_uri_payload, "data_uri_seed"
     )
-
-    time.sleep(1)
+    _wait_for_router_event_progress(router_proc, event_count)
 
     # Now send HTTP URL request for the identical image
     http_payload = _build_payload(
