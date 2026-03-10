@@ -36,7 +36,8 @@ use crate::preprocessor::OpenAIPreprocessor;
 use crate::protocols::anthropic::stream_converter::AnthropicStreamConverter;
 use crate::protocols::anthropic::types::{
     AnthropicCountTokensRequest, AnthropicCountTokensResponse, AnthropicCreateMessageRequest,
-    AnthropicErrorBody, AnthropicErrorResponse, SystemContent, chat_completion_to_anthropic_response,
+    AnthropicErrorBody, AnthropicErrorResponse, SystemContent,
+    chat_completion_to_anthropic_response,
 };
 use crate::protocols::openai::chat_completions::{
     NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
