@@ -46,12 +46,12 @@ fn query_page_nodes(ptr: *const u8, size: usize) -> Vec<i32> {
     let ret = unsafe {
         libc::syscall(
             libc::SYS_move_pages,
-            0i32,                                      // pid = 0 (self)
-            num_pages as libc::c_ulong,                // count
-            pages.as_ptr(),                                 // pages
-            std::ptr::null::<i32>(),                    // nodes = NULL (query mode)
-            status.as_mut_ptr(),                        // status (output)
-            0i32,                                       // flags
+            0i32,                       // pid = 0 (self)
+            num_pages as libc::c_ulong, // count
+            pages.as_ptr(),             // pages
+            std::ptr::null::<i32>(),    // nodes = NULL (query mode)
+            status.as_mut_ptr(),        // status (output)
+            0i32,                       // flags
         )
     };
 

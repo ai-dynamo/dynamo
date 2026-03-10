@@ -121,10 +121,7 @@ unsafe fn malloc_host_prefer_writecombined(size: usize) -> Result<*mut u8, Stora
 unsafe fn malloc_host_devicemap(size: usize) -> Result<*mut u8, StorageError> {
     // SAFETY: Caller guarantees a valid CUDA context is bound to the current thread
     unsafe {
-        cudarc::driver::result::malloc_host(
-            size,
-            cudarc::driver::sys::CU_MEMHOSTALLOC_DEVICEMAP,
-        )
+        cudarc::driver::result::malloc_host(size, cudarc::driver::sys::CU_MEMHOSTALLOC_DEVICEMAP)
     }
     .map(|ptr| ptr as *mut u8)
     .map_err(StorageError::Cuda)
@@ -273,21 +270,34 @@ impl PinnedStorage {
     /// Create a new pinned storage, optionally NUMA-aware for a specific GPU.
     ///
     /// Creates a [`CudaContext`] internally. When `device_id` is `Some`, tries
-    /// NUMA-aware allocation on the GPU's NUMA node (gated by
-    /// [`numa_allocator::is_numa_enabled`]). Uses `CU_MEMHOSTALLOC_DEVICEMAP`
-    /// (not write-combined) for the fallback/default path.
+    /// NUMA-aware allocation on the GPU's NUMA node unless the global kill
+    /// switch `DYN_MEMORY_DISABLE_NUMA` is set. Uses
+    /// `CU_MEMHOSTALLOC_DEVICEMAP` (not write-combined) for the
+    /// fallback/default path.
     ///
     /// When `device_id` is `None`, allocates on device 0 without NUMA awareness.
     pub fn new_for_device(size: usize, device_id: Option<u32>) -> Result<Self, StorageError> {
+        // Warn once if the legacy opt-in env var is still set.
+        static DEPRECATION_WARN: std::sync::Once = std::sync::Once::new();
+        if std::env::var("DYN_KVBM_ENABLE_NUMA").is_ok() {
+            DEPRECATION_WARN.call_once(|| {
+                tracing::warn!(
+                    "DYN_KVBM_ENABLE_NUMA is deprecated for PinnedStorage::new_for_device; \
+                     NUMA is now enabled by default. Use DYN_MEMORY_DISABLE_NUMA=1 to disable."
+                );
+            });
+        }
+
         let gpu_id = device_id.unwrap_or(0) as usize;
         let ctx = Cuda::device_or_create(gpu_id)?;
 
         unsafe {
             ctx.bind_to_thread().map_err(StorageError::Cuda)?;
 
-            // Try NUMA-aware allocation when a device_id is provided and NUMA is enabled.
+            // Try NUMA-aware allocation when a device_id is provided and NUMA
+            // is not globally disabled.
             let ptr = if let Some(gpu_id) = device_id {
-                if numa_allocator::is_numa_enabled() {
+                if !numa_allocator::is_numa_disabled() {
                     match numa_allocator::worker_pool::NumaWorkerPool::global()
                         .allocate_pinned_for_gpu(size, gpu_id)
                     {
