@@ -12,7 +12,31 @@ use validator::Validate;
 use crate::common::perf_model::PerfModel;
 use dynamo_kv_router::protocols::KvCacheEvent;
 use dynamo_tokens::blocks::UniqueBlock;
-use dynamo_tokens::{BlockHash, SequenceHash, Token};
+use dynamo_tokens::{BlockHash, PositionalLineageHash, SequenceHash, Token};
+
+/// Metadata type for kvbm-logical blocks in the mocker.
+#[derive(Clone, Debug)]
+pub struct G1;
+
+/// Which KV manager backend to use.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
+pub enum KvManagerBackend {
+    /// Original manual ref-counting implementation
+    #[default]
+    Manual,
+    /// Production kvbm-logical BlockManager
+    KvbmLogical,
+}
+
+/// Which eviction strategy for the KvbmLogical backend.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
+pub enum MockerEvictionBackend {
+    Lru,
+    MultiLru,
+    /// Lineage is the default — matches kvbm-logical's own default backend.
+    #[default]
+    Lineage,
+}
 
 /// Trait for publishing KV cache events.
 /// This abstracts the runtime dependency so mocker components can remain generic.
@@ -30,10 +54,22 @@ pub type NumBlocks = usize;
 /// For Use and Promote variants, block hashes are included for KV event publishing
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum MoveBlock {
-    Use(Vec<UniqueBlock>, Vec<BlockHash>, Option<Vec<Vec<u32>>>),
+    Use(
+        Vec<UniqueBlock>,
+        Vec<BlockHash>,
+        Vec<PositionalLineageHash>,
+        Option<Vec<Vec<u32>>>,
+    ),
     Destroy(Vec<UniqueBlock>),
     Deref(Vec<UniqueBlock>),
-    Promote(Uuid, SequenceHash, Option<u64>, BlockHash, Option<Vec<u32>>),
+    Promote(
+        Uuid,
+        SequenceHash,
+        Option<u64>,
+        BlockHash,
+        PositionalLineageHash,
+        Option<Vec<u32>>,
+    ),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -205,6 +241,14 @@ pub struct MockEngineArgs {
     /// A KvEventPublisher relay subscribes to this socket and forwards events to NATS.
     #[builder(default = "None")]
     pub zmq_kv_events_port: Option<u16>,
+
+    /// Which KV manager backend to use (Manual or KvbmLogical)
+    #[builder(default = "KvManagerBackend::Manual")]
+    pub kv_manager_backend: KvManagerBackend,
+
+    /// Which eviction strategy for KvbmLogical backend
+    #[builder(default = "MockerEvictionBackend::Lineage")]
+    pub eviction_backend: MockerEvictionBackend,
 }
 
 impl Default for MockEngineArgs {
@@ -261,6 +305,8 @@ impl MockEngineArgs {
             "kv_transfer_bandwidth",
             "reasoning",
             "zmq_kv_events_port",
+            "kv_manager_backend",
+            "eviction_backend",
         ]
         .iter()
         .cloned()
@@ -423,6 +469,41 @@ impl MockEngineArgs {
             Arc::new(PerfModel::default())
         };
         builder = builder.perf_model(perf_model);
+
+        // Parse kv_manager_backend
+        if let Some(value) = extra_args.get("kv_manager_backend")
+            && let Some(s) = value.as_str()
+        {
+            let backend = match s {
+                "manual" | "Manual" => KvManagerBackend::Manual,
+                "kvbm_logical" | "KvbmLogical" => KvManagerBackend::KvbmLogical,
+                other => {
+                    return Err(anyhow::anyhow!(
+                        "Invalid kv_manager_backend: '{}'. Valid values: manual, kvbm_logical",
+                        other
+                    ));
+                }
+            };
+            builder = builder.kv_manager_backend(backend);
+        }
+
+        // Parse eviction_backend
+        if let Some(value) = extra_args.get("eviction_backend")
+            && let Some(s) = value.as_str()
+        {
+            let eviction = match s {
+                "lru" | "Lru" => MockerEvictionBackend::Lru,
+                "multi_lru" | "MultiLru" => MockerEvictionBackend::MultiLru,
+                "lineage" | "Lineage" => MockerEvictionBackend::Lineage,
+                other => {
+                    return Err(anyhow::anyhow!(
+                        "Invalid eviction_backend: '{}'. Valid values: lru, multi_lru, lineage",
+                        other
+                    ));
+                }
+            };
+            builder = builder.eviction_backend(eviction);
+        }
 
         // Build the MockEngineArgs with either defaults or overridden values
         builder
