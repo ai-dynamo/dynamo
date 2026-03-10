@@ -28,7 +28,7 @@
 //! ## Preemption
 //! If a Use operation fails (typically due to insufficient space), a false boolean signal
 //! is returned to the scheduler for preemption. Initial KV block allocations for new requests
-//! should not fail due to the watermark checking.
+//! should not fail due to the capacity checking during scheduling.
 //!
 //! ## NOTE
 //! For simplicity (or non-simplicity), reference counting is tracked manually instead of using
@@ -177,8 +177,14 @@ impl KvManager {
         }
     }
 
-    /// Process a MoveBlock instruction synchronously
-    pub fn process(&mut self, event: &MoveBlock) -> bool {
+    /// Process a MoveBlock instruction synchronously.
+    ///
+    /// For `MoveBlock::Use`, returns the number of blocks successfully allocated.
+    /// On partial failure, blocks 0..N are committed but block N+1 could not be
+    /// allocated. Callers should use the return value to track partial progress.
+    ///
+    /// For other variants, returns the total block count (they always succeed or panic).
+    pub fn process(&mut self, event: &MoveBlock) -> usize {
         match event {
             MoveBlock::Use(hashes, local_hashes, token_ids) => {
                 let mut blocks_stored = Vec::<u64>::new();
@@ -186,25 +192,28 @@ impl KvManager {
                     token_ids.as_ref().map(|_| Vec::new());
 
                 let mut parent_block: Option<&UniqueBlock> = None;
+                let mut allocated = 0;
                 for (i, hash) in hashes.iter().enumerate() {
                     // First check if it already exists in active blocks
                     if self.cache.contains_active(hash) {
                         // Block already active, just increment reference count
                         self.cache.increment_ref(hash);
                         parent_block = Some(hash);
+                        allocated += 1;
                         continue;
                     }
 
                     // Then check if it exists in inactive and move it to active if found
                     if self.cache.reactivate(hash) {
                         parent_block = Some(hash);
+                        allocated += 1;
                         continue;
                     }
 
                     // If at max capacity, evict the oldest entry from inactive blocks
                     if self.cache.is_at_capacity() {
                         let Some(evicted) = self.cache.evict_inactive() else {
-                            return false;
+                            return allocated;
                         };
                         tracing::trace!(
                             "Evicting block from inactive pool: {evicted:?}, dp_rank={}",
@@ -217,6 +226,7 @@ impl KvManager {
 
                     // Now insert the new block in active blocks with reference count 1
                     self.cache.insert_active(hash.clone(), 1);
+                    allocated += 1;
                     // Track blocks for trace/event
                     if let UniqueBlock::FullBlock(stored_full_block) = hash {
                         blocks_stored.push(*stored_full_block);
@@ -238,6 +248,7 @@ impl KvManager {
                     true,
                     stored_token_ids,
                 );
+                return allocated;
             }
 
             MoveBlock::Destroy(hashes) => {
@@ -306,8 +317,7 @@ impl KvManager {
             }
         }
 
-        // Return true if we made it this far
-        true
+        1
     }
 
     /// Get the count of blocks that aren't in active or inactive pools
@@ -406,8 +416,8 @@ mod tests {
         // Create a KvManager with 10 blocks capacity
         let mut manager = KvManager::new(10, 16);
 
-        // Helper function to use multiple blocks that returns the response
-        fn use_blocks(manager: &mut KvManager, ids: Vec<u64>) -> bool {
+        // Helper function to use multiple blocks that returns the count allocated
+        fn use_blocks(manager: &mut KvManager, ids: Vec<u64>) -> usize {
             let blocks: Vec<_> = ids.iter().map(|&id| UniqueBlock::FullBlock(id)).collect();
             let hashes: Vec<_> = ids.into_iter().collect();
             manager.process(&MoveBlock::Use(blocks, hashes, None))
@@ -415,16 +425,16 @@ mod tests {
 
         // First use 10 blocks (0 to 9) in a batch
         let response = use_blocks(&mut manager, (0..10).collect());
-        assert!(response, "Expected success response");
+        assert_eq!(response, 10, "Expected all 10 blocks allocated");
 
         // Verify we are at capacity
         assert_eq!(manager.current_capacity(), 10);
 
-        // The 11th block should return false, not panic
+        // The 11th block should return 0, not panic
         let response = use_blocks(&mut manager, vec![10]);
-        assert!(
-            !response,
-            "Expected failure response when exceeding max capacity"
+        assert_eq!(
+            response, 0,
+            "Expected 0 blocks allocated when exceeding max capacity"
         );
     }
 

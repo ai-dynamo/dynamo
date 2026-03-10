@@ -107,7 +107,7 @@ def create_temp_engine_args_file(args: argparse.Namespace) -> Path:
         "max_num_batched_tokens": getattr(args, "max_num_batched_tokens", None),
         "enable_prefix_caching": getattr(args, "enable_prefix_caching", None),
         "enable_chunked_prefill": getattr(args, "enable_chunked_prefill", None),
-        "watermark": getattr(args, "watermark", None),
+        "preemption_mode": getattr(args, "preemption_mode", None),
         "speedup_ratio": getattr(args, "speedup_ratio", None),
         "dp_size": getattr(args, "dp_size", None),
         "startup_time": getattr(args, "startup_time", None),
@@ -287,10 +287,13 @@ def parse_args() -> argparse.Namespace:
         help="Disable chunked prefill",
     )
     parser.add_argument(
-        "--watermark",
-        type=float,
+        "--preemption-mode",
+        type=str,
         default=None,
-        help="Watermark value for the mocker engine (default: 0.01)",
+        choices=["lifo", "fifo"],
+        help="Preemption mode for decode eviction under memory pressure. "
+        "'lifo' (default) evicts the newest request (matches vLLM v1), "
+        "'fifo' evicts the oldest request.",
     )
     parser.add_argument(
         "--speedup-ratio",
