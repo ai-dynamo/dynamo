@@ -102,25 +102,23 @@ def build_block_mm_infos(
         return None
 
     num_blocks = (num_tokens + block_size - 1) // block_size
-    sorted_imgs = sorted(zip(image_ranges, mm_hashes), key=lambda x: x[0][0])
+    result = []
 
-    result: list[dict | None] = []
-    img_ptr = 0
     for block_idx in range(num_blocks):
         block_start = block_idx * block_size
         block_end = block_start + block_size
 
-        while img_ptr < len(sorted_imgs) and sorted_imgs[img_ptr][0][1] <= block_start:
-            img_ptr += 1
-
-        mm_objects = []
-        for j in range(img_ptr, len(sorted_imgs)):
-            img_start, img_end = sorted_imgs[j][0]
-            if img_start >= block_end:
-                break
-            mm_objects.append({"mm_hash": sorted_imgs[j][1], "offsets": []})
+        # Find images overlapping this block
+        mm_objects = [
+            {"mm_hash": mm_hash, "offsets": []}
+            for mm_hash, (img_start, img_end) in zip(mm_hashes, image_ranges)
+            # FIXME: Revisit the bounds checks here
+            # https://github.com/ai-dynamo/dynamo/issues/6588
+            if block_end > img_start and block_start <= img_end
+        ]
 
         result.append({"mm_objects": mm_objects} if mm_objects else None)
+
     return result
 
 
