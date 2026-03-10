@@ -462,13 +462,29 @@ jobs:
         namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
 
   # ============================================================================
-  # ERROR CLASSIFICATION
-  # Classify CI failures after all jobs complete
+  # ERROR CLASSIFICATION (temporary test job - remove before merge)
   # ============================================================================
+
+  fake-failure:
+    runs-on: ubuntu-latest
+    needs: [changed-files]
+    steps:
+      - name: Simulate build failure
+        run: |
+          echo "##[group]Build image"
+          echo "Compiling dynamo-runtime crate..."
+          echo "error[E0277]: the trait bound \`MyStruct: Send\` is not satisfied"
+          echo "  --> src/runtime/mod.rs:42:5"
+          echo "   |"
+          echo "42 |     tokio::spawn(async move {"
+          echo "   |     ^^^^^^^^^^^^ \`MyStruct\` cannot be sent between threads safely"
+          echo "error: aborting due to previous error"
+          echo "##[endgroup]"
+          exit 1
 
   classify-errors:
     if: always() && !cancelled()
-    needs: [vllm-pipeline, sglang-pipeline, trtllm-pipeline, operator]
+    needs: [fake-failure]
     uses: ./.github/workflows/classify-errors.yml
     with:
       workflow_type: pr
