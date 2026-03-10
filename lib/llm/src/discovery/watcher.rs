@@ -463,7 +463,7 @@ impl ModelWatcher {
                             &endpoint,
                             card.kv_cache_block_size,
                             Some(self.router_config.kv_router_config),
-                            WORKER_TYPE_DECODE,
+                            WORKER_TYPE_DECODE, // This is the decode router
                         )
                         .await?,
                 )

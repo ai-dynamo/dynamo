@@ -301,11 +301,7 @@ impl KvRouter {
 
         let indexer = Indexer::new(component, &kv_router_config, block_size);
 
-        if kv_router_config.skip_initial_worker_wait {
-            tracing::info!(
-                "skip_initial_worker_wait=true: skipping wait for discovery-based workers"
-            );
-        } else {
+        if !kv_router_config.skip_initial_worker_wait {
             let _ = workers_with_configs
                 .wait_for(|m| !m.is_empty())
                 .await
