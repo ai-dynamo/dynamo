@@ -1,0 +1,128 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: llm-config-kimi-k25-agg-eagle-specdec
+data:
+  config.yaml: |
+    backend: pytorch
+    trust_remote_code: true
+    kv_cache_config:
+      enable_block_reuse: false
+      free_gpu_memory_fraction: 0.8
+    speculative_config:
+      decoding_type: Eagle
+      max_draft_len: 3
+      speculative_model_dir: /opt/models/kimi-eagle-layers
+      allow_advanced_sampling: true
+    cuda_graph_config:
+      max_batch_size: 64
+      enable_padding: true
+    moe_config:
+      backend: TRTLLM
+    enable_chunked_prefill: true
+---
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: kimi-k25-agg-eagle-specdec
+spec:
+  backendFramework: trtllm
+  pvcs:
+    - name: model-cache
+      create: false
+  services:
+    Frontend:
+      componentType: frontend
+      extraPodSpec:
+        affinity:
+          podAntiAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              - labelSelector:
+                  matchExpressions:
+                    - key: nvidia.com/dynamo-graph-deployment-name
+                      operator: In
+                      values:
+                        - kimi-k25-agg-eagle-specdec-frontend
+                topologyKey: kubernetes.io/hostname
+        mainContainer:
+          args:
+            - python3 -m dynamo.frontend --router-mode kv --http-port 8000 --discovery-backend kubernetes
+          command:
+            - /bin/sh
+            - -c
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag-patched
+          env:
+            - name: DYN_DISCOVERY_BACKEND
+              value: kubernetes
+            - name: DYN_REQUEST_PLANE
+              value: tcp
+      replicas: 1
+    TrtllmWorker:
+      componentType: worker
+      envFromSecret: hf-token-secret
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /opt/models
+      sharedMemory:
+        size: 179Gi
+      extraPodSpec:
+        tolerations:
+          - key: nvidia.com/gpu
+            operator: Exists
+            effect: NoSchedule
+        affinity:
+          nodeAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              nodeSelectorTerms:
+                - matchExpressions:
+                    - key: nvidia.com/gpu.present
+                      operator: In
+                      values:
+                        - "true"
+        mainContainer:
+          args:
+            - |
+              python3 -m dynamo.trtllm \
+                --model-path "${MODEL_NAME}" \
+                --served-model-name "${MODEL_NAME}" \
+                --extra-engine-args "${ENGINE_ARGS}" \
+                --tensor-parallel-size 8 \
+                --expert-parallel-size 8 \
+                --max-batch-size 64 \
+                --discovery-backend kubernetes \
+                --dyn-reasoning-parser kimi_k25 \
+                --dyn-tool-call-parser kimi_k2
+          command:
+            - /bin/sh
+            - -c
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag-patched
+          env:
+            - name: DYN_DISCOVERY_BACKEND
+              value: kubernetes
+            - name: DYN_REQUEST_PLANE
+              value: tcp
+            - name: TRTLLM_ENABLE_PDL
+              value: "1"
+            - name: MODEL_NAME
+              value: nvidia/Kimi-K2.5-NVFP4
+            - name: ENGINE_ARGS
+              value: /opt/dynamo/configs/config.yaml
+            - name: HF_HOME
+              value: /opt/models
+          volumeMounts:
+            - mountPath: /opt/dynamo/configs
+              name: llm-config-kimi-k25-agg-eagle-specdec
+              readOnly: true
+          workingDir: /workspace/examples/backends/trtllm
+        volumes:
+          - configMap:
+              name: llm-config-kimi-k25-agg-eagle-specdec
+            name: llm-config-kimi-k25-agg-eagle-specdec
+      replicas: 1
+      resources:
+        limits:
+          gpu: "8"
+        requests:
+          gpu: "8"

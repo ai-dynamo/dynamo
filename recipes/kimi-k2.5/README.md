@@ -8,12 +8,15 @@ There are two model weight variants, each with its own model download and deploy
 
 | Variant | Model | Deploy Configs | Notes |
 |---------|-------|---------------|-------|
-| **nvidia** 🚧 | `nvidia/Kimi-K2.5-NVFP4` | [`deploy.yaml`](trtllm/agg/nvidia/deploy.yaml), [`deploy-kvbm.yaml`](trtllm/agg/nvidia/deploy-kvbm.yaml) | Requires a [patched image](trtllm/agg/nvidia/patch/) |
+| **nvidia** 🚧 | `nvidia/Kimi-K2.5-NVFP4` | [`deploy.yaml`](trtllm/agg/nvidia/deploy.yaml), [`deploy-eagle-specdec.yaml`](trtllm/agg/nvidia/deploy-eagle-specdec.yaml), [`deploy-kvbm.yaml`](trtllm/agg/nvidia/deploy-kvbm.yaml) | Requires a [patched image](trtllm/agg/nvidia/patch/) |
 | **baseten** | `baseten-admin/Kimi-2.5-text-nvfp4-v3` | [`deploy.yaml`](trtllm/agg/baseten/deploy.yaml) | Works with the stock image |
 
 All configurations use TP8, EP8, aggregated mode with KV-aware routing.
 
-The **nvidia** variant also has a KVBM (KV Block Manager) deploy that enables CPU-offloaded KV cache via `deploy-kvbm.yaml`.
+
+The **nvidia** variant also includes:
+- `deploy-eagle-specdec.yaml` for EAGLE speculative decoding with a separate eagle-head checkpoint stored under `/opt/models/kimi-eagle-layers`
+- `deploy-kvbm.yaml` for CPU-offloaded KV cache via KVBM (KV Block Manager)
 
 ## Prerequisites
 
