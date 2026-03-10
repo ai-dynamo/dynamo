@@ -53,7 +53,7 @@ echo ""
 echo "=== Starting TRT-LLM Workers ==="
 for i in $(seq 0 $((NUM_WORKERS - 1))); do
     echo "Starting TRT-LLM worker $i..."
-    DYN_REQUEST_PLANE=nats python -m dynamo.trtllm \
+    DYN_REQUEST_PLANE=tcp python -m dynamo.trtllm \
         --model-path "$MODEL" \
         --served-model-name "${MODEL}__internal" \
         --endpoint "dyn://${NAMESPACE}.trtllm.generate" \
@@ -72,7 +72,7 @@ sleep 15
 # Use NATS request plane to match Frontend
 echo ""
 echo "=== Starting MM Router Worker ==="
-DYN_REQUEST_PLANE=nats python -m examples.backends.trtllm.mm_router_worker \
+DYN_REQUEST_PLANE=tcp python -m examples.backends.trtllm.mm_router_worker \
     --model "$MODEL" \
     --model-type "$MODEL_TYPE" \
     --namespace "$NAMESPACE" \
@@ -92,7 +92,7 @@ sleep 5
 # Use NATS request plane to match MM Router
 echo ""
 echo "=== Starting Frontend ==="
-DYN_REQUEST_PLANE=nats python -m dynamo.frontend \
+DYN_REQUEST_PLANE=tcp python -m dynamo.frontend \
     --http-port "$HTTP_PORT" \
     --router-mode round-robin \
     2>&1 | sed "s/^/[frontend] /" &
