@@ -46,71 +46,6 @@ _SLEEP_MODE_LEVEL = 1
 _MEMORY_TAGS = ["kv_cache", "weights", "cuda_graph"]
 
 
-def _patch_static_state_for_criu(using_gms: bool):
-    """Monkey-patch SGLang's _export/_import_static_state for CRIU safety.
-
-    SGLang's release_memory_occupation clones named buffers (BatchNorm running
-    stats, etc.) via buffer.detach().clone() -- keeping them on GPU through the
-    default CUDA allocator.  After CRIU freeze/restore those device pointers are
-    stale, causing cudaErrorInvalidValue when _import_static_state reads them.
-
-    Two strategies depending on the memory backend:
-
-    GMS path: export/import become no-ops.  GMS preserves all model tensors
-    (parameters AND buffers allocated in the GMS mempool) via VA-stable
-    unmap/remap.  The physical memory stays in GMS across the CRIU boundary;
-    the checkpoint process kill just drops a reference.  After restore the
-    scheduler reconnects and remaps the same VAs, so buffers already hold
-    their correct values -- no clone needed.
-
-    Non-GMS path: export clones buffers to CPU so they survive CRIU intact.
-    Import moves them back to the buffer's device.
-    """
-    try:
-        from sglang.srt.managers import scheduler_update_weights_mixin as _mixin
-
-        if using_gms:
-
-            def _export_noop(model):
-                return dict(buffers=[])
-
-            def _import_noop(model, static_params):
-                pass
-
-            _mixin._export_static_state = _export_noop
-            _mixin._import_static_state = _import_noop
-            logger.info(
-                "Patched _export/_import_static_state -> no-op (GMS preserves buffers)"
-            )
-        else:
-
-            def _export_cpu(model):
-                return dict(
-                    buffers=[
-                        (name, buffer.detach().cpu())
-                        for name, buffer in model.named_buffers()
-                    ]
-                )
-
-            def _import_cpu(model, static_params):
-                self_named_buffers = dict(model.named_buffers())
-                for name, tensor in static_params["buffers"]:
-                    target = self_named_buffers[name]
-                    self_named_buffers[name][...] = tensor.to(target.device)
-
-            _mixin._export_static_state = _export_cpu
-            _mixin._import_static_state = _import_cpu
-            logger.info(
-                "Patched _export/_import_static_state -> CPU clone (non-GMS fallback)"
-            )
-    except Exception as e:
-        logger.warning(
-            "Could not patch _export/_import_static_state: %s. "
-            "Named-buffer restore after CRIU may fail.",
-            e,
-        )
-
-
 class SGLangCheckpointAdapter:
     """Adapts an sgl.Engine to the sleep/wake_up interface expected by
     CheckpointConfig.run_lifecycle (matching vLLM's AsyncLLM API).
@@ -141,9 +76,7 @@ class SGLangCheckpointAdapter:
         )
 
         # Synchronize the CUDA context in this (tokenizer-manager) process so
-        # any pending ops complete before we message the scheduler.  The actual
-        # fix for stale GPU pointers in named-buffer clones is in
-        # _patch_static_state_for_criu() which runs in the scheduler process.
+        # any pending ops complete before we message the scheduler.
         try:
             import torch
 
@@ -321,10 +254,12 @@ async def handle_checkpoint_mode(server_args) -> tuple[bool, Optional[sgl.Engine
     if not _using_gms:
         server_args.enable_weights_cpu_backup = True
 
-    # Must be applied before sgl.Engine() so forked scheduler processes inherit
-    # the patched module.  With GMS the export/import is a no-op (buffers stay
-    # in GMS); without GMS, buffers are cloned to CPU so they survive CRIU.
-    _patch_static_state_for_criu(using_gms=_using_gms)
+    # NOTE: The GMS static-state patch (no-op _export/_import_static_state)
+    # is applied inside the scheduler child process via
+    # gpu_memory_service.integrations.sglang.patches.patch_static_state_for_gms,
+    # triggered when the child unpickles server_args.load_format=GMSModelLoader.
+    # Patching here in the parent would have no effect because SGLang uses
+    # multiprocessing spawn, not fork.
 
     start_time = time.time()
     engine = sgl.Engine(server_args=server_args)
