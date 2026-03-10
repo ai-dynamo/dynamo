@@ -148,7 +148,6 @@ export NATS_SERVER=nats://127.0.0.1:4222
 export ETCD_ENDPOINTS=http://127.0.0.1:2379
 export DYN_SYSTEM_PORT=18081
 export DYN_VLLM_KV_EVENT_PORT=20080
-export DYN_ENABLE_MM_ROUTER=1
 
 python -m dynamo.vllm \
   --model "$MODEL_NAME" \
@@ -162,7 +161,6 @@ python -m dynamo.vllm \
 Notes:
 - Current `dynamo.vllm` default component name is `backend` (used below by the MM router).
 - MM-aware routing depends on KV events from the vLLM worker. In current Dynamo builds, KV events are auto-configured when prefix caching is enabled.
-- Set `DYN_ENABLE_MM_ROUTER=1` on the vLLM backend worker when using the MM router. This enables backend-side multimodal UUID hashing that matches the MM router's routing hashes.
 - When running multiple vLLM workers on the same host, each worker must use a unique KV events port (for example `20080`, `20081`) via `DYN_VLLM_KV_EVENT_PORT`; otherwise the second worker can fail with `Address already in use (addr='tcp://*:20080')`.
 
 ### Terminal 3: Start vLLM Worker #2 (backend)
@@ -179,7 +177,6 @@ export NATS_SERVER=nats://127.0.0.1:4222
 export ETCD_ENDPOINTS=http://127.0.0.1:2379
 export DYN_SYSTEM_PORT=18083
 export DYN_VLLM_KV_EVENT_PORT=20081
-export DYN_ENABLE_MM_ROUTER=1
 
 python -m dynamo.vllm \
   --model "$MODEL_NAME" \
@@ -207,8 +204,6 @@ Important:
 - If you customize backend/MM router component names, update the MM router CLI args to match.
 - `--block-size` defaults to `16`; if your vLLM backend uses a different KV cache block size,
   pass the same value to the MM router.
-- `DYN_MM_ROUTER_IMAGE_TRANSPORT_MODE` is optional. If unset, the MM router uses `url`.
-
 ```bash
 cd "$DYNAMO_ROOT"
 
@@ -221,22 +216,6 @@ export DYN_LOG=debug
 python -m examples.backends.vllm.mm_router_worker \
   --model "$MODEL_NAME"
 ```
-
-Image transport setting:
-
-```bash
-export DYN_MM_ROUTER_IMAGE_TRANSPORT_MODE=url      # default
-# or
-export DYN_MM_ROUTER_IMAGE_TRANSPORT_MODE=data_uri
-```
-
-How to choose:
-- Leave it unset or set it to `url` when external image download HTTP latency is low. This keeps the request payload between the MM router and backend smaller, and lets the backend fetch the image URL directly.
-- Set it to `data_uri` when external image download HTTP latency is high. This makes the MM router inline the downloaded image bytes into the forwarded request so the backend does not need to pay the slow external HTTP fetch again.
-
-Tradeoff summary:
-- `url`: smaller internal payloads, lower serialization overhead, but the backend still performs the external download.
-- `data_uri`: larger internal payloads, higher serialization overhead, but avoids repeating a slow external HTTP fetch on the backend side.
 
 ### Terminal 5: Start Frontend
 

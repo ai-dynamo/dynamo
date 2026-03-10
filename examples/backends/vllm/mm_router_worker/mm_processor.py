@@ -10,30 +10,35 @@ Key differences from the TRT-LLM version:
 - Fast path token expansion computes token counts from image dimensions directly.
 """
 
-import base64
+import asyncio
 import logging
 from dataclasses import dataclass
 from io import BytesIO
 from typing import Any, Sequence
-from urllib.parse import urlparse
 
-import requests
 from PIL import Image
 
+from dynamo.common.multimodal.image_loader import ImageLoader
 from dynamo.vllm.multimodal_utils.hash_utils import compute_mm_uuids_from_images
 
 logger = logging.getLogger(__name__)
 
 
+# =============================================================================
+# Data structures
+# =============================================================================
+
+
 @dataclass
 class ProcessedInput:
+    """Processed multimodal input."""
+
     tokens: list[int]
     mm_hashes: list[int] | None
-    image_ranges: list[tuple[int, int]] | None
-
+    image_ranges: list[tuple[int, int]] | None  # [(start, end), ...] per image
 
 # =============================================================================
-# Public API
+# Public functions
 # =============================================================================
 
 
@@ -51,21 +56,22 @@ def extract_image_urls(messages: list[dict]) -> list[str]:
     return urls
 
 
-def process_multimodal(
+async def process_multimodal(
     messages: list[dict],
     image_urls: list[str],
     tokenizer: Any,
     processor: Any,
     model: str,
+    image_loader: ImageLoader,
 ) -> ProcessedInput:
-    """Process multimodal request: load images, expand tokens, compute mm_hashes.
+    """Process multimodal request: load images, get expanded tokens and mm_hashes.
 
-    Uses PIL images for hash computation to natively match the vLLM backend's
-    multi_modal_uuids — no backend changes needed.
+    Uses the shared ImageLoader for async loading with HTTP cache.
+    Hashes PIL images to natively match the vLLM backend's multi_modal_uuids.
     """
     prompt = _apply_chat_template(messages, tokenizer, processor)
 
-    pil_images = [_load_image(url) for url in image_urls]
+    pil_images = list(await asyncio.gather(*[image_loader.load_image(url) for url in image_urls]))
     image_dims = [(img.width, img.height) for img in pil_images]
 
     tokens, image_ranges = _get_expanded_tokens(
@@ -84,7 +90,14 @@ def build_block_mm_infos(
     mm_hashes: list[int] | None,
     image_ranges: list[tuple[int, int]] | None,
 ) -> list[dict | None] | None:
-    """Build per-block mm_info for KV-cache-aware routing."""
+    """
+    Build per-block mm_info for routing.
+
+    For each block, check which images overlap with it and add their mm_hash.
+
+    Assumption: mm_hashes and image_ranges are in the same order as images appear
+    in the request (which matches their order in the token sequence).
+    """
     if not mm_hashes or not image_ranges or len(mm_hashes) != len(image_ranges):
         return None
 
@@ -130,21 +143,6 @@ def _apply_chat_template(messages: list[dict], tokenizer: Any, processor: Any) -
                 messages, tokenize=False, add_generation_prompt=True
             )
     raise ValueError("Neither processor nor tokenizer provides apply_chat_template")
-
-
-def _load_image(url: str) -> Image.Image:
-    """Load image from URL or data URI, returning PIL RGB image."""
-    parsed = urlparse(url)
-    if parsed.scheme == "data":
-        _, data = parsed.path.split(",", 1)
-        raw_bytes = base64.b64decode(data)
-    elif parsed.scheme in ("http", "https"):
-        response = requests.get(url, timeout=30)
-        response.raise_for_status()
-        raw_bytes = response.content
-    else:
-        raise ValueError(f"Unsupported URL scheme: {parsed.scheme}")
-    return Image.open(BytesIO(raw_bytes)).convert("RGB")
 
 
 def _get_expanded_tokens(

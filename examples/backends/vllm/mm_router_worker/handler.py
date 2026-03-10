@@ -6,6 +6,7 @@
 import logging
 from typing import Any, AsyncGenerator
 
+from dynamo.common.multimodal.image_loader import ImageLoader
 from dynamo.llm import KvRouter
 from dynamo.runtime.logging import configure_dynamo_logging
 
@@ -31,6 +32,7 @@ class MMRouterHandler:
         self.processor = processor
         self.model = model
         self.block_size = block_size
+        self._image_loader = ImageLoader()
 
     async def generate(self, request: dict) -> AsyncGenerator[dict, None]:
         """Main entry point: process request, compute routing, forward to best worker."""
@@ -38,7 +40,7 @@ class MMRouterHandler:
         image_urls = extract_image_urls(messages)
 
         if image_urls:
-            routing_tokens, block_mm_infos = self._process_mm_request(
+            routing_tokens, block_mm_infos = await self._process_mm_request(
                 request, messages, image_urls
             )
         else:
@@ -65,19 +67,20 @@ class MMRouterHandler:
         async for response in stream:
             yield response
 
-    def _process_mm_request(
+    async def _process_mm_request(
         self,
         request: dict,
         messages: list[dict],
         image_urls: list[str],
     ) -> tuple[list[int], list[dict | None]]:
         """Process multimodal: load images, expand tokens, build routing info."""
-        processed = process_multimodal(
+        processed = await process_multimodal(
             messages=messages,
             image_urls=image_urls,
             tokenizer=self.tokenizer,
             processor=self.processor,
             model=self.model,
+            image_loader=self._image_loader,
         )
 
         # Strip image content from messages to reduce serialization payload
