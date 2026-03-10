@@ -18,10 +18,10 @@ type CheckpointManifest struct {
 	CheckpointHash string    `yaml:"checkpointHash"`
 	CreatedAt      time.Time `yaml:"createdAt"`
 
-	CRIUDump   CRIUDumpManifest  `yaml:"criuDump"`
-	K8s        SourcePodManifest `yaml:"k8s"`
-	Overlay OverlayManifest   `yaml:"overlay"`
-	CUDA       CUDAManifest      `yaml:"cudaRestore,omitempty"`
+	CRIUDump CRIUDumpManifest  `yaml:"criuDump"`
+	K8s      SourcePodManifest `yaml:"k8s"`
+	Overlay  OverlayManifest   `yaml:"overlay"`
+	CUDA     CUDAManifest      `yaml:"cudaRestore,omitempty"`
 }
 
 func NewCheckpointManifest(
@@ -35,7 +35,7 @@ func NewCheckpointManifest(
 		CreatedAt:      time.Now().UTC(),
 		CRIUDump:       criuDump,
 		K8s:            k8s,
-		Overlay:     overlay,
+		Overlay:        overlay,
 	}
 }
 
@@ -94,9 +94,9 @@ func NewSourcePodManifest(containerID string, pid int, sourceNode, podName, podN
 // OverlayManifest holds runtime overlay state captured at checkpoint time.
 type OverlayManifest struct {
 	Exclusions     OverlaySettings `yaml:"exclusions"`
-	UpperDir       string           `yaml:"upperDir,omitempty"`
-	ExternalPaths  []string         `yaml:"externalPaths,omitempty"`
-	BindMountDests []string         `yaml:"bindMountDests,omitempty"`
+	UpperDir       string          `yaml:"upperDir,omitempty"`
+	ExternalPaths  []string        `yaml:"externalPaths,omitempty"`
+	BindMountDests []string        `yaml:"bindMountDests,omitempty"`
 }
 
 func NewOverlayManifest(exclusions OverlaySettings, upperDir string, ociSpec *specs.Spec) OverlayManifest {

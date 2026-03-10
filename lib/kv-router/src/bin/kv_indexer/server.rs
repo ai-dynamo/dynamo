@@ -248,25 +248,65 @@ async fn query_by_hash(
     }
 }
 
-async fn dump_events(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let indexers = state.registry.all_indexers();
-    let mut handles = Vec::with_capacity(indexers.len());
+#[derive(Deserialize)]
+struct PeerRequest {
+    url: String,
+}
 
-    for (key, indexer) in indexers {
+async fn register_peer(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<PeerRequest>,
+) -> impl IntoResponse {
+    state.registry.register_peer(req.url);
+    (
+        StatusCode::CREATED,
+        Json(serde_json::json!({"status": "ok"})),
+    )
+}
+
+async fn deregister_peer(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<PeerRequest>,
+) -> impl IntoResponse {
+    if state.registry.deregister_peer(&req.url) {
+        (StatusCode::OK, Json(serde_json::json!({"status": "ok"})))
+    } else {
+        (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "peer not found"})),
+        )
+    }
+}
+
+async fn list_peers(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    Json(state.registry.list_peers())
+}
+
+async fn dump_events(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let all = state.registry.all_indexers_with_block_size();
+    let mut handles = Vec::with_capacity(all.len());
+
+    for (key, indexer, block_size) in all {
         handles.push(tokio::spawn(async move {
             let events = indexer.dump_events().await;
-            (key, events)
+            (key, events, block_size)
         }));
     }
 
     let mut result: HashMap<String, serde_json::Value> = HashMap::new();
     for handle in handles {
         match handle.await {
-            Ok((key, Ok(events))) => {
+            Ok((key, Ok(events), block_size)) => {
                 let map_key = format!("{}:{}", key.model_name, key.tenant_id);
-                result.insert(map_key, serde_json::json!(events));
+                result.insert(
+                    map_key,
+                    serde_json::json!({
+                        "block_size": block_size,
+                        "events": events,
+                    }),
+                );
             }
-            Ok((key, Err(e))) => {
+            Ok((key, Err(e), _)) => {
                 let map_key = format!("{}:{}", key.model_name, key.tenant_id);
                 result.insert(map_key, serde_json::json!({"error": e.to_string()}));
             }
@@ -286,5 +326,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/query", post(query))
         .route("/query_by_hash", post(query_by_hash))
         .route("/dump", get(dump_events))
+        .route("/register_peer", post(register_peer))
+        .route("/deregister_peer", post(deregister_peer))
+        .route("/peers", get(list_peers))
         .with_state(state)
 }
