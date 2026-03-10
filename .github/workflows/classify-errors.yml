@@ -15,11 +15,7 @@ on:
         type: string
         default: "true"
     secrets:
-      CI_CLASSIFIER_API_KEY:
-        required: true
-      CI_CLASSIFIER_API_BASE_URL:
-        required: true
-      CI_CLASSIFIER_MODEL:
+      ANTHROPIC_API_KEY:
         required: true
   workflow_dispatch:
     inputs:
@@ -76,9 +72,9 @@ jobs:
       - name: Classify errors
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          API_KEY: ${{ secrets.CI_CLASSIFIER_API_KEY }}
-          API_BASE_URL: ${{ secrets.CI_CLASSIFIER_API_BASE_URL }}
-          MODEL: ${{ secrets.CI_CLASSIFIER_MODEL }}
+          API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          API_BASE_URL: "https://inference-api.nvidia.com/v1"
+          MODEL: "aws/anthropic/claude-sonnet-4-5-20250929"
         run: |
           PR_ARGS=""
           if [ -n "${{ steps.detect.outputs.pr_number }}" ]; then
