@@ -93,7 +93,7 @@ pub struct PyRequestMetric {
 #[pymethods]
 impl PyPerformanceMetricsRegistry {
     #[new]
-    #[pyo3(signature = (runtime_metrics, publish_interval_seconds = 5.0, metric_prefix = "performance".to_string(), labels = None))]
+    #[pyo3(signature = (runtime_metrics, publish_interval_seconds = 5.0, metric_prefix = "".to_string(), labels = None))]
     fn new(
         py: Python<'_>,
         runtime_metrics: &RuntimeMetrics,

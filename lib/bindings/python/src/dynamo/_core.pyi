@@ -1711,7 +1711,7 @@ class PerformanceMetricsRegistry:
         self,
         runtime_metrics: RuntimeMetrics,
         publish_interval_seconds: float = 5.0,
-        metric_prefix: str = "performance",
+        metric_prefix: str = "",
         labels: Optional[Dict[str, str]] = None,
     ) -> None: ...
     def new_rate_metric(self, name: str, quantiles: Optional[List[float]] = None, sample_period_seconds: float = 1.0, window_seconds: Optional[float] = None) -> RateMetric: ...
@@ -1726,18 +1726,26 @@ class RequestMetric:
 
 class RequestMetricsFactory:
     """Factory for per-request metrics.
-    Will record:
+    Records sliding-window request metrics.
 
-    - Input tokens
-    - Time to first token (TTFT)
-    - Inter Token Latency (ITL)
-    - TTFT per input token (normalized ttft based on input size)
+    Core metrics:
+    - Request rate
+    - Input tokens per second
+    - Net-new input tokens per second (when cached_tokens is provided before first token)
+    - TTFT (ms)
+    - TTFT per input token
+    - TTFT per net-new input token (when cached_tokens is provided before first token)
+    - ITL (ms)
 
-    Request Rates:
-    - Started requests
-    - Pre-first token cancellation (cancellation before first token is received)
-    - Mid-stream cancellation (cancellation after first token is received)
-    - Successful request latency (terminal latency for successful requests)
+    Lifecycle rates:
+    - Pre-first token cancellation
+    - Mid-stream cancellation
+    - Successful requests
+
+    Semantics:
+    - `record_tokens(total_tokens, cached_tokens=None)` expects cumulative `total_tokens`.
+    - If `new_request(input_tokens=0)`, the first `total_tokens` value is used as input tokens.
+    - `cached_tokens` is consumed once (first provided value before first token).
 
     Usage:
         ```
@@ -1749,9 +1757,8 @@ class RequestMetricsFactory:
             req = self.factory.new_request(input_tokens=prompt_tokens)
             try:
                 async for stream in engine.generate(...):
-                    req.record_tokens(stream.usage.total_tokens) # 10us per call.
-                    # Optional: pass cached prefix tokens once before first token to emit
-                    # net-new input token metrics.
+                    req.record_tokens(stream.usage.total_tokens)
+                    # Optional, once before first token:
                     # req.record_tokens(stream.usage.total_tokens, cached_tokens=cache_hit_tokens)
                     yield stream
                 req.success()
