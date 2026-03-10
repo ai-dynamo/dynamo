@@ -17,7 +17,9 @@ This Helm chart deploys the checkpoint/restore infrastructure for NVIDIA Dynamo,
 ⚠️ **Security Warning**: The Dynamo Snapshot DaemonSet runs in **privileged mode** with `hostPID`, `hostIPC`, and `hostNetwork` to perform CRIU checkpoint/restore operations. Workload pods do not need privileged mode. Only deploy in environments where a privileged DaemonSet is acceptable.
 
 - Kubernetes 1.21+
+- **x86_64 (amd64) nodes only** for the snapshot agent and placeholder images
 - GPU nodes with NVIDIA runtime (`nvidia` runtime class)
+- NVIDIA driver 580.xx or newer on the target GPU nodes
 - containerd runtime (for container inspection; CRIU is bundled in Dynamo Snapshot images)
 - NVIDIA Dynamo operator installed (cluster-wide or namespace-scoped)
 - RWX (ReadWriteMany) storage class for multi-node deployments
@@ -35,9 +37,9 @@ export NAMESPACE=my-team  # Your target namespace
 export DOCKER_SERVER=your-registry.com/  # Your container registry
 export IMAGE_TAG=latest
 
-# Build Dynamo Snapshot agent image
+# Build Dynamo Snapshot agent image (amd64 only)
 cd deploy/snapshot
-docker build --target agent -t $DOCKER_SERVER/snapshot-agent:$IMAGE_TAG .
+docker build --platform linux/amd64 --target agent -t $DOCKER_SERVER/snapshot-agent:$IMAGE_TAG .
 docker push $DOCKER_SERVER/snapshot-agent:$IMAGE_TAG
 cd -
 

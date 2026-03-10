@@ -15,10 +15,9 @@ import (
 	podresourcesv1 "k8s.io/kubelet/pkg/apis/podresources/v1"
 )
 
-const (
-	podResourcesSocket = "/var/lib/kubelet/pod-resources/kubelet.sock"
-	nvidiaGPUResource  = "nvidia.com/gpu"
-)
+const nvidiaGPUResource = "nvidia.com/gpu"
+
+var podResourcesSocketPath = "/var/lib/kubelet/pod-resources/kubelet.sock"
 
 // GetPodGPUUUIDs resolves GPU UUIDs for a pod/container from the kubelet PodResources API.
 // All nvidia.com/gpu device entries are accumulated in case the kubelet splits them
@@ -28,11 +27,9 @@ func GetPodGPUUUIDs(ctx context.Context, podName, podNamespace, containerName st
 		return nil, nil
 	}
 
-	conn, err := grpc.DialContext(
-		ctx,
-		"unix://"+podResourcesSocket,
+	conn, err := grpc.NewClient(
+		"unix://"+podResourcesSocketPath,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithBlock(),
 	)
 	if err != nil {
 		return nil, err

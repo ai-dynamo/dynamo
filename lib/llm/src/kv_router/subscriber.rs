@@ -33,15 +33,21 @@ async fn start_kv_router_background_event_plane(
     transport_kind: EventTransportKind,
 ) -> Result<()> {
     let cancellation_token = component.drt().primary_token();
-    // WorkerQueryClient handles its own discovery loop for lifecycle + initial recovery.
-    // No blocking wait — recovery happens asynchronously as endpoints are discovered.
-    let worker_query_client = WorkerQueryClient::spawn(component.clone(), indexer.clone()).await?;
 
-    // Subscribe to KV events using the selected event plane transport
+    // Subscribe to KV events BEFORE spawning the discovery/recovery loop.
+    // This ensures no events are lost between the initial dump fetch and the
+    // subscription becoming active — the tree state at fetch time is guaranteed
+    // to be a subset of what the subscription will deliver.
     let mut subscriber =
         EventSubscriber::for_component_with_transport(&component, KV_EVENT_SUBJECT, transport_kind)
             .await?
             .typed::<RouterEvent>();
+
+    // Brief delay to let the subscription fully establish with the NATS server
+    // before recovery fetches the initial dump from workers.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let worker_query_client = WorkerQueryClient::spawn(component.clone(), indexer.clone()).await?;
     let kv_event_subject = format!(
         "namespace.{}.component.{}.{}",
         component.namespace().name(),
