@@ -149,7 +149,6 @@ class InstrumentedScheduler(Scheduler):
         self._pending_output: SchedulerOutput | None = None
         self._pending_waiting_snapshot: _WaitingSnapshot | None = None
         self._was_active: bool = False
-        self._prefix_cache_per_req: dict[str, int] = {}
         self._prompt_len_per_req: dict[str, int] = {}
 
         base_port = int(os.environ.get(ENV_FPM_PORT, str(DEFAULT_FPM_PORT)))
@@ -243,8 +242,7 @@ class InstrumentedScheduler(Scheduler):
 
         prefill_token_counts: list[int] = []
         prefill_prompt_lengths: list[int] = []
-        prefill_non_cached_lengths: list[int] = []
-        sum_prefill_prefix_cached = 0
+        sum_prefill_kv_tokens = 0
 
         for req in new_reqs:
             tokens_this_step = num_scheduled.get(req.req_id, 0)
@@ -252,10 +250,8 @@ class InstrumentedScheduler(Scheduler):
 
             prompt_len = len(req.prompt_token_ids) if req.prompt_token_ids else 0
             prefill_prompt_lengths.append(prompt_len)
-            prefill_non_cached_lengths.append(prompt_len - req.num_computed_tokens)
-            sum_prefill_prefix_cached += req.num_computed_tokens
+            sum_prefill_kv_tokens += req.num_computed_tokens
 
-            self._prefix_cache_per_req[req.req_id] = req.num_computed_tokens
             self._prompt_len_per_req[req.req_id] = prompt_len
 
         for i, req_id in enumerate(cached.req_ids):
@@ -265,36 +261,22 @@ class InstrumentedScheduler(Scheduler):
 
                 prompt_len = self._prompt_len_per_req.get(req_id, 0)
                 prefill_prompt_lengths.append(prompt_len)
-                prefix_cached = self._prefix_cache_per_req.get(req_id, 0)
-                prefill_non_cached_lengths.append(prompt_len - prefix_cached)
-                sum_prefill_prefix_cached += prefix_cached
+                sum_prefill_kv_tokens += cached.num_computed_tokens[i]
 
         decode_kv_lengths: list[int] = []
-        decode_prefix_cached: list[int] = []
 
         for i, req_id in enumerate(cached.req_ids):
             if not cached.is_context_phase(req_id):
-                kv_len = cached.num_computed_tokens[i]
-                decode_kv_lengths.append(kv_len)
-                decode_prefix_cached.append(
-                    self._prefix_cache_per_req.get(req_id, 0)
-                )
+                decode_kv_lengths.append(cached.num_computed_tokens[i])
 
         return ScheduledRequestMetrics(
             num_prefill_requests=len(prefill_token_counts),
             sum_prefill_tokens=sum(prefill_token_counts),
             var_prefill_length=_population_variance(prefill_prompt_lengths),
-            sum_prefill_tokens_prefix_cached=sum_prefill_prefix_cached,
-            var_non_prefix_cached_prefill_length=_population_variance(
-                prefill_non_cached_lengths
-            ),
+            sum_prefill_kv_tokens=sum_prefill_kv_tokens,
             num_decode_requests=len(decode_kv_lengths),
             sum_decode_kv_tokens=sum(decode_kv_lengths),
-            sum_decode_kv_tokens_prefix_cached=sum(decode_prefix_cached),
             var_decode_kv_tokens=_population_variance(decode_kv_lengths),
-            var_decode_kv_tokens_prefix_cached=_population_variance(
-                decode_prefix_cached
-            ),
         )
 
     def _extract_queued(
@@ -339,7 +321,6 @@ class InstrumentedScheduler(Scheduler):
 
     def _cleanup_finished(self, output: SchedulerOutput) -> None:
         for req_id in output.finished_req_ids:
-            self._prefix_cache_per_req.pop(req_id, None)
             self._prompt_len_per_req.pop(req_id, None)
 
 
