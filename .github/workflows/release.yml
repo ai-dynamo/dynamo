@@ -40,6 +40,7 @@ jobs:
         id: extract
         env:
           COMMIT_SHA: ${{ github.event.inputs.commit_sha }}
+          BRANCH_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
 
@@ -47,8 +48,6 @@ jobs:
             echo "Error: commit_sha must be a full 40-character hex SHA (got: '${COMMIT_SHA}')"
             exit 1
           fi
-
-          BRANCH_NAME="${GITHUB_REF#refs/heads/}"
 
           if [[ ! "$BRANCH_NAME" =~ ^release/[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "Error: workflow_dispatch must be triggered from a release/* branch"
