@@ -14,7 +14,8 @@ repository.workspace = true
 default = []
 metrics = []
 bench = ["dep:clap", "dep:indicatif", "dep:serde_json", "dep:plotters"]
-indexer-bin = ["metrics", "dep:axum", "dep:clap", "dep:zeromq", "dep:tracing-subscriber", "dep:serde_json", "dep:reqwest"]
+standalone-indexer = ["metrics", "dep:axum", "dep:zeromq", "dep:serde_json", "dep:reqwest"]
+indexer-bin = ["standalone-indexer", "dep:clap", "dep:tracing-subscriber"]
 
 [dependencies]
 # repo

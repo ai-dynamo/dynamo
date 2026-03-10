@@ -9,7 +9,7 @@ use dashmap::mapref::one::Ref;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-use dynamo_kv_router::protocols::WorkerId;
+use crate::protocols::WorkerId;
 
 use super::indexer::{Indexer, create_indexer};
 use super::listener::run_zmq_listener;
@@ -86,8 +86,6 @@ impl WorkerRegistry {
             tenant_id,
         };
 
-        // Get or create the indexer for this (model, tenant) pair.
-        // Use the entry API for atomic check-and-insert.
         let indexer_entry = self.indexers.entry(key.clone()).or_insert_with(|| {
             tracing::info!(
                 model_name = %key.model_name,

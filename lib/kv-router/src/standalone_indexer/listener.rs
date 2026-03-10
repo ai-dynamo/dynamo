@@ -10,8 +10,8 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use zeromq::{Socket, SocketRecv, SubSocket};
 
-use dynamo_kv_router::protocols::{RouterEvent, WorkerId};
-use dynamo_kv_router::zmq_wire::{KvEventBatch, convert_event};
+use crate::protocols::{RouterEvent, WorkerId};
+use crate::zmq_wire::{KvEventBatch, convert_event};
 
 use super::indexer::Indexer;
 
@@ -26,27 +26,6 @@ fn calculate_backoff_ms(consecutive_errors: u32) -> u64 {
         MAX_BACKOFF_MS,
     )
 }
-
-// TODO: Gap detection for missed ZMQ messages
-//
-// ZMQ PUB/SUB is lossy — if the subscriber is slow or disconnects briefly,
-// messages can be dropped. The `zeromq` 0.4 crate uses bounded internal
-// channels between the PUB and SUB sockets (via `try_send` with a noop
-// waker), so messages are silently dropped when the write buffer is full
-// (per ZMQ spec RFC 29).
-//
-// For P2P recovery, the ready signal delays `recv()` only briefly (the
-// duration of the HTTP dump fetch), which is well within the crate's
-// internal channel capacity. For longer delays or high-throughput scenarios,
-// messages could be lost.
-//
-// Easy win: hook up the vLLM replay endpoint — workers already expose
-// `LocalKvIndexer` with event buffering and range queries (see
-// `lib/llm/src/kv_router/worker_query.rs`), just need to query it from
-// the standalone indexer on gap detection.
-//
-// Alternative future approach: switch to an explicit `mpsc` channel as the
-// buffer (unbounded, no drops) instead of relying on ZMQ's internal buffer.
 
 pub async fn run_zmq_listener(
     worker_id: WorkerId,
@@ -71,9 +50,6 @@ pub async fn run_zmq_listener(
         return;
     }
 
-    // Wait for the ready signal before entering the recv loop.
-    // During P2P recovery, this delay lets the recovery code fetch the dump
-    // from a peer while ZMQ subscription handshakes complete in the background.
     tokio::select! {
         biased;
         _ = cancel.cancelled() => {
@@ -180,11 +156,6 @@ pub async fn run_zmq_listener(
 mod tests {
     use zeromq::{PubSocket, Socket, SocketRecv, SocketSend, SubSocket};
 
-    /// Verify that the `zeromq` crate buffers a small number of messages in
-    /// TCP kernel buffers when `recv()` is not being called. The PUB socket
-    /// uses `try_send` with a noop waker — once the TCP send buffer is full
-    /// it silently drops messages (per ZMQ spec RFC 29). This test confirms
-    /// that a brief delay (simulating P2P recovery) doesn't lose messages.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn zmq_buffers_messages_during_brief_delay() {
         let mut pub_socket = PubSocket::new();
@@ -197,8 +168,6 @@ mod tests {
             .await
             .unwrap();
 
-        // Wait for SUB handshake: spawn recv in a background task so the
-        // PUB's accept/subscription processing can proceed concurrently.
         let (tx, mut rx) = tokio::sync::mpsc::channel::<SubSocket>(1);
         tokio::spawn(async move {
             let _ = sub_socket.recv().await.unwrap();
@@ -215,8 +184,6 @@ mod tests {
 
         let num_messages = 10u64;
 
-        // Send messages without calling recv() — simulates the brief window
-        // between ZMQ connect and ready signal during P2P recovery.
         for i in 0..num_messages {
             pub_socket
                 .send(i.to_le_bytes().to_vec().into())
@@ -224,10 +191,8 @@ mod tests {
                 .unwrap();
         }
 
-        // Simulate recovery delay
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-        // All messages should be buffered in TCP kernel buffers
         for i in 0u64..num_messages {
             let msg = tokio::time::timeout(std::time::Duration::from_secs(5), sub_socket.recv())
                 .await

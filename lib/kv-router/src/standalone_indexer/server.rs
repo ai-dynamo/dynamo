@@ -11,7 +11,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
-use dynamo_kv_router::protocols::{LocalBlockHash, WorkerId, compute_block_hash_for_seq};
+use crate::protocols::{LocalBlockHash, WorkerId, compute_block_hash_for_seq};
 
 use super::registry::{IndexerKey, WorkerRegistry};
 
@@ -61,11 +61,6 @@ pub struct QueryRequest {
     pub lora_name: Option<String>,
 }
 
-/// Query using pre-computed block hashes.
-///
-/// Callers must include the LoRA salt in their hashes when applicable — use
-/// [`compute_block_hash_for_seq`] with the appropriate `lora_name`. The indexer
-/// cannot retroactively apply a LoRA salt to pre-computed hashes.
 #[derive(Deserialize)]
 pub struct QueryByHashRequest {
     pub block_hashes: Vec<i64>,
@@ -153,7 +148,7 @@ async fn list_workers(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 }
 
 fn build_score_response(
-    overlap: dynamo_kv_router::protocols::OverlapScores,
+    overlap: crate::protocols::OverlapScores,
     block_size: u32,
 ) -> ScoreResponse {
     let mut scores: HashMap<String, HashMap<String, u32>> = HashMap::new();
