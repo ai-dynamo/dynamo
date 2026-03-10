@@ -64,12 +64,21 @@ class _FpmPublisherThread:
     """
 
     SHUTDOWN_TIMEOUT: float = 1.0
+    HEARTBEAT_INTERVAL: float = 1.0
 
-    def __init__(self, endpoint: str, max_queue_size: int = 10_000) -> None:
+    def __init__(
+        self,
+        endpoint: str,
+        worker_id: str,
+        dp_rank: int,
+        max_queue_size: int = 10_000,
+    ) -> None:
         self._queue: queue.Queue[ForwardPassMetrics | None] = queue.Queue(
             maxsize=max_queue_size
         )
         self._seq = count()
+        self._worker_id = worker_id
+        self._dp_rank = dp_rank
 
         self._ctx = zmq.Context.instance()
         self._pub = self._ctx.socket(zmq.PUB)
@@ -103,20 +112,27 @@ class _FpmPublisherThread:
 
     def _run(self) -> None:
         topic = b""
+        last_publish = time.monotonic()
+
         while self._running or not self._queue.empty():
             try:
-                metrics = self._queue.get(timeout=0.1)
+                metrics = self._queue.get(timeout=self.HEARTBEAT_INTERVAL)
                 if metrics is None:
                     break
             except queue.Empty:
-                continue
+                if time.monotonic() - last_publish >= self.HEARTBEAT_INTERVAL:
+                    metrics = ForwardPassMetrics(
+                        worker_id=self._worker_id,
+                        dp_rank=self._dp_rank,
+                    )
+                else:
+                    continue
 
             try:
                 payload = encode(metrics)
                 seq_bytes = next(self._seq).to_bytes(8, "big")
-                self._pub.send_multipart(
-                    (topic, seq_bytes, payload), flags=zmq.NOBLOCK
-                )
+                self._pub.send_multipart((topic, seq_bytes, payload), flags=zmq.NOBLOCK)
+                last_publish = time.monotonic()
             except zmq.Again:
                 pass
             except Exception:
@@ -124,7 +140,6 @@ class _FpmPublisherThread:
 
 
 class InstrumentedScheduler(Scheduler):
-
     def __init__(
         self,
         vllm_config: "VllmConfig",
@@ -148,12 +163,15 @@ class InstrumentedScheduler(Scheduler):
         self._schedule_time: float = 0.0
         self._pending_output: SchedulerOutput | None = None
         self._pending_waiting_snapshot: _WaitingSnapshot | None = None
-        self._was_active: bool = False
         self._prompt_len_per_req: dict[str, int] = {}
 
         base_port = int(os.environ.get(ENV_FPM_PORT, str(DEFAULT_FPM_PORT)))
         port = base_port + dp_rank
-        self._publisher = _FpmPublisherThread(f"tcp://*:{port}")
+        self._publisher = _FpmPublisherThread(
+            f"tcp://*:{port}",
+            worker_id=self._fpm_worker_id,
+            dp_rank=dp_rank,
+        )
 
         logger.info(
             "InstrumentedScheduler: ZMQ PUB bound on tcp://*:%d "
@@ -168,7 +186,6 @@ class InstrumentedScheduler(Scheduler):
     # ------------------------------------------------------------------
 
     def schedule(self) -> SchedulerOutput:
-        self._was_active = True
         self._schedule_time = time.monotonic()
 
         output = super().schedule()
@@ -201,19 +218,6 @@ class InstrumentedScheduler(Scheduler):
         self._cleanup_finished(scheduler_output)
 
         return result
-
-    def has_requests(self) -> bool:
-        has = super().has_requests()
-        if not has and self._was_active:
-            self._publisher.publish(
-                ForwardPassMetrics(
-                    worker_id=self._fpm_worker_id,
-                    dp_rank=self._fpm_dp_rank,
-                    wall_time=0.0,
-                )
-            )
-            self._was_active = False
-        return has
 
     # ------------------------------------------------------------------
     # Metric extraction

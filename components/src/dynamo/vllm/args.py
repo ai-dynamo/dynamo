@@ -262,9 +262,9 @@ def update_engine_config_with_dynamo(
     if envs.is_set("DYN_VLLM_FORWARDPASS_METRIC_PORT"):
         existing_cls = getattr(engine_config, "scheduler_cls", None)
         if existing_cls is None:
-            defaults["scheduler_cls"] = (
-                "dynamo.vllm.instrumented_scheduler.InstrumentedScheduler"
-            )
+            defaults[
+                "scheduler_cls"
+            ] = "dynamo.vllm.instrumented_scheduler.InstrumentedScheduler"
             logger.info(
                 "Forward pass metrics enabled: scheduler_cls set to InstrumentedScheduler "
                 f"(port={envs.DYN_VLLM_FORWARDPASS_METRIC_PORT})"

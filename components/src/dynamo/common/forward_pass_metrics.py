@@ -18,6 +18,7 @@ import msgspec
 
 class ScheduledRequestMetrics(
     msgspec.Struct,
+    frozen=True,
     gc=False,
 ):
     """Metrics for requests scheduled in this iteration"""
@@ -55,6 +56,7 @@ class ScheduledRequestMetrics(
 
 class QueuedRequestMetrics(
     msgspec.Struct,
+    frozen=True,
     gc=False,
 ):
     """Metrics for requests waiting in the queue (not scheduled this iteration).
@@ -85,6 +87,7 @@ class QueuedRequestMetrics(
 
 class ForwardPassMetrics(
     msgspec.Struct,
+    frozen=True,
     gc=False,
 ):
     """Per-iteration metrics emitted by InstrumentedScheduler.
