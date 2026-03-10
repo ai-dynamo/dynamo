@@ -91,6 +91,8 @@ Set up your Kubernetes cluster with NVIDIA GPUs and install the Dynamo Kubernete
 
 ### Step 2: Port-Forward and Run a Single Benchmark
 
+> **Wait for model readiness.** Before benchmarking, ensure your deployment has fully loaded the model. Check pod logs or hit the health endpoint (`curl http://localhost:8000/health`) — it should return `200 OK` before you proceed.
+
 ```bash
 # Port-forward the frontend service
 kubectl port-forward -n <namespace> svc/<frontend-service-name> 8000:8000 > /dev/null 2>&1 &
@@ -295,7 +297,7 @@ Server-side benchmarking runs directly within the Kubernetes cluster, eliminatin
 ## Quick Start
 
 ### Step 1: Deploy Your DynamoGraphDeployment
-Deploy using the [deployment documentation](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends). Ensure it has a frontend service exposed.
+Deploy using the [deployment documentation](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends). Ensure it has a frontend service exposed and the model is fully loaded before running benchmarks — check pod logs or verify the health endpoint returns `200 OK`.
 
 ### Step 2: Configure and Run Benchmark Job
 
