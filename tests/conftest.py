@@ -4,6 +4,7 @@
 import logging
 import os
 import shutil
+import subprocess
 import tempfile
 from pathlib import Path
 from typing import Generator, Optional
@@ -239,6 +240,35 @@ def predownload_tokenizers(pytestconfig):
     os.environ["HF_HUB_OFFLINE"] = "1"
     yield
     os.environ.pop("HF_HUB_OFFLINE", None)
+
+
+@pytest.fixture(scope="session")
+def build_kv_indexer():
+    """Ensure the standalone KV indexer binary is available.
+
+    Runs `maturin develop --features kv-indexer` to install the binary into
+    the venv. Skipped if the binary is already on PATH (e.g. in CI containers
+    where the wheel was built with --features kv-indexer).
+    """
+    if shutil.which("dynamo-kv-indexer"):
+        _logger.info("dynamo-kv-indexer already on PATH, skipping build")
+        return
+
+    _logger.info("Building dynamo-kv-indexer via maturin develop")
+    venv = os.environ.get("VIRTUAL_ENV", "")
+    subprocess.check_call(
+        [
+            "maturin",
+            "develop",
+            "--features",
+            "kv-indexer",
+            "--uv",
+        ],
+        cwd=str(Path(__file__).resolve().parents[1] / "lib" / "bindings" / "python"),
+        env={**os.environ, "VIRTUAL_ENV": venv} if venv else None,
+        timeout=600,
+    )
+    _logger.info("dynamo-kv-indexer binary ready")
 
 
 @pytest.fixture(autouse=True)
