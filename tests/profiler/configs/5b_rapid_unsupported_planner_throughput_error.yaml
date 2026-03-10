@@ -4,7 +4,8 @@
 # Case 5b: AIC unsupported model, rapid, with planner + throughput scaling
 # This should FAIL with a ValueError because throughput-based planner
 # requires AIC support.
-model: "Qwen/Qwen3-32B"
+#
+model: "meta-llama/Llama-3.1-8B"
 backend: vllm
 image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:latest"
 hardware:
