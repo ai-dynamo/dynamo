@@ -10,7 +10,6 @@ Key differences from the TRT-LLM version:
 - Fast path token expansion computes token counts from image dimensions directly.
 """
 
-import asyncio
 import logging
 from dataclasses import dataclass
 from typing import Any, Sequence
