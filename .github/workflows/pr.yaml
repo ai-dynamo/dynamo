@@ -460,3 +460,20 @@ jobs:
       with:
         kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
         namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
+
+  # ============================================================================
+  # ERROR CLASSIFICATION
+  # Classify CI failures after all jobs complete
+  # ============================================================================
+
+  classify-errors:
+    if: always() && !cancelled()
+    needs: [clean-k8s-builder, cleanup]
+    uses: ./.github/workflows/classify-errors.yml
+    with:
+      workflow_type: pr
+      enable_pr_comments: 'true'
+    secrets:
+      CI_CLASSIFIER_API_KEY: ${{ secrets.CI_CLASSIFIER_API_KEY }}
+      CI_CLASSIFIER_API_BASE_URL: ${{ secrets.CI_CLASSIFIER_API_BASE_URL }}
+      CI_CLASSIFIER_MODEL: ${{ secrets.CI_CLASSIFIER_MODEL }}
