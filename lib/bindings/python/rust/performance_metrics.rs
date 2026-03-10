@@ -307,9 +307,15 @@ impl PyRequestMetricsFactory {
 
 #[pymethods]
 impl PyRequestMetric {
-    fn record_tokens(&mut self, py: Python<'_>, total_tokens: u64) -> PyResult<()> {
+    #[pyo3(signature = (total_tokens, cached_tokens = None))]
+    fn record_tokens(
+        &mut self,
+        py: Python<'_>,
+        total_tokens: u64,
+        cached_tokens: Option<u64>,
+    ) -> PyResult<()> {
         // RequestMetric now uses a Send RNG, so this path can run without the GIL.
-        py.allow_threads(|| self.inner.record_tokens(total_tokens))
+        py.allow_threads(|| self.inner.record_tokens(total_tokens, cached_tokens))
             .map_err(|e| PyValueError::new_err(e.to_string()))
     }
 

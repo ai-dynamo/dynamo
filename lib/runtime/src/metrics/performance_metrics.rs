@@ -155,8 +155,10 @@ pub struct RatioMetricHandle {
 struct RequestMetricsFactoryInner {
     request: RateMetricHandle,
     input_tokens: RateMetricHandle,
+    net_new_input_tokens: RateMetricHandle,
     ttft: DistributionMetricHandle,
     ttft_per_input_token: DistributionMetricHandle,
+    ttft_per_net_new_input_token: DistributionMetricHandle,
     itl: DistributionMetricHandle,
     pre_first_token_cancellation: RateMetricHandle,
     mid_stream_cancellation: RateMetricHandle,
@@ -224,6 +226,32 @@ impl Default for RequestMetricsOptions {
 
 #[derive(Clone)]
 /// Factory that creates one [`RequestMetric`] per request.
+///
+/// Calling [`RequestMetricsFactory::new`] registers a fixed set of sliding-window metrics under
+/// the provided `metric_prefix`.
+///
+/// With `metric_prefix = "request_metrics"` and default [`RequestMetricsOptions`]:
+///
+/// | Base metric | Kind | Exported gauges |
+/// | --- | --- | --- |
+/// | `{prefix}_request` | Rate | `{prefix}_request_per_second`, `{prefix}_request_per_second_quantile{quantile="0.1|0.5|0.9"}` |
+/// | `{prefix}_input_tokens` | Rate | `{prefix}_input_tokens_per_second`, `{prefix}_input_tokens_per_second_quantile{quantile="0.01|0.1|0.5|0.9|0.99"}` |
+/// | `{prefix}_net_new_input_tokens` | Rate | `{prefix}_net_new_input_tokens_per_second`, `{prefix}_net_new_input_tokens_per_second_quantile{quantile="0.01|0.1|0.5|0.9|0.99"}` |
+/// | `{prefix}_ttft_ms` | Distribution | `{prefix}_ttft_ms_avg`, `{prefix}_ttft_ms{quantile="0.1|0.5|0.9|0.99"}` |
+/// | `{prefix}_ttft_ms_per_input_token` | Distribution | `{prefix}_ttft_ms_per_input_token_avg`, `{prefix}_ttft_ms_per_input_token{quantile="0.1|0.5|0.9|0.99"}` |
+/// | `{prefix}_ttft_ms_per_net_new_input_token` | Distribution | `{prefix}_ttft_ms_per_net_new_input_token_avg`, `{prefix}_ttft_ms_per_net_new_input_token{quantile="0.1|0.5|0.9|0.99"}` |
+/// | `{prefix}_itl_ms` | Distribution | `{prefix}_itl_ms_avg`, `{prefix}_itl_ms{quantile="0.1|0.5|0.9|0.99|0.999"}` |
+/// | `{prefix}_pre_first_token_cancellation` | Rate | `{prefix}_pre_first_token_cancellation_per_second` |
+/// | `{prefix}_mid_stream_cancellation` | Rate | `{prefix}_mid_stream_cancellation_per_second` |
+/// | `{prefix}_successful_request` | Rate | `{prefix}_successful_request_per_second` |
+///
+/// Notes:
+/// - Rate quantiles are exported on `*_per_second_quantile` with a `quantile` label.
+/// - Distribution quantiles are exported on the base metric with a `quantile` label.
+/// - Input tokens are recorded on first [`RequestMetric::record_tokens`] call.
+///   If `new_request(input_tokens=0)` is used, first `total_tokens` is used as input-token value.
+/// - Net-new metrics are recorded once and only when
+///   [`RequestMetric::record_tokens`] is called with `cached_tokens=Some(...)` before first token.
 pub struct RequestMetricsFactory {
     inner: Arc<RequestMetricsFactoryInner>,
 }
@@ -233,10 +261,10 @@ pub struct RequestMetric {
     factory: Arc<RequestMetricsFactoryInner>,
     input_tokens: u64,
     started_at: Instant,
-    first_token_at: Option<Instant>,
     last_token_at: Option<Instant>,
     last_total_tokens: u64,
     terminal: bool,
+    cached_tokens_hint: Option<u64>,
     rng: SmallRng,
 }
 
@@ -643,6 +671,12 @@ impl RequestMetricsFactory {
             options.input_tokens_sample_period_seconds,
             options.input_tokens_window_seconds,
         )?;
+        let net_new_input_tokens = registry.new_rate_metric(
+            format!("{metric_prefix}_net_new_input_tokens"),
+            options.input_tokens_quantiles.clone(),
+            options.input_tokens_sample_period_seconds,
+            options.input_tokens_window_seconds,
+        )?;
         let ttft = registry.new_distribution_metric(
             format!("{metric_prefix}_ttft_ms"),
             options.ttft_quantiles.clone(),
@@ -650,6 +684,11 @@ impl RequestMetricsFactory {
         )?;
         let ttft_per_input_token = registry.new_distribution_metric(
             format!("{metric_prefix}_ttft_ms_per_input_token"),
+            options.ttft_per_input_token_quantiles.clone(),
+            options.ttft_per_input_token_window_seconds,
+        )?;
+        let ttft_per_net_new_input_token = registry.new_distribution_metric(
+            format!("{metric_prefix}_ttft_ms_per_net_new_input_token"),
             options.ttft_per_input_token_quantiles.clone(),
             options.ttft_per_input_token_window_seconds,
         )?;
@@ -681,8 +720,10 @@ impl RequestMetricsFactory {
             inner: Arc::new(RequestMetricsFactoryInner {
                 request,
                 input_tokens,
+                net_new_input_tokens,
                 ttft,
                 ttft_per_input_token,
+                ttft_per_net_new_input_token,
                 itl,
                 pre_first_token_cancellation,
                 mid_stream_cancellation,
@@ -694,25 +735,22 @@ impl RequestMetricsFactory {
 
     /// Start tracking a single request.
     ///
-    /// This records one request event immediately and optionally records input tokens.
+    /// This records one request event immediately.
+    ///
+    /// Input tokens are recorded on the first [`RequestMetric::record_tokens`] call.
     pub fn new_request(&self, input_tokens: u64) -> RequestMetric {
         if let Err(e) = self.inner.request.record_count(1) {
             tracing::warn!(error = %e, "failed to record request rate metric");
-        }
-        if input_tokens > 0
-            && let Err(e) = self.inner.input_tokens.record_count(input_tokens)
-        {
-            tracing::warn!(error = %e, "failed to record input token metric");
         }
 
         RequestMetric {
             factory: Arc::clone(&self.inner),
             input_tokens,
             started_at: Instant::now(),
-            first_token_at: None,
             last_token_at: None,
             last_total_tokens: 0,
             terminal: false,
+            cached_tokens_hint: None,
             rng: SmallRng::from_rng(&mut rand::rng()),
         }
     }
@@ -723,13 +761,32 @@ impl RequestMetric {
     ///
     /// On the first token this records TTFT in milliseconds. On later updates this records
     /// sampled ITL values in milliseconds per token.
-    pub fn record_tokens(&mut self, total_tokens: u64) -> anyhow::Result<()> {
-        if self.terminal || total_tokens <= self.last_total_tokens {
+    pub fn record_tokens(
+        &mut self,
+        total_tokens: u64,
+        cached_tokens: Option<u64>,
+    ) -> anyhow::Result<()> {
+        if self.terminal {
+            return Ok(());
+        }
+
+        if let Some(cached_tokens) = cached_tokens {
+            self.cached_tokens_hint.get_or_insert(cached_tokens);
+        }
+
+        if total_tokens <= self.last_total_tokens {
             return Ok(());
         }
 
         let now = Instant::now();
-        if self.first_token_at.is_none() {
+        if self.last_token_at.is_none() {
+            if self.input_tokens == 0 {
+                self.input_tokens = total_tokens;
+            }
+            if self.input_tokens > 0 {
+                self.factory.input_tokens.record_count(self.input_tokens)?;
+            }
+
             let ttft_ms = now.duration_since(self.started_at).as_secs_f64() * 1000.0;
             self.factory.ttft.record_value(ttft_ms)?;
             if self.input_tokens > 0 {
@@ -737,7 +794,15 @@ impl RequestMetric {
                     .ttft_per_input_token
                     .record_value(ttft_ms / self.input_tokens as f64)?;
             }
-            self.first_token_at = Some(now);
+            if let Some(cached_tokens) = self.cached_tokens_hint.take() {
+                let net_new = self.input_tokens.saturating_sub(cached_tokens);
+                if net_new > 0 {
+                    self.factory.net_new_input_tokens.record_count(net_new)?;
+                    self.factory
+                        .ttft_per_net_new_input_token
+                        .record_value(ttft_ms / net_new as f64)?;
+                }
+            }
             self.last_token_at = Some(now);
             self.last_total_tokens = total_tokens;
             return Ok(());
@@ -779,7 +844,7 @@ impl RequestMetric {
         if self.terminal {
             return Ok(());
         }
-        if self.first_token_at.is_some() {
+        if self.last_token_at.is_some() {
             self.factory.mid_stream_cancellation.record_count(1)?;
         } else {
             self.factory.pre_first_token_cancellation.record_count(1)?;
@@ -2039,15 +2104,12 @@ mod tests {
         let deadline = Instant::now() + Duration::from_millis(100);
         loop {
             let request_snapshot = factory.inner.request.snapshot_for_test().unwrap();
-            let input_tokens_snapshot = factory.inner.input_tokens.snapshot_for_test().unwrap();
-            if request_snapshot.rate_per_second.unwrap_or_default() > 0.0
-                && input_tokens_snapshot.rate_per_second.unwrap_or_default() > 0.0
-            {
+            if request_snapshot.rate_per_second.unwrap_or_default() > 0.0 {
                 break;
             }
             assert!(
                 Instant::now() < deadline,
-                "request/input token rates did not become positive before timeout"
+                "request rate did not become positive before timeout"
             );
             std::thread::sleep(Duration::from_millis(2));
         }
@@ -2072,7 +2134,7 @@ mod tests {
         .unwrap();
         let mut request = factory.new_request(100);
         std::thread::sleep(Duration::from_millis(1));
-        request.record_tokens(1).unwrap();
+        request.record_tokens(1, None).unwrap();
 
         let s = factory
             .inner
@@ -2081,6 +2143,128 @@ mod tests {
             .unwrap();
         assert_eq!(s.kind, PerformanceMetricKind::Distribution);
         assert!(s.average.unwrap_or_default() >= 0.0);
+    }
+
+    #[test]
+    fn request_metrics_records_input_tokens_on_first_record_tokens_call() {
+        let hierarchy = Arc::new(TestHierarchy::new());
+        let registry = PerformanceMetricsRegistry::new_attached(
+            Duration::from_secs(5),
+            hierarchy,
+            "baseten_frontend",
+            &[] as &[(&str, &str)],
+        )
+        .unwrap();
+
+        let factory = RequestMetricsFactory::new(
+            &registry,
+            "request_metrics",
+            RequestMetricsOptions::default(),
+        )
+        .unwrap();
+        let mut request = factory.new_request(123);
+        request.record_tokens(1, None).unwrap();
+
+        let deadline = Instant::now() + Duration::from_millis(100);
+        loop {
+            let input_tokens_snapshot = factory.inner.input_tokens.snapshot_for_test().unwrap();
+            if input_tokens_snapshot.rate_per_second.unwrap_or_default() > 0.0 {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "input token rate did not become positive before timeout"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    #[test]
+    fn request_metrics_can_infer_input_tokens_from_first_total_tokens() {
+        let hierarchy = Arc::new(TestHierarchy::new());
+        let registry = PerformanceMetricsRegistry::new_attached(
+            Duration::from_secs(5),
+            hierarchy,
+            "baseten_frontend",
+            &[] as &[(&str, &str)],
+        )
+        .unwrap();
+
+        let factory = RequestMetricsFactory::new(
+            &registry,
+            "request_metrics",
+            RequestMetricsOptions::default(),
+        )
+        .unwrap();
+        let mut request = factory.new_request(0);
+        request.record_tokens(129, None).unwrap();
+
+        let deadline = Instant::now() + Duration::from_millis(100);
+        loop {
+            let input_tokens_snapshot = factory.inner.input_tokens.snapshot_for_test().unwrap();
+            let ttft_per_input_token_snapshot = factory
+                .inner
+                .ttft_per_input_token
+                .snapshot_for_test()
+                .unwrap();
+            if input_tokens_snapshot.rate_per_second.unwrap_or_default() > 0.0
+                && ttft_per_input_token_snapshot.average.unwrap_or_default() > 0.0
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "inferred input token metrics did not become positive before timeout"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    #[test]
+    fn request_metrics_cached_tokens_record_net_new_once_before_first_token() {
+        let hierarchy = Arc::new(TestHierarchy::new());
+        let registry = PerformanceMetricsRegistry::new_attached(
+            Duration::from_secs(5),
+            hierarchy,
+            "baseten_frontend",
+            &[] as &[(&str, &str)],
+        )
+        .unwrap();
+
+        let factory = RequestMetricsFactory::new(
+            &registry,
+            "request_metrics",
+            RequestMetricsOptions::default(),
+        )
+        .unwrap();
+        let mut request = factory.new_request(100);
+        std::thread::sleep(Duration::from_millis(1));
+        request.record_tokens(1, Some(60)).unwrap();
+        request.record_tokens(2, Some(50)).unwrap();
+
+        let deadline = Instant::now() + Duration::from_millis(100);
+        loop {
+            let net_new_tokens_snapshot = factory
+                .inner
+                .net_new_input_tokens
+                .snapshot_for_test()
+                .unwrap();
+            let ttft_per_net_new_snapshot = factory
+                .inner
+                .ttft_per_net_new_input_token
+                .snapshot_for_test()
+                .unwrap();
+            if net_new_tokens_snapshot.rate_per_second.unwrap_or_default() > 0.0
+                && ttft_per_net_new_snapshot.average.unwrap_or_default() > 0.0
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "net-new token metrics did not become positive before timeout"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
     }
 
     #[test]

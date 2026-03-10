@@ -1714,7 +1714,7 @@ class PerformanceMetricsRegistry:
 
 class RequestMetric:
     """Per-request recorder for TTFT/ITL and terminal outcomes."""
-    def record_tokens(self, total_tokens: int) -> None: ...
+    def record_tokens(self, total_tokens: int, cached_tokens: Optional[int] = None) -> None: ...
     def success(self) -> None: ...
     def cancel(self) -> None: ...
 
@@ -1744,6 +1744,9 @@ class RequestMetricsFactory:
             try:
                 async for stream in engine.generate(...):
                     req.record_tokens(stream.usage.total_tokens) # 10us per call.
+                    # Optional: pass cached prefix tokens once before first token to emit
+                    # net-new input token metrics.
+                    # req.record_tokens(stream.usage.total_tokens, cached_tokens=cache_hit_tokens)
                     yield stream
                 req.success()
             except:
