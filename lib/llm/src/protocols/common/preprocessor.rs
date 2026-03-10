@@ -60,7 +60,7 @@ pub struct RoutingHints {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_control_ttl: Option<u64>,
 
-    /// Optional set of allowed worker IDs to restrict routing decisions (EPP).
+    /// Worker IDs provided externally and not discovered by the router.
     /// When set, only workers in this set are considered during scoring.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowed_worker_ids: Option<HashSet<WorkerId>>,

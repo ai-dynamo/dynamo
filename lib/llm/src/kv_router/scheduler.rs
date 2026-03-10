@@ -71,10 +71,10 @@ impl KvScheduler {
         //
         // In EPP mode (skip_initial_worker_wait=true) the per-request
         // allowed_worker_ids is the source of truth; workers are lazily registered
-        // via ensure_workers_exist() in SchedulerQueue::schedule(). We must NOT
-        // run update_workers() here because it would remove workers that EPP knows
-        // about but discovery hasn't seen yet.
-        // Worker removal in External mode will be handled separately via GAIE
+        // via ensure_workers_exist() in SchedulerQueue::schedule(). We skip the
+        // monitoring task because update_workers() would impose discovery-based
+        // lifecycle (add/remove) on the slot tracker, conflicting with EPP ownership.
+        // Worker removal in EPP mode will be handled separately via GAIE
         // lifecycle events (not yet implemented). TODO (atchernych) once we upgrade to GAIE latest.
         if !kv_router_config.skip_initial_worker_wait {
             let slots_monitor = slots.clone();

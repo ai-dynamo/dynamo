@@ -104,8 +104,7 @@ impl<P: SequencePublisher + 'static, C: WorkerConfigLike + Default + Clone> Sche
     /// Otherwise park in the pending heap.
     ///
     /// When `allowed_worker_ids` is set on the request (external routing), the
-    /// capacity check is skipped because the discovery-based worker map may not
-    /// contain the externally-provided workers.
+    /// capacity check is skipped.
     pub async fn enqueue(&self, request: SchedulingRequest) {
         let Some(threshold) = self.threshold_frac else {
             self.schedule(request).await;
