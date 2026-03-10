@@ -63,15 +63,15 @@ const (
 
 // GPUInfo contains discovered GPU configuration from cluster nodes
 type GPUInfo struct {
-	NodeName      string         // Name of the node with this GPU configuration
-	GPUsPerNode   int            // Maximum GPUs per node found in the cluster
-	NodesWithGPUs int            // Number of nodes that have GPUs
-	Model         string         // GPU product name (e.g., "H100-SXM5-80GB")
-	VRAMPerGPU    int            // VRAM in MiB per GPU
-	System        nvidiacomv1beta1.GPUSKUType         // AIC hardware system identifier (e.g., "h100_sxm", "h200_sxm"), empty if unknown
-	MIGEnabled    bool           // True if MIG is enabled (inferred from model or additional labels, not implemented in this version)
-	MIGProfiles   map[string]int // Optional: map of MIG profile name to count (requires additional label parsing, not implemented in this version)
-	CloudProvider string         // NEW: aws | gcp | aks | other | unknown
+	NodeName      string                      // Name of the node with this GPU configuration
+	GPUsPerNode   int                         // Maximum GPUs per node found in the cluster
+	NodesWithGPUs int                         // Number of nodes that have GPUs
+	Model         string                      // GPU product name (e.g., "H100-SXM5-80GB")
+	VRAMPerGPU    int                         // VRAM in MiB per GPU
+	System        nvidiacomv1beta1.GPUSKUType // AIC hardware system identifier (e.g., "h100_sxm", "h200_sxm"), empty if unknown
+	MIGEnabled    bool                        // True if MIG is enabled (inferred from model or additional labels, not implemented in this version)
+	MIGProfiles   map[string]int              // Optional: map of MIG profile name to count (requires additional label parsing, not implemented in this version)
+	CloudProvider string                      // NEW: aws | gcp | aks | other | unknown
 }
 
 type ScrapeMetricsFunc func(ctx context.Context, endpoint string) (*GPUInfo, error)
