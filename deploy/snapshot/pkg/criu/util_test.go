@@ -105,7 +105,7 @@ func TestBuildRestoreExtMounts(t *testing.T) {
 			CRIUDump: types.CRIUDumpManifest{
 				ExtMnt: map[string]string{
 					"/etc/hostname": "/etc/hostname",
-					"/proc/acpi":   "/dev/null",
+					"/proc/acpi":    "/dev/null",
 				},
 			},
 		}

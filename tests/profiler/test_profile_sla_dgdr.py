@@ -155,7 +155,7 @@ class TestRapidSupported:
 
 
 class TestRapidUnsupported:
-    """Rapid strategy with AIC-unsupported model (Qwen3-32B on l40s/vllm)."""
+    """Rapid strategy with AIC-unsupported model/hardware combos."""
 
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
