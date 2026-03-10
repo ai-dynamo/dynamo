@@ -116,7 +116,9 @@ fn collect_completed<T>(
                     early.insert(notif_uuid);
 
                     #[cfg(all(not(test), debug_assertions))]
-                    panic!("Notification arrived for transfer not in outstanding map (early arrival); ensure all transfers are registered the NIXL notification can be triggered");
+                    panic!(
+                        "Notification arrived for transfer not in outstanding map (early arrival); ensure all transfers are registered the NIXL notification can be triggered"
+                    );
                 }
             }
         }
