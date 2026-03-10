@@ -176,7 +176,9 @@ impl AnthropicStreamConverter {
                 // Close thinking block before text starts (Anthropic spec: thinking → text → tool_use)
                 if self.thinking_block_started && !self.thinking_block_closed {
                     self.thinking_block_closed = true;
-                    // Emit signature delta to close the thinking block properly
+                    // Emit signature delta to close the thinking block.
+                    // The engine doesn't produce Anthropic-style cryptographic signatures,
+                    // so we use "erased" (the standard placeholder per the Anthropic spec).
                     let sig_delta = AnthropicStreamEvent::ContentBlockDelta {
                         index: self.thinking_block_index,
                         delta: AnthropicDelta::SignatureDelta {
