@@ -185,6 +185,14 @@ async fn anthropic_messages(
     let (orig_request, context) = request.into_parts();
     let model_for_resp = orig_request.model.clone();
 
+    // Check if the Anthropic request explicitly enabled thinking. When thinking
+    // is enabled, reasoning-capable models' chat templates typically inject
+    // `<think>` into the prompt, so the completion starts mid-reasoning.
+    let thinking_enabled = orig_request
+        .thinking
+        .as_ref()
+        .is_some_and(|t| t.thinking_type == "enabled");
+
     // Convert Anthropic request -> Chat Completion request
     let chat_request: NvCreateChatCompletionRequest =
         orig_request.try_into().map_err(|e: anyhow::Error| {
@@ -234,12 +242,18 @@ async fn anthropic_messages(
     // bypassed by the Anthropic endpoint, so we apply the same stream
     // transform here.  This populates `delta.reasoning_content` which the
     // AnthropicStreamConverter translates into thinking content blocks.
+    //
+    // When thinking is enabled, the model's chat template likely injected
+    // `<think>` into the prompt (e.g., Qwen3.5), so the parser must start
+    // in reasoning mode — the completion begins mid-reasoning without an
+    // explicit `<think>` tag.
     let engine_stream: Pin<
         Box<dyn futures::Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>,
     > = if let Some(ref reasoning_parser_name) = parsing_options.reasoning_parser {
         Box::pin(OpenAIPreprocessor::parse_reasoning_content_from_stream(
             engine_stream,
             reasoning_parser_name.clone(),
+            thinking_enabled,
         ))
     } else {
         Box::pin(engine_stream)
