@@ -14,6 +14,9 @@
 #   The ~1.3 GiB pad comes from the overhead term (CUDA ctx + activations).
 #   Overestimating is intentional -- better to pad than OOM.
 
+set -e
+trap 'echo Cleaning up...; kill 0' EXIT
+
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 source "$SCRIPT_DIR/../../../common/gpu_utils.sh"
 
@@ -34,9 +37,6 @@ if [[ -n "${DYN_GPU_MEMORY_FRACTION_OVERRIDE:-}" ]]; then
 else
     GPU_MEM_FRACTION=$(gpu_worker_fraction vllm)
 fi
-
-set -e
-trap 'echo Cleaning up...; kill 0' EXIT
 
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 

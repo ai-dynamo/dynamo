@@ -25,10 +25,17 @@
 #   EXAMPLE_PROMPT         Default example prompt for curl commands (LLM / embedding)
 #   EXAMPLE_PROMPT_VISUAL  Default example prompt for image / video generation
 #
+# Requires: bash 4.3+ (wait -n)
+#
 # Functions:
 #   print_launch_banner    Print startup banner with model info and example curl
 #   print_curl_footer      Print a custom curl example with standard framing (heredoc)
 #   wait_any_exit          Wait for any background process to exit, propagate its code
+
+if [[ "${BASH_VERSINFO[0]}" -lt 4 || ( "${BASH_VERSINFO[0]}" -eq 4 && "${BASH_VERSINFO[1]}" -lt 3 ) ]]; then
+    echo "launch_utils.sh requires bash 4.3+ (for wait -n), found ${BASH_VERSION}" >&2
+    exit 1
+fi
 
 EXAMPLE_PROMPT="Who is the tennis GOAT: Federer, Djokovic, or Nadal?"
 EXAMPLE_PROMPT_VISUAL="A golden retriever riding a skateboard through a neon-lit city"

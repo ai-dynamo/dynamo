@@ -14,6 +14,9 @@
 #   KV cache                      : 25,536-29,712 tokens per worker
 #   Handles full 4096-token context with --max-running-requests 2.
 
+set -e
+trap 'echo Cleaning up...; kill 0' EXIT
+
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 source "$SCRIPT_DIR/../../../common/gpu_utils.sh"
 
@@ -34,9 +37,6 @@ if [[ -n "${DYN_GPU_MEMORY_FRACTION_OVERRIDE:-}" ]]; then
 else
     GPU_MEM_FRACTION=$(gpu_worker_fraction sglang)
 fi
-
-set -e
-trap 'echo Cleaning up...; kill 0' EXIT
 
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 

@@ -18,6 +18,9 @@
 #   fraction per worker (free)   : 0.05
 #   Overestimating is intentional -- better to pad than OOM.
 
+set -e
+trap 'echo Cleaning up...; kill 0' EXIT
+
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 source "$SCRIPT_DIR/../../../common/gpu_utils.sh"
 
@@ -45,9 +48,6 @@ export PREFILL_ENGINE_ARGS=${PREFILL_ENGINE_ARGS:-"$DYNAMO_HOME/examples/backend
 export DECODE_ENGINE_ARGS=${DECODE_ENGINE_ARGS:-"$DYNAMO_HOME/examples/backends/trtllm/engine_configs/qwen3/decode.yaml"}
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-"0"}
 export MODALITY=${MODALITY:-"text"}
-
-set -e
-trap 'echo Cleaning up...; kill 0' EXIT
 
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 

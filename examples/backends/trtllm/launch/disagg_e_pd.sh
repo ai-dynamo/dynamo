@@ -6,11 +6,11 @@
 # GPU 0: Encode (vision encoder)
 # GPU 0: PD worker (prefill + decode, TP=1)
 
-SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
-source "$SCRIPT_DIR/../../../common/launch_utils.sh"
-
 set -e
 trap 'echo Cleaning up...; kill 0' EXIT
+
+SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
 # Environment variables with defaults
 export DYNAMO_HOME=${DYNAMO_HOME:-"/workspace"}
