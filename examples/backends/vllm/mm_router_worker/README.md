@@ -300,6 +300,12 @@ If MM-aware routing and prefix reuse are working, after sending the same request
 | `--downstream-component` | `backend` | Downstream component name (use `backend` for current `dynamo.vllm` defaults) |
 | `--downstream-endpoint` | `generate` | Downstream vLLM endpoint name |
 
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DYN_MM_IMAGE_CACHE_SIZE` | `8` | Maximum number of images to keep in the MM router's in-memory image cache. Increase this if your workload has high image reuse across a larger unique image set. |
+
 ## How It Works
 
 ### MM Hash Computation
