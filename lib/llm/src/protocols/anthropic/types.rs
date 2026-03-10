@@ -585,6 +585,8 @@ pub struct AnthropicMessageResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum AnthropicResponseContentBlock {
+    #[serde(rename = "thinking")]
+    Thinking { thinking: String, signature: String },
     #[serde(rename = "text")]
     Text {
         text: String,
@@ -692,13 +694,12 @@ pub enum AnthropicStreamEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum AnthropicDelta {
+    #[serde(rename = "thinking_delta")]
+    ThinkingDelta { thinking: String },
     #[serde(rename = "text_delta")]
     TextDelta { text: String },
     #[serde(rename = "input_json_delta")]
     InputJsonDelta { partial_json: String },
-    /// Incremental thinking content during extended thinking streaming.
-    #[serde(rename = "thinking_delta")]
-    ThinkingDelta { thinking: String },
     /// Incremental signature for a thinking block (sent at the end).
     #[serde(rename = "signature_delta")]
     SignatureDelta { signature: String },

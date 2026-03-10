@@ -71,6 +71,7 @@ class FrontendConfig(KvRouterConfigBase):
     event_plane: str
     chat_processor: str
     enable_anthropic_api: bool
+    strip_anthropic_preamble: bool
     debug_perf: bool
     preprocess_workers: int
 
@@ -342,6 +343,16 @@ class FrontendArgGroup(ArgGroup):
             help=(
                 "[EXPERIMENTAL] Enable Anthropic Messages API endpoint (/v1/messages). "
                 "This feature is experimental and may change."
+            ),
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--strip-anthropic-preamble",
+            env_var="DYN_STRIP_ANTHROPIC_PREAMBLE",
+            default=False,
+            help=(
+                "Strip the Claude Code billing preamble (x-anthropic-billing-header) "
+                "from the system prompt. Saves tokens and improves prompt caching."
             ),
         )
         add_argument(

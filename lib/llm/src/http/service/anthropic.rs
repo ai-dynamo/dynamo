@@ -21,6 +21,7 @@ use axum::{
     },
     routing::post,
 };
+use dynamo_runtime::config::{environment_names::llm as env_llm, env_is_truthy};
 use dynamo_runtime::pipeline::{AsyncEngineContextProvider, Context};
 use futures::{StreamExt, stream};
 use tracing::Instrument;
@@ -165,6 +166,11 @@ async fn anthropic_messages(
         if request.max_tokens == 0 {
             request.max_tokens = template.max_completion_tokens;
         }
+    }
+
+    // Strip Claude Code billing preamble from system prompt if enabled
+    if env_is_truthy(env_llm::DYN_STRIP_ANTHROPIC_PREAMBLE) {
+        strip_billing_preamble(&mut request.system);
     }
 
     let model = request.model.clone();
@@ -354,6 +360,22 @@ async fn handler_count_tokens(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Strip the Claude Code billing preamble from the system prompt.
+///
+/// Claude Code prepends `x-anthropic-billing-header: cc_version=...; cch=...;\n`
+/// to every system prompt. This varies per session and per release, wasting tokens
+/// and preventing prompt prefix caching on the target model.
+fn strip_billing_preamble(system: &mut Option<String>) {
+    if let Some(text) = system {
+        let trimmed = text.trim_start();
+        if trimmed.starts_with("x-anthropic-billing-header:") {
+            if let Some(newline_pos) = trimmed.find('\n') {
+                *text = trimmed[newline_pos + 1..].to_string();
+            }
+        }
+    }
+}
 
 /// Build an Anthropic-formatted error response.
 /// Maps HTTP status codes to Anthropic error types following the Anthropic API spec.
