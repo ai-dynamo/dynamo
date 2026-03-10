@@ -20,6 +20,7 @@ jobs:
   # VLLM PIPELINE
   # ============================================================================
   vllm-pipeline:
+    name: vllm
     uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
     with:
       framework: vllm
@@ -44,6 +45,7 @@ jobs:
   # SGLANG PIPELINE
   # ============================================================================
   sglang-pipeline:
+    name: sglang
     uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
     with:
       framework: sglang
@@ -68,6 +70,7 @@ jobs:
   # TRTLLM PIPELINE
   # ============================================================================
   trtllm-pipeline:
+    name: trtllm
     uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
     with:
       framework: trtllm
@@ -91,7 +94,8 @@ jobs:
   # ============================================================================
   # DEV PIPELINES
   # ============================================================================
-  vllm-pipeline:
+  vllm-dev-pipeline:
+    name: vllm-dev
     needs: [changed-files]
     uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
     with:
@@ -106,7 +110,8 @@ jobs:
       run_multi_gpu_tests: false
     secrets: inherit
 
-  sglang-pipeline:
+  sglang-dev-pipeline:
+    name: sglang-dev
     needs: [changed-files]
     uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
     with:
@@ -122,6 +127,7 @@ jobs:
     secrets: inherit
 
   trtllm-dev-pipeline:
+    name: trtllm-dev
     needs: [changed-files]
     uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
     with:
