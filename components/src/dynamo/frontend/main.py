@@ -259,6 +259,9 @@ async def async_main():
     if config.enable_anthropic_api:
         os.environ["DYN_ENABLE_ANTHROPIC_API"] = "1"
 
+    if config.strip_anthropic_preamble:
+        os.environ["DYN_STRIP_ANTHROPIC_PREAMBLE"] = "1"
+
     if config.chat_processor == "vllm":
         assert (
             vllm_flags is not None
