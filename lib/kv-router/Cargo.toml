@@ -13,8 +13,8 @@ repository.workspace = true
 [features]
 default = []
 metrics = []
-bench = ["dep:clap", "dep:indicatif", "dep:serde_json", "dynamo-runtime/integration", "dep:plotters"]
-indexer-bin = ["metrics", "dep:axum", "dep:clap", "dep:zeromq", "dep:tracing-subscriber", "dep:serde_json"]
+bench = ["dep:clap", "dep:indicatif", "dep:serde_json", "dep:plotters"]
+indexer-bin = ["metrics", "dep:axum", "dep:clap", "dep:zeromq", "dep:tracing-subscriber", "dep:serde_json", "dep:reqwest"]
 
 [dependencies]
 # repo
@@ -52,33 +52,19 @@ rustc-hash = "2.1.1"
 
 # indexer-bin (optional)
 axum = { workspace = true, optional = true }
+reqwest = { workspace = true, optional = true }
 zeromq = { version = "0.4.1", optional = true }
 tracing-subscriber = { workspace = true, optional = true }
 
+[package.metadata.cargo-machete]
+ignored = ["indicatif", "plotters"]
+
 [dev-dependencies]
-dynamo-bench = { path = "../bench" }
 rstest = "0.18.2"
 rstest_reuse = "0.7.0"
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros", "time"] }
-dynamo-mocker = { workspace = true }
 dynamo-tokens = { workspace = true }
-minstant = "0.1.7"
-
-[[bench]]
-name = "kv_indexer_bench"
-harness = false
-required-features = ["bench"]
-
-[[bench]]
-name = "mooncake_bench"
-harness = false
-required-features = ["bench"]
-
-[[bench]]
-name = "active_sequences_bench"
-harness = false
-required-features = ["bench"]
 
 [[bin]]
 name = "dynamo-kv-indexer"

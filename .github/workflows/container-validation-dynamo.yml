@@ -26,9 +26,9 @@ jobs:
   changed-files:
     runs-on: ubuntu-latest
     outputs:
-      core: ${{ steps.changes.outputs.core }}
-      planner: ${{ steps.changes.outputs.planner }}
-      frontend: ${{ steps.changes.outputs.frontend }}
+      core: ${{ github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || steps.changes.outputs.core == 'true' }}
+      planner: ${{ github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || steps.changes.outputs.planner == 'true' }}
+      frontend: ${{ github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || steps.changes.outputs.frontend == 'true' }}
       builder_name: ${{ steps.export-builder-name.outputs.builder_name }}
     steps:
       - name: Checkout code
@@ -215,6 +215,7 @@ jobs:
           test_type: "pre_merge_parallel"
           platform_arch: amd64
           enable_mypy: 'true'
+          hf_token: ${{ secrets.HF_TOKEN }}
           parallel_mode: '4'
           dind_as_sidecar: 'false'
 
@@ -247,5 +248,6 @@ jobs:
           test_type: "pre_merge_sequential"
           platform_arch: amd64
           enable_mypy: 'false'
+          hf_token: ${{ secrets.HF_TOKEN }}
           parallel_mode: 'none'
           dind_as_sidecar: 'false'

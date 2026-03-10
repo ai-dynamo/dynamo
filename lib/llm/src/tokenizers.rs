@@ -60,6 +60,10 @@ pub mod traits {
         fn encode_batch(&self, inputs: &[&str]) -> Result<Vec<Encoding>>;
     }
 
+    /// Implementations **must** use lossy UTF-8 conversion (e.g. `String::from_utf8_lossy`)
+    /// so that partial multi-byte sequences produce U+FFFD (`�`) rather than returning `Err`.
+    /// `DecodeStream::step()` relies on the replacement character to detect incomplete
+    /// sequences and buffer tokens until the full character arrives.
     pub trait Decoder: Send + Sync {
         fn decode(&self, token_ids: &[TokenIdType], skip_special_tokens: bool) -> Result<String>;
     }

@@ -1298,7 +1298,7 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 					Storage: configv1alpha1.CheckpointStorageConfiguration{
 						Type: configv1alpha1.CheckpointStorageTypePVC,
 						PVC: configv1alpha1.CheckpointPVCConfig{
-							PVCName:  "chrek-pvc",
+							PVCName:  "snapshot-pvc",
 							BasePath: "/checkpoints",
 						},
 					},
@@ -1430,7 +1430,7 @@ func TestDynamoComponentDeploymentReconciler_generateDeployment_RestoreStrategy(
 					Storage: configv1alpha1.CheckpointStorageConfiguration{
 						Type: configv1alpha1.CheckpointStorageTypePVC,
 						PVC: configv1alpha1.CheckpointPVCConfig{
-							PVCName:  "chrek-pvc",
+							PVCName:  "snapshot-pvc",
 							BasePath: "/checkpoints",
 						},
 					},
