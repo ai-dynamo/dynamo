@@ -56,6 +56,9 @@ struct FunctionCallState {
     accumulated_args: String,
     output_index: u32,
     started: bool,
+    /// Set when done/item_done events have already been emitted inline
+    /// (complete tool call detected mid-stream). Prevents duplicate in `emit_end_events()`.
+    done: bool,
 }
 
 impl ResponseStreamConverter {
@@ -284,6 +287,7 @@ impl ResponseStreamConverter {
                             accumulated_args: String::new(),
                             output_index,
                             started: false,
+                            done: false,
                         });
                     }
 
@@ -330,12 +334,58 @@ impl ResponseStreamConverter {
                                 ResponseStreamEvent::ResponseFunctionCallArgumentsDelta(
                                     ResponseFunctionCallArgumentsDeltaEvent {
                                         sequence_number: seq,
-                                        item_id,
+                                        item_id: item_id.clone(),
                                         output_index,
                                         delta: args.clone(),
                                     },
                                 );
                             events.push(make_sse_event(&args_delta));
+
+                            // Emit done + output_item.done immediately if the tool call
+                            // arrived complete in a single chunk (id + name + args all present).
+                            // Dynamo backends emit complete tool calls, so this fires on the
+                            // same chunk — no need to wait for finish_reason.
+                            if tc.id.is_some()
+                                && func.name.is_some()
+                                && !self.function_call_items[tc_index].done
+                            {
+                                self.function_call_items[tc_index].done = true;
+                                // Capture values before calling self.next_seq() (borrow rules)
+                                let fc_item_id = self.function_call_items[tc_index].item_id.clone();
+                                let fc_call_id = self.function_call_items[tc_index].call_id.clone();
+                                let fc_name = self.function_call_items[tc_index].name.clone();
+                                let fc_args =
+                                    self.function_call_items[tc_index].accumulated_args.clone();
+                                let fc_output_index =
+                                    self.function_call_items[tc_index].output_index;
+
+                                let args_done =
+                                    ResponseStreamEvent::ResponseFunctionCallArgumentsDone(
+                                        ResponseFunctionCallArgumentsDoneEvent {
+                                            sequence_number: self.next_seq(),
+                                            item_id: fc_item_id.clone(),
+                                            output_index: fc_output_index,
+                                            arguments: fc_args.clone(),
+                                            name: Some(fc_name.clone()),
+                                        },
+                                    );
+                                events.push(make_sse_event(&args_done));
+
+                                let item_done = ResponseStreamEvent::ResponseOutputItemDone(
+                                    ResponseOutputItemDoneEvent {
+                                        sequence_number: self.next_seq(),
+                                        output_index: fc_output_index,
+                                        item: OutputItem::FunctionCall(FunctionToolCall {
+                                            id: Some(fc_item_id),
+                                            call_id: fc_call_id,
+                                            name: fc_name,
+                                            arguments: fc_args,
+                                            status: Some(OutputStatus::Completed),
+                                        }),
+                                    },
+                                );
+                                events.push(make_sse_event(&item_done));
+                            }
                         }
                     }
                 }
@@ -393,11 +443,11 @@ impl ResponseStreamConverter {
             events.push(make_sse_event(&item_done));
         }
 
-        // Close any function call items - collect data first to avoid borrow conflicts
+        // Close any function call items not already done inline
         let fc_data: Vec<_> = self
             .function_call_items
             .iter()
-            .filter(|fc| fc.started)
+            .filter(|fc| fc.started && !fc.done)
             .map(|fc| {
                 (
                     fc.item_id.clone(),
