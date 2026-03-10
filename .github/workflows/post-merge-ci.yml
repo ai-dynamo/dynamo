@@ -241,6 +241,74 @@ jobs:
           done
 
   # ============================================================================
+  # Snapshot Agent
+  # ============================================================================
+
+  snapshot-agent:
+    name: Snapshot Agent
+    runs-on: prod-default-v2
+    env:
+      IMAGE_REGISTRY: ai-dynamo
+      IMAGE_REPOSITORY: dynamo
+      ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      - name: Initialize Dynamo Builder
+        uses: ./.github/actions/init-dynamo-builder
+        with:
+          builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+          flavor: general
+      - name: Docker Login
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+      - name: Linter
+        shell: bash
+        working-directory: ./deploy/snapshot
+        run: |
+          docker buildx build --platform linux/amd64 --target linter --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
+      - name: Tester
+        shell: bash
+        working-directory: ./deploy/snapshot
+        run: |
+          docker buildx build --platform linux/amd64 --target tester --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
+      - name: Build and push Container
+        id: build-and-push-image
+        shell: bash
+        working-directory: ./deploy/snapshot
+        run: |
+          ECR_DEFAULT_IMAGE_BASE="${ECR_HOSTNAME}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}"
+          DEFAULT_TAG="${{ github.sha }}-snapshot-agent"
+          IMAGE_URIS=(
+            "${ECR_DEFAULT_IMAGE_BASE}:${DEFAULT_TAG}"
+          )
+
+          if [[ "${{ github.ref_name }}" == "main" ]]; then
+            IMAGE_URIS+=(
+              "${ECR_DEFAULT_IMAGE_BASE}:main-snapshot-agent"
+            )
+          fi
+
+          TAGGING_FLAGS=$(printf -- '-t %s ' "${IMAGE_URIS[@]}")
+          echo "flags for docker buildx: ${TAGGING_FLAGS}"
+
+          docker buildx build --push \
+              --platform linux/amd64 \
+              --target agent \
+              --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
+              ${TAGGING_FLAGS} -f Dockerfile .
+
+          echo "### 🐳 Snapshot Agent Container Images" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Image URI |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----|" >> $GITHUB_STEP_SUMMARY
+          for image_uri in "${IMAGE_URIS[@]}"; do
+            echo "| \`${image_uri}\` |" >> $GITHUB_STEP_SUMMARY
+          done
+
+  # ============================================================================
   # DEPLOYMENT JOBS
   # Deploy operator and run end-to-end tests on Kubernetes cluster
   # ============================================================================
@@ -411,7 +479,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [vllm-pipeline, sglang-pipeline, trtllm-pipeline, vllm-efa-pipeline, trtllm-efa-pipeline, operator]
+    needs: [vllm-pipeline, sglang-pipeline, trtllm-pipeline, vllm-efa-pipeline, trtllm-efa-pipeline, operator, snapshot-agent]
     steps:
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
@@ -447,7 +515,7 @@ jobs:
     name: Notify Slack
     runs-on: prod-builder-amd-v1
     if: always() && failure()
-    needs: [ vllm-pipeline, sglang-pipeline, trtllm-pipeline, vllm-efa-pipeline, trtllm-efa-pipeline, operator, deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm ]
+    needs: [ vllm-pipeline, sglang-pipeline, trtllm-pipeline, vllm-efa-pipeline, trtllm-efa-pipeline, operator, snapshot-agent, deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm ]
     permissions:
       contents: read
     steps:
