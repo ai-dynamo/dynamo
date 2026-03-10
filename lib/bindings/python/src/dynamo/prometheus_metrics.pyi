@@ -4,7 +4,6 @@
 """Type stubs for prometheus metrics callbacks.
 
 This file defines Python type stubs for the RuntimeMetrics class.
-Only register_prometheus_expfmt_callback is exposed for integrating external metrics.
 """
 
 from typing import Callable
@@ -27,6 +26,12 @@ class RuntimeMetrics:
         Args:
             callback: A callable that takes no arguments and returns a string
                      in Prometheus text exposition format
+        """
+        ...
+
+    def prometheus_expfmt(self) -> str:
+        """
+        Return this hierarchy's Prometheus exposition text.
         """
         ...
 

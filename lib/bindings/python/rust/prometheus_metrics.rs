@@ -8,6 +8,7 @@
 //! Dynamo's metrics endpoint.
 
 use pyo3::prelude::*;
+use pyo3::exceptions::PyValueError;
 use std::sync::Arc;
 
 use crate::rs;
@@ -76,6 +77,14 @@ impl RuntimeMetrics {
             .add_expfmt_callback(callback_arc.clone());
 
         Ok(())
+    }
+
+    /// Return this hierarchy's Prometheus exposition text.
+    fn prometheus_expfmt(&self) -> PyResult<String> {
+        self.hierarchy
+            .metrics()
+            .prometheus_expfmt()
+            .map_err(|e| PyValueError::new_err(e.to_string()))
     }
 }
 

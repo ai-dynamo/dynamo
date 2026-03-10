@@ -1,6 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-// Initially contributed by Baseten @michaelfeil, feel free to tag on maintance.
+// Initially contributed by Baseten @michaelfeil, feel free to tag on maintenance.
 
 use dynamo_runtime::metrics::performance_metrics::{
     DistributionMetricHandle as RsDistributionMetricHandle,
@@ -10,6 +10,7 @@ use dynamo_runtime::metrics::performance_metrics::{
     RequestMetricsOptions as RsRequestMetricsOptions,
 };
 use pyo3::{exceptions::PyValueError, prelude::*};
+use std::collections::HashMap;
 
 use crate::prometheus_metrics::RuntimeMetrics;
 
@@ -92,11 +93,36 @@ pub struct PyRequestMetric {
 #[pymethods]
 impl PyPerformanceMetricsRegistry {
     #[new]
-    fn new(py: Python<'_>, runtime_metrics: &RuntimeMetrics) -> PyResult<Self> {
+    #[pyo3(signature = (runtime_metrics, publish_interval_seconds = 5.0, metric_prefix = "performance".to_string(), labels = None))]
+    fn new(
+        py: Python<'_>,
+        runtime_metrics: &RuntimeMetrics,
+        publish_interval_seconds: f64,
+        metric_prefix: String,
+        labels: Option<HashMap<String, String>>,
+    ) -> PyResult<Self> {
+        if !publish_interval_seconds.is_finite() || publish_interval_seconds <= 0.0 {
+            return Err(PyValueError::new_err(
+                "publish_interval_seconds must be a positive finite number",
+            ));
+        }
+
         let hierarchy = runtime_metrics.hierarchy();
+        let labels = labels.unwrap_or_default();
         // Control-path setup can block (thread spawn + registry wiring), so release GIL.
         let registry = py
-            .allow_threads(move || RsPerformanceMetricsRegistry::new_attached_default(hierarchy))
+            .allow_threads(move || {
+                let label_pairs = labels
+                    .iter()
+                    .map(|(k, v)| (k.as_str(), v.as_str()))
+                    .collect::<Vec<_>>();
+                RsPerformanceMetricsRegistry::new_attached(
+                    std::time::Duration::from_secs_f64(publish_interval_seconds),
+                    hierarchy,
+                    metric_prefix,
+                    label_pairs.as_slice(),
+                )
+            })
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
         Ok(Self { registry })

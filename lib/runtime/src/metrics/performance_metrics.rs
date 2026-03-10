@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-// Initially contributed by Baseten @michaelfeil, feel free to tag on maintance.
+// Initially contributed by Baseten @michaelfeil, feel free to tag on maintenance.
 
 //! Generic sliding-window performance metrics with a command-loop backend.
 //!
@@ -424,8 +424,8 @@ impl PerformanceMetricsRegistry {
         labels: Vec<(String, String)>,
     ) -> Self {
         let publish_interval = publish_interval
-            .max(Duration::from_secs(2))
-            .min(Duration::from_secs(60));
+            .max(Duration::from_secs(1))
+            .min(Duration::from_secs(120));
         let (control_tx, control_rx) = mpsc::channel::<ControlMessage>();
         let (data_tx, data_rx) = mpsc::sync_channel::<DataMessage>(DEFAULT_QUEUE_CAPACITY);
         let worker = std::thread::spawn(move || {
@@ -1862,6 +1862,35 @@ mod tests {
         }
     }
 
+    fn metric_sample_count(output: &str, metric_prefix: &str) -> usize {
+        output
+            .lines()
+            .filter(|line| line.starts_with(metric_prefix))
+            .count()
+    }
+
+    fn metric_value_with_labels(
+        output: &str,
+        metric_name: &str,
+        required_labels: &[(&str, &str)],
+    ) -> Option<f64> {
+        for line in output.lines() {
+            if !line.starts_with(metric_name) {
+                continue;
+            }
+            let (lhs, rhs) = line.rsplit_once(' ')?;
+            if required_labels
+                .iter()
+                .all(|(k, v)| lhs.contains(&format!("{k}=\"{v}\"")))
+            {
+                if let Ok(value) = rhs.parse::<f64>() {
+                    return Some(value);
+                }
+            }
+        }
+        None
+    }
+
     #[test]
     fn ratio_snapshot_has_absolute_and_relative() {
         let hierarchy = Arc::new(TestHierarchy::new());
@@ -2083,6 +2112,228 @@ mod tests {
     }
 
     #[test]
+    fn pef_exposition_contains_expected_metric_shapes() {
+        let hierarchy = Arc::new(TestHierarchy::new());
+        let registry = PerformanceMetricsRegistry::new_attached(
+            Duration::from_secs(1),
+            hierarchy.clone(),
+            "baseten_frontend",
+            &[] as &[(&str, &str)],
+        )
+        .unwrap();
+
+        let requests = registry
+            .new_rate_metric("requests", vec![0.1, 0.99, 0.999], Some(1.0), None)
+            .unwrap();
+        requests.record_count(3).unwrap();
+
+        let foo = registry
+            .new_distribution_metric("foo_per_second", vec![0.5, 0.999], None)
+            .unwrap();
+        foo.record_value(42.0).unwrap();
+
+        let factory = RequestMetricsFactory::new(
+            &registry,
+            "request_metrics",
+            RequestMetricsOptions::default(),
+        )
+        .unwrap();
+        let mut request = factory.new_request(128);
+        std::thread::sleep(Duration::from_millis(1));
+        request.record_tokens(129, None).unwrap();
+        std::thread::sleep(Duration::from_millis(1));
+        request.record_tokens(145, None).unwrap();
+        request.success().unwrap();
+
+        let deadline = Instant::now() + Duration::from_millis(1500);
+        let output = loop {
+            let output = hierarchy.metrics().prometheus_expfmt().unwrap();
+            if metric_value_with_labels(
+                output.as_str(),
+                "dynamo_component_baseten_frontend_requests_per_second",
+                &[],
+            )
+            .unwrap_or_default()
+                > 0.0
+            {
+                break output;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "requests_per_second did not become positive before timeout"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        };
+
+        let expected = [
+            "component_baseten_frontend_requests_per_second ",
+            "component_baseten_frontend_requests_per_second_quantile{quantile=\"0.99\"",
+            "component_baseten_frontend_foo_per_second{quantile=\"0.999\"",
+            "component_baseten_frontend_request_metrics_itl_ms_avg ",
+            "component_baseten_frontend_request_metrics_input_tokens_per_second_quantile{quantile=\"0.1\"",
+        ];
+        for needle in expected {
+            assert!(
+                output.contains(needle),
+                "expected PEF output to contain '{needle}'"
+            );
+        }
+        assert_eq!(
+            metric_sample_count(
+                output.as_str(),
+                "dynamo_component_baseten_frontend_requests_per_second_quantile{"
+            ),
+            3
+        );
+        assert!(
+            metric_value_with_labels(
+                output.as_str(),
+                "dynamo_component_baseten_frontend_requests_per_second",
+                &[]
+            )
+            .unwrap_or_default()
+                > 0.0
+        );
+        assert!(
+            metric_value_with_labels(
+                output.as_str(),
+                "dynamo_component_baseten_frontend_foo_per_second",
+                &[("quantile", "0.999")]
+            )
+            .unwrap_or_default()
+                > 0.0
+        );
+    }
+
+    #[test]
+    fn request_metrics_factory_default_pef_exposition_contains_all_metric_families() {
+        let hierarchy = Arc::new(TestHierarchy::new());
+        let registry = PerformanceMetricsRegistry::new_attached(
+            Duration::from_secs(1),
+            hierarchy.clone(),
+            "performance",
+            &[] as &[(&str, &str)],
+        )
+        .unwrap();
+
+        let factory = RequestMetricsFactory::new(
+            &registry,
+            "request_metrics",
+            RequestMetricsOptions::default(),
+        )
+        .unwrap();
+
+        // Drive at least one request through first-token + later-token so TTFT/ITL paths publish.
+        let mut req = factory.new_request(128);
+        std::thread::sleep(Duration::from_millis(1));
+        req.record_tokens(129, Some(32)).unwrap();
+        std::thread::sleep(Duration::from_millis(1));
+        req.record_tokens(145, None).unwrap();
+        req.success().unwrap();
+
+        // Exercise cancellation families as well.
+        let mut cancelled = factory.new_request(64);
+        cancelled.cancel().unwrap();
+
+        let deadline = Instant::now() + Duration::from_millis(1500);
+        let output = loop {
+            let output = hierarchy.metrics().prometheus_expfmt().unwrap();
+            if metric_value_with_labels(
+                output.as_str(),
+                "dynamo_component_performance_request_metrics_request_per_second",
+                &[],
+            )
+            .unwrap_or_default()
+                > 0.0
+            {
+                break output;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "request_metrics_request_per_second did not become positive before timeout"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        };
+
+        // Request rate
+        assert!(output.contains("component_performance_request_metrics_request_per_second "));
+        assert!(output.contains(
+            "component_performance_request_metrics_request_per_second_quantile{quantile=\"0.1\""
+        ));
+        assert!(output.contains(
+            "component_performance_request_metrics_request_per_second_quantile{quantile=\"0.5\""
+        ));
+        assert!(output.contains(
+            "component_performance_request_metrics_request_per_second_quantile{quantile=\"0.9\""
+        ));
+
+        // Input token rates (all + net-new)
+        assert!(output.contains("component_performance_request_metrics_input_tokens_per_second "));
+        assert!(output.contains(
+            "component_performance_request_metrics_input_tokens_per_second_quantile{quantile=\"0.01\""
+        ));
+        assert!(output.contains(
+            "component_performance_request_metrics_input_tokens_per_second_quantile{quantile=\"0.99\""
+        ));
+        assert!(
+            output
+                .contains("component_performance_request_metrics_net_new_input_tokens_per_second ")
+        );
+        assert!(output.contains(
+            "component_performance_request_metrics_net_new_input_tokens_per_second_quantile{quantile=\"0.01\""
+        ));
+
+        // TTFT / ITL distributions
+        assert!(output.contains("component_performance_request_metrics_ttft_ms_avg "));
+        assert!(output.contains("component_performance_request_metrics_ttft_ms{quantile=\"0.1\""));
+        assert!(output.contains("component_performance_request_metrics_ttft_ms{quantile=\"0.99\""));
+        assert!(
+            output.contains("component_performance_request_metrics_ttft_ms_per_input_token_avg ")
+        );
+        assert!(output.contains(
+            "component_performance_request_metrics_ttft_ms_per_input_token{quantile=\"0.99\""
+        ));
+        assert!(output.contains(
+            "component_performance_request_metrics_ttft_ms_per_net_new_input_token_avg "
+        ));
+        assert!(output.contains(
+            "component_performance_request_metrics_ttft_ms_per_net_new_input_token{quantile=\"0.99\""
+        ));
+        assert!(output.contains("component_performance_request_metrics_itl_ms_avg "));
+        assert!(output.contains("component_performance_request_metrics_itl_ms{quantile=\"0.999\""));
+
+        // Lifecycle / inflight
+        assert!(output.contains(
+            "component_performance_request_metrics_pre_first_token_cancellation_per_second "
+        ));
+        assert!(
+            output.contains(
+                "component_performance_request_metrics_mid_stream_cancellation_per_second "
+            )
+        );
+        assert!(
+            output.contains("component_performance_request_metrics_successful_request_per_second ")
+        );
+
+        // Ensure the default factory exposes a broad PEF surface area.
+        assert!(
+            metric_sample_count(
+                output.as_str(),
+                "dynamo_component_performance_request_metrics_"
+            ) >= 25
+        );
+        assert!(
+            metric_value_with_labels(
+                output.as_str(),
+                "dynamo_component_performance_request_metrics_request_per_second",
+                &[]
+            )
+            .unwrap_or_default()
+                > 0.0
+        );
+    }
+
+    #[test]
     fn request_metrics_new_request_records_request_and_input_tokens() {
         let hierarchy = Arc::new(TestHierarchy::new());
         let registry = PerformanceMetricsRegistry::new_attached(
@@ -2134,7 +2385,7 @@ mod tests {
         .unwrap();
         let mut request = factory.new_request(100);
         std::thread::sleep(Duration::from_millis(1));
-        request.record_tokens(1, None).unwrap();
+        request.record_tokens(101, None).unwrap();
 
         let s = factory
             .inner
@@ -2163,7 +2414,7 @@ mod tests {
         )
         .unwrap();
         let mut request = factory.new_request(123);
-        request.record_tokens(1, None).unwrap();
+        request.record_tokens(124, None).unwrap();
 
         let deadline = Instant::now() + Duration::from_millis(100);
         loop {
@@ -2239,8 +2490,8 @@ mod tests {
         .unwrap();
         let mut request = factory.new_request(100);
         std::thread::sleep(Duration::from_millis(1));
-        request.record_tokens(1, Some(60)).unwrap();
-        request.record_tokens(2, Some(50)).unwrap();
+        request.record_tokens(101, Some(60)).unwrap();
+        request.record_tokens(116, Some(50)).unwrap();
 
         let deadline = Instant::now() + Duration::from_millis(100);
         loop {

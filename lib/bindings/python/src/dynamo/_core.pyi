@@ -15,7 +15,7 @@ from typing import (
 )
 
 # Import from specialized modules
-from .prometheus_metrics import RuntimeMetrics as PyRuntimeMetrics
+from .prometheus_metrics import RuntimeMetrics
 
 def log_message(level: str, message: str, module: str, file: str, line: int) -> None:
     """
@@ -155,12 +155,12 @@ class Endpoint:
         ...
 
     @property
-    def metrics(self) -> PyRuntimeMetrics:
+    def metrics(self) -> RuntimeMetrics:
         """
-        Get a PyRuntimeMetrics helper for registering Prometheus metrics callbacks.
+        Get a RuntimeMetrics helper for registering Prometheus metrics callbacks.
 
         Returns:
-            A PyRuntimeMetrics object for callback registration
+            A RuntimeMetrics object for callback registration
         """
         ...
 
@@ -1707,7 +1707,13 @@ class RatioMetric:
     def record_ratio(self, numerator: float, denominator: float) -> None: ...
 
 class PerformanceMetricsRegistry:
-    def __init__(self, runtime_metrics: Any) -> None: ...
+    def __init__(
+        self,
+        runtime_metrics: RuntimeMetrics,
+        publish_interval_seconds: float = 5.0,
+        metric_prefix: str = "performance",
+        labels: Optional[Dict[str, str]] = None,
+    ) -> None: ...
     def new_rate_metric(self, name: str, quantiles: Optional[List[float]] = None, sample_period_seconds: float = 1.0, window_seconds: Optional[float] = None) -> RateMetric: ...
     def new_distribution_metric(self, name: str, quantiles: Optional[List[float]] = None, window_seconds: Optional[float] = None) -> DistributionMetric: ...
     def new_ratio_metric(self, name: str, quantiles: Optional[List[float]] = None, window_seconds: Optional[float] = None) -> RatioMetric: ...
