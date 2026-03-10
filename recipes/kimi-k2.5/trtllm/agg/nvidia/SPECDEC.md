@@ -1,4 +1,4 @@
-# Kimi-K2.5 Aggregated Deployment on Kubernetes with EAGLE Speculative Decoding 
+# Kimi-K2.5 Aggregated Deployment on Kubernetes with EAGLE Speculative Decoding
 
 ## Prerequisites
 
@@ -23,13 +23,13 @@ The worker config references this path via:
 speculative_config:
   decoding_type: Eagle
   max_draft_len: 3
-  speculative_model_dir: /opt/models/kimi-eagle-layers <- path is loaded here
+  speculative_model_dir: /opt/models/kimi-eagle-layers
 ```
 
 ## Deploy
 
 ```bash
-kubectl apply -f deploy-eagle-specdec.yaml
+kubectl -n ${NAMESPACE} apply -f deploy-eagle-specdec.yaml
 ```
 
 This creates:
