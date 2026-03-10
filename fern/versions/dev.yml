@@ -136,7 +136,7 @@ navigation:
             path: ../pages-dev/fault-tolerance/request-rejection.md
           - page: Testing
             path: ../pages-dev/fault-tolerance/testing.md
-      - page: Writing Python Workers in Dynamo
+      - page: Writing Python Workers
         path: ../pages-dev/development/backend-guide.md
   # ==================== Backends ====================
   - section: Backends
@@ -231,18 +231,22 @@ navigation:
         path: ../pages-dev/design-docs/disagg-serving.md
       - page: Distributed Runtime
         path: ../pages-dev/design-docs/distributed-runtime.md
-      - page: Discovery Plane
-        path: ../pages-dev/design-docs/discovery-plane.md
-      - page: Request Plane
-        path: ../pages-dev/design-docs/request-plane.md
-      - page: Event Plane
-        path: ../pages-dev/design-docs/event-plane.md
-      - page: Router Design
-        path: ../pages-dev/design-docs/router-design.md
-      - page: KVBM Design
-        path: ../pages-dev/design-docs/kvbm-design.md
-      - page: Planner Design
-        path: ../pages-dev/design-docs/planner-design.md
+      - section: Communication Planes
+        contents:
+          - page: Discovery Plane
+            path: ../pages-dev/design-docs/discovery-plane.md
+          - page: Request Plane
+            path: ../pages-dev/design-docs/request-plane.md
+          - page: Event Plane
+            path: ../pages-dev/design-docs/event-plane.md
+      - section: Component Design
+        contents:
+          - page: Router Design
+            path: ../pages-dev/design-docs/router-design.md
+          - page: KVBM Design
+            path: ../pages-dev/design-docs/kvbm-design.md
+          - page: Planner Design
+            path: ../pages-dev/design-docs/planner-design.md
   # ==================== Blog ====================
   - section: Blog
     hidden: true
