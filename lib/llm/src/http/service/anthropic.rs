@@ -32,6 +32,7 @@ use super::{
     metrics::{Endpoint, process_response_and_observe_metrics},
     service_v2,
 };
+use crate::preprocessor::OpenAIPreprocessor;
 use crate::protocols::anthropic::stream_converter::AnthropicStreamConverter;
 use crate::protocols::anthropic::types::{
     AnthropicCountTokensRequest, AnthropicCountTokensResponse, AnthropicCreateMessageRequest,
@@ -39,7 +40,7 @@ use crate::protocols::anthropic::types::{
 };
 use crate::protocols::openai::chat_completions::{
     NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
-    aggregator::ChatCompletionAggregator,
+    NvCreateChatCompletionStreamResponse, aggregator::ChatCompletionAggregator,
 };
 use crate::request_template::RequestTemplate;
 
@@ -224,6 +225,24 @@ async fn anthropic_messages(
     })?;
 
     let ctx = engine_stream.context();
+
+    // Apply reasoning parser to the engine stream if configured.
+    // The preprocessor (which normally handles this for the OpenAI path) is
+    // bypassed by the Anthropic endpoint, so we apply the same stream
+    // transform here.  This populates `delta.reasoning_content` which the
+    // AnthropicStreamConverter translates into thinking content blocks.
+    use std::pin::Pin;
+    use crate::types::Annotated;
+    let engine_stream: Pin<
+        Box<dyn futures::Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>,
+    > = if let Some(ref reasoning_parser_name) = parsing_options.reasoning_parser {
+        Box::pin(OpenAIPreprocessor::parse_reasoning_content_from_stream(
+            engine_stream,
+            reasoning_parser_name.clone(),
+        ))
+    } else {
+        Box::pin(engine_stream)
+    };
 
     let mut inflight_guard =
         state
