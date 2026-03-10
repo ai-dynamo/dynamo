@@ -9,7 +9,7 @@
 //! 3. Simulating the execution of running requests with realistic timing
 //!
 //! ## Scheduling Process
-//! The scheduler uses a watermark-based approach to determine if there's sufficient
+//! The scheduler checks direct block capacity to determine if there's sufficient
 //! KV cache space for new requests. It also enforces a batched tokens budget to prevent
 //! oversubscription of computational resources. Only requests that can be allocated
 //! these resources are moved from waiting to running state.
@@ -22,20 +22,20 @@
 //! ## Resource Management
 //! The scheduler communicates with the KvManager through MoveBlock signals at each
 //! stage of request processing. When resources become constrained, it employs an
-//! LRU-based preemption strategy where the oldest running request is evicted and
-//! placed at the back of the waiting queue to be rescheduled later.
+//! preemption strategy (LIFO by default, matching vLLM v1) where a running request
+//! is evicted and placed at the front of the waiting queue to be rescheduled later.
 //!
 //! ## NOTE
 //! The current prefill and decoding time simulations are not scientific at all and are WIP
 
-use crate::common::evictor::LRUEvictor;
 use crate::common::perf_model::PerfModel;
 use crate::common::protocols::{
-    DirectRequest, KvCacheEventSink, MockEngineArgs, MoveBlock, OutputSignal, PrefillCost,
+    DirectRequest, KvCacheEventSink, MockEngineArgs, MoveBlock, OutputSignal, PreemptionMode,
     WorkerType,
 };
 use crate::common::running_mean::RunningMean;
 use crate::common::sequence::ActiveSequence;
+use crate::common::utils::sleep_until_precise;
 use crate::kv_manager::KvManager;
 use dynamo_kv_router::protocols::DpRank;
 use dynamo_tokens::blocks::UniqueBlock;
@@ -44,8 +44,6 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio::time::Duration;
-#[cfg(target_os = "linux")]
-use tokio_timerfd::Delay;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 use validator::Validate;
@@ -67,128 +65,55 @@ pub enum Request {
 struct SchedulerState {
     waiting: VecDeque<Uuid>,
     prefill: VecDeque<Uuid>,
-    decode: LRUEvictor<Uuid>,
+    decode: VecDeque<Uuid>,
     requests: HashMap<Uuid, Request>,
-    prefill_costs: HashMap<Uuid, PrefillCost>,
-    max_num_batched_tokens: Option<usize>,
-    active_tokens: usize,
-    waiting_tokens: usize,
 }
 
 impl SchedulerState {
-    fn new(max_num_batched_tokens: Option<usize>) -> Self {
-        SchedulerState {
-            max_num_batched_tokens,
-            ..Default::default()
-        }
-    }
-
     fn is_empty(&self) -> bool {
         self.requests.is_empty()
     }
 
-    /// Create a new UUID for a DirectRequest, add it to requests, and push the UUID to waiting.
     fn receive(&mut self, request: DirectRequest) -> Uuid {
-        // Use the provided UUID if available, otherwise generate a new one
         let uuid = request.uuid.unwrap_or_else(Uuid::new_v4);
         self.requests.insert(uuid, Request::Direct(request));
         self.waiting.push_back(uuid);
         uuid
     }
 
-    /// Get the next UUID from ready or waiting queue and its associated Request.
-    fn next(&mut self) -> Option<(Uuid, Request)> {
-        let uuid = self.waiting.pop_front()?;
-        let request = self
-            .requests
-            .remove(&uuid)
-            .expect("Request does not exist.");
-        Some((uuid, request))
-    }
+    /// Try to admit one request from waiting → prefill.
+    /// Converts DirectRequest → ActiveSequence if needed. PrefillCost is computed
+    /// later in simulate_prefill when the request reaches the front of the queue.
+    fn admit_one(&mut self, args: &MockEngineArgs) -> bool {
+        let Some(&uuid) = self.waiting.front() else {
+            return false;
+        };
+        let num_active = self.prefill.len() + self.decode.len();
+        if args.max_num_seqs.is_some_and(|limit| num_active >= limit) {
+            return false;
+        }
 
-    /// Move a UUID and its Request to the waiting queue (front).
-    fn first_in_line(&mut self, uuid: Uuid, request: Request) {
-        self.requests.insert(uuid, request);
-        self.waiting.push_front(uuid);
-    }
+        self.waiting.pop_front();
 
-    /// Move a UUID and its Request to the ready queue.
-    fn move_to_prefill(&mut self, uuid: Uuid, active_seq: ActiveSequence, cost: PrefillCost) {
-        self.waiting_tokens += cost.new_tokens;
-        self.requests.insert(uuid, Request::Active(active_seq));
-        self.prefill.push_back(uuid);
-        self.prefill_costs.insert(uuid, cost);
-    }
-
-    /// Try (chunked) prefill and move to decode queue
-    ///
-    /// Returns `Some((prefill_compute, creation_signal, is_full_prefill))` where:
-    /// - `prefill_compute`: The compute time in milliseconds for this prefill operation
-    /// - `creation_signal`: Optional MoveBlock signal for KV cache block creation
-    /// - `is_full_prefill`: true if the entire sequence was prefilled, false if chunked
-    fn try_prefill(&mut self, perf_model: &PerfModel) -> Option<(f64, Option<MoveBlock>, bool)> {
-        let uuid = self.prefill.pop_front()?;
-
-        // Remove and extract prefill_compute from prefill_costs
-        let mut prefill_cost = self
-            .prefill_costs
-            .remove(&uuid)
-            .expect("Expects valid prefill cost.");
-
-        let new_tokens = prefill_cost.new_tokens;
-
-        let maybe_prefill_tokens = self.max_num_batched_tokens.and_then(|max_tokens| {
-            let remaining_tokens = max_tokens - self.active_tokens;
-            if prefill_cost.new_tokens > remaining_tokens {
-                Some(remaining_tokens)
-            } else {
-                None
-            }
-        });
-
-        let (prefill_compute, is_full_prefill) = if let Some(prefill_tokens) = maybe_prefill_tokens
-        {
-            let prefill_compute =
-                prefill_cost.predict_prefill_compute(Some(prefill_tokens), perf_model);
-            prefill_cost.new_tokens -= prefill_tokens;
-            assert!(
-                prefill_cost.new_tokens > 0,
-                "Encountered negative prefill tokens."
+        // Convert DirectRequest → ActiveSequence if needed
+        if let Some(Request::Direct(_)) = self.requests.get(&uuid) {
+            let Some(Request::Direct(direct)) = self.requests.remove(&uuid) else {
+                unreachable!()
+            };
+            self.requests.insert(
+                uuid,
+                Request::Active(ActiveSequence::new(
+                    direct.tokens,
+                    direct.max_output_tokens,
+                    Some(args.block_size),
+                    args.enable_prefix_caching,
+                    args.zmq_kv_events_port.is_some(),
+                )),
             );
+        }
 
-            self.prefill.push_front(uuid);
-            self.prefill_costs.insert(uuid, prefill_cost);
-
-            self.active_tokens = self.max_num_batched_tokens.unwrap();
-            self.waiting_tokens -= prefill_tokens;
-
-            (prefill_compute, false)
-        } else {
-            // Assume possible to complete prefilling the sequence, transfer to decode
-            self.decode.insert(uuid);
-
-            self.active_tokens += new_tokens;
-            self.waiting_tokens -= new_tokens;
-
-            (prefill_cost.predict_prefill_compute(None, perf_model), true)
-        };
-
-        // NOTE: the current behavior allocates the KV blocks for the entire sequence,
-        // even if only a chunk is prefilled
-        let Some(Request::Active(sequence)) = self.requests.get_mut(&uuid) else {
-            panic!("Request does not exist.");
-        };
-
-        Some((
-            prefill_compute,
-            sequence.take_creation_signal(),
-            is_full_prefill,
-        ))
-    }
-
-    // assume (chunked) prefills are completed, then active tokens would be 1 per decoding sequence
-    fn reset_active_tokens(&mut self) {
-        self.active_tokens = self.decode.len();
+        self.prefill.push_back(uuid);
+        true
     }
 
     fn run(&mut self, uuid: Uuid) -> Option<&mut ActiveSequence> {
@@ -201,49 +126,49 @@ impl SchedulerState {
         Some(sequence)
     }
 
-    fn num_active_requests(&self) -> usize {
-        self.prefill.len() + self.decode.len()
-    }
-
     /// Remove a UUID and its associated Request from collections.
     fn complete(&mut self, uuid: &Uuid) {
         tracing::trace!("Request {uuid} will complete");
-        self.decode.remove(uuid);
+        self.decode.retain(|u| u != uuid);
         self.requests.remove(uuid);
-        self.prefill_costs.remove(uuid);
-        self.active_tokens -= 1;
     }
 
-    /// Preempt the oldest running request by evicting it from running, resetting the sequence,
-    /// and adding it back to the waiting queue.
-    /// Returns the signal from reset_with_signal or None if no requests are running.
-    fn preempt(&mut self) -> Vec<MoveBlock> {
-        // Evict the oldest UUID from running
-        let uuid = self
-            .decode
-            .evict()
-            .expect("Nothing to evict for preemption.");
+    /// Preempt a running request by evicting it from decode, resetting the sequence,
+    /// and adding it back to the front of the waiting queue.
+    /// In LIFO mode, evicts the newest request (matches vLLM v1).
+    /// In FIFO mode, evicts the oldest request.
+    fn preempt(&mut self, mode: PreemptionMode) -> Vec<MoveBlock> {
+        let uuid = match mode {
+            PreemptionMode::Lifo => self.decode.pop_back(),
+            PreemptionMode::Fifo => self.decode.pop_front(),
+        }
+        .expect("Nothing to evict for preemption.");
         let request = self
             .requests
             .remove(&uuid)
             .expect("Request does not exist.");
-        self.prefill_costs.remove(&uuid);
-        self.active_tokens -= 1;
         tracing::warn!("Request {uuid} will be preempted");
 
-        // Reset the sequence and get the new sequence and signal
-        // Insert the new sequence back into the requests map and add to waiting queue
+        // Reset the sequence and re-queue for prefill
         let Request::Active(mut active_sequence) = request else {
             panic!("Expected ActiveSequence in running queue")
         };
         let signals = active_sequence.reset_with_signal();
 
-        // Note: For preemption, we don't compute hit rate since we don't have access to new_tokens
-        // and the sequence is being reset anyway. Hit rate tracking is primarily for new scheduling attempts.
-
-        self.first_in_line(uuid, Request::Active(active_sequence));
+        self.requests.insert(uuid, Request::Active(active_sequence));
+        self.waiting.push_front(uuid);
 
         signals
+    }
+}
+
+/// Cancels its token when dropped. Shared via Arc so the background task is
+/// only cancelled when the last Scheduler clone is dropped.
+struct CancelGuard(CancellationToken);
+
+impl Drop for CancelGuard {
+    fn drop(&mut self) {
+        self.0.cancel();
     }
 }
 
@@ -252,6 +177,7 @@ impl SchedulerState {
 pub struct Scheduler {
     request_tx: mpsc::UnboundedSender<DirectRequest>,
     metrics_rx: tokio::sync::watch::Receiver<MockerMetrics>,
+    _cancel_guard: Arc<CancelGuard>,
 }
 
 impl Scheduler {
@@ -274,12 +200,14 @@ impl Scheduler {
         let (metrics_tx, metrics_rx) =
             tokio::sync::watch::channel::<MockerMetrics>(initial_metrics);
 
-        let cancel_token_clone = cancellation_token.unwrap_or_default().clone();
+        let cancel_token = cancellation_token.unwrap_or_default();
+        let cancel_token_clone = cancel_token.clone();
+        let cancel_guard = Arc::new(CancelGuard(cancel_token));
 
         // Spawn main background task with cancellation token
         tokio::spawn(async move {
             // Create state and kv_manager as local variables owned by this task
-            let mut state = SchedulerState::new(args.max_num_batched_tokens);
+            let mut state = SchedulerState::default();
             let mut kv_manager = KvManager::new_with_event_sink(
                 args.num_gpu_blocks,
                 args.block_size,
@@ -297,18 +225,8 @@ impl Scheduler {
                     break;
                 }
 
-                // 2. Schedule waiting requests (once per iteration)
-                try_schedule(&mut state, &kv_manager, &mut hit_rates, &args);
-
-                // 3. Simulate prefill + decode
-                simulate_prefill(
-                    &mut state,
-                    &mut kv_manager,
-                    &args.perf_model,
-                    args.worker_type,
-                    args.speedup_ratio,
-                )
-                .await;
+                // 2. Simulate prefill + decode
+                simulate_prefill(&mut state, &mut kv_manager, &mut hit_rates, &args).await;
 
                 simulate_decode(
                     &mut state,
@@ -317,10 +235,11 @@ impl Scheduler {
                     &args.perf_model,
                     args.block_size,
                     args.speedup_ratio,
+                    args.preemption_mode,
                 )
                 .await;
 
-                // 4. Send metrics once per forward pass (after all prefill and decode processing)
+                // 3. Send metrics once per forward pass (after all prefill and decode processing)
                 let _ = metrics_tx.send(MockerMetrics {
                     dp_rank,
                     active_decode_blocks: kv_manager.num_active_blocks() as u64,
@@ -331,10 +250,11 @@ impl Scheduler {
         Self {
             request_tx,
             metrics_rx,
+            _cancel_guard: cancel_guard,
         }
     }
 
-    /// Add a new request to the waiting queue
+    /// Add a new request to the prefill queue
     pub async fn receive(&self, request: DirectRequest) {
         let _ = self.request_tx.send(request);
     }
@@ -361,13 +281,16 @@ async fn receive_requests(
     }
 
     if state.is_empty() {
-        // Fully idle - block until new request arrives
+        // Fully idle - block until new request arrives or shutdown
         tokio::select! {
             biased;
             _ = cancel_token.cancelled() => {
                 return None;
             }
-            Some(request) = request_rx.recv() => {
+            result = request_rx.recv() => {
+                let Some(request) = result else {
+                    return None; // channel closed
+                };
                 state.receive(request);
                 return Some(());
             }
@@ -383,53 +306,118 @@ async fn receive_requests(
 }
 
 /// Simulate prefill phase for all pending prefill requests.
-/// Returns the total prefill compute time.
+///
+/// Handles token budget, block allocation, and preemption inline.
+/// Token budget: `max_num_batched_tokens - decode.len()` (1 token per decode request).
+/// When blocks are unavailable, decode requests are preempted (LIFO by default)
+/// to free capacity, matching vLLM v1 behavior.
 async fn simulate_prefill(
     state: &mut SchedulerState,
     kv_manager: &mut KvManager,
-    perf_model: &PerfModel,
-    worker_type: WorkerType,
-    speedup_ratio: f64,
+    hit_rates: &mut RunningMean<f32>,
+    args: &MockEngineArgs,
 ) -> Duration {
     let start_time = Instant::now();
     let mut total_time = Duration::ZERO;
 
-    while let Some((prefill_compute, maybe_creation_signal, is_full_prefill)) =
-        state.try_prefill(perf_model)
-    {
-        // NOTE: Prefill cost/time is always incremented for new blocks, even if they
-        // could be cached by other requests in the same batch. This matches vLLM behavior.
-        // For decode workers, skip adding prefill compute time
-        if worker_type != WorkerType::Decode {
-            total_time += Duration::from_secs_f64(prefill_compute / 1000.0);
+    let mut token_budget = args
+        .max_num_batched_tokens
+        .map_or(usize::MAX, |t| t.saturating_sub(state.decode.len()));
+
+    'prefill: while token_budget > 0 {
+        // Drain prefill first, then pull from waiting one at a time
+        if state.prefill.is_empty() && !state.admit_one(args) {
+            break;
+        }
+        let uuid = state.prefill[0];
+
+        let Some(Request::Active(seq)) = state.requests.get(&uuid) else {
+            panic!("Request does not exist.");
+        };
+        let prefill_cost = kv_manager.get_prefill_cost(seq);
+        let sequence_len = seq.len();
+        let allocated_tokens = seq.num_allocated_tokens();
+        let remaining = prefill_cost.new_tokens;
+
+        // Token budget check
+        let tokens_left = sequence_len - allocated_tokens;
+        if !args.enable_chunked_prefill && tokens_left > token_budget {
+            break;
+        }
+        let chunk = tokens_left.min(token_budget);
+        let cumulative = allocated_tokens + chunk;
+
+        // Allocate blocks. process() returns the number of blocks committed.
+        // On partial success, preempt a decode request and retry — the next
+        // loop iteration re-prepares from the updated num_allocated_tokens.
+        let Some(Request::Active(seq)) = state.requests.get_mut(&uuid) else {
+            panic!("Request does not exist.");
+        };
+        if let Some(signal) = seq.prepare_allocation(cumulative) {
+            let expected = match &signal {
+                MoveBlock::Use(blocks, ..) => blocks.len(),
+                _ => unreachable!(),
+            };
+            let allocated = kv_manager.process(&signal);
+            // Commit the blocks that were actually allocated
+            let committed_tokens = if allocated == expected {
+                cumulative
+            } else {
+                // Partial: compute token boundary from block count
+                let prev_blocks = allocated_tokens
+                    .div_ceil(seq.block_size())
+                    .min(seq.unique_blocks().len());
+                (prev_blocks + allocated) * seq.block_size()
+            };
+            seq.commit_allocation(committed_tokens.min(cumulative));
+
+            if allocated < expected {
+                if state.decode.is_empty() {
+                    break;
+                }
+                for signal in state.preempt(args.preemption_mode) {
+                    kv_manager.process(&signal);
+                }
+                continue 'prefill; // retry with freed capacity
+            }
+        } else {
+            seq.commit_allocation(cumulative);
         }
 
-        if let Some(creation_signal) = maybe_creation_signal
-            && !process_signals(kv_manager, std::slice::from_ref(&creation_signal))
-        {
-            panic!("Block allocation for prefilling cannot fail.");
+        // Accumulate prefill compute time (only for the new tokens in this chunk)
+        let new_tokens_in_chunk = chunk.min(remaining);
+        if args.worker_type != WorkerType::Decode && new_tokens_in_chunk > 0 {
+            total_time += Duration::from_secs_f64(
+                prefill_cost.predict_prefill_compute(Some(new_tokens_in_chunk), &args.perf_model)
+                    / 1000.0,
+            );
         }
 
-        // Impossible to schedule more prefills if we encounter one incomplete (chunked) prefill
-        if !is_full_prefill {
+        // Hit rate: fraction of tokens that were already cached
+        let hit_rate = if sequence_len > 0 {
+            1.0 - (remaining as f32 / sequence_len as f32)
+        } else {
+            0.0
+        };
+        hit_rates.push(hit_rate);
+
+        token_budget -= chunk;
+
+        if cumulative >= sequence_len {
+            // Fully prefilled — promote to decode queue
+            state.prefill.pop_front();
+            state.decode.push_back(uuid);
+        } else {
+            // Partially prefilled — resume next iteration with updated allocated_tokens
             break;
         }
     }
 
-    if speedup_ratio > 0.0 && total_time > Duration::ZERO {
-        let sleep_duration = Duration::from_secs_f64(total_time.as_secs_f64() / speedup_ratio);
+    if args.speedup_ratio > 0.0 && total_time > Duration::ZERO {
+        let sleep_duration = Duration::from_secs_f64(total_time.as_secs_f64() / args.speedup_ratio);
         let deadline = start_time + sleep_duration;
 
-        #[cfg(target_os = "linux")]
-        {
-            if let Ok(delay) = Delay::new(deadline) {
-                let _ = delay.await;
-            }
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
-        }
+        sleep_until_precise(deadline).await;
     }
 
     total_time
@@ -444,6 +432,7 @@ async fn simulate_decode(
     perf_model: &PerfModel,
     block_size: usize,
     speedup_ratio: f64,
+    preemption_mode: PreemptionMode,
 ) -> Duration {
     let start_time = Instant::now();
 
@@ -453,7 +442,7 @@ async fn simulate_decode(
     // Compute average context length across all active decode requests
     let total_length: usize = state
         .decode
-        .keys()
+        .iter()
         .map(|uuid| {
             if let Request::Active(seq) = state.requests.get(uuid).unwrap() {
                 seq.len()
@@ -468,25 +457,47 @@ async fn simulate_decode(
     let decoding_time = perf_model.predict_decode_time(active_kv_tokens, context_length);
     let total_time = Duration::from_secs_f64(decoding_time / 1000.0);
 
-    state.reset_active_tokens();
-
     // Process decoding
-    let uuids: Vec<Uuid> = state.decode.keys().cloned().collect();
+    let uuids: Vec<Uuid> = state.decode.iter().copied().collect();
     for uuid in uuids {
+        // Try to generate; if allocation fails, preempt until it succeeds
+        // or nothing is left to preempt (matches vLLM v1 scheduler loop).
+        // Reborrow sequence each iteration so the mutable ref doesn't
+        // conflict with state.preempt().
+        let mut allocated = false;
+        loop {
+            let Some(sequence) = state.run(uuid) else {
+                break;
+            };
+            let signals = sequence.generate();
+            if process_signals(kv_manager, &signals) {
+                allocated = true;
+                break;
+            }
+            sequence.pop(); // revert the failed generation
+
+            if state.decode.is_empty() {
+                break;
+            }
+
+            // Preempt one request and free its blocks
+            for signal in state.preempt(preemption_mode) {
+                kv_manager.process(&signal);
+            }
+
+            // If the current request was the one preempted, stop retrying
+            if !state.decode.contains(&uuid) {
+                break;
+            }
+        }
+
+        if !allocated {
+            continue;
+        }
+
         let Some(sequence) = state.run(uuid) else {
             continue;
         };
-        let signals = sequence.generate();
-
-        // Process all signals with the KvManager
-        // Handling of preemption on failure
-        if !process_signals(kv_manager, &signals) {
-            sequence.pop(); // revert the failed generation op
-            for signal in state.preempt() {
-                kv_manager.process(&signal);
-            }
-            continue;
-        }
 
         // Check completion and send notification
         let is_complete = sequence.generated_tokens() >= sequence.max_output_tokens();
@@ -514,90 +525,10 @@ async fn simulate_decode(
         let sleep_duration = Duration::from_secs_f64(total_time.as_secs_f64() / speedup_ratio);
         let deadline = start_time + sleep_duration;
 
-        #[cfg(target_os = "linux")]
-        {
-            if let Ok(delay) = Delay::new(deadline) {
-                let _ = delay.await;
-            }
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
-        }
+        sleep_until_precise(deadline).await;
     }
 
     total_time
-}
-
-/// Attempts to schedule waiting requests from the state queue.
-/// Returns the number of requests successfully scheduled.
-fn try_schedule(
-    state: &mut SchedulerState,
-    kv_manager: &KvManager,
-    hit_rates: &mut RunningMean<f32>,
-    args: &MockEngineArgs,
-) -> usize {
-    let mut scheduled_count = 0;
-    let mut current_blocks = kv_manager.num_active_blocks();
-    let mut current_tokens = state.active_tokens + state.waiting_tokens;
-    let mut current_seqs = state.num_active_requests();
-
-    while let Some((uuid, request)) = state.next() {
-        // Convert Request to ActiveSequence
-        let active_sequence = match request {
-            Request::Active(active_seq) => active_seq,
-            Request::Direct(direct_request) => ActiveSequence::new(
-                direct_request.tokens,
-                direct_request.max_output_tokens,
-                Some(args.block_size),
-                args.enable_prefix_caching,
-            ),
-        };
-
-        // Update predictive budgets
-        let prefill_cost = kv_manager.get_prefill_cost(&active_sequence);
-        let total_tokens = active_sequence.len();
-        // this is conservative, assumes no cache hit so never over-schedules
-        let new_blocks = (total_tokens as u32).div_ceil(args.block_size as u32) as usize;
-        let new_tokens = prefill_cost.new_tokens;
-
-        current_blocks += new_blocks;
-        current_tokens += new_tokens;
-        current_seqs += 1;
-
-        // Check various budgets to see if possible to schedule
-        let under_block_budget =
-            current_blocks as f64 <= (1. - args.watermark) * kv_manager.max_capacity() as f64;
-        // If chunked prefill is enabled, we can be under token budget when scheduling
-        let comparison_tokens = if args.enable_chunked_prefill {
-            current_tokens - new_tokens
-        } else {
-            current_tokens
-        };
-        let under_token_budget = args
-            .max_num_batched_tokens
-            .is_none_or(|limit| comparison_tokens <= limit);
-        let under_seq_budget = args.max_num_seqs.is_none_or(|limit| current_seqs <= limit);
-
-        // Cannot schedule, put first in line instead
-        if !(under_block_budget && under_token_budget && under_seq_budget) {
-            state.first_in_line(uuid, Request::Active(active_sequence));
-            break;
-        }
-
-        // Compute and store hit rate
-        let hit_rate = if !active_sequence.is_empty() {
-            1.0 - (new_tokens as f32 / active_sequence.len() as f32)
-        } else {
-            0.0
-        };
-        hit_rates.push(hit_rate);
-
-        state.move_to_prefill(uuid, active_sequence, prefill_cost);
-        scheduled_count += 1;
-    }
-
-    scheduled_count
 }
 
 /// Processes MoveBlock signals with the KvManager.
@@ -609,12 +540,12 @@ fn try_schedule(
 /// indicate an unexpected state in the system.
 fn process_signals(kv_manager: &mut KvManager, signals: &[MoveBlock]) -> bool {
     for signal in signals {
-        if kv_manager.process(signal) {
+        if kv_manager.process(signal) > 0 {
             continue;
         }
 
         // Check we have a Use signal with blocks
-        let MoveBlock::Use(blocks, _hashes) = signal else {
+        let MoveBlock::Use(blocks, _hashes, ..) = signal else {
             panic!(
                 "Failed signal is Invalid. Has to fail on generation signal, but failed on {signal:?}"
             );
@@ -874,6 +805,186 @@ mod tests {
         assert_scheduler_idle(&metrics);
 
         println!("Test passed! Received {received_tokens} tokens");
+    }
+
+    /// White-box unit test that directly creates SchedulerState + KvManager,
+    /// manually invokes simulate_prefill / simulate_decode, and asserts on
+    /// queue states and block counts after each step.
+    #[tokio::test]
+    async fn test_scheduler_internal_state_transitions() {
+        let args = MockEngineArgs::builder()
+            .block_size(4)
+            .num_gpu_blocks(6)
+            .max_num_batched_tokens(Some(12))
+            .max_num_seqs(Some(3))
+            .enable_chunked_prefill(true)
+            .enable_prefix_caching(false)
+            .speedup_ratio(0.0)
+            .build()
+            .unwrap();
+
+        let mut state = SchedulerState::default();
+        let mut kv_manager = KvManager::new(args.num_gpu_blocks, args.block_size);
+        let mut hit_rates = RunningMean::new(1000);
+        let output_tx: Option<mpsc::UnboundedSender<OutputSignal>> = None;
+
+        let r1_uuid = Uuid::from_u128(1);
+        let r2_uuid = Uuid::from_u128(2);
+        let r3_uuid = Uuid::from_u128(3);
+
+        // ── Step 1: Receive 3 requests ──
+        // R1: 8 input, 2 max_output → 2 blocks
+        // R2: 8 input, 2 max_output → 2 blocks
+        // R3: 12 input, 2 max_output → 3 blocks
+        state.receive(DirectRequest {
+            tokens: (0..8).collect(),
+            max_output_tokens: 2,
+            uuid: Some(r1_uuid),
+            dp_rank: 0,
+        });
+        state.receive(DirectRequest {
+            tokens: (100..108).collect(),
+            max_output_tokens: 2,
+            uuid: Some(r2_uuid),
+            dp_rank: 0,
+        });
+        state.receive(DirectRequest {
+            tokens: (200..212).collect(),
+            max_output_tokens: 2,
+            uuid: Some(r3_uuid),
+            dp_rank: 0,
+        });
+
+        assert_eq!(state.waiting.len(), 3);
+        assert_eq!(state.prefill.len(), 0);
+        assert_eq!(state.decode.len(), 0);
+        assert_eq!(kv_manager.num_active_blocks(), 0);
+
+        // ── Step 2: First simulate_prefill ──
+        // Budget=12. R1 takes 8 tokens (2 blocks), fully prefilled → decode.
+        // R2 takes 4 tokens (1 block, chunked), partially prefilled → stays in prefill.
+        simulate_prefill(&mut state, &mut kv_manager, &mut hit_rates, &args).await;
+
+        assert_eq!(state.waiting.len(), 1);
+        assert_eq!(state.prefill.len(), 1);
+        assert_eq!(state.decode.len(), 1);
+        assert_eq!(state.decode[0], r1_uuid);
+        assert_eq!(state.prefill[0], r2_uuid);
+        assert_eq!(state.waiting[0], r3_uuid);
+        assert_eq!(kv_manager.num_active_blocks(), 3); // 2 for R1 + 1 for R2
+
+        let seq = match state.requests.get(&r1_uuid).unwrap() {
+            Request::Active(s) => s,
+            _ => panic!("expected ActiveSequence"),
+        };
+        assert_eq!(seq.num_allocated_tokens(), 8);
+        assert_eq!(seq.generated_tokens(), 0);
+
+        let seq = match state.requests.get(&r2_uuid).unwrap() {
+            Request::Active(s) => s,
+            _ => panic!("expected ActiveSequence"),
+        };
+        assert_eq!(seq.num_allocated_tokens(), 4);
+        assert_eq!(seq.generated_tokens(), 0);
+
+        // ── Step 3: First simulate_decode ──
+        // R1 generates 1 token, gains a partial block.
+        simulate_decode(
+            &mut state,
+            &mut kv_manager,
+            &output_tx,
+            &args.perf_model,
+            args.block_size,
+            args.speedup_ratio,
+            args.preemption_mode,
+        )
+        .await;
+
+        assert_eq!(state.decode.len(), 1);
+        assert_eq!(state.decode[0], r1_uuid);
+        assert_eq!(kv_manager.num_active_blocks(), 4); // +1 partial for R1
+
+        let seq = match state.requests.get(&r1_uuid).unwrap() {
+            Request::Active(s) => s,
+            _ => panic!("expected ActiveSequence"),
+        };
+        assert_eq!(seq.generated_tokens(), 1);
+
+        // ── Step 4: Second simulate_prefill ──
+        // Budget=11. R2 finishes (4 more tokens, 1 block → active=5, decode).
+        // R3 admitted, needs 2 blocks for chunk of 7. Only 1 free slot → partial.
+        // Preempt R2 (LIFO) → R2 back to waiting. Retry R3 → evicts R2's
+        // inactive blocks, allocates 2 more → R3 allocated_tokens=11.
+        simulate_prefill(&mut state, &mut kv_manager, &mut hit_rates, &args).await;
+
+        assert_eq!(state.waiting.len(), 1, "R2 preempted back to waiting");
+        assert_eq!(state.waiting[0], r2_uuid);
+        assert_eq!(state.prefill.len(), 1, "R3 partially prefilled");
+        assert_eq!(state.prefill[0], r3_uuid);
+        assert_eq!(state.decode.len(), 1, "R1 still decoding");
+        assert_eq!(state.decode[0], r1_uuid);
+        assert_eq!(kv_manager.num_active_blocks(), 6); // at capacity
+
+        let seq = match state.requests.get(&r3_uuid).unwrap() {
+            Request::Active(s) => s,
+            _ => panic!("expected ActiveSequence"),
+        };
+        assert_eq!(seq.num_allocated_tokens(), 11);
+
+        // ── Step 5: Second simulate_decode ──
+        // R1 generates 2nd token → complete. Frees 3 blocks (1 destroyed, 2 deactivated).
+        simulate_decode(
+            &mut state,
+            &mut kv_manager,
+            &output_tx,
+            &args.perf_model,
+            args.block_size,
+            args.speedup_ratio,
+            args.preemption_mode,
+        )
+        .await;
+
+        assert!(!state.requests.contains_key(&r1_uuid), "R1 completed");
+        assert_eq!(state.decode.len(), 0);
+        assert_eq!(state.prefill.len(), 1);
+        assert_eq!(state.waiting.len(), 1);
+        assert_eq!(kv_manager.num_active_blocks(), 3); // only R3's 3 blocks
+
+        // ── Step 6: Third simulate_prefill ──
+        // R3 finishes prefill (1 token left, no new blocks) → decode.
+        // R2 re-admitted, fully prefilled (2 blocks via inactive eviction) → decode.
+        simulate_prefill(&mut state, &mut kv_manager, &mut hit_rates, &args).await;
+
+        assert_eq!(state.waiting.len(), 0);
+        assert_eq!(state.prefill.len(), 0);
+        assert_eq!(state.decode.len(), 2);
+        assert!(state.decode.contains(&r3_uuid));
+        assert!(state.decode.contains(&r2_uuid));
+        assert_eq!(kv_manager.num_active_blocks(), 5); // 3 for R3 + 2 for R2
+
+        // ── Steps 7+: Cycle until all requests complete ──
+        loop {
+            simulate_prefill(&mut state, &mut kv_manager, &mut hit_rates, &args).await;
+            simulate_decode(
+                &mut state,
+                &mut kv_manager,
+                &output_tx,
+                &args.perf_model,
+                args.block_size,
+                args.speedup_ratio,
+                args.preemption_mode,
+            )
+            .await;
+
+            if state.is_empty() {
+                break;
+            }
+        }
+
+        assert_eq!(state.waiting.len(), 0);
+        assert_eq!(state.prefill.len(), 0);
+        assert_eq!(state.decode.len(), 0);
+        assert_eq!(kv_manager.num_active_blocks(), 0);
     }
 
     #[tokio::test]

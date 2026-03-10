@@ -26,6 +26,12 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field, model_validator
 
+# Import canonical planner types - do NOT redefine them here.
+from dynamo.planner.utils.planner_config import (  # noqa: F401 (re-exported)
+    PlannerConfig,
+    PlannerPreDeploymentSweepMode,
+)
+
 
 class DGDRPhase(str, Enum):
     Pending = "Pending"
@@ -56,17 +62,20 @@ class SearchStrategy(str, Enum):
     Thorough = "thorough"
 
 
+class GPUSKUType(str, Enum):
+    GB200SXM = "gb200_sxm"
+    H200SXM = "h200_sxm"
+    H100SXM = "h100_sxm"
+    B200SXM = "b200_sxm"
+    A100SXM = "a100_sxm"
+    L40S = "l40s"
+
+
 class BackendType(str, Enum):
     Auto = "auto"
     Sglang = "sglang"
     Trtllm = "trtllm"
     Vllm = "vllm"
-
-
-class PlannerPreDeploymentSweepMode(str, Enum):
-    None_ = "none"
-    Rapid = "rapid"
-    Thorough = "thorough"
 
 
 class WorkloadSpec(BaseModel):
@@ -117,9 +126,14 @@ class SLASpec(BaseModel):
     @model_validator(mode="after")
     def _validate_sla_options(self) -> "SLASpec":
         """Ensure at most one SLA mode is active."""
-        has_ttft_itl = self.ttft is not None and self.itl is not None
         has_e2e = self.e2eLatency is not None
         has_opt = self.optimizationType is not None
+        ttft_itl_touched = (
+            "ttft" in self.model_fields_set or "itl" in self.model_fields_set
+        )
+        has_ttft_itl = (self.ttft is not None and self.itl is not None) and (
+            ttft_itl_touched or (not has_e2e and not has_opt)
+        )
         options_count = sum([has_ttft_itl, has_e2e, has_opt])
         if options_count > 1:
             raise ValueError(
@@ -161,22 +175,6 @@ class OverridesSpec(BaseModel):
     )
 
 
-class PlannerSpec(BaseModel):
-    """PlannerSpec configures the SLA planner for autoscaling in the generated DGD."""
-
-    enabled: Optional[bool] = Field(
-        default=None, description="Enabled indicates whether the planner is enabled."
-    )
-    plannerPreDeploymentSweeping: Optional[PlannerPreDeploymentSweepMode] = Field(
-        default=None,
-        description='PlannerPreDeploymentSweeping controls pre-deployment sweeping mode for planner in-depth profiling. "none" means no pre-deployment sweep (only load-based scaling). "rapid" uses AI Configurator to simulate engine performance. "thorough" uses real GPUs to measure engine performance (takes several hours).',
-    )
-    plannerArgsList: Optional[List[str]] = Field(
-        default=None,
-        description="PlannerArgsList is a list of additional planner arguments.",
-    )
-
-
 class MockerSpec(BaseModel):
     """MockerSpec configures the simulated (mocker) backend."""
 
@@ -198,9 +196,9 @@ class KVRouterSpec(BaseModel):
 class FeaturesSpec(BaseModel):
     """FeaturesSpec controls optional Dynamo platform features in the generated deployment."""
 
-    planner: Optional[PlannerSpec] = Field(
+    planner: Optional[PlannerConfig] = Field(
         default=None,
-        description="Planner configures the SLA planner for autoscaling in the generated DGD.",
+        description="Planner is the raw SLA planner configuration passed to the planner service. Its schema is defined by dynamo.planner.utils.planner_config.PlannerConfig. Go treats this as opaque bytes; the Planner service validates it at startup. The presence of this field (non-null) enables the planner in the generated DGD.",
     )
     mocker: Optional[MockerSpec] = Field(
         default=None,
@@ -211,9 +209,9 @@ class FeaturesSpec(BaseModel):
 class HardwareSpec(BaseModel):
     """HardwareSpec describes the hardware resources available for profiling and deployment. These fields are typically auto-filled by the operator from cluster discovery."""
 
-    gpuSku: Optional[str] = Field(
+    gpuSku: Optional[GPUSKUType] = Field(
         default=None,
-        description='GPUSKU is the GPU SKU identifier (e.g., "H100_SXM", "A100_80GB").',
+        description="GPUSKU is the AIC hardware system identifier for the GPU. When omitted, the operator auto-detects this via InferHardwareSystem from cluster GPU node labels.",
     )
     vramMb: Optional[float] = Field(
         default=None, description="VRAMMB is the VRAM per GPU in MiB."
@@ -239,7 +237,7 @@ class DynamoGraphDeploymentRequestSpec(BaseModel):
     )
     image: Optional[str] = Field(
         default=None,
-        description='Image is the container image reference for the profiling job (frontend image). Example: "nvcr.io/nvidia/dynamo-runtime:latest" TODO: In a future MR, the operator will derive the backend inference image from the backend type automatically; backend images can be overridden via overrides.dgd.',
+        description='Image is the container image reference for the profiling job (frontend image). Example: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.0.0".',
     )
     modelCache: Optional[ModelCacheSpec] = Field(
         default=None,
@@ -269,7 +267,7 @@ class DynamoGraphDeploymentRequestSpec(BaseModel):
         default="rapid",
         description='SearchStrategy controls the profiling search depth. "rapid" performs a fast sweep; "thorough" explores more configurations.',
     )
-    autoApply: bool = Field(
+    autoApply: Optional[bool] = Field(
         default=True,
         description="AutoApply indicates whether to automatically create a DynamoGraphDeployment after profiling completes. If false, the generated spec is stored in status for manual review and application.",
     )

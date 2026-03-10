@@ -26,9 +26,10 @@ import threading
 import time
 import traceback
 import weakref
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from queue import Queue
-from typing import Awaitable, Callable, Dict, Optional, Union
+from typing import Any, Awaitable, Callable, Dict, Optional, Union
 
 import msgpack
 import zmq
@@ -87,7 +88,7 @@ class ZmqKvEventPublisher:
         Publishes events from TensorRT-LLM engine to ZMQ for consolidator to consume.
     """
 
-    def __init__(self, zmq_endpoint: str, kv_block_size: int, topic: str = ""):
+    def __init__(self, zmq_endpoint: str, kv_block_size: int, topic: str = "") -> None:
         """
         Initialize ZMQ publisher.
 
@@ -116,11 +117,11 @@ class ZmqKvEventPublisher:
         token_ids: list[int],
         num_block_tokens: list[int],
         block_hashes: list[int],
-        lora_id: int = 0,
         parent_hash: Optional[int] = None,
         block_mm_infos: Optional[list[dict | None]] = None,
         attention_dp_rank: int = 0,
-    ):
+        lora_name: Optional[str] = None,
+    ) -> None:
         """Publish a BlockStored event.
 
         Note: event_id is managed internally via self.sequence counter.
@@ -133,14 +134,15 @@ class ZmqKvEventPublisher:
 
         # Create event in the same format as vLLM's ZmqEventPublisher:
         # All blocks should have the same size (kv_block_size)
-        event = {
+        event: dict[str, Any] = {
             "type": "BlockStored",
             "block_hashes": block_hashes_signed,
             "parent_block_hash": parent_hash_signed,
             "token_ids": token_ids,
             "block_size": self.kv_block_size,
-            "lora_id": lora_id if lora_id != 0 else None,
         }
+        if lora_name is not None:
+            event["lora_name"] = lora_name
 
         # Add multimodal info if present
         if block_mm_infos is not None:
@@ -148,7 +150,9 @@ class ZmqKvEventPublisher:
 
         self._publish_event(event, attention_dp_rank)
 
-    def publish_removed(self, block_hashes: list[int], attention_dp_rank: int = 0):
+    def publish_removed(
+        self, block_hashes: list[int], attention_dp_rank: int = 0
+    ) -> None:
         """Publish a BlockRemoved event.
 
         Note: event_id is managed internally via self.sequence counter.
@@ -163,7 +167,7 @@ class ZmqKvEventPublisher:
 
         self._publish_event(event, attention_dp_rank)
 
-    def publish_all_cleared(self):
+    def publish_all_cleared(self) -> None:
         """Publish an AllBlocksCleared event."""
         event = {"type": "AllBlocksCleared"}
         self._publish_event(event)
@@ -196,7 +200,7 @@ class ZmqKvEventPublisher:
         except Exception as e:
             logging.error(f"Failed to publish ZMQ event: {e}", exc_info=True)
 
-    def shutdown(self):
+    def shutdown(self) -> None:
         """Shutdown the ZMQ publisher."""
         if self.socket:
             self.socket.close()
@@ -228,10 +232,10 @@ class ManagedThread(threading.Thread):
 
         self._stop_event = threading.Event()
 
-    def set_loop(self, loop: asyncio.AbstractEventLoop):
+    def set_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         self.loop = loop
 
-    def run(self):
+    def run(self) -> None:
         while not self._stop_event.is_set():
             task: Optional[
                 Union[Callable[..., Awaitable[bool]], weakref.WeakMethod]
@@ -271,7 +275,7 @@ class ManagedThread(threading.Thread):
 
         logging.info(f"Thread {self.name} stopped.")
 
-    def stop(self):
+    def stop(self) -> None:
         self._stop_event.set()
         if self._current_future and not self._current_future.done():
             self._current_future.cancel()
@@ -296,15 +300,16 @@ class Publisher:
 
     def __init__(
         self,
-        endpoint,
-        engine,
-        worker_id,
-        kv_block_size,
-        metrics_labels,
+        endpoint: Any,
+        engine: Any,
+        worker_id: Any,
+        kv_block_size: int,
+        metrics_labels: Any,
         component_gauges: LLMBackendMetrics,
         zmq_endpoint: Optional[str] = None,
         enable_local_indexer: bool = False,
-    ):
+        metrics_collector: Any = None,
+    ) -> None:
         self.endpoint = endpoint
         self.engine = engine
         self.worker_id = worker_id
@@ -313,6 +318,7 @@ class Publisher:
         self.metrics_labels = metrics_labels
         self.component_gauges = component_gauges
         self.enable_local_indexer = enable_local_indexer
+        self.metrics_collector = metrics_collector
         self.attention_dp_size = engine.get_attention_dp_size()
 
         # The first few kv events from the model engine are always "created" type events.
@@ -321,7 +327,7 @@ class Publisher:
         self.processing_initial_created_events = True
 
         # Needed by the events and metrics publishers
-        self.metrics_publisher = None
+        self.metrics_publisher: Optional[WorkerMetricsPublisher] = None
         self.kv_event_publishers: Optional[
             Dict[int, KvEventPublisher]
         ] = None  # One per attention_dp_rank
@@ -356,7 +362,7 @@ class Publisher:
             return
         await self.metrics_publisher.create_endpoint(self.endpoint)
 
-    def initialize(self):
+    def initialize(self) -> None:
         # Setup the metrics publisher
         self.metrics_publisher = WorkerMetricsPublisher()
         self._init_publish_metrics_thread()
@@ -471,6 +477,7 @@ class Publisher:
             kv_total_blocks = stat["kvCacheStats"]["maxNumBlocks"]
             logging.debug(f"Publishing stats: kv_active_blocks: {kv_active_blocks}")
             # TRT-LLM doesn't use data parallelism currently (dp_rank=None for NATS, "0" for Prometheus)
+            assert self.metrics_publisher is not None
             self.metrics_publisher.publish(None, kv_active_blocks)
 
             # Publish Prometheus metrics
@@ -481,6 +488,16 @@ class Publisher:
                 kv_active_blocks / kv_total_blocks if kv_total_blocks > 0 else 0.0
             )
             self.component_gauges.set_gpu_cache_usage("0", gpu_cache_usage)
+
+            # Log iteration stats to TRT-LLM MetricsCollector (PR #11243)
+            # This populates trtllm_kv_cache_hit_rate and trtllm_kv_cache_utilization gauges
+            if self.metrics_collector and hasattr(
+                self.metrics_collector, "log_iteration_stats"
+            ):
+                try:
+                    self.metrics_collector.log_iteration_stats(stat)
+                except Exception as e:
+                    logging.warning(f"Failed to log iteration stats: {e}")
 
         await self._polling_loop(
             lambda: self.engine.llm.get_stats_async(timeout=_STATS_TIMEOUT_SEC),
@@ -585,17 +602,14 @@ class Publisher:
                 else:
                     block_mm_infos.append(None)
 
-            # Note: Currently data does not have lora_id.
-            # Using 0 as default value. If later data has
-            # lora_id, we need to verify if this is correct.
-            lora_id = data.get("lora_id", 0)
+            lora_name = data.get("lora_name")
 
             # Get attention_dp_rank from event (TRT-LLM includes this in KVCacheEvent)
             # Default to 0 for backwards compatibility with older TRT-LLM versions
             attention_dp_rank = event.get("attention_dp_rank", 0)
 
             logging.debug(
-                f"publish stored event: engine_event_id: {event_id}, attention_dp_rank: {attention_dp_rank}, token_ids: {token_ids}, num_block_tokens: {num_block_tokens}, block_hashes: {block_hashes}, lora_id: {lora_id}, parent_hash: {parent_hash}"
+                f"publish stored event: engine_event_id: {event_id}, attention_dp_rank: {attention_dp_rank}, token_ids: {token_ids}, num_block_tokens: {num_block_tokens}, block_hashes: {block_hashes}, lora_name: {lora_name}, parent_hash: {parent_hash}"
             )
             # Publish to ZMQ if consolidator is enabled, otherwise publish to NATS
             # Note: event_id is managed internally by the publisher (monotonic counter per dp_rank)
@@ -605,10 +619,10 @@ class Publisher:
                     token_ids,
                     num_block_tokens,
                     block_hashes,
-                    lora_id,
                     parent_hash,
                     block_mm_infos,
                     attention_dp_rank,
+                    lora_name,
                 )
             elif self.kv_event_publishers:
                 # No consolidator: publish to NATS (router subscribes directly)
@@ -619,9 +633,9 @@ class Publisher:
                         token_ids,
                         num_block_tokens,
                         block_hashes,
-                        lora_id,
                         parent_hash,
                         block_mm_infos,
+                        lora_name=lora_name,
                     )
                 else:
                     logging.warning(
@@ -670,7 +684,7 @@ class Publisher:
         elif data["type"] == "created" and self.processing_initial_created_events:
             self.update_max_window_size(event)
 
-    def start(self):
+    def start(self) -> None:
         if (
             self.publish_kv_cache_events_thread
             and not self.publish_kv_cache_events_thread.is_alive()
@@ -688,13 +702,13 @@ class Publisher:
             self.publish_stats_thread.start()
             logging.debug("Started stats thread")
 
-    def check_error_queue(self):
+    def check_error_queue(self) -> Optional[Exception]:
         if not self.error_queue.empty():
             logging.error("Error in publishers error queue")
             return self.error_queue.get()
         return None
 
-    async def cleanup(self):
+    async def cleanup(self) -> None:
         """Cleanup threads and resources"""
         self._stop_event.set()
         # Add timeout to prevent hanging
@@ -719,7 +733,7 @@ class Publisher:
         if self.zmq_kv_event_publisher:
             self.zmq_kv_event_publisher.shutdown()
 
-    def update_max_window_size(self, event):
+    def update_max_window_size(self, event: dict) -> None:
         if "window_size" in event:
             window_size = event["window_size"]
             if self.max_window_size is None or window_size > self.max_window_size:
@@ -734,7 +748,7 @@ class Publisher:
     # TRTLLM emits a "created" event at the very beginning when it creates the KV cache,
     # so we can use the "created" event to identify the max_window_size of the global
     # attention layer in the model engine.
-    def should_drop_event(self, event):
+    def should_drop_event(self, event: dict) -> bool:
         # There are two cases for KV event filtering:
         #
         # 1. If "window_size" is NOT in the KV event:
@@ -758,15 +772,16 @@ class Publisher:
 
 @asynccontextmanager
 async def get_publisher(
-    endpoint,
-    engine,
-    worker_id,
-    kv_block_size,
-    metrics_labels,
+    endpoint: Any,
+    engine: Any,
+    worker_id: Any,
+    kv_block_size: int,
+    metrics_labels: Any,
     component_gauges: LLMBackendMetrics,
     zmq_endpoint: Optional[str] = None,
     enable_local_indexer: bool = False,
-):
+    metrics_collector: Any = None,
+) -> AsyncGenerator[Publisher, None]:
     publisher = Publisher(
         endpoint,
         engine,
@@ -776,6 +791,7 @@ async def get_publisher(
         component_gauges=component_gauges,
         zmq_endpoint=zmq_endpoint,
         enable_local_indexer=enable_local_indexer,
+        metrics_collector=metrics_collector,
     )
     try:
         publisher.initialize()

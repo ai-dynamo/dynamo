@@ -17,7 +17,11 @@ use dynamo_tokens::{BlockHash, SequenceHash, Token};
 /// Trait for publishing KV cache events.
 /// This abstracts the runtime dependency so mocker components can remain generic.
 pub trait KvCacheEventSink: Send + Sync {
-    fn publish(&self, event: KvCacheEvent) -> anyhow::Result<()>;
+    fn publish(
+        &self,
+        event: KvCacheEvent,
+        block_token_ids: Option<&[Vec<u32>]>,
+    ) -> anyhow::Result<()>;
 }
 
 pub type NumBlocks = usize;
@@ -26,10 +30,10 @@ pub type NumBlocks = usize;
 /// For Use and Promote variants, block hashes are included for KV event publishing
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum MoveBlock {
-    Use(Vec<UniqueBlock>, Vec<BlockHash>),
+    Use(Vec<UniqueBlock>, Vec<BlockHash>, Option<Vec<Vec<u32>>>),
     Destroy(Vec<UniqueBlock>),
     Deref(Vec<UniqueBlock>),
-    Promote(Uuid, SequenceHash, Option<u64>, BlockHash),
+    Promote(Uuid, SequenceHash, Option<u64>, BlockHash, Option<Vec<u32>>),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -69,6 +73,16 @@ impl PrefillCost {
 pub struct OutputSignal {
     pub uuid: Uuid,
     pub completed: bool,
+}
+
+/// Preemption policy for evicting decode requests under memory pressure
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum PreemptionMode {
+    /// Evict the newest request (matches vLLM v1 default)
+    #[default]
+    Lifo,
+    /// Evict the oldest request
+    Fifo,
 }
 
 /// Worker type for disaggregated serving configurations
@@ -143,10 +157,6 @@ pub struct MockEngineArgs {
     #[builder(default = true)]
     pub enable_chunked_prefill: bool,
 
-    #[builder(default = "0.01")]
-    #[validate(range(min = 0.0, max = 1.0))]
-    pub watermark: f64,
-
     #[builder(default = "1.0")]
     #[validate(range(min = 0.0))]
     pub speedup_ratio: f64,
@@ -179,10 +189,33 @@ pub struct MockEngineArgs {
     #[builder(default = "None")]
     pub bootstrap_port: Option<u16>,
 
+    /// KV cache bytes per token, auto-computed from model config by Python CLI.
+    /// Formula: num_layers * 2 * num_kv_heads * head_dim * dtype_bytes
+    #[builder(default = "None")]
+    pub kv_bytes_per_token: Option<usize>,
+
+    /// KV cache transfer bandwidth in GB/s for disaggregated serving latency simulation.
+    /// Default: 64.0 (inter-node InfiniBand). Set to 0 to disable KV transfer delay.
+    /// For intra-node NVLink, typical value is ~450.
+    #[builder(default = "None")]
+    #[validate(range(min = 0.0))]
+    pub kv_transfer_bandwidth: Option<f64>,
+
     /// Reasoning/thinking token configuration.
     /// When set, the mocker wraps output in thinking boundary tokens.
     #[builder(default = "None")]
     pub reasoning: Option<ReasoningConfig>,
+
+    /// ZMQ port for publishing KV events in vLLM's native wire format.
+    /// When set, the scheduler publishes to a ZMQ PUB socket instead of directly to NATS.
+    /// A KvEventPublisher relay subscribes to this socket and forwards events to NATS.
+    #[builder(default = "None")]
+    pub zmq_kv_events_port: Option<u16>,
+
+    /// Preemption mode for decode eviction under memory pressure.
+    /// Lifo (default) evicts the newest request; Fifo evicts the oldest.
+    #[builder(default)]
+    pub preemption_mode: PreemptionMode,
 }
 
 impl Default for MockEngineArgs {
@@ -226,7 +259,6 @@ impl MockEngineArgs {
             "max_num_batched_tokens",
             "enable_prefix_caching",
             "enable_chunked_prefill",
-            "watermark",
             "speedup_ratio",
             "dp_size",
             "startup_time",
@@ -235,7 +267,11 @@ impl MockEngineArgs {
             "planner_profile_data",
             "enable_local_indexer",
             "bootstrap_port",
+            "kv_bytes_per_token",
+            "kv_transfer_bandwidth",
             "reasoning",
+            "zmq_kv_events_port",
+            "preemption_mode",
         ]
         .iter()
         .cloned()
@@ -293,12 +329,6 @@ impl MockEngineArgs {
             builder = builder.enable_chunked_prefill(enabled);
         }
 
-        if let Some(value) = extra_args.get("watermark")
-            && let Some(num) = value.as_f64()
-        {
-            builder = builder.watermark(num);
-        }
-
         if let Some(value) = extra_args.get("speedup_ratio")
             && let Some(num) = value.as_f64()
         {
@@ -329,10 +359,44 @@ impl MockEngineArgs {
             builder = builder.bootstrap_port(Some(port as u16));
         }
 
+        if let Some(value) = extra_args.get("kv_bytes_per_token")
+            && let Some(num) = value.as_u64()
+        {
+            builder = builder.kv_bytes_per_token(Some(num as usize));
+        }
+
+        if let Some(value) = extra_args.get("kv_transfer_bandwidth")
+            && let Some(num) = value.as_f64()
+        {
+            builder = builder.kv_transfer_bandwidth(Some(num));
+        }
+
         if let Some(value) = extra_args.get("reasoning") {
             let cfg: ReasoningConfig = serde_json::from_value(value.clone())
                 .map_err(|e| anyhow::anyhow!("Failed to parse reasoning config: {}", e))?;
             builder = builder.reasoning(Some(cfg));
+        }
+
+        if let Some(value) = extra_args.get("zmq_kv_events_port")
+            && let Some(port) = value.as_u64()
+        {
+            builder = builder.zmq_kv_events_port(Some(port as u16));
+        }
+
+        if let Some(value) = extra_args.get("preemption_mode")
+            && let Some(mode_str) = value.as_str()
+        {
+            let mode = match mode_str {
+                "lifo" => PreemptionMode::Lifo,
+                "fifo" => PreemptionMode::Fifo,
+                _ => {
+                    return Err(anyhow::anyhow!(
+                        "Invalid preemption_mode: '{}'. Must be 'lifo' or 'fifo'.",
+                        mode_str
+                    ));
+                }
+            };
+            builder = builder.preemption_mode(mode);
         }
 
         // Parse worker type from is_prefill and is_decode flags

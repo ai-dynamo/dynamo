@@ -73,24 +73,16 @@ spec:
       extraPodSpec:
         mainContainer:
           image: my-registry/vllm-runtime:my-tag
-          workingDir: /workspace/components/src/dynamo/planner
           ports:
             - name: metrics
               containerPort: 9085
           command:
-            - /bin/sh
-            - -c
+          - python3
+          - -m
+          - dynamo.planner
           args:
-            - >-
-              python3 -m planner_sla
-              --environment=kubernetes
-              --backend=vllm
-              --ttft 200
-              --itl 10
-              --profile-results-dir /workspace/tests/planner/profiling_results/H200_TP1P_TP1D/
-              --adjustment-interval=60
-              --prometheus-port=9085
-              --no-correction
+            - --config
+            - '{"environment": "kubernetes", "backend": "vllm", "ttft": 200, "itl": 10, "profile_results_dir": "/workspace/tests/planner/profiling_results/H200_TP1P_TP1D/", "throughput_adjustment_interval": 60, "metric_reporting_prometheus_port": 9085, "no_correction": true}'
     VllmDecodeWorker:
       envFromSecret: hf-token-secret
       componentType: worker
@@ -196,7 +188,8 @@ spec:
             - dynamo.vllm
             - --model
             - nvidia/Llama-3.1-8B-Instruct-FP8
-            - --is-prefill-worker
+            - --disaggregation-mode
+            - prefill
             - --no-enable-prefix-caching
             - --block-size
             - "128"

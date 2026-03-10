@@ -51,6 +51,16 @@ pytestmark = [
 SUCCESS_RATE_THRESHOLD = 0.95
 
 
+# TRT-LLM will crash when loading the deepseek-ai/DeepSeek-R1-Distill-Llama-8B model on GB200 with a KV block size of 16.
+# As a workaround, use a block size of 32 on GB200.
+def is_gb200() -> bool:
+    out = subprocess.check_output(
+        ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+        text=True,
+    )
+    return bool(out.strip()) and "GB200" in out.splitlines()[0].upper()
+
+
 class LLMServerManager:
     """Manages LLM server lifecycle for determinism testing."""
 
@@ -143,8 +153,8 @@ class LLMServerManager:
             "16",
             "--max-model-len",
             "8000",  # required to fit on L4 GPU when using 8b model
-            "--connector",
-            "nixl",
+            "--kv-transfer-config",
+            '{"kv_connector":"NixlConnector","kv_role":"kv_both"}',
         ]
 
         # Construct prefiller command
@@ -154,14 +164,14 @@ class LLMServerManager:
             "dynamo.vllm",
             "--model",
             os.environ.get("KVBM_MODEL_ID", "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"),
-            "--is-prefill-worker",
+            "--disaggregation-mode",
+            "prefill",
             "--block-size",
             "16",
             "--max-model-len",
             "8000",  # required to fit on L4 GPU when using 8b model
-            "--connector",
-            "kvbm",
-            "nixl",
+            "--kv-transfer-config",
+            '{"kv_connector":"PdConnector","kv_role":"kv_both","kv_connector_extra_config":{"connectors":[{"kv_connector":"DynamoConnector","kv_connector_module_path":"kvbm.vllm_integration.connector","kv_role":"kv_both"},{"kv_connector":"NixlConnector","kv_role":"kv_both"}]},"kv_connector_module_path":"kvbm.vllm_integration.connector"}',
         ]
 
         # GPU blocks override
@@ -185,7 +195,7 @@ class LLMServerManager:
             "/tmp/kvbm_llm_api_decode_config.yaml",
         )
 
-        KV_BLOCK_SIZE = 16
+        KV_BLOCK_SIZE = 32 if is_gb200() else 16
 
         llm_api_config: Dict[str, Any] = {}
         llm_api_config["kv_cache_config"] = {
@@ -205,7 +215,7 @@ class LLMServerManager:
         prefill_config["disable_overlap_scheduler"] = True
         prefill_config["cache_transceiver_config"] = {
             "backend": "DEFAULT",
-            "max_tokens_in_buffer": 16384,
+            "max_tokens_in_buffer": 32768 if is_gb200() else 16384,
         }
         prefill_config["cuda_graph_config"] = None
 
@@ -227,7 +237,7 @@ class LLMServerManager:
             "--model",
             model,
             "--kv-block-size",
-            "16",
+            str(KV_BLOCK_SIZE),
             "--max-num-tokens",
             "8000",
         ]
@@ -478,7 +488,9 @@ class DisaggDeterminismTester(DeterminismTester):
         """Reset the prefix cache."""
         print("Resetting prefix cache...")
         # 150 shakespeare requests (each request is 200 words, and roughly 17 blocks) could evict 150 * 17 = 2550 blocks
-        shakespeare_count = 150
+        # On GB200, the block size is 32 tokens, and each request uses roughly 6 blocks.
+        # 300 × 6 = 1800 blocks should be enough to evict the GPU cache (which holds 1000 blocks).
+        shakespeare_count = 300 if is_gb200() else 150
         for seq_idx in range(1, shakespeare_count + 1):
             start_word = (seq_idx - 1) * self.word_count
             content = self.get_shakespeare_content(start_word)

@@ -111,6 +111,8 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
                 num_frames = nvext.fps * req.seconds
 
             # Generate video
+            context_id = context.id()
+            assert context_id is not None
             video_bytes = await self._generate_video(
                 prompt=req.prompt,
                 width=width,
@@ -120,14 +122,14 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
                 num_inference_steps=nvext.num_inference_steps,
                 guidance_scale=nvext.guidance_scale,
                 seed=nvext.seed,
-                request_id=context.id(),
+                request_id=context_id,
                 negative_prompt=nvext.negative_prompt,
                 input_reference=req.input_reference,
             )
 
             video_data = []
             if req.response_format == "url":
-                url = await self._upload_to_fs(video_bytes, context.id())
+                url = await self._upload_to_fs(video_bytes, context_id)
                 video_data.append(VideoData(url=url))
             else:  # b64_json
                 b64 = self._encode_base64(video_bytes)
@@ -223,8 +225,12 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
                 sampling_params_kwargs=args,
             )
 
-        # Result contains 'frames' with list of frames
-        frames = result.get("frames", [])
+        # DiffGenerator.generate() returns GenerationResult | list[GenerationResult] | None
+        if result is None:
+            raise RuntimeError("DiffGenerator returned None")
+        if isinstance(result, list):
+            result = result[0]
+        frames = result.frames
         if not frames:
             raise RuntimeError("DiffGenerator returned no frames")
 
@@ -265,13 +271,13 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
             output_buffer = io.BytesIO()
             with imageio.get_writer(
                 output_buffer,
-                format="mp4",
+                format="mp4",  # type: ignore
                 fps=fps,
                 codec=codec,
                 output_params=["-pix_fmt", "yuv420p"],
             ) as writer:
                 for frame in np_frames:
-                    writer.append_data(frame)
+                    writer.append_data(frame)  # type: ignore
 
             output_buffer.seek(0)
             return output_buffer.read()

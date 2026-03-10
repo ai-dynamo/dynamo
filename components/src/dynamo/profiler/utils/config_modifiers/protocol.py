@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import copy
 import logging
 from typing import Any, Protocol, Tuple
 
@@ -26,6 +27,7 @@ from dynamo.profiler.utils.config import (
     ServiceResources,
     break_arguments,
     get_service_name_by_type,
+    sanitize_cli_args,
     set_argument_value,
     update_image,
 )
@@ -133,6 +135,12 @@ class BaseConfigModifier:
 
     # Subclasses should override, e.g. "vllm" / "sglang" / "trtllm"
     BACKEND: str = ""
+
+    @classmethod
+    def load_default_config(cls, mode: str = "disagg") -> dict:
+        """Load default DGD config for the given mode. Subclasses must implement."""
+        raise NotImplementedError("Subclasses must implement load_default_config")
+
     # Worker CLI arg name for model path / name. vLLM uses "--model"; others use "--model-path".
     WORKER_MODEL_PATH_ARG: str = "--model-path"
     WORKER_SERVED_MODEL_NAME_ARG: str = "--served-model-name"
@@ -401,18 +409,9 @@ class BaseConfigModifier:
 
         cls._ensure_spec_pvc(cfg, pvc_name)
 
-        # Mount to Frontend + prefill + decode services if present.
-        if "Frontend" in cfg.spec.services:
-            cls._ensure_service_volume_mount(
-                cfg.spec.services["Frontend"], pvc_name, pvc_mount_path
-            )
-
-        for sct in (SubComponentType.PREFILL, SubComponentType.DECODE):
-            svc_name = get_service_name_by_type(cfg, cls.BACKEND, sct)
-            if svc_name in cfg.spec.services:
-                cls._ensure_service_volume_mount(
-                    cfg.spec.services[svc_name], pvc_name, pvc_mount_path
-                )
+        # Mount PVC to all services (Frontend + workers)
+        for svc_name, svc in cfg.spec.services.items():
+            cls._ensure_service_volume_mount(svc, pvc_name, pvc_mount_path)
 
         # Patch workers + frontend with PVC model path.
         cls._apply_model_update_to_cfg(
@@ -515,12 +514,16 @@ class BaseConfigModifier:
         # Update model (handles worker args + frontend patching)
         effective_model_path = model_path or model_name
         if pvc_name and pvc_mount_path:
+            # Derive pvc_path from effective_model_path by stripping the mount prefix
+            pvc_path = ""
+            if effective_model_path and effective_model_path.startswith(pvc_mount_path):
+                pvc_path = effective_model_path[len(pvc_mount_path) :].strip("/")
             result = cls.update_model_from_pvc(
                 cfg.model_dump(),
                 model_name=model_name,
                 pvc_name=pvc_name,
                 pvc_mount_path=pvc_mount_path,
-                pvc_path="",
+                pvc_path=pvc_path,
             )
         else:
             result = cls.update_model(
@@ -566,7 +569,7 @@ class BaseConfigModifier:
         service.resources.limits["gpu"] = str(gpus)
 
         if service.extraPodSpec and service.extraPodSpec.mainContainer:
-            service.extraPodSpec.mainContainer.args = list(cli_args)
+            service.extraPodSpec.mainContainer.args = sanitize_cli_args(list(cli_args))
 
     @classmethod
     def _apply_disagg_workers(
@@ -629,3 +632,129 @@ class BaseConfigModifier:
         cls._apply_worker_config(
             cfg.spec.services[svc_name], agg_cli_args, agg_replicas, agg_gpus
         )
+
+
+# ---------------------------------------------------------------------------
+# DGD override merging (module-level, backend-agnostic)
+# ---------------------------------------------------------------------------
+
+# Services whose CLI args are fully replaced by overrides.
+# For engine-worker services (everything else), the main container args
+# are *appended* because they contain profiler-generated sweep results.
+_OVERRIDE_NON_WORKER_SERVICES = frozenset({"Frontend", "Planner"})
+
+# The exact path suffix where profiler-generated CLI args live inside a
+# service dict.  Only this specific location gets append semantics.
+_WORKER_ARGS_SUFFIX = ("extraPodSpec", "mainContainer", "args")
+
+
+def _is_worker_main_container_args(path: list[str]) -> bool:
+    """True when *path* is ``spec.services.<worker>.extraPodSpec.mainContainer.args``."""
+    if len(path) != 6:
+        return False
+    return (
+        path[0] == "spec"
+        and path[1] == "services"
+        and path[2] not in _OVERRIDE_NON_WORKER_SERVICES
+        and tuple(path[3:]) == _WORKER_ARGS_SUFFIX
+    )
+
+
+def _deep_merge_overrides(
+    target: dict,
+    overrides: dict,
+    path: list[str],
+) -> None:
+    """Recursively merge *overrides* into *target* (mutates *target* in-place).
+
+    Rules:
+    - Dicts are merged recursively; missing intermediate keys are created.
+    - ``spec.services.<name>`` that does not exist in *target* is skipped
+      with a warning (all nested overrides under that service are dropped).
+    - Only ``spec.services.<worker>.extraPodSpec.mainContainer.args`` is
+      *appended* to the existing list (preserving profiler-generated CLI
+      args).  ``args`` at any other path is replaced normally.
+    - All other leaf values replace the target value.
+    """
+    for key, value in overrides.items():
+        current_path = path + [key]
+
+        # Guard: skip overrides for services that don't exist in the DGD
+        if (
+            len(current_path) == 3
+            and current_path[0] == "spec"
+            and current_path[1] == "services"
+        ):
+            services = target.get("services", target) if path == ["spec"] else target
+            if key not in services:
+                logger.warning(
+                    "Service '%s' does not exist in the generated DGD config; "
+                    "overrides for this service will not be applied.",
+                    key,
+                )
+                continue
+
+        if isinstance(value, dict) and isinstance(target.get(key), dict):
+            _deep_merge_overrides(target[key], value, current_path)
+        elif isinstance(value, dict) and key not in target:
+            target[key] = copy.deepcopy(value)
+        elif (
+            key == "args"
+            and isinstance(value, list)
+            and _is_worker_main_container_args(current_path)
+        ):
+            existing = target.get(key) or []
+            target[key] = list(existing) + list(value)
+        else:
+            target[key] = (
+                copy.deepcopy(value) if isinstance(value, (dict, list)) else value
+            )
+
+
+def apply_dgd_overrides(dgd_config: dict, overrides: dict) -> dict:
+    """Deep-merge an ``overrides.dgd`` dict onto a generated DGD config.
+
+    Args:
+        dgd_config: The generated DynamoGraphDeployment config dict.
+        overrides: A partial DGD dict with the same structure.  Leaf values
+            overwrite the corresponding keys in *dgd_config*.
+
+    Returns:
+        A new dict with the overrides applied (the original is not mutated).
+    """
+    result = copy.deepcopy(dgd_config)
+    # Strip K8s envelope fields — these are controlled by the template and must
+    # not be overwritten by user-supplied overrides (e.g. apiVersion from a
+    # DGDR spec would change v1alpha1 → v1beta1 causing a 400 Bad Request).
+    stripped_top = [k for k in ("apiVersion", "kind") if k in overrides]
+    if stripped_top:
+        logger.info(
+            "Ignoring envelope field(s) %s from overrides.dgd — these are "
+            "controlled by the deployment template and cannot be overridden.",
+            stripped_top,
+        )
+    filtered = {
+        k: v
+        for k, v in overrides.items()
+        if k not in ("apiVersion", "kind", "metadata")
+    }
+    # For metadata: only copy explicit safe keys (labels, annotations) to avoid
+    # leaking runtime-managed fields like ownerReferences, finalizers, managedFields.
+    _METADATA_SAFE_KEYS = frozenset({"labels", "annotations"})
+    if "metadata" in overrides and isinstance(overrides["metadata"], dict):
+        ignored_meta = [
+            k for k in overrides["metadata"] if k not in _METADATA_SAFE_KEYS
+        ]
+        if ignored_meta:
+            logger.info(
+                "Ignoring metadata identity field(s) %s from overrides.dgd — "
+                "use the DGD template to set these.",
+                ignored_meta,
+            )
+        sanitized_metadata = {
+            k: v for k, v in overrides["metadata"].items() if k in _METADATA_SAFE_KEYS
+        }
+        if sanitized_metadata:
+            filtered["metadata"] = sanitized_metadata
+    _deep_merge_overrides(result, filtered, path=[])
+    return result

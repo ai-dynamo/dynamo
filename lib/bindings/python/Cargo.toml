@@ -7,7 +7,7 @@
 
 [package]
 name = "dynamo-py3"
-version = "0.9.0"
+version = "1.0.0"
 edition = "2024"
 authors = ["NVIDIA"]
 license = "Apache-2.0"
@@ -27,6 +27,7 @@ media-ffmpeg = ["dynamo-llm/media-ffmpeg"]
 
 [dependencies]
 dynamo-runtime = { path = "../../runtime" }
+dynamo-mocker = { path = "../../mocker" }
 dynamo-parsers = { path = "../../parsers" }
 
 anyhow = { version = "1" }

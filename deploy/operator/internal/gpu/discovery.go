@@ -23,6 +23,7 @@ import (
 	"strconv"
 	"strings"
 
+	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -37,10 +38,11 @@ const (
 
 // GPUInfo contains discovered GPU configuration from cluster nodes
 type GPUInfo struct {
-	GPUsPerNode int    // Maximum GPUs per node found in the cluster
-	Model       string // GPU product name (e.g., "H100-SXM5-80GB")
-	VRAMPerGPU  int    // VRAM in MiB per GPU
-	System      string // AIC hardware system identifier (e.g., "h100_sxm", "h200_sxm"), empty if unknown
+	GPUsPerNode   int                         // Maximum GPUs per node found in the cluster
+	NodesWithGPUs int                         // Number of nodes that have GPUs
+	Model         string                      // GPU product name (e.g., "H100-SXM5-80GB")
+	VRAMPerGPU    int                         // VRAM in MiB per GPU
+	System        nvidiacomv1beta1.GPUSKUType // AIC hardware system identifier (e.g., "h100_sxm", "h200_sxm"), empty if unknown
 }
 
 // DiscoverGPUs queries Kubernetes nodes to determine GPU configuration.
@@ -50,7 +52,7 @@ type GPUInfo struct {
 //
 // This function requires cluster-wide node read permissions and expects nodes
 // to have GFD labels. If no nodes with GPU labels are found, it returns an error.
-func DiscoverGPUs(ctx context.Context, k8sClient client.Client) (*GPUInfo, error) {
+func DiscoverGPUs(ctx context.Context, k8sClient client.Reader) (*GPUInfo, error) {
 	logger := log.FromContext(ctx)
 	logger.Info("Starting GPU discovery from cluster nodes")
 
@@ -104,13 +106,15 @@ func DiscoverGPUs(ctx context.Context, k8sClient client.Client) (*GPUInfo, error
 
 	// Infer hardware system from GPU model
 	bestGPUInfo.System = InferHardwareSystem(bestGPUInfo.Model)
+	bestGPUInfo.NodesWithGPUs = nodesWithGPUs
 
 	logger.Info("GPU discovery completed",
 		"gpusPerNode", bestGPUInfo.GPUsPerNode,
+		"nodesWithGPUs", bestGPUInfo.NodesWithGPUs,
+		"totalGpus", bestGPUInfo.GPUsPerNode*bestGPUInfo.NodesWithGPUs,
 		"model", bestGPUInfo.Model,
 		"vram", bestGPUInfo.VRAMPerGPU,
-		"system", bestGPUInfo.System,
-		"nodesWithGPUs", nodesWithGPUs)
+		"system", bestGPUInfo.System)
 
 	return bestGPUInfo, nil
 }
@@ -167,7 +171,7 @@ func extractGPUInfoFromNode(node *corev1.Node) (*GPUInfo, error) {
 //
 // Users can manually override the system in their profiling config (hardware.system)
 // if auto-detection is incorrect or unavailable.
-func InferHardwareSystem(gpuProduct string) string {
+func InferHardwareSystem(gpuProduct string) nvidiacomv1beta1.GPUSKUType {
 	if gpuProduct == "" {
 		return ""
 	}
@@ -176,17 +180,17 @@ func InferHardwareSystem(gpuProduct string) string {
 	normalized := strings.ToUpper(strings.ReplaceAll(gpuProduct, "-", ""))
 	normalized = strings.ReplaceAll(normalized, " ", "")
 
-	// Map common NVIDIA datacenter GPU products to hardware system identifiers
+	// Map common NVIDIA datacenter GPU products to AIC hardware system identifiers.
 	patterns := []struct {
 		pattern string
-		system  string
+		system  nvidiacomv1beta1.GPUSKUType
 	}{
-		{"GB200", "gb200_sxm"},
-		{"H200", "h200_sxm"},
-		{"H100", "h100_sxm"},
-		{"B200", "b200_sxm"},
-		{"A100", "a100_sxm"},
-		{"L40S", "l40s"},
+		{"GB200", nvidiacomv1beta1.GPUSKUTypeGB200SXM},
+		{"H200", nvidiacomv1beta1.GPUSKUTypeH200SXM},
+		{"H100", nvidiacomv1beta1.GPUSKUTypeH100SXM},
+		{"B200", nvidiacomv1beta1.GPUSKUTypeB200SXM},
+		{"A100", nvidiacomv1beta1.GPUSKUTypeA100SXM},
+		{"L40S", nvidiacomv1beta1.GPUSKUTypeL40S},
 	}
 
 	for _, p := range patterns {
@@ -195,7 +199,7 @@ func InferHardwareSystem(gpuProduct string) string {
 		}
 	}
 
-	// Unknown GPU type, return empty string
-	// User must specify system manually in profiling config (hardware.system)
+	// Unknown GPU type, return empty value.
+	// User must specify gpuSku explicitly in spec.hardware.
 	return ""
 }

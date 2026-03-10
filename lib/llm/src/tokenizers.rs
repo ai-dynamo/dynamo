@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 pub mod hf;
+pub mod tiktoken;
 
 // TODO: Add tokenizer benchmarks
 // TODO: Enable README.md as a module doc
@@ -15,11 +16,13 @@ use crate::protocols::TokenIdType;
 pub use anyhow::{Error, Result};
 
 pub use hf::HuggingFaceTokenizer;
+pub use tiktoken::TikTokenTokenizer;
 
 /// Represents the type of tokenizer being used
 #[derive(Debug)]
 pub enum TokenizerType {
     HuggingFace(String),
+    TikToken(String),
 }
 
 /// character offsets in the original text
@@ -57,6 +60,10 @@ pub mod traits {
         fn encode_batch(&self, inputs: &[&str]) -> Result<Vec<Encoding>>;
     }
 
+    /// Implementations **must** use lossy UTF-8 conversion (e.g. `String::from_utf8_lossy`)
+    /// so that partial multi-byte sequences produce U+FFFD (`�`) rather than returning `Err`.
+    /// `DecodeStream::step()` relies on the replacement character to detect incomplete
+    /// sequences and buffer tokens until the full character arrives.
     pub trait Decoder: Send + Sync {
         fn decode(&self, token_ids: &[TokenIdType], skip_special_tokens: bool) -> Result<String>;
     }
@@ -121,6 +128,8 @@ where
 /// The file extension is used to determine the tokenizer type.
 /// Supported file types are:
 /// - json: HuggingFace tokenizer
+/// - model, tiktoken: tiktoken BPE tokenizer (requires `config.json` with a supported
+///   `model_type` in the same directory; currently: kimi, kimi_k2, kimi_k25)
 pub fn create_tokenizer_from_file(file_path: &str) -> Result<Arc<dyn traits::Tokenizer>> {
     let path = Path::new(file_path);
     let extension = path
@@ -133,7 +142,13 @@ pub fn create_tokenizer_from_file(file_path: &str) -> Result<Arc<dyn traits::Tok
             let tokenizer = HuggingFaceTokenizer::from_file(file_path)?;
             Ok(Arc::new(tokenizer))
         }
-        _ => Err(Error::msg("Unsupported file type".to_string())),
+        "model" | "tiktoken" => {
+            let tokenizer = TikTokenTokenizer::from_file_auto(file_path)?;
+            Ok(Arc::new(tokenizer))
+        }
+        _ => Err(Error::msg(format!(
+            "Unsupported tokenizer file type: .{extension}"
+        ))),
     }
 }
 

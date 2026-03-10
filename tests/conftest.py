@@ -4,6 +4,7 @@
 import logging
 import os
 import shutil
+import subprocess
 import tempfile
 from pathlib import Path
 from typing import Generator, Optional
@@ -121,7 +122,11 @@ def set_ucx_tls_no_mm():
     #   (uct_mem.c:482: mem.memh != UCT_MEM_HANDLE_NULL) when two workers
     #   start on the same node (maybe a shared-memory segment collision/limits).
     # - Mitigation: disable UCX "mm" shared-memory transport globally for tests
-    mp.setenv("UCX_TLS", "^mm")
+    #
+    # Also exclude gdr_copy transport to prevent GDRCopy driver initialization
+    # failures (driverInitFileInfo result=11) that can abort the process when
+    # the gdrdrv kernel module is not loaded.
+    mp.setenv("UCX_TLS", "^mm,gdr_copy")
     yield
     mp.undo()
 
@@ -137,7 +142,7 @@ def download_models(model_list=None, ignore_weights=False):
         model_list = TEST_MODELS
 
     # Check for HF_TOKEN in environment
-    hf_token = os.environ.get("HF_TOKEN")
+    hf_token = os.environ.get("HF_TOKEN", "").strip() or None
     if hf_token:
         logging.info("HF_TOKEN found in environment")
     else:
@@ -149,45 +154,50 @@ def download_models(model_list=None, ignore_weights=False):
 
     try:
         from huggingface_hub import snapshot_download
+    except ImportError as exc:
+        raise RuntimeError(
+            "huggingface_hub is required to pre-download models for tests"
+        ) from exc
 
-        for model_id in model_list:
-            logging.info(
-                f"Pre-downloading {'model (no weights)' if ignore_weights else 'model'}: {model_id}"
-            )
+    failures = []
+    for model_id in model_list:
+        logging.info(
+            f"Pre-downloading {'model (no weights)' if ignore_weights else 'model'}: {model_id}"
+        )
 
-            try:
-                if ignore_weights:
-                    # Weight file patterns to exclude (based on hub.rs implementation)
-                    weight_patterns = [
-                        "*.bin",
-                        "*.safetensors",
-                        "*.h5",
-                        "*.msgpack",
-                        "*.ckpt.index",
-                    ]
+        try:
+            if ignore_weights:
+                # Weight file patterns to exclude (based on hub.rs implementation)
+                weight_patterns = [
+                    "*.bin",
+                    "*.safetensors",
+                    "*.h5",
+                    "*.msgpack",
+                    "*.ckpt.index",
+                ]
 
-                    # Download everything except weight files
-                    snapshot_download(
-                        repo_id=model_id,
-                        token=hf_token,
-                        ignore_patterns=weight_patterns,
-                    )
-                else:
-                    # Download the full model snapshot (includes all files)
-                    snapshot_download(
-                        repo_id=model_id,
-                        token=hf_token,
-                    )
-                logging.info(f"Successfully pre-downloaded: {model_id}")
+                # Download everything except weight files
+                snapshot_download(
+                    repo_id=model_id,
+                    token=hf_token,
+                    ignore_patterns=weight_patterns,
+                )
+            else:
+                # Download the full model snapshot (includes all files)
+                snapshot_download(
+                    repo_id=model_id,
+                    token=hf_token,
+                )
+            logging.info(f"Successfully pre-downloaded: {model_id}")
 
-            except Exception as e:
-                logging.error(f"Failed to pre-download {model_id}: {e}")
-                # Don't fail the fixture - let individual tests handle missing models
+        except Exception as exc:
+            logging.error(f"Failed to pre-download {model_id}: {exc}")
+            failures.append(f"{model_id}: {exc}")
 
-    except ImportError:
-        logging.warning(
-            "huggingface_hub not installed. "
-            "Models will be downloaded during test execution."
+    if failures:
+        raise RuntimeError(
+            "Failed to pre-download required Hugging Face models:\n"
+            + "\n".join(failures)
         )
 
 
@@ -230,6 +240,30 @@ def predownload_tokenizers(pytestconfig):
     os.environ["HF_HUB_OFFLINE"] = "1"
     yield
     os.environ.pop("HF_HUB_OFFLINE", None)
+
+
+@pytest.fixture(scope="session")
+def build_kv_indexer():
+    """Pre-build the standalone KV indexer binary once per session.
+
+    Runs `cargo build` so that `cargo run` in tests starts instantly.
+    No-op if the binary is already cached in target/.
+    """
+    _logger.info("Building dynamo-kv-indexer binary (cached after first build)")
+    subprocess.check_call(
+        [
+            "cargo",
+            "build",
+            "-p",
+            "dynamo-kv-router",
+            "--features",
+            "indexer-bin",
+            "--bin",
+            "dynamo-kv-indexer",
+        ],
+        timeout=600,
+    )
+    _logger.info("dynamo-kv-indexer binary ready")
 
 
 @pytest.fixture(autouse=True)

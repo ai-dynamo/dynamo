@@ -94,13 +94,14 @@ class DynamoSglangPublisher:
         # Non-leader nodes don't receive scheduler metrics via this socket - they only
         # need KV event publishing which is set up separately in init_kv_event_publish()
         node_rank = getattr(self.server_args, "node_rank", 0) or 0
+        self._ctx: zmq.asyncio.Context | None = None
         if node_rank == 0:
-            self._ctx = zmq.asyncio.Context()  # type: ignore
+            self._ctx = zmq.asyncio.Context()
             self._sock = get_zmq_socket(
                 self._ctx,
                 zmq.PULL,
                 self.engine.port_args.metrics_ipc_name,
-                True,  # type: ignore
+                True,
             )
         else:
             self._ctx = None
@@ -375,3 +376,33 @@ async def setup_sgl_metrics(
     task = asyncio.create_task(publisher.run())
     logging.info("SGLang metrics loop started")
     return publisher, task, metrics_labels
+
+
+async def handle_non_leader_node(
+    engine: sgl.Engine,
+    publisher: DynamoSglangPublisher,
+    metrics_task: asyncio.Task,
+) -> None:
+    """
+    Handle non-leader node (node_rank >= 1) in multi-node deployments.
+
+    Non-leader nodes run scheduler processes but don't handle requests directly.
+    They still need:
+    - KV event publishing (subscribe to local DP ranks, forward to NATS)
+    - Metrics collection from local schedulers
+    - Prometheus metrics exposure
+    """
+    logging.info(
+        f"Non-leader node detected (node_rank={engine.server_args.node_rank}). "
+        "Running with metrics and KV event publishing for local DP ranks."
+    )
+
+    try:
+        await asyncio.Event().wait()
+    finally:
+        metrics_task.cancel()
+        try:
+            await metrics_task
+        except asyncio.CancelledError:
+            pass
+        publisher.cleanup()

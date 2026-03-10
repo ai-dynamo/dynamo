@@ -83,6 +83,8 @@ class MMRouterHandler:
                 processor=self.processor,
                 model=self.model,
                 model_type=self.model_type,
+                request_token_ids=request.get("token_ids"),
+                request_multi_modal_data=request.get("multi_modal_data"),
             )
 
             # Build block_mm_infos for MM-aware hash computation

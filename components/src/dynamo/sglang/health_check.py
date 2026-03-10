@@ -86,7 +86,7 @@ class SglangHealthCheckPayload(HealthCheckPayload):
 
 
 class SglangDisaggHealthCheckPayload(HealthCheckPayload):
-    """SGLang-specific health check payload for PD-disaggregated mode (prefill or decode).
+    """SGLang-specific health check payload for PD-disaggregated mode.
 
     Both prefill and decode handlers support flat format with bootstrap_info.
     Uses FAKE_BOOTSTRAP_HOST to enable fake-transfer mode, so health checks
@@ -161,6 +161,10 @@ class SglangDisaggHealthCheckPayload(HealthCheckPayload):
         )
 
         super().__init__()
+
+
+class SglangPrefillHealthCheckPayload(SglangDisaggHealthCheckPayload):
+    """Backward-compatible alias for prefill health checks in disaggregated mode."""
 
 
 class ImageDiffusionHealthCheckPayload(HealthCheckPayload):

@@ -317,10 +317,10 @@ class TRTLLMProcess:
         time.sleep(2)
 
 
-@pytest.mark.pre_merge
 @pytest.mark.gpu_1
+@pytest.mark.nightly
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
-@pytest.mark.timeout(150)  # ~3x average (~45s/test), rounded up
+@pytest.mark.timeout(300)
 def test_trtllm_kv_router_basic(
     request,
     runtime_services_dynamic_ports,
@@ -420,14 +420,9 @@ def test_router_decisions_trtllm_attention_dp(
         )
 
 
-@pytest.mark.pre_merge
 @pytest.mark.gpu_1
+@pytest.mark.nightly
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
-@pytest.mark.parametrize(
-    "router_event_threads",
-    [1, 2],
-    ids=["single_thread", "multi_thread"],
-)
 @pytest.mark.timeout(150)  # ~3x average (~45s/test), rounded up
 def test_router_decisions_trtllm_multiple_workers(
     request,
@@ -435,7 +430,6 @@ def test_router_decisions_trtllm_multiple_workers(
     predownload_models,
     set_ucx_tls_no_mm,
     request_plane,
-    router_event_threads,
 ):
     # runtime_services starts etcd and nats
     logger.info("Starting TRT-LLM router prefix reuse test with two workers")
@@ -464,12 +458,11 @@ def test_router_decisions_trtllm_multiple_workers(
             request,
             test_dp_rank=False,
             block_size=TRTLLM_BLOCK_SIZE,
-            router_event_threads=router_event_threads,
         )
 
 
-@pytest.mark.pre_merge
 @pytest.mark.gpu_1
+@pytest.mark.nightly
 @pytest.mark.timeout(150)  # ~3x average (~45s/test), rounded up
 @pytest.mark.parametrize(
     "store_backend,durable_kv_events,request_plane",

@@ -181,8 +181,20 @@ async def init_llm_worker(
         "max_beam_width": config.max_beam_width,
         "max_batch_size": config.max_batch_size,
         "return_perf_metrics": config.publish_events_and_metrics,
+        # enable_iter_perf_stats is required for PyTorch backend to compute iteration-level
+        # stats (KV cache utilization, hit rate). TensorRT backend always has this enabled.
+        # See TRT-LLM PR #11243: MetricsCollector.log_iteration_stats() needs these stats.
+        "enable_iter_perf_stats": config.publish_events_and_metrics,
         "kv_connector_config": kv_connector_config,
     }
+
+    # Add guided decoding backend if specified
+    if config.guided_decoding_backend is not None:
+        arg_map["guided_decoding_backend"] = config.guided_decoding_backend
+        logging.info(
+            "Guided decoding enabled with backend: %s",
+            config.guided_decoding_backend,
+        )
 
     if config.extra_engine_args != "":
         # TODO: Support extra engine args from json file as well.
@@ -385,6 +397,7 @@ async def init_llm_worker(
         # Initialize TensorRT-LLM MetricsCollector and register with global REGISTRY
         # This enables exposing TRT-LLM's native Prometheus metrics (request latency, TTFT, TPOT, etc.)
         metrics_collector = None
+        additional_metrics = None
         if config.publish_events_and_metrics:
             try:
                 model_name_for_metrics = config.served_model_name or config.model
@@ -393,18 +406,47 @@ async def init_llm_worker(
                 )
                 logging.info("TensorRT-LLM MetricsCollector initialized")
 
-                # Register TRT-LLM metrics (TRT-LLM natively outputs trtllm_* metrics after traffic)
-                # Auto-label injection: hierarchy labels are added automatically
+                # Prefix filter: all TRT-LLM metrics (engine + additional) use "trtllm_" prefix
+                _metric_prefixes = ["trtllm_"]
+
+                # Additional metrics (abort tracking, request types, KV transfer perf).
+                # Wrapped in try/except because AdditionalMetricsCollector depends on
+                # prometheus_names which may not be available in all packaging variants.
+                try:
+                    from dynamo.trtllm.metrics import AdditionalMetricsCollector
+
+                    disagg_mode_str = (
+                        config.disaggregation_mode.value
+                        if hasattr(config.disaggregation_mode, "value")
+                        else str(config.disaggregation_mode)
+                    )
+                    additional_metrics = AdditionalMetricsCollector(
+                        labels={
+                            "model_name": model_name_for_metrics,
+                            "disaggregation_mode": disagg_mode_str,
+                            "engine_type": "trtllm",
+                        },
+                    )
+                    logging.info(
+                        "Additional metrics initialized (disagg_mode=%s)",
+                        disagg_mode_str,
+                    )
+                except Exception as e:
+                    logging.warning("Failed to initialize additional metrics: %s", e)
+
+                # Single callback for all Python-side metrics (trtllm_ + additional)
                 register_engine_metrics_callback(
                     endpoint=endpoint,
                     registry=REGISTRY,
-                    metric_prefix_filters=["trtllm_"],
+                    metric_prefix_filters=_metric_prefixes,
                     namespace_name=config.namespace,
                     component_name=config.component,
                     endpoint_name="generate",
                     model_name=model_name_for_metrics,
                 )
-                logging.info("TensorRT-LLM Prometheus metrics registered")
+                logging.info(
+                    "Prometheus metrics registered (prefixes: %s)", _metric_prefixes
+                )
             except Exception as e:
                 logging.warning(
                     f"Failed to initialize TensorRT-LLM Prometheus metrics: {e}"
@@ -432,6 +474,7 @@ async def init_llm_worker(
             shutdown_event=shutdown_event,
             encoder_cache_capacity_gb=config.multimodal_embedding_cache_capacity_gb,
             disable_request_abort=config.disable_request_abort,
+            additional_metrics=additional_metrics,
         )
 
         # Register the model with runtime config
@@ -444,6 +487,7 @@ async def init_llm_worker(
                 endpoint,
                 config.model,
                 config.served_model_name,
+                context_length=config.max_seq_len,
                 kv_cache_block_size=config.kv_block_size,
                 runtime_config=runtime_config,
                 custom_template_path=config.custom_jinja_template,
@@ -493,6 +537,7 @@ async def init_llm_worker(
                 component_gauges=component_gauges,
                 zmq_endpoint=trtllm_zmq_bind_endpoint,
                 enable_local_indexer=config.enable_local_indexer,
+                metrics_collector=metrics_collector,
             ) as publisher:
                 handler_config.publisher = publisher
                 handler = RequestHandlerFactory().get_request_handler(handler_config)
