@@ -10,12 +10,19 @@ import time
 from pathlib import Path
 from typing import List, Optional
 
+import psutil
+
 
 class ServerManager:
     """Manages the lifecycle of a serving backend launched via a bash script.
 
     Uses ``setsid`` so the server gets its own process group, allowing clean
     shutdown without killing the orchestrator.
+
+    Cleanup follows the pattern from PR #7122: snapshot child processes before
+    killing the parent, then explicitly kill any orphaned children that escaped
+    the process group (e.g. TRT-LLM engine workers started via MPI in separate
+    PGIDs).
     """
 
     def __init__(self, port: int = 8000, timeout: int = 600) -> None:
@@ -107,13 +114,34 @@ class ServerManager:
         raise TimeoutError(f"Server did not become ready within {self.timeout}s")
 
     def stop(self) -> None:
-        """Stop the server by killing its process group."""
+        """Stop the server by killing its process group and orphaned children.
+
+        TRT-LLM spawns engine workers via MPI in separate process groups.
+        os.killpg() only reaches the parent's PGID, leaving MPI workers alive
+        with GPU memory allocated. We snapshot children before killing the
+        parent, then explicitly kill any survivors (PR #7122 pattern).
+        """
         if self._process is None:
             return
 
         pid = self._process.pid
         print(f"Stopping server (PID {pid})...", flush=True)
 
+        # 1. Snapshot all child processes BEFORE killing the parent.
+        #    MPI workers run in separate PGIDs — after the parent dies they
+        #    become orphans reparented to init, invisible via parent PID.
+        orphan_candidates = []
+        try:
+            parent = psutil.Process(pid)
+            orphan_candidates = parent.children(recursive=True)
+            print(
+                f"  Snapshotted {len(orphan_candidates)} child processes",
+                flush=True,
+            )
+        except psutil.NoSuchProcess:
+            pass
+
+        # 2. SIGTERM the process group
         try:
             os.killpg(pid, signal.SIGTERM)
         except (ProcessLookupError, PermissionError):
@@ -122,18 +150,44 @@ class ServerManager:
             except (ProcessLookupError, PermissionError):
                 pass
 
+        # 3. Wait for graceful shutdown
         try:
             self._process.wait(timeout=15)
         except subprocess.TimeoutExpired:
+            # 4. Escalate to SIGKILL
             try:
                 os.killpg(pid, signal.SIGKILL)
             except (ProcessLookupError, PermissionError):
                 pass
-            self._process.wait(timeout=5)
+            try:
+                self._process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                pass
+
+        # 5. Kill any orphaned child processes that survived the process
+        #    group kill (MPI workers, engine cores in different PGIDs).
+        killed_orphans = 0
+        for child in orphan_candidates:
+            try:
+                if child.is_running():
+                    print(
+                        f"  Killing orphaned child: PID {child.pid} "
+                        f"name={child.name()}",
+                        flush=True,
+                    )
+                    child.kill()
+                    child.wait(timeout=5)
+                    killed_orphans += 1
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.TimeoutExpired):
+                pass
+        if killed_orphans:
+            print(f"  Killed {killed_orphans} orphaned child processes", flush=True)
 
         print(f"Server stopped (PID {pid}).", flush=True)
         self._process = None
         if self._log_file is not None:
             self._log_file.close()
             self._log_file = None
-        time.sleep(5)
+
+        # Wait for GPU memory to be released
+        time.sleep(10)

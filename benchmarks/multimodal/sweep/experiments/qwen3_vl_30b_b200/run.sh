@@ -10,8 +10,8 @@
 #
 # Usage:
 #   bash run.sh --account <ACCOUNT> --config agg
-#   bash run.sh --account <ACCOUNT> --config epd-1e --concurrencies "16 32 64 128 256"
-#   bash run.sh --account <ACCOUNT> --config epd-2e --dry-run
+#   bash run.sh --account <ACCOUNT> --config epd-1e --concurrencies "64 32 16"
+#   bash run.sh --account <ACCOUNT> --dry-run   # cycles ALL configs, 1 request each
 #
 # The script self-allocates via salloc if not already inside a Slurm job.
 
@@ -23,7 +23,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ACCOUNT=""
 CONFIG=""
 MODEL="Qwen/Qwen3-VL-30B-A3B-Instruct"
-CONCURRENCIES="1 8 16 32 64 128 256"
+CONCURRENCIES="1 8 16 32 64"
 OSL=500
 REQUEST_COUNT=1000
 WARMUP_COUNT=5
@@ -37,15 +37,19 @@ INPUT_FILE="benchmarks/multimodal/jsonl/1000req_1img_200pool_400word_http.jsonl"
 TIMEOUT=900
 
 VALID_CONFIGS="agg epd-1e epd-2e epd-4e epd-6e"
+ALL_CONFIGS=("agg" "epd-1e" "epd-2e" "epd-4e" "epd-6e")
 
 # ── Argument Parsing ─────────────────────────────────────────────────
 usage() {
     cat <<EOF
-Usage: bash run.sh --account ACCOUNT --config CONFIG [OPTIONS]
+Usage: bash run.sh --account ACCOUNT [--config CONFIG | --dry-run] [OPTIONS]
 
 Required:
   --account ACCOUNT       Slurm account
+
+One of:
   --config CONFIG         Benchmark config: agg, epd-1e, epd-2e, epd-4e, epd-6e
+  --dry-run               Cycle ALL configs with 1 request each to validate GPU placement
 
 Options:
   --model MODEL           HuggingFace model name [default: $MODEL]
@@ -60,7 +64,6 @@ Options:
   --output-dir DIR        Results directory (relative to workspace) [default: $OUTPUT_DIR]
   --input-file FILE       JSONL input file (relative to workspace) [default: $INPUT_FILE]
   --timeout N             Server startup timeout in seconds [default: $TIMEOUT]
-  --dry-run               Quick validation: concurrency=1, 3 requests
   --help                  Show this help
 EOF
     exit 0
@@ -94,38 +97,46 @@ if [[ -z "$ACCOUNT" ]]; then
     exit 1
 fi
 
-if [[ -z "$CONFIG" ]]; then
-    echo "ERROR: --config is required (one of: $VALID_CONFIGS)"
+if ! $DRY_RUN && [[ -z "$CONFIG" ]]; then
+    echo "ERROR: --config is required (one of: $VALID_CONFIGS), or use --dry-run"
     exit 1
 fi
 
-if ! echo "$VALID_CONFIGS" | grep -qw "$CONFIG"; then
+if [[ -n "$CONFIG" ]] && ! echo "$VALID_CONFIGS" | grep -qw "$CONFIG"; then
     echo "ERROR: Invalid config '$CONFIG'. Must be one of: $VALID_CONFIGS"
     exit 1
 fi
 
 if $DRY_RUN; then
     CONCURRENCIES="1"
-    REQUEST_COUNT=3
-    WARMUP_COUNT=1
+    REQUEST_COUNT=1
+    WARMUP_COUNT=0
     OSL=50
+    OUTPUT_DIR="benchmarks/results/qwen3_vl_30b_b200/dry_run"
 fi
 
-# Map config name to launch script
-case "$CONFIG" in
-    agg)     LAUNCH_SCRIPT="benchmarks/multimodal/sweep/experiments/qwen3_vl_30b_b200/launch_agg.sh" ;;
-    epd-*)   LAUNCH_SCRIPT="benchmarks/multimodal/sweep/experiments/qwen3_vl_30b_b200/launch_${CONFIG//-/_}.sh" ;;
-esac
+# ── Helper: map config name to launch script ─────────────────────────
+config_to_script() {
+    local cfg="$1"
+    case "$cfg" in
+        agg)     echo "benchmarks/multimodal/sweep/experiments/qwen3_vl_30b_b200/launch_agg.sh" ;;
+        epd-*)   echo "benchmarks/multimodal/sweep/experiments/qwen3_vl_30b_b200/launch_${cfg//-/_}.sh" ;;
+    esac
+}
 
 # ── Self-allocate if not inside Slurm ────────────────────────────────
 if [[ -z "${SLURM_JOB_ID:-}" ]]; then
     echo "======================================================================="
-    echo "  TRTLLM MM Benchmark: $CONFIG"
+    if $DRY_RUN; then
+        echo "  TRTLLM MM Benchmark: DRY RUN (all configs)"
+    else
+        echo "  TRTLLM MM Benchmark: $CONFIG"
+    fi
     echo "======================================================================="
     echo "  Account:       $ACCOUNT"
     echo "  Partition:     $PARTITION"
     echo "  Time:          $TIME"
-    echo "  Config:        $CONFIG"
+    echo "  Config:        ${CONFIG:-all (dry-run)}"
     echo "  Model:         $MODEL"
     echo "  Concurrencies: $CONCURRENCIES"
     echo "  OSL:           $OSL"
@@ -135,19 +146,20 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
     echo ""
 
     # Rebuild args to forward to salloc
-    ARGS=(--account "$ACCOUNT" --config "$CONFIG" --model "$MODEL"
+    ARGS=(--account "$ACCOUNT" --model "$MODEL"
           --concurrencies "$CONCURRENCIES" --osl "$OSL"
           --request-count "$REQUEST_COUNT" --warmup-count "$WARMUP_COUNT"
           --partition "$PARTITION" --time "$TIME" --sqsh "$SQSH"
           --workspace "$WORKSPACE" --output-dir "$OUTPUT_DIR"
           --input-file "$INPUT_FILE" --timeout "$TIMEOUT")
+    [[ -n "$CONFIG" ]] && ARGS+=(--config "$CONFIG")
     $DRY_RUN && ARGS+=(--dry-run)
 
     echo "Allocating node via salloc..."
     exec salloc \
         --partition="$PARTITION" \
         --account="$ACCOUNT" \
-        --job-name="${ACCOUNT}-trtllm-bench-${CONFIG}" \
+        --job-name="${ACCOUNT}-trtllm-bench-${CONFIG:-dryrun}" \
         -t "$TIME" \
         srun --mpi=pmix \
             --container-image="$SQSH" \
@@ -159,7 +171,11 @@ fi
 # ── Inside container ─────────────────────────────────────────────────
 echo ""
 echo "======================================================================="
-echo "  Inside container — building and running: $CONFIG"
+if $DRY_RUN; then
+    echo "  Inside container — DRY RUN (all configs)"
+else
+    echo "  Inside container — building and running: $CONFIG"
+fi
 echo "======================================================================="
 
 cd /workspace
@@ -201,44 +217,77 @@ fi
 # ── GPU check ────────────────────────────────────────────────────────
 echo ""
 echo "[gpu] Available GPUs:"
-nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader
+nvidia-smi --query-gpu=index,name,memory.total,memory.free --format=csv,noheader
 
-# ── Generate per-run sweep YAML ──────────────────────────────────────
-# Convert "1 8 16 32" -> "[1, 8, 16, 32]"
-CONC_YAML="[$(echo "$CONCURRENCIES" | tr ' ' ',')]"
+# ── Helper: generate and run a sweep YAML ────────────────────────────
+run_sweep_config() {
+    local cfg="$1"
+    local launch_script
+    launch_script=$(config_to_script "$cfg")
 
-RUN_YAML="/tmp/sweep_${CONFIG}.yaml"
-cat > "$RUN_YAML" <<YAML
+    # Convert "1 8 16 32" -> "[1,8,16,32]"
+    local conc_yaml="[$(echo "$CONCURRENCIES" | tr ' ' ',')]"
+
+    local run_yaml="/tmp/sweep_${cfg}.yaml"
+    cat > "$run_yaml" <<YAML
 model: $MODEL
-concurrencies: $CONC_YAML
+concurrencies: $conc_yaml
 osl: $OSL
 request_count: $REQUEST_COUNT
 warmup_count: $WARMUP_COUNT
 timeout: $TIMEOUT
+skip_plots: true
 output_dir: $OUTPUT_DIR
 
 input_files:
   - $INPUT_FILE
 
 configs:
-  - label: $CONFIG
-    workflow: $LAUNCH_SCRIPT
+  - label: $cfg
+    workflow: $launch_script
 YAML
 
-echo ""
-echo "[sweep] Generated config:"
-cat "$RUN_YAML"
-echo ""
+    echo ""
+    echo "[sweep] Config: $cfg"
+    cat "$run_yaml"
+    echo ""
 
-# ── Run sweep ────────────────────────────────────────────────────────
-echo "======================================================================="
-echo "  Starting sweep: $CONFIG"
-echo "======================================================================="
+    python -m benchmarks.multimodal.sweep --config "$run_yaml"
 
-python -m benchmarks.multimodal.sweep --config "$RUN_YAML"
+    # Post-run GPU snapshot to verify memory was fully released
+    echo ""
+    echo "[gpu] Post-cleanup GPU state after $cfg:"
+    nvidia-smi --query-gpu=index,memory.used,memory.free --format=csv,noheader
+    echo ""
+}
 
-echo ""
-echo "======================================================================="
-echo "  Sweep complete: $CONFIG"
-echo "  Results: /workspace/$OUTPUT_DIR"
-echo "======================================================================="
+# ── Run ──────────────────────────────────────────────────────────────
+if $DRY_RUN; then
+    echo "======================================================================="
+    echo "  DRY RUN: cycling through all configs"
+    echo "======================================================================="
+
+    for cfg in "${ALL_CONFIGS[@]}"; do
+        echo ""
+        echo "--- DRY RUN: $cfg ---"
+        run_sweep_config "$cfg"
+    done
+
+    echo ""
+    echo "======================================================================="
+    echo "  DRY RUN complete — all configs validated"
+    echo "  Results: /workspace/$OUTPUT_DIR"
+    echo "======================================================================="
+else
+    echo "======================================================================="
+    echo "  Starting sweep: $CONFIG"
+    echo "======================================================================="
+
+    run_sweep_config "$CONFIG"
+
+    echo ""
+    echo "======================================================================="
+    echo "  Sweep complete: $CONFIG"
+    echo "  Results: /workspace/$OUTPUT_DIR"
+    echo "======================================================================="
+fi
