@@ -30,7 +30,11 @@ const SUFFIX_QUANTILE: &str = "quantile";
 const LABEL_QUANTILE: &str = "quantile";
 const DEFAULT_QUEUE_CAPACITY: usize = 16_384;
 const WORKER_POLL: Duration = Duration::from_millis(100);
-// guard against unbounded memory growth (should not happen for reasonable metrics)
+// Guard against unbounded memory growth and expensive quantile scans.
+// Each sample is at most ~24 bytes in the largest case (Instant + two f64s for Ratio),
+// so 100k samples is roughly 2.4 MB per metric. The time-based window (default 60s)
+// typically prunes well before this cap, but we keep a hard limit to bound memory and
+// avoid pathological O(n log n) sort costs in quantile computation.
 const MAX_SAMPLES_PER_METRIC: usize = 100_000;
 const DEFAULT_METRIC_WINDOW_SECONDS: f64 = 60.0;
 const SAMPLE_OVERFLOW_LOG_INTERVAL: u64 = 5_000;
