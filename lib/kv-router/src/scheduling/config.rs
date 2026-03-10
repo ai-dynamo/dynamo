@@ -91,6 +91,11 @@ pub struct KvRouterConfig {
     /// requests, firing a pin_prefix call (with TTL) to the worker after generation completes.
     /// When false (default), cache_control is ignored and no cache_control client is created.
     pub router_enable_cache_control: bool,
+
+    /// Skip blocking for workers at init time (default: false).
+    /// When true, the router starts immediately without waiting for discovery-based
+    /// workers. Used when workers are provided externally per-request (e.g., EPP).
+    pub skip_initial_worker_wait: bool,
 }
 
 impl Default for KvRouterConfig {
@@ -112,6 +117,7 @@ impl Default for KvRouterConfig {
             router_queue_threshold: None,
             router_event_threads: 4,
             router_enable_cache_control: false,
+            skip_initial_worker_wait: false,
         }
     }
 }

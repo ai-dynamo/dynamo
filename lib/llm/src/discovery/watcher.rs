@@ -464,7 +464,6 @@ impl ModelWatcher {
                             card.kv_cache_block_size,
                             Some(self.router_config.kv_router_config),
                             WORKER_TYPE_DECODE,
-                            Default::default(),
                         )
                         .await?,
                 )

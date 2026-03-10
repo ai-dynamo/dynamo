@@ -218,7 +218,6 @@ impl PrefillRouter {
                     kv_cache_block_size,
                     kv_router_config,
                     WORKER_TYPE_PREFILL,
-                    Default::default(),
                 )
                 .await?;
 

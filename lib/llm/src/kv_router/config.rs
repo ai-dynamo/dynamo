@@ -2,11 +2,3 @@
 // SPDX-License-Identifier: Apache-2.0
 
 pub use dynamo_kv_router::config::{KvRouterConfig, RouterConfigOverride};
-
-/// How the router discovers its worker set.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub enum WorkerDiscoveryMode {
-    #[default]
-    Dynamo,
-    External,
-}

@@ -19,9 +19,9 @@ use dynamo_runtime::{DistributedRuntime, Worker};
 use dynamo_runtime::Runtime;
 
 use dynamo_llm::discovery::{ModelManager, WORKER_TYPE_DECODE};
+use dynamo_llm::kv_router::KvRouterConfig;
 use dynamo_llm::kv_router::protocols::WorkerWithDpRank;
 use dynamo_llm::kv_router::{KvRouter, PrefillRouter, RouterConfigOverride};
-use dynamo_llm::kv_router::{KvRouterConfig, WorkerDiscoveryMode};
 use dynamo_runtime::pipeline::RouterMode;
 
 use std::collections::HashSet;
@@ -640,8 +640,8 @@ pub unsafe extern "C" fn create_routers(
                 }
             };
 
-        let kv_router_config = kv_router_config_from_env();
-        let worker_discovery_mode = WorkerDiscoveryMode::External;
+        let mut kv_router_config = kv_router_config_from_env();
+        kv_router_config.skip_initial_worker_wait = true;
 
         // Get component and endpoint
         let component_handle = match drt.namespace(&namespace_str) {
@@ -668,7 +668,6 @@ pub unsafe extern "C" fn create_routers(
                 block_size,
                 Some(kv_router_config),
                 WORKER_TYPE_DECODE,
-                worker_discovery_mode,
             )
             .await
         {
