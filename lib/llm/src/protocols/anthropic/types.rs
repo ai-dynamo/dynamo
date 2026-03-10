@@ -599,8 +599,6 @@ pub enum AnthropicResponseContentBlock {
         name: String,
         input: serde_json::Value,
     },
-    #[serde(rename = "thinking")]
-    Thinking { thinking: String, signature: String },
     #[serde(rename = "redacted_thinking")]
     RedactedThinking { data: String },
     #[serde(rename = "server_tool_use")]
