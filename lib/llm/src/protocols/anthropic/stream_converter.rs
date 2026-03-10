@@ -135,33 +135,33 @@ impl AnthropicStreamConverter {
             }
 
             // Handle reasoning/thinking content deltas
-            if let Some(ref reasoning) = delta.reasoning_content {
-                if !reasoning.is_empty() {
-                    // Emit content_block_start on first thinking token
-                    if !self.thinking_block_started {
-                        self.thinking_block_started = true;
-                        self.thinking_block_index = self.next_block_index;
-                        self.next_block_index += 1;
+            if let Some(ref reasoning) = delta.reasoning_content
+                && !reasoning.is_empty()
+            {
+                // Emit content_block_start on first thinking token
+                if !self.thinking_block_started {
+                    self.thinking_block_started = true;
+                    self.thinking_block_index = self.next_block_index;
+                    self.next_block_index += 1;
 
-                        let block_start = AnthropicStreamEvent::ContentBlockStart {
-                            index: self.thinking_block_index,
-                            content_block: AnthropicResponseContentBlock::Thinking {
-                                thinking: String::new(),
-                                signature: String::new(),
-                            },
-                        };
-                        events.push(make_sse_event("content_block_start", &block_start));
-                    }
-
-                    // Emit thinking delta
-                    let block_delta = AnthropicStreamEvent::ContentBlockDelta {
+                    let block_start = AnthropicStreamEvent::ContentBlockStart {
                         index: self.thinking_block_index,
-                        delta: AnthropicDelta::ThinkingDelta {
-                            thinking: reasoning.clone(),
+                        content_block: AnthropicResponseContentBlock::Thinking {
+                            thinking: String::new(),
+                            signature: String::new(),
                         },
                     };
-                    events.push(make_sse_event("content_block_delta", &block_delta));
+                    events.push(make_sse_event("content_block_start", &block_start));
                 }
+
+                // Emit thinking delta
+                let block_delta = AnthropicStreamEvent::ContentBlockDelta {
+                    index: self.thinking_block_index,
+                    delta: AnthropicDelta::ThinkingDelta {
+                        thinking: reasoning.clone(),
+                    },
+                };
+                events.push(make_sse_event("content_block_delta", &block_delta));
             }
 
             // Handle text content deltas
@@ -455,31 +455,31 @@ impl AnthropicStreamConverter {
             }
 
             // Handle reasoning/thinking content deltas
-            if let Some(ref reasoning) = delta.reasoning_content {
-                if !reasoning.is_empty() {
-                    if !self.thinking_block_started {
-                        self.thinking_block_started = true;
-                        self.thinking_block_index = self.next_block_index;
-                        self.next_block_index += 1;
+            if let Some(ref reasoning) = delta.reasoning_content
+                && !reasoning.is_empty()
+            {
+                if !self.thinking_block_started {
+                    self.thinking_block_started = true;
+                    self.thinking_block_index = self.next_block_index;
+                    self.next_block_index += 1;
 
-                        let ev = AnthropicStreamEvent::ContentBlockStart {
-                            index: self.thinking_block_index,
-                            content_block: AnthropicResponseContentBlock::Thinking {
-                                thinking: String::new(),
-                                signature: String::new(),
-                            },
-                        };
-                        events.push(make_tagged_event("content_block_start", &ev));
-                    }
-
-                    let ev = AnthropicStreamEvent::ContentBlockDelta {
+                    let ev = AnthropicStreamEvent::ContentBlockStart {
                         index: self.thinking_block_index,
-                        delta: AnthropicDelta::ThinkingDelta {
-                            thinking: reasoning.clone(),
+                        content_block: AnthropicResponseContentBlock::Thinking {
+                            thinking: String::new(),
+                            signature: String::new(),
                         },
                     };
-                    events.push(make_tagged_event("content_block_delta", &ev));
+                    events.push(make_tagged_event("content_block_start", &ev));
                 }
+
+                let ev = AnthropicStreamEvent::ContentBlockDelta {
+                    index: self.thinking_block_index,
+                    delta: AnthropicDelta::ThinkingDelta {
+                        thinking: reasoning.clone(),
+                    },
+                };
+                events.push(make_tagged_event("content_block_delta", &ev));
             }
 
             let content_text = match &delta.content {

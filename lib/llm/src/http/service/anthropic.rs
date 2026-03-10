@@ -388,10 +388,10 @@ async fn handler_count_tokens(
 fn strip_billing_preamble(system: &mut Option<SystemContent>) {
     if let Some(content) = system {
         let trimmed = content.text.trim_start();
-        if trimmed.starts_with("x-anthropic-billing-header:") {
-            if let Some(newline_pos) = trimmed.find('\n') {
-                content.text = trimmed[newline_pos + 1..].to_string();
-            }
+        if trimmed.starts_with("x-anthropic-billing-header:")
+            && let Some(newline_pos) = trimmed.find('\n')
+        {
+            content.text = trimmed[newline_pos + 1..].to_string();
         }
     }
 }
