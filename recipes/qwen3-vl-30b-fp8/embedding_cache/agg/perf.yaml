@@ -1,11 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Runs cache_on vs cache_off with a concurrency sweep (32, 64, 128) across all datasets.
-# cache_on: restarts worker between runs (deployment already has cache enabled).
-# cache_off: patches DynamoGraphDeployment CRD to set cache=0, then sweeps.
+# Runs cache_on vs cache_off interleaved per dataset/concurrency for realtime comparison.
+# For each (dataset, concurrency): run cache_on, then cache_off, back-to-back.
 #
-# Requires: ServiceAccount with permissions to restart deployments and patch the CRD.
+# Requires: ServiceAccount with permissions to restart workers and patch the CRD.
 #
 apiVersion: v1
 kind: ServiceAccount
@@ -100,34 +99,28 @@ spec:
             wait_for_model
           }
 
-          run_sweep() {
-            local mode=$1
-            for ds in "${DATASETS[@]}"; do
-              for conc in "${CONCURRENCIES[@]}"; do
-                RUN_DIR="${ARTIFACT_BASE_DIR}/${mode}/${ds}/c${conc}"
-                mkdir -p "${RUN_DIR}"
+          run_one() {
+            local mode=$1 ds=$2 conc=$3
+            RUN_DIR="${ARTIFACT_BASE_DIR}/${mode}/${ds}/c${conc}"
+            mkdir -p "${RUN_DIR}"
 
-                restart_worker
+            echo "=== Running: ${mode} ${ds} concurrency=${conc} ==="
+            aiperf profile \
+              --model "${MODEL_NAME}" \
+              --input-file "${DATASET_DIR}/${ds}.jsonl" \
+              --custom-dataset-type single_turn \
+              --url "http://${FRONTEND}:8000" \
+              --streaming \
+              --ui-type none \
+              --request-count "${REQUEST_COUNT}" \
+              --concurrency "${conc}" \
+              --warmup-request-count "${WARMUP_REQUEST_COUNT}" \
+              --artifact-dir "${RUN_DIR}" \
+              --extra-inputs "max_tokens:${MAX_TOKENS}" \
+              --extra-inputs "min_tokens:${MAX_TOKENS}" \
+              --extra-inputs "ignore_eos:true"
 
-                echo "=== Running: ${mode} ${ds} concurrency=${conc} ==="
-                aiperf profile \
-                  --model "${MODEL_NAME}" \
-                  --input-file "${DATASET_DIR}/${ds}.jsonl" \
-                  --custom-dataset-type single_turn \
-                  --url "http://${FRONTEND}:8000" \
-                  --streaming \
-                  --ui-type none \
-                  --request-count "${REQUEST_COUNT}" \
-                  --concurrency "${conc}" \
-                  --warmup-request-count "${WARMUP_REQUEST_COUNT}" \
-                  --artifact-dir "${RUN_DIR}" \
-                  --extra-inputs "max_tokens:${MAX_TOKENS}" \
-                  --extra-inputs "min_tokens:${MAX_TOKENS}" \
-                  --extra-inputs "ignore_eos:true"
-
-                echo "Done: ${RUN_DIR}"
-              done
-            done
+            echo "Done: ${RUN_DIR}"
           }
 
           DATASETS=(
@@ -146,13 +139,21 @@ spec:
             done
           done
 
-          # Phase 1: cache_on (deployment already has cache enabled)
           wait_for_model
-          run_sweep cache_on
 
-          # Phase 2: cache_off (patch CRD to disable cache, then sweep)
-          set_cache_gb 0
-          run_sweep cache_off
+          for ds in "${DATASETS[@]}"; do
+            for conc in "${CONCURRENCIES[@]}"; do
+              # cache_on: set cache, restart, run
+              set_cache_gb "${CACHE_GB}"
+              restart_worker
+              run_one cache_on "${ds}" "${conc}"
+
+              # cache_off: set cache=0, restart, run
+              set_cache_gb 0
+              restart_worker
+              run_one cache_off "${ds}" "${conc}"
+            done
+          done
 
           # Restore cache setting
           set_cache_gb "${CACHE_GB}"
@@ -179,7 +180,7 @@ spec:
         - name: DATASET_DIR
           value: /perf-cache/datasets
         - name: ARTIFACT_BASE_DIR
-          value: /perf-cache/artifacts/fp8/gb200/agg
+          value: /perf-cache/artifacts/fp8/gb200-4gpu/agg
       resources:
         requests:
           cpu: "8"

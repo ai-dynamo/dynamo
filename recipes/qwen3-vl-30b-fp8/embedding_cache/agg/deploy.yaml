@@ -33,6 +33,14 @@ spec:
             value: "user-workload"
             effect: "NoExecute"
             operator: "Equal"
+        affinity:
+          podAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              - labelSelector:
+                  matchLabels:
+                    nvidia.com/dynamo-component: VllmWorker
+                    nvidia.com/dynamo-graph-deployment-name: qwen3-vl-agg-gb200
+                topologyKey: kubernetes.io/hostname
         mainContainer:
           image: nvcr.io/nvstaging/ai-dynamo/vllm-runtime:1.0.0rc8-arm64
           imagePullPolicy: IfNotPresent
@@ -100,7 +108,7 @@ spec:
             - name: DYN_MULTIMODAL_EMBEDDING_CACHE_GB
               value: "10"  # DYN_MULTIMODAL_EMBEDDING_CACHE_GB
           workingDir: /workspace
-      replicas: 1
+      replicas: 4
       resources:
         limits:
           gpu: "1"
