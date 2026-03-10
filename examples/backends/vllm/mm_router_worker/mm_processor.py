@@ -13,7 +13,6 @@ Key differences from the TRT-LLM version:
 import asyncio
 import logging
 from dataclasses import dataclass
-from io import BytesIO
 from typing import Any, Sequence
 
 from PIL import Image
@@ -36,6 +35,7 @@ class ProcessedInput:
     tokens: list[int]
     mm_hashes: list[int] | None
     image_ranges: list[tuple[int, int]] | None  # [(start, end), ...] per image
+
 
 # =============================================================================
 # Public functions
@@ -71,7 +71,9 @@ async def process_multimodal(
     """
     prompt = _apply_chat_template(messages, tokenizer, processor)
 
-    pil_images = list(await asyncio.gather(*[image_loader.load_image(url) for url in image_urls]))
+    pil_images = list(
+        await asyncio.gather(*[image_loader.load_image(url) for url in image_urls])
+    )
     image_dims = [(img.width, img.height) for img in pil_images]
 
     tokens, image_ranges = _get_expanded_tokens(
