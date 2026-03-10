@@ -3,86 +3,102 @@ SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES.
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Global Planner Example
+# Global Planner Examples
 
-This example demonstrates a global planner routing setup with:
-- A **Global Router** that routes to different pools based on request characteristics
-- **Local Routers** in each pool namespace
-- **Workers** (Mocker for local testing, vLLM for Kubernetes deployment)
+Examples demonstrating **GlobalPlanner** — the centralized scaling execution layer that
+enforces shared scaling policy across multiple DGDs.
 
-## Architecture
+## Example Manifests
+
+| File | Pattern | Backend | Description |
+|------|---------|---------|-------------|
+| `global-planner-gpu-budget.yaml` | Multi-model, GPU budget | vLLM | 2 independent model DGDs + 1 control DGD with `--max-total-gpus` |
+| `global-planner-vllm-test.yaml` | Single-endpoint, multi-pool | vLLM | 1 Frontend + GlobalRouter + GlobalPlanner, 2 prefill pools (TP1, TP2) + 1 decode pool |
+| `global-planner-mocker-test.yaml` | Single-endpoint, multi-pool | Mocker | Same as above with Mocker workers; GlobalPlanner in `--no-operation` mode |
+
+## Deployment Patterns
+
+### Pattern 1: Multi-Model with GPU Budget (`global-planner-gpu-budget.yaml`)
+
+Multiple independent DGDs, each serving a different model with its own Frontend.
+A shared GlobalPlanner enforces a cluster-wide GPU cap.
 
 ```
-                    Frontend (round-robin routing)
-                         |
-                         v
-                    Global Router
-                   (registers as both prefill + decode)
-                         |
-        +----------------+----------------+
-        |                |                |
-        v                v                v
-   Prefill Pool 0   Prefill Pool 1   Decode Pool 0
-   (prefill-pool-0) (prefill-pool-1) (decode-pool-0)
-        |                |                |
-        v                v                v
-   Local Router     Local Router     Local Router
-        |                |                |
-        v                v                v
-      Worker           Worker           Worker
-   (prefill)        (prefill)        (decode)
+DGD gp-ctrl:    GlobalPlanner (--max-total-gpus)
+DGD model-a:    Frontend + VllmPrefillWorker + VllmDecodeWorker + Planner  (MODEL_A)
+DGD model-b:    Frontend + VllmPrefillWorker + VllmDecodeWorker + Planner  (MODEL_B)
 ```
 
-## Configuration
+- No GlobalRouter needed — each model has its own endpoint.
+- Each DGD's local planner uses `environment: "global-planner"` to delegate scaling.
+- GlobalPlanner rejects any scale request that would push total GPUs above the limit.
 
-The `global_router_config.json` defines:
-- 2 prefill pools (`prefill-pool-0`, `prefill-pool-1`)
-- 1 decode pool (`decode-pool-0`)
-- Grid-based pool selection strategy
+### Pattern 2: Single Endpoint, Multi-Pool (`global-planner-vllm-test.yaml`)
 
-Pool selection is based on a 2x2 grid:
-- **Prefill**: (ISL, TTFT_target) maps to prefill pool index
-- **Decode**: (context_length, ITL_target) maps to decode pool index
+One public endpoint for a single model, backed by multiple specialized pools.
+A GlobalRouter selects the best pool for each request.
 
-## Running Locally (with Mocker)
+```
+DGD gp-ctrl:      Frontend + GlobalRouter + GlobalPlanner
+DGD gp-prefill-0: LocalRouter + VllmPrefillWorker (TP1) + Planner
+DGD gp-prefill-1: LocalRouter + VllmPrefillWorker (TP2) + Planner
+DGD gp-decode-0:  LocalRouter + VllmDecodeWorker  (TP1) + Planner
+```
 
-For local testing without GPUs, use the mocker-based script:
+- GlobalRouter routes prefill requests by (ISL, TTFT target) and decode by (context length, ITL target).
+- Each pool planner delegates scaling to GlobalPlanner.
+
+## Prerequisites
+
+- Dynamo Kubernetes Platform installed (see [Kubernetes Quickstart](../../docs/kubernetes/README.md))
+- Cluster Prometheus scraping router metrics via PodMonitor
+- HuggingFace token secret:
+  ```bash
+  kubectl create secret generic hf-token-secret \
+    --from-literal=HF_TOKEN=<your-token> -n ${K8S_NAMESPACE}
+  ```
+- A ReadWriteMany StorageClass for the shared model cache PVC
+
+## Deploying
+
+All manifests use `envsubst` for configuration. Set the required variables and apply:
+
+### GPU Budget Example
 
 ```bash
-cd examples/global_planner
-./run_example.sh
+export K8S_NAMESPACE=my-ns
+export DYNAMO_IMAGE=<dynamo-image>
+export DYNAMO_VLLM_IMAGE=<vllm-image>
+export STORAGE_CLASS_NAME=<rwx-storage-class>
+export MODEL_A=meta-llama/Llama-3.1-8B-Instruct
+export MODEL_B=Qwen/Qwen3-8B
+export MAX_TOTAL_GPUS=8
+
+envsubst < global-planner-gpu-budget.yaml | kubectl apply -n ${K8S_NAMESPACE} -f -
 ```
 
-This starts all components in the background and provides instructions for testing.
-
-## Kubernetes Deployment (with vLLM)
-
-The `vllm-2p1d.yaml` file provides a multi-DGD deployment with real vLLM workers (1 GPU each).
-
-### Prerequisites
-
-- Kubernetes cluster with GPU nodes
-- `hf-token-secret` secret containing your HuggingFace token
-- The Dynamo operator installed
-
-### Deployment
-
-The YAML uses environment variable placeholders:
-- `${K8S_NAMESPACE}` - Your Kubernetes namespace
-- `${VLLM_IMAGE}` - Dynamo vLLM runtime container image
-
-Use `envsubst` to substitute these before applying:
+### Single-Endpoint vLLM Example
 
 ```bash
-# Set your Kubernetes namespace and image
-export K8S_NAMESPACE=<your-k8s-namespace>
-export VLLM_IMAGE=<dynamo-vllm-image>
+export K8S_NAMESPACE=my-ns
+export DYNAMO_IMAGE=<dynamo-image>
+export DYNAMO_VLLM_IMAGE=<vllm-image>
+export STORAGE_CLASS_NAME=<rwx-storage-class>
+export MODEL_NAME=meta-llama/Llama-3.1-8B-Instruct
 
-# Deploy all DGDs
-envsubst < vllm-2p1d.yaml | kubectl apply -n ${K8S_NAMESPACE} -f -
+envsubst < global-planner-vllm-test.yaml | kubectl apply -n ${K8S_NAMESPACE} -f -
 ```
 
-### Verify Deployment
+### Mocker Example (No GPUs)
+
+```bash
+export K8S_NAMESPACE=my-ns
+export DYNAMO_IMAGE=<dynamo-image>
+
+envsubst < global-planner-mocker-test.yaml | kubectl apply -n ${K8S_NAMESPACE} -f -
+```
+
+## Verifying
 
 ```bash
 # Check DGD status
@@ -91,153 +107,49 @@ kubectl get dgd -n ${K8S_NAMESPACE}
 # Check pods
 kubectl get pods -n ${K8S_NAMESPACE}
 
-# Check logs for a specific component
-kubectl logs -n ${K8S_NAMESPACE} -l nvidia.com/dynamo-component=Frontend
+# Watch GlobalPlanner logs for scale requests
+kubectl logs -n ${K8S_NAMESPACE} \
+  -l nvidia.com/dynamo-component=GlobalPlanner -f
 ```
 
-### Cleanup
+## Cleanup
 
 ```bash
-export K8S_NAMESPACE=<your-k8s-namespace>
-export VLLM_IMAGE=<dynamo-vllm-image>
-envsubst < vllm-2p1d.yaml | kubectl delete -n ${K8S_NAMESPACE} -f -
+envsubst < <manifest>.yaml | kubectl delete -n ${K8S_NAMESPACE} -f -
 ```
 
-### Namespace Convention
+## SLA Planner Configuration
 
-The Dynamo operator prepends the Kubernetes namespace to the `dynamoNamespace` field:
-- K8s namespace: `my-namespace`
-- `dynamoNamespace: prefill-pool-0`
-- Actual Dynamo namespace: `my-namespace-prefill-pool-0`
-
-This is why the global router config and local router endpoints must use the full namespace path.
-
-## Testing
-
-Once all components are running, send a request to the frontend:
-
-```bash
-curl -X POST http://localhost:8000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "Qwen/Qwen3-0.6B",
-    "messages": [{"role": "user", "content": "Hello, how are you?"}],
-    "max_tokens": 50,
-    "stream": true
-  }'
-```
-
-For Kubernetes, port-forward the frontend service first:
-
-```bash
-kubectl port-forward -n ${K8S_NAMESPACE} svc/global-planner-frontend-frontend 8000:8000
-```
-
-## Request Flow
-
-1. Request arrives at **Frontend**
-2. Frontend's `PrefillRouter` detects both prefill and decode registered for the model
-3. Frontend sends prefill request to **Global Router** (registered as prefill)
-4. Global Router selects prefill pool based on (ISL, TTFT_target) grid
-5. Request forwarded to **Local Router** in selected prefill pool namespace
-6. Local Router forwards to **Worker** (prefill mode)
-7. Prefill response returns with `disaggregated_params`
-8. Frontend sends decode request to **Global Router** (registered as decode)
-9. Global Router selects decode pool based on (context_length, ITL_target) grid
-10. Tokens stream back through the chain
-
-## Customizing Pool Selection
-
-Edit `global_router_config.json` (or the ConfigMap in `vllm-2p1d.yaml`) to change:
-
-- **Number of pools**: Adjust `num_prefill_pools`, `num_decode_pools` and corresponding namespace lists
-- **Selection grid**: Modify `isl_resolution`, `ttft_resolution` etc. to change grid granularity
-- **Pool mapping**: Edit `prefill_pool_mapping` and `decode_pool_mapping` matrices
-
-Example: To always route to pool 0 regardless of request characteristics:
-```json
-"prefill_pool_mapping": [[0, 0], [0, 0]]
-```
-
-## SLA Planner with GlobalPlanner
-
-Each pool can run an SLA Planner that reads throughput metrics and delegates autoscaling decisions
-to a central **GlobalPlanner** service. The GlobalPlanner arbitrates across pools and executes
-scaling via the Dynamo operator.
-
-### Architecture with SLA Planners
-
-```
-Frontend (round-robin)
-     |
-     v
-Global Router ─── GlobalPlanner  ◄─── scale decisions from pool planners
-     |
-     +──────────────────────────────────────+
-     |                |                     |
-Prefill Pool 0    Prefill Pool 1       Decode Pool 0
-LocalRouter       LocalRouter          LocalRouter
-Worker            Worker               Worker
-Planner ──────►   Planner ──────►      Planner ──────►  (all → GlobalPlanner)
-```
-
-### SLA Planner configuration
-
-The SLA Planner is configured via a JSON blob passed to `--config`. Key fields for the
-global-planner environment:
+Each pool's local planner is configured via a JSON blob passed to `--config`.
+Key fields for GlobalPlanner delegation:
 
 | Field | Description |
-|---|---|
-| `environment` | `"global-planner"` to delegate scaling to GlobalPlanner |
-| `global_planner_namespace` | Dynamo namespace of the DGD running GlobalPlanner |
-| `mode` | `"prefill"` or `"decode"` |
-| `throughput_metrics_source` | `"frontend"` (default) or `"router"` — see below |
+|-------|-------------|
+| `environment` | `"global-planner"` — delegates scaling to GlobalPlanner |
+| `global_planner_namespace` | Dynamo namespace of the control DGD (e.g. `${K8S_NAMESPACE}-gp-ctrl`) |
+| `mode` | `"disagg"`, `"prefill"`, or `"decode"` |
+| `throughput_metrics_source` | `"router"` for multi-DGD setups (reads `dynamo_component_router_*` from Prometheus) |
+| `max_gpu_budget` | Per-pool GPU limit (`-1` = unlimited, defer to GlobalPlanner) |
 
-### `throughput_metrics_source`
+## GlobalPlanner Flags
 
-Controls where the SLA Planner reads aggregate throughput metrics (TTFT, ITL, request rate):
+| Flag | Description |
+|------|-------------|
+| `--max-total-gpus N` | Reject requests that would exceed N total GPUs across all managed DGDs (`-1` = unlimited) |
+| `--managed-namespaces NS...` | Only accept scale requests from listed Dynamo namespaces (default: accept all) |
+| `--no-operation` | Log scale requests without executing them (useful for dry-run testing) |
 
-- **`frontend`** (default): reads `dynamo_frontend_*` histograms from the frontend service. Works
-  for single-DGD disagg deployments where the planner and frontend share a namespace.
+## Namespace Convention
 
-- **`router`**: reads `dynamo_component_router_*` histograms emitted by LocalRouter pods and
-  scraped by cluster Prometheus. Required for hierarchical (multi-DGD) disagg deployments where
-  the SLA Planner runs in a pool DGD namespace that is different from the frontend DGD namespace.
+The Dynamo operator prepends the Kubernetes namespace to the DGD's `dynamoNamespace`:
+- K8s namespace: `my-ns`, DGD name: `gp-ctrl`
+- Dynamo namespace: `my-ns-gp-ctrl`
 
-Use `throughput_metrics_source: "router"` whenever the planner is co-located with a pool
-(not the frontend), i.e. in any GlobalPlanner setup.
+This is why planner configs and router endpoints use the full `${K8S_NAMESPACE}-<dgd-name>` path.
 
-### Prometheus scraping for router metrics
+## Further Reading
 
-The Dynamo operator Helm chart includes a PodMonitor that scrapes LocalRouter pods on port 9090.
-LocalRouter pods must expose metrics on that port via:
-
-```yaml
-env:
-  - name: DYN_SYSTEM_PORT
-    value: "9090"
-```
-
-No standalone Prometheus is needed — the cluster-wide Prometheus picks up the PodMonitor
-automatically.
-
-### GlobalPlanner `--no-operation` mode
-
-Pass `--no-operation` to GlobalPlanner to receive and log scale requests without executing them.
-Useful for observing planner behaviour before enabling live scaling:
-
-```yaml
-command: [python3, -m, dynamo.global_planner]
-args: [--no-operation]
-```
-
-### Example deployments
-
-Complete end-to-end examples are in `examples/backends/`:
-
-| File | Description |
-|---|---|
-| `mocker/deploy/global-planner-mocker-test.yaml` | 2 prefill + 2 decode pools with Mocker workers; GlobalPlanner in no-op mode |
-| `vllm/deploy/global-planner-vllm-test.yaml` | 2 prefill (TP1, TP2) + 1 decode pool with real vLLM workers |
-
-Both use `envsubst` for substituting `${K8S_NAMESPACE}`, `${DYNAMO_IMAGE}`, etc.
+- [Global Planner Deployment Guide](../../docs/components/planner/global-planner.md)
+- [Global Planner README](../../components/src/dynamo/global_planner/README.md)
+- [Planner Configuration Guide](../../docs/components/planner/planner-guide.md)
+- [Global Router README](../../components/src/dynamo/global_router/README.md)
