@@ -109,7 +109,7 @@ aiperf profile \
 
 This produces results in `artifacts/` and prints a summary table to the console:
 
-```
+```text
                                 NVIDIA AIPerf | LLM Metrics
 ┏━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━┓
 ┃              Metric ┃     avg ┃     min ┃     max ┃     p99 ┃     p90 ┃     p50 ┃     std ┃
@@ -211,7 +211,7 @@ See the [AIPerf Visualization Guide](https://github.com/ai-dynamo/aiperf/blob/ma
 
 ### Commonly Used Options
 
-```
+```text
 aiperf profile [OPTIONS]
 
 REQUIRED:
