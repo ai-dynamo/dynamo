@@ -5,10 +5,10 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Build a patched image for aggregated encoder cache support.
+Build a patched image for aggregated embedding cache support.
 
 Usage:
-  ./patch_vllm_agg_encoder_cache.sh --base-image <image> --output-image <image>
+  ./patch_vllm_agg_embedding_cache.sh --base-image <image> --output-image <image>
 
 Options:
   --base-image   Base runtime image to patch (required)
@@ -16,7 +16,7 @@ Options:
   -h, --help     Show this help
 
 Example:
-  ./patch_vllm_agg_encoder_cache.sh \
+  ./patch_vllm_agg_embedding_cache.sh \
     --base-image <your dynamo image>:<your tag> \
     --output-image <your dynamo image>:<your tag>-agg-ec-patched
 EOF

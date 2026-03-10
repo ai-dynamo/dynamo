@@ -20,16 +20,16 @@ spec:
           value: tcp
       extraPodSpec:
         mainContainer:
-          # NOTE: Use patched vllm image for agg encoder support
+          # NOTE: Use patched vllm image for agg embedding support
           image: <your-dynamo-image>
           imagePullPolicy: IfNotPresent
           workingDir: /workspace
       replicas: 1
       resources:
         requests:
-          cpu: "8"
+          cpu: "1"
         limits:
-          cpu: "8"
+          cpu: "1"
       subComponentType: null
 
     VllmWorker:
@@ -50,8 +50,8 @@ spec:
                 --max-model-len 16384 \
                 --disable-log-requests \
                 --enable-prefix-caching \
-                --multimodal-embedding-cache-capacity-gb "${MM_EMBEDDING_CACHE_GB}"
-          # NOTE: Use patched vllm image for agg encoder support
+                --multimodal-embedding-cache-capacity-gb "${DYN_MULTIMODAL_EMBEDDING_CACHE_GB}"
+          # NOTE: Use patched vllm image for agg embedding support
           image: <your-dynamo-image>
           imagePullPolicy: IfNotPresent
           env:
@@ -61,10 +61,10 @@ spec:
               value: tcp
             - name: DYN_VLLM_EMBEDDING_TRANSFER_MODE
               value: nixl-write
-            - name: MM_EMBEDDING_CACHE_GB
-              value: "4"
+            - name: DYN_MULTIMODAL_EMBEDDING_CACHE_GB
+              value: "10"
           workingDir: /workspace
-      replicas: 8
+      replicas: 1
       resources:
         limits:
           gpu: "1"

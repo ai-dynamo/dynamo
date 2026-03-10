@@ -42,16 +42,13 @@ spec:
             --model "${MODEL_NAME}" \
             --input-file "${INPUT_FILE}" \
             --custom-dataset-type single_turn \
-            --shared-system-prompt-length "${SYSTEM_PROMPT_TOKENS}" \
             --url "http://${FRONTEND}:8000" \
             --streaming \
             --ui-type none \
             --request-count "${REQUEST_COUNT}" \
             --concurrency "${CONCURRENCY}" \
-            --request-rate "${REQUEST_RATE}" \
             --request-rate-mode constant \
             --warmup-request-count "${WARMUP_REQUEST_COUNT}" \
-            --warmup-duration "${WARMUP_DURATION}" \
             --artifact-dir "${RUN_DIR}" \
             --extra-inputs "max_tokens:${MAX_TOKENS}" \
             --extra-inputs "min_tokens:${MAX_TOKENS}" \
@@ -66,24 +63,18 @@ spec:
           value: qwen3-vl-agg-frontend
         - name: CACHE_MODE
           value: cache_on
-        - name: SYSTEM_PROMPT_TOKENS
-          value: "160"
         - name: MAX_TOKENS
-          value: "500"
+          value: "150"
         - name: REQUEST_COUNT
           value: "1000"
         - name: CONCURRENCY
-          value: "32"
-        - name: REQUEST_RATE
-          value: "32"
+          value: "64"
         - name: WARMUP_REQUEST_COUNT
-          value: "50"
-        - name: WARMUP_DURATION
-          value: "60"
+          value: "3"
         - name: DATASET_DIR
           value: /perf-cache/datasets
         - name: ARTIFACT_BASE_DIR
-          value: /perf-cache/artifacts/qwen3_vl_30b_encoder_cache/agg
+          value: /perf-cache/artifacts/qwen3_vl_30b_embedding_cache/agg
       resources:
         requests:
           cpu: "8"

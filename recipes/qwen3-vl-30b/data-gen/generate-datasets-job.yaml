@@ -43,7 +43,7 @@ spec:
                 --images-per-request 1 \
                 --images-pool 200 \
                 --user-text-tokens 400 \
-                --image-mode base64 \
+                --image-mode http \
                 --image-dir /perf-cache/images \
                 -o "${OUTPUT_DIR}/qwen3_vl_1000req_1img_pool200.jsonl"
 

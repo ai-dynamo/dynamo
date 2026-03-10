@@ -3,13 +3,13 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Usage:
-#   ./run-benchmark.sh on   # benchmark with embedding cache ON (4GB)
+#   ./run-benchmark.sh on   # benchmark with embedding cache ON (10GB)
 #   ./run-benchmark.sh off  # benchmark with embedding cache OFF
 #
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-NAMESPACE="${NAMESPACE:dynamo}"
+NAMESPACE="${NAMESPACE:-dynamo}"
 
 if [[ $# -ne 1 ]] || [[ "$1" != "on" && "$1" != "off" ]]; then
   echo "Usage: $0 <on|off>"
@@ -19,7 +19,7 @@ fi
 MODE="$1"
 
 if [[ "${MODE}" == "on" ]]; then
-  CACHE_GB="4"
+  CACHE_GB="10"
   CACHE_MODE="cache_on"
 else
   CACHE_GB="0"
@@ -28,9 +28,11 @@ fi
 
 echo "==> Embedding cache: ${MODE} (${CACHE_GB}GB)"
 
-# Patch deploy.yaml: replace MM_EMBEDDING_CACHE_GB value
-sed 's/value: "[0-9]*"  # MM_EMBEDDING_CACHE_GB/value: "'"${CACHE_GB}"'"  # MM_EMBEDDING_CACHE_GB/' \
-  "${SCRIPT_DIR}/deploy.yaml" | \
+# Patch deploy.yaml: set DYN_MULTIMODAL_EMBEDDING_CACHE_GB value
+awk -v cache_gb="${CACHE_GB}" '
+  /name: DYN_MULTIMODAL_EMBEDDING_CACHE_GB/ { print; getline; print "              value: \"" cache_gb "\""; next }
+  { print }
+' "${SCRIPT_DIR}/deploy.yaml" | \
   kubectl apply -f - -n "${NAMESPACE}"
 
 echo "==> Waiting for worker to be ready..."

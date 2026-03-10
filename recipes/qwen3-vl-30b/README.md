@@ -1,14 +1,18 @@
-# Qwen3-VL-30B-A3B-FP8: Aggregated Encoder Cache On vs Off Comparison
+# Qwen3-VL-30B-A3B-Instruct-FP8: Aggregated Embedding Cache On vs Off Comparison
 
-This recipe demonstrates the performance difference when encoder cache is enabled for multi-modal payloads. It includes guidance on creating an artificial dataset with user-defined image re-use, and production-ready deployments for `Qwen3-VL-30B-A3B`.
+This recipe demonstrates the performance difference when embedding cache is enabled for multi-modal payloads. It includes guidance on creating an artificial dataset with user-defined image re-use, and production-ready deployments for `Qwen/Qwen3-VL-30B-A3B-Instruct-FP8`.
 
 ## Results
 
-| Metric                         | Cache OFF  | Cache ON (4GB) | Delta  |
-|-------------------------------|------------|----------------|--------|
-| TTFT (avg)                    | 369 ms     | 302 ms         | -18.2% |
-| ITL (avg)                     | 7.56 ms    | 7.61 ms        | ~same  |
-| Prefill Throughput/user (avg) | 1633 tok/s | 2158 tok/s     | +32.1% |
+| Metric               | Cache ON | Cache OFF | Delta  |
+|----------------------|---------:|----------:|-------:|
+| Output TPS (tok/s)           |   3575.6 |    3072.3 | +16.4% |
+| TTFT avg (ms)        |    526.0 |     727.5 | -27.7% |
+| TTFT p50 (ms)        |    356.8 |     510.8 | -30.1% |
+| ITL avg (ms)         |     14.1 |      15.5 |  -8.8% |
+| Req Latency avg (ms) |   2630.0 |    3035.7 | -13.4% |
+
+**Enabling embedding cache on `Qwen3-VL-30B-A3B-Instruct-FP8` shows an average improvement of +16% throughput, -28% TTFT, and -13% request latency on a single aggregated replica of GB200 using the vLLM backend**
 
 ## Pre-requisites
 
@@ -32,7 +36,7 @@ Total number of slots is calculated as `num_requests*images/request`, representi
 
 The `data-gen/generate-datasets-job.yaml` script creates a dataset of 1000 requests, 1 image per request, and an image pool of 200. Each request will pick an image from this pool without replacement, and loop back through the image pool after it has been exhausted. Thus, the first 200 out of 1000 requests will contain unique images, while the remaining 800 out of 1000 requests will have been seen already by the inference engine. Refer to jsonl [documentation](https://github.com/ai-dynamo/dynamo/tree/main/benchmarks/multimodal/jsonl) for more details on data generation.
 
-Each dataset is hardcoded to have 400 tokens of user-input text. AIPerf configures the system prompt via `--shared-system-prompt-length` and the `perf.yaml` scripts have this set to 160 tokens.
+Each dataset is hardcoded to have 400 tokens of user-input text.
 
 To generate the dataset, run:
 
@@ -42,9 +46,9 @@ kubectl apply -f data-gen/generate-datasets-job.yaml -n ${NAMESPACE}
 
 ## Notes
 
-1. Exact cache hit rates cannot be explicitly controlled via dataset due to potential LRU encoder cache eviction policies; however, decreasing the image pool relative to the number of requests allows for proportionally higher probabilities of seeing duplicate images and cache hits. Increasing the encoder cache capacity also allows for higher cache hit rate because it will evict less.
+1. Exact cache hit rates cannot be explicitly controlled via dataset due to potential LRU embedding cache eviction policies; however, decreasing the image pool relative to the number of requests allows for proportionally higher probabilities of seeing duplicate images and cache hits. Increasing the embedding cache capacity also allows for higher cache hit rate because it will evict less.
 
-**2. Agg encoder cache requires `ec_both` ECConnector role in vLLM, but that functionality was merged post 1.0.0 release. If you see an error such as `Input should be 'ec_producer' or 'ec_consumer' [type=literal_error, input_value='ec_both', input_type=str]`, you can use the `patch_vllm_agg_encoder_cache.sh` script to re-tag your dynamo image with the patch applied. See [multimodal-vllm.md](https://github.com/ai-dynamo/dynamo/blob/main/docs/features/multimodal/multimodal-vllm.md#embedding-cache) for more details.**
+**2. Agg embedding cache requires `ec_both` ECConnector role in vLLM, but that functionality was merged post 1.0.0 release. If you see an error such as `Input should be 'ec_producer' or 'ec_consumer' [type=literal_error, input_value='ec_both', input_type=str]`, you can use the `patch_vllm_agg_embedding_cache.sh` script to re-tag your dynamo image with the patch applied. See [multimodal-vllm.md](https://github.com/ai-dynamo/dynamo/blob/main/docs/features/multimodal/multimodal-vllm.md#embedding-cache) for more details.**
 
 3. Replace placeholders in `*.yaml` before running:
    - `storageClassName: "your-storage-class-name"` in `model-cache/model-cache.yaml`
@@ -53,7 +57,7 @@ kubectl apply -f data-gen/generate-datasets-job.yaml -n ${NAMESPACE}
 
 ## Directory setup
 
-This recipe has three top-level components: `model-cache/` for PVC/model prep, `data-gen/` for dataset creation, and `vllm/agg-encoder-cache/` for deployment and benchmarking with [AIPerf](https://github.com/ai-dynamo/aiperf).
+This recipe has three top-level components: `model-cache/` for PVC/model prep, `data-gen/` for dataset creation, and `vllm/agg-embedding-cache/` for deployment and benchmarking with [AIPerf](https://github.com/ai-dynamo/aiperf).
 
 ```text
 qwen3-vl-30b/
@@ -63,14 +67,14 @@ qwen3-vl-30b/
 │   ├── model-cache.yaml
 │   └── model-download.yaml
 └── vllm/
-    └── agg-encoder-cache/
+    └── agg-embedding-cache/
         ├── deploy.yaml
-        ├── patch_vllm_agg_encoder_cache.sh
+        ├── patch_vllm_agg_embedding_cache.sh
         ├── perf.yaml
         └── run-benchmark.sh
 ```
 
-The `deploy.yaml` scripts have `MM_EMBEDDING_CACHE_GB=4` by default, which represents an embedding cache **on** configuration. To toggle it off, set the env variable to 0.
+The `deploy.yaml` script has `DYN_MULTIMODAL_EMBEDDING_CACHE_GB=10` by default, which represents an embedding cache **on** configuration. To toggle it off, set the env variable to 0.
 
 Similarly, each `perf.yaml` exposes a `CACHE_MODE` env variable to control where AIPerf dumps its results. Set it to either `cache_on` or `cache_off` depending on your deployment.
 
@@ -100,25 +104,25 @@ kubectl logs job/qwen3-vl-30b-generate-datasets -n ${NAMESPACE}
 ```bash
 # Build a patched runtime image outside the cluster.
 # This applies the required vLLM diffs and produces a new image tag.
-./vllm/agg-encoder-cache/patch_vllm_agg_encoder_cache.sh \
+./vllm/agg-embedding-cache/patch_vllm_agg_embedding_cache.sh \
   --base-image <your-dynamo-image>:<tag> \
   --output-image <your-dynamo-image>:<tag>-agg-ec-patched
 ```
 
-Then set `image: <your-dynamo-image>` in `vllm/agg-encoder-cache/deploy.yaml` to your patched output image tag.
+Then set `image: <your-dynamo-image>` in `vllm/agg-embedding-cache/deploy.yaml` to your patched output image tag.
 
-### 4. Deploy and Benchmark (`agg-encoder-cache`)
+### 4. Deploy and Benchmark (`agg-embedding-cache`)
 
 ```bash
-# deploy.yaml defaults to cache ON (MM_EMBEDDING_CACHE_GB=4)
-kubectl apply -f vllm/agg-encoder-cache/deploy.yaml -n ${NAMESPACE}
+# deploy.yaml defaults to cache ON (DYN_MULTIMODAL_EMBEDDING_CACHE_GB=10)
+kubectl apply -f vllm/agg-embedding-cache/deploy.yaml -n ${NAMESPACE}
 kubectl wait --for=condition=Ready dynamographdeployment/qwen3-vl-agg -n ${NAMESPACE} --timeout=900s
 
-kubectl apply -f vllm/agg-encoder-cache/perf.yaml -n ${NAMESPACE}
+kubectl apply -f vllm/agg-embedding-cache/perf.yaml -n ${NAMESPACE}
 kubectl wait --for=condition=Ready pod/qwen3-vl-agg-benchmark -n ${NAMESPACE} --timeout=300s
 ```
 
-Optional: to run cache OFF, change `MM_EMBEDDING_CACHE_GB` to `0` in `vllm/agg-encoder-cache/deploy.yaml` and set `CACHE_MODE=cache_off` in `vllm/agg-encoder-cache/perf.yaml` before applying.
+Optional: to run cache OFF, change `DYN_MULTIMODAL_EMBEDDING_CACHE_GB` to `0` in `vllm/agg-embedding-cache/deploy.yaml` and set `CACHE_MODE=cache_off` in `vllm/agg-embedding-cache/perf.yaml` before applying.
 
 ### 5. Monitor Benchmark Progress
 
@@ -132,6 +136,6 @@ kubectl logs -f qwen3-vl-agg-benchmark -n ${NAMESPACE}
 kubectl wait --for=jsonpath='{.status.phase}'=Succeeded pod/qwen3-vl-agg-benchmark -n ${NAMESPACE} --timeout=7200s
 ```
 
-Wait for `Run complete. Artifacts in /perf-cache/artifacts/qwen3_vl_30b_encoder_cache/agg/<cache_mode>`.
+Wait for `Run complete. Artifacts in /perf-cache/artifacts/qwen3_vl_30b_embedding_cache/agg/<cache_mode>`.
 
-`vllm/agg-encoder-cache/run-benchmark.sh` is also provided as a helper to launch cache-on/cache-off runs.
+`vllm/agg-embedding-cache/run-benchmark.sh` is also provided as a helper to launch cache-on/cache-off runs.
