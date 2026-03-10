@@ -132,6 +132,7 @@ class GMSMemorySaverImpl:
             yield
 
     def pause(self, tag: Optional[str] = None) -> None:
+        logger.info("[GMS] pause called (tag=%s, disabled=%s)", tag, self._disabled)
         if self._disabled:
             return
         if tag is None or self._is_weights_tag(tag):
@@ -149,8 +150,10 @@ class GMSMemorySaverImpl:
 
     def _pause_weights(self) -> None:
         if self._allocator is None:
+            logger.warning("[GMS] _pause_weights: allocator is None, skipping unmap")
             return
         if self._allocator.is_unmapped:
+            logger.info("[GMS] _pause_weights: already unmapped, skipping")
             return
         logger.info("[GMS] Unmapping weights (VA-stable)")
         self._allocator.unmap_all_vas()

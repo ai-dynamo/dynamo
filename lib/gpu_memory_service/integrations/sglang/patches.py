@@ -46,7 +46,10 @@ def patch_torch_memory_saver() -> None:
         """Patched _ensure_initialized that uses GPU Memory Service implementation."""
         # Check if already initialized
         if self._impl is not None:
-            logger.debug("[GMS] TorchMemorySaver already initialized, skipping")
+            logger.info(
+                "[GMS] TorchMemorySaver already initialized (impl=%s), skipping",
+                type(self._impl).__name__,
+            )
             return
 
         # Check hook_mode - use GMS for None or explicit "gms"
@@ -106,6 +109,25 @@ def patch_torch_memory_saver() -> None:
         return None
 
     entrypoint_module.TorchMemorySaver.gms_impl = gms_impl
+
+    # If the singleton was already initialized before this patch ran (e.g.,
+    # due to import ordering in multiprocessing spawn), reset _impl so the
+    # next call to _ensure_initialized goes through the patched version and
+    # creates GMSMemorySaverImpl instead of the default _TorchMemorySaverImpl.
+    import torch_memory_saver
+
+    singleton = torch_memory_saver.torch_memory_saver
+    if singleton._impl is not None:
+        logger.info(
+            "[GMS] TorchMemorySaver singleton already initialized "
+            "(impl=%s), resetting to force GMS re-init on next use",
+            type(singleton._impl).__name__,
+        )
+        singleton._impl = None
+        # The original _ensure_initialized deletes _impl_ctor_kwargs after
+        # creating _impl.  Restore it so the patched version can read it.
+        if not hasattr(singleton, "_impl_ctor_kwargs"):
+            singleton._impl_ctor_kwargs = {}
 
     _torch_memory_saver_patched = True
     logger.debug("[GMS] Patched torch_memory_saver")
