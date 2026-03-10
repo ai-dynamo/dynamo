@@ -33,6 +33,7 @@ from tensorrt_llm.scheduling_params import SchedulingParams
 
 from dynamo._core import Context
 from dynamo.common.utils.otel_tracing import build_trace_headers
+from dynamo.llm.exceptions import EngineShutdown
 from dynamo.logits_processing.examples import HelloWorldLogitsProcessor
 from dynamo.nixl_connect import Connector
 from dynamo.runtime import DistributedRuntime
@@ -200,7 +201,7 @@ class HandlerBase(BaseGenerativeHandler):
         Background task to trigger cancellation if request is cancelled or shutdown
         event is set.
 
-        Raise GeneratorExit if shutdown event is triggered.
+        Raise EngineShutdown if shutdown event is triggered.
         """
         try:
             cancellation_triggers: list[asyncio.Future[Any]] = [
@@ -236,9 +237,9 @@ class HandlerBase(BaseGenerativeHandler):
                 except asyncio.CancelledError:
                     pass
 
-            # Raise GeneratorExit if cancellation is due to shutdown event triggered
+            # Raise EngineShutdown if cancellation is due to shutdown event triggered
             if shutdown_task in done:
-                raise GeneratorExit("Engine was shut down during generation.")
+                raise EngineShutdown("Engine was shut down during generation.")
 
         except asyncio.CancelledError:
             # Task was cancelled, which is expected when generation completes normally
@@ -252,7 +253,7 @@ class HandlerBase(BaseGenerativeHandler):
         Monitor for cancellation triggers and cancel by calling
         generation_result.abort().
 
-        Raise GeneratorExit if shutdown event is triggered.
+        Raise EngineShutdown if shutdown event is triggered.
 
         Yields:
             asyncio.Task: The cancellation monitoring task

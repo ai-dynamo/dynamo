@@ -120,6 +120,8 @@ In such cases, you can signal incomplete responses by raising a `GeneratorExit` 
 Here's an example of how to implement this in your `RequestHandler`:
 
 ```python
+from dynamo.llm.exceptions import EngineShutdown
+
 class RequestHandler:
 
     async def generate(self, request):
@@ -127,13 +129,13 @@ class RequestHandler:
         for result in self.engine.generate_streaming(request):
             # Check if we need to migrate before yielding each token
             if is_shutting_down():
-                # Raising GeneratorExit closes the stream and triggers migration
-                raise GeneratorExit("Worker shutting down, migrating request")
+                # Raising EngineShutdown closes the stream and triggers migration
+                raise EngineShutdown("Worker shutting down, migrating request")
 
             yield result
 ```
 
-When `GeneratorExit` is raised, the frontend receives the incomplete response and can seamlessly continue generation on another available worker instance, preserving the user experience even during worker shutdowns.
+When `EngineShutdown` is raised, the frontend receives the incomplete response and can seamlessly continue generation on another available worker instance, preserving the user experience even during worker shutdowns.
 
 For more information about how request migration works, see the [Request Migration Architecture](../fault-tolerance/request-migration.md) documentation.
 

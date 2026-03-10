@@ -22,6 +22,7 @@ pub use dynamo_runtime::{
 };
 
 use super::context::{Context, callable_accepts_kwarg};
+use super::errors::py_exception_to_backend_error;
 
 /// Add bingings from this crate to the provided module
 pub fn add_to_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -132,8 +133,8 @@ enum ResponseProcessingError {
     #[error("python exception: {0}")]
     PythonException(String),
 
-    #[error("python generator exit: {0}")]
-    PyGeneratorExit(String),
+    #[error("dynamo error")]
+    DynamoError(DynamoError),
 
     #[error("deserialize error: {0}")]
     DeserializeError(String),
@@ -249,17 +250,16 @@ where
                                     e
                                 ))
                             }
-                            ResponseProcessingError::PyGeneratorExit(_) => Annotated::from_err(
-                                DynamoError::builder()
-                                    .error_type(ErrorType::Backend(BackendError::EngineShutdown))
-                                    .message("engine shutting down")
-                                    .build(),
-                            ),
+                            ResponseProcessingError::DynamoError(dynamo_err) => {
+                                Annotated::from_err(dynamo_err)
+                            }
                             ResponseProcessingError::PythonException(e) => {
-                                Annotated::from_error(format!(
-                                    "a python exception was caught while processing the async generator: {}",
-                                    e
-                                ))
+                                Annotated::from_err(
+                                    DynamoError::builder()
+                                        .error_type(ErrorType::Backend(BackendError::Unknown))
+                                        .message(e)
+                                        .build(),
+                                )
                             }
                             ResponseProcessingError::OffloadError(e) => {
                                 Annotated::from_error(format!(
@@ -307,17 +307,33 @@ where
     Resp: Data + for<'de> Deserialize<'de>,
 {
     let item = item.map_err(|e| {
-        println!();
-        let mut is_py_generator_exit = false;
         Python::with_gil(|py| {
             e.display(py);
-            is_py_generator_exit = e.is_instance_of::<pyo3::exceptions::PyGeneratorExit>(py);
-        });
-        if is_py_generator_exit {
-            ResponseProcessingError::PyGeneratorExit(e.to_string())
-        } else {
+
+            // Check if the Python exception is a Dynamo error type.
+            // Wrap as Backend.<*> since this is the backend engine context.
+            if let Some((backend_err, message)) = py_exception_to_backend_error(py, &e) {
+                return ResponseProcessingError::DynamoError(
+                    DynamoError::builder()
+                        .error_type(ErrorType::Backend(backend_err))
+                        .message(message)
+                        .build(),
+                );
+            }
+
+            // GeneratorExit from Python's generator protocol (e.g., GC closing
+            // a generator) is treated as an engine shutdown.
+            if e.is_instance_of::<pyo3::exceptions::PyGeneratorExit>(py) {
+                return ResponseProcessingError::DynamoError(
+                    DynamoError::builder()
+                        .error_type(ErrorType::Backend(BackendError::EngineShutdown))
+                        .message("engine shutting down")
+                        .build(),
+                );
+            }
+
             ResponseProcessingError::PythonException(e.to_string())
-        }
+        })
     })?;
     let response = tokio::task::spawn_blocking(move || {
         Python::with_gil(|py| depythonize::<Resp>(&item.into_bound(py)))

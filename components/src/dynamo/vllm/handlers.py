@@ -36,6 +36,7 @@ from dynamo.llm import (
     register_model,
     unregister_model,
 )
+from dynamo.llm.exceptions import EngineShutdown
 from dynamo.runtime.logging import configure_dynamo_logging
 
 from .engine_monitor import VllmEngineMonitor
@@ -429,7 +430,7 @@ class BaseWorkerHandler(ABC):
     async def _monitor_abort(self, context, request_id, is_prefill):
         """
         Background task that monitors for context cancellation and shutdown.
-        Aborts the request if either occurs. Raises GeneratorExit if shutdown was triggered.
+        Aborts the request if either occurs. Raises EngineShutdown if shutdown was triggered.
         """
         try:
             # Build list of futures/tasks to wait for
@@ -461,13 +462,15 @@ class BaseWorkerHandler(ABC):
                 f"Aborted {'Prefill ' if is_prefill else ''}Request ID: {request_id}"
             )
 
-            # Check which event triggered and raise GeneratorExit if shutdown
+            # Check which event triggered and raise EngineShutdown if shutdown
             if shutdown_task and shutdown_task in done:
-                raise GeneratorExit("Engine was shut down during generation.")
+                raise EngineShutdown("Engine was shut down during generation.")
 
         except asyncio.CancelledError:
             # Task was cancelled, normal cleanup if not aborted
             pass
+        except EngineShutdown:
+            raise
         except Exception as e:
             logger.error(f"Error in abort monitor for request {request_id}: {e}")
 
@@ -475,7 +478,7 @@ class BaseWorkerHandler(ABC):
     async def _abort_monitor(self, context, request_id, is_prefill=False):
         """
         Context manager that creates and automatically cleans up an abort monitoring task.
-        If shutdown event was triggered, raises GeneratorExit on exit.
+        If shutdown event was triggered, raises EngineShutdown on exit.
         """
         task = asyncio.create_task(self._monitor_abort(context, request_id, is_prefill))
         try:
@@ -489,7 +492,7 @@ class BaseWorkerHandler(ABC):
                 except asyncio.CancelledError:
                     pass
             else:
-                # If the task completed, check if it raised GeneratorExit
+                # If the task completed, check if it raised EngineShutdown
                 task.result()
 
     async def clear_kv_blocks(self, request=None):

@@ -64,6 +64,7 @@ impl From<RouterMode> for RsRouterMode {
 
 mod context;
 mod engine;
+pub mod errors;
 mod http;
 mod kserve_grpc;
 mod llm;
@@ -181,6 +182,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<planner::PlannerDecision>()?;
 
     engine::add_to_module(m)?;
+    errors::register_exceptions(m)?;
     parsers::add_to_module(m)?;
 
     m.add_class::<prometheus_metrics::RuntimeMetrics>()?;
