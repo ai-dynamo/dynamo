@@ -71,9 +71,8 @@ async def process_multimodal(
     """
     prompt = _apply_chat_template(messages, tokenizer, processor)
 
-    pil_images = list(
-        await asyncio.gather(*[image_loader.load_image(url) for url in image_urls])
-    )
+    image_mm_items = [{"Url": url} for url in image_urls]
+    pil_images = await image_loader.load_image_batch(image_mm_items)
     image_dims = [(img.width, img.height) for img in pil_images]
 
     tokens, image_ranges = _get_expanded_tokens(
