@@ -47,10 +47,5 @@ CODEOWNERS @ai-dynamo/Devops
 /LICENSE @ai-dynamo/Devops
 /SECURITY.md @ai-dynamo/Devops
 
-# KVBM v2
-/lib/memory/ @grahamking @ryanolson @oandreeva-nv
-/lib/kvbm-*/ @ai-dynamo/kvbm-v2
-/lib/kvbm-logical/ @ai-dynamo/kvbm-v2 @PeaBrane
-
 # Claude Code
 /.claude/ @ishandhanani @alec-flowers @MatejKosec @dagil-nvidia @athreesh @nv-tusharma @ayushag-nv
