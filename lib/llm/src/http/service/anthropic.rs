@@ -367,8 +367,11 @@ async fn anthropic_messages(
 /// Returns an estimated input token count using a len/3 heuristic.
 async fn handler_count_tokens(
     State((_state, _template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
-    Json(request): Json<AnthropicCountTokensRequest>,
+    Json(mut request): Json<AnthropicCountTokensRequest>,
 ) -> Result<Response, Response> {
+    if env_is_truthy(env_llm::DYN_STRIP_ANTHROPIC_PREAMBLE) {
+        strip_billing_preamble(&mut request.system);
+    }
     let tokens = request.estimate_tokens();
     Ok(Json(AnthropicCountTokensResponse {
         input_tokens: tokens,

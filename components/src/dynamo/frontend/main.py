@@ -261,6 +261,8 @@ async def async_main():
 
     if config.strip_anthropic_preamble:
         os.environ["DYN_STRIP_ANTHROPIC_PREAMBLE"] = "1"
+    else:
+        os.environ.pop("DYN_STRIP_ANTHROPIC_PREAMBLE", None)
 
     if config.chat_processor == "vllm":
         assert (
