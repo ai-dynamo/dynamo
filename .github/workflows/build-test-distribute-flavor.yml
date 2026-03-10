@@ -118,6 +118,16 @@ on:
         required: false
         type: boolean
         default: false
+      build_only:
+        description: 'Build and push only — skip all tests, show summary'
+        required: false
+        type: boolean
+        default: false
+      sanitized_ref_name:
+        description: 'Sanitized git ref name for branch-tagged images (used with build_only)'
+        required: false
+        type: string
+        default: ''
     secrets:
       AWS_DEFAULT_REGION:
         required: true
@@ -129,8 +139,6 @@ on:
         required: true
       AZURE_ACR_PASSWORD:
         required: true
-      CI_TOKEN:
-        required: false
       SCCACHE_S3_BUCKET:
         required: false
       AWS_ACCESS_KEY_ID:
@@ -161,27 +169,6 @@ jobs:
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
         with:
           lfs: true
-      - name: Calculate extra tags with platform suffix # will get redundant upon multi arch builds support
-        id: extra-tags
-        shell: bash
-        env:
-          EXTRA_TAGS: ${{ inputs.extra_tags }}
-          CUDA_VERSION: ${{ inputs.cuda_version }}
-        run: |
-          CUDA_VERSION_MAJOR=${CUDA_VERSION%%.*}
-          if [ -n "$EXTRA_TAGS" ]; then
-            RESULT=""
-            while IFS= read -r tag; do
-              if [ -n "$tag" ]; then
-                RESULT+="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${tag}-cuda${CUDA_VERSION_MAJOR}-${{ inputs.platform }}"$'\n'
-              fi
-            done <<< "$EXTRA_TAGS"
-            echo "tags<<EOF" >> $GITHUB_OUTPUT
-            echo "$RESULT" >> $GITHUB_OUTPUT
-            echo "EOF" >> $GITHUB_OUTPUT
-          else
-            echo "tags=" >> $GITHUB_OUTPUT
-          fi
       - name: Docker Login
         uses: ./.github/actions/docker-login
         with:
@@ -212,6 +199,37 @@ jobs:
           flavor: ${{ inputs.framework }}
           arch: ${{ inputs.platform }}
           cuda_version: ${{ inputs.cuda_version }}
+      - name: Calculate extra tags with platform suffix # will get redundant upon multi arch builds support
+        id: extra-tags
+        shell: bash
+        env:
+          EXTRA_TAGS: ${{ inputs.extra_tags }}
+          CUDA_VERSION: ${{ inputs.cuda_version }}
+        run: |
+          CUDA_VERSION_MAJOR=${CUDA_VERSION%%.*}
+          ECR_REGISTRY="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com"
+          ACR_REGISTRY="${{ secrets.AZURE_ACR_HOSTNAME }}"
+          RESULT=""
+          if [ -n "$EXTRA_TAGS" ]; then
+            while IFS= read -r tag; do
+              if [ -n "$tag" ]; then
+                RESULT+="${ECR_REGISTRY}/ai-dynamo/dynamo:${tag}-cuda${CUDA_VERSION_MAJOR}-${{ inputs.platform }}"$'\n'
+              fi
+            done <<< "$EXTRA_TAGS"
+          fi
+          if [ "${{ inputs.build_only }}" == "true" ]; then
+            BRANCH_TAG="${{ inputs.sanitized_ref_name }}-${{ inputs.framework }}"
+            RESULT+="${ECR_REGISTRY}/ai-dynamo/dynamo:${BRANCH_TAG}-cuda${CUDA_VERSION_MAJOR}-${{ inputs.platform }}"$'\n'
+            RESULT+="${ACR_REGISTRY}/ai-dynamo/dynamo:${BRANCH_TAG}-cuda${CUDA_VERSION_MAJOR}-${{ inputs.platform }}"$'\n'
+            RESULT+="${ACR_REGISTRY}/ai-dynamo/dynamo:${{ steps.calculate-target-tag.outputs.target_tag_plain }}-cuda${CUDA_VERSION_MAJOR}-${{ inputs.platform }}"$'\n'
+          fi
+          if [ -n "$RESULT" ]; then
+            echo "tags<<EOF" >> $GITHUB_OUTPUT
+            echo "$RESULT" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+          else
+            echo "tags=" >> $GITHUB_OUTPUT
+          fi
       - name: Print Build Container inputs
         run: |
           echo "=== Build Container Inputs ==="
@@ -250,7 +268,6 @@ jobs:
           target: ${{ inputs.target }}
           platform: ${{ inputs.platform }}
           cuda_version: ${{ inputs.cuda_version }}
-          ci_token: ${{ secrets.CI_TOKEN }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
@@ -260,6 +277,8 @@ jobs:
           extra_tags: ${{ steps.extra-tags.outputs.tags }}
           push_image: ${{ inputs.push_image }}
           no_load: ${{ inputs.no_load }}
+          extra_build_args: |
+            DYNAMO_COMMIT_SHA=${{ github.sha }}
       - name: Show summary
         shell: bash
         if: ${{ inputs.push_image && inputs.show_summary }}
@@ -269,13 +288,29 @@ jobs:
           echo "| Image URI |" >> $GITHUB_STEP_SUMMARY
           echo "|-----|" >> $GITHUB_STEP_SUMMARY
           echo "| \`${{ steps.calculate-target-tag.outputs.default_target_image_uri }}\` |" >> $GITHUB_STEP_SUMMARY
+          EXTRA_TAGS="${{ steps.extra-tags.outputs.tags }}"
+          if [ -n "$EXTRA_TAGS" ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### 🏷️ Extra Tags" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "| Image URI |" >> $GITHUB_STEP_SUMMARY
+            echo "|-----|" >> $GITHUB_STEP_SUMMARY
+            while IFS= read -r tag; do
+              if [ -n "$tag" ]; then
+                echo "| \`${tag}\` |" >> $GITHUB_STEP_SUMMARY
+              fi
+            done <<< "$EXTRA_TAGS"
+          fi
 
 
   # ============================================================================
   # TEST
   # ============================================================================
   test:
-    if: ( inputs.run_cpu_only_tests || inputs.run_single_gpu_tests ) && inputs.build_image
+    if: |
+        !inputs.build_only &&
+        ( inputs.run_cpu_only_tests || inputs.run_single_gpu_tests ) &&
+        inputs.build_image
     needs: [build]
     name: Test ${{ inputs.framework }}-cuda${{ inputs.cuda_version }}-${{ inputs.platform }}
     runs-on: ${{ inputs.platform == 'amd64' && 'prod-tester-amd-gpu-v1' || 'prod-tester-arm-v1' }}
@@ -372,6 +407,7 @@ jobs:
   multi-gpu-test:
     # Multi-GPU support limited to AMD64 only
     if: |
+        !inputs.build_only &&
         inputs.run_multi_gpu_tests &&
         inputs.build_image &&
         ( inputs.platform != 'arm64' )
@@ -435,6 +471,7 @@ jobs:
     # Run if copy_to_acr is true AND build succeeded AND (test succeeded OR test was skipped)
     if: |
       always() &&
+      !inputs.build_only &&
       inputs.copy_to_acr &&
       needs.build.result == 'success' &&
       (needs.test.result == 'success' || needs.test.result == 'skipped')
