@@ -119,7 +119,7 @@ class TestDisaggLogprobsSerializationRoundtrip:
         assert len(recovered) == 2
         assert set(recovered[0].keys()) == {100, 200, 300}
         assert set(recovered[1].keys()) == {400, 500}
-        for orig_pos, rec_pos in zip(original, recovered):
+        for orig_pos, rec_pos in zip(original, recovered, strict=True):
             for tid in orig_pos:
                 assert rec_pos[tid].logprob == pytest.approx(orig_pos[tid].logprob)
                 assert rec_pos[tid].rank == orig_pos[tid].rank
