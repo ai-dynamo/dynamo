@@ -21,7 +21,7 @@ The mocker engine now supports a vLLM-style CLI interface with individual argume
 - `--max-num-batched-tokens`: Maximum number of batched tokens per iteration (default: 8192)
 - `--enable-prefix-caching` / `--no-enable-prefix-caching`: Enable/disable automatic prefix caching (default: True)
 - `--enable-chunked-prefill` / `--no-enable-chunked-prefill`: Enable/disable chunked prefill (default: True)
-- `--watermark`: KV cache watermark threshold as a fraction (default: 0.01)
+- `--preemption-mode`: Preemption mode for decode eviction under memory pressure: `lifo` (default, matches vLLM v1) or `fifo`
 - `--speedup-ratio`: Speed multiplier for token generation (default: 1.0). Higher values make the simulation engines run faster. Use `0` for infinite speedup (no simulation delays)
 - `--data-parallel-size`: Number of data parallel workers to simulate (default: 1)
 - `--num-workers`: Number of mocker workers to launch in the same process (default: 1). All workers share the same tokio runtime and thread pool

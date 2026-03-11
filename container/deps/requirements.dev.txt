@@ -1,0 +1,8 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Development-only tools — NOT for runtime or test containers.
+
+mypy==1.18.2
+pre-commit==4.5.0
+pyright==1.1.407
