@@ -262,6 +262,7 @@ jobs:
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_timeout_minutes: 60
       push_image: false # Only push dev images on main
+      copy_to_acr: false
       run_cpu_only_tests: false
       run_single_gpu_tests: false
       run_multi_gpu_tests: false
@@ -280,6 +281,7 @@ jobs:
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_timeout_minutes: 60
       push_image: false # Only push dev images on main
+      copy_to_acr: false
       run_cpu_only_tests: false
       run_single_gpu_tests: false
       run_multi_gpu_tests: false
@@ -298,6 +300,7 @@ jobs:
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_timeout_minutes: 60
       push_image: false # Only push dev images on main
+      copy_to_acr: false
       run_cpu_only_tests: false
       run_single_gpu_tests: false
       run_multi_gpu_tests: false
