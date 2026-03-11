@@ -11,7 +11,7 @@
 //! # Initialization Flow
 //!
 //! 1. Worker calls `register_kv_caches` → tensors cached in `PendingWorkerState`
-//! 2. Worker exports Nova peer address as handshake metadata (no NIXL yet)
+//! 2. Worker exports Velo peer address as handshake metadata (no NIXL yet)
 //! 3. Leader collects handshake metadata and coordinates layout creation
 //! 4. Leader calls `configure_layouts` RPC on each worker
 //! 5. Worker completes NIXL registration and creates DirectWorker

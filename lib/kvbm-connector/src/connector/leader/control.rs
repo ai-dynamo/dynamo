@@ -168,7 +168,7 @@ struct RegisterLeaderResponse {
 /// Handler for PUT /register_leader/{instance_id}
 ///
 /// Discovers a remote leader by instance_id using nova-discovery,
-/// registers it with Nova for communication, and adds it to the
+/// registers it with Velo for communication, and adds it to the
 /// list of remote leaders for distributed search.
 async fn register_leader_handler(
     State(leader): State<Arc<ConnectorLeader>>,

@@ -29,7 +29,7 @@ use kvbm_physical::layout::LayoutConfig;
 
 /// Velo event handle for forward pass completion notification.
 /// Stored separately from CUDA events since we now use pre-allocated per-layer events.
-pub(crate) type ForwardPassNovaEvent = velo::EventHandle;
+pub(crate) type ForwardPassVeloEvent = velo::EventHandle;
 
 /// Worker details set during KV cache registration.
 pub(crate) struct WorkerDetails {
@@ -118,16 +118,16 @@ pub struct WorkerState {
     /// Layout configuration, set during KV cache registration.
     layout_config: OnceLock<LayoutConfig>,
 
-    /// Nova worker service, set when initialization completes.
+    /// Velo worker service, set when initialization completes.
     pub(crate) service: OnceLock<VeloWorkerService>,
 
     // --- Mutable state fields (Mutex) ---
     /// Pending state for deferred initialization.
     pending: Mutex<Option<PendingWorkerState>>,
 
-    /// Nova event handle for forward pass completion notification.
+    /// Velo event handle for forward pass completion notification.
     /// Set in `bind_connector_metadata`, consumed in `save_kv_layer` on last layer.
-    pub(crate) forward_pass_nova_event: Mutex<Option<ForwardPassNovaEvent>>,
+    pub(crate) forward_pass_velo_event: Mutex<Option<ForwardPassVeloEvent>>,
 
     // --- Pre-allocated CUDA events for layer-wise operations ---
     /// CUDA events for intra-pass G2→G1 onboarding, one per layer.
@@ -141,7 +141,7 @@ pub struct WorkerState {
     /// Recorded on the torch stream during save_kv_layer,
     /// and represents the moment in time when the layer has been computed
     /// and is ready to be offloaded.
-    /// The last layer event triggers Nova forward pass completion notification.
+    /// The last layer event triggers Velo forward pass completion notification.
     pub(crate) compute_layer_events: OnceLock<Vec<Arc<CudaEvent>>>,
 
     /// Recorded on the offload stream when the last layer is complete.
@@ -162,7 +162,7 @@ impl WorkerState {
             layout_config: OnceLock::new(),
             service: OnceLock::new(),
             pending: Mutex::new(None),
-            forward_pass_nova_event: Mutex::new(None),
+            forward_pass_velo_event: Mutex::new(None),
             onboard_layer_events: OnceLock::new(),
             compute_layer_events: OnceLock::new(),
             offload_complete_event: OnceLock::new(),
@@ -320,21 +320,21 @@ impl WorkerState {
             .ok_or_else(|| anyhow::anyhow!("compute_layer_events not initialized"))
     }
 
-    /// Store the Nova event handle for forward pass completion.
-    pub(crate) fn set_forward_pass_nova_event(&self, event: ForwardPassNovaEvent) {
-        *self.forward_pass_nova_event.lock() = Some(event);
+    /// Store the Velo event handle for forward pass completion.
+    pub(crate) fn set_forward_pass_velo_event(&self, event: ForwardPassVeloEvent) {
+        *self.forward_pass_velo_event.lock() = Some(event);
     }
 
-    /// Take the Nova event handle for forward pass completion.
+    /// Take the Velo event handle for forward pass completion.
     /// Returns None if no event was set.
-    pub(crate) fn take_forward_pass_nova_event(&self) -> Option<ForwardPassNovaEvent> {
-        self.forward_pass_nova_event.lock().take()
+    pub(crate) fn take_forward_pass_velo_event(&self) -> Option<ForwardPassVeloEvent> {
+        self.forward_pass_velo_event.lock().take()
     }
 
-    /// Clear the Nova event handle without consuming it.
+    /// Clear the Velo event handle without consuming it.
     #[expect(dead_code)]
-    pub(crate) fn clear_forward_pass_nova_event(&self) {
-        *self.forward_pass_nova_event.lock() = None;
+    pub(crate) fn clear_forward_pass_velo_event(&self) {
+        *self.forward_pass_velo_event.lock() = None;
     }
 
     // --- Delegate methods to FinishedState ---

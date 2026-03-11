@@ -198,7 +198,7 @@ impl ConnectorLeader {
     /// the status of the operation and return results when complete.
     ///
     /// The second boolean in the return tuple indicates whether async loading is in progress:
-    /// - `true` for inter-pass mode (async out-of-band via Nova messages)
+    /// - `true` for inter-pass mode (async out-of-band via Velo messages)
     /// - `false` for intra-pass mode (sync layer-wise during forward pass)
     #[tracing::instrument(level = "info", skip(self), ret)]
     pub fn get_num_new_matched_tokens(
@@ -274,7 +274,7 @@ impl ConnectorLeader {
     /// for prefill.
     ///
     /// The behavior depends on the configured onboard mode:
-    /// - **Inter-pass mode**: Spawns an async task to transfer blocks from G2 to G1 via Nova messages.
+    /// - **Inter-pass mode**: Spawns an async task to transfer blocks from G2 to G1 via Velo messages.
     /// - **Intra-pass mode**: Stores G2/G1 block pairs for later aggregation in `process_scheduler_output`,
     ///   which will pass them to workers via `KvConnectorMetadata.intra_pass_load`.
     #[tracing::instrument(level = "debug", skip(self), fields(?request_id))]
@@ -303,7 +303,7 @@ impl ConnectorLeader {
 
         let result = match self.onboard_mode() {
             OnboardMode::Inter => {
-                // Async out-of-band onboarding via Nova messages
+                // Async out-of-band onboarding via Velo messages
                 self.start_onboarding(request_id, block_ids, num_external_tokens)
             }
             OnboardMode::Intra => {

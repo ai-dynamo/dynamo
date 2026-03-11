@@ -25,7 +25,7 @@
 //!    - On binding the metadata, the action will be armed and triggered on the last call to save_kv_layer.
 //!      - The arming of the action is the creation of CudaEvent on bindings
 //!      - The triggering is to record the CudaEvent on the Torch CUDA stream on the last call to save_kv_layer;
-//!        the event immediately pass to an async task which await on the completion, then triggers the Nova
+//!        the event immediately pass to an async task which await on the completion, then triggers the Velo
 //!        active message to trigger the EventHandle specific to the worker's rank back to the leader.
 //!    - The ForwardPassCompletionEvent is used as a precondition for leader initiated action that require the
 //!      forward pass completion event to be triggered.
@@ -99,7 +99,7 @@ pub trait ConnectorWorkerInterface: Send + Sync {
     ///
     /// Always callable - returns immediately if no action is needed for this layer.
     /// On the last layer, records a CUDA event and spawns a task to trigger
-    /// the Nova forward pass completion event.
+    /// the Velo forward pass completion event.
     ///
     /// # Arguments
     /// * `layer_index` - The layer index being saved
@@ -165,7 +165,7 @@ pub struct ConnectorWorker {
     /// used by wait_for_layer_load to decide whether to insert cudaStreamWaitEvent.
     intra_pass_onboard_active: Arc<AtomicBool>,
     /// Flag indicating whether forward pass completion notification is active.
-    /// Set to true in bind_connector_metadata when a Nova event is present,
+    /// Set to true in bind_connector_metadata when a Velo event is present,
     /// used by save_kv_layer to decide whether to record events.
     forward_pass_completion_active: Arc<AtomicBool>,
 
@@ -245,7 +245,7 @@ impl ConnectorWorker {
     /// This is called from `save_kv_layer` when `needs_offload_action` returns true.
     /// Actions performed:
     /// - Record CUDA event on the stream for this layer
-    /// - On last layer with forward pass completion: spawn task to trigger Nova event
+    /// - On last layer with forward pass completion: spawn task to trigger Velo event
     fn perform_offload_action(&self, layer_index: usize, stream_handle: u64) -> Result<()> {
         let is_last_layer = layer_index == self.num_layers() - 1;
         let forward_pass_active = self.forward_pass_completion_active.load(Ordering::Relaxed);
@@ -311,7 +311,7 @@ impl ConnectorWorker {
             }
         }
 
-        // On last layer with forward pass completion: spawn task to trigger Nova
+        // On last layer with forward pass completion: spawn task to trigger Velo
         if is_last_layer && forward_pass_active {
             self.trigger_forward_pass_completion(event.clone())?;
         }
@@ -319,15 +319,15 @@ impl ConnectorWorker {
         Ok(())
     }
 
-    /// Spawn async task to wait for CUDA event then trigger Nova forward pass event.
+    /// Spawn async task to wait for CUDA event then trigger Velo forward pass event.
     fn trigger_forward_pass_completion(
         &self,
         cuda_event: Arc<cudarc::driver::CudaEvent>,
     ) -> Result<()> {
-        // Take the Nova event handle
-        let nova_event = self.state.take_forward_pass_nova_event().ok_or_else(|| {
+        // Take the Velo event handle
+        let velo_event = self.state.take_forward_pass_velo_event().ok_or_else(|| {
             anyhow::anyhow!(
-                "No Nova event handle - forward_pass_completion_active was true but no event set"
+                "No Velo event handle - forward_pass_completion_active was true but no event set"
             )
         })?;
 
@@ -335,7 +335,7 @@ impl ConnectorWorker {
         let cuda_event_handle = cuda_event.cu_event() as u64;
 
         tracing::debug!(
-            ?nova_event,
+            ?velo_event,
             cuda_event = cuda_event_handle,
             "Spawning forward pass completion task"
         );
@@ -359,8 +359,8 @@ impl ConnectorWorker {
                 }
 
                 // Trigger the Velo forward pass event
-                tracing::debug!(?nova_event, "CUDA event complete, triggering Velo event");
-                if let Err(e) = messenger.events().trigger(nova_event).await {
+                tracing::debug!(?velo_event, "CUDA event complete, triggering Velo event");
+                if let Err(e) = messenger.events().trigger(velo_event).await {
                     tracing::error!("Failed to trigger forward pass event: {}", e);
                 }
             },
@@ -437,13 +437,13 @@ impl ConnectorWorkerInterface for ConnectorWorker {
     fn bind_connector_metadata(&self, metadata: KvConnectorMetadata) -> Result<()> {
         tracing::debug!(iteration = metadata.iteration, "Binding connector metadata");
 
-        // Store Nova event handle if present (we use pre-allocated CUDA events now)
+        // Store Velo event handle if present (we use pre-allocated CUDA events now)
         if let Some(event_map) = &metadata.foward_pass_completion_events {
             let my_instance_id = self.state.runtime().messenger().instance_id();
 
-            if let Some(&nova_event) = event_map.get(&my_instance_id) {
-                tracing::debug!(?nova_event, "Storing forward pass Nova event");
-                self.state.set_forward_pass_nova_event(nova_event);
+            if let Some(&velo_event) = event_map.get(&my_instance_id) {
+                tracing::debug!(?velo_event, "Storing forward pass Velo event");
+                self.state.set_forward_pass_velo_event(velo_event);
                 self.forward_pass_completion_active
                     .store(true, Ordering::Relaxed);
             }
@@ -489,12 +489,12 @@ impl ConnectorWorkerInterface for ConnectorWorker {
     fn clear_connector_metadata(&self) -> Result<()> {
         tracing::debug!("Clearing connector metadata");
 
-        // Verify that Nova event has been consumed by save_kv_layer (on last layer)
-        if self.state.take_forward_pass_nova_event().is_some() {
+        // Verify that Velo event has been consumed by save_kv_layer (on last layer)
+        if self.state.take_forward_pass_velo_event().is_some() {
             // This could happen if there was an error during forward pass
             // or if no layers were processed. Log but don't fail.
             tracing::trace!(
-                "Forward pass Nova event not consumed - save_kv_layer may not have been called on last layer"
+                "Forward pass Velo event not consumed - save_kv_layer may not have been called on last layer"
             );
         }
 
