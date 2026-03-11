@@ -1,4 +1,13 @@
-# Full Stack Optimizations for Agentic Inference with Dynamo
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+subtitle: "Ishan Dhanani, Alec Flowers — March 2026"
+description: "How Dynamo optimizes for agentic workloads at three layers: frontend API, router, and KV cache management."
+keywords: agentic inference, KV cache, prefix caching, agent hints, disaggregated serving, Dynamo
+last-updated: March 10, 2026
+---
+
+# Full-Stack Optimizations for Agentic Inference with Dynamo
 
 Coding agents are starting to write production code at scale. [Stripe’s agents generate 1,300+ PRs per week](https://stripe.dev/blog/minions-stripes-one-shot-end-to-end-coding-agents). [Ramp attributes 30% of merged PRs to agents](https://www.infoq.com/news/2026/01/ramp-coding-agent-platform/). [Spotify reports 650+ agent-generated PRs per month](https://engineering.atspotify.com/2025/11/spotifys-background-coding-agent-part-1). Tools like Claude Code and Codex make hundreds of API calls per coding session, each carrying the full conversation history. Behind every one of these workflows is an inference stack under significant KV cache pressure. Agentic systems are the most cache-intensive workloads in production LLM inference today.
 

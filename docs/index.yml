@@ -252,6 +252,9 @@ navigation:
     path: blogs/index.mdx
     slug: blog
     contents:
+      - page: "Full-Stack Optimizations for Agentic Inference"
+        path: blogs/agentic-inference/agentic-inference.md
+        slug: agentic-inference
       - page: "Flash Indexer: Inter-Galactic KV Routing"
         path: blogs/flash-indexer/flash-indexer.md
         slug: flash-indexer
