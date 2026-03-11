@@ -9078,18 +9078,6 @@ spec:
                     itl:
                       description: ITL is the Inter-Token Latency target in milliseconds.
                       type: number
-                    optimizationType:
-                      allOf:
-                        - enum:
-                            - latency
-                            - throughput
-                        - enum:
-                            - latency
-                            - throughput
-                      description: |-
-                        OptimizationType controls the profiling optimization strategy.
-                        Use when explicit SLA targets (ttft+itl or e2eLatency) are not known.
-                      type: string
                     ttft:
                       description: TTFT is the Time To First Token target in milliseconds.
                       type: number

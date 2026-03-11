@@ -54,9 +54,9 @@ kvbm-logical = { path = "lib/kvbm-logical", version = "1.0.0" }
 kvbm-physical = { path = "lib/kvbm-physical", version = "1.0.0" }
 
 # velo
-velo-common = { path = "lib/velo-common", version = "1.0.0" }
-velo-transports = { path = "lib/velo-transports", version = "1.0.0" }
-velo-events = { path = "lib/velo-events", version = "1.0.0" }
+velo-common = { path = "lib/velo-common", version = "0.1.0" }
+velo-transports = { path = "lib/velo-transports", version = "0.1.0" }
+velo-events = { path = "lib/velo-events", version = "0.1.0" }
 
 # External dependencies
 anyhow = { version = "1" }
@@ -127,9 +127,10 @@ tracing-subscriber = { version = "0.3", features = [
     "json",
 ] }
 tracing-opentelemetry = { version = "0.32.0" }
-opentelemetry = { version = "0.31.0", features = ["trace"] }
-opentelemetry_sdk = { version = "0.31.0", features = ["trace", "rt-tokio"] }
-opentelemetry-otlp = { version = "0.31.0", features = ["trace", "grpc-tonic"] }
+opentelemetry = { version = "0.31.0", features = ["trace", "logs"] }
+opentelemetry_sdk = { version = "0.31.0", features = ["trace", "logs", "rt-tokio"] }
+opentelemetry-otlp = { version = "0.31.0", features = ["trace", "logs", "grpc-tonic"] }
+opentelemetry-appender-tracing = { version = "0.31.0" }
 validator = { version = "0.20.0", features = ["derive"] }
 uuid = { version = "1.18.1", features = ["v4", "serde"] }
 url = { version = "2.5", features = ["serde"] }

@@ -117,7 +117,7 @@ vllm_configs = {
             pytest.mark.gpu_1,
             pytest.mark.pre_merge,
             pytest.mark.timeout(360),  # 3x estimated time (70s) + download time (150s)
-            pytest.mark.xfail(
+            pytest.mark.skipif(
                 _is_cuda13(),
                 reason="lmcache does not support CUDA 13 as of v0.3.11",
                 strict=False,
@@ -139,7 +139,7 @@ vllm_configs = {
             pytest.mark.gpu_1,
             pytest.mark.pre_merge,
             pytest.mark.timeout(360),  # 3x estimated time (70s) + download time (150s)
-            pytest.mark.xfail(
+            pytest.mark.skipif(
                 _is_cuda13(),
                 reason="lmcache does not support CUDA 13 as of v0.3.11",
                 strict=False,
