@@ -57,7 +57,10 @@ Plans:
   1. `cargo check -p kvbm-connector` exits with zero errors
   2. `cargo check -p kvbm-connector` exits with zero warnings, or all remaining warnings are pre-existing and documented
   3. `cargo check --workspace` exits with zero errors (no regressions in other crates)
-**Plans**: TBD
+**Plans**: 1 plan
+
+Plans:
+- [ ] 03-01-PLAN.md — Declare nccl feature in kvbm-connector Cargo.toml and verify clean compilation
 
 ### Phase 4: Test Porting
 **Goal**: Connector-specific tests from `ryan/kvbm-next` are ported into the workspace, compile under `--features testing`, and pass
@@ -79,5 +82,5 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 |-------|----------------|--------|-----------|
 | 1. Workspace Wiring | 1/1 | Complete   | 2026-03-11 |
 | 2. Import Migration | 0/4 | Not started | - |
-| 3. Compilation Gate | 0/TBD | Not started | - |
+| 3. Compilation Gate | 0/1 | Not started | - |
 | 4. Test Porting | 0/TBD | Not started | - |
