@@ -53,7 +53,7 @@ navigation:
             path: kubernetes/autoscaling.md
           - page: Inference Gateway (GAIE)
             path: kubernetes/inference-gateway.md
-          - page: Checkpointing
+          - page: Snapshot
             path: kubernetes/snapshot.md
       - section: Observability (K8s)
         contents:
