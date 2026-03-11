@@ -119,7 +119,8 @@ impl KvEventPublisher {
     ///     endpoint: The Dynamo component endpoint for this worker.
     ///     worker_id: Identifier of this worker (default 0).
     ///     kv_block_size: KV cache block size in tokens; must be > 0.
-    ///     dp_rank: Data-parallel rank of this worker (default 0).
+    ///     dp_rank: Default data-parallel rank used when per-event `dp_rank`
+    ///         override is not provided (default 0).
     ///     enable_local_indexer: When True, a local KV indexer is kept in-process
     ///         so that routers can recover events directly from this worker.
     ///     zmq_endpoint: Optional ZMQ SUB endpoint to read raw engine events from.
@@ -175,8 +176,19 @@ impl KvEventPublisher {
         })
     }
 
+    /// Publish a KV stored event.
+    ///
+    /// Args:
+    ///     token_ids: Token IDs for the stored blocks.
+    ///     num_block_tokens: Number of tokens in each block.
+    ///     block_hashes: Block hashes corresponding to stored blocks.
+    ///     parent_hash: Optional parent block hash.
+    ///     block_mm_infos: Optional multimodal metadata per block.
+    ///     lora_name: Optional LoRA adapter name.
+    ///     dp_rank: Optional per-event data-parallel rank override.
+    ///         When omitted, the publisher's constructor `dp_rank` is used.
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (token_ids, num_block_tokens, block_hashes, parent_hash=None, block_mm_infos=None, lora_name=None))]
+    #[pyo3(signature = (token_ids, num_block_tokens, block_hashes, parent_hash=None, block_mm_infos=None, lora_name=None, dp_rank=None))]
     fn publish_stored(
         &self,
         py: Python,
@@ -186,9 +198,10 @@ impl KvEventPublisher {
         parent_hash: Option<i64>,
         block_mm_infos: Option<Bound<PyAny>>,
         lora_name: Option<String>,
+        dp_rank: Option<DpRank>,
     ) -> PyResult<()> {
         let kv_block_size = self.kv_block_size as u32;
-        let dp_rank = self.dp_rank;
+        let dp_rank = dp_rank.unwrap_or(self.dp_rank);
         let warning_count = self.warning_count.clone();
         let inner = self.inner.clone();
 
@@ -222,8 +235,20 @@ impl KvEventPublisher {
         })
     }
 
-    fn publish_removed(&self, py: Python, block_hashes: Vec<i64>) -> PyResult<()> {
-        let dp_rank = self.dp_rank;
+    /// Publish a KV removed event.
+    ///
+    /// Args:
+    ///     block_hashes: List of block hashes to remove.
+    ///     dp_rank: Optional per-event data-parallel rank override.
+    ///         When omitted, the publisher's constructor `dp_rank` is used.
+    #[pyo3(signature = (block_hashes, dp_rank=None))]
+    fn publish_removed(
+        &self,
+        py: Python,
+        block_hashes: Vec<i64>,
+        dp_rank: Option<DpRank>,
+    ) -> PyResult<()> {
+        let dp_rank = dp_rank.unwrap_or(self.dp_rank);
         let inner = self.inner.clone();
 
         // Use shared monotonic event_id counter from the inner publisher

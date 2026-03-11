@@ -703,7 +703,10 @@ class ApproxKvIndexer:
 
 class KvEventPublisher:
     """
-    A KV event publisher will publish KV events corresponding to the component.
+    Publish KV cache events for a worker/component.
+
+    The constructor `dp_rank` is the default rank. You can override it per event
+    in `publish_stored(..., dp_rank=...)` and `publish_removed(..., dp_rank=...)`.
     """
 
     ...
@@ -730,7 +733,8 @@ class KvEventPublisher:
             endpoint: The endpoint to extract component information from for event publishing
             worker_id: The worker ID (unused, inferred from endpoint)
             kv_block_size: The KV block size (must be > 0)
-            dp_rank: The data parallel rank (defaults to 0)
+            dp_rank: Default data parallel rank used when publish calls omit
+                `dp_rank` (defaults to 0)
             enable_local_indexer: Enable worker-local KV indexer
             zmq_endpoint: Optional ZMQ endpoint for relay mode (e.g. "tcp://127.0.0.1:5557")
             zmq_topic: ZMQ topic to subscribe to (defaults to "" when zmq_endpoint is set)
@@ -744,6 +748,7 @@ class KvEventPublisher:
         parent_hash: Optional[int] = None,
         block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
         lora_name: Optional[str] = None,
+        dp_rank: Optional[int] = None,
     ) -> None:
         """
         Publish a KV stored event.
@@ -759,10 +764,14 @@ class KvEventPublisher:
                 Each item is either None or a dict with "mm_objects" key containing
                 a list of {"mm_hash": int, "offsets": [[start, end], ...]} dicts.
             lora_name: Optional LoRA adapter name for adapter-aware block hashing.
+            dp_rank: Optional override for this event's data parallel rank.
+                When omitted, constructor `dp_rank` is used.
         """
         ...
 
-    def publish_removed(self, block_hashes: List[int]) -> None:
+    def publish_removed(
+        self, block_hashes: List[int], dp_rank: Optional[int] = None
+    ) -> None:
         """
         Publish a KV removed event.
 
@@ -770,6 +779,8 @@ class KvEventPublisher:
 
         Args:
             block_hashes: List of block hashes to remove (signed 64-bit integers)
+            dp_rank: Optional override for this event's data parallel rank.
+                When omitted, constructor `dp_rank` is used.
         """
         ...
 
@@ -1690,4 +1701,3 @@ class VirtualConnectorClient:
     async def wait(self) -> None:
         """Blocks until there is a new decision to fetch using 'get'"""
         ...
-
