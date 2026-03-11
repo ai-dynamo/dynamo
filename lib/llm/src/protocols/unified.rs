@@ -209,7 +209,7 @@ impl TryFrom<NvCreateResponse> for UnifiedRequest {
         // Capture API-specific fields BEFORE the lossy conversion
         let responses_ctx = ResponsesContext {
             previous_response_id: req.inner.previous_response_id.clone(),
-            truncation: req.inner.truncation.clone(),
+            truncation: req.inner.truncation,
             reasoning: req.inner.reasoning.clone(),
             include: req.inner.include.clone(),
             store: req.inner.store.unwrap_or(false),
@@ -237,14 +237,14 @@ fn extract_cache_breakpoints(req: &AnthropicCreateMessageRequest) -> Vec<CacheBr
     let mut breakpoints = Vec::new();
 
     // System-level cache control
-    if let Some(system) = &req.system {
-        if let Some(cc) = &system.cache_control {
-            breakpoints.push(CacheBreakpoint {
-                message_index: 0, // system is logically position 0
-                block_index: 0,
-                cache_control: cc.clone(),
-            });
-        }
+    if let Some(system) = &req.system
+        && let Some(cc) = &system.cache_control
+    {
+        breakpoints.push(CacheBreakpoint {
+            message_index: 0, // system is logically position 0
+            block_index: 0,
+            cache_control: cc.clone(),
+        });
     }
 
     let offset = if req.system.is_some() { 1 } else { 0 };
@@ -285,9 +285,7 @@ fn extract_disable_parallel_tool_use(req: &AnthropicCreateMessageRequest) -> boo
         Some(AnthropicToolChoice::Simple(simple)) => {
             simple.disable_parallel_tool_use.unwrap_or(false)
         }
-        Some(AnthropicToolChoice::Named(named)) => {
-            named.disable_parallel_tool_use.unwrap_or(false)
-        }
+        Some(AnthropicToolChoice::Named(named)) => named.disable_parallel_tool_use.unwrap_or(false),
         None => false,
     }
 }
@@ -676,10 +674,7 @@ mod tests {
         let unified = UnifiedRequest::try_from(req).unwrap();
 
         let ctx = unified.responses_context().unwrap();
-        assert_eq!(
-            ctx.previous_response_id.as_deref(),
-            Some("resp_abc123")
-        );
+        assert_eq!(ctx.previous_response_id.as_deref(), Some("resp_abc123"));
         assert!(ctx.store);
         assert!(ctx.truncation.is_some());
         assert!(ctx.reasoning.is_some());

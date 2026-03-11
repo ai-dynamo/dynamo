@@ -126,7 +126,12 @@ impl ResponseStreamConverter {
             parallel_tool_calls: Some(true),
             presence_penalty: Some(0.0),
             // store: false because this branch does not persist responses.
-            store: self.api_context.as_ref().map(|ctx| ctx.store).or(self.params.store).or(Some(false)),
+            store: self
+                .api_context
+                .as_ref()
+                .map(|ctx| ctx.store)
+                .or(self.params.store)
+                .or(Some(false)),
             temperature: self.params.temperature.or(Some(1.0)),
             text: Some(self.params.text.clone().unwrap_or(ResponseTextParam {
                 format: TextResponseFormatConfiguration::Text,
@@ -154,7 +159,10 @@ impl ResponseStreamConverter {
             instructions: self.params.instructions.clone().map(Instructions::Text),
             max_output_tokens: self.params.max_output_tokens,
             max_tool_calls: None,
-            previous_response_id: self.api_context.as_ref().and_then(|ctx| ctx.previous_response_id.clone()),
+            previous_response_id: self
+                .api_context
+                .as_ref()
+                .and_then(|ctx| ctx.previous_response_id.clone()),
             prompt: None,
             prompt_cache_key: None,
             prompt_cache_retention: None,
