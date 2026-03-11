@@ -132,13 +132,18 @@ pub struct PrefillRouter {
     state: ArcSwap<PrefillState>,
     model_manager: Arc<ModelManager>,
     endpoint_id: ArcSwap<Option<EndpointId>>,
-    cancel_token: CancellationToken,
+    /// Swappable cancel token: cancelled on deactivate(), replaced on reactivate().
+    cancel_token: ArcSwap<CancellationToken>,
     router_mode: RouterMode,
     enforce_disagg: bool,
     /// Model name used to look up the worker monitor for prefill client registration
     model_name: String,
     /// Namespace used to look up the correct WorkerSet's worker monitor
     namespace: String,
+    /// Stored for reactivation — needed to rebuild the inner router after prefill rejoin.
+    kv_cache_block_size: u32,
+    /// Stored for reactivation — needed to rebuild the inner router after prefill rejoin.
+    kv_router_config: Option<KvRouterConfig>,
 }
 
 impl PrefillRouter {
@@ -152,11 +157,13 @@ impl PrefillRouter {
             state: ArcSwap::from_pointee(PrefillState::Passthrough),
             model_manager,
             endpoint_id: ArcSwap::from_pointee(None),
-            cancel_token: CancellationToken::new(),
+            cancel_token: ArcSwap::from_pointee(CancellationToken::new()),
             router_mode,
             enforce_disagg,
             model_name: String::new(),
             namespace: String::new(),
+            kv_cache_block_size: 0,
+            kv_router_config: None,
         })
     }
 
@@ -177,11 +184,13 @@ impl PrefillRouter {
             state: ArcSwap::from_pointee(PrefillState::AwaitingPrefill),
             model_manager: model_manager.clone(),
             endpoint_id: ArcSwap::from_pointee(None),
-            cancel_token: cancel_token.clone(),
+            cancel_token: ArcSwap::from_pointee(cancel_token.clone()),
             router_mode,
             enforce_disagg,
             model_name,
             namespace,
+            kv_cache_block_size,
+            kv_router_config,
         });
 
         // Spawn background task to wait for activation
@@ -290,6 +299,15 @@ impl PrefillRouter {
             InnerPrefillRouter::SimpleRouter(Arc::new(push_router))
         };
 
+        // Guard: if deactivated while activation was in-flight (across the await
+        // points above), don't resurrect — the prefill workers are already gone.
+        if matches!(&**self.state.load(), PrefillState::Deactivated) {
+            tracing::warn!(
+                "Router deactivated during activation setup, discarding stale activation"
+            );
+            return Ok(());
+        }
+
         self.state
             .store(Arc::new(PrefillState::Active(inner_router)));
 
@@ -304,6 +322,12 @@ impl PrefillRouter {
     /// Deactivate the prefill router. Called when all prefill workers are removed.
     /// After deactivation, requests fall back to aggregated mode (or fail if enforce_disagg).
     pub fn deactivate(&self) {
+        // Cancel any in-flight activation task to prevent a stale activate()
+        // from overwriting Deactivated back to Active after we return.
+        self.cancel_token.load().cancel();
+        // Swap in a fresh token so a future reactivate() can use a live one.
+        self.cancel_token.store(Arc::new(CancellationToken::new()));
+
         self.state.store(Arc::new(PrefillState::Deactivated));
         self.endpoint_id.store(Arc::new(None));
         tracing::info!(
@@ -312,6 +336,55 @@ impl PrefillRouter {
             enforce_disagg = self.enforce_disagg,
             "Prefill router deactivated (prefill workers removed)"
         );
+    }
+
+    /// Reactivate a deactivated router with a new prefill endpoint.
+    /// Spawns a new background activation task.  Called when prefill workers
+    /// rejoin after a transient failure.
+    pub fn reactivate(self: &Arc<Self>, endpoint: Endpoint) {
+        if !matches!(&**self.state.load(), PrefillState::Deactivated) {
+            tracing::warn!(
+                model_name = %self.model_name,
+                namespace = %self.namespace,
+                "Cannot reactivate router not in Deactivated state, ignoring"
+            );
+            return;
+        }
+
+        tracing::info!(
+            model_name = %self.model_name,
+            namespace = %self.namespace,
+            "Reactivating prefill router (prefill workers rejoined)"
+        );
+
+        self.state.store(Arc::new(PrefillState::AwaitingPrefill));
+
+        // Fresh cancel token for the new activation task.
+        let new_token = CancellationToken::new();
+        self.cancel_token.store(Arc::new(new_token.clone()));
+
+        let router_clone = Arc::clone(self);
+        let model_manager = self.model_manager.clone();
+        let kv_cache_block_size = self.kv_cache_block_size;
+        let kv_router_config = self.kv_router_config;
+
+        tokio::spawn(async move {
+            tokio::select! {
+                result = router_clone.activate(
+                    endpoint,
+                    model_manager,
+                    kv_cache_block_size,
+                    kv_router_config,
+                ) => {
+                    if let Err(e) = result {
+                        tracing::error!(error = %e, "Failed to reactivate prefill router");
+                    }
+                }
+                _ = new_token.cancelled() => {
+                    tracing::debug!("Prefill router reactivation cancelled");
+                }
+            }
+        });
     }
 
     /// Whether this router can serve requests in its current state.
@@ -624,7 +697,7 @@ impl PrefillRouter {
 impl Drop for PrefillRouter {
     fn drop(&mut self) {
         tracing::debug!("Dropping PrefillRouter, cancelling background activation task");
-        self.cancel_token.cancel();
+        self.cancel_token.load().cancel();
     }
 }
 
@@ -804,11 +877,38 @@ impl PrefillRouter {
             state: ArcSwap::from_pointee(PrefillState::Deactivated),
             model_manager: Arc::new(crate::discovery::ModelManager::new()),
             endpoint_id: ArcSwap::from_pointee(None),
-            cancel_token: CancellationToken::new(),
+            cancel_token: ArcSwap::from_pointee(CancellationToken::new()),
             router_mode: dynamo_runtime::pipeline::RouterMode::RoundRobin,
             enforce_disagg,
             model_name: "test-model".to_string(),
             namespace: "test-ns".to_string(),
+            kv_cache_block_size: 0,
+            kv_router_config: None,
+        })
+    }
+
+    /// Test helper: create a router in `AwaitingPrefill` state — simulates a decode
+    /// worker that registered for disagg but prefill hasn't arrived yet.
+    /// `can_serve_requests()` returns true (model visible during startup).
+    /// Calling `deactivate()` transitions to `Deactivated`, enabling lifecycle tests.
+    /// Test helper: simulate the synchronous part of reactivate() without
+    /// requiring a real Endpoint.  Transitions Deactivated → AwaitingPrefill.
+    pub fn simulate_reactivation(&self) {
+        self.state.store(Arc::new(PrefillState::AwaitingPrefill));
+    }
+
+    pub fn make_awaiting_for_test(enforce_disagg: bool) -> Arc<Self> {
+        Arc::new(Self {
+            state: ArcSwap::from_pointee(PrefillState::AwaitingPrefill),
+            model_manager: Arc::new(crate::discovery::ModelManager::new()),
+            endpoint_id: ArcSwap::from_pointee(None),
+            cancel_token: ArcSwap::from_pointee(CancellationToken::new()),
+            router_mode: dynamo_runtime::pipeline::RouterMode::RoundRobin,
+            enforce_disagg,
+            model_name: "test-model".to_string(),
+            namespace: "test-ns".to_string(),
+            kv_cache_block_size: 0,
+            kv_router_config: None,
         })
     }
 }
@@ -893,6 +993,62 @@ mod tests {
         assert!(
             !router.was_ever_activated(),
             "fresh disabled router must not claim prior activation"
+        );
+    }
+
+    // ── deactivate cancels activation token (Fix 2a) ─────────────────────
+
+    /// deactivate() must cancel the current cancel_token so any in-flight
+    /// activation task is killed before it can overwrite Deactivated → Active.
+    #[test]
+    fn test_deactivate_cancels_activation_token() {
+        let router = PrefillRouter::make_awaiting_for_test(true);
+
+        // Grab the token before deactivation.
+        let token_before = router.cancel_token.load_full();
+        assert!(
+            !token_before.is_cancelled(),
+            "token must be live before deactivation"
+        );
+
+        router.deactivate();
+
+        // The OLD token must now be cancelled.
+        assert!(
+            token_before.is_cancelled(),
+            "deactivate() must cancel the in-flight activation token"
+        );
+
+        // A fresh token must have been swapped in for future reactivation.
+        let token_after = router.cancel_token.load_full();
+        assert!(
+            !token_after.is_cancelled(),
+            "deactivate() must install a fresh token for future use"
+        );
+    }
+
+    // ── reactivate state guard (Fix 3) ───────────────────────────────────
+    // Note: full reactivation tests require a real Endpoint (needs a runtime).
+    // The AwaitingPrefill state is already covered by test_can_serve_requests_never_activated
+    // and the lifecycle integration tests in model_manager.rs.
+
+    /// Deactivate → AwaitingPrefill transition is the core of reactivation.
+    /// Verify that the deactivated router can transition back to AwaitingPrefill
+    /// by simulating the state change directly (the synchronous part of reactivate).
+    #[test]
+    fn test_deactivated_to_awaiting_restores_servability() {
+        let router = PrefillRouter::make_deactivated_for_test(true);
+        assert!(
+            !router.can_serve_requests(),
+            "deactivated + enforce_disagg must block"
+        );
+
+        // Simulate the synchronous state transition that reactivate() performs.
+        router.state.store(Arc::new(PrefillState::AwaitingPrefill));
+
+        assert!(
+            router.can_serve_requests(),
+            "AwaitingPrefill must allow serving (model visible again)"
         );
     }
 }

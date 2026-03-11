@@ -690,6 +690,23 @@ impl ModelManager {
                 );
             }
             None => {
+                // Try to reactivate an existing deactivated router first.
+                // This handles prefill rejoin after a transient failure: the decode
+                // WorkerSet's PrefillRouter already exists but is in Deactivated state.
+                if let Some(model) = self.get_model(model_name)
+                    && let Some(ws) = model.get_worker_set(namespace)
+                    && let Some(ref pr) = ws.prefill_router
+                {
+                    pr.reactivate(endpoint);
+                    tracing::info!(
+                        model_name = %model_name,
+                        namespace = %namespace,
+                        "Reactivated existing prefill router for decode WorkerSet (prefill rejoin)"
+                    );
+                    return Ok(());
+                }
+
+                // No existing router — store endpoint for a future decode registration.
                 let (tx, rx) = oneshot::channel();
                 tx.send(endpoint).map_err(|_| {
                     anyhow::anyhow!(
@@ -1213,6 +1230,166 @@ mod tests {
         assert!(
             !mm.model_display_names().contains("llama"),
             "model must remain hidden after re-deactivation"
+        );
+    }
+
+    // These exercise the full lifecycle that the watcher drives in production:
+    //   decode registers → prefill registers → prefill dies → model hidden/visible
+    /// Full disagg lifecycle with enforce_disagg=true.
+    ///
+    /// When the prefill engine dies and enforce_disagg is set, the model must be
+    /// hidden from /v1/models after deactivation.
+    ///
+    /// Guards the `!ws.can_serve_requests()` check in `is_displayable()`.
+    #[test]
+    fn test_disagg_lifecycle_prefill_death_hides_model() {
+        use crate::kv_router::PrefillRouter;
+
+        let mm = ModelManager::new();
+
+        // Step 1: Decode WorkerSet registers with an AwaitingPrefill router.
+        // Model should be visible (decode is ready, prefill pending).
+        let mut decode_ws = make_worker_set("decode-ns", "abc");
+        decode_ws.prefill_router = Some(PrefillRouter::make_awaiting_for_test(true));
+        mm.add_worker_set("llama", "decode-ns", decode_ws).unwrap();
+
+        assert!(
+            mm.model_display_names().contains("llama"),
+            "step 1: model must be visible while awaiting prefill"
+        );
+
+        // Step 2: Prefill WorkerSet registers (same model, different namespace key).
+        // Model should still be visible.
+        let prefill_ws = make_worker_set("prefill-ns", "abc");
+        mm.add_worker_set("llama", "prefill-ns", prefill_ws)
+            .unwrap();
+
+        assert!(
+            mm.model_display_names().contains("llama"),
+            "step 2: model must be visible with both decode and prefill"
+        );
+
+        // Step 3: Prefill WorkerSet removed (engine dies).
+        // Model is still visible because the decode router hasn't been deactivated yet.
+        mm.remove_worker_set("llama", "prefill-ns");
+
+        assert!(
+            mm.model_display_names().contains("llama"),
+            "step 3: model must be visible before deactivation (router still AwaitingPrefill)"
+        );
+
+        // Step 4: Deactivate the prefill router on the decode side.
+        // (In production, watcher::handle_delete does this.)
+        // With enforce_disagg=true, the model must now be hidden.
+        mm.deactivate_prefill_router_for_decode("llama", "decode-ns");
+
+        assert!(
+            !mm.model_display_names().contains("llama"),
+            "step 4: model must be hidden after prefill death with enforce_disagg=true"
+        );
+    }
+
+    /// Full disagg lifecycle with enforce_disagg=false (fallback allowed).
+    ///
+    /// When the prefill engine dies but enforce_disagg is not set, the model
+    /// should remain visible — requests fall back to aggregated mode.
+    #[test]
+    fn test_disagg_lifecycle_prefill_death_keeps_model_no_enforce() {
+        use crate::kv_router::PrefillRouter;
+
+        let mm = ModelManager::new();
+
+        // Step 1: Decode WorkerSet with enforce_disagg=false.
+        let mut decode_ws = make_worker_set("decode-ns", "abc");
+        decode_ws.prefill_router = Some(PrefillRouter::make_awaiting_for_test(false));
+        mm.add_worker_set("llama", "decode-ns", decode_ws).unwrap();
+
+        assert!(
+            mm.model_display_names().contains("llama"),
+            "step 1: model must be visible while awaiting prefill"
+        );
+
+        // Step 2: Prefill registers.
+        let prefill_ws = make_worker_set("prefill-ns", "abc");
+        mm.add_worker_set("llama", "prefill-ns", prefill_ws)
+            .unwrap();
+
+        assert!(
+            mm.model_display_names().contains("llama"),
+            "step 2: model must be visible with both decode and prefill"
+        );
+
+        // Step 3: Prefill removed.
+        mm.remove_worker_set("llama", "prefill-ns");
+
+        assert!(
+            mm.model_display_names().contains("llama"),
+            "step 3: model must be visible before deactivation"
+        );
+
+        // Step 4: Deactivate prefill router.
+        // With enforce_disagg=false, model stays visible (fallback to aggregated).
+        mm.deactivate_prefill_router_for_decode("llama", "decode-ns");
+
+        assert!(
+            mm.model_display_names().contains("llama"),
+            "step 4: model must remain visible (enforce_disagg=false, fallback allowed)"
+        );
+    }
+
+    /// Full disagg lifecycle including prefill rejoin after transient failure.
+    ///
+    /// Lifecycle:
+    ///   decode registers → prefill dies → model hidden → prefill rejoins → model visible
+    ///
+    /// Verifies that deactivate_prefill_router_for_decode() hides the model and
+    /// that a subsequent reactivation (simulated via state transition) restores it.
+    /// Full reactivation through activate_prefill_router() requires a real Endpoint
+    /// (runtime), so we simulate the synchronous reactivation state change.
+    #[test]
+    fn test_disagg_lifecycle_prefill_rejoin_restores_model() {
+        use crate::kv_router::PrefillRouter;
+
+        let mm = ModelManager::new();
+
+        // Step 1: Decode with AwaitingPrefill router (enforce_disagg=true).
+        let mut decode_ws = make_worker_set("decode-ns", "abc");
+        decode_ws.prefill_router = Some(PrefillRouter::make_awaiting_for_test(true));
+        mm.add_worker_set("llama", "decode-ns", decode_ws).unwrap();
+
+        assert!(
+            mm.model_display_names().contains("llama"),
+            "step 1: model must be visible while awaiting prefill"
+        );
+
+        // Step 2: Prefill dies → deactivate.
+        mm.deactivate_prefill_router_for_decode("llama", "decode-ns");
+
+        assert!(
+            !mm.model_display_names().contains("llama"),
+            "step 2: model must be hidden after prefill death (enforce_disagg=true)"
+        );
+
+        // Step 3: Simulate prefill rejoin by transitioning the router back to
+        // AwaitingPrefill.  In production, activate_prefill_router() calls
+        // pr.reactivate(endpoint) which does this + spawns activation task.
+        // Here we use simulate_reactivation() which doesn't require a real Endpoint.
+        if let Some(model) = mm.get_model("llama")
+            && let Some(ws) = model.get_worker_set("decode-ns")
+            && let Some(ref pr) = ws.prefill_router
+        {
+            assert!(
+                !pr.can_serve_requests(),
+                "must be non-serving before rejoin"
+            );
+            pr.simulate_reactivation();
+        } else {
+            panic!("decode WorkerSet or prefill_router not found");
+        }
+
+        assert!(
+            mm.model_display_names().contains("llama"),
+            "step 3: model must be visible again after prefill rejoin"
         );
     }
 }
