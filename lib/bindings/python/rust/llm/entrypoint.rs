@@ -92,6 +92,7 @@ impl KvRouterConfig {
                 router_queue_threshold,
                 router_event_threads,
                 router_enable_cache_control,
+                skip_initial_worker_wait: false,
             },
         }
     }
