@@ -94,6 +94,33 @@ def terminate_process_tree(
     psutil.wait_procs(alive, timeout=timeout)
 
 
+class ManagedProcessStopError(RuntimeError):
+    """Raised when a ManagedProcess subprocess cannot be stopped cleanly."""
+
+    def __init__(self, attr_name: str, pid: int, detail: str):
+        super().__init__(
+            f"Failed to stop managed process '{attr_name}' (pid={pid}): {detail}"
+        )
+        self.attr_name = attr_name
+        self.pid = pid
+        self.detail = detail
+
+
+class ManagedProcessStopTimeoutError(ManagedProcessStopError):
+    """Raised when a subprocess remains alive after forceful shutdown."""
+
+    def __init__(self, attr_name: str, pid: int, wait_timeout: float):
+        super().__init__(
+            attr_name,
+            pid,
+            (
+                "process did not exit after forceful shutdown "
+                f"within {wait_timeout:.1f}s"
+            ),
+        )
+        self.wait_timeout = wait_timeout
+
+
 @dataclass
 class ManagedProcess:
     """Manages a subprocess with health checks and automatic cleanup.
@@ -342,22 +369,90 @@ class ManagedProcess:
                     stream = getattr(process, stream_name, None)
                     if stream is not None:
                         stream.close()
-            except Exception as e:
+            except OSError as e:
                 self._logger.warning("Error closing process streams: %s", e)
 
             try:
                 terminate_process_tree(process.pid, self._logger)
-            except Exception as e:
-                self._logger.warning("Error terminating process: %s", e)
-
-            try:
                 process.wait(timeout=wait_timeout)
-            except Exception as e:
-                self._logger.warning("Error waiting for process exit: %s", e)
-            finally:
-                setattr(self, attr_name, None)
+            except (psutil.TimeoutExpired, subprocess.TimeoutExpired) as e:
+                self._logger.warning(
+                    "Process '%s' (pid=%s) timed out during shutdown: %s. "
+                    "Retrying with forceful termination.",
+                    attr_name,
+                    process.pid,
+                    e,
+                )
+                self._force_stop_process(process, attr_name, wait_timeout)
+            except OSError as e:
+                if process.poll() is None:
+                    self._logger.warning(
+                        "Process '%s' (pid=%s) hit an OS error during shutdown: %s. "
+                        "Retrying with forceful termination.",
+                        attr_name,
+                        process.pid,
+                        e,
+                    )
+                    self._force_stop_process(process, attr_name, wait_timeout)
+
+            if process.poll() is None:
+                raise ManagedProcessStopTimeoutError(
+                    attr_name, process.pid, wait_timeout
+                )
+
+            setattr(self, attr_name, None)
 
         self._pgid = None
+
+    def _force_stop_process(
+        self,
+        process: subprocess.Popen,
+        attr_name: str,
+        wait_timeout: float,
+    ) -> None:
+        """Forcefully stop a process tree and confirm the launched child exits."""
+        try:
+            terminate_process_tree(
+                process.pid,
+                self._logger,
+                immediate_kill=True,
+                timeout=0,
+            )
+        except (psutil.TimeoutExpired, OSError) as e:
+            self._logger.warning(
+                "Forceful tree termination failed for process '%s' (pid=%s): %s. "
+                "Falling back to process.kill().",
+                attr_name,
+                process.pid,
+                e,
+            )
+            try:
+                process.kill()
+            except OSError as kill_err:
+                if process.poll() is None:
+                    raise ManagedProcessStopError(
+                        attr_name,
+                        process.pid,
+                        f"forceful shutdown failed: {kill_err}",
+                    ) from kill_err
+
+        try:
+            process.wait(timeout=wait_timeout)
+        except subprocess.TimeoutExpired as e:
+            if process.poll() is None:
+                raise ManagedProcessStopTimeoutError(
+                    attr_name, process.pid, wait_timeout
+                ) from e
+        except OSError as e:
+            if process.poll() is None:
+                raise ManagedProcessStopError(
+                    attr_name,
+                    process.pid,
+                    f"error waiting for exit after forceful shutdown: {e}",
+                ) from e
+
+        if process.poll() is None:
+            raise ManagedProcessStopTimeoutError(attr_name, process.pid, wait_timeout)
 
     def _start_process(self):
         assert self._command_name
