@@ -459,14 +459,7 @@ class NatsServer(ManagedProcess):
     def stop(self):
         """Stop the NATS server for restart. Does not release port or clean up fully."""
         _logger.info(f"Stopping NATS server on port {self.port}")
-        self._terminate_process_group()
-        proc = self.proc  # type: ignore[has-type]
-        if proc is not None:
-            try:
-                proc.wait(timeout=10)
-            except Exception as e:
-                _logger.warning(f"Error waiting for NATS process to stop: {e}")
-            self.proc = None
+        self._stop_started_processes()
 
     def start(self):
         """Restart a stopped NATS server with fresh state."""

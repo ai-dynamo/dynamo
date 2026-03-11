@@ -7,6 +7,7 @@
 //! chat completions, processed by the existing engine, and responses/streams
 //! are converted back to Anthropic format.
 
+use std::pin::Pin;
 use std::sync::Arc;
 
 use axum::{
@@ -21,6 +22,7 @@ use axum::{
     },
     routing::post,
 };
+use dynamo_runtime::config::{env_is_truthy, environment_names::llm as env_llm};
 use dynamo_runtime::pipeline::{AsyncEngineContextProvider, Context};
 use futures::{StreamExt, stream};
 use tracing::Instrument;
@@ -31,16 +33,19 @@ use super::{
     metrics::{Endpoint, process_response_and_observe_metrics},
     service_v2,
 };
+use crate::preprocessor::OpenAIPreprocessor;
 use crate::protocols::anthropic::stream_converter::AnthropicStreamConverter;
 use crate::protocols::anthropic::types::{
     AnthropicCountTokensRequest, AnthropicCountTokensResponse, AnthropicCreateMessageRequest,
-    AnthropicErrorBody, AnthropicErrorResponse, chat_completion_to_anthropic_response,
+    AnthropicErrorBody, AnthropicErrorResponse, SystemContent,
+    chat_completion_to_anthropic_response,
 };
 use crate::protocols::openai::chat_completions::{
     NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
-    aggregator::ChatCompletionAggregator,
+    NvCreateChatCompletionStreamResponse, aggregator::ChatCompletionAggregator,
 };
 use crate::request_template::RequestTemplate;
+use crate::types::Annotated;
 
 // Re-use helpers from the openai module (sibling under service/)
 use super::openai::{get_body_limit, get_or_create_request_id};
@@ -167,6 +172,11 @@ async fn anthropic_messages(
         }
     }
 
+    // Strip Claude Code billing preamble from system prompt if enabled
+    if env_is_truthy(env_llm::DYN_STRIP_ANTHROPIC_PREAMBLE) {
+        strip_billing_preamble(&mut request.system);
+    }
+
     let model = request.model.clone();
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&model);
 
@@ -174,6 +184,14 @@ async fn anthropic_messages(
 
     let (orig_request, context) = request.into_parts();
     let model_for_resp = orig_request.model.clone();
+
+    // Check if the Anthropic request explicitly enabled thinking. When thinking
+    // is enabled, reasoning-capable models' chat templates typically inject
+    // `<think>` into the prompt, so the completion starts mid-reasoning.
+    let thinking_enabled = orig_request
+        .thinking
+        .as_ref()
+        .is_some_and(|t| t.thinking_type == "enabled");
 
     // Convert Anthropic request -> Chat Completion request
     let chat_request: NvCreateChatCompletionRequest =
@@ -218,6 +236,28 @@ async fn anthropic_messages(
     })?;
 
     let ctx = engine_stream.context();
+
+    // Apply reasoning parser to the engine stream if configured.
+    // The preprocessor (which normally handles this for the OpenAI path) is
+    // bypassed by the Anthropic endpoint, so we apply the same stream
+    // transform here.  This populates `delta.reasoning_content` which the
+    // AnthropicStreamConverter translates into thinking content blocks.
+    //
+    // When thinking is enabled, the model's chat template likely injected
+    // `<think>` into the prompt (e.g., Qwen3.5), so the parser must start
+    // in reasoning mode — the completion begins mid-reasoning without an
+    // explicit `<think>` tag.
+    let engine_stream: Pin<
+        Box<dyn futures::Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>,
+    > = if let Some(ref reasoning_parser_name) = parsing_options.reasoning_parser {
+        Box::pin(OpenAIPreprocessor::parse_reasoning_content_from_stream(
+            engine_stream,
+            reasoning_parser_name.clone(),
+            thinking_enabled,
+        ))
+    } else {
+        Box::pin(engine_stream)
+    };
 
     let mut inflight_guard =
         state
@@ -342,8 +382,11 @@ async fn anthropic_messages(
 /// Returns an estimated input token count using a len/3 heuristic.
 async fn handler_count_tokens(
     State((_state, _template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
-    Json(request): Json<AnthropicCountTokensRequest>,
+    Json(mut request): Json<AnthropicCountTokensRequest>,
 ) -> Result<Response, Response> {
+    if env_is_truthy(env_llm::DYN_STRIP_ANTHROPIC_PREAMBLE) {
+        strip_billing_preamble(&mut request.system);
+    }
     let tokens = request.estimate_tokens();
     Ok(Json(AnthropicCountTokensResponse {
         input_tokens: tokens,
@@ -354,6 +397,22 @@ async fn handler_count_tokens(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Strip the Claude Code billing preamble from the system prompt.
+///
+/// Claude Code prepends `x-anthropic-billing-header: cc_version=...; cch=...;\n`
+/// to every system prompt. This varies per session and per release, wasting tokens
+/// and preventing prompt prefix caching on the target model.
+fn strip_billing_preamble(system: &mut Option<SystemContent>) {
+    if let Some(content) = system {
+        let trimmed = content.text.trim_start();
+        if trimmed.starts_with("x-anthropic-billing-header:")
+            && let Some(newline_pos) = trimmed.find('\n')
+        {
+            content.text = trimmed[newline_pos + 1..].to_string();
+        }
+    }
+}
 
 /// Build an Anthropic-formatted error response.
 /// Maps HTTP status codes to Anthropic error types following the Anthropic API spec.

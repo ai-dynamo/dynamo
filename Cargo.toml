@@ -48,15 +48,15 @@ dynamo-async-openai = { path = "lib/async-openai", version = "1.0.0", features =
 dynamo-parsers = { path = "lib/parsers", version = "1.0.0" }
 
 # kvbm
-kvbm-common = { path = "lib/kvbm-common", version = "1.0.0" }
-kvbm-kernels = { path = "lib/kvbm-kernels", version = "1.0.0" }
-kvbm-logical = { path = "lib/kvbm-logical", version = "1.0.0" }
-kvbm-physical = { path = "lib/kvbm-physical", version = "1.0.0" }
+kvbm-common = { path = "lib/kvbm-common", version = "0.1.0" }
+kvbm-kernels = { path = "lib/kvbm-kernels", version = "0.1.0" }
+kvbm-logical = { path = "lib/kvbm-logical", version = "0.1.0" }
+kvbm-physical = { path = "lib/kvbm-physical", version = "0.1.0" }
 
 # velo
-velo-common = { path = "lib/velo-common", version = "1.0.0" }
-velo-transports = { path = "lib/velo-transports", version = "1.0.0" }
-velo-events = { path = "lib/velo-events", version = "1.0.0" }
+velo-common = { path = "lib/velo-common", version = "0.1.0" }
+velo-transports = { path = "lib/velo-transports", version = "0.1.0" }
+velo-events = { path = "lib/velo-events", version = "0.1.0" }
 
 # External dependencies
 anyhow = { version = "1" }
