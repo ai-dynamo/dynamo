@@ -152,6 +152,14 @@ runs:
           DOCKER_ENV_FLAGS+=(--env "HF_TOKEN=${HF_TOKEN}")
         fi
 
+        docker run ${GPU_FLAGS} --rm -w /workspace \
+          --cpus=${NUM_CPUS} \
+          --network host \
+          "${DOCKER_ENV_FLAGS[@]}" \
+          --name ${{ env.CONTAINER_ID }}_pytest \
+          -v "${TEST_RESULTS_DIR}:/workspace/test-results" \
+          ${{ inputs.image_tag }} \
+          bash -c "${PYTEST_CMD}"
 
         TEST_EXIT_CODE=$?
         echo "TEST_EXIT_CODE=${TEST_EXIT_CODE}" >> $GITHUB_ENV
