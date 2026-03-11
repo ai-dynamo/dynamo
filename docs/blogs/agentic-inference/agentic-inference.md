@@ -13,7 +13,7 @@ Coding agents are starting to write production code at scale. [Stripe’s agents
 
 ![Cumulative cache reads vs writes across a 42-call Claude Code session. Cache reads (891K tokens) grow steeply while writes (76K) and uncached input stay flat -- an 11.7x read/write ratio.](./cumulative-reads-writes.png)
 
-After the first API call that writes the prefix to KV cache, every subsequent call to the same worker hits 85-97% cache. Agent teams (or swarms) push this further: 97.2% aggregate cache rate across 4 Opus teammates (measured in Claude Code team sessions). An 11.7x read/write ratio means the system reads from cache nearly 12 times for every token it writes. 
+After the first API call that writes the prefix to KV cache, every subsequent call to the same worker hits 85-97% cache. Agent teams (or swarms) push this further: 97.2% aggregate cache rate across 4 Opus teammates (measured in Claude Code team sessions). An 11.7x read/write ratio means the system reads from cache nearly 12 times for every token it writes.
 
 These numbers come from managed API infrastructure where the provider controls prefix matching, cache placement, and eviction. For teams running open-source models on their own GPUs, none of this exists out of the box. We have been building Dynamo to close that gap. This post walks through how we are making Dynamo agent-native at three layers: the frontend API, the router, and KV cache management.
 
@@ -155,7 +155,7 @@ LRU sees only recency. In a high traffic environment, a wait for the completion 
 
 ### KV Cache as a Shared Resource
 
-Today, KV cache is treated as a local, ephemeral resource on each worker. An agent's ~32K-token system prompt and tool definitions are computed independently on every worker that serves its requests. When a lead agent spawns 4 subagents, each with overlapping tool definitions, that shared prefix is recomputed 4 times if the subagents land on different workers. In our analysis of Claude Code team sessions, we measured this directly: teammates averaged 79.4% cache hit rate vs. 91.3% for the lead agent's explore subagents (5.0x vs. 11.7x read/write ratio), with the gap driven almost entirely by cold-start writes on each teammate's first call. The goal is to make high value KV cache blocks available to all workers in the cluster. Essentially, they are written once during cold start and then read by any worker at all times. 
+Today, KV cache is treated as a local, ephemeral resource on each worker. An agent's ~32K-token system prompt and tool definitions are computed independently on every worker that serves its requests. When a lead agent spawns 4 subagents, each with overlapping tool definitions, that shared prefix is recomputed 4 times if the subagents land on different workers. In our analysis of Claude Code team sessions, we measured this directly: teammates averaged 79.4% cache hit rate vs. 91.3% for the lead agent's explore subagents (5.0x vs. 11.7x read/write ratio), with the gap driven almost entirely by cold-start writes on each teammate's first call. The goal is to make high value KV cache blocks available to all workers in the cluster. Essentially, they are written once during cold start and then read by any worker at all times.
 
 Solutions like SGLang's HiCache and Dynamo's KV Block Manager (KVBM) are building toward a 4-tier memory hierarchy:
 
@@ -171,7 +171,7 @@ Multi-tier storage solves sharing and persistence, but blocks still arrive on GP
 
 ### Selective Cache Retention
 
-Making blocks globally available solves the sharing problem, but does not solve eviction. SGLang and vLLM both support priority-based eviction via a priority heap where the harness assigns a numeric priority per request and lower-priority blocks are evicted first. TensorRT-LLM takes this further with `TokenRangeRetentionConfig` (designed and implemented by a Dynamo team member[@jthomson04](https://github.com/jthomson04)) which allows per-region control within a single request. 
+Making blocks globally available solves the sharing problem, but does not solve eviction. SGLang and vLLM both support priority-based eviction via a priority heap where the harness assigns a numeric priority per request and lower-priority blocks are evicted first. TensorRT-LLM takes this further with `TokenRangeRetentionConfig` (designed and implemented by a Dynamo team member[@jthomson04](https://github.com/jthomson04)) which allows per-region control within a single request.
 
 A request carries zero or more directives. Blocks without directives follow the default LRU path with zero overhead. The evictor becomes a two-structure system: an LRU free list for unprioritized blocks (O(1), unchanged) and a priority queue for annotated blocks. The harness can express "system prompt blocks are evicted last (priority: 100); conversation context survives a 30-second tool call (duration: 45s); decode tokens are first to go (priority: 1)" without the engine needing to understand why.
 
