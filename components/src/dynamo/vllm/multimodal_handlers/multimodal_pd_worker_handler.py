@@ -384,7 +384,7 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
                 yield self._format_engine_output(output, num_output_tokens_so_far)
                 if output.outputs:
                     if num_output_tokens_so_far == 0:
-                        decode_timer.time_interval()  # Log time to first decode response
+                        decode_timer.stop_interval()  # Log time to first decode response
                     num_output_tokens_so_far = len(output.outputs[0].token_ids)
 
     # ── Public entry point ───────────────────────────────────────────

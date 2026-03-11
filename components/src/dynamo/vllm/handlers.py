@@ -1326,7 +1326,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
             async for chunk in generator:
                 if first_token:
-                    decode_timer.time_interval()
+                    decode_timer.stop_interval()
                     first_token = False
                 yield chunk
 

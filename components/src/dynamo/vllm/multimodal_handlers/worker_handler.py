@@ -105,7 +105,7 @@ class MultimodalDecodeWorkerHandler(BaseWorkerHandler):
             try:
                 async for response in gen:
                     if first_token:
-                        gen_timer.time_interval()  # Log time to first response
+                        gen_timer.stop_interval()  # Log time to first response
                         _nvtx.end_range(rng_first)
                         first_token = False
                     logger.debug(
