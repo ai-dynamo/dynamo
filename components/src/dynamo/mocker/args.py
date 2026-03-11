@@ -491,6 +491,8 @@ def parse_args() -> argparse.Namespace:
     # Parse and validate zmq_replay_ports
     args.zmq_replay_ports_list = parse_bootstrap_ports(args.zmq_replay_ports)
     if args.zmq_replay_ports_list:
+        if not args.zmq_kv_events_ports_list:
+            raise ValueError("--zmq-replay-ports requires --zmq-kv-events-ports")
         if len(args.zmq_replay_ports_list) != args.num_workers:
             raise ValueError(
                 f"--zmq-replay-ports must have exactly --num-workers ({args.num_workers}) ports, "

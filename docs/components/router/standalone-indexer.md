@@ -283,7 +283,7 @@ Each incoming `KvEventBatch` may carry an optional `data_parallel_rank` field. I
 
 ZMQ PUB/SUB is lossy — messages can be dropped under backpressure or brief disconnects. The indexer detects gaps by tracking the sequence number of each batch: if `seq > last_seq + 1`, a gap is detected.
 
-When a `replay_endpoint` is provided during `/register`, the indexer connects a REQ socket to the engine's ROUTER socket and requests the missing batches by sequence number. The engine streams back buffered `(seq, payload)` pairs from its ring buffer until an empty-payload sentinel.
+When a `replay_endpoint` is provided during `/register`, the indexer connects a DEALER socket to the engine's ROUTER socket and requests the missing batches by sequence number. The engine streams back buffered `(seq, payload)` pairs from its ring buffer until an empty-payload sentinel.
 
 If no `replay_endpoint` is configured, gaps are logged as warnings but not recovered.
 

@@ -131,56 +131,8 @@ impl ZmqKvEventSink {
                 tokio::select! {
                     biased;
 
-                    msg_opt = rx.recv() => {
-                        let Some(msg) = msg_opt else { break };
-
-                        let events = convert_to_zmq_events(
-                            &msg.event,
-                            msg.block_token_ids.as_deref(),
-                            block_size,
-                        );
-                        if events.is_empty() {
-                            continue;
-                        }
-
-                        let timestamp = SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs_f64();
-
-                        let batch: (f64, Vec<ZmqRawKvEvent>, Option<i32>) =
-                            (timestamp, events, Some(dp_rank as i32));
-                        let payload: Bytes = match rmp_serde::to_vec(&batch) {
-                            Ok(p) => p.into(),
-                            Err(e) => {
-                                tracing::warn!("Failed to serialize ZMQ KV event: {e}");
-                                continue;
-                            }
-                        };
-
-                        let frames = vec![
-                            Bytes::from(""),
-                            Bytes::from(seq_num.to_be_bytes().to_vec()),
-                            payload.clone(), // ref-count bump, not memcpy
-                        ];
-                        let zmq_msg = zeromq::ZmqMessage::try_from(frames)
-                            .expect("Failed to create ZMQ multipart message");
-
-                        if let Err(e) = pub_socket.send(zmq_msg).await {
-                            tracing::warn!("Failed to send ZMQ KV event: {e}");
-                        }
-
-                        if router_socket.is_some() {
-                            if ring_buffer.len() >= REPLAY_BUFFER_CAPACITY {
-                                ring_buffer.pop_front();
-                            }
-                            ring_buffer.push_back((seq_num, payload));
-                        }
-
-                        seq_num += 1;
-                    }
-
-                    // Handle replay requests from ROUTER socket
+                    // Replay requests are rare but latency-sensitive — poll first
+                    // to prevent starvation under sustained KV event load.
                     replay_result = async {
                         match router_socket.as_mut() {
                             Some(sock) => sock.recv().await,
@@ -237,6 +189,55 @@ impl ZmqKvEventSink {
                         let sentinel = zeromq::ZmqMessage::try_from(sentinel_frames)
                             .expect("sentinel frame");
                         let _ = sock.send(sentinel).await;
+                    }
+
+                    msg_opt = rx.recv() => {
+                        let Some(msg) = msg_opt else { break };
+
+                        let events = convert_to_zmq_events(
+                            &msg.event,
+                            msg.block_token_ids.as_deref(),
+                            block_size,
+                        );
+                        if events.is_empty() {
+                            continue;
+                        }
+
+                        let timestamp = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs_f64();
+
+                        let batch: (f64, Vec<ZmqRawKvEvent>, Option<i32>) =
+                            (timestamp, events, Some(dp_rank as i32));
+                        let payload: Bytes = match rmp_serde::to_vec(&batch) {
+                            Ok(p) => p.into(),
+                            Err(e) => {
+                                tracing::warn!("Failed to serialize ZMQ KV event: {e}");
+                                continue;
+                            }
+                        };
+
+                        let frames = vec![
+                            Bytes::from(""),
+                            Bytes::from(seq_num.to_be_bytes().to_vec()),
+                            payload.clone(), // ref-count bump, not memcpy
+                        ];
+                        let zmq_msg = zeromq::ZmqMessage::try_from(frames)
+                            .expect("Failed to create ZMQ multipart message");
+
+                        if let Err(e) = pub_socket.send(zmq_msg).await {
+                            tracing::warn!("Failed to send ZMQ KV event: {e}");
+                        }
+
+                        if router_socket.is_some() {
+                            if ring_buffer.len() >= REPLAY_BUFFER_CAPACITY {
+                                ring_buffer.pop_front();
+                            }
+                            ring_buffer.push_back((seq_num, payload));
+                        }
+
+                        seq_num += 1;
                     }
                 }
             }

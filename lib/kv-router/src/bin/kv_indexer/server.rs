@@ -251,6 +251,7 @@ async fn query_by_hash(
     }
 }
 
+#[cfg(feature = "test-endpoints")]
 #[derive(Deserialize)]
 struct ListenerControlRequest {
     instance_id: WorkerId,
@@ -258,6 +259,7 @@ struct ListenerControlRequest {
     dp_rank: Option<u32>,
 }
 
+#[cfg(feature = "test-endpoints")]
 async fn test_pause_listener(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ListenerControlRequest>,
@@ -274,6 +276,7 @@ async fn test_pause_listener(
     }
 }
 
+#[cfg(feature = "test-endpoints")]
 async fn test_resume_listener(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ListenerControlRequest>,
@@ -361,17 +364,21 @@ async fn dump_events(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 }
 
 pub fn create_router(state: Arc<AppState>) -> Router {
-    Router::new()
+    let router = Router::new()
         .route("/register", post(register))
         .route("/unregister", post(unregister))
         .route("/workers", get(list_workers))
         .route("/query", post(query))
         .route("/query_by_hash", post(query_by_hash))
         .route("/dump", get(dump_events))
-        .route("/test/pause_listener", post(test_pause_listener))
-        .route("/test/resume_listener", post(test_resume_listener))
         .route("/register_peer", post(register_peer))
         .route("/deregister_peer", post(deregister_peer))
-        .route("/peers", get(list_peers))
-        .with_state(state)
+        .route("/peers", get(list_peers));
+
+    #[cfg(feature = "test-endpoints")]
+    let router = router
+        .route("/test/pause_listener", post(test_pause_listener))
+        .route("/test/resume_listener", post(test_resume_listener));
+
+    router.with_state(state)
 }
