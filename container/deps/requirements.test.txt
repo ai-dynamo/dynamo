@@ -32,6 +32,8 @@ pytest-order==1.3.0
 pytest-timeout==2.4.0
 pytest-xdist==3.8.0
 requests==2.32.5
+# Required by kr8s (not declared in kr8s's own dependencies)
+sniffio==1.3.1
 tabulate==0.9.0
 types-aiofiles>=24.1.0
 types-PyYAML==6.0.12.20250915
