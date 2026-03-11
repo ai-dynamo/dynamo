@@ -127,6 +127,12 @@ async fn replay_gap(
 // detection works regardless, but replay semantics may differ if a single
 // socket multiplexes dp_ranks.
 
+/// Connect the ZMQ SUB (and optional DEALER replay) sockets, wait for the
+/// ready signal, then spawn the recv loop as a background task.
+///
+/// The function returns only after the sockets are connected and the ready
+/// signal has fired, so callers know the listener is fully wired before they
+/// expose the worker via HTTP.
 pub async fn run_zmq_listener(
     worker_id: WorkerId,
     dp_rank: u32,
@@ -189,6 +195,29 @@ pub async fn run_zmq_listener(
         }
     }
 
+    // Spawn the recv loop so the caller isn't blocked.
+    tokio::spawn(zmq_recv_loop(
+        worker_id,
+        dp_rank,
+        block_size,
+        indexer,
+        cancel,
+        socket,
+        replay_socket,
+        watermark,
+    ));
+}
+
+async fn zmq_recv_loop(
+    worker_id: WorkerId,
+    dp_rank: u32,
+    block_size: u32,
+    indexer: Indexer,
+    cancel: CancellationToken,
+    mut socket: SubSocket,
+    mut replay_socket: Option<zeromq::DealerSocket>,
+    watermark: Arc<AtomicU64>,
+) {
     let warning_count = Arc::new(AtomicU32::new(0));
     let mut consecutive_errors = 0u32;
     #[expect(unused_assignments)]

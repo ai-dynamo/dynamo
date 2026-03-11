@@ -284,6 +284,7 @@ async fn test_resume_listener(
     match state
         .registry
         .resume_listener(req.instance_id, req.dp_rank.unwrap_or(0))
+        .await
     {
         Ok(()) => (StatusCode::OK, Json(serde_json::json!({"status": "ok"}))),
         Err(e) => (

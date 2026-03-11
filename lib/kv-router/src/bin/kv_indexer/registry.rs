@@ -134,17 +134,24 @@ impl WorkerRegistry {
         let bs = indexer_entry.block_size;
         drop(indexer_entry);
 
-        let mut entry = self
-            .workers
-            .entry(instance_id)
-            .or_insert_with(|| WorkerEntry {
-                endpoints: HashMap::new(),
-                replay_endpoints: HashMap::new(),
-                cancels: HashMap::new(),
-            });
+        // Check for duplicate and insert replay endpoint while holding the lock briefly.
+        {
+            let mut entry = self
+                .workers
+                .entry(instance_id)
+                .or_insert_with(|| WorkerEntry {
+                    endpoints: HashMap::new(),
+                    replay_endpoints: HashMap::new(),
+                    cancels: HashMap::new(),
+                });
 
-        if entry.endpoints.contains_key(&dp_rank) {
-            bail!("instance {instance_id} dp_rank {dp_rank} already registered");
+            if entry.endpoints.contains_key(&dp_rank) {
+                bail!("instance {instance_id} dp_rank {dp_rank} already registered");
+            }
+
+            if let Some(rep) = &replay_endpoint {
+                entry.replay_endpoints.insert(dp_rank, rep.clone());
+            }
         }
 
         // Reuse watermark if it survived a previous unregister (preserves gap detection).
@@ -153,10 +160,6 @@ impl WorkerRegistry {
             .entry((instance_id, dp_rank))
             .or_insert_with(|| Arc::new(AtomicU64::new(u64::MAX)))
             .clone();
-
-        if let Some(rep) = &replay_endpoint {
-            entry.replay_endpoints.insert(dp_rank, rep.clone());
-        }
 
         self.listener_states.insert(
             (instance_id, dp_rank),
@@ -174,21 +177,25 @@ impl WorkerRegistry {
         let addr = endpoint.clone();
         let ready = self.ready_rx();
 
-        tokio::spawn(async move {
-            run_zmq_listener(
-                instance_id,
-                dp_rank,
-                addr,
-                bs,
-                indexer,
-                child_cancel,
-                ready,
-                replay_endpoint,
-                watermark,
-            )
-            .await;
-        });
+        // Await connection setup — the recv loop is spawned inside.
+        run_zmq_listener(
+            instance_id,
+            dp_rank,
+            addr,
+            bs,
+            indexer,
+            child_cancel,
+            ready,
+            replay_endpoint,
+            watermark,
+        )
+        .await;
 
+        // Re-acquire to store the endpoint and cancel token.
+        let mut entry = self
+            .workers
+            .get_mut(&instance_id)
+            .expect("worker entry disappeared during listener setup");
         entry.endpoints.insert(dp_rank, endpoint);
         entry.cancels.insert(dp_rank, cancel);
         Ok(())
@@ -319,14 +326,16 @@ impl WorkerRegistry {
         Ok(())
     }
 
-    pub fn resume_listener(&self, instance_id: WorkerId, dp_rank: u32) -> Result<()> {
-        let mut entry = self
-            .workers
-            .get_mut(&instance_id)
-            .ok_or_else(|| anyhow::anyhow!("instance {instance_id} not found"))?;
+    pub async fn resume_listener(&self, instance_id: WorkerId, dp_rank: u32) -> Result<()> {
+        {
+            let entry = self
+                .workers
+                .get(&instance_id)
+                .ok_or_else(|| anyhow::anyhow!("instance {instance_id} not found"))?;
 
-        if entry.cancels.contains_key(&dp_rank) {
-            bail!("instance {instance_id} dp_rank {dp_rank} already running");
+            if entry.cancels.contains_key(&dp_rank) {
+                bail!("instance {instance_id} dp_rank {dp_rank} already running");
+            }
         }
 
         let state = self
@@ -344,21 +353,23 @@ impl WorkerRegistry {
         let watermark = state.watermark.clone();
         drop(state);
 
-        tokio::spawn(async move {
-            run_zmq_listener(
-                instance_id,
-                dp_rank,
-                addr,
-                bs,
-                indexer,
-                child_cancel,
-                ready,
-                replay_ep,
-                watermark,
-            )
-            .await;
-        });
+        run_zmq_listener(
+            instance_id,
+            dp_rank,
+            addr,
+            bs,
+            indexer,
+            child_cancel,
+            ready,
+            replay_ep,
+            watermark,
+        )
+        .await;
 
+        let mut entry = self
+            .workers
+            .get_mut(&instance_id)
+            .expect("worker entry disappeared during listener resume");
         entry.cancels.insert(dp_rank, cancel);
         Ok(())
     }
