@@ -1,0 +1,102 @@
+<?xml version='1.0' encoding='utf-8'?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 550" width="1000" height="550">
+  <rect x="0" y="0" width="1000" height="550" fill="#0a0a0a" stroke="none" rx="0" ry="0" />
+  <text x="500.0" y="28" fill="#e0e0e0" font-size="16" font-family="Arial, Helvetica, sans-serif" text-anchor="middle" font-weight="bold" font-style="normal" dy="0" letter-spacing="0.08em">CACHE FATE — SESSION LIFECYCLE</text>
+  <rect x="830" y="50" width="12" height="12" fill="#2a4a10" stroke="#76b900" rx="2" ry="2" />
+  <text x="848" y="61" fill="#cdcdcd" font-size="10" font-family="Arial, Helvetica, sans-serif" text-anchor="start" font-weight="normal" font-style="normal" dy="0">Active</text>
+  <rect x="830" y="72" width="12" height="12" fill="#2a1010" stroke="#b04040" rx="2" ry="2" />
+  <text x="848" y="83" fill="#cdcdcd" font-size="10" font-family="Arial, Helvetica, sans-serif" text-anchor="start" font-weight="normal" font-style="normal" dy="0">Critical event</text>
+  <rect x="830" y="94" width="12" height="12" fill="#0a0a0a" stroke="#3a3a3a" rx="2" ry="2" stroke-dasharray="3,3" />
+  <text x="848" y="105" fill="#cdcdcd" font-size="10" font-family="Arial, Helvetica, sans-serif" text-anchor="start" font-weight="normal" font-style="normal" dy="0">Dead cache</text>
+  <text x="160" y="58" fill="#767676" font-size="11" font-family="Arial, Helvetica, sans-serif" text-anchor="start" font-weight="normal" font-style="normal" dy="0" letter-spacing="0.08em">AGENT ACTIVITY</text>
+  <text x="146" y="110" fill="#cdcdcd" font-size="13" font-family="Arial, Helvetica, sans-serif" text-anchor="end" font-weight="normal" font-style="normal" dy="0">Lead Agent</text>
+  <text x="146" y="170" fill="#cdcdcd" font-size="13" font-family="Arial, Helvetica, sans-serif" text-anchor="end" font-weight="normal" font-style="normal" dy="0">Explore Subagent</text>
+  <text x="146" y="230" fill="#cdcdcd" font-size="13" font-family="Arial, Helvetica, sans-serif" text-anchor="end" font-weight="normal" font-style="normal" dy="0">Team of 4</text>
+  <rect x="160.0" y="91.0" width="472.5" height="28" fill="#2a4a10" stroke="#76b900" rx="4" ry="4" stroke-width="1.5" />
+  <text x="396.25" y="109" fill="#e0e0e0" font-size="11" font-family="Arial, Helvetica, sans-serif" text-anchor="middle" font-weight="normal" font-style="normal" dy="0">Cold start → Turns 2–10</text>
+  <rect x="632.5" y="91.0" width="40.5" height="28" fill="#2a1010" stroke="#b04040" rx="4" ry="4" />
+  <text x="652.75" y="85.0" fill="#b04040" font-size="10" font-family="Arial, Helvetica, sans-serif" text-anchor="middle" font-weight="normal" font-style="normal" dy="0">Summarize 175K→40K</text>
+  <rect x="673.0" y="91.0" width="297.0" height="28" fill="#2a4a10" stroke="#76b900" rx="4" ry="4" stroke-width="1.5" />
+  <text x="821.5" y="109" fill="#e0e0e0" font-size="11" font-family="Arial, Helvetica, sans-serif" text-anchor="middle" font-weight="normal" font-style="normal" dy="0">Turns 11–20, new prefix</text>
+  <rect x="295.0" y="151.0" width="108.0" height="28" fill="#2a4a10" stroke="#76b900" rx="4" ry="4" stroke-width="1.5" />
+  <text x="349.0" y="169" fill="#e0e0e0" font-size="11" font-family="Arial, Helvetica, sans-serif" text-anchor="middle" font-weight="normal" font-style="normal" dy="0">Spawn → Turns 2–3</text>
+  <rect x="403.0" y="151.0" width="13.5" height="28" fill="#2a1010" stroke="#b04040" rx="4" ry="4" />
+  <text x="409.75" y="145.0" fill="#b04040" font-size="10" font-family="Arial, Helvetica, sans-serif" text-anchor="middle" font-weight="normal" font-style="normal" dy="0">End</text>
+  <rect x="457.0" y="211.0" width="162.0" height="28" fill="#2a4a10" stroke="#76b900" rx="4" ry="4" stroke-width="1.5" />
+  <text x="538.0" y="229" fill="#e0e0e0" font-size="11" font-family="Arial, Helvetica, sans-serif" text-anchor="middle" font-weight="normal" font-style="normal" dy="0">Teammates A–D</text>
+  <rect x="619.0" y="211.0" width="13.5" height="28" fill="#2a1010" stroke="#b04040" rx="4" ry="4" />
+  <text x="625.75" y="205.0" fill="#b04040" font-size="10" font-family="Arial, Helvetica, sans-serif" text-anchor="middle" font-weight="normal" font-style="normal" dy="0">End</text>
+  <line x1="632.5" y1="75" x2="632.5" y2="430" stroke="#3a3a3a" stroke-dasharray="4,4" />
+  <line x1="416.5" y1="148" x2="416.5" y2="380" stroke="#3a3a3a" stroke-dasharray="4,4" />
+  <text x="160" y="298" fill="#767676" font-size="11" font-family="Arial, Helvetica, sans-serif" text-anchor="start" font-weight="normal" font-style="normal" dy="0" letter-spacing="0.08em">CACHE STATE</text>
+  <rect x="227.5" y="310" width="12" height="12" fill="#2a4a10" stroke="#76b900" rx="2" ry="2" />
+  <rect x="241.5" y="310" width="12" height="12" fill="#2a4a10" stroke="#76b900" rx="2" ry="2" />
+  <rect x="255.5" y="310" width="12" height="12" fill="#2a4a10" stroke="#76b900" rx="2" ry="2" />
+  <rect x="269.5" y="310" width="12" height="12" fill="#2a4a10" stroke="#76b900" rx="2" ry="2" />
+  <rect x="283.5" y="310" width="12" height="12" fill="#2a4a10" stroke="#76b900" rx="2" ry="2" />
+  <rect x="297.5" y="310" width="12" height="12" fill="#2a4a10" stroke="#76b900" rx="2" ry="2" />
+  <rect x="227.5" y="324" width="12" height="12" fill="#2a4a10" stroke="#76b900" rx="2" ry="2" />
+  <rect x="241.5" y="324" width="12" height="12" fill="#2a4a10" stroke="#76b900" rx="2" ry="2" />
+  <rect x="255.5" y="324" width="12" height="12" fill="#2a4a10" stroke="#76b900" rx="2" ry="2" />
+  <rect x="269.5" y="324" width="12" height="12" fill="#2a4a10" stroke="#76b900" rx="2" ry="2" />
+  <rect x="283.5" y="324" width="12" height="12" fill="#2a4a10" stroke="#76b900" rx="2" ry="2" />
+  <rect x="297.5" y="324" width="12" height="12" fill="#2a4a10" stroke="#76b900" rx="2" ry="2" />
+  <rect x="646.0" y="310" width="12" height="12" fill="#0a0a0a" stroke="#3a3a3a" rx="2" ry="2" stroke-dasharray="3,3" />
+  <rect x="660.0" y="310" width="12" height="12" fill="#0a0a0a" stroke="#3a3a3a" rx="2" ry="2" stroke-dasharray="3,3" />
+  <rect x="674.0" y="310" width="12" height="12" fill="#0a0a0a" stroke="#3a3a3a" rx="2" ry="2" stroke-dasharray="3,3" />
+  <rect x="688.0" y="310" width="12" height="12" fill="#0a0a0a" stroke="#3a3a3a" rx="2" ry="2" stroke-dasharray="3,3" />
+  <rect x="702.0" y="310" width="12" height="12" fill="#0a0a0a" stroke="#3a3a3a" rx="2" ry="2" stroke-dasharray="3,3" />
+  <rect x="716.0" y="310" width="12" height="12" fill="#0a0a0a" stroke="#3a3a3a" rx="2" ry="2" stroke-dasharray="3,3" />
+  <rect x="646.0" y="324" width="12" height="12" fill="#0a0a0a" stroke="#3a3a3a" rx="2" ry="2" stroke-dasharray="3,3" />
+  <rect x="660.0" y="324" width="12" height="12" fill="#0a0a0a" stroke="#3a3a3a" rx="2" ry="2" stroke-dasharray="3,3" />
+  <rect x="674.0" y="324" width="12" height="12" fill="#0a0a0a" stroke="#3a3a3a" rx="2" ry="2" stroke-dasharray="3,3" />
+  <rect x="688.0" y="324" width="12" height="12" fill="#0a0a0a" stroke="#3a3a3a" rx="2" ry="2" stroke-dasharray="3,3" />
+  <rect x="702.0" y="324" width="12" height="12" fill="#0a0a0a" stroke="#3a3a3a" rx="2" ry="2" stroke-dasharray="3,3" />
+  <rect x="716.0" y="324" width="12" height="12" fill="#0a0a0a" stroke="#3a3a3a" rx="2" ry="2" stroke-dasharray="3,3" />
+  <rect x="767.5" y="310" width="12" height="12" fill="#2a4a10" stroke="#76b900" rx="2" ry="2" />
+  <rect x="781.5" y="310" width="12" height="12" fill="#2a4a10" stroke="#76b900" rx="2" ry="2" />
+  <rect x="795.5" y="310" width="12" height="12" fill="#2a4a10" stroke="#76b900" rx="2" ry="2" />
+  <rect x="809.5" y="310" width="12" height="12" fill="#2a4a10" stroke="#76b900" rx="2" ry="2" />
+  <rect x="767.5" y="324" width="12" height="12" fill="#2a4a10" stroke="#76b900" rx="2" ry="2" />
+  <rect x="781.5" y="324" width="12" height="12" fill="#2a4a10" stroke="#76b900" rx="2" ry="2" />
+  <rect x="795.5" y="324" width="12" height="12" fill="#2a4a10" stroke="#76b900" rx="2" ry="2" />
+  <rect x="809.5" y="324" width="12" height="12" fill="#2a4a10" stroke="#76b900" rx="2" ry="2" />
+  <rect x="308.5" y="355" width="12" height="12" fill="#2a4a10" stroke="#76b900" rx="2" ry="2" />
+  <rect x="322.5" y="355" width="12" height="12" fill="#2a4a10" stroke="#76b900" rx="2" ry="2" />
+  <rect x="336.5" y="355" width="12" height="12" fill="#2a4a10" stroke="#76b900" rx="2" ry="2" />
+  <rect x="350.5" y="355" width="12" height="12" fill="#2a4a10" stroke="#76b900" rx="2" ry="2" />
+  <rect x="430.0" y="355" width="12" height="12" fill="#0a0a0a" stroke="#3a3a3a" rx="2" ry="2" stroke-dasharray="3,3" />
+  <rect x="444.0" y="355" width="12" height="12" fill="#0a0a0a" stroke="#3a3a3a" rx="2" ry="2" stroke-dasharray="3,3" />
+  <rect x="458.0" y="355" width="12" height="12" fill="#0a0a0a" stroke="#3a3a3a" rx="2" ry="2" stroke-dasharray="3,3" />
+  <rect x="472.0" y="355" width="12" height="12" fill="#0a0a0a" stroke="#3a3a3a" rx="2" ry="2" stroke-dasharray="3,3" />
+  <rect x="470.5" y="390" width="12" height="12" fill="#2a4a10" stroke="#76b900" rx="2" ry="2" />
+  <rect x="484.5" y="390" width="12" height="12" fill="#2a4a10" stroke="#76b900" rx="2" ry="2" />
+  <rect x="498.5" y="390" width="12" height="12" fill="#2a4a10" stroke="#76b900" rx="2" ry="2" />
+  <rect x="512.5" y="390" width="12" height="12" fill="#2a4a10" stroke="#76b900" rx="2" ry="2" />
+  <rect x="526.5" y="390" width="12" height="12" fill="#2a4a10" stroke="#76b900" rx="2" ry="2" />
+  <rect x="540.5" y="390" width="12" height="12" fill="#2a4a10" stroke="#76b900" rx="2" ry="2" />
+  <rect x="646.0" y="390" width="12" height="12" fill="#0a0a0a" stroke="#3a3a3a" rx="2" ry="2" stroke-dasharray="3,3" />
+  <rect x="660.0" y="390" width="12" height="12" fill="#0a0a0a" stroke="#3a3a3a" rx="2" ry="2" stroke-dasharray="3,3" />
+  <rect x="674.0" y="390" width="12" height="12" fill="#0a0a0a" stroke="#3a3a3a" rx="2" ry="2" stroke-dasharray="3,3" />
+  <rect x="688.0" y="390" width="12" height="12" fill="#0a0a0a" stroke="#3a3a3a" rx="2" ry="2" stroke-dasharray="3,3" />
+  <rect x="702.0" y="390" width="12" height="12" fill="#0a0a0a" stroke="#3a3a3a" rx="2" ry="2" stroke-dasharray="3,3" />
+  <rect x="716.0" y="390" width="12" height="12" fill="#0a0a0a" stroke="#3a3a3a" rx="2" ry="2" stroke-dasharray="3,3" />
+  <text x="497.5" y="438" fill="#767676" font-size="11" font-family="Arial, Helvetica, sans-serif" text-anchor="middle" font-weight="normal" font-style="italic" dy="0">Cache holds dead blocks — no lifecycle signal</text>
+  <line x1="160" y1="458" x2="970" y2="458" stroke="#3a3a3a" />
+  <line x1="160.0" y1="458" x2="160.0" y2="464" stroke="#3a3a3a" />
+  <text x="160.0" y="476" fill="#767676" font-size="10" font-family="Arial, Helvetica, sans-serif" text-anchor="middle" font-weight="normal" font-style="normal" dy="0">0</text>
+  <line x1="295.0" y1="458" x2="295.0" y2="464" stroke="#3a3a3a" />
+  <text x="295.0" y="476" fill="#767676" font-size="10" font-family="Arial, Helvetica, sans-serif" text-anchor="middle" font-weight="normal" font-style="normal" dy="0">10</text>
+  <line x1="430.0" y1="458" x2="430.0" y2="464" stroke="#3a3a3a" />
+  <text x="430.0" y="476" fill="#767676" font-size="10" font-family="Arial, Helvetica, sans-serif" text-anchor="middle" font-weight="normal" font-style="normal" dy="0">20</text>
+  <line x1="565.0" y1="458" x2="565.0" y2="464" stroke="#3a3a3a" />
+  <text x="565.0" y="476" fill="#767676" font-size="10" font-family="Arial, Helvetica, sans-serif" text-anchor="middle" font-weight="normal" font-style="normal" dy="0">30</text>
+  <line x1="700.0" y1="458" x2="700.0" y2="464" stroke="#3a3a3a" />
+  <text x="700.0" y="476" fill="#767676" font-size="10" font-family="Arial, Helvetica, sans-serif" text-anchor="middle" font-weight="normal" font-style="normal" dy="0">40</text>
+  <line x1="835.0" y1="458" x2="835.0" y2="464" stroke="#3a3a3a" />
+  <text x="835.0" y="476" fill="#767676" font-size="10" font-family="Arial, Helvetica, sans-serif" text-anchor="middle" font-weight="normal" font-style="normal" dy="0">50</text>
+  <line x1="970.0" y1="458" x2="970.0" y2="464" stroke="#3a3a3a" />
+  <text x="970.0" y="476" fill="#767676" font-size="10" font-family="Arial, Helvetica, sans-serif" text-anchor="middle" font-weight="normal" font-style="normal" dy="0">60</text>
+  <text x="565.0" y="493" fill="#767676" font-size="11" font-family="Arial, Helvetica, sans-serif" text-anchor="middle" font-weight="normal" font-style="normal" dy="0">Time (relative)</text>
+  <rect x="0" y="0" width="1000" height="550" fill="none" stroke="#76b900" rx="0" ry="0" />
+</svg>
