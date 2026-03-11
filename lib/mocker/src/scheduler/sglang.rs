@@ -204,7 +204,7 @@ impl SglangScheduler {
                 }
 
                 // 4. Simulate prefill
-                simulate_prefill(&admit.can_run, &config).await;
+                simulate_prefill(admit.total_new_tokens, admit.can_run.len(), &config).await;
 
                 // Separate fully-prefilled from chunked requests
                 for mut req in admit.can_run {
@@ -335,6 +335,8 @@ fn apply_schedule_policy(
 
 struct AdmitResult {
     can_run: Vec<SglangRequest>,
+    /// Total new tokens to prefill (computed before prefilled_tokens is updated).
+    total_new_tokens: usize,
     oom: bool,
 }
 
@@ -363,6 +365,7 @@ fn get_new_batch_prefill(
     let mut can_run = Vec::new();
     let mut rejected = VecDeque::new();
     let mut oom = false;
+    let mut total_new_tokens: usize = 0;
 
     while let Some(mut req) = waiting.pop_front() {
         let extend_input = req.extend_input_len() as f64;
@@ -412,6 +415,7 @@ fn get_new_batch_prefill(
         req.prefilled_tokens = chunk_end;
 
         let actual_prefilled = (chunk_end - (req.token_ids.len() - extend_input as usize)) as f64;
+        total_new_tokens += actual_prefilled as usize;
         rem_total_tokens -= total_needed;
         rem_input_tokens -= actual_prefilled;
         rem_chunk_tokens -= actual_prefilled;
@@ -427,11 +431,11 @@ fn get_new_batch_prefill(
         waiting.push_front(req);
     }
 
-    AdmitResult { can_run, oom }
+    AdmitResult { can_run, total_new_tokens, oom }
 }
 
-async fn simulate_prefill(can_run: &[SglangRequest], config: &SglangConfig) {
-    if can_run.is_empty() {
+async fn simulate_prefill(total_new_tokens: usize, num_reqs: usize, config: &SglangConfig) {
+    if num_reqs == 0 {
         return;
     }
 
@@ -440,7 +444,6 @@ async fn simulate_prefill(can_run: &[SglangRequest], config: &SglangConfig) {
     }
 
     let start = Instant::now();
-    let total_new_tokens: usize = can_run.iter().map(|r| r.extend_input_len()).sum();
     let prefill_time = config.perf_model.predict_prefill_time(total_new_tokens);
     let total_time = Duration::from_secs_f64(prefill_time / 1000.0);
 
