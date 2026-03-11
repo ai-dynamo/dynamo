@@ -250,6 +250,7 @@ mod tests {
             "mistral",
             "granite",
             "nemotron_nano",
+            "nemotron3",
             "glm45",
             "minimax_append_think",
         ];
