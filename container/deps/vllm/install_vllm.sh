@@ -199,8 +199,7 @@ if [ "$DEVICE" = "cpu" ]; then
     fi
     # vLLM CPU requirements pin torch with a +cpu local version (e.g. 2.10.0+cpu),
     # which is published on the PyTorch CPU wheel index instead of PyPI.
-    # Install torchvision, torchaudio from the same index to get the correct v1ersions with +cpu suffix.
-    python -c "import platform; print(platform.machine())"
+    # Install torchvision, torchaudio from the same index to get the correct versions with +cpu suffix.
     uv pip install -r requirements/cpu-build.txt --extra-index-url https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-match
     uv pip install torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-match
     VLLM_TARGET_DEVICE=cpu \
