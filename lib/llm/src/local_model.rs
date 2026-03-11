@@ -472,11 +472,23 @@ impl LocalModel {
 
         // Register the Model Deployment Card via discovery interface
         // The model_suffix (for LoRA) will be appended AFTER the instance_id
-        let priority: u32 =
-            std::env::var(dynamo_runtime::config::environment_names::worker::DYN_WORKER_PRIORITY)
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0);
+        let priority: u32 = match std::env::var(
+            dynamo_runtime::config::environment_names::worker::DYN_WORKER_PRIORITY,
+        ) {
+            Ok(value) => match value.parse() {
+                Ok(priority) => priority,
+                Err(err) => {
+                    tracing::warn!(
+                        env_var = dynamo_runtime::config::environment_names::worker::DYN_WORKER_PRIORITY,
+                        value,
+                        %err,
+                        "Invalid worker priority; defaulting to 0"
+                    );
+                    0
+                }
+            },
+            Err(_) => 0,
+        };
         let discovery = endpoint.drt().discovery();
         let spec = DiscoverySpec::from_model_with_suffix_and_priority(
             endpoint.component().namespace().name().to_string(),

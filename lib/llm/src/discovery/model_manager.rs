@@ -64,12 +64,17 @@ pub enum ModelManagerError {
 /// Each WorkerSet owns a complete pipeline built from its specific configuration.
 ///
 /// Note: Don't implement Clone for this, put it in an Arc instead.
+pub(crate) struct StoredModelCard {
+    pub(crate) card: ModelDeploymentCard,
+    pub(crate) priority: u32,
+}
+
 pub struct ModelManager {
     /// Model name → Model (which contains WorkerSets with engines)
     models: DashMap<String, Arc<Model>>,
 
     /// Per-instance model cards, keyed by instance path. Used for cleanup on worker removal.
-    cards: DashMap<String, ModelDeploymentCard>,
+    cards: DashMap<String, StoredModelCard>,
 
     /// Prefill router activation rendezvous, keyed by "model_name:namespace".
     prefill_router_activators: DashMap<String, PrefillActivationState>,
@@ -157,18 +162,35 @@ impl ModelManager {
     // -- Model cards --
 
     pub fn get_model_cards(&self) -> Vec<ModelDeploymentCard> {
-        self.cards.iter().map(|r| r.value().clone()).collect()
+        self.cards.iter().map(|r| r.value().card.clone()).collect()
     }
 
     /// Save a ModelDeploymentCard from an instance's key so we can fetch it later when the key is
     /// deleted.
     pub fn save_model_card(&self, key: &str, card: ModelDeploymentCard) -> anyhow::Result<()> {
-        self.cards.insert(key.to_string(), card);
+        self.save_model_card_with_priority(key, card, 0)
+    }
+
+    /// Save a ModelDeploymentCard and its worker selection priority from an instance's key so we
+    /// can fetch it later when the key is deleted.
+    pub fn save_model_card_with_priority(
+        &self,
+        key: &str,
+        card: ModelDeploymentCard,
+        priority: u32,
+    ) -> anyhow::Result<()> {
+        self.cards
+            .insert(key.to_string(), StoredModelCard { card, priority });
         Ok(())
     }
 
     /// Remove and return model card for this instance's key. We do this when the instance stops.
     pub fn remove_model_card(&self, key: &str) -> Option<ModelDeploymentCard> {
+        self.remove_model_card_entry(key).map(|entry| entry.card)
+    }
+
+    /// Remove and return the stored model card metadata for this instance's key.
+    pub(crate) fn remove_model_card_entry(&self, key: &str) -> Option<StoredModelCard> {
         self.cards.remove(key).map(|(_, v)| v)
     }
 

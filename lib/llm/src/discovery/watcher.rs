@@ -50,12 +50,14 @@ use super::ModelManager;
 use crate::namespace::NamespaceFilter;
 
 /// Constructs the WorkerSet storage key. Prefill and decode workers in the same
-/// namespace get different keys so they don't block each other's registration.
-fn worker_set_key(namespace: &str, model_type: ModelType) -> String {
+/// namespace get different keys so they don't block each other's registration,
+/// and priority changes create distinct WorkerSets so rolling updates tier
+/// correctly while old and new workers coexist.
+fn worker_set_key(namespace: &str, model_type: ModelType, priority: u32) -> String {
     if model_type.supports_prefill() {
-        format!("{}:prefill", namespace)
+        format!("{}:prefill:priority={}", namespace, priority)
     } else {
-        namespace.to_string()
+        format!("{}:priority={}", namespace, priority)
     }
 }
 
@@ -290,33 +292,35 @@ impl ModelWatcher {
         namespace_filter: &NamespaceFilter,
     ) -> anyhow::Result<Option<String>> {
         let key = mcid.to_path();
-        let card = match self.manager.remove_model_card(&key) {
-            Some(card) => card,
+        let stored_card = match self.manager.remove_model_card_entry(&key) {
+            Some(stored_card) => stored_card,
             None => {
                 anyhow::bail!("Missing ModelDeploymentCard for {}", key);
             }
         };
+        let card = stored_card.card;
         let model_name = card.name().to_string();
         let worker_namespace = &mcid.namespace;
-        let worker_component = &mcid.component;
-        let ws_key = worker_set_key(&mcid.namespace, card.model_type);
+        let ws_key = worker_set_key(&mcid.namespace, card.model_type, stored_card.priority);
 
         // Query discovery for all remaining instances of this model
         let active_instances = self
-            .cards_for_model_with_endpoints(&model_name, namespace_filter)
+            .card_instances_for_model(&model_name, namespace_filter)
             .await
             .with_context(|| model_name.clone())?;
 
-        // Check if instances of the SAME component remain in this namespace.
-        // In disaggregated deployments, prefill and decode are different components
-        // in the same namespace, so we must check at the component level to avoid
-        // removing one type's WorkerSet while the other still has workers.
-        let component_has_instances = active_instances.iter().any(|(eid, _)| {
-            eid.namespace == *worker_namespace && eid.component == *worker_component
-        });
+        // Check if instances of the same WorkerSet key remain. This keeps
+        // priority tiers isolated during rolling updates while still allowing
+        // prefill and decode to coexist in the same namespace.
+        let worker_set_has_instances =
+            active_instances
+                .iter()
+                .any(|(instance_id, card, priority)| {
+                    worker_set_key(&instance_id.namespace, card.model_type, *priority) == ws_key
+                });
 
-        if !component_has_instances {
-            // No more workers of this component in this namespace — remove its WorkerSet
+        if !worker_set_has_instances {
+            // No more workers remain in this WorkerSet — remove it.
             if let Some(_removed_ws) = self.manager.remove_worker_set(&model_name, &ws_key) {
                 // remove_prefill_activator uses deployment namespace (not ws_key)
                 self.manager
@@ -367,13 +371,13 @@ impl ModelWatcher {
         // If so, this is just another worker joining an existing set — no pipeline build needed.
         let model_name = card.name().to_string();
         let namespace = mcid.namespace.clone();
-        let ws_key = worker_set_key(&namespace, card.model_type);
+        let ws_key = worker_set_key(&namespace, card.model_type, priority);
 
         if let Some(model) = self.manager.get_model(&model_name)
             && model.has_worker_set(&ws_key)
         {
             self.manager
-                .save_model_card(&mcid.to_path(), card.clone())?;
+                .save_model_card_with_priority(&mcid.to_path(), card.clone(), priority)?;
             tracing::debug!(
                 model_name = card.name(),
                 namespace = namespace,
@@ -389,7 +393,7 @@ impl ModelWatcher {
             .insert(registration_key.clone())
         {
             self.manager
-                .save_model_card(&mcid.to_path(), card.clone())?;
+                .save_model_card_with_priority(&mcid.to_path(), card.clone(), priority)?;
             tracing::debug!(
                 model_name = card.name(),
                 namespace = namespace,
@@ -429,7 +433,7 @@ impl ModelWatcher {
             "building worker set pipeline"
         );
         self.manager
-            .save_model_card(&mcid.to_path(), card.clone())?;
+            .save_model_card_with_priority(&mcid.to_path(), card.clone(), priority)?;
 
         if let Some(tx) = &self.model_update_tx {
             tx.send(ModelUpdate::Added(card.clone())).await.ok();
@@ -437,7 +441,7 @@ impl ModelWatcher {
 
         let checksum = card.mdcsum();
         let namespace = mcid.namespace.clone();
-        let ws_key = worker_set_key(&namespace, card.model_type);
+        let ws_key = worker_set_key(&namespace, card.model_type, priority);
 
         // Build the WorkerSet with all applicable engines
         let mut worker_set = WorkerSet::with_priority(
@@ -763,8 +767,10 @@ impl ModelWatcher {
         Ok(())
     }
 
-    /// All the registered ModelDeploymentCard with the EndpointId they are attached to, one per instance
-    async fn all_cards(&self) -> anyhow::Result<Vec<(EndpointId, ModelDeploymentCard)>> {
+    /// All the registered ModelDeploymentCard with their instance IDs and priorities, one per instance.
+    async fn all_card_instances(
+        &self,
+    ) -> anyhow::Result<Vec<(ModelCardInstanceId, ModelDeploymentCard, u32)>> {
         let discovery = self.drt.discovery();
         let instances = discovery.list(DiscoveryQuery::AllModels).await?;
 
@@ -772,17 +778,25 @@ impl ModelWatcher {
         for instance in instances {
             match instance.deserialize_model::<ModelDeploymentCard>() {
                 Ok(card) => {
-                    let endpoint_id = match &instance {
+                    let model_instance = match &instance {
                         dynamo_runtime::discovery::DiscoveryInstance::Model {
                             namespace,
                             component,
                             endpoint,
+                            instance_id,
+                            model_suffix,
+                            priority,
                             ..
-                        } => EndpointId {
-                            namespace: namespace.clone(),
-                            component: component.clone(),
-                            name: endpoint.clone(),
-                        },
+                        } => (
+                            ModelCardInstanceId {
+                                namespace: namespace.clone(),
+                                component: component.clone(),
+                                endpoint: endpoint.clone(),
+                                instance_id: *instance_id,
+                                model_suffix: model_suffix.clone(),
+                            },
+                            *priority,
+                        ),
                         _ => {
                             tracing::error!(
                                 "Unexpected discovery instance type (expected ModelCard)"
@@ -790,7 +804,7 @@ impl ModelWatcher {
                             continue;
                         }
                     };
-                    results.push((endpoint_id, card));
+                    results.push((model_instance.0, card, model_instance.1));
                 }
                 Err(err) => {
                     tracing::error!(%err, "Failed to deserialize model card");
@@ -799,6 +813,25 @@ impl ModelWatcher {
             }
         }
         Ok(results)
+    }
+
+    /// All the registered ModelDeploymentCard with the EndpointId they are attached to, one per instance.
+    async fn all_cards(&self) -> anyhow::Result<Vec<(EndpointId, ModelDeploymentCard)>> {
+        Ok(self
+            .all_card_instances()
+            .await?
+            .into_iter()
+            .map(|(model_id, card, _)| {
+                (
+                    EndpointId {
+                        namespace: model_id.namespace,
+                        component: model_id.component,
+                        name: model_id.endpoint,
+                    },
+                    card,
+                )
+            })
+            .collect())
     }
 
     pub async fn cards_for_model(
@@ -812,6 +845,20 @@ impl ModelWatcher {
             .into_iter()
             .map(|(_, card)| card)
             .collect())
+    }
+
+    async fn card_instances_for_model(
+        &self,
+        model_name: &str,
+        namespace_filter: &NamespaceFilter,
+    ) -> anyhow::Result<Vec<(ModelCardInstanceId, ModelDeploymentCard, u32)>> {
+        let mut all = self.all_card_instances().await?;
+        all.retain(|(instance_id, card, _)| {
+            let matches_name = card.name() == model_name;
+            let matches_namespace = namespace_filter.matches(&instance_id.namespace);
+            matches_name && matches_namespace
+        });
+        Ok(all)
     }
 
     /// Like `cards_for_model` but also returns the EndpointId for each card,
