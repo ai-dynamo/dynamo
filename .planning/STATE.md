@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: planning
-stopped_at: Completed 02-import-migration/02-03-PLAN.md
-last_updated: "2026-03-11T10:24:28.298Z"
+stopped_at: Completed 02-import-migration/02-04-PLAN.md
+last_updated: "2026-03-11T15:14:31.856Z"
 last_activity: 2026-03-11 — Roadmap created
 progress:
   total_phases: 4
   completed_phases: 2
-  total_plans: 4
-  completed_plans: 4
+  total_plans: 5
+  completed_plans: 5
   percent: 0
 ---
 
@@ -54,6 +54,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 02-import-migration P01 | 25 | 3 tasks | 12 files |
 | Phase 02-import-migration P02 | 8 | 2 tasks | 15 files |
 | Phase 02-import-migration P03 | 28min | 3 tasks | 11 files |
+| Phase 02-import-migration P04 | 3min | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -76,6 +77,7 @@ Recent decisions affecting current work:
 - [Phase 02-import-migration]: velo::Event::trigger(self) consumes ownership — store as Event not Arc<Event> when trigger needed
 - [Phase 02-import-migration]: InstanceLeader::execute_local_transfer is pub(crate) — route through parallel_worker() (pub) which implements WorkerTransfers
 - [Phase 02-import-migration]: execute_local_layerwise_onboard requires nccl feature — gate call in kvbm-connector with cfg(feature = nccl)
+- [Phase 02-import-migration]: Single atomic commit for Tasks 1+2 combined — plan explicitly deferred Task 1 commit until Task 2 cargo check passed
 
 ### Pending Todos
 
@@ -87,6 +89,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-11T10:24:28.296Z
-Stopped at: Completed 02-import-migration/02-03-PLAN.md
+Last session: 2026-03-11T15:14:31.855Z
+Stopped at: Completed 02-import-migration/02-04-PLAN.md
 Resume file: None
