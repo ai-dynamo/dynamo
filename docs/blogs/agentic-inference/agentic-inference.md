@@ -206,8 +206,8 @@ The same mechanism addresses cache coherence in disaggregated prefill-decode ser
 
 Multi-tier storage solves sharing and persistence, but blocks still arrive on GPU only after the request hits the worker. The missing piece for agentic systems is prefetch: the harness knows when an agent's tool call is about to return, which means it knows which blocks will be needed and when. We are building prefetch hooks so the harness can signal "bring these blocks from storage to GPU ahead of the next request." Combined with the retention APIs below, this gives the harness full lifecycle control: pin blocks to prevent eviction, set priority to control eviction ordering, and prefetch blocks proactively before they are needed.
 
-<Frame caption="Figure 6 — Tool-Call Offload">
-  <img src="./images/fig-6-tool-call-offload.svg" alt="KV block offload during tool calls and prefetch before the next LLM call" />
+<Frame caption="Figure 5 — Tool-Call Offload">
+  <img src="./images/fig-5-tool-call-offload.svg" alt="KV block offload during tool calls and prefetch before the next LLM call" />
 </Frame>
 
 <Info icon="hand-point-up" className="fig-caption">
@@ -236,8 +236,8 @@ The next step is connecting retention with the distributed cache. Today, retenti
 
 Consider a typical Claude Code session. The lead agent runs for 20+ turns, accumulating a growing conversation prefix. Along the way it spawns explore subagents that each run 1–3 turns and terminate. It might spawn a team of 4 specialists that work in parallel on different subtasks and then terminate. Midway through, the agent hits a context limit and summarizes its history, compressing ~175K tokens down to ~40K. Each of these events has direct implications for the cache: subagent termination means its KV will never be referenced again, summarization means the old conversation history is dead weight, and the lead agent's prefix should survive across all of it. Reasoning models add another dimension: `<think>...</think>` blocks account for ~40% of generated tokens but have zero reuse after the reasoning loop closes. None of this lifecycle information is visible to the cache layer today.
 
-<Frame caption="Figure 7 — Session Lifecycle">
-  <img src="./images/fig-7-session-lifecycle.svg" alt="Cache lifecycle of a Claude Code session with subagents" />
+<Frame caption="Figure 6 — Session Lifecycle">
+  <img src="./images/fig-6-session-lifecycle.svg" alt="Cache lifecycle of a Claude Code session with subagents" />
 </Frame>
 
 <Info icon="hand-point-up" className="fig-caption">
