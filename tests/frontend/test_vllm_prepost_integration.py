@@ -75,7 +75,7 @@ class MockVllmPrepostWorkerProcess(ManagedProcess):
                     self._check_models_api,
                 )
             ],
-            timeout=300,
+            timeout=60,
             display_output=True,
             terminate_all_matching_process_names=False,
             straggler_commands=["-m tests.frontend.vllm_prepost_worker"],

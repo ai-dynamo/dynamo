@@ -17,9 +17,8 @@ from transformers import AutoTokenizer
 from dynamo.llm import ModelInput, ModelType, register_model
 from dynamo.runtime import DistributedRuntime
 from tests.frontend.test_prepost import OUTPUTS_INTERVAL_20
+from tests.frontend.test_vllm_prepost_integration import CAPTURE_PATH_ENV
 from tests.utils.constants import QWEN
-
-CAPTURE_PATH_ENV = "DYN_VLLM_PREPOST_CAPTURE_PATH"
 
 
 class VllmPrepostTestHandler:
