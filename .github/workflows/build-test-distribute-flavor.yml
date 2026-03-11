@@ -188,8 +188,8 @@ jobs:
           if [ "${{ inputs.make_efa }}" == "true" ]; then
             EFA_SUFFIX="-efa"
           fi
-          TARGET_TAG_PLAIN="${{ github.sha }}-${{ inputs.framework }}${EFA_SUFFIX}"
-          TEST_TAG_PLAIN="${{ github.sha }}-${{ inputs.framework }}${EFA_SUFFIX}-test"
+          TARGET_TAG_PLAIN="${{ github.sha }}-${{ inputs.framework }}-${{ inputs.target}}${EFA_SUFFIX}"
+          TEST_TAG_PLAIN="${{ github.sha }}-${{ inputs.framework }}-${{ inputs.target}}${EFA_SUFFIX}-test"
           DEFAULT_TARGET_IMAGE_URI="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${TARGET_TAG_PLAIN}-cuda${CUDA_VERSION}-${{ inputs.platform }}"
           TEST_IMAGE_URI="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${TEST_TAG_PLAIN}-cuda${CUDA_VERSION}-${{ inputs.platform }}"
           echo "default_target_image_uri=${DEFAULT_TARGET_IMAGE_URI}" >> $GITHUB_OUTPUT
