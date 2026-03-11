@@ -2302,32 +2302,44 @@ def _test_router_decisions(
         _dp_b = dp_rank_b if dp_rank_b is not None else 0
 
         async def _verify_scores():
-            # Wait for ZMQ events to propagate to the indexer
-            await asyncio.sleep(3)
+            id_a = str(worker_a_id)
+            id_b = str(worker_b_id)
+            dp_a = str(_dp_a)
+            dp_b = str(_dp_b)
 
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    f"{standalone_indexer_url}/query",
-                    json={"token_ids": req4_tokens, "model_name": model_name},
-                ) as resp:
-                    assert resp.status == 200, f"POST /query failed: {resp.status}"
-                    scores = (await resp.json())["scores"]
+            # Poll until ZMQ events propagate to the standalone indexer.
+            max_attempts = 30
+            for attempt in range(max_attempts):
+                await asyncio.sleep(0.5)
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(
+                        f"{standalone_indexer_url}/query",
+                        json={"token_ids": req4_tokens, "model_name": model_name},
+                    ) as resp:
+                        assert resp.status == 200, f"POST /query failed: {resp.status}"
+                        scores = (await resp.json())["scores"]
 
-                    id_a = str(worker_a_id)
-                    id_b = str(worker_b_id)
-                    dp_a = str(_dp_a)
-                    dp_b = str(_dp_b)
-                    score_a = scores[id_a][dp_a]
-                    score_b = scores[id_b][dp_b]
+                        if id_a in scores and dp_a in scores.get(id_a, {}):
+                            score_a = scores[id_a][dp_a]
+                            score_b = scores.get(id_b, {}).get(dp_b, 0)
+                            logger.info(
+                                f"Standalone indexer /query (attempt {attempt + 1}): "
+                                f"{id_a}[{dp_a}]={score_a}, {id_b}[{dp_b}]={score_b}"
+                            )
+                            assert score_a > score_b, (
+                                f"Expected instance {id_a} dp_rank {dp_a} score {score_a} > "
+                                f"instance {id_b} dp_rank {dp_b} score {score_b} for req4 tokens"
+                            )
+                            return
 
-                    logger.info(
-                        f"Standalone indexer /query: {id_a}[{dp_a}]={score_a}, "
-                        f"{id_b}[{dp_b}]={score_b}"
-                    )
-                    assert score_a > score_b, (
-                        f"Expected instance {id_a} dp_rank {dp_a} score {score_a} > "
-                        f"instance {id_b} dp_rank {dp_b} score {score_b} for req4 tokens"
-                    )
+                        logger.debug(
+                            f"Waiting for indexer events (attempt {attempt + 1}/{max_attempts}), "
+                            f"scores keys: {list(scores.keys())}"
+                        )
+
+            raise AssertionError(
+                f"Timed out waiting for standalone indexer to receive events for worker {id_a}"
+            )
 
         asyncio.run(_verify_scores())
 
