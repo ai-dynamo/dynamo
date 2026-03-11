@@ -10,7 +10,7 @@ use std::sync::Arc;
 use kvbm_physical::layout::LayoutConfig;
 use crate::v2::BlockId;
 use crate::v2::InstanceId;
-use crate::v2::distributed::worker::{LeaderLayoutConfig, WorkerLayoutResponse};
+use kvbm_engine::worker::{LeaderLayoutConfig, WorkerLayoutResponse};
 
 use super::*;
 

@@ -22,10 +22,9 @@ use std::sync::{Arc, OnceLock};
 
 use super::{FinishedRequests, init::PendingWorkerState};
 
-use crate::{
-    KvbmRuntime,
-    distributed::worker::{LeaderLayoutConfig, NovaWorkerService, WorkerLayoutResponse},
-};
+use kvbm_engine::worker::{LeaderLayoutConfig, VeloWorkerService, WorkerLayoutResponse};
+
+use crate::KvbmRuntime;
 use kvbm_physical::layout::LayoutConfig;
 
 /// Nova event handle for forward pass completion notification.
@@ -120,7 +119,7 @@ pub struct WorkerState {
     layout_config: OnceLock<LayoutConfig>,
 
     /// Nova worker service, set when initialization completes.
-    pub(crate) service: OnceLock<NovaWorkerService>,
+    pub(crate) service: OnceLock<VeloWorkerService>,
 
     // --- Mutable state fields (Mutex) ---
     /// Pending state for deferred initialization.
@@ -251,8 +250,8 @@ impl WorkerState {
             "Pre-allocated layer events for intra-pass onboarding and offloading"
         );
 
-        // Build NovaWorkerService
-        let service = NovaWorkerService::new(self.runtime.nova.clone(), worker)?;
+        // Build VeloWorkerService
+        let service = VeloWorkerService::new(self.runtime.nova.clone(), worker)?;
 
         self.service
             .set(service)

@@ -26,17 +26,14 @@ use dynamo_memory::TensorDescriptor;
 
 use kvbm_physical::transfer::context::TokioRuntime;
 
+use kvbm_engine::object::create_object_client;
+use kvbm_engine::worker::{DirectWorker, LeaderLayoutConfig, WorkerLayoutResponse};
+
 use crate::{
     KvbmRuntime,
-    v2::{
-        distributed::{
-            object::create_object_client,
-            worker::{DirectWorker, LeaderLayoutConfig, WorkerLayoutResponse},
-        },
-        physical::{
-            TransferManager,
-            layout::{BlockDimension, LayoutConfig, PhysicalLayoutBuilder},
-        },
+    v2::physical::{
+        TransferManager,
+        layout::{BlockDimension, LayoutConfig, PhysicalLayoutBuilder},
     },
 };
 use kvbm_common::LogicalLayoutHandle;

@@ -6,15 +6,13 @@ use std::sync::Arc;
 
 use super::ConnectorLeader;
 
-use crate::distributed::leader::InstanceLeader;
-use crate::distributed::worker::{LeaderLayoutConfig, NovaWorkerClient, Worker};
+use kvbm_engine::leader::InstanceLeader;
+use kvbm_engine::worker::{LeaderLayoutConfig, VeloWorkerClient, Worker};
 use crate::integrations::connector::worker::ConnectorWorkerClient;
 use kvbm_logical::blocks::{BlockDuplicationPolicy, BlockRegistry};
 use kvbm_logical::manager::{BlockManager, FrequencyTrackingCapacity};
-use crate::v2::distributed::object::{
-    ObjectLockManager, create_lock_manager, create_object_client,
-};
-use crate::v2::distributed::offload::{
+use kvbm_engine::object::{ObjectLockManager, create_lock_manager, create_object_client};
+use kvbm_engine::offload::{
     ObjectPipelineBuilder, ObjectPresenceFilter, OffloadEngine, PendingTracker, PipelineBuilder,
     S3PresenceChecker, create_policy_from_config,
 };
@@ -48,7 +46,7 @@ impl ConnectorLeader {
                 self.runtime.nova.clone(),
                 instance_id,
             ));
-        state.worker_transfer_clients.push(NovaWorkerClient::new(
+        state.worker_transfer_clients.push(VeloWorkerClient::new(
             self.runtime.nova.clone(),
             instance_id,
         ));
@@ -296,7 +294,7 @@ impl ConnectorLeader {
             let mut state = self.init.lock();
             state.worker_metadata = collected_metadata.clone();
 
-            // Configure layout handles for each NovaWorkerClient from their metadata
+            // Configure layout handles for each VeloWorkerClient from their metadata
             tracing::debug!("Configuring layout handles for all workers");
             for (i, (client, metadata)) in state
                 .worker_transfer_clients
@@ -501,7 +499,7 @@ impl ConnectorLeader {
             // Get parallel_worker from leader - it implements ObjectBlockOps and fans out to all workers
             if let Some(parallel_worker) = leader.parallel_worker() {
                 // parallel_worker implements ObjectBlockOps, we can cast it to the trait object
-                let object_ops: Arc<dyn crate::v2::distributed::object::ObjectBlockOps> =
+                let object_ops: Arc<dyn kvbm_engine::object::ObjectBlockOps> =
                     parallel_worker;
 
                 // Create S3 presence checker using the parallel worker

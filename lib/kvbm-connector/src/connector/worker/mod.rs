@@ -56,7 +56,7 @@ use std::time::Instant;
 
 use kvbm_common::LogicalLayoutHandle;
 use kvbm_physical::TransferOptions;
-use crate::v2::distributed::worker::{DirectWorker, WorkerTransfers};
+use kvbm_engine::worker::{DirectWorker, WorkerTransfers};
 use crate::v2::integrations::connector::leader::scheduler::KvConnectorMetadata;
 use crate::v2::integrations::vllm::layout::determine_kv_layout;
 use crate::{BlockId, KvbmRuntime};
