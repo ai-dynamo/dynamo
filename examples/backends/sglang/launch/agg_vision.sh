@@ -5,14 +5,11 @@
 # Aggregated multimodal (vision + LLM) serving.
 # GPUs: 1
 
-# Setup cleanup trap
-cleanup() {
-    echo "Cleaning up background processes..."
-    kill $DYNAMO_PID 2>/dev/null || true
-    wait $DYNAMO_PID 2>/dev/null || true
-    echo "Cleanup complete."
-}
-trap cleanup EXIT INT TERM
+set -e
+trap 'echo Cleaning up...; kill 0' EXIT
+
+SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
 # Default values
 MODEL="Qwen/Qwen3-VL-8B-Instruct"
@@ -64,33 +61,12 @@ if [ "$ENABLE_OTEL" = true ]; then
 fi
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
-echo "=========================================="
-echo "Launching Aggregated Vision Worker"
-echo "=========================================="
-echo "Model:       $MODEL"
-echo "Frontend:    http://localhost:$HTTP_PORT"
-echo "=========================================="
-echo ""
-echo "Example test command:"
-echo ""
-echo "  curl http://localhost:${HTTP_PORT}/v1/chat/completions \\"
-echo "    -H 'Content-Type: application/json' \\"
-echo "    -d '{"
-echo "      \"model\": \"${MODEL}\","
-echo "      \"messages\": [{\"role\": \"user\", \"content\": ["
-echo "        {\"type\": \"text\", \"text\": \"Explain why Roger Federer is considered one of the greatest tennis players of all time\"},"
-echo "        {\"type\": \"image_url\", \"image_url\": {\"url\": \"http://images.cocodataset.org/test2017/000000155781.jpg\"}}"
-echo "      ]}],"
-echo "      \"max_tokens\": 50"
-echo "    }'"
-echo ""
-echo "=========================================="
+print_launch_banner --multimodal "Launching Aggregated Vision Worker" "$MODEL" "$HTTP_PORT"
 
 # run ingress
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
 OTEL_SERVICE_NAME=dynamo-frontend \
 python3 -m dynamo.frontend &
-DYNAMO_PID=$!
 
 # Build chat template args (only if explicitly set)
 TEMPLATE_ARGS=()
@@ -110,4 +86,7 @@ python3 -m dynamo.sglang \
   --skip-tokenizer-init \
   --enable-metrics \
   "${TRACE_ARGS[@]}" \
-  "${EXTRA_ARGS[@]}"
+  "${EXTRA_ARGS[@]}" &
+
+# Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
+wait_any_exit

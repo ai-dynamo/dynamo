@@ -673,7 +673,9 @@ func GenerateComponentService(params ComponentServiceParams) (*corev1.Service, e
 
 	service := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:        params.ServiceName,
+			// Service names must be DNS-1035 labels (no dots). Replace dots with
+			// hyphens so model names like "Qwen3-0.6B" don't cause rejections.
+			Name:        strings.ReplaceAll(params.ServiceName, ".", "-"),
 			Namespace:   params.Namespace,
 			Labels:      labels,
 			Annotations: annotations,
@@ -833,7 +835,11 @@ func expandRolesForService(serviceName string, serviceReplicas *int32, numberOfN
 		roles = append(roles, ServiceRole{Name: serviceName + "-" + commonconsts.GroveRoleSuffixLeader, Role: RoleLeader, Replicas: 1})
 		roles = append(roles, ServiceRole{Name: serviceName + "-" + commonconsts.GroveRoleSuffixWorker, Role: RoleWorker, Replicas: numberOfNodes - 1})
 	} else {
-		roles = append(roles, ServiceRole{Name: serviceName, Role: RoleMain, Replicas: *serviceReplicas})
+		replicas := int32(1)
+		if serviceReplicas != nil {
+			replicas = *serviceReplicas
+		}
+		roles = append(roles, ServiceRole{Name: serviceName, Role: RoleMain, Replicas: replicas})
 	}
 	return roles
 }
