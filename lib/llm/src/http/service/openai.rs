@@ -1614,15 +1614,37 @@ async fn list_models_openai(
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs();
+
+    // Build a lookup from display_name -> context_length using model cards.
+    // Clients (e.g. Claude Code) read context_window from this response to
+    // determine how much context the model supports.
+    let cards = state.manager().get_model_cards();
+    let card_map: std::collections::HashMap<String, u32> = cards
+        .iter()
+        .map(|c| (c.display_name.clone(), c.context_length))
+        .collect();
+
+    // Allow env var override (applies to all models).
+    let context_window_override: Option<u64> = std::env::var("DYN_CONTEXT_WINDOW")
+        .ok()
+        .and_then(|v| v.parse().ok());
+    let max_output_tokens: Option<u64> = std::env::var("DYN_MAX_OUTPUT_TOKENS")
+        .ok()
+        .and_then(|v| v.parse().ok());
+
     let mut data = Vec::new();
 
     let models: HashSet<String> = state.manager().model_display_names();
     for model_name in models {
+        let context_window = context_window_override
+            .or_else(|| card_map.get(&model_name).map(|&cl| cl as u64));
         data.push(ModelListing {
             id: model_name.clone(),
             object: "model", // Per OpenAI spec, this should be "model"
             created,
             owned_by: "nvidia".to_string(),
+            context_window,
+            max_output_tokens,
         });
     }
 
@@ -1645,6 +1667,10 @@ struct ModelListing {
     object: &'static str, // always "model" per OpenAI spec
     created: u64,         // Seconds since epoch
     owned_by: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context_window: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_output_tokens: Option<u64>,
 }
 
 /// Create an Axum [`Router`] for the OpenAI API Completions endpoint
