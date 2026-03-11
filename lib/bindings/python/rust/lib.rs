@@ -345,10 +345,12 @@ fn register_model<'p>(
             }
 
             // Register the Model Deployment Card via discovery interface
-            let priority: u32 = std::env::var("DYN_WORKER_PRIORITY")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0);
+            let priority: u32 = std::env::var(
+                rs::config::environment_names::worker::DYN_WORKER_PRIORITY,
+            )
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
             let discovery = endpoint.inner.drt().discovery();
             let spec = rs::discovery::DiscoverySpec::from_model_with_suffix_and_priority(
                 endpoint.inner.component().namespace().name().to_string(),
