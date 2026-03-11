@@ -130,7 +130,7 @@ runs:
             echo "🔍 Mypy type checking enabled"
             MYPY_FLAG="--mypy"
           fi
-          PYTEST_CMD="pytest -v --continue-on-collection-errors --tb=short --basetemp=/tmp/pytest_temp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --durations=20 ${MYPY_FLAG} -m \"${{ inputs.pytest_marks }}\""
+          PYTEST_CMD="pytest --continue-on-collection-errors -v --tb=short --basetemp=/tmp/pytest_temp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --durations=20 ${MYPY_FLAG} -m \"${{ inputs.pytest_marks }}\""
 
           # Detect GPU availability and conditionally add GPU flags
           GPU_FLAGS=""
@@ -234,7 +234,7 @@ runs:
 
           # Construct final command with xdist parallelization (-n) and other options
           # --dist=loadscope groups tests by module/class to prevent race conditions in stateful tests
-          PYTEST_CMD="pytest -v ${PARALLEL_OPTS} --dist=loadscope --continue-on-collection-errors --tb=short --basetemp=/tmp/pytest_temp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --durations=10 ${MYPY_FLAG} -m \"${{ inputs.pytest_marks }}\""
+          PYTEST_CMD="pytest ${PARALLEL_OPTS} --dist=loadscope --continue-on-collection-errors -v --tb=short --basetemp=/tmp/pytest_temp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --durations=10 ${MYPY_FLAG} -m \"${{ inputs.pytest_marks }}\""
         fi
 
         # Get absolute path for test-results directory and ensure it has proper permissions
