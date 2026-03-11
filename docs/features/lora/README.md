@@ -30,31 +30,20 @@ Dynamo's LoRA implementation provides:
 
 ### Architecture
 
-```text
-┌─────────────────────────────────────────────────────────────────┐
-│                        LoRA Architecture                         │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                  │
-│  ┌──────────────┐     ┌──────────────┐     ┌──────────────┐     │
-│  │   Frontend   │────▶│    Router    │────▶│   Workers    │     │
-│  │  /v1/models  │     │  LoRA-aware  │     │  LoRA-loaded │     │
-│  └──────────────┘     └──────────────┘     └──────────────┘     │
-│                                                   │              │
-│                                                   ▼              │
-│                              ┌─────────────────────────────────┐ │
-│                              │         LoRA Manager            │ │
-│                              │  ┌───────────┐ ┌─────────────┐  │ │
-│                              │  │ Downloader│ │    Cache    │  │ │
-│                              │  └───────────┘ └─────────────┘  │ │
-│                              └─────────────────────────────────┘ │
-│                                         │                        │
-│                     ┌───────────────────┼───────────────────┐   │
-│                     ▼                   ▼                   ▼   │
-│              ┌────────────┐      ┌────────────┐      ┌─────────┐│
-│              │  file://   │      │   s3://    │      │  hf://  ││
-│              │   Local    │      │  S3/MinIO  │      │(custom) ││
-│              └────────────┘      └────────────┘      └─────────┘│
-└─────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    Frontend["Frontend"] --> Router["Router<br/>(LoRA-aware)"]
+    Router --> Workers["Workers<br/>(LoRA-loaded)"]
+    Workers --> ManagerNode["LoRA Manager"]
+
+    subgraph ManagerGroup["LoRA Manager"]
+        Downloader
+        Cache
+    end
+
+    ManagerNode --> Local["file://<br/>Local"]
+    ManagerNode --> S3["s3://<br/>S3/MinIO"]
+    ManagerNode --> HF["hf://<br/>(custom)"]
 ```
 
 The LoRA system consists of:
