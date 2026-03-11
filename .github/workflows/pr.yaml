@@ -315,7 +315,7 @@ jobs:
     runs-on: prod-default-small-v2
     # Run when any deploy test will run: if any framework or deploy files changed
     if: |
-      always() && !cancelled() &&
+      always() &&
       (needs.changed-files.outputs.vllm == 'true' ||
        needs.changed-files.outputs.sglang == 'true' ||
        needs.changed-files.outputs.trtllm == 'true' ||
