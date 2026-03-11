@@ -41,12 +41,13 @@ Plans:
   2. `crate::integrations::*` self-referential imports are resolved to correct local or workspace paths
   3. All files under `src/connector/worker/nova/` reference `velo` transport types instead of `nova` types
   4. No `nova` module import appears anywhere in the codebase
-**Plans**: 3 plans
+**Plans**: 4 plans
 
 Plans:
 - [ ] 02-01-PLAN.md — Pass 1-3: Replace crate::logical::*, crate::physical::*, and crate::distributed::* imports
 - [ ] 02-02-PLAN.md — Pass 4-5: Replace crate::v2::* imports and resolve crate::integrations::* self-refs
 - [ ] 02-03-PLAN.md — Pass 6: Complete nova→velo sweep (directory rename, type renames, runtime.nova→messenger)
+- [ ] 02-04-PLAN.md — Gap closure: rename ForwardPassNovaEvent and remaining Nova identifiers/comments
 
 ### Phase 3: Compilation Gate
 **Goal**: kvbm-connector compiles cleanly as a workspace member and does not break any other workspace crate
@@ -77,6 +78,6 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Workspace Wiring | 1/1 | Complete   | 2026-03-11 |
-| 2. Import Migration | 0/3 | Not started | - |
+| 2. Import Migration | 0/4 | Not started | - |
 | 3. Compilation Gate | 0/TBD | Not started | - |
 | 4. Test Porting | 0/TBD | Not started | - |
