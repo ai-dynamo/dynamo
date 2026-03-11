@@ -8,8 +8,8 @@ use dynamo_nova::Nova;
 use std::sync::Arc;
 
 use kvbm_physical::layout::LayoutConfig;
-use crate::v2::BlockId;
-use crate::v2::InstanceId;
+use kvbm_common::BlockId;
+use kvbm_engine::InstanceId;
 use kvbm_engine::worker::{LeaderLayoutConfig, WorkerLayoutResponse};
 
 use super::*;

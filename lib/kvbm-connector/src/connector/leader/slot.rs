@@ -10,7 +10,8 @@ use super::Request;
 use super::scheduler::CachedRequestData;
 use kvbm_engine::leader::FindMatchesResult;
 use kvbm_engine::offload::TransferHandle;
-use crate::v2::{BlockId, KvbmSequenceHashProvider, SequenceHash};
+use kvbm_common::{BlockId, SequenceHash};
+use kvbm_logical::KvbmSequenceHashProvider;
 
 // ============================================================================
 // Error Types

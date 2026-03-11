@@ -8,7 +8,7 @@ use super::ConnectorLeader;
 
 use kvbm_engine::leader::InstanceLeader;
 use kvbm_engine::worker::{LeaderLayoutConfig, VeloWorkerClient, Worker};
-use crate::integrations::connector::worker::ConnectorWorkerClient;
+use crate::connector::worker::ConnectorWorkerClient;
 use kvbm_logical::blocks::{BlockDuplicationPolicy, BlockRegistry};
 use kvbm_logical::manager::{BlockManager, FrequencyTrackingCapacity};
 use kvbm_engine::object::{ObjectLockManager, create_lock_manager, create_object_client};
@@ -429,8 +429,8 @@ impl ConnectorLeader {
         // Default: Presence filter to prevent duplicate transfers (pending auto-wired)
         let g1_to_g2_config = if offload_config.g1_to_g2.policies.is_empty() {
             tracing::debug!("No G1→G2 policies configured, using default: [Presence]");
-            dynamo_kvbm_config::TierOffloadConfig {
-                policies: vec![dynamo_kvbm_config::PolicyType::Presence],
+            kvbm_config::TierOffloadConfig {
+                policies: vec![kvbm_config::PolicyType::Presence],
                 ..Default::default()
             }
         } else {
@@ -455,8 +455,8 @@ impl ConnectorLeader {
         // Default: PresenceLfu filter for presence + LFU frequency check (pending auto-wired)
         let g2_to_g3_config = if offload_config.g2_to_g3.policies.is_empty() {
             tracing::debug!("No G2→G3 policies configured, using default: [PresenceLfu]");
-            dynamo_kvbm_config::TierOffloadConfig {
-                policies: vec![dynamo_kvbm_config::PolicyType::PresenceLfu],
+            kvbm_config::TierOffloadConfig {
+                policies: vec![kvbm_config::PolicyType::PresenceLfu],
                 ..Default::default()
             }
         } else {

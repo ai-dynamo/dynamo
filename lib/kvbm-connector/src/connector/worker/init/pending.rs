@@ -29,13 +29,9 @@ use kvbm_physical::transfer::context::TokioRuntime;
 use kvbm_engine::object::create_object_client;
 use kvbm_engine::worker::{DirectWorker, LeaderLayoutConfig, WorkerLayoutResponse};
 
-use crate::{
-    KvbmRuntime,
-    v2::physical::{
-        TransferManager,
-        layout::{BlockDimension, LayoutConfig, PhysicalLayoutBuilder},
-    },
-};
+use crate::KvbmRuntime;
+use kvbm_physical::TransferManager;
+use kvbm_physical::layout::{BlockDimension, LayoutConfig, PhysicalLayoutBuilder};
 use kvbm_common::LogicalLayoutHandle;
 
 /// Cached state from `register_kv_caches` for deferred initialization.
@@ -154,8 +150,8 @@ impl PendingWorkerState {
         let mut created_layouts = vec![];
 
         let nixl_agent = runtime
-            .nixl_agent
-            .clone()
+            .nixl_agent()
+            .cloned()
             .ok_or_else(|| anyhow::anyhow!("NIXL agent not found"))?;
 
         // 1. Build TransferManager and NixlAgent
@@ -215,7 +211,7 @@ impl PendingWorkerState {
         //
         // For ReplicatedData mode: only rank 0 gets G2/G3 layouts
         // For TensorParallel mode: all workers get G2/G3 layouts
-        let skip_g2_g3 = config.parallelism == dynamo_kvbm_config::ParallelismMode::ReplicatedData
+        let skip_g2_g3 = config.parallelism == kvbm_config::ParallelismMode::ReplicatedData
             && config.rank > 0;
 
         let (g2_handle, g3_handle) = if skip_g2_g3 {

@@ -13,9 +13,9 @@ use kvbm_engine::worker::VeloWorkerClient;
 use kvbm_engine::leader::InstanceLeader;
 use kvbm_engine::offload::OffloadEngine;
 use kvbm_engine::worker::SerializedLayout;
-use crate::v2::logical::blocks::ImmutableBlock;
+use kvbm_logical::blocks::ImmutableBlock;
 use crate::{BlockId, G2, InstanceId, KvbmRuntime};
-use dynamo_kvbm_config::OnboardMode;
+use kvbm_config::OnboardMode;
 
 use anyhow::{Result, anyhow, bail};
 use dashmap::DashMap;
@@ -113,7 +113,7 @@ impl ConnectorLeader {
 
     /// Get the current onboard mode.
     pub fn onboard_mode(&self) -> OnboardMode {
-        self.runtime.config.onboard.mode
+        self.runtime.config().onboard.mode
     }
 
     /// Get the block size.
@@ -542,7 +542,7 @@ impl ConnectorLeader {
     pub fn request_priority_offload(
         &self,
         request_id: &str,
-        block_ids: &[crate::v2::BlockId],
+        block_ids: &[crate::BlockId],
     ) -> Result<usize> {
         let _slot_ref = self.get_slot(request_id)?;
 
@@ -600,7 +600,7 @@ impl ConnectorLeader {
     pub fn get_block_g2_status(
         &self,
         request_id: &str,
-    ) -> Result<std::collections::HashMap<crate::v2::BlockId, bool>> {
+    ) -> Result<std::collections::HashMap<crate::BlockId, bool>> {
         // Verify request exists
         let _slot_ref = self.get_slot(request_id)?;
 

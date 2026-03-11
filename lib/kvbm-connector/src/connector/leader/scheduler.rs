@@ -6,9 +6,10 @@ use kvbm_engine::offload::ExternalBlock;
 
 use crate::{
     G1, G2, InstanceId,
-    integrations::connector::leader::slot::RequestSlot, v2::BlockId,
-    v2::logical::blocks::ImmutableBlock,
+    connector::leader::slot::RequestSlot,
 };
+use kvbm_common::BlockId;
+use kvbm_logical::blocks::ImmutableBlock;
 
 use derive_builder::Builder;
 use dynamo_nova::events::EventHandle;
@@ -18,7 +19,7 @@ use anyhow::Result;
 use std::{collections::HashMap, sync::Arc, time::Instant};
 
 // Re-export common types for backwards compatibility
-pub use crate::v2::integrations::common::{CachedRequestData, NewRequestData, SchedulerOutput};
+pub use crate::common::{CachedRequestData, NewRequestData, SchedulerOutput};
 
 pub struct IterationSession {
     pub iteration: usize,

@@ -57,8 +57,8 @@ use std::time::Instant;
 use kvbm_common::LogicalLayoutHandle;
 use kvbm_physical::TransferOptions;
 use kvbm_engine::worker::{DirectWorker, WorkerTransfers};
-use crate::v2::integrations::connector::leader::scheduler::KvConnectorMetadata;
-use crate::v2::integrations::vllm::layout::determine_kv_layout;
+use crate::connector::leader::scheduler::KvConnectorMetadata;
+use crate::vllm::layout::determine_kv_layout;
 use crate::{BlockId, KvbmRuntime};
 
 pub trait ConnectorWorkerInterface: Send + Sync {
@@ -646,5 +646,5 @@ pub struct FinishedRequests {
     pub onboarding: HashSet<String>,
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "testing"))]
 mod tests;
