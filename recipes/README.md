@@ -40,9 +40,21 @@ These recipes demonstrate aggregated or disaggregated serving:
 
 *1: Please use `deepseek-r1/model-cache/model-download-sglang.yaml` to download the model into the PVC.
 
+### Non-optimized Recipes
+
+These recipes demonstrate functional deployments with Dynamo features, but have not yet been tuned for best performance or paired with benchmark manifests.
+
+| Model | Framework | Mode | GPUs | Deployment | Notes |
+|-------|-----------|-------|------|------------|-------|
+| **[Nemotron-3-Super-FP8](nemotron-3-super-fp8/vllm/agg/)** | vLLM | Aggregated | 4x H100/H200 | ✅ | TP=4, KV-aware routing |
+| **[Nemotron-3-Super-FP8](nemotron-3-super-fp8/trtllm/agg/)** | TensorRT-LLM | Aggregated | 4x H100/H200 | ✅ | TP=4, round-robin routing |
+| **[Nemotron-3-Super-FP8](nemotron-3-super-fp8/sglang/agg/)** | SGLang | Aggregated | 4x H100/H200 | ✅ | TP=4, KV-aware routing, 1.0+ |
+| **[Nemotron-3-Super-FP8](nemotron-3-super-fp8/trtllm/disagg/)** | TensorRT-LLM | Disaggregated | 4x H100/H200 | ✅ | TP=2 prefill/decode split, UCX KV transfer |
+| **[Nemotron-3-Super-FP8](nemotron-3-super-fp8/sglang/disagg/)** | SGLang | Disaggregated | 4x H100/H200 | ✅ | TP=2 prefill/decode split, nixl KV transfer, 1.0+ |
+
 **Legend:**
 - **Deployment**: ✅ = Complete `deploy.yaml` manifest available | ❌ = Missing or incomplete
-- **Benchmark Recipe**: ✅ = Includes `perf.yaml` for running AIPerf benchmarks | ❌ = No benchmark recipe provided
+- **Benchmark Recipe**: In the production-ready table above, ✅ = Includes `perf.yaml` for running AIPerf benchmarks | ❌ = No benchmark recipe provided
 
 ## Recipe Structure
 
