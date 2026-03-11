@@ -36,11 +36,15 @@ class SweepConfig:
     concurrencies: List[int] = field(default_factory=lambda: [1, 2, 4, 8, 16, 32])
     qps_rates: Optional[List[float]] = None
     min_duration: int = 60
+    isl: int = 400
     osl: int = 150
     request_count: int = 1000
     warmup_count: int = 5
     port: int = 8000
     timeout: int = 600
+    image_width: int = 0
+    image_height: int = 0
+    images_per_request: int = 0
     input_files: List[str] = field(default_factory=list)
     configs: List[BenchmarkConfig] = field(default_factory=list)
     output_dir: str = "benchmarks/results/multimodal_default"
@@ -61,10 +65,16 @@ class SweepConfig:
         """Auto-scale request count for a QPS level: max(200, qps * min_duration)."""
         return max(200, int(qps * self.min_duration))
 
+    @property
+    def is_synthetic_mode(self) -> bool:
+        return not self.input_files
+
     def validate(self, repo_root: Optional[Path] = None) -> None:
         """Validate that all referenced files and scripts exist."""
-        if not self.input_files:
-            raise ValueError("At least one input_file is required.")
+        if not self.input_files and self.images_per_request <= 0:
+            raise ValueError(
+                "Either input_files or images_per_request (synthetic mode) is required."
+            )
         if not self.configs:
             raise ValueError("At least one benchmark config is required.")
 
@@ -118,11 +128,15 @@ def load_config(
         concurrencies=raw.get("concurrencies", defaults.concurrencies),
         qps_rates=qps_rates,
         min_duration=raw.get("min_duration", defaults.min_duration),
+        isl=raw.get("isl", defaults.isl),
         osl=raw.get("osl", defaults.osl),
         request_count=raw.get("request_count", defaults.request_count),
         warmup_count=raw.get("warmup_count", defaults.warmup_count),
         port=raw.get("port", defaults.port),
         timeout=raw.get("timeout", defaults.timeout),
+        image_width=raw.get("image_width", defaults.image_width),
+        image_height=raw.get("image_height", defaults.image_height),
+        images_per_request=raw.get("images_per_request", defaults.images_per_request),
         input_files=raw.get("input_files", []),
         configs=configs,
         output_dir=raw.get("output_dir", defaults.output_dir),

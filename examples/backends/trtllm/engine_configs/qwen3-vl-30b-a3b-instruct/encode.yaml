@@ -15,7 +15,7 @@
 tensor_parallel_size: 1
 enable_attention_dp: false
 max_num_tokens: 1024
-max_batch_size: 4
+max_batch_size: 64
 trust_remote_code: true
 backend: pytorch
 enable_chunked_prefill: true

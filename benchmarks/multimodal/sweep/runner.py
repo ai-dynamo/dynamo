@@ -13,11 +13,15 @@ def _build_aiperf_cmd(
     port: int,
     request_count: int,
     warmup_count: int,
-    input_file: str,
     osl: int,
     artifact_dir: Path,
+    input_file: str = "",
+    isl: int = 400,
     concurrency: int = 0,
     qps: float = 0,
+    image_width: int = 0,
+    image_height: int = 0,
+    images_per_request: int = 0,
 ) -> List[str]:
     cmd = [
         "aiperf",
@@ -30,10 +34,6 @@ def _build_aiperf_cmd(
         str(request_count),
         "--warmup-request-count",
         str(warmup_count),
-        "--input-file",
-        input_file,
-        "--custom-dataset-type",
-        "single_turn",
         "--extra-inputs",
         f"max_tokens:{osl}",
         "--extra-inputs",
@@ -50,6 +50,38 @@ def _build_aiperf_cmd(
         "--no-server-metrics",
     ]
 
+    # Dataset: custom JSONL or synthetic
+    if input_file:
+        cmd.extend(["--input-file", input_file, "--custom-dataset-type", "single_turn"])
+    else:
+        # Synthetic mode with optional images
+        cmd.extend(
+            [
+                "--synthetic-input-tokens-mean",
+                str(isl),
+                "--synthetic-input-tokens-stddev",
+                "0",
+                "--output-tokens-mean",
+                str(osl),
+            ]
+        )
+        if images_per_request > 0 and image_width > 0 and image_height > 0:
+            cmd.extend(
+                [
+                    "--image-width-mean",
+                    str(image_width),
+                    "--image-width-stddev",
+                    "0",
+                    "--image-height-mean",
+                    str(image_height),
+                    "--image-height-stddev",
+                    "0",
+                    "--image-batch-size",
+                    str(images_per_request),
+                ]
+            )
+
+    # Load mode
     if qps > 0:
         cmd.extend(["--request-rate", str(qps)])
     else:
@@ -63,15 +95,20 @@ def run_aiperf_single(
     port: int,
     request_count: int,
     warmup_count: int,
-    input_file: str,
     osl: int,
     artifact_dir: Path,
+    input_file: str = "",
+    isl: int = 400,
     concurrency: int = 0,
     qps: float = 0,
+    image_width: int = 0,
+    image_height: int = 0,
+    images_per_request: int = 0,
 ) -> None:
     """Run a single aiperf profile invocation.
 
     Specify either concurrency (fixed in-flight) or qps (fixed arrival rate).
+    When input_file is empty, uses aiperf's synthetic mode with optional images.
     """
     artifact_dir.mkdir(parents=True, exist_ok=True)
     cmd = _build_aiperf_cmd(
@@ -79,11 +116,15 @@ def run_aiperf_single(
         port=port,
         request_count=request_count,
         warmup_count=warmup_count,
-        input_file=input_file,
         osl=osl,
         artifact_dir=artifact_dir,
+        input_file=input_file,
+        isl=isl,
         concurrency=concurrency,
         qps=qps,
+        image_width=image_width,
+        image_height=image_height,
+        images_per_request=images_per_request,
     )
 
     load_desc = f"qps={qps}" if qps > 0 else f"concurrency={concurrency}"
@@ -114,9 +155,10 @@ def run_concurrency_sweep(
     concurrencies: List[int],
     request_count: int,
     warmup_count: int,
-    input_file: str,
     osl: int,
     output_dir: Path,
+    input_file: str = "",
+    **kwargs,
 ) -> None:
     """Run aiperf across all concurrency levels, writing results under output_dir/c{N}/."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -131,6 +173,7 @@ def run_concurrency_sweep(
             input_file=input_file,
             osl=osl,
             artifact_dir=output_dir / f"c{c}",
+            **kwargs,
         )
 
     print(f"Sweep complete. Results in {output_dir}", flush=True)
@@ -142,10 +185,11 @@ def run_qps_sweep(
     qps_rates: List[float],
     request_count: int,
     warmup_count: int,
-    input_file: str,
     osl: int,
     output_dir: Path,
+    input_file: str = "",
     min_duration: int = 60,
+    **kwargs,
 ) -> None:
     """Run aiperf across QPS rates, writing results under output_dir/qps{N}/.
 
@@ -164,6 +208,7 @@ def run_qps_sweep(
             input_file=input_file,
             osl=osl,
             artifact_dir=output_dir / f"qps{qps:g}",
+            **kwargs,
         )
 
     print(f"QPS sweep complete. Results in {output_dir}", flush=True)

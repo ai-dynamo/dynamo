@@ -60,12 +60,27 @@ def run_sweep(
     server = ServerManager(port=config.port, timeout=config.timeout)
     env_overrides = dict(config.env) if config.env else {}
 
-    try:
-        for input_file in config.input_files:
-            file_tag = input_file_tag(input_file)
-            file_output_dir = output_base / file_tag
+    # Common aiperf kwargs from config (image params for synthetic mode)
+    aiperf_kwargs = {
+        "isl": config.isl,
+        "image_width": config.image_width,
+        "image_height": config.image_height,
+        "images_per_request": config.images_per_request,
+    }
 
-            _print_banner(f"Input: {Path(input_file).name}  ({file_tag})", char="#")
+    # Build iteration list: [(input_file, file_tag, file_output_dir)]
+    if config.is_synthetic_mode:
+        tag = f"synthetic_{config.isl}isl_{config.images_per_request}img_{config.image_width}x{config.image_height}"
+        iterations = [("", tag, output_base / tag)]
+    else:
+        iterations = [
+            (f, input_file_tag(f), output_base / input_file_tag(f))
+            for f in config.input_files
+        ]
+
+    try:
+        for input_file, file_tag, file_output_dir in iterations:
+            _print_banner(f"Input: {file_tag}", char="#")
 
             for bench_cfg in config.configs:
                 _print_banner(f"[{file_tag}] Config: {bench_cfg.label}", char="-")
@@ -82,6 +97,7 @@ def run_sweep(
                         env_overrides=env_overrides,
                         input_file=input_file,
                         output_dir=sweep_dir,
+                        aiperf_kwargs=aiperf_kwargs,
                     )
                 else:
                     server.start(
@@ -103,6 +119,7 @@ def run_sweep(
                                 osl=config.osl,
                                 output_dir=sweep_dir,
                                 min_duration=config.min_duration,
+                                **aiperf_kwargs,
                             )
                         else:
                             run_concurrency_sweep(
@@ -114,6 +131,7 @@ def run_sweep(
                                 input_file=input_file,
                                 osl=config.osl,
                                 output_dir=sweep_dir,
+                                **aiperf_kwargs,
                             )
                     finally:
                         server.stop()
@@ -138,9 +156,11 @@ def _sweep_with_restart(
     env_overrides: dict,
     input_file: str,
     output_dir: Path,
+    aiperf_kwargs: dict = None,
 ) -> None:
     """Run each load level with a fresh server to avoid warm-cache effects."""
     output_dir.mkdir(parents=True, exist_ok=True)
+    extra = aiperf_kwargs or {}
 
     if config.is_qps_mode:
         for qps in config.qps_rates:
@@ -164,6 +184,7 @@ def _sweep_with_restart(
                     input_file=input_file,
                     osl=config.osl,
                     artifact_dir=artifact_dir,
+                    **extra,
                 )
             finally:
                 server.stop()
@@ -187,6 +208,7 @@ def _sweep_with_restart(
                     input_file=input_file,
                     osl=config.osl,
                     artifact_dir=artifact_dir,
+                    **extra,
                 )
             finally:
                 server.stop()
