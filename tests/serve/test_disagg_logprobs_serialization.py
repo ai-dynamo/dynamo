@@ -34,8 +34,8 @@ try:
     from tensorrt_llm.executor.result import Logprob
 
     from dynamo.trtllm.utils.disagg_utils import DisaggregatedParamsCodec
-except ImportError:
-    pytest.skip("tensorrt_llm not installed", allow_module_level=True)
+except ImportError as e:
+    pytest.skip(f"tensorrt_llm import failed: {e}", allow_module_level=True)
 
 
 def _to_asdict_format(logprob_dicts):
