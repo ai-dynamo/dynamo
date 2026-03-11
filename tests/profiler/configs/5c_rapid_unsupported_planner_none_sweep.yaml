@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Case 5c: AIC unsupported model, rapid, with planner, pre_deployment_sweeping_mode: none.
+# Load-only planner does not require profiling data; the profiler must still
+# generate a valid DGD with the correct planner entrypoint (dynamo.planner,
+# NOT the non-existent dynamo.planner.planner_sla).  Regression test for
+# bug 5970670 / bug 5960287 naive-fallback code path.
+model: "Qwen/Qwen3-32B"
+backend: vllm
+image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:latest"
+hardware:
+  gpuSku: l40s
+  totalGpus: 4
+  numGpusPerNode: 4
+sla:
+  ttft: 500.0
+  itl: 50.0
+features:
+  planner:
+    pre_deployment_sweeping_mode: none
+    enable_throughput_scaling: false
+    enable_load_scaling: true
+    mode: disagg
+    backend: vllm

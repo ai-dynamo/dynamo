@@ -189,6 +189,40 @@ class TestRapidUnsupported:
         with pytest.raises(ValueError, match="AIC does not support"):
             asyncio.run(run_profile(dgdr, ops))
 
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_planner_load_scaling_none_sweep_naive_fallback(self, tmp_path):
+        """Case 5c: load-only planner with pre_deployment_sweeping_mode: none on an
+        AIC-unsupported combo (Qwen3-32B / l40s / vllm).
+
+        Regression test for bug 5970670: the naive fallback code path must
+        generate ``dynamo.planner`` as the planner entrypoint, not the
+        non-existent ``dynamo.planner.planner_sla``.
+        """
+        dgdr = _load_dgdr(
+            CONFIGS_DIR / "5c_rapid_unsupported_planner_none_sweep.yaml"
+        )
+        ops = _make_ops(tmp_path)
+        asyncio.run(run_profile(dgdr, ops))
+
+        output = tmp_path / "profiling_results" / "final_config.yaml"
+        assert output.exists(), "Profiler must produce a final config"
+
+        docs = list(yaml.safe_load_all(output.read_text()))
+        dgd = next((d for d in docs if d and d.get("kind") == "DynamoGraphDeployment"), None)
+        assert dgd is not None, "Final config must contain a DynamoGraphDeployment"
+
+        planner_svc = dgd.get("spec", {}).get("services", {}).get("Planner")
+        assert planner_svc is not None, "DGD must include a Planner service"
+
+        cmd = planner_svc.get("extraPodSpec", {}).get("mainContainer", {}).get("command", [])
+        assert cmd, "Planner mainContainer must have a command"
+        module_arg = cmd[-1]
+        assert module_arg == "dynamo.planner", (
+            f"Planner entrypoint must be 'dynamo.planner', got '{module_arg}'. "
+            "Regression: bug 5970670 / 5960287 naive-fallback code path."
+        )
+
 
 class TestThoroughDryRun:
     """Thorough strategy tested with --dry-run (no real deployments)."""

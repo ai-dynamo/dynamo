@@ -28,6 +28,7 @@ try:
         _extract_profiler_params,
         _write_final_output,
     )
+    from dynamo.profiler.utils.config import DgdPlannerServiceConfig
     from dynamo.profiler.utils.config_modifiers.parallelization_mapping import (
         PickedParallelConfig,
     )
@@ -581,3 +582,73 @@ class TestAssembleFinalConfig:
         mock_planner.assert_not_called()
         mock_profile.assert_called_once()
         assert result == [profile_cm, mocker_base]
+
+
+# ---------------------------------------------------------------------------
+# DgdPlannerServiceConfig — regression guard for bug 5970670 / 5960287
+# ---------------------------------------------------------------------------
+
+
+class TestDgdPlannerServiceConfigEntrypoint:
+    """Ensure the planner service always uses the correct Python module entrypoint.
+
+    Both the rapid/autoscale-sim path and the naive fallback path generate the
+    Planner service via DgdPlannerServiceConfig.  The module was previously
+    hardcoded to the non-existent ``dynamo.planner.planner_sla``; it must be
+    ``dynamo.planner``.
+    """
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_planner_command_uses_dynamo_planner_not_planner_sla(self):
+        """Regression: DgdPlannerServiceConfig must not reference dynamo.planner.planner_sla."""
+        cfg = DgdPlannerServiceConfig()
+        assert cfg.extraPodSpec is not None
+        assert cfg.extraPodSpec.mainContainer is not None
+
+        cmd = cfg.extraPodSpec.mainContainer.command
+        assert cmd is not None, "Planner container must have a command"
+
+        module_arg = cmd[-1]
+        assert module_arg == "dynamo.planner", (
+            f"Planner entrypoint must be 'dynamo.planner', got '{module_arg}'. "
+            "Regression guard for bug 5970670 / 5960287: the module "
+            "'dynamo.planner.planner_sla' no longer exists."
+        )
+        assert "dynamo.planner.planner_sla" not in " ".join(cmd), (
+            "Command must not reference the removed dynamo.planner.planner_sla module."
+        )
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_add_planner_injects_correct_entrypoint(self, tmp_path):
+        """add_planner_to_config injects a Planner service with the correct entrypoint.
+
+        This tests the full planner injection path used by both the rapid and
+        naive-fallback (pre_deployment_sweeping_mode: none) code paths.
+        """
+        from dynamo.profiler.utils.dgd_generation import add_planner_to_config
+
+        planner = _make_planner(
+            enable_throughput_scaling=False,
+            enable_load_scaling=True,
+            pre_deployment_sweeping_mode=PlannerPreDeploymentSweepMode.None_,
+            mode="disagg",
+            backend="vllm",
+        )
+        dgdr = _make_dgdr(features=FeaturesSpec(planner=planner))
+        dgd_config = {"spec": {"services": {}}}
+
+        add_planner_to_config(dgdr, dgd_config)
+
+        planner_svc = dgd_config["spec"]["services"].get("Planner")
+        assert planner_svc is not None, "Planner service must be injected"
+
+        cmd = planner_svc.get("extraPodSpec", {}).get("mainContainer", {}).get("command", [])
+        assert cmd, "Planner mainContainer must have a command"
+
+        module_arg = cmd[-1]
+        assert module_arg == "dynamo.planner", (
+            f"Injected planner entrypoint must be 'dynamo.planner', got '{module_arg}'. "
+            "Regression guard for bug 5970670."
+        )
