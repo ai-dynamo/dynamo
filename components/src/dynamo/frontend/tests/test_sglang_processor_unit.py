@@ -27,13 +27,6 @@ from dynamo.frontend.sglang_processor import (
 )
 from dynamo.frontend.utils import PreprocessError, random_call_id, random_uuid
 
-pytestmark = [
-    pytest.mark.sglang,
-    pytest.mark.gpu_0,
-    pytest.mark.pre_merge,
-    pytest.mark.unit,
-]
-
 MODEL = "Qwen/Qwen3-0.6B"
 
 

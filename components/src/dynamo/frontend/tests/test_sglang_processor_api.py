@@ -10,15 +10,6 @@ upgrades that break our integration surface are caught immediately.
 import inspect
 import pickle
 
-import pytest
-
-pytestmark = [
-    pytest.mark.sglang,
-    pytest.mark.gpu_0,
-    pytest.mark.pre_merge,
-    pytest.mark.unit,
-]
-
 # ---------------------------------------------------------------------------
 # Import tests -- verify all required modules and symbols exist
 # ---------------------------------------------------------------------------

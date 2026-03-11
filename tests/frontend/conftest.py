@@ -34,16 +34,6 @@ def pytest_ignore_collect(collection_path, config):
         if importlib.util.find_spec("torch") is None:
             return True  # torch not available, skip this file
 
-    # Skip sglang tests if sglang can't actually be loaded (e.g. ARM64/no GPU
-    # where sgl_kernel fails to import libcuda.so.1).  find_spec alone is not
-    # sufficient because sglang *is* installed — it's the native extension that
-    # blows up at import time.
-    if filename.startswith("test_sglang_"):
-        from .common import check_module_available
-
-        if not check_module_available("sglang.srt.utils.hf_transformers_utils"):
-            return True
-
     return None
 
 
