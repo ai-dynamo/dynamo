@@ -13,9 +13,6 @@ from dynamo.runtime import DistributedRuntime, dynamo_endpoint
 
 logger = logging.getLogger(__name__)
 
-# Model name used for KubernetesConnector in remote execution mode
-MANAGED_MODEL_NAME = "managed"
-
 
 class ScaleRequestHandler:
     """Handles incoming scale requests in GlobalPlanner.
@@ -26,6 +23,14 @@ class ScaleRequestHandler:
     3. Caches KubernetesConnector per DGD for efficiency
     4. Executes scaling via Kubernetes API
     5. Returns current replica counts
+
+    Management modes:
+    - **Explicit** (``--managed-namespaces`` set): Only DGDs whose Dynamo
+      namespaces are listed are managed. Authorization rejects requests from
+      unlisted namespaces, and GPU budget only counts these DGDs.
+    - **Implicit** (no ``--managed-namespaces``): All DGDs in the Kubernetes
+      namespace are managed. Any caller is accepted, and GPU budget counts
+      every DGD discovered in the namespace.
     """
 
     def __init__(
@@ -75,36 +80,67 @@ class ScaleRequestHandler:
             logger.info(
                 f"GPU budget enforcement ENABLED: max {self.max_total_gpus} total GPUs"
             )
-            self._discover_existing_dgds()
+            self._populate_k8s_connectors()
         else:
             logger.info("GPU budget enforcement DISABLED (unlimited)")
 
-    def _discover_existing_dgds(self):
-        """Pre-populate connectors for all DGDs in the k8s namespace.
+    def _managed_dgd_names(self) -> set[str] | None:
+        """Derive the DGD names that this GlobalPlanner manages.
+
+        Returns:
+            A set of DGD names when in explicit mode, or None in implicit mode.
+
+        The Dynamo operator convention is:
+            DYN_NAMESPACE = "{k8s_namespace}-{dgd_name}"
+        so the DGD name is the Dynamo namespace with the k8s prefix stripped.
+        """
+        if self.managed_namespaces is None:
+            return None
+
+        prefix = f"{self.k8s_namespace}-"
+        names = set()
+        for ns in self.managed_namespaces:
+            if ns.startswith(prefix):
+                names.add(ns[len(prefix) :])
+            else:
+                logger.warning(
+                    f"Managed namespace '{ns}' does not start with "
+                    f"expected prefix '{prefix}'; cannot derive DGD name"
+                )
+        return names
+
+    def _populate_k8s_connectors(self):
+        """Pre-populate connectors for DGDs managed by this GlobalPlanner.
 
         This ensures the GPU budget calculation accounts for DGDs that already
         exist at startup, even if they haven't sent a scale request yet.
+
+        In explicit mode (--managed-namespaces set), only DGDs whose names
+        match the managed Dynamo namespaces are discovered.
+        In implicit mode, all DGDs in the k8s namespace are discovered.
         """
         try:
             kube_api = KubernetesAPI(self.k8s_namespace)
+            managed_names = self._managed_dgd_names()
             dgds = kube_api.list_graph_deployments()
+            discovered = []
             for dgd in dgds:
                 name = dgd.get("metadata", {}).get("name", "")
                 if not name:
+                    continue
+                # In explicit mode, skip DGDs not in the managed set
+                if managed_names is not None and name not in managed_names:
                     continue
                 connector_key = f"{self.k8s_namespace}/{name}"
                 if connector_key not in self.connectors:
                     connector = KubernetesConnector(
                         dynamo_namespace="discovered",
-                        model_name=MANAGED_MODEL_NAME,
                         k8s_namespace=self.k8s_namespace,
                         parent_dgd_name=name,
                     )
                     self.connectors[connector_key] = connector
-            logger.info(
-                f"Discovered {len(dgds)} existing DGDs: "
-                f"{[d.get('metadata', {}).get('name') for d in dgds]}"
-            )
+                discovered.append(name)
+            logger.info(f"Discovered {len(discovered)} existing DGDs: {discovered}")
         except Exception as e:
             logger.warning(f"Failed to discover existing DGDs: {e}")
 
@@ -208,7 +244,6 @@ class ScaleRequestHandler:
             if connector_key not in self.connectors:
                 connector = KubernetesConnector(
                     dynamo_namespace=request.caller_namespace,
-                    model_name=MANAGED_MODEL_NAME,  # Not used for remote execution
                     k8s_namespace=request.k8s_namespace,
                     parent_dgd_name=request.graph_deployment_name,
                 )

@@ -135,9 +135,20 @@ Key fields for GlobalPlanner delegation:
 
 | Flag | Description |
 |------|-------------|
-| `--max-total-gpus N` | Reject requests that would exceed N total GPUs across all managed DGDs (`-1` = unlimited) |
-| `--managed-namespaces NS...` | Only accept scale requests from listed Dynamo namespaces (default: accept all) |
+| `--max-total-gpus N` | Reject requests that would exceed N total GPUs across all managed DGDs. `0` = no GPU scaling allowed, `-1` (default) = unlimited |
+| `--managed-namespaces NS...` | Only accept scale requests from listed Dynamo namespaces (default: accept all). See *Management Modes* below |
 | `--no-operation` | Log scale requests without executing them (useful for dry-run testing) |
+
+### Management Modes
+
+GlobalPlanner operates in one of two modes depending on whether `--managed-namespaces` is set:
+
+- **Explicit mode** (`--managed-namespaces` provided): Only the listed Dynamo
+  namespaces are authorized to send scale requests, and only their corresponding
+  DGDs count toward the GPU budget. DGD names are derived from the Dynamo
+  namespace using the operator convention `DYN_NAMESPACE = {k8s_namespace}-{dgd_name}`.
+- **Implicit mode** (no `--managed-namespaces`): Any caller is accepted, and all
+  DGDs in the Kubernetes namespace count toward the GPU budget.
 
 ## Namespace Convention
 

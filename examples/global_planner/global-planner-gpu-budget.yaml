@@ -2,11 +2,17 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Minimal GlobalPlanner GPU budget example: 2 independent model DGDs sharing a
-# cluster-wide GPU cap enforced by a central GlobalPlanner.
+# GPU cap enforced by a central GlobalPlanner.
 #
 # Each model DGD is self-contained (Frontend + Workers + Planner) and serves a
 # different model. The GlobalPlanner in the ctrl DGD rejects any scale request
-# that would push the total GPU count across both DGDs above MAX_TOTAL_GPUS.
+# that would push the total GPU count across its managed DGDs above MAX_TOTAL_GPUS.
+#
+# The budget applies only to DGDs managed by this GlobalPlanner (see
+# --managed-namespaces), not to every DGD in the cluster. In this example the
+# ctrl DGD runs in implicit mode (no --managed-namespaces), so all DGDs in the
+# same K8s namespace count toward the budget. To limit the budget to specific
+# DGDs, pass --managed-namespaces with their Dynamo namespaces.
 #
 # Architecture:
 #   DGD gp-ctrl:    GlobalPlanner (--max-total-gpus)
