@@ -1,0 +1,110 @@
+#!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Aggregated multimodal serving with standard Dynamo preprocessing
+#
+# Architecture: Single-worker PD (Prefill-Decode)
+# - Frontend: Rust OpenAIPreprocessor handles image URLs (HTTP and data:// base64)
+# - Worker: Standard vLLM worker with vision model support
+#
+# For EPD (Encode-Prefill-Decode) architecture with dedicated encoding worker,
+# see agg_multimodal_epd.sh
+
+set -e
+trap 'echo Cleaning up...; kill 0' EXIT
+
+# Default values
+MODEL_NAME="Qwen/Qwen3-VL-8B-Instruct"
+BLOCK_SIZE=64
+
+# Parse command line arguments
+# Extra arguments are passed through to the vLLM worker
+EXTRA_ARGS=()
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --model)
+            MODEL_NAME=$2
+            shift 2
+            ;;
+        --block-size)
+            BLOCK_SIZE=$2
+            shift 2
+            ;;
+        -h|--help)
+            echo "Usage: $0 [OPTIONS] [-- EXTRA_VLLM_ARGS]"
+            echo "Options:"
+            echo "  --model <model_name>   Specify the VLM model to use (default: $MODEL_NAME)"
+            echo "  --block-size <block_size>   Specify the block size (default: $BLOCK_SIZE)"
+            echo "  -h, --help             Show this help message"
+            echo ""
+            echo "Any additional arguments are passed through to the vLLM worker."
+            echo "Example: $0 --model Qwen/Qwen3-VL-8B-Instruct --dyn-tool-call-parser hermes"
+            exit 0
+            ;;
+        *)
+            EXTRA_ARGS+=("$1")
+            shift
+            ;;
+    esac
+done
+
+HTTP_PORT="${DYN_HTTP_PORT:-8000}"
+echo "=========================================="
+echo "Launching Aggregated Multimodal Serving"
+echo "=========================================="
+echo "Model:       $MODEL_NAME"
+echo "Frontend:    http://localhost:$HTTP_PORT"
+echo "=========================================="
+echo ""
+echo "Example test command:"
+echo ""
+echo "  curl http://localhost:${HTTP_PORT}/v1/chat/completions \\"
+echo "    -H 'Content-Type: application/json' \\"
+echo "    -d '{"
+echo "      \"model\": \"${MODEL_NAME}\","
+echo "      \"messages\": [{"
+echo "        \"role\": \"user\","
+echo "        \"content\": ["
+echo "          {\"type\": \"text\", \"text\": \"Describe the image.\"},"
+echo "          {\"type\": \"image_url\", \"image_url\": {\"url\": \"https://upload.wikimedia.org/wikipedia/commons/thumb/3/3a/Cat03.jpg/480px-Cat03.jpg\"}}"
+echo "        ]"
+echo "      }],"
+echo "      \"max_tokens\": 50"
+echo "    }'"
+echo ""
+echo "=========================================="
+
+# Use TCP transport (instead of default NATS)
+# TCP is preferred for multimodal workloads because it overcomes:
+# - NATS default 1MB max payload limit (multimodal base64 images can exceed this)
+export DYN_REQUEST_PLANE=tcp
+
+# Start frontend with Rust OpenAIPreprocessor
+# dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
+python -m dynamo.frontend &
+
+# Configure GPU memory optimization for specific models (if no extra args override)
+MODEL_SPECIFIC_ARGS="--gpu-memory-utilization 0.85 --max-model-len 16384"
+if [[ "$MODEL_NAME" == "Qwen/Qwen2.5-VL-7B-Instruct" ]]; then
+    MODEL_SPECIFIC_ARGS="--gpu-memory-utilization 0.85 --max-model-len 4096"
+elif [[ "$MODEL_NAME" == "llava-hf/llava-1.5-7b-hf" ]]; then
+    MODEL_SPECIFIC_ARGS="--gpu-memory-utilization 0.85 --max-model-len 4096"
+elif [[ "$MODEL_NAME" == "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8" ]]; then
+    MODEL_SPECIFIC_ARGS="--tensor-parallel-size=8 --gpu-memory-utilization 0.85 --max-model-len=108960"
+fi
+
+# Start vLLM worker with vision model
+# Multimodal data (images) are decoded in the backend worker using ImageLoader
+# --enforce-eager: Quick deployment (remove for production)
+# Extra args from command line come last to allow overrides
+DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
+ZE_AFFINITY_MASK=${ZE_AFFINITY_MASK:-0} python -m dynamo.vllm \
+    --enable-multimodal \
+    --model $MODEL_NAME \
+    --block-size $BLOCK_SIZE \
+    $MODEL_SPECIFIC_ARGS \
+    "${EXTRA_ARGS[@]}"
+
+# Wait for all background processes to complete
+wait

@@ -49,10 +49,18 @@ bash launch/agg.sh
 
 Two workers behind a [KV-aware router](../../components/router/README.md) that maximizes cache reuse. Requires 2 GPUs.
 
+Run on cuda devices:
+
 ```bash
 cd $DYNAMO_HOME/examples/backends/vllm
 bash launch/agg_router.sh
 ```
+Run on XPUs:
+```bash
+cd $DYNAMO_HOME/examples/backends/vllm
+bash launch/agg_router_xpu.sh
+```
+
 
 This launches the frontend in KV routing mode with two workers publishing KV events over ZMQ.
 
