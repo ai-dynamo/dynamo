@@ -6,6 +6,8 @@
 package dynamo
 
 import (
+	"fmt"
+
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
@@ -52,6 +54,7 @@ type ComponentContext struct {
 	DiscoveryBackend               configv1alpha1.DiscoveryBackend
 	EPPConfig                      *v1alpha1.EPPConfig
 	WorkerHashSuffix               string
+	Priority                       *int32
 }
 
 func (b *BaseComponentDefaults) GetBaseContainer(context ComponentContext) (corev1.Container, error) {
@@ -125,6 +128,13 @@ func (b *BaseComponentDefaults) getCommonContainer(context ComponentContext) cor
 		container.Env = append(container.Env, corev1.EnvVar{
 			Name:  commonconsts.DynamoDiscoveryBackendEnvVar,
 			Value: "kubernetes",
+		})
+	}
+
+	if context.Priority != nil {
+		container.Env = append(container.Env, corev1.EnvVar{
+			Name:  "DYN_WORKER_PRIORITY",
+			Value: fmt.Sprintf("%d", *context.Priority),
 		})
 	}
 

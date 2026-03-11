@@ -164,14 +164,15 @@ impl ModelWatcher {
 
             match event {
                 DiscoveryEvent::Added(instance) => {
-                    // Extract ModelCardInstanceId and card from the discovery instance
-                    let (mcid, mut card) = match &instance {
+                    // Extract ModelCardInstanceId, card, and priority from the discovery instance
+                    let (mcid, mut card, priority) = match &instance {
                         DiscoveryInstance::Model {
                             namespace,
                             component,
                             endpoint,
                             instance_id,
                             model_suffix,
+                            priority,
                             ..
                         } => {
                             let mcid = ModelCardInstanceId {
@@ -183,7 +184,7 @@ impl ModelWatcher {
                             };
 
                             match instance.deserialize_model::<ModelDeploymentCard>() {
-                                Ok(card) => (mcid, card),
+                                Ok(card) => (mcid, card, *priority),
                                 Err(err) => {
                                     tracing::error!(%err, instance_id, "Failed to deserialize model card");
                                     continue;
@@ -231,7 +232,7 @@ impl ModelWatcher {
                         continue;
                     }
 
-                    match self.handle_put(&mcid, &mut card).await {
+                    match self.handle_put(&mcid, &mut card, priority).await {
                         Ok(()) => {
                             tracing::info!(
                                 model_name = card.name(),
@@ -360,6 +361,7 @@ impl ModelWatcher {
         &self,
         mcid: &ModelCardInstanceId,
         card: &mut ModelDeploymentCard,
+        priority: u32,
     ) -> anyhow::Result<()> {
         // Check if this specific (model, namespace, type) WorkerSet already exists.
         // If so, this is just another worker joining an existing set — no pipeline build needed.
@@ -396,7 +398,7 @@ impl ModelWatcher {
             return Ok(());
         }
 
-        let result = self.do_worker_set_registration(mcid, card).await;
+        let result = self.do_worker_set_registration(mcid, card, priority).await;
 
         // Always remove from registering set
         self.registering_worker_sets.remove(&registration_key);
@@ -410,6 +412,7 @@ impl ModelWatcher {
         &self,
         mcid: &ModelCardInstanceId,
         card: &mut ModelDeploymentCard,
+        priority: u32,
     ) -> anyhow::Result<()> {
         card.download_config().await?;
 
@@ -437,7 +440,12 @@ impl ModelWatcher {
         let ws_key = worker_set_key(&namespace, card.model_type);
 
         // Build the WorkerSet with all applicable engines
-        let mut worker_set = WorkerSet::new(namespace.clone(), checksum.to_string(), card.clone());
+        let mut worker_set = WorkerSet::with_priority(
+            namespace.clone(),
+            checksum.to_string(),
+            card.clone(),
+            priority,
+        );
         worker_set.set_instance_watcher(instance_watcher);
 
         if card.model_input == ModelInput::Tokens

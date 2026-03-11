@@ -143,6 +143,13 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// When enabled, pods can be restored from a checkpoint files for faster cold start.
 	// +optional
 	Checkpoint *ServiceCheckpointConfig `json:"checkpoint,omitempty"`
+
+	// Priority for worker selection routing. Higher values are preferred by the
+	// frontend when multiple workers serve the same model. Workers at the highest
+	// priority tier receive all traffic; lower tiers only receive traffic when all
+	// higher-tier workers are unhealthy. Default: 0 (lowest priority).
+	// +optional
+	Priority *int32 `json:"priority,omitempty"`
 }
 
 type MultinodeSpec struct {

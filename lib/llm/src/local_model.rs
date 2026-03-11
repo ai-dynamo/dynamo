@@ -507,6 +507,7 @@ impl LocalModel {
             instance_id,
             card_json: serde_json::Value::Null,
             model_suffix,
+            priority: 0,
         };
 
         let discovery = drt.discovery();
