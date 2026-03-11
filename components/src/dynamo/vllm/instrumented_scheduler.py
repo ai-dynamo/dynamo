@@ -34,6 +34,7 @@ from dynamo.common.forward_pass_metrics import (
     ForwardPassMetrics,
     QueuedRequestMetrics,
     ScheduledRequestMetrics,
+    WelfordAccumulator,
     encode,
 )
 
@@ -48,35 +49,6 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_FPM_PORT = 20380
 ENV_FPM_PORT = "DYN_VLLM_FORWARDPASS_METRIC_PORT"
-
-
-class _Accum:
-    """Welford's online algorithm for count / sum / population-variance.
-
-    Numerically stable single-pass computation -- avoids catastrophic
-    cancellation that sum-of-squares can suffer with large values.
-    """
-
-    __slots__ = ("n", "s", "_mean", "_m2")
-
-    def __init__(self) -> None:
-        self.n = 0
-        self.s = 0
-        self._mean = 0.0
-        self._m2 = 0.0
-
-    def add(self, v: int) -> None:
-        self.n += 1
-        self.s += v
-        delta = v - self._mean
-        self._mean += delta / self.n
-        delta2 = v - self._mean
-        self._m2 += delta * delta2
-
-    def variance(self) -> float:
-        if self.n == 0:
-            return 0.0
-        return self._m2 / self.n
 
 
 # ---------------------------------------------------------------------------
@@ -256,7 +228,7 @@ class InstrumentedScheduler(Scheduler):
         return result
 
     # ------------------------------------------------------------------
-    # Metric extraction (single-pass with _Accum, no lists)
+    # Metric extraction (single-pass with WelfordAccumulator, no lists)
     # ------------------------------------------------------------------
 
     def _extract_metrics(
@@ -280,9 +252,9 @@ class InstrumentedScheduler(Scheduler):
 
         num_prefill = 0
         sum_prefill_tokens = 0
-        prefill_lengths = _Accum()
+        prefill_lengths = WelfordAccumulator()
         sum_prefill_kv_tokens = 0
-        decode_kv = _Accum()
+        decode_kv = WelfordAccumulator()
 
         for req in new_reqs:
             num_prefill += 1
@@ -313,8 +285,8 @@ class InstrumentedScheduler(Scheduler):
 
     def _compute_queued(self) -> QueuedRequestMetrics:
         """Single-pass aggregation over self.waiting -- no intermediate list."""
-        prefill = _Accum()
-        decode_kv = _Accum()
+        prefill = WelfordAccumulator()
+        decode_kv = WelfordAccumulator()
 
         for request in self.waiting:
             if request.status == RequestStatus.PREEMPTED:

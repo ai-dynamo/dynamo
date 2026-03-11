@@ -39,6 +39,42 @@ from __future__ import annotations
 import msgspec
 
 
+class WelfordAccumulator:
+    """Welford's online algorithm for count / sum / population-variance.
+
+    Numerically stable single-pass computation -- avoids catastrophic
+    cancellation that sum-of-squares can suffer with large values.
+
+    Usage::
+
+        acc = WelfordAccumulator()
+        for v in values:
+            acc.add(v)
+        print(acc.n, acc.s, acc.variance())
+    """
+
+    __slots__ = ("n", "s", "_mean", "_m2")
+
+    def __init__(self) -> None:
+        self.n = 0
+        self.s = 0
+        self._mean = 0.0
+        self._m2 = 0.0
+
+    def add(self, v: int) -> None:
+        self.n += 1
+        self.s += v
+        delta = v - self._mean
+        self._mean += delta / self.n
+        delta2 = v - self._mean
+        self._m2 += delta * delta2
+
+    def variance(self) -> float:
+        if self.n == 0:
+            return 0.0
+        return self._m2 / self.n
+
+
 class ScheduledRequestMetrics(
     msgspec.Struct,
     frozen=True,
