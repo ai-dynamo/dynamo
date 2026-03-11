@@ -13,6 +13,10 @@
 
 set -euo pipefail
 
+# TEMPORARY: Injected build failure to validate deploy-test skips on build failure (revert after validation)
+echo "INJECTED BUILD FAILURE: validating deploy-test skip behavior"
+exit 1
+
 VLLM_VER="0.16.0"
 VLLM_REF="v${VLLM_VER}"
 DEVICE="cuda"
