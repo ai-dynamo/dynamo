@@ -46,6 +46,17 @@ def get_fs(fs_url: str) -> DirFileSystem:
     Args:
         fs_url: The URL of the filesystem to initialize. e.g. s3://bucket, gs://bucket, file:///local/path
 
+    Examples:
+        >>> from dynamo.common.storage import get_fs
+        >>>
+        >>> fs = get_fs("file:///data/media")
+        >>> protocol = fs.fs.protocol
+        >>> protocol if isinstance(protocol, str) else protocol[0]
+        'file'
+        >>> fs = get_fs("s3://my-bucket")
+        >>> fs.path
+        'my-bucket'
+
     Returns:
         The initialized DirFileSystem wrapper for the filesystem.
 
@@ -81,6 +92,15 @@ def get_media_url(
             ``{base_url}/{storage_path}``.  When *None*, the URL is constructed
             from the filesystem's protocol and root path.
 
+    Examples:
+        >>> from dynamo.common.storage import get_fs, get_media_url
+        >>>
+        >>> fs = get_fs("file:///data/media")
+        >>> get_media_url(fs, "videos/req-123.mp4")
+        'file:///data/media/videos/req-123.mp4'
+        >>> get_media_url(fs, "img.png", base_url="https://cdn.example.com/media")
+        'https://cdn.example.com/media/img.png'
+
     Returns:
         Public URL string for the uploaded file.
     """
@@ -109,6 +129,16 @@ async def upload_to_fs(
         storage_path: Relative path within the filesystem (e.g. "images/req-id/file.png").
         data: Raw bytes to upload.
         base_url: Optional CDN / proxy base URL for URL rewriting.
+
+    Examples:
+        >>> import asyncio
+        >>> from dynamo.common.storage import get_fs, upload_to_fs
+        >>>
+        >>> fs = get_fs("s3://my-media-bucket")
+        >>> image_bytes = b"\\x89PNG..."
+        >>> url = asyncio.run(
+        ...     upload_to_fs(fs, "images/req-123/output.png", image_bytes)
+        ... )  # doctest: +SKIP
 
     Returns:
         Public URL string for the uploaded file.

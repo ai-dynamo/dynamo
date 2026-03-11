@@ -28,6 +28,19 @@ class GlobalPlannerConnector(PlannerConnector):
     This connector wraps RemotePlannerClient and implements the PlannerConnector
     interface, allowing planner_core.py to treat global-planner environment mode
     consistently with kubernetes and virtual modes.
+
+    Examples:
+        >>> from dynamo.planner.global_planner_connector import GlobalPlannerConnector
+        >>>
+        >>> connector = GlobalPlannerConnector(
+        ...     runtime=runtime,
+        ...     dynamo_namespace="test-ns",
+        ...     global_planner_namespace="global-ns",
+        ...     model_name="Llama-3.2-1B-Instruct",
+        ... )
+        >>> await connector._async_init()
+        >>> connector.get_model_name()
+        'Llama-3.2-1B-Instruct'
     """
 
     def __init__(

@@ -20,6 +20,20 @@ from dynamo.planner.defaults import SubComponentType
 
 # TODO: add ability to scale component to X replicas
 class PlannerConnector(ABC):
+    """Abstract base class for planner connectors that manage scaling operations.
+
+    Concrete implementations include KubernetesConnector, VirtualConnector,
+    and GlobalPlannerConnector.
+
+    Examples:
+        >>> from dynamo.planner import KubernetesConnector, VirtualConnector
+        >>> from dynamo.planner.planner_connector import PlannerConnector
+        >>> issubclass(KubernetesConnector, PlannerConnector)
+        True
+        >>> issubclass(VirtualConnector, PlannerConnector)
+        True
+    """
+
     @abstractmethod
     async def add_component(
         self, sub_component_type: SubComponentType, blocking: bool = True
