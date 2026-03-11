@@ -86,26 +86,15 @@ navigation:
         path: components/kvbm/kvbm-guide.md
       - page: Dynamo Benchmarking
         path: benchmarks/benchmarking.md
-      - section: Multimodal Model Serving
+      - section: Multimodality Support
+        path: features/multimodal/README.md
         contents:
-          - section: Vision Language Models (VLMs)
-            path: features/multimodal/README.md
-            contents:
-              - page: Embedding Cache
-                path: features/multimodal/embedding-cache.md
-              - page: Encoder Disaggregation
-                path: features/multimodal/encoder-disaggregation.md
-              - page: Multimodal KV Routing
-                path: features/multimodal/multimodal-kv-routing.md
-          - section: Diffusion (Experimental)
-            path: features/multimodal/diffusion.md
-            contents:
-              - page: vLLM-Omni
-                path: backends/vllm/vllm-omni.md
-              - page: SGLang Diffusion
-                path: backends/sglang/sglang-diffusion.md
-              - page: TRT-LLM Diffusion
-                path: backends/trtllm/trtllm-video-diffusion.md
+          - page: vLLM Multimodal
+            path: features/multimodal/multimodal-vllm.md
+          - page: TensorRT-LLM Multimodal
+            path: features/multimodal/multimodal-trtllm.md
+          - page: SGLang Multimodal
+            path: features/multimodal/multimodal-sglang.md
       - page: Tool Calling
         path: agents/tool-calling.md
       - page: LoRA Adapters
@@ -259,15 +248,15 @@ navigation:
           - page: Planner Design
             path: design-docs/planner-design.md
 
-  # ==================== Blog ====================
-  - section: Blog
-    hidden: true
-    path: blogs/index.mdx
-    slug: blog
+  # ==================== API Reference ====================
+  - section: API Reference
     contents:
-      - page: "Flash Indexer: Inter-Galactic KV Routing"
-        path: blogs/flash-indexer/flash-indexer.md
-        slug: flash-indexer
+      - page: Python API
+        path: api/python/README.md
+      - page: Rust API
+        path: api/rust/README.md
+      - page: Kubernetes CRD
+        path: kubernetes/api-reference.md
 
   # ==================== Documentation ====================
   - section: Documentation
@@ -282,6 +271,14 @@ navigation:
   - section: Additional Resources
     hidden: true
     contents:
+      # -- Blog --
+      - section: Blog
+        path: blogs/index.mdx
+        slug: blog
+        contents:
+          - page: "Flash Indexer: Inter-Galactic KV Routing"
+            path: blogs/flash-indexer/flash-indexer.md
+            slug: flash-indexer
       # -- Development --
       - page: Runtime Guide
         path: development/runtime-guide.md
@@ -312,8 +309,6 @@ navigation:
           - page: RDMA Metadata
             path: api/nixl-connect/rdma-metadata.md
       # -- Kubernetes (hidden sub-pages) --
-      - page: API Reference (K8s)
-        path: kubernetes/api-reference.md
       - page: Creating Deployments
         path: kubernetes/deployment/create-deployment.md
       - page: FluxCD
