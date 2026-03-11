@@ -130,7 +130,7 @@ Use the same environment in terminals 2/3/4/5:
 cd "$DYNAMO_ROOT"
 
 export DYN_NAMESPACE=dynamo
-export DYN_REQUEST_PLANE=nats
+export DYN_REQUEST_PLANE=tcp
 export NATS_SERVER=nats://127.0.0.1:4222
 export ETCD_ENDPOINTS=http://127.0.0.1:2379
 ```
@@ -143,7 +143,7 @@ Use the same model string here and in the MM router.
 cd "$DYNAMO_ROOT"
 
 export DYN_NAMESPACE=dynamo
-export DYN_REQUEST_PLANE=nats
+export DYN_REQUEST_PLANE=tcp
 export NATS_SERVER=nats://127.0.0.1:4222
 export ETCD_ENDPOINTS=http://127.0.0.1:2379
 export DYN_SYSTEM_PORT=18081
@@ -172,7 +172,7 @@ worker again for a repeated multimodal request.
 cd "$DYNAMO_ROOT"
 
 export DYN_NAMESPACE=dynamo
-export DYN_REQUEST_PLANE=nats
+export DYN_REQUEST_PLANE=tcp
 export NATS_SERVER=nats://127.0.0.1:4222
 export ETCD_ENDPOINTS=http://127.0.0.1:2379
 export DYN_SYSTEM_PORT=18083
@@ -204,12 +204,12 @@ Important:
 - If you customize backend/MM router component names, update the MM router CLI args to match.
 - `--block-size` defaults to `16`; if your vLLM backend uses a different KV cache block size,
   pass the same value to the MM router.
-
 ```bash
+
 cd "$DYNAMO_ROOT"
 
 export DYN_NAMESPACE=dynamo
-export DYN_REQUEST_PLANE=nats
+export DYN_REQUEST_PLANE=tcp
 export NATS_SERVER=nats://127.0.0.1:4222
 export ETCD_ENDPOINTS=http://127.0.0.1:2379
 export DYN_LOG=debug
@@ -226,7 +226,7 @@ python -m examples.backends.vllm.mm_router_worker \
 cd "$DYNAMO_ROOT"
 
 export DYN_NAMESPACE=dynamo
-export DYN_REQUEST_PLANE=nats
+export DYN_REQUEST_PLANE=tcp
 export NATS_SERVER=nats://127.0.0.1:4222
 export ETCD_ENDPOINTS=http://127.0.0.1:2379
 
