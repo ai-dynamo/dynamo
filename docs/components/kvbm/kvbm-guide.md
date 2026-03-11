@@ -343,12 +343,15 @@ vllm serve Qwen/Qwen3-0.6B
 
 ```bash
 # Create config without kv_connector_config
+# return_perf_metrics + enable_iter_perf_stats enable /prometheus/metrics (trtllm_*)
 cat > "/tmp/llm_api_config.yaml" <<EOF
 backend: pytorch
 cuda_graph_config: null
 kv_cache_config:
   enable_partial_reuse: false
   free_gpu_memory_fraction: 0.80
+return_perf_metrics: true
+enable_iter_perf_stats: true
 EOF
 
 trtllm-serve Qwen/Qwen3-0.6B --host localhost --port 8000 --backend pytorch --extra_llm_api_options /tmp/llm_api_config.yaml
@@ -375,6 +378,37 @@ trtllm-serve Qwen/Qwen3-0.6B --host localhost --port 8000 --backend pytorch --ex
 ```bash
 export DYN_KVBM_LEADER_WORKER_INIT_TIMEOUT_SECS=3600  # 1 hour
 ```
+
+### Prometheus Metrics Empty
+
+**Symptom:** `curl http://localhost:8000/prometheus/metrics` returns HTTP 200 but empty body or no `trtllm_*` metrics.
+
+**Causes and solutions:**
+
+1. **Config:** You need **both** `return_perf_metrics` and `enable_iter_perf_stats` in the YAML:
+
+   ```yaml
+   return_perf_metrics: true
+   enable_iter_perf_stats: true
+   ```
+
+2. **PROMETHEUS_MULTIPROC_DIR timing:** The executor may start before the multiproc dir is set. Set it explicitly **before** starting the server:
+
+   ```bash
+   export PROMETHEUS_MULTIPROC_DIR=/tmp/trtllm_prometheus
+   mkdir -p $PROMETHEUS_MULTIPROC_DIR
+   trtllm-serve Qwen/Qwen3-0.6B --host localhost --port 8000 --backend pytorch \
+     --extra_llm_api_options /tmp/extra_llm_api_options.yaml
+   ```
+
+3. **Verify metrics are collected:** Add `perf_metrics_max_requests: 10` to your YAML, then check `/perf_metrics` after a request. If it returns data, the executor is collecting; the issue is likely multiproc dir or Prometheus registry.
+
+   ```bash
+   # In YAML: perf_metrics_max_requests: 10
+   curl -s http://localhost:8000/perf_metrics | jq length
+   ```
+
+4. **TensorRT-LLM version:** Some versions have different behavior. If the above does not help, consider filing an issue at [NVIDIA/TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM).
 
 ### Disk Offload Fails to Start
 

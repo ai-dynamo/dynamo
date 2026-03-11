@@ -1,0 +1,176 @@
+From 24f99338b09c7085d34d8bf563a58cba9ce745bc Mon Sep 17 00:00:00 2001
+From: Ziqi Fan <ziqif@nvidia.com>
+Date: Wed, 11 Mar 2026 14:36:45 -0700
+Subject: [PATCH] feat: enable attention_dp to work with KVBM
+
+Signed-off-by: Ziqi Fan <ziqif@nvidia.com>
+---
+ .../_torch/pyexecutor/kv_cache_connector.py   | 53 ++++++++++++++-----
+ .../_torch/pyexecutor/py_executor_creator.py  | 27 ++++++++--
+ 2 files changed, 65 insertions(+), 15 deletions(-)
+
+diff --git a/tensorrt_llm/_torch/pyexecutor/kv_cache_connector.py b/tensorrt_llm/_torch/pyexecutor/kv_cache_connector.py
+index e2000a35b..0851de274 100644
+--- a/tensorrt_llm/_torch/pyexecutor/kv_cache_connector.py
++++ b/tensorrt_llm/_torch/pyexecutor/kv_cache_connector.py
+@@ -344,6 +344,11 @@ class KvCacheConnectorSchedulerOutputManager:
+         for req in scheduled_batch.context_requests:
+             if req.request_id in new_async_requests.loading_ids:
+                 continue
++            # Skip attention DP dummy requests (request_id=0) injected by TensorRT-LLM
++            # to pad DP ranks with no active requests. They never go through _create_slot
++            # so they are not in inflight_requests.
++            if getattr(req, "is_attention_dp_dummy", False):
++                continue
+ 
+             is_new = req.request_id not in self.requests
+ 
+@@ -361,6 +366,8 @@ class KvCacheConnectorSchedulerOutputManager:
+                 scheduler_output.cached_requests.append(request_data)
+ 
+         for req in scheduled_batch.generation_requests:
++            if getattr(req, "is_attention_dp_dummy", False):
++                continue
+             request_data = self.requests[req.request_id].update_and_build_data(
+                 req, kv_cache_manager)
+ 
+@@ -387,15 +394,24 @@ class KvCacheConnectorManager(KvCacheConnectorManagerCpp):
+     When implementing a connector API, you do not need to implement this class.
+     """
+ 
+-    def __init__(self, worker: KvCacheConnectorWorker,
+-                 scheduler: Optional[KvCacheConnectorScheduler]):
+-        assert (scheduler is not None) == (
+-            mpi_rank() == 0), "The scheduler may only exist on rank 0!"
++    def __init__(self,
++                 worker: KvCacheConnectorWorker,
++                 scheduler: Optional[KvCacheConnectorScheduler],
++                 enable_attention_dp: bool = False):
++        if enable_attention_dp:
++            # With attention DP, each rank is an independent DP domain
++            # and needs its own scheduler.
++            assert scheduler is not None, \
++                "Each attention DP rank must have its own scheduler!"
++        else:
++            assert (scheduler is not None) == (
++                mpi_rank() == 0), "The scheduler may only exist on rank 0!"
+ 
+         super().__init__()
+ 
+         self.worker = worker
+         self.scheduler = scheduler
++        self._enable_attention_dp = enable_attention_dp
+ 
+         # Requests that haven't yet been passed into get_finished.
+         self.new_async_requests = AsyncRequests(dict(), dict())
+@@ -415,7 +431,13 @@ class KvCacheConnectorManager(KvCacheConnectorManagerCpp):
+     def _run_on_leader(self, f: Callable[[], Any]) -> Any:
+         """
+         Run a function on the leader rank, and broadcast the result to all other ranks.
++
++        With attention DP, each rank is independent and has its own scheduler,
++        so no MPI communication is needed.
+         """
++        if self._enable_attention_dp:
++            return f()
++
+         if self.scheduler is not None:
+             assert mpi_rank() == 0, "The scheduler may only exist on rank 0!"
+             res = f()
+@@ -506,6 +528,9 @@ class KvCacheConnectorManager(KvCacheConnectorManagerCpp):
+             Whether the request is performing asynchronous saving operations. If true, we do not immediately call free_resources on the request.
+         """
+ 
++        if req.is_attention_dp_dummy:
++            return False
++
+         if req.request_id in self.finished_async_loading_requests:
+             del self.finished_async_loading_requests[req.request_id]
+ 
+@@ -546,17 +571,21 @@ class KvCacheConnectorManager(KvCacheConnectorManagerCpp):
+         self.local_finished_async_requests.add_from(
+             new_local_finished_async_requests)
+ 
+-        # Broadcast this whole list to all other workers.
++        # Collect finished IDs from all workers and find the intersection
++        # (only release when ALL workers confirm completion).
+         finished_saving = list(self.local_finished_async_requests.saving_ids)
+         finished_loading = list(self.local_finished_async_requests.loading_ids)
+ 
+-        all_results = mpi_allgather((finished_saving, finished_loading))
+-
+-        # Find only the requests that have been reported complete by all workers.
+-        intersect_finished_saving = set.intersection(
+-            *[set(res[0]) for res in all_results])
+-        intersect_finished_loading = set.intersection(
+-            *[set(res[1]) for res in all_results])
++        if self._enable_attention_dp:
++            # With attention DP, each rank is independent — use local results directly.
++            intersect_finished_saving = set(finished_saving)
++            intersect_finished_loading = set(finished_loading)
++        else:
++            all_results = mpi_allgather((finished_saving, finished_loading))
++            intersect_finished_saving = set.intersection(
++                *[set(res[0]) for res in all_results])
++            intersect_finished_loading = set.intersection(
++                *[set(res[1]) for res in all_results])
+ 
+         # Remove these requests from our list of locally finished requests.
+         all_finished = self.local_finished_async_requests.extract_by_id(
+diff --git a/tensorrt_llm/_torch/pyexecutor/py_executor_creator.py b/tensorrt_llm/_torch/pyexecutor/py_executor_creator.py
+index f79395c82..508d479c3 100644
+--- a/tensorrt_llm/_torch/pyexecutor/py_executor_creator.py
++++ b/tensorrt_llm/_torch/pyexecutor/py_executor_creator.py
+@@ -13,7 +13,7 @@ from strenum import StrEnum
+ 
+ import tensorrt_llm
+ from tensorrt_llm._torch.pyexecutor.resource_manager import ResourceManagerType
+-from tensorrt_llm._utils import get_sm_version
++from tensorrt_llm._utils import get_sm_version, mpi_rank, mpi_world_size
+ from tensorrt_llm.llmapi.llm_args import (CapacitySchedulerPolicy,
+                                           ContextChunkingPolicy,
+                                           GuidedDecodingConfig, LoadFormat,
+@@ -610,10 +610,30 @@ def create_py_executor(
+             # Some connector API implementations may need to establish out-of-band communication between the scheduler and workers.
+             # In this case, the worker may be dependent on the scheduler, or vice-versa.
+             # To deal with cases like this, we instantiate them both concurrently.
++            # With attention DP, each rank is an independent DP domain and
++            # needs its own scheduler (no cross-rank MPI in the connector).
++            needs_scheduler = (scheduler_cls is not None
++                               and (rank == 0
++                                    or mapping.enable_attention_dp))
+             with ThreadPoolExecutor(max_workers=2) as executor:
+                 connector_worker_task = executor.submit(worker_cls, llm_args)
+ 
+-                if scheduler_cls is not None and rank == 0:
++                # HACK: DO NOT MERGE THIS. THIS IS UGLY.
++                if mapping.enable_attention_dp:
++                    pub_port = 56001 + mpi_rank()
++                    ack_port = 56002 + mpi_world_size() + mpi_rank()
++
++                    logger.info(f"Setting DYN_KVBM_LEADER_ZMQ_PUB_PORT to {pub_port}, DYN_KVBM_LEADER_ZMQ_ACK_PORT to {ack_port} for MPI rank {mpi_rank()}")
++                    os.environ["DYN_KVBM_LEADER_ZMQ_PUB_PORT"] = str(pub_port)
++                    os.environ["DYN_KVBM_LEADER_ZMQ_ACK_PORT"] = str(ack_port)
++
++
++                    if os.environ.get("DYN_KVBM_TRTLLM_ZMQ_PORT") is not None:
++                        trtllm_port = int(os.environ.get("DYN_KVBM_TRTLLM_ZMQ_PORT")) + mpi_rank()
++                        os.environ["DYN_KVBM_TRTLLM_ZMQ_PORT"] = str(trtllm_port)
++                        logger.info(f"Setting DYN_KVBM_TRTLLM_ZMQ_PORT to {trtllm_port} for MPI rank {mpi_rank()}")
++
++                if needs_scheduler:
+                     connector_scheduler_task = executor.submit(
+                         scheduler_cls, llm_args)
+                     connector_scheduler = connector_scheduler_task.result()
+@@ -629,7 +649,8 @@ def create_py_executor(
+                     forward_pass_callable)
+ 
+             kv_connector_manager = KvCacheConnectorManager(
+-                connector_worker, connector_scheduler)
++                connector_worker, connector_scheduler,
++                enable_attention_dp=mapping.enable_attention_dp)
+ 
+         except Exception as e:
+             logger.error(f"Error instantiating connector: {e}")
+-- 
+2.43.0

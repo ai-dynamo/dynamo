@@ -105,7 +105,8 @@ spec:
               --extra-engine-args "${ENGINE_ARGS}" \
               --tensor-parallel-size 8 \
               --dyn-reasoning-parser kimi_k25 \
-              --dyn-tool-call-parser kimi_k2
+              --dyn-tool-call-parser kimi_k2 \
+              --publish-events-and-metrics
           command:
           - /bin/sh
           - -c
@@ -127,6 +128,9 @@ spec:
             value: "true"
           - name: DYN_KVBM_METRICS_PORT
             value: "6880"
+          # Use different port for TRT-LLM ZMQ publisher; 56001 is used by KVBM leader
+          - name: DYN_KVBM_TRTLLM_ZMQ_PORT
+            value: "20081"
           volumeMounts:
           - mountPath: /opt/dynamo/configs
             name: llm-config-kimi-agg-kvbm
