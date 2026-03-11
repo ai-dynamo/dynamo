@@ -36,6 +36,7 @@ const WATERMARK_UNSET: u64 = u64::MAX;
 /// Uses a DEALER socket (no send/recv lockstep) to send one request and
 /// receive multiple response frames. Each response is `[empty, seq, payload]`;
 /// an empty payload signals end of replay.
+#[expect(clippy::too_many_arguments)]
 async fn replay_gap(
     replay_socket: &mut zeromq::DealerSocket,
     start_seq: u64,
@@ -133,6 +134,7 @@ async fn replay_gap(
 /// The function returns only after the sockets are connected and the ready
 /// signal has fired, so callers know the listener is fully wired before they
 /// expose the worker via HTTP.
+#[expect(clippy::too_many_arguments)]
 pub async fn run_zmq_listener(
     worker_id: WorkerId,
     dp_rank: u32,
@@ -208,6 +210,7 @@ pub async fn run_zmq_listener(
     ));
 }
 
+#[expect(clippy::too_many_arguments)]
 async fn zmq_recv_loop(
     worker_id: WorkerId,
     dp_rank: u32,

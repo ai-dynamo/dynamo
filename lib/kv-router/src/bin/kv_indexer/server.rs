@@ -87,15 +87,19 @@ async fn register(
     State(state): State<Arc<AppState>>,
     Json(req): Json<RegisterRequest>,
 ) -> impl IntoResponse {
-    match state.registry.register(
-        req.instance_id,
-        req.endpoint,
-        req.dp_rank.unwrap_or(0),
-        req.model_name,
-        req.tenant_id,
-        req.block_size,
-        req.replay_endpoint,
-    ) {
+    match state
+        .registry
+        .register(
+            req.instance_id,
+            req.endpoint,
+            req.dp_rank.unwrap_or(0),
+            req.model_name,
+            req.tenant_id,
+            req.block_size,
+            req.replay_endpoint,
+        )
+        .await
+    {
         Ok(()) => (
             StatusCode::CREATED,
             Json(serde_json::json!({"status": "ok"})),

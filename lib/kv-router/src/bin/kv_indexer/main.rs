@@ -106,15 +106,17 @@ async fn main() -> anyhow::Result<()> {
         })?;
         for (instance_id, dp_rank, endpoint) in parse_workers(workers_str) {
             tracing::info!(instance_id, dp_rank, endpoint, "Registering initial worker");
-            registry.register(
-                instance_id,
-                endpoint,
-                dp_rank,
-                cli.model_name.clone(),
-                cli.tenant_id.clone(),
-                block_size,
-                None,
-            )?;
+            registry
+                .register(
+                    instance_id,
+                    endpoint,
+                    dp_rank,
+                    cli.model_name.clone(),
+                    cli.tenant_id.clone(),
+                    block_size,
+                    None,
+                )
+                .await?;
         }
     }
 
