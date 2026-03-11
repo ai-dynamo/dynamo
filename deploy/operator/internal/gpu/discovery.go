@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -38,6 +39,8 @@ import (
 )
 
 const (
+	defaultDCGMEndpointTemplate = "http://{POD_IP}:9400/metrics"
+
 	// NVIDIA GPU Feature Discovery (GFD) label keys
 	LabelGPUCount   = "nvidia.com/gpu.count"
 	LabelGPUProduct = "nvidia.com/gpu.product"
@@ -60,6 +63,21 @@ const (
 	CloudProviderOther   = "other"
 	CloudProviderUnknown = "unknown"
 )
+
+// awsInstanceTypePrefixes matches known GPU/accelerator instance families on EKS. See: https://aws.amazon.com/ec2/instance-types/
+var awsInstanceTypePrefixes = []string{
+	"p3.", "p3dn.", "p4d.", "p4de.", "p5.", // GPU instances
+	"g3.", "g4dn.", "g4ad.", "g5.", "g6.", // GPU instances
+	"inf1.", "inf2.", // Inferentia
+	"trn1.", "trn1n.", // Trainium
+}
+
+// gcpMachineSeries matches known GCP accelerator-optimised machine series on GKE. See: https://cloud.google.com/compute/docs/machine-resource
+var gcpMachineSeries = []string{
+	"a2-", // A100 GPU machines
+	"a3-", // H100 GPU machines
+	"g2-", // L4 GPU machines
+}
 
 // GPUInfo contains discovered GPU configuration from cluster nodes
 type GPUInfo struct {
@@ -197,7 +215,7 @@ func (g *GPUDiscovery) DiscoverGPUsFromDCGM(ctx context.Context, k8sClient clien
 			continue
 		}
 
-		endpoint := fmt.Sprintf("http://%s:9400/metrics", pod.Status.PodIP)
+		endpoint := buildDCGMEndpoint(pod.Status.PodIP)
 		info, err := g.Scraper(ctx, endpoint)
 		if err != nil {
 			scrapeErrors = append(scrapeErrors, fmt.Errorf("pod %s (%s): %w", pod.Name, pod.Status.PodIP, err))
@@ -234,6 +252,15 @@ func (g *GPUDiscovery) DiscoverGPUsFromDCGM(ctx context.Context, k8sClient clien
 		cache.Set(bestNode, 60*time.Second)
 	}
 	return bestNode, nil
+}
+
+func buildDCGMEndpoint(podIP string) string {
+	template := os.Getenv("DCGM_METRICS_ENDPOINT_TEMPLATE")
+	if template == "" {
+		template = defaultDCGMEndpointTemplate
+	}
+
+	return strings.ReplaceAll(template, "{POD_IP}", podIP)
 }
 
 func listDCGMExporterPods(ctx context.Context, k8sClient client.Reader) ([]corev1.Pod, error) {
@@ -377,7 +404,7 @@ func ScrapeMetricsEndpoint(ctx context.Context, endpoint string) (*GPUInfo, erro
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("GET HTTP%s failed: %w", endpoint, err)
+		return nil, fmt.Errorf("HTTP GET %s failed: %w", endpoint, err)
 	}
 	defer func() {
 		if cerr := resp.Body.Close(); cerr != nil {
@@ -532,7 +559,7 @@ func parseMetrics(ctx context.Context, families map[string]*dto.MetricFamily) (*
 		}
 	}
 
-	// --- Calculate Max VRAM in case of heterogenous GPUs
+	// --- Calculate Max VRAM
 	for gpuID := range gpuSet {
 		total := int(fbFree[gpuID] + fbUsed[gpuID] + fbReserved[gpuID])
 		if total > vram {
@@ -761,15 +788,33 @@ func GetCloudProviderInfo(ctx context.Context, k8sClient client.Reader) (string,
 	if _, ok := labels["eks.amazonaws.com/nodegroup"]; ok {
 		return CloudProviderAWS, nil
 	}
-	if strings.HasPrefix(instanceType, "p") {
+	if isAWSInstanceType(instanceType) {
 		return CloudProviderAWS, nil
 	}
 	// GKE labels
 	if _, ok := labels["cloud.google.com/gke-nodepool"]; ok {
 		return CloudProviderGCP, nil
 	}
-	if strings.HasPrefix(instanceType, "a2-") {
+	if isGCPInstanceType(instanceType) {
 		return CloudProviderGCP, nil
 	}
 	return "other", nil
+}
+
+func isGCPInstanceType(instanceType string) bool {
+	for _, prefix := range gcpMachineSeries {
+		if strings.HasPrefix(instanceType, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func isAWSInstanceType(instanceType string) bool {
+	for _, prefix := range awsInstanceTypePrefixes {
+		if strings.HasPrefix(instanceType, prefix) {
+			return true
+		}
+	}
+	return false
 }

@@ -895,7 +895,7 @@ func GetGPUDiscoveryFailureReason(err error) string {
 		return "failed to initialize Helm client (RBAC, kubeconfig, or Helm driver issue)"
 	case strings.Contains(errMsg, "timeout waiting for dcgm exporter pods"):
 		return "timeout while waiting for DCGM exporter pods to become ready"
-	case strings.Contains(errMsg, "get http"):
+	case strings.Contains(errMsg, "http get"):
 		return "failed to reach DCGM metrics endpoint on pod (network/port issue)"
 	case strings.Contains(errMsg, "metrics endpoint") &&
 		strings.Contains(errMsg, "status"):
