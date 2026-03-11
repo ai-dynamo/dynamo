@@ -34,7 +34,6 @@ use super::{
     service_v2,
 };
 use crate::preprocessor::OpenAIPreprocessor;
-use crate::protocols::unified::UnifiedRequest;
 use crate::protocols::anthropic::stream_converter::AnthropicStreamConverter;
 use crate::protocols::anthropic::types::{
     AnthropicCountTokensRequest, AnthropicCountTokensResponse, AnthropicCreateMessageRequest,
@@ -45,6 +44,7 @@ use crate::protocols::openai::chat_completions::{
     NvCreateChatCompletionResponse, NvCreateChatCompletionStreamResponse,
     aggregator::ChatCompletionAggregator,
 };
+use crate::protocols::unified::UnifiedRequest;
 use crate::request_template::RequestTemplate;
 use crate::types::Annotated;
 
@@ -205,19 +205,18 @@ async fn anthropic_messages(
         .is_some_and(|t| t.thinking_type == "enabled");
 
     // Convert Anthropic request -> UnifiedRequest -> Chat Completion request
-    let unified_request: UnifiedRequest =
-        orig_request.try_into().map_err(|e: anyhow::Error| {
-            tracing::error!(
-                request_id,
-                error = %e,
-                "Failed to convert AnthropicCreateMessageRequest to UnifiedRequest",
-            );
-            anthropic_error(
-                StatusCode::BAD_REQUEST,
-                "invalid_request_error",
-                &format!("Failed to convert request: {}", e),
-            )
-        })?;
+    let unified_request: UnifiedRequest = orig_request.try_into().map_err(|e: anyhow::Error| {
+        tracing::error!(
+            request_id,
+            error = %e,
+            "Failed to convert AnthropicCreateMessageRequest to UnifiedRequest",
+        );
+        anthropic_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            &format!("Failed to convert request: {}", e),
+        )
+    })?;
 
     // Extract the API context before consuming the UnifiedRequest — this
     // carries Anthropic-specific fields (thinking config, cache breakpoints,
