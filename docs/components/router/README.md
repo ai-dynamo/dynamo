@@ -21,7 +21,7 @@ For Kubernetes, set `DYN_ROUTER_MODE=kv` on the Frontend service. Workers automa
 | `--router-mode kv` | `round_robin` | Enable KV cache-aware routing |
 | `--router-kv-overlap-score-weight` | `1.0` | Balance prefill vs decode optimization (higher = better TTFT) |
 | `--no-router-kv-events` | enabled | Fall back to approximate routing (no event consumption from workers) |
-| `--router-queue-threshold` | `1.5` | Backpressure queue threshold; enables priority scheduling via `nvext.agent_hints.latency_sensitivity` |
+| `--router-queue-threshold` | `2.0` | Backpressure queue threshold; enables priority scheduling via `nvext.agent_hints.latency_sensitivity` |
 | `--router-queue-policy` | `fcfs` | Queue scheduling policy: `fcfs` (tail TTFT) or `wspt` (avg TTFT) |
 
 For all CLI arguments, environment variables, K8s deployment examples, and tuning guidelines, see the [Router Guide](router-guide.md). For A/B benchmarking, see the [KV Router A/B Benchmarking Guide](../../benchmarks/kv-router-ab-testing.md).

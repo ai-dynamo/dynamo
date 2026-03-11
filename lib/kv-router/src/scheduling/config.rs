@@ -148,7 +148,7 @@ impl Default for KvRouterConfig {
             router_ttl_secs: 120.0,
             router_max_tree_size: 2usize.pow(20), // 2^20 = 1048576, matches PruneConfig::default()
             router_prune_target_ratio: 0.8,
-            router_queue_threshold: Some(1.5),
+            router_queue_threshold: Some(2.0),
             router_event_threads: 4,
             router_enable_cache_control: false,
             router_queue_policy: RouterQueuePolicy::default(),

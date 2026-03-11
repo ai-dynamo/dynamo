@@ -224,7 +224,7 @@ class KvRouterArgGroup(ArgGroup):
             g,
             flag_name="--router-queue-threshold",
             env_var="DYN_ROUTER_QUEUE_THRESHOLD",
-            default=1.5,
+            default=2.0,
             help=(
                 "KV Router: Queue threshold fraction for prefill token capacity. "
                 "Requests are queued if all workers exceed this fraction of "
