@@ -53,10 +53,9 @@ _IMPORT_OVERRIDES: dict[str, tuple[str, str, bool]] = {
 _STRUCT_DOCSTRINGS: dict = {
     "SLASpec": (
         "Service-level agreement targets.\n\n"
-        "    Provide exactly one of:\n\n"
+        "    Provide one of:\n\n"
         "    - ``ttft`` + ``itl``: explicit latency targets (default: 2000 ms / 30 ms)\n"
-        "    - ``e2eLatency``: end-to-end latency target\n"
-        "    - ``optimizationType``: high-level objective without explicit numeric targets"
+        "    - ``e2eLatency``: end-to-end latency target (mutually exclusive with ttft/itl)"
     ),
 }
 
@@ -66,18 +65,15 @@ _STRUCT_EXTRAS: dict = {
     "SLASpec": """\
     @model_validator(mode="after")
     def _validate_sla_options(self) -> "SLASpec":
-        \"\"\"Ensure at most one SLA mode is active.\"\"\"
+        \"\"\"Ensure e2eLatency and ttft/itl are not both provided.\"\"\"
         has_e2e = self.e2eLatency is not None
-        has_opt = self.optimizationType is not None
-        ttft_itl_touched = "ttft" in self.model_fields_set or "itl" in self.model_fields_set
-        has_ttft_itl = (self.ttft is not None and self.itl is not None) and (
-            ttft_itl_touched or (not has_e2e and not has_opt)
+        ttft_itl_touched = (
+            "ttft" in self.model_fields_set or "itl" in self.model_fields_set
         )
-        options_count = sum([has_ttft_itl, has_e2e, has_opt])
-        if options_count > 1:
+        has_ttft_itl = (self.ttft is not None or self.itl is not None) and ttft_itl_touched
+        if has_e2e and has_ttft_itl:
             raise ValueError(
-                "SLA must specify exactly one of: (ttft and itl), e2eLatency, "
-                "or optimizationType \u2014 not multiple."
+                "SLA must specify either (ttft and itl) or e2eLatency, not both."
             )
         if (self.ttft is not None) != (self.itl is not None):
             raise ValueError("ttft and itl must both be provided together.")
