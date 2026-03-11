@@ -1,12 +1,46 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::fmt;
+use std::str::FromStr;
+
 use derive_builder::Builder;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use validator::{Validate, ValidationError};
 
 use crate::protocols::{compute_block_hash_for_seq, compute_seq_hash_for_block};
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RouterQueuePolicy {
+    #[default]
+    Fcfs,
+    Wspt,
+}
+
+impl fmt::Display for RouterQueuePolicy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Fcfs => f.write_str("fcfs"),
+            Self::Wspt => f.write_str("wspt"),
+        }
+    }
+}
+
+impl FromStr for RouterQueuePolicy {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "fcfs" => Ok(Self::Fcfs),
+            "wspt" => Ok(Self::Wspt),
+            _ => Err(format!(
+                "unknown queue policy: {s:?}, expected 'fcfs' or 'wspt'"
+            )),
+        }
+    }
+}
 
 /// Override configuration for router settings that can be specified per-request
 #[derive(Debug, Clone, Default, Builder, Serialize, Deserialize, Validate)]
@@ -75,8 +109,8 @@ pub struct KvRouterConfig {
 
     /// Queue threshold fraction for prefill token capacity.
     /// When set, requests are queued if all workers exceed this fraction of max_num_batched_tokens.
-    /// If None (default), queueing is disabled and all requests go directly to ready.
-    /// Must be > 0.
+    /// If None, queueing is disabled and all requests go directly to ready.
+    /// Default: 1.5. Must be > 0.
     #[validate(range(min = 0.0))]
     pub router_queue_threshold: Option<f64>,
 
@@ -91,6 +125,11 @@ pub struct KvRouterConfig {
     /// requests, firing a pin_prefix call (with TTL) to the worker after generation completes.
     /// When false (default), cache_control is ignored and no cache_control client is created.
     pub router_enable_cache_control: bool,
+
+    /// Scheduling policy for the router queue.
+    /// "fcfs" (default): first-come first-served with priority bumps — optimizes tail TTFT.
+    /// "wspt": weighted shortest processing time (Smith's rule) — optimizes average TTFT.
+    pub router_queue_policy: RouterQueuePolicy,
 }
 
 impl Default for KvRouterConfig {
@@ -109,9 +148,10 @@ impl Default for KvRouterConfig {
             router_ttl_secs: 120.0,
             router_max_tree_size: 2usize.pow(20), // 2^20 = 1048576, matches PruneConfig::default()
             router_prune_target_ratio: 0.8,
-            router_queue_threshold: None,
+            router_queue_threshold: Some(1.5),
             router_event_threads: 4,
             router_enable_cache_control: false,
+            router_queue_policy: RouterQueuePolicy::default(),
         }
     }
 }
