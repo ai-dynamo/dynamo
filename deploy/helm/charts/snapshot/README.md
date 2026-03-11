@@ -50,7 +50,7 @@ helm upgrade --install snapshot ./deploy/helm/charts/snapshot \
 
 If your cluster does not use a default storage class, also set `storage.pvc.storageClass`.
 
-If you only want same-node restore, override the default with `--set storage.pvc.accessMode=ReadWriteOnce`.
+Keep `storage.pvc.accessMode=ReadWriteMany` for this chart layout. The DaemonSet mounts the same PVC on each eligible node, so a shared `ReadWriteOnce` claim only works when the agent runs on one node.
 
 If you already have a PVC, keep the chart in "use existing PVC" mode:
 
@@ -76,7 +76,7 @@ kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/name=snapshot -o wide
 
 | Parameter | Meaning | Default |
 |-----------|---------|---------|
-| `storage.pvc.create` | Create `snapshot-pvc` instead of using an existing PVC | `false` |
+| `storage.pvc.create` | Create `snapshot-pvc` instead of using an existing PVC | `true` |
 | `storage.pvc.name` | PVC name used by the agent and by the operator config | `snapshot-pvc` |
 | `storage.pvc.size` | Requested PVC size | `1Ti` |
 | `storage.pvc.storageClass` | Storage class name | `""` |

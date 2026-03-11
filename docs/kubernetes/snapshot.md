@@ -372,6 +372,7 @@ llama3-8b-vllm-prewarm meta-llama/Llama-3-8B      vllm     Creating 7ab4f89c12de
 ```
 
 **Phases:**
+
 | Phase | Description |
 |-------|-------------|
 | `Pending` | CR created, waiting for job to start |
@@ -408,7 +409,7 @@ Status:
   Phase: Ready
   IdentityHash: e5962d34ba272638
   JobName: checkpoint-qwen3-06b-vllm-prewarm
-  Location: /checkpoints/e5962d34ba272638
+  Location: /checkpoints/e5962d34ba272638.tar
   StorageType: pvc
   CreatedAt: 2026-01-29T10:05:00Z
   Conditions:

@@ -25,7 +25,7 @@ storage:
   # PVC configuration (when type=pvc)
   pvc:
     # Create a new PVC (set to false if using existing PVC)
-    create: false
+    create: true
     # PVC name - must match operator configuration
     name: snapshot-pvc
     # PVC size
