@@ -14,9 +14,9 @@
 ### Import Migration
 
 - [ ] **IMP-01**: All `crate::v2::*` imports replaced with correct workspace crate paths (`kvbm_logical`, `kvbm_engine`, `kvbm_common`)
-- [ ] **IMP-02**: All `crate::distributed::*` imports replaced with `kvbm_engine` paths
-- [ ] **IMP-03**: All `crate::logical::*` imports replaced with `kvbm_logical::*`
-- [ ] **IMP-04**: All `crate::physical::*` imports replaced with `kvbm_physical::*`
+- [x] **IMP-02**: All `crate::distributed::*` imports replaced with `kvbm_engine` paths
+- [x] **IMP-03**: All `crate::logical::*` imports replaced with `kvbm_logical::*`
+- [x] **IMP-04**: All `crate::physical::*` imports replaced with `kvbm_physical::*`
 - [ ] **IMP-05**: All `crate::integrations::*` self-referential imports resolved (moved to correct module paths or local re-exports)
 
 ### Nova → Velo Migration
@@ -65,9 +65,9 @@
 | WS-02 | Phase 1 | Complete |
 | WS-03 | Phase 1 | Complete |
 | IMP-01 | Phase 2 | Pending |
-| IMP-02 | Phase 2 | Pending |
-| IMP-03 | Phase 2 | Pending |
-| IMP-04 | Phase 2 | Pending |
+| IMP-02 | Phase 2 | Complete |
+| IMP-03 | Phase 2 | Complete |
+| IMP-04 | Phase 2 | Complete |
 | IMP-05 | Phase 2 | Pending |
 | VELO-01 | Phase 2 | Pending |
 | VELO-02 | Phase 2 | Pending |

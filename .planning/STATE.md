@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: planning
-stopped_at: Phase 2 context gathered
-last_updated: "2026-03-11T09:26:01.381Z"
+stopped_at: Completed 02-import-migration/02-01-PLAN.md
+last_updated: "2026-03-11T09:55:01.541Z"
 last_activity: 2026-03-11 — Roadmap created
 progress:
   total_phases: 4
   completed_phases: 1
-  total_plans: 1
-  completed_plans: 1
+  total_plans: 4
+  completed_plans: 2
   percent: 0
 ---
 
@@ -51,6 +51,7 @@ Progress: [░░░░░░░░░░] 0%
 
 *Updated after each plan completion*
 | Phase 01-workspace-wiring P01 | 12 | 2 tasks | 2 files |
+| Phase 02-import-migration P01 | 25 | 3 tasks | 12 files |
 
 ## Accumulated Context
 
@@ -65,6 +66,8 @@ Recent decisions affecting current work:
 - [Phase 01-workspace-wiring]: kvbm-connector uses version 0.1.0 in workspace.dependencies entry (all other kvbm crates use 1.0.0)
 - [Phase 01-workspace-wiring]: testing feature declares kvbm-engine/logical/physical explicitly for Cargo resolver 3 correctness
 - [Phase 01-workspace-wiring]: velo-events and velo-transports excluded from kvbm-connector deps — zero direct namespace usage confirmed
+- [Phase 02-import-migration]: kvbm_common::LogicalLayoutHandle is the correct path (not kvbm_logical::) — LogicalLayoutHandle lives in kvbm_common; kvbm_logical re-exports it
+- [Phase 02-import-migration]: crate::v2::distributed::* maps identically to kvbm_engine::* (same as crate::distributed::*)
 
 ### Pending Todos
 
@@ -76,6 +79,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-11T09:26:01.380Z
-Stopped at: Phase 2 context gathered
-Resume file: .planning/phases/02-import-migration/02-CONTEXT.md
+Last session: 2026-03-11T09:55:01.539Z
+Stopped at: Completed 02-import-migration/02-01-PLAN.md
+Resume file: None
