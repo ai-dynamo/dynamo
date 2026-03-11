@@ -26,6 +26,9 @@ use velo_transports::{
     tcp::{TcpTransport, TcpTransportBuilder},
 };
 
+#[cfg(unix)]
+use velo_transports::uds::{UdsTransport, UdsTransportBuilder};
+
 use std::sync::Once;
 use tracing_subscriber::FmtSubscriber;
 
@@ -254,6 +257,24 @@ impl TestTransportHandle<TcpTransport> {
     }
 }
 
+// UDS-specific convenience constructors
+#[cfg(unix)]
+impl TestTransportHandle<UdsTransport> {
+    /// Create a new UDS transport using a temp directory socket path
+    pub async fn new_uds() -> anyhow::Result<Self> {
+        Self::with_factory(|| {
+            let dir = std::env::temp_dir()
+                .join(format!("velo-uds-test-{}", velo_transports::InstanceId::new_v4()));
+            std::fs::create_dir_all(&dir)?;
+            let socket_path = dir.join("transport.sock");
+            UdsTransportBuilder::new()
+                .socket_path(&socket_path)
+                .build()
+        })
+        .await
+    }
+}
+
 // // UCX-specific convenience constructors
 // #[cfg(feature = "ucx")]
 // impl TestTransportHandle<UcxTransport> {
@@ -418,6 +439,24 @@ impl TestCluster<TcpTransport> {
     }
 }
 
+// UDS-specific convenience constructor
+#[cfg(unix)]
+impl TestCluster<UdsTransport> {
+    /// Create a new UDS test cluster with the specified number of transports
+    pub async fn new_uds(size: usize) -> anyhow::Result<Self> {
+        Self::with_factory(size, || {
+            let dir = std::env::temp_dir()
+                .join(format!("velo-uds-test-{}", velo_transports::InstanceId::new_v4()));
+            std::fs::create_dir_all(&dir)?;
+            let socket_path = dir.join("transport.sock");
+            UdsTransportBuilder::new()
+                .socket_path(&socket_path)
+                .build()
+        })
+        .await
+    }
+}
+
 // UCX-specific convenience constructor
 #[cfg(feature = "ucx")]
 impl TestCluster<UcxTransport> {
@@ -546,6 +585,23 @@ impl TransportFactory for TcpFactory {
 
     async fn create_cluster(size: usize) -> anyhow::Result<TestCluster<Self::Transport>> {
         TestCluster::new(size).await
+    }
+}
+
+/// UDS transport factory
+#[cfg(unix)]
+pub struct UdsFactory;
+
+#[cfg(unix)]
+impl TransportFactory for UdsFactory {
+    type Transport = UdsTransport;
+
+    async fn create() -> anyhow::Result<TestTransportHandle<Self::Transport>> {
+        TestTransportHandle::new_uds().await
+    }
+
+    async fn create_cluster(size: usize) -> anyhow::Result<TestCluster<Self::Transport>> {
+        TestCluster::new_uds(size).await
     }
 }
 

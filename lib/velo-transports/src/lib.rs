@@ -31,6 +31,9 @@ mod address;
 
 pub mod tcp;
 
+#[cfg(unix)]
+pub mod uds;
+
 // #[cfg(feature = "ucx")]
 // pub mod ucx;
 
