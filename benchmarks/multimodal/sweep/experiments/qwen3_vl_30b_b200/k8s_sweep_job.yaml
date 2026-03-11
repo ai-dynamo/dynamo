@@ -1,0 +1,299 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# K8s Job equivalent of the SLURM run.sh sweep for Qwen3-VL-30B on 8xB200.
+#
+# Reserves 8 GPUs on a single node and runs the full agg-vs-EPD benchmark
+# sweep inside the container — same logic as the SLURM workflow but on K8s.
+#
+# Usage:
+#   kubectl apply -f k8s_sweep_job.yaml -n kprashanth \
+#     --context=nv-prd-dgxc.teleport.sh-dynamo-nscale-dev-cluster
+#
+#   # Monitor:
+#   kubectl logs -f job/trtllm-mm-sweep -n kprashanth
+#
+#   # Retrieve results:
+#   kubectl cp kprashanth/pvc-access-pod:/model-cache/results ./results
+#
+# To run a single config instead of the full sweep, change SWEEP_CONFIGS
+# to e.g. "agg" or "epd-4e".
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: trtllm-mm-sweep
+spec:
+  backoffLimit: 0
+  # Auto-cleanup 2 hours after completion so namespace doesn't accumulate stale jobs
+  ttlSecondsAfterFinished: 7200
+  template:
+    metadata:
+      labels:
+        app: trtllm-mm-sweep
+    spec:
+      restartPolicy: Never
+      # Pin to a single GPU node
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: nvidia.com/gpu.present
+                    operator: In
+                    values: ["true"]
+                  # Pin to node with cached image to avoid long pull
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values: ["cluster-0967a26d-pool-14bee067-prctr-f4kvl"]
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      imagePullSecrets:
+        - name: nvcrimagepullsecret
+      containers:
+        - name: sweep
+          image: nvcr.io/nvidian/dynamo-dev/kprashanth:trtllm-rc7-post1
+          imagePullPolicy: IfNotPresent
+          workingDir: /workspace
+          securityContext:
+            privileged: true  # needed for sysctl + GPU access
+            runAsUser: 0
+          env:
+            - name: MODEL
+              value: "Qwen/Qwen3-VL-30B-A3B-Instruct"
+            - name: SERVED_MODEL_NAME
+              value: "Qwen/Qwen3-VL-30B-A3B-Instruct"
+            # Sweep parameters — edit these to control the experiment
+            - name: SWEEP_CONFIGS
+              value: "agg epd-1e epd-2e epd-4e epd-6e"
+            - name: CONCURRENCIES
+              value: "1 8 16 32 64"
+            - name: OSL
+              value: "500"
+            - name: REQUEST_COUNT
+              value: "200"
+            - name: WARMUP_COUNT
+              value: "5"
+            - name: TIMEOUT
+              value: "1800"
+            - name: OUTPUT_DIR
+              value: "/model-cache/results/qwen3_vl_30b_b200/agg_vs_epd"
+            - name: INPUT_FILE
+              value: "benchmarks/multimodal/jsonl/1000req_1img_200pool_400word_http.jsonl"
+            # Infra
+            - name: ETCD_ENDPOINTS
+              value: "localhost:2379"
+            - name: NATS_SERVER
+              value: "nats://localhost:4222"
+            - name: HF_HOME
+              value: "/model-cache/huggingface"
+            - name: PYTHONUNBUFFERED
+              value: "1"
+            # MPI: use TCP (avoid RDMA errors for MPI process spawning)
+            - name: OMPI_MCA_btl
+              value: "tcp,self"
+            - name: OMPI_MCA_pml
+              value: "ob1"
+            # UCX: allow CUDA transports for NIXL KV transfer, but exclude IB/RDMA
+            - name: UCX_TLS
+              value: "tcp,cuda_copy,cuda_ipc,self,sm"
+            - name: UCX_NET_DEVICES
+              value: "all"
+            # NIXL/GPU transfer support
+            - name: NVIDIA_GDRCOPY
+              value: "1"
+            - name: NCCL_CUMEM_ENABLE
+              value: "1"
+            # HuggingFace token for model download
+            - name: HUGGING_FACE_HUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-token-secret
+                  key: HF_TOKEN
+          command: ["/bin/bash", "-l", "-c"]
+          args:
+            - |
+              set -euo pipefail
+
+              echo "======================================================================="
+              echo "  TRTLLM Multimodal Benchmark Sweep (K8s)"
+              echo "  Configs: $SWEEP_CONFIGS"
+              echo "  Model:   $MODEL"
+              echo "  Concurrencies: $CONCURRENCIES"
+              echo "  OSL:     $OSL"
+              echo "  Requests: $REQUEST_COUNT"
+              echo "======================================================================="
+
+              # ── Fix locked memory limit for UCX/RDMA ─────────────────
+              ulimit -l unlimited
+              echo "[setup] ulimit -l set to unlimited"
+
+              echo ""
+              echo "[gpu] Available GPUs:"
+              nvidia-smi --query-gpu=index,name,memory.total,memory.free --format=csv,noheader
+              echo ""
+
+              # ── Start infra services ───────────────────────────────────
+              echo "[infra] Starting etcd and nats-server..."
+              etcd --listen-client-urls http://0.0.0.0:2379 \
+                   --advertise-client-urls http://0.0.0.0:2379 \
+                   --data-dir /tmp/etcd &
+              nats-server -js &
+              sleep 3
+              echo "[infra] etcd and nats-server running"
+
+              # ── Sync latest benchmark scripts from repo ──────────────
+              echo "[setup] Fetching latest benchmark scripts (sparse, no LFS)..."
+              cd /tmp
+              export GIT_LFS_SKIP_SMUDGE=1
+              git clone --depth=1 --filter=blob:none --sparse \
+                https://github.com/ai-dynamo/dynamo.git -b kprashanth/trtllm-bench dynamo-scripts
+              cd dynamo-scripts
+              git sparse-checkout set benchmarks examples/backends/trtllm/engine_configs
+              cp -r benchmarks/* /workspace/benchmarks/
+              cp -r examples/backends/trtllm/engine_configs/* /workspace/examples/backends/trtllm/engine_configs/
+              cd /workspace
+              rm -rf /tmp/dynamo-scripts
+              echo "[setup] Benchmark scripts updated"
+
+              echo "[setup] Installing aiperf and psutil..."
+              uv pip install aiperf psutil
+              echo "[setup] Dependencies installed"
+
+              # ── Patch TRT-LLM Qwen3-VL multimodal_embedding bug ───────
+              echo "[setup] Patching TRT-LLM Qwen3-VL multimodal_embedding bug..."
+              TRTLLM_QWEN3VL="/opt/dynamo/venv/lib/python3.12/site-packages/tensorrt_llm/_torch/models/modeling_qwen3vl.py"
+              if grep -q 'or data.get("multimodal_embedding")$' "$TRTLLM_QWEN3VL" 2>/dev/null; then
+                  sed -i 's/or data.get("multimodal_embedding")$/or data.get("multimodal_embedding") is not None/' "$TRTLLM_QWEN3VL"
+                  echo "  Patched: $(grep -n 'multimodal_embedding.*is not None' "$TRTLLM_QWEN3VL")"
+              else
+                  echo "  Already patched or file not found — skipping"
+              fi
+
+              # ── Generate JSONL input data if missing ───────────────────
+              if [[ ! -f "/workspace/$INPUT_FILE" ]]; then
+                  echo "[data] Generating JSONL input file..."
+                  cd /workspace/benchmarks/multimodal/jsonl
+                  python main.py -n 1000 --images-per-request 1 --images-pool 200 \
+                      --user-text-tokens 400 --image-mode http
+                  cd /workspace
+              else
+                  echo "[data] Input file exists: $INPUT_FILE"
+              fi
+
+              # ── Sweep helper ───────────────────────────────────────────
+              config_to_script() {
+                  local cfg="$1"
+                  case "$cfg" in
+                      agg)   echo "benchmarks/multimodal/sweep/experiments/qwen3_vl_30b_b200/launch_agg.sh" ;;
+                      epd-*) echo "benchmarks/multimodal/sweep/experiments/qwen3_vl_30b_b200/launch_${cfg//-/_}.sh" ;;
+                  esac
+              }
+
+              # Background server.log tailer — streams to stdout so kubectl logs shows it
+              tail_server_log() {
+                  local log_dir="$OUTPUT_DIR"
+                  while true; do
+                      local log_file=$(find "$log_dir" -name "server.log" -newer /tmp/.last_tail 2>/dev/null | head -1)
+                      if [[ -n "$log_file" ]]; then
+                          echo "[server.log] === Tailing $log_file ==="
+                          tail -f "$log_file" 2>/dev/null | sed 's/^/[server.log] /' &
+                          TAIL_PID=$!
+                          touch /tmp/.last_tail
+                          wait $TAIL_PID 2>/dev/null || true
+                      fi
+                      sleep 5
+                  done
+              }
+              touch /tmp/.last_tail
+              tail_server_log &
+              TAIL_SERVER_PID=$!
+
+              run_sweep_config() {
+                  local cfg="$1"
+                  local launch_script
+                  launch_script=$(config_to_script "$cfg")
+                  local conc_yaml="[$(echo "$CONCURRENCIES" | tr ' ' ',')]"
+
+                  local run_yaml="/tmp/sweep_${cfg}.yaml"
+                  cat > "$run_yaml" <<YAML
+              model: $MODEL
+              concurrencies: $conc_yaml
+              osl: $OSL
+              request_count: $REQUEST_COUNT
+              warmup_count: $WARMUP_COUNT
+              timeout: $TIMEOUT
+              skip_plots: true
+              output_dir: $OUTPUT_DIR
+
+              input_files:
+                - $INPUT_FILE
+
+              configs:
+                - label: $cfg
+                  workflow: $launch_script
+              YAML
+
+                  echo ""
+                  echo "[sweep] ============================================"
+                  echo "[sweep] Config: $cfg"
+                  echo "[sweep] ============================================"
+                  cat "$run_yaml"
+                  echo ""
+
+                  python -m benchmarks.multimodal.sweep --config "$run_yaml"
+
+                  echo ""
+                  echo "[gpu] Post-cleanup GPU state after $cfg:"
+                  nvidia-smi --query-gpu=index,memory.used,memory.free --format=csv,noheader
+                  echo ""
+              }
+
+              # ── Create output dir on PVC ────────────────────────────────
+              mkdir -p "$OUTPUT_DIR"
+
+              # ── Run all configs ─────────────────────────────────────────
+              echo "======================================================================="
+              echo "  Starting sweep"
+              echo "======================================================================="
+
+              for cfg in $SWEEP_CONFIGS; do
+                  echo ""
+                  echo "--- Sweep config: $cfg ---"
+                  run_sweep_config "$cfg"
+              done
+
+              # Stop server.log tailer
+              kill $TAIL_SERVER_PID 2>/dev/null || true
+
+              echo ""
+              echo "======================================================================="
+              echo "  Sweep complete!"
+              echo "  Results: $OUTPUT_DIR"
+              echo "======================================================================="
+              ls -la "$OUTPUT_DIR"
+
+          resources:
+            requests:
+              nvidia.com/gpu: "8"
+              cpu: "64"
+              memory: "256Gi"
+            limits:
+              nvidia.com/gpu: "8"
+              cpu: "128"
+              memory: "512Gi"
+          volumeMounts:
+            - name: model-cache
+              mountPath: /model-cache
+            - name: dshm
+              mountPath: /dev/shm
+      volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 128Gi

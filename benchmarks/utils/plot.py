@@ -136,6 +136,9 @@ def create_plot(
     if log_scale_y:
         plt.yscale("log")
 
+    # Y-axis starts from 0
+    plt.ylim(bottom=0)
+
     plt.legend()
 
     plt.tight_layout()
@@ -333,25 +336,25 @@ def generate_plots(
         ylabel="P50 Inter-Token Latency (ms)",
         data_series=p50_data,
         output_path=output_dir / "p50_inter_token_latency_vs_concurrency.png",
-        log_scale_x=True,
+        log_scale_x=False,
     )
 
-    # 2. Average Inter-token Latency vs Concurrency
-    avg_latency_data = []
+    # 2. P90 Inter-token Latency vs Concurrency
+    p90_latency_data = []
     for deployment_type, results in deployment_results.items():
         concurrencies, latencies = extract_metric_series(
-            results, "inter_token_latency", "avg"
+            results, "inter_token_latency", "p90"
         )
         if concurrencies:
-            avg_latency_data.append((deployment_type.title(), concurrencies, latencies))
+            p90_latency_data.append((deployment_type.title(), concurrencies, latencies))
 
     create_plot(
-        title="Average Inter-Token Latency vs Concurrency",
+        title="P90 Inter-Token Latency vs Concurrency",
         xlabel="Concurrency Level",
-        ylabel="Average Inter-Token Latency (ms)",
-        data_series=avg_latency_data,
-        output_path=output_dir / "avg_inter_token_latency_vs_concurrency.png",
-        log_scale_x=True,
+        ylabel="P90 Inter-Token Latency (ms)",
+        data_series=p90_latency_data,
+        output_path=output_dir / "p90_inter_token_latency_vs_concurrency.png",
+        log_scale_x=False,
     )
 
     # 3. Request Throughput vs Concurrency
@@ -371,46 +374,28 @@ def generate_plots(
         ylabel="Request Throughput (req/s)",
         data_series=throughput_data,
         output_path=output_dir / "request_throughput_vs_concurrency.png",
-        log_scale_x=True,
+        log_scale_x=False,
     )
 
-    # 4. Average Time to First Token vs Concurrency
+    # 4. P90 Time to First Token vs Concurrency
     ttft_data = []
-    for deployment_type, results in deployment_results.items():
-        concurrencies, ttfts = extract_metric_series(
-            results, "time_to_first_token", "avg"
-        )
-        if concurrencies:
-            ttft_data.append((deployment_type.title(), concurrencies, ttfts))
-
-    create_plot(
-        title="Average Time to First Token vs Concurrency",
-        xlabel="Concurrency Level",
-        ylabel="Average Time to First Token (ms)",
-        data_series=ttft_data,
-        output_path=output_dir / "avg_time_to_first_token_vs_concurrency.png",
-        log_scale_x=True,
-    )
-
-    # 5. P90 Time to First Token vs Concurrency
-    p90_ttft_data = []
     for deployment_type, results in deployment_results.items():
         concurrencies, ttfts = extract_metric_series(
             results, "time_to_first_token", "p90"
         )
         if concurrencies:
-            p90_ttft_data.append((deployment_type.title(), concurrencies, ttfts))
+            ttft_data.append((deployment_type.title(), concurrencies, ttfts))
 
     create_plot(
         title="P90 Time to First Token vs Concurrency",
         xlabel="Concurrency Level",
         ylabel="P90 Time to First Token (ms)",
-        data_series=p90_ttft_data,
+        data_series=ttft_data,
         output_path=output_dir / "p90_time_to_first_token_vs_concurrency.png",
-        log_scale_x=True,
+        log_scale_x=False,
     )
 
-    # 6. P99 Inter-token Latency vs Concurrency
+    # 5. P99 Inter-token Latency vs Concurrency
     p99_itl_data = []
     for deployment_type, results in deployment_results.items():
         concurrencies, latencies = extract_metric_series(
@@ -425,7 +410,7 @@ def generate_plots(
         ylabel="P99 Inter-Token Latency (ms)",
         data_series=p99_itl_data,
         output_path=output_dir / "p99_inter_token_latency_vs_concurrency.png",
-        log_scale_x=True,
+        log_scale_x=False,
     )
 
     # 7. Output Token Throughput vs Concurrency
@@ -445,7 +430,7 @@ def generate_plots(
         ylabel="Output Token Throughput (tok/s)",
         data_series=output_tok_data,
         output_path=output_dir / "output_token_throughput_vs_concurrency.png",
-        log_scale_x=True,
+        log_scale_x=False,
     )
 
     # 8. Average Input Sequence Length vs Concurrency
@@ -463,7 +448,7 @@ def generate_plots(
         ylabel="Average ISL (tokens)",
         data_series=isl_data,
         output_path=output_dir / "avg_input_sequence_length_vs_concurrency.png",
-        log_scale_x=True,
+        log_scale_x=False,
     )
 
     # 9. Average Output Sequence Length vs Concurrency
@@ -481,7 +466,7 @@ def generate_plots(
         ylabel="Average OSL (tokens)",
         data_series=osl_data,
         output_path=output_dir / "avg_output_sequence_length_vs_concurrency.png",
-        log_scale_x=True,
+        log_scale_x=False,
     )
 
     # 10. Efficiency plot: tok/s/gpu vs tok/s/user
@@ -509,9 +494,8 @@ def generate_plots(
             "",
             "Generated Plots:",
             "  - p50_inter_token_latency_vs_concurrency.png",
-            "  - avg_inter_token_latency_vs_concurrency.png",
+            "  - p90_inter_token_latency_vs_concurrency.png",
             "  - request_throughput_vs_concurrency.png",
-            "  - avg_time_to_first_token_vs_concurrency.png",
             "  - p90_time_to_first_token_vs_concurrency.png",
             "  - p99_inter_token_latency_vs_concurrency.png",
             "  - output_token_throughput_vs_concurrency.png",
