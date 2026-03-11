@@ -14,6 +14,7 @@ Usage:
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import replace
 
 import torch
@@ -36,7 +37,82 @@ patch_empty_cache()
 patch_torch_memory_saver()
 patch_model_runner()
 patch_static_state_for_gms()
-logger.info("[GMS] Applied patches")
+logger.info("[GMS] Applied patches (pid=%d)", os.getpid())
+
+# Verify patches took effect
+_patch_ok = True
+
+try:
+    import torch_memory_saver.entrypoint as _ep
+
+    _patched_init = getattr(_ep.TorchMemorySaver, "_ensure_initialized", None)
+    if _patched_init is not None and "patched" not in getattr(
+        _patched_init, "__doc__", ""
+    ):
+        logger.error(
+            "[GMS] PATCH VERIFY FAIL: TorchMemorySaver._ensure_initialized is NOT patched"
+        )
+        _patch_ok = False
+    else:
+        logger.info(
+            "[GMS] PATCH VERIFY OK: torch_memory_saver._ensure_initialized is patched"
+        )
+except ImportError:
+    logger.warning("[GMS] PATCH VERIFY SKIP: torch_memory_saver not importable")
+
+try:
+    from sglang.srt.managers import scheduler_update_weights_mixin as _mixin
+
+    _export_fn = getattr(_mixin, "_export_static_state", None)
+    _import_fn = getattr(_mixin, "_import_static_state", None)
+    if _export_fn is None or "NO-OP" not in (_export_fn.__doc__ or ""):
+        # Fall back to checking return value with a dummy
+        _test_result = _export_fn(
+            type("FakeModel", (), {"named_buffers": lambda self: iter([])})()
+        )
+        if _test_result == dict(buffers=[]):
+            logger.info(
+                "[GMS] PATCH VERIFY OK: _export_static_state returns no-op result"
+            )
+        else:
+            logger.error(
+                "[GMS] PATCH VERIFY FAIL: _export_static_state returned %s (expected empty buffers)",
+                _test_result,
+            )
+            _patch_ok = False
+    else:
+        logger.info("[GMS] PATCH VERIFY OK: _export_static_state is no-op")
+except ImportError:
+    logger.warning(
+        "[GMS] PATCH VERIFY SKIP: scheduler_update_weights_mixin not importable"
+    )
+except Exception as _e:
+    logger.error("[GMS] PATCH VERIFY ERROR: _export_static_state check failed: %s", _e)
+    _patch_ok = False
+
+try:
+    _is_empty_cache_patched = "safe_empty_cache" in (
+        torch.cuda.empty_cache.__name__
+        if hasattr(torch.cuda.empty_cache, "__name__")
+        else ""
+    )
+    if _is_empty_cache_patched:
+        logger.info("[GMS] PATCH VERIFY OK: torch.cuda.empty_cache is patched")
+    else:
+        logger.warning(
+            "[GMS] PATCH VERIFY WARN: torch.cuda.empty_cache may not be patched (name=%s)",
+            getattr(torch.cuda.empty_cache, "__name__", "?"),
+        )
+except Exception as _e:
+    logger.warning("[GMS] PATCH VERIFY SKIP: empty_cache check failed: %s", _e)
+
+if _patch_ok:
+    logger.info("[GMS] All patch verifications passed (pid=%d)", os.getpid())
+else:
+    logger.error(
+        "[GMS] Some patch verifications FAILED (pid=%d) -- checkpoint may include stale GPU data",
+        os.getpid(),
+    )
 
 
 class GMSModelLoader:

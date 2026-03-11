@@ -58,6 +58,7 @@ class SGLangCheckpointAdapter:
         self._engine = engine
 
     async def sleep(self, level: int = 1) -> None:
+        logger.info("Sleeping engine")
         from sglang.srt.managers.io_struct import (
             PauseGenerationReqInput,
             ReleaseMemoryOccupationReqInput,

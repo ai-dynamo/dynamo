@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import Optional
 
 import torch
@@ -212,15 +213,27 @@ def patch_static_state_for_gms() -> None:
         from sglang.srt.managers import scheduler_update_weights_mixin as _mixin
 
         def _export_noop(model):
+            num_buffers = sum(1 for _ in model.named_buffers())
+            logger.info(
+                "[GMS] _export_static_state NO-OP called (pid=%d, %d named buffers skipped)",
+                os.getpid(),
+                num_buffers,
+            )
             return dict(buffers=[])
 
         def _import_noop(model, static_params):
-            pass
+            logger.info(
+                "[GMS] _import_static_state NO-OP called (pid=%d)",
+                os.getpid(),
+            )
 
         _mixin._export_static_state = _export_noop
         _mixin._import_static_state = _import_noop
         _static_state_patched = True
-        logger.info("[GMS] Patched _export/_import_static_state -> no-op")
+        logger.info(
+            "[GMS] Patched _export/_import_static_state -> no-op (pid=%d)",
+            os.getpid(),
+        )
     except ImportError:
         logger.warning(
             "[GMS] Could not import scheduler_update_weights_mixin, "
