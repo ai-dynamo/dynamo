@@ -14,7 +14,7 @@
 model: Qwen/Qwen3-VL-30B-A3B-Instruct
 concurrencies: [1, 8, 16, 32, 64]
 osl: 500
-request_count: 1000
+request_count: 100
 warmup_count: 5
 timeout: 900
 output_dir: benchmarks/results/qwen3_vl_30b_b200/agg_vs_epd

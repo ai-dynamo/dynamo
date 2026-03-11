@@ -76,17 +76,22 @@ def run_aiperf_single(
     )
 
     print(f"  aiperf concurrency={concurrency} -> {artifact_dir}", flush=True)
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    print(f"  cmd: {' '.join(cmd)}", flush=True)
+
+    # Stream aiperf output to stdout in real time (and capture to log file)
+    aiperf_log = artifact_dir / "aiperf_stdout.log"
+    with open(aiperf_log, "w") as log_f:
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+        )
+        for line in proc.stdout:
+            print(f"    [aiperf] {line}", end="", flush=True)
+            log_f.write(line)
+        proc.wait()
 
     if proc.returncode != 0:
         print(f"  aiperf FAILED (exit {proc.returncode})", flush=True)
-        for stream_name, stream in [("stderr", proc.stderr), ("stdout", proc.stdout)]:
-            if stream:
-                for line in stream.strip().splitlines()[-15:]:
-                    print(f"    [{stream_name}] {line}", flush=True)
-        raise subprocess.CalledProcessError(
-            proc.returncode, cmd, output=proc.stdout, stderr=proc.stderr
-        )
+        raise subprocess.CalledProcessError(proc.returncode, cmd)
 
     print(f"  aiperf concurrency={concurrency} done.", flush=True)
 
