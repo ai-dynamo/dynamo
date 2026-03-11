@@ -3967,7 +3967,7 @@ dependencies = [
 
 [[package]]
 name = "kvbm-common"
-version = "1.0.0"
+version = "0.1.0"
 dependencies = [
  "dynamo-tokens",
  "serde",
@@ -3975,7 +3975,7 @@ dependencies = [
 
 [[package]]
 name = "kvbm-kernels"
-version = "1.0.0"
+version = "0.1.0"
 dependencies = [
  "clap 4.5.60",
  "cudarc",
@@ -3986,7 +3986,7 @@ dependencies = [
 
 [[package]]
 name = "kvbm-logical"
-version = "1.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -4011,7 +4011,7 @@ dependencies = [
 
 [[package]]
 name = "kvbm-physical"
-version = "1.0.0"
+version = "0.1.0"
 dependencies = [
  "aligned-vec",
  "anyhow",
