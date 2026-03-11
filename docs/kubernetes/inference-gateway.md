@@ -145,7 +145,7 @@ Use the proper folder in commands below.
 
 # agg
 kubectl apply -f recipes/llama-3-70b/vllm/agg/gaie/deploy.yaml -n ${NAMESPACE}
-# Deploy the GAIE http-route CR.
+# Deploy the GAIE http-route CR. Adjust parentRefs.namespace in this file first to point where your gateway is.
 kubectl apply -f recipes/llama-3-70b/vllm/agg/gaie/http-route.yaml -n ${NAMESPACE}
 
 # or disagg
@@ -285,7 +285,7 @@ use port-forward to expose the gateway to the host
 
 ```bash
 # in first terminal
-kubectl port-forward svc/inference-gateway 8000:80 -n ${NAMESPACE} # for NAMESPACE put wherever you installed the gateway i.e. kgateway-system
+kubectl port-forward svc/inference-gateway 8000:80 -n ${NAMESPACE} # for NAMESPACE put wherever you installed the gateway i.e. kgateway-system or my-model
 
 # in second terminal where you want to send inference requests
 GATEWAY_URL=http://localhost:8000

@@ -1244,8 +1244,21 @@ async fn init_preprocessor(
         instance_count
     );
 
-    let (prep, block_size, model_name) =
-        fetch_preprocessor_from_discovery(drt, target_namespace).await?;
+    // Retry fetching the preprocessor: model card metadata may arrive after
+    // worker endpoints are registered.
+    let (prep, block_size, model_name) = loop {
+        match fetch_preprocessor_from_discovery(drt, target_namespace).await {
+            Ok(result) => break result,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    target_namespace,
+                    "Model card not available yet, retrying in 5s..."
+                );
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            }
+        }
+    };
 
     tracing::info!(
         kv_cache_block_size = block_size,
