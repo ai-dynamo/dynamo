@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # Nemotron-3-Super FP8 Recipes
 
 Functional deployments for **nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8** (~124B hybrid Mamba/Attention/MoE) across multiple backends.
