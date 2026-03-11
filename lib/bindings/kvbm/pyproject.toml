@@ -47,16 +47,6 @@ keywords = ["llm", "genai", "inference", "nvidia", "kvcache", "dynamo"]
 [project.optional-dependencies]
 cu12 = ["nixl[cu12]==0.10.1"]
 cu13 = ["nixl[cu13]==0.10.1"]
-test = [
-    "pytest>=8.3.4",
-    "pytest-mypy",
-    "pytest-asyncio",
-]
-dev = [
-    "kvbm[test]",
-    "maturin>=1.0,<2.0",
-    "patchelf",
-]
 
 [tool.maturin]
 module-name = "kvbm._core"
