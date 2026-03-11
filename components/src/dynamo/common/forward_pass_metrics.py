@@ -8,7 +8,7 @@ Uses msgspec.Struct for zero-copy serialization (same approach as KV cache event
 We do not use prometheus for forward pass metrics because:
     1. Metric scrapper for pull based prometheus metrics is async with engine.
        Metrics can be easily lost/repeated.
-    2. Push based prometheus uses HTTP and might not scale as well as ZMQ. 
+    2. Push based prometheus uses HTTP and might not scale as well as ZMQ.
     3. Existing KV event infra can be reused for forward pass metrics.
 
 Data flow (two-layer relay, same architecture as KV events)::
