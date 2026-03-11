@@ -488,7 +488,8 @@ def setup_vllm_engine(
     vllm_config.additional_config["consolidator_endpoints"] = consolidator_endpoints
 
     # Pass worker identity to InstrumentedScheduler via additional_config.
-    vllm_config.additional_config["fpm_worker_id"] = fpm_worker_id
+    if fpm_worker_id is not None:
+        vllm_config.additional_config["fpm_worker_id"] = fpm_worker_id
 
     factory = []
     if stat_logger:

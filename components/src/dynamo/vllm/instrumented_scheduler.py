@@ -5,9 +5,11 @@
 InstrumentedScheduler -- vLLM Scheduler subclass that emits
 ForwardPassMetrics over ZMQ PUB on every iteration.
 
+The scheduler thread does a single-pass accumulation (count, sum,
+sum_of_squares) and produces a final ForwardPassMetrics struct.
 Serialization and ZMQ send are handled by a background thread
 (same approach as vLLM's ZmqEventPublisher) so the scheduler
-hot path only pays for a queue.put().
+hot path only pays for accumulation + queue.put().
 
 Inject via:
     --scheduler-cls "dynamo.vllm.instrumented_scheduler.InstrumentedScheduler"
@@ -48,19 +50,44 @@ DEFAULT_FPM_PORT = 20380
 ENV_FPM_PORT = "DYN_VLLM_FORWARDPASS_METRIC_PORT"
 
 
-def _population_variance(values: list[int | float]) -> float:
-    if len(values) == 0:
-        return 0.0
-    mean = sum(values) / len(values)
-    return sum((v - mean) ** 2 for v in values) / len(values)
+class _Accum:
+    """Welford's online algorithm for count / sum / population-variance.
+
+    Numerically stable single-pass computation -- avoids catastrophic
+    cancellation that sum-of-squares can suffer with large values.
+    """
+
+    __slots__ = ("n", "s", "_mean", "_m2")
+
+    def __init__(self) -> None:
+        self.n = 0
+        self.s = 0
+        self._mean = 0.0
+        self._m2 = 0.0
+
+    def add(self, v: int) -> None:
+        self.n += 1
+        self.s += v
+        delta = v - self._mean
+        self._mean += delta / self.n
+        delta2 = v - self._mean
+        self._m2 += delta * delta2
+
+    def variance(self) -> float:
+        if self.n == 0:
+            return 0.0
+        return self._m2 / self.n
+
+
+# ---------------------------------------------------------------------------
+# Background publisher thread
+# ---------------------------------------------------------------------------
 
 
 class _FpmPublisherThread:
     """Background thread that serializes and sends ForwardPassMetrics over ZMQ.
 
-    The scheduler thread only calls ``publish(metrics)`` which is a
-    non-blocking ``queue.put``.  Serialization (msgspec) and the ZMQ
-    send happen entirely in the daemon thread.
+    Also emits periodic heartbeats when idle.
     """
 
     SHUTDOWN_TIMEOUT: float = 1.0
@@ -136,7 +163,12 @@ class _FpmPublisherThread:
             except zmq.Again:
                 pass
             except Exception:
-                logger.debug("FPM publisher send failed", exc_info=True)
+                logger.warning("FPM publisher send failed", exc_info=True)
+
+
+# ---------------------------------------------------------------------------
+# Scheduler subclass
+# ---------------------------------------------------------------------------
 
 
 class InstrumentedScheduler(Scheduler):
@@ -162,7 +194,7 @@ class InstrumentedScheduler(Scheduler):
 
         self._schedule_time: float = 0.0
         self._pending_output: SchedulerOutput | None = None
-        self._pending_waiting_snapshot: _WaitingSnapshot | None = None
+        self._pending_queued: QueuedRequestMetrics | None = None
         self._prompt_len_per_req: dict[str, int] = {}
 
         base_port = int(os.environ.get(ENV_FPM_PORT, str(DEFAULT_FPM_PORT)))
@@ -185,13 +217,17 @@ class InstrumentedScheduler(Scheduler):
     # Overrides
     # ------------------------------------------------------------------
 
+    def shutdown(self) -> None:
+        self._publisher.shutdown()
+        super().shutdown()
+
     def schedule(self) -> SchedulerOutput:
         self._schedule_time = time.monotonic()
 
         output = super().schedule()
 
         self._pending_output = output
-        self._pending_waiting_snapshot = self._snapshot_waiting()
+        self._pending_queued = self._compute_queued()
 
         return output
 
@@ -207,36 +243,34 @@ class InstrumentedScheduler(Scheduler):
         if self._pending_output is not None:
             metrics = self._extract_metrics(
                 self._pending_output,
-                self._pending_waiting_snapshot,
+                self._pending_queued,
                 wall_time,
             )
             self._publisher.publish(metrics)
 
         self._pending_output = None
-        self._pending_waiting_snapshot = None
+        self._pending_queued = None
 
         self._cleanup_finished(scheduler_output)
 
         return result
 
     # ------------------------------------------------------------------
-    # Metric extraction
+    # Metric extraction (single-pass with _Accum, no lists)
     # ------------------------------------------------------------------
 
     def _extract_metrics(
         self,
         output: SchedulerOutput,
-        waiting: _WaitingSnapshot | None,
+        queued: QueuedRequestMetrics | None,
         wall_time: float,
     ) -> ForwardPassMetrics:
-        scheduled = self._extract_scheduled(output)
-        queued = self._extract_queued(waiting)
         return ForwardPassMetrics(
             worker_id=self._fpm_worker_id,
             dp_rank=self._fpm_dp_rank,
             wall_time=wall_time,
-            scheduled_requests=scheduled,
-            queued_requests=queued,
+            scheduled_requests=self._extract_scheduled(output),
+            queued_requests=queued or QueuedRequestMetrics(),
         )
 
     def _extract_scheduled(self, output: SchedulerOutput) -> ScheduledRequestMetrics:
@@ -244,80 +278,58 @@ class InstrumentedScheduler(Scheduler):
         cached: CachedRequestData = output.scheduled_cached_reqs
         num_scheduled = output.num_scheduled_tokens
 
-        prefill_token_counts: list[int] = []
-        prefill_prompt_lengths: list[int] = []
+        num_prefill = 0
+        sum_prefill_tokens = 0
+        prefill_lengths = _Accum()
         sum_prefill_kv_tokens = 0
+        decode_kv = _Accum()
 
         for req in new_reqs:
-            tokens_this_step = num_scheduled.get(req.req_id, 0)
-            prefill_token_counts.append(tokens_this_step)
-
+            num_prefill += 1
+            sum_prefill_tokens += num_scheduled.get(req.req_id, 0)
             prompt_len = len(req.prompt_token_ids) if req.prompt_token_ids else 0
-            prefill_prompt_lengths.append(prompt_len)
+            prefill_lengths.add(prompt_len)
             sum_prefill_kv_tokens += req.num_computed_tokens
-
             self._prompt_len_per_req[req.req_id] = prompt_len
 
         for i, req_id in enumerate(cached.req_ids):
             if cached.is_context_phase(req_id):
-                tokens_this_step = num_scheduled.get(req_id, 0)
-                prefill_token_counts.append(tokens_this_step)
-
-                prompt_len = self._prompt_len_per_req.get(req_id, 0)
-                prefill_prompt_lengths.append(prompt_len)
+                num_prefill += 1
+                sum_prefill_tokens += num_scheduled.get(req_id, 0)
+                prefill_lengths.add(self._prompt_len_per_req.get(req_id, 0))
                 sum_prefill_kv_tokens += cached.num_computed_tokens[i]
-
-        decode_kv_lengths: list[int] = []
-
-        for i, req_id in enumerate(cached.req_ids):
-            if not cached.is_context_phase(req_id):
-                decode_kv_lengths.append(cached.num_computed_tokens[i])
+            else:
+                decode_kv.add(cached.num_computed_tokens[i])
 
         return ScheduledRequestMetrics(
-            num_prefill_requests=len(prefill_token_counts),
-            sum_prefill_tokens=sum(prefill_token_counts),
-            var_prefill_length=_population_variance(prefill_prompt_lengths),
+            num_prefill_requests=num_prefill,
+            sum_prefill_tokens=sum_prefill_tokens,
+            var_prefill_length=prefill_lengths.variance(),
             sum_prefill_kv_tokens=sum_prefill_kv_tokens,
-            num_decode_requests=len(decode_kv_lengths),
-            sum_decode_kv_tokens=sum(decode_kv_lengths),
-            var_decode_kv_tokens=_population_variance(decode_kv_lengths),
+            num_decode_requests=decode_kv.n,
+            sum_decode_kv_tokens=decode_kv.s,
+            var_decode_kv_tokens=decode_kv.variance(),
         )
 
-    def _extract_queued(
-        self, snapshot: _WaitingSnapshot | None
-    ) -> QueuedRequestMetrics:
-        if snapshot is None:
-            return QueuedRequestMetrics()
+    def _compute_queued(self) -> QueuedRequestMetrics:
+        """Single-pass aggregation over self.waiting -- no intermediate list."""
+        prefill = _Accum()
+        decode_kv = _Accum()
 
-        prefill_lengths: list[int] = []
-        decode_kv_lengths: list[int] = []
-
-        for status, num_tokens, num_computed in snapshot.entries:
-            if status == RequestStatus.PREEMPTED:
-                decode_kv_lengths.append(num_computed)
+        for request in self.waiting:
+            if request.status == RequestStatus.PREEMPTED:
+                decode_kv.add(request.num_computed_tokens)
             else:
-                prefill_lengths.append(num_tokens)
+                prefill.add(request.num_tokens)
 
         return QueuedRequestMetrics(
-            num_prefill_requests=len(prefill_lengths),
-            sum_prefill_tokens=sum(prefill_lengths),
-            var_prefill_length=_population_variance(prefill_lengths),
-            num_decode_requests=len(decode_kv_lengths),
-            sum_decode_kv_tokens=sum(decode_kv_lengths),
-            var_decode_kv_tokens=_population_variance(decode_kv_lengths),
+            num_prefill_requests=prefill.n,
+            sum_prefill_tokens=prefill.s,
+            var_prefill_length=prefill.variance(),
+            num_decode_requests=decode_kv.n,
+            sum_decode_kv_tokens=decode_kv.s,
+            var_decode_kv_tokens=decode_kv.variance(),
         )
-
-    # ------------------------------------------------------------------
-    # Waiting queue snapshot
-    # ------------------------------------------------------------------
-
-    def _snapshot_waiting(self) -> _WaitingSnapshot:
-        entries: list[tuple[RequestStatus, int, int]] = []
-        for request in self.waiting:
-            entries.append(
-                (request.status, request.num_tokens, request.num_computed_tokens)
-            )
-        return _WaitingSnapshot(entries)
 
     # ------------------------------------------------------------------
     # State cleanup
@@ -326,12 +338,3 @@ class InstrumentedScheduler(Scheduler):
     def _cleanup_finished(self, output: SchedulerOutput) -> None:
         for req_id in output.finished_req_ids:
             self._prompt_len_per_req.pop(req_id, None)
-
-
-class _WaitingSnapshot:
-    """Lightweight snapshot of the waiting queue state."""
-
-    __slots__ = ("entries",)
-
-    def __init__(self, entries: list[tuple[RequestStatus, int, int]]) -> None:
-        self.entries = entries
