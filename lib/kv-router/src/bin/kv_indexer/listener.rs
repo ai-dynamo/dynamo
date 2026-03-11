@@ -272,6 +272,12 @@ pub async fn run_zmq_listener(
                     }
                 }
 
+                // After replay, last_seq may have advanced past the current
+                // batch — skip to avoid double-apply.
+                if last_seq.load(Ordering::Acquire) >= seq {
+                    continue;
+                }
+
                 let payload = msg.get(2).unwrap();
                 let batch_result = rmps::from_slice::<KvEventBatch>(payload);
                 let Ok(batch) = batch_result else {
