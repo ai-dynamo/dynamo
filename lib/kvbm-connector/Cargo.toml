@@ -37,6 +37,8 @@ dashmap        = { workspace = true }
 derive_builder = { workspace = true }
 derive-getters = { workspace = true }
 figment        = { version = "0.10", features = ["env", "toml", "json"], optional = true }
+rand           = { workspace = true, optional = true }
+rand_chacha    = { workspace = true, optional = true }
 futures        = { workspace = true }
 parking_lot    = { workspace = true }
 serde          = { workspace = true }
@@ -56,6 +58,8 @@ testing = [
     "kvbm-logical/testing",
     "kvbm-physical/testing",
     "dep:figment",
+    "dep:rand",
+    "dep:rand_chacha",
 ]
 # Gates NCCL-accelerated intra-pass layer-wise onboard (G2→G1 via cudarc).
 nccl = ["kvbm-engine/nccl"]

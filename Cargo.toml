@@ -109,6 +109,7 @@ oneshot = { version = "0.1.13", features = ["std", "async"] }
 parking_lot = "0.12.5"
 prometheus = { version = "0.14"}
 rand = { version = "0.9.2" }
+rand_chacha = { version = "0.9" }
 reqwest = { version = "0.12.24", default-features = false, features = [
     "multipart",
     "json",
