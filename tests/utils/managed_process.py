@@ -296,20 +296,7 @@ class ManagedProcess:
                 except psutil.NoSuchProcess:
                     pass
 
-            self._terminate_process_group()
-
-            process_list = [self.proc, self._tee_proc, self._sed_proc]
-            for process in process_list:
-                if process:
-                    try:
-                        if process.stdout:
-                            process.stdout.close()
-                        if process.stdin:
-                            process.stdin.close()
-                        terminate_process_tree(process.pid, self._logger)
-                        process.wait()
-                    except Exception as e:
-                        self._logger.warning("Error terminating process: %s", e)
+            self._stop_started_processes()
 
             # Kill any child processes that survived the process group kill.
             # This catches children in different PGIDs (e.g. MPI workers, engine
@@ -331,6 +318,46 @@ class ManagedProcess:
         finally:
             # Always run straggler cleanup, even if interrupted
             self._cleanup_stragglers()
+
+    def _stop_started_processes(self, wait_timeout: float = 10.0):
+        """Terminate launched subprocesses and close any open pipe handles.
+
+        This is used both during normal teardown and when a managed service
+        needs to stop and restart in-place without releasing higher-level
+        resources such as ports.
+        """
+        self._terminate_process_group()
+
+        process_entries = [
+            ("proc", self.proc),
+            ("_tee_proc", self._tee_proc),
+            ("_sed_proc", self._sed_proc),
+        ]
+        for attr_name, process in process_entries:
+            if process is None:
+                continue
+
+            try:
+                for stream_name in ("stdout", "stdin", "stderr"):
+                    stream = getattr(process, stream_name, None)
+                    if stream is not None:
+                        stream.close()
+            except Exception as e:
+                self._logger.warning("Error closing process streams: %s", e)
+
+            try:
+                terminate_process_tree(process.pid, self._logger)
+            except Exception as e:
+                self._logger.warning("Error terminating process: %s", e)
+
+            try:
+                process.wait(timeout=wait_timeout)
+            except Exception as e:
+                self._logger.warning("Error waiting for process exit: %s", e)
+            finally:
+                setattr(self, attr_name, None)
+
+        self._pgid = None
 
     def _start_process(self):
         assert self._command_name
