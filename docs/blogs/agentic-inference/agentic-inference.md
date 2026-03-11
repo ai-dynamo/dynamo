@@ -1,4 +1,13 @@
-# Full Stack Optimizations for Agentic Inference with Dynamo
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+subtitle: "Ishan Dhanani, Alec Flowers — March 2026"
+description: "How Dynamo optimizes for agentic workloads at three layers: frontend API, router, and KV cache management."
+keywords: agentic inference, KV cache, prefix caching, agent hints, disaggregated serving, Dynamo
+last-updated: March 10, 2026
+---
+
+# Full-Stack Optimizations for Agentic Inference with Dynamo
 
 Agentic systems are the most cache-intensive workloads in production LLM inference today. Agentic coding tools like Claude Code and Codex make hundreds of API calls per coding session, each carrying the full conversation history. After one cold call that writes the prefix to KV cache, every subsequent call to the same worker hits 85-97% cache. Agent teams push this further: 97.2% aggregate cache rate across 4 Opus teammates (measured in Claude Code team sessions). An 11.7x read/write ratio means the system reads from cache nearly 12 times for every token it writes.
 
