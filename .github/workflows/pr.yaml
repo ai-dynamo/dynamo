@@ -366,7 +366,8 @@ jobs:
     # jobs unless always() is present. !failure() ensures we still skip on real failures.
     if: |
       always() && !failure() && !cancelled() &&
-      (needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true')
+      (needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true') &&
+      (needs.vllm-pipeline.result == 'success')
     runs-on: prod-default-small-v2
     needs: [changed-files, deploy-operator, vllm-pipeline]
     timeout-minutes: 25
@@ -406,7 +407,8 @@ jobs:
     # Run if core, sglang, or deploy is changed (see deploy-test-vllm for always() rationale)
     if: |
       always() && !failure() && !cancelled() &&
-      (needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true')
+      (needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true') &&
+      (needs.sglang-pipeline.result == 'success')
     needs: [changed-files, deploy-operator, sglang-pipeline]
     timeout-minutes: 25
     permissions:
@@ -443,7 +445,8 @@ jobs:
     # Run if core, trtllm, or deploy is changed (see deploy-test-vllm for always() rationale)
     if: |
       always() && !failure() && !cancelled() &&
-      (needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true')
+      (needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true') &&
+      (needs.trtllm-pipeline.result == 'success')
     needs: [changed-files, deploy-operator, trtllm-pipeline]
     timeout-minutes: 25
     permissions:
