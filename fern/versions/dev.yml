@@ -54,11 +54,8 @@ navigation:
             path: ../pages-dev/kubernetes/rolling-update.md
           - page: Inference Gateway (GAIE)
             path: ../pages-dev/kubernetes/inference-gateway.md
-          - section: Checkpointing
-            path: ../pages-dev/kubernetes/snapshot/README.md
-            contents:
-              - page: Integration with Dynamo
-                path: ../pages-dev/kubernetes/snapshot/dynamo.md
+          - page: Snapshot
+            path: ../pages-dev/kubernetes/snapshot.md
       - section: Observability (K8s)
         contents:
           - page: Metrics
