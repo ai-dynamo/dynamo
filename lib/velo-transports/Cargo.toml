@@ -3,7 +3,7 @@
 
 [package]
 name = "velo-transports"
-version.workspace = true
+version = "0.1.0"
 edition.workspace = true
 description.workspace = true
 authors.workspace = true
@@ -14,7 +14,6 @@ keywords.workspace = true
 
 [features]
 default = ["http", "nats", "grpc"]
-ucx = ["dep:async-ucx"]
 http = ["dep:axum", "dep:reqwest"]
 nats = ["dep:async-nats", "dep:bs58"]
 grpc = ["dep:tonic", "dep:prost", "dep:tower", "dep:hyper", "dep:http", "dep:http-body", "dep:http-body-util", "dep:hyper-util", "dep:tokio-stream"]
@@ -49,7 +48,6 @@ tokio-util = { version = "0.7", features = ["codec"] }
 nix = { version = "0.30", features = ["sched"] }
 
 # optional dependencies
-async-ucx = { git = "https://github.com/ryanolson/async-ucx.git", branch = "ryan/ucx", optional = true, features = ["am", "event"] }
 axum = { version = "0.8", optional = true }
 reqwest = { workspace = true , optional = true }
 async-nats = { workspace = true, optional = true }

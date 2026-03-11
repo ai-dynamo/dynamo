@@ -1480,24 +1480,6 @@ _Appears in:_
 | `pvcMountPath` _string_ | PVCMountPath is the mount path for the PVC inside the container. | /opt/model-cache | Optional: \{\} <br /> |
 
 
-#### OptimizationType
-
-_Underlying type:_ _string_
-
-OptimizationType specifies the profiling optimization strategy.
-
-_Validation:_
-- Enum: [latency throughput]
-
-_Appears in:_
-- [SLASpec](#slaspec)
-
-| Field | Description |
-| --- | --- |
-| `latency` |  |
-| `throughput` |  |
-
-
 #### OverridesSpec
 
 
@@ -1579,7 +1561,6 @@ _Appears in:_
 
 
 SLASpec defines the service-level agreement targets for profiling optimization.
-Exactly one mode should be active: ttft+itl (default), e2eLatency, or optimizationType.
 
 
 
@@ -1588,7 +1569,6 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `optimizationType` _[OptimizationType](#optimizationtype)_ | OptimizationType controls the profiling optimization strategy.<br />Use when explicit SLA targets (ttft+itl or e2eLatency) are not known. |  | Enum: [latency throughput] <br />Optional: \{\} <br /> |
 | `ttft` _float_ | TTFT is the Time To First Token target in milliseconds. |  | Optional: \{\} <br /> |
 | `itl` _float_ | ITL is the Inter-Token Latency target in milliseconds. |  | Optional: \{\} <br /> |
 | `e2eLatency` _float_ | E2ELatency is the target end-to-end request latency in milliseconds.<br />Alternative to specifying TTFT + ITL. |  | Optional: \{\} <br /> |
