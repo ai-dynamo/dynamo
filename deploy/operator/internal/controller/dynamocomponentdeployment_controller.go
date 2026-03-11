@@ -64,6 +64,7 @@ const (
 	KubeAnnotationDeploymentStrategy                    = "nvidia.com/deployment-strategy"
 	KubeAnnotationDeploymentRollingUpdateMaxSurge       = "nvidia.com/deployment-rolling-update-max-surge"
 	KubeAnnotationDeploymentRollingUpdateMaxUnavailable = "nvidia.com/deployment-rolling-update-max-unavailable"
+	SchedulerNameVolcano                                = "volcano"
 )
 
 // DynamoComponentDeploymentReconciler reconciles a DynamoComponentDeployment object
@@ -561,7 +562,7 @@ func (r *DynamoComponentDeploymentReconciler) generateLeaderPodTemplateSpec(ctx 
 	}
 	leaderPodTemplateSpec.ObjectMeta.Annotations["scheduling.k8s.io/group-name"] = kubeName
 
-	leaderPodTemplateSpec.Spec.SchedulerName = "volcano"
+	leaderPodTemplateSpec.Spec.SchedulerName = SchedulerNameVolcano
 
 	err = checkMainContainer(&leaderPodTemplateSpec.Spec)
 
@@ -614,7 +615,7 @@ func (r *DynamoComponentDeploymentReconciler) generateWorkerPodTemplateSpec(ctx 
 	workerPodTemplateSpec.ObjectMeta.Labels["instance-id"] = fmt.Sprintf("%d", instanceID)
 	delete(workerPodTemplateSpec.ObjectMeta.Labels, commonconsts.KubeLabelDynamoSelector)
 
-	workerPodTemplateSpec.Spec.SchedulerName = "volcano"
+	workerPodTemplateSpec.Spec.SchedulerName = SchedulerNameVolcano
 
 	if workerPodTemplateSpec.ObjectMeta.Annotations == nil {
 		workerPodTemplateSpec.ObjectMeta.Annotations = make(map[string]string)
