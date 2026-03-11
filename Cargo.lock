@@ -2172,6 +2172,7 @@ dependencies = [
  "nuid",
  "once_cell",
  "opentelemetry",
+ "opentelemetry-appender-tracing",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
  "parking_lot",
@@ -5255,6 +5256,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "opentelemetry-appender-tracing"
+version = "0.31.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ef6a1ac5ca3accf562b8c306fa8483c85f4390f768185ab775f242f7fe8fdcc2"
+dependencies = [
+ "opentelemetry",
+ "tracing",
+ "tracing-core",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "opentelemetry-http"
 version = "0.31.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6885,9 +6898,9 @@ dependencies = [
 
 [[package]]
 name = "schannel"
-version = "0.1.28"
+version = "0.1.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "891d81b926048e76efe18581bf793546b4c0eaf8448d72be8de2bbee5fd166e1"
+checksum = "91c1b7e4904c873ef0710c1f407dde2e6287de2bebc1bbbf7d430bb7cbffd939"
 dependencies = [
  "windows-sys 0.61.2",
 ]
@@ -8746,7 +8759,7 @@ checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 
 [[package]]
 name = "velo-common"
-version = "1.0.0"
+version = "0.1.0"
 dependencies = [
  "bytes",
  "rmp-serde",
@@ -8760,7 +8773,7 @@ dependencies = [
 
 [[package]]
 name = "velo-events"
-version = "1.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "dashmap 6.1.0",
@@ -8776,7 +8789,7 @@ dependencies = [
 
 [[package]]
 name = "velo-transports"
-version = "1.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-nats",

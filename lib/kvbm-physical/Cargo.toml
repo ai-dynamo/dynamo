@@ -42,3 +42,4 @@ testing-nixl-gds = []
 [dev-dependencies]
 dynamo-memory = { workspace = true, features = ["unsafe-slices"] }
 rstest = "0.26"
+tokio = { workspace = true, features = ["test-util"] }

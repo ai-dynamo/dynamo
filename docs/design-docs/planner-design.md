@@ -147,7 +147,7 @@ The interpolators use the profiling sweep granularity to determine precision. Fi
 
 ## Initialization
 
-The planner starts with a 30-second delay (`INIT_PLANNER_START_DELAY`) to allow other components (frontend, workers) to register and stabilize. This is a known workaround (marked TODO in code) that should be replaced with a proper readiness check.
+The planner currently waits 30 seconds (`INIT_PLANNER_START_DELAY` in `components/src/dynamo/planner/__main__.py`) as a temporary workaround while other components (frontend, workers) register and stabilize; see [Known Limitations](#known-limitations) for the planned readiness-probing replacement.
 
 After the delay:
 
@@ -231,5 +231,4 @@ In aggregated mode (`--mode agg`), engines handle both prefill and decode via ch
 | `exceptions.py`              | Custom exception hierarchy                            |
 | `defaults.py`                | Default configs, backend name mappings                |
 | `planner_argparse.py`        | CLI argument definitions                              |
-
 
