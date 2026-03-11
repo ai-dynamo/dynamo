@@ -131,7 +131,7 @@ Issues labeled `good-first-issue` are sized for new contributors. We provide ext
 
 Understanding Dynamo's architecture helps you find where to make changes. For the complete picture, see the [Architecture Documentation](docs/design-docs/architecture.md) and [Support Matrix](docs/reference/support-matrix.md).
 
-![Dynamo Architecture](docs/assets/img/architecture.png)
+![Dynamo Architecture](docs/assets/img/dynamo-architecture.svg)
 
 ### Core Components
 

@@ -38,7 +38,7 @@ Dynamo addresses these constraints by separating serving, control, and state pro
 
 ## Architecture Overview
 
-![Diagram of the NVIDIA Dynamo architecture for distributed AI inference, including User Requests, Planner, API Server, Smart Router, and Disaggregated Serving](../assets/img/architecture.png "Dynamo Architecture")
+![Dynamo architecture showing Request Plane (Client, Frontend, Router, Prefill/Decode workers), Control Plane (Planner, Dynamo Operator, Dynamo Graph, Grove, Model Express, Runtime Resources), and Storage &amp; Events Plane (KVBM, NIXL, Local SSD/NFS/Remote Storage)](../assets/img/dynamo-architecture.svg "Dynamo Architecture")
 
 ## System Model
 
