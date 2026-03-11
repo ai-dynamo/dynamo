@@ -104,3 +104,86 @@ def test_apply_dgd_overrides_metadata_only_identity_keys_dropped_entirely() -> N
 
     # Only original metadata should remain — no extra keys added.
     assert result["metadata"] == {"name": "svc"}
+
+
+def test_apply_dgd_overrides_extrapodspec_tolerations() -> None:
+    """extraPodSpec.tolerations from overrides are merged into existing services.
+
+    Regression test for TC-5.2a: interpolation DGDs were deployed without
+    tolerations because apply_dgd_overrides was called after run_interpolation.
+    This test verifies the merge logic itself is correct.
+    """
+    toleration = {"key": "nvidia.com/gpu", "operator": "Exists", "effect": "NoSchedule"}
+    dgd_config = {
+        "spec": {
+            "services": {
+                "VllmDecodeWorker": {
+                    "componentType": "worker",
+                    "extraPodSpec": {
+                        "mainContainer": {
+                            "image": "my-image",
+                            "args": ["--model", "Qwen3-32B"],
+                        }
+                    },
+                    "replicas": 1,
+                },
+                "Frontend": {
+                    "extraPodSpec": {},
+                },
+            }
+        }
+    }
+    overrides = {
+        "apiVersion": "nvidia.com/v1alpha1",
+        "kind": "DynamoGraphDeployment",
+        "metadata": {"name": "placeholder"},
+        "spec": {
+            "services": {
+                "VllmDecodeWorker": {"extraPodSpec": {"tolerations": [toleration]}},
+                "Frontend": {"extraPodSpec": {"tolerations": [toleration]}},
+            }
+        },
+    }
+
+    result = apply_dgd_overrides(dgd_config, overrides)
+
+    # Tolerations must be present on both services.
+    decode_eps = result["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"]
+    assert decode_eps["tolerations"] == [toleration]
+    # mainContainer must be preserved (not overwritten).
+    assert decode_eps["mainContainer"]["image"] == "my-image"
+
+    frontend_eps = result["spec"]["services"]["Frontend"]["extraPodSpec"]
+    assert frontend_eps["tolerations"] == [toleration]
+
+    # Original must not be mutated.
+    assert (
+        "tolerations"
+        not in dgd_config["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"]
+    )
+
+
+def test_apply_dgd_overrides_missing_service_skipped_with_warning() -> None:
+    """Overrides for services absent from the DGD are skipped (warns, no crash)."""
+    dgd_config = {
+        "spec": {
+            "services": {
+                "Frontend": {"replicas": 1},
+            }
+        }
+    }
+    overrides = {
+        "spec": {
+            "services": {
+                "Frontend": {"replicas": 2},
+                "NonExistentWorker": {
+                    "extraPodSpec": {"tolerations": [{"key": "foo"}]}
+                },
+            }
+        }
+    }
+
+    result = apply_dgd_overrides(dgd_config, overrides)
+
+    assert result["spec"]["services"]["Frontend"]["replicas"] == 2
+    assert "NonExistentWorker" not in result["spec"]["services"]
