@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: planning
-stopped_at: Completed 04-01-PLAN.md
-last_updated: "2026-03-11T18:44:23.976Z"
+stopped_at: Completed 04-02-PLAN.md
+last_updated: "2026-03-11T18:56:21.726Z"
 last_activity: 2026-03-11 — Roadmap created
 progress:
   total_phases: 4
   completed_phases: 3
   total_plans: 10
-  completed_plans: 7
-  percent: 0
+  completed_plans: 8
+  percent: 70
 ---
 
 # Project State
@@ -57,6 +57,7 @@ Progress: [███████░░░] 70%
 | Phase 02-import-migration P04 | 3min | 2 tasks | 5 files |
 | Phase 03-compilation-gate P01 | 3min | 2 tasks | 1 files |
 | Phase 04-test-porting P01 | 5min | 2 tasks | 3 files |
+| Phase 04-test-porting P02 | 10min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -83,6 +84,8 @@ Recent decisions affecting current work:
 - [Phase 03-compilation-gate]: nccl feature declared as passthrough to kvbm-engine/nccl in kvbm-connector Cargo.toml — no collectives/testing-nccl added (YAGNI)
 - [Phase 04-01]: figment in [dependencies] not dev-deps: ConnectorTestConfig will export Figment as a field, making it a public API type requiring a regular dep
 - [Phase 04-01]: Phase A skeleton pattern: testing/mod.rs created with all submodule declarations commented out so cargo check passes before Plan 02/03 create the actual files
+- [Phase 04-02]: super::{managers, nova, physical, token_blocks} replaced with kvbm_engine::testing::{managers, messenger, physical, token_blocks} individual imports — nova module renamed to messenger
+- [Phase 04-02]: leader_nova field kept as Arc<Messenger>; velo::WorkerAddress imported directly for struct field type
 
 ### Pending Todos
 
@@ -94,6 +97,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-11T18:44:23.974Z
-Stopped at: Completed 04-01-PLAN.md
+Last session: 2026-03-11T18:56:21.722Z
+Stopped at: Completed 04-02-PLAN.md
 Resume file: None
