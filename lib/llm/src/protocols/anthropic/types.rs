@@ -1208,7 +1208,7 @@ fn convert_anthropic_tool_choice(tc: &AnthropicToolChoice) -> ChatCompletionTool
 pub fn chat_completion_to_anthropic_response(
     chat_resp: NvCreateChatCompletionResponse,
     model: &str,
-    api_context: Option<&super::unified::AnthropicContext>,
+    api_context: Option<&crate::protocols::unified::AnthropicContext>,
 ) -> AnthropicMessageResponse {
     let _ = api_context; // Available for future enrichment (service_tier, etc.)
     let msg_id = format!("msg_{}", Uuid::new_v4().simple());
