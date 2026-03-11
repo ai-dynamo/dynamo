@@ -41,7 +41,7 @@ def pytest_ignore_collect(collection_path, config):
     if filename.startswith("test_sglang_"):
         from .common import check_module_available
 
-        if not check_module_available("sglang.srt.utils.hf_transformers_utils"):
+        if not check_module_available("sglang.srt"):
             return True
 
     return None
