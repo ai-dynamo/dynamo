@@ -499,7 +499,7 @@ impl OAIChatLikeRequest for UnifiedRequest {
     }
 
     fn should_add_generation_prompt(&self) -> bool {
-        true
+        OAIChatLikeRequest::should_add_generation_prompt(&self.inner)
     }
 
     fn extract_text(&self) -> Option<TextInput> {
