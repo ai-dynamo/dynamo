@@ -14,8 +14,7 @@ use std::sync::atomic::Ordering;
 use crate::connector::leader::scheduler::{
     IntraPassLoad, IntraPassStore, KvConnectorMetadata,
 };
-// TODO(Phase 4): Restore when testing infra is ported
-// use crate::v2::testing::connector::{ConnectorTestConfig, TestConnectorInstance};
+use crate::testing::connector::{ConnectorTestConfig, TestConnectorInstance};
 
 use super::ConnectorWorkerInterface;
 

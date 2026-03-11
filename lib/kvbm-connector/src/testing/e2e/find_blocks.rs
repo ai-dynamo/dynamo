@@ -8,7 +8,7 @@
 
 #[cfg(test)]
 mod tests {
-    use kvbm_engine::distributed::leader::{
+    use kvbm_engine::leader::{
         FindMatchesOptions, FindMatchesResult, Leader, OnboardingStatus, StagingMode,
     };
     use kvbm_physical::transfer::FillPattern;
