@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: planning
-stopped_at: Phase 4 context gathered
-last_updated: "2026-03-11T18:02:56.621Z"
+stopped_at: Completed 04-01-PLAN.md
+last_updated: "2026-03-11T18:44:23.976Z"
 last_activity: 2026-03-11 — Roadmap created
 progress:
   total_phases: 4
   completed_phases: 3
-  total_plans: 6
-  completed_plans: 6
+  total_plans: 10
+  completed_plans: 7
   percent: 0
 ---
 
@@ -30,7 +30,7 @@ Plan: 0 of TBD in current phase
 Status: Ready to plan
 Last activity: 2026-03-11 — Roadmap created
 
-Progress: [░░░░░░░░░░] 0%
+Progress: [███████░░░] 70%
 
 ## Performance Metrics
 
@@ -56,6 +56,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 02-import-migration P03 | 28min | 3 tasks | 11 files |
 | Phase 02-import-migration P04 | 3min | 2 tasks | 5 files |
 | Phase 03-compilation-gate P01 | 3min | 2 tasks | 1 files |
+| Phase 04-test-porting P01 | 5min | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -80,6 +81,8 @@ Recent decisions affecting current work:
 - [Phase 02-import-migration]: execute_local_layerwise_onboard requires nccl feature — gate call in kvbm-connector with cfg(feature = nccl)
 - [Phase 02-import-migration]: Single atomic commit for Tasks 1+2 combined — plan explicitly deferred Task 1 commit until Task 2 cargo check passed
 - [Phase 03-compilation-gate]: nccl feature declared as passthrough to kvbm-engine/nccl in kvbm-connector Cargo.toml — no collectives/testing-nccl added (YAGNI)
+- [Phase 04-01]: figment in [dependencies] not dev-deps: ConnectorTestConfig will export Figment as a field, making it a public API type requiring a regular dep
+- [Phase 04-01]: Phase A skeleton pattern: testing/mod.rs created with all submodule declarations commented out so cargo check passes before Plan 02/03 create the actual files
 
 ### Pending Todos
 
@@ -91,6 +94,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-11T18:02:56.618Z
-Stopped at: Phase 4 context gathered
-Resume file: .planning/phases/04-test-porting/04-CONTEXT.md
+Last session: 2026-03-11T18:44:23.974Z
+Stopped at: Completed 04-01-PLAN.md
+Resume file: None
