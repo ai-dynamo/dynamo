@@ -19,7 +19,7 @@ use kvbm_engine::offload::{
 use crate::{G1, G2, G3, InstanceId};
 
 use anyhow::{Context, Result, anyhow, bail};
-use dynamo_nova_backend::{PeerInfo, WorkerAddress};
+use velo::{PeerInfo, WorkerAddress};
 
 impl ConnectorLeader {
     /// This is called by the Scheduler-side of the ConnectorAPI during the call to set_xfer_handshake_metadata.
@@ -36,18 +36,18 @@ impl ConnectorLeader {
         }
 
         self.runtime
-            .nova
+            .messenger()
             .register_peer(PeerInfo::new(instance_id, worker_address))?;
 
         state.worker_instance_ids.push(instance_id);
         state
             .worker_connector_clients
             .push(ConnectorWorkerClient::new(
-                self.runtime.nova.clone(),
+                self.runtime.messenger().clone(),
                 instance_id,
             ));
         state.worker_transfer_clients.push(VeloWorkerClient::new(
-            self.runtime.nova.clone(),
+            self.runtime.messenger().clone(),
             instance_id,
         ));
 
@@ -380,7 +380,7 @@ impl ConnectorLeader {
         let g3_manager_for_offload = g3_manager.clone();
 
         let mut leader_builder = InstanceLeader::builder()
-            .nova(self.runtime.nova.clone())
+            .messenger(self.runtime.messenger().clone())
             .registry(registry)
             .g2_manager(g2_manager)
             .workers(
@@ -492,7 +492,7 @@ impl ConnectorLeader {
             tracing::debug!("Object storage configured, creating G2→G4 pipeline");
 
             // Create lock manager for distributed locking
-            let instance_id = self.runtime.nova.instance_id().to_string();
+            let instance_id = self.runtime.messenger().instance_id().to_string();
             let lock_manager: Arc<dyn ObjectLockManager> =
                 create_lock_manager(object_config, instance_id).await?;
 
@@ -573,7 +573,7 @@ impl ConnectorLeader {
                 "Refreshing handlers for worker"
             );
             self.runtime
-                .nova
+                .messenger()
                 .refresh_handlers(*instance_id)
                 .await
                 .with_context(|| {
@@ -613,7 +613,7 @@ impl ConnectorLeader {
         // Log the instance_id for distributed discovery
         // Operators can use this ID with the /register_leader endpoint on other instances
         tracing::info!(
-            instance_id = %self.runtime.nova.instance_id(),
+            instance_id = %self.runtime.messenger().instance_id(),
             "KVBM leader instance started - use this ID for register_leader on remote instances"
         );
 

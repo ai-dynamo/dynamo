@@ -33,11 +33,11 @@
 //!    - Future optimization for P/D offloading from prefill to decode.
 
 mod init;
-mod nova;
+mod velo;
 mod state;
 
 use cudarc::driver::CudaStream;
-pub use nova::client::ConnectorWorkerClient;
+pub use velo::client::ConnectorWorkerClient;
 
 use init::PendingWorkerState;
 use state::{WorkerDetails, WorkerState};
@@ -150,7 +150,7 @@ struct IntraPassOffloadState {
     g2_dst_block_ids: Arc<[BlockId]>,
 }
 
-/// Connector worker implementation that uses Nova for communication and
+/// Connector worker implementation that uses Velo for communication and
 /// NIXL for RDMA transfers.
 ///
 /// Uses deferred initialization by default:
@@ -181,11 +181,11 @@ impl ConnectorWorker {
     /// Registers the `kvbm.connector.configure_layouts` handler immediately
     /// so the leader can trigger initialization via RPC.
     pub fn new(runtime: Arc<KvbmRuntime>) -> Self {
-        let nova = runtime.nova.clone();
+        let messenger = runtime.messenger().clone();
         let state = Arc::new(WorkerState::new(Arc::clone(&runtime)));
 
         // Register handlers
-        nova::service::init(&nova, Arc::clone(&state));
+        velo::service::init(&messenger, Arc::clone(&state));
 
         Self {
             runtime,
@@ -331,7 +331,7 @@ impl ConnectorWorker {
             )
         })?;
 
-        let nova = self.runtime.nova().clone();
+        let messenger = self.runtime.messenger().clone();
         let cuda_event_handle = cuda_event.cu_event() as u64;
 
         tracing::debug!(
@@ -340,7 +340,7 @@ impl ConnectorWorker {
             "Spawning forward pass completion task"
         );
 
-        self.runtime.nova().tracker().spawn_on(
+        self.runtime.messenger().tracker().spawn_on(
             async move {
                 // Poll the CUDA event until complete
                 loop {
@@ -358,9 +358,9 @@ impl ConnectorWorker {
                     }
                 }
 
-                // Trigger the Nova forward pass event
-                tracing::debug!(?nova_event, "CUDA event complete, triggering Nova event");
-                if let Err(e) = nova.events().trigger(nova_event).await {
+                // Trigger the Velo forward pass event
+                tracing::debug!(?nova_event, "CUDA event complete, triggering Velo event");
+                if let Err(e) = messenger.events().trigger(nova_event).await {
                     tracing::error!("Failed to trigger forward pass event: {}", e);
                 }
             },
@@ -372,7 +372,7 @@ impl ConnectorWorker {
 }
 
 impl ConnectorWorkerInterface for ConnectorWorker {
-    #[tracing::instrument(level = "debug", skip_all, fields(instance_id = ?self.runtime.nova.instance_id()))]
+    #[tracing::instrument(level = "debug", skip_all, fields(instance_id = ?self.runtime.messenger().instance_id()))]
     fn register_kv_caches(
         &self,
         tensors: Vec<Arc<dyn TensorDescriptor>>,
@@ -439,7 +439,7 @@ impl ConnectorWorkerInterface for ConnectorWorker {
 
         // Store Nova event handle if present (we use pre-allocated CUDA events now)
         if let Some(event_map) = &metadata.foward_pass_completion_events {
-            let my_instance_id = self.state.runtime().nova().instance_id();
+            let my_instance_id = self.state.runtime().messenger().instance_id();
 
             if let Some(&nova_event) = event_map.get(&my_instance_id) {
                 tracing::debug!(?nova_event, "Storing forward pass Nova event");
@@ -527,24 +527,33 @@ impl ConnectorWorkerInterface for ConnectorWorker {
                 "Starting intra-pass layer-wise onboard from G2 to G1"
             );
 
-            // Get the DirectWorker
-            let worker = self
-                .worker()
-                .ok_or_else(|| anyhow::anyhow!("Worker not initialized"))?;
+            #[cfg(feature = "nccl")]
+            {
+                // Get the DirectWorker
+                let worker = self
+                    .worker()
+                    .ok_or_else(|| anyhow::anyhow!("Worker not initialized"))?;
 
-            // Get pre-allocated layer events
-            let layer_events = self.state.onboard_layer_events()?;
+                // Get pre-allocated layer events
+                let layer_events = self.state.onboard_layer_events()?;
 
-            // Execute layer-wise onboard
-            worker.execute_local_layerwise_onboard(
-                &load.g2_src_block_ids,
-                &load.g1_dst_block_ids,
-                layer_events,
-            )?;
+                // Execute layer-wise onboard (requires nccl feature for layerwise CUDA event tracking)
+                worker.execute_local_layerwise_onboard(
+                    &load.g2_src_block_ids,
+                    &load.g1_dst_block_ids,
+                    layer_events,
+                )?;
 
-            // Set flag so wait_for_layer_load knows to sync
-            self.intra_pass_onboard_active
-                .store(true, Ordering::Relaxed);
+                // Set flag so wait_for_layer_load knows to sync
+                self.intra_pass_onboard_active
+                    .store(true, Ordering::Relaxed);
+            }
+
+            #[cfg(not(feature = "nccl"))]
+            {
+                let _ = load;
+                tracing::warn!("Intra-pass layerwise onboard requires nccl feature — skipping");
+            }
 
             tracing::debug!("Intra-pass onboard initiated - events recorded on transfer stream");
         }

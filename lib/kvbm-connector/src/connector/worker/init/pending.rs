@@ -134,12 +134,12 @@ impl PendingWorkerState {
     /// 5. Creates G2/G3 layouts based on leader config
     ///
     /// # Arguments
-    /// * `nova` - Nova instance for event system and runtime
+    /// * `runtime` - KvbmRuntime providing event system and tokio handle
     /// * `config` - Leader-provided layout configuration
     ///
     /// # Returns
     /// Tuple of (DirectWorker, WorkerLayoutResponse)
-    #[tracing::instrument(level = "debug", skip_all, fields(instance_id = ?runtime.nova.instance_id()))]
+    #[tracing::instrument(level = "debug", skip_all, fields(instance_id = ?runtime.messenger().instance_id()))]
     pub fn complete_initialization(
         self,
         runtime: &KvbmRuntime,
@@ -157,9 +157,9 @@ impl PendingWorkerState {
         // 1. Build TransferManager and NixlAgent
         tracing::info!("Building TransferManager with NIXL backend");
         let transfer_manager = TransferManager::builder()
-            .event_system(runtime.nova.events().local().clone())
+            .event_system(runtime.event_system())
             .cuda_device_id(self.cuda_device_id)
-            .tokio_runtime(TokioRuntime::Handle(runtime.nova.runtime().clone()))
+            .tokio_runtime(TokioRuntime::Handle(runtime.tokio()))
             .nixl_agent(nixl_agent.clone())
             .build()?;
 
@@ -240,7 +240,7 @@ impl PendingWorkerState {
             let g2_handle = transfer_manager.register_layout(host_layout)?;
             created_layouts.push(LogicalLayoutHandle::G2);
 
-            // todo: we need to get a path from the the config and create a unique file based on the nova instance_id
+            // todo: we need to get a path from the the config and create a unique file based on the velo instance_id
             let g3_handle = if let Some(disk_blocks) = config.disk_block_count {
                 let mut disk_layout = self.layout_config.clone();
                 disk_layout.num_blocks = disk_blocks;
@@ -249,7 +249,7 @@ impl PendingWorkerState {
                     .fully_contiguous()
                     .allocate_disk(Some(PathBuf::from(format!(
                         "/tmp/kvbm_g3_{}.bin",
-                        runtime.nova.instance_id()
+                        runtime.messenger().instance_id()
                     ))))
                     .build()?;
 

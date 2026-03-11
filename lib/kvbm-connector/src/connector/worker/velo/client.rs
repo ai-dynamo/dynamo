@@ -1,10 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Client for calling Nova services registered on ConnectorWorker.
+//! Client for calling Velo services registered on ConnectorWorker.
 
 use anyhow::Result;
-use dynamo_nova::Nova;
+use velo::Messenger;
 use std::sync::Arc;
 
 use kvbm_physical::layout::LayoutConfig;
@@ -14,7 +14,7 @@ use kvbm_engine::worker::{LeaderLayoutConfig, WorkerLayoutResponse};
 
 use super::*;
 
-/// Client for communicating with a remote ConnectorWorker via Nova.
+/// Client for communicating with a remote ConnectorWorker via Velo.
 ///
 /// This client is generally used by the leader or a mock leader to communicate with the worker.
 ///
@@ -23,7 +23,7 @@ use super::*;
 /// - Marking onboarding/offloading operations as complete
 #[derive(Clone)]
 pub struct ConnectorWorkerClient {
-    nova: Arc<Nova>,
+    messenger: Arc<Messenger>,
     remote: InstanceId,
 }
 
@@ -31,10 +31,10 @@ impl ConnectorWorkerClient {
     /// Create a new ConnectorWorkerClient for communicating with a remote worker.
     ///
     /// # Arguments
-    /// * `nova` - Local Nova instance for sending messages
+    /// * `messenger` - Local Velo Messenger instance for sending messages
     /// * `remote` - Remote worker's instance ID
-    pub fn new(nova: Arc<Nova>, remote: InstanceId) -> Self {
-        Self { nova, remote }
+    pub fn new(messenger: Arc<Messenger>, remote: InstanceId) -> Self {
+        Self { messenger, remote }
     }
 
     /// Initialize the remote worker with leader-provided configuration.
@@ -51,9 +51,9 @@ impl ConnectorWorkerClient {
     pub fn initialize(
         &self,
         config: LeaderLayoutConfig,
-    ) -> Result<dynamo_nova::am::TypedUnaryResult<WorkerLayoutResponse>> {
+    ) -> Result<velo::TypedUnaryResult<WorkerLayoutResponse>> {
         let awaiter = self
-            .nova
+            .messenger
             .typed_unary::<WorkerLayoutResponse>(INITIALIZE_HANDLER)?
             .payload(config)?
             .instance(self.remote)
@@ -72,7 +72,7 @@ impl ConnectorWorkerClient {
     pub async fn mark_onboarding_complete(&self, request_id: String) -> Result<()> {
         let message = OnboardCompleteMessage { request_id };
 
-        self.nova
+        self.messenger
             .unary(ONBOARD_COMPLETE_HANDLER)?
             .payload(message)?
             .instance(self.remote)
@@ -99,7 +99,7 @@ impl ConnectorWorkerClient {
             request_id,
             block_ids,
         };
-        self.nova
+        self.messenger
             .unary(FAILED_ONBOARD_HANDLER)?
             .payload(message)?
             .instance(self.remote)
@@ -119,7 +119,7 @@ impl ConnectorWorkerClient {
     pub async fn mark_offloading_complete(&self, request_id: String) -> Result<()> {
         let message = OffloadCompleteMessage { request_id };
 
-        self.nova
+        self.messenger
             .unary(OFFLOAD_COMPLETE_HANDLER)?
             .payload(message)?
             .instance(self.remote)
@@ -135,9 +135,9 @@ impl ConnectorWorkerClient {
     ///
     /// # Returns
     /// A typed unary result that resolves to the layout configuration
-    pub fn get_layout_config(&self) -> Result<dynamo_nova::am::TypedUnaryResult<LayoutConfig>> {
+    pub fn get_layout_config(&self) -> Result<velo::TypedUnaryResult<LayoutConfig>> {
         let awaiter = self
-            .nova
+            .messenger
             .typed_unary::<LayoutConfig>(GET_LAYOUT_CONFIG_HANDLER)?
             .instance(self.remote)
             .send();

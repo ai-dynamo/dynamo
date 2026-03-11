@@ -197,18 +197,21 @@ async fn execute_onboarding(
 
     // All blocks are now in G2
     let instance_leader = leader.instance_leader().expect("InstanceLeader not set");
+    let parallel_worker = instance_leader
+        .parallel_worker()
+        .ok_or_else(|| anyhow::anyhow!("No parallel worker available for local transfer"))?;
 
     // TODO: potential optimization would be to stream G2 blocks to G1 blocks as G2 blocks are ready.
     // The current implementation awaits all G2 blocks to be ready before executing the transfer.
     // The balance here is when do we acquire/allocate G1 blocks as they are a precious commodity vs.,
     // when should we start onboarding. More analysis is needed here to determine the optimal strategy.
     // let start_time = Instant::now();
-    instance_leader
+    parallel_worker
         .execute_local_transfer(
             LogicalLayoutHandle::G2,
             LogicalLayoutHandle::G1,
-            g2_block_ids,
-            g1_block_ids,
+            Arc::from(g2_block_ids),
+            Arc::from(g1_block_ids),
             TransferOptions::default(),
         )?
         .await?;

@@ -27,9 +27,9 @@ use kvbm_engine::worker::{LeaderLayoutConfig, VeloWorkerService, WorkerLayoutRes
 use crate::KvbmRuntime;
 use kvbm_physical::layout::LayoutConfig;
 
-/// Nova event handle for forward pass completion notification.
+/// Velo event handle for forward pass completion notification.
 /// Stored separately from CUDA events since we now use pre-allocated per-layer events.
-pub(crate) type ForwardPassNovaEvent = dynamo_nova::events::EventHandle;
+pub(crate) type ForwardPassNovaEvent = velo::EventHandle;
 
 /// Worker details set during KV cache registration.
 pub(crate) struct WorkerDetails {
@@ -251,7 +251,7 @@ impl WorkerState {
         );
 
         // Build VeloWorkerService
-        let service = VeloWorkerService::new(self.runtime.nova.clone(), worker)?;
+        let service = VeloWorkerService::new(self.runtime.messenger().clone(), worker)?;
 
         self.service
             .set(service)

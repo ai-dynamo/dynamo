@@ -12,7 +12,7 @@ use kvbm_common::BlockId;
 use kvbm_logical::blocks::ImmutableBlock;
 
 use derive_builder::Builder;
-use dynamo_nova::events::EventHandle;
+use velo::EventHandle;
 use serde::{Deserialize, Serialize};
 
 use anyhow::Result;
@@ -166,7 +166,7 @@ impl ConnectorLeader {
         // Create cheap local event as the "promise" for forward pass completion.
         // This is passed to process_request_offload as the precondition.
         // The actual merge event is only created at the end if any actions were scheduled.
-        let forward_pass_promise = Arc::new(self.runtime.nova().events().new_event()?);
+        let forward_pass_promise = self.runtime.messenger().events().new_event()?;
         let forward_pass_handle = Some(forward_pass_promise.handle());
 
         // Track if any offload actions were scheduled
@@ -470,12 +470,12 @@ impl ConnectorLeader {
     /// Create one event per worker for forward pass completion tracking.
     fn create_worker_foward_pass_completion_events(
         &self,
-    ) -> Result<HashMap<InstanceId, Arc<dynamo_nova::events::LocalEvent>>> {
+    ) -> Result<HashMap<InstanceId, Arc<velo::Event>>> {
         let worker_instances = self.get_worker_instance_ids()?;
         let mut events = HashMap::new();
 
         for instance_id in worker_instances {
-            let event = Arc::new(self.runtime.nova().events().new_event()?);
+            let event = Arc::new(self.runtime.messenger().events().new_event()?);
             events.insert(instance_id, event);
         }
 
@@ -502,11 +502,11 @@ impl ConnectorLeader {
     /// the merge task unless offload actions were actually scheduled.
     fn spawn_forward_pass_cleanup_task(
         &self,
-        worker_events: HashMap<InstanceId, Arc<dynamo_nova::events::LocalEvent>>,
-        forward_pass_promise: Arc<dynamo_nova::events::LocalEvent>,
+        worker_events: HashMap<InstanceId, Arc<velo::Event>>,
+        forward_pass_promise: velo::Event,
         g2_blocks: Vec<ImmutableBlock<G2>>,
     ) {
-        let nova = self.runtime.nova().clone();
+        let event_manager = self.runtime.messenger().event_manager();
         let block_count = g2_blocks.len();
 
         tracing::debug!(
@@ -521,7 +521,7 @@ impl ConnectorLeader {
 
             let await_result: Option<Result<(), anyhow::Error>> = if handles.len() == 1 {
                 // Single worker - just await directly
-                match nova.events().awaiter(handles[0]) {
+                match event_manager.awaiter(handles[0]) {
                     Ok(awaiter) => Some(awaiter.await),
                     Err(e) => {
                         tracing::error!("Failed to create awaiter for single worker: {}", e);
@@ -530,8 +530,8 @@ impl ConnectorLeader {
                 }
             } else if !handles.is_empty() {
                 // Multiple workers - create merge and await
-                match nova.events().merge_events(handles) {
-                    Ok(merge_handle) => match nova.events().awaiter(merge_handle) {
+                match event_manager.merge_events(handles) {
+                    Ok(merge_handle) => match event_manager.awaiter(merge_handle) {
                         Ok(awaiter) => Some(awaiter.await),
                         Err(e) => {
                             tracing::error!("Failed to create merge awaiter: {}", e);
