@@ -89,6 +89,7 @@ RUN userdel -r ubuntu > /dev/null 2>&1 || true \
     && mkdir -p /etc/profile.d && echo 'umask 002' > /etc/profile.d/00-umask.sh
 
 ARG PYTHON_VERSION
+ARG COMMON_UTILS
 ENV PYTHON_VERSION=${PYTHON_VERSION}
 
 # Install Python, build-essential and python3-dev as apt dependencies
@@ -155,11 +156,7 @@ RUN wget https://github.com/uxlfoundation/oneCCL/releases/download/2021.15.7/int
 {% if device == "cpu" %}
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-    curl \
-    git \
-    wget \
-    vim \
-    ca-certificates \
+    $COMMON_UTILS \
     gcc-12 g++-12 ccache \
     libtcmalloc-minimal4 libnuma-dev \
     ffmpeg libsm6 libxext6 libgl1 jq lsof && \

@@ -36,7 +36,14 @@ WORKDIR /workspace
 ARG COMMON_UTILS
 {% if device == "xpu" or device == "cpu" %}
 RUN apt clean && apt-get update -y && \
-    apt-get install -y --no-install-recommends --fix-missing $COMMON_UTILS
+    apt-get install -y --no-install-recommends --fix-missing \
+    $COMMON_UTILS \
+    libsndfile1 \
+    libsm6 \
+    libxext6 \
+    libgl1 \
+    libaio-dev \
+    linux-libc-dev
 {% endif %}
 
 {% if device == "cuda" %}

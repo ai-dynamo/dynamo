@@ -132,7 +132,6 @@ ARG EFA_VERSION={{ context.dynamo.efa_version }}
 ARG EFA_BASE_IMAGE={{ "runtime" if target=="runtime" else "dev" }}
 {%- endif -%}
 
-# Install common utilities in base docker file
+# Common utils across devices and stages.
 ARG COMMON_UTILS="curl ca-certificates zip unzip git \
- libsndfile1 libsm6 libxext6 libgl1 lsb-release \
- libaio-dev numactl wget vim linux-libc-dev"
+ lsb-release numactl wget vim"
