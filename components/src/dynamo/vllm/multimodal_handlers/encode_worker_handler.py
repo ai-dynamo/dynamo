@@ -180,7 +180,9 @@ class EncodeWorkerHandler:
 
             with _nvtx.annotate(
                 "mm:enc:image_load", color="green"
-            ), time_and_log_code_section("[ENCODE] image loading"):
+            ), time_and_log_code_section(
+                f"[ENCODE] request: {request_id} image loading"
+            ):
                 # Load and generate image tensors
                 image_tasks = []
                 image_to_load = []
@@ -212,14 +214,18 @@ class EncodeWorkerHandler:
             if loaded_images:
                 with _nvtx.annotate(
                     "mm:enc:image_preprocess", color="yellow"
-                ), time_and_log_code_section("[ENCODE] image processing"):
+                ), time_and_log_code_section(
+                    f"[ENCODE] request: {request_id} image processing"
+                ):
                     image_embeds = await asyncio.to_thread(
                         self.image_processor, images=loaded_images, return_tensors="pt"
                     )
 
                 with _nvtx.annotate(
                     "mm:enc:vision_encode", color="red"
-                ), time_and_log_code_section("[ENCODE] encoding"):
+                ), time_and_log_code_section(
+                    f"[ENCODE] request: {request_id} encoding"
+                ):
                     # Encode the image embeddings using model-specific encoder
                     embeddings = await asyncio.to_thread(
                         encode_image_embeddings,

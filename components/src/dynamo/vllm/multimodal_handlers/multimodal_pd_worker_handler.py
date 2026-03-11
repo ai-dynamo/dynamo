@@ -306,7 +306,9 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
         """Prefill locally, then forward to a remote decode worker."""
         with _nvtx.annotate(
             "mm:pd:disagg_prefill", color="darkred"
-        ), time_and_log_code_section("[PREFILL] prefill time"):
+        ), time_and_log_code_section(
+            f"[PREFILL] request: {request.request_id} prefill time"
+        ):
             # Prepare prefill-only request
             prefill_only_request = copy.deepcopy(request)
             extra_args = prefill_only_request.sampling_params.extra_args or {}
@@ -372,7 +374,9 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
 
         with (
             _nvtx.annotate("mm:pd:disagg_remote_decode", color="purple"),
-            time_and_log_code_section("[PREFILL] remote decode time") as decode_timer,
+            time_and_log_code_section(
+                f"[PREFILL] request: {request.request_id} remote decode time"
+            ) as decode_timer,
         ):
             num_output_tokens_so_far = 0
             async for (

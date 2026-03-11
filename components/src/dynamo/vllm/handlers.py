@@ -1316,7 +1316,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         request_id = context.id()
         logger.debug(f"Decode Request ID: {request_id}")
         first_token = True
-        with time_and_log_code_section("[DECODE] generate") as decode_timer:
+        with time_and_log_code_section(
+            f"[DECODE] request: {request_id} generate"
+        ) as decode_timer:
             if self.use_vllm_tokenizer:
                 # Text-in-text-out mode: use InputParamManager and OpenAI-compatible format
                 generator = self._generate_text_mode(request, context, request_id)
@@ -1530,7 +1532,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         logger.debug(f"Prefill Request ID: {request_id}")
 
         # Token-in-token-out mode: internal protocol format
-        with time_and_log_code_section("[PREFILL] generate"):
+        with time_and_log_code_section(f"[PREFILL] request: {request_id} generate"):
             async for chunk in self._generate_token_mode(request, context, request_id):
                 yield chunk
 

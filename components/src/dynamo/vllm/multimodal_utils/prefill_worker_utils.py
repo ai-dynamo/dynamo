@@ -164,7 +164,7 @@ async def _fetch_from_encode_workers(
         multimodal_inputs=[],
     )
 
-    with time_and_log_code_section("[PREFILL] dispatch encode"):
+    with time_and_log_code_section(f"[PREFILL] request: {request_id} dispatch encode"):
         batch: List[MultiModalGroup] = []
         encode_response_streams = []
         for url in image_urls:
@@ -187,7 +187,9 @@ async def _fetch_from_encode_workers(
                 await encode_worker_client.round_robin(payload)  # type: ignore[arg-type]
             )
 
-    with time_and_log_code_section("[PREFILL] receive encode responses"):
+    with time_and_log_code_section(
+        f"[PREFILL] request: {request_id} receive encode responses"
+    ):
         multimodal_groups: List[MultiModalGroup] = []
         for stream in encode_response_streams:
             async for response in stream:
@@ -196,7 +198,9 @@ async def _fetch_from_encode_workers(
                 if output.multimodal_inputs:
                     multimodal_groups.extend(output.multimodal_inputs)
 
-    with time_and_log_code_section("[PREFILL] receive embeddings"):
+    with time_and_log_code_section(
+        f"[PREFILL] request: {request_id} receive embeddings"
+    ):
         tasks = [
             asyncio.create_task(receiver.receive_embeddings(group.serialized_request))
             for group in multimodal_groups
@@ -306,7 +310,9 @@ async def load_multimodal_embeddings(
     )
 
     multi_modal_data: Dict[str, Any] = defaultdict(list)
-    with time_and_log_code_section("[PREFILL] accumulate embeddings"):
+    with time_and_log_code_section(
+        f"[PREFILL] request: {request_id} accumulate embeddings"
+    ):
         for group in groups:
             assert group.loaded_embedding is not None
             _accumulate_embeddings(

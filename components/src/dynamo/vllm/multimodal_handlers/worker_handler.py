@@ -57,7 +57,9 @@ class MultimodalDecodeWorkerHandler(BaseWorkerHandler):
     async def generate(self, request: vLLMMultimodalRequest, context):
         rng_decode = _nvtx.start_range("mm:decode_worker_generate", color="blue")
         logger.debug(f"Got raw request: {request}")
-        with time_and_log_code_section("[DECODE] preprocessing time"):
+        with time_and_log_code_section(
+            f"[DECODE] request: {request.request_id} preprocessing time"
+        ):
             if not isinstance(request, vLLMMultimodalRequest):
                 if isinstance(request, str):
                     request = vLLMMultimodalRequest.model_validate_json(request)
@@ -89,7 +91,9 @@ class MultimodalDecodeWorkerHandler(BaseWorkerHandler):
                     )
             lora_request = self._resolve_lora_request(request.model)
 
-        with time_and_log_code_section("[DECODE] generate time") as gen_timer:
+        with time_and_log_code_section(
+            f"[DECODE] request: {request.request_id} generate time"
+        ) as gen_timer:
             gen = self.engine_client.generate(
                 prompt=TokensPrompt(
                     prompt_token_ids=request.engine_prompt["prompt_token_ids"],
