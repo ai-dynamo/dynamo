@@ -8,13 +8,13 @@
 //! patterns over pluggable transports. Includes a distributed event system.
 
 mod client;
-mod discovery;
 mod messenger;
 
 pub(crate) mod common;
 pub(crate) mod handlers;
 pub(crate) mod server;
 
+pub mod discovery;
 pub mod events;
 
 pub use client::builders::{
