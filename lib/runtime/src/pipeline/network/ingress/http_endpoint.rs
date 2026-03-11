@@ -23,7 +23,7 @@ use hyper_util::service::TowerToHyperService;
 use parking_lot::Mutex;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
-use tokio::sync::Notify;
+use tokio::sync::{Notify, RwLock};
 use tokio_util::sync::CancellationToken;
 use tower_http::trace::TraceLayer;
 use tracing::Instrument;
@@ -38,6 +38,7 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub struct SharedHttpServer {
     handlers: Arc<DashMap<String, Arc<EndpointHandler>>>,
     bind_addr: SocketAddr,
+    actual_addr: RwLock<Option<SocketAddr>>,
     cancellation_token: CancellationToken,
 }
 
@@ -58,8 +59,14 @@ impl SharedHttpServer {
         Arc::new(Self {
             handlers: Arc::new(DashMap::new()),
             bind_addr,
+            actual_addr: RwLock::new(None),
             cancellation_token,
         })
+    }
+
+    /// Get the actual bound address (after `bind_and_start` resolves).
+    pub fn actual_address(&self) -> Option<SocketAddr> {
+        self.actual_addr.try_read().ok().and_then(|g| *g)
     }
 
     /// Register an endpoint handler with this server
@@ -129,8 +136,10 @@ impl SharedHttpServer {
         }
     }
 
-    /// Start the shared HTTP server
-    pub async fn start(self: Arc<Self>) -> Result<()> {
+    /// Bind the TCP listener and start the accept loop.
+    ///
+    /// Returns the actual bound `SocketAddr` (important when binding to port 0).
+    pub async fn bind_and_start(self: Arc<Self>) -> Result<SocketAddr> {
         let rpc_root_path = std::env::var("DYN_HTTP_RPC_ROOT_PATH")
             .unwrap_or_else(|_| DEFAULT_RPC_ROOT_PATH.to_string());
         let route_pattern = format!("{}/{{*endpoint}}", rpc_root_path);
@@ -140,56 +149,64 @@ impl SharedHttpServer {
             .layer(TraceLayer::new_for_http())
             .with_state(self.clone());
 
+        let listener = tokio::net::TcpListener::bind(&self.bind_addr).await?;
+        let actual_addr = listener.local_addr()?;
+
         tracing::info!(
-            "Starting shared HTTP/2 endpoint server on {} at path {}/:endpoint",
-            self.bind_addr,
-            rpc_root_path
+            requested = %self.bind_addr,
+            actual = %actual_addr,
+            rpc_root = %rpc_root_path,
+            "HTTP/2 endpoint server bound"
         );
 
-        let listener = tokio::net::TcpListener::bind(&self.bind_addr).await?;
+        // Store the actual address so `address()` returns the real port.
+        *self.actual_addr.write().await = Some(actual_addr);
+
         let cancellation_token = self.cancellation_token.clone();
 
-        loop {
-            tokio::select! {
-                accept_result = listener.accept() => {
-                    match accept_result {
-                        Ok((stream, _addr)) => {
-                            let app_clone = app.clone();
-                            let cancel_clone = cancellation_token.clone();
+        // Spawn the accept loop in the background.
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    accept_result = listener.accept() => {
+                        match accept_result {
+                            Ok((stream, _addr)) => {
+                                let app_clone = app.clone();
+                                let cancel_clone = cancellation_token.clone();
 
-                            tokio::spawn(async move {
-                                // Create HTTP/2 connection builder with prior knowledge
-                                let http2_builder = Http2Builder::new(TokioExecutor::new());
+                                tokio::spawn(async move {
+                                    let http2_builder = Http2Builder::new(TokioExecutor::new());
 
-                                let io = TokioIo::new(stream);
-                                let tower_service = app_clone.into_service();
+                                    let io = TokioIo::new(stream);
+                                    let tower_service = app_clone.into_service();
+                                    let hyper_service = TowerToHyperService::new(tower_service);
 
-                                // Wrap Tower service for Hyper compatibility
-                                let hyper_service = TowerToHyperService::new(tower_service);
-
-                                tokio::select! {
-                                    result = http2_builder.serve_connection(io, hyper_service) => {
-                                        if let Err(e) = result {
-                                            tracing::debug!("HTTP/2 connection error: {e}");
+                                    tokio::select! {
+                                        result = http2_builder.serve_connection(io, hyper_service) => {
+                                            if let Err(e) = result {
+                                                tracing::debug!("HTTP/2 connection error: {e}");
+                                            }
+                                        }
+                                        _ = cancel_clone.cancelled() => {
+                                            tracing::trace!("Connection cancelled");
                                         }
                                     }
-                                    _ = cancel_clone.cancelled() => {
-                                        tracing::trace!("Connection cancelled");
-                                    }
-                                }
-                            });
-                        }
-                        Err(e) => {
-                            tracing::error!("Failed to accept connection: {e}");
+                                });
+                            }
+                            Err(e) => {
+                                tracing::error!("Failed to accept connection: {e}");
+                            }
                         }
                     }
-                }
-                _ = cancellation_token.cancelled() => {
-                    tracing::info!("SharedHttpServer received cancellation signal, shutting down");
-                    return Ok(());
+                    _ = cancellation_token.cancelled() => {
+                        tracing::info!("SharedHttpServer received cancellation signal, shutting down");
+                        return;
+                    }
                 }
             }
-        }
+        });
+
+        Ok(actual_addr)
     }
 
     /// Wait for all inflight requests across all endpoints
@@ -332,7 +349,8 @@ impl super::unified_server::RequestPlaneServer for SharedHttpServer {
     }
 
     fn address(&self) -> String {
-        format!("http://{}:{}", self.bind_addr.ip(), self.bind_addr.port())
+        let addr = self.actual_address().unwrap_or(self.bind_addr);
+        format!("http://{}:{}", addr.ip(), addr.port())
     }
 
     fn transport_name(&self) -> &'static str {
@@ -373,5 +391,70 @@ mod tests {
 
         let server = SharedHttpServer::new(bind_addr, token);
         assert!(server.handlers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_bind_and_start_assigns_os_port() {
+        use std::net::{IpAddr, Ipv4Addr};
+        let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
+        let token = CancellationToken::new();
+
+        let server = SharedHttpServer::new(bind_addr, token.clone());
+        let actual_addr = server.clone().bind_and_start().await.unwrap();
+
+        // OS should assign a non-zero port
+        assert_ne!(actual_addr.port(), 0);
+
+        // actual_address() should return the real bound address
+        assert_eq!(server.actual_address(), Some(actual_addr));
+
+        // address() should contain the real port
+        let addr_str =
+            <SharedHttpServer as super::unified_server::RequestPlaneServer>::address(&*server);
+        assert!(addr_str.contains(&actual_addr.port().to_string()));
+
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn test_two_servers_get_different_ports() {
+        use std::net::{IpAddr, Ipv4Addr};
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
+
+        let token1 = CancellationToken::new();
+        let token2 = CancellationToken::new();
+
+        let server1 = SharedHttpServer::new(addr, token1.clone());
+        let server2 = SharedHttpServer::new(addr, token2.clone());
+
+        let actual1 = server1.clone().bind_and_start().await.unwrap();
+        let actual2 = server2.clone().bind_and_start().await.unwrap();
+
+        // Two servers binding to port 0 must get different ports
+        assert_ne!(actual1.port(), actual2.port());
+
+        token1.cancel();
+        token2.cancel();
+    }
+
+    #[tokio::test]
+    async fn test_bind_and_start_with_explicit_port() {
+        use std::net::{IpAddr, Ipv4Addr};
+
+        // First bind to port 0 to get a free port
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let free_port = listener.local_addr().unwrap().port();
+        drop(listener); // Release the port
+
+        let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), free_port);
+        let token = CancellationToken::new();
+
+        let server = SharedHttpServer::new(bind_addr, token.clone());
+        let actual_addr = server.clone().bind_and_start().await.unwrap();
+
+        // When binding to an explicit port, actual should match
+        assert_eq!(actual_addr.port(), free_port);
+
+        token.cancel();
     }
 }

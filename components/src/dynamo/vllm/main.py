@@ -42,7 +42,6 @@ from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.vllm.worker_factory import WorkerFactory
 
 from .args import Config, _uses_dynamo_connector, parse_args
-from .checkpoint_restore import get_checkpoint_config
 from .constants import DisaggregationMode
 from .handlers import DecodeWorkerHandler, PrefillWorkerHandler, get_dp_range_for_worker
 from .health_check import (
@@ -51,6 +50,7 @@ from .health_check import (
     VllmPrefillHealthCheckPayload,
 )
 from .publisher import DYNAMO_COMPONENT_REGISTRY, StatLoggerFactory
+from .snapshot import get_checkpoint_config
 
 # Optional imports for frontend decoding support
 MediaDecoder: type | None = None
@@ -135,15 +135,15 @@ async def worker() -> None:
 
     # CHECKPOINT MODE: Load engine BEFORE runtime creation
     # This allows checkpointing GPU state before runtime connections are established
-    checkpoint_restore_engine = None
+    snapshot_engine = None
     if checkpoint_cfg is not None:
         logger.info("Checkpoint mode enabled (watcher-driven signals)")
 
         # Checkpoint mode requires sleep mode — enable before engine init
         config.engine_args.enable_sleep_mode = True
 
-        checkpoint_restore_engine = setup_vllm_engine(config)
-        engine_client = checkpoint_restore_engine[0]
+        snapshot_engine = setup_vllm_engine(config)
+        engine_client = snapshot_engine[0]
 
         if not await checkpoint_cfg.run_lifecycle(
             engine_client, CHECKPOINT_SLEEP_MODE_LEVEL
@@ -173,7 +173,7 @@ async def worker() -> None:
             config,
             shutdown_event,
             shutdown_endpoints,
-            checkpoint_restore_engine=checkpoint_restore_engine,
+            snapshot_engine=snapshot_engine,
         )
         logger.debug("multimodal worker completed")
     elif config.omni:
@@ -184,7 +184,7 @@ async def worker() -> None:
             runtime,
             config,
             shutdown_event,
-            checkpoint_restore_engine=checkpoint_restore_engine,
+            snapshot_engine=snapshot_engine,
         )
         logger.debug("init_prefill completed")
     else:
@@ -192,7 +192,7 @@ async def worker() -> None:
             runtime,
             config,
             shutdown_event,
-            checkpoint_restore_engine=checkpoint_restore_engine,
+            snapshot_engine=snapshot_engine,
         )
         logger.debug("init completed")
 
@@ -370,7 +370,9 @@ def setup_kv_event_publisher(
 
 
 def setup_vllm_engine(
-    config: Config, stat_logger: Optional[StatLoggerFactory] = None
+    config: Config,
+    stat_logger: Optional[StatLoggerFactory] = None,
+    fpm_worker_id: Optional[str] = None,
 ) -> tuple[AsyncLLM, VllmConfig, Any, Any, LLMBackendMetrics]:
     # vLLM v0.11.0 bug: vllm/v1.metrics/prometheus.py:79 passes TemporaryDirectory object
     # instead of .name string, causing false error on exit. Set PROMETHEUS_MULTIPROC_DIR
@@ -485,6 +487,10 @@ def setup_vllm_engine(
     # dataclass fields; monkey-patching attributes onto VllmConfig is no longer safe).
     vllm_config.additional_config["consolidator_endpoints"] = consolidator_endpoints
 
+    # Pass worker identity to InstrumentedScheduler via additional_config.
+    if fpm_worker_id is not None:
+        vllm_config.additional_config["fpm_worker_id"] = fpm_worker_id
+
     factory = []
     if stat_logger:
         factory.append(stat_logger)
@@ -597,7 +603,7 @@ async def init_prefill(
     runtime: DistributedRuntime,
     config: Config,
     shutdown_event: asyncio.Event,
-    checkpoint_restore_engine: Optional[
+    snapshot_engine: Optional[
         tuple[AsyncLLM, VllmConfig, Any, Any, LLMBackendMetrics]
     ] = None,
 ) -> None:
@@ -612,14 +618,14 @@ async def init_prefill(
     )
 
     # Use pre-created engine if provided (checkpoint mode), otherwise create new
-    if checkpoint_restore_engine is not None:
+    if snapshot_engine is not None:
         (
             engine_client,
             vllm_config,
             default_sampling_params,
             prometheus_temp_dir,
             _component_gauges,
-        ) = checkpoint_restore_engine
+        ) = snapshot_engine
     else:
         (
             engine_client,
@@ -627,7 +633,9 @@ async def init_prefill(
             default_sampling_params,
             prometheus_temp_dir,
             _component_gauges,
-        ) = setup_vllm_engine(config)
+        ) = setup_vllm_engine(
+            config, fpm_worker_id=str(generate_endpoint.connection_id())
+        )
 
     handler = PrefillWorkerHandler(
         runtime,
@@ -741,7 +749,7 @@ async def init(
     runtime: DistributedRuntime,
     config: Config,
     shutdown_event: asyncio.Event,
-    checkpoint_restore_engine: Optional[
+    snapshot_engine: Optional[
         tuple[AsyncLLM, VllmConfig, Any, Any, LLMBackendMetrics]
     ] = None,
 ) -> None:
@@ -782,14 +790,14 @@ async def init(
         )
 
     # Use pre-created engine if provided (checkpoint mode), otherwise create new
-    if checkpoint_restore_engine is not None:
+    if snapshot_engine is not None:
         (
             engine_client,
             vllm_config,
             default_sampling_params,
             prometheus_temp_dir,
             component_gauges,
-        ) = checkpoint_restore_engine
+        ) = snapshot_engine
         # Factory is created after unpack so component_gauges is available
         factory = StatLoggerFactory(
             endpoint=generate_endpoint,
@@ -808,7 +816,9 @@ async def init(
             default_sampling_params,
             prometheus_temp_dir,
             component_gauges,
-        ) = setup_vllm_engine(config, factory)
+        ) = setup_vllm_engine(
+            config, factory, fpm_worker_id=str(generate_endpoint.connection_id())
+        )
 
     # TODO Hack to get data, move this to registering in TBD
     factory.set_num_gpu_blocks_all(vllm_config.cache_config.num_gpu_blocks)

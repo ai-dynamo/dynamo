@@ -18,6 +18,7 @@ Dynamo provides built-in metrics capabilities through the Dynamo metrics API, wh
 |----------|-------------|---------|---------|
 | `DYN_SYSTEM_PORT` | Backend component metrics/health port | `-1` (disabled) | `8081` |
 | `DYN_HTTP_PORT` | Frontend HTTP port (also configurable via `--http-port` flag) | `8000` | `8000` |
+| `NIXL_TELEMETRY_ENABLE` | Enable NIXL telemetry (see [NIXL Telemetry Metrics](#nixl-telemetry-metrics)). Options: `y`, `n` | `n` (disabled) | `y` |
 
 ## Getting Started Quickly
 
@@ -187,18 +188,24 @@ curl -s localhost:8000/v1/completions -H "Content-Type: application/json" -d '{
 ```
 
 **Timeline:**
-```
-Timeline:    0, 1, ...
-Client ────> Frontend:8000 ────────────────────> Dynamo component/backend (SGLang, TRT, vLLM)
-             │request start                     │received                              │
-             |                                  |                                      |
-             │                                  ├──> start prefill ──> first token ──> |last token
-             │                                  │     (not impl)       |               |
-             ├─────actual HTTP queue¹ ──────────┘                      │               |
-             │                                                         │               │
-             ├─────implemented HTTP queue ─────────────────────────────┘               |
-             │                                                                         │
-             └─────────────────────────────────── Inflight ────────────────────────────┘
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Frontend as Frontend:8000
+    participant Backend as Backend (SGLang/TRT/vLLM)
+
+    Client->>Frontend: Request start
+    Note over Frontend,Backend: HTTP queue begins
+    Frontend->>Backend: Forward request
+    Note over Backend: Start prefill
+    Backend-->>Frontend: First token
+    Note over Frontend,Backend: HTTP queue ends
+    loop Token generation
+        Backend-->>Frontend: Tokens
+    end
+    Backend-->>Frontend: Last token
+    Frontend-->>Client: Complete response
+    Note over Frontend: Inflight ends
 ```
 
 **Concurrency Example:**
@@ -276,6 +283,29 @@ These appear once workers register and begin serving requests. They are register
 | `worker_type` | `prefill` or `decode` | Worker role |
 
 In disaggregated mode, the `worker_type` label shows both `"prefill"` and `"decode"` values; in aggregated mode, all workers report as `"decode"`.
+
+## NIXL Telemetry Metrics
+
+[NIXL](https://github.com/ai-dynamo/nixl) exposes its own Prometheus metrics on a **separate port** from Dynamo metrics. These metrics track KV cache and embedding data transfers and are only populated during **disaggregated serving** or **multimodal embedding transfers**.
+
+To enable, set these environment variables on your worker process:
+
+```bash
+# Prefill worker
+NIXL_TELEMETRY_ENABLE=y NIXL_TELEMETRY_EXPORTER=prometheus \
+  NIXL_TELEMETRY_PROMETHEUS_PORT=19090 DYN_SYSTEM_PORT=8081 \
+  python -m dynamo.vllm --model <model> --disaggregation-mode prefill
+
+# Decode worker (different NIXL port to avoid collision)
+NIXL_TELEMETRY_ENABLE=y NIXL_TELEMETRY_EXPORTER=prometheus \
+  NIXL_TELEMETRY_PROMETHEUS_PORT=19091 DYN_SYSTEM_PORT=8082 \
+  python -m dynamo.vllm --model <model> --disaggregation-mode decode
+
+# Scrape NIXL metrics (separate from Dynamo metrics on 8081/8082)
+curl http://localhost:19090/metrics
+```
+
+For the full list of metrics, configuration options, and architecture details, see the upstream [NIXL Telemetry documentation](https://github.com/ai-dynamo/nixl/blob/main/docs/telemetry.md) and [Prometheus exporter README](https://github.com/ai-dynamo/nixl/blob/main/src/plugins/telemetry/prometheus/README.md). For Kubernetes, see [Enable NIXL Telemetry](../kubernetes/observability/metrics.md#enable-nixl-telemetry-optional).
 
 ## Related Documentation
 
