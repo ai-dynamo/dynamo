@@ -113,6 +113,17 @@ storage: "" {
     stroke: transparent
   }
 
+  pad_left: "" {
+    style: {
+      fill: transparent
+      stroke: transparent
+      font-size: 8
+      font-color: transparent
+    }
+    width: 120
+    height: 1
+  }
+
   host: "Host Memory" {
     style: {
       fill: "#0f1e30"
@@ -137,11 +148,34 @@ storage: "" {
     }
   }
 
+  pad_left -> host: {
+    style: {
+      stroke: transparent
+      stroke-width: 0
+    }
+  }
   host -> disk: {
     style: {
       stroke: "#5d5d5d"
       stroke-width: 1
     }
+  }
+  disk -> pad_right: {
+    style: {
+      stroke: transparent
+      stroke-width: 0
+    }
+  }
+
+  pad_right: "" {
+    style: {
+      fill: transparent
+      stroke: transparent
+      font-size: 8
+      font-color: transparent
+    }
+    width: 120
+    height: 1
   }
 }
 

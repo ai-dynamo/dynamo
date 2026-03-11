@@ -34,14 +34,18 @@ Agent harnesses are increasingly adopting `v1/responses` and `v1/messages` over 
 
 **Serving Claude Code with Dynamo**
 
-https://github.com/user-attachments/assets/5fa8a224-44e8-4acb-943b-9b8af84815e6
+<video controls width="100%">
+  <source src="https://github.com/user-attachments/assets/5fa8a224-44e8-4acb-943b-9b8af84815e6" type="video/mp4" />
+</video>
 
 </td>
 <td width="50%">
 
 **Serving Codex with Dynamo**
 
-https://github.com/user-attachments/assets/8694b544-3fd1-4931-9fd0-7d9a3a2fb78f
+<video controls width="100%">
+  <source src="https://github.com/user-attachments/assets/8694b544-3fd1-4931-9fd0-7d9a3a2fb78f" type="video/mp4" />
+</video>
 
 </td>
 </tr>
@@ -165,9 +169,9 @@ LRU sees only recency. In a high traffic environment, a wait for the completion 
 
 ### KV Cache as a Shared Resource
 
-Today, KV cache is treated as a local, ephemeral resource on each worker. An agent's ~32K-token system prompt and tool definitions are computed independently on every worker that serves its requests. When a lead agent spawns 4 subagents, each with overlapping tool definitions, that shared prefix is recomputed 4 times if the subagents land on different workers. In our analysis of Claude Code team sessions, we measured this directly: teammates averaged 79.4% cache hit rate vs. 91.3% for the lead agent's explore subagents (5.0x vs. 11.7x read/write ratio), with the gap driven almost entirely by cold-start writes on each teammate's first call. The goal is to make high value KV cache blocks available to all workers in the cluster. Essentially, they are written once during cold start and then read by any worker at all times.
+Today, KV cache is treated as a local, ephemeral resource on each worker. An agent's ~32K-token system prompt and tool definitions are computed independently on every worker that serves its requests. When a lead agent spawns 4 subagents, each with overlapping tool definitions, that shared prefix is recomputed 4 times if the subagents land on different workers. In our analysis of Claude Code team sessions, we measured this directly: teammates averaged 79.4% cache hit rate vs. 91.3% for the lead agent's explore subagents (5.0x vs. 11.7x read/write ratio), with the gap driven almost entirely by cold-start writes on each teammate's first call. The goal is to make high value KV cache blocks available to all workers in the cluster. Essentially, they are written once during cold start and then read by any worker at all times. 
 
-Solutions like SGLang's HiCache (which already supports distributed KV cache) and Dynamo's KV Block Manager (KVBM) are building toward a 4-tier memory hierarchy:
+Solutions like SGLang's HiCache and Dynamo's KV Block Manager (KVBM) are building toward a 4-tier memory hierarchy:
 
 ![KV cache memory hierarchy: GPU (HBM) at ~ns, CPU (pinned DRAM) at ~us, Local NVMe at ~ms, Remote Storage (NIXL) at ~ms via RDMA](./kv-memory-hierarchy.svg)
 
