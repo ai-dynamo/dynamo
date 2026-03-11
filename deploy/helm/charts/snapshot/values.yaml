@@ -29,7 +29,7 @@ storage:
     # PVC name - must match operator configuration
     name: snapshot-pvc
     # PVC size
-    size: 100Gi
+    size: 1Ti
     # Storage class (leave empty for default)
     storageClass: ""
     # Access mode - ReadWriteMany required for multi-pod access

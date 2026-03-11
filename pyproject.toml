@@ -318,6 +318,12 @@ module = ["vllm.*"]
 follow_imports = "skip"
 ignore_missing_imports = true
 
+[[tool.mypy.overrides]]
+# WAR mypy 1.18.x crash with numpy 1.26.x stubs:
+# "Should never get here in normal mode, got TypeAlias:numpy.float64 instead of TypeInfo"
+module = ["numpy", "numpy.*"]
+follow_imports = "skip"
+
 [tool.sphinx]
 
 # extra-content-head
