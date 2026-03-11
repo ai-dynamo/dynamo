@@ -285,6 +285,7 @@ jobs:
           extra_build_args: |
             DYNAMO_COMMIT_SHA=${{ github.sha }}
       - name: Build and Push Test Image
+        if: ${{ inputs.target != 'dev' }} # no need to build a separate test image for dev as its not tested
         shell: bash
         env:
           ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com

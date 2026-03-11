@@ -167,7 +167,7 @@ runs:
         fi
 
         # Always continue to results processing
-        exit 1 #TEST
+        exit 0
 
     - name: Run tests in dind as sidecar mode
       if: inputs.dind_as_sidecar == 'true'
