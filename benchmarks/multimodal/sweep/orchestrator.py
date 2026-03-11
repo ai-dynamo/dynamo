@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from .config import SweepConfig, input_file_tag, resolve_repo_root
-from .runner import run_aiperf_single, run_concurrency_sweep
+from .runner import run_aiperf_single, run_concurrency_sweep, run_qps_sweep
 from .server import ServerManager
 
 
@@ -43,9 +43,16 @@ def run_sweep(
         print(f"                   {f}")
     labels = [c.label for c in config.configs]
     print(f"  Configs:       {labels}")
-    print(f"  Concurrencies: {config.concurrencies}")
+    if config.is_qps_mode:
+        print("  Mode:          QPS (fixed arrival rate)")
+        print(f"  QPS rates:     {config.qps_rates}")
+        print(f"  Min duration:  {config.min_duration}s")
+        print(f"  Requests:      auto-scaled per QPS (min {config.request_count})")
+    else:
+        print("  Mode:          Concurrency (fixed in-flight)")
+        print(f"  Concurrencies: {config.concurrencies}")
+        print(f"  Requests:      {config.request_count} per level")
     print(f"  OSL:           {config.osl}")
-    print(f"  Requests:      {config.request_count} per concurrency")
     print(f"  Restart every: {restart}")
     print(f"  Output:        {output_base}")
     print(flush=True)
@@ -85,16 +92,29 @@ def run_sweep(
                         log_dir=sweep_dir,
                     )
                     try:
-                        run_concurrency_sweep(
-                            model=config.model,
-                            port=config.port,
-                            concurrencies=config.concurrencies,
-                            request_count=config.request_count,
-                            warmup_count=config.warmup_count,
-                            input_file=input_file,
-                            osl=config.osl,
-                            output_dir=sweep_dir,
-                        )
+                        if config.is_qps_mode:
+                            run_qps_sweep(
+                                model=config.model,
+                                port=config.port,
+                                qps_rates=config.qps_rates,
+                                request_count=config.request_count,
+                                warmup_count=config.warmup_count,
+                                input_file=input_file,
+                                osl=config.osl,
+                                output_dir=sweep_dir,
+                                min_duration=config.min_duration,
+                            )
+                        else:
+                            run_concurrency_sweep(
+                                model=config.model,
+                                port=config.port,
+                                concurrencies=config.concurrencies,
+                                request_count=config.request_count,
+                                warmup_count=config.warmup_count,
+                                input_file=input_file,
+                                osl=config.osl,
+                                output_dir=sweep_dir,
+                            )
                     finally:
                         server.stop()
 
@@ -119,31 +139,57 @@ def _sweep_with_restart(
     input_file: str,
     output_dir: Path,
 ) -> None:
-    """Run each concurrency level with a fresh server to avoid warm-cache effects."""
+    """Run each load level with a fresh server to avoid warm-cache effects."""
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    for c in config.concurrencies:
-        artifact_dir = output_dir / f"c{c}"
-        server.start(
-            workflow_script=workflow_script,
-            model=config.model,
-            extra_args=bench_cfg.extra_args,
-            env_overrides=env_overrides,
-            log_dir=artifact_dir,
-        )
-        try:
-            run_aiperf_single(
+    if config.is_qps_mode:
+        for qps in config.qps_rates:
+            dir_name = f"qps{qps:g}"
+            artifact_dir = output_dir / dir_name
+            server.start(
+                workflow_script=workflow_script,
                 model=config.model,
-                port=config.port,
-                concurrency=c,
-                request_count=config.request_count,
-                warmup_count=config.warmup_count,
-                input_file=input_file,
-                osl=config.osl,
-                artifact_dir=artifact_dir,
+                extra_args=bench_cfg.extra_args,
+                env_overrides=env_overrides,
+                log_dir=artifact_dir,
             )
-        finally:
-            server.stop()
+            try:
+                scaled_count = config.request_count_for_qps(qps)
+                run_aiperf_single(
+                    model=config.model,
+                    port=config.port,
+                    qps=qps,
+                    request_count=scaled_count,
+                    warmup_count=config.warmup_count,
+                    input_file=input_file,
+                    osl=config.osl,
+                    artifact_dir=artifact_dir,
+                )
+            finally:
+                server.stop()
+    else:
+        for c in config.concurrencies:
+            artifact_dir = output_dir / f"c{c}"
+            server.start(
+                workflow_script=workflow_script,
+                model=config.model,
+                extra_args=bench_cfg.extra_args,
+                env_overrides=env_overrides,
+                log_dir=artifact_dir,
+            )
+            try:
+                run_aiperf_single(
+                    model=config.model,
+                    port=config.port,
+                    concurrency=c,
+                    request_count=config.request_count,
+                    warmup_count=config.warmup_count,
+                    input_file=input_file,
+                    osl=config.osl,
+                    artifact_dir=artifact_dir,
+                )
+            finally:
+                server.stop()
 
     print(f"Sweep complete. Results in {output_dir}", flush=True)
 

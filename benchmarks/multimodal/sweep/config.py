@@ -22,10 +22,20 @@ class BenchmarkConfig:
 
 @dataclass
 class SweepConfig:
-    """Top-level sweep configuration loaded from YAML with optional CLI overrides."""
+    """Top-level sweep configuration loaded from YAML with optional CLI overrides.
+
+    Load mode is determined by which field is set:
+      - concurrencies: fixed in-flight requests (default)
+      - qps_rates: fixed arrival rate (QPS-based, like vLLM bench serve)
+
+    When using qps_rates, request_count is auto-scaled to
+    max(200, qps * min_duration) unless explicitly set.
+    """
 
     model: str = "Qwen/Qwen3-VL-30B-A3B-Instruct-FP8"
     concurrencies: List[int] = field(default_factory=lambda: [1, 2, 4, 8, 16, 32])
+    qps_rates: Optional[List[float]] = None
+    min_duration: int = 60
     osl: int = 150
     request_count: int = 1000
     warmup_count: int = 5
@@ -37,6 +47,19 @@ class SweepConfig:
     skip_plots: bool = False
     restart_server_every_benchmark: bool = True
     env: Dict[str, str] = field(default_factory=dict)
+
+    @property
+    def is_qps_mode(self) -> bool:
+        return self.qps_rates is not None and len(self.qps_rates) > 0
+
+    @property
+    def load_levels(self) -> List:
+        """Return the list of load levels (concurrencies or QPS rates)."""
+        return self.qps_rates if self.is_qps_mode else self.concurrencies
+
+    def request_count_for_qps(self, qps: float) -> int:
+        """Auto-scale request count for a QPS level: max(200, qps * min_duration)."""
+        return max(200, int(qps * self.min_duration))
 
     def validate(self, repo_root: Optional[Path] = None) -> None:
         """Validate that all referenced files and scripts exist."""
@@ -58,8 +81,12 @@ class SweepConfig:
                     f"Workflow script not found: {script} (config '{cfg.label}')"
                 )
 
-        if not self.concurrencies:
-            raise ValueError("At least one concurrency level is required.")
+        if self.is_qps_mode:
+            if not self.qps_rates:
+                raise ValueError("At least one QPS rate is required.")
+        else:
+            if not self.concurrencies:
+                raise ValueError("At least one concurrency level is required.")
 
 
 def _parse_benchmark_config(raw: Dict[str, Any]) -> BenchmarkConfig:
@@ -81,9 +108,16 @@ def load_config(
     defaults = SweepConfig()
     configs = [_parse_benchmark_config(c) for c in raw.get("configs", [])]
 
+    # If qps_rates is set, use QPS mode; otherwise use concurrency mode
+    qps_rates = raw.get("qps_rates", None)
+    if qps_rates is not None:
+        qps_rates = [float(q) for q in qps_rates]
+
     cfg = SweepConfig(
         model=raw.get("model", defaults.model),
         concurrencies=raw.get("concurrencies", defaults.concurrencies),
+        qps_rates=qps_rates,
+        min_duration=raw.get("min_duration", defaults.min_duration),
         osl=raw.get("osl", defaults.osl),
         request_count=raw.get("request_count", defaults.request_count),
         warmup_count=raw.get("warmup_count", defaults.warmup_count),

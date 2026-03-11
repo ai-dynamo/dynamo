@@ -11,22 +11,21 @@ from typing import List
 def _build_aiperf_cmd(
     model: str,
     port: int,
-    concurrency: int,
     request_count: int,
     warmup_count: int,
     input_file: str,
     osl: int,
     artifact_dir: Path,
+    concurrency: int = 0,
+    qps: float = 0,
 ) -> List[str]:
-    return [
+    cmd = [
         "aiperf",
         "profile",
         "-m",
         model,
         "-u",
         f"http://localhost:{port}",
-        "--concurrency",
-        str(concurrency),
         "--request-count",
         str(request_count),
         "--warmup-request-count",
@@ -51,31 +50,44 @@ def _build_aiperf_cmd(
         "--no-server-metrics",
     ]
 
+    if qps > 0:
+        cmd.extend(["--request-rate", str(qps)])
+    else:
+        cmd.extend(["--concurrency", str(concurrency)])
+
+    return cmd
+
 
 def run_aiperf_single(
     model: str,
     port: int,
-    concurrency: int,
     request_count: int,
     warmup_count: int,
     input_file: str,
     osl: int,
     artifact_dir: Path,
+    concurrency: int = 0,
+    qps: float = 0,
 ) -> None:
-    """Run a single aiperf profile invocation."""
+    """Run a single aiperf profile invocation.
+
+    Specify either concurrency (fixed in-flight) or qps (fixed arrival rate).
+    """
     artifact_dir.mkdir(parents=True, exist_ok=True)
     cmd = _build_aiperf_cmd(
         model=model,
         port=port,
-        concurrency=concurrency,
         request_count=request_count,
         warmup_count=warmup_count,
         input_file=input_file,
         osl=osl,
         artifact_dir=artifact_dir,
+        concurrency=concurrency,
+        qps=qps,
     )
 
-    print(f"  aiperf concurrency={concurrency} -> {artifact_dir}", flush=True)
+    load_desc = f"qps={qps}" if qps > 0 else f"concurrency={concurrency}"
+    print(f"  aiperf {load_desc} -> {artifact_dir}", flush=True)
     print(f"  cmd: {' '.join(cmd)}", flush=True)
 
     # Stream aiperf output to stdout in real time (and capture to log file)
@@ -93,7 +105,7 @@ def run_aiperf_single(
         print(f"  aiperf FAILED (exit {proc.returncode})", flush=True)
         raise subprocess.CalledProcessError(proc.returncode, cmd)
 
-    print(f"  aiperf concurrency={concurrency} done.", flush=True)
+    print(f"  aiperf {load_desc} done.", flush=True)
 
 
 def run_concurrency_sweep(
@@ -122,3 +134,36 @@ def run_concurrency_sweep(
         )
 
     print(f"Sweep complete. Results in {output_dir}", flush=True)
+
+
+def run_qps_sweep(
+    model: str,
+    port: int,
+    qps_rates: List[float],
+    request_count: int,
+    warmup_count: int,
+    input_file: str,
+    osl: int,
+    output_dir: Path,
+    min_duration: int = 60,
+) -> None:
+    """Run aiperf across QPS rates, writing results under output_dir/qps{N}/.
+
+    Request count is auto-scaled per QPS level: max(request_count, qps * min_duration).
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    for qps in qps_rates:
+        scaled_count = max(request_count, int(qps * min_duration))
+        run_aiperf_single(
+            model=model,
+            port=port,
+            qps=qps,
+            request_count=scaled_count,
+            warmup_count=warmup_count,
+            input_file=input_file,
+            osl=osl,
+            artifact_dir=output_dir / f"qps{qps:g}",
+        )
+
+    print(f"QPS sweep complete. Results in {output_dir}", flush=True)
