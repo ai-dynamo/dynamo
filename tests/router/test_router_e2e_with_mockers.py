@@ -20,7 +20,7 @@ from typing import Any, Dict, Optional
 import aiohttp
 import pytest
 
-from tests.router.common import (  # utilities
+from tests.router.common import (
     _test_busy_threshold_endpoint,
     _test_python_router_bindings,
     _test_router_basic,
@@ -30,9 +30,8 @@ from tests.router.common import (  # utilities
     _test_router_overload_503,
     _test_router_query_instance_id,
     _test_router_two_routers,
-    generate_random_suffix,
-    get_runtime,
 )
+from tests.router.helper import generate_random_suffix, get_runtime
 from tests.utils.constants import ROUTER_MODEL_NAME
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.port_utils import allocate_ports, deallocate_ports
