@@ -4,6 +4,9 @@
 set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
+SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+source "$SCRIPT_DIR/../../../common/launch_utils.sh"
+
 # Set deterministic hash for KV event IDs
 export PYTHONHASHSEED=0
 
@@ -12,24 +15,9 @@ MODEL="Qwen/Qwen3-0.6B"
 BLOCK_SIZE=64
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
-echo "=========================================="
-echo "Launching Disaggregated + KV Routing (4 GPUs)"
-echo "=========================================="
-echo "Model:       $MODEL"
-echo "Frontend:    http://localhost:$HTTP_PORT"
-echo "=========================================="
-echo ""
-echo "Example test command:"
-echo ""
-echo "  curl http://localhost:${HTTP_PORT}/v1/chat/completions \\"
-echo "    -H 'Content-Type: application/json' \\"
-echo "    -d '{"
-echo "      \"model\": \"${MODEL}\","
-echo "      \"messages\": [{\"role\": \"user\", \"content\": \"Explain why Roger Federer is considered one of the greatest tennis players of all time\"}],"
-echo "      \"max_tokens\": 32"
-echo "    }'"
-echo ""
-echo "=========================================="
+
+print_launch_banner "Launching Disaggregated + KV Routing (4 GPUs)" "$MODEL" "$HTTP_PORT"
+
 
 # Start frontend with KV routing
 # The frontend will automatically detect prefill workers and activate an internal prefill router
@@ -74,4 +62,7 @@ CUDA_VISIBLE_DEVICES=3 python3 -m dynamo.vllm \
     --enforce-eager \
     --disaggregation-mode prefill \
     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
-    --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20083","enable_kv_cache_events":true}'
+    --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20083","enable_kv_cache_events":true}' &
+
+# Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
+wait_any_exit
