@@ -15,6 +15,9 @@ export SERVED_MODEL_NAME=${SERVED_MODEL_NAME:-"openai/gpt-oss-120b"}
 export PREFILL_ENGINE_ARGS=${PREFILL_ENGINE_ARGS:-"$DYNAMO_HOME/examples/backends/trtllm/engine_configs/gpt-oss-120b/prefill.yaml"}
 export DECODE_ENGINE_ARGS=${DECODE_ENGINE_ARGS:-"$DYNAMO_HOME/examples/backends/trtllm/engine_configs/gpt-oss-120b/decode.yaml"}
 
+HTTP_PORT="${DYN_HTTP_PORT:-8000}"
+print_launch_banner "Launching Disaggregated Serving (8 GPUs)" "$SERVED_MODEL_NAME" "$HTTP_PORT"
+
 # run frontend
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
 python3 -m dynamo.frontend --router-mode round-robin &
