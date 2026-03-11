@@ -97,6 +97,10 @@ def test_example(tmp_path):
 **Always flag** any test that writes to paths relative to `__file__` or the repo
 root. This pollutes the working tree and creates untracked noise in `git status`.
 
+**Exception:** The autouse `logger` fixture writes to `test_output/<test_name>/`
+by design -- this is sanctioned shared infra, not ad-hoc test output. Do not
+flag it.
+
 ```python
 # BAD -- writes into the repo alongside the test file; flag this
 output = os.path.join(os.path.dirname(__file__), "scratch_output.txt")
@@ -337,22 +341,24 @@ to execute in parallel without conflicts.
       assert results["worker-1"] == "registered"
   ```
 
-- **Reusing namespace/component/endpoint names.** Dynamo workers register under
-  `dyn://{namespace}.{component}.{endpoint}` in etcd/NATS. Hardcoded names
-  collide under parallel execution.
+- **Colliding `dyn://` registration paths across tests.** Dynamo workers register
+  under `dyn://{namespace}.{component}.{endpoint}` in etcd/NATS. Hardcoding
+  namespace, component, and endpoint strings is fine on its own -- the problem
+  is when two tests that share an etcd/NATS instance use the **same full path**,
+  causing flaky collisions under parallel execution.
 
-  **Always flag** hardcoded strings like `"dynamo"`, `"backend"`, `"generate"` in
-  test setup. Use `generate_random_suffix()` from `tests/router/common.py`.
+  **Always flag** tests whose full `dyn://` path can collide with another test's.
+  The simplest fix is to randomize at least one segment (typically namespace).
 
   ```python
-  # BAD -- hardcoded namespace collides with other tests; flag this
+  # BAD -- two tests using this identical path will collide
   namespace = "dynamo"
   component = "backend"
   endpoint = f"dyn://{namespace}.{component}.generate"
 
-  # GOOD -- unique per test run
+  # GOOD -- unique namespace prevents collisions; component/endpoint can stay fixed
   from tests.router.common import generate_random_suffix
-  namespace = f"test-namespace-{generate_random_suffix()}"
+  namespace = f"dynamo-{generate_random_suffix()}"
   component = "backend"
   endpoint = f"dyn://{namespace}.{component}.generate"
   ```
