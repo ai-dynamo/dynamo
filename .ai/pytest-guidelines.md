@@ -4,6 +4,10 @@ Rules and conventions for Python tests in this repository.
 
 ## Running Tests
 
+**Always run your tests locally before pushing to CI.** Every failed CI run
+wastes shared GPU minutes and blocks other PRs. A local run catches most
+failures in seconds.
+
 Always use the venv-aware invocation -- never bare `pytest`:
 
 ```bash
@@ -42,22 +46,16 @@ python3 -m pytest tests/serve/ -k "aggregated and not disagg" -v --tb=short
 
 ## Critical Rules
 
-These are the most common sources of flaky, non-hermetic tests. Violating any of
-these will block your PR.
-
-Hardcoded values in tests are cringy code. They signal that the author didn't
-think about parallel execution, reproducibility, or the next person who has to
-debug a phantom CI failure at 2 AM. Don't be that person.
+These are the most common sources of flaky, non-hermetic tests. Violating any
+will block your PR.
 
 ### DO NOT hardcode ports
 
-Never use literal port numbers (e.g. `port=8000`, `port=8081`) in test code. Two
-tests that share a port will collide when run in parallel, causing mysterious
-failures that only reproduce in CI.
+**Always flag** literal port numbers (`port=8000`, `port=8081`) in test code.
+Parallel tests sharing any resource (port, file, env var, etc.) will collide.
 
-**Instead:** Use the `dynamo_dynamic_ports` fixture (allocates `frontend_port` +
-`system_ports` per test) or call `allocate_port()` / `allocate_ports()` directly
-from `tests.utils.port_utils`.
+Use `dynamo_dynamic_ports` (allocates `frontend_port` + `system_ports` per test)
+or `allocate_port()` / `allocate_ports()` from `tests.utils.port_utils`.
 
 ```python
 # BAD
@@ -71,16 +69,22 @@ def test_example(dynamo_dynamic_ports):
 
 ### DO NOT hardcode temp paths
 
-Never write to fixed paths like `/tmp/my-test.log` or `/tmp/output/`. The next test
-(or a parallel worker) will pick up stale files, creating subtle side-effects.
+**Always flag** fixed paths like `/tmp/my-test.log` or `/tmp/output/` in test code.
+Parallel workers will clobber each other's files.
 
-**Instead:** Use Python's `tempfile` module or pytest's `tmp_path` fixture. Both
-provide unique paths and auto-cleanup.
+Use pytest's `tmp_path` fixture or Python's `tempfile` module -- both provide
+unique paths with auto-cleanup.
 
 ```python
-# BAD
+# BAD -- hardcoded path collides with parallel tests
 with open("/tmp/test-output.json", "w") as f:
     json.dump(result, f)
+
+# BAD -- "ghost fixture": accepts tmp_path but ignores it and writes to /tmp anyway.
+# Flag any test that requests tmp_path but still references /tmp/ or hardcoded paths.
+def test_example(tmp_path):
+    with open("/tmp/test-output.json", "w") as f:
+        json.dump(result, f)
 
 # GOOD
 def test_example(tmp_path):
@@ -88,27 +92,38 @@ def test_example(tmp_path):
     out.write_text(json.dumps(result))
 ```
 
-Also: never dump output files into the repo working tree. This pollutes the repo and
-risks clobbering real files, especially in dev (root user) containers.
+### DO NOT write output files into the repository tree
+
+**Always flag** any test that writes to paths relative to `__file__` or the repo
+root. This pollutes the working tree and creates untracked noise in `git status`.
+
+```python
+# BAD -- writes into the repo alongside the test file; flag this
+output = os.path.join(os.path.dirname(__file__), "scratch_output.txt")
+with open(output, "w") as f:
+    f.write("debug output\n")
+
+# GOOD -- use tmp_path; cleaned up automatically
+def test_example(tmp_path):
+    output = tmp_path / "scratch_output.txt"
+    output.write_text("debug output\n")
+```
 
 ### DO NOT write custom engine start/stop logic
 
-Never write your own subprocess management code to launch, health-check, or tear down
-engines (vLLM, SGLang, TRT-LLM) or infrastructure (NATS, etcd, frontends). Homegrown
-lifecycle code inevitably leaks processes, misses cleanup on failure, or races with
-parallel tests.
+**Always flag** hand-rolled `subprocess.Popen` / `os.system` / `time.sleep`
+patterns for engine or infra lifecycle. Homegrown lifecycle code leaks processes,
+misses cleanup on failure, and races with parallel tests.
 
-**Instead:** Use the existing fixtures and context managers:
+Use the existing fixtures and context managers:
 
 - **Fixtures:** `runtime_services_dynamic_ports`, `start_services_with_http`,
   `start_services_with_grpc`, `start_services_with_mocker`
 - **Context managers:** `DynamoFrontendProcess`, `DynamoWorkerProcess`,
   `ManagedProcess`, `EtcdServer`, `NatsServer`
 
-These handle health-checking, port allocation, log capture, straggler cleanup,
-and graceful teardown automatically. If your test needs something the existing
-infrastructure doesn't support, extend the shared fixtures -- don't reinvent them
-in your test file.
+These handle health-checking, port allocation, log capture, and graceful teardown
+automatically. Extend the shared fixtures if needed -- don't reinvent them.
 
 ```python
 # BAD -- hand-rolled subprocess management
@@ -127,19 +142,14 @@ def test_example(start_services_with_mocker):
 
 ### DO NOT copy-paste test infrastructure -- reuse and refactor
 
-Do not duplicate setup logic, helper functions, or fixture code across test files.
-Copy-pasted code means the same bug gets fixed in one place but not the others, and
-changing a shared pattern requires hunting down every copy.
+**Always flag** duplicated setup logic, helpers, or fixture code across test files.
+Copy-pasted infra means bugs get fixed in one copy but not the others.
 
-**Instead:**
-
-- **Reuse existing fixtures and helpers.** Check `tests/conftest.py`,
-  subdirectory `conftest.py` files, and `tests/utils/` before writing anything new.
-- **Extract shared logic into fixtures or utility functions.** If two or more tests
-  need the same setup, it belongs in a `conftest.py` or `tests/utils/`.
-- **Parametrize rather than duplicate.** If tests differ only in config (model,
-  backend, port count), use `@pytest.mark.parametrize` with indirect fixtures
-  instead of writing separate test functions.
+- Check `tests/conftest.py`, subdirectory `conftest.py` files, and `tests/utils/`
+  before writing anything new.
+- If two or more tests share setup, extract it into a fixture or `tests/utils/`.
+- If tests differ only in config, use `@pytest.mark.parametrize` with indirect
+  fixtures instead of separate functions.
 
 ```python
 # BAD -- same setup copy-pasted across three test files
@@ -162,17 +172,15 @@ def test_vllm_requests(start_serve_deployment, payload_fn):
     assert resp.status_code == 200
 ```
 
-When the existing infrastructure doesn't fit your needs, extend the shared code
-(add a parameter to a fixture, add a helper to `tests/utils/`) rather than forking
-a private copy.
+Extend shared code rather than forking a private copy.
 
 ---
 
 ## Markers
 
-`--strict-markers` and `--strict-config` are enforced in `pyproject.toml`. Using an
-undefined marker **fails collection**. All markers must be registered in both
-`pyproject.toml [tool.pytest.ini_options].markers` and `tests/conftest.py:pytest_configure`.
+`--strict-markers` and `--strict-config` are enforced. Using an undefined marker
+**fails collection**. Register all markers in both `pyproject.toml` and
+`tests/conftest.py:pytest_configure`.
 
 ### Required markers
 
@@ -201,6 +209,9 @@ CI compute is finite. Choose placement carefully:
 
 - Only use `pre_merge` for tests that are **absolutely critical** -- every pre-merge
   test slows down every PR for every contributor.
+- **Tests averaging over 60 seconds should default to `post_merge`** unless they
+  guard a critical path that justifies blocking every PR. If a test must stay
+  `pre_merge` despite being slow, add a comment explaining why.
 - E2E tests involve more components and tend to be flakier. Prefer `post_merge` for
   E2E tests unless they guard a critical path.
 - Consider `nightly` or `weekly` for expensive, GPU-heavy, or stress tests.
@@ -212,15 +223,34 @@ Apply when the test depends on a specific inference backend:
 
 ### Timeouts
 
-Tests that run longer than 30 seconds **must** have `@pytest.mark.timeout(<seconds>)`.
-Set the timeout to **3x the measured average duration** to absorb variance.
+Tests over 30 seconds **must** have `@pytest.mark.timeout(<seconds>)`. Set the
+timeout to **3x measured average** to absorb variance.
 
-Measure your test 5-10 times, then add a timing comment:
+**Always flag** any test that runs over 30 seconds or contains `time.sleep()`,
+polling loops, network calls, or subprocess waits but lacks a
+`@pytest.mark.timeout(...)` marker. This is a **required change, not a style
+suggestion** -- a missing timeout can hang CI indefinitely.
+
+**Also flag** real `time.sleep()` in `pre_merge` + `unit` tests. Unit tests
+should not burn wall-clock time. Mock the sleep, use shared fixtures, or
+reclassify as `integration`/`e2e` with `@pytest.mark.slow`.
 
 ```python
+# BAD -- sleeps and loops with no timeout marker; can hang CI forever
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+@pytest.mark.unit
+def test_poll_server():
+    for _ in range(50):
+        time.sleep(0.1)
+    assert True
+
+# GOOD -- timeout prevents infinite hangs
 @pytest.mark.timeout(300)  # ~100s average, 3x buffer
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+@pytest.mark.unit
 def test_vllm_aggregated(...):
-    # on average this test takes about 1.5 minutes
     ...
 ```
 
@@ -251,30 +281,117 @@ def test_vllm_aggregated(start_serve_deployment):
 
 ## Async Tests
 
-`asyncio_mode = "auto"` is configured in `pyproject.toml`. Do **not** add
-`@pytest.mark.asyncio` manually -- all `async def test_*` functions are collected
-automatically.
+`asyncio_mode = "auto"` is configured in `pyproject.toml`, so all `async def test_*`
+functions are collected automatically.
+
+**Always flag** `@pytest.mark.asyncio` -- this is a **required change, not a style
+suggestion**. The marker is never needed in this repo. Remove it.
+
+```python
+# BAD -- redundant marker; asyncio_mode = "auto" handles this
+@pytest.mark.asyncio
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+@pytest.mark.unit
+async def test_async_endpoint():
+    await asyncio.sleep(0.01)
+
+# GOOD -- no marker needed, pytest collects it automatically
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+@pytest.mark.unit
+async def test_async_endpoint():
+    await asyncio.sleep(0.01)
+```
 
 ## Hermetic Testing
 
-Tests must be isolated and must not interfere with each other. Every test should:
-
-- Run reliably in any order, on any machine, at any time.
-- Produce deterministic results.
-- Not create side-effects for other tests.
-- Clean up properly after itself.
-- Fail fast when something is wrong.
-
-Given enough resources, multiple tests must be able to execute in parallel without
-conflicts or race conditions. See the **Critical Rules** section at the top for the
-three most important requirements (dynamic ports, temp paths, shared fixtures).
+Tests must be isolated. Every test must run in any order, on any machine, and
+produce deterministic results with no side-effects. Multiple tests must be able
+to execute in parallel without conflicts.
 
 ### Additional anti-patterns
 
-- **Reusing namespace/component/endpoint names** across tests that share a
-  registration service. Use unique names per test.
-- **Leaking environment variables**. Use `monkeypatch.setenv()` or save/restore
-  patterns so env changes don't persist across tests.
+- **Module-level mutable state.** **Always flag** any mutable object (`{}`, `[]`,
+  `set()`) at module scope that tests read or write. This makes tests
+  order-dependent and produces phantom xdist failures.
+
+  ```python
+  # BAD -- module-level dict shared across all tests; flag this
+  _shared_results = {}
+
+  def test_a():
+      _shared_results["worker-1"] = "registered"
+
+  def test_b():
+      # Passes only if test_a ran first!
+      assert _shared_results["worker-1"] == "registered"
+
+  # GOOD -- each test gets its own state
+  @pytest.fixture
+  def results():
+      return {}
+
+  def test_a(results):
+      results["worker-1"] = "registered"
+      assert results["worker-1"] == "registered"
+  ```
+
+- **Reusing namespace/component/endpoint names.** Dynamo workers register under
+  `dyn://{namespace}.{component}.{endpoint}` in etcd/NATS. Hardcoded names
+  collide under parallel execution.
+
+  **Always flag** hardcoded strings like `"dynamo"`, `"backend"`, `"generate"` in
+  test setup. Use `generate_random_suffix()` from `tests/router/common.py`.
+
+  ```python
+  # BAD -- hardcoded namespace collides with other tests; flag this
+  namespace = "dynamo"
+  component = "backend"
+  endpoint = f"dyn://{namespace}.{component}.generate"
+
+  # GOOD -- unique per test run
+  from tests.router.common import generate_random_suffix
+  namespace = f"test-namespace-{generate_random_suffix()}"
+  component = "backend"
+  endpoint = f"dyn://{namespace}.{component}.generate"
+  ```
+
+- **Leaking environment variables.** **Always flag** direct `os.environ[...] = ...`
+  or `os.environ.update(...)` in tests. These mutations persist into subsequent
+  tests and cause order-dependent failures.
+
+  ```python
+  # BAD -- env var leaks into every test that runs after this one; flag this
+  def test_service_discovery():
+      os.environ["NATS_SERVER"] = "nats://rogue-server:4222"
+      assert connect()
+
+  # GOOD -- monkeypatch auto-restores after each test
+  def test_service_discovery(monkeypatch):
+      monkeypatch.setenv("NATS_SERVER", "nats://rogue-server:4222")
+      assert connect()
+  ```
+
+- **Mutable default arguments in test helpers.** **Always flag** any function
+  with a mutable default (`[]`, `{}`, `set()`). Defaults are evaluated once and
+  shared across calls, so mutations accumulate silently between invocations.
+
+  ```python
+  # BAD -- registry list is shared across all calls; flag this
+  def register_workers(new_worker, registry=[]):
+      registry.append(new_worker)
+      return registry
+
+  # GOOD -- None sentinel, fresh list each call
+  def register_workers(new_worker, registry=None):
+      if registry is None:
+          registry = []
+      registry.append(new_worker)
+      return registry
+  ```
+
+  See also: `python-guidelines.md` > "Mutable default arguments" for the general rule.
 
 ### Optimization tips
 
@@ -340,6 +457,26 @@ triggers a new warning, either fix the root cause or add a targeted ignore in
 - No blanket `except Exception` -- let failures propagate.
 - Catch only specific exceptions you can actually handle.
 - Prefer fixtures for setup/teardown over try/finally in test bodies.
+
+## Linter Suppression (`# noqa`)
+
+**Always flag** `# noqa` that suppresses warnings for anti-patterns documented in
+these guidelines. If the linter caught a real problem (`E711` for `== None`,
+`E712` for `== True`, `F841` for unused variable), fix the code.
+
+```python
+# BAD -- noqa hides the very bug the linter caught; flag this
+assert error == None  # noqa: E711
+result = compute()    # noqa: F841
+
+# GOOD -- fix the code
+assert error is None
+result = compute()
+assert result == expected
+```
+
+The only acceptable `# noqa` is for genuine false positives. Always explain:
+`# noqa: F401 -- imported for side-effects`.
 
 ## Test File Organization
 
