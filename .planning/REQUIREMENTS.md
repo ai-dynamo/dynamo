@@ -68,11 +68,11 @@
 | IMP-03 | Phase 2 | Pending |
 | IMP-04 | Phase 2 | Pending |
 | IMP-05 | Phase 2 | Pending |
-| VELO-01 | Phase 3 | Pending |
-| VELO-02 | Phase 3 | Pending |
-| VELO-03 | Phase 3 | Pending |
-| VELO-04 | Phase 3 | Pending |
-| VELO-05 | Phase 3 | Pending |
+| VELO-01 | Phase 2 | Pending |
+| VELO-02 | Phase 2 | Pending |
+| VELO-03 | Phase 2 | Pending |
+| VELO-04 | Phase 2 | Pending |
+| VELO-05 | Phase 2 | Pending |
 | COMP-01 | Phase 3 | Pending |
 | COMP-02 | Phase 3 | Pending |
 | COMP-03 | Phase 3 | Pending |
@@ -84,4 +84,4 @@
 
 ---
 *Requirements defined: 2026-03-11*
-*Last updated: 2026-03-11 after initial definition*
+*Last updated: 2026-03-11 after roadmap creation*
