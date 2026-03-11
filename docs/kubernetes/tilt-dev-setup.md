@@ -66,6 +66,8 @@ Press **Space** in the terminal to open the web UI. Press **Ctrl-C** to
 shut everything down (resources remain deployed; run `tilt down` to tear
 them down).
 
+![Tilt web UI showing the operator, CRDs, webhook cert, and infrastructure resources](../assets/img/tilt-ui.png)
+
 ## Configuration
 
 All configuration is optional. The Tiltfile defines sensible defaults for every
