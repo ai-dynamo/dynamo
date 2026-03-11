@@ -39,7 +39,7 @@ struct ListenerState {
     replay_endpoint: Option<String>,
     block_size: u32,
     indexer: Indexer,
-    last_seq: Arc<AtomicU64>,
+    watermark: Arc<AtomicU64>,
 }
 
 pub struct WorkerRegistry {
@@ -47,7 +47,7 @@ pub struct WorkerRegistry {
     indexers: DashMap<IndexerKey, IndexerEntry>,
     peers: DashMap<String, ()>,
     /// Persists across unregister/register cycles so gap detection works after re-registration.
-    last_seqs: DashMap<(WorkerId, u32), Arc<AtomicU64>>,
+    watermarks: DashMap<(WorkerId, u32), Arc<AtomicU64>>,
     /// Saved listener state for pause/resume. Populated on register, kept on pause.
     listener_states: DashMap<(WorkerId, u32), ListenerState>,
     num_threads: usize,
@@ -62,7 +62,7 @@ impl WorkerRegistry {
             workers: DashMap::new(),
             indexers: DashMap::new(),
             peers: DashMap::new(),
-            last_seqs: DashMap::new(),
+            watermarks: DashMap::new(),
             listener_states: DashMap::new(),
             num_threads,
             ready_tx,
@@ -147,9 +147,9 @@ impl WorkerRegistry {
             bail!("instance {instance_id} dp_rank {dp_rank} already registered");
         }
 
-        // Reuse last_seq if it survived a previous unregister (preserves gap detection).
-        let last_seq = self
-            .last_seqs
+        // Reuse watermark if it survived a previous unregister (preserves gap detection).
+        let watermark = self
+            .watermarks
             .entry((instance_id, dp_rank))
             .or_insert_with(|| Arc::new(AtomicU64::new(u64::MAX)))
             .clone();
@@ -165,7 +165,7 @@ impl WorkerRegistry {
                 replay_endpoint: replay_endpoint.clone(),
                 block_size: bs,
                 indexer: indexer.clone(),
-                last_seq: last_seq.clone(),
+                watermark: watermark.clone(),
             },
         );
 
@@ -184,7 +184,7 @@ impl WorkerRegistry {
                 child_cancel,
                 ready,
                 replay_endpoint,
-                last_seq,
+                watermark,
             )
             .await;
         });
@@ -341,7 +341,7 @@ impl WorkerRegistry {
         let bs = state.block_size;
         let indexer = state.indexer.clone();
         let replay_ep = state.replay_endpoint.clone();
-        let last_seq = state.last_seq.clone();
+        let watermark = state.watermark.clone();
         drop(state);
 
         tokio::spawn(async move {
@@ -354,7 +354,7 @@ impl WorkerRegistry {
                 child_cancel,
                 ready,
                 replay_ep,
-                last_seq,
+                watermark,
             )
             .await;
         });

@@ -28,8 +28,8 @@ fn calculate_backoff_ms(consecutive_errors: u32) -> u64 {
     )
 }
 
-/// Sentinel value for `last_seq`: indicates no batch has been processed yet.
-const SEQ_UNSET: u64 = u64::MAX;
+/// Sentinel value for `watermark`: indicates no batch has been processed yet.
+const WATERMARK_UNSET: u64 = u64::MAX;
 
 /// Replay missed batches from the engine's ROUTER socket.
 ///
@@ -45,7 +45,7 @@ async fn replay_gap(
     block_size: u32,
     indexer: &Indexer,
     warning_count: &Arc<AtomicU32>,
-    last_seq: &Arc<AtomicU64>,
+    watermark: &Arc<AtomicU64>,
 ) -> u64 {
     tracing::info!(
         worker_id,
@@ -115,7 +115,7 @@ async fn replay_gap(
             let router_event = RouterEvent::new(worker_id, kv_event);
             indexer.apply_event(router_event).await;
         }
-        last_seq.store(seq, Ordering::Release);
+        watermark.store(seq, Ordering::Release);
         replayed += 1;
     }
 
@@ -136,7 +136,7 @@ pub async fn run_zmq_listener(
     cancel: CancellationToken,
     mut ready: watch::Receiver<bool>,
     replay_endpoint: Option<String>,
-    last_seq: Arc<AtomicU64>,
+    watermark: Arc<AtomicU64>,
 ) {
     tracing::info!(worker_id, dp_rank, zmq_address, "ZMQ listener starting");
 
@@ -248,8 +248,8 @@ pub async fn run_zmq_listener(
                 let seq = u64::from_be_bytes(seq_bytes[..8].try_into().unwrap());
 
                 // Gap detection
-                let prev = last_seq.load(Ordering::Acquire);
-                if prev != SEQ_UNSET && seq > prev + 1 {
+                let prev = watermark.load(Ordering::Acquire);
+                if prev != WATERMARK_UNSET && seq > prev + 1 {
                     let gap_start = prev + 1;
                     tracing::warn!(
                         worker_id, dp_rank,
@@ -260,7 +260,7 @@ pub async fn run_zmq_listener(
                         Some(sock) => {
                             replay_gap(
                                 sock, gap_start, seq, worker_id, dp_rank,
-                                block_size, &indexer, &warning_count, &last_seq,
+                                block_size, &indexer, &warning_count, &watermark,
                             ).await;
                         }
                         None => tracing::warn!(
@@ -272,9 +272,9 @@ pub async fn run_zmq_listener(
                     }
                 }
 
-                // After replay, last_seq may have advanced past the current
+                // After replay, watermark may have advanced past the current
                 // batch — skip to avoid double-apply.
-                if last_seq.load(Ordering::Acquire) >= seq {
+                if watermark.load(Ordering::Acquire) >= seq {
                     continue;
                 }
 
@@ -294,7 +294,7 @@ pub async fn run_zmq_listener(
                     indexer.apply_event(router_event).await;
                     messages_processed += 1;
                 }
-                last_seq.store(seq, Ordering::Release);
+                watermark.store(seq, Ordering::Release);
             }
         }
     }
