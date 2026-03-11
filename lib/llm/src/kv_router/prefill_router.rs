@@ -537,7 +537,7 @@ impl PrefillRouter {
                     r.peek_next_worker()
                 }
                 .ok_or_else(|| anyhow::anyhow!("No workers available for prefill"))?;
-                Ok((worker_id, 0))
+                Ok((worker_id, u32::MAX))
             }
         }
     }
