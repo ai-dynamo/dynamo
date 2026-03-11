@@ -5,11 +5,11 @@
 # Image diffusion worker (text-to-image). Default model: FLUX.1-dev (~38 GB VRAM).
 # GPUs: 1
 
-SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
-source "$SCRIPT_DIR/../../../common/launch_utils.sh"
-
 set -e
 trap 'echo Cleaning up...; kill 0' EXIT
+
+SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
 # Defaults
 MODEL_PATH="black-forest-labs/FLUX.1-dev"

@@ -5,11 +5,11 @@
 # Diffusion language model (LLaDA2.0). Text generation via iterative refinement.
 # GPUs: 1
 
-SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
-source "$SCRIPT_DIR/../../../common/launch_utils.sh"
-
 set -e
 trap 'echo Cleaning up...; kill 0' EXIT
+
+SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
 # Model configuration
 MODEL_PATH="inclusionAI/LLaDA2.0-mini-preview"

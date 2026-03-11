@@ -5,11 +5,11 @@
 # Text-to-video generation with Wan2.1 models.
 # GPUs: 1 (--wan-size 1b) or 2 (--wan-size 14b)
 
-SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
-source "$SCRIPT_DIR/../../../common/launch_utils.sh"
-
 set -e
 trap 'echo Cleaning up...; kill 0' EXIT
+
+SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
 # Defaults
 WAN_SIZE="1b"
