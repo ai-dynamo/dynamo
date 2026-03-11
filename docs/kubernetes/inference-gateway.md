@@ -297,8 +297,9 @@ a. Query models:
 
 ```bash
 # in the second terminal where you GATEWAY_URL is set
-
 curl $GATEWAY_URL/v1/models | jq .
+# or if you added the host name to http route:
+curl -H "Host: llama3-70b-disagg.example.com" $GATEWAY_URL/v1/models | jq .
 ```
 
 Sample output:

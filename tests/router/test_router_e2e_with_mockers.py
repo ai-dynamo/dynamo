@@ -22,6 +22,7 @@ import pytest
 
 from tests.router.common import (  # utilities
     _test_busy_threshold_endpoint,
+    _test_disagg_direct_mode,
     _test_python_router_bindings,
     _test_router_basic,
     _test_router_decisions,
@@ -1179,3 +1180,62 @@ def test_busy_threshold_endpoint(
             test_payload=TEST_PAYLOAD,
             request_plane=request_plane,
         )
+
+
+@pytest.mark.timeout(180)
+def test_disagg_direct_mode_epp_headers(
+    request,
+    runtime_services_dynamic_ports,
+    predownload_tokenizers,
+):
+    """E2E: disaggregated serving with Direct routing mode (simulating GAIE EPP).
+
+    This test verifies the EPP-driven routing path used in the GAIE deploy recipe:
+      - Frontend runs with --router-mode direct (no autonomous worker selection)
+      - Worker IDs are supplied via x-worker-instance-id / x-prefill-instance-id headers
+      - Prefill and decode workers are separate pools
+
+    Validates:
+      1. Requests with explicit headers succeed and report correct worker IDs
+      2. Requests without headers are rejected (Direct mode enforces header routing)
+    """
+    logger.info("Starting disaggregated Direct-mode EPP headers E2E test")
+
+    namespace_suffix = generate_random_suffix()
+    shared_namespace = f"test-namespace-{namespace_suffix}"
+
+    mocker_args = {
+        "speedup_ratio": SPEEDUP_RATIO,
+        "block_size": BLOCK_SIZE,
+    }
+
+    with DisaggMockerProcess(
+        request,
+        namespace=shared_namespace,
+        worker_type="prefill",
+        mocker_args=mocker_args,
+        num_mockers=2,
+        request_plane="nats",
+    ) as prefill_workers:
+        logger.info(f"Prefill workers using endpoint: {prefill_workers.endpoint}")
+
+        with DisaggMockerProcess(
+            request,
+            namespace=shared_namespace,
+            worker_type="decode",
+            mocker_args=mocker_args,
+            num_mockers=2,
+            request_plane="nats",
+        ) as decode_workers:
+            logger.info(f"Decode workers using endpoint: {decode_workers.endpoint}")
+
+            frontend_port = get_unique_ports(request, num_ports=1)[0]
+
+            _test_disagg_direct_mode(
+                prefill_workers=prefill_workers,
+                decode_workers=decode_workers,
+                request=request,
+                frontend_port=frontend_port,
+                test_payload=TEST_PAYLOAD,
+                request_plane="nats",
+            )
