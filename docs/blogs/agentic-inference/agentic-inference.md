@@ -51,13 +51,17 @@ Agent harnesses are increasingly adopting `v1/responses` and `v1/messages` over 
 </tr>
 </table>
 
-We have also invested in day-0 tool call and reasoning parsing support for various open-source models. If you find that a model is not supported, please [open an issue](https://github.com/ai-dynamo/dynamo/issues).
+We have also invested in day-0 tool call and reasoning parsing support for various open-source models. If you find that a model is not supported, please [open an issue](https://github.com/ai-dynamo/dynamo/issues) or use the [tool-call-parser-generator](https://github.com/ai-dynamo/dynamo/blob/main/.claude/skills/tool-parser-generator/SKILL.md) skill to generate it with your harness of choice.
 
 ### Agent Hints: The Harness-Orchestrator Interface
 
 Agent workloads have a distinct set of characteristics when compared to traditional multi-turn chat workloads. When using coding agents, the user waits for a final result, not individual token streams, so the orchestrator can reorder and prioritize requests across agents without affecting the end-user experience. Sessions run for minutes to [even days](https://factory.ai/news/missions) with long tool-call pauses, and the harness has global context: which agents are mid-task and waiting on tool calls, which just spawned, how many turns remain in a session, and whether the current call is a quick lookup or a long synthesis. This is enough to optimize inference scheduling in ways that traditional serving cannot.
 
-Today, inference servers see anonymous tokenized requests with none of this "global context". Dynamo’s new agent hints extension was designed to bridge this gap. It allows any harness to attach structured hints to a request across all three API endpoints, giving the router and runtime the context they need to make agent aware scheduling and caching decisions. This is a v1 API that we are actively co-designing with the community and would love feedback from teams building agent harnesses on what signals are most useful. Please reach out to us if you have any ideas or feedback!
+Today, inference servers see anonymous tokenized requests with none of this "global context".
+
+![Where nvext fits in the agentic protocol stack alongside MCP and A2A](./protocol-stack.svg)
+
+Dynamo’s new agent hints extension was designed to bridge this gap. It allows any harness to attach structured hints to a request across all three API endpoints, giving the router and runtime the context they need to make agent aware scheduling and caching decisions. This is a v1 API that we are actively co-designing with the community and would love feedback from teams building agent harnesses on what signals are most useful. Please reach out to us if you have any ideas or feedback!
 
 ```json
 {
@@ -105,25 +109,7 @@ At the router, incoming requests enter a `BinaryHeap<QueueEntry>` ordered by eff
 
 Once dispatched, Dynamo passes `priority` through to the engine directly. SGLang, vLLM, and TRT-LLM all support priority-based request scheduling, and engines like SGLang support priority-based radix cache eviction where lower-priority blocks are evicted first under memory pressure.
 
-```mermaid
-sequenceDiagram
-    participant AF as Agent Framework
-    participant R as Dynamo Router
-    participant E as Engine (SGLang/vLLM)
-
-    AF->>R: POST /v1/responses<br/>nvext.agent_hints:<br/>  priority: 10<br/>  latency_sensitivity: 0.9
-
-    Note over R: Router Queue (binary heap)<br/>synthesis turn [p10] → dispatched first<br/>background task [p1] → waits
-
-    R->>E: generate(priority=10)
-
-    Note over E: Engine scheduler<br/>reorders requests by priority
-
-    Note over E: Eviction policy<br/>(--radix-eviction-policy priority)<br/>low-priority blocks evicted first
-
-    E-->>R: tokens (streaming)
-    R-->>AF: SSE response
-```
+![How latency_sensitivity and priority flow from harness through router dispatch to engine treatment](./two-gates.svg)
 
 ### Agentic Workload Routing Strategies
 
@@ -165,7 +151,7 @@ Agentic workloads produce blocks with vastly different reuse value but default L
 | Thinking/reasoning tokens | Typically zero reuse after reasoning loop closes (a significant portion of output) | Near-zero |
 | Subagent KV | Multiple turns then agent dies. No need to retain | Near-zero |
 
-LRU sees only recency. In a high traffic environment, a wait for the completion of a called tool (2-30 seconds while the agent waits for an external API) might cause the agent's blocks to age out and when the agent resumes, the entire prefix must be recomputed. To solve this, we need to provide the orchestrator granular APIs to control which blocks should be retained, where they should live, and for how long.
+LRU sees only recency. In a high traffic environment, a wait for the completion of a called tool (2-30 seconds while the agent waits for an external API) might cause the agent's blocks to age out and when the agent resumes, the entire prefix must be recomputed. To solve this, we need to provide the orchestrator APIs to control which blocks should be retained, where they should live, and for how long.
 
 ### KV Cache as a Shared Resource
 
@@ -179,7 +165,7 @@ Blocks follow a write-through path: when a worker computes KV for a prefix, the 
 
 This directly solves the subagent cold-start problem. When the lead agent computes tool definitions and system prompt, those blocks write through to shared storage. When subagent 1 spawns on a different worker, the router queries the Flash Indexer, finds the blocks in shared storage, and the worker loads them via NIXL (RDMA read) instead of recomputing from scratch. Subagent 2 does the same. Four redundant prefill computations become one compute and three loads. The same mechanism addresses cache coherence in disaggregated prefill-decode serving. In disagg mode, the prefill worker computes KV and transfers it to the decode worker via NIXL. The decode worker generates tokens, producing new KV state. On the next turn, a prefill worker needs both the original prefix and the generated tokens from turn 1, but those live only on the decode worker. With shared storage, the decode worker writes its new blocks to the common tier and any prefill worker can fetch them on the next turn.
 
-Multi-tier storage solves sharing and persistence, but blocks still arrive on GPU only after the request hits the worker. The missing piece for agentic systems is prefetch: the harness knows when an agent's tool call is about to return, which means it knows which blocks will be needed and when. We are building prefetch hooks so the harness can signal "bring these blocks from storage to GPU ahead of the next request." Combined with the retention APIs (below), this gives the harness full lifecycle control: pin blocks to prevent eviction, set priority to control eviction ordering, and prefetch blocks proactively before they are needed.
+Multi-tier storage solves sharing and persistence, but blocks still arrive on GPU only after the request hits the worker. The missing piece for agentic systems is prefetch: the harness can leverage historical timing data to predict when an agent's tool call might return, which means it knows which blocks will be needed and when. We are building prefetch hooks so the harness can signal "bring these blocks from storage to GPU ahead of the next request." Combined with the retention APIs (below), this gives the harness full lifecycle control: pin blocks to prevent eviction, set priority to control eviction ordering, and prefetch blocks proactively before they are needed.
 
 ![During tool calls, KV blocks offload to host memory and storage, then prefetch back to GPU before the next LLM call.](./tool-call-offload-prefetch.svg)
 
@@ -199,30 +185,8 @@ Consider a typical Claude Code session. The lead agent runs for 20+ turns, accum
 
 ![Lead agent conversation flow branches to a sub-agent. The sub-agent's ephemeral KV is evicted on session end.](./subagent-lifecycle-vertical.svg)
 
-The retention primitives from above (priority, TTL, token ranges) give us the building blocks. What is missing is the ability to associate them with sessions. If the harness can tag a subagent's requests as belonging to a session and mark that session's KV as ephemeral, the evictor can target those blocks first and skip writing them to shared storage entirely. When the subagent terminates, its session's blocks are the first to reclaim. When the lead agent summarizes context, the old history blocks drop to the lowest priority. The same mechanism applies to thinking tokens: the engine can detect `<think>` boundaries during generation and tag those blocks as ephemeral at insertion time, so they skip L2 write-back and evict before normal blocks without any external signal. The design space here is wide: harness-driven session tagging, engine-native semantic detection, hybrid approaches that combine both. We are actively exploring multiple directions and expect the right answer will vary by workload and framework.
+The retention primitives from above (priority, TTL, token ranges) give us the building blocks. What is missing is the ability to associate them with sessions. If the harness can tag a subagent's requests as belonging to a session and mark that session's KV as ephemeral, the evictor can target those blocks first and skip writing them to shared storage entirely. When the subagent terminates, its session's blocks are the first to reclaim. The same mechanism applies to thinking tokens: the engine can detect `<think>` boundaries during generation and tag those blocks as ephemeral at insertion time, so they skip L2 write-back and evict before normal blocks without any external signal. The design space here is wide: harness-driven session tagging, engine-native semantic detection, hybrid approaches that combine both. We are actively exploring multiple directions and expect the right answer will vary by workload and framework.
 
-## Active Research Directions
+## Closing the Gap
 
-This post covers where Dynamo is today and the directions we are actively building toward. Here is what is next on the roadmap:
-
-### Distributed KV cache in KVBM
-The write-through multi-tier hierarchy exists, but retention metadata (priority, TTL) does not yet travel with blocks across workers. The next milestone is extending retention semantics across the shared storage tier so the harness can pin a block once and have it survive across the cluster.
-
-### Prefetch hooks
-The harness knows when a tool call is about to return and which blocks the next request will need. We are building APIs for the harness to signal prefetch intent so the orchestrator can move blocks from storage to GPU ahead of time, eliminating the load latency on cache-hit paths.
-
-### Semantic KV cache awareness
-Today, blocks are identified by sequence hash. They have no type information. We want to associate semantic metadata with blocks: is this a system prompt, a tool definition, a reasoning chain, a conversation turn? This enables policies like "always replicate tool definitions across workers" or "never offload checkpoints to cold storage," and gives the orchestrator vocabulary to reason about cache contents by role rather than token range.
-
-### Engine-level optimizations
-Dynamo integrates with SGLang, vLLM, and TRT-LLM, and we are working with all three teams on runtime-level improvements for agentic workloads. One example: we prototyped a decode-side radix cache in SGLang ([PR #19746](https://github.com/sgl-project/sglang/pull/19746)) that matches cached prefixes on the decode worker and transfers only delta KV in disaggregated serving. With ~91% prefix reuse on Qwen3-32B (3P1D on B200), this achieved 8.1x p50 TTFT improvement and 1.32x throughput.
-
-### CMX: Datacenter-Scale KV Storage
-Looking further out, NVIDIA's CMX (Context Memory Storage) platform extends this hierarchy to datacenter scale. Built on BlueField-4 DPUs and NIXL, CMX provides RDMA-speed access to networked KV storage. At [VAST Forward 2026](https://www.hpcwire.com/2026/03/02/blasting-through-the-gpu-memory-wall-with-nvidias-new-cmx-platform/), NVIDIA and VAST demonstrated 20x TTFT improvement by fetching KV cache from VAST storage via CMX instead of recomputing. For agentic workloads where context persists across sessions and spans hundreds of workers, treating storage as a first-class cache tier changes the economics entirely. The KVBM already achieves 2.2x-12x TTFT improvement depending on the tier hit. CMX will extend this to shared storage with hardware-accelerated data movement.
-
-### `nvext` API co-design
-The `agent_hints` and `cache_control` fields are a v1 API. We want input from teams building agent harnesses on what signals matter most. If you are building on top of Dynamo or thinking about cache-aware inference for your workloads, we would love to collaborate. Reach out on [GitHub](https://github.com/ai-dynamo/dynamo) or tag us on X: [@0xishand](https://x.com/0xishand), [@KranenKyle](https://x.com/KranenKyle), [@flowpow123](https://x.com/flowpow123).
-
----
-
-The code is at [github.com/ai-dynamo/dynamo](https://github.com/ai-dynamo/dynamo).
+The biggest optimization surface in agentic inference is the gap between what the harness knows and what the infrastructure can see. Which agents are blocked, which are about to resume, which KV is worth keeping, which can be thrown away -- all of this context exists at the harness layer but never crosses the API boundary. `nvext.agent_hints` is our first cut at closing that gap: a small set of structured signals that let the orchestrator make informed routing, scheduling, and cache management decisions instead of treating every request as anonymous tokens. This is a v1 API and we are actively evolving it. If you are building agent harnesses, running open-source models for agentic workloads, or thinking about cache-aware inference, we want to hear what signals matter most for your use case. Reach out on [GitHub](https://github.com/ai-dynamo/dynamo) or tag us on X: [@0xishand](https://x.com/0xishand), [@KranenKyle](https://x.com/KranenKyle), [@flowpow123](https://x.com/flowpow123).
