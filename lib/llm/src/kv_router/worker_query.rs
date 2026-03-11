@@ -22,7 +22,7 @@ use tokio::sync::{Mutex, Semaphore};
 
 use crate::kv_router::Indexer;
 use crate::kv_router::indexer::{LocalKvIndexer, WorkerKvQueryRequest, WorkerKvQueryResponse};
-use crate::kv_router::protocols::{DpRank, RouterEvent, WorkerId};
+use crate::kv_router::protocols::{DpRank, KvCacheEventData, RouterEvent, WorkerId};
 use crate::kv_router::worker_kv_indexer_query_endpoint;
 
 // Recovery retry configuration
@@ -40,6 +40,7 @@ struct RecoveryState {
     last_applied_id: Option<u64>,
     max_seen_live_id: Option<u64>,
     recovery_inflight: bool,
+    resume_from_next_live: bool,
 }
 
 #[derive(Debug, Default)]
@@ -339,11 +340,75 @@ impl WorkerQueryClient {
         }
     }
 
+    async fn apply_worker_clear_barrier_locked(
+        self: &Arc<Self>,
+        worker_state: &mut WorkerState,
+        event: RouterEvent,
+    ) {
+        let worker_id = event.worker_id;
+        let clear_dp_rank = event.event.dp_rank;
+        let clear_event_id = event.event.event_id;
+        let mut tracked_dp_ranks = worker_state.known_dp_ranks.clone();
+        tracked_dp_ranks.insert(clear_dp_rank);
+        for entry in &self.recovery_states {
+            let &(entry_worker_id, entry_dp_rank) = entry.key();
+            if entry_worker_id == worker_id {
+                tracked_dp_ranks.insert(entry_dp_rank);
+            }
+        }
+
+        worker_state.known_dp_ranks = tracked_dp_ranks.clone();
+        worker_state.epoch += 1;
+        let clear_key = (worker_id, clear_dp_rank);
+
+        for dp_rank in tracked_dp_ranks {
+            let key = (worker_id, dp_rank);
+            let recovery_state = self.get_or_create_recovery_state(key);
+            let mut recovery_state = recovery_state.lock().await;
+            recovery_state.max_seen_live_id = None;
+            recovery_state.recovery_inflight = false;
+            if key == clear_key {
+                recovery_state.last_applied_id = Some(clear_event_id);
+                recovery_state.resume_from_next_live = false;
+            } else {
+                recovery_state.resume_from_next_live = true;
+            }
+        }
+
+        tracing::info!(
+            "Applying clear barrier for worker {worker_id}; invalidating recovery for {} dp_ranks",
+            worker_state.known_dp_ranks.len()
+        );
+        self.indexer.apply_event(event).await;
+    }
+
+    async fn handle_cleared_event(self: &Arc<Self>, event: RouterEvent) {
+        let worker_state = self.get_or_create_worker_state(event.worker_id);
+        let mut worker_state = worker_state.lock().await;
+        self.apply_worker_clear_barrier_locked(&mut worker_state, event)
+            .await;
+    }
+
     pub(crate) async fn handle_live_event(self: &Arc<Self>, event: RouterEvent) {
         let worker_id = event.worker_id;
         let dp_rank = event.event.dp_rank;
         let event_id = event.event.event_id;
         let key = (worker_id, dp_rank);
+
+        if matches!(&event.event.data, KvCacheEventData::Cleared) {
+            let recovery_state = self.get_or_create_recovery_state(key);
+            let is_stale = {
+                let recovery_state = recovery_state.lock().await;
+                recovery_state
+                    .last_applied_id
+                    .is_some_and(|last_applied_id| event_id <= last_applied_id)
+            };
+            if !is_stale {
+                self.handle_cleared_event(event).await;
+            }
+            return;
+        }
+
         let recovery_state = self.get_or_create_recovery_state(key);
 
         enum Action {
@@ -356,49 +421,60 @@ impl WorkerQueryClient {
         let action = {
             let mut recovery_state = recovery_state.lock().await;
 
-            match recovery_state.last_applied_id {
-                None => {
-                    recovery_state.max_seen_live_id = Some(
-                        recovery_state
-                            .max_seen_live_id
-                            .map_or(event_id, |max_seen| max_seen.max(event_id)),
-                    );
-                    if !recovery_state.recovery_inflight {
-                        recovery_state.recovery_inflight = true;
-                        Action::SpawnFullRestore
-                    } else {
-                        Action::Drop
-                    }
+            if recovery_state.resume_from_next_live {
+                if event_id <= recovery_state.last_applied_id.unwrap_or(0) {
+                    Action::Drop
+                } else {
+                    recovery_state.resume_from_next_live = false;
+                    recovery_state.last_applied_id = Some(event_id);
+                    recovery_state.max_seen_live_id = None;
+                    Action::ApplyDirect
                 }
-                Some(last_applied_id) => {
-                    if event_id <= last_applied_id {
-                        Action::Drop
-                    } else if recovery_state.recovery_inflight {
+            } else {
+                match recovery_state.last_applied_id {
+                    None => {
                         recovery_state.max_seen_live_id = Some(
                             recovery_state
                                 .max_seen_live_id
                                 .map_or(event_id, |max_seen| max_seen.max(event_id)),
                         );
-                        Action::Drop
-                    } else if event_id > last_applied_id.saturating_add(1) {
-                        recovery_state.max_seen_live_id = Some(
-                            recovery_state
+                        if !recovery_state.recovery_inflight {
+                            recovery_state.recovery_inflight = true;
+                            Action::SpawnFullRestore
+                        } else {
+                            Action::Drop
+                        }
+                    }
+                    Some(last_applied_id) => {
+                        if event_id <= last_applied_id {
+                            Action::Drop
+                        } else if recovery_state.recovery_inflight {
+                            recovery_state.max_seen_live_id = Some(
+                                recovery_state
+                                    .max_seen_live_id
+                                    .map_or(event_id, |max_seen| max_seen.max(event_id)),
+                            );
+                            Action::Drop
+                        } else if event_id > last_applied_id.saturating_add(1) {
+                            recovery_state.max_seen_live_id = Some(
+                                recovery_state
+                                    .max_seen_live_id
+                                    .map_or(event_id, |max_seen| max_seen.max(event_id)),
+                            );
+                            recovery_state.recovery_inflight = true;
+                            Action::SpawnIncremental {
+                                start_event_id: last_applied_id.saturating_add(1),
+                            }
+                        } else {
+                            recovery_state.last_applied_id = Some(event_id);
+                            if recovery_state
                                 .max_seen_live_id
-                                .map_or(event_id, |max_seen| max_seen.max(event_id)),
-                        );
-                        recovery_state.recovery_inflight = true;
-                        Action::SpawnIncremental {
-                            start_event_id: last_applied_id.saturating_add(1),
+                                .is_some_and(|max_seen| max_seen <= event_id)
+                            {
+                                recovery_state.max_seen_live_id = None;
+                            }
+                            Action::ApplyDirect
                         }
-                    } else {
-                        recovery_state.last_applied_id = Some(event_id);
-                        if recovery_state
-                            .max_seen_live_id
-                            .is_some_and(|max_seen| max_seen <= event_id)
-                        {
-                            recovery_state.max_seen_live_id = None;
-                        }
-                        Action::ApplyDirect
                     }
                 }
             }
@@ -448,7 +524,7 @@ impl WorkerQueryClient {
         result: Result<WorkerKvQueryResponse>,
     ) {
         let worker_state = self.get_or_create_worker_state(key.0);
-        let worker_state = worker_state.lock().await;
+        let mut worker_state = worker_state.lock().await;
         if worker_state.epoch != epoch {
             tracing::debug!(
                 "Discarding stale recovery result for worker {} dp_rank {} due to epoch change",
@@ -467,6 +543,7 @@ impl WorkerQueryClient {
             recovery_state.last_applied_id
         };
         let mut successful_response = false;
+        let mut saw_clear = false;
 
         match result {
             Ok(WorkerKvQueryResponse::Events(events)) => {
@@ -477,10 +554,15 @@ impl WorkerQueryClient {
                     count = events.len()
                 );
                 for event in &events {
+                    if matches!(&event.event.data, KvCacheEventData::Cleared) {
+                        self.apply_worker_clear_barrier_locked(&mut worker_state, event.clone())
+                            .await;
+                        new_last_applied_id = Some(event.event.event_id);
+                        saw_clear = true;
+                        continue;
+                    }
                     self.indexer.apply_event(event.clone()).await;
-                }
-                if let Some(last_event) = events.last() {
-                    new_last_applied_id = Some(last_event.event.event_id);
+                    new_last_applied_id = Some(event.event.event_id);
                 }
                 successful_response = true;
             }
@@ -552,6 +634,7 @@ impl WorkerQueryClient {
             }
 
             if successful_response
+                && !saw_clear
                 && recovery_state
                     .max_seen_live_id
                     .is_some_and(|max_seen| max_seen > last_applied_id)
@@ -820,6 +903,17 @@ mod tests {
                         mm_extra_info: None,
                     }],
                 }),
+                dp_rank,
+            },
+        )
+    }
+
+    fn make_clear_event(worker_id: WorkerId, dp_rank: DpRank, event_id: u64) -> RouterEvent {
+        RouterEvent::new(
+            worker_id,
+            KvCacheEvent {
+                event_id,
+                data: KvCacheEventData::Cleared,
                 dp_rank,
             },
         )
@@ -1196,5 +1290,158 @@ mod tests {
         kv_indexer.flush().await;
         let events = kv_indexer.dump_events().await.unwrap();
         assert!(events.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_live_cleared_invalidates_inflight_recovery_without_restore() {
+        let component = make_test_component("live-cleared-no-restore").await;
+        let (kv_indexer, indexer) = make_test_indexer();
+        let transport = Arc::new(MockWorkerQueryTransport::default());
+        let client = WorkerQueryClient::new(component, indexer, transport.clone());
+        let key0 = (1, 0);
+        let key1 = (1, 1);
+
+        {
+            let worker_state = client.get_or_create_worker_state(1);
+            let mut worker_state = worker_state.lock().await;
+            worker_state.known_dp_ranks.insert(0);
+            worker_state.known_dp_ranks.insert(1);
+
+            let recovery_state = client.get_or_create_recovery_state(key0);
+            recovery_state.lock().await.last_applied_id = Some(10);
+            let recovery_state = client.get_or_create_recovery_state(key1);
+            recovery_state.lock().await.last_applied_id = Some(20);
+        }
+
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        transport.push_action(
+            key0,
+            MockQueryAction {
+                started: Some(started.clone()),
+                release: Some(release.clone()),
+                response: Ok(WorkerKvQueryResponse::Events(vec![
+                    make_store_event(1, 0, 11),
+                    make_store_event(1, 0, 12),
+                    make_store_event(1, 0, 13),
+                ])),
+            },
+        );
+        client.handle_live_event(make_store_event(1, 0, 13)).await;
+        started.notified().await;
+        client.handle_live_event(make_clear_event(1, 0, 14)).await;
+
+        wait_for(|| transport.call_count() == 1).await;
+        release.notify_waiters();
+
+        wait_for(|| {
+            client
+                .recovery_states
+                .get(&key0)
+                .map(|state| {
+                    matches!(
+                        state.try_lock(),
+                        Ok(ref guard)
+                            if guard.last_applied_id == Some(14) && !guard.recovery_inflight
+                    )
+                })
+                .unwrap_or(false)
+                && client
+                    .recovery_states
+                    .get(&key1)
+                    .map(|state| {
+                        matches!(
+                            state.try_lock(),
+                            Ok(ref guard)
+                                if guard.last_applied_id == Some(20)
+                                    && !guard.recovery_inflight
+                                    && guard.resume_from_next_live
+                        )
+                    })
+                    .unwrap_or(false)
+        })
+        .await;
+
+        client.handle_live_event(make_store_event(1, 0, 15)).await;
+        client.handle_live_event(make_store_event(1, 1, 30)).await;
+
+        kv_indexer.flush().await;
+        let events = kv_indexer.dump_events().await.unwrap();
+        assert_eq!(transport.call_count(), 1);
+        assert_eq!(stored_block_hashes(&events), vec![15, 30]);
+    }
+
+    #[tokio::test]
+    async fn test_recovered_cleared_resumes_live_without_restore() {
+        let component = make_test_component("recovered-cleared-no-restore").await;
+        let (kv_indexer, indexer) = make_test_indexer();
+        let transport = Arc::new(MockWorkerQueryTransport::default());
+        let client = WorkerQueryClient::new(component, indexer, transport.clone());
+        let key0 = (1, 0);
+        let key1 = (1, 1);
+
+        {
+            let worker_state = client.get_or_create_worker_state(1);
+            let mut worker_state = worker_state.lock().await;
+            worker_state.known_dp_ranks.insert(0);
+            worker_state.known_dp_ranks.insert(1);
+
+            let recovery_state = client.get_or_create_recovery_state(key0);
+            recovery_state.lock().await.last_applied_id = Some(10);
+            let recovery_state = client.get_or_create_recovery_state(key1);
+            recovery_state.lock().await.last_applied_id = Some(20);
+        }
+
+        transport.push_action(
+            key0,
+            MockQueryAction {
+                started: None,
+                release: None,
+                response: Ok(WorkerKvQueryResponse::Events(vec![
+                    make_store_event(1, 0, 11),
+                    make_clear_event(1, 0, 12),
+                    make_store_event(1, 0, 13),
+                ])),
+            },
+        );
+
+        client.handle_live_event(make_store_event(1, 0, 13)).await;
+
+        wait_for(|| {
+            client
+                .recovery_states
+                .get(&key0)
+                .map(|state| {
+                    matches!(
+                        state.try_lock(),
+                        Ok(ref guard)
+                            if guard.last_applied_id == Some(13) && !guard.recovery_inflight
+                    )
+                })
+                .unwrap_or(false)
+                && client
+                    .recovery_states
+                    .get(&key1)
+                    .map(|state| {
+                        matches!(
+                            state.try_lock(),
+                            Ok(ref guard)
+                                if guard.last_applied_id == Some(20)
+                                    && !guard.recovery_inflight
+                                    && guard.resume_from_next_live
+                        )
+                    })
+                    .unwrap_or(false)
+        })
+        .await;
+
+        assert_eq!(transport.call_count(), 1);
+
+        client.handle_live_event(make_store_event(1, 0, 14)).await;
+        client.handle_live_event(make_store_event(1, 1, 30)).await;
+
+        kv_indexer.flush().await;
+        let events = kv_indexer.dump_events().await.unwrap();
+        assert_eq!(stored_block_hashes(&events), vec![13, 14, 30]);
     }
 }
