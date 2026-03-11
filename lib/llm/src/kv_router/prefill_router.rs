@@ -493,21 +493,6 @@ impl PrefillRouter {
         );
     }
 
-    /// Call the prefill router and extract structured prefill result, worker ID, and dp_rank.
-    ///
-    /// This is the synchronous prefill path - we wait for prefill to complete before proceeding.
-    /// No phase permit is needed since `record_worker` completes before we return.
-    ///
-    /// Returns (PrefillResult, Option<(worker_id, dp_rank)>).
-    async fn call_prefill(
-        &self,
-        request: SingleIn<PreprocessedRequest>,
-    ) -> Result<(PrefillResult, Option<(u64, u32)>), PrefillError> {
-        // For call_prefill path, routing is handled by the router itself (no direct routing needed)
-        // No phase permit needed - we wait for completion before changing phase
-        Self::execute_prefill(self.prefill_router.get().cloned(), request, None, None).await
-    }
-
     /// Query the best prefill worker without executing a request.
     /// Returns (worker_id, dp_rank).
     ///
@@ -652,14 +637,22 @@ impl
                 // Original prefill path: wait for prefill to complete
                 tracing::debug!("Using original prefill path");
 
-                // Drop the phase permit before calling call_prefill - we wait for completion
+                // Drop the phase permit - we wait for completion
                 // so there's no race with set_phase(Decode) below
                 drop(prefill_phase_permit);
 
                 let prefill_context = Context::with_id(prefill_req, request_id.clone());
                 engine_ctx.link_child(prefill_context.context());
 
-                let (result, _worker_info) = self.call_prefill(prefill_context).await?;
+                // In Direct mode, pass preselected_worker so execute_prefill uses
+                // router.direct() instead of router.generate() (which bails in Direct mode).
+                let (result, _worker_info) = Self::execute_prefill(
+                    self.prefill_router.get().cloned(),
+                    prefill_context,
+                    preselected_worker,
+                    None,
+                )
+                .await?;
 
                 Ok(PrefillOutcome::Completed(result))
             }
