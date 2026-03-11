@@ -152,10 +152,18 @@ runs:
           DOCKER_ENV_FLAGS+=(--env "HF_TOKEN=${HF_TOKEN}")
         fi
 
+        # Mount CI-cached models if available on the host
+        CI_MODELS_FLAGS=()
+        if [[ -d "/models/ci/models" ]]; then
+          echo "📦 CI model cache detected, mounting into container"
+          CI_MODELS_FLAGS+=(-v "/models/ci/models:/models/ci/models:ro")
+        fi
+
         docker run ${GPU_FLAGS} --rm -w /workspace \
           --cpus=${NUM_CPUS} \
           --network host \
           "${DOCKER_ENV_FLAGS[@]}" \
+          "${CI_MODELS_FLAGS[@]}" \
           --name ${{ env.CONTAINER_ID }}_pytest \
           -v "${TEST_RESULTS_DIR}:/workspace/test-results" \
           ${{ inputs.image_tag }} \
@@ -248,9 +256,17 @@ runs:
           DOCKER_ENV_FLAGS+=(--env "HF_TOKEN=${HF_TOKEN}")
         fi
 
+        # Mount CI-cached models if available on the host
+        CI_MODELS_FLAGS=()
+        if [[ -d "/models/ci/models" ]]; then
+          echo "📦 CI model cache detected, mounting into container"
+          CI_MODELS_FLAGS+=(-v "/models/ci/models:/models/ci/models:ro")
+        fi
+
         docker run ${GPU_FLAGS} ${DOCKER_OPTS} --rm -w /workspace \
           --network host \
           "${DOCKER_ENV_FLAGS[@]}" \
+          "${CI_MODELS_FLAGS[@]}" \
           --name ${{ env.CONTAINER_ID }}_pytest \
           -v "${TEST_RESULTS_DIR}:/workspace/test-results" \
           ${{ inputs.image_tag }} \
