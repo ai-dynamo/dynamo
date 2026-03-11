@@ -974,7 +974,9 @@ mod tests {
             AnthropicStreamEvent::ContentBlockStart { index: 1, .. }
         ));
 
-        // 3. Tool call → text block closes, tool block opens at index 2
+        // 3. Tool call → text block closes, tool block opens at index 2.
+        //    Because the tool call arrives complete (id + name + args in one
+        //    chunk), inline dispatch also emits content_block_stop immediately.
         let ev = conv.process_chunk_tagged(&tool_call_chunk(
             0,
             Some("call-1"),
@@ -986,7 +988,8 @@ mod tests {
             vec![
                 "content_block_stop",
                 "content_block_start",
-                "content_block_delta"
+                "content_block_delta",
+                "content_block_stop"
             ]
         );
         assert!(matches!(
