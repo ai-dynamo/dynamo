@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: planning
-stopped_at: Completed 02-import-migration/02-01-PLAN.md
-last_updated: "2026-03-11T09:55:01.541Z"
+stopped_at: Completed 02-import-migration/02-02-PLAN.md
+last_updated: "2026-03-11T10:06:06.737Z"
 last_activity: 2026-03-11 — Roadmap created
 progress:
   total_phases: 4
   completed_phases: 1
   total_plans: 4
-  completed_plans: 2
+  completed_plans: 3
   percent: 0
 ---
 
@@ -52,6 +52,7 @@ Progress: [░░░░░░░░░░] 0%
 *Updated after each plan completion*
 | Phase 01-workspace-wiring P01 | 12 | 2 tasks | 2 files |
 | Phase 02-import-migration P01 | 25 | 3 tasks | 12 files |
+| Phase 02-import-migration P02 | 8 | 2 tasks | 15 files |
 
 ## Accumulated Context
 
@@ -68,6 +69,8 @@ Recent decisions affecting current work:
 - [Phase 01-workspace-wiring]: velo-events and velo-transports excluded from kvbm-connector deps — zero direct namespace usage confirmed
 - [Phase 02-import-migration]: kvbm_common::LogicalLayoutHandle is the correct path (not kvbm_logical::) — LogicalLayoutHandle lives in kvbm_common; kvbm_logical re-exports it
 - [Phase 02-import-migration]: crate::v2::distributed::* maps identically to kvbm_engine::* (same as crate::distributed::*)
+- [Phase 02-import-migration]: CacheLayout and ModelExecutorBackend defined locally in kvbm-connector/config.rs — absent from entire workspace
+- [Phase 02-import-migration]: dynamo_kvbm_config → kvbm_config: Cargo dep name is kvbm-config, Rust crate name is kvbm_config
 
 ### Pending Todos
 
@@ -79,6 +82,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-11T09:55:01.539Z
-Stopped at: Completed 02-import-migration/02-01-PLAN.md
+Last session: 2026-03-11T10:06:06.733Z
+Stopped at: Completed 02-import-migration/02-02-PLAN.md
 Resume file: None
