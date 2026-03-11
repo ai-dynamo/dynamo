@@ -27,6 +27,7 @@ media-ffmpeg = ["dynamo-llm/media-ffmpeg"]
 
 [dependencies]
 dynamo-runtime = { path = "../../runtime" }
+dynamo-mocker = { path = "../../mocker" }
 dynamo-parsers = { path = "../../parsers" }
 
 anyhow = { version = "1" }

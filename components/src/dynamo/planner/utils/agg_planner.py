@@ -40,9 +40,7 @@ class AggPlanner:
     # Engine metrics from agg workers are labeled "decode" by the router
     ENGINE_WORKER_TYPE = "decode"
 
-    def __init__(
-        self, runtime: Optional[DistributedRuntime], config: PlannerConfig
-    ) -> None:
+    def __init__(self, runtime: DistributedRuntime, config: PlannerConfig) -> None:
         self.config = config
         self.shared_state = PlannerSharedState()
 
@@ -66,9 +64,8 @@ class AggPlanner:
             shared_state=self.shared_state,
             prometheus_metrics=prometheus_metrics,
             start_prometheus_server=True,
+            component_type=SubComponentType.DECODE,
         )
-        # Override: agg planner uses component_type DECODE for metrics fetching
-        self.planner.component_type = SubComponentType.DECODE
 
         # Create both regression models (agg needs both TTFT and ITL)
         self.ttft_regression = LoadBasedRegressionModel(
@@ -212,7 +209,7 @@ class AggPlanner:
             return "up"
 
         # Scale down: ALL workers below boundary
-        if num_workers > 1:
+        if num_workers > self.config.min_endpoint:
             sensitivity = self.config.load_scaling_down_sensitivity / 100.0
             boundary = target * (num_workers - 1) / num_workers * sensitivity
             if all(
@@ -255,7 +252,7 @@ class AggPlanner:
         # Scale down: ALL workers below boundary
         # TODO: should we strictly enforce all workers below boundary?
         # how about user-configurable percentage?
-        if num_workers > 1:
+        if num_workers > self.config.min_endpoint:
             sensitivity = self.config.load_scaling_down_sensitivity / 100.0
             boundary = x_sla * (num_workers - 1) / num_workers * sensitivity
             if all(

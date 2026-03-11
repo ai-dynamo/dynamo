@@ -32,9 +32,8 @@ nvtx = { version = "1.3", optional = true }
 
 # Velo dependencies
 velo = { workspace = true }
-velo-discovery = { workspace = true }
 
-# Memory dependencies (for NixL)
+# Memory dependencies
 dynamo-memory = { workspace = true }
 
 [dev-dependencies]

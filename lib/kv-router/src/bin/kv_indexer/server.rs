@@ -13,17 +13,24 @@ use serde::{Deserialize, Serialize};
 
 use dynamo_kv_router::protocols::{LocalBlockHash, WorkerId, compute_block_hash_for_seq};
 
-use super::registry::WorkerRegistry;
+use super::registry::{IndexerKey, WorkerRegistry};
 
 pub struct AppState {
     pub registry: WorkerRegistry,
-    pub block_size: u32,
+}
+
+fn default_tenant() -> String {
+    "default".to_string()
 }
 
 #[derive(Deserialize)]
 pub struct RegisterRequest {
     pub instance_id: WorkerId,
     pub endpoint: String,
+    pub model_name: String,
+    #[serde(default = "default_tenant")]
+    pub tenant_id: String,
+    pub block_size: u32,
     #[serde(default)]
     pub dp_rank: Option<u32>,
 }
@@ -31,6 +38,9 @@ pub struct RegisterRequest {
 #[derive(Deserialize)]
 pub struct UnregisterRequest {
     pub instance_id: WorkerId,
+    pub model_name: String,
+    #[serde(default)]
+    pub tenant_id: Option<String>,
     #[serde(default)]
     pub dp_rank: Option<u32>,
 }
@@ -44,13 +54,24 @@ struct WorkerInfo {
 #[derive(Deserialize)]
 pub struct QueryRequest {
     pub token_ids: Vec<u32>,
+    pub model_name: String,
+    #[serde(default = "default_tenant")]
+    pub tenant_id: String,
     #[serde(default)]
     pub lora_name: Option<String>,
 }
 
+/// Query using pre-computed block hashes.
+///
+/// Callers must include the LoRA salt in their hashes when applicable — use
+/// [`compute_block_hash_for_seq`] with the appropriate `lora_name`. The indexer
+/// cannot retroactively apply a LoRA salt to pre-computed hashes.
 #[derive(Deserialize)]
 pub struct QueryByHashRequest {
     pub block_hashes: Vec<i64>,
+    pub model_name: String,
+    #[serde(default = "default_tenant")]
+    pub tenant_id: String,
 }
 
 #[derive(Serialize)]
@@ -64,10 +85,14 @@ async fn register(
     State(state): State<Arc<AppState>>,
     Json(req): Json<RegisterRequest>,
 ) -> impl IntoResponse {
-    match state
-        .registry
-        .register(req.instance_id, req.endpoint, req.dp_rank.unwrap_or(0))
-    {
+    match state.registry.register(
+        req.instance_id,
+        req.endpoint,
+        req.dp_rank.unwrap_or(0),
+        req.model_name,
+        req.tenant_id,
+        req.block_size,
+    ) {
         Ok(()) => (
             StatusCode::CREATED,
             Json(serde_json::json!({"status": "ok"})),
@@ -83,14 +108,27 @@ async fn unregister(
     State(state): State<Arc<AppState>>,
     Json(req): Json<UnregisterRequest>,
 ) -> impl IntoResponse {
-    let result = match req.dp_rank {
-        Some(dp_rank) => {
+    let result = match req.tenant_id {
+        Some(tenant_id) => match req.dp_rank {
+            Some(dp_rank) => {
+                state
+                    .registry
+                    .deregister_dp_rank(req.instance_id, dp_rank, &req.model_name, &tenant_id)
+                    .await
+            }
+            None => {
+                state
+                    .registry
+                    .deregister(req.instance_id, &req.model_name, &tenant_id)
+                    .await
+            }
+        },
+        None => {
             state
                 .registry
-                .deregister_dp_rank(req.instance_id, dp_rank)
+                .deregister_all_tenants(req.instance_id, &req.model_name)
                 .await
         }
-        None => state.registry.deregister(req.instance_id).await,
     };
     match result {
         Ok(()) => (StatusCode::OK, Json(serde_json::json!({"status": "ok"}))),
@@ -114,13 +152,16 @@ async fn list_workers(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     Json(workers)
 }
 
-fn build_score_response(overlap: dynamo_kv_router::protocols::OverlapScores) -> ScoreResponse {
+fn build_score_response(
+    overlap: dynamo_kv_router::protocols::OverlapScores,
+    block_size: u32,
+) -> ScoreResponse {
     let mut scores: HashMap<String, HashMap<String, u32>> = HashMap::new();
     for (k, v) in &overlap.scores {
         scores
             .entry(k.worker_id.to_string())
             .or_default()
-            .insert(k.dp_rank.to_string(), *v);
+            .insert(k.dp_rank.to_string(), v * block_size);
     }
     let mut tree_sizes: HashMap<String, HashMap<String, usize>> = HashMap::new();
     for (k, v) in &overlap.tree_sizes {
@@ -140,16 +181,28 @@ async fn query(
     State(state): State<Arc<AppState>>,
     Json(req): Json<QueryRequest>,
 ) -> impl IntoResponse {
-    let block_hashes = compute_block_hash_for_seq(
-        &req.token_ids,
-        state.block_size,
-        None,
-        req.lora_name.as_deref(),
-    );
-    match state.registry.indexer().find_matches(block_hashes).await {
+    let key = IndexerKey {
+        model_name: req.model_name,
+        tenant_id: req.tenant_id,
+    };
+    let Some(ie) = state.registry.get_indexer(&key) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": format!("no indexer for model={} tenant={}", key.model_name, key.tenant_id)
+            })),
+        );
+    };
+    let block_size = ie.block_size;
+    let indexer = ie.indexer.clone();
+    drop(ie);
+
+    let block_hashes =
+        compute_block_hash_for_seq(&req.token_ids, block_size, None, req.lora_name.as_deref());
+    match indexer.find_matches(block_hashes).await {
         Ok(overlap) => (
             StatusCode::OK,
-            Json(serde_json::json!(build_score_response(overlap))),
+            Json(serde_json::json!(build_score_response(overlap, block_size))),
         ),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -162,15 +215,31 @@ async fn query_by_hash(
     State(state): State<Arc<AppState>>,
     Json(req): Json<QueryByHashRequest>,
 ) -> impl IntoResponse {
+    let key = IndexerKey {
+        model_name: req.model_name,
+        tenant_id: req.tenant_id,
+    };
+    let Some(ie) = state.registry.get_indexer(&key) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": format!("no indexer for model={} tenant={}", key.model_name, key.tenant_id)
+            })),
+        );
+    };
+    let block_size = ie.block_size;
+    let indexer = ie.indexer.clone();
+    drop(ie);
+
     let block_hashes: Vec<LocalBlockHash> = req
         .block_hashes
         .iter()
         .map(|h| LocalBlockHash(*h as u64))
         .collect();
-    match state.registry.indexer().find_matches(block_hashes).await {
+    match indexer.find_matches(block_hashes).await {
         Ok(overlap) => (
             StatusCode::OK,
-            Json(serde_json::json!(build_score_response(overlap))),
+            Json(serde_json::json!(build_score_response(overlap, block_size))),
         ),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -179,14 +248,74 @@ async fn query_by_hash(
     }
 }
 
-async fn dump_events(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    match state.registry.indexer().dump_events().await {
-        Ok(events) => (StatusCode::OK, Json(serde_json::json!(events))),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
-        ),
+#[derive(Deserialize)]
+struct PeerRequest {
+    url: String,
+}
+
+async fn register_peer(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<PeerRequest>,
+) -> impl IntoResponse {
+    state.registry.register_peer(req.url);
+    (
+        StatusCode::CREATED,
+        Json(serde_json::json!({"status": "ok"})),
+    )
+}
+
+async fn deregister_peer(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<PeerRequest>,
+) -> impl IntoResponse {
+    if state.registry.deregister_peer(&req.url) {
+        (StatusCode::OK, Json(serde_json::json!({"status": "ok"})))
+    } else {
+        (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "peer not found"})),
+        )
     }
+}
+
+async fn list_peers(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    Json(state.registry.list_peers())
+}
+
+async fn dump_events(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let all = state.registry.all_indexers_with_block_size();
+    let mut handles = Vec::with_capacity(all.len());
+
+    for (key, indexer, block_size) in all {
+        handles.push(tokio::spawn(async move {
+            let events = indexer.dump_events().await;
+            (key, events, block_size)
+        }));
+    }
+
+    let mut result: HashMap<String, serde_json::Value> = HashMap::new();
+    for handle in handles {
+        match handle.await {
+            Ok((key, Ok(events), block_size)) => {
+                let map_key = format!("{}:{}", key.model_name, key.tenant_id);
+                result.insert(
+                    map_key,
+                    serde_json::json!({
+                        "block_size": block_size,
+                        "events": events,
+                    }),
+                );
+            }
+            Ok((key, Err(e), _)) => {
+                let map_key = format!("{}:{}", key.model_name, key.tenant_id);
+                result.insert(map_key, serde_json::json!({"error": e.to_string()}));
+            }
+            Err(e) => {
+                tracing::warn!("dump task join error: {e}");
+            }
+        }
+    }
+    (StatusCode::OK, Json(serde_json::json!(result)))
 }
 
 pub fn create_router(state: Arc<AppState>) -> Router {
@@ -197,5 +326,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/query", post(query))
         .route("/query_by_hash", post(query_by_hash))
         .route("/dump", get(dump_events))
+        .route("/register_peer", post(register_peer))
+        .route("/deregister_peer", post(deregister_peer))
+        .route("/peers", get(list_peers))
         .with_state(state)
 }

@@ -10,7 +10,7 @@ subtitle: Enable KV-aware routing using Router for Dynamo deployments
 The Dynamo KV Router intelligently routes requests by evaluating their computational costs across different workers. It considers both decoding costs (from active blocks) and prefill costs (from newly computed blocks), using KV cache overlap to minimize redundant computation. Optimizing the KV Router is critical for achieving maximum throughput and minimum latency in distributed inference setups.
 This guide helps you get started with using the Dynamo router, with further details on configuration, disaggregated serving setup, and parameter tuning.
 
-## Quick start
+## Quick Start
 
 ### Python / CLI Deployment
 
@@ -31,7 +31,7 @@ Backend workers register themselves using the `register_model` API, after which 
 
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `--router-mode kv` | `round_robin` | Enable KV cache-aware routing |
+| `--router-mode kv` | `round-robin` | Enable KV cache-aware routing |
 | `--router-temperature <float>` | `0.0` | Controls routing randomness (0.0 = deterministic, higher = more random) |
 | `--kv-cache-block-size <size>` | Backend-specific | KV cache block size (should match backend config) |
 | `--router-kv-events` / `--no-router-kv-events` | `--router-kv-events` | Enable/disable real-time KV event tracking |
@@ -73,7 +73,7 @@ All CLI arguments can be configured via environment variables using the `DYN_` p
 
 | CLI Argument | Environment Variable | Default |
 |--------------|---------------------|---------|
-| `--router-mode kv` | `DYN_ROUTER_MODE=kv` | `round_robin` |
+| `--router-mode kv` | `DYN_ROUTER_MODE=kv` | `round-robin` |
 | `--router-temperature` | `DYN_ROUTER_TEMPERATURE` | `0.0` |
 | `--kv-cache-block-size` | `DYN_KV_CACHE_BLOCK_SIZE` | Backend-specific |
 | `--no-router-kv-events` | `DYN_ROUTER_USE_KV_EVENTS=false` | `true` |
@@ -190,7 +190,7 @@ The main KV-aware routing arguments (frontend uses the same `--router-*` flag na
 
 - `--no-router-track-active-blocks`: Disables tracking of active blocks (blocks being used for ongoing generation/decode phases). By default, the router tracks active blocks for load balancing. Disable this when routing to workers that only perform prefill (no decode phase), as tracking decode load is not relevant. This reduces router overhead and simplifies state management.
 
-- `--router-track-output-blocks`: Enables tracking of output blocks during generation (default: disabled). When enabled, the router adds placeholder blocks as tokens are generated and applies fractional decay based on progress toward the expected output sequence length (`agent_hints.osl` in nvext). This improves load balancing accuracy for long-running generation requests by accounting for output-side KV cache growth.
+- `--router-track-output-blocks`: **(Experimental)** Enables tracking of output blocks during generation (default: disabled). When enabled, the router adds placeholder blocks as tokens are generated and applies fractional decay based on progress toward the expected output sequence length (`agent_hints.osl` in nvext). This improves load balancing accuracy for long-running generation requests by accounting for output-side KV cache growth.
 
 - `--no-router-assume-kv-reuse`: When tracking active blocks, disables the assumption of KV cache reuse. By default (`router_assume_kv_reuse=true`), the router computes actual block hashes for sequence tracking to deduplicate blocks and optimize load balancing. When disabled via this flag, the router generates random hashes for sequence blocks, treating each request's blocks as unique. This is useful in disaggregated setups where prefill transfers blocks to decode workers that may already have those blocks cached, but the engine cannot coordinate transfers to avoid duplication. Without this flag, the router's load balancing heuristics would undercount decode blocks when duplicates exist.
 
@@ -204,7 +204,7 @@ The main KV-aware routing arguments (frontend uses the same `--router-*` flag na
 
 - `--router-prune-target-ratio`: Target size ratio to prune down to when `--router-max-tree-size` is exceeded. For example, with a value of 0.8 (default) and max tree size of 1048576, the router will prune down to approximately 838860 blocks when the threshold is exceeded. Defaults to 0.8 when `--no-router-kv-events` is used. This creates headroom before the next pruning cycle.
 
-- `--router-event-threads`: Number of event processing threads for the KV indexer (default: 4). When set to 1, the router uses a single-threaded radix tree with channel-based event processing. When set to a value greater than 1 (the default), the router uses a concurrent radix tree with a thread pool of the specified size for higher event throughput. This setting only applies when KV events are enabled (the default). When `--no-router-kv-events` is set (approximate mode), the router always uses a single-threaded indexer with TTL-based expiration and pruning regardless of this setting. Can be set via `DYN_ROUTER_EVENT_THREADS` env var. For details on the underlying index data structures (`RadixTree`, `ConcurrentRadixTree`, `PositionalIndexer`) and their concurrency model (inline reads, sticky-routed writes via thread pool), see the [KV Router Index documentation](../../../lib/kv-router/README.md).
+- `--router-event-threads`: Number of event processing threads for the KV indexer (default: 4). When set to 1, the router uses a single-threaded radix tree with channel-based event processing. When set to a value greater than 1 (the default), the router uses a concurrent radix tree with a thread pool of the specified size for higher event throughput. This setting only applies when KV events are enabled (the default). When `--no-router-kv-events` is set (approximate mode), the router always uses a single-threaded indexer with TTL-based expiration and pruning regardless of this setting. Can be set via `DYN_ROUTER_EVENT_THREADS` env var. For details on the underlying index data structures (`RadixTree`, `ConcurrentRadixTree`, `PositionalIndexer`) and their concurrency model (inline reads, sticky-routed writes via thread pool), see the [KV Router Index documentation](../../../lib/kv-router/src/indexer/README.md).
 
 To implement KV event publishing for custom inference engines, enabling them to participate in Dynamo's KV cache-aware routing, see [KV Event Publishing for Custom Engines](../../integrations/kv-events-custom-engines.md).
 
@@ -217,6 +217,8 @@ The `--router-kv-overlap-score-weight` parameter is the primary knob for balanci
 Use `--no-router-kv-events` when you are not confident that your backend engine emits KV events correctly — for example, with hybrid models or custom engines that haven't been validated for event accuracy. In this mode the router falls back to approximate routing, predicting cache state from its own routing decisions with TTL-based expiration and pruning, rather than relying on real-time block creation/deletion events from workers.
 
 Use `--no-router-assume-kv-reuse` in disaggregated setups where the decode worker does not reuse transferred KV cache blocks. By default the router assumes KV blocks transferred from prefill to decode will be deduplicated on the decode side, but vLLM and SGLang decode workers currently do not support this — only TensorRT-LLM does. Without this flag, the router undercounts decode blocks when duplicates exist, leading to inaccurate load estimates.
+
+Use `--router-track-output-blocks` **(experimental)** when your workload is output-heavy and you want the router to account for output-side KV cache growth in load balancing. This is useful in two scenarios: (1) workloads with long output sequences and little multi-turn reuse, where output blocks dominate the KV cache footprint; (2) agentic schedulers (e.g. NAT or other LLM routers) that can accurately predict the expected output sequence length per request. When enabled, the router adds placeholder blocks as tokens are generated. If you additionally pass `nvext.agent_hints.osl` (expected output sequence length in tokens) per request, the router applies fractional decay to output blocks — each output block's weight starts at 1.0 and decays linearly toward 0.0 as generation approaches the expected OSL. This lets the router predict that a request nearing completion will soon free its blocks, effectively modeling the future load trajectory rather than just the current snapshot. Without `osl`, output blocks are added at full weight with no decay. The flag requires `--router-track-active-blocks` (the default).
 
 Set `--router-queue-threshold` (e.g. `1.5`) to enable backpressure under very high concurrency workloads. When set, the router holds incoming requests in a priority queue while all workers exceed the given fraction of `max_num_batched_tokens`, releasing them as capacity frees up. This defers the routing decision so it is made with the freshest load metrics, rather than dispatching into an already-saturated system. It also enables priority scheduling via `nvext.agent_hints.latency_sensitivity`.
 
@@ -309,7 +311,7 @@ graph TD
 
 ## Serving Multiple Router Replicas
 
-For improved fault tolerance, you can launch multiple frontend + router replicas. Since the frontend and router are currently tied together, you'll need to use different HTTP ports for each instance. (The separation of the frontend and Router is WIP.)
+For improved fault tolerance, you can launch multiple frontend + router replicas. If multiple `dynamo.frontend` processes share the same host or network namespace, give each instance a different HTTP port. In Kubernetes or on separate hosts, replicas can usually reuse the same container port. Alternatively, you can deploy the router separately as the standalone `python -m dynamo.router` service; see the [Standalone Router README](../../../components/src/dynamo/router/README.md).
 
 ### Router State Management
 
@@ -345,6 +347,7 @@ Persistence behavior depends on which event transport mode is active:
 - On startup, the router queries each worker's local indexer to rebuild state
 - Recovery depends on workers being available; if a worker is down, its blocks cannot be recovered
 - Simpler infrastructure (no JetStream required)
+- For more info on how the local indexer handles gap detection and replay (and how it compares to vLLM's approach), see [KV Event Replay — Dynamo vs vLLM](kv-event-replay-comparison.md)
 
 **JetStream Mode** (`--router-durable-kv-events` on **both** frontend **and** workers):
 - Prefix blocks are stored in NATS JetStream with 1-hour retention
@@ -389,7 +392,8 @@ The cli args `--router-ttl-secs`, `--router-max-tree-size`, and `--router-prune-
 
 - **[Router README](README.md)**: Quick start guide for the KV Router
 - **[Router Examples](router-examples.md)**: Python API usage, K8s examples, and custom routing patterns
-- **[KV Router Index Data Structures](../../../lib/kv-router/README.md)**: `RadixTree`, `ConcurrentRadixTree`, and `PositionalIndexer` internals and concurrency model
+- **[KV Router Index Data Structures](../../../lib/kv-router/src/indexer/README.md)**: `RadixTree`, `ConcurrentRadixTree`, and `PositionalIndexer` internals and concurrency model
+- **[KV Event Replay — Dynamo vs vLLM](kv-event-replay-comparison.md)**: How Dynamo's local indexer compares to vLLM's replay buffer for gap detection and recovery
 - **[Router Design](../../design-docs/router-design.md)**: Architecture details and event transport modes
 - **[KV Event Publishing for Custom Engines](../../integrations/kv-events-custom-engines.md)**: Integrate custom inference engines with KV-aware routing
 - **[Prometheus and Grafana Setup](../../observability/prometheus-grafana.md)**: General Prometheus/Grafana configuration

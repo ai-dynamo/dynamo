@@ -180,7 +180,7 @@ class TestLoadMultimodalData:
         mock_client = MagicMock()
         handler = _make_handler(encode_worker_client=mock_client)
 
-        fake_mm_data = defaultdict(list, {"image": torch.randn(1, 10)})
+        fake_mm_data = defaultdict(list, {"image": torch.randn(1, 10)})  # type: ignore
         with patch.object(
             mod,
             "load_multimodal_embeddings",

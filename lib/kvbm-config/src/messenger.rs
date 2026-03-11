@@ -68,7 +68,7 @@ impl MessengerConfig {
                     bail!("P2P discovery not yet supported in velo");
                 }
                 DiscoveryConfig::Filesystem(cfg) => {
-                    use velo_discovery::FilesystemPeerDiscovery;
+                    use velo::discovery::FilesystemPeerDiscovery;
 
                     let peer_discovery = FilesystemPeerDiscovery::new(&cfg.path)
                         .context("Failed to build filesystem discovery")?;
