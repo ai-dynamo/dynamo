@@ -29,9 +29,9 @@
 
 ### Compilation
 
-- [ ] **COMP-01**: `cargo check -p kvbm-connector` passes with zero errors
-- [ ] **COMP-02**: `cargo check -p kvbm-connector` passes with zero warnings (or warnings are pre-existing and documented)
-- [ ] **COMP-03**: Existing workspace members still compile after changes (`cargo check --workspace` passes)
+- [x] **COMP-01**: `cargo check -p kvbm-connector` passes with zero errors
+- [x] **COMP-02**: `cargo check -p kvbm-connector` passes with zero warnings (or warnings are pre-existing and documented)
+- [x] **COMP-03**: Existing workspace members still compile after changes (`cargo check --workspace` passes)
 
 ### Test Porting
 
@@ -74,9 +74,9 @@
 | VELO-03 | Phase 2 | Complete |
 | VELO-04 | Phase 2 | Complete |
 | VELO-05 | Phase 2 | Complete |
-| COMP-01 | Phase 3 | Pending |
-| COMP-02 | Phase 3 | Pending |
-| COMP-03 | Phase 3 | Pending |
+| COMP-01 | Phase 3 | Complete |
+| COMP-02 | Phase 3 | Complete |
+| COMP-03 | Phase 3 | Complete |
 | TEST-01 | Phase 4 | Pending |
 | TEST-02 | Phase 4 | Pending |
 | TEST-03 | Phase 4 | Pending |
