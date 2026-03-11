@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: planning
-stopped_at: Completed 02-import-migration/02-02-PLAN.md
-last_updated: "2026-03-11T10:06:06.737Z"
+stopped_at: Completed 02-import-migration/02-03-PLAN.md
+last_updated: "2026-03-11T10:24:28.298Z"
 last_activity: 2026-03-11 — Roadmap created
 progress:
   total_phases: 4
-  completed_phases: 1
+  completed_phases: 2
   total_plans: 4
-  completed_plans: 3
+  completed_plans: 4
   percent: 0
 ---
 
@@ -53,6 +53,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 01-workspace-wiring P01 | 12 | 2 tasks | 2 files |
 | Phase 02-import-migration P01 | 25 | 3 tasks | 12 files |
 | Phase 02-import-migration P02 | 8 | 2 tasks | 15 files |
+| Phase 02-import-migration P03 | 28min | 3 tasks | 11 files |
 
 ## Accumulated Context
 
@@ -71,6 +72,10 @@ Recent decisions affecting current work:
 - [Phase 02-import-migration]: crate::v2::distributed::* maps identically to kvbm_engine::* (same as crate::distributed::*)
 - [Phase 02-import-migration]: CacheLayout and ModelExecutorBackend defined locally in kvbm-connector/config.rs — absent from entire workspace
 - [Phase 02-import-migration]: dynamo_kvbm_config → kvbm_config: Cargo dep name is kvbm-config, Rust crate name is kvbm_config
+- [Phase 02-import-migration]: VeloEvents lacks merge_events — use Messenger::event_manager() for multi-event merge operations
+- [Phase 02-import-migration]: velo::Event::trigger(self) consumes ownership — store as Event not Arc<Event> when trigger needed
+- [Phase 02-import-migration]: InstanceLeader::execute_local_transfer is pub(crate) — route through parallel_worker() (pub) which implements WorkerTransfers
+- [Phase 02-import-migration]: execute_local_layerwise_onboard requires nccl feature — gate call in kvbm-connector with cfg(feature = nccl)
 
 ### Pending Todos
 
@@ -82,6 +87,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-11T10:06:06.733Z
-Stopped at: Completed 02-import-migration/02-02-PLAN.md
+Last session: 2026-03-11T10:24:28.296Z
+Stopped at: Completed 02-import-migration/02-03-PLAN.md
 Resume file: None

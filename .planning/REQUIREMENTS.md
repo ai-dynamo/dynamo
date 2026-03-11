@@ -21,11 +21,11 @@
 
 ### Nova → Velo Migration
 
-- [ ] **VELO-01**: `src/connector/worker/nova/client.rs` updated to use `velo` transport types
-- [ ] **VELO-02**: `src/connector/worker/nova/service.rs` updated to use `velo` types
-- [ ] **VELO-03**: `src/connector/worker/nova/protocol.rs` updated for velo protocol
-- [ ] **VELO-04**: All `nova` module imports across the codebase updated to velo equivalents
-- [ ] **VELO-05**: `velo` dependency declared in `kvbm-connector/Cargo.toml`
+- [x] **VELO-01**: `src/connector/worker/nova/client.rs` updated to use `velo` transport types
+- [x] **VELO-02**: `src/connector/worker/nova/service.rs` updated to use `velo` types
+- [x] **VELO-03**: `src/connector/worker/nova/protocol.rs` updated for velo protocol
+- [x] **VELO-04**: All `nova` module imports across the codebase updated to velo equivalents
+- [x] **VELO-05**: `velo` dependency declared in `kvbm-connector/Cargo.toml`
 
 ### Compilation
 
@@ -69,11 +69,11 @@
 | IMP-03 | Phase 2 | Complete |
 | IMP-04 | Phase 2 | Complete |
 | IMP-05 | Phase 2 | Complete |
-| VELO-01 | Phase 2 | Pending |
-| VELO-02 | Phase 2 | Pending |
-| VELO-03 | Phase 2 | Pending |
-| VELO-04 | Phase 2 | Pending |
-| VELO-05 | Phase 2 | Pending |
+| VELO-01 | Phase 2 | Complete |
+| VELO-02 | Phase 2 | Complete |
+| VELO-03 | Phase 2 | Complete |
+| VELO-04 | Phase 2 | Complete |
+| VELO-05 | Phase 2 | Complete |
 | COMP-01 | Phase 3 | Pending |
 | COMP-02 | Phase 3 | Pending |
 | COMP-03 | Phase 3 | Pending |
