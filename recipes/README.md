@@ -12,13 +12,15 @@ Production-tested Kubernetes deployment recipes for LLM inference using NVIDIA D
 
 ## Available Recipes
 
-### Multi-Feature Recipe
+### Feature Comparison Recipes
 
-This recipe combines multiple Dynamo performance features (disaggregated serving + KV-aware routing):
+These recipes compare Dynamo performance features with benchmark results, each including both baseline and optimized deployment configurations:
 
 | Model | Framework | Configuration | GPUs | Features |
 |-------|-----------|---------------|------|----------|
-| **[Qwen3-32B](qwen3-32b/)** | vLLM | Disagg + KV-Router | 16x H200 | **Disaggregated Serving + KV-Aware Routing** — includes benchmark comparison with real-world Mooncake traces |
+| **[Qwen3-32B](qwen3-32b/)** | vLLM | Disagg + KV-Router | 16x H200 | **Disaggregated Serving + KV-Aware Routing** — benchmark comparison with real-world Mooncake traces |
+| **[DeepSeek-V3.2-NVFP4](deepseek-v32-fp4/)** | TensorRT-LLM | Agg + Disagg WideEP | 32x GB200 | **Disaggregated Serving + KV-Aware Routing** — benchmark comparison with Mooncake-based synthetic coding trace |
+| **[Qwen3-VL-30B-A3B-FP8](qwen3-vl-30b/)** | vLLM | Agg + Embedding Cache | 1x GB200 | **Multimodal Embedding Cache** — benchmark comparison showing +16% throughput, -28% TTFT |
 
 ### Aggregated & Disaggregated Recipes
 
@@ -26,28 +28,29 @@ These recipes demonstrate aggregated or disaggregated serving:
 
 **GAIE Column**: Indicates whether the recipe includes integration with the [Gateway API Inference Extension (GAIE)](../deploy/inference-gateway/README.md) — a Kubernetes SIG project that extends the Gateway API for AI inference workloads, providing load balancing, model routing, and request management.
 
-| Model | Framework | Mode | GPUs | Deployment | Benchmark Recipe | Notes | GAIE |
-|-------|-----------|------|------|------------|------------------|-------|------|
+| Model | Framework | Mode | GPUs | Deployment | Benchmark | Notes | GAIE |
+|-------|-----------|------|------|------------|-----------|-------|------|
 | **[Llama-3-70B](llama-3-70b/vllm/agg/)** | vLLM | Aggregated | 4x H100/H200 | ✅ | ✅ | FP8 dynamic quantization | ✅ |
 | **[Llama-3-70B](llama-3-70b/vllm/disagg-single-node/)** | vLLM | Disagg (Single-Node) | 8x H100/H200 | ✅ | ✅ | Prefill + Decode separation | ❌ |
 | **[Llama-3-70B](llama-3-70b/vllm/disagg-multi-node/)** | vLLM | Disagg (Multi-Node) | 16x H100/H200 | ✅ | ✅ | 2 nodes, 8 GPUs each | ❌ |
-| **[Qwen3-32B-FP8](qwen3-32b-fp8/trtllm/agg/)** | TensorRT-LLM | Aggregated | 2x GPU | ✅ | ✅ | FP8 quantization | ❌ |
-| **[Qwen3-32B-FP8](qwen3-32b-fp8/trtllm/disagg/)** | TensorRT-LLM | Disaggregated | 8x GPU | ✅ | ✅ | Prefill + Decode separation | ❌ |
-| **[Qwen3-235B-A22B-FP8](qwen3-235b-a22b-fp8/trtllm/agg/)** | TensorRT-LLM | Aggregated | 16x GPU | ✅ | ✅ | MoE model, TP4×EP4 | ❌ |
-| **[Qwen3-235B-A22B-FP8](qwen3-235b-a22b-fp8/trtllm/disagg/)** | TensorRT-LLM | Disaggregated | 16x GPU | ✅ | ✅ | MoE model, Prefill + Decode | ❌ |
+| **[Qwen3-32B-FP8](qwen3-32b-fp8/trtllm/agg/)** | TensorRT-LLM | Aggregated | 2x H100/H200/A100 | ✅ | ✅ | FP8 quantization | ❌ |
+| **[Qwen3-32B-FP8](qwen3-32b-fp8/trtllm/disagg/)** | TensorRT-LLM | Disaggregated | 8x H100/H200/A100 | ✅ | ✅ | Prefill + Decode separation | ❌ |
+| **[Qwen3-235B-A22B-FP8](qwen3-235b-a22b-fp8/trtllm/agg/)** | TensorRT-LLM | Aggregated | 16x H100/H200 | ✅ | ✅ | MoE model, TP4×EP4 | ❌ |
+| **[Qwen3-235B-A22B-FP8](qwen3-235b-a22b-fp8/trtllm/disagg/)** | TensorRT-LLM | Disaggregated | 16x H100/H200 | ✅ | ✅ | MoE model, Prefill + Decode | ❌ |
 | **[GPT-OSS-120B](gpt-oss-120b/trtllm/agg/)** | TensorRT-LLM | Aggregated | 4x GB200 | ✅ | ✅ | Blackwell only, WideEP | ❌ |
-| **[GPT-OSS-120B](gpt-oss-120b/trtllm/disagg/)** | TensorRT-LLM | Disaggregated | TBD | ❌ | ❌ | Engine configs only, no K8s manifest | ❌ |
-| **[DeepSeek-R1](deepseek-r1/sglang/disagg-8gpu/)** | SGLang | Disagg WideEP | 16x H200 | ✅*1 | ❌ | TP=8 per worker, single-node | ❌ |
-| **[DeepSeek-R1](deepseek-r1/sglang/disagg-16gpu/)** | SGLang | Disagg WideEP | 32x H200 | ✅*1 | ❌ | TP=16 per worker, multi-node | ❌ |
-| **[DeepSeek-R1](deepseek-r1/trtllm/disagg/wide_ep/gb200/)** | TensorRT-LLM | Disagg WideEP (GB200) | 32+4 GB200 | ✅ | ✅ | Multi-node: 8 decode + 1 prefill nodes | ❌ |
+| **[DeepSeek-R1](deepseek-r1/sglang/disagg-8gpu/)** | SGLang | Disagg WideEP | 16x H200 | ✅ | ❌ | TP=8, single-node. Use `model-download-sglang.yaml` | ❌ |
+| **[DeepSeek-R1](deepseek-r1/sglang/disagg-16gpu/)** | SGLang | Disagg WideEP | 32x H200 | ✅ | ❌ | TP=16, multi-node. Use `model-download-sglang.yaml` | ❌ |
+| **[DeepSeek-R1](deepseek-r1/trtllm/disagg/wide_ep/gb200/)** | TensorRT-LLM | Disagg WideEP (GB200) | 36x GB200 | ✅ | ✅ | Multi-node: 8 decode + 1 prefill nodes | ❌ |
 | **[DeepSeek-R1](deepseek-r1/vllm/disagg/)** | vLLM | Disagg DEP16 | 32x H200 | ✅ | ❌ | Multi-node, data-expert parallel | ❌ |
-| **[Kimi-K2.5](kimi-k2.5/trtllm/agg/)** | TensorRT-LLM | Aggregated | 8x GPU | ✅ | ❌ | MoE model, TP8×EP8, reasoning + tool calling | ❌ |
+| **[Kimi-K2.5](kimi-k2.5/trtllm/agg/)** | TensorRT-LLM | Aggregated | 8x B200 | ✅ | ❌ | MoE model, TP8×EP8, reasoning + tool calling | ❌ |
 
-*1: Please use `deepseek-r1/model-cache/model-download-sglang.yaml` to download the model into the PVC.
+**Legend:**
+- **Deployment**: ✅ = Complete `deploy.yaml` manifest available
+- **Benchmark**: ✅ = Includes `perf.yaml` for running AIPerf benchmarks
 
-### Non-Optimized Recipes
+### Functional Recipes (Not Yet Benchmarked)
 
-These recipes demonstrate functional deployments with Dynamo features, but have not yet been tuned for best performance or paired with benchmark manifests.
+These recipes demonstrate functional deployments with Dynamo features, but have not yet been performance-tuned or paired with benchmark manifests.
 
 | Model | Framework | Mode | GPUs | Deployment | Notes |
 |-------|-----------|-------|------|------------|-------|
@@ -55,10 +58,6 @@ These recipes demonstrate functional deployments with Dynamo features, but have 
 | **[Nemotron-3-Super-FP8](nemotron-3-super-fp8/sglang/agg/)** | SGLang | Aggregated | 4x H100/H200 | ✅ | TP=4, KV-aware routing, 1.0+ |
 | **[Nemotron-3-Super-FP8](nemotron-3-super-fp8/trtllm/disagg/)** | TensorRT-LLM | Disaggregated | 4x H100/H200 | ✅ | TP=2 prefill/decode split, UCX KV transfer |
 | **[Nemotron-3-Super-FP8](nemotron-3-super-fp8/sglang/disagg/)** | SGLang | Disaggregated | 4x H100/H200 | ✅ | TP=2 prefill/decode split, nixl KV transfer, 1.0+ |
-
-**Legend:**
-- **Deployment**: ✅ = Complete `deploy.yaml` manifest available | ❌ = Missing or incomplete
-- **Benchmark Recipe**: In the production-ready table above, ✅ = Includes `perf.yaml` for running AIPerf benchmarks | ❌ = No benchmark recipe provided
 
 ## Recipe Structure
 
@@ -129,9 +128,6 @@ kubectl get storageclass
 cd recipes
 # Update storageClassName in model-cache.yaml first!
 kubectl apply -f <model>/model-cache/ -n ${NAMESPACE}
-
-# Create model cache PVC
-kubectl apply -f <model>/model-cache/model-download.yaml -n ${NAMESPACE}
 
 # Wait for download to complete (may take 10-60 minutes depending on model size)
 kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=6000s
@@ -206,7 +202,6 @@ kubectl create secret generic hf-token-secret \
 # Deploy
 cd recipes
 kubectl apply -f llama-3-70b/model-cache/ -n ${NAMESPACE}
-kubectl apply -f llama-3-70b/model-cache/model-download.yaml -n ${NAMESPACE}
 kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=6000s
 kubectl apply -f llama-3-70b/vllm/agg/deploy.yaml -n ${NAMESPACE}
 
@@ -214,7 +209,7 @@ kubectl apply -f llama-3-70b/vllm/agg/deploy.yaml -n ${NAMESPACE}
 kubectl port-forward svc/llama3-70b-agg-frontend 8000:8000 -n ${NAMESPACE}
 ```
 
-### Inference Gateway (GAIE) Integration (Optional)**
+### Inference Gateway (GAIE) Integration (Optional)
 
 For Llama-3-70B with vLLM (Aggregated), an example of integration with the Inference Gateway is provided.
 

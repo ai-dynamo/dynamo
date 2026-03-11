@@ -1,52 +1,59 @@
-# GPT-OSS-120B Recipe Guide
+# GPT-OSS-120B Recipes
 
-This guide will help you run the GPT-OSS-120B language model using Dynamo's optimized setup.
+Production-ready deployment for **GPT-OSS-120B** using TensorRT-LLM on Blackwell (GB200) hardware.
+
+## Available Configurations
+
+| Configuration | GPUs | Mode | Description |
+|--------------|------|------|-------------|
+| [**trtllm/agg**](trtllm/agg/) | 4x GB200 | Aggregated | WideEP, ARM64 |
+
+> **Note:** A [disaggregated configuration](trtllm/disagg/) exists with engine configs but is not yet production-ready. See [trtllm/disagg/README.md](trtllm/disagg/README.md) for details.
 
 ## Prerequisites
 
-Follow the instructions in recipe [README.md](../README.md) to create a namespace and kubernetes secret for huggingface token.
+1. **Dynamo Platform installed** — See [Kubernetes Deployment Guide](../../docs/kubernetes/README.md)
+2. **GPU cluster** with GB200 (Blackwell) GPUs
+3. **HuggingFace token** with access to the model
 
 ## Quick Start
 
-To run the model, simply execute this command in your terminal:
+```bash
+# Set namespace
+export NAMESPACE=dynamo-demo
+kubectl create namespace ${NAMESPACE}
+
+# Create HuggingFace token secret
+kubectl create secret generic hf-token-secret \
+  --from-literal=HF_TOKEN="your-token-here" \
+  -n ${NAMESPACE}
+
+# Download model (update storageClassName in model-cache.yaml first!)
+kubectl apply -f model-cache/ -n ${NAMESPACE}
+kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=3600s
+
+# Deploy
+kubectl apply -f trtllm/agg/deploy.yaml -n ${NAMESPACE}
+```
+
+## Test the Deployment
 
 ```bash
-cd recipe
-./run.sh --model gpt-oss-120b --framework trtllm agg
-```
+# Port-forward the frontend
+kubectl port-forward svc/gpt-oss-agg-frontend 8000:8000 -n ${NAMESPACE}
 
-## (Alternative) Step by Step Guide
-
-### 1. Download the Model
-
-```bash
-cd recipes/gpt-oss-120b
-kubectl apply -n $NAMESPACE -f ./model-cache
-```
-
-### 2. Deploy and Benchmark the Model
-
-```bash
-cd recipes/gpt-oss-120b
-kubectl apply -n $NAMESPACE -f ./trtllm/agg
-```
-
-### Container Image
-This recipe was tested with dynamo trtllm runtime container for ARM64 processors.
-
-**Important Note:**
-
-Before dynamo v0.5.1 release, following container image is supported:
-```
-nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.5.1-rc0.pre3
-```
-
-After dynamo v0.5.1 release, following container image will be supported:
-```
-nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.5.1
+# Send a test request
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "openai/gpt-oss-120b",
+    "messages": [{"role": "user", "content": "Hello!"}],
+    "max_tokens": 50
+  }'
 ```
 
 ## Notes
-1. The benchmark container image uses a specific commit of aiperf to ensure reproducible results and compatibility with the benchmarking setup.
 
-2. storage class is not specified in the recipe, you need to specify it in the `deploy.yaml` file.
+- Update `storageClassName` in `model-cache/model-cache.yaml` before deploying
+- This recipe requires ARM64 (GB200) nodes — it will not run on x86 Hopper/Ampere hardware
+- Update the container image tag in `deploy.yaml` to match your Dynamo release version
