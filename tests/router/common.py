@@ -1342,6 +1342,61 @@ def _test_router_overload_503(
         logger.info("Successfully verified 503 response when all workers are busy")
 
 
+async def _zmq_replay_cycle(
+    phase: int,
+    router,
+    router_name: str,
+    endpoint,
+    indexer_url: str,
+    engine_workers,
+    send_requests_to_router,
+):
+    """Pause indexer listeners → send gap requests → resume → send to trigger replay."""
+    await asyncio.sleep(1)
+    worker_ids = list(engine_workers.worker_id_to_zmq_ports.keys())
+    dp_size = getattr(engine_workers, "dp_size", None) or 1
+
+    logger.info(f"=== ZMQ REPLAY TEST: Phase {phase} ({router_name}) ===")
+    async with aiohttp.ClientSession() as session:
+        for wid in worker_ids:
+            for dp_rank in range(dp_size):
+                async with session.post(
+                    f"{indexer_url}/test/pause_listener",
+                    json={"instance_id": wid, "dp_rank": dp_rank},
+                ) as resp:
+                    assert (
+                        resp.status == 200
+                    ), f"Pause {wid}:{dp_rank} failed: {await resp.text()}"
+
+    logger.info("Sending 10 requests while indexer listeners are paused")
+    successful_gap = await send_requests_to_router(
+        router, 10, f"{router_name} (indexer paused)", endpoint
+    )
+    assert (
+        successful_gap == 10
+    ), f"Expected 10 requests while paused, got {successful_gap}"
+
+    async with aiohttp.ClientSession() as session:
+        for wid in worker_ids:
+            for dp_rank in range(dp_size):
+                async with session.post(
+                    f"{indexer_url}/test/resume_listener",
+                    json={"instance_id": wid, "dp_rank": dp_rank},
+                ) as resp:
+                    assert (
+                        resp.status == 200
+                    ), f"Resume {wid}:{dp_rank} failed: {await resp.text()}"
+
+    logger.info("Sending 5 requests after resume (triggers gap detection + replay)")
+    successful_post = await send_requests_to_router(
+        router, 5, f"{router_name} (post-resume)", endpoint
+    )
+    assert (
+        successful_post == 5
+    ), f"Expected 5 requests post-resume, got {successful_post}"
+    await asyncio.sleep(2)
+
+
 def _test_router_indexers_sync(
     engine_workers,
     block_size: int,
@@ -1355,6 +1410,7 @@ def _test_router_indexers_sync(
     router_event_threads: int = 4,
     standalone_indexer_url: Optional[str] = None,
     standalone_indexer_b_url: Optional[str] = None,
+    test_zmq_replay: bool = False,
 ):
     """Test that two KV routers have synchronized indexer states after processing requests.
 
@@ -1495,6 +1551,17 @@ def _test_router_indexers_sync(
 
             await asyncio.sleep(5)
 
+        if test_zmq_replay and standalone_indexer_url:
+            await _zmq_replay_cycle(
+                1,
+                kv_router1,
+                "Router 1",
+                endpoint1,
+                standalone_indexer_url,
+                engine_workers,
+                send_requests_to_router,
+            )
+
         # Wait for snapshot to be available before creating second router.
         # In JetStream mode, the background task may purge acknowledged messages
         # from the stream before the snapshot upload completes. Poll the object
@@ -1585,6 +1652,17 @@ def _test_router_indexers_sync(
             assert (
                 successful_recovery == 5
             ), f"Expected 5 successful requests post-recovery, got {successful_recovery}"
+
+        if test_zmq_replay and standalone_indexer_url:
+            await _zmq_replay_cycle(
+                2,
+                kv_router2,
+                "Router 2",
+                endpoint2,
+                standalone_indexer_url,
+                engine_workers,
+                send_requests_to_router,
+            )
 
         # Wait for internal synchronization and ZMQ event propagation
         logger.info("Waiting for final synchronization")

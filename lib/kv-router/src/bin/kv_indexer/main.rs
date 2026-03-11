@@ -113,6 +113,7 @@ async fn main() -> anyhow::Result<()> {
                 cli.model_name.clone(),
                 cli.tenant_id.clone(),
                 block_size,
+                None,
             )?;
         }
     }

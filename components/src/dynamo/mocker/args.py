@@ -386,6 +386,15 @@ def parse_args() -> argparse.Namespace:
         "subscribes and forwards events to NATS. (default: None, disabled)",
     )
     parser.add_argument(
+        "--zmq-replay-ports",
+        type=str,
+        default=None,
+        help="Comma-separated list of ZMQ ROUTER base ports for KV event replay. "
+        "One port per worker (must match --num-workers). "
+        "Each worker's DP ranks bind on base_port + dp_rank. "
+        "Used alongside --zmq-kv-events-ports for gap recovery. (default: None, disabled)",
+    )
+    parser.add_argument(
         "--bootstrap-ports",
         type=str,
         default=None,
@@ -477,6 +486,15 @@ def parse_args() -> argparse.Namespace:
             raise ValueError(
                 f"--zmq-kv-events-ports must have exactly --num-workers ({args.num_workers}) ports, "
                 f"got {len(args.zmq_kv_events_ports_list)}: {args.zmq_kv_events_ports_list}"
+            )
+
+    # Parse and validate zmq_replay_ports
+    args.zmq_replay_ports_list = parse_bootstrap_ports(args.zmq_replay_ports)
+    if args.zmq_replay_ports_list:
+        if len(args.zmq_replay_ports_list) != args.num_workers:
+            raise ValueError(
+                f"--zmq-replay-ports must have exactly --num-workers ({args.num_workers}) ports, "
+                f"got {len(args.zmq_replay_ports_list)}: {args.zmq_replay_ports_list}"
             )
 
     # Set endpoint default based on worker type if not explicitly provided

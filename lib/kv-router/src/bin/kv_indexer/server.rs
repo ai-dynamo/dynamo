@@ -33,6 +33,8 @@ pub struct RegisterRequest {
     pub block_size: u32,
     #[serde(default)]
     pub dp_rank: Option<u32>,
+    #[serde(default)]
+    pub replay_endpoint: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -92,6 +94,7 @@ async fn register(
         req.model_name,
         req.tenant_id,
         req.block_size,
+        req.replay_endpoint,
     ) {
         Ok(()) => (
             StatusCode::CREATED,
@@ -249,6 +252,45 @@ async fn query_by_hash(
 }
 
 #[derive(Deserialize)]
+struct ListenerControlRequest {
+    instance_id: WorkerId,
+    #[serde(default)]
+    dp_rank: Option<u32>,
+}
+
+async fn test_pause_listener(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ListenerControlRequest>,
+) -> impl IntoResponse {
+    match state
+        .registry
+        .pause_listener(req.instance_id, req.dp_rank.unwrap_or(0))
+    {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"status": "ok"}))),
+        Err(e) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": e.to_string()})),
+        ),
+    }
+}
+
+async fn test_resume_listener(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ListenerControlRequest>,
+) -> impl IntoResponse {
+    match state
+        .registry
+        .resume_listener(req.instance_id, req.dp_rank.unwrap_or(0))
+    {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"status": "ok"}))),
+        Err(e) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": e.to_string()})),
+        ),
+    }
+}
+
+#[derive(Deserialize)]
 struct PeerRequest {
     url: String,
 }
@@ -326,6 +368,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/query", post(query))
         .route("/query_by_hash", post(query_by_hash))
         .route("/dump", get(dump_events))
+        .route("/test/pause_listener", post(test_pause_listener))
+        .route("/test/resume_listener", post(test_resume_listener))
         .route("/register_peer", post(register_peer))
         .route("/deregister_peer", post(deregister_peer))
         .route("/peers", get(list_peers))

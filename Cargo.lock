@@ -1940,6 +1940,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum 0.8.4",
+ "bytes",
  "clap 4.5.60",
  "dashmap 6.1.0",
  "derive-getters",

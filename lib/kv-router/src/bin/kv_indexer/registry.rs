@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 
 use anyhow::{Result, bail};
 use dashmap::DashMap;
@@ -27,13 +29,27 @@ pub struct IndexerEntry {
 
 pub struct WorkerEntry {
     pub endpoints: HashMap<u32, String>,
+    pub replay_endpoints: HashMap<u32, String>,
     cancels: HashMap<u32, CancellationToken>,
+}
+
+/// State needed to restart a paused ZMQ listener.
+struct ListenerState {
+    endpoint: String,
+    replay_endpoint: Option<String>,
+    block_size: u32,
+    indexer: Indexer,
+    last_seq: Arc<AtomicU64>,
 }
 
 pub struct WorkerRegistry {
     workers: DashMap<WorkerId, WorkerEntry>,
     indexers: DashMap<IndexerKey, IndexerEntry>,
     peers: DashMap<String, ()>,
+    /// Persists across unregister/register cycles so gap detection works after re-registration.
+    last_seqs: DashMap<(WorkerId, u32), Arc<AtomicU64>>,
+    /// Saved listener state for pause/resume. Populated on register, kept on pause.
+    listener_states: DashMap<(WorkerId, u32), ListenerState>,
     num_threads: usize,
     ready_tx: watch::Sender<bool>,
     ready_rx: watch::Receiver<bool>,
@@ -46,6 +62,8 @@ impl WorkerRegistry {
             workers: DashMap::new(),
             indexers: DashMap::new(),
             peers: DashMap::new(),
+            last_seqs: DashMap::new(),
+            listener_states: DashMap::new(),
             num_threads,
             ready_tx,
             ready_rx,
@@ -80,6 +98,7 @@ impl WorkerRegistry {
         model_name: String,
         tenant_id: String,
         block_size: u32,
+        replay_endpoint: Option<String>,
     ) -> Result<()> {
         let key = IndexerKey {
             model_name,
@@ -120,6 +139,7 @@ impl WorkerRegistry {
             .entry(instance_id)
             .or_insert_with(|| WorkerEntry {
                 endpoints: HashMap::new(),
+                replay_endpoints: HashMap::new(),
                 cancels: HashMap::new(),
             });
 
@@ -127,13 +147,46 @@ impl WorkerRegistry {
             bail!("instance {instance_id} dp_rank {dp_rank} already registered");
         }
 
+        // Reuse last_seq if it survived a previous unregister (preserves gap detection).
+        let last_seq = self
+            .last_seqs
+            .entry((instance_id, dp_rank))
+            .or_insert_with(|| Arc::new(AtomicU64::new(u64::MAX)))
+            .clone();
+
+        if let Some(rep) = &replay_endpoint {
+            entry.replay_endpoints.insert(dp_rank, rep.clone());
+        }
+
+        self.listener_states.insert(
+            (instance_id, dp_rank),
+            ListenerState {
+                endpoint: endpoint.clone(),
+                replay_endpoint: replay_endpoint.clone(),
+                block_size: bs,
+                indexer: indexer.clone(),
+                last_seq: last_seq.clone(),
+            },
+        );
+
         let cancel = CancellationToken::new();
         let child_cancel = cancel.child_token();
         let addr = endpoint.clone();
         let ready = self.ready_rx();
 
         tokio::spawn(async move {
-            run_zmq_listener(instance_id, dp_rank, addr, bs, indexer, child_cancel, ready).await;
+            run_zmq_listener(
+                instance_id,
+                dp_rank,
+                addr,
+                bs,
+                indexer,
+                child_cancel,
+                ready,
+                replay_endpoint,
+                last_seq,
+            )
+            .await;
         });
 
         entry.endpoints.insert(dp_rank, endpoint);
@@ -248,6 +301,65 @@ impl WorkerRegistry {
             );
         }
 
+        Ok(())
+    }
+
+    pub fn pause_listener(&self, instance_id: WorkerId, dp_rank: u32) -> Result<()> {
+        let mut entry = self
+            .workers
+            .get_mut(&instance_id)
+            .ok_or_else(|| anyhow::anyhow!("instance {instance_id} not found"))?;
+
+        let cancel = entry.cancels.remove(&dp_rank).ok_or_else(|| {
+            anyhow::anyhow!("instance {instance_id} dp_rank {dp_rank} not active")
+        })?;
+        cancel.cancel();
+
+        tracing::info!(instance_id, dp_rank, "Paused ZMQ listener");
+        Ok(())
+    }
+
+    pub fn resume_listener(&self, instance_id: WorkerId, dp_rank: u32) -> Result<()> {
+        let mut entry = self
+            .workers
+            .get_mut(&instance_id)
+            .ok_or_else(|| anyhow::anyhow!("instance {instance_id} not found"))?;
+
+        if entry.cancels.contains_key(&dp_rank) {
+            bail!("instance {instance_id} dp_rank {dp_rank} already running");
+        }
+
+        let state = self
+            .listener_states
+            .get(&(instance_id, dp_rank))
+            .ok_or_else(|| anyhow::anyhow!("no saved state for {instance_id} dp_rank {dp_rank}"))?;
+
+        let cancel = CancellationToken::new();
+        let child_cancel = cancel.child_token();
+        let ready = self.ready_rx();
+        let addr = state.endpoint.clone();
+        let bs = state.block_size;
+        let indexer = state.indexer.clone();
+        let replay_ep = state.replay_endpoint.clone();
+        let last_seq = state.last_seq.clone();
+        drop(state);
+
+        tokio::spawn(async move {
+            run_zmq_listener(
+                instance_id,
+                dp_rank,
+                addr,
+                bs,
+                indexer,
+                child_cancel,
+                ready,
+                replay_ep,
+                last_seq,
+            )
+            .await;
+        });
+
+        entry.cancels.insert(dp_rank, cancel);
         Ok(())
     }
 
