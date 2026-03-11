@@ -386,7 +386,11 @@ async fn anthropic_messages(
                     )
                 })?;
 
-        let response = chat_completion_to_anthropic_response(chat_response, &model_for_resp);
+        let response = chat_completion_to_anthropic_response(
+            chat_response,
+            &model_for_resp,
+            anthropic_ctx.as_ref(),
+        );
 
         inflight_guard.mark_ok();
 

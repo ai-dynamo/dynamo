@@ -1085,4 +1085,35 @@ mod tests {
             "no block stops in end events"
         );
     }
+
+    /// Verify that `with_context` stores the context and produces the same
+    /// event structure as `new` — the context is carried for future enrichment.
+    #[test]
+    fn test_with_context_preserves_context() {
+        use crate::protocols::unified::AnthropicContext;
+
+        let ctx = AnthropicContext {
+            service_tier: Some("priority".to_string()),
+            ..Default::default()
+        };
+        let mut conv = AnthropicStreamConverter::with_context("test-model".into(), ctx);
+        assert!(conv.api_context.is_some());
+        assert_eq!(
+            conv.api_context.as_ref().unwrap().service_tier.as_deref(),
+            Some("priority")
+        );
+
+        // Should produce the same events as a regular converter
+        let ev = conv.process_chunk_tagged(&text_chunk("Hello"));
+        assert_eq!(
+            event_types(&ev),
+            vec!["content_block_start", "content_block_delta"]
+        );
+
+        let end = conv.emit_end_events_tagged();
+        assert_eq!(
+            event_types(&end),
+            vec!["content_block_stop", "message_delta", "message_stop"]
+        );
+    }
 }

@@ -664,6 +664,7 @@ fn get_event_type(event: &ResponseStreamEvent) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocols::unified::ResponsesContext;
     use dynamo_async_openai::types::{
         ChatChoiceStream, ChatCompletionMessageContent, ChatCompletionMessageToolCallChunk,
         ChatCompletionStreamResponseDelta, ChatCompletionToolType, FunctionCallStream,
@@ -727,6 +728,7 @@ mod tests {
             nvext: None,
         }
     }
+
 
     fn text_chunk(text: &str) -> NvCreateChatCompletionStreamResponse {
         #[allow(deprecated)]
@@ -917,5 +919,42 @@ mod tests {
             tool_types.contains(&"response.output_item.done".to_string()),
             "output_item.done inline after text: {tool_types:?}"
         );
+    }
+
+    /// Verify that `with_context` populates `previous_response_id` and `store`
+    /// in the generated Response objects.
+    #[test]
+    fn test_with_context_enriches_response() {
+        let ctx = ResponsesContext {
+            previous_response_id: Some("resp_prev_123".to_string()),
+            store: true,
+            ..Default::default()
+        };
+        let params = ResponseParams::default();
+        let mut conv = ResponseStreamConverter::with_context("test-model".into(), params, ctx);
+
+        // Process one text chunk so there's output
+        let _ = conv.emit_start_events();
+        let _ = conv.process_chunk(&text_chunk("Hello"));
+        let _end_events = conv.emit_end_events();
+
+        // Verify the Response object carries the context values through
+        let response = conv.make_response(Status::Completed, vec![]);
+        assert_eq!(
+            response.previous_response_id.as_deref(),
+            Some("resp_prev_123")
+        );
+        assert_eq!(response.store, Some(true));
+    }
+
+    /// Without context, previous_response_id is None and store defaults to false.
+    #[test]
+    fn test_without_context_defaults() {
+        let params = ResponseParams::default();
+        let conv = ResponseStreamConverter::new("test-model".into(), params);
+
+        let response = conv.make_response(Status::Completed, vec![]);
+        assert_eq!(response.previous_response_id, None);
+        assert_eq!(response.store, Some(false));
     }
 }

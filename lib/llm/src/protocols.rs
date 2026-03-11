@@ -14,8 +14,8 @@ pub mod anthropic;
 pub mod codec;
 pub mod common;
 pub mod openai;
-pub mod tensor;
 pub mod unified;
+pub mod tensor;
 
 /// The token ID type
 pub type TokenIdType = u32;

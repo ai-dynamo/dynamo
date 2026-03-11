@@ -1208,7 +1208,9 @@ fn convert_anthropic_tool_choice(tc: &AnthropicToolChoice) -> ChatCompletionTool
 pub fn chat_completion_to_anthropic_response(
     chat_resp: NvCreateChatCompletionResponse,
     model: &str,
+    api_context: Option<&super::unified::AnthropicContext>,
 ) -> AnthropicMessageResponse {
+    let _ = api_context; // Available for future enrichment (service_tier, etc.)
     let msg_id = format!("msg_{}", Uuid::new_v4().simple());
 
     let choice = chat_resp.choices.into_iter().next();
@@ -1691,7 +1693,7 @@ mod tests {
             nvext: None,
         };
 
-        let response = chat_completion_to_anthropic_response(chat_resp, "test-model");
+        let response = chat_completion_to_anthropic_response(chat_resp, "test-model", None);
         assert!(response.id.starts_with("msg_"));
         assert_eq!(response.object_type, "message");
         assert_eq!(response.role, "assistant");

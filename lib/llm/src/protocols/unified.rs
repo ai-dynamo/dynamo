@@ -46,6 +46,8 @@ use crate::protocols::openai::{
     OpenAIOutputOptionsProvider, OpenAISamplingOptionsProvider, OpenAIStopConditionsProvider,
 };
 
+use dynamo_async_openai::types::responses::{IncludeEnum, Reasoning, Truncation};
+
 use super::anthropic::types::{AnthropicCreateMessageRequest, ThinkingConfig};
 use super::openai::responses::NvCreateResponse;
 
@@ -106,9 +108,6 @@ pub struct AnthropicContext {
     /// Output configuration (effort level, JSON schema format).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_config: Option<serde_json::Value>,
-
-    /// Whether the original request had `stream: true`.
-    pub streaming: bool,
 }
 
 /// Responses API-specific fields preserved from `NvCreateResponse`.
@@ -121,15 +120,15 @@ pub struct ResponsesContext {
 
     /// Context truncation strategy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub truncation: Option<String>,
+    pub truncation: Option<Truncation>,
 
     /// Reasoning configuration (effort + optional summary generation).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reasoning: Option<serde_json::Value>,
+    pub reasoning: Option<Reasoning>,
 
     /// Output items to include in the response.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub include: Option<Vec<String>>,
+    pub include: Option<Vec<IncludeEnum>>,
 
     /// Whether responses should be stored server-side.
     #[serde(default)]
@@ -191,7 +190,6 @@ impl TryFrom<AnthropicCreateMessageRequest> for UnifiedRequest {
             service_tier: req.service_tier.clone(),
             container: req.container.clone(),
             output_config: req.output_config.clone(),
-            streaming: req.stream,
         };
 
         // Perform the existing lossy conversion
@@ -211,22 +209,9 @@ impl TryFrom<NvCreateResponse> for UnifiedRequest {
         // Capture API-specific fields BEFORE the lossy conversion
         let responses_ctx = ResponsesContext {
             previous_response_id: req.inner.previous_response_id.clone(),
-            truncation: req
-                .inner
-                .truncation
-                .as_ref()
-                .map(|t| serde_json::to_string(t).unwrap_or_default()),
-            reasoning: req
-                .inner
-                .reasoning
-                .as_ref()
-                .map(|r| serde_json::to_value(r).unwrap_or_default()),
-            include: req.inner.include.as_ref().map(|items| {
-                items
-                    .iter()
-                    .map(|i| serde_json::to_string(i).unwrap_or_default())
-                    .collect()
-            }),
+            truncation: req.inner.truncation.clone(),
+            reasoning: req.inner.reasoning.clone(),
+            include: req.inner.include.clone(),
             store: req.inner.store.unwrap_or(false),
         };
 
@@ -373,7 +358,7 @@ impl OpenAISamplingOptionsProvider for UnifiedRequest {
     }
 
     fn get_best_of(&self) -> Option<u8> {
-        None
+        OpenAISamplingOptionsProvider::get_best_of(&self.inner)
     }
 }
 
@@ -475,15 +460,15 @@ impl OpenAIOutputOptionsProvider for UnifiedRequest {
     }
 
     fn get_prompt_logprobs(&self) -> Option<u32> {
-        None
+        OpenAIOutputOptionsProvider::get_prompt_logprobs(&self.inner)
     }
 
     fn get_skip_special_tokens(&self) -> Option<bool> {
-        self.inner.common.skip_special_tokens
+        OpenAIOutputOptionsProvider::get_skip_special_tokens(&self.inner)
     }
 
     fn get_formatted_prompt(&self) -> Option<bool> {
-        None
+        OpenAIOutputOptionsProvider::get_formatted_prompt(&self.inner)
     }
 }
 
@@ -520,7 +505,7 @@ impl OAIChatLikeRequest for UnifiedRequest {
     }
 
     fn extract_text(&self) -> Option<TextInput> {
-        Some(TextInput::Single(String::new()))
+        OAIChatLikeRequest::extract_text(&self.inner)
     }
 
     fn chat_template_args(&self) -> Option<&HashMap<String, serde_json::Value>> {
@@ -665,11 +650,43 @@ mod tests {
         assert_eq!(ctx.thinking.as_ref().unwrap().budget_tokens, Some(4096));
         assert!(unified.thinking_enabled());
         assert_eq!(unified.thinking_budget_tokens(), Some(4096));
-        assert!(ctx.streaming);
         assert!(ctx.metadata.is_some());
 
         // Verify it still works as a preprocessor input
         assert_eq!(unified.model(), "claude-sonnet-4-20250514");
         assert!(unified.extract_text().is_some());
+    }
+
+    #[test]
+    fn test_responses_context_preserved() {
+        // Construct an NvCreateResponse via JSON to satisfy all required fields
+        let json = serde_json::json!({
+            "model": "gpt-4o",
+            "input": "What is the capital of France?",
+            "previous_response_id": "resp_abc123",
+            "store": true,
+            "truncation": "auto",
+            "reasoning": {
+                "effort": "medium"
+            },
+            "include": ["message.output_text.logprobs"]
+        });
+        let req: NvCreateResponse = serde_json::from_value(json).unwrap();
+
+        let unified = UnifiedRequest::try_from(req).unwrap();
+
+        let ctx = unified.responses_context().unwrap();
+        assert_eq!(
+            ctx.previous_response_id.as_deref(),
+            Some("resp_abc123")
+        );
+        assert!(ctx.store);
+        assert!(ctx.truncation.is_some());
+        assert!(ctx.reasoning.is_some());
+        assert!(ctx.include.is_some());
+        assert_eq!(ctx.include.as_ref().unwrap().len(), 1);
+
+        // Verify it still works as a preprocessor input
+        assert_eq!(unified.model(), "gpt-4o");
     }
 }
