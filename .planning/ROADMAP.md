@@ -71,7 +71,13 @@ Plans:
   2. Connector tests from `ryan/kvbm-next:lib/kvbm/src/v2/testing` are present in `lib/kvbm-connector/`
   3. `cargo test -p kvbm-connector --features testing` compiles without errors
   4. `cargo test -p kvbm-connector --features testing` passes (all tests green)
-**Plans**: TBD
+**Plans**: 4 plans
+
+Plans:
+- [ ] 04-01-PLAN.md — Update Cargo.toml (figment dep, tracing-subscriber dev-dep, testing feature), wire lib.rs and testing/mod.rs skeleton
+- [ ] 04-02-PLAN.md — Port testing/connector.rs (~1756 lines) with import migration, activate pub mod connector
+- [ ] 04-03-PLAN.md — Port testing/e2e/ (3 files) and testing/scheduler/ (8 files), disable Scheduler-dependent tests
+- [ ] 04-04-PLAN.md — Restore worker/tests.rs imports, run full cargo test, achieve green suite
 
 ## Progress
 
@@ -83,4 +89,4 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 | 1. Workspace Wiring | 1/1 | Complete   | 2026-03-11 |
 | 2. Import Migration | 0/4 | Not started | - |
 | 3. Compilation Gate | 0/1 | Not started | - |
-| 4. Test Porting | 0/TBD | Not started | - |
+| 4. Test Porting | 0/4 | Not started | - |
