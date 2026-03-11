@@ -558,7 +558,17 @@ mod tests {
         cache.inc_lock_ref(n2);
         cache.dec_lock_ref(n2);
 
-        assert_eq!(cache.evict(3).0, 3);
+        let (evicted_count, evicted_indices) = cache.evict(3);
+        assert_eq!(evicted_count, 3);
+        // Evicted indices should match the pool indices originally inserted for [1,2,3]
+        let mut sorted_evicted = evicted_indices.clone();
+        sorted_evicted.sort();
+        let mut expected_indices = vec![0, 1, 2];
+        expected_indices.sort();
+        assert_eq!(
+            sorted_evicted, expected_indices,
+            "evicted indices should match inserted indices"
+        );
         assert_eq!(cache.match_prefix(&[1, 2, 3]).0, 0); // oldest evicted
         assert_eq!(cache.match_prefix(&[4, 5, 6]).0, 3); // newer kept
 
@@ -571,7 +581,15 @@ mod tests {
         let (_, unlocked) = cache.match_prefix(&[4, 5, 6]);
         cache.inc_lock_ref(unlocked);
         cache.dec_lock_ref(unlocked);
-        assert_eq!(cache.evict(6).0, 3); // only unlocked evicted
+        let (evicted_count, evicted_indices) = cache.evict(6);
+        assert_eq!(evicted_count, 3); // only unlocked evicted
+        let mut sorted_evicted = evicted_indices;
+        sorted_evicted.sort();
+        assert_eq!(
+            sorted_evicted,
+            vec![3, 4, 5],
+            "should evict unlocked [4,5,6] indices"
+        );
         assert_eq!(cache.match_prefix(&[1, 2, 3]).0, 3);
     }
 

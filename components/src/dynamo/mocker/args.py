@@ -126,22 +126,27 @@ def create_temp_engine_args_file(args: argparse.Namespace) -> Path:
         # - kv_cache_dtype is only used Python-side for the auto-computation.
         "kv_transfer_bandwidth": getattr(args, "kv_transfer_bandwidth", None),
         "engine_type": getattr(args, "engine_type", None),
-        "sglang_schedule_policy": getattr(args, "sglang_schedule_policy", None),
-        "sglang_page_size": getattr(args, "sglang_page_size", None),
-        "sglang_max_prefill_tokens": getattr(args, "sglang_max_prefill_tokens", None),
-        "sglang_chunked_prefill_size": getattr(
-            args, "sglang_chunked_prefill_size", None
-        ),
-        "sglang_clip_max_new_tokens": getattr(args, "sglang_clip_max_new_tokens", None),
-        "sglang_schedule_conservativeness": getattr(
-            args, "sglang_schedule_conservativeness", None
-        ),
     }
 
     # Parse --reasoning JSON string into a nested object
     reasoning_str = getattr(args, "reasoning", None)
     if reasoning_str:
         engine_args["reasoning"] = json.loads(reasoning_str)
+
+    # Build nested sglang config from individual CLI flags
+    sglang_args = {
+        "schedule_policy": getattr(args, "sglang_schedule_policy", None),
+        "page_size": getattr(args, "sglang_page_size", None),
+        "max_prefill_tokens": getattr(args, "sglang_max_prefill_tokens", None),
+        "chunked_prefill_size": getattr(args, "sglang_chunked_prefill_size", None),
+        "clip_max_new_tokens": getattr(args, "sglang_clip_max_new_tokens", None),
+        "schedule_conservativeness": getattr(
+            args, "sglang_schedule_conservativeness", None
+        ),
+    }
+    sglang_args = {k: v for k, v in sglang_args.items() if v is not None}
+    if sglang_args:
+        engine_args["sglang"] = sglang_args
 
     # Remove None values to only include explicitly set arguments
     engine_args = {k: v for k, v in engine_args.items() if v is not None}

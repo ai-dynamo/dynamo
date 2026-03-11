@@ -139,6 +139,31 @@ impl ReasoningConfig {
     }
 }
 
+/// SGLang-specific configuration parameters.
+///
+/// Grouped into a nested struct to keep the `MockEngineArgs` namespace clean,
+/// following the same pattern as [`ReasoningConfig`].
+#[derive(Debug, Clone, Serialize, Deserialize, Validate, Default)]
+pub struct SglangArgs {
+    /// Scheduling policy: "fifo"/"fcfs" or "lpm". Default: "fifo".
+    pub schedule_policy: Option<String>,
+    /// Radix cache page size in tokens. Default: 1.
+    #[validate(range(min = 1))]
+    pub page_size: Option<usize>,
+    /// Maximum prefill tokens budget per batch. Default: 16384.
+    #[validate(range(min = 1))]
+    pub max_prefill_tokens: Option<usize>,
+    /// Chunked prefill size (max tokens per chunk). Default: 8192.
+    #[validate(range(min = 1))]
+    pub chunked_prefill_size: Option<usize>,
+    /// Clip max new tokens for admission budget. Default: 4096.
+    #[validate(range(min = 1))]
+    pub clip_max_new_tokens: Option<usize>,
+    /// Schedule conservativeness factor (0.0–1.0). Default: 1.0.
+    #[validate(range(min = 0.0, max = 1.0))]
+    pub schedule_conservativeness: Option<f64>,
+}
+
 /// Configuration arguments for MockEngine
 #[derive(Debug, Clone, Serialize, Deserialize, Builder, Validate)]
 #[builder(pattern = "owned", build_fn(public))]
@@ -231,34 +256,9 @@ pub struct MockEngineArgs {
     #[builder(default)]
     pub preemption_mode: PreemptionMode,
 
-    /// SGLang: scheduling policy ("fifo" or "lpm"). Default: "fifo".
+    /// SGLang-specific configuration. Only used when `engine_type == Sglang`.
     #[builder(default = "None")]
-    pub sglang_schedule_policy: Option<String>,
-
-    /// SGLang: page size for radix cache (tokens per page). Default: 1.
-    #[builder(default = "None")]
-    #[validate(range(min = 1))]
-    pub sglang_page_size: Option<usize>,
-
-    /// SGLang: maximum prefill tokens budget per batch. Default: 16384.
-    #[builder(default = "None")]
-    #[validate(range(min = 1))]
-    pub sglang_max_prefill_tokens: Option<usize>,
-
-    /// SGLang: chunked prefill size (max tokens per chunk). Default: 8192.
-    #[builder(default = "None")]
-    #[validate(range(min = 1))]
-    pub sglang_chunked_prefill_size: Option<usize>,
-
-    /// SGLang: clip max new tokens for admission budget. Default: 4096.
-    #[builder(default = "None")]
-    #[validate(range(min = 1))]
-    pub sglang_clip_max_new_tokens: Option<usize>,
-
-    /// SGLang: schedule conservativeness factor (0.0-1.0). Default: 1.0.
-    #[builder(default = "None")]
-    #[validate(range(min = 0.0, max = 1.0))]
-    pub sglang_schedule_conservativeness: Option<f64>,
+    pub sglang: Option<SglangArgs>,
 }
 
 impl Default for MockEngineArgs {
@@ -316,12 +316,7 @@ impl MockEngineArgs {
             "reasoning",
             "zmq_kv_events_port",
             "preemption_mode",
-            "sglang_schedule_policy",
-            "sglang_page_size",
-            "sglang_max_prefill_tokens",
-            "sglang_chunked_prefill_size",
-            "sglang_clip_max_new_tokens",
-            "sglang_schedule_conservativeness",
+            "sglang",
         ]
         .iter()
         .cloned()
@@ -465,40 +460,10 @@ impl MockEngineArgs {
             builder = builder.preemption_mode(mode);
         }
 
-        if let Some(value) = extra_args.get("sglang_schedule_policy")
-            && let Some(s) = value.as_str()
-        {
-            builder = builder.sglang_schedule_policy(Some(s.to_string()));
-        }
-
-        if let Some(value) = extra_args.get("sglang_page_size")
-            && let Some(num) = value.as_u64()
-        {
-            builder = builder.sglang_page_size(Some(num as usize));
-        }
-
-        if let Some(value) = extra_args.get("sglang_max_prefill_tokens")
-            && let Some(num) = value.as_u64()
-        {
-            builder = builder.sglang_max_prefill_tokens(Some(num as usize));
-        }
-
-        if let Some(value) = extra_args.get("sglang_chunked_prefill_size")
-            && let Some(num) = value.as_u64()
-        {
-            builder = builder.sglang_chunked_prefill_size(Some(num as usize));
-        }
-
-        if let Some(value) = extra_args.get("sglang_clip_max_new_tokens")
-            && let Some(num) = value.as_u64()
-        {
-            builder = builder.sglang_clip_max_new_tokens(Some(num as usize));
-        }
-
-        if let Some(value) = extra_args.get("sglang_schedule_conservativeness")
-            && let Some(num) = value.as_f64()
-        {
-            builder = builder.sglang_schedule_conservativeness(Some(num));
+        if let Some(value) = extra_args.get("sglang") {
+            let cfg: SglangArgs = serde_json::from_value(value.clone())
+                .map_err(|e| anyhow::anyhow!("Failed to parse sglang config: {}", e))?;
+            builder = builder.sglang(Some(cfg));
         }
 
         // Parse worker type from is_prefill and is_decode flags
