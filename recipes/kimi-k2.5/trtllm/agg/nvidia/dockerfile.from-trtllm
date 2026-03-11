@@ -30,8 +30,6 @@ RUN pip install --no-cache-dir --break-system-packages "nixl[cu12]<=0.10.1"
 # Clean up Dynamo source and Rust toolchain to reduce image size
 RUN rm -rf /opt/dynamo-src /root/.cargo /root/.rustup
 
-USER dynamo
-
 # Patch TRT-LLM with KimiK25ForConditionalGeneration support
 # Same patch as https://github.com/NVIDIA/TensorRT-LLM/tree/feat/k25-demo
 # and dynamo/recipes/kimi-k2.5/trtllm/agg/nvidia/patch/kimi.patch

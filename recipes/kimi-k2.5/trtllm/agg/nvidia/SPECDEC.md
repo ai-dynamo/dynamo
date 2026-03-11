@@ -8,7 +8,7 @@
 - A pre-existing `model-cache` PVC
 - An image, either:
   - A Dynamo + TRT-LLM runtime image built from `nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc5`, or:
-  - A Dynamo 1.0.0 release image with the Kimi-K2.5 patch.
+  - A Dynamo 1.0.0 release image with the Kimi-K2.5 patch. Follow the [patch guide](./patch/README.md) to learn more about how to patch the Dynamo image.
 - Replace the placeholder image tag `nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag-patched` in `deploy-eagle-specdec.yaml` with your actual patched image.
 
 ## Build the Runtime Image
