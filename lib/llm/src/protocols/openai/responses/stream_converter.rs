@@ -737,7 +737,6 @@ mod tests {
         }
     }
 
-
     fn text_chunk(text: &str) -> NvCreateChatCompletionStreamResponse {
         #[allow(deprecated)]
         NvCreateChatCompletionStreamResponse {
