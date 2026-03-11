@@ -36,6 +36,7 @@ cudarc         = { workspace = true }
 dashmap        = { workspace = true }
 derive_builder = { workspace = true }
 derive-getters = { workspace = true }
+figment        = { version = "0.10", features = ["env", "toml", "json"], optional = true }
 futures        = { workspace = true }
 parking_lot    = { workspace = true }
 serde          = { workspace = true }
@@ -46,11 +47,15 @@ uuid           = { workspace = true }
 oneshot        = { workspace = true }
 serde_json     = { workspace = true }
 
+[dev-dependencies]
+tracing-subscriber = { workspace = true }
+
 [features]
 testing = [
     "kvbm-engine/testing",
     "kvbm-logical/testing",
     "kvbm-physical/testing",
+    "dep:figment",
 ]
 # Gates NCCL-accelerated intra-pass layer-wise onboard (G2→G1 via cudarc).
 nccl = ["kvbm-engine/nccl"]

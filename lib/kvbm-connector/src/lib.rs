@@ -22,3 +22,6 @@ pub use config::{AttentionConfig, IntegrationsConfig, ParallelConfig};
 // Re-export workspace types used throughout this crate
 pub use kvbm_common::{BlockId, SequenceHash};
 pub use kvbm_engine::{G1, G2, G3, G4, InstanceId, KvbmRuntime};
+
+#[cfg(feature = "testing")]
+pub mod testing;
