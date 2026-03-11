@@ -29,7 +29,6 @@ fi
 
 export DYNAMO_HOME=${DYNAMO_HOME:-"/workspace"}
 export MODEL_PATH=${MODEL_PATH:-"Qwen/Qwen3-VL-30B-A3B-Instruct"}
-export SERVED_MODEL_NAME=${SERVED_MODEL_NAME:-"Qwen/Qwen3-VL-30B-A3B-Instruct"}
 export PREFILL_ENGINE_ARGS=${PREFILL_ENGINE_ARGS:-"$DYNAMO_HOME/examples/backends/trtllm/engine_configs/qwen3-vl-30b-a3b-instruct/prefill.yaml"}
 export DECODE_ENGINE_ARGS=${DECODE_ENGINE_ARGS:-"$DYNAMO_HOME/examples/backends/trtllm/engine_configs/qwen3-vl-30b-a3b-instruct/decode.yaml"}
 export ENCODE_ENGINE_ARGS=${ENCODE_ENGINE_ARGS:-"$DYNAMO_HOME/examples/backends/trtllm/engine_configs/qwen3-vl-30b-a3b-instruct/encode.yaml"}
@@ -40,6 +39,15 @@ export MAX_FILE_SIZE_MB=${MAX_FILE_SIZE_MB:-50}
 
 # Remaining arguments forwarded from sweep orchestrator
 EXTRA_ARGS=("$@")
+
+# Parse --model-path from extra args to keep SERVED_MODEL_NAME in sync
+for (( i=0; i<${#EXTRA_ARGS[@]}; i++ )); do
+    if [[ "${EXTRA_ARGS[$i]}" == "--model-path" || "${EXTRA_ARGS[$i]}" == "--model" ]]; then
+        MODEL_PATH="${EXTRA_ARGS[$((i+1))]}"
+        break
+    fi
+done
+export SERVED_MODEL_NAME="$MODEL_PATH"
 
 echo "EPD config: ${NUM_ENCODERS} encoder(s) — 1 per GPU"
 

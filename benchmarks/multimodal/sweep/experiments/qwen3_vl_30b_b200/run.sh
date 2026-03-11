@@ -110,7 +110,7 @@ fi
 if $DRY_RUN; then
     CONCURRENCIES="1"
     REQUEST_COUNT=1
-    WARMUP_COUNT=0
+    WARMUP_COUNT=1
     OSL=50
     OUTPUT_DIR="benchmarks/results/qwen3_vl_30b_b200/dry_run"
 fi
