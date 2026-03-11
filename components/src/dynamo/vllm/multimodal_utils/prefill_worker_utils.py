@@ -261,8 +261,10 @@ async def _fetch_embeddings(
         )
 
         # ── 3. Update cache (no-op when cache is None) ──────────────
+
         for (idx, _url, key), group in zip(to_fetch, groups, strict=True):
             if cache is not None and key is not None:
+                assert group.loaded_embedding is not None
                 cache.set(
                     key,
                     CachedEmbedding(
@@ -306,6 +308,7 @@ async def load_multimodal_embeddings(
     multi_modal_data: Dict[str, Any] = defaultdict(list)
     with time_and_log_code_section("[PREFILL] accumulate embeddings"):
         for group in groups:
+            assert group.loaded_embedding is not None
             _accumulate_embeddings(
                 multi_modal_data,
                 model,

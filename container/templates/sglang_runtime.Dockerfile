@@ -121,14 +121,17 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
 COPY --chmod=775 --chown=dynamo:0 benchmarks/ /workspace/benchmarks/
 {% endif %}
 
-# Install common and test dependencies as root
-RUN --mount=type=bind,source=container/deps/requirements.txt,target=/tmp/deps/requirements.txt \
-    --mount=type=bind,source=container/deps/requirements.test.txt,target=/tmp/deps/requirements.test.txt \
+# Install runtime dependencies (common + planner + benchmarks) as root.
+# Test and dev dependencies are NOT installed here — they go in the test and dev images.
+RUN --mount=type=bind,source=container/deps/requirements.common.txt,target=/tmp/deps/requirements.common.txt \
+    --mount=type=bind,source=container/deps/requirements.planner.txt,target=/tmp/deps/requirements.planner.txt \
+    --mount=type=bind,source=container/deps/requirements.benchmark.txt,target=/tmp/deps/requirements.benchmark.txt \
     --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     export PIP_CACHE_DIR=/root/.cache/pip && \
     pip install --break-system-packages \
-        --requirement /tmp/deps/requirements.txt \
-        --requirement /tmp/deps/requirements.test.txt \
+        --requirement /tmp/deps/requirements.common.txt \
+        --requirement /tmp/deps/requirements.planner.txt \
+        --requirement /tmp/deps/requirements.benchmark.txt \
         sglang==${SGLANG_VERSION} && \
     #TODO: Temporary change until upstream sglang runtime image is updated
     pip install --break-system-packages "urllib3>=2.6.3"
@@ -142,7 +145,7 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     chmod -R g+w /workspace/benchmarks
 {% endif %}
 
-# Force-reinstall NVIDIA packages in a separate layer so requirements.txt changes don't trigger re-download
+# Force-reinstall NVIDIA packages in a separate layer so requirements changes don't trigger re-download
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     export PIP_CACHE_DIR=/root/.cache/pip && \
     CUDA_MAJOR=$(nvcc --version | egrep -o 'cuda_[0-9]+' | cut -d_ -f2) && \

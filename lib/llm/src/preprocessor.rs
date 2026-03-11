@@ -209,7 +209,9 @@ impl OpenAIPreprocessor {
     }
 
     /// Translate a [`NvCreateChatCompletionRequest`] request to a common completion request.
-    /// Returns both the common completion request and a hashmap of annotations.
+    /// Returns the common completion request, a hashmap of annotations, and a boolean
+    /// indicating whether the rendered prompt ends with a reasoning start token (e.g.,
+    /// `<think>`), meaning the model's completion will begin mid-reasoning.
     ///
     /// Annotations evaluated by this method include:
     /// - `formatted_prompt`
@@ -225,19 +227,28 @@ impl OpenAIPreprocessor {
         &self,
         request: &R,
         tracker: Option<&RequestTracker>,
-    ) -> Result<(PreprocessedRequest, HashMap<String, String>)> {
+    ) -> Result<(PreprocessedRequest, HashMap<String, String>, bool)> {
         let mut builder = self.builder(request)?;
         let formatted_prompt = self
             .apply_template(request)
             .with_context(|| "Failed to apply prompt template")?;
+
+        // Check if the chat template injected a reasoning start token at the end
+        // of the prompt (e.g., Qwen3.5 appends `<think>\n` when enable_thinking
+        // is not explicitly false). If so, the model's completion starts
+        // mid-reasoning and the parser should begin in reasoning mode.
+        let prompt_injected_reasoning = formatted_prompt
+            .as_ref()
+            .is_some_and(|p| p.trim_end().ends_with("<think>"));
+
         let annotations = self
-            .gather_tokens(request, &mut builder, formatted_prompt, tracker)
+            .gather_tokens(request, &mut builder, formatted_prompt.clone(), tracker)
             .with_context(|| "Failed to gather tokens")?;
-        self.gather_multi_modal_data(request, &mut builder)
+        self.gather_multi_modal_data(request, &mut builder, formatted_prompt)
             .await
             .with_context(|| "Failed to gather multimodal data")?;
 
-        Ok((builder.build()?, annotations))
+        Ok((builder.build()?, annotations, prompt_injected_reasoning))
     }
 
     pub fn builder<
@@ -351,6 +362,7 @@ impl OpenAIPreprocessor {
         &self,
         request: &R,
         builder: &mut PreprocessedRequestBuilder,
+        formatted_prompt: Option<String>,
     ) -> Result<()> {
         let mut media_map: MultimodalDataMap = HashMap::new();
         let mut fetch_tasks: Vec<(String, ChatCompletionRequestUserMessageContentPart)> =
@@ -417,12 +429,16 @@ impl OpenAIPreprocessor {
         if !media_map.is_empty() {
             builder.multi_modal_data(Some(media_map));
 
-            // Preserve original messages in extra_args for multimodal workers that need them
-            // (e.g., TRT-LLM multimodal processor needs raw messages for proper tokenization)
+            // Preserve original messages and formatted prompt in extra_args for multimodal
+            // workers (e.g., TRT-LLM needs messages and the template-rendered prompt with
+            // <image> placeholders for embedding-path / NIXL flows).
             let messages_json = serde_json::to_value(request.messages())?;
-            let extra_args = serde_json::json!({
+            let mut extra_args = serde_json::json!({
                 "messages": messages_json
             });
+            if let Some(ref prompt) = formatted_prompt {
+                extra_args["formatted_prompt"] = serde_json::Value::String(prompt.clone());
+            }
             builder.extra_args(Some(extra_args));
         }
 
@@ -654,6 +670,7 @@ impl OpenAIPreprocessor {
         &self,
         stream: S,
         request: &NvCreateChatCompletionRequest,
+        prompt_injected_reasoning: bool,
     ) -> anyhow::Result<
         impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
     >
@@ -678,6 +695,7 @@ impl OpenAIPreprocessor {
             Box::pin(Self::parse_reasoning_content_from_stream(
                 stream,
                 self.runtime_config.reasoning_parser.clone().unwrap(), // Safety: We already checked that parser is some, so gtg
+                prompt_injected_reasoning,
             ))
         } else {
             Box::pin(stream)
@@ -1099,17 +1117,29 @@ impl OpenAIPreprocessor {
     // Motivation: Each transformation on the stream should be a separate step to allow for more flexibility
     // Earlier reasoning parser logic was nested under delta generation logic in choice_from_postprocessor
     // Since we have tool calling parsing as separate step, it makes sense to have reasoning parser as separate step as well
+    /// Apply reasoning parsing to the output stream, splitting content into
+    /// `reasoning_content` and normal `content` based on think tags.
+    ///
+    /// When `prompt_injected_reasoning` is `true`, the parser starts in reasoning
+    /// mode immediately — use this when the chat template already appended the
+    /// reasoning start token (e.g., `<think>`) to the prompt, so the model's
+    /// completion begins with thinking content without an explicit start tag.
     pub fn parse_reasoning_content_from_stream<S>(
         stream: S,
         parser_name: String,
+        prompt_injected_reasoning: bool,
     ) -> impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send
     where
         S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
     {
         // Initialize reasoning parser from parser_name
-        let reasoning_parser = Box::new(ReasoningParserType::get_reasoning_parser_from_name(
+        let mut reasoning_parser = Box::new(ReasoningParserType::get_reasoning_parser_from_name(
             parser_name.as_ref(),
         )) as Box<dyn ReasoningParser>;
+
+        if prompt_injected_reasoning {
+            reasoning_parser.set_in_reasoning(true);
+        }
 
         let state = ReasoningState {
             stream: Box::pin(stream),
@@ -1205,10 +1235,10 @@ impl
         let tracker = response_generator.tracker();
 
         // convert the chat completion request to a common completion request
-        let (mut common_request, annotations) = self
+        let (mut common_request, annotations, prompt_injected_reasoning) = self
             .preprocess_request(&request, tracker.as_deref())
             .await?;
-        tracing::trace!(request = ?common_request, "Pre-processed request");
+        tracing::trace!(request = ?common_request, prompt_injected_reasoning, "Pre-processed request");
 
         // Attach the timing tracker to the request so downstream components can record metrics
         common_request.tracker = tracker;
@@ -1243,7 +1273,8 @@ impl
             context.clone(),
         );
 
-        let transformed_stream = self.postprocessor_parsing_stream(stream, &request)?;
+        let transformed_stream =
+            self.postprocessor_parsing_stream(stream, &request, prompt_injected_reasoning)?;
 
         // Apply audit aggregation strategy.
         // The audit branch already returns Pin<Box<...>> from scan/fold_aggregate_with_future,
@@ -1335,7 +1366,8 @@ impl
         };
 
         // Gather multimodal data (works with both embeddings and text prompts)
-        self.gather_multi_modal_data(&request, &mut builder).await?;
+        self.gather_multi_modal_data(&request, &mut builder, None)
+            .await?;
 
         let mut common_request = builder.build()?;
 

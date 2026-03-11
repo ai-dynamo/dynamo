@@ -377,10 +377,10 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
             num_output_tokens_so_far = 0
             async for (
                 decode_response
-            ) in await self.decode_worker_client.round_robin(  # type: ignore[union-attr]
+            ) in await self.decode_worker_client.round_robin(  # type: ignore
                 request.model_dump_json()
             ):
-                output = MyRequestOutput.model_validate_json(decode_response.data())  # type: ignore[attr-defined]
+                output = MyRequestOutput.model_validate_json(decode_response.data())  # type: ignore
                 yield self._format_engine_output(output, num_output_tokens_so_far)
                 if output.outputs:
                     if num_output_tokens_so_far == 0:
