@@ -1,0 +1,82 @@
+#  SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#  SPDX-License-Identifier: Apache-2.0
+
+...@dynamo.d2
+
+grid-rows: 2
+grid-gap: 40
+
+timeline: "" {
+  direction: right
+  style: {
+    fill: transparent
+    stroke: transparent
+  }
+
+  prefill: "Prefill" {
+    class: gpu
+    style.font-size: 18
+  }
+
+  call1: "LLM Call 1" {
+    class: gpu
+    style.font-size: 18
+  }
+
+  tool: "Tool Call" {
+    class: neutral
+    style.font-size: 18
+  }
+
+  call2: "LLM Call 2" {
+    class: gpu
+    style.font-size: 18
+  }
+
+  prefill -> call1: {
+    class: dependency
+  }
+  call1 -> tool: {
+    class: dependency
+  }
+  tool -> call2: {
+    class: dependency
+  }
+}
+
+storage: "" {
+  direction: right
+  style: {
+    fill: transparent
+    stroke: transparent
+  }
+
+  host: "Host Memory" {
+    class: cpu
+    style.font-size: 18
+  }
+
+  disk: "Storage" {
+    shape: cylinder
+    class: cache
+    style.font-size: 18
+  }
+
+  host -> disk: {
+    class: dependency
+  }
+}
+
+timeline.call1 -> storage.host: "KV offload" {
+  class: data_flow
+  style.font-size: 16
+}
+
+storage.host -> timeline.call2: "KV prefetch" {
+  style: {
+    stroke: "#76b900"
+    stroke-width: 2
+    font-color: "#76b900"
+    font-size: 16
+  }
+}

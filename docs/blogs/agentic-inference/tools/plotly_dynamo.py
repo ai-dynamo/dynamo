@@ -1,0 +1,1 @@
+../../flash-indexer/tools/plotly_dynamo.py
