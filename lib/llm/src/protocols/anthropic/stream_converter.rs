@@ -1013,4 +1013,42 @@ mod tests {
             ]
         );
     }
+
+    /// Multiple tool calls: each gets inline content_block_stop.
+    #[test]
+    fn test_multiple_tool_calls_each_stopped_inline() {
+        let mut conv = AnthropicStreamConverter::new("test-model".into());
+
+        let events1 = conv.process_chunk_tagged(&tool_call_chunk(
+            0,
+            Some("call-1"),
+            Some("Read"),
+            Some("{\"path\":\"/tmp/a.txt\"}"),
+        ));
+        assert_eq!(
+            event_types(&events1),
+            vec!["content_block_start", "content_block_delta", "content_block_stop"],
+            "first tool call closed inline"
+        );
+
+        let events2 = conv.process_chunk_tagged(&tool_call_chunk(
+            1,
+            Some("call-2"),
+            Some("Write"),
+            Some("{\"path\":\"/tmp/b.txt\"}"),
+        ));
+        assert_eq!(
+            event_types(&events2),
+            vec!["content_block_start", "content_block_delta", "content_block_stop"],
+            "second tool call closed inline"
+        );
+
+        // End events: no block stops (both already closed)
+        let end_events = conv.emit_end_events_tagged();
+        assert_eq!(
+            event_types(&end_events),
+            vec!["message_delta", "message_stop"],
+            "no block stops in end events"
+        );
+    }
 }
