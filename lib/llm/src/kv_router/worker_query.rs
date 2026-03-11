@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -35,18 +35,35 @@ const QUERY_ENDPOINT_PREFIX: &str = "worker_kv_indexer_query_dp";
 
 type RecoveryKey = (WorkerId, DpRank);
 
+#[derive(Clone, Copy, Debug, Default)]
+enum RankCursor {
+    #[default]
+    NeedsRestore,
+    Live(u64),
+    InvalidatedByBarrier(Option<u64>),
+}
+
 #[derive(Debug, Default)]
-struct RecoveryState {
-    last_applied_id: Option<u64>,
+struct RankState {
+    cursor: RankCursor,
     max_seen_live_id: Option<u64>,
     recovery_inflight: bool,
-    resume_from_next_live: bool,
+}
+
+impl RankState {
+    fn last_applied_id(&self) -> Option<u64> {
+        match self.cursor {
+            RankCursor::NeedsRestore => None,
+            RankCursor::Live(event_id) => Some(event_id),
+            RankCursor::InvalidatedByBarrier(last_applied_id) => last_applied_id,
+        }
+    }
 }
 
 #[derive(Debug, Default)]
 struct WorkerState {
     epoch: u64,
-    known_dp_ranks: HashSet<DpRank>,
+    ranks: HashMap<DpRank, RankState>,
 }
 
 #[async_trait]
@@ -131,8 +148,9 @@ impl WorkerQueryTransport for RuntimeWorkerQueryTransport {
 /// Router-side client for querying worker local KV indexers.
 ///
 /// Discovers query endpoints via `ComponentEndpoints` discovery, filtering for
-/// the `worker_kv_indexer_query_dp{N}` name pattern. Recovers each
-/// `(worker_id, dp_rank)` individually as it appears in discovery.
+/// the `worker_kv_indexer_query_dp{N}` name pattern. Coordinates restore and
+/// gap recovery at the worker level while still querying each `(worker_id,
+/// dp_rank)` endpoint independently.
 ///
 /// Also handles worker lifecycle (add/remove) by tracking known endpoints and
 /// sending removal events to the router indexer when all dp_ranks for a worker
@@ -142,7 +160,6 @@ pub struct WorkerQueryClient {
     transport: Arc<dyn WorkerQueryTransport>,
     /// Indexer for applying recovered events and worker removals.
     indexer: Indexer,
-    recovery_states: DashMap<RecoveryKey, Arc<Mutex<RecoveryState>>>,
     worker_states: DashMap<WorkerId, Arc<Mutex<WorkerState>>>,
     recovery_semaphore: Arc<Semaphore>,
 }
@@ -157,7 +174,6 @@ impl WorkerQueryClient {
             component,
             transport,
             indexer,
-            recovery_states: DashMap::new(),
             worker_states: DashMap::new(),
             recovery_semaphore: Arc::new(Semaphore::new(RECOVERY_CONCURRENCY_LIMIT)),
         })
@@ -183,7 +199,7 @@ impl WorkerQueryClient {
         Ok(client)
     }
 
-    /// Background loop: watches ComponentEndpoints, recovers per (worker_id, dp_rank).
+    /// Background loop: watches ComponentEndpoints and schedules worker-coordinated recovery.
     async fn run_discovery_loop(
         self: Arc<Self>,
         cancel_token: tokio_util::sync::CancellationToken,
@@ -254,23 +270,11 @@ impl WorkerQueryClient {
         Some((eid.instance_id, dp_rank))
     }
 
-    fn get_or_create_recovery_state(&self, key: RecoveryKey) -> Arc<Mutex<RecoveryState>> {
-        self.recovery_states
-            .entry(key)
-            .or_insert_with(|| Arc::new(Mutex::new(RecoveryState::default())))
-            .clone()
-    }
-
     fn get_or_create_worker_state(&self, worker_id: WorkerId) -> Arc<Mutex<WorkerState>> {
         self.worker_states
             .entry(worker_id)
             .or_insert_with(|| Arc::new(Mutex::new(WorkerState::default())))
             .clone()
-    }
-
-    async fn current_worker_epoch(&self, worker_id: WorkerId) -> u64 {
-        let worker_state = self.get_or_create_worker_state(worker_id);
-        worker_state.lock().await.epoch
     }
 
     pub(crate) async fn handle_discovered_worker(
@@ -279,40 +283,28 @@ impl WorkerQueryClient {
         dp_rank: DpRank,
     ) {
         let worker_state = self.get_or_create_worker_state(worker_id);
-        let is_new = {
+        let spawn = {
             let mut worker_state = worker_state.lock().await;
-            worker_state.known_dp_ranks.insert(dp_rank)
-        };
-
-        if !is_new {
-            return;
-        }
-
-        tracing::info!(
-            "WorkerQueryClient: discovered worker {worker_id} dp_rank {dp_rank}, scheduling restore"
-        );
-
-        let key = (worker_id, dp_rank);
-        let recovery_state = self.get_or_create_recovery_state(key);
-        let should_spawn = {
-            let mut recovery_state = recovery_state.lock().await;
-            if recovery_state.last_applied_id.is_none() && !recovery_state.recovery_inflight {
-                recovery_state.recovery_inflight = true;
-                true
+            let rank_state = worker_state.ranks.entry(dp_rank).or_default();
+            if matches!(rank_state.cursor, RankCursor::NeedsRestore)
+                && !rank_state.recovery_inflight
+            {
+                tracing::info!(
+                    "WorkerQueryClient: discovered worker {worker_id} dp_rank {dp_rank}, scheduling restore"
+                );
+                rank_state.recovery_inflight = true;
+                Some(worker_state.epoch)
             } else {
-                false
+                None
             }
         };
 
-        if should_spawn {
-            let epoch = self.current_worker_epoch(worker_id).await;
-            self.spawn_recovery_task(key, epoch, None, None);
+        if let Some(epoch) = spawn {
+            self.spawn_recovery_task((worker_id, dp_rank), epoch, None, None);
         }
     }
 
     pub(crate) async fn handle_removed_worker_dp(&self, worker_id: WorkerId, dp_rank: DpRank) {
-        self.recovery_states.remove(&(worker_id, dp_rank));
-
         let Some(worker_state) = self
             .worker_states
             .get(&worker_id)
@@ -323,70 +315,39 @@ impl WorkerQueryClient {
 
         let should_remove_worker = {
             let mut worker_state = worker_state.lock().await;
-            if !worker_state.known_dp_ranks.remove(&dp_rank) {
+            if worker_state.ranks.remove(&dp_rank).is_none() {
                 return;
             }
-            if worker_state.known_dp_ranks.is_empty() {
-                worker_state.epoch += 1;
-                true
-            } else {
-                false
-            }
+            worker_state.ranks.is_empty()
         };
 
         if should_remove_worker {
             tracing::warn!("WorkerQueryClient: all dp_ranks gone for worker {worker_id}, removing");
+            self.worker_states.remove(&worker_id);
             self.indexer.remove_worker(worker_id).await;
         }
     }
 
-    async fn apply_worker_clear_barrier_locked(
-        self: &Arc<Self>,
-        worker_state: &mut WorkerState,
-        event: RouterEvent,
-    ) {
+    async fn apply_worker_clear_locked(&self, worker_state: &mut WorkerState, event: RouterEvent) {
         let worker_id = event.worker_id;
         let clear_dp_rank = event.event.dp_rank;
         let clear_event_id = event.event.event_id;
-        let mut tracked_dp_ranks = worker_state.known_dp_ranks.clone();
-        tracked_dp_ranks.insert(clear_dp_rank);
-        for entry in &self.recovery_states {
-            let &(entry_worker_id, entry_dp_rank) = entry.key();
-            if entry_worker_id == worker_id {
-                tracked_dp_ranks.insert(entry_dp_rank);
-            }
-        }
 
-        worker_state.known_dp_ranks = tracked_dp_ranks.clone();
         worker_state.epoch += 1;
-        let clear_key = (worker_id, clear_dp_rank);
-
-        for dp_rank in tracked_dp_ranks {
-            let key = (worker_id, dp_rank);
-            let recovery_state = self.get_or_create_recovery_state(key);
-            let mut recovery_state = recovery_state.lock().await;
-            recovery_state.max_seen_live_id = None;
-            recovery_state.recovery_inflight = false;
-            if key == clear_key {
-                recovery_state.last_applied_id = Some(clear_event_id);
-                recovery_state.resume_from_next_live = false;
-            } else {
-                recovery_state.resume_from_next_live = true;
-            }
+        for rank_state in worker_state.ranks.values_mut() {
+            rank_state.cursor = RankCursor::InvalidatedByBarrier(rank_state.last_applied_id());
+            rank_state.max_seen_live_id = None;
+            rank_state.recovery_inflight = false;
         }
+
+        let rank_state = worker_state.ranks.entry(clear_dp_rank).or_default();
+        rank_state.cursor = RankCursor::Live(clear_event_id);
 
         tracing::info!(
-            "Applying clear barrier for worker {worker_id}; invalidating recovery for {} dp_ranks",
-            worker_state.known_dp_ranks.len()
+            "Applying clear barrier for worker {worker_id}; invalidating recovery across {} dp_ranks",
+            worker_state.ranks.len()
         );
         self.indexer.apply_event(event).await;
-    }
-
-    async fn handle_cleared_event(self: &Arc<Self>, event: RouterEvent) {
-        let worker_state = self.get_or_create_worker_state(event.worker_id);
-        let mut worker_state = worker_state.lock().await;
-        self.apply_worker_clear_barrier_locked(&mut worker_state, event)
-            .await;
     }
 
     pub(crate) async fn handle_live_event(self: &Arc<Self>, event: RouterEvent) {
@@ -395,84 +356,96 @@ impl WorkerQueryClient {
         let event_id = event.event.event_id;
         let key = (worker_id, dp_rank);
 
-        if matches!(&event.event.data, KvCacheEventData::Cleared) {
-            let recovery_state = self.get_or_create_recovery_state(key);
-            let is_stale = {
-                let recovery_state = recovery_state.lock().await;
-                recovery_state
-                    .last_applied_id
-                    .is_some_and(|last_applied_id| event_id <= last_applied_id)
-            };
-            if !is_stale {
-                self.handle_cleared_event(event).await;
-            }
-            return;
-        }
-
-        let recovery_state = self.get_or_create_recovery_state(key);
-
         enum Action {
             ApplyDirect,
-            SpawnFullRestore,
-            SpawnIncremental { start_event_id: u64 },
+            SpawnFullRestore { epoch: u64 },
+            SpawnIncremental { epoch: u64, start_event_id: u64 },
             Drop,
         }
 
         let action = {
-            let mut recovery_state = recovery_state.lock().await;
+            let worker_state = self.get_or_create_worker_state(worker_id);
+            let mut worker_state = worker_state.lock().await;
+            let rank_state = worker_state.ranks.entry(dp_rank).or_default();
 
-            if recovery_state.resume_from_next_live {
-                if event_id <= recovery_state.last_applied_id.unwrap_or(0) {
+            // `Cleared` is worker-wide in the indexer, so it bypasses the per-rank gap logic and
+            // instead installs a worker barrier that invalidates any inflight recovery.
+            if matches!(&event.event.data, KvCacheEventData::Cleared) {
+                if rank_state
+                    .last_applied_id()
+                    .is_some_and(|last_applied_id| event_id <= last_applied_id)
+                {
                     Action::Drop
                 } else {
-                    recovery_state.resume_from_next_live = false;
-                    recovery_state.last_applied_id = Some(event_id);
-                    recovery_state.max_seen_live_id = None;
-                    Action::ApplyDirect
+                    self.apply_worker_clear_locked(&mut worker_state, event.clone())
+                        .await;
+                    Action::Drop
                 }
             } else {
-                match recovery_state.last_applied_id {
-                    None => {
-                        recovery_state.max_seen_live_id = Some(
-                            recovery_state
+                match rank_state.cursor {
+                    // We have never established a cursor for this rank, so live traffic only tells
+                    // us how far ahead the stream has moved while a full restore catches up.
+                    RankCursor::NeedsRestore => {
+                        rank_state.max_seen_live_id = Some(
+                            rank_state
                                 .max_seen_live_id
                                 .map_or(event_id, |max_seen| max_seen.max(event_id)),
                         );
-                        if !recovery_state.recovery_inflight {
-                            recovery_state.recovery_inflight = true;
-                            Action::SpawnFullRestore
+                        if !rank_state.recovery_inflight {
+                            rank_state.recovery_inflight = true;
+                            Action::SpawnFullRestore {
+                                epoch: worker_state.epoch,
+                            }
                         } else {
                             Action::Drop
                         }
                     }
-                    Some(last_applied_id) => {
+                    // Normal steady-state path: apply contiguous events directly, but coalesce any
+                    // gap into a single recovery pass using `max_seen_live_id` as the high-water mark.
+                    RankCursor::Live(last_applied_id) => {
                         if event_id <= last_applied_id {
                             Action::Drop
-                        } else if recovery_state.recovery_inflight {
-                            recovery_state.max_seen_live_id = Some(
-                                recovery_state
+                        } else if rank_state.recovery_inflight {
+                            rank_state.max_seen_live_id = Some(
+                                rank_state
                                     .max_seen_live_id
                                     .map_or(event_id, |max_seen| max_seen.max(event_id)),
                             );
                             Action::Drop
                         } else if event_id > last_applied_id.saturating_add(1) {
-                            recovery_state.max_seen_live_id = Some(
-                                recovery_state
+                            rank_state.max_seen_live_id = Some(
+                                rank_state
                                     .max_seen_live_id
                                     .map_or(event_id, |max_seen| max_seen.max(event_id)),
                             );
-                            recovery_state.recovery_inflight = true;
+                            rank_state.recovery_inflight = true;
                             Action::SpawnIncremental {
+                                epoch: worker_state.epoch,
                                 start_event_id: last_applied_id.saturating_add(1),
                             }
                         } else {
-                            recovery_state.last_applied_id = Some(event_id);
-                            if recovery_state
+                            rank_state.cursor = RankCursor::Live(event_id);
+                            if rank_state
                                 .max_seen_live_id
                                 .is_some_and(|max_seen| max_seen <= event_id)
                             {
-                                recovery_state.max_seen_live_id = None;
+                                rank_state.max_seen_live_id = None;
                             }
+                            Action::ApplyDirect
+                        }
+                    }
+                    // A worker-wide barrier (currently `Cleared`) invalidated this rank's old
+                    // cursor. The next newer live event becomes the new starting point; we do not
+                    // recover across the barrier.
+                    RankCursor::InvalidatedByBarrier(last_applied_id) => {
+                        if last_applied_id
+                            .is_some_and(|last_applied_id| event_id <= last_applied_id)
+                        {
+                            Action::Drop
+                        } else {
+                            rank_state.cursor = RankCursor::Live(event_id);
+                            rank_state.max_seen_live_id = None;
+                            rank_state.recovery_inflight = false;
                             Action::ApplyDirect
                         }
                     }
@@ -484,12 +457,13 @@ impl WorkerQueryClient {
             Action::ApplyDirect => {
                 self.indexer.apply_event(event).await;
             }
-            Action::SpawnFullRestore => {
-                let epoch = self.current_worker_epoch(worker_id).await;
+            Action::SpawnFullRestore { epoch } => {
                 self.spawn_recovery_task(key, epoch, None, None);
             }
-            Action::SpawnIncremental { start_event_id } => {
-                let epoch = self.current_worker_epoch(worker_id).await;
+            Action::SpawnIncremental {
+                epoch,
+                start_event_id,
+            } => {
                 self.spawn_recovery_task(key, epoch, Some(start_event_id), None);
             }
             Action::Drop => {}
@@ -523,7 +497,9 @@ impl WorkerQueryClient {
         epoch: u64,
         result: Result<WorkerKvQueryResponse>,
     ) {
-        let worker_state = self.get_or_create_worker_state(key.0);
+        let Some(worker_state) = self.worker_states.get(&key.0).map(|entry| entry.clone()) else {
+            return;
+        };
         let mut worker_state = worker_state.lock().await;
         if worker_state.epoch != epoch {
             tracing::debug!(
@@ -534,14 +510,11 @@ impl WorkerQueryClient {
             return;
         }
 
-        let Some(recovery_state) = self.recovery_states.get(&key).map(|entry| entry.clone()) else {
+        let Some(rank_state) = worker_state.ranks.get(&key.1) else {
             return;
         };
 
-        let mut new_last_applied_id = {
-            let recovery_state = recovery_state.lock().await;
-            recovery_state.last_applied_id
-        };
+        let mut new_cursor = rank_state.cursor;
         let mut successful_response = false;
         let mut saw_clear = false;
 
@@ -555,14 +528,14 @@ impl WorkerQueryClient {
                 );
                 for event in &events {
                     if matches!(&event.event.data, KvCacheEventData::Cleared) {
-                        self.apply_worker_clear_barrier_locked(&mut worker_state, event.clone())
+                        self.apply_worker_clear_locked(&mut worker_state, event.clone())
                             .await;
-                        new_last_applied_id = Some(event.event.event_id);
+                        new_cursor = RankCursor::Live(event.event.event_id);
                         saw_clear = true;
                         continue;
                     }
                     self.indexer.apply_event(event.clone()).await;
-                    new_last_applied_id = Some(event.event.event_id);
+                    new_cursor = RankCursor::Live(event.event.event_id);
                 }
                 successful_response = true;
             }
@@ -580,7 +553,7 @@ impl WorkerQueryClient {
                 for event in &events {
                     self.indexer.apply_event(event.clone()).await;
                 }
-                new_last_applied_id = Some(last_event_id);
+                new_cursor = RankCursor::Live(last_event_id);
                 successful_response = true;
             }
             Ok(WorkerKvQueryResponse::TooNew {
@@ -621,32 +594,36 @@ impl WorkerQueryClient {
 
         let mut follow_up_start = None;
         {
-            let mut recovery_state = recovery_state.lock().await;
-            recovery_state.recovery_inflight = false;
-            recovery_state.last_applied_id = new_last_applied_id;
+            let rank_state = worker_state
+                .ranks
+                .get_mut(&key.1)
+                .expect("rank state should exist while finishing recovery");
+            rank_state.recovery_inflight = false;
+            rank_state.cursor = new_cursor;
 
-            let last_applied_id = recovery_state.last_applied_id.unwrap_or(0);
-            if recovery_state
+            let last_applied_id = rank_state.last_applied_id().unwrap_or(0);
+            if rank_state
                 .max_seen_live_id
                 .is_some_and(|max_seen| max_seen <= last_applied_id)
             {
-                recovery_state.max_seen_live_id = None;
+                rank_state.max_seen_live_id = None;
             }
 
             if successful_response
                 && !saw_clear
-                && recovery_state
+                && rank_state
                     .max_seen_live_id
                     .is_some_and(|max_seen| max_seen > last_applied_id)
             {
-                recovery_state.recovery_inflight = true;
+                rank_state.recovery_inflight = true;
                 follow_up_start = Some(last_applied_id.saturating_add(1));
             }
         }
+        let follow_up_epoch = worker_state.epoch;
         drop(worker_state);
 
         if let Some(start_event_id) = follow_up_start {
-            self.spawn_recovery_task(key, epoch, Some(start_event_id), None);
+            self.spawn_recovery_task(key, follow_up_epoch, Some(start_event_id), None);
         }
     }
 
@@ -946,6 +923,20 @@ mod tests {
         panic!("condition not met before timeout");
     }
 
+    fn rank_state_matches<F>(client: &Arc<WorkerQueryClient>, key: RecoveryKey, check: F) -> bool
+    where
+        F: FnOnce(&RankState) -> bool,
+    {
+        client
+            .worker_states
+            .get(&key.0)
+            .map(|worker_state| match worker_state.try_lock() {
+                Ok(worker_state) => worker_state.ranks.get(&key.1).is_some_and(check),
+                Err(_) => false,
+            })
+            .unwrap_or(false)
+    }
+
     #[tokio::test]
     async fn test_worker_kv_query_engine_returns_buffered_events() {
         let worker_id = 7u64;
@@ -1047,9 +1038,8 @@ mod tests {
 
         {
             let worker_state = client.get_or_create_worker_state(key.0);
-            worker_state.lock().await.known_dp_ranks.insert(key.1);
-            let recovery_state = client.get_or_create_recovery_state(key);
-            recovery_state.lock().await.last_applied_id = Some(10);
+            let mut worker_state = worker_state.lock().await;
+            worker_state.ranks.entry(key.1).or_default().cursor = RankCursor::Live(10);
         }
 
         let first_started = Arc::new(Notify::new());
@@ -1083,17 +1073,9 @@ mod tests {
         first_release.notify_waiters();
 
         wait_for(|| {
-            client
-                .recovery_states
-                .get(&key)
-                .map(|state| {
-                    matches!(
-                        state.try_lock(),
-                        Ok(ref guard)
-                            if guard.last_applied_id == Some(18) && !guard.recovery_inflight
-                    )
-                })
-                .unwrap_or(false)
+            rank_state_matches(&client, key, |state| {
+                state.last_applied_id() == Some(18) && !state.recovery_inflight
+            })
         })
         .await;
 
@@ -1138,51 +1120,27 @@ mod tests {
 
         client.handle_discovered_worker(1, 0).await;
         wait_for(|| {
-            client
-                .recovery_states
-                .get(&key)
-                .map(|state| {
-                    matches!(
-                        state.try_lock(),
-                        Ok(ref guard)
-                            if guard.last_applied_id == Some(10) && !guard.recovery_inflight
-                    )
-                })
-                .unwrap_or(false)
+            rank_state_matches(&client, key, |state| {
+                state.last_applied_id() == Some(10) && !state.recovery_inflight
+            })
         })
         .await;
         assert_eq!(transport.call_count(), 1);
 
         client.handle_live_event(make_store_event(1, 0, 11)).await;
         wait_for(|| {
-            client
-                .recovery_states
-                .get(&key)
-                .map(|state| {
-                    matches!(
-                        state.try_lock(),
-                        Ok(ref guard)
-                            if guard.last_applied_id == Some(11) && !guard.recovery_inflight
-                    )
-                })
-                .unwrap_or(false)
+            rank_state_matches(&client, key, |state| {
+                state.last_applied_id() == Some(11) && !state.recovery_inflight
+            })
         })
         .await;
         assert_eq!(transport.call_count(), 1);
 
         client.handle_live_event(make_store_event(1, 0, 13)).await;
         wait_for(|| {
-            client
-                .recovery_states
-                .get(&key)
-                .map(|state| {
-                    matches!(
-                        state.try_lock(),
-                        Ok(ref guard)
-                            if guard.last_applied_id == Some(13) && !guard.recovery_inflight
-                    )
-                })
-                .unwrap_or(false)
+            rank_state_matches(&client, key, |state| {
+                state.last_applied_id() == Some(13) && !state.recovery_inflight
+            })
         })
         .await;
         assert_eq!(transport.call_count(), 2);
@@ -1202,20 +1160,14 @@ mod tests {
         let delayed_key = (1, 0);
         {
             let worker_state = client.get_or_create_worker_state(delayed_key.0);
-            worker_state
-                .lock()
-                .await
-                .known_dp_ranks
-                .insert(delayed_key.1);
-            let recovery_state = client.get_or_create_recovery_state(delayed_key);
-            recovery_state.lock().await.last_applied_id = Some(10);
+            let mut worker_state = worker_state.lock().await;
+            worker_state.ranks.entry(delayed_key.1).or_default().cursor = RankCursor::Live(10);
         }
         let other_key = (2, 0);
         {
             let worker_state = client.get_or_create_worker_state(other_key.0);
-            worker_state.lock().await.known_dp_ranks.insert(other_key.1);
-            let recovery_state = client.get_or_create_recovery_state(other_key);
-            recovery_state.lock().await.last_applied_id = Some(20);
+            let mut worker_state = worker_state.lock().await;
+            worker_state.ranks.entry(other_key.1).or_default().cursor = RankCursor::Live(20);
         }
 
         let started = Arc::new(Notify::new());
@@ -1262,9 +1214,8 @@ mod tests {
 
         {
             let worker_state = client.get_or_create_worker_state(key.0);
-            worker_state.lock().await.known_dp_ranks.insert(key.1);
-            let recovery_state = client.get_or_create_recovery_state(key);
-            recovery_state.lock().await.last_applied_id = Some(10);
+            let mut worker_state = worker_state.lock().await;
+            worker_state.ranks.entry(key.1).or_default().cursor = RankCursor::Live(10);
         }
 
         let started = Arc::new(Notify::new());
@@ -1286,7 +1237,7 @@ mod tests {
         client.handle_removed_worker_dp(1, 0).await;
         release.notify_waiters();
 
-        wait_for(|| !client.recovery_states.contains_key(&key)).await;
+        wait_for(|| !rank_state_matches(&client, key, |_| true)).await;
         kv_indexer.flush().await;
         let events = kv_indexer.dump_events().await.unwrap();
         assert!(events.is_empty());
@@ -1304,13 +1255,8 @@ mod tests {
         {
             let worker_state = client.get_or_create_worker_state(1);
             let mut worker_state = worker_state.lock().await;
-            worker_state.known_dp_ranks.insert(0);
-            worker_state.known_dp_ranks.insert(1);
-
-            let recovery_state = client.get_or_create_recovery_state(key0);
-            recovery_state.lock().await.last_applied_id = Some(10);
-            let recovery_state = client.get_or_create_recovery_state(key1);
-            recovery_state.lock().await.last_applied_id = Some(20);
+            worker_state.ranks.entry(0).or_default().cursor = RankCursor::Live(10);
+            worker_state.ranks.entry(1).or_default().cursor = RankCursor::Live(20);
         }
 
         let started = Arc::new(Notify::new());
@@ -1335,30 +1281,11 @@ mod tests {
         release.notify_waiters();
 
         wait_for(|| {
-            client
-                .recovery_states
-                .get(&key0)
-                .map(|state| {
-                    matches!(
-                        state.try_lock(),
-                        Ok(ref guard)
-                            if guard.last_applied_id == Some(14) && !guard.recovery_inflight
-                    )
-                })
-                .unwrap_or(false)
-                && client
-                    .recovery_states
-                    .get(&key1)
-                    .map(|state| {
-                        matches!(
-                            state.try_lock(),
-                            Ok(ref guard)
-                                if guard.last_applied_id == Some(20)
-                                    && !guard.recovery_inflight
-                                    && guard.resume_from_next_live
-                        )
-                    })
-                    .unwrap_or(false)
+            rank_state_matches(&client, key0, |state| {
+                state.last_applied_id() == Some(14) && !state.recovery_inflight
+            }) && rank_state_matches(&client, key1, |state| {
+                state.last_applied_id() == Some(20) && !state.recovery_inflight
+            })
         })
         .await;
 
@@ -1383,13 +1310,8 @@ mod tests {
         {
             let worker_state = client.get_or_create_worker_state(1);
             let mut worker_state = worker_state.lock().await;
-            worker_state.known_dp_ranks.insert(0);
-            worker_state.known_dp_ranks.insert(1);
-
-            let recovery_state = client.get_or_create_recovery_state(key0);
-            recovery_state.lock().await.last_applied_id = Some(10);
-            let recovery_state = client.get_or_create_recovery_state(key1);
-            recovery_state.lock().await.last_applied_id = Some(20);
+            worker_state.ranks.entry(0).or_default().cursor = RankCursor::Live(10);
+            worker_state.ranks.entry(1).or_default().cursor = RankCursor::Live(20);
         }
 
         transport.push_action(
@@ -1408,30 +1330,11 @@ mod tests {
         client.handle_live_event(make_store_event(1, 0, 13)).await;
 
         wait_for(|| {
-            client
-                .recovery_states
-                .get(&key0)
-                .map(|state| {
-                    matches!(
-                        state.try_lock(),
-                        Ok(ref guard)
-                            if guard.last_applied_id == Some(13) && !guard.recovery_inflight
-                    )
-                })
-                .unwrap_or(false)
-                && client
-                    .recovery_states
-                    .get(&key1)
-                    .map(|state| {
-                        matches!(
-                            state.try_lock(),
-                            Ok(ref guard)
-                                if guard.last_applied_id == Some(20)
-                                    && !guard.recovery_inflight
-                                    && guard.resume_from_next_live
-                        )
-                    })
-                    .unwrap_or(false)
+            rank_state_matches(&client, key0, |state| {
+                state.last_applied_id() == Some(13) && !state.recovery_inflight
+            }) && rank_state_matches(&client, key1, |state| {
+                state.last_applied_id() == Some(20) && !state.recovery_inflight
+            })
         })
         .await;
 
