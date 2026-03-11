@@ -20,15 +20,14 @@ from sglang.srt.utils.hf_transformers_utils import get_tokenizer
 
 from dynamo.frontend.sglang_prepost import SglangStreamingPostProcessor
 
-MODEL = "Qwen/Qwen3-0.6B"
-
 pytestmark = [
     pytest.mark.sglang,
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
     pytest.mark.unit,
-    pytest.mark.model(MODEL),
 ]
+
+MODEL = "Qwen/Qwen3-0.6B"
 
 
 @pytest.fixture(scope="module")
