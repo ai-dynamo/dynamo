@@ -6,8 +6,27 @@
 - 8 x NVIDIA B200 GPUs
 - A `hf-token-secret` Secret containing your Hugging Face token
 - A pre-existing `model-cache` PVC
-- A [patched container image](patch/) built from `nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:<tag>`
-- Replace the placeholder image tag `nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag-patched` in `deploy-eagle-specdec.yaml` with your actual patched image
+- An image, either:
+  - A Dynamo + TRT-LLM runtime image built from `nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc5`, or:
+  - A Dynamo 1.0.0 release image with the Kimi-K2.5 patch.
+- Replace the placeholder image tag `nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag-patched` in `deploy-eagle-specdec.yaml` with your actual patched image.
+
+## Build the Runtime Image
+
+To build a Dynamo+TensorRT-LLM image for this recipe:
+
+1. Start from `nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc5`.
+2. Clone Dynamo at our tested commit `3dc2d053ebe7f3b858bd6955dac52cc373e730b1`.
+3. Build and install the `ai_dynamo_runtime` Rust wheel with `maturin`.
+4. Install the Dynamo Python package plus `nixl[cu12]`.
+5. Append the Kimi TensorRT-LLM patch from `patch/kimi.patch`.
+
+An example Dockerfile is available in [dockerfile.from-trtllm](dockerfile.from-trtllm). You should be able to run it with:
+
+```bash
+cd recipes/kimi-k2.5/trtllm/agg/nvidia
+docker build -f dockerfile.from-trtllm -t <your tag here> .
+```
 
 ## Additional Model Assets
 

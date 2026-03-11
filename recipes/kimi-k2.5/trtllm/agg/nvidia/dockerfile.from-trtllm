@@ -1,0 +1,50 @@
+FROM nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc5
+
+USER root
+
+RUN apt-get update && apt-get install -y wget curl git build-essential pkg-config libssl-dev && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Install Rust toolchain (needed to build ai-dynamo-runtime from source)
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+# Install maturin (Rust<->Python build tool)
+RUN pip install --no-cache-dir --break-system-packages maturin
+
+RUN git clone https://github.com/ai-dynamo/dynamo.git /opt/dynamo-src && \
+    cd /opt/dynamo-src && \
+    git checkout 3dc2d053ebe7f3b858bd6955dac52cc373e730b1
+
+# Build and install Dynamo runtime (Rust bindings)
+RUN cd /opt/dynamo-src/lib/bindings/python && \
+    maturin build --release && \
+    pip install --no-cache-dir --break-system-packages /opt/dynamo-src/lib/bindings/python/target/wheels/ai_dynamo_runtime*.whl
+
+# Install Dynamo Python package
+RUN pip install --no-cache-dir --break-system-packages /opt/dynamo-src
+
+# Install nixl (required by dynamo.trtllm at runtime but not declared in the trtllm extra)
+RUN pip install --no-cache-dir --break-system-packages "nixl[cu12]<=0.10.1"
+
+# Clean up Dynamo source and Rust toolchain to reduce image size
+RUN rm -rf /opt/dynamo-src /root/.cargo /root/.rustup
+
+USER dynamo
+
+# Patch TRT-LLM with KimiK25ForConditionalGeneration support
+# Same patch as https://github.com/NVIDIA/TensorRT-LLM/tree/feat/k25-demo
+# and dynamo/recipes/kimi-k2.5/trtllm/agg/nvidia/patch/kimi.patch
+# Since the cloned Dynamo does not have kimi patch - we need to copy from our local disk
+COPY patch/kimi.patch /opt/kimi.patch
+RUN TARGET_FILE="$(python3 -c "from importlib.util import find_spec; print(find_spec('tensorrt_llm').submodule_search_locations[0])")/_torch/models/modeling_deepseekv3.py" && \
+    if grep -q 'KimiK25ForConditionalGeneration' "$TARGET_FILE"; then \
+        echo "Patch already applied, skipping."; \
+    else \
+        if ! head -50 "$TARGET_FILE" | grep -q '^import copy'; then \
+            sed -i '1s/^/import copy\n/' "$TARGET_FILE"; \
+        fi && \
+        echo "" >> "$TARGET_FILE" && \
+        cat /opt/kimi.patch >> "$TARGET_FILE"; \
+    fi && \
+    rm -f /opt/kimi.patch
