@@ -140,7 +140,7 @@ spec:
           - name: ENGINE_ARGS
             value: "/opt/dynamo/configs/config.yaml"
           - name: MODEL_PATH
-            value: "nvidia/nemotron-super-rl-030326-FP8"
+            value: "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8"
           command:
           - /bin/sh
           - -c
@@ -192,7 +192,7 @@ spec:
           - name: ENGINE_ARGS
             value: "/opt/dynamo/configs/config.yaml"
           - name: MODEL_PATH
-            value: "nvidia/nemotron-super-rl-030326-FP8"
+            value: "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8"
           command:
           - /bin/sh
           - -c

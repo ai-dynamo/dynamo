@@ -1,9 +1,6 @@
 # Nemotron-Super-RL FP8 Recipes
 
-Functional deployments for **nvidia/nemotron-super-rl-030326-FP8** (~124B hybrid Mamba/Attention/MoE) across multiple backends.
-
-> [!Note]
-> Uses internal checkpoint, must change to public URL before publishing
+Functional deployments for **nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8** (~124B hybrid Mamba/Attention/MoE) across multiple backends.
 
 These recipes target **Dynamo 1.0**. See [Dynamo 0.9.1 Compatibility](#dynamo-091-compatibility) for notes on running with older containers.
 
@@ -66,7 +63,7 @@ kubectl port-forward svc/nemotron-super-fp8-vllm-agg-frontend 8000:8000 -n ${NAM
 curl http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "nvidia/nemotron-super-rl-030326-FP8",
+    "model": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8",
     "messages": [{"role": "user", "content": "Hello!"}],
     "max_tokens": 100
   }'
@@ -75,7 +72,7 @@ curl http://localhost:8000/v1/chat/completions \
 curl http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "nvidia/nemotron-super-rl-030326-FP8",
+    "model": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8",
     "messages": [{"role": "user", "content": "What is the weather in SF?"}],
     "tools": [{"type": "function", "function": {"name": "get_weather", "parameters": {"type": "object", "properties": {"location": {"type": "string"}}, "required": ["location"]}}}],
     "max_tokens": 256
@@ -85,7 +82,7 @@ curl http://localhost:8000/v1/chat/completions \
 curl http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "nvidia/nemotron-super-rl-030326-FP8",
+    "model": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8",
     "messages": [{"role": "user", "content": "What is 2+2?"}],
     "chat_template_kwargs": {"enable_thinking": false},
     "max_tokens": 64
@@ -94,7 +91,7 @@ curl http://localhost:8000/v1/chat/completions \
 
 ## Model Details
 
-- **Model**: `nvidia/nemotron-super-rl-030326-FP8`
+- **Model**: `nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8`
 - **Architecture**: Nemotron-H (hybrid Mamba/Attention/MoE, 88 layers)
 - **Parameters**: ~124B total (~119B FP8, ~4.7B BF16)
 - **Quantization**: ModelOpt FP8 (F8_E4M3) with FP8 KV cache
