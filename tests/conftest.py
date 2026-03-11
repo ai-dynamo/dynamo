@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import importlib.util
 import logging
 import os
 import shutil
@@ -287,6 +288,19 @@ def pytest_collection_modifyitems(config, items):
     """
     This function is called to modify the list of tests to run.
     """
+    # Auto-skip tests marked with a framework marker when the framework is not installed
+    framework_markers = {
+        "trtllm": "tensorrt_llm",
+        "vllm": "vllm",
+        "sglang": "sglang",
+    }
+    for marker_name, module_name in framework_markers.items():
+        if importlib.util.find_spec(module_name) is None:
+            skip = pytest.mark.skip(reason=f"{module_name} is not installed")
+            for item in items:
+                if item.get_closest_marker(marker_name):
+                    item.add_marker(skip)
+
     # Collect models via explicit pytest mark from final filtered items only
     models_to_download = set()
     for item in items:

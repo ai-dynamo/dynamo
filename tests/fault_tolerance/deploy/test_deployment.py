@@ -9,7 +9,7 @@ import re
 import signal
 from contextlib import contextmanager
 from multiprocessing.context import SpawnProcess
-from typing import Any
+from typing import Any, Optional
 
 import pytest
 
@@ -31,8 +31,8 @@ from tests.utils.test_output import resolve_test_output_path
 
 def get_model_from_deployment(
     deployment_spec: DeploymentSpec,
-    scenario: Scenario = None,
-    service_name: str = None,
+    scenario: Optional[Scenario] = None,
+    service_name: Optional[str] = None,
 ) -> str:
     """Get model name from deployment spec.
 
@@ -60,19 +60,22 @@ def get_model_from_deployment(
     # Get model from backend-specific worker (if scenario provided)
     if scenario:
         try:
+            model: Optional[str] = None
             if scenario.backend == "vllm":
-                return deployment_spec["VllmDecodeWorker"].model
+                model = deployment_spec["VllmDecodeWorker"].model
             elif scenario.backend == "sglang":
-                return deployment_spec["decode"].model
+                model = deployment_spec["decode"].model
             elif scenario.backend == "trtllm":
                 # Determine deployment type from scenario deployment name
                 if (
                     "agg" in deployment_spec.name
                     and "disagg" not in deployment_spec.name
                 ):
-                    return deployment_spec["TRTLLMWorker"].model
+                    model = deployment_spec["TRTLLMWorker"].model
                 else:
-                    return deployment_spec["TRTLLMDecodeWorker"].model
+                    model = deployment_spec["TRTLLMDecodeWorker"].model
+            if model:
+                return model
         except (KeyError, AttributeError) as e:
             logging.warning(
                 f"Could not get model from backend-specific worker "
