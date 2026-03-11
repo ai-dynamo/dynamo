@@ -4396,9 +4396,9 @@ dependencies = [
 
 [[package]]
 name = "minijinja"
-version = "2.17.0"
+version = "2.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "65ab6f50e4e8fb40bd21f527066bd019f5b029035b4e5ac9b9f9ba526c6bd87b"
+checksum = "5ea5ea1e90055f200af6b8e52a4a34e05e77e7fee953a9fb40c631efdc43cab1"
 dependencies = [
  "memo-map",
  "self_cell",
@@ -4407,9 +4407,9 @@ dependencies = [
 
 [[package]]
 name = "minijinja-contrib"
-version = "2.17.0"
+version = "2.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2db46838f53a8c6e1d19135432e6b9bdbf4f0382c4fbf163f7f9dc24e31800e1"
+checksum = "b2fce60cb2e26ba7ddd485c8f5d3d635535e465c195bfb4af85971b428a985d0"
 dependencies = [
  "minijinja",
  "serde",
@@ -6898,9 +6898,9 @@ dependencies = [
 
 [[package]]
 name = "schannel"
-version = "0.1.28"
+version = "0.1.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "891d81b926048e76efe18581bf793546b4c0eaf8448d72be8de2bbee5fd166e1"
+checksum = "91c1b7e4904c873ef0710c1f407dde2e6287de2bebc1bbbf7d430bb7cbffd939"
 dependencies = [
  "windows-sys 0.61.2",
 ]
@@ -8759,7 +8759,7 @@ checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 
 [[package]]
 name = "velo-common"
-version = "1.0.0"
+version = "0.1.0"
 dependencies = [
  "bytes",
  "rmp-serde",
@@ -8773,7 +8773,7 @@ dependencies = [
 
 [[package]]
 name = "velo-events"
-version = "1.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "dashmap 6.1.0",
@@ -8789,7 +8789,7 @@ dependencies = [
 
 [[package]]
 name = "velo-transports"
-version = "1.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-nats",
