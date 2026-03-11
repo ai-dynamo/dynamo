@@ -28,7 +28,7 @@ kubectl create secret generic hf-token-secret \
   --from-literal=HF_TOKEN="your-token-here" \
   -n ${NAMESPACE}
 
-# Download model (update storageClassName in model-cache.yaml first!)
+# Download model (update storageClassName in model-cache/model-cache.yaml first!)
 kubectl apply -f model-cache/ -n ${NAMESPACE}
 kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=3600s
 
