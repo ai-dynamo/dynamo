@@ -90,9 +90,9 @@ See [values.yaml](./values.yaml) for the complete configuration surface.
 
 ## End To End
 
-Once the chart is installed, use the checkpointing guide to deploy a snapshot-capable `DynamoGraphDeployment`, wait for the checkpoint to become ready, and then scale the worker to verify restore:
+Once the chart is installed, use the snapshot guide to deploy a snapshot-capable `DynamoGraphDeployment`, wait for the checkpoint to become ready, and then scale the worker to verify restore:
 
-- [Checkpointing](../../../../docs/kubernetes/snapshot.md)
+- [Snapshot](../../../../docs/kubernetes/snapshot.md)
 
 ## Uninstall
 
