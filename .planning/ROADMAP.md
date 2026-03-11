@@ -27,7 +27,10 @@ Decimal phases appear between their surrounding integers in numeric order.
   1. `lib/kvbm-connector` appears in the `[workspace.members]` list in root `Cargo.toml`
   2. `kvbm-connector/Cargo.toml` lists all required workspace crate dependencies (`kvbm-logical`, `kvbm-engine`, `kvbm-physical`, `kvbm-common`, `kvbm-config`, `velo`)
   3. `kvbm-connector` is declared in `[workspace.dependencies]` so downstream crates can reference it
-**Plans**: TBD
+**Plans**: 1 plan
+
+Plans:
+- [ ] 01-01-PLAN.md — Register workspace members, populate kvbm-connector Cargo.toml dependencies and testing feature
 
 ### Phase 2: Import Migration
 **Goal**: Every broken import path inside kvbm-connector is replaced with the correct workspace crate path, including the nova-to-velo transport swap
@@ -68,7 +71,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Workspace Wiring | 0/TBD | Not started | - |
+| 1. Workspace Wiring | 0/1 | Not started | - |
 | 2. Import Migration | 0/TBD | Not started | - |
 | 3. Compilation Gate | 0/TBD | Not started | - |
 | 4. Test Porting | 0/TBD | Not started | - |
