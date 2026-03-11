@@ -86,8 +86,6 @@ Two fields in `agent_hints` control scheduling. They are separate knobs because 
 
 - **`priority`** (integer) controls **how the engine treats the request once it arrives**: scheduling order within the engine's batch and KV cache eviction policy. It answers: "how important is this request's compute and cache relative to other active requests on this worker?" A long-running synthesis request whose KV cache should survive memory pressure gets a high priority; a short lookup whose cache is disposable gets a low one.
 
-A request can be high on one axis and low on the other. For example, a background agent doing speculative work might have low `latency_sensitivity` (no rush to dispatch) but high `priority` (once it starts, its cache is expensive to recompute and should not be evicted). Conversely, a quick interactive lookup might have high `latency_sensitivity` (user is waiting) but low `priority` (small context, cheap to recompute if evicted).
-
 At the router, incoming requests enter a `BinaryHeap<QueueEntry>` ordered by effective arrival time. A higher `latency_sensitivity` makes the request appear as if it arrived earlier, placing it ahead of lower-priority work. Requests only enter the queue when all workers exceed a configurable load threshold. Below that threshold, they bypass the queue entirely and go straight to worker selection. When capacity frees up (prefill completes or a request finishes), the queue drains highest-priority entries first.
 
 Once dispatched, Dynamo passes `priority` through to the engine directly. SGLang, vLLM, and TRT-LLM all support priority-based request scheduling, and engines like SGLang support priority-based radix cache eviction where lower-priority blocks are evicted first under memory pressure.
@@ -136,7 +134,7 @@ stream = await router.generate(
 )
 ```
 
-The [NeMo Agent Toolkit (NAT)](https://github.com/NVIDIA/NeMo-Agent-Toolkit/tree/develop/examples/dynamo_integration) team used these bindings to build a custom online-learning router. Their router extracts session metadata from `nvext` annotations and feeds it to a [Thompson Sampling](https://en.wikipedia.org/wiki/Thompson_sampling) bandit that learns which workers perform best for which prefix patterns under load. Compared to Dynamo's default routing, they measured 4x reduction in p50 TTFT and 1.5x increase in p50 tokens-per-second. Priority tagging of latency-sensitive requests achieved up to 63% p50 TTFT reduction under moderate memory pressure. See the [NAT Dynamo integration example](https://github.com/NVIDIA/NeMo-Agent-Toolkit/tree/develop/examples/dynamo_integration) for implementation details. We will be making this available as a routing strategy in Dynamo soon.
+The [NeMo Agent Toolkit (NAT)](https://github.com/NVIDIA/NeMo-Agent-Toolkit/tree/develop/examples/dynamo_integration) team used these bindings to build a custom online-learning agentic router. Their router extracts session metadata from `nvext` annotations and feeds it to a [Thompson Sampling](https://en.wikipedia.org/wiki/Thompson_sampling) bandit style cost function that learns which workers perform best for which prefix patterns under load. Compared to Dynamo's default routing, they measured 4x reduction in p50 TTFT and 1.5x increase in p50 tokens-per-second. Priority tagging of latency-sensitive requests achieved up to 63% p50 TTFT reduction under moderate memory pressure. See the [NAT Dynamo integration example](https://github.com/NVIDIA/NeMo-Agent-Toolkit/tree/develop/examples/dynamo_integration) for implementation details. We will be making this available as a routing strategy in Dynamo soon.
 
 
 ## Layer 3: KV Cache Management
@@ -147,12 +145,12 @@ Agentic workloads produce blocks with vastly different reuse value but default L
 
 | Block Type | Reuse Pattern | Value |
 |------------|---------------|-------|
-| System prompt + tool definitions | Every turn, 8-20K tokens | Highest |
+| System prompt + tool definitions | Every turn | Highest |
 | Conversation history | Subsequent turns, growing monotonically | High |
 | Thinking/reasoning tokens | Typically zero reuse after reasoning loop closes (a significant portion of output) | Near-zero |
 | Subagent KV | Multiple turns then agent dies. No need to retain | Near-zero |
 
-LRU sees only recency. In a high traffic environment, a wait for the completion of a called tool (2-30 seconds while the agent waits for an external API) might cause the agent's blocks to age out and when the agent resumes, the entire prefix must be recomputed. To solve this, we need to provide the harness a granular API to control which blocks should be retained, where they should live, and for how long.
+LRU sees only recency. In a high traffic environment, a wait for the completion of a called tool (2-30 seconds while the agent waits for an external API) might cause the agent's blocks to age out and when the agent resumes, the entire prefix must be recomputed. To solve this, we need to provide the orchestrator granular APIs to control which blocks should be retained, where they should live, and for how long.
 
 ### Distributed KV Cache with Multi-Tier Storage
 
