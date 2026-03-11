@@ -86,6 +86,14 @@ pub trait ReasoningParser: Send + std::fmt::Debug {
         text: &str,
         token_ids: &[u32],
     ) -> ParserResult;
+
+    /// Override the parser's initial reasoning state. When called with `true`, the parser
+    /// starts in reasoning mode without waiting for the start token in the completion stream.
+    /// Use this when the chat template already injected the start token (e.g., `<think>`)
+    /// into the prompt, so it won't appear in the model's output.
+    fn set_in_reasoning(&mut self, _in_reasoning: bool) {
+        // Default no-op for parsers that don't support per-request overrides.
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,6 +129,10 @@ impl ReasoningParser for ReasoningParserWrapper {
     ) -> ParserResult {
         self.parser
             .parse_reasoning_streaming_incremental(text, token_ids)
+    }
+
+    fn set_in_reasoning(&mut self, in_reasoning: bool) {
+        self.parser.set_in_reasoning(in_reasoning)
     }
 }
 
