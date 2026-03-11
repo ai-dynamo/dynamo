@@ -1,4 +1,4 @@
-# Nemotron-Super-RL FP8 Recipes
+# Nemotron-3-Super FP8 Recipes
 
 Functional deployments for **nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8** (~124B hybrid Mamba/Attention/MoE) across multiple backends.
 
@@ -8,11 +8,11 @@ These recipes target **Dynamo 1.0**. See [Dynamo 0.9.1 Compatibility](#dynamo-09
 
 | Configuration | GPUs | Backend | Mode | Description |
 |--------------|------|---------|------|-------------|
-| [**vllm/agg**](vllm/agg/) | 4x H100 | vLLM | Aggregated | TP=4, KV-aware routing |
-| [**trtllm/agg**](trtllm/agg/) | 4x H100 | TensorRT-LLM | Aggregated | TP=4, round-robin routing |
-| [**sglang/agg**](sglang/agg/) | 4x H100 | SGLang | Aggregated | TP=4, KV-aware routing (not working on 0.9.1) |
-| [**trtllm/disagg**](trtllm/disagg/) | 4x H100 | TensorRT-LLM | Disaggregated | TP=2 P/D split, UCX KV transfer |
-| [**sglang/disagg**](sglang/disagg/) | 4x H100 | SGLang | Disaggregated | TP=2 P/D split, nixl KV transfer (not working on 0.9.1) |
+| [**vllm/agg**](vllm/agg/) | 4x H100/H200 | vLLM | Aggregated | TP=4, KV-aware routing |
+| [**trtllm/agg**](trtllm/agg/) | 4x H100/H200 | TensorRT-LLM | Aggregated | TP=4, round-robin routing |
+| [**sglang/agg**](sglang/agg/) | 4x H100/H200 | SGLang | Aggregated | TP=4, KV-aware routing (not working on 0.9.1) |
+| [**trtllm/disagg**](trtllm/disagg/) | 4x H100/H200 | TensorRT-LLM | Disaggregated | TP=2 P/D split, UCX KV transfer |
+| [**sglang/disagg**](sglang/disagg/) | 4x H100/H200 | SGLang | Disaggregated | TP=2 P/D split, nixl KV transfer (not working on 0.9.1) |
 
 ## Prerequisites
 
