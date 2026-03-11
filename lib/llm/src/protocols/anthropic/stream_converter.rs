@@ -53,7 +53,7 @@ struct ToolCallState {
 }
 
 impl AnthropicStreamConverter {
-    pub fn new(model: String) -> Self {
+    pub fn new(model: String, estimated_input_tokens: u32) -> Self {
         Self {
             model,
             message_id: format!("msg_{}", Uuid::new_v4().simple()),
@@ -63,7 +63,7 @@ impl AnthropicStreamConverter {
             text_block_started: false,
             text_block_closed: false,
             text_block_index: 0,
-            input_token_count: 0,
+            input_token_count: estimated_input_tokens,
             output_token_count: 0,
             cached_token_count: None,
             tool_call_states: Vec::new(),
@@ -84,7 +84,7 @@ impl AnthropicStreamConverter {
             stop_reason: None,
             stop_sequence: None,
             usage: AnthropicUsage {
-                input_tokens: 0,
+                input_tokens: self.input_token_count,
                 output_tokens: 0,
                 cache_creation_input_tokens: None,
                 cache_read_input_tokens: None,
@@ -766,7 +766,7 @@ mod tests {
     /// events and fail to execute tool calls ("Error editing file").
     #[test]
     fn test_text_block_stops_before_tool_block_starts() {
-        let mut conv = AnthropicStreamConverter::new("test-model".into());
+        let mut conv = AnthropicStreamConverter::new("test-model".into(), 0);
 
         // Stream some text
         let text_events = conv.process_chunk_tagged(&text_chunk("I'll edit the file."));
@@ -830,7 +830,7 @@ mod tests {
     /// Tool-only response (no preceding text): no spurious stop events.
     #[test]
     fn test_tool_only_response_no_text_block() {
-        let mut conv = AnthropicStreamConverter::new("test-model".into());
+        let mut conv = AnthropicStreamConverter::new("test-model".into(), 0);
 
         let tool_events = conv.process_chunk_tagged(&tool_call_chunk(
             0,
@@ -853,7 +853,7 @@ mod tests {
     /// Text-only response: stop emitted in end events (no early close).
     #[test]
     fn test_text_only_response_stop_in_end_events() {
-        let mut conv = AnthropicStreamConverter::new("test-model".into());
+        let mut conv = AnthropicStreamConverter::new("test-model".into(), 0);
 
         conv.process_chunk_tagged(&text_chunk("Hello world"));
 
