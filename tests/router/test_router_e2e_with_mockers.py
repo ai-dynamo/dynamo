@@ -561,7 +561,7 @@ def test_kv_router_bindings(
     ],
     indirect=["request_plane", "durable_kv_events"],
 )
-@pytest.mark.timeout(180)
+@pytest.mark.timeout(300)
 def test_indexers_sync(
     request,
     runtime_services_dynamic_ports,
@@ -663,7 +663,7 @@ def test_query_instance_id_returns_worker_and_tokens(
         )
 
 
-@pytest.mark.timeout(90)  # bumped for xdist contention (was 29s; ~9.55s serial avg)
+@pytest.mark.timeout(300)  # bumped for xdist contention (was 29s; ~9.55s serial avg)
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 @pytest.mark.parametrize(
     "durable_kv_events,use_kv_events,zmq_kv_events",

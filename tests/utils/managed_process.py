@@ -94,6 +94,33 @@ def terminate_process_tree(
     psutil.wait_procs(alive, timeout=timeout)
 
 
+class ManagedProcessStopError(RuntimeError):
+    """Raised when a ManagedProcess subprocess cannot be stopped cleanly."""
+
+    def __init__(self, attr_name: str, pid: int, detail: str):
+        super().__init__(
+            f"Failed to stop managed process '{attr_name}' (pid={pid}): {detail}"
+        )
+        self.attr_name = attr_name
+        self.pid = pid
+        self.detail = detail
+
+
+class ManagedProcessStopTimeoutError(ManagedProcessStopError):
+    """Raised when a subprocess remains alive after forceful shutdown."""
+
+    def __init__(self, attr_name: str, pid: int, wait_timeout: float):
+        super().__init__(
+            attr_name,
+            pid,
+            (
+                "process did not exit after forceful shutdown "
+                f"within {wait_timeout:.1f}s"
+            ),
+        )
+        self.wait_timeout = wait_timeout
+
+
 @dataclass
 class ManagedProcess:
     """Manages a subprocess with health checks and automatic cleanup.
@@ -280,25 +307,149 @@ class ManagedProcess:
         This ALWAYS runs regardless of terminate_all_matching_process_names setting.
         """
         try:
-            self._terminate_process_group()
+            # Snapshot all child processes BEFORE killing the parent.
+            # Some frameworks (e.g. TRT-LLM via MPI) spawn children in separate
+            # process groups. After the parent dies these children become orphans
+            # reparented to init, so psutil can no longer find them via the parent
+            # PID. We must capture them now while the parent is still alive.
+            orphan_candidates = []
+            if self.proc:
+                try:
+                    parent = psutil.Process(self.proc.pid)
+                    orphan_candidates = parent.children(recursive=True)
+                except psutil.NoSuchProcess:
+                    pass
 
-            process_list = [self.proc, self._tee_proc, self._sed_proc]
-            for process in process_list:
-                if process:
-                    try:
-                        if process.stdout:
-                            process.stdout.close()
-                        if process.stdin:
-                            process.stdin.close()
-                        terminate_process_tree(process.pid, self._logger)
-                        process.wait()
-                    except Exception as e:
-                        self._logger.warning("Error terminating process: %s", e)
+            self._stop_started_processes()
+
+            # Kill any child processes that survived the process group kill.
+            # This catches children in different PGIDs (e.g. MPI workers, engine
+            # cores) that os.killpg() could not reach.
+            for child in orphan_candidates:
+                try:
+                    if child.is_running():
+                        self._logger.info(
+                            "Killing orphaned child process: PID %s name=%s",
+                            child.pid,
+                            child.name(),
+                        )
+                        terminate_process_tree(child.pid, self._logger)
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
+
             if self.data_dir:
                 self._remove_directory(self.data_dir)
         finally:
             # Always run straggler cleanup, even if interrupted
             self._cleanup_stragglers()
+
+    def _stop_started_processes(self, wait_timeout: float = 10.0):
+        """Terminate launched subprocesses and close any open pipe handles.
+
+        This is used both during normal teardown and when a managed service
+        needs to stop and restart in-place without releasing higher-level
+        resources such as ports.
+        """
+        self._terminate_process_group()
+
+        process_entries = [
+            ("proc", self.proc),
+            ("_tee_proc", self._tee_proc),
+            ("_sed_proc", self._sed_proc),
+        ]
+        for attr_name, process in process_entries:
+            if process is None:
+                continue
+
+            try:
+                for stream_name in ("stdout", "stdin", "stderr"):
+                    stream = getattr(process, stream_name, None)
+                    if stream is not None:
+                        stream.close()
+            except OSError as e:
+                self._logger.warning("Error closing process streams: %s", e)
+
+            try:
+                terminate_process_tree(process.pid, self._logger)
+                process.wait(timeout=wait_timeout)
+            except (psutil.TimeoutExpired, subprocess.TimeoutExpired) as e:
+                self._logger.warning(
+                    "Process '%s' (pid=%s) timed out during shutdown: %s. "
+                    "Retrying with forceful termination.",
+                    attr_name,
+                    process.pid,
+                    e,
+                )
+                self._force_stop_process(process, attr_name, wait_timeout)
+            except OSError as e:
+                if process.poll() is None:
+                    self._logger.warning(
+                        "Process '%s' (pid=%s) hit an OS error during shutdown: %s. "
+                        "Retrying with forceful termination.",
+                        attr_name,
+                        process.pid,
+                        e,
+                    )
+                    self._force_stop_process(process, attr_name, wait_timeout)
+
+            if process.poll() is None:
+                raise ManagedProcessStopTimeoutError(
+                    attr_name, process.pid, wait_timeout
+                )
+
+            setattr(self, attr_name, None)
+
+        self._pgid = None
+
+    def _force_stop_process(
+        self,
+        process: subprocess.Popen,
+        attr_name: str,
+        wait_timeout: float,
+    ) -> None:
+        """Forcefully stop a process tree and confirm the launched child exits."""
+        try:
+            terminate_process_tree(
+                process.pid,
+                self._logger,
+                immediate_kill=True,
+                timeout=0,
+            )
+        except (psutil.TimeoutExpired, OSError) as e:
+            self._logger.warning(
+                "Forceful tree termination failed for process '%s' (pid=%s): %s. "
+                "Falling back to process.kill().",
+                attr_name,
+                process.pid,
+                e,
+            )
+            try:
+                process.kill()
+            except OSError as kill_err:
+                if process.poll() is None:
+                    raise ManagedProcessStopError(
+                        attr_name,
+                        process.pid,
+                        f"forceful shutdown failed: {kill_err}",
+                    ) from kill_err
+
+        try:
+            process.wait(timeout=wait_timeout)
+        except subprocess.TimeoutExpired as e:
+            if process.poll() is None:
+                raise ManagedProcessStopTimeoutError(
+                    attr_name, process.pid, wait_timeout
+                ) from e
+        except OSError as e:
+            if process.poll() is None:
+                raise ManagedProcessStopError(
+                    attr_name,
+                    process.pid,
+                    f"error waiting for exit after forceful shutdown: {e}",
+                ) from e
+
+        if process.poll() is None:
+            raise ManagedProcessStopTimeoutError(attr_name, process.pid, wait_timeout)
 
     def _start_process(self):
         assert self._command_name
@@ -399,6 +550,11 @@ class ManagedProcess:
         poll_interval = 0.1
         elapsed = 0.0
         while elapsed < timeout:
+            # Reap the launched child if it has already exited. Without this,
+            # the child can remain as a zombie and keep killpg(..., 0) reporting
+            # the process group as alive until the timeout expires.
+            if self.proc is not None:
+                self.proc.poll()
             try:
                 # Check if any process in the group is still alive
                 os.killpg(self._pgid, 0)  # Signal 0 = check existence (no kill)
