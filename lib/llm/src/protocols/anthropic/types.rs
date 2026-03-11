@@ -181,6 +181,54 @@ pub struct ThinkingConfig {
     pub budget_tokens: Option<u32>,
 }
 
+impl AnthropicCreateMessageRequest {
+    /// Estimate input token count using a `len/3` heuristic.
+    ///
+    /// Used to populate `input_tokens` in the streaming `message_start` event,
+    /// since the engine only reports prompt token counts on the final chunk.
+    /// The real Anthropic API sends `input_tokens` in `message_start`, so
+    /// clients (e.g. Claude Code) expect a non-zero value there.
+    pub fn estimate_input_tokens(&self) -> u32 {
+        let mut total_len: usize = 0;
+
+        if let Some(system) = &self.system {
+            total_len += system.len();
+        }
+
+        for msg in &self.messages {
+            total_len += match msg.role {
+                AnthropicRole::User => 4,
+                AnthropicRole::Assistant => 9,
+            };
+            match &msg.content {
+                AnthropicMessageContent::Text { content } => total_len += content.len(),
+                AnthropicMessageContent::Blocks { content } => {
+                    for block in content {
+                        total_len += estimate_block_len(block);
+                    }
+                }
+            }
+        }
+
+        if let Some(tools) = &self.tools {
+            for tool in tools {
+                total_len += tool.name.len();
+                if let Some(desc) = &tool.description {
+                    total_len += desc.len();
+                }
+                total_len += tool.input_schema.to_string().len();
+            }
+        }
+
+        let tokens = total_len / 3;
+        if tokens == 0 && total_len > 0 {
+            1
+        } else {
+            tokens as u32
+        }
+    }
+}
+
 /// A single message in the conversation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnthropicMessage {

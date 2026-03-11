@@ -193,6 +193,13 @@ async fn anthropic_messages(
         .as_ref()
         .is_some_and(|t| t.thinking_type == "enabled");
 
+    // Estimate input tokens before consuming the request.
+    // The real Anthropic API sends input_tokens in `message_start`, but we
+    // don't have a tokenizer in the frontend — the engine only reports prompt
+    // token counts on the final streaming chunk. Use a len/3 heuristic so
+    // clients (e.g. Claude Code) see a non-zero value in `message_start`.
+    let estimated_input_tokens = orig_request.estimate_input_tokens();
+
     // Convert Anthropic request -> Chat Completion request
     let chat_request: NvCreateChatCompletionRequest =
         orig_request.try_into().map_err(|e: anyhow::Error| {
@@ -269,7 +276,7 @@ async fn anthropic_messages(
 
         use std::sync::atomic::{AtomicBool, Ordering};
 
-        let mut converter = AnthropicStreamConverter::new(model_for_resp);
+        let mut converter = AnthropicStreamConverter::new(model_for_resp, estimated_input_tokens);
         let start_events = converter.emit_start_events();
 
         let converter = std::sync::Arc::new(std::sync::Mutex::new(converter));
