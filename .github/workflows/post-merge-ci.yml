@@ -134,7 +134,6 @@ jobs:
       cuda_versions: '["13.1"]'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_timeout_minutes: 60
-      push_image: false # Only push dev images on main
       run_cpu_only_tests: false
       run_single_gpu_tests: false
       run_multi_gpu_tests: false
