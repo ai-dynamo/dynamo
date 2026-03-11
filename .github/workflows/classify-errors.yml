@@ -74,7 +74,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           API_BASE_URL: "https://inference-api.nvidia.com/v1"
-          MODEL: "aws/anthropic/claude-sonnet-4-5-20250929"
+          MODEL: "nvcf/meta/llama-3.3-70b-instruct"
         run: |
           PR_ARGS=""
           if [ -n "${{ steps.detect.outputs.pr_number }}" ]; then

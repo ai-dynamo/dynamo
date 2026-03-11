@@ -39,7 +39,7 @@ def main():
     github_token = os.environ.get("GITHUB_TOKEN", "")
     api_key = os.environ.get("API_KEY", "")
     base_url = os.environ.get("API_BASE_URL", "https://inference-api.nvidia.com/v1")
-    model = os.environ.get("MODEL", "aws/anthropic/claude-sonnet-4-5-20250929")
+    model = os.environ.get("MODEL", "nvcf/meta/llama-3.3-70b-instruct")
 
     if not github_token:
         print("Error: GITHUB_TOKEN not set", file=sys.stderr)
