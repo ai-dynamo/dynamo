@@ -293,6 +293,8 @@ async def _inject_failures(
     return affected_pods
 
 
+# TODO: These globals might not work in parallel testing. FIXME
+
 global_result_list = []
 # Global storage for test results (used by validation fixture)
 test_results_cache = {}
@@ -492,6 +494,7 @@ def results_summary():
 @pytest.mark.post_merge
 @pytest.mark.e2e
 @pytest.mark.slow
+@pytest.mark.gpu_0
 @pytest.mark.filterwarnings("ignore::DeprecationWarning")
 async def test_fault_scenario(
     scenario: Scenario,  # noqa: F811
