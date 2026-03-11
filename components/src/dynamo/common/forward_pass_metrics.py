@@ -9,6 +9,10 @@ planner or any ZMQ SUB listener.
 
 Uses msgspec.Struct for zero-copy serialization (same approach as
 vLLM's KV cache events).
+
+TODO: hook to our rust infra for discovery
+TODO: add metrics for Trtllm/SGLang
+TODO: planner consuming these metrics instead of frontend/router metrics
 """
 
 from __future__ import annotations
