@@ -11,6 +11,8 @@ import pytest
 import yaml
 
 from dynamo.sglang.args import parse_args
+from sglang.srt.disaggregation.utils import FAKE_BOOTSTRAP_HOST
+
 from dynamo.sglang.health_check import (
     SglangDisaggHealthCheckPayload,
     SglangPrefillHealthCheckPayload,
@@ -274,7 +276,7 @@ async def test_disagg_config_rejects_dynamo_keys(tmp_path, mock_sglang_cli, capf
 def test_disagg_health_check_payload_includes_bootstrap_info():
     payload = SglangDisaggHealthCheckPayload().to_dict()
 
-    assert payload["bootstrap_info"]["bootstrap_host"] == "fake_bootstrap_host"
+    assert payload["bootstrap_info"]["bootstrap_host"] == FAKE_BOOTSTRAP_HOST
     assert payload["bootstrap_info"]["bootstrap_port"] == 0
     assert payload["bootstrap_info"]["bootstrap_room"] == 0
     assert payload["token_ids"] == [1]
@@ -284,5 +286,5 @@ def test_prefill_health_check_payload_is_disagg_compatible_alias():
     payload = SglangPrefillHealthCheckPayload().to_dict()
 
     assert "request" not in payload
-    assert payload["bootstrap_info"]["bootstrap_host"] == "fake_bootstrap_host"
+    assert payload["bootstrap_info"]["bootstrap_host"] == FAKE_BOOTSTRAP_HOST
     assert payload["stop_conditions"]["max_tokens"] == 1
