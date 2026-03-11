@@ -320,7 +320,7 @@ jobs:
           fi
 
       - name: Comment preview URL on PR
-        if: steps.ctx.outputs.is_main != 'true' && steps.preview.outputs.url != '' && startsWith(github.ref, 'refs/heads/pull-request/')
+        if: false && steps.ctx.outputs.is_main != 'true' && steps.preview.outputs.url != '' && startsWith(github.ref, 'refs/heads/pull-request/')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
