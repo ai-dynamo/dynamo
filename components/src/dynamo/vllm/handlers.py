@@ -309,6 +309,7 @@ class BaseWorkerHandler(ABC):
         self.engine_client = engine
         self.default_sampling_params = default_sampling_params
         self.kv_publishers: list[KvEventPublisher] | None = None
+        self.fpm_relays: list | None = None
         self.generate_endpoint = generate_endpoint
         self.config = config
         self.engine_monitor = VllmEngineMonitor(runtime, engine, shutdown_event)
@@ -872,7 +873,13 @@ class BaseWorkerHandler(ABC):
             yield {"status": "error", "message": str(e)}
 
     def cleanup(self):
-        """Clean up resources including temporary directories."""
+        """Clean up resources including temporary directories and FPM relays."""
+        if self.fpm_relays:
+            for relay in self.fpm_relays:
+                try:
+                    relay.shutdown()
+                except Exception as e:
+                    logger.warning(f"Failed to shut down FPM relay: {e}")
         for temp_dir in self.temp_dirs:
             try:
                 temp_dir.cleanup()

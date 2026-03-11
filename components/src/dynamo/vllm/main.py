@@ -41,6 +41,7 @@ from dynamo.runtime import DistributedRuntime, Endpoint
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.vllm.worker_factory import WorkerFactory
 
+from . import envs
 from .args import Config, _uses_dynamo_connector, parse_args
 from .constants import DisaggregationMode
 from .handlers import DecodeWorkerHandler, PrefillWorkerHandler, get_dp_range_for_worker
@@ -369,6 +370,51 @@ def setup_kv_event_publisher(
     return kv_publishers if kv_publishers else None
 
 
+def setup_fpm_relay(
+    generate_endpoint: Endpoint,
+    vllm_config: VllmConfig,
+) -> Optional[list]:
+    """
+    Set up forward pass metrics relays for the event plane.
+
+    Creates one FpmEventRelay per dp_rank. Each relay subscribes to the
+    local raw ZMQ PUB from InstrumentedScheduler (in the EngineCore child
+    process) and re-publishes to the Dynamo event plane with automatic
+    discovery registration.
+
+    Returns:
+        List of FpmEventRelay instances, or None if FPM is not enabled.
+    """
+    if not envs.is_set("DYN_VLLM_FORWARDPASS_METRIC_PORT"):
+        return None
+
+    try:
+        from dynamo.llm import FpmEventRelay
+    except ImportError:
+        logger.warning(
+            "FpmEventRelay not available (Rust bindings not built with FPM support). "
+            "Forward pass metrics will not be relayed to the event plane."
+        )
+        return None
+
+    dp_start, dp_size = get_dp_range_for_worker(vllm_config)
+    relays = []
+
+    for dp_rank in range(dp_start, dp_start + dp_size):
+        base_port = envs.DYN_VLLM_FORWARDPASS_METRIC_PORT
+        zmq_endpoint = f"tcp://127.0.0.1:{base_port + dp_rank}"
+
+        relay = FpmEventRelay(
+            endpoint=generate_endpoint,
+            zmq_endpoint=zmq_endpoint,
+        )
+        relays.append(relay)
+
+        logger.info(f"FPM relay for dp_rank={dp_rank} subscribing to {zmq_endpoint}")
+
+    return relays if relays else None
+
+
 def setup_vllm_engine(
     config: Config,
     stat_logger: Optional[StatLoggerFactory] = None,
@@ -675,6 +721,11 @@ async def init_prefill(
     if kv_publishers:
         handler.kv_publishers = kv_publishers
 
+    # Set up forward pass metrics relay (child ZMQ -> event plane)
+    fpm_relays = setup_fpm_relay(generate_endpoint, vllm_config)
+    if fpm_relays:
+        handler.fpm_relays = fpm_relays
+
     setup_metrics_collection(config, generate_endpoint, logger)
 
     # Register sleep/wake_up engine routes
@@ -861,6 +912,11 @@ async def init(
     )
     if kv_publishers:
         handler.kv_publishers = kv_publishers
+
+    # Set up forward pass metrics relay (child ZMQ -> event plane)
+    fpm_relays = setup_fpm_relay(generate_endpoint, vllm_config)
+    if fpm_relays:
+        handler.fpm_relays = fpm_relays
 
     setup_metrics_collection(config, generate_endpoint, logger)
 

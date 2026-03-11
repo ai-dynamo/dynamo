@@ -779,6 +779,64 @@ class KvEventPublisher:
         """
         ...
 
+
+class FpmEventRelay:
+    """
+    Relay that bridges ForwardPassMetrics from a local raw ZMQ PUB socket
+    (InstrumentedScheduler in EngineCore child process) to the Dynamo event
+    plane with automatic discovery registration.
+    """
+
+    def __init__(
+        self,
+        endpoint: Endpoint,
+        zmq_endpoint: str,
+    ) -> None:
+        """
+        Create a relay.
+
+        Args:
+            endpoint: Dynamo component endpoint (provides runtime + discovery).
+            zmq_endpoint: Local ZMQ PUB address to subscribe to
+                (e.g., "tcp://127.0.0.1:20380").
+        """
+        ...
+
+    def shutdown(self) -> None:
+        """Shut down the relay task."""
+        ...
+
+
+class FpmEventSubscriber:
+    """
+    Subscriber for ForwardPassMetrics from the Dynamo event plane.
+    Auto-discovers engine publishers via the discovery plane.
+    """
+
+    def __init__(self, endpoint: Endpoint) -> None:
+        """
+        Create a subscriber that auto-discovers FPM publishers.
+
+        Args:
+            endpoint: Dynamo component endpoint (provides runtime + discovery).
+        """
+        ...
+
+    def recv(self) -> Optional[bytes]:
+        """
+        Blocking receive of the next message (raw msgspec bytes).
+        Releases the GIL while waiting.
+
+        Returns:
+            Raw msgspec payload, or None if the stream is closed.
+        """
+        ...
+
+    def shutdown(self) -> None:
+        """Shut down the subscriber."""
+        ...
+
+
 class HttpService:
     """
     A HTTP service for dynamo applications.
