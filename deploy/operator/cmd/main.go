@@ -171,6 +171,9 @@ func initConfigScheme() {
 
 //nolint:gocyclo
 func main() {
+	// TEMPORARY: inject crash to validate diagnostics. Revert before merging.
+	fmt.Println("INJECTED CRASH: testing deploy-operator diagnostics")
+	os.Exit(1)
 	initCRDSchemes()
 	initConfigScheme()
 
