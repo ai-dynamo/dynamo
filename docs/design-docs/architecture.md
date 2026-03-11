@@ -87,7 +87,7 @@ This path is optimized for cache reuse and cross-worker handoff efficiency.
 8. **KV Events** update cache visibility for future routing decisions.
 9. **KVBM** may offload or recall KV blocks based on pressure and reuse potential.
 
-For flow-level detail, see [Architecture Flow](dynamo-flow.md).  
+For flow-level detail, see [Architecture Flow](dynamo-flow.md).
 For request transport options, see [Request Plane](request-plane.md).
 
 ## Control Loops
