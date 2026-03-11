@@ -631,7 +631,10 @@ impl AnthropicStreamConverter {
                             };
                             events.push(make_tagged_event("content_block_delta", &ev));
 
-                            // Emit content_block_stop immediately for complete tool calls
+                            // Emit content_block_stop immediately if the tool call arrived
+                            // complete in a single chunk (id + name + args all present).
+                            // Dynamo backends emit complete tool calls, so this fires on the
+                            // same chunk — no need to wait for finish_reason.
                             if tc.id.is_some()
                                 && func.name.is_some()
                                 && !self.tool_call_states[tc_index].stopped
