@@ -5,14 +5,11 @@
 # Multimodal E/P/D: encoder (GPU 0), prefill (GPU 1), decode (GPU 2).
 # GPUs: 3
 
-# Setup cleanup trap
-cleanup() {
-    echo "Cleaning up background processes..."
-    kill $DYNAMO_PID $PREFILL_PID 2>/dev/null || true
-    wait $DYNAMO_PID $PREFILL_PID 2>/dev/null || true
-    echo "Cleanup complete."
-}
-trap cleanup EXIT INT TERM
+set -e
+trap 'echo Cleaning up...; kill 0' EXIT
+
+SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
 # Default values
 MODEL_NAME="Qwen/Qwen2.5-VL-7B-Instruct"
@@ -63,32 +60,11 @@ if [[ -n "$SERVED_MODEL_NAME" ]]; then
 fi
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
-echo "=========================================="
-echo "Launching Multimodal E/P/D Workers"
-echo "=========================================="
-echo "Model:       $MODEL_NAME"
-echo "Frontend:    http://localhost:$HTTP_PORT"
-echo "=========================================="
-echo ""
-echo "Example test command:"
-echo ""
-echo "  curl http://localhost:${HTTP_PORT}/v1/chat/completions \\"
-echo "    -H 'Content-Type: application/json' \\"
-echo "    -d '{"
-echo "      \"model\": \"${MODEL_NAME}\","
-echo "      \"messages\": [{\"role\": \"user\", \"content\": ["
-echo "        {\"type\": \"text\", \"text\": \"Explain why Roger Federer is considered one of the greatest tennis players of all time\"},"
-echo "        {\"type\": \"image_url\", \"image_url\": {\"url\": \"http://images.cocodataset.org/test2017/000000155781.jpg\"}}"
-echo "      ]}],"
-echo "      \"max_tokens\": 50"
-echo "    }'"
-echo ""
-echo "=========================================="
+print_launch_banner --multimodal "Launching Multimodal E/P/D Workers" "$MODEL_NAME" "$HTTP_PORT"
 
 # run ingress
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
 python3 -m dynamo.frontend &
-DYNAMO_PID=$!
 
 # run SGLang multimodal processor
 python3 -m dynamo.sglang --multimodal-processor --model-path "$MODEL_NAME" $SERVED_MODEL_ARG --chat-template "$CHAT_TEMPLATE" &
@@ -127,5 +103,5 @@ CUDA_VISIBLE_DEVICES=2 python3 -m dynamo.sglang \
   --host 0.0.0.0 \
   --disaggregation-transfer-backend nixl &
 
-# Wait for all background processes to complete
-wait
+# Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
+wait_any_exit
