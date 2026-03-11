@@ -12,7 +12,7 @@ Port `lib/kvbm-connector` from a stale branch into the current workspace: wire i
 
 Decimal phases appear between their surrounding integers in numeric order.
 
-- [ ] **Phase 1: Workspace Wiring** - Add kvbm-connector to the Cargo workspace and declare all dependencies
+- [x] **Phase 1: Workspace Wiring** - Add kvbm-connector to the Cargo workspace and declare all dependencies (completed 2026-03-11)
 - [ ] **Phase 2: Import Migration** - Replace all stale internal imports with correct workspace crate paths and migrate nova to velo
 - [ ] **Phase 3: Compilation Gate** - Verify the crate and full workspace compile cleanly
 - [ ] **Phase 4: Test Porting** - Port connector tests from ryan/kvbm-next and verify they pass
@@ -71,7 +71,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Workspace Wiring | 0/1 | Not started | - |
+| 1. Workspace Wiring | 1/1 | Complete   | 2026-03-11 |
 | 2. Import Migration | 0/TBD | Not started | - |
 | 3. Compilation Gate | 0/TBD | Not started | - |
 | 4. Test Porting | 0/TBD | Not started | - |

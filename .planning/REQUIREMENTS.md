@@ -7,9 +7,9 @@
 
 ### Workspace Integration
 
-- [ ] **WS-01**: `lib/kvbm-connector` is listed as a member in root `Cargo.toml`
-- [ ] **WS-02**: `kvbm-connector/Cargo.toml` declares all required workspace crate dependencies
-- [ ] **WS-03**: `kvbm-connector` is listed in `[workspace.dependencies]` for downstream use
+- [x] **WS-01**: `lib/kvbm-connector` is listed as a member in root `Cargo.toml`
+- [x] **WS-02**: `kvbm-connector/Cargo.toml` declares all required workspace crate dependencies
+- [x] **WS-03**: `kvbm-connector` is listed in `[workspace.dependencies]` for downstream use
 
 ### Import Migration
 
@@ -61,9 +61,9 @@
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| WS-01 | Phase 1 | Pending |
-| WS-02 | Phase 1 | Pending |
-| WS-03 | Phase 1 | Pending |
+| WS-01 | Phase 1 | Complete |
+| WS-02 | Phase 1 | Complete |
+| WS-03 | Phase 1 | Complete |
 | IMP-01 | Phase 2 | Pending |
 | IMP-02 | Phase 2 | Pending |
 | IMP-03 | Phase 2 | Pending |

@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: planning
-stopped_at: Phase 1 context gathered
-last_updated: "2026-03-11T08:40:56.683Z"
+stopped_at: Completed 01-workspace-wiring/01-01-PLAN.md
+last_updated: "2026-03-11T09:11:30.394Z"
 last_activity: 2026-03-11 — Roadmap created
 progress:
-  total_phases: 3
-  completed_phases: 0
-  total_plans: 0
-  completed_plans: 0
+  total_phases: 4
+  completed_phases: 1
+  total_plans: 1
+  completed_plans: 1
   percent: 0
 ---
 
@@ -50,6 +50,7 @@ Progress: [░░░░░░░░░░] 0%
 - Trend: -
 
 *Updated after each plan completion*
+| Phase 01-workspace-wiring P01 | 12 | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -60,6 +61,10 @@ Recent decisions affecting current work:
 
 - nova → velo is a rename (not rewrite): same API, name change + minor updates — treat as find-and-replace migration
 - Scope is compile-only: no new features, no refactoring beyond what's needed to compile
+- kvbm-connector was previously working code: slot/leader/worker logic is sound and must not be modified — only rewire imports/deps to point at current crate names
+- [Phase 01-workspace-wiring]: kvbm-connector uses version 0.1.0 in workspace.dependencies entry (all other kvbm crates use 1.0.0)
+- [Phase 01-workspace-wiring]: testing feature declares kvbm-engine/logical/physical explicitly for Cargo resolver 3 correctness
+- [Phase 01-workspace-wiring]: velo-events and velo-transports excluded from kvbm-connector deps — zero direct namespace usage confirmed
 
 ### Pending Todos
 
@@ -71,6 +76,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-11T08:40:56.682Z
-Stopped at: Phase 1 context gathered
-Resume file: .planning/phases/01-workspace-wiring/01-CONTEXT.md
+Last session: 2026-03-11T09:11:30.391Z
+Stopped at: Completed 01-workspace-wiring/01-01-PLAN.md
+Resume file: None
