@@ -158,7 +158,7 @@ spec:
           command:
           - /bin/sh
           - -c
-          image: dnvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
           workingDir: /workspace/examples/backends/vllm
       replicas: 1
       resources:
