@@ -20,6 +20,7 @@ nats = ["velo-transports/nats"]
 
 [dependencies]
 velo-common = { workspace = true }
+velo-discovery = { workspace = true }
 velo-events = { workspace = true }
 velo-transports = { workspace = true }
 

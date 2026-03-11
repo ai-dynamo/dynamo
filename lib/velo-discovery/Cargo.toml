@@ -13,7 +13,6 @@ repository.workspace = true
 
 [dependencies]
 velo-common = { workspace = true }
-velo-messenger = { workspace = true }
 anyhow = { workspace = true }
 futures = { workspace = true }
 parking_lot = { workspace = true }
