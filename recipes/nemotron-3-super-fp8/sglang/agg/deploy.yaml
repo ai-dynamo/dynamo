@@ -67,7 +67,7 @@ spec:
             - dynamo.sglang
           args:
             - --model-path
-            - nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8-A12B-FP8
+            - nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8
             - --served-model-name
             - nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8
             - --tp
