@@ -155,6 +155,24 @@ fn test_chat_completions_guided_decoding_from_common() {
         request.get_guided_decoding_backend(),
         Some("backend".to_string())
     );
+
+    // Test guided_structural_tag can be specified at root level
+    let json_str = r#"{
+        "model": "test-model",
+        "messages": [{"role": "user", "content": "Hello"}],
+        "guided_structural_tag": {"type": "sequence", "elements": []}
+    }"#;
+
+    let request: NvCreateChatCompletionRequest = serde_json::from_str(json_str).unwrap();
+
+    assert_eq!(
+        request.common.guided_structural_tag,
+        Some(serde_json::json!({"type": "sequence", "elements": []}))
+    );
+    assert_eq!(
+        request.get_guided_structural_tag(),
+        Some(serde_json::json!({"type": "sequence", "elements": []}))
+    );
 }
 
 #[test]
@@ -358,4 +376,57 @@ fn test_sampling_parameters_extraction() {
 
     assert_eq!(sampling_options.top_k, Some(42));
     assert_eq!(sampling_options.repetition_penalty, Some(1.3));
+}
+
+#[test]
+fn test_chat_completions_enable_thinking_extraction() {
+    use dynamo_llm::protocols::common::SamplingOptionsProvider;
+
+    // Test that enable_thinking is extracted from chat_template_args
+    let json_str = r#"{
+        "model": "test-model",
+        "messages": [{"role": "user", "content": "Hello"}],
+        "guided_json": {"type": "object"},
+        "chat_template_args": {"enable_thinking": true}
+    }"#;
+
+    let request: NvCreateChatCompletionRequest = serde_json::from_str(json_str).unwrap();
+
+    // Verify enable_thinking is extracted via the trait method
+    assert_eq!(request.get_enable_thinking(), Some(true));
+
+    // Verify it flows through to guided_decoding in sampling_options
+    let sampling = request.extract_sampling_options().unwrap();
+    let guided = sampling.guided_decoding.unwrap();
+    assert_eq!(guided.enable_thinking, Some(true));
+    assert_eq!(guided.json, Some(serde_json::json!({"type": "object"})));
+
+    // Test enable_thinking: false
+    let json_str_off = r#"{
+        "model": "test-model",
+        "messages": [{"role": "user", "content": "Hello"}],
+        "guided_json": {"type": "object"},
+        "chat_template_args": {"enable_thinking": false}
+    }"#;
+
+    let request_off: NvCreateChatCompletionRequest = serde_json::from_str(json_str_off).unwrap();
+    assert_eq!(request_off.get_enable_thinking(), Some(false));
+
+    let sampling_off = request_off.extract_sampling_options().unwrap();
+    let guided_off = sampling_off.guided_decoding.unwrap();
+    assert_eq!(guided_off.enable_thinking, Some(false));
+
+    // Test without enable_thinking (should be None)
+    let json_str_none = r#"{
+        "model": "test-model",
+        "messages": [{"role": "user", "content": "Hello"}],
+        "guided_json": {"type": "object"}
+    }"#;
+
+    let request_none: NvCreateChatCompletionRequest = serde_json::from_str(json_str_none).unwrap();
+    assert_eq!(request_none.get_enable_thinking(), None);
+
+    let sampling_none = request_none.extract_sampling_options().unwrap();
+    let guided_none = sampling_none.guided_decoding.unwrap();
+    assert_eq!(guided_none.enable_thinking, None);
 }

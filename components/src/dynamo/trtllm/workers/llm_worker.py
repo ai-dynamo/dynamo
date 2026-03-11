@@ -479,6 +479,7 @@ async def init_llm_worker(
             disable_request_abort=config.disable_request_abort,
             additional_metrics=additional_metrics,
             max_seq_len=config.max_seq_len,
+            enable_thinking_default=config.dyn_enable_thinking_default,
         )
 
         # Register the model with runtime config
