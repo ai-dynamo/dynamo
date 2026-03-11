@@ -52,3 +52,5 @@ testing = [
     "kvbm-logical/testing",
     "kvbm-physical/testing",
 ]
+# Gates NCCL-accelerated intra-pass layer-wise onboard (G2→G1 via cudarc).
+nccl = ["kvbm-engine/nccl"]
