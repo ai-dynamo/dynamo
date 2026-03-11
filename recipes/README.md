@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # Dynamo Production-Ready Recipes
 
 Production-tested Kubernetes deployment recipes for LLM inference using NVIDIA Dynamo.
@@ -40,7 +45,7 @@ These recipes demonstrate aggregated or disaggregated serving:
 
 *1: Please use `deepseek-r1/model-cache/model-download-sglang.yaml` to download the model into the PVC.
 
-### Non-optimized Recipes
+### Non-Optimized Recipes
 
 These recipes demonstrate functional deployments with Dynamo features, but have not yet been tuned for best performance or paired with benchmark manifests.
 
