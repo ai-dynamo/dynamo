@@ -18,11 +18,14 @@ use super::types::{
     AnthropicResponseContentBlock, AnthropicStopReason, AnthropicStreamEvent, AnthropicUsage,
 };
 use crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
+use crate::protocols::unified::AnthropicContext;
 
 /// State machine that converts a chat completion stream into Anthropic SSE events.
 pub struct AnthropicStreamConverter {
     model: String,
     message_id: String,
+    /// Preserved Anthropic-specific request context for faithful response reconstruction.
+    api_context: Option<AnthropicContext>,
     // Thinking/reasoning tracking
     thinking_block_started: bool,
     thinking_block_closed: bool,
@@ -60,6 +63,7 @@ impl AnthropicStreamConverter {
         Self {
             model,
             message_id: format!("msg_{}", Uuid::new_v4().simple()),
+            api_context: None,
             thinking_block_started: false,
             thinking_block_closed: false,
             thinking_block_index: 0,
@@ -76,8 +80,19 @@ impl AnthropicStreamConverter {
         }
     }
 
+    /// Create a converter seeded with the original Anthropic request context.
+    /// This allows the response stream to carry forward metadata that was lost
+    /// during the Anthropic-to-OpenAI request conversion.
+    pub fn with_context(model: String, context: AnthropicContext) -> Self {
+        let mut converter = Self::new(model);
+        converter.api_context = Some(context);
+        converter
+    }
+
     /// Emit the initial `message_start` event.
     pub fn emit_start_events(&mut self) -> Vec<Result<Event, anyhow::Error>> {
+        // TODO: When AnthropicMessageResponse gains a `service_tier` field,
+        // populate it from `self.api_context` (if the original request specified one).
         let message = AnthropicMessageResponse {
             id: self.message_id.clone(),
             object_type: "message".to_string(),
@@ -182,6 +197,11 @@ impl AnthropicStreamConverter {
                     // Emit signature delta to close the thinking block.
                     // The engine doesn't produce Anthropic-style cryptographic signatures,
                     // so we use "erased" (the standard placeholder per the Anthropic spec).
+                    // When `api_context` is available and the original request had
+                    // `thinking.thinking_type == "enabled"`, this is expected — the backend
+                    // simply doesn't generate real signatures. If/when the backend starts
+                    // returning real signatures, we can use the context to validate or
+                    // pass them through instead of hardcoding "erased".
                     let sig_delta = AnthropicStreamEvent::ContentBlockDelta {
                         index: self.thinking_block_index,
                         delta: AnthropicDelta::SignatureDelta {
