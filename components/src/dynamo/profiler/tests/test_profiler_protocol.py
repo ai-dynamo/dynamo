@@ -291,7 +291,7 @@ async def test_run_profile_applies_dgd_overrides_before_interpolation(
                 None,
                 2000.0,
                 30.0,
-                SearchStrategy.Rapid,
+                SearchStrategy.RAPID,
                 "throughput",
             ),
         ),
