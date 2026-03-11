@@ -37,8 +37,8 @@
 
 - [x] **TEST-01**: `testing` feature enabled in `kvbm-connector/Cargo.toml` pulling in test infra from kvbm-logical, kvbm-physical, kvbm-engine
 - [x] **TEST-02**: Connector-specific tests ported from `ryan/kvbm-next:lib/kvbm/src/v2/testing` into the current workspace
-- [ ] **TEST-03**: Ported tests compile with `cargo test -p kvbm-connector --features testing`
-- [ ] **TEST-04**: Ported tests pass with `cargo test -p kvbm-connector --features testing`
+- [x] **TEST-03**: Ported tests compile with `cargo test -p kvbm-connector --features testing`
+- [x] **TEST-04**: Ported tests pass with `cargo test -p kvbm-connector --features testing`
 
 ## v2 Requirements
 
@@ -79,8 +79,8 @@
 | COMP-03 | Phase 3 | Complete |
 | TEST-01 | Phase 4 | Complete |
 | TEST-02 | Phase 4 | Complete |
-| TEST-03 | Phase 4 | Pending |
-| TEST-04 | Phase 4 | Pending |
+| TEST-03 | Phase 4 | Complete |
+| TEST-04 | Phase 4 | Complete |
 
 **Coverage:**
 - v1 requirements: 20 total

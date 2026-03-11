@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: planning
-stopped_at: Completed 04-03-PLAN.md
-last_updated: "2026-03-11T19:14:42.236Z"
+stopped_at: Completed 04-04-PLAN.md
+last_updated: "2026-03-11T19:22:46.868Z"
 last_activity: 2026-03-11 — Roadmap created
 progress:
   total_phases: 4
-  completed_phases: 3
+  completed_phases: 4
   total_plans: 10
-  completed_plans: 9
+  completed_plans: 10
   percent: 70
 ---
 
@@ -59,6 +59,7 @@ Progress: [███████░░░] 70%
 | Phase 04-test-porting P01 | 5min | 2 tasks | 3 files |
 | Phase 04-test-porting P02 | 10min | 2 tasks | 2 files |
 | Phase 04-test-porting P03 | 20min | 2 tasks | 14 files |
+| Phase 04-test-porting P04 | 5min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -89,6 +90,8 @@ Recent decisions affecting current work:
 - [Phase 04-02]: leader_nova field kept as Arc<Messenger>; velo::WorkerAddress imported directly for struct field type
 - [Phase 04-test-porting]: rand_chacha added to workspace deps (v0.9) and kvbm-connector testing feature — required by MockModelRunner in mock/model.rs
 - [Phase 04-test-porting]: MockModelRunner kept live (no #[cfg(TODO)]); only Scheduler-dependent code gated — model.rs has pure rand dependency
+- [Phase 04-test-porting]: kvbm_engine::leader:: is the correct import path (not kvbm_engine::distributed::leader::) — all FindMatchesOptions/Result/Leader types live there
+- [Phase 04-test-porting]: All 9 worker unit tests pass without GPU — TestConnectorInstance uses CPU-only NIXL path by default
 
 ### Pending Todos
 
@@ -100,6 +103,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-11T19:14:42.232Z
-Stopped at: Completed 04-03-PLAN.md
+Last session: 2026-03-11T19:22:46.866Z
+Stopped at: Completed 04-04-PLAN.md
 Resume file: None
