@@ -520,11 +520,6 @@ impl OAIChatLikeRequest for UnifiedRequest {
 // ---------------------------------------------------------------------------
 
 impl UnifiedRequest {
-    /// Returns the API context.
-    pub fn api_context(&self) -> &ApiContext {
-        &self.api_context
-    }
-
     /// Returns the Anthropic context if this request originated from the
     /// Anthropic Messages API.
     pub fn anthropic_context(&self) -> Option<&AnthropicContext> {
@@ -541,35 +536,6 @@ impl UnifiedRequest {
             ApiContext::Responses(ctx) => Some(ctx),
             _ => None,
         }
-    }
-
-    /// Returns true if this request has extended thinking enabled (Anthropic).
-    pub fn thinking_enabled(&self) -> bool {
-        self.anthropic_context()
-            .and_then(|ctx| ctx.thinking.as_ref())
-            .is_some_and(|t| t.thinking_type == "enabled")
-    }
-
-    /// Returns the thinking budget tokens if thinking is enabled.
-    pub fn thinking_budget_tokens(&self) -> Option<u32> {
-        self.anthropic_context()
-            .and_then(|ctx| ctx.thinking.as_ref())
-            .filter(|t| t.thinking_type == "enabled")
-            .and_then(|t| t.budget_tokens)
-    }
-
-    /// Returns the per-block cache breakpoints (Anthropic).
-    pub fn cache_breakpoints(&self) -> &[CacheBreakpoint] {
-        match &self.api_context {
-            ApiContext::Anthropic(ctx) => &ctx.cache_breakpoints,
-            _ => &[],
-        }
-    }
-
-    /// Returns whether parallel tool use is disabled (Anthropic).
-    pub fn disable_parallel_tool_use(&self) -> bool {
-        self.anthropic_context()
-            .is_some_and(|ctx| ctx.disable_parallel_tool_use)
     }
 
     /// Unwrap back to the inner `NvCreateChatCompletionRequest`.
@@ -645,9 +611,8 @@ mod tests {
         // Verify the context was preserved
         let ctx = unified.anthropic_context().unwrap();
         assert!(ctx.thinking.is_some());
+        assert_eq!(ctx.thinking.as_ref().unwrap().thinking_type, "enabled");
         assert_eq!(ctx.thinking.as_ref().unwrap().budget_tokens, Some(4096));
-        assert!(unified.thinking_enabled());
-        assert_eq!(unified.thinking_budget_tokens(), Some(4096));
         assert!(ctx.metadata.is_some());
 
         // Verify it still works as a preprocessor input
