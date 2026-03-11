@@ -9,7 +9,6 @@ These recipes target **Dynamo 1.0**. See [Dynamo 0.9.1 Compatibility](#dynamo-09
 | Configuration | GPUs | Backend | Mode | Description |
 |--------------|------|---------|------|-------------|
 | [**vllm/agg**](vllm/agg/) | 4x H100/H200 | vLLM | Aggregated | TP=4, KV-aware routing |
-| [**trtllm/agg**](trtllm/agg/) | 4x H100/H200 | TensorRT-LLM | Aggregated | TP=4, round-robin routing |
 | [**sglang/agg**](sglang/agg/) | 4x H100/H200 | SGLang | Aggregated | TP=4, KV-aware routing (not working on 0.9.1) |
 | [**trtllm/disagg**](trtllm/disagg/) | 4x H100/H200 | TensorRT-LLM | Disaggregated | TP=2 P/D split, UCX KV transfer |
 | [**sglang/disagg**](sglang/disagg/) | 4x H100/H200 | SGLang | Disaggregated | TP=2 P/D split, nixl KV transfer (not working on 0.9.1) |
@@ -38,7 +37,6 @@ kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeo
 
 # Deploy (choose one configuration)
 kubectl apply -f vllm/agg/deploy.yaml -n ${NAMESPACE}
-# OR: kubectl apply -f trtllm/agg/deploy.yaml -n ${NAMESPACE}
 # OR: kubectl apply -f trtllm/disagg/deploy.yaml -n ${NAMESPACE}
 # OR: kubectl apply -f sglang/agg/deploy.yaml -n ${NAMESPACE}
 # OR: kubectl apply -f sglang/disagg/deploy.yaml -n ${NAMESPACE}
@@ -50,8 +48,6 @@ kubectl apply -f vllm/agg/deploy.yaml -n ${NAMESPACE}
 # Port-forward the frontend
 # If deployed vllm/agg:
 kubectl port-forward svc/nemotron-super-fp8-vllm-agg-frontend 8000:8000 -n ${NAMESPACE}
-# If deployed trtllm/agg:
-# kubectl port-forward svc/nemotron-super-fp8-trtllm-agg-frontend 8000:8000 -n ${NAMESPACE}
 # If deployed trtllm/disagg:
 # kubectl port-forward svc/nemotron-super-fp8-trtllm-disagg-frontend 8000:8000 -n ${NAMESPACE}
 # If deployed sglang/agg:
@@ -108,7 +104,7 @@ To disable reasoning at request time, pass `"chat_template_kwargs": {"enable_thi
 ## Routing
 
 - **vLLM** and **SGLang** recipes use **approximate KV-aware routing** (`--router-mode kv --no-kv-events` on the frontend). The frontend uses prefix hashing to route requests to workers most likely to have relevant KV cache blocks, which helps workloads with shared system prompts or multi-turn conversations.
-- **TensorRT-LLM** recipes use **round-robin routing**. Nemotron-H on TRT-LLM still requires `enable_block_reuse: false`, so KV overlap routing does not provide a real cache-reuse benefit here and only adds misleading overlap bookkeeping.
+- The **TensorRT-LLM** disaggregated recipe uses **round-robin routing**. Nemotron-H on TRT-LLM still requires `enable_block_reuse: false`, so KV overlap routing does not provide a real cache-reuse benefit here and only adds misleading overlap bookkeeping.
 
 Approximate (hash-based) routing is used for the vLLM and SGLang variants because hybrid Mamba+Attention models do not yet have a reliable KV-event path in these recipes (`--kv-events-config` for vLLM/SGLang, `--publish-events-and-metrics` for TRT-LLM).
 
@@ -125,7 +121,7 @@ Approximate (hash-based) routing is used for the vLLM and SGLang variants becaus
 ### TensorRT-LLM
 - Uses PyTorch backend (`backend: pytorch` in engine config)
 - Block reuse is still not supported for Nemotron-H / Mamba hybrid cache. Set `enable_block_reuse: false` explicitly in all TRT-LLM Nemotron configs. If the field is omitted, current TRT-LLM builds may still start only because the Nemotron model class silently applies a model default of `enable_block_reuse: false`; block reuse is not actually active.
-- The TRT-LLM recipes use `--router-mode round-robin` rather than KV routing. With block reuse disabled, KV-overlap scoring does not correspond to a real runtime win for Nemotron-H.
+- The TRT-LLM disaggregated recipe uses `--router-mode round-robin` rather than KV routing. With block reuse disabled, KV-overlap scoring does not correspond to a real runtime win for Nemotron-H.
 - **Disaggregated mode** requires `cache_transceiver_config: backend: UCX`. NIXL and MOONCAKE backends do not support hybrid models with Mamba SSM state — only UCX (or MPI) can transfer both attention KV cache and Mamba conv/SSM state between workers.
 
 ### SGLang
