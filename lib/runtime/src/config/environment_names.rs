@@ -280,6 +280,11 @@ pub mod llm {
     /// Enable the experimental Anthropic Messages API endpoint (/v1/messages)
     pub const DYN_ENABLE_ANTHROPIC_API: &str = "DYN_ENABLE_ANTHROPIC_API";
 
+    /// Strip the Claude Code billing preamble (`x-anthropic-billing-header: ...`)
+    /// from the system prompt before forwarding to the target model. The preamble
+    /// varies per session and per release, wasting tokens and breaking prompt caching.
+    pub const DYN_STRIP_ANTHROPIC_PREAMBLE: &str = "DYN_STRIP_ANTHROPIC_PREAMBLE";
+
     /// Metrics configuration
     pub mod metrics {
         /// Custom metrics prefix (overrides default "dynamo_frontend")
@@ -458,6 +463,7 @@ mod tests {
             llm::DYN_LORA_ENABLED,
             llm::DYN_LORA_PATH,
             llm::DYN_ENABLE_ANTHROPIC_API,
+            llm::DYN_STRIP_ANTHROPIC_PREAMBLE,
             llm::metrics::DYN_METRICS_PREFIX,
             // Model
             model::model_express::MODEL_EXPRESS_URL,
