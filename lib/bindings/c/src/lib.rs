@@ -1289,13 +1289,14 @@ async fn fetch_preprocessor_from_discovery(
     // List all models
     let instances = discovery.list(DiscoveryQuery::AllModels).await?;
 
-    // Find first model card in the target namespace (decode workers only)
+    // Find first model card in the target namespace (decode workers only).
+    // Use prefix matching because workers may append a rolling-update hash
+    // suffix to the base namespace (e.g. "ns-dgd-58908edc" vs "ns-dgd").
     let mut model_card: Option<ModelDeploymentCard> = None;
 
     for instance in instances {
         if let DiscoveryInstance::Model { namespace, .. } = &instance {
-            // Filter by namespace
-            if namespace != target_namespace {
+            if !namespace.starts_with(target_namespace) {
                 continue;
             }
 
@@ -1368,8 +1369,7 @@ async fn find_prefill_endpoint(
             ..
         } = &instance
         {
-            // Filter by namespace
-            if namespace != target_namespace {
+            if !namespace.starts_with(target_namespace) {
                 continue;
             }
 

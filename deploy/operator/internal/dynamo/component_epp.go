@@ -99,6 +99,10 @@ func (e *EPPDefaults) GetBaseContainer(context ComponentContext) (corev1.Contain
 			Name:  "DYN_ENFORCE_DISAGG",
 			Value: "false",
 		},
+		{
+			Name:  commonconsts.DynamoNamespacePrefixEnvVar,
+			Value: context.DynamoNamespace,
+		},
 	}...)
 
 	// EPP default args

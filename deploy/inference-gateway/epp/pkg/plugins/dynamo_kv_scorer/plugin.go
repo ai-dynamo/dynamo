@@ -123,7 +123,7 @@ var (
 )
 
 func loadDynamoConfig() {
-	ffiNamespace = getEnvOrDefault("DYN_NAMESPACE", "vllm-agg")
+	ffiNamespace = getEnvOrDefault("DYN_NAMESPACE_PREFIX", getEnvOrDefault("DYN_NAMESPACE", "vllm-agg"))
 	ffiComponent = "backend" // This is not the same as DYN_COMPONENT=epp (in this case)
 	ffiEnforceDisagg = getEnvBoolOrDefault("DYN_ENFORCE_DISAGG", false)
 	// Note: model name and kv_cache_block_size are now auto-discovered from the model card
