@@ -66,9 +66,8 @@ class AggPlanner:
             shared_state=self.shared_state,
             prometheus_metrics=prometheus_metrics,
             start_prometheus_server=True,
+            component_type=SubComponentType.DECODE,
         )
-        # Override: agg planner uses component_type DECODE for metrics fetching
-        self.planner.component_type = SubComponentType.DECODE
 
         # Create both regression models (agg needs both TTFT and ITL)
         self.ttft_regression = LoadBasedRegressionModel(

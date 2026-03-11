@@ -668,3 +668,355 @@ class TestAddProfileDataMockerGuard:
             assert (
                 "--planner-profile-data" in args
             ), f"mocker worker '{name}' should have --planner-profile-data"
+
+
+# ---------------------------------------------------------------------------
+# Regression tests: naive fallback resolved_backend propagation (bug fix)
+# ---------------------------------------------------------------------------
+
+
+class TestNaiveFallbackResolvedBackend:
+    """Regression tests for the 'auto' backend KeyError bug.
+
+    When backend='auto', _run_naive_fallback resolves it to a concrete
+    backend (e.g. 'vllm') and must expose that in the result dict so
+    run_profile() can pass the concrete name to run_interpolation().
+    """
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    @pytest.mark.parallel
+    def test_naive_fallback_resolved_backend_auto(self):
+        """_run_naive_fallback sets 'resolved_backend' to the concrete backend
+        when the input backend is 'auto'."""
+        try:
+            from unittest.mock import patch
+
+            from dynamo.profiler.rapid import _run_naive_fallback
+        except ImportError as e:
+            pytest.skip(f"Missing dependency: {e}")
+
+        dgdr = _make_dgdr(backend="auto")
+
+        with (
+            patch(
+                "dynamo.profiler.rapid.build_naive_generator_params",
+                return_value={},
+            ),
+            patch(
+                "dynamo.profiler.rapid.generate_backend_artifacts",
+                return_value={},
+            ),
+        ):
+            result = _run_naive_fallback(
+                dgdr,
+                model="Qwen/Qwen3-32B",
+                total_gpus=8,
+                system="h200_sxm",
+                backend="auto",
+            )
+
+        # The resolved backend must be a concrete name, not 'auto'
+        assert (
+            "resolved_backend" in result
+        ), "result dict must contain 'resolved_backend' key"
+        resolved = result["resolved_backend"]
+        assert (
+            resolved != "auto"
+        ), f"resolved_backend must not be 'auto', got {resolved!r}"
+        assert resolved in (
+            "vllm",
+            "sglang",
+            "trtllm",
+        ), f"resolved_backend must be a concrete backend, got {resolved!r}"
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    @pytest.mark.parallel
+    def test_naive_fallback_resolved_backend_concrete(self):
+        """_run_naive_fallback preserves the concrete backend in 'resolved_backend'
+        when a concrete backend (e.g. 'vllm') is passed directly."""
+        try:
+            from unittest.mock import patch
+
+            from dynamo.profiler.rapid import _run_naive_fallback
+        except ImportError as e:
+            pytest.skip(f"Missing dependency: {e}")
+
+        dgdr = _make_dgdr(backend="vllm")
+
+        with (
+            patch(
+                "dynamo.profiler.rapid.build_naive_generator_params",
+                return_value={},
+            ),
+            patch(
+                "dynamo.profiler.rapid.generate_backend_artifacts",
+                return_value={},
+            ),
+        ):
+            result = _run_naive_fallback(
+                dgdr,
+                model="Qwen/Qwen3-32B",
+                total_gpus=8,
+                system="h200_sxm",
+                backend="vllm",
+            )
+
+        assert result.get("resolved_backend") == "vllm"
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    @pytest.mark.parallel
+    def test_naive_fallback_chosen_exp_is_agg(self):
+        """_run_naive_fallback always returns chosen_exp='agg' (aggregated config)."""
+        try:
+            from unittest.mock import patch
+
+            from dynamo.profiler.rapid import _run_naive_fallback
+        except ImportError as e:
+            pytest.skip(f"Missing dependency: {e}")
+
+        dgdr = _make_dgdr(backend="vllm")
+        with (
+            patch(
+                "dynamo.profiler.rapid.build_naive_generator_params",
+                return_value={},
+            ),
+            patch(
+                "dynamo.profiler.rapid.generate_backend_artifacts",
+                return_value={},
+            ),
+        ):
+            result = _run_naive_fallback(
+                dgdr,
+                model="Qwen/Qwen3-32B",
+                total_gpus=8,
+                system="h200_sxm",
+                backend="vllm",
+            )
+
+        assert result.get("chosen_exp") == "agg"
+
+
+# ---------------------------------------------------------------------------
+# Regression tests: run_profile skips interpolation for aggregated configs
+# ---------------------------------------------------------------------------
+
+
+class TestRunProfileSkipsInterpolationForAggConfig:
+    """Regression tests for the aggregated-config crash in run_interpolation.
+
+    When the picked DGD config is aggregated (chosen_exp='agg'), run_profile()
+    must not call run_interpolation(), which only works with disaggregated
+    configs that have separate prefill and decode services.
+    """
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    @pytest.mark.parallel
+    def test_run_profile_skips_interpolation_when_agg(self, tmp_path):
+        """run_profile skips run_interpolation when chosen_exp='agg'."""
+        try:
+            import asyncio
+            from unittest.mock import AsyncMock, patch
+
+            from dynamo.planner.utils.planner_config import (
+                PlannerPreDeploymentSweepMode,
+            )
+            from dynamo.profiler.profile_sla import run_profile
+            from dynamo.profiler.utils.dgdr_v1beta1_types import FeaturesSpec
+        except ImportError as e:
+            pytest.skip(f"Missing dependency: {e}")
+
+        dgdr = _make_dgdr(
+            backend="auto",
+            features=FeaturesSpec(
+                planner=_make_planner(
+                    enable_throughput_scaling=True,
+                    pre_deployment_sweeping_mode=PlannerPreDeploymentSweepMode.Rapid,
+                )
+            ),
+        )
+        ops = _make_ops(tmp_path)
+        os.makedirs(ops.output_dir, exist_ok=True)
+
+        # Simulate naive fallback result: agg config, resolved backend
+        agg_dgd = {
+            "metadata": {"name": "vllm-agg"},
+            "spec": {"services": {"Frontend": {}, "VllmWorker": {}}},
+        }
+        pick_result = {
+            "best_config_df": None,
+            "best_latencies": {"ttft": 0.0, "tpot": 0.0, "request_latency": 0.0},
+            "dgd_config": agg_dgd,
+            "chosen_exp": "agg",
+            "resolved_backend": "vllm",
+        }
+
+        _PROFILE_SLA = "dynamo.profiler.profile_sla"
+        with (
+            patch(
+                f"{_PROFILE_SLA}._extract_profiler_params",
+                return_value=(
+                    "Qwen/Qwen3-32B",
+                    "auto",
+                    "h200_sxm",
+                    8,
+                    4000,
+                    1000,
+                    None,
+                    2000.0,
+                    50.0,
+                    __import__(
+                        "dynamo.profiler.utils.defaults", fromlist=["SearchStrategy"]
+                    ).SearchStrategy.RAPID,
+                    "autoscale",
+                ),
+            ),
+            patch(f"{_PROFILE_SLA}.check_model_hardware_support", return_value=False),
+            patch(f"{_PROFILE_SLA}._check_auto_backend_support", return_value=False),
+            patch(f"{_PROFILE_SLA}.validate_dgdr_dynamo_features"),
+            patch(
+                f"{_PROFILE_SLA}._execute_strategy",
+                new_callable=AsyncMock,
+                return_value=(
+                    pick_result,
+                    PickedParallelConfig(tp=1),
+                    PickedParallelConfig(tp=1),
+                    2000.0,
+                    50.0,
+                ),
+            ),
+            patch(
+                f"{_PROFILE_SLA}.run_interpolation", new_callable=AsyncMock
+            ) as mock_interp,
+            patch(f"{_PROFILE_SLA}.assemble_final_config", return_value=agg_dgd),
+            patch(f"{_PROFILE_SLA}.needs_profile_data", return_value=True),
+            patch(
+                f"{_PROFILE_SLA}.get_model_config_from_model_path",
+                side_effect=Exception("no model"),
+            ),
+            patch(
+                f"{_PROFILE_SLA}.cleanup_remaining_deployments", new_callable=AsyncMock
+            ),
+            patch(f"{_PROFILE_SLA}.valid_dgdr_spec"),
+        ):
+            asyncio.run(run_profile(dgdr, ops))
+
+        # run_interpolation must NOT have been called for agg configs
+        mock_interp.assert_not_called()
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    @pytest.mark.parallel
+    def test_run_profile_calls_interpolation_with_resolved_backend_for_disagg(
+        self, tmp_path
+    ):
+        """run_profile passes the concrete resolved backend (not 'auto') to
+        run_interpolation when the picked config is disaggregated."""
+        try:
+            import asyncio
+            from unittest.mock import AsyncMock, patch
+
+            from dynamo.planner.utils.planner_config import (
+                PlannerPreDeploymentSweepMode,
+            )
+            from dynamo.profiler.profile_sla import run_profile
+            from dynamo.profiler.utils.dgdr_v1beta1_types import FeaturesSpec
+        except ImportError as e:
+            pytest.skip(f"Missing dependency: {e}")
+
+        dgdr = _make_dgdr(
+            backend="auto",
+            features=FeaturesSpec(
+                planner=_make_planner(
+                    enable_throughput_scaling=True,
+                    pre_deployment_sweeping_mode=PlannerPreDeploymentSweepMode.Rapid,
+                )
+            ),
+        )
+        ops = _make_ops(tmp_path)
+        os.makedirs(ops.output_dir, exist_ok=True)
+
+        # Simulate AIC disagg result with 'auto' resolved to 'vllm'
+        disagg_dgd = {
+            "metadata": {"name": "vllm-disagg"},
+            "spec": {
+                "services": {
+                    "Frontend": {},
+                    "VllmPrefillWorker": {},
+                    "VllmDecodeWorker": {},
+                }
+            },
+        }
+        pick_result = {
+            "best_config_df": None,
+            "best_latencies": {"ttft": 0.0, "tpot": 0.0, "request_latency": 0.0},
+            "dgd_config": disagg_dgd,
+            "chosen_exp": "disagg",
+            "resolved_backend": "vllm",
+        }
+
+        _PROFILE_SLA = "dynamo.profiler.profile_sla"
+        with (
+            patch(
+                f"{_PROFILE_SLA}._extract_profiler_params",
+                return_value=(
+                    "Qwen/Qwen3-32B",
+                    "auto",
+                    "h200_sxm",
+                    8,
+                    4000,
+                    1000,
+                    None,
+                    2000.0,
+                    50.0,
+                    __import__(
+                        "dynamo.profiler.utils.defaults", fromlist=["SearchStrategy"]
+                    ).SearchStrategy.RAPID,
+                    "autoscale",
+                ),
+            ),
+            patch(f"{_PROFILE_SLA}.check_model_hardware_support", return_value=False),
+            patch(f"{_PROFILE_SLA}._check_auto_backend_support", return_value=False),
+            patch(f"{_PROFILE_SLA}.validate_dgdr_dynamo_features"),
+            patch(
+                f"{_PROFILE_SLA}._execute_strategy",
+                new_callable=AsyncMock,
+                return_value=(
+                    pick_result,
+                    PickedParallelConfig(tp=1),
+                    PickedParallelConfig(tp=1),
+                    2000.0,
+                    50.0,
+                ),
+            ),
+            patch(
+                f"{_PROFILE_SLA}.run_interpolation", new_callable=AsyncMock
+            ) as mock_interp,
+            patch(f"{_PROFILE_SLA}.assemble_final_config", return_value=disagg_dgd),
+            patch(f"{_PROFILE_SLA}.needs_profile_data", return_value=True),
+            patch(
+                f"{_PROFILE_SLA}.get_model_config_from_model_path",
+                side_effect=Exception("no model"),
+            ),
+            patch(
+                f"{_PROFILE_SLA}.cleanup_remaining_deployments", new_callable=AsyncMock
+            ),
+            patch(f"{_PROFILE_SLA}.valid_dgdr_spec"),
+        ):
+            asyncio.run(run_profile(dgdr, ops))
+
+        # run_interpolation must be called, and with the resolved 'vllm' backend, not 'auto'
+        mock_interp.assert_called_once()
+        call_kwargs = mock_interp.call_args
+        # backend is the 8th positional argument (index 7)
+        called_backend = (
+            call_kwargs.args[7]
+            if call_kwargs.args
+            else call_kwargs.kwargs.get("backend")
+        )
+        assert (
+            called_backend == "vllm"
+        ), f"run_interpolation must be called with resolved backend 'vllm', got {called_backend!r}"

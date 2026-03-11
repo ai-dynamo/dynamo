@@ -29,95 +29,46 @@ This guide covers single GPU demo setup using Docker Compose. For Kubernetes dep
 
 Start the observability stack (Prometheus, Grafana, Tempo, exporters). See [Observability Getting Started](README.md#getting-started-quickly) for instructions.
 
-### 2. Set Environment Variables
+### 2. Start Dynamo Components (Single GPU)
 
-Configure Dynamo components to export traces:
-
-```bash
-# Enable JSONL logging and tracing
-export DYN_LOGGING_JSONL=true
-export OTEL_EXPORT_ENABLED=true
-export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://localhost:4317
-```
-
-### 3. Start Dynamo Components (Single GPU)
-
-For a simple single-GPU deployment, start the frontend and a single vLLM worker:
+For a simple single-GPU deployment, run the aggregated tracing launch script. This script enables tracing, sets per-component service names, and starts a frontend with a single vLLM worker:
 
 ```bash
-# Start the frontend with tracing enabled (default port 8000, override with --http-port or DYN_HTTP_PORT env var)
-export OTEL_SERVICE_NAME=dynamo-frontend
-python -m dynamo.frontend --router-mode kv &
-
-# Start a single vLLM worker (aggregated prefill and decode)
-export OTEL_SERVICE_NAME=dynamo-worker-vllm
-python -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager \
---otlp-traces-endpoint="$OTEL_EXPORTER_OTLP_TRACES_ENDPOINT" &
-
-wait
+cd examples/backends/vllm/launch
+./agg_tracing.sh
 ```
 
-This runs both prefill and decode on the same GPU, providing a simpler setup for testing tracing.
+To override the Tempo endpoint (default `http://localhost:4317`):
+
+```bash
+export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://tempo:4317
+./agg_tracing.sh
+```
+
+This runs a single aggregated worker on one GPU, providing a simpler setup for testing tracing.
 
 ### Alternative: Disaggregated Deployment (2 GPUs)
 
-Run the vLLM disaggregated script with tracing enabled:
+For a disaggregated deployment with tracing, run the disaggregated tracing launch script. This script sets up tracing and launches a frontend, a decode worker on GPU 0, and a prefill worker on GPU 1:
 
 ```bash
-# Navigate to vLLM launch directory
 cd examples/backends/vllm/launch
-
-# Export tracing env vars, then run the disaggregated deployment script.
-./disagg.sh
+./disagg_tracing.sh
 ```
 
-**Note:** the example vLLM `disagg.sh` sets per-worker `--kv-events-config` with unique ZMQ endpoints and unique
-`VLLM_NIXL_SIDE_CHANNEL_PORT` values to avoid "Address already in use" conflicts when multiple workers run on the same host. If you run the components manually, make sure you mirror those settings.
+This separates prefill and decode onto different GPUs for better resource utilization.
 
-```bash
-#!/bin/bash
-set -e
-trap 'echo Cleaning up...; kill 0' EXIT
+### 3. Generate Traces
 
-# Enable tracing
-export DYN_LOGGING_JSONL=true
-export OTEL_EXPORT_ENABLED=true
-export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://localhost:4317
+Send requests to the frontend to generate traces (works for both aggregated and disaggregated deployments). The launch scripts print an example `curl` command on startup with the correct model name.
 
-# Run frontend (default port 8000, override with --http-port or DYN_HTTP_PORT env var)
-export OTEL_SERVICE_NAME=dynamo-frontend
-python -m dynamo.frontend --router-mode kv &
-
-# Run decode worker, make sure to wait for start up
-export OTEL_SERVICE_NAME=dynamo-worker-decode
-DYN_SYSTEM_PORT=8081 CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm \
-    --model Qwen/Qwen3-0.6B \
-    --enforce-eager \
-    --otlp-traces-endpoint="$OTEL_EXPORTER_OTLP_TRACES_ENDPOINT" &
-
-# Run prefill worker, make sure to wait for start up
-export OTEL_SERVICE_NAME=dynamo-worker-prefill
-DYN_SYSTEM_PORT=8082 \
-VLLM_NIXL_SIDE_CHANNEL_PORT=20097 \
-CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.vllm \
-    --model Qwen/Qwen3-0.6B \
-    --enforce-eager \
-    --otlp-traces-endpoint="$OTEL_EXPORTER_OTLP_TRACES_ENDPOINT" \
-    --disaggregation-mode prefill \
-    --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081","enable_kv_cache_events":true}' &
-```
-
-For disaggregated deployments, this separates prefill and decode onto different GPUs for better resource utilization.
-
-### 4. Generate Traces
-
-Send requests to the frontend to generate traces (works for both aggregated and disaggregated deployments). **Note the `x-request-id` header**, which allows you to easily search for and correlate this specific trace in Grafana:
+**Tip:** Add an `x-request-id` header to easily search for a specific trace in Grafana:
 
 ```bash
 curl -H 'Content-Type: application/json' \
 -H 'x-request-id: test-trace-001' \
 -d '{
-  "model": "Qwen/Qwen3-0.6B",
+  "model": "<MODEL>",
   "max_completion_tokens": 100,
   "messages": [
     {"role": "user", "content": "What is the capital of France?"}
@@ -126,7 +77,7 @@ curl -H 'Content-Type: application/json' \
 http://localhost:8000/v1/chat/completions
 ```
 
-### 5. View Traces in Grafana Tempo
+### 4. View Traces in Grafana Tempo
 
 1. Open Grafana at `http://localhost:3000`
 2. Login with username `dynamo` and password `dynamo`
@@ -145,7 +96,7 @@ Below is an example of what a trace looks like in Grafana Tempo:
 
 ![Trace Example](../assets/img/trace.png)
 
-### 6. Stop Services
+### 5. Stop Services
 
 When done, stop the observability stack. See [Observability Getting Started](README.md#getting-started-quickly) for Docker Compose commands.
 
@@ -157,56 +108,17 @@ For Kubernetes deployments, ensure you have a Tempo instance deployed and access
 
 ### Modify DynamoGraphDeployment for Tracing
 
-Add common tracing environment variables at the top level and service-specific names in each component in your `DynamoGraphDeployment` (e.g., `examples/backends/vllm/deploy/disagg.yaml`):
+Tracing-enabled variants of the example deployments are provided:
 
-```yaml
-apiVersion: nvidia.com/v1alpha1
-kind: DynamoGraphDeployment
-metadata:
-  name: vllm-disagg
-spec:
-  # Common environment variables for all services
-  env:
-    - name: DYN_LOGGING_JSONL
-      value: "true"
-    - name: OTEL_EXPORT_ENABLED
-      value: "true"
-    - name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
-      value: "http://tempo.observability.svc.cluster.local:4317"
+- **Aggregated:** `examples/backends/vllm/deploy/agg_tracing.yaml`
+- **Disaggregated:** `examples/backends/vllm/deploy/disagg_tracing.yaml`
 
-  services:
-    Frontend:
-      # ... existing configuration ...
-      extraPodSpec:
-        mainContainer:
-          # ... existing configuration ...
-          env:
-            - name: OTEL_SERVICE_NAME
-              value: "dynamo-frontend"
+These add the [Environment Variables](#environment-variables) to the base `agg.yaml` / `disagg.yaml` deployments. To override the Tempo endpoint, edit `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` in the YAML.
 
-    VllmDecodeWorker:
-      # ... existing configuration ...
-      extraPodSpec:
-        mainContainer:
-          # ... existing configuration ...
-          env:
-            - name: OTEL_SERVICE_NAME
-              value: "dynamo-worker-decode"
-
-    VllmPrefillWorker:
-      # ... existing configuration ...
-      extraPodSpec:
-        mainContainer:
-          # ... existing configuration ...
-          env:
-            - name: OTEL_SERVICE_NAME
-              value: "dynamo-worker-prefill"
-```
-
-Apply the updated DynamoGraphDeployment:
+Apply a tracing-enabled deployment:
 
 ```bash
-kubectl apply -f examples/backends/vllm/deploy/disagg.yaml
+kubectl apply -f examples/backends/vllm/deploy/disagg_tracing.yaml
 ```
 
 Traces will now be exported to Tempo and can be viewed in Grafana.
