@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"text/template"
 
 	batchv1 "k8s.io/api/batch/v1"
@@ -228,6 +229,12 @@ if [ -f {{.OutputPath}}/profiler_status.yaml ]; then
   sed 's/^/    /' {{.OutputPath}}/profiler_status.yaml >> /tmp/cm.yaml
 fi
 
+# Add webui_data.json for pareto curve data (used by operator to populate status.profilingResults.pareto)
+if [ -f {{.OutputPath}}/webui_data.json ]; then
+  echo "  webui_data.json: |" >> /tmp/cm.yaml
+  sed 's/^/    /' {{.OutputPath}}/webui_data.json >> /tmp/cm.yaml
+fi
+
 # Note: Profiling data (raw_data.npz converted to JSON) is included in the
 # generated DGD YAML as a separate ConfigMap by the profiler, no need to add it here
 
@@ -412,10 +419,17 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleProfilingPhase(ctx contex
 		return ctrl.Result{}, nil
 	}
 
-	// Profiling complete — clear the profiling sub-phase
-	dgdr.ClearProfilingPhase()
+	profilingResults, dgdName, err := r.generateDGDSpec(ctx, dgdr)
+	if err != nil {
+		dgdr.ClearProfilingPhase()
+		r.Recorder.Event(dgdr, corev1.EventTypeWarning, MessageGenerationFailed, err.Error())
+		return r.updatePhaseWithCondition(ctx, dgdr, nvidiacomv1beta1.DGDRPhaseFailed, nvidiacomv1beta1.ConditionTypeSpecGenerated, metav1.ConditionFalse, MessageGenerationFailed, err.Error())
+	}
+	if err := r.Get(ctx, types.NamespacedName{Name: dgdr.Name, Namespace: dgdr.Namespace}, dgdr); err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to refetch DGDR after generateDGDSpec: %w", err)
+	}
 
-	// Mark profiling as completed successfully
+	dgdr.ClearProfilingPhase()
 	meta.SetStatusCondition(&dgdr.Status.Conditions, metav1.Condition{
 		Type:               nvidiacomv1beta1.ConditionTypeProfiling,
 		Status:             metav1.ConditionTrue,
@@ -423,14 +437,9 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleProfilingPhase(ctx contex
 		Reason:             "ProfilingCompleted",
 		Message:            "Profiling job completed successfully",
 	})
+	dgdr.Status.DGDName = dgdName
+	dgdr.Status.ProfilingResults = profilingResults
 
-	// Retrieve profiling results and generate spec
-	if err := r.generateDGDSpec(ctx, dgdr); err != nil {
-		r.Recorder.Event(dgdr, corev1.EventTypeWarning, MessageGenerationFailed, err.Error())
-		return r.updatePhaseWithCondition(ctx, dgdr, nvidiacomv1beta1.DGDRPhaseFailed, nvidiacomv1beta1.ConditionTypeSpecGenerated, metav1.ConditionFalse, MessageGenerationFailed, err.Error())
-	}
-
-	// Record spec generation event
 	r.Recorder.Event(dgdr, corev1.EventTypeNormal, nvidiacomv1beta1.EventReasonSpecGenerated, MessageSpecGenerated)
 
 	// Create additional resources (ConfigMaps) immediately after profiling
@@ -476,12 +485,10 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleDeployingPhase(ctx contex
 		return ctrl.Result{}, r.Status().Update(ctx, dgdr)
 	}
 
-	// Check if we need to create DGD
 	if dgdr.Status.DGDName == "" {
 		return r.createDGD(ctx, dgdr)
 	}
 
-	// DGD was already created, check its status
 	dgd := &dgdv1alpha1.DynamoGraphDeployment{}
 	err := r.Get(ctx, types.NamespacedName{
 		Name:      dgdr.Status.DGDName,
@@ -489,7 +496,11 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleDeployingPhase(ctx contex
 	}, dgd)
 
 	if apierrors.IsNotFound(err) {
-		// DGD was deleted by user
+		// Annotation present means DGD was never created (spec ready but create not yet called).
+		// Annotation absent means DGD was previously created and then manually deleted.
+		if _, hasSpec := dgdr.Annotations["nvidia.com/generated-dgd-spec"]; hasSpec {
+			return r.createDGD(ctx, dgdr)
+		}
 		return r.handleDGDDeleted(ctx, dgdr)
 	}
 
@@ -664,13 +675,24 @@ func (r *DynamoGraphDeploymentRequestReconciler) createDGD(ctx context.Context, 
 
 	if err := r.Create(ctx, dgd); err != nil {
 		if apierrors.IsAlreadyExists(err) {
-			// DGD already exists, just update status
 			logger.Info("DGD already exists, updating status")
+			delete(dgdr.Annotations, "nvidia.com/generated-dgd-spec")
+			if updateErr := r.Update(ctx, dgdr); updateErr != nil {
+				logger.Error(updateErr, "Failed to remove generated-dgd-spec annotation on IsAlreadyExists path")
+				return ctrl.Result{}, updateErr
+			}
 			dgdr.Status.DGDName = dgdName
 			return ctrl.Result{}, r.Status().Update(ctx, dgdr)
 		}
 		r.Recorder.Event(dgdr, corev1.EventTypeWarning, MessageDeploymentCreationFailed, err.Error())
 		return ctrl.Result{}, err
+	}
+
+	delete(dgdr.Annotations, "nvidia.com/generated-dgd-spec")
+	if err := r.Update(ctx, dgdr); err != nil {
+		// Return the error to force a retry. The DGD was created successfully, so a
+		// retry will hit the IsAlreadyExists path above and attempt cleanup again.
+		return ctrl.Result{}, fmt.Errorf("failed to remove generated-dgd-spec annotation after DGD creation: %w", err)
 	}
 
 	// Update status
@@ -1350,8 +1372,10 @@ func (r *DynamoGraphDeploymentRequestReconciler) getProfilingJobErrorDetails(ctx
 	return ""
 }
 
-// generateDGDSpec generates DGD spec from profiling results (online or offline/AIC)
-func (r *DynamoGraphDeploymentRequestReconciler) generateDGDSpec(ctx context.Context, dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest) error {
+// generateDGDSpec reads profiling output from the sidecar ConfigMap, extracts the
+// DynamoGraphDeployment spec and pareto configs, stores the spec in an annotation via
+// r.Update, and returns the ProfilingResultsStatus and DGD name.
+func (r *DynamoGraphDeploymentRequestReconciler) generateDGDSpec(ctx context.Context, dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest) (*nvidiacomv1beta1.ProfilingResultsStatus, string, error) {
 	logger := log.FromContext(ctx)
 	logger.Info("Generating DGD spec from profiling results", "name", dgdr.Name, "backend", dgdr.Spec.Backend)
 
@@ -1365,9 +1389,9 @@ func (r *DynamoGraphDeploymentRequestReconciler) generateDGDSpec(ctx context.Con
 
 	if err != nil {
 		if apierrors.IsNotFound(err) {
-			return fmt.Errorf("output ConfigMap %s not found - profiling may not have completed yet", outputConfigMapName)
+			return nil, "", fmt.Errorf("output ConfigMap %s not found - profiling may not have completed yet", outputConfigMapName)
 		}
-		return fmt.Errorf("failed to get output ConfigMap: %w", err)
+		return nil, "", fmt.Errorf("failed to get output ConfigMap: %w", err)
 	}
 
 	// Select the right config file based on mocker feature flag
@@ -1377,7 +1401,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) generateDGDSpec(ctx context.Con
 	// Get YAML content from ConfigMap
 	yamlContent, exists := cm.Data[outputFile]
 	if !exists {
-		return fmt.Errorf("key %s not found in ConfigMap %s", outputFile, outputConfigMapName)
+		return nil, "", fmt.Errorf("key %s not found in ConfigMap %s", outputFile, outputConfigMapName)
 	}
 
 	logger.Info("Found profiling output in ConfigMap", "configMap", outputConfigMapName, "outputFile", outputFile, "size", len(yamlContent))
@@ -1385,58 +1409,125 @@ func (r *DynamoGraphDeploymentRequestReconciler) generateDGDSpec(ctx context.Con
 	// Extract DGD and any supporting resources from potentially multi-document YAML (ConfigMap + DGD)
 	dgd, additionalResources, err := r.extractResourcesFromYAML([]byte(yamlContent))
 	if err != nil {
-		return fmt.Errorf("failed to extract DGD from %s: %w", outputFile, err)
+		return nil, "", fmt.Errorf("failed to extract DGD from %s: %w", outputFile, err)
 	}
 
 	logger.Info("Parsed profiling output", "dgdName", dgd.Name, "additionalResources", len(additionalResources))
 
-	// Store additional resources (ConfigMaps) in annotations first
 	if len(additionalResources) > 0 {
 		if err := r.storeAdditionalResources(ctx, dgdr, additionalResources); err != nil {
 			logger.Error(err, "Failed to store additional resources")
-			return err
+			return nil, "", err
 		}
-		// Refetch the DGDR after updating annotations to get the latest resourceVersion
+		// storeAdditionalResources calls r.Update internally, bumping resourceVersion.
+		// Refetch so the subsequent r.Update for the spec annotation doesn't 409.
 		if err := r.Get(ctx, types.NamespacedName{Name: dgdr.Name, Namespace: dgdr.Namespace}, dgdr); err != nil {
-			return fmt.Errorf("failed to refetch DGDR after storing annotations: %w", err)
+			return nil, "", fmt.Errorf("failed to refetch DGDR after storing additional resources: %w", err)
 		}
 	}
 
-	// Store the generated DGD name in status and cache the spec in an annotation for createDGD
-	dgdr.Status.DGDName = dgd.Name
+	profilingResults := &nvidiacomv1beta1.ProfilingResultsStatus{}
+	if webUIData, ok := cm.Data["webui_data.json"]; ok {
+		pareto, err := extractParetoFromWebUIData([]byte(webUIData))
+		if err != nil {
+			logger.Error(err, "Failed to parse webui_data.json; skipping pareto population")
+		} else {
+			profilingResults.Pareto = pareto
+			logger.Info("Populated ProfilingResults.Pareto", "count", len(pareto))
+		}
+	}
 
-	// Store the generated DGD in ProfilingResults.SelectedConfig for status visibility
+	// Store the generated DGD in ProfilingResults.SelectedConfig
 	dgdJSON, err := json.Marshal(dgd)
 	if err != nil {
-		return fmt.Errorf("failed to marshal generated DGD to JSON: %w", err)
+		return nil, "", fmt.Errorf("failed to marshal generated DGD to JSON: %w", err)
 	}
-	if dgdr.Status.ProfilingResults == nil {
-		dgdr.Status.ProfilingResults = &nvidiacomv1beta1.ProfilingResultsStatus{}
-	}
-	dgdr.Status.ProfilingResults.SelectedConfig = &runtime.RawExtension{Raw: dgdJSON}
+	profilingResults.SelectedConfig = &runtime.RawExtension{Raw: dgdJSON}
 
 	// Serialize the DGD spec to an annotation so createDGD can retrieve it
 	dgdBytes, err := sigsyaml.Marshal(dgd)
 	if err != nil {
-		return fmt.Errorf("failed to marshal generated DGD: %w", err)
+		return nil, "", fmt.Errorf("failed to marshal generated DGD: %w", err)
 	}
 	if dgdr.Annotations == nil {
 		dgdr.Annotations = make(map[string]string)
 	}
 	dgdr.Annotations["nvidia.com/generated-dgd-spec"] = string(dgdBytes)
 
-	// Update the object (annotations are on the object, not status)
 	if err := r.Update(ctx, dgdr); err != nil {
-		return fmt.Errorf("failed to update DGDR with generated DGD annotation: %w", err)
+		return nil, "", fmt.Errorf("failed to update DGDR with generated DGD annotation: %w", err)
+	}
+	return profilingResults, dgd.Name, nil
+}
+
+// extractParetoFromWebUIData parses webui_data.json and returns all Pareto-optimal
+// deployment configurations from the cost table. Each row's last column ("Action")
+// is a partial DynamoGraphDeployment YAML snippet.
+func extractParetoFromWebUIData(data []byte) ([]nvidiacomv1beta1.ParetoConfig, error) {
+	var parsed struct {
+		Cost struct {
+			Table struct {
+				Data [][]json.RawMessage `json:"data"`
+			} `json:"table"`
+		} `json:"cost"`
+	}
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal webui_data.json: %w", err)
 	}
 
-	// Refetch the DGDR after the annotation update to get the latest resourceVersion
-	// and avoid conflicts with concurrent modifications before updating status.
-	if err := r.Get(ctx, types.NamespacedName{Name: dgdr.Name, Namespace: dgdr.Namespace}, dgdr); err != nil {
-		return fmt.Errorf("failed to refetch DGDR after annotation update: %w", err)
+	rows := parsed.Cost.Table.Data
+	if len(rows) == 0 {
+		return nil, nil
 	}
 
-	return r.Status().Update(ctx, dgdr)
+	// Schema: [TTFT(ms), PrefillThpt, ITL(ms), DecodeThpt, TokensPerUser, GPUHours, ActionYAML]
+	const minColumns = 7
+	const actionColumnIndex = 6
+
+	pareto := make([]nvidiacomv1beta1.ParetoConfig, 0, len(rows))
+	for _, row := range rows {
+		if len(row) < minColumns {
+			continue
+		}
+
+		var actionYAML string
+		if err := json.Unmarshal(row[actionColumnIndex], &actionYAML); err != nil {
+			continue
+		}
+
+		var configObj map[string]interface{}
+		if err := sigsyaml.Unmarshal([]byte(stripYAMLComments(actionYAML)), &configObj); err != nil {
+			continue
+		}
+
+		if len(configObj) == 0 {
+			continue
+		}
+
+		configJSON, err := json.Marshal(configObj)
+		if err != nil {
+			continue
+		}
+
+		pareto = append(pareto, nvidiacomv1beta1.ParetoConfig{
+			Config: runtime.RawExtension{Raw: configJSON},
+		})
+	}
+
+	return pareto, nil
+}
+
+// stripYAMLComments removes comment lines (lines whose first non-whitespace character
+// is '#') from a YAML string. The profiler prefixes action snippets with comment lines.
+func stripYAMLComments(s string) string {
+	lines := strings.Split(s, "\n")
+	out := lines[:0] // reuse backing array; write index always <= range read index
+	for _, line := range lines {
+		if !strings.HasPrefix(strings.TrimLeft(line, " \t"), "#") {
+			out = append(out, line)
+		}
+	}
+	return strings.Join(out, "\n")
 }
 
 // storeAdditionalResources marshals additional resources to YAML and stores them in DGDR annotations.

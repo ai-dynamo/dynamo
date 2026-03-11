@@ -4,22 +4,19 @@
 """
 Multimodal processing utilities for vLLM MM Router Worker.
 
-Key differences from TRT-LLM version:
-- Image loading: PIL + requests/base64 (no TRT-LLM dependency)
-- mm_hash: SHA256 of normalized PNG bytes (matches vLLM multi_modal_uuids)
-- Token replacement: NOT needed — vLLM keeps the original image_token_id as-is
+Key differences from the TRT-LLM version:
+- mm_hash uses PIL image bytes to match the vLLM backend's multi_modal_uuids.
+- Token replacement is not needed — vLLM keeps the original image_token_id.
+- Fast path token expansion computes token counts from image dimensions directly.
 """
 
-import base64
 import logging
 from dataclasses import dataclass
-from io import BytesIO
-from typing import Any
-from urllib.parse import urlparse
+from typing import Any, Sequence
 
-import requests
 from PIL import Image
 
+from dynamo.common.multimodal.image_loader import ImageLoader
 from dynamo.vllm.multimodal_utils.hash_utils import compute_mm_uuids_from_images
 
 logger = logging.getLogger(__name__)
@@ -58,41 +55,31 @@ def extract_image_urls(messages: list[dict]) -> list[str]:
     return urls
 
 
-def process_multimodal(
+async def process_multimodal(
     messages: list[dict],
     image_urls: list[str],
     tokenizer: Any,
     processor: Any,
     model: str,
+    image_loader: ImageLoader,
 ) -> ProcessedInput:
+    """Process multimodal request: load images, get expanded tokens and mm_hashes.
+
+    Uses the shared ImageLoader for async loading with HTTP cache.
+    Hashes PIL images to natively match the vLLM backend's multi_modal_uuids.
     """
-    Process multimodal request: load images, get expanded tokens and mm_hashes.
+    prompt = _apply_chat_template(messages, tokenizer, processor)
 
-    Uses PIL for image loading and hashlib for mm_hash computation.
-    Unlike TRT-LLM, vLLM keeps original image_token_id (no replacement).
-    """
-    # The preprocessed request does not carry a rendered template string; it carries
-    # original messages in extra_args, so we must apply chat template again here.
-    prompt = _build_prompt_with_images(messages, tokenizer, processor)
-    logger.info(f"Prompt (first 300 chars): {prompt[:300]}")
+    image_mm_items = [{"Url": url} for url in image_urls]
+    pil_images = await image_loader.load_image_batch(image_mm_items)
+    image_dims = [(img.width, img.height) for img in pil_images]
 
-    # Load images as PIL
-    pil_images = []
-    for url in image_urls:
-        pil_img = _load_image(url)
-        pil_images.append(pil_img)
-
-    # Get expanded tokens and image ranges (no token replacement for vLLM)
     tokens, image_ranges = _get_expanded_tokens(
-        prompt, pil_images, tokenizer, processor
+        prompt, image_dims, pil_images, tokenizer, processor
     )
-    logger.info(f"Expanded: {len(tokens)} tokens, " f"image_ranges={image_ranges}")
 
-    # Compute mm_hashes exactly like vLLM handler's multi_modal_uuids path.
     mm_uuids = compute_mm_uuids_from_images(pil_images)
     mm_hashes = [int(uuid[:16], 16) for uuid in mm_uuids]
-
-    logger.info(f"mm_hashes={mm_hashes}")
 
     return ProcessedInput(tokens=tokens, mm_hashes=mm_hashes, image_ranges=image_ranges)
 
@@ -136,202 +123,138 @@ def build_block_mm_infos(
 
 
 # =============================================================================
-# Internal functions
+# Token expansion: fast path (dimensions) -> slow path (HF processor)
 # =============================================================================
 
 
-def _build_prompt_with_images(
-    messages: list[dict], tokenizer: Any, processor: Any
-) -> str:
+def _apply_chat_template(messages: list[dict], tokenizer: Any, processor: Any) -> str:
+    """Re-apply chat template for routing token expansion.
+
+    Cannot reuse Frontend's token_ids because the Frontend tokenizer may lack
+    vision-specific markers (e.g. <|vision_start|><|image_pad|><|vision_end|>
+    for Qwen). The processor's template produces the correct placeholder
+    structure needed for image token expansion and block_mm_infos.
     """
-    Build a prompt that includes image placeholders using the tokenizer's
-    chat template. This is critical for Qwen2-VL/Qwen2.5-VL models which
-    need <|vision_start|><|image_pad|>...<|vision_end|> in the prompt for
-    the processor to expand image tokens correctly.
-
-    Raises if chat template cannot be applied. For MM routing correctness, we do
-    not silently fall back to text-only prompts.
-    """
-    # Try processor first (has the best chat template for multimodal)
-    if processor is not None and hasattr(processor, "apply_chat_template"):
-        return processor.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
-
-    # Fall back to tokenizer if available
-    if hasattr(tokenizer, "apply_chat_template"):
-        return tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
-
+    for obj in (processor, tokenizer):
+        if obj is not None and hasattr(obj, "apply_chat_template"):
+            return obj.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
     raise ValueError("Neither processor nor tokenizer provides apply_chat_template")
-
-
-def _load_image(url: str) -> Image.Image:
-    """
-    Load an image from URL (http/https or data URI) and return a PIL RGB image.
-    """
-    parsed = urlparse(url)
-
-    if parsed.scheme == "data":
-        # data:image/png;base64,<data>
-        _, data = parsed.path.split(",", 1)
-        raw_bytes = base64.b64decode(data)
-    elif parsed.scheme in ("http", "https"):
-        response = requests.get(url, timeout=30)
-        response.raise_for_status()
-        raw_bytes = response.content
-    else:
-        raise ValueError(f"Unsupported URL scheme: {parsed.scheme}")
-
-    return Image.open(BytesIO(raw_bytes)).convert("RGB")
 
 
 def _get_expanded_tokens(
     prompt: str,
+    image_dims: list[tuple[int, int]],
     pil_images: list[Image.Image],
     tokenizer: Any,
     processor: Any,
 ) -> tuple[list[int], list[tuple[int, int]] | None]:
-    """
-    Get tokens with visual expansion and find each image's token range.
-
-    Unlike TRT-LLM, vLLM keeps the original image_token_id (no replacement).
-    """
+    """Expand image placeholder tokens. Fast path from dims, slow path via processor."""
     if processor is None:
         return tokenizer.encode(prompt), None
 
     try:
-        output = processor(
-            text=[prompt], images=pil_images, return_tensors="pt", padding=True
-        )
-        tokens = output["input_ids"][0].tolist()
-
-        # Get image_token_id from processor
-        image_token_id = getattr(processor, "image_token_id", None)
-        if image_token_id is None:
-            raise ValueError("processor.image_token_id not found")
-
-        # Find contiguous image token ranges (NO replacement for vLLM)
-        contiguous_ranges = _find_image_token_ranges(tokens, image_token_id)
-
-        # Compute tokens per image from processor output
-        tokens_per_image = _compute_tokens_per_image(output, processor)
-
-        # Split ranges according to tokens_per_image
-        image_ranges = _compute_per_image_ranges(contiguous_ranges, tokens_per_image)
-
-        return tokens, image_ranges
-
+        return _expand_from_dims(prompt, image_dims, tokenizer, processor)
     except Exception as e:
-        logger.warning(f"HF processor failed: {e}", exc_info=True)
+        logger.info("Fast path failed (%s), falling back to processor", e)
+
+    try:
+        return _expand_with_processor(prompt, pil_images, tokenizer, processor)
+    except Exception as e:
+        logger.warning("Slow path also failed: %s", e, exc_info=True)
         return tokenizer.encode(prompt), None
 
 
-def _compute_tokens_per_image(processor_output: dict, processor: Any) -> list[int]:
-    """
-    Compute the number of visual tokens for each image from processor output.
+# -- Fast path --
 
-    Only Qwen-style processors (Qwen2-VL, Qwen2.5-VL) are supported.
-    Other model families will raise ValueError.
-    """
-    processor_cls = type(processor).__qualname__
-    if "qwen" not in processor_cls.lower():
-        raise NotImplementedError(
-            f"_compute_tokens_per_image only supports Qwen-style processors "
-            f"tuples. Got processor class: {processor_cls}"
+
+def _expand_from_dims(
+    prompt: str,
+    image_dims: list[tuple[int, int]],
+    tokenizer: Any,
+    processor: Any,
+) -> tuple[list[int], list[tuple[int, int]]]:
+    """Expand placeholders using dimension-based token counts (Qwen-style)."""
+    image_processor = processor.image_processor
+    get_num_patches = image_processor.get_number_of_image_patches
+    merge_size = image_processor.merge_size
+    image_token_id = processor.image_token_id
+
+    tokens_per_image = []
+    for w, h in image_dims:
+        n_patches: int = int(get_num_patches(h, w, {}))  # type: ignore[arg-type]
+        tokens_per_image.append(n_patches // (merge_size**2))
+
+    base_tokens = tokenizer.encode(prompt)
+    placeholders = [i for i, t in enumerate(base_tokens) if t == image_token_id]
+
+    if len(placeholders) != len(image_dims):
+        raise ValueError(
+            f"Placeholder count ({len(placeholders)}) != image count ({len(image_dims)})"
         )
 
-    grid_thw = processor_output.get("image_grid_thw")
-    if grid_thw is None:
-        raise ValueError("image_grid_thw not found in processor output")
+    expanded: list[int] = []
+    ranges: list[tuple[int, int]] = []
+    prev = 0
+    for idx, pos in enumerate(placeholders):
+        expanded.extend(base_tokens[prev:pos])
+        start = len(expanded)
+        n = tokens_per_image[idx]
+        expanded.extend([image_token_id] * n)
+        ranges.append((start, start + n))
+        prev = pos + 1
+    expanded.extend(base_tokens[prev:])
+    return expanded, ranges
+
+
+# -- Slow path --
+
+
+def _expand_with_processor(
+    prompt: str,
+    pil_images: Sequence[Image.Image],
+    tokenizer: Any,
+    processor: Any,
+) -> tuple[list[int], list[tuple[int, int]] | None]:
+    """Expand using full HF processor (works for any model, ~55ms)."""
+    output = processor(
+        text=[prompt], images=pil_images, return_tensors="pt", padding=True
+    )
+    tokens = output["input_ids"][0].tolist()
+
+    image_token_id = getattr(processor, "image_token_id", None)
+    if image_token_id is None:
+        return tokens, None
 
     merge_size = getattr(processor.image_processor, "merge_size", 2)
-    return [int(t * h * w) // (merge_size**2) for t, h, w in grid_thw]
+    grid_thw = output.get("image_grid_thw")
+    if grid_thw is None:
+        return tokens, None
+    tokens_per_image = [int(t * h * w) // (merge_size**2) for t, h, w in grid_thw]
 
-
-def _find_image_token_ranges(
-    tokens: list[int], image_token_id: int
-) -> list[tuple[int, int]]:
-    """
-    Find all contiguous ranges of image tokens.
-
-    Unlike the TRT-LLM version, this does NOT replace tokens — vLLM keeps
-    the original image_token_id as-is in KV events.
-
-    Returns: list of (start, end) ranges for contiguous image token regions.
-    """
-    ranges = []
-    start = None
-
+    contiguous: list[tuple[int, int]] = []
+    run_start = None
     for i, t in enumerate(tokens):
         if t == image_token_id:
-            if start is None:
-                start = i
-        elif start is not None:
-            ranges.append((start, i))
-            start = None
+            if run_start is None:
+                run_start = i
+        elif run_start is not None:
+            contiguous.append((run_start, i))
+            run_start = None
+    if run_start is not None:
+        contiguous.append((run_start, len(tokens)))
 
-    if start is not None:
-        ranges.append((start, len(tokens)))
-
-    if ranges:
-        logger.info(
-            f"Found {sum(e - s for s, e in ranges)} image tokens "
-            f"(id={image_token_id}) in {len(ranges)} range(s)"
-        )
-
-    return ranges
-
-
-def _compute_per_image_ranges(
-    contiguous_ranges: list[tuple[int, int]],
-    tokens_per_image: list[int],
-) -> list[tuple[int, int]] | None:
-    """
-    Split contiguous image token ranges by each image's token count.
-
-    Example: contiguous_ranges=[(0, 100)], tokens_per_image=[60, 40]
-    Returns: [(0, 60), (60, 100)]  # image 1 at 0-60, image 2 at 60-100
-    """
-    if not contiguous_ranges:
-        if tokens_per_image:
-            logger.warning(
-                f"No image tokens found but {len(tokens_per_image)} images expected"
-            )
-        return None
-
-    # Greedily assign images to ranges in order
-    result = []
-    image_idx = 0
-
-    for range_start, range_end in contiguous_ranges:
-        range_size = range_end - range_start
-        pos = range_start
-        consumed = 0
-
-        # Consume images that fit entirely in this range
-        # (a single image's tokens are always contiguous, cannot span ranges)
-        while image_idx < len(tokens_per_image):
-            needed = tokens_per_image[image_idx]
-            if consumed + needed <= range_size:
+    result: list[tuple[int, int]] = []
+    img_idx = 0
+    for rng_start, rng_end in contiguous:
+        pos = rng_start
+        while img_idx < len(tokens_per_image):
+            needed = tokens_per_image[img_idx]
+            if pos + needed <= rng_end:
                 result.append((pos, pos + needed))
                 pos += needed
-                consumed += needed
-                image_idx += 1
+                img_idx += 1
             else:
                 break
-
-        # Range must be exactly filled (no leftover image tokens)
-        if consumed != range_size:
-            logger.warning(
-                f"Range size mismatch: consumed {consumed} != range {range_size}"
-            )
-            return None
-
-    # All images must be consumed
-    if image_idx != len(tokens_per_image):
-        logger.warning(f"Not all images mapped: {image_idx} < {len(tokens_per_image)}")
-        return None
-
-    return result
+    return tokens, result if len(result) == len(tokens_per_image) else None
