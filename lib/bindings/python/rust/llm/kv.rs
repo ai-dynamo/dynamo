@@ -127,7 +127,7 @@ impl KvEventPublisher {
     ///     batching_timeout_ms: Maximum time (in **milliseconds**) to accumulate
     ///         events into a single batch before flushing.
     ///         ``None`` disables batching: every event is published immediately.
-    ///         ``5`` (default, 5 ms) to enable batching with a 5 ms window.
+    ///         ``50`` to enable batching with a 50 ms window.
     ///         ``0`` is treated as ``None`` (also disables batching).
     ///         Maximum allowed is 15_000 (15 seconds); larger values are capped.
     #[new]
