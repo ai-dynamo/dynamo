@@ -31,11 +31,8 @@ pytest-order==1.3.0
 pytest-timeout==2.4.0
 pytest-xdist==3.8.0
 requests==2.32.5
-# Required by kr8s
-# https://github.com/kr8s-org/kr8s/blob/750022c3ebbb7988cddb5a979aca2ee8074a1069/examples/kubectl-ng/uv.lock#L988
-sniffio==1.3.1
 tabulate==0.9.0
 types-aiofiles>=24.1.0
 types-PyYAML==6.0.12.20250915
 types-requests==2.32.4.20250913
-websocket-client==1.9.0
+filelock
