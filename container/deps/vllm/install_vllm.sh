@@ -12,8 +12,7 @@
 
 set -euo pipefail
 
-VLLM_VER="0.16.0"
-VLLM_REF="v${VLLM_VER}"
+VLLM_REF="v0.16.0"
 DEVICE="cuda"
 
 # Basic Configurations
@@ -97,6 +96,13 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# Validate VLLM_REF is a version tag (e.g., v0.16.0) - this script only supports release installs
+if [[ ! "$VLLM_REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "❌ Invalid --vllm-ref '${VLLM_REF}': must be a version tag (e.g., v0.16.0). This script only supports release versions."
+    exit 1
+fi
+VLLM_VER="${VLLM_REF#v}"
 
 # Convert x86_64 to amd64 for consistency with Docker ARG
 if [ "$ARCH" = "x86_64" ]; then
