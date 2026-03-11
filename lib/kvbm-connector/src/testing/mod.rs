@@ -22,6 +22,7 @@ pub use connector::{
     TestConnectorWorker,
 };
 
-// TODO(Phase 4 Plan 03): Uncomment after e2e/ and scheduler/ are ported
-// pub mod e2e;
+pub mod e2e;
+
+// TODO(Phase 4 Plan 03): Uncomment after scheduler/ is ported
 // pub mod scheduler;
