@@ -3,5 +3,5 @@
 
 # Benchmark and profiling tool dependencies.
 
-aiperf @ git+https://github.com/ai-dynamo/aiperf.git@0746a7cdeb259f365e1124ffa94b2a976207b668
+aiperf==0.6.0
 genai-perf==0.0.15
