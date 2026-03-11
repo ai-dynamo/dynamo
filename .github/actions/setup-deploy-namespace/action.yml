@@ -124,24 +124,24 @@ runs:
         echo "### OPERATOR DEPLOYMENT FAILED" | tee -a $GITHUB_STEP_SUMMARY
 
         echo "::group::Pod status"
-        kubectl get pods -n ${NAMESPACE} -o wide
+        kubectl get pods -n "${NAMESPACE}" -o wide
         echo "::endgroup::"
 
-        NOT_READY=$(kubectl get pods -n ${NAMESPACE} --no-headers | awk -F'[/ ]+' '$2 != $3 || $4 == "Error"')
+        NOT_READY=$(kubectl get pods -n "${NAMESPACE}" --no-headers | awk -F'[/ ]+' '$2 != $3 || ($4 != "Running" && $4 != "Completed")')
         if [ -n "$NOT_READY" ]; then
           echo "$NOT_READY" | awk '{print "- **" $1 "** | Ready: `" $2 "` | Status: `" $3 "`"}' >> $GITHUB_STEP_SUMMARY
 
           echo "$NOT_READY" | awk '{print $1}' | while read POD; do
             echo "::group::describe pod/$POD"
-            kubectl describe pod "$POD" -n ${NAMESPACE} 2>&1
+            kubectl describe pod "$POD" -n "${NAMESPACE}" 2>&1
             echo "::endgroup::"
 
             echo "::group::logs pod/$POD"
-            kubectl logs "$POD" -n ${NAMESPACE} --all-containers --tail=80 2>&1
+            kubectl logs "$POD" -n "${NAMESPACE}" --all-containers --tail=80 2>&1
             echo "::endgroup::"
           done
         fi
 
         echo "::group::Namespace events (recent)"
-        kubectl get events -n ${NAMESPACE} --sort-by='.lastTimestamp' 2>&1
+        kubectl get events -n "${NAMESPACE}" --sort-by='.lastTimestamp' 2>&1
         echo "::endgroup::"
