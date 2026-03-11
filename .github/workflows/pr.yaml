@@ -306,7 +306,8 @@ jobs:
     # auto-skipping dependents. See: https://github.com/orgs/community/discussions/189172
     if: |
       !cancelled() && !failure() &&
-      (needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true')
+      (needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true') &&
+      (needs.vllm-pipeline.result == 'success')
     runs-on: prod-default-small-v2
     needs: [changed-files, deploy-operator, vllm-pipeline]
     timeout-minutes: 25
@@ -345,7 +346,8 @@ jobs:
     runs-on: prod-default-small-v2
     if: |
       !cancelled() && !failure() &&
-      (needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true')
+      (needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true') &&
+      (needs.sglang-pipeline.result == 'success')
     needs: [changed-files, deploy-operator, sglang-pipeline]
     timeout-minutes: 25
     permissions:
@@ -381,7 +383,8 @@ jobs:
     runs-on: prod-default-small-v2
     if: |
       !cancelled() && !failure() &&
-      (needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true')
+      (needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true') &&
+      (needs.trtllm-pipeline.result == 'success')
     needs: [changed-files, deploy-operator, trtllm-pipeline]
     timeout-minutes: 25
     permissions:
