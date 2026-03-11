@@ -26,6 +26,9 @@ kvbm-connector compiles as a workspace member with all imports resolved against 
 - [ ] Replace `nova` RPC layer (`src/connector/worker/nova/`) with `velo` equivalents
 - [ ] Fix `crate::integrations::*` self-referential imports
 - [ ] Resolve all remaining compilation errors (`cargo check -p kvbm-connector` passes)
+- [ ] Port connector-specific tests from `ryan/kvbm-next:lib/kvbm/src/v2/testing` into `lib/kvbm-connector/`
+- [ ] Wire `testing` feature in `kvbm-connector/Cargo.toml` to pull in test infra from kvbm-logical, kvbm-physical, kvbm-engine
+- [ ] Ported tests pass under `cargo test -p kvbm-connector --features testing`
 
 ### Out of Scope
 

@@ -2,7 +2,7 @@
 
 ## Overview
 
-Port `lib/kvbm-connector` from a stale branch into the current workspace by completing three sequential steps: wire it into the Cargo workspace, replace all broken internal imports with correct workspace crate paths (including the nova-to-velo transport swap), then confirm the crate compiles cleanly without breaking anything else. The milestone is complete when `cargo check -p kvbm-connector` and `cargo check --workspace` both pass.
+Port `lib/kvbm-connector` from a stale branch into the current workspace: wire it into Cargo, replace all broken imports (including nova→velo), confirm clean compilation, then port connector-specific tests from `ryan/kvbm-next:lib/kvbm/src/v2/testing` and verify they pass using the `testing` feature infrastructure from kvbm-logical/physical/engine.
 
 ## Phases
 
@@ -15,6 +15,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [ ] **Phase 1: Workspace Wiring** - Add kvbm-connector to the Cargo workspace and declare all dependencies
 - [ ] **Phase 2: Import Migration** - Replace all stale internal imports with correct workspace crate paths and migrate nova to velo
 - [ ] **Phase 3: Compilation Gate** - Verify the crate and full workspace compile cleanly
+- [ ] **Phase 4: Test Porting** - Port connector tests from ryan/kvbm-next and verify they pass
 
 ## Phase Details
 
@@ -49,13 +50,25 @@ Decimal phases appear between their surrounding integers in numeric order.
   3. `cargo check --workspace` exits with zero errors (no regressions in other crates)
 **Plans**: TBD
 
+### Phase 4: Test Porting
+**Goal**: Connector-specific tests from `ryan/kvbm-next` are ported into the workspace, compile under `--features testing`, and pass
+**Depends on**: Phase 3
+**Requirements**: TEST-01, TEST-02, TEST-03, TEST-04
+**Success Criteria** (what must be TRUE):
+  1. `kvbm-connector/Cargo.toml` has a `testing` feature that pulls in testing infra from kvbm-logical, kvbm-physical, kvbm-engine
+  2. Connector tests from `ryan/kvbm-next:lib/kvbm/src/v2/testing` are present in `lib/kvbm-connector/`
+  3. `cargo test -p kvbm-connector --features testing` compiles without errors
+  4. `cargo test -p kvbm-connector --features testing` passes (all tests green)
+**Plans**: TBD
+
 ## Progress
 
 **Execution Order:**
-Phases execute in numeric order: 1 → 2 → 3
+Phases execute in numeric order: 1 → 2 → 3 → 4
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Workspace Wiring | 0/TBD | Not started | - |
 | 2. Import Migration | 0/TBD | Not started | - |
 | 3. Compilation Gate | 0/TBD | Not started | - |
+| 4. Test Porting | 0/TBD | Not started | - |

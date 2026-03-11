@@ -33,6 +33,13 @@
 - [ ] **COMP-02**: `cargo check -p kvbm-connector` passes with zero warnings (or warnings are pre-existing and documented)
 - [ ] **COMP-03**: Existing workspace members still compile after changes (`cargo check --workspace` passes)
 
+### Test Porting
+
+- [ ] **TEST-01**: `testing` feature enabled in `kvbm-connector/Cargo.toml` pulling in test infra from kvbm-logical, kvbm-physical, kvbm-engine
+- [ ] **TEST-02**: Connector-specific tests ported from `ryan/kvbm-next:lib/kvbm/src/v2/testing` into the current workspace
+- [ ] **TEST-03**: Ported tests compile with `cargo test -p kvbm-connector --features testing`
+- [ ] **TEST-04**: Ported tests pass with `cargo test -p kvbm-connector --features testing`
+
 ## v2 Requirements
 
 ### Integration
@@ -42,11 +49,6 @@
 - **INT-03**: SGLang backend wired to kvbm-connector
 - **INT-04**: kvbm-connector accessible from Python bindings
 
-### Testing
-
-- **TEST-01**: Unit tests in `src/connector/worker/tests.rs` pass
-- **TEST-02**: Integration tests with mock backend pass
-
 ## Out of Scope
 
 | Feature | Reason |
@@ -54,7 +56,6 @@
 | New kvbm-connector features | Port only — no scope expansion |
 | Refactoring beyond compile fixes | Minimize diff, compile first |
 | Python/vLLM integration | Separate milestone |
-| kvbm-common workspace membership fix | Not blocking compilation of kvbm-connector |
 
 ## Traceability
 
@@ -76,10 +77,14 @@
 | COMP-01 | Phase 3 | Pending |
 | COMP-02 | Phase 3 | Pending |
 | COMP-03 | Phase 3 | Pending |
+| TEST-01 | Phase 4 | Pending |
+| TEST-02 | Phase 4 | Pending |
+| TEST-03 | Phase 4 | Pending |
+| TEST-04 | Phase 4 | Pending |
 
 **Coverage:**
-- v1 requirements: 16 total
-- Mapped to phases: 16
+- v1 requirements: 20 total
+- Mapped to phases: 20
 - Unmapped: 0 ✓
 
 ---

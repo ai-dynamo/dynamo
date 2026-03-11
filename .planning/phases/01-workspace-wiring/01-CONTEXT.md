@@ -29,10 +29,14 @@ Code changes to fix broken imports are Phase 2. This phase is Cargo.toml changes
 - `dynamo_nova_backend` → depends on `velo-common` (exports `PeerInfo`, `WorkerAddress`, `InstanceId`)
 - Both `velo` and `velo-common` are already declared in `[workspace.dependencies]` pointing to `ryan/velo-messenger` branch
 
+### testing feature flag
+- kvbm-connector MUST declare a `testing` feature in `kvbm-connector/Cargo.toml`
+- That feature pulls in testing infra from kvbm-logical, kvbm-physical, kvbm-engine via their respective `testing` features
+- This is required for Phase 4: connector-specific tests from `ryan/kvbm-next:lib/kvbm/src/v2/testing` will be ported and need this infra
+
 ### Claude's Discretion
 - Exact `derive_getters` version to pin in workspace.dependencies
 - Whether kvbm-connector needs `velo-events` or `velo-transports` beyond `velo` + `velo-common` (determine from imports)
-- Feature flags for kvbm-logical `testing` feature (determine if kvbm-connector needs it)
 
 </decisions>
 
