@@ -48,15 +48,15 @@ dynamo-async-openai = { path = "lib/async-openai", version = "1.0.0", features =
 dynamo-parsers = { path = "lib/parsers", version = "1.0.0" }
 
 # kvbm
-kvbm-common = { path = "lib/kvbm-common", version = "1.0.0" }
-kvbm-kernels = { path = "lib/kvbm-kernels", version = "1.0.0" }
-kvbm-logical = { path = "lib/kvbm-logical", version = "1.0.0" }
-kvbm-physical = { path = "lib/kvbm-physical", version = "1.0.0" }
+kvbm-common = { path = "lib/kvbm-common", version = "0.1.0" }
+kvbm-kernels = { path = "lib/kvbm-kernels", version = "0.1.0" }
+kvbm-logical = { path = "lib/kvbm-logical", version = "0.1.0" }
+kvbm-physical = { path = "lib/kvbm-physical", version = "0.1.0" }
 
 # velo
-velo-common = { path = "lib/velo-common", version = "1.0.0" }
-velo-transports = { path = "lib/velo-transports", version = "1.0.0" }
-velo-events = { path = "lib/velo-events", version = "1.0.0" }
+velo-common = { path = "lib/velo-common", version = "0.1.0" }
+velo-transports = { path = "lib/velo-transports", version = "0.1.0" }
+velo-events = { path = "lib/velo-events", version = "0.1.0" }
 
 # External dependencies
 anyhow = { version = "1" }
@@ -97,6 +97,7 @@ parking_lot = "0.12.5"
 prometheus = { version = "0.14"}
 rand = { version = "0.9.2" }
 reqwest = { version = "0.12.24", default-features = false, features = [
+    "multipart",
     "json",
     "stream",
     "rustls-tls",
@@ -126,9 +127,10 @@ tracing-subscriber = { version = "0.3", features = [
     "json",
 ] }
 tracing-opentelemetry = { version = "0.32.0" }
-opentelemetry = { version = "0.31.0", features = ["trace"] }
-opentelemetry_sdk = { version = "0.31.0", features = ["trace", "rt-tokio"] }
-opentelemetry-otlp = { version = "0.31.0", features = ["trace", "grpc-tonic"] }
+opentelemetry = { version = "0.31.0", features = ["trace", "logs"] }
+opentelemetry_sdk = { version = "0.31.0", features = ["trace", "logs", "rt-tokio"] }
+opentelemetry-otlp = { version = "0.31.0", features = ["trace", "logs", "grpc-tonic"] }
+opentelemetry-appender-tracing = { version = "0.31.0" }
 validator = { version = "0.20.0", features = ["derive"] }
 uuid = { version = "1.18.1", features = ["v4", "serde"] }
 url = { version = "2.5", features = ["serde"] }

@@ -6,15 +6,6 @@ title: Router Examples
 
 For quick start instructions, see the [Router README](README.md). This document provides further examples for using the Dynamo Router, including Python API usage, Kubernetes deployments, and custom routing patterns.
 
-## Table of Contents
-
-- [Using KvRouter Python API](#using-kvrouter-python-api)
-- [K8s Examples](#k8s-examples)
-- [Routing Patterns](#routing-patterns)
-- [Custom Routing Example: Minimizing TTFT](#custom-routing-example-minimizing-ttft)
-- [KV Event Publishing for Custom Engines](#kv-event-publishing-for-custom-engines)
-- [Global Router (Hierarchical Routing)](#global-router-hierarchical-routing)
-
 ## Using KvRouter Python API
 
 Instead of launching the KV Router via command line, you can create a `KvRouter` object directly in Python. This allows per-request routing configuration overrides.
@@ -288,7 +279,7 @@ For full documentation on implementing KV event publishing for custom inference 
 For deployments with multiple worker pools, the **Global Router** enables hierarchical routing by sitting between the frontend and local routers. It selects the appropriate pool for each request based on configurable policies, supporting disaggregated topologies where pools are tuned for different workload characteristics.
 
 - **Component details**: [`components/src/dynamo/global_router/`](https://github.com/ai-dynamo/dynamo/tree/main/components/src/dynamo/global_router/)
-- **Example**: [`examples/hierarchical_planner/`](https://github.com/ai-dynamo/dynamo/tree/main/examples/hierarchical_planner/)
+- **Example**: [`examples/global_planner/`](https://github.com/ai-dynamo/dynamo/tree/main/examples/global_planner/)
 
 ## See Also
 
