@@ -3,9 +3,12 @@
 
 """Unit tests for SGLang backend components."""
 
+import asyncio
 import re
 import sys
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 import yaml
@@ -15,6 +18,7 @@ from dynamo.sglang.health_check import (
     SglangDisaggHealthCheckPayload,
     SglangPrefillHealthCheckPayload,
 )
+from dynamo.sglang.request_handlers.handler_base import BaseGenerativeHandler
 from dynamo.sglang.tests.conftest import make_cli_args_fixture
 
 # Get path relative to this test file
@@ -36,6 +40,25 @@ pytestmark = [
 mock_sglang_cli = make_cli_args_fixture("dynamo.sglang")
 
 
+class DummyGenerativeHandler(BaseGenerativeHandler):
+    """Minimal handler for exercising shared cancellation logic."""
+
+    def __init__(self) -> None:
+        self.shutdown_event = None
+        self.engine = SimpleNamespace(tokenizer_manager=MagicMock())
+
+    async def generate(self, request, context):
+        if False:
+            yield request, context
+
+
+async def _set_request_id_later(
+    request_id_future: asyncio.Future[str], request_id: str
+) -> None:
+    await asyncio.sleep(0)
+    request_id_future.set_result(request_id)
+
+
 @pytest.mark.asyncio
 async def test_custom_jinja_template_invalid_path(mock_sglang_cli):
     """Test that invalid file path raises FileNotFoundError."""
@@ -49,6 +72,53 @@ async def test_custom_jinja_template_invalid_path(mock_sglang_cli):
         match=re.escape(f"Custom Jinja template file not found: {invalid_path}"),
     ):
         await parse_args(sys.argv[1:])
+
+
+@pytest.mark.asyncio
+async def test_handle_cancellation_returns_when_request_id_never_arrives(
+    monkeypatch,
+):
+    """Cancellation should not wait indefinitely for a late SGLang request ID."""
+    monkeypatch.setenv("CANCEL_GRACE_MS", "1")
+
+    handler = DummyGenerativeHandler()
+    context = MagicMock()
+    context.id.return_value = "ctx-1"
+
+    cancellation_future = asyncio.get_running_loop().create_future()
+    cancellation_future.set_result(True)
+    context.async_killed_or_stopped.return_value = cancellation_future
+
+    request_id_future = asyncio.get_running_loop().create_future()
+
+    await handler._handle_cancellation(request_id_future, context)
+
+    handler.engine.tokenizer_manager.abort_request.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_handle_cancellation_recovers_late_request_id_after_cancel(monkeypatch):
+    """Cancellation should still abort if the request ID appears within the grace window."""
+    monkeypatch.setenv("CANCEL_GRACE_MS", "50")
+
+    handler = DummyGenerativeHandler()
+    context = MagicMock()
+    context.id.return_value = "ctx-2"
+
+    cancellation_future = asyncio.get_running_loop().create_future()
+    cancellation_future.set_result(True)
+    context.async_killed_or_stopped.return_value = cancellation_future
+
+    request_id_future = asyncio.get_running_loop().create_future()
+    task = asyncio.create_task(_set_request_id_later(request_id_future, "sg-123"))
+
+    await handler._handle_cancellation(request_id_future, context)
+    await task
+
+    handler.engine.tokenizer_manager.abort_request.assert_called_once_with(
+        rid="sg-123",
+        abort_all=False,
+    )
 
 
 @pytest.mark.asyncio
