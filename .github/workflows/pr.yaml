@@ -301,6 +301,9 @@ jobs:
    # End-to-end tests for each framework with various deployment profiles
    # ============================================================================
   deploy-test-vllm:
+    # !cancelled() && !failure() is required because reusable workflows with skipped
+    # internal jobs (e.g. multi-gpu tests) propagate non-success through `needs`,
+    # auto-skipping dependents. See: https://github.com/orgs/community/discussions/189172
     if: |
       !cancelled() && !failure() &&
       (needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true')

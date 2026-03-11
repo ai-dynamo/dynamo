@@ -98,7 +98,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     else \
         ARCH_FOR_GPG="sbsa"; \
     fi && \
-    curl -fsSL \
+    curl -fsSL --retry 5 --retry-delay 3 \
         https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/${ARCH_FOR_GPG}/cuda-archive-keyring.gpg \
         -o /usr/share/keyrings/cuda-archive-keyring.gpg &&\
     echo "deb [signed-by=/usr/share/keyrings/cuda-archive-keyring.gpg] \
