@@ -1354,6 +1354,7 @@ def _test_router_indexers_sync(
     durable_kv_events: bool = False,
     router_event_threads: int = 4,
     standalone_indexer_url: Optional[str] = None,
+    standalone_indexer_b_url: Optional[str] = None,
 ):
     """Test that two KV routers have synchronized indexer states after processing requests.
 
@@ -1538,6 +1539,15 @@ def _test_router_indexers_sync(
             kv_router_config=kv_router_config,
         )
 
+        # Launch Indexer B alongside Router 2. Workers are passed via --workers
+        # so ZMQ sockets connect before recovery, avoiding the slow-joiner problem.
+        if standalone_indexer_b_url:
+            engine_workers.launch_indexer()
+            logger.info(
+                f"Launched Indexer B at {standalone_indexer_b_url} "
+                f"(P2P recovery from Indexer A)"
+            )
+
         # Send 25 requests to second router with initial retry loop
         logger.info("Sending 25 requests to second router")
         successful2 = await send_requests_to_router(
@@ -1576,14 +1586,13 @@ def _test_router_indexers_sync(
                 successful_recovery == 5
             ), f"Expected 5 successful requests post-recovery, got {successful_recovery}"
 
-        # Wait for all requests to complete (they should already be complete from gather)
-        # Wait another 1 second for internal synchronization
+        # Wait for internal synchronization and ZMQ event propagation
         logger.info("Waiting for final synchronization")
-        await asyncio.sleep(1)
+        await asyncio.sleep(2)
 
         # Verify NATS object store bucket was created with snapshot
-        # Skip for NATS interruption test (restarts fresh), and standalone indexer (no JetStream)
-        if not test_nats_interruption and not standalone_indexer_url:
+        # Skip for NATS interruption test (restarts fresh) and non-durable modes
+        if not test_nats_interruption and durable_kv_events:
             # Mirror the Rust bucket naming logic from subscriber.rs:
             # component.subject() -> "namespace.{ns}.component.{comp}"
             # then slugify (convert dots to dashes, lowercase, etc) and append "-radix-bucket"
@@ -1630,16 +1639,14 @@ def _test_router_indexers_sync(
                 "Skipping NATS object store verification (NATS was restarted fresh for interruption test)"
             )
 
-        # Dump states from both routers
-        logger.info("Dumping states from both routers")
+        # Dump states from all sources
+        logger.info("Dumping states from all sources")
         state1_json = await kv_router1.dump_events()
         state2_json = await kv_router2.dump_events()
 
-        # Parse JSON strings for comparison
         state1 = json.loads(state1_json)
         state2 = json.loads(state2_json)
 
-        # Sort both states for comparison (order might differ due to HashMap iteration and sharding)
         def sort_key(event):
             data = event["event"]["data"]["stored"]
             blocks = data["blocks"]
@@ -1657,50 +1664,66 @@ def _test_router_indexers_sync(
         logger.info(f"Router 2 has {len(sorted_state2)} events")
 
         assert_event_dumps_equal(sorted_state1, sorted_state2, "Router 1", "Router 2")
-        logger.info("Successfully verified that both router states are equal")
+        logger.info("Successfully verified Router 1 and Router 2 states are equal")
 
-        # Verify standalone HTTP indexer builds the same tree (non-durable with ZMQ)
+        # Verify standalone HTTP indexers build the same tree (via ZMQ)
         if standalone_indexer_url:
-            logger.info("Verifying standalone HTTP indexer tree state via /dump")
-
-            # Wait for ZMQ events to propagate to the indexer
-            await asyncio.sleep(3)
-
             async with aiohttp.ClientSession() as session:
                 async with session.get(f"{standalone_indexer_url}/dump") as resp:
                     assert resp.status == 200, f"GET /dump failed: {resp.status}"
-                    dump_by_key = await resp.json()
+                    dump_a = await resp.json()
 
-            # /dump returns {model:tenant -> events}, extract the expected key
+            # /dump returns {model:tenant -> {"block_size": N, "events": [...]}}
             expected_key = f"{model_name}:default"
-            assert expected_key in dump_by_key, (
+            assert expected_key in dump_a, (
                 f"Expected dump key '{expected_key}', "
-                f"got keys={list(dump_by_key.keys())}"
+                f"got keys={list(dump_a.keys())}"
             )
-            for k, v in dump_by_key.items():
-                assert isinstance(v, list), f"Dump key '{k}' returned error: {v}"
-            standalone_state = dump_by_key[expected_key]
-            sorted_standalone = sorted(standalone_state, key=sort_key)
-            logger.info(f"Standalone HTTP indexer has {len(sorted_standalone)} events")
+            for k, v in dump_a.items():
+                assert (
+                    isinstance(v, dict) and "events" in v
+                ), f"Dump key '{k}' returned unexpected format: {v}"
+            sorted_standalone_a = sorted(dump_a[expected_key]["events"], key=sort_key)
+            logger.info(f"Standalone Indexer A has {len(sorted_standalone_a)} events")
 
             assert_event_dumps_equal(
-                sorted_state1, sorted_standalone, "Router 1", "Standalone"
+                sorted_state1, sorted_standalone_a, "Router 1", "Standalone A"
             )
-            logger.info(
-                "Successfully verified standalone HTTP indexer state matches router states"
-            )
-        elif not durable_kv_events:
-            logger.info(
-                "Skipping standalone indexer verification (no standalone_indexer_url)"
-            )
-        else:
-            logger.info(
-                "Skipping standalone indexer verification (not supported with durable_kv_events)"
-            )
+            logger.info("Standalone A matches Router 1")
+
+            if standalone_indexer_b_url:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(f"{standalone_indexer_b_url}/dump") as resp:
+                        assert (
+                            resp.status == 200
+                        ), f"GET /dump from Indexer B failed: {resp.status}"
+                        dump_b = await resp.json()
+
+                assert expected_key in dump_b, (
+                    f"Indexer B missing dump key '{expected_key}', "
+                    f"got keys={list(dump_b.keys())}"
+                )
+                sorted_standalone_b = sorted(
+                    dump_b[expected_key]["events"], key=sort_key
+                )
+                logger.info(
+                    f"Standalone Indexer B has {len(sorted_standalone_b)} events"
+                )
+
+                assert_event_dumps_equal(
+                    sorted_standalone_a,
+                    sorted_standalone_b,
+                    "Standalone A",
+                    "Standalone B",
+                )
+                logger.info(
+                    "All 4 dumps match: Router 1, Router 2, "
+                    "Standalone A, Standalone B"
+                )
 
         # Verify NATS consumers are created (while routers are still alive)
-        # Skip for NATS interruption test and standalone indexer (neither uses JetStream)
-        if not test_nats_interruption and not standalone_indexer_url:
+        # Skip for NATS interruption test (restarts fresh) and non-durable modes
+        if not test_nats_interruption and durable_kv_events:
             logger.info("Verifying NATS consumers exist for both routers")
             component_subject = f"namespace.{engine_workers.namespace}.component.{engine_workers.component_name}"
             slugified = component_subject.lower().replace(".", "-").replace("_", "-")

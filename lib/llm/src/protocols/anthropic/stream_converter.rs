@@ -23,6 +23,10 @@ use crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResp
 pub struct AnthropicStreamConverter {
     model: String,
     message_id: String,
+    // Thinking/reasoning tracking
+    thinking_block_started: bool,
+    thinking_block_closed: bool,
+    thinking_block_index: u32,
     // Text tracking
     text_block_started: bool,
     text_block_closed: bool,
@@ -53,6 +57,9 @@ impl AnthropicStreamConverter {
         Self {
             model,
             message_id: format!("msg_{}", Uuid::new_v4().simple()),
+            thinking_block_started: false,
+            thinking_block_closed: false,
+            thinking_block_index: 0,
             text_block_started: false,
             text_block_closed: false,
             text_block_index: 0,
@@ -127,6 +134,36 @@ impl AnthropicStreamConverter {
                 });
             }
 
+            // Handle reasoning/thinking content deltas
+            if let Some(ref reasoning) = delta.reasoning_content
+                && !reasoning.is_empty()
+            {
+                // Emit content_block_start on first thinking token
+                if !self.thinking_block_started {
+                    self.thinking_block_started = true;
+                    self.thinking_block_index = self.next_block_index;
+                    self.next_block_index += 1;
+
+                    let block_start = AnthropicStreamEvent::ContentBlockStart {
+                        index: self.thinking_block_index,
+                        content_block: AnthropicResponseContentBlock::Thinking {
+                            thinking: String::new(),
+                            signature: String::new(),
+                        },
+                    };
+                    events.push(make_sse_event("content_block_start", &block_start));
+                }
+
+                // Emit thinking delta
+                let block_delta = AnthropicStreamEvent::ContentBlockDelta {
+                    index: self.thinking_block_index,
+                    delta: AnthropicDelta::ThinkingDelta {
+                        thinking: reasoning.clone(),
+                    },
+                };
+                events.push(make_sse_event("content_block_delta", &block_delta));
+            }
+
             // Handle text content deltas
             let content_text = match &delta.content {
                 Some(ChatCompletionMessageContent::Text(text)) => Some(text.as_str()),
@@ -136,6 +173,26 @@ impl AnthropicStreamConverter {
             if let Some(text) = content_text
                 && !text.is_empty()
             {
+                // Close thinking block before text starts (Anthropic spec: thinking → text → tool_use)
+                if self.thinking_block_started && !self.thinking_block_closed {
+                    self.thinking_block_closed = true;
+                    // Emit signature delta to close the thinking block.
+                    // The engine doesn't produce Anthropic-style cryptographic signatures,
+                    // so we use "erased" (the standard placeholder per the Anthropic spec).
+                    let sig_delta = AnthropicStreamEvent::ContentBlockDelta {
+                        index: self.thinking_block_index,
+                        delta: AnthropicDelta::SignatureDelta {
+                            signature: "erased".to_string(),
+                        },
+                    };
+                    events.push(make_sse_event("content_block_delta", &sig_delta));
+
+                    let block_stop = AnthropicStreamEvent::ContentBlockStop {
+                        index: self.thinking_block_index,
+                    };
+                    events.push(make_sse_event("content_block_stop", &block_stop));
+                }
+
                 // Emit content_block_start on first text
                 if !self.text_block_started {
                     self.text_block_started = true;
@@ -164,6 +221,22 @@ impl AnthropicStreamConverter {
 
             // Handle tool call deltas
             if let Some(tool_calls) = &delta.tool_calls {
+                // Close thinking block before tool blocks (if text never appeared)
+                if self.thinking_block_started && !self.thinking_block_closed {
+                    self.thinking_block_closed = true;
+                    let sig_delta = AnthropicStreamEvent::ContentBlockDelta {
+                        index: self.thinking_block_index,
+                        delta: AnthropicDelta::SignatureDelta {
+                            signature: "erased".to_string(),
+                        },
+                    };
+                    events.push(make_sse_event("content_block_delta", &sig_delta));
+                    let block_stop = AnthropicStreamEvent::ContentBlockStop {
+                        index: self.thinking_block_index,
+                    };
+                    events.push(make_sse_event("content_block_stop", &block_stop));
+                }
+
                 // Close the text block before opening any tool blocks.
                 // Anthropic streaming spec requires each block to be closed
                 // (content_block_stop) before the next block starts.
@@ -252,6 +325,22 @@ impl AnthropicStreamConverter {
     /// Emit the final events when the stream ends.
     pub fn emit_end_events(&mut self) -> Vec<Result<Event, anyhow::Error>> {
         let mut events = Vec::new();
+
+        // Close thinking block if started and not already closed mid-stream
+        if self.thinking_block_started && !self.thinking_block_closed {
+            self.thinking_block_closed = true;
+            let sig_delta = AnthropicStreamEvent::ContentBlockDelta {
+                index: self.thinking_block_index,
+                delta: AnthropicDelta::SignatureDelta {
+                    signature: "erased".to_string(),
+                },
+            };
+            events.push(make_sse_event("content_block_delta", &sig_delta));
+            let block_stop = AnthropicStreamEvent::ContentBlockStop {
+                index: self.thinking_block_index,
+            };
+            events.push(make_sse_event("content_block_stop", &block_stop));
+        }
 
         // Close text block if started and not already closed mid-stream
         if self.text_block_started && !self.text_block_closed {
@@ -367,6 +456,34 @@ impl AnthropicStreamConverter {
                 });
             }
 
+            // Handle reasoning/thinking content deltas
+            if let Some(ref reasoning) = delta.reasoning_content
+                && !reasoning.is_empty()
+            {
+                if !self.thinking_block_started {
+                    self.thinking_block_started = true;
+                    self.thinking_block_index = self.next_block_index;
+                    self.next_block_index += 1;
+
+                    let ev = AnthropicStreamEvent::ContentBlockStart {
+                        index: self.thinking_block_index,
+                        content_block: AnthropicResponseContentBlock::Thinking {
+                            thinking: String::new(),
+                            signature: String::new(),
+                        },
+                    };
+                    events.push(make_tagged_event("content_block_start", &ev));
+                }
+
+                let ev = AnthropicStreamEvent::ContentBlockDelta {
+                    index: self.thinking_block_index,
+                    delta: AnthropicDelta::ThinkingDelta {
+                        thinking: reasoning.clone(),
+                    },
+                };
+                events.push(make_tagged_event("content_block_delta", &ev));
+            }
+
             let content_text = match &delta.content {
                 Some(ChatCompletionMessageContent::Text(text)) => Some(text.as_str()),
                 _ => None,
@@ -375,6 +492,22 @@ impl AnthropicStreamConverter {
             if let Some(text) = content_text
                 && !text.is_empty()
             {
+                // Close thinking block before text starts
+                if self.thinking_block_started && !self.thinking_block_closed {
+                    self.thinking_block_closed = true;
+                    let ev = AnthropicStreamEvent::ContentBlockDelta {
+                        index: self.thinking_block_index,
+                        delta: AnthropicDelta::SignatureDelta {
+                            signature: "erased".to_string(),
+                        },
+                    };
+                    events.push(make_tagged_event("content_block_delta", &ev));
+                    let ev = AnthropicStreamEvent::ContentBlockStop {
+                        index: self.thinking_block_index,
+                    };
+                    events.push(make_tagged_event("content_block_stop", &ev));
+                }
+
                 if !self.text_block_started {
                     self.text_block_started = true;
                     self.text_block_index = self.next_block_index;
@@ -401,6 +534,22 @@ impl AnthropicStreamConverter {
             }
 
             if let Some(tool_calls) = &delta.tool_calls {
+                // Close thinking block before tool blocks
+                if self.thinking_block_started && !self.thinking_block_closed {
+                    self.thinking_block_closed = true;
+                    let ev = AnthropicStreamEvent::ContentBlockDelta {
+                        index: self.thinking_block_index,
+                        delta: AnthropicDelta::SignatureDelta {
+                            signature: "erased".to_string(),
+                        },
+                    };
+                    events.push(make_tagged_event("content_block_delta", &ev));
+                    let ev = AnthropicStreamEvent::ContentBlockStop {
+                        index: self.thinking_block_index,
+                    };
+                    events.push(make_tagged_event("content_block_stop", &ev));
+                }
+
                 if self.text_block_started && !self.text_block_closed {
                     self.text_block_closed = true;
                     let ev = AnthropicStreamEvent::ContentBlockStop {
@@ -474,6 +623,22 @@ impl AnthropicStreamConverter {
     /// Like `emit_end_events` but returns tagged events for test assertions.
     fn emit_end_events_tagged(&mut self) -> Vec<TaggedEvent> {
         let mut events = Vec::new();
+
+        // Close thinking block if not already closed
+        if self.thinking_block_started && !self.thinking_block_closed {
+            self.thinking_block_closed = true;
+            let ev = AnthropicStreamEvent::ContentBlockDelta {
+                index: self.thinking_block_index,
+                delta: AnthropicDelta::SignatureDelta {
+                    signature: "erased".to_string(),
+                },
+            };
+            events.push(make_tagged_event("content_block_delta", &ev));
+            let ev = AnthropicStreamEvent::ContentBlockStop {
+                index: self.thinking_block_index,
+            };
+            events.push(make_tagged_event("content_block_stop", &ev));
+        }
 
         if self.text_block_started && !self.text_block_closed {
             let ev = AnthropicStreamEvent::ContentBlockStop {
@@ -701,5 +866,117 @@ mod tests {
             AnthropicStreamEvent::ContentBlockStop { index } => assert_eq!(*index, 0),
             other => panic!("expected text stop at index 0, got {other:?}"),
         }
+    }
+
+    fn reasoning_chunk(text: &str) -> NvCreateChatCompletionStreamResponse {
+        #[allow(deprecated)]
+        NvCreateChatCompletionStreamResponse {
+            id: "chat-1".into(),
+            choices: vec![ChatChoiceStream {
+                index: 0,
+                delta: ChatCompletionStreamResponseDelta {
+                    content: None,
+                    function_call: None,
+                    tool_calls: None,
+                    role: None,
+                    refusal: None,
+                    reasoning_content: Some(text.into()),
+                },
+                finish_reason: None,
+                stop_reason: None,
+                logprobs: None,
+            }],
+            created: 0,
+            model: "test".into(),
+            service_tier: None,
+            system_fingerprint: None,
+            object: "chat.completion.chunk".into(),
+            usage: None,
+            nvext: None,
+        }
+    }
+
+    /// Full reasoning flow: thinking → text → tool_use.
+    /// Verifies block ordering (thinking=0, text=1, tool=2) and that each
+    /// block is properly closed before the next one starts.
+    #[test]
+    fn test_thinking_text_then_tool_call() {
+        let mut conv = AnthropicStreamConverter::new("test-model".into());
+
+        // 1. Reasoning tokens → thinking block starts
+        let ev = conv.process_chunk_tagged(&reasoning_chunk("Let me think..."));
+        assert_eq!(
+            event_types(&ev),
+            vec!["content_block_start", "content_block_delta"]
+        );
+        assert!(matches!(
+            &ev[0].data,
+            AnthropicStreamEvent::ContentBlockStart {
+                index: 0,
+                content_block: AnthropicResponseContentBlock::Thinking { .. }
+            }
+        ));
+
+        // 2. Text arrives → thinking block closes (signature + stop), text block opens
+        let ev = conv.process_chunk_tagged(&text_chunk("Hello!"));
+        assert_eq!(
+            event_types(&ev),
+            vec![
+                "content_block_delta",
+                "content_block_stop",
+                "content_block_start",
+                "content_block_delta"
+            ]
+        );
+        assert!(matches!(
+            &ev[1].data,
+            AnthropicStreamEvent::ContentBlockStop { index: 0 }
+        ));
+        assert!(matches!(
+            &ev[2].data,
+            AnthropicStreamEvent::ContentBlockStart { index: 1, .. }
+        ));
+
+        // 3. Tool call → text block closes, tool block opens at index 2
+        let ev = conv.process_chunk_tagged(&tool_call_chunk(
+            0,
+            Some("call-1"),
+            Some("Read"),
+            Some("{\"path\":\"/tmp/test.txt\"}"),
+        ));
+        assert_eq!(
+            event_types(&ev),
+            vec![
+                "content_block_stop",
+                "content_block_start",
+                "content_block_delta"
+            ]
+        );
+        assert!(matches!(
+            &ev[0].data,
+            AnthropicStreamEvent::ContentBlockStop { index: 1 }
+        ));
+        assert!(matches!(
+            &ev[1].data,
+            AnthropicStreamEvent::ContentBlockStart { index: 2, .. }
+        ));
+    }
+
+    /// Thinking-only response (no text/tool follows): thinking block closed in end events.
+    #[test]
+    fn test_thinking_only_closed_in_end_events() {
+        let mut conv = AnthropicStreamConverter::new("test-model".into());
+        conv.process_chunk_tagged(&reasoning_chunk("Deep thought..."));
+
+        let ev = conv.emit_end_events_tagged();
+        assert_eq!(
+            event_types(&ev),
+            vec![
+                "content_block_delta",
+                "content_block_stop",
+                "message_delta",
+                "message_stop"
+            ]
+        );
     }
 }

@@ -26,7 +26,10 @@ from aiconfigurator.generator.naive import build_naive_generator_params
 from aiconfigurator.sdk.task import TaskConfig, TaskRunner
 
 from dynamo.profiler.utils.dgdr_v1beta1_types import DynamoGraphDeploymentRequestSpec
-from dynamo.profiler.utils.profile_common import derive_backend_image
+from dynamo.profiler.utils.profile_common import (
+    derive_backend_image,
+    needs_profile_data,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -96,7 +99,7 @@ def _generate_dgd_from_pick(
     return None
 
 
-# in naive mode, use vllm as the default backend
+# Fallback backend when AIC simulation is unavailable and no concrete backend is specified.
 _DEFAULT_NAIVE_BACKEND = "vllm"
 
 
@@ -107,19 +110,10 @@ def _run_naive_fallback(
     system: str,
     backend: str,
 ) -> dict:
-    """Handle the AIC-unsupported path via naive config generation.
-
-    Builds naive generator params (CLI args, parallelism) and then
-    assembles the DGD via ``build_dgd_config`` — the same route used
-    by the normal simulation path — so the output always uses the
-    clean base DGD YAMLs with actual ``command``/``args`` arrays.
-    """
+    """Handle the AIC-unsupported path via naive config generation."""
     if backend == "auto":
         backend = _DEFAULT_NAIVE_BACKEND
-        logger.info(
-            "Auto backend resolved to '%s' for naive fallback.",
-            backend,
-        )
+        logger.info("Auto backend resolved to '%s' for naive fallback.", backend)
     logger.info(
         "AIC does not support this combo — falling back to naive config generation."
     )
@@ -149,6 +143,7 @@ def _run_naive_fallback(
         "best_latencies": {"ttft": 0.0, "tpot": 0.0, "request_latency": 0.0},
         "dgd_config": dgd_config,
         "chosen_exp": "agg",
+        "resolved_backend": backend,
     }
 
 
@@ -165,6 +160,13 @@ def _run_autoscale_sim(
     request_latency: float | None,
 ) -> dict:
     """Build a TaskConfig, run autoscale simulation, collect latencies, generate DGD."""
+    # TODO(AIC): the autoscale path constructs TaskConfig directly; BackendName("auto")
+    # is not a valid enum value, so resolve "auto" to a concrete backend here.
+    # AIC should add native auto-backend support in the autoscale path.
+    if backend == "auto":
+        backend = _DEFAULT_NAIVE_BACKEND
+        logger.info("Auto backend resolved to '%s' for autoscale simulation.", backend)
+
     planner_cfg = dgdr.features.planner if dgdr.features else None
     if planner_cfg and planner_cfg.enable_throughput_scaling:
         logger.warning(
@@ -201,6 +203,7 @@ def _run_autoscale_sim(
         "dgd_config": dgd_config,
         "chosen_exp": "disagg",
         "task_configs": task_configs,
+        "resolved_backend": backend,
     }
 
 
@@ -243,6 +246,28 @@ def _run_default_sim(
         **load_kwargs,
     )
 
+    # When interpolation data is needed (mocker or throughput-scaling), a
+    # disaggregated config is required.  If AIC picked an aggregated config,
+    # override to the best available disaggregated alternative so that
+    # run_interpolation() can run successfully downstream.
+    if chosen == "agg" and needs_profile_data(dgdr):
+        disagg_key = next(
+            (k for k in best_configs if "disagg" in k and not best_configs[k].empty),
+            None,
+        )
+        if disagg_key:
+            logger.info(
+                "AIC picked aggregated config but interpolation data is required — "
+                "overriding to '%s' to support mocker/throughput-scaling.",
+                disagg_key,
+            )
+            chosen = disagg_key
+        else:
+            logger.warning(
+                "AIC picked aggregated config and no disaggregated alternative "
+                "is available; interpolation data will be skipped."
+            )
+
     best_config_df = best_configs.get(chosen, pd.DataFrame())
     best_latencies = best_latencies_map.get(
         chosen, {"ttft": 0.0, "tpot": 0.0, "request_latency": 0.0}
@@ -250,12 +275,24 @@ def _run_default_sim(
 
     dgd_config = _generate_dgd_from_pick(dgdr, best_config_df, chosen, task_configs)
 
+    # When backend="auto" AIC expands to per-backend task configs; the winning
+    # row carries the concrete backend name so downstream consumers (e.g.
+    # run_interpolation) can use it without re-encountering "auto".
+    resolved_backend = backend
+    if (
+        backend == "auto"
+        and not best_config_df.empty
+        and "backend" in best_config_df.columns
+    ):
+        resolved_backend = best_config_df.iloc[0]["backend"]
+
     return {
         "best_config_df": best_config_df,
         "best_latencies": best_latencies,
         "dgd_config": dgd_config,
         "chosen_exp": chosen,
         "task_configs": task_configs,
+        "resolved_backend": resolved_backend,
     }
 
 
