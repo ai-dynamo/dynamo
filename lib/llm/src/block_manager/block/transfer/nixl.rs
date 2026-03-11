@@ -298,6 +298,7 @@ where
 {
     let num_blocks = descriptors.len();
     let _default_bucket = ctx.default_bucket().unwrap_or("default");
+    let worker_id = ctx.worker_id();
 
     // Use a scope block to ensure all non-Send types are dropped before await
     let (xfer_req, still_pending) = {
@@ -308,7 +309,17 @@ where
         // TODO: Add support for string-based object keys via metadata in nixl-sys Rust bindings.
         // For now, we pass the sequence hash (u64) directly as device_id.
 
-        for desc in descriptors.iter() {
+        // Pre-compute per-worker object keys: each TP worker offsets the base hash
+        // by its worker_id so that different workers store to different S3 objects.
+        let per_worker_keys: Vec<u64> = descriptors
+            .iter()
+            .map(|desc| {
+                let base_hash = desc.sequence_hash().unwrap_or(0);
+                base_hash.wrapping_add(worker_id)
+            })
+            .collect();
+
+        for (desc, &object_key) in descriptors.iter().zip(per_worker_keys.iter()) {
             let bucket = match desc.key() {
                 RemoteKey::Object(obj_key) => obj_key.bucket.as_str(),
                 _ => {
@@ -317,14 +328,6 @@ where
                     ));
                 }
             };
-
-            // Use sequence hash directly as device_id - NIXL uses this as the object key
-            let object_key = desc.sequence_hash().ok_or_else(|| {
-                TransferError::ExecutionError(format!(
-                    "Descriptor missing sequence_hash: {:?}",
-                    desc.key()
-                ))
-            })?;
 
             let obj_storage = ObjectStorage::new(bucket, object_key, block_size).map_err(|e| {
                 TransferError::ExecutionError(format!("Failed to create ObjectStorage: {:?}", e))
@@ -346,12 +349,12 @@ where
             TransferError::ExecutionError(format!("Failed to create dst_dl: {:?}", e))
         })?;
 
-        for (block, desc) in local_blocks.iter().zip(descriptors.iter()) {
+        for (block, &object_key) in local_blocks.iter().zip(per_worker_keys.iter()) {
             let block_view = block.block_data().block_view()?;
             let addr = unsafe { block_view.as_ptr() as usize };
 
             src_dl.add_desc(addr, block_size, 0);
-            dst_dl.add_desc(0, block_size, desc.sequence_hash().unwrap());
+            dst_dl.add_desc(0, block_size, object_key);
         }
 
         // Determine the transfer operation
