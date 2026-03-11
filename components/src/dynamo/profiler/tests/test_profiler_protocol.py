@@ -204,7 +204,7 @@ def test_apply_dgd_overrides_missing_service_skipped_with_warning(caplog) -> Non
     assert result["spec"]["services"]["Frontend"]["replicas"] == 2
     assert "NonExistentWorker" not in result["spec"]["services"]
     assert any(
-        "NonExistentWorker" in r.message and r.levelno == logging.WARNING
+        "NonExistentWorker" in r.getMessage() and r.levelno == logging.WARNING
         for r in caplog.records
     ), "Expected a WARNING mentioning 'NonExistentWorker'"
 
@@ -344,7 +344,7 @@ async def test_run_profile_applies_dgd_overrides_before_interpolation(
 
     # apply_dgd_overrides must emit a WARNING about the skipped service.
     assert any(
-        "GhostService" in r.message and r.levelno == logging.WARNING
+        "GhostService" in r.getMessage() and r.levelno == logging.WARNING
         for r in caplog.records
     ), "Expected a WARNING mentioning the skipped 'GhostService'"
 
