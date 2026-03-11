@@ -1105,15 +1105,15 @@ impl OpenAIPreprocessor {
             }
             Some("nemotron_nano") | Some("nemotron3") => {
                 if let Some(args) = chat_template_args {
-                    if let Some(enable_thinking) = args.get("enable_thinking") {
-                        if enable_thinking == &serde_json::Value::Bool(false) {
-                            return true;
-                        }
+                    if let Some(enable_thinking) = args.get("enable_thinking")
+                        && enable_thinking == &serde_json::Value::Bool(false)
+                    {
+                        return true;
                     }
-                    if let Some(force_nonempty) = args.get("force_nonempty_content") {
-                        if force_nonempty == &serde_json::Value::Bool(true) {
-                            return true;
-                        }
+                    if let Some(force_nonempty) = args.get("force_nonempty_content")
+                        && force_nonempty == &serde_json::Value::Bool(true)
+                    {
+                        return true;
                     }
                 }
                 false
