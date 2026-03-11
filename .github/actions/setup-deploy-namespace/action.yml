@@ -110,7 +110,7 @@ runs:
         NAMESPACE: ${{ inputs.namespace }}
       run: |
         echo "::group::Wait for operator rollout"
-        kubectl rollout status deployment -n $NAMESPACE --watch --timeout=300s
+        kubectl rollout status deployment -n $NAMESPACE --watch --timeout=600s
         echo "::endgroup::"
 
     - name: Debug deployment failure
