@@ -412,6 +412,10 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
 
             self._finalize_request_metadata(request, multi_modal_data)
 
+        self.inflight_request_count += 1
+        logger.info(
+            f"Starting generation for request {request.request_id}. Current inflight requests: {self.inflight_request_count}"
+        )
         if self.enable_disagg and self.decode_worker_client:
             rng_disagg = _nvtx.start_range("mm:pd:generate_disagg", color="red")
             async for chunk in self._generate_disagg(
@@ -426,3 +430,4 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
             _nvtx.end_range(rng_agg)
 
         _nvtx.end_range(rng_pd)
+        self.inflight_request_count -= 1

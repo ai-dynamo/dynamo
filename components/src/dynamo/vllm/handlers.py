@@ -343,6 +343,9 @@ class BaseWorkerHandler(ABC):
         # Store shutdown event for graceful shutdown monitoring
         self.shutdown_event = shutdown_event
 
+        # Debug tracker
+        self.inflight_request_count = 0
+
     async def sleep(self, body: dict) -> dict:
         """Sleep the engine to release GPU memory and unregister from discovery.
 
@@ -1314,7 +1317,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
     async def generate(self, request, context):
         # Use context ID for request tracking and correlation
         request_id = context.id()
-        logger.debug(f"Decode Request ID: {request_id}")
+        self.inflight_request_count += 1
+        logger.info(
+            f"Decode Request ID: {request_id}, current inflight requests: {self.inflight_request_count}"
+        )
         first_token = True
         with time_and_log_code_section(
             f"[DECODE] request: {request_id} generate"
@@ -1331,6 +1337,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     decode_timer.stop_interval()
                     first_token = False
                 yield chunk
+        self.inflight_request_count -= 1
 
     async def _generate_token_mode(self, request, context, request_id):
         """Generate tokens using internal protocol format (token-in-token-out)."""
@@ -1529,12 +1536,16 @@ class PrefillWorkerHandler(BaseWorkerHandler):
     async def generate(self, request, context):
         # Use context ID for request tracking and correlation with decode phase
         request_id = context.id()
-        logger.debug(f"Prefill Request ID: {request_id}")
+        self.inflight_request_count += 1
+        logger.info(
+            f"Prefill Request ID: {request_id}, current inflight requests: {self.inflight_request_count}"
+        )
 
         # Token-in-token-out mode: internal protocol format
         with time_and_log_code_section(f"[PREFILL] request: {request_id} generate"):
             async for chunk in self._generate_token_mode(request, context, request_id):
                 yield chunk
+        self.inflight_request_count -= 1
 
     async def _generate_token_mode(self, request, context, request_id):
         """Generate prefill using internal protocol format (token-in-token-out)."""

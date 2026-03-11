@@ -9,7 +9,7 @@ from typing import Callable
 logger = logging.getLogger(__name__)
 
 
-DEFAULT_LOG_LEVEL = logging.DEBUG
+DEFAULT_LOG_LEVEL = logging.INFO
 
 
 class Timer:
