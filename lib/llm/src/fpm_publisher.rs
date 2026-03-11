@@ -91,7 +91,7 @@ impl FpmEventRelay {
                                 .into_iter()
                                 .map(|f| f.to_vec())
                                 .collect();
-                            if frames.len() >= 3 {
+                            if frames.len() == 3 {
                                 let payload = frames.swap_remove(2);
                                 if let Err(e) = publisher.publish_bytes(payload).await {
                                     tracing::warn!("FPM relay: event plane publish failed: {e}");

@@ -873,13 +873,7 @@ class BaseWorkerHandler(ABC):
             yield {"status": "error", "message": str(e)}
 
     def cleanup(self):
-        """Clean up resources including temporary directories and FPM relays."""
-        if self.fpm_relays:
-            for relay in self.fpm_relays:
-                try:
-                    relay.shutdown()
-                except Exception as e:
-                    logger.warning(f"Failed to shut down FPM relay: {e}")
+        """Clean up resources including temporary directories."""
         for temp_dir in self.temp_dirs:
             try:
                 temp_dir.cleanup()
