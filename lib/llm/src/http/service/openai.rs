@@ -963,6 +963,7 @@ fn make_dispatch_event(
 /// for correct disambiguation when `n > 1`.
 fn streaming_tool_dispatch_events(
     response: &crate::types::Annotated<NvCreateChatCompletionStreamResponse>,
+    dispatched_ids: &mut HashSet<String>,
 ) -> Vec<Result<Event, axum::Error>> {
     let Some(data) = &response.data else {
         return vec![];
@@ -980,7 +981,12 @@ fn streaming_tool_dispatch_events(
                 .as_ref()
                 .is_some_and(|f| f.name.is_some() && f.arguments.is_some());
 
-            if chunk.id.is_some() && has_name_and_args {
+            if let (true, Some(id)) = (has_name_and_args, &chunk.id) {
+                // Skip already-dispatched tool calls (dedup guard, matches
+                // the stopped/done flags in Anthropic/Responses converters).
+                if !dispatched_ids.insert(id.clone()) {
+                    continue;
+                }
                 let payload = serde_json::json!({
                     "choice_index": choice.index,
                     "tool_call": chunk,
@@ -1168,6 +1174,7 @@ async fn chat_completions(
         let tool_dispatch_enabled = state.streaming_tool_dispatch_enabled();
         let reasoning_dispatch_enabled = state.streaming_reasoning_dispatch_enabled();
         let mut reasoning_buffer: HashMap<u32, String> = HashMap::new();
+        let mut dispatched_tool_ids: HashSet<String> = HashSet::new();
 
         // flat_map lets us optionally prepend extra SSE events before each regular chunk:
         //   - `event: tool_call_dispatch`  — complete tool call detected early (tool dispatch)
@@ -1177,7 +1184,10 @@ async fn chat_completions(
             // Extract side-channel events before the response is consumed by EventConverter.
             let mut events: Vec<Result<Event, axum::Error>> = vec![];
             if tool_dispatch_enabled {
-                events.extend(streaming_tool_dispatch_events(&response));
+                events.extend(streaming_tool_dispatch_events(
+                    &response,
+                    &mut dispatched_tool_ids,
+                ));
             }
             if reasoning_dispatch_enabled {
                 events.extend(accumulate_reasoning_dispatch(
@@ -3008,7 +3018,7 @@ mod tests {
 
     // ── streaming dispatch tests ──────────────────────────────────────
 
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
 
     use dynamo_async_openai::types::{
         ChatChoiceStream, ChatCompletionMessageToolCallChunk, ChatCompletionStreamResponseDelta,
@@ -3022,9 +3032,11 @@ mod tests {
     /// `axum::response::sse::Event` doesn't expose its fields publicly and doesn't
     /// implement `Display` (the wire format is only produced during response
     /// serialization). The `Debug` representation includes the event name and data
-    /// string, so we parse it here. This is inherently coupled to axum's Debug
-    /// format, but it's the best we can do without sending the event through an
-    /// actual SSE stream.
+    /// string, so we parse it here.
+    ///
+    /// WARNING: Coupled to axum's internal Debug format for `Event`. If an axum
+    /// upgrade changes the Debug output, these tests will break. Preferred over
+    /// spinning up an actual SSE stream for unit test simplicity.
     fn extract_sse_data_json(event: &axum::response::sse::Event) -> serde_json::Value {
         // The Event Debug format is:
         //   Event { buffer: b"event: <name>\ndata: <json>\n", flags: ... }
@@ -3097,10 +3109,12 @@ mod tests {
     }
 
     /// Assert that an SSE Event has the expected event type name.
+    /// Uses "event: <name>\n" pattern to avoid substring false-matches.
     fn assert_event_type(event: &axum::response::sse::Event, expected: &str) {
         let debug = format!("{:?}", event);
+        let pattern = format!("event: {expected}\\n");
         assert!(
-            debug.contains(expected),
+            debug.contains(&pattern),
             "expected event type '{expected}' not found in: {debug}"
         );
     }
@@ -3194,7 +3208,7 @@ mod tests {
             Some(r#"{"city":"Paris"}"#),
         )]);
 
-        let events = streaming_tool_dispatch_events(&response);
+        let events = streaming_tool_dispatch_events(&response, &mut HashSet::new());
         assert_eq!(events.len(), 1);
 
         let event = events[0].as_ref().unwrap();
@@ -3218,7 +3232,7 @@ mod tests {
             Some(r#"{"city":"Paris"}"#),
         )]);
 
-        let events = streaming_tool_dispatch_events(&response);
+        let events = streaming_tool_dispatch_events(&response, &mut HashSet::new());
         assert!(events.is_empty(), "should not dispatch without id");
     }
 
@@ -3231,7 +3245,7 @@ mod tests {
             Some(r#"{"city":"Paris"}"#),
         )]);
 
-        let events = streaming_tool_dispatch_events(&response);
+        let events = streaming_tool_dispatch_events(&response, &mut HashSet::new());
         assert!(events.is_empty(), "should not dispatch without name");
     }
 
@@ -3244,7 +3258,7 @@ mod tests {
             None, // no arguments
         )]);
 
-        let events = streaming_tool_dispatch_events(&response);
+        let events = streaming_tool_dispatch_events(&response, &mut HashSet::new());
         assert!(events.is_empty(), "should not dispatch without arguments");
     }
 
@@ -3285,7 +3299,7 @@ mod tests {
         };
 
         let response = make_stream_response(vec![choice]);
-        let events = streaming_tool_dispatch_events(&response);
+        let events = streaming_tool_dispatch_events(&response, &mut HashSet::new());
         assert_eq!(events.len(), 2, "should dispatch both tool calls");
 
         // Verify each dispatched event has the correct tool call data
@@ -3307,14 +3321,14 @@ mod tests {
             comment: None,
             error: None,
         };
-        let events = streaming_tool_dispatch_events(&response);
+        let events = streaming_tool_dispatch_events(&response, &mut HashSet::new());
         assert!(events.is_empty());
     }
 
     #[test]
     fn test_tool_dispatch_empty_choices() {
         let response = make_stream_response(vec![]);
-        let events = streaming_tool_dispatch_events(&response);
+        let events = streaming_tool_dispatch_events(&response, &mut HashSet::new());
         assert!(events.is_empty());
     }
 
@@ -3357,7 +3371,7 @@ mod tests {
         };
 
         let response = make_stream_response(vec![choice]);
-        let events = streaming_tool_dispatch_events(&response);
+        let events = streaming_tool_dispatch_events(&response, &mut HashSet::new());
         assert_eq!(
             events.len(),
             1,
@@ -3394,7 +3408,7 @@ mod tests {
         };
 
         let response = make_stream_response(vec![choice]);
-        let events = streaming_tool_dispatch_events(&response);
+        let events = streaming_tool_dispatch_events(&response, &mut HashSet::new());
         assert!(events.is_empty(), "function: None should not dispatch");
     }
 
@@ -3409,7 +3423,7 @@ mod tests {
             Some(""),
         )]);
 
-        let events = streaming_tool_dispatch_events(&response);
+        let events = streaming_tool_dispatch_events(&response, &mut HashSet::new());
         assert_eq!(events.len(), 1, "empty arguments should still dispatch");
 
         let json = extract_sse_data_json(events[0].as_ref().unwrap());
@@ -3436,7 +3450,7 @@ mod tests {
         );
 
         let response = make_stream_response(vec![choice_0, choice_1]);
-        let events = streaming_tool_dispatch_events(&response);
+        let events = streaming_tool_dispatch_events(&response, &mut HashSet::new());
         assert_eq!(events.len(), 2, "should dispatch from both choices");
 
         let json0 = extract_sse_data_json(events[0].as_ref().unwrap());
@@ -3447,6 +3461,29 @@ mod tests {
         assert_eq!(json1["choice_index"], 1);
         assert_eq!(json1["tool_call"]["id"], "call_b");
     }
+
+    #[test]
+    fn test_tool_dispatch_dedup_skips_already_dispatched_id() {
+        // Simulate a backend that sends the same complete tool call in two consecutive chunks.
+        // The HashSet should prevent the second dispatch.
+        let response = make_stream_response(vec![make_choice_with_tool_call(
+            0,
+            Some("call_dup"),
+            Some("get_weather"),
+            Some(r#"{"city":"Paris"}"#),
+        )]);
+
+        let mut dispatched = HashSet::new();
+
+        // First call — should dispatch
+        let events = streaming_tool_dispatch_events(&response, &mut dispatched);
+        assert_eq!(events.len(), 1);
+
+        // Second call with same response — should be deduped
+        let events = streaming_tool_dispatch_events(&response, &mut dispatched);
+        assert!(events.is_empty(), "duplicate id should not dispatch twice");
+    }
+
     // ── accumulate_reasoning_dispatch tests ──
 
     #[test]

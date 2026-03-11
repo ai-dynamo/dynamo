@@ -327,8 +327,13 @@ impl ResponseStreamConverter {
                             self.function_call_items[tc_index]
                                 .accumulated_args
                                 .push_str(args);
-                            let item_id = self.function_call_items[tc_index].item_id.clone();
                             let output_index = self.function_call_items[tc_index].output_index;
+                            let is_complete = tc.id.is_some()
+                                && func.name.is_some()
+                                && !self.function_call_items[tc_index].done;
+
+                            // Clone item_id once; reused by both args_delta and (if complete) done events.
+                            let item_id = self.function_call_items[tc_index].item_id.clone();
                             let seq = self.next_seq();
                             let args_delta =
                                 ResponseStreamEvent::ResponseFunctionCallArgumentsDelta(
@@ -345,13 +350,10 @@ impl ResponseStreamConverter {
                             // arrived complete in a single chunk (id + name + args all present).
                             // Dynamo backends emit complete tool calls, so this fires on the
                             // same chunk — no need to wait for finish_reason.
-                            if tc.id.is_some()
-                                && func.name.is_some()
-                                && !self.function_call_items[tc_index].done
-                            {
+                            if is_complete {
                                 self.function_call_items[tc_index].done = true;
-                                // Capture values before calling self.next_seq() (borrow rules)
-                                let fc_item_id = self.function_call_items[tc_index].item_id.clone();
+                                // Reuse item_id from above; capture remaining values before self.next_seq()
+                                let fc_item_id = item_id;
                                 let fc_call_id = self.function_call_items[tc_index].call_id.clone();
                                 let fc_name = self.function_call_items[tc_index].name.clone();
                                 let fc_args =
