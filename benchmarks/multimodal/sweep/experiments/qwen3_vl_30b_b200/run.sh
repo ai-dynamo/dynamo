@@ -197,6 +197,15 @@ echo "[build] Building dynamo..."
 cd lib/bindings/python && maturin develop --release --uv && cd /workspace
 uv pip install -e .
 
+echo "[build] Patching TRT-LLM Qwen3-VL multimodal_embedding bug (rc5 -> is not None fix)..."
+TRTLLM_QWEN3VL="/opt/dynamo/venv/lib/python3.12/site-packages/tensorrt_llm/_torch/models/modeling_qwen3vl.py"
+if grep -q 'or data.get("multimodal_embedding")$' "$TRTLLM_QWEN3VL" 2>/dev/null; then
+    sed -i 's/or data.get("multimodal_embedding")$/or data.get("multimodal_embedding") is not None/' "$TRTLLM_QWEN3VL"
+    echo "  Patched: $(grep -n 'multimodal_embedding.*is not None' "$TRTLLM_QWEN3VL")"
+else
+    echo "  Already patched or file not found — skipping"
+fi
+
 echo "[build] Sanity check..."
 deploy/sanity_check.py --runtime-check-only
 
