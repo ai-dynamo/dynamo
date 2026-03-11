@@ -139,6 +139,7 @@ async def _fetch_from_encode_workers(
     image_urls: List[str],
     request_id: str,
     receiver: AbstractEmbeddingReceiver,
+    context=None,
 ) -> tuple[List[MultiModalGroup], _PendingRelease | None]:
     """Fan out image URLs to encode workers, load embeddings, and return ready groups.
 
@@ -174,7 +175,7 @@ async def _fetch_from_encode_workers(
             encode_request.multimodal_inputs = batch
             payload = encode_request.model_dump_json()
             encode_response_streams.append(
-                await encode_worker_client.round_robin(payload)  # type: ignore[arg-type]
+                await encode_worker_client.round_robin(payload, context=context)  # type: ignore[arg-type]
             )
             batch = []
 
@@ -182,7 +183,7 @@ async def _fetch_from_encode_workers(
         encode_request.multimodal_inputs = batch
         payload = encode_request.model_dump_json()
         encode_response_streams.append(
-            await encode_worker_client.round_robin(payload)  # type: ignore[arg-type]
+            await encode_worker_client.round_robin(payload, context=context)  # type: ignore[arg-type]
         )
 
     multimodal_groups: List[MultiModalGroup] = []
@@ -215,6 +216,7 @@ async def _fetch_embeddings(
     request_id: str,
     receiver: AbstractEmbeddingReceiver,
     cache: MultimodalEmbeddingCacheManager | None = None,
+    context=None,
 ) -> tuple[list[MultiModalGroup], _PendingRelease | None]:
     """Fetch multimodal embeddings with transparent cache-through.
 
@@ -254,6 +256,7 @@ async def _fetch_embeddings(
             miss_urls,
             request_id,
             receiver,
+            context=context,
         )
 
         # ── 3. Update cache (no-op when cache is None) ──────────────
@@ -285,6 +288,7 @@ async def load_multimodal_embeddings(
     model: str,
     embeddings_dtype: torch.dtype,
     cache: MultimodalEmbeddingCacheManager | None = None,
+    context=None,
 ) -> Dict[str, Any]:
     """Fetch embeddings and build engine-ready ``multi_modal_data``.
 
@@ -299,6 +303,7 @@ async def load_multimodal_embeddings(
         request_id,
         receiver,
         cache=cache,
+        context=context,
     )
 
     multi_modal_data: Dict[str, Any] = defaultdict(list)

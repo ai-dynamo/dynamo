@@ -7,6 +7,7 @@ from vllm.inputs.data import TokensPrompt
 
 import dynamo.nixl_connect as connect
 from dynamo.common.utils import nvtx_utils as _nvtx
+from dynamo.common.utils.otel_tracing import build_trace_headers
 from dynamo.runtime import DistributedRuntime
 
 from ..args import Config
@@ -87,6 +88,7 @@ class MultimodalDecodeWorkerHandler(BaseWorkerHandler):
                 )
 
         lora_request = self._resolve_lora_request(request.model)
+        trace_headers = build_trace_headers(context) if context else None
         gen = self.engine_client.generate(
             prompt=TokensPrompt(
                 prompt_token_ids=request.engine_prompt["prompt_token_ids"],
@@ -95,6 +97,7 @@ class MultimodalDecodeWorkerHandler(BaseWorkerHandler):
             sampling_params=request.sampling_params,
             request_id=request.request_id,
             lora_request=lora_request,
+            trace_headers=trace_headers,
         )
 
         rng_first = _nvtx.start_range("mm:decode:first_token", color="darkred")
