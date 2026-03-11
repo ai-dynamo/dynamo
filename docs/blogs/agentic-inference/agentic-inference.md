@@ -1,7 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-subtitle: "Ishan Dhanani, Alec Flowers — March 2026"
+subtitle: "Ishan Dhanani and Matej Kosec — March 2026"
 description: "How Dynamo optimizes for agentic workloads at three layers: frontend API, router, and KV cache management."
 keywords: agentic inference, KV cache, prefix caching, agent hints, disaggregated serving, Dynamo
 last-updated: March 10, 2026
