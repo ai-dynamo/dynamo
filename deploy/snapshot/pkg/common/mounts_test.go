@@ -186,22 +186,26 @@ func TestBuildMountPolicy(t *testing.T) {
 			wantExt: map[string]string{},
 		},
 		{
-			name: "masked path non-dir file maps to /dev/null",
+			name:   "masked path non-dir file maps to /dev/null",
 			mounts: []types.MountInfo{},
 			rootFS: func() string {
 				dir := t.TempDir()
-				os.WriteFile(filepath.Join(dir, "proc"), []byte("x"), 0644)
+				if err := os.WriteFile(filepath.Join(dir, "proc"), []byte("x"), 0644); err != nil {
+					t.Fatalf("write masked file: %v", err)
+				}
 				return dir
 			}(),
 			maskedPaths: []string{"/proc"},
 			wantExt:     map[string]string{"/proc": "/dev/null"},
 		},
 		{
-			name: "masked path directory is ignored",
+			name:   "masked path directory is ignored",
 			mounts: []types.MountInfo{},
 			rootFS: func() string {
 				dir := t.TempDir()
-				os.MkdirAll(filepath.Join(dir, "proc"), 0755)
+				if err := os.MkdirAll(filepath.Join(dir, "proc"), 0755); err != nil {
+					t.Fatalf("mkdir masked dir: %v", err)
+				}
 				return dir
 			}(),
 			maskedPaths:  []string{"/proc"},
