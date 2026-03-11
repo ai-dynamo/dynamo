@@ -815,7 +815,10 @@ pub fn chat_completion_to_response(
         presence_penalty: Some(0.0),
         // Echo actual request values, falling back to spec defaults.
         // store: false because this branch does not persist responses.
-        store: api_context.map(|ctx| ctx.store).or(params.store).or(Some(false)),
+        store: api_context
+            .map(|ctx| ctx.store)
+            .or(params.store)
+            .or(Some(false)),
         temperature: params.temperature.or(Some(1.0)),
         text: Some(params.text.clone().unwrap_or(ResponseTextParam {
             format: TextResponseFormatConfiguration::Text,
@@ -1193,7 +1196,8 @@ mod tests {
             nvext: None,
         };
 
-        let wrapped = chat_completion_to_response(chat_resp, &ResponseParams::default(), None).unwrap();
+        let wrapped =
+            chat_completion_to_response(chat_resp, &ResponseParams::default(), None).unwrap();
 
         assert_eq!(wrapped.inner.model, "llama-3.1-8b-instruct");
         assert_eq!(wrapped.inner.status, Status::Completed);
@@ -1251,7 +1255,8 @@ mod tests {
             nvext: None,
         };
 
-        let wrapped = chat_completion_to_response(chat_resp, &ResponseParams::default(), None).unwrap();
+        let wrapped =
+            chat_completion_to_response(chat_resp, &ResponseParams::default(), None).unwrap();
         assert_eq!(wrapped.inner.output.len(), 1);
         match &wrapped.inner.output[0] {
             OutputItem::FunctionCall(fc) => {
