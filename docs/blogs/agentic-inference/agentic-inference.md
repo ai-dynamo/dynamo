@@ -15,7 +15,7 @@ Throughout this post, we use three terms consistently:
 
 ### Multi-Protocol Support
 
-Over the last few months, we have seen teams start moving from a "stateless" `v1/chat/completions` API to "stateful" APIs like `v1/responses` and `v1/messages` to cleanly handle new patterns including interleaved thinking and tool calls. Unlike `v1/chat/completions` where each message carries a single content block, `v1/responses` and `v1/messages` support multi-block messages that natively represent interleaved thinking, tool calls, and tool results within a single turn. Dynamo now supports both APIs and we are actively developing a reference architecture for a stateful server-side backend for `v1/responses`. Different agent harnesses use different APIs: Claude Code uses `v1/messages`, Codex uses `v1/responses`, and most others still use `v1/chat/completions`. Dynamo serves all three through a common internal representation, so a single deployment can act as the inference backend for any of them. Our team has internally been running a Dynamo deployment of GLM-5 and Minimax2.5 and optimizing our backend to match closed-source inference performance. We'll be sharing a full write-up and some optimized recipes for deploying both models in the upcoming weeks.
+Agent harnesses are increasingly adopting `v1/responses` and `v1/messages` over `v1/chat/completions` to cleanly handle new patterns including interleaved thinking and tool calls. The key difference is structural. In `v1/chat/completions`, message content is a flat string and tool calls are bolted on as a separate field. `v1/responses` and `v1/messages` use typed content blocks, so a single assistant turn can contain interleaved thinking, tool calls, and text as distinct objects. This matters for inference because the orchestrator can see block boundaries and apply different cache and scheduling policies per block type (pin system prompt blocks, deprioritize reasoning tokens that will never be reused). Different harnesses use different APIs: Claude Code uses `v1/messages`, Codex uses `v1/responses`, and most others still use `v1/chat/completions`. Dynamo serves all three through a common internal representation, so a single deployment can act as the inference backend for any of them. Our team has internally been running a Dynamo deployment of GLM-5 and Minimax2.5 and optimizing our backend to match closed-source inference performance. We will be sharing a full write-up and some optimized recipes for deploying both models in the upcoming weeks.
 
 <table>
 <tr>
@@ -66,7 +66,13 @@ Dynamo’s new `nvext.agent_hints` extension bridges this gap. It attaches struc
 }
 ```
 
-The `agent_hints` field carries per-request metadata: scheduling priority, latency sensitivity, expected output length, and a flag for speculative cache warming. These flow downstream to the router and engine. The `cache_control` field will look familiar to anyone who has used Anthropic's prompt caching API. It tells the orchestrator to pin the computed prefix on the worker for the specified TTL. We discuss how this works in the cache retention section below.
+The `agent_hints` fields:
+
+- **`latency_sensitivity`** and **`priority`** control scheduling at the router and engine respectively. We cover both in detail in the Priority Scheduling section below.
+- **`osl`** (output sequence length) is the harness's estimate of how many tokens this request will generate. The router uses this to gauge how long a worker will be occupied, which improves load balancing. A harness can learn this over time by tracking average output lengths per tool call type.
+- **`speculative_prefill`** signals the orchestrator to begin caching this request's prefix on a likely worker before the full request is ready. This is useful when the harness knows a tool call is about to return and wants to warm the cache ahead of time.
+
+The `cache_control` field will look familiar to anyone who has used Anthropic's prompt caching API. It tells the orchestrator to pin the computed prefix on the worker for the specified TTL, protecting it from eviction during tool call gaps. Currently `ephemeral` is the only supported type. We discuss how this works in the cache retention section below.
 
 ## Layer 2: The Router
 
