@@ -50,7 +50,14 @@ From scanning source files, kvbm-connector uses:
 - `dynamo_tokens` = `dynamo-tokens`
 - `dynamo_nova` = `velo` (to be mapped in Phase 2)
 - `dynamo_nova_backend` = `velo-common` (to be mapped in Phase 2)
-- `kvbm-logical`, `kvbm-engine`, `kvbm-physical`, `kvbm-common` (accessed via broken `crate::v2::*` — Phase 2 will fix imports, Phase 1 just declares deps)
+- `kvbm-logical`, `kvbm-engine`, `kvbm-physical`, `kvbm-common` (accessed via broken `crate::*` paths — Phase 2 will fix imports, Phase 1 just declares deps)
+
+### Confirmed module-to-crate mapping (user-verified)
+Inside kvbm-connector source, these internal module paths map to workspace crates:
+- `crate::logical::*` → `kvbm_logical` (`lib/kvbm-logical`)
+- `crate::physical::*` → `kvbm_physical` (`lib/kvbm-physical`)
+- `crate::distributed::*` → `kvbm_engine` (`lib/kvbm-engine`)
+- `crate::v2::{logical, physical, distributed}::*` → same mapping above
 
 ### Missing from workspace.dependencies
 - `derive_getters` — add to root Cargo.toml workspace.dependencies
