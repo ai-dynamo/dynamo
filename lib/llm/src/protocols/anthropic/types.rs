@@ -9,11 +9,13 @@
 use dynamo_async_openai::types::{
     ChatCompletionMessageToolCall, ChatCompletionNamedToolChoice,
     ChatCompletionRequestAssistantMessage, ChatCompletionRequestAssistantMessageContent,
-    ChatCompletionRequestMessage, ChatCompletionRequestSystemMessage,
+    ChatCompletionRequestMessage, ChatCompletionRequestMessageContentPartImage,
+    ChatCompletionRequestMessageContentPartText, ChatCompletionRequestSystemMessage,
     ChatCompletionRequestSystemMessageContent, ChatCompletionRequestToolMessage,
     ChatCompletionRequestToolMessageContent, ChatCompletionRequestUserMessage,
-    ChatCompletionRequestUserMessageContent, ChatCompletionTool, ChatCompletionToolChoiceOption,
-    ChatCompletionToolType, FunctionName, FunctionObject, ReasoningContent,
+    ChatCompletionRequestUserMessageContent, ChatCompletionRequestUserMessageContentPart,
+    ChatCompletionTool, ChatCompletionToolChoiceOption, ChatCompletionToolType, FunctionName,
+    FunctionObject, ImageUrl, ReasoningContent,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -911,30 +913,45 @@ fn convert_user_blocks(
     blocks: &[AnthropicContentBlock],
     messages: &mut Vec<ChatCompletionRequestMessage>,
 ) -> Result<(), anyhow::Error> {
-    // Gather text blocks for a single user message, emit tool_result blocks as Tool messages.
-    let mut text_parts = Vec::new();
+    // Accumulate content parts (text + image). When the message contains images,
+    // we emit `ChatCompletionRequestUserMessageContent::Array` (multimodal format).
+    // For pure-text messages we keep `::Text` for backwards compatibility.
+    let mut content_parts: Vec<ChatCompletionRequestUserMessageContentPart> = Vec::new();
+    let mut has_image = false;
 
     for block in blocks {
         match block {
             AnthropicContentBlock::Text { text, .. } => {
-                text_parts.push(text.clone());
+                content_parts.push(ChatCompletionRequestUserMessageContentPart::Text(
+                    ChatCompletionRequestMessageContentPartText { text: text.clone() },
+                ));
+            }
+            AnthropicContentBlock::Image { source } => {
+                has_image = true;
+                let data_uri =
+                    format!("data:{};base64,{}", source.media_type, source.data);
+                let url = url::Url::parse(&data_uri).map_err(|e| {
+                    anyhow::anyhow!("invalid image data URI: {e}")
+                })?;
+                content_parts.push(ChatCompletionRequestUserMessageContentPart::ImageUrl(
+                    ChatCompletionRequestMessageContentPartImage {
+                        image_url: ImageUrl {
+                            url,
+                            detail: None,
+                            uuid: None,
+                        },
+                    },
+                ));
             }
             AnthropicContentBlock::ToolResult {
                 tool_use_id,
                 content,
                 ..
             } => {
-                // Flush any accumulated text first
-                if !text_parts.is_empty() {
-                    let combined = text_parts.join("");
-                    messages.push(ChatCompletionRequestMessage::User(
-                        ChatCompletionRequestUserMessage {
-                            content: ChatCompletionRequestUserMessageContent::Text(combined),
-                            name: None,
-                        },
-                    ));
-                    text_parts.clear();
-                }
+                // Flush any accumulated content parts before the tool result message.
+                flush_user_content_parts(&mut content_parts, has_image, messages);
+                has_image = false;
+
                 let text = content.clone().map(|c| c.into_text()).unwrap_or_default();
                 messages.push(ChatCompletionRequestMessage::Tool(
                     ChatCompletionRequestToolMessage {
@@ -942,12 +959,6 @@ fn convert_user_blocks(
                         tool_call_id: tool_use_id.clone(),
                     },
                 ));
-            }
-            AnthropicContentBlock::Image { .. } => {
-                tracing::warn!(
-                    "Image content blocks are not supported in the Anthropic-to-chat-completions conversion; replaced with placeholder text."
-                );
-                text_parts.push("[image]".to_string());
             }
             AnthropicContentBlock::ToolUse { .. }
             | AnthropicContentBlock::Thinking { .. }
@@ -960,18 +971,48 @@ fn convert_user_blocks(
         }
     }
 
-    // Flush remaining text
-    if !text_parts.is_empty() {
-        let combined = text_parts.join("");
-        messages.push(ChatCompletionRequestMessage::User(
-            ChatCompletionRequestUserMessage {
-                content: ChatCompletionRequestUserMessageContent::Text(combined),
-                name: None,
-            },
-        ));
-    }
+    // Flush remaining content parts.
+    flush_user_content_parts(&mut content_parts, has_image, messages);
 
     Ok(())
+}
+
+/// Flush accumulated user content parts into a user message.
+///
+/// If the parts are pure text, joins them into a single `Text` message
+/// (backwards-compatible with non-multimodal backends). If any images are
+/// present, emits an `Array` message (OpenAI multimodal format).
+fn flush_user_content_parts(
+    parts: &mut Vec<ChatCompletionRequestUserMessageContentPart>,
+    has_image: bool,
+    messages: &mut Vec<ChatCompletionRequestMessage>,
+) {
+    if parts.is_empty() {
+        return;
+    }
+
+    let content = if has_image {
+        // Multimodal: emit as Array so images are preserved.
+        ChatCompletionRequestUserMessageContent::Array(std::mem::take(parts))
+    } else {
+        // Pure text: join into a single string for backwards compatibility.
+        let combined = parts
+            .drain(..)
+            .filter_map(|p| match p {
+                ChatCompletionRequestUserMessageContentPart::Text(t) => Some(t.text),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("");
+        ChatCompletionRequestUserMessageContent::Text(combined)
+    };
+
+    messages.push(ChatCompletionRequestMessage::User(
+        ChatCompletionRequestUserMessage {
+            content,
+            name: None,
+        },
+    ));
 }
 
 /// Convert assistant-role content blocks into chat completion messages.
@@ -2588,5 +2629,220 @@ mod tests {
             }
             other => panic!("expected Simple tool choice, got {other:?}"),
         }
+    }
+
+    // --- Image passthrough tests ---
+
+    #[test]
+    fn test_image_block_becomes_multimodal_content() {
+        let req = AnthropicCreateMessageRequest {
+            model: "test-model".into(),
+            max_tokens: 100,
+            messages: vec![AnthropicMessage {
+                role: AnthropicRole::User,
+                content: AnthropicMessageContent::Blocks {
+                    content: vec![
+                        AnthropicContentBlock::Text {
+                            text: "What is in this image?".into(),
+                            citations: None,
+                            cache_control: None,
+                        },
+                        AnthropicContentBlock::Image {
+                            source: AnthropicImageSource {
+                                source_type: "base64".into(),
+                                media_type: "image/png".into(),
+                                data: "iVBORw0KGgo=".into(), // tiny valid-ish base64
+                            },
+                        },
+                    ],
+                },
+            }],
+            system: None,
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            stop_sequences: None,
+            stream: false,
+            metadata: None,
+            tools: None,
+            tool_choice: None,
+            cache_control: None,
+            thinking: None,
+            service_tier: None,
+            container: None,
+            output_config: None,
+        };
+
+        let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
+        assert_eq!(chat_req.inner.messages.len(), 1);
+
+        match &chat_req.inner.messages[0] {
+            ChatCompletionRequestMessage::User(u) => match &u.content {
+                ChatCompletionRequestUserMessageContent::Array(parts) => {
+                    assert_eq!(parts.len(), 2);
+                    // First part: text
+                    match &parts[0] {
+                        ChatCompletionRequestUserMessageContentPart::Text(t) => {
+                            assert_eq!(t.text, "What is in this image?");
+                        }
+                        other => panic!("expected text part, got {other:?}"),
+                    }
+                    // Second part: image with data URI
+                    match &parts[1] {
+                        ChatCompletionRequestUserMessageContentPart::ImageUrl(img) => {
+                            let url_str = img.image_url.url.to_string();
+                            assert!(
+                                url_str.starts_with("data:image/png;base64,"),
+                                "expected data URI, got: {url_str}"
+                            );
+                            assert!(url_str.contains("iVBORw0KGgo="));
+                        }
+                        other => panic!("expected image_url part, got {other:?}"),
+                    }
+                }
+                other => panic!("expected Array content, got {other:?}"),
+            },
+            other => panic!("expected user message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_pure_text_stays_text_format() {
+        // Verify backwards compatibility: pure text messages don't use Array format.
+        let req = AnthropicCreateMessageRequest {
+            model: "test-model".into(),
+            max_tokens: 100,
+            messages: vec![AnthropicMessage {
+                role: AnthropicRole::User,
+                content: AnthropicMessageContent::Blocks {
+                    content: vec![
+                        AnthropicContentBlock::Text {
+                            text: "Hello ".into(),
+                            citations: None,
+                            cache_control: None,
+                        },
+                        AnthropicContentBlock::Text {
+                            text: "world".into(),
+                            citations: None,
+                            cache_control: None,
+                        },
+                    ],
+                },
+            }],
+            system: None,
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            stop_sequences: None,
+            stream: false,
+            metadata: None,
+            tools: None,
+            tool_choice: None,
+            cache_control: None,
+            thinking: None,
+            service_tier: None,
+            container: None,
+            output_config: None,
+        };
+
+        let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
+        match &chat_req.inner.messages[0] {
+            ChatCompletionRequestMessage::User(u) => match &u.content {
+                ChatCompletionRequestUserMessageContent::Text(t) => {
+                    assert_eq!(t, "Hello world");
+                }
+                other => panic!("expected Text content (not Array), got {other:?}"),
+            },
+            other => panic!("expected user message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_image_with_tool_result_flush() {
+        // Image + text should flush as Array before tool_result becomes a Tool message.
+        let req = AnthropicCreateMessageRequest {
+            model: "test-model".into(),
+            max_tokens: 100,
+            messages: vec![
+                AnthropicMessage {
+                    role: AnthropicRole::User,
+                    content: AnthropicMessageContent::Text {
+                        content: "What's the weather?".into(),
+                    },
+                },
+                AnthropicMessage {
+                    role: AnthropicRole::Assistant,
+                    content: AnthropicMessageContent::Blocks {
+                        content: vec![AnthropicContentBlock::ToolUse {
+                            id: "tool_1".into(),
+                            name: "screenshot".into(),
+                            input: serde_json::json!({}),
+                            cache_control: None,
+                        }],
+                    },
+                },
+                AnthropicMessage {
+                    role: AnthropicRole::User,
+                    content: AnthropicMessageContent::Blocks {
+                        content: vec![
+                            AnthropicContentBlock::Image {
+                                source: AnthropicImageSource {
+                                    source_type: "base64".into(),
+                                    media_type: "image/jpeg".into(),
+                                    data: "/9j/4AAQ".into(),
+                                },
+                            },
+                            AnthropicContentBlock::ToolResult {
+                                tool_use_id: "tool_1".into(),
+                                content: Some(ToolResultContent::Text(
+                                    "screenshot taken".into(),
+                                )),
+                                is_error: None,
+                                cache_control: None,
+                            },
+                        ],
+                    },
+                },
+            ],
+            system: None,
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            stop_sequences: None,
+            stream: false,
+            metadata: None,
+            tools: None,
+            tool_choice: None,
+            cache_control: None,
+            thinking: None,
+            service_tier: None,
+            container: None,
+            output_config: None,
+        };
+
+        let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
+        // user("What's the weather?"), assistant(tool_use), user(image), tool("screenshot taken")
+        assert_eq!(chat_req.inner.messages.len(), 4);
+
+        // Third message: user with image (Array format, flushed before tool_result)
+        match &chat_req.inner.messages[2] {
+            ChatCompletionRequestMessage::User(u) => match &u.content {
+                ChatCompletionRequestUserMessageContent::Array(parts) => {
+                    assert_eq!(parts.len(), 1);
+                    assert!(matches!(
+                        &parts[0],
+                        ChatCompletionRequestUserMessageContentPart::ImageUrl(_)
+                    ));
+                }
+                other => panic!("expected Array content for image, got {other:?}"),
+            },
+            other => panic!("expected user message, got {other:?}"),
+        }
+
+        // Fourth message: tool result
+        assert!(matches!(
+            &chat_req.inner.messages[3],
+            ChatCompletionRequestMessage::Tool(_)
+        ));
     }
 }
