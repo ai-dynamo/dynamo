@@ -280,7 +280,7 @@ For full documentation on implementing KV event publishing for custom inference 
 For deployments with multiple worker pools, the **Global Router** enables hierarchical routing by sitting between the frontend and local routers. It selects the appropriate pool for each request based on configurable policies, supporting disaggregated topologies where pools are tuned for different workload characteristics.
 
 - **Component details**: [`components/src/dynamo/global_router/`](https://github.com/ai-dynamo/dynamo/tree/main/components/src/dynamo/global_router/)
-- **Example**: [`examples/hierarchical_planner/`](https://github.com/ai-dynamo/dynamo/tree/main/examples/hierarchical_planner/)
+- **Example**: [`examples/global_planner/`](https://github.com/ai-dynamo/dynamo/tree/main/examples/global_planner/)
 
 ## See Also
 

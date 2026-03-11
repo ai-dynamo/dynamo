@@ -15,6 +15,8 @@ When both modes are enabled, throughput-based scaling provides a lower bound on 
 
 > **New to the Planner?** Start with the [SLA Planner Quick Start Guide](planner-guide.md) for a complete workflow including profiling and deployment.
 
+> **Need multi-DGD coordination?** See [Global Planner Deployment Guide](global-planner.md). It covers both shared-policy coordination across multiple DGDs and the one-endpoint multi-pool pattern.
+
 ## Feature Matrix
 
 | Feature | Throughput-Based | Load-Based (Experimental) |
@@ -84,6 +86,7 @@ kubectl apply -f examples/backends/vllm/deploy/disagg_planner.yaml -n $NAMESPACE
 | Document | Description |
 |----------|-------------|
 | [Planner Guide](planner-guide.md) | Deployment, configuration, integration, troubleshooting |
+| [Global Planner Deployment Guide](global-planner.md) | When to use `GlobalPlanner`, including multi-model coordination and single-endpoint multi-pool deployments |
 | [Planner Examples](planner-examples.md) | DGDR YAML examples, sample configurations, advanced patterns |
 | [SLA-Driven Profiling](../profiler/profiler-guide.md) | Pre-deployment profiling process and configuration |
 | [Planner Design](../../design-docs/planner-design.md) | Architecture deep-dive for contributors |
