@@ -193,20 +193,11 @@ etcd --listen-client-urls http://0.0.0.0:2379 \
      --data-dir /tmp/etcd &
 sleep 2
 
-echo "[setup] Patching TRT-LLM Qwen3-VL multimodal_embedding bug (rc5 -> is not None fix)..."
-TRTLLM_QWEN3VL="/opt/dynamo/venv/lib/python3.12/site-packages/tensorrt_llm/_torch/models/modeling_qwen3vl.py"
-if grep -q 'or data.get("multimodal_embedding")$' "$TRTLLM_QWEN3VL" 2>/dev/null; then
-    sed -i 's/or data.get("multimodal_embedding")$/or data.get("multimodal_embedding") is not None/' "$TRTLLM_QWEN3VL"
-    echo "  Patched: $(grep -n 'multimodal_embedding.*is not None' "$TRTLLM_QWEN3VL")"
-else
-    echo "  Already patched or file not found — skipping"
-fi
-
 echo "[setup] Sanity check..."
 deploy/sanity_check.py --runtime-check-only
 
-echo "[setup] Installing aiperf..."
-uv pip install aiperf
+echo "[setup] Installing benchmark dependencies..."
+uv pip install aiperf psutil
 
 # ── Generate input data if missing ───────────────────────────────────
 if [[ ! -f "/workspace/$INPUT_FILE" ]]; then
