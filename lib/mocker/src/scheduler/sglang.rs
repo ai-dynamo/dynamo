@@ -107,18 +107,22 @@ struct SglangConfig {
 
 impl SglangConfig {
     fn from_args(args: &MockEngineArgs) -> Self {
-        let schedule_conservativeness = args.sglang_schedule_conservativeness.unwrap_or(1.0);
+        let sglang = args.sglang.as_ref();
+        let schedule_conservativeness = sglang
+            .and_then(|s| s.schedule_conservativeness)
+            .unwrap_or(1.0);
         let init_new_token_ratio = DEFAULT_INIT_NEW_TOKEN_RATIO * schedule_conservativeness;
         let min_new_token_ratio = init_new_token_ratio * DEFAULT_MIN_NEW_TOKEN_RATIO_FACTOR;
         let decay_steps = DEFAULT_NEW_TOKEN_RATIO_DECAY_STEPS;
         let decay_step = (init_new_token_ratio - min_new_token_ratio) / decay_steps;
 
-        let schedule_policy = match args.sglang_schedule_policy.as_deref() {
+        let policy_str = sglang.and_then(|s| s.schedule_policy.as_deref());
+        let schedule_policy = match policy_str {
             Some("lpm") => SchedulePolicy::Lpm,
             Some("fifo") | Some("fcfs") | None => SchedulePolicy::Fifo,
             Some(other) => {
                 tracing::warn!(
-                    "Unknown sglang_schedule_policy '{}', falling back to FIFO",
+                    "Unknown sglang schedule_policy '{}', falling back to FIFO",
                     other
                 );
                 SchedulePolicy::Fifo
@@ -127,14 +131,14 @@ impl SglangConfig {
 
         Self {
             schedule_policy,
-            max_prefill_tokens: args
-                .sglang_max_prefill_tokens
+            max_prefill_tokens: sglang
+                .and_then(|s| s.max_prefill_tokens)
                 .unwrap_or(DEFAULT_MAX_PREFILL_TOKENS),
-            chunked_prefill_size: args
-                .sglang_chunked_prefill_size
+            chunked_prefill_size: sglang
+                .and_then(|s| s.chunked_prefill_size)
                 .unwrap_or(DEFAULT_CHUNKED_PREFILL_SIZE),
-            clip_max_new_tokens: args
-                .sglang_clip_max_new_tokens
+            clip_max_new_tokens: sglang
+                .and_then(|s| s.clip_max_new_tokens)
                 .unwrap_or(DEFAULT_CLIP_MAX_NEW_TOKENS),
             init_new_token_ratio,
             min_new_token_ratio,
@@ -142,7 +146,7 @@ impl SglangConfig {
             perf_model: args.perf_model.clone(),
             speedup_ratio: args.speedup_ratio,
             worker_type: args.worker_type,
-            page_size: args.sglang_page_size.unwrap_or(1),
+            page_size: sglang.and_then(|s| s.page_size).unwrap_or(1),
         }
     }
 }
@@ -431,7 +435,11 @@ fn get_new_batch_prefill(
         waiting.push_front(req);
     }
 
-    AdmitResult { can_run, total_new_tokens, oom }
+    AdmitResult {
+        can_run,
+        total_new_tokens,
+        oom,
+    }
 }
 
 async fn simulate_prefill(total_new_tokens: usize, num_reqs: usize, config: &SglangConfig) {
@@ -567,7 +575,9 @@ async fn simulate_decode(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::protocols::SglangArgs;
     use crate::scheduler::SchedulerHandle;
+    use rstest::rstest;
 
     #[tokio::test]
     async fn test_sglang_scheduler_fifo_ordering() {
@@ -766,5 +776,50 @@ mod tests {
         // Simulate OOM reset
         ratio = config.init_new_token_ratio;
         assert!((ratio - 0.7).abs() < 0.001);
+    }
+
+    /// Stress test mirroring vLLM's `test_scheduler_token_generation_patterns`.
+    /// Sends 200 requests × 1000 input × 100 output under heavy eviction pressure
+    /// and parametrises across `(shared_tokens, schedule_policy, page_size)`.
+    #[rstest]
+    #[case::case_1(false, "fifo", 1)]
+    #[case::case_2(true, "fifo", 1)]
+    #[case::case_3(false, "lpm", 1)]
+    #[case::case_4(true, "lpm", 1)]
+    #[case::case_5(false, "fifo", 4)]
+    #[case::case_6(true, "fifo", 4)]
+    #[case::case_7(false, "lpm", 4)]
+    #[case::case_8(true, "lpm", 4)]
+    #[tokio::test]
+    async fn test_sglang_scheduler_token_generation_patterns(
+        #[case] use_shared_tokens: bool,
+        #[case] schedule_policy: &str,
+        #[case] page_size: usize,
+    ) {
+        let (output_tx, mut output_rx) = mpsc::unbounded_channel::<OutputSignal>();
+
+        let args = MockEngineArgs::builder()
+            .num_gpu_blocks(500)
+            .block_size(64)
+            .speedup_ratio(10.0)
+            .sglang(Some(SglangArgs {
+                schedule_policy: Some(schedule_policy.to_string()),
+                page_size: Some(page_size),
+                ..Default::default()
+            }))
+            .build()
+            .unwrap();
+
+        let scheduler = SglangScheduler::new(args, 0, Some(output_tx), None, None);
+
+        crate::scheduler::test_utils::assert_scheduler_completes_all(
+            &scheduler,
+            &mut output_rx,
+            200,
+            1000,
+            100,
+            use_shared_tokens,
+        )
+        .await;
     }
 }
