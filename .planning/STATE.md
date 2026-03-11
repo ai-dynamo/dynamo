@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: planning
-stopped_at: Completed 04-02-PLAN.md
-last_updated: "2026-03-11T18:56:21.726Z"
+stopped_at: Completed 04-03-PLAN.md
+last_updated: "2026-03-11T19:14:42.236Z"
 last_activity: 2026-03-11 — Roadmap created
 progress:
   total_phases: 4
   completed_phases: 3
   total_plans: 10
-  completed_plans: 8
+  completed_plans: 9
   percent: 70
 ---
 
@@ -58,6 +58,7 @@ Progress: [███████░░░] 70%
 | Phase 03-compilation-gate P01 | 3min | 2 tasks | 1 files |
 | Phase 04-test-porting P01 | 5min | 2 tasks | 3 files |
 | Phase 04-test-porting P02 | 10min | 2 tasks | 2 files |
+| Phase 04-test-porting P03 | 20min | 2 tasks | 14 files |
 
 ## Accumulated Context
 
@@ -86,6 +87,8 @@ Recent decisions affecting current work:
 - [Phase 04-01]: Phase A skeleton pattern: testing/mod.rs created with all submodule declarations commented out so cargo check passes before Plan 02/03 create the actual files
 - [Phase 04-02]: super::{managers, nova, physical, token_blocks} replaced with kvbm_engine::testing::{managers, messenger, physical, token_blocks} individual imports — nova module renamed to messenger
 - [Phase 04-02]: leader_nova field kept as Arc<Messenger>; velo::WorkerAddress imported directly for struct field type
+- [Phase 04-test-porting]: rand_chacha added to workspace deps (v0.9) and kvbm-connector testing feature — required by MockModelRunner in mock/model.rs
+- [Phase 04-test-porting]: MockModelRunner kept live (no #[cfg(TODO)]); only Scheduler-dependent code gated — model.rs has pure rand dependency
 
 ### Pending Todos
 
@@ -97,6 +100,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-11T18:56:21.722Z
-Stopped at: Completed 04-02-PLAN.md
+Last session: 2026-03-11T19:14:42.232Z
+Stopped at: Completed 04-03-PLAN.md
 Resume file: None
