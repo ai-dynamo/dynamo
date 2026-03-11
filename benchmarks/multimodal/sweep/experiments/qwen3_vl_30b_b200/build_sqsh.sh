@@ -10,8 +10,8 @@
 set -euo pipefail
 
 ACCOUNT=""
-PARTITION="batch"
-TIME="01:00:00"
+PARTITION="backfill"
+TIME="00:30:00"
 LOCAL_IMAGE="/lustre/fsw/core_dlfw_ci/kprashanth/trtllm_bench_rc7_post1.sqsh"
 IMAGE="gitlab-master.nvidia.com/dl/ai-dynamo/dynamo:prashanth-trtllm-rc7-post1"
 
