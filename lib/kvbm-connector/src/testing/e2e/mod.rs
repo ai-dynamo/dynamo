@@ -9,14 +9,14 @@
 #[cfg(test)]
 mod find_blocks;
 
-// TODO: s3 feature not declared in kvbm-connector. Disabled until s3 is added.
-#[cfg(TODO)]
-mod s3_object;
+// // TODO: s3 feature not declared in kvbm-connector. Disabled until s3 is added.
+// #[cfg(TODO)]
+// mod s3_object;
 
 #[cfg(test)]
 mod tests {
-    use kvbm_physical::transfer::FillPattern;
     use crate::testing::connector::{ConnectorTestConfig, TestConnectorCluster};
+    use kvbm_physical::transfer::FillPattern;
     use std::time::Duration;
     use tokio::time::timeout;
 

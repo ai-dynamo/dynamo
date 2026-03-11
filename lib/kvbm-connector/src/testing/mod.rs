@@ -16,12 +16,9 @@
 pub mod connector;
 
 pub use connector::{
-    ConnectorTestConfig,
-    TestConnectorInstance,
-    TestConnectorCluster,
-    TestConnectorWorker,
+    ConnectorTestConfig, TestConnectorCluster, TestConnectorInstance, TestConnectorWorker,
 };
 
 pub mod e2e;
 
-pub mod scheduler;
+// pub mod scheduler;

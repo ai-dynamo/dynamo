@@ -15,7 +15,7 @@
 //!    - CUDA will ensure that the the next attention layer will not start until the the onboarding for that layer
 //!      is complete.
 //! 2. Inter-Pass Onboarding
-//!    - The NovaWorkerService performs this action via the wrapped DirectWorker.
+//!    - The VeloWorkerService performs this action via the wrapped DirectWorker.
 //!    - This is performed out-of-band from the forward pass execution and is driven by the leader.
 //!    - The completion of this action is another active message from the leader that updates the
 //!      finished_state of the worker which which be observed via calls to get_finished.
@@ -33,8 +33,8 @@
 //!    - Future optimization for P/D offloading from prefill to decode.
 
 mod init;
-mod velo;
 mod state;
+mod velo;
 
 use cudarc::driver::CudaStream;
 pub use velo::client::ConnectorWorkerClient;
@@ -54,12 +54,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
-use kvbm_common::LogicalLayoutHandle;
-use kvbm_physical::TransferOptions;
-use kvbm_engine::worker::{DirectWorker, WorkerTransfers};
 use crate::connector::leader::scheduler::KvConnectorMetadata;
 use crate::vllm::layout::determine_kv_layout;
 use crate::{BlockId, KvbmRuntime};
+use kvbm_common::LogicalLayoutHandle;
+use kvbm_engine::worker::{DirectWorker, WorkerTransfers};
+use kvbm_physical::TransferOptions;
 
 pub trait ConnectorWorkerInterface: Send + Sync {
     /// Register KV cache tensors (deferred mode - caches state for later).
