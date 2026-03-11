@@ -1030,7 +1030,11 @@ mod tests {
         ));
         assert_eq!(
             event_types(&events1),
-            vec!["content_block_start", "content_block_delta", "content_block_stop"],
+            vec![
+                "content_block_start",
+                "content_block_delta",
+                "content_block_stop"
+            ],
             "first tool call closed inline"
         );
 
@@ -1042,7 +1046,11 @@ mod tests {
         ));
         assert_eq!(
             event_types(&events2),
-            vec!["content_block_start", "content_block_delta", "content_block_stop"],
+            vec![
+                "content_block_start",
+                "content_block_delta",
+                "content_block_stop"
+            ],
             "second tool call closed inline"
         );
 
