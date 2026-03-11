@@ -259,6 +259,7 @@ def post_pr_comment(repo, pr_number, results, run_id, run_url, workflow_name, to
     else:
         url = f"https://api.github.com/repos/{repo}/issues/{pr_number}/comments"
         resp = requests.post(url, headers=headers, json={"body": body})
+    print(f"  Comment API response: {resp.status_code} {resp.text[:500]}")
     resp.raise_for_status()
 
 
