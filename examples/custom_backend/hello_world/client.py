@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import asyncio
+import os
 
 import uvloop
 
@@ -23,7 +24,8 @@ from dynamo.runtime import DistributedRuntime, dynamo_worker
 @dynamo_worker()
 async def worker(runtime: DistributedRuntime):
     # Get endpoint
-    endpoint = runtime.endpoint("hello_world.backend.generate")
+    namespace = os.environ.get("DYN_TEST_HELLO_WORLD_NAMESPACE", "hello_world")
+    endpoint = runtime.endpoint(f"{namespace}.backend.generate")
 
     # Create client and wait for service to be ready
     client = await endpoint.client()

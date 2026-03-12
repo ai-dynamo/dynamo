@@ -14,7 +14,15 @@
 # limitations under the License.
 
 
+import pytest
+
 from dynamo._core import get_reasoning_parser_names, get_tool_parser_names
+
+pytestmark = [
+    pytest.mark.gpu_0,
+    pytest.mark.pre_merge,
+    pytest.mark.unit,
+]
 
 
 def test_get_tool_parser_names():

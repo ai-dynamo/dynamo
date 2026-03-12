@@ -8,10 +8,48 @@ Tests for the hello_world example in examples/custom_backend/hello_world
 import asyncio
 import os
 import subprocess
+import uuid
 
 import pytest
 
-pytestmark = pytest.mark.pre_merge
+pytestmark = [
+    pytest.mark.gpu_0,
+    pytest.mark.pre_merge,
+    pytest.mark.unit,
+]
+
+
+async def wait_for_output(process, expected_text, timeout=10):
+    """Read process output until the expected text appears."""
+    if process.stdout is None:
+        raise RuntimeError("Process stdout was not captured")
+
+    output = ""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+
+    while True:
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            raise TimeoutError(
+                f"Timed out waiting for '{expected_text}'. Output so far:\n{output}"
+            )
+
+        line = await asyncio.wait_for(
+            asyncio.to_thread(process.stdout.readline),
+            timeout=remaining,
+        )
+
+        if not line:
+            if process.poll() is not None:
+                raise RuntimeError(
+                    f"Process exited before '{expected_text}' appeared. Output:\n{output}"
+                )
+            continue
+
+        output += line
+        if expected_text in output:
+            return output
 
 
 @pytest.fixture(scope="module")
@@ -26,57 +64,81 @@ def example_dir():
 
 
 @pytest.fixture(scope="module")
-async def server_process(example_dir):
+def example_env():
+    """Environment for isolated hello_world example subprocesses."""
+    env = os.environ.copy()
+    env["DYN_TEST_HELLO_WORLD_NAMESPACE"] = f"hello_world_test_{uuid.uuid4().hex}"
+    env["DYN_TEST_HELLO_WORLD_WORD_DELAY_SEC"] = "0.2"
+    return env
+
+
+def stop_process(process):
+    """Terminate a process and collect any remaining output."""
+    process.terminate()
+    try:
+        stdout, _ = process.communicate(timeout=1)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        stdout, _ = process.communicate(timeout=1)
+    return stdout
+
+
+@pytest.fixture(scope="module")
+async def server_process(example_dir, example_env):
     """Start the hello_world server and clean up after test"""
     server_proc = subprocess.Popen(
-        ["python3", "hello_world.py"],
+        ["python3", "-u", "hello_world.py"],
         cwd=example_dir,
+        env=example_env,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
     )
 
-    # Wait for server to start
-    await asyncio.sleep(1)
+    try:
+        await wait_for_output(server_proc, "Successfully registered")
+    except Exception:
+        stop_process(server_proc)
+        raise
 
     yield server_proc
 
     # Cleanup
-    server_proc.terminate()
-    server_proc.wait(timeout=1)
+    stop_process(server_proc)
 
 
-async def run_client(example_dir):
+async def run_client(example_dir, example_env):
     """Run the client for a specified duration and capture its output"""
+
+    # -u means unbuffered mode
     client_proc = subprocess.Popen(
         ["python3", "-u", "client.py"],
         cwd=example_dir,
+        env=example_env,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
     )
 
-    # Let it run for 5 seconds
-    await asyncio.sleep(5)
+    # Let it run long enough for one full response cycle.
+    await asyncio.sleep(2)
 
     # Terminate the client
-    client_proc.terminate()
-    stdout, _ = client_proc.communicate(timeout=1)
+    stdout = stop_process(client_proc)
 
     return stdout
 
 
 @pytest.mark.asyncio
-async def test_hello_world(example_dir, server_process):
+async def test_hello_world(example_dir, example_env, server_process):
     """Test that hello_world starts and its client produces the expected output sequence"""
     # Run the client for 5 seconds
-    client_output = await run_client(example_dir)
+    client_output = await run_client(example_dir, example_env)
 
     # Split output into lines and strip whitespace, filter out empty lines
     lines = [line.strip() for line in client_output.split("\n") if line.strip()]
 
-    # Each client iteration produces 4 lines in about 4 seconds
-    # The client ran for 5 seconds so the first iteration is expected to be completed
+    # Under the test-only fast path, one iteration completes within the 2s client window.
     # Check that all 4 expected lines appear in the output
     expected_lines = ["Hello world!", "Hello sun!", "Hello moon!", "Hello star!"]
     for expected_line in expected_lines:

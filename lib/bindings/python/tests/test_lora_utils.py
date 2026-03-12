@@ -5,6 +5,12 @@ import pytest
 
 from dynamo.llm import lora_name_to_id
 
+pytestmark = [
+    pytest.mark.gpu_0,
+    pytest.mark.pre_merge,
+    pytest.mark.unit,
+]
+
 max_int32 = 0x7FFFFFFF
 
 

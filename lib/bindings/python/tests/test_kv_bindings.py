@@ -21,7 +21,11 @@ import pytest
 
 from dynamo.llm import RadixTree
 
-pytestmark = pytest.mark.pre_merge
+pytestmark = [
+    pytest.mark.gpu_0,
+    pytest.mark.pre_merge,
+    pytest.mark.unit,
+]
 
 
 @pytest.mark.timeout(5)  # Expected: ~1s, timeout set to 5x for safety

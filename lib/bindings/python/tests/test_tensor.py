@@ -11,6 +11,12 @@ import uvloop
 from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_model
 from dynamo.runtime import DistributedRuntime
 
+pytestmark = [
+    pytest.mark.gpu_0,
+    pytest.mark.pre_merge,
+    pytest.mark.unit,
+]
+
 TEST_END_TO_END = os.environ.get("TEST_END_TO_END", 0)
 
 

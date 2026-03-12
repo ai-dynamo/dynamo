@@ -5,7 +5,11 @@ import pytest
 
 from dynamo.llm import HttpError
 
-pytestmark = pytest.mark.pre_merge
+pytestmark = [
+    pytest.mark.gpu_0,
+    pytest.mark.pre_merge,
+    pytest.mark.unit,
+]
 
 
 def test_raise_http_error():
