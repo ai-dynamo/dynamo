@@ -38,6 +38,12 @@ from dynamo.runtime import Client, DistributedRuntime
 from .prepost import StreamingPostProcessor, preprocess_chat_request
 from .utils import random_uuid
 
+
+def _is_settable(cls: type, name: str) -> bool:
+    """Return True if *name* on *cls* is not a read-only property."""
+    attr = getattr(cls, name, None)
+    return not (isinstance(attr, property) and attr.fset is None)
+
 logger = logging.getLogger(__name__)
 
 
@@ -145,12 +151,10 @@ class VllmProcessor:
             max_tokens=max_tokens,
         )
         # generation_config.json
-        # Skip eos_token_id: vLLM 0.17.0 made SamplingParams.eos_token_id a
-        # read-only property; eos tokens are handled via eos_token_ids below.
+        # Skip read-only properties (e.g. eos_token_id became read-only in
+        # vLLM 0.17.0); eos tokens are handled via eos_token_ids separately.
         for k, v in self.input_processor.generation_config_fields.items():
-            if k == "eos_token_id":
-                continue
-            if hasattr(sampling_params, k):
+            if hasattr(sampling_params, k) and _is_settable(SamplingParams, k):
                 setattr(sampling_params, k, v)
 
         # User request: copy fields supported by both request schema and
@@ -193,6 +197,7 @@ class VllmProcessor:
             request_id,
             prompt_inputs,
             sampling_params,
+            supported_tasks=("generate",),
             # arrival_time: float | None = None,
             # lora_request: LoRARequest | None = None,
             # tokenization_kwargs: dict[str, Any] | None = None,
