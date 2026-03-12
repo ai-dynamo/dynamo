@@ -192,8 +192,9 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 
 			// Update the hash to prevent repeated warnings
 			hash := dynamo.ComputeDGDWorkersSpecHash(dynamoDeployment)
+			patch := client.MergeFrom(dynamoDeployment.DeepCopy())
 			r.setCurrentWorkerHash(dynamoDeployment, hash)
-			if updateErr := r.Update(ctx, dynamoDeployment); updateErr != nil {
+			if updateErr := r.Patch(ctx, dynamoDeployment, patch); updateErr != nil {
 				logger.Error(updateErr, "Failed to update worker hash for unsupported pathway")
 			}
 		}

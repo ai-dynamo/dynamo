@@ -91,8 +91,9 @@ func (r *DynamoGraphDeploymentReconciler) initializeWorkerHashIfNeeded(
 		}
 
 		// Set sentinel hash — next reconcile triggers a real rolling update from "legacy" -> computed hash
+		patch := client.MergeFrom(dgd.DeepCopy())
 		r.setCurrentWorkerHash(dgd, consts.LegacyWorkerHash)
-		if err := r.Update(ctx, dgd); err != nil {
+		if err := r.Patch(ctx, dgd, patch); err != nil {
 			return fmt.Errorf("failed to set legacy worker hash: %w", err)
 		}
 
@@ -103,9 +104,10 @@ func (r *DynamoGraphDeploymentReconciler) initializeWorkerHashIfNeeded(
 
 	// Normal first deploy — set the actual computed hash
 	hash := dynamo.ComputeDGDWorkersSpecHash(dgd)
+	patch := client.MergeFrom(dgd.DeepCopy())
 	r.setCurrentWorkerHash(dgd, hash)
 
-	if err := r.Update(ctx, dgd); err != nil {
+	if err := r.Patch(ctx, dgd, patch); err != nil {
 		return fmt.Errorf("failed to initialize worker hash: %w", err)
 	}
 
@@ -229,8 +231,9 @@ func (r *DynamoGraphDeploymentReconciler) reconcileRollingUpdate(
 		if err == nil && newInfo.TotalReadyWorkers() > 0 {
 			logger.Info("Updating stale worker hash annotation",
 				"prevWorkerHash", prevWorkerHash, "newHash", newWorkerHash)
+			patch := client.MergeFrom(dgd.DeepCopy())
 			r.setCurrentWorkerHash(dgd, newWorkerHash)
-			return r.Update(ctx, dgd)
+			return r.Patch(ctx, dgd, patch)
 		}
 		// New spec change: reset to start a proper rolling update cycle with surge/drain.
 		logger.Info("New worker spec change detected, starting new rolling update cycle",
@@ -421,8 +424,9 @@ func (r *DynamoGraphDeploymentReconciler) completeRollingUpdate(
 	}
 
 	// Update the current worker hash to the new hash
+	patch := client.MergeFrom(dgd.DeepCopy())
 	r.setCurrentWorkerHash(dgd, newWorkerHash)
-	if err := r.Update(ctx, dgd); err != nil {
+	if err := r.Patch(ctx, dgd, patch); err != nil {
 		return fmt.Errorf("failed to update current worker hash: %w", err)
 	}
 
