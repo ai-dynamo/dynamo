@@ -63,7 +63,7 @@ pub trait FrameTransport: Send + Sync {
 ///
 /// The `recv` method takes `&mut self` — a [`FrameReader`] is exclusively
 /// owned by a single reader task and is not shared across threads.
-pub trait FrameReader: Send {
+pub trait FrameReader: Send + Sync {
     /// Receive the next frame.
     ///
     /// Returns:
