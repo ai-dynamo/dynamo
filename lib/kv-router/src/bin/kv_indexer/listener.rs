@@ -334,8 +334,10 @@ async fn zmq_recv_loop(
                 }
 
                 // After replay, watermark may have advanced past the current
-                // batch — skip to avoid double-apply.
-                if watermark.load(Ordering::Acquire) >= seq {
+                // batch — skip to avoid double-apply. Exclude the sentinel
+                // (WATERMARK_UNSET) so the very first message is not skipped.
+                let current_wm = watermark.load(Ordering::Acquire);
+                if current_wm != WATERMARK_UNSET && current_wm >= seq {
                     continue;
                 }
 
