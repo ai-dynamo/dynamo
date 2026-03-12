@@ -8,7 +8,7 @@ This document provides an in-depth look at the architecture, components, framewo
 
 ## KVBM Components
 
-![Internal Components of Dynamo KVBM](../assets/img/kvbm-components.png)
+![Internal Components of Dynamo KVBM](../assets/img/kvbm-components.svg)
 
 
 *Internal Components of Dynamo KVBM*
