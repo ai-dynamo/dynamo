@@ -1219,6 +1219,9 @@ class BaseWorkerHandler(ABC):
                 request_id,
                 lora_request,
             )
+            accumulated_true_decode = 0
+            decode_start_time = None
+            decode_count = 0
             gen = self.engine_client.generate(
                 prompt,
                 sampling_params,
@@ -1232,6 +1235,10 @@ class BaseWorkerHandler(ABC):
             num_output_tokens_so_far = 0
             async for res in gen:
                 # res is vllm's RequestOutput
+                if decode_start_time is not None:
+                    now = time.perf_counter()
+                    accumulated_true_decode += now - decode_start_time
+                    decode_count += 1
 
                 if not res.outputs:
                     self._log_with_lora_context(
@@ -1278,6 +1285,7 @@ class BaseWorkerHandler(ABC):
                 if output.stop_reason:
                     out["stop_reason"] = output.stop_reason
                 yield out
+                decode_start_time = time.perf_counter()
                 num_output_tokens_so_far = next_total_toks
 
         except EngineDeadError as e:
@@ -1285,6 +1293,10 @@ class BaseWorkerHandler(ABC):
             logger.warning("Initiating Dynamo Runtime shutdown.")
             self.runtime.shutdown()
             os._exit(1)
+        if decode_count > 0:
+            logger.info(
+                f"[DECODE] request: {request_id} true decode (engine decode) time {accumulated_true_decode:.4f} seconds total, {decode_count} responses, {accumulated_true_decode / decode_count:.4f} seconds per response"
+            )
 
 
 class DecodeWorkerHandler(BaseWorkerHandler):

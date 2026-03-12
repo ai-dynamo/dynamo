@@ -3,6 +3,7 @@
 
 import copy
 import logging
+import time
 import uuid
 from collections import defaultdict
 from typing import Any
@@ -262,38 +263,54 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
         rng_ttft=None,
     ):
         """Run prefill and decode on this worker (aggregated mode)."""
-        lora_request = self._resolve_lora_request(request.model)
-        gen = self.engine_client.generate(
-            prompt=TokensPrompt(
-                prompt_token_ids=request.engine_prompt["prompt_token_ids"],
-                multi_modal_data=multi_modal_data,
-            ),
-            sampling_params=request.sampling_params,
-            request_id=request.request_id,
-            lora_request=lora_request,
-        )
+        with time_and_log_code_section(
+            f"[PREFILL] request: {request.request_id} prefill time"
+        ) as prefill_timer:
+            lora_request = self._resolve_lora_request(request.model)
+            gen = self.engine_client.generate(
+                prompt=TokensPrompt(
+                    prompt_token_ids=request.engine_prompt["prompt_token_ids"],
+                    multi_modal_data=multi_modal_data,
+                ),
+                sampling_params=request.sampling_params,
+                request_id=request.request_id,
+                lora_request=lora_request,
+            )
 
-        num_output_tokens_so_far = 0
-        first_token = True
-        try:
-            async for response in gen:
+            num_output_tokens_so_far = 0
+            first_token = True
+            accumulated_true_decode = 0
+            decode_start_time = None
+            decode_count = 0
+            try:
+                async for response in gen:
+                    if first_token:
+                        prefill_timer.stop_interval()  # Log time to first token
+                        if rng_ttft is not None:
+                            _nvtx.end_range(rng_ttft)
+                        first_token = False
+                    logger.debug(
+                        f"Response kv_transfer_params: {response.kv_transfer_params}"
+                    )
+                    logger.debug(
+                        f"length of expanded prompt ids: {len(response.prompt_token_ids)}"
+                    )
+                    if decode_start_time is not None:
+                        now = time.perf_counter()
+                        accumulated_true_decode += now - decode_start_time
+                        decode_count += 1
+                    yield self._format_engine_output(response, num_output_tokens_so_far)
+                    if response.outputs:
+                        num_output_tokens_so_far = len(response.outputs[0].token_ids)
+                    decode_start_time = time.perf_counter()
+            finally:
+                if decode_count > 0:
+                    logger.info(
+                        f"[PREFILL] request: {request.request_id} true decode (engine decode) time {accumulated_true_decode:.4f} seconds total, {decode_count} responses, {accumulated_true_decode / decode_count:.4f} seconds per response"
+                    )
                 if first_token:
                     if rng_ttft is not None:
                         _nvtx.end_range(rng_ttft)
-                    first_token = False
-                logger.debug(
-                    f"Response kv_transfer_params: {response.kv_transfer_params}"
-                )
-                logger.debug(
-                    f"length of expanded prompt ids: {len(response.prompt_token_ids)}"
-                )
-                yield self._format_engine_output(response, num_output_tokens_so_far)
-                if response.outputs:
-                    num_output_tokens_so_far = len(response.outputs[0].token_ids)
-        finally:
-            if first_token:
-                if rng_ttft is not None:
-                    _nvtx.end_range(rng_ttft)
 
     # ── Disaggregated generation (prefill here, decode remote) ───────
 
