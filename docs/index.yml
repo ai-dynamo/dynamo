@@ -61,11 +61,8 @@ navigation:
             path: kubernetes/autoscaling.md
           - page: Inference Gateway (GAIE)
             path: kubernetes/inference-gateway.md
-          - section: Checkpointing
-            path: kubernetes/snapshot/README.md
-            contents:
-              - page: Integration with Dynamo
-                path: kubernetes/snapshot/dynamo.md
+          - page: Snapshot
+            path: kubernetes/snapshot.md
       - section: Observability (K8s)
         contents:
           - page: Metrics
