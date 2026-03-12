@@ -231,7 +231,7 @@ jobs:
       matrix:
         arch: [amd64, arm64]
     name: Compliance frontend-${{ matrix.arch }}
-    runs-on: prod-default-small-v2
+    runs-on: ${{ matrix.arch == 'amd64' && 'prod-builder-amd-v1' || 'prod-tester-arm-v1' }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
