@@ -232,6 +232,74 @@ impl AnchorManager {
             .get_mut(&local_id)
             .and_then(|mut entry| entry.attachment.take())
     }
+
+    /// Attach a sender to an existing anchor, establishing the transport connection.
+    ///
+    /// This is the primary sender-side entry point (API-05). It:
+    /// 1. Validates the anchor exists and is unattached
+    /// 2. Calls `transport.connect()` to establish the write channel
+    /// 3. Atomically marks the anchor as attached
+    /// 4. Returns a [`StreamSender<T>`](crate::sender::StreamSender) for pushing typed frames
+    ///
+    /// The StreamSender writes to the entry's `frame_tx` so items flow directly
+    /// to the [`AnchorStream<T>`] consumer. The transport connection validates
+    /// network setup; the reader pump (Plan 03) will forward transport-received
+    /// frames to `frame_tx` for cross-worker flows.
+    ///
+    /// # Errors
+    /// - [`AttachError::AnchorNotFound`] if the handle is not in the registry
+    /// - [`AttachError::AlreadyAttached`] if another sender is already connected
+    /// - [`AttachError::TransportError`] if `transport.connect()` fails
+    pub async fn attach_stream_anchor<T: serde::Serialize>(
+        &self,
+        handle: StreamAnchorHandle,
+        endpoint: &str,
+        session_id: u64,
+    ) -> Result<crate::sender::StreamSender<T>, AttachError> {
+        let (_, local_id) = handle.unpack();
+
+        // Step 1: Quick check anchor exists and is unattached (drop ref before async)
+        {
+            let entry = self.registry.get(&local_id);
+            match entry {
+                None => return Err(AttachError::AnchorNotFound { handle }),
+                Some(e) if e.attachment.is_some() => {
+                    return Err(AttachError::AlreadyAttached { handle });
+                }
+                _ => {} // looks good, proceed
+            }
+        } // DashMap ref dropped here
+
+        // Step 2: Async connect OUTSIDE shard lock — validates transport setup
+        let _transport_tx = self
+            .transport
+            .connect(endpoint, local_id, session_id)
+            .await?; // maps to AttachError::TransportError via From<anyhow::Error>
+
+        // Step 3: Atomically set attachment under shard lock.
+        // Re-check under the entry guard to prevent TOCTOU.
+        use dashmap::mapref::entry::Entry;
+        match self.registry.entry(local_id) {
+            Entry::Vacant(_) => Err(AttachError::AnchorNotFound { handle }),
+            Entry::Occupied(mut occ) => {
+                let entry = occ.get_mut();
+                if entry.attachment.is_some() {
+                    Err(AttachError::AlreadyAttached { handle })
+                } else {
+                    // Clone the frame_tx so the StreamSender can write items
+                    // directly to the AnchorStream consumer.
+                    let frame_tx = entry.frame_tx.clone();
+
+                    // Mark as attached with a dummy receiver (Plan 03 will
+                    // change attachment to bool since the reader pump takes
+                    // ownership of the transport receiver separately).
+                    entry.attachment = Some(flume::bounded::<Vec<u8>>(1).1);
+
+                    Ok(crate::sender::StreamSender::new(frame_tx, handle))
+                }
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
