@@ -177,6 +177,8 @@ class GMSClientMemoryManager:
         Updates self._granted_lock_type based on granted lock type. Saves memory layout hash
         for stale detection if server is in committed state.
         """
+        if self._client is not None:
+            raise RuntimeError("Memory manager is already connected")
         self._client = _GMSClientSession(
             self.socket_path,
             lock_type=lock_type,
@@ -192,6 +194,8 @@ class GMSClientMemoryManager:
 
     def disconnect(self) -> None:
         """Close connection and release lock."""
+        if any(mapping.handle != 0 for mapping in self._mappings.values()):
+            raise RuntimeError("disconnect requires all mappings to be unmapped first")
         if self._client is not None:
             try:
                 self._client.close()
@@ -403,17 +407,26 @@ class GMSClientMemoryManager:
         if size <= 0:
             raise ValueError("size must be > 0 when allocation_id is None")
         alloc_id = self.allocate_handle(size, tag)
-        fd = self.export_handle(alloc_id)
-        aligned_size = align_to_granularity(size, self.granularity)
-        va = self.reserve_va(aligned_size)
         try:
+            fd = self.export_handle(alloc_id)
+            aligned_size = align_to_granularity(size, self.granularity)
+            va = self.reserve_va(aligned_size)
             self.map_va(fd, va, size, alloc_id, tag)
         except Exception as e:
-            cumem_address_free(va, aligned_size)
-            raise RuntimeError(
+            if "va" in locals():
+                cumem_address_free(va, aligned_size)
+            cleanup_error = None
+            try:
+                self.free_handle(alloc_id)
+            except Exception as cleanup_exc:
+                cleanup_error = cleanup_exc
+            error = (
                 f"create_mapping allocate path failed for allocation_id={alloc_id} "
-                f"va=0x{va:x}: {e}"
+                f"{f'va=0x{va:x}' if 'va' in locals() else 'va=<unreserved>'}: {e}"
             )
+            if cleanup_error is not None:
+                error = f"{error}; cleanup failed: {cleanup_error}"
+            raise RuntimeError(error)
         return va
 
     def destroy_mapping(self, va: int) -> None:
@@ -536,22 +549,38 @@ class GMSClientMemoryManager:
                 "reallocate_all_handles requires preserved VAs (call unmap_all_vas first)"
             )
 
-        reallocated = 0
-        for va, mapping in list(self._mappings.items()):
-            if mapping.handle != 0:
-                continue
+        reallocation_plan: list[tuple[int, LocalMapping, str]] = []
+        cleanup_failures: list[str] = []
+        try:
+            for va, mapping in list(self._mappings.items()):
+                if mapping.handle != 0:
+                    continue
 
-            # Allocate fresh handle on server (uses raw RPC to avoid re-aligning)
-            allocation_id, server_aligned = self._client_rpc.allocate(
-                mapping.aligned_size, tag
-            )
-            if int(server_aligned) != mapping.aligned_size:
-                raise RuntimeError(
-                    "GMS reallocation alignment mismatch: "
-                    f"{mapping.aligned_size} vs {server_aligned}"
+                allocation_id, server_aligned = self._client_rpc.allocate(
+                    mapping.aligned_size, tag
                 )
+                if int(server_aligned) != mapping.aligned_size:
+                    self.free_handle(allocation_id)
+                    raise RuntimeError(
+                        "GMS reallocation alignment mismatch: "
+                        f"{mapping.aligned_size} vs {server_aligned}"
+                    )
+                reallocation_plan.append((va, mapping, allocation_id))
+        except Exception as exc:
+            for _, _, allocation_id in reallocation_plan:
+                try:
+                    self.free_handle(allocation_id)
+                except Exception as cleanup_exc:
+                    cleanup_failures.append(f"{allocation_id}: {cleanup_exc}")
+            if cleanup_failures:
+                self.disconnect()
+                raise RuntimeError(
+                    f"{exc}; rollback failed for {cleanup_failures}; session closed"
+                ) from exc
+            raise
 
-            # Update tracking: new allocation_id, handle stays 0
+        reallocated = 0
+        for va, mapping, allocation_id in reallocation_plan:
             old_alloc_id = mapping.allocation_id
             self._inverse_mapping.pop(old_alloc_id, None)
             self._mappings[va] = mapping.with_allocation_id(allocation_id)

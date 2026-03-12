@@ -10,6 +10,7 @@ import shutil
 
 import requests
 
+from .common import DYNAMO_BIN
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.payloads import check_health_generate, check_models_api
@@ -45,7 +46,7 @@ class VLLMWithGMSProcess(ManagedProcess):
         )
         super().__init__(
             command=[
-                "python3",
+                "python",
                 "-m",
                 "dynamo.vllm",
                 "--model",
@@ -60,6 +61,7 @@ class VLLMWithGMSProcess(ManagedProcess):
             ],
             env={
                 **os.environ,
+                "PATH": f"{DYNAMO_BIN}:{os.environ.get('PATH', '')}",
                 "DYN_LOG": "debug",
                 "DYN_SYSTEM_PORT": str(system_port),
                 "VLLM_NIXL_SIDE_CHANNEL_PORT": str(nixl_port),
@@ -74,6 +76,7 @@ class VLLMWithGMSProcess(ManagedProcess):
             terminate_all_matching_process_names=False,
             stragglers=[],
             log_dir=log_dir,
+            display_name=engine_id,
         )
 
     def _is_ready(self, response) -> bool:
@@ -83,20 +86,22 @@ class VLLMWithGMSProcess(ManagedProcess):
             return False
 
     def sleep(self) -> dict:
-        """Put the engine to sleep, offloading weights from GPU memory."""
+        """Put the engine to sleep, offloading weights and KV cache."""
         r = requests.post(
             f"http://localhost:{self.system_port}/engine/sleep",
-            json={"level": 1},
+            json={"level": 2},
             timeout=30,
         )
         r.raise_for_status()
         logger.info(f"{self.engine_id} sleep: {r.json()}")
         return r.json()
 
-    def wake(self) -> dict:
-        """Wake the engine, reloading weights to GPU memory."""
+    def wake(self, timeout: int = 30) -> dict:
+        """Wake the engine, restoring weights and KV cache."""
         r = requests.post(
-            f"http://localhost:{self.system_port}/engine/wake_up", json={}, timeout=30
+            f"http://localhost:{self.system_port}/engine/wake_up",
+            json={"tags": ["weights", "kv_cache"]},
+            timeout=timeout,
         )
         r.raise_for_status()
         logger.info(f"{self.engine_id} wake: {r.json()}")

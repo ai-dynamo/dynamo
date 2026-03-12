@@ -21,6 +21,7 @@ from gpu_memory_service import (
     get_gms_client_memory_manager,
     get_or_create_gms_client_memory_manager,
 )
+from gpu_memory_service.client.torch.allocator import gms_use_mem_pool
 from gpu_memory_service.common.types import RequestedLockType
 from gpu_memory_service.common.utils import get_socket_path
 from gpu_memory_service.integrations.common import patch_empty_cache
@@ -71,9 +72,29 @@ class GMSWorker(Worker):
             scope="weights",
             tag="weights",
         )
-
         # Parent will set device again (harmless) and do memory checks
         super().init_device()
+
+    def initialize_from_config(self, kv_cache_config) -> None:
+        """Allocate KV cache with a dedicated RW-only GMS scope."""
+        from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized
+
+        ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
+
+        if not self.vllm_config.model_config.enable_sleep_mode:
+            self.model_runner.initialize_kv_cache(kv_cache_config)
+            return
+
+        device = self.local_rank
+        get_or_create_gms_client_memory_manager(
+            get_socket_path(device, "kv_cache"),
+            device,
+            mode=RequestedLockType.RW,
+            scope="kv_cache",
+            tag="kv_cache",
+        )
+        with gms_use_mem_pool("kv_cache", torch.device(f"cuda:{device}")):
+            self.model_runner.initialize_kv_cache(kv_cache_config)
 
     def load_model(self, *args, **kwargs) -> None:
         """Load model with corrected memory accounting.
@@ -110,24 +131,23 @@ class GMSWorker(Worker):
         """
         vLLM sleep implementation with GMS integration.
 
-        NOTE: `level` is a no-op here: weights are only unmapped (but remain in GPU memory).
         NOTE: We do NOT call super().sleep() because it tries to copy GPU buffers to CPU,
               which segfaults on already-unmapped GMS memory.
         """
         free_bytes_before = torch.cuda.mem_get_info()[0]
 
         # Unmap GMS weights: synchronize + unmap all VAs + disconnect
-        manager = get_gms_client_memory_manager("weights")
-        assert manager is not None, "GMS client is not initialized"
-        assert not manager.is_unmapped, "GMS weights are already unmapped"
-        manager.unmap_all_vas()
-        manager.disconnect()
+        weights_manager = get_gms_client_memory_manager("weights")
+        assert weights_manager is not None, "GMS weights client is not initialized"
+        assert not weights_manager.is_unmapped, "GMS weights are already unmapped"
+        weights_manager.unmap_all_vas()
+        weights_manager.disconnect()
 
-        # Sleep KV cache via CuMemAllocator
-        from vllm.device_allocator.cumem import CuMemAllocator
-
-        allocator = CuMemAllocator.get_instance()
-        allocator.sleep(offload_tags=tuple())
+        kv_cache_manager = get_gms_client_memory_manager("kv_cache")
+        assert kv_cache_manager is not None, "GMS KV cache client is not initialized"
+        assert not kv_cache_manager.is_unmapped, "GMS KV cache is already unmapped"
+        kv_cache_manager.unmap_all_vas()
+        kv_cache_manager.disconnect()
 
         free_bytes_after, total = torch.cuda.mem_get_info()
         freed_bytes = free_bytes_after - free_bytes_before
@@ -144,17 +164,21 @@ class GMSWorker(Worker):
             tags = ["weights", "kv_cache"]
 
         if "weights" in tags:
-            manager = get_gms_client_memory_manager("weights")
-            assert manager is not None, "GMS client is not initialized"
-            assert manager.is_unmapped, "GMS weights are not unmapped"
-            manager.connect(RequestedLockType.RO)
-            manager.remap_all_vas()
+            weights_manager = get_gms_client_memory_manager("weights")
+            assert weights_manager is not None, "GMS weights client is not initialized"
+            assert weights_manager.is_unmapped, "GMS weights are not unmapped"
+            weights_manager.connect(RequestedLockType.RO)
+            weights_manager.remap_all_vas()
 
         if "kv_cache" in tags:
-            from vllm.device_allocator.cumem import CuMemAllocator
-
-            allocator = CuMemAllocator.get_instance()
-            allocator.wake_up(tags=["kv_cache"])
+            kv_cache_manager = get_gms_client_memory_manager("kv_cache")
+            assert (
+                kv_cache_manager is not None
+            ), "GMS KV cache client is not initialized"
+            assert kv_cache_manager.is_unmapped, "GMS KV cache is not unmapped"
+            kv_cache_manager.connect(RequestedLockType.RW)
+            kv_cache_manager.reallocate_all_handles(tag="kv_cache")
+            kv_cache_manager.remap_all_vas()
 
             # Reinitialize FP8 KV scales if needed
             if self.cache_config.cache_dtype.startswith("fp8") and hasattr(
@@ -171,4 +195,6 @@ class GMSWorker(Worker):
         if tag == "weights":
             logger.debug("[GMS] Skipping CuMemAllocator for weights")
             return nullcontext()
+        if tag == "kv_cache":
+            return gms_use_mem_pool("kv_cache", torch.device("cuda", self.local_rank))
         return super()._maybe_get_memory_pool_context(tag)

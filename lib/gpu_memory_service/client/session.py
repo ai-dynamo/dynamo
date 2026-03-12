@@ -55,7 +55,14 @@ class _GMSClientSession:
         self._requested_lock_type = lock_type
         self._transport = _GMSRPCTransport(socket_path)
         self._transport.connect()
-        response = self._transport.handshake(lock_type, timeout_ms)
+        try:
+            response = self._transport.handshake(lock_type, timeout_ms)
+        except Exception:
+            try:
+                self._transport.close()
+            except Exception:
+                pass
+            raise
         self._initialize_from_handshake(response)
 
     def _initialize_from_handshake(self, response: HandshakeResponse) -> None:

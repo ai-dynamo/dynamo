@@ -3,13 +3,10 @@
 
 """Hybrid torch_memory_saver implementation for GPU Memory Service.
 
-This module provides a hybrid implementation that combines:
-1. GPU Memory Service allocator for "weights" tag (VA-stable unmap/remap, shared)
-2. Torch mempool mode for other tags like "kv_cache" (CPU backup, per-instance)
-
-The impl uses RW_OR_RO mode to connect to GMS:
-- First process gets RW lock and loads weights from disk
-- Subsequent processes get RO lock and import weights from metadata
+This module uses:
+1. GPU Memory Service for "weights" (shared RO/RW publish flow)
+2. GPU Memory Service for "kv_cache" (RW-only failover flow)
+3. torch_memory_saver for any remaining tags
 """
 
 from __future__ import annotations
@@ -19,7 +16,10 @@ from contextlib import contextmanager
 from typing import TYPE_CHECKING, Optional
 
 import torch
+from gpu_memory_service import get_or_create_gms_client_memory_manager
 from gpu_memory_service.client.torch.allocator import gms_use_mem_pool
+from gpu_memory_service.common.types import GrantedLockType, RequestedLockType
+from gpu_memory_service.common.utils import get_socket_path
 
 if TYPE_CHECKING:
     from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
@@ -39,54 +39,59 @@ def get_gms_memory_saver_impl() -> Optional["GMSMemorySaverImpl"]:
 
 
 class GMSMemorySaverImpl:
-    """Hybrid implementation: GMS for weights, torch mempool for KV cache.
-
-    Routes operations based on tag:
-    - "weights" or "model_weights": Handled by GMS allocator (VA-stable)
-    - Other tags (e.g., "kv_cache"): Delegated to torch mempool mode
-    """
+    """Hybrid implementation: GMS for weights and KV cache."""
 
     def __init__(
         self,
         torch_impl: "_TorchMemorySaverImpl",
-        socket_path: str,
         device_index: int,
         mode=None,
     ):
         self._torch_impl = torch_impl
-        self._socket_path = socket_path
         self._device_index = device_index
         self._requested_mode = mode
         self._disabled = False
         self._imported_weights_bytes: int = 0
 
-        self._allocator: Optional["GMSClientMemoryManager"]
+        self._weights_allocator: Optional["GMSClientMemoryManager"]
+        self._kv_cache_allocator: "GMSClientMemoryManager"
         self._mode: str
-        self._allocator, self._mode = self._init_allocator()
+        (
+            self._weights_allocator,
+            self._kv_cache_allocator,
+            self._mode,
+        ) = self._init_allocators()
 
         logger.info(
-            "[GMS] Initialized: weights=%s mode (device=%d, socket=%s)",
+            "[GMS] Initialized weights=%s mode, kv_cache=RW (device=%d)",
             self._mode.upper(),
             device_index,
-            socket_path,
         )
 
-    def _init_allocator(
+    def _init_allocators(
         self,
-    ) -> tuple[Optional["GMSClientMemoryManager"], str]:
+    ) -> tuple[
+        Optional["GMSClientMemoryManager"],
+        "GMSClientMemoryManager",
+        str,
+    ]:
         """Create allocator with mode from config (default: RW_OR_RO)."""
-        from gpu_memory_service import get_or_create_gms_client_memory_manager
-        from gpu_memory_service.common.types import GrantedLockType, RequestedLockType
-
         mode = self._requested_mode or RequestedLockType.RW_OR_RO
-        allocator = get_or_create_gms_client_memory_manager(
-            self._socket_path,
+        weights_allocator = get_or_create_gms_client_memory_manager(
+            get_socket_path(self._device_index, "weights"),
             self._device_index,
             mode=mode,
             scope="weights",
             tag="weights",
         )
-        granted_mode = allocator.granted_lock_type
+        kv_cache_allocator = get_or_create_gms_client_memory_manager(
+            get_socket_path(self._device_index, "kv_cache"),
+            self._device_index,
+            mode=RequestedLockType.RW,
+            scope="kv_cache",
+            tag="kv_cache",
+        )
+        granted_mode = weights_allocator.granted_lock_type
         if granted_mode == GrantedLockType.RW:
             actual_mode = "write"
         else:
@@ -96,7 +101,7 @@ class GMSMemorySaverImpl:
             actual_mode.upper(),
             self._device_index,
         )
-        return allocator, actual_mode
+        return weights_allocator, kv_cache_allocator, actual_mode
 
     def _is_weights_tag(self, tag: Optional[str]) -> bool:
         return tag in ("weights", "model_weights")
@@ -105,22 +110,28 @@ class GMSMemorySaverImpl:
         return self._mode
 
     def get_allocator(self) -> Optional["GMSClientMemoryManager"]:
-        return self._allocator
+        return self._weights_allocator
 
     @contextmanager
     def region(self, tag: str, enable_cpu_backup: bool):
         """Mark allocation region with tag."""
-        if not self._is_weights_tag(tag):
-            with self._torch_impl.region(tag=tag, enable_cpu_backup=enable_cpu_backup):
+        if self._is_weights_tag(tag):
+            if self._mode == "read":
+                yield
+                return
+
+            target_device = torch.device("cuda", self._device_index)
+            with gms_use_mem_pool("weights", target_device):
                 yield
             return
 
-        if self._mode == "read":
-            yield
+        if tag == "kv_cache":
+            target_device = torch.device("cuda", self._device_index)
+            with gms_use_mem_pool("kv_cache", target_device):
+                yield
             return
 
-        target_device = torch.device("cuda", self._device_index)
-        with gms_use_mem_pool("weights", target_device):
+        with self._torch_impl.region(tag=tag, enable_cpu_backup=enable_cpu_backup):
             yield
 
     def pause(self, tag: Optional[str] = None) -> None:
@@ -128,7 +139,9 @@ class GMSMemorySaverImpl:
             return
         if tag is None or self._is_weights_tag(tag):
             self._pause_weights()
-        if tag is None or not self._is_weights_tag(tag):
+        if tag is None or tag == "kv_cache":
+            self._pause_kv_cache()
+        if tag is None or (not self._is_weights_tag(tag) and tag != "kv_cache"):
             self._torch_impl.pause(tag=tag)
 
     def resume(self, tag: Optional[str] = None) -> None:
@@ -136,39 +149,56 @@ class GMSMemorySaverImpl:
             return
         if tag is None or self._is_weights_tag(tag):
             self._resume_weights()
-        if tag is None or not self._is_weights_tag(tag):
+        if tag is None or tag == "kv_cache":
+            self._resume_kv_cache()
+        if tag is None or (not self._is_weights_tag(tag) and tag != "kv_cache"):
             self._torch_impl.resume(tag=tag)
 
     def _pause_weights(self) -> None:
-        if self._allocator is None:
+        if self._weights_allocator is None:
             return
-        if self._allocator.is_unmapped:
+        if self._weights_allocator.is_unmapped:
             return
         logger.info("[GMS] Unmapping weights (VA-stable)")
-        self._allocator.unmap_all_vas()
-        self._allocator.disconnect()
+        self._weights_allocator.unmap_all_vas()
+        self._weights_allocator.disconnect()
 
     def _resume_weights(self) -> None:
-        if self._allocator is None:
+        if self._weights_allocator is None:
             return
-        if not self._allocator.is_unmapped:
+        if not self._weights_allocator.is_unmapped:
             return
         logger.info("[GMS] Remapping weights (VA-stable)")
-        from gpu_memory_service.common.types import RequestedLockType
+        self._weights_allocator.connect(RequestedLockType.RO)
+        self._weights_allocator.remap_all_vas()
 
-        self._allocator.connect(RequestedLockType.RO)
-        self._allocator.remap_all_vas()
+    def _pause_kv_cache(self) -> None:
+        if self._kv_cache_allocator.is_unmapped:
+            return
+        logger.info("[GMS] Unmapping KV cache")
+        self._kv_cache_allocator.unmap_all_vas()
+        self._kv_cache_allocator.disconnect()
+
+    def _resume_kv_cache(self) -> None:
+        if not self._kv_cache_allocator.is_unmapped:
+            return
+        logger.info("[GMS] Remapping KV cache")
+        self._kv_cache_allocator.connect(RequestedLockType.RW)
+        self._kv_cache_allocator.reallocate_all_handles(tag="kv_cache")
+        self._kv_cache_allocator.remap_all_vas()
 
     def finalize_write_mode(self, model: torch.nn.Module) -> None:
         """Finalize write mode: register tensors, commit, and switch to read."""
         if self._mode != "write":
             return
-        if self._allocator is None:
+        if self._weights_allocator is None:
             raise RuntimeError("Allocator is None in WRITE mode")
 
         from gpu_memory_service.integrations.common.utils import finalize_gms_write
 
-        self._imported_weights_bytes = finalize_gms_write(self._allocator, model)
+        self._imported_weights_bytes = finalize_gms_write(
+            self._weights_allocator, model
+        )
         self._mode = "read"
 
     def set_imported_weights_bytes(self, bytes_count: int) -> None:

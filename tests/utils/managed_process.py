@@ -8,6 +8,7 @@ import shutil
 import signal
 import socket
 import subprocess
+import sys
 import time
 from dataclasses import dataclass, field
 from typing import Any, List, Optional
@@ -204,7 +205,7 @@ class ManagedProcess:
             if self.display_name:
                 self._command_name = self.display_name
             else:
-                self._command_name = self.command[0]
+                self._command_name = os.path.basename(self.command[0])
 
             # Keep test logs out of the git working tree: many tests pass a relative
             # `log_dir` derived from `request.node.name`, which otherwise creates a large
@@ -903,7 +904,13 @@ class DynamoFrontendProcess(ManagedProcess):
             DefaultPort.FRONTEND.value if frontend_port is None else int(frontend_port)
         )
 
-        command = ["python", "-m", "dynamo.frontend", "--router-mode", router_mode]
+        command = [
+            sys.executable,
+            "-m",
+            "dynamo.frontend",
+            "--router-mode",
+            router_mode,
+        ]
 
         # dynamo.frontend defaults to 8000 when neither env nor flag is provided.
         if frontend_port is not None:

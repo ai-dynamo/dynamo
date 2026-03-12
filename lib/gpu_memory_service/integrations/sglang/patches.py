@@ -14,7 +14,6 @@ from contextlib import contextmanager
 from typing import Optional
 
 import torch
-from gpu_memory_service.common.utils import get_socket_path
 
 logger = logging.getLogger(__name__)
 
@@ -64,10 +63,7 @@ def patch_torch_memory_saver() -> None:
             # Get device from torch.cuda.current_device() (already set by SGLang)
             device_index = torch.cuda.current_device()
 
-            # Resolve socket path from env or default
-            socket_path = get_socket_path(device_index)
-
-            # Create underlying torch impl for non-weights tags (KV cache etc.)
+            # Create underlying torch impl for non-GMS tags.
             torch_impl = _TorchMemorySaverImpl(hook_mode="torch")
 
             # Read lock mode set by setup_gms() (defaults to RW_OR_RO)
@@ -75,7 +71,6 @@ def patch_torch_memory_saver() -> None:
 
             gms_impl = GMSMemorySaverImpl(
                 torch_impl=torch_impl,
-                socket_path=socket_path,
                 device_index=device_index,
                 mode=_gms_lock_mode,
             )
@@ -83,9 +78,8 @@ def patch_torch_memory_saver() -> None:
             # Set _impl directly (accessible via gms_impl property)
             self._impl = gms_impl
             logger.info(
-                "[GMS] Using GMS mode (device=%d, socket=%s, mode=%s)",
+                "[GMS] Using GMS mode (device=%d, mode=%s)",
                 device_index,
-                socket_path,
                 gms_impl.get_mode(),
             )
             del self._impl_ctor_kwargs

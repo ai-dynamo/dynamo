@@ -545,7 +545,10 @@ The integration uses a custom worker class (`GMSWorker`) that:
 - Establishes the GMS connection early in `init_device()` so vLLM's `MemorySnapshot` can account for committed weights
 - Registers a custom model loader (`GMSModelLoader`) for the `gms` load format
 - Patches `torch.cuda.empty_cache` to avoid releasing GMS-managed memory
-- Routes weight allocation through a `CUDAPluggableAllocator` backed by GMS
+- Uses two GMS scopes on the GPU:
+  - `weights`: normal publish/import flow (`RW_OR_RO`, then `RO` after commit)
+  - `kv_cache`: separate RW-only scope for mutable KV-cache memory
+- Routes both weight and KV-cache allocation through a `CUDAPluggableAllocator` backed by the appropriate GMS scope
 
 #### SGLang
 
@@ -557,9 +560,10 @@ python -m dynamo.sglang \
   --mem-fraction-static 0.9
 ```
 
-The integration patches `torch_memory_saver` to route weight operations through GMS:
-- Weights (`"weights"` / `"model_weights"` tags) go through `GMSMemorySaverImpl`
-- Other tags (e.g., `"kv_cache"`) are delegated to the default torch mempool implementation
+The integration patches `torch_memory_saver` to route both weight and KV-cache operations through GMS:
+- Weights (`"weights"` / `"model_weights"` tags) use the `weights` GMS scope
+- KV cache (`"kv_cache"`) uses a separate RW-only `kv_cache` GMS scope
+- Other tags still use the default torch mempool implementation
 - The `--enable-memory-saver` flag is required to activate the memory saver pathway
 
 ### Shadow Engine Failover (Sleep / Wake)
@@ -569,9 +573,14 @@ Both integrations support releasing and reclaiming GPU memory for shadow engine 
 - **vLLM**: `sleep` / `wake_up` (via `/engine/sleep` and `/engine/wake_up` HTTP endpoints)
 - **SGLang**: `release_memory_occupation` / `resume_memory_occupation` (via the corresponding HTTP endpoints)
 
-Under the hood, sleeping calls `unmap_all_vas()` + `disconnect()` to release GPU memory while preserving VA reservations, and waking calls `connect(RO)` + `remap_all_vas()` to re-import weights at the same virtual addresses. Tensor pointers remain valid, so no model re-initialization is needed.
+Under the hood, sleeping calls `unmap_all_vas()` + `disconnect()` to release GPU memory while preserving VA reservations. Waking is scope-specific:
 
-This enables a shadow engine to release its GPU memory, let a primary engine use the GPU, and then reclaim the memory after the primary is killed.
+- **weights**: `connect(RO)` + `remap_all_vas()`
+- **kv_cache**: `connect(RW)` + `reallocate_all_handles("kv_cache")` + `remap_all_vas()`
+
+Tensor pointers remain valid because the original virtual addresses are preserved.
+
+This enables a shadow engine to release its GPU memory, let a primary engine use the GPU, and then reclaim the memory after the primary is killed. The mutable KV cache always moves through a new RW epoch in its own GMS scope before it is reallocated.
 
 ### Configuration via `model_loader_extra_config`
 

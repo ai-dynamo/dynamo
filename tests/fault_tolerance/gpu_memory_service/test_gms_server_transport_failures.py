@@ -310,6 +310,44 @@ async def test_reader_waiter_wakes_when_waiting_writer_times_out():
 
 
 @pytest.mark.asyncio
+async def test_rw_or_ro_waiter_becomes_rw_after_writer_abort():
+    sessions = GMSSessionManager()
+
+    writer_mode = await sessions.acquire_lock(
+        RequestedLockType.RW,
+        timeout_ms=50,
+        session_id="writer_1",
+    )
+    assert writer_mode == GrantedLockType.RW
+
+    writer = Connection(
+        reader=_DummyReader(),
+        writer=_DummyWriter(),
+        mode=GrantedLockType.RW,
+        session_id="writer_1",
+        recv_buffer=bytearray(),
+    )
+    sessions.on_connect(writer)
+
+    waiter = asyncio.create_task(
+        sessions.acquire_lock(
+            RequestedLockType.RW_OR_RO,
+            timeout_ms=200,
+            session_id="waiter_1",
+        )
+    )
+    await asyncio.sleep(0)
+    assert not waiter.done()
+
+    event = sessions.begin_cleanup(writer)
+    assert event == StateEvent.RW_ABORT
+    await sessions.finish_cleanup(writer)
+
+    assert await waiter == GrantedLockType.RW
+    await sessions.cancel_connect("waiter_1", GrantedLockType.RW)
+
+
+@pytest.mark.asyncio
 async def test_gms_clears_aborted_rw_epoch_before_waking_waiters():
     gms = object.__new__(GMS)
     cleanup_order: list[str] = []
@@ -736,3 +774,31 @@ def test_disconnect_clears_local_state_even_if_close_fails():
 
     assert manager._client is None
     assert manager._granted_lock_type is None
+
+
+def test_create_mapping_frees_server_allocation_if_export_fails(monkeypatch):
+    manager = object.__new__(GMSClientMemoryManager)
+    manager.socket_path = "/tmp/gms-test.sock"
+    manager.device = 0
+    manager.granularity = 4096
+    manager._client = object()
+    manager._granted_lock_type = GrantedLockType.RW
+    manager._mappings = {}
+    manager._inverse_mapping = {}
+    manager._unmapped = False
+    manager._va_preserved = False
+    manager._last_memory_layout_hash = ""
+
+    freed_allocations: list[str] = []
+    monkeypatch.setattr(manager, "allocate_handle", lambda size, tag: "alloc_1")
+    monkeypatch.setattr(
+        manager,
+        "export_handle",
+        lambda allocation_id: (_ for _ in ()).throw(RuntimeError("export failed")),
+    )
+    monkeypatch.setattr(manager, "free_handle", freed_allocations.append)
+
+    with pytest.raises(RuntimeError, match="export failed"):
+        manager.create_mapping(size=4096, tag="kv_cache")
+
+    assert freed_allocations == ["alloc_1"]

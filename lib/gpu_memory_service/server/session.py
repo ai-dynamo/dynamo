@@ -253,6 +253,11 @@ class GMSSessionManager:
             self._waiting_writers
         )
 
+    def _can_grant_rw_or_ro(self) -> bool:
+        if self._can_grant_ro():
+            return True
+        return self._can_grant_rw() and not self._locking.committed
+
     async def acquire_lock(
         self,
         mode: RequestedLockType,
@@ -296,11 +301,14 @@ class GMSSessionManager:
                 return GrantedLockType.RW
             try:
                 await asyncio.wait_for(
-                    self._condition.wait_for(self._can_grant_ro),
+                    self._condition.wait_for(self._can_grant_rw_or_ro),
                     timeout=timeout,
                 )
             except asyncio.TimeoutError:
                 return None
+            if self._can_grant_rw() and not self._locking.committed:
+                self._reserved_rw_session_id = session_id
+                return GrantedLockType.RW
         return GrantedLockType.RO
 
     async def cancel_connect(
