@@ -114,13 +114,13 @@ vllm_configs = {
         directory=vllm_dir,
         script_name="agg_lmcache.sh",
         marks=[
+            pytest.mark.lmcache,
             pytest.mark.gpu_1,
             pytest.mark.pre_merge,
             pytest.mark.timeout(360),  # 3x estimated time (70s) + download time (150s)
             pytest.mark.skipif(
                 _is_cuda13(),
                 reason="lmcache does not support CUDA 13 as of v0.3.11",
-                strict=False,
             ),
         ],
         model="Qwen/Qwen3-0.6B",
@@ -136,13 +136,13 @@ vllm_configs = {
         directory=vllm_dir,
         script_name="agg_lmcache_multiproc.sh",
         marks=[
+            pytest.mark.lmcache,
             pytest.mark.gpu_1,
             pytest.mark.pre_merge,
             pytest.mark.timeout(360),  # 3x estimated time (70s) + download time (150s)
             pytest.mark.skipif(
                 _is_cuda13(),
                 reason="lmcache does not support CUDA 13 as of v0.3.11",
-                strict=False,
             ),
         ],
         model="Qwen/Qwen3-0.6B",
@@ -317,7 +317,8 @@ vllm_configs = {
         name="multimodal_agg_frontend_decoding",
         directory=vllm_dir,
         script_name="agg_multimodal.sh",
-        marks=[pytest.mark.gpu_1, pytest.mark.pre_merge],
+        # post_merge because needs real NIXL not stub
+        marks=[pytest.mark.gpu_1, pytest.mark.post_merge],
         model="Qwen/Qwen2-VL-2B-Instruct",
         # Pass --frontend-decoding to enable Rust frontend image decoding + NIXL RDMA transfer
         script_args=[
@@ -351,7 +352,7 @@ vllm_configs = {
         script_name="disagg_multimodal_epd.sh",
         marks=[
             pytest.mark.gpu_1,
-            pytest.mark.pre_merge,
+            pytest.mark.post_merge,
             pytest.mark.skip(reason="DYN-2265"),
         ],
         model="Qwen/Qwen3-VL-2B-Instruct",
@@ -388,7 +389,7 @@ vllm_configs = {
         name="multimodal_agg_qwen",
         directory=vllm_dir,
         script_name="agg_multimodal.sh",
-        marks=[pytest.mark.gpu_1, pytest.mark.pre_merge],
+        marks=[pytest.mark.gpu_1, pytest.mark.post_merge],
         model="Qwen/Qwen2.5-VL-7B-Instruct",
         script_args=["--model", "Qwen/Qwen2.5-VL-7B-Instruct"],
         delayed_start=0,

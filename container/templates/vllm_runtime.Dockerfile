@@ -89,7 +89,6 @@ RUN userdel -r ubuntu > /dev/null 2>&1 || true \
     # NOTE: Setting ENV UMASK=002 does NOT work - umask is a shell builtin, not an environment variable
     && mkdir -p /etc/profile.d && echo 'umask 002' > /etc/profile.d/00-umask.sh
 
-ARG ARCH_ALT
 ARG PYTHON_VERSION
 ENV PYTHON_VERSION=${PYTHON_VERSION}
 
@@ -171,11 +170,11 @@ SHELL ["/bin/bash", "-l", "-o", "pipefail", "-c"]
 
 {% if device == "xpu" %}
 ENV NIXL_PREFIX=/opt/intel/intel_nixl
-ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/${ARCH_ALT}-linux-gnu
+ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/x86_64-linux-gnu
 ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
 {% else %}
 ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
-ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/${ARCH_ALT}-linux-gnu
+ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib64
 ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
 {% endif %}
 
@@ -222,20 +221,13 @@ COPY --chown=dynamo:0 --from=framework /opt/vllm /opt/vllm
 COPY --from=wheel_builder /usr/local/ucx /usr/local/ucx
 COPY --chown=dynamo: --from=wheel_builder $NIXL_PREFIX $NIXL_PREFIX
 {% if device == "xpu" %}
-COPY --chown=dynamo: --from=wheel_builder /opt/intel/intel_nixl/lib/${ARCH_ALT}-linux-gnu/. ${NIXL_LIB_DIR}/
-{% else %}
-COPY --chown=dynamo: --from=wheel_builder /opt/nvidia/nvda_nixl/lib64/. ${NIXL_LIB_DIR}/
+{# XPU NIXL uses lib/x86_64-linux-gnu; copy to NIXL_LIB_DIR to ensure lib dir is populated #}
+COPY --chown=dynamo: --from=wheel_builder /opt/intel/intel_nixl/lib/x86_64-linux-gnu/. ${NIXL_LIB_DIR}/
 {% endif %}
+{# For cuda: NIXL_LIB_DIR = lib64, already included in the $NIXL_PREFIX COPY above #}
 COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
 COPY --chown=dynamo: --from=wheel_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
 
-{% if device == "cuda" %}
-# Copy AWS SDK C++ libraries (required for NIXL OBJ backend / S3 support)
-COPY --chown=dynamo: --from=wheel_builder /usr/local/lib64/libaws* /usr/local/lib/
-COPY --chown=dynamo: --from=wheel_builder /usr/local/lib64/libs2n* /usr/local/lib/
-COPY --chown=dynamo: --from=wheel_builder /usr/lib64/libcrypto.so.1.1* /usr/local/lib/
-COPY --chown=dynamo: --from=wheel_builder /usr/lib64/libssl.so.1.1* /usr/local/lib/
-{% endif %}
 
 ENV PATH=/usr/local/ucx/bin:$PATH
 
@@ -347,6 +339,12 @@ RUN chmod g+w /workspace /workspace/* /opt/dynamo /opt/dynamo/* ${VIRTUAL_ENV} &
     echo 'cat /opt/dynamo/.launch_screen' >> /etc/bash.bashrc
 
 {% if device == "cuda" %}
+# Copy AWS SDK C++ libraries (required for NIXL OBJ backend / S3 support)
+COPY --chown=dynamo: --from=wheel_builder /usr/local/lib64/libaws* /usr/local/lib/
+COPY --chown=dynamo: --from=wheel_builder /usr/local/lib64/libs2n* /usr/local/lib/
+COPY --chown=dynamo: --from=wheel_builder /usr/lib64/libcrypto.so.1.1* /usr/local/lib/
+COPY --chown=dynamo: --from=wheel_builder /usr/lib64/libssl.so.1.1* /usr/local/lib/
+
 # Fix library symlinks that Docker COPY dereferenced (COPY always follows symlinks)
 # This recreates proper symlinks to save space and suppress ldconfig warnings
 RUN cd /usr/local/lib && \
