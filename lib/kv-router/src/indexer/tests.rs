@@ -2030,7 +2030,7 @@ async fn test_local_indexer_get_events_in_id_range_all_cases() {
 
     // Tree dump path tests
     let result = indexer.get_events_in_id_range(None, None).await;
-    assert!(matches!(result, WorkerKvQueryResponse::TreeDump { .. }));
+    assert!(matches!(&result, WorkerKvQueryResponse::TreeDump { .. }));
     assert_eq!(extract_events(result).len(), 10);
 
     let result = indexer.get_events_in_id_range(Some(7), None).await;
@@ -2181,6 +2181,51 @@ async fn test_local_indexer_buffer_and_serialization() {
     };
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].worker_id, worker_id);
+}
+
+#[tokio::test]
+async fn test_local_indexer_does_not_buffer_failed_send() {
+    let local_indexer = LocalKvIndexer::new(
+        CancellationToken::new(),
+        4,
+        Arc::new(KvIndexerMetrics::new_unregistered()),
+        5,
+    );
+
+    let test_event = RouterEvent::new(
+        7,
+        KvCacheEvent {
+            event_id: 1,
+            data: KvCacheEventData::Stored(KvCacheStoreData {
+                parent_hash: None,
+                blocks: vec![KvCacheStoredBlockData {
+                    block_hash: ExternalSequenceBlockHash(100),
+                    tokens_hash: LocalBlockHash(200),
+                    mm_extra_info: None,
+                }],
+            }),
+            dp_rank: 0,
+        },
+    );
+
+    let event_tx = local_indexer.event_sender();
+    local_indexer.shutdown();
+    event_tx.closed().await;
+
+    let result = local_indexer.apply_event_with_buffer(test_event).await;
+    assert!(matches!(result, Err(KvRouterError::IndexerOffline)));
+    assert_eq!(local_indexer.buffer_len(), 0);
+
+    match local_indexer.get_events_in_id_range(None, None).await {
+        WorkerKvQueryResponse::TreeDump {
+            events,
+            last_event_id,
+        } => {
+            assert!(events.is_empty());
+            assert_eq!(last_event_id, 0);
+        }
+        other => panic!("Expected TreeDump, got: {other:?}"),
+    }
 }
 
 #[tokio::test]

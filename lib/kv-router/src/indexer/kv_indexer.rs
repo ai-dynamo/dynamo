@@ -18,6 +18,74 @@ use crate::indexer::pruning::{BlockEntry, PruneConfig, PruneManager};
 use crate::protocols::*;
 use dynamo_tokens::SequenceHash;
 
+fn stored_block_entries(event: &RouterEvent) -> Option<Vec<BlockEntry>> {
+    let KvCacheEventData::Stored(ref store_data) = event.event.data else {
+        return None;
+    };
+
+    let worker = WorkerWithDpRank::new(event.worker_id, event.event.dp_rank);
+    Some(
+        store_data
+            .blocks
+            .iter()
+            .enumerate()
+            .map(|(idx, block)| BlockEntry {
+                key: block.block_hash,
+                worker,
+                seq_position: idx,
+            })
+            .collect(),
+    )
+}
+
+fn apply_event_with_prune_tracking(
+    trie: &mut RadixTree,
+    event: RouterEvent,
+    metrics: &KvIndexerMetrics,
+    prune_manager: &mut Option<PruneManager<BlockEntry>>,
+    prune_tx: &mpsc::Sender<()>,
+) {
+    let event_type = KvIndexerMetrics::get_event_type(&event.event.data);
+    let event_id = event.event.event_id;
+    let worker_id = event.worker_id;
+    let event_for_prune = prune_manager.is_some().then(|| event.clone());
+    let result = trie.apply_event(event);
+    let result_is_ok = result.is_ok();
+    let tree_size = trie.current_size();
+    tracing::trace!(
+        "Applied KV event to global radix tree: event_type={event_type}, event_id={event_id}, worker_id={worker_id}, success={result_is_ok}, global_radix_tree_size={tree_size}"
+    );
+    metrics.increment_event_applied(event_type, result);
+
+    let Some(pm) = prune_manager.as_mut() else {
+        return;
+    };
+    if !result_is_ok {
+        return;
+    }
+    let Some(ref event) = event_for_prune else {
+        return;
+    };
+    let Some(block_entries) = stored_block_entries(event) else {
+        return;
+    };
+
+    pm.insert(block_entries);
+
+    let Some(ref pc) = pm.prune_config else {
+        return;
+    };
+    let current_size = trie.current_size();
+    if current_size > pc.max_tree_size {
+        tracing::info!(
+            "Pruning: tree size ({}) exceeded max tree size ({}), scheduling pruning",
+            current_size,
+            pc.max_tree_size
+        );
+        let _ = prune_tx.try_send(());
+    }
+}
+
 /// The KV Indexer, managing the KV store and handling events and match requests.
 #[derive(Clone)]
 pub struct KvIndexer {
@@ -151,52 +219,25 @@ impl KvIndexer {
                         }
 
                         Some(event) = event_rx.recv() => {
-                            let event_type = KvIndexerMetrics::get_event_type(&event.event.data);
-                            let event_id = event.event.event_id;
-                            let worker_id = event.worker_id;
-                            // Only clone if we need the event for prune_manager afterward
-                            let event_for_prune = prune_manager.is_some().then(|| event.clone());
-                            let result = trie.apply_event(event);
-                            let result_is_ok = result.is_ok();
-                            let tree_size = trie.current_size();
-                            tracing::trace!(
-                                "Applied KV event to global radix tree: event_type={event_type}, event_id={event_id}, worker_id={worker_id}, success={result_is_ok}, global_radix_tree_size={tree_size}"
+                            apply_event_with_prune_tracking(
+                                &mut trie,
+                                event,
+                                &metrics,
+                                &mut prune_manager,
+                                &prune_tx,
                             );
-                            metrics.increment_event_applied(event_type, result);
-
-                            // Track blocks in PruneManager if TTL is enabled and event was stored successfully
-                            let Some(ref mut pm) = prune_manager else { continue };
-                            if !result_is_ok { continue };
-                            let Some(ref event) = event_for_prune else { continue };
-                            let KvCacheEventData::Stored(ref store_data) = event.event.data else { continue };
-
-                            let worker = WorkerWithDpRank::new(event.worker_id, event.event.dp_rank);
-                            let block_entries: Vec<BlockEntry> = store_data.blocks.iter().enumerate().map(|(idx, block)| {
-                                BlockEntry {
-                                    key: block.block_hash,
-                                    worker,
-                                    seq_position: idx,
-                                }
-                            }).collect();
-                            pm.insert(block_entries);
-
-                            // Check if we need to prune due to tree size
-                            let Some(ref pc) = pm.prune_config else { continue };
-                            let current_size = trie.current_size();
-                            if current_size > pc.max_tree_size {
-                                tracing::info!(
-                                    "Pruning: tree size ({}) exceeded max tree size ({}), scheduling pruning",
-                                    current_size,
-                                    pc.max_tree_size
-                                );
-                                let _ = prune_tx.try_send(());
-                            }
                         }
 
                         Some(dump_req) = dump_rx.recv() => {
                             // Flush pending events so tree is consistent with buffer
                             while let Ok(event) = event_rx.try_recv() {
-                                let _ = trie.apply_event(event);
+                                apply_event_with_prune_tracking(
+                                    &mut trie,
+                                    event,
+                                    &metrics,
+                                    &mut prune_manager,
+                                    &prune_tx,
+                                );
                             }
                             let events = trie.dump_tree_as_events();
                             let _ = dump_req.resp.send(events);

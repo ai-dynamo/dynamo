@@ -202,7 +202,7 @@ impl LocalKvIndexer {
 
     /// Apply event with buffering.
     ///
-    /// This records the event in the buffer and forwards it to the underlying indexer.
+    /// This forwards the event to the underlying indexer and records it on success.
     pub async fn apply_event_with_buffer(&self, event: RouterEvent) -> Result<(), KvRouterError> {
         // Forward to underlying indexer
         let result = self
@@ -211,8 +211,9 @@ impl LocalKvIndexer {
             .send(event.clone())
             .await
             .map_err(|_| KvRouterError::IndexerOffline);
-        // Record in buffer
-        self.record_event(event);
+        if result.is_ok() {
+            self.record_event(event);
+        }
 
         result
     }
