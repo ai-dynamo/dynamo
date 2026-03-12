@@ -103,7 +103,7 @@ kubectl apply -f examples/backends/vllm/deploy/disagg_planner.yaml -n $NAMESPACE
 
 Load-based scaling is experimental and has the following known limitations. These are actively being addressed as part of the metrics refactor work. Throughput-based scaling is not affected by any of these.
 
-**Requires the KV Router.** Load-based scaling relies on per-worker engine metrics (active prefill tokens, active KV blocks) published by the [KV Router](../routers/kv-router.md). Other routing strategies (round-robin, random) do not emit these metrics, so load-based scaling cannot operate without the KV Router.
+**Requires the KV Router.** Load-based scaling relies on per-worker engine metrics (active prefill tokens, active KV blocks) published by the [KV Router](../router/README.md). Other routing strategies (round-robin, random) do not emit these metrics, so load-based scaling cannot operate without the KV Router.
 
 **Scale-down with idle workers.** If a worker receives no requests (for example, because the router is not distributing traffic evenly), the router does not publish metrics for that worker. Without metrics, the Planner cannot evaluate whether the worker is underutilized, which can prevent scale-down decisions. **Workaround:** Ensure traffic distribution reaches all workers. If you observe workers stuck at zero load, check your router configuration.
 
