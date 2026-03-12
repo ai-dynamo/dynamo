@@ -101,7 +101,8 @@ impl KvScheduler {
         let (request_tx, request_rx) = tokio::sync::mpsc::channel::<SchedulingRequest>(1024);
         let scheduler_cancel_token = component.drt().primary_token();
 
-        let policy = RouterSchedulingPolicy::from(kv_router_config.router_queue_policy);
+        let policy =
+            RouterSchedulingPolicy::new(kv_router_config.router_queue_policy, block_size as usize);
         tracing::info!(
             "Router queue policy: {}",
             kv_router_config.router_queue_policy
