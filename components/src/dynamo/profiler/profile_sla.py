@@ -339,6 +339,17 @@ async def run_profile(
         dgd_config = pick_result.get("dgd_config") if not ops.dry_run else None
         resolved_backend = pick_result.get("resolved_backend", backend)
 
+        if dgd_config and dgdr.overrides and dgdr.overrides.dgd:
+            dgd_config = apply_dgd_overrides(dgd_config, dgdr.overrides.dgd)
+            logger.info("Applied DGD overrides to the picked DGD config.")
+        job_tolerations = get_profiling_job_tolerations(dgdr)
+        if job_tolerations and dgd_config:
+            dgd_config = inject_tolerations_into_dgd(dgd_config, job_tolerations)
+            logger.debug(
+                "Propagated %d profiling-job toleration(s) to the picked DGD config.",
+                len(job_tolerations),
+            )
+
         # ---------------------------------------------------------------
         # Interpolation curves — only needed when something consumes
         # the per-engine performance data (throughput scaling or mocker).
@@ -398,8 +409,8 @@ async def run_profile(
                 final_config = apply_dgd_overrides(final_config, dgdr.overrides.dgd)
             logger.info("Applied DGD overrides to the final config.")
 
-        # Propagate profiling-job tolerations to the final DGD
-        job_tolerations = get_profiling_job_tolerations(dgdr)
+        # Propagate profiling-job tolerations to the final DGD (covers any
+        # services added by assemble_final_config, e.g. Planner).
         if job_tolerations and final_config:
             final_config = _apply_tolerations_to_final_config(
                 final_config, job_tolerations

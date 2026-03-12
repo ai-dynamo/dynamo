@@ -82,7 +82,7 @@ Built in Rust for performance and Python for extensibility, Dynamo is fully open
 | [**Kubernetes Deployment**](#kubernetes-deployment) | Production multi-node clusters | ~30 min | K8s cluster with GPUs |
 | [**Building from Source**](#building-from-source) | Contributors and development | ~15 min | Ubuntu, Rust, Python |
 
-Want to help shape the future of distributed LLM inference? See the **[Contributing Guide](CONTRIBUTING.md)**.
+Want to help shape the future of distributed LLM inference? See the **[Contribution Guide](docs/contribution-guide.md)**.
 
 # Local Quick Start
 

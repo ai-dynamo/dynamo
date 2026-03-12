@@ -183,6 +183,7 @@ jobs:
           test_type: "pre_merge_parallel"
           platform_arch: amd64
           enable_mypy: 'true'
+          hf_token: ${{ secrets.HF_TOKEN }}
           parallel_mode: '4'
           dind_as_sidecar: 'false'
 
@@ -213,5 +214,6 @@ jobs:
           test_type: "pre_merge_sequential"
           platform_arch: amd64
           enable_mypy: 'false'
+          hf_token: ${{ secrets.HF_TOKEN }}
           parallel_mode: 'none'
           dind_as_sidecar: 'false'

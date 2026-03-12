@@ -192,6 +192,7 @@ filterwarnings = [
     "ignore:The pynvml package is deprecated.*:FutureWarning", # Ignore pynvml deprecation warning, temporary until upstream library updates to nvidia-ml-py
     "ignore:The behavior of DataFrame concatenation with empty or all-NA entries is deprecated.*:FutureWarning", # pandas 2.x concat deprecation in AIC SDK TODO: fix in AIC
     "ignore:Automatic KV events configuration is deprecated.*:FutureWarning", # Ignore Dynamo's own KV events deprecation warning in tests
+    "ignore:builtin type (SwigPyPacked|SwigPyObject|swigvarlink) has no __module__ attribute:DeprecationWarning", # Python 3.12 SWIG extension warning from third-party tokenizer deps
     # Pydantic V2 deprecation warnings from TRTLLM dependencies (raised at import time during collection)
     "ignore:Support for class-based `config`.*:pydantic.warnings.PydanticDeprecatedSince20",
     "ignore:Using extra keyword arguments on `Field`.*:pydantic.warnings.PydanticDeprecatedSince20",
@@ -332,4 +333,3 @@ extra_content_footer = [
    <script type="text/javascript">if (typeof _satellite !== "undefined") {_satellite.pageBottom();}</script>
    ''',
 ]
-
