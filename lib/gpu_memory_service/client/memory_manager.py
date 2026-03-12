@@ -185,11 +185,14 @@ class GMSClientMemoryManager:
             timeout_ms=timeout_ms,
         )
         self._granted_lock_type = self._client.lock_type
-        # Only committed epochs have a stable layout hash that can be used for
-        # stale remap detection.
-        if self._client.committed:
+        # Preserve the pre-unmap hash across reconnects so remap_all_vas can
+        # detect that another epoch changed the committed layout while this
+        # process was disconnected.
+        if self._client.committed and (
+            not self._va_preserved or not self._last_memory_layout_hash
+        ):
             self._last_memory_layout_hash = self._client.get_memory_layout_hash()
-        else:
+        elif not self._va_preserved:
             self._last_memory_layout_hash = ""
 
     def disconnect(self) -> None:
@@ -512,18 +515,38 @@ class GMSClientMemoryManager:
 
         remapped_count = 0
         total_bytes = 0
-        for va, mapping, handle in remap_plan:
-            cumem_map(va, mapping.aligned_size, handle)
-            cumem_set_access(
-                va, mapping.aligned_size, self.device, self._granted_lock_type
-            )
+        remapped: list[tuple[int, LocalMapping, int]] = []
+        current_index = -1
+        try:
+            for current_index, (va, mapping, handle) in enumerate(remap_plan):
+                mapped = False
+                try:
+                    cumem_map(va, mapping.aligned_size, handle)
+                    mapped = True
+                    cumem_set_access(
+                        va, mapping.aligned_size, self.device, self._granted_lock_type
+                    )
 
-            cuda_synchronize()
-            cuda_validate_pointer(va)
+                    cuda_synchronize()
+                    cuda_validate_pointer(va)
+                except Exception:
+                    if mapped:
+                        cumem_unmap(va, mapping.aligned_size)
+                    cumem_release(handle)
+                    raise
 
-            self._mappings[va] = mapping.with_handle(handle)
-            remapped_count += 1
-            total_bytes += mapping.aligned_size
+                self._mappings[va] = mapping.with_handle(handle)
+                remapped.append((va, mapping, handle))
+                remapped_count += 1
+                total_bytes += mapping.aligned_size
+        except Exception:
+            for va, mapping, handle in reversed(remapped):
+                cumem_unmap(va, mapping.aligned_size)
+                cumem_release(handle)
+                self._mappings[va] = mapping.with_handle(0)
+            for _, _, handle in remap_plan[current_index + 1 :]:
+                cumem_release(handle)
+            raise
 
         self._va_preserved = False
         self._unmapped = False

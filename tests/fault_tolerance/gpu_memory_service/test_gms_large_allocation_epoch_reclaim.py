@@ -180,6 +180,17 @@ async def test_new_epoch_large_allocation_waits_for_dead_writer_process(
         second = await asyncio.wait_for(allocation_task, timeout=120.0)
         assert second.epoch_id == second_epoch
         assert allocations.allocation_count == 1
+
+        cleared_epoch_id = epochs.on_rw_abort()
+        assert cleared_epoch_id == second_epoch
+        assert cleared_epoch_id is not None
+        allocations.clear_all_allocations(cleared_epoch_id)
+        assert allocations.allocation_count == 0
+
+        deadline = time.monotonic() + 30.0
+        while _gpu_memory_free_bytes() < free_before - (1 << 30):
+            assert time.monotonic() < deadline
+            await asyncio.sleep(0.1)
     finally:
         if allocation_task is not None and not allocation_task.done():
             allocation_task.cancel()
@@ -187,6 +198,11 @@ async def test_new_epoch_large_allocation_waits_for_dead_writer_process(
                 await allocation_task
             except asyncio.CancelledError:
                 pass
+        active_epoch_id = epochs.active_rw_epoch_id
+        if active_epoch_id is not None:
+            cleared_epoch_id = epochs.on_rw_abort()
+            if cleared_epoch_id is not None:
+                allocations.clear_all_allocations(cleared_epoch_id)
         if holder is not None and holder.poll() is None:
             os.killpg(os.getpgid(holder.pid), signal.SIGKILL)
             holder.wait(timeout=30.0)

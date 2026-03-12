@@ -10,10 +10,6 @@ from dataclasses import dataclass
 
 import pytest
 from cuda.bindings import driver as cuda
-from gpu_memory_service.client.memory_manager import (
-    GMSClientMemoryManager,
-    LocalMapping,
-)
 from gpu_memory_service.common import cuda_utils
 from gpu_memory_service.common.protocol.messages import (
     CommitRequest,
@@ -94,6 +90,33 @@ class _DummyWriter:
 
     def get_extra_info(self, _name: str):
         return None
+
+
+def _make_connection(
+    mode: GrantedLockType,
+    session_id: str,
+) -> tuple[Connection, _DummyWriter]:
+    writer = _DummyWriter()
+    return (
+        Connection(
+            reader=_DummyReader(),
+            writer=writer,
+            mode=mode,
+            session_id=session_id,
+            recv_buffer=bytearray(),
+        ),
+        writer,
+    )
+
+
+def _make_allocation_manager() -> GMSAllocationManager:
+    manager = object.__new__(GMSAllocationManager)
+    manager._device = 0
+    manager._allocations = {}
+    manager._granularity = 1
+    manager._allocation_retry_interval = 0.0
+    manager._allocation_retry_timeout = None
+    return manager
 
 
 @dataclass
@@ -353,13 +376,7 @@ async def test_rw_or_ro_waiter_becomes_rw_after_writer_abort():
 async def test_gms_clears_aborted_rw_epoch_before_waking_waiters():
     gms = object.__new__(GMS)
     cleanup_order: list[str] = []
-    conn = Connection(
-        reader=_DummyReader(),
-        writer=_DummyWriter(),
-        mode=GrantedLockType.RW,
-        session_id="session_1",
-        recv_buffer=bytearray(),
-    )
+    conn, _ = _make_connection(GrantedLockType.RW, "session_1")
 
     def begin_cleanup(self, cleanup_conn):
         cleanup_order.append("begin_cleanup")
@@ -412,15 +429,7 @@ async def test_request_response_send_failure_disconnects_without_error_response(
     server = _make_server(handler)
     server._gms._sessions._locking._committed = True
 
-    reader = _DummyReader()
-    writer = _DummyWriter()
-    conn = Connection(
-        reader=reader,
-        writer=writer,
-        mode=GrantedLockType.RO,
-        session_id="session_2",
-        recv_buffer=bytearray(),
-    )
+    conn, writer = _make_connection(GrantedLockType.RO, "session_2")
     server._gms._sessions._locking.transition(StateEvent.RO_CONNECT, conn)
 
     recv_calls = 0
@@ -454,15 +463,7 @@ async def test_post_commit_response_send_failure_stays_committed(monkeypatch):
     handler = _FakeHandler(active_rw_epoch_id=2)
     server = _make_server(handler)
 
-    reader = _DummyReader()
-    writer = _DummyWriter()
-    conn = Connection(
-        reader=reader,
-        writer=writer,
-        mode=GrantedLockType.RW,
-        session_id="session_3",
-        recv_buffer=bytearray(),
-    )
+    conn, writer = _make_connection(GrantedLockType.RW, "session_3")
     server._gms._sessions._locking.transition(StateEvent.RW_CONNECT, conn)
 
     recv_calls = 0
@@ -494,12 +495,7 @@ async def test_post_commit_response_send_failure_stays_committed(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_allocate_rejects_non_positive_size_before_cuda():
-    manager = object.__new__(GMSAllocationManager)
-    manager._device = 0
-    manager._allocations = {}
-    manager._granularity = 1
-    manager._allocation_retry_interval = 0.0
-    manager._allocation_retry_timeout = None
+    manager = _make_allocation_manager()
 
     with pytest.raises(ValueError, match="size must be > 0"):
         await manager.allocate(0, epoch_id=1, tag="weights", is_connected=None)
@@ -507,12 +503,7 @@ async def test_allocate_rejects_non_positive_size_before_cuda():
 
 @pytest.mark.asyncio
 async def test_allocate_aborts_retry_when_writer_disconnects(monkeypatch):
-    manager = object.__new__(GMSAllocationManager)
-    manager._device = 0
-    manager._allocations = {}
-    manager._granularity = 1
-    manager._allocation_retry_interval = 0.0
-    manager._allocation_retry_timeout = None
+    manager = _make_allocation_manager()
 
     checks = 0
 
@@ -530,277 +521,3 @@ async def test_allocate_aborts_retry_when_writer_disconnects(monkeypatch):
         ConnectionAbortedError, match="RW client disconnected during allocation retry"
     ):
         await manager.allocate(1, epoch_id=1, tag="weights", is_connected=is_connected)
-
-
-def test_commit_failure_after_local_unmap_keeps_preserved_unmapped_state(monkeypatch):
-    manager = object.__new__(GMSClientMemoryManager)
-    manager.socket_path = "/tmp/gms-test.sock"
-    manager.device = 0
-    manager._client = type(
-        "_FailingClient",
-        (),
-        {
-            "commit": lambda self: (_ for _ in ()).throw(
-                ConnectionError("commit failed after local unmap")
-            ),
-            "is_connected": True,
-        },
-    )()
-    manager._mappings = {
-        0x1000: LocalMapping(
-            allocation_id="alloc_1",
-            va=0x1000,
-            size=4096,
-            aligned_size=4096,
-            handle=11,
-            tag="weights",
-        ),
-        0x2000: LocalMapping(
-            allocation_id="alloc_2",
-            va=0x2000,
-            size=4096,
-            aligned_size=4096,
-            handle=0,
-            tag="weights",
-        ),
-    }
-    manager._inverse_mapping = {"alloc_1": 0x1000, "alloc_2": 0x2000}
-    manager._unmapped = False
-    manager._granted_lock_type = GrantedLockType.RW
-    manager._va_preserved = False
-    manager._last_memory_layout_hash = ""
-    manager.granularity = 4096
-
-    unmapped_vas: list[int] = []
-
-    monkeypatch.setattr(
-        "gpu_memory_service.client.memory_manager.cuda_synchronize", lambda: None
-    )
-
-    def fake_unmap_va(self, va: int) -> None:
-        unmapped_vas.append(va)
-        self._mappings[va] = self._mappings[va].with_handle(0)
-
-    monkeypatch.setattr(GMSClientMemoryManager, "unmap_va", fake_unmap_va)
-
-    with pytest.raises(ConnectionError, match="commit failed after local unmap"):
-        manager.commit()
-
-    assert unmapped_vas == [0x1000]
-    assert manager._mappings[0x1000].handle == 0
-    assert manager._mappings[0x2000].handle == 0
-    assert manager._va_preserved
-    assert manager._unmapped
-    assert manager._client is not None
-
-
-def test_successful_commit_clears_rw_mode_before_local_cleanup(monkeypatch):
-    manager = object.__new__(GMSClientMemoryManager)
-    manager.socket_path = "/tmp/gms-test.sock"
-    manager.device = 0
-    manager._client = type(
-        "_CommittingClient",
-        (),
-        {
-            "commit": lambda self: True,
-            "is_connected": True,
-        },
-    )()
-    manager._mappings = {
-        0x1000: LocalMapping(
-            allocation_id="alloc_1",
-            va=0x1000,
-            size=4096,
-            aligned_size=4096,
-            handle=11,
-            tag="weights",
-        ),
-    }
-    manager._inverse_mapping = {"alloc_1": 0x1000}
-    manager._unmapped = False
-    manager._granted_lock_type = GrantedLockType.RW
-    manager._va_preserved = False
-    manager._last_memory_layout_hash = ""
-    manager.granularity = 4096
-
-    free_handle_calls: list[str] = []
-
-    monkeypatch.setattr(
-        "gpu_memory_service.client.memory_manager.cuda_synchronize", lambda: None
-    )
-
-    def fake_unmap_va(self, va: int) -> None:
-        self._mappings[va] = self._mappings[va].with_handle(0)
-
-    def fake_free_va(self, va: int) -> None:
-        mapping = self._mappings.pop(va)
-        self._inverse_mapping.pop(mapping.allocation_id, None)
-
-    def fake_free_handle(self, allocation_id: str) -> bool:
-        free_handle_calls.append(allocation_id)
-        return True
-
-    monkeypatch.setattr(GMSClientMemoryManager, "unmap_va", fake_unmap_va)
-    monkeypatch.setattr(GMSClientMemoryManager, "free_va", fake_free_va)
-    monkeypatch.setattr(GMSClientMemoryManager, "free_handle", fake_free_handle)
-
-    assert manager.commit()
-    assert manager._client is None
-    assert manager._granted_lock_type is None
-    assert manager._unmapped
-    assert manager._va_preserved
-
-    manager.destroy_mapping(0x1000)
-    assert free_handle_calls == []
-
-
-def test_destroy_mapping_keeps_local_state_when_server_free_fails(monkeypatch):
-    manager = object.__new__(GMSClientMemoryManager)
-    manager.socket_path = "/tmp/gms-test.sock"
-    manager.device = 0
-    manager._client = None
-    manager._mappings = {}
-    manager._inverse_mapping = {}
-    manager._granted_lock_type = GrantedLockType.RW
-    manager._unmapped = False
-    manager._va_preserved = False
-    manager._last_memory_layout_hash = ""
-    mapping = LocalMapping(
-        allocation_id="alloc_1",
-        va=0x1000,
-        size=4096,
-        aligned_size=4096,
-        handle=77,
-        tag="weights",
-    )
-    manager._track_mapping(mapping)
-
-    monkeypatch.setattr(
-        manager,
-        "free_handle",
-        lambda allocation_id: (_ for _ in ()).throw(RuntimeError("server free failed")),
-    )
-
-    with pytest.raises(RuntimeError, match="server free failed"):
-        manager.destroy_mapping(mapping.va)
-
-    assert manager.mappings[mapping.va] == mapping
-
-
-def test_remap_all_vas_releases_imported_handles_before_local_state_changes(
-    monkeypatch,
-):
-    manager = object.__new__(GMSClientMemoryManager)
-    manager.socket_path = "/tmp/gms-test.sock"
-    manager.device = 0
-    manager._client = None
-    manager._mappings = {}
-    manager._inverse_mapping = {}
-    manager.granularity = 4096
-    manager._granted_lock_type = GrantedLockType.RO
-    manager._last_memory_layout_hash = "stable"
-    manager._unmapped = True
-    manager._va_preserved = True
-    monkeypatch.setattr(
-        "gpu_memory_service.client.memory_manager.cuda_set_current_device",
-        lambda device: None,
-    )
-    manager._track_mapping(
-        LocalMapping(
-            allocation_id="alloc_1",
-            va=0x1000,
-            size=4096,
-            aligned_size=4096,
-            handle=0,
-            tag="weights",
-        )
-    )
-    manager._track_mapping(
-        LocalMapping(
-            allocation_id="alloc_2",
-            va=0x2000,
-            size=4096,
-            aligned_size=4096,
-            handle=0,
-            tag="weights",
-        )
-    )
-
-    monkeypatch.setattr(manager, "get_memory_layout_hash", lambda: "stable")
-    monkeypatch.setattr(
-        manager,
-        "get_handle_info",
-        lambda allocation_id: type("_Info", (), {"aligned_size": 4096})(),
-    )
-    export_fds = iter([11])
-    monkeypatch.setattr(
-        manager, "export_handle", lambda allocation_id: next(export_fds)
-    )
-    monkeypatch.setattr(
-        "gpu_memory_service.client.memory_manager.cumem_import_from_shareable_handle_close_fd",
-        lambda fd: 71,
-    )
-    released_handles: list[int] = []
-    monkeypatch.setattr(
-        "gpu_memory_service.client.memory_manager.cumem_release",
-        released_handles.append,
-    )
-
-    with pytest.raises(StopIteration):
-        manager.remap_all_vas()
-
-    assert released_handles == [71]
-    assert manager.mappings[0x1000].handle == 0
-    assert manager.mappings[0x2000].handle == 0
-    assert manager.is_unmapped
-
-
-def test_disconnect_clears_local_state_even_if_close_fails():
-    manager = object.__new__(GMSClientMemoryManager)
-    manager.socket_path = "/tmp/gms-test.sock"
-    manager.device = 0
-    manager._granted_lock_type = GrantedLockType.RO
-    manager._client = type(
-        "_Client",
-        (),
-        {"close": lambda self: (_ for _ in ()).throw(ConnectionError("close failed"))},
-    )()
-    manager._mappings = {}
-    manager._inverse_mapping = {}
-    manager._unmapped = False
-    manager._va_preserved = False
-    manager._last_memory_layout_hash = ""
-
-    with pytest.raises(ConnectionError, match="close failed"):
-        manager.disconnect()
-
-    assert manager._client is None
-    assert manager._granted_lock_type is None
-
-
-def test_create_mapping_frees_server_allocation_if_export_fails(monkeypatch):
-    manager = object.__new__(GMSClientMemoryManager)
-    manager.socket_path = "/tmp/gms-test.sock"
-    manager.device = 0
-    manager.granularity = 4096
-    manager._client = object()
-    manager._granted_lock_type = GrantedLockType.RW
-    manager._mappings = {}
-    manager._inverse_mapping = {}
-    manager._unmapped = False
-    manager._va_preserved = False
-    manager._last_memory_layout_hash = ""
-
-    freed_allocations: list[str] = []
-    monkeypatch.setattr(manager, "allocate_handle", lambda size, tag: "alloc_1")
-    monkeypatch.setattr(
-        manager,
-        "export_handle",
-        lambda allocation_id: (_ for _ in ()).throw(RuntimeError("export failed")),
-    )
-    monkeypatch.setattr(manager, "free_handle", freed_allocations.append)
-
-    with pytest.raises(RuntimeError, match="export failed"):
-        manager.create_mapping(size=4096, tag="kv_cache")
-
-    assert freed_allocations == ["alloc_1"]

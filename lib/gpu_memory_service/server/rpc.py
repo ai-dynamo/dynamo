@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import socket
 from typing import Optional
 
 from gpu_memory_service.common.protocol.messages import (
@@ -23,6 +24,21 @@ from .gms import GMS
 from .session import Connection, InvalidTransition, OperationNotAllowed
 
 logger = logging.getLogger(__name__)
+
+
+def _is_connection_alive(conn: Connection) -> bool:
+    if conn.writer.is_closing():
+        return False
+    if conn.reader.at_eof() or conn.reader.exception() is not None:
+        return False
+    sock = getattr(conn.raw_socket, "_sock", conn.raw_socket)
+    try:
+        data = sock.recv(1, socket.MSG_PEEK | socket.MSG_DONTWAIT)
+    except BlockingIOError:
+        return True
+    except OSError:
+        return False
+    return data != b""
 
 
 class GMSRPCServer:
@@ -171,9 +187,7 @@ class GMSRPCServer:
                 response, fd, should_close = await self._gms.handle_request(
                     conn,
                     msg,
-                    lambda: not conn.reader.at_eof()
-                    and conn.reader.exception() is None
-                    and not conn.writer.is_closing(),
+                    lambda: _is_connection_alive(conn),
                 )
             except ConnectionAbortedError as exc:
                 logger.warning(
