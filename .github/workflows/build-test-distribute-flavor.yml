@@ -158,7 +158,7 @@ jobs:
   # ============================================================================
   build:
     if: inputs.build_image
-    name: Build ${{ inputs.framework }}-cuda${{ inputs.cuda_version }}-${{ inputs.platform }}
+    name: Build cuda${{ inputs.cuda_version }}-${{ inputs.platform }}
     runs-on: prod-builder-v3
     outputs:
       target_tag_plain: ${{ steps.calculate-target-tag.outputs.target_tag_plain }}
@@ -188,8 +188,8 @@ jobs:
           if [ "${{ inputs.make_efa }}" == "true" ]; then
             EFA_SUFFIX="-efa"
           fi
-          TARGET_TAG_PLAIN="${{ github.sha }}-${{ inputs.framework }}${EFA_SUFFIX}"
-          TEST_TAG_PLAIN="${{ github.sha }}-${{ inputs.framework }}${EFA_SUFFIX}-test"
+          TARGET_TAG_PLAIN="${{ github.sha }}-${{ inputs.framework }}-${{ inputs.target }}${EFA_SUFFIX}"
+          TEST_TAG_PLAIN="${{ github.sha }}-${{ inputs.framework }}-${{ inputs.target }}${EFA_SUFFIX}-test"
           DEFAULT_TARGET_IMAGE_URI="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${TARGET_TAG_PLAIN}-cuda${CUDA_VERSION}-${{ inputs.platform }}"
           TEST_IMAGE_URI="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${TEST_TAG_PLAIN}-cuda${CUDA_VERSION}-${{ inputs.platform }}"
           echo "default_target_image_uri=${DEFAULT_TARGET_IMAGE_URI}" >> $GITHUB_OUTPUT
@@ -263,7 +263,7 @@ jobs:
               ${MAKE_EFA_FLAG} \
               --show-result \
               --output-short-filename
-      - name: Build and Push Runtime Image
+      - name: Build and Push Image
         id: build-image
         timeout-minutes: ${{ inputs.build_timeout_minutes }}
         uses: ./.github/actions/docker-remote-build
@@ -285,6 +285,7 @@ jobs:
           extra_build_args: |
             DYNAMO_COMMIT_SHA=${{ github.sha }}
       - name: Build and Push Test Image
+        if: ${{ inputs.target != 'dev' }} # no need to build a separate test image for dev as its not tested
         shell: bash
         env:
           ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
@@ -347,7 +348,7 @@ jobs:
         ( inputs.run_cpu_only_tests || inputs.run_single_gpu_tests ) &&
         inputs.build_image
     needs: [build]
-    name: Test ${{ inputs.framework }}-cuda${{ inputs.cuda_version }}-${{ inputs.platform }}
+    name: Test cuda${{ inputs.cuda_version }}-${{ inputs.platform }}
     runs-on: ${{ inputs.platform == 'amd64' && 'prod-tester-amd-gpu-v1' || 'prod-tester-arm-v1' }}
     env:
       FRAMEWORK: ${{ inputs.framework }}
@@ -450,7 +451,7 @@ jobs:
         inputs.build_image &&
         ( inputs.platform != 'arm64' )
     needs: [build]
-    name: Multi-gpu Test ${{ inputs.framework }}-cuda${{ inputs.cuda_version }}-${{ inputs.platform }}
+    name: Multi-gpu test cuda${{ inputs.cuda_version }}-${{ inputs.platform }}
     runs-on: prod-tester-amd-gpu-4-v1
     env:
       FRAMEWORK: ${{ inputs.framework }}
@@ -515,7 +516,7 @@ jobs:
       inputs.copy_to_acr &&
       needs.build.result == 'success' &&
       (needs.test.result == 'success' || needs.test.result == 'skipped')
-    name: copy ${{ inputs.framework }}-cuda${{ inputs.cuda_version }}-${{ inputs.platform }}
+    name: copy-to-acr cuda${{ inputs.cuda_version }}-${{ inputs.platform }}
     runs-on: prod-default-small-v2
     outputs:
       target_tag_plain: ${{ needs.build.outputs.target_tag_plain }}
