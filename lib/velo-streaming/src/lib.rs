@@ -21,6 +21,7 @@ pub mod anchor;
 pub mod control;
 pub mod frame;
 pub mod handle;
+pub mod sender;
 pub mod transport;
 
 pub use anchor::{AnchorManager, AnchorStream, AttachError};
