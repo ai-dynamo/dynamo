@@ -15,3 +15,4 @@ repository.workspace = true
 velo-common = { workspace = true }
 serde = { workspace = true }
 rmp-serde = { workspace = true }
+anyhow = { workspace = true }
