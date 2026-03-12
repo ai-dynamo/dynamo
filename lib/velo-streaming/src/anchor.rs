@@ -137,6 +137,47 @@ impl<T> AnchorStream<T> {
             entry.cancel_token.cancel();
         }
     }
+
+    /// Configure or override the inactivity timeout for this anchor.
+    ///
+    /// - `Some(duration)`: anchor will be auto-removed if no sender attaches
+    ///   within `duration`. If the anchor is currently unattached, a new timeout
+    ///   task is spawned immediately (replacing any existing one).
+    /// - `None`: disable timeout for this anchor. Any running timeout task is
+    ///   cancelled.
+    ///
+    /// If the anchor is currently attached, the new duration is stored and will
+    /// take effect on the next detach (no immediate spawn since the timer is
+    /// paused while attached).
+    pub fn set_timeout(&self, timeout: Option<Duration>) {
+        if let Some(mut entry) = self.registry.get_mut(&self.local_id) {
+            // Cancel existing timeout task if any
+            if let Some(ref old_tc) = entry.timeout_cancel {
+                old_tc.cancel();
+            }
+
+            // Update the stored duration
+            entry.timeout_duration = timeout;
+
+            // If unattached and a timeout is set, spawn a new timeout task
+            if !entry.attachment {
+                if let Some(duration) = timeout {
+                    let tc = AnchorManager::spawn_timeout_task(
+                        self.registry.clone(),
+                        self.local_id,
+                        duration,
+                    );
+                    entry.timeout_cancel = Some(tc);
+                } else {
+                    entry.timeout_cancel = None;
+                }
+            } else {
+                // Attached: just clear the old cancel token; duration is stored
+                // and will be used when detach respawns the timeout task.
+                entry.timeout_cancel = None;
+            }
+        }
+    }
 }
 
 // SAFETY: AnchorStream does not use structural pinning. Its `inner_stream`
