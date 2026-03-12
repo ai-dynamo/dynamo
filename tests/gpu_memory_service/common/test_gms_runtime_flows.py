@@ -6,92 +6,51 @@ from __future__ import annotations
 import asyncio
 import itertools
 import os
+import signal
 import socket
+import subprocess
+import sys
+import textwrap
 import threading
 import time
 
+import pynvml
 import pytest
 from gpu_memory_service.client.memory_manager import (
     GMSClientMemoryManager,
     StaleMemoryLayoutError,
 )
+from gpu_memory_service.client.rpc import _GMSRPCTransport
 from gpu_memory_service.client.session import _GMSClientSession
+from gpu_memory_service.common.protocol.messages import (
+    GetEventHistoryRequest,
+    GetEventHistoryResponse,
+    GetRuntimeStateRequest,
+    GetRuntimeStateResponse,
+)
+from gpu_memory_service.common import cuda_utils
 from gpu_memory_service.common.types import (
     GrantedLockType,
     RequestedLockType,
     ServerState,
 )
+from gpu_memory_service.server.allocations import GMSAllocationManager
+from gpu_memory_service.server.epochs import GMSEpochManager
 from gpu_memory_service.server.rpc import GMSRPCServer
+from tests.gpu_memory_service.harness.gms import ServerThread
 
 pytestmark = [
     pytest.mark.unit,
-    pytest.mark.fault_tolerance,
 ]
 
 
-class _ServerThread:
-    def __init__(self, server: GMSRPCServer, socket_path: str) -> None:
-        self.server = server
-        self.socket_path = socket_path
-        self._loop: asyncio.AbstractEventLoop | None = None
-        self._task: asyncio.Task[None] | None = None
-        self._thread = threading.Thread(target=self._run, daemon=True)
-        self._exception: BaseException | None = None
-
-    def _run(self) -> None:
-        loop = asyncio.new_event_loop()
-        self._loop = loop
-        asyncio.set_event_loop(loop)
-        self._task = loop.create_task(self.server.serve())
-        try:
-            loop.run_until_complete(self._task)
-        except asyncio.CancelledError:
-            pass
-        except BaseException as exc:
-            self._exception = exc
-        finally:
-            pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
-            for task in pending:
-                task.cancel()
-            if pending:
-                loop.run_until_complete(
-                    asyncio.gather(*pending, return_exceptions=True)
-                )
-            loop.close()
-
-    def start(self) -> None:
-        self._thread.start()
-        deadline = time.time() + 5
-        while not os.path.exists(self.socket_path):
-            if self._exception is not None:
-                raise self._exception
-            if time.time() > deadline:
-                raise TimeoutError(f"GMS socket did not appear at {self.socket_path}")
-            time.sleep(0.01)
-
-    def stop(self) -> None:
-        if self._loop is not None:
-
-            def cancel() -> None:
-                if self.server._server is not None:
-                    self.server._server.close()
-                if self._task is not None:
-                    self._task.cancel()
-
-            self._loop.call_soon_threadsafe(cancel)
-        self._thread.join(timeout=5)
-        if self._exception is not None:
-            raise self._exception
-        if os.path.exists(self.socket_path):
-            os.unlink(self.socket_path)
-
-
-def _wait_for(predicate, *, timeout: float = 2.0) -> None:
-    deadline = time.time() + timeout
-    while not predicate():
-        if time.time() > deadline:
-            raise TimeoutError("condition was not satisfied before timeout")
-        time.sleep(0.01)
+def _gpu_memory_free_bytes(device: int = 0) -> int:
+    pynvml.nvmlInit()
+    try:
+        handle = pynvml.nvmlDeviceGetHandleByIndex(device)
+        return int(pynvml.nvmlDeviceGetMemoryInfo(handle).free)
+    finally:
+        pynvml.nvmlShutdown()
 
 
 def _drop_connection(session: _GMSClientSession) -> None:
@@ -103,6 +62,42 @@ def _drop_connection(session: _GMSClientSession) -> None:
         pass
     sock.close()
     session._transport._socket = None
+
+
+def _wait_for_server_state(
+    server: GMSRPCServer,
+    expected: ServerState,
+    timeout: float = 2.0,
+) -> None:
+    deadline = time.monotonic() + timeout
+    while server.state != expected:
+        if time.monotonic() > deadline:
+            raise TimeoutError(f"server did not reach {expected.name}")
+        time.sleep(0.01)
+
+
+def _wait_for_waiting_writers(
+    server: GMSRPCServer,
+    expected: int,
+    timeout: float = 2.0,
+) -> None:
+    deadline = time.monotonic() + timeout
+    while server._gms._sessions.snapshot().waiting_writers != expected:
+        if time.monotonic() > deadline:
+            raise TimeoutError(f"waiting writers did not reach {expected}")
+        time.sleep(0.01)
+
+
+def _wait_for_ro_session_count(
+    server: GMSRPCServer,
+    expected: int,
+    timeout: float = 2.0,
+) -> None:
+    deadline = time.monotonic() + timeout
+    while server._gms._sessions.snapshot().ro_session_count != expected:
+        if time.monotonic() > deadline:
+            raise TimeoutError(f"RO session count did not reach {expected}")
+        time.sleep(0.01)
 
 
 @pytest.fixture
@@ -190,7 +185,7 @@ def real_gms(monkeypatch, tmp_path):
 
     socket_path = str(tmp_path / "gms.sock")
     server = GMSRPCServer(socket_path, device=0, allocation_retry_interval=0.01)
-    thread = _ServerThread(server, socket_path)
+    thread = ServerThread(server, socket_path)
     thread.start()
     try:
         yield server, socket_path
@@ -220,7 +215,7 @@ def test_rw_commit_publishes_allocations_metadata_and_layout_hash(real_gms):
 
     assert writer.is_unmapped
     assert not writer.is_connected
-    _wait_for(lambda: server.state == ServerState.COMMITTED)
+    _wait_for_server_state(server, ServerState.COMMITTED)
 
 
 def test_rw_disconnect_aborts_epoch_and_next_writer_starts_clean(real_gms):
@@ -231,7 +226,7 @@ def test_rw_disconnect_aborts_epoch_and_next_writer_starts_clean(real_gms):
     writer.metadata_put("stale", allocation_id, 0, b"value")
     _drop_connection(writer)
 
-    _wait_for(lambda: server.state == ServerState.EMPTY)
+    _wait_for_server_state(server, ServerState.EMPTY)
 
     next_writer = _GMSClientSession(socket_path, RequestedLockType.RW, None)
     try:
@@ -248,7 +243,7 @@ def test_rw_or_ro_grants_rw_from_empty_and_ro_from_committed(real_gms):
     assert session.lock_type == GrantedLockType.RW
     session.commit()
 
-    _wait_for(lambda: server.state == ServerState.COMMITTED)
+    _wait_for_server_state(server, ServerState.COMMITTED)
 
     session = _GMSClientSession(socket_path, RequestedLockType.RW_OR_RO, 100)
     try:
@@ -256,6 +251,46 @@ def test_rw_or_ro_grants_rw_from_empty_and_ro_from_committed(real_gms):
         assert session.committed
     finally:
         session.close()
+
+
+def test_runtime_state_and_event_history_are_side_effect_free(real_gms):
+    server, socket_path = real_gms
+
+    writer = GMSClientMemoryManager(socket_path, device=0)
+    writer.connect(RequestedLockType.RW)
+    writer.create_mapping(size=4096, tag="weights")
+    assert writer.commit()
+
+    assert server._gms._sessions.snapshot().ro_session_count == 0
+
+    with _GMSRPCTransport(socket_path) as transport:
+        transport.connect()
+        state = transport.request(
+            GetRuntimeStateRequest(),
+            GetRuntimeStateResponse,
+        )
+
+    with _GMSRPCTransport(socket_path) as transport:
+        transport.connect()
+        history = transport.request(
+            GetEventHistoryRequest(),
+            GetEventHistoryResponse,
+        )
+
+    assert state.state == ServerState.COMMITTED.name
+    assert state.committed
+    assert state.is_ready
+    assert state.ro_session_count == 0
+    assert state.waiting_writers == 0
+    assert state.committed_epoch_id == 1
+    assert state.active_rw_epoch_id is None
+    assert state.allocation_count == 1
+    assert state.memory_layout_hash
+    assert [(event.kind, event.epoch_id) for event in history.events] == [
+        ("rw_connected", 1),
+        ("committed", 1),
+    ]
+    assert server._gms._sessions.snapshot().ro_session_count == 0
 
 
 def test_committed_epoch_is_replaced_when_new_writer_connects(real_gms):
@@ -266,7 +301,7 @@ def test_committed_epoch_is_replaced_when_new_writer_connects(real_gms):
     first_writer.create_mapping(size=4096, tag="weights")
     assert first_writer.commit()
 
-    _wait_for(lambda: server.state == ServerState.COMMITTED)
+    _wait_for_server_state(server, ServerState.COMMITTED)
     assert server._gms.allocation_count == 1
 
     second_writer = _GMSClientSession(socket_path, RequestedLockType.RW, None)
@@ -279,6 +314,56 @@ def test_committed_epoch_is_replaced_when_new_writer_connects(real_gms):
         assert server._gms.active_rw_epoch_id is not None
     finally:
         second_writer.close()
+
+
+def test_reader_mapping_disconnect_then_next_writer_clears_old_epoch(real_gms):
+    server, socket_path = real_gms
+
+    writer = GMSClientMemoryManager(socket_path, device=0)
+    writer.connect(RequestedLockType.RW)
+    va = writer.create_mapping(size=4096, tag="weights")
+    allocation_id = writer.mappings[va].allocation_id
+    assert writer.commit()
+
+    reader = GMSClientMemoryManager(socket_path, device=0)
+    reader.connect(RequestedLockType.RO)
+    imported_va = reader.create_mapping(allocation_id=allocation_id)
+    assert reader.mappings[imported_va].handle != 0
+
+    next_writer_result: dict[str, object] = {}
+
+    def open_writer() -> None:
+        try:
+            next_writer_result["session"] = _GMSClientSession(
+                socket_path,
+                RequestedLockType.RW,
+                500,
+            )
+        except Exception as exc:
+            next_writer_result["error"] = exc
+
+    thread = threading.Thread(target=open_writer)
+    thread.start()
+    _wait_for_waiting_writers(server, 1)
+
+    assert thread.is_alive()
+    assert server.state == ServerState.RO
+    assert server._gms.allocation_count == 1
+
+    reader.unmap_all_vas()
+    reader.disconnect()
+    thread.join(timeout=2)
+
+    next_writer = next_writer_result.get("session")
+    assert isinstance(next_writer, _GMSClientSession)
+    try:
+        assert next_writer.lock_type == GrantedLockType.RW
+        assert next_writer.list_allocations() == []
+        assert server._gms.allocation_count == 0
+        assert server._gms.committed_epoch_id is None
+        assert server._gms.active_rw_epoch_id is not None
+    finally:
+        next_writer.close()
 
 
 def test_waiting_writer_blocks_new_readers_until_last_reader_disconnects(real_gms):
@@ -302,7 +387,7 @@ def test_waiting_writer_blocks_new_readers_until_last_reader_disconnects(real_gm
 
     thread = threading.Thread(target=open_writer)
     thread.start()
-    _wait_for(lambda: server._gms._sessions.snapshot().waiting_writers == 1)
+    _wait_for_waiting_writers(server, 1)
 
     with pytest.raises(TimeoutError, match="Timeout waiting for lock"):
         _GMSClientSession(socket_path, RequestedLockType.RO, 100)
@@ -339,7 +424,7 @@ def test_rw_or_ro_times_out_while_writer_waits_behind_reader(real_gms):
 
     thread = threading.Thread(target=block_writer)
     thread.start()
-    _wait_for(lambda: server._gms._sessions.snapshot().waiting_writers == 1)
+    _wait_for_waiting_writers(server, 1)
 
     with pytest.raises(TimeoutError, match="Timeout waiting for lock"):
         _GMSClientSession(socket_path, RequestedLockType.RW_OR_RO, 100)
@@ -368,11 +453,11 @@ def test_reader_can_acquire_after_waiting_writer_times_out(real_gms):
 
     thread = threading.Thread(target=timeout_writer)
     thread.start()
-    _wait_for(lambda: server._gms._sessions.snapshot().waiting_writers == 1)
+    _wait_for_waiting_writers(server, 1)
     thread.join(timeout=2)
 
     assert isinstance(writer_result["error"], TimeoutError)
-    _wait_for(lambda: server._gms._sessions.snapshot().waiting_writers == 0)
+    _wait_for_waiting_writers(server, 0)
 
     second_reader = _GMSClientSession(socket_path, RequestedLockType.RO, 200)
     try:
@@ -391,15 +476,15 @@ def test_multiple_readers_hold_committed_state_until_last_disconnect(real_gms):
     reader_a = _GMSClientSession(socket_path, RequestedLockType.RO, None)
     reader_b = _GMSClientSession(socket_path, RequestedLockType.RO, None)
 
-    _wait_for(lambda: server.state == ServerState.RO)
+    _wait_for_server_state(server, ServerState.RO)
     assert server._gms._sessions.snapshot().ro_session_count == 2
 
     reader_a.close()
-    _wait_for(lambda: server._gms._sessions.snapshot().ro_session_count == 1)
+    _wait_for_ro_session_count(server, 1)
     assert server.state == ServerState.RO
 
     reader_b.close()
-    _wait_for(lambda: server.state == ServerState.COMMITTED)
+    _wait_for_server_state(server, ServerState.COMMITTED)
 
 
 def test_ro_session_rejects_rw_only_requests(real_gms):
@@ -589,7 +674,7 @@ def test_reallocate_all_handles_reuses_preserved_vas_in_new_epoch(real_gms):
     old_allocation_id = manager.mappings[va].allocation_id
     assert manager.commit()
 
-    _wait_for(lambda: server.state == ServerState.COMMITTED)
+    _wait_for_server_state(server, ServerState.COMMITTED)
     manager.connect(RequestedLockType.RW)
     manager.reallocate_all_handles(tag="weights")
 
@@ -601,7 +686,7 @@ def test_reallocate_all_handles_reuses_preserved_vas_in_new_epoch(real_gms):
     assert manager.mappings[va].va == va
     assert manager.mappings[va].handle != 0
     manager.close()
-    _wait_for(lambda: server.state == ServerState.EMPTY)
+    _wait_for_server_state(server, ServerState.EMPTY)
 
 
 def test_disconnect_during_allocation_retry_aborts_writer_and_unblocks_next_writer(
@@ -636,12 +721,16 @@ def test_disconnect_during_allocation_retry_aborts_writer_and_unblocks_next_writ
 
     thread = threading.Thread(target=allocate)
     thread.start()
-    _wait_for(lambda: oom_attempts > 0)
+    deadline = time.monotonic() + 2.0
+    while oom_attempts == 0:
+        if time.monotonic() > deadline:
+            raise TimeoutError("allocation retry never reached CUDA OOM")
+        time.sleep(0.01)
 
     _drop_connection(writer)
 
     thread.join(timeout=2)
-    _wait_for(lambda: server.state == ServerState.EMPTY)
+    _wait_for_server_state(server, ServerState.EMPTY)
 
     allow_allocation = True
     next_writer = _GMSClientSession(socket_path, RequestedLockType.RW, 200)
@@ -654,3 +743,180 @@ def test_disconnect_during_allocation_retry_aborts_writer_and_unblocks_next_writ
         next_writer.close()
 
     assert isinstance(result.get("error"), ConnectionError)
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(180)
+async def test_new_epoch_large_allocation_waits_for_dead_writer_process(
+    tmp_path,
+    monkeypatch,
+):
+    free_before = _gpu_memory_free_bytes()
+    size = int(free_before * 0.9)
+    assert size > 0
+
+    oom_failures = 0
+
+    def count_oom(size: int, device: int) -> tuple[bool, int]:
+        nonlocal oom_failures
+        allocated, handle = cuda_utils.cumem_create_tolerate_oom(size, device)
+        if not allocated:
+            oom_failures += 1
+        return allocated, handle
+
+    monkeypatch.setattr(
+        "gpu_memory_service.server.allocations.cumem_create_tolerate_oom",
+        count_oom,
+    )
+
+    allocations = GMSAllocationManager(
+        device=0,
+        allocation_retry_interval=0.1,
+        allocation_retry_timeout=120.0,
+    )
+    epochs = GMSEpochManager()
+    holder = None
+    allocation_task = None
+
+    try:
+        assert epochs.on_rw_connect() is None
+        first_epoch = epochs.active_rw_epoch_id
+        first = await allocations.allocate(
+            size=size,
+            epoch_id=epochs.require_epoch_id(GrantedLockType.RW),
+            tag="weights",
+            is_connected=lambda: True,
+        )
+        assert first.epoch_id == first_epoch
+
+        free_after_first = _gpu_memory_free_bytes()
+        assert free_after_first < free_before - (size // 2)
+
+        exported_fd = allocations.export_allocation(
+            first.allocation_id,
+            epochs.require_epoch_id(GrantedLockType.RW),
+        )
+        holder_ready = tmp_path / "holder.ready"
+        holder_log = tmp_path / "holder.log"
+        holder_script = tmp_path / "hold_import.py"
+        holder_script.write_text(
+            textwrap.dedent("""
+                import sys
+                import time
+                from pathlib import Path
+
+                from gpu_memory_service.common.cuda_utils import (
+                    cuda_ensure_initialized,
+                    cuda_set_current_device,
+                    cumem_address_reserve,
+                    cumem_get_allocation_granularity,
+                    cumem_import_from_shareable_handle_close_fd,
+                    cumem_map,
+                    cumem_set_access,
+                )
+                from gpu_memory_service.common.types import GrantedLockType
+
+                fd = int(sys.argv[1])
+                size = int(sys.argv[2])
+                ready_path = Path(sys.argv[3])
+
+                cuda_ensure_initialized()
+                cuda_set_current_device(0)
+                granularity = cumem_get_allocation_granularity(0)
+                handle = cumem_import_from_shareable_handle_close_fd(fd)
+                va = cumem_address_reserve(size, granularity)
+                cumem_map(va, size, handle)
+                cumem_set_access(va, size, 0, GrantedLockType.RW)
+                ready_path.write_text(str(va))
+
+                while True:
+                    time.sleep(1.0)
+                """),
+            encoding="utf-8",
+        )
+
+        with holder_log.open("w", encoding="utf-8") as log_file:
+            holder = subprocess.Popen(
+                [
+                    sys.executable,
+                    str(holder_script),
+                    str(exported_fd),
+                    str(first.aligned_size),
+                    str(holder_ready),
+                ],
+                pass_fds=[exported_fd],
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+        os.close(exported_fd)
+
+        deadline = time.monotonic() + 30.0
+        while not holder_ready.exists():
+            assert holder.poll() is None, holder_log.read_text(encoding="utf-8")
+            assert time.monotonic() < deadline, holder_log.read_text(encoding="utf-8")
+            await asyncio.sleep(0.1)
+
+        cleared_epoch_id = epochs.on_rw_abort()
+        assert cleared_epoch_id == first_epoch
+        assert cleared_epoch_id is not None
+        allocations.clear_all_allocations(cleared_epoch_id)
+        assert epochs.active_rw_epoch_id is None
+        assert allocations.allocation_count == 0
+
+        assert epochs.on_rw_connect() is None
+        second_epoch = epochs.active_rw_epoch_id
+        assert second_epoch != first_epoch
+
+        allocation_task = asyncio.create_task(
+            allocations.allocate(
+                size=size,
+                epoch_id=epochs.require_epoch_id(GrantedLockType.RW),
+                tag="weights",
+                is_connected=lambda: True,
+            )
+        )
+
+        deadline = time.monotonic() + 30.0
+        while oom_failures == 0:
+            assert holder.poll() is None, holder_log.read_text(encoding="utf-8")
+            assert not allocation_task.done()
+            assert time.monotonic() < deadline
+            await asyncio.sleep(0.1)
+
+        assert oom_failures > 0
+        assert not allocation_task.done()
+        assert epochs.active_rw_epoch_id == second_epoch
+
+        os.killpg(os.getpgid(holder.pid), signal.SIGKILL)
+        holder.wait(timeout=30.0)
+
+        second = await asyncio.wait_for(allocation_task, timeout=120.0)
+        assert second.epoch_id == second_epoch
+        assert allocations.allocation_count == 1
+
+        cleared_epoch_id = epochs.on_rw_abort()
+        assert cleared_epoch_id == second_epoch
+        assert cleared_epoch_id is not None
+        allocations.clear_all_allocations(cleared_epoch_id)
+        assert allocations.allocation_count == 0
+
+        deadline = time.monotonic() + 30.0
+        while _gpu_memory_free_bytes() < free_before - (1 << 30):
+            assert time.monotonic() < deadline
+            await asyncio.sleep(0.1)
+    finally:
+        if allocation_task is not None and not allocation_task.done():
+            allocation_task.cancel()
+            try:
+                await allocation_task
+            except asyncio.CancelledError:
+                pass
+        active_epoch_id = epochs.active_rw_epoch_id
+        if active_epoch_id is not None:
+            cleared_epoch_id = epochs.on_rw_abort()
+            if cleared_epoch_id is not None:
+                allocations.clear_all_allocations(cleared_epoch_id)
+        if holder is not None and holder.poll() is None:
+            os.killpg(os.getpgid(holder.pid), signal.SIGKILL)
+            holder.wait(timeout=30.0)

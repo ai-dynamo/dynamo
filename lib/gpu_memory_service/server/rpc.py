@@ -8,11 +8,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import socket
+import select
 from typing import Optional
 
 from gpu_memory_service.common.protocol.messages import (
     ErrorResponse,
+    GetEventHistoryRequest,
+    GetRuntimeStateRequest,
     HandshakeRequest,
     HandshakeResponse,
 )
@@ -31,14 +33,22 @@ def _is_connection_alive(conn: Connection) -> bool:
         return False
     if conn.reader.at_eof() or conn.reader.exception() is not None:
         return False
-    sock = getattr(conn.raw_socket, "_sock", conn.raw_socket)
+    sock = conn.writer.get_extra_info("socket")
+    if sock is None:
+        return False
     try:
-        data = sock.recv(1, socket.MSG_PEEK | socket.MSG_DONTWAIT)
-    except BlockingIOError:
-        return True
+        fd = sock.fileno()
     except OSError:
         return False
-    return data != b""
+    if fd < 0:
+        return False
+
+    flags = select.POLLERR | select.POLLHUP | select.POLLNVAL
+    if hasattr(select, "POLLRDHUP"):
+        flags |= select.POLLRDHUP
+    poller = select.poll()
+    poller.register(fd, flags)
+    return not poller.poll(0)
 
 
 class GMSRPCServer:
@@ -103,6 +113,24 @@ class GMSRPCServer:
             msg, _, recv_buffer = await recv_message(reader, bytearray())
         except Exception:
             logger.exception("Handshake recv error")
+            return None
+
+        if isinstance(msg, GetRuntimeStateRequest):
+            try:
+                await send_message(writer, self._gms.get_runtime_state())
+            except Exception as exc:
+                logger.debug("Runtime-state response send failed: %s", exc)
+            finally:
+                writer.close()
+            return None
+
+        if isinstance(msg, GetEventHistoryRequest):
+            try:
+                await send_message(writer, self._gms.get_event_history())
+            except Exception as exc:
+                logger.debug("Event-history response send failed: %s", exc)
+            finally:
+                writer.close()
             return None
 
         if not isinstance(msg, HandshakeRequest):

@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import asyncio
-import socket
 from dataclasses import dataclass, field
 from typing import Optional, Set
 
@@ -31,10 +30,6 @@ class Connection:
 
     def __hash__(self) -> int:
         return hash(self.session_id)
-
-    @property
-    def raw_socket(self) -> socket.socket:
-        return self.writer.get_extra_info("socket")
 
     async def close(self) -> None:
         self.writer.close()

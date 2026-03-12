@@ -13,7 +13,6 @@ from gpu_memory_service.integrations.sglang.memory_saver import GMSMemorySaverIm
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.sglang,
-    pytest.mark.fault_tolerance,
 ]
 
 

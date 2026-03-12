@@ -1,9 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""vLLM-specific utilities for GPU Memory Service tests."""
+"""SGLang-specific utilities for GPU Memory Service tests."""
 
-import json
 import logging
 import os
 import shutil
@@ -14,21 +13,21 @@ from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.payloads import check_health_generate, check_models_api
 
-from .common import DYNAMO_BIN
+from .runtime import REPO_ROOT
 
 logger = logging.getLogger(__name__)
+SGLANG_BIN = REPO_ROOT / "dynamo-sglang" / "bin"
 
 
-class VLLMWithGMSProcess(ManagedProcess):
-    """vLLM engine with GPU Memory Service integration."""
+class SGLangWithGMSProcess(ManagedProcess):
+    """SGLang engine with GPU Memory Service integration."""
 
     def __init__(
         self,
         request,
         engine_id: str,
         system_port: int,
-        kv_event_port: int,
-        nixl_port: int,
+        sglang_port: int,
         frontend_port: int,
     ):
         self.engine_id = engine_id
@@ -37,35 +36,28 @@ class VLLMWithGMSProcess(ManagedProcess):
         log_dir = f"{request.node.name}_{engine_id}"
         shutil.rmtree(log_dir, ignore_errors=True)
 
-        kv_events_cfg = json.dumps(
-            {
-                "publisher": "zmq",
-                "topic": "kv-events",
-                "endpoint": f"tcp://*:{kv_event_port}",
-                "enable_kv_cache_events": True,
-            }
-        )
         super().__init__(
             command=[
                 "python",
                 "-m",
-                "dynamo.vllm",
-                "--model",
+                "dynamo.sglang",
+                "--model-path",
                 FAULT_TOLERANCE_MODEL_NAME,
                 "--load-format",
                 "gms",
-                "--enable-sleep-mode",
-                "--gpu-memory-utilization",
+                "--enable-memory-saver",
+                "--mem-fraction-static",
                 "0.9",
-                "--kv-events-config",
-                kv_events_cfg,
+                "--port",
+                str(sglang_port),
             ],
             env={
                 **os.environ,
-                "PATH": f"{DYNAMO_BIN}:{os.environ.get('PATH', '')}",
+                "PATH": f"/usr/local/cuda/bin:{SGLANG_BIN}:{os.environ.get('PATH', '')}",
+                "CC": "/usr/bin/gcc",
+                "CXX": "/usr/bin/g++",
                 "DYN_LOG": "debug",
                 "DYN_SYSTEM_PORT": str(system_port),
-                "VLLM_NIXL_SIDE_CHANNEL_PORT": str(nixl_port),
             },
             health_check_urls=[
                 (f"http://localhost:{system_port}/health", self._is_ready),
@@ -89,21 +81,21 @@ class VLLMWithGMSProcess(ManagedProcess):
     def sleep(self) -> dict:
         """Put the engine to sleep, offloading weights and KV cache."""
         r = requests.post(
-            f"http://localhost:{self.system_port}/engine/sleep",
-            json={"level": 2},
+            f"http://localhost:{self.system_port}/engine/release_memory_occupation",
+            json={"tags": ["weights", "kv_cache"]},
             timeout=30,
         )
         r.raise_for_status()
-        logger.info(f"{self.engine_id} sleep: {r.json()}")
+        logger.info(f"{self.engine_id} release_memory_occupation: {r.json()}")
         return r.json()
 
     def wake(self, timeout: int = 30) -> dict:
         """Wake the engine, restoring weights and KV cache."""
         r = requests.post(
-            f"http://localhost:{self.system_port}/engine/wake_up",
+            f"http://localhost:{self.system_port}/engine/resume_memory_occupation",
             json={"tags": ["weights", "kv_cache"]},
             timeout=timeout,
         )
         r.raise_for_status()
-        logger.info(f"{self.engine_id} wake: {r.json()}")
+        logger.info(f"{self.engine_id} resume_memory_occupation: {r.json()}")
         return r.json()

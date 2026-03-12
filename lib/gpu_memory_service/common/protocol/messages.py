@@ -167,6 +167,37 @@ class GetStateHashResponse(msgspec.Struct, tag="get_memory_layout_hash_response"
     memory_layout_hash: str  # Hash of allocations + metadata, empty if not committed
 
 
+class GetRuntimeStateRequest(msgspec.Struct, tag="get_runtime_state_request"):
+    pass
+
+
+class GetRuntimeStateResponse(msgspec.Struct, tag="get_runtime_state_response"):
+    state: str
+    has_rw_session: bool
+    ro_session_count: int
+    waiting_writers: int
+    committed: bool
+    is_ready: bool
+    committed_epoch_id: Optional[int] = None
+    active_rw_epoch_id: Optional[int] = None
+    allocation_count: int = 0
+    memory_layout_hash: str = ""
+
+
+class GMSRuntimeEvent(msgspec.Struct):
+    kind: str
+    epoch_id: int
+    allocation_count: int = 0
+
+
+class GetEventHistoryRequest(msgspec.Struct, tag="get_event_history_request"):
+    pass
+
+
+class GetEventHistoryResponse(msgspec.Struct, tag="get_event_history_response"):
+    events: List[GMSRuntimeEvent] = []
+
+
 Message = Union[
     HandshakeRequest,
     HandshakeResponse,
@@ -197,6 +228,10 @@ Message = Union[
     MetadataListResponse,
     GetStateHashRequest,
     GetStateHashResponse,
+    GetRuntimeStateRequest,
+    GetRuntimeStateResponse,
+    GetEventHistoryRequest,
+    GetEventHistoryResponse,
 ]
 
 _encoder = msgspec.msgpack.Encoder()

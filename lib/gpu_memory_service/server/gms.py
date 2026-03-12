@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from collections import deque
 import logging
 from typing import Callable, Optional
 
@@ -21,10 +22,15 @@ from gpu_memory_service.common.protocol.messages import (
     GetAllocationResponse,
     GetAllocationStateRequest,
     GetAllocationStateResponse,
+    GetEventHistoryRequest,
+    GetEventHistoryResponse,
     GetLockStateRequest,
     GetLockStateResponse,
+    GetRuntimeStateRequest,
+    GetRuntimeStateResponse,
     GetStateHashRequest,
     GetStateHashResponse,
+    GMSRuntimeEvent,
     ListAllocationsRequest,
     ListAllocationsResponse,
     MetadataDeleteRequest,
@@ -53,6 +59,8 @@ logger = logging.getLogger(__name__)
 class GMS:
     """Owns all non-transport server state."""
 
+    _MAX_EVENTS = 256
+
     def __init__(
         self,
         device: int = 0,
@@ -67,6 +75,7 @@ class GMS:
         )
         self._epochs = GMSEpochManager()
         self._sessions = GMSSessionManager()
+        self._events: deque[GMSRuntimeEvent] = deque(maxlen=self._MAX_EVENTS)
         logger.info("GMS initialized: device=%d", device)
 
     @property
@@ -91,6 +100,24 @@ class GMS:
 
     def is_ready(self) -> bool:
         return self._sessions.snapshot().is_ready
+
+    def get_runtime_state(self) -> GetRuntimeStateResponse:
+        session = self._sessions.snapshot()
+        return GetRuntimeStateResponse(
+            state=session.state.name,
+            has_rw_session=session.has_rw_session,
+            ro_session_count=session.ro_session_count,
+            waiting_writers=session.waiting_writers,
+            committed=session.committed,
+            is_ready=session.is_ready,
+            committed_epoch_id=self._epochs.committed_epoch_id,
+            active_rw_epoch_id=self._epochs.active_rw_epoch_id,
+            allocation_count=self._allocations.allocation_count,
+            memory_layout_hash=self._epochs.memory_layout_hash,
+        )
+
+    def get_event_history(self) -> GetEventHistoryResponse:
+        return GetEventHistoryResponse(events=list(self._events))
 
     def next_session_id(self) -> str:
         return self._sessions.next_session_id()
@@ -117,13 +144,39 @@ class GMS:
                 old_committed_epoch_id = self._epochs.on_rw_connect()
                 rw_epoch_initialized = True
                 if old_committed_epoch_id is not None:
-                    self._allocations.clear_all_allocations(old_committed_epoch_id)
+                    cleared = self._allocations.clear_all_allocations(
+                        old_committed_epoch_id
+                    )
+                    self._events.append(
+                        GMSRuntimeEvent(
+                            kind="allocations_cleared",
+                            epoch_id=old_committed_epoch_id,
+                            allocation_count=cleared,
+                        )
+                    )
             self._sessions.on_connect(conn)
+            if conn.mode == GrantedLockType.RW:
+                self._events.append(
+                    GMSRuntimeEvent(
+                        kind="rw_connected",
+                        epoch_id=self._epochs.require_epoch_id(GrantedLockType.RW),
+                    )
+                )
         except Exception:
             if rw_epoch_initialized:
                 active_epoch_id = self._epochs.on_rw_abort()
                 if active_epoch_id is not None:
-                    self._allocations.clear_all_allocations(active_epoch_id)
+                    self._events.append(
+                        GMSRuntimeEvent(kind="rw_aborted", epoch_id=active_epoch_id)
+                    )
+                    cleared = self._allocations.clear_all_allocations(active_epoch_id)
+                    self._events.append(
+                        GMSRuntimeEvent(
+                            kind="allocations_cleared",
+                            epoch_id=active_epoch_id,
+                            allocation_count=cleared,
+                        )
+                    )
             raise
 
     async def cleanup_connection(self, conn: Connection | None) -> None:
@@ -131,7 +184,17 @@ class GMS:
         if event == StateEvent.RW_ABORT:
             active_epoch_id = self._epochs.on_rw_abort()
             if active_epoch_id is not None:
-                self._allocations.clear_all_allocations(active_epoch_id)
+                self._events.append(
+                    GMSRuntimeEvent(kind="rw_aborted", epoch_id=active_epoch_id)
+                )
+                cleared = self._allocations.clear_all_allocations(active_epoch_id)
+                self._events.append(
+                    GMSRuntimeEvent(
+                        kind="allocations_cleared",
+                        epoch_id=active_epoch_id,
+                        allocation_count=cleared,
+                    )
+                )
         await self._sessions.finish_cleanup(conn)
 
     async def handle_request(
@@ -150,8 +213,23 @@ class GMS:
                 )
             )
             if old_committed_epoch_id is not None:
-                self._allocations.clear_all_allocations(old_committed_epoch_id)
+                cleared = self._allocations.clear_all_allocations(
+                    old_committed_epoch_id
+                )
+                self._events.append(
+                    GMSRuntimeEvent(
+                        kind="allocations_cleared",
+                        epoch_id=old_committed_epoch_id,
+                        allocation_count=cleared,
+                    )
+                )
             self._sessions.on_commit(conn)
+            self._events.append(
+                GMSRuntimeEvent(
+                    kind="committed",
+                    epoch_id=self._epochs.committed_epoch_id,
+                )
+            )
             return CommitResponse(success=True), -1, True
 
         if msg_type is AllocateRequest:
@@ -195,6 +273,12 @@ class GMS:
                 -1,
                 False,
             )
+
+        if msg_type is GetRuntimeStateRequest:
+            return self.get_runtime_state(), -1, False
+
+        if msg_type is GetEventHistoryRequest:
+            return self.get_event_history(), -1, False
 
         if msg_type is ExportAllocationRequest:
             info = self._allocations.get_allocation(

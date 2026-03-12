@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+import socket
+import time
 
 import pytest
 from cuda.bindings import driver as cuda
@@ -14,8 +16,12 @@ from gpu_memory_service.common import cuda_utils
 from gpu_memory_service.common.protocol.messages import (
     CommitRequest,
     CommitResponse,
+    GetEventHistoryRequest,
+    GetEventHistoryResponse,
     GetLockStateRequest,
     GetLockStateResponse,
+    GetRuntimeStateRequest,
+    GetRuntimeStateResponse,
     HandshakeRequest,
 )
 from gpu_memory_service.common.types import (
@@ -26,13 +32,12 @@ from gpu_memory_service.common.types import (
 )
 from gpu_memory_service.server.allocations import GMSAllocationManager
 from gpu_memory_service.server.gms import GMS
-from gpu_memory_service.server.rpc import GMSRPCServer
+from gpu_memory_service.server.rpc import GMSRPCServer, _is_connection_alive
 from gpu_memory_service.server.session import Connection, GMSSessionManager
 
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.gpu_0,
-    pytest.mark.fault_tolerance,
 ]
 
 
@@ -75,12 +80,17 @@ def test_cumem_export_to_shareable_handle_returns_fd(monkeypatch):
 
 
 class _DummyReader:
-    pass
+    def at_eof(self) -> bool:
+        return False
+
+    def exception(self):
+        return None
 
 
 class _DummyWriter:
-    def __init__(self) -> None:
+    def __init__(self, sock: socket.socket | None = None) -> None:
         self.closed = False
+        self._socket = sock
 
     def close(self) -> None:
         self.closed = True
@@ -88,8 +98,35 @@ class _DummyWriter:
     async def wait_closed(self) -> None:
         return None
 
+    def is_closing(self) -> bool:
+        return self.closed
+
     def get_extra_info(self, _name: str):
-        return None
+        return self._socket
+
+
+def test_is_connection_alive_detects_dead_peer() -> None:
+    local_sock, peer_sock = socket.socketpair()
+    local_sock.setblocking(False)
+    try:
+        conn = Connection(
+            reader=_DummyReader(),
+            writer=_DummyWriter(local_sock),
+            mode=GrantedLockType.RW,
+            session_id="session_1",
+            recv_buffer=bytearray(),
+        )
+        assert _is_connection_alive(conn)
+
+        peer_sock.close()
+        deadline = time.monotonic() + 1.0
+        while _is_connection_alive(conn):
+            if time.monotonic() > deadline:
+                raise TimeoutError("peer disconnect was not detected")
+            time.sleep(0.01)
+    finally:
+        peer_sock.close()
+        local_sock.close()
 
 
 def _make_connection(
@@ -152,11 +189,7 @@ class _FakeHandler:
             state=(
                 "RW"
                 if has_rw
-                else "RO"
-                if ro_count
-                else "COMMITTED"
-                if committed
-                else "EMPTY"
+                else "RO" if ro_count else "COMMITTED" if committed else "EMPTY"
             ),
             has_rw_session=has_rw,
             ro_session_count=ro_count,
@@ -377,6 +410,7 @@ async def test_gms_clears_aborted_rw_epoch_before_waking_waiters():
     gms = object.__new__(GMS)
     cleanup_order: list[str] = []
     conn, _ = _make_connection(GrantedLockType.RW, "session_1")
+    gms._events = []
 
     def begin_cleanup(self, cleanup_conn):
         cleanup_order.append("begin_cleanup")
@@ -491,6 +525,72 @@ async def test_post_commit_response_send_failure_stays_committed(monkeypatch):
     assert server._gms._sessions.snapshot().committed
     assert server._gms._sessions.state == ServerState.COMMITTED
     assert writer.closed
+
+
+@pytest.mark.asyncio
+async def test_runtime_state_handshake_send_failure_does_not_fail_server(monkeypatch):
+    server = _make_server()
+    reader = _DummyReader()
+    writer = _DummyWriter()
+
+    async def fake_recv_message(_reader, _buffer):
+        return GetRuntimeStateRequest(), -1, bytearray()
+
+    async def fake_send_message(_writer, _msg, _fd=-1):
+        raise BrokenPipeError("runtime-state send failed")
+
+    monkeypatch.setattr("gpu_memory_service.server.rpc.recv_message", fake_recv_message)
+    monkeypatch.setattr("gpu_memory_service.server.rpc.send_message", fake_send_message)
+
+    conn = await server._do_handshake(reader, writer, "session_diag")
+
+    assert conn is None
+    assert server._gms._sessions.state == ServerState.EMPTY
+    assert writer.closed
+
+
+@pytest.mark.asyncio
+async def test_runtime_state_request_is_supported_on_live_session():
+    gms = GMS()
+    conn, _ = _make_connection(GrantedLockType.RW, "session_4")
+
+    gms._sessions._reserved_rw_session_id = conn.session_id
+    gms.on_connect(conn)
+
+    response, fd, should_close = await gms.handle_request(
+        conn,
+        GetRuntimeStateRequest(),
+        lambda: True,
+    )
+
+    assert fd == -1
+    assert not should_close
+    assert isinstance(response, GetRuntimeStateResponse)
+    assert response.state == ServerState.RW.name
+    assert response.has_rw_session
+    assert response.active_rw_epoch_id == 1
+
+
+@pytest.mark.asyncio
+async def test_event_history_request_is_supported_on_live_session():
+    gms = GMS()
+    conn, _ = _make_connection(GrantedLockType.RW, "session_5")
+
+    gms._sessions._reserved_rw_session_id = conn.session_id
+    gms.on_connect(conn)
+
+    response, fd, should_close = await gms.handle_request(
+        conn,
+        GetEventHistoryRequest(),
+        lambda: True,
+    )
+
+    assert fd == -1
+    assert not should_close
+    assert isinstance(response, GetEventHistoryResponse)
+    assert [(event.kind, event.epoch_id) for event in response.events] == [
+        ("rw_connected", 1),
+    ]
 
 
 @pytest.mark.asyncio

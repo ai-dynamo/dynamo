@@ -14,7 +14,6 @@ from gpu_memory_service.common.types import GrantedLockType, RequestedLockType
 
 pytestmark = [
     pytest.mark.unit,
-    pytest.mark.fault_tolerance,
 ]
 
 
