@@ -5,17 +5,17 @@ set -euo pipefail
 
 NAMESPACE="${NAMESPACE:-qiwa}"
 POD="agg-vllm-serve-1gpu-benchmark"
-REMOTE_BASE="/perf-cache-tmp/artifacts/fp8/gb200-1gpu/agg-vllm-serve"
-LOCAL_BASE="$(cd "$(dirname "$0")" && pwd)/gb200-1gpu"
+REMOTE_BASE="/perf-cache-tmp/artifacts/fp8/gb200-1gpu/agg-vllm-serve-800pool"
+LOCAL_BASE="$(cd "$(dirname "$0")" && pwd)/gb200-1gpu-800pool"
 DATASETS=(
-  "1000req_1img_200pool_400word_base64"
-  "1000req_1img_200pool_400word_http"
-  "1000req_2img_200pool_400word_base64"
-  "1000req_2img_200pool_400word_http"
-  "1000req_4img_200pool_400word_base64"
-  "1000req_4img_200pool_400word_http"
-  "1000req_8img_200pool_400word_base64"
-  "1000req_8img_200pool_400word_http"
+  "1000req_1img_800pool_400word_base64"
+  "1000req_1img_800pool_400word_http"
+  "1000req_2img_800pool_400word_base64"
+  "1000req_2img_800pool_400word_http"
+  "1000req_4img_800pool_400word_base64"
+  "1000req_4img_800pool_400word_http"
+  "1000req_8img_800pool_400word_base64"
+  "1000req_8img_800pool_400word_http"
 )
 CONCURRENCIES=(c4 c8 c16 c32 c64 c128)
 

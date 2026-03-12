@@ -49,7 +49,7 @@ spec:
 
               for IMAGES_PER_REQ in 1 2 4 8; do
                 for IMAGE_MODE in base64 http; do
-                  OUTPUT_FILE="${OUTPUT_DIR}/1000req_${IMAGES_PER_REQ}img_200pool_400word_${IMAGE_MODE}.jsonl"
+                  OUTPUT_FILE="${OUTPUT_DIR}/1000req_${IMAGES_PER_REQ}img_800pool_400word_${IMAGE_MODE}.jsonl"
                   if [[ -f "${OUTPUT_FILE}" ]]; then
                     echo "Skipping ${OUTPUT_FILE} (already exists)"
                     continue
@@ -58,7 +58,7 @@ spec:
                   python3 "${GENERATOR_MAIN}" \
                     -n 1000 \
                     --images-per-request "${IMAGES_PER_REQ}" \
-                    --images-pool 200 \
+                    --images-pool 800 \
                     --user-text-tokens 400 \
                     --image-mode "${IMAGE_MODE}" \
                     --image-dir /perf-cache-tmp/images \

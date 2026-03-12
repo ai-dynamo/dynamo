@@ -131,14 +131,14 @@ spec:
           }
 
           DATASETS=(
-            "1000req_1img_200pool_400word_base64"
-            "1000req_1img_200pool_400word_http"
-            "1000req_2img_200pool_400word_base64"
-            "1000req_2img_200pool_400word_http"
-            "1000req_4img_200pool_400word_base64"
-            "1000req_4img_200pool_400word_http"
-            "1000req_8img_200pool_400word_base64"
-            "1000req_8img_200pool_400word_http"
+            "1000req_1img_800pool_400word_base64"
+            "1000req_1img_800pool_400word_http"
+            "1000req_2img_800pool_400word_base64"
+            "1000req_2img_800pool_400word_http"
+            "1000req_4img_800pool_400word_base64"
+            "1000req_4img_800pool_400word_http"
+            "1000req_8img_800pool_400word_base64"
+            "1000req_8img_800pool_400word_http"
           )
           CONCURRENCIES=(4 8 16 32 64 128)
 
@@ -189,7 +189,7 @@ spec:
         - name: EXPECTED_REPLICAS
           value: "1"
         - name: ARTIFACT_BASE_DIR
-          value: /perf-cache-tmp/artifacts/fp8/gb200-1gpu/agg-vllm-serve
+          value: /perf-cache-tmp/artifacts/fp8/gb200-1gpu/agg-vllm-serve-800pool
       resources:
         requests:
           cpu: "8"
