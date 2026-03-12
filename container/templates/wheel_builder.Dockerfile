@@ -33,11 +33,10 @@ ARG CARGO_BUILD_JOBS
 ARG DEVICE
 
 WORKDIR /workspace
-ARG COMMON_UTILS
 {% if device == "xpu" or device == "cpu" %}
 RUN apt clean && apt-get update -y && \
     apt-get install -y --no-install-recommends --fix-missing \
-    $COMMON_UTILS \
+    curl ca-certificates zip unzip git lsb-release numactl wget vim \
     libsndfile1 \
     libsm6 \
     libxext6 \

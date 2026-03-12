@@ -15,9 +15,9 @@ USER root
 WORKDIR /opt/dynamo
 
 {% if device == "cpu" %}
-ARG COMMON_UTILS
 RUN apt clean && apt-get update -y && \
-    apt-get install -y --no-install-recommends --fix-missing $COMMON_UTILS
+    apt-get install -y --no-install-recommends --fix-missing \
+    curl ca-certificates zip unzip git lsb-release numactl wget vim
 {% endif %}
 
 # Install sccache into the base image so downstream stages can COPY it

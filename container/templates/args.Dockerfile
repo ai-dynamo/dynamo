@@ -131,7 +131,3 @@ ARG TRTLLM_PYTHON_VERSION={{ context[framework].python_version }}
 ARG EFA_VERSION={{ context.dynamo.efa_version }}
 ARG EFA_BASE_IMAGE={{ "runtime" if target=="runtime" else "dev" }}
 {%- endif -%}
-
-# Common utils across devices and stages.
-ARG COMMON_UTILS="curl ca-certificates zip unzip git \
- lsb-release numactl wget vim"
