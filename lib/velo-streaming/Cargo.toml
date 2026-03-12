@@ -13,6 +13,11 @@ repository.workspace = true
 
 [dependencies]
 velo-common = { workspace = true }
+velo-messenger = { workspace = true }
 serde = { workspace = true }
 rmp-serde = { workspace = true }
 anyhow = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+dashmap = { workspace = true }

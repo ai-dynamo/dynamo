@@ -225,6 +225,20 @@ impl Messenger {
         self.handlers.register_handler(handler)
     }
 
+    /// Register an internal streaming handler, allowing names starting with `_`.
+    ///
+    /// Intended for use by `velo-streaming` to register `_anchor_*` control
+    /// handlers from outside this crate. Bypasses the underscore-prefix
+    /// restriction enforced by [`Messenger::register_handler`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a handler with the same name has already been
+    /// registered.
+    pub fn register_streaming_handler(&self, handler: crate::handlers::Handler) -> anyhow::Result<()> {
+        self.handlers.register_internal_handler(handler)
+    }
+
     /// Connect to a peer by registering their peer information.
     pub fn register_peer(&self, peer_info: PeerInfo) -> Result<()> {
         let instance_id = peer_info.instance_id();
@@ -317,5 +331,29 @@ impl Messenger {
     /// Internal: create an unchecked message builder (for system messages)
     pub(crate) fn message_builder_unchecked(&self, handler: &str) -> MessageBuilder {
         MessageBuilder::new_unchecked(self.client.clone(), handler)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::handlers::Handler;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_register_streaming_handler_allows_underscore() {
+        let messenger = Messenger::builder().build().await.unwrap();
+        let handler = Handler::am_handler("_anchor_test", |_ctx| Ok(()))
+            .build();
+        let result = messenger.register_streaming_handler(handler);
+        assert!(result.is_ok(), "register_streaming_handler should allow underscore-prefixed names");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_register_streaming_handler_allows_normal() {
+        let messenger = Messenger::builder().build().await.unwrap();
+        let handler = Handler::am_handler("normal_test", |_ctx| Ok(()))
+            .build();
+        let result = messenger.register_streaming_handler(handler);
+        assert!(result.is_ok(), "register_streaming_handler should allow normal handler names");
     }
 }

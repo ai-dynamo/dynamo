@@ -11,9 +11,16 @@
 //! - [`transport::FrameTransport`]: pluggable ordered-delivery transport trait
 //! - [`transport::FrameReader`]: frame receive half of the transport channel
 //! - [`transport::FrameWriter`]: frame send half of the transport channel
+//!
+//! Anchor registry:
+//! - [`anchor::AnchorManager`]: creates and tracks streaming anchors
+//! - [`anchor::AnchorStream`]: typed receive stream for anchor consumers
+//! - [`anchor::AttachError`]: errors for exclusive-attach operations
 
+pub mod anchor;
 pub mod frame;
 pub mod handle;
 pub mod transport;
 
+pub use anchor::{AnchorManager, AnchorStream, AttachError};
 pub use transport::{FrameReader, FrameTransport, FrameWriter};
