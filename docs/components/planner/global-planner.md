@@ -6,6 +6,8 @@ title: Global Planner Deployment Guide
 
 This guide explains how to deploy `GlobalPlanner` and when to use it. `GlobalPlanner` is the centralized scaling execution layer for deployments where multiple DGDs should delegate scaling through one component, whether those DGDs expose separate endpoints or sit behind one shared endpoint.
 
+> **New to Planner?** We recommend starting with a single-DGD deployment using either throughput-based or load-based scaling before adopting GlobalPlanner. See the [Planner overview](README.md) and [Planner Guide](planner-guide.md) to get started.
+
 ## Why Global Planner?
 
 Without `GlobalPlanner`, each DGD's local planner scales only its own deployment directly. That is fine for isolated deployments, but it becomes awkward when you want one place to:
@@ -18,8 +20,8 @@ Without `GlobalPlanner`, each DGD's local planner scales only its own deployment
 
 ## Terminology
 
-- **SLA Planner**: The normal `dynamo.planner` component that computes desired replica counts to maintain SLAs.
-- **Local Planner**: A pool-local instance of a SLA planner inside one DGD.
+- **Planner**: The `dynamo.planner` component that computes desired replica counts to maintain latency SLAs. See the [Planner overview](README.md).
+- **Local Planner**: A pool-local instance of the Planner running inside a single DGD.
 - **Global Planner**: The centralized execution and policy layer that receives scale requests from local planners.
 - **Single-endpoint multi-pool deployment**: One model endpoint backed by multiple DGDs for the same model. This pattern uses both `GlobalRouter` and `GlobalPlanner`.
 

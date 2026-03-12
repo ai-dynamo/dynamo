@@ -61,7 +61,7 @@ if [ "$ENABLE_OTEL" = true ]; then
 fi
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
-print_launch_banner --multimodal "Launching Aggregated Vision Worker" "$MODEL" "$HTTP_PORT"
+print_launch_banner --multimodal "Launching Aggregated Multimodal Serving" "$MODEL" "$HTTP_PORT"
 
 # run ingress
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)

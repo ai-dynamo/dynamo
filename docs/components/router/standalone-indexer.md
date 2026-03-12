@@ -135,6 +135,7 @@ curl -X POST http://localhost:8090/register \
 | `block_size` | yes | — | KV cache block size (must match the engine) |
 | `tenant_id` | no | `"default"` | Tenant identifier for isolation |
 | `dp_rank` | no | `0` | Data parallel rank |
+| `replay_endpoint` | no | — | ZMQ ROUTER address for gap replay (e.g. `tcp://host:5560`) |
 
 ### `POST /unregister` — Deregister an instance
 
@@ -269,6 +270,24 @@ Returns:
 ```json
 ["http://peer:8091"]
 ```
+
+## DP Rank Handling
+
+When a worker registers with the standalone KV indexer (`/register`), it provides an `instance_id`, a ZMQ `endpoint`, and an optional `dp_rank` (defaults to 0). The service spawns one ZMQ listener per registration.
+
+Each incoming `KvEventBatch` may carry an optional `data_parallel_rank` field. If present, it **overrides** the statically-registered `dp_rank` for that batch. This allows a single ZMQ port to multiplex events from multiple DP ranks.
+
+**Caveat**: the registry only tracks dp_ranks from explicit `/register` calls. If an engine dynamically emits batches with a dp_rank that was never registered, the indexer will store those blocks correctly (under the dynamic `WorkerWithDpRank` key), but per-dp_rank deregistration (`/unregister` with `dp_rank`) will not find them. Full-instance deregistration (`/unregister` without `dp_rank`) still cleans up all dp_ranks for a given `worker_id` in the tree via `remove_worker`.
+
+## Gap Detection and Replay
+
+ZMQ PUB/SUB is lossy — messages can be dropped under backpressure or brief disconnects. The indexer detects gaps by tracking the sequence number of each batch: if `seq > last_seq + 1`, a gap is detected.
+
+When a `replay_endpoint` is provided during `/register`, the indexer connects a DEALER socket to the engine's ROUTER socket and requests the missing batches by sequence number. The engine streams back buffered `(seq, payload)` pairs from its ring buffer until an empty-payload sentinel.
+
+If no `replay_endpoint` is configured, gaps are logged as warnings but not recovered.
+
+The sequence counter (`last_seq`) persists across unregister/register cycles, so re-registering a worker after a gap will trigger replay on the first batch received by the new listener.
 
 ## Limitations
 
