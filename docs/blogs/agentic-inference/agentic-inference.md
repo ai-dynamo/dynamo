@@ -13,7 +13,7 @@ Coding agents are starting to write production code at scale. [Stripe’s agents
 
 ![Cumulative cache reads vs writes across a 42-call Claude Code session. Cache reads (891K tokens) grow steeply while writes (76K) and uncached input stay flat -- an 11.7x read/write ratio.](./cumulative-reads-writes.png)
 
-Lets take Claude Code as an example. After the first API call that writes the conversation prefix to KV cache, every subsequent call to the same worker hits 85-97% cache. Agent teams (or swarms) push this further with 97.2% aggregate cache hit rate across 4 Opus teammates. An 11.7x read/write ratio means the system reads from cache nearly 12 times for every token it writes.
+Lets take Claude Code as an example. After the first API call that writes the conversation prefix to KV cache, every subsequent call to the same worker hits 85-97% cache. Agent teams (or swarms) push this further with 97.2% aggregate cache hit rate across 4 Opus teammates. An 11.7x read/write ratio means the system reads from cache nearly 12 times for every token it writes. This is a write-once-read-many (WORM) access pattern: the system prompt and growing conversation prefix are computed once, then served from cache on every subsequent call. Maximizing cache reuse rate across all workers and keeping KV blocks warm and routable is the central optimization target for agentic inference.
 
 These numbers come from managed API infrastructure where the provider controls prefix matching, cache placement, and eviction. For teams running open-source models on their own GPUs, none of this exists out of the box. We have been building Dynamo to close that gap. This post walks through how we are making Dynamo agent-native at three layers: the frontend API, the router, and KV cache management.
 
@@ -26,7 +26,7 @@ Throughout this post, we use three terms consistently:
 
 ### Multi-Protocol Support
 
-Agent harnesses are increasingly adopting `v1/responses` and `v1/messages` over `v1/chat/completions` to cleanly handle new patterns including interleaved thinking and tool calls. The key difference in these APIs is structural. In `v1/chat/completions`, message content is a flat string and tool calls are bolted on as a separate field. As an example, notice how [GLM](https://docs.z.ai/guides/capabilities/thinking-mode#example-usage) and [MiniMax](https://platform.minimax.io/docs/guides/text-m2-function-call#important-note) API handle interleaved thinking differently when hosting their model behind the `v1/chat/completions` endpoint. The `v1/responses` and `v1/messages` APIs use typed content blocks, so a single assistant turn can contain thinking, tool calls, and text as distinct objects. This matters for inference because the orchestrator can see block boundaries, perform prompt optimizations, and apply different cache and scheduling policies per block type. Dynamo serves all three endpoints through a common internal representation, so a single deployment can act as the inference backend for any harness. Our team has internally been running a Dynamo deployment of GLM-5 and Minimax2.5 to power our Codex and Claude Code harnesses allowing us to understand and optimize our backend implementations to match closed-source inference and kv cache reuse performance. We will be sharing a full write-up and some optimized recipes for deploying both models in the upcoming weeks.
+Agent harnesses are increasingly adopting `v1/responses` and `v1/messages` over `v1/chat/completions` to cleanly handle new patterns including interleaved thinking and tool calls. The key difference in these APIs is structural. In `v1/chat/completions`, message content is a flat string and tool calls are bolted on as a separate field. As an example, notice how [GLM](https://docs.z.ai/guides/capabilities/thinking-mode#example-usage) and [MiniMax](https://platform.minimax.io/docs/guides/text-m2-function-call#important-note) API handle interleaved thinking differently when hosting their model behind the `v1/chat/completions` endpoint. The `v1/responses` and `v1/messages` APIs use typed content blocks, so a single assistant turn can contain thinking, tool calls, and text as distinct objects. This matters for inference because the orchestrator can see block boundaries, perform prompt optimizations, and apply different cache and scheduling policies per block type. Dynamo serves all three endpoints through a common internal representation, so a single deployment can act as the inference backend for any harness. Our team has been running a Dynamo deployment of GLM-5 and MiniMax2.5 internally to power our Codex and Claude Code harnesses. This lets us benchmark our backend implementations against closed-source inference, targeting parity on cache reuse performance. We will be sharing a full write-up and some optimized recipes for deploying both models in the upcoming weeks.
 
 <table>
 <tr>
@@ -55,9 +55,7 @@ We have also invested in day-0 tool call and reasoning parsing support for vario
 
 ### Agent Hints: The Harness-Orchestrator Interface
 
-Agent workloads have a distinct set of characteristics when compared to traditional multi-turn chat workloads. When using coding agents, the user waits for a final result, not individual token streams, so the orchestrator can reorder and prioritize requests across agents without affecting the end-user experience. Sessions run for minutes to [even days](https://factory.ai/news/missions) with long tool-call pauses, and the harness has global context: which agents are mid-task and waiting on tool calls, which just spawned, how many turns remain in a session, and whether the current call is a quick lookup or a long synthesis. This is enough to optimize inference scheduling in ways that traditional serving cannot.
-
-Today, inference servers see anonymous tokenized requests with none of this "global context".
+Today, inference servers see anonymous tokenized requests. But agent harnesses have global context that the infrastructure never sees: which agents are blocked on tool calls, which just spawned, how many turns remain in a session, and whether the current call is a quick lookup or a long synthesis. When using coding agents, the user waits for a final result, not individual token streams, so the orchestrator can reorder and prioritize requests across agents without affecting the end-user experience. Sessions run for minutes to [even days](https://factory.ai/news/missions) with long tool-call pauses. This is enough to optimize inference scheduling in ways that traditional serving cannot.
 
 ![Where nvext fits in the agentic protocol stack alongside MCP and A2A](./protocol-stack.svg)
 
@@ -93,6 +91,8 @@ The `cache_control` field will look familiar to anyone who has used Anthropic's 
 
 ## Layer 2: The Router
 
+A coding agent follows a sequential pattern: long prefill, tool call, extend prefix, repeat. A multi-agent harness fans out work across parallel subagents with short, independent contexts. Default round-robin routing is blind to both patterns -- it cannot account for cache locality, request priority, or session structure. Dynamo's router closes this gap with three mechanisms: KV-aware placement, priority scheduling, and extensible routing strategies.
+
 ### KV-Aware Placement
 
 Without cache-aware routing, turn 2 of a conversation has a ~1/N chance of landing on the same worker as turn 1. Every miss is a full prefix recomputation which is a significant performance bottleneck and extremely costly for an end user. Dynamo's router maintains a global index of which KV cache blocks exist on which workers. The [Flash Indexer post](https://developer.nvidia.com/blog/building-a-high-performance-kv-cache-index-for-llm-inference-with-nvidia-dynamo/) covers the six iterations that got this indexer to 170M ops/s (**planetary** scale KV routing). On every request, the router queries the index for per-worker overlap scores and selects the worker that minimizes the combined cost of cache miss and current decode load. This cost function is tunable, and we show below how teams can build custom agent aware routing strategies on top of it.
@@ -113,7 +113,7 @@ Once dispatched, Dynamo passes `priority` through to the engine directly. SGLang
 
 ### Agentic Workload Routing Strategies
 
-A coding agent follows a sequential pattern: long prefill, tool call, extend prefix, repeat. A multi-agent harness fans out work across parallel subagents with short, independent contexts. A research agent with a 200K context window needs workers with enough free KV capacity to hold its full state. The router's default cost function (overlap score + decode load) handles the common case, but teams with domain-specific workloads can easily leverage the router's Python bindings to implement custom routing strategies. The core `KvRouter` class provides `best_worker()` for querying routing decisions, `get_potential_loads()` for per-worker load inspection, and `generate()` for routing + dispatch in one call. Custom routers register on the same service mesh as the default components and can override routing config per-request:
+A research agent with a 200K context window needs workers with enough free KV capacity to hold its full state. The router's default cost function (overlap score + decode load) handles the common case, but teams with domain-specific workloads can use the router's Python bindings to implement custom routing strategies. The core `KvRouter` class provides `best_worker()` for querying routing decisions, `get_potential_loads()` for per-worker load inspection, and `generate()` for routing + dispatch in one call. Custom routers register on the same service mesh as the default components and can override routing config per-request:
 
 ```python
 # Query per-worker load and overlap for custom routing logic
@@ -140,9 +140,9 @@ The [NeMo Agent Toolkit (NAT)](https://github.com/NVIDIA/NeMo-Agent-Toolkit/tree
 
 ## Layer 3: KV Cache Management
 
-### The Problem with Uniform Eviction
+Agentic workloads produce blocks with vastly different reuse value -- system prompts reused every turn, reasoning tokens never reused again -- but default LRU eviction treats all blocks identically. A 2-30 second tool call pause can age out an agent's entire prefix, forcing full recomputation when it resumes. The cache needs to understand block value, support cross-worker sharing, and respect agent lifecycle boundaries.
 
-Agentic workloads produce blocks with vastly different reuse value but default LRU eviction policies treat all KV blocks identically.
+### The Problem with Uniform Eviction
 
 | Block Type | Reuse Pattern | Value |
 |------------|---------------|-------|
@@ -165,7 +165,7 @@ Blocks follow a write-through path: when a worker computes KV for a prefix, the 
 
 This directly solves the subagent cold-start problem. When the lead agent computes tool definitions and system prompt, those blocks write through to shared storage. When subagent 1 spawns on a different worker, the router queries the Flash Indexer, finds the blocks in shared storage, and the worker loads them via NIXL (RDMA read) instead of recomputing from scratch. Subagent 2 does the same. Four redundant prefill computations become one compute and three loads. The same mechanism addresses cache coherence in disaggregated prefill-decode serving. In disagg mode, the prefill worker computes KV and transfers it to the decode worker via NIXL. The decode worker generates tokens, producing new KV state. On the next turn, a prefill worker needs both the original prefix and the generated tokens from turn 1, but those live only on the decode worker. With shared storage, the decode worker writes its new blocks to the common tier and any prefill worker can fetch them on the next turn.
 
-Multi-tier storage solves sharing and persistence, but blocks still arrive on GPU only after the request hits the worker. The missing piece for agentic systems is prefetch: the harness can leverage historical timing data to predict when an agent's tool call might return, which means it knows which blocks will be needed and when. We are building prefetch hooks so the harness can signal "bring these blocks from storage to GPU ahead of the next request." Combined with the retention APIs (below), this gives the harness full lifecycle control: pin blocks to prevent eviction, set priority to control eviction ordering, and prefetch blocks proactively before they are needed.
+Multi-tier storage solves sharing and persistence, but blocks still arrive on GPU only after the request hits the worker. The missing piece for agentic systems is prefetch: the harness can use historical timing data to predict when an agent's tool call might return, which means it knows which blocks will be needed and when. We are building prefetch hooks so the harness can signal "bring these blocks from storage to GPU ahead of the next request." Combined with the retention APIs (below), this gives the harness full lifecycle control: pin blocks to prevent eviction, set priority to control eviction ordering, and prefetch blocks proactively before they are needed.
 
 ![During tool calls, KV blocks offload to host memory and storage, then prefetch back to GPU before the next LLM call.](./tool-call-offload-prefetch.svg)
 
