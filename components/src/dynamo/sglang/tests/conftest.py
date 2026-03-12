@@ -13,13 +13,19 @@ import pytest
 
 
 def pytest_ignore_collect(collection_path, config):
-    """Skip collecting sglang test files if sglang module isn't installed.
-    Checks test file naming pattern: test_sglang_*.py
+    """Skip collecting sglang test files if sglang can't actually be loaded.
+
+    find_spec alone is insufficient: sglang may be installed but sgl_kernel
+    fails to load libcuda.so.1 on CPU-only / ARM64 runners.
     """
     filename = collection_path.name
     if filename.startswith("test_sglang_"):
         if importlib.util.find_spec("sglang") is None:
-            return True  # sglang not available, skip this file
+            return True
+        try:
+            importlib.import_module("sglang")
+        except (ImportError, ModuleNotFoundError):
+            return True
     return None
 
 
