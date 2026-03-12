@@ -116,6 +116,7 @@ navigation:
       - page: LoRA Adapters
         path: features/lora/README.md
       - section: Agents
+        slug: agents
         path: features/agentic_workloads.md
         contents:
           - page: SGLang for Agentic Workloads
