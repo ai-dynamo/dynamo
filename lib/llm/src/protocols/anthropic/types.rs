@@ -927,6 +927,12 @@ fn convert_user_blocks(
                 ));
             }
             AnthropicContentBlock::Image { source } => {
+                if source.source_type != "base64" {
+                    anyhow::bail!(
+                        "unsupported image source type {:?}; only base64 is supported",
+                        source.source_type
+                    );
+                }
                 has_image = true;
                 let data_uri = format!("data:{};base64,{}", source.media_type, source.data);
                 let url = url::Url::parse(&data_uri)
