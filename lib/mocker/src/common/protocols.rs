@@ -75,6 +75,16 @@ pub struct OutputSignal {
     pub completed: bool,
 }
 
+/// Preemption policy for evicting decode requests under memory pressure
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum PreemptionMode {
+    /// Evict the newest request (matches vLLM v1 default)
+    #[default]
+    Lifo,
+    /// Evict the oldest request
+    Fifo,
+}
+
 /// Worker type for disaggregated serving configurations
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum WorkerType {
@@ -147,10 +157,6 @@ pub struct MockEngineArgs {
     #[builder(default = true)]
     pub enable_chunked_prefill: bool,
 
-    #[builder(default = "0.01")]
-    #[validate(range(min = 0.0, max = 1.0))]
-    pub watermark: f64,
-
     #[builder(default = "1.0")]
     #[validate(range(min = 0.0))]
     pub speedup_ratio: f64,
@@ -205,6 +211,18 @@ pub struct MockEngineArgs {
     /// A KvEventPublisher relay subscribes to this socket and forwards events to NATS.
     #[builder(default = "None")]
     pub zmq_kv_events_port: Option<u16>,
+
+    /// ZMQ ROUTER port for replay of buffered KV event batches.
+    /// When set alongside `zmq_kv_events_port`, the mocker binds a ROUTER socket
+    /// that streams back buffered batches by sequence number on request.
+    /// Port is offset by dp_rank (replay_port + dp_rank).
+    #[builder(default = "None")]
+    pub zmq_replay_port: Option<u16>,
+
+    /// Preemption mode for decode eviction under memory pressure.
+    /// Lifo (default) evicts the newest request; Fifo evicts the oldest.
+    #[builder(default)]
+    pub preemption_mode: PreemptionMode,
 }
 
 impl Default for MockEngineArgs {
@@ -248,7 +266,6 @@ impl MockEngineArgs {
             "max_num_batched_tokens",
             "enable_prefix_caching",
             "enable_chunked_prefill",
-            "watermark",
             "speedup_ratio",
             "dp_size",
             "startup_time",
@@ -261,6 +278,8 @@ impl MockEngineArgs {
             "kv_transfer_bandwidth",
             "reasoning",
             "zmq_kv_events_port",
+            "zmq_replay_port",
+            "preemption_mode",
         ]
         .iter()
         .cloned()
@@ -318,12 +337,6 @@ impl MockEngineArgs {
             builder = builder.enable_chunked_prefill(enabled);
         }
 
-        if let Some(value) = extra_args.get("watermark")
-            && let Some(num) = value.as_f64()
-        {
-            builder = builder.watermark(num);
-        }
-
         if let Some(value) = extra_args.get("speedup_ratio")
             && let Some(num) = value.as_f64()
         {
@@ -376,6 +389,28 @@ impl MockEngineArgs {
             && let Some(port) = value.as_u64()
         {
             builder = builder.zmq_kv_events_port(Some(port as u16));
+        }
+
+        if let Some(value) = extra_args.get("zmq_replay_port")
+            && let Some(port) = value.as_u64()
+        {
+            builder = builder.zmq_replay_port(Some(port as u16));
+        }
+
+        if let Some(value) = extra_args.get("preemption_mode")
+            && let Some(mode_str) = value.as_str()
+        {
+            let mode = match mode_str {
+                "lifo" => PreemptionMode::Lifo,
+                "fifo" => PreemptionMode::Fifo,
+                _ => {
+                    return Err(anyhow::anyhow!(
+                        "Invalid preemption_mode: '{}'. Must be 'lifo' or 'fifo'.",
+                        mode_str
+                    ));
+                }
+            };
+            builder = builder.preemption_mode(mode);
         }
 
         // Parse worker type from is_prefill and is_decode flags

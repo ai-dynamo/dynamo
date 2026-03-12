@@ -82,26 +82,12 @@ Each backend has deployment examples and configuration options:
 
 ## 3. Deploy Your First Model
 
-```bash
-export NAMESPACE=dynamo-system
-kubectl create namespace ${NAMESPACE}
+Follow the **[Deploying Your First Model](dgdr.md)** guide for a complete end-to-end
+walkthrough using `DynamoGraphDeploymentRequest` (DGDR) — Dynamo's recommended path that
+handles profiling and configuration automatically.
 
-# to pull model from HF
-export HF_TOKEN=<Token-Here>
-kubectl create secret generic hf-token-secret \
-  --from-literal=HF_TOKEN="$HF_TOKEN" \
-  -n ${NAMESPACE};
-
-# Deploy any example (this uses vLLM with Qwen model using aggregated serving)
-kubectl apply -f examples/backends/vllm/deploy/agg.yaml -n ${NAMESPACE}
-
-# Check status
-kubectl get dynamoGraphDeployment -n ${NAMESPACE}
-
-# Test it
-kubectl port-forward svc/vllm-agg-frontend 8000:8000 -n ${NAMESPACE}
-curl http://localhost:8000/v1/models
-```
+The tutorial deploys `Qwen/Qwen3-0.6B` with vLLM and walks you through every step: creating
+the DGDR, watching the profiling lifecycle, and sending your first inference request.
 
 For SLA-based autoscaling, see [SLA Planner Guide](../components/planner/planner-guide.md).
 
@@ -230,7 +216,7 @@ Key customization points include:
 - **[Operator Documentation](dynamo-operator.md)** - How the platform works
 - **[Service Discovery](service-discovery.md)** - Discovery backends and configuration
 - **[Helm Charts](https://github.com/ai-dynamo/dynamo/tree/main/deploy/helm/README.md)** - For advanced users
-- **[Checkpointing](chrek/README.md)** - Fast pod startup with checkpoint/restore
+- **[Snapshot](snapshot.md)** - Fast pod startup with checkpoint/restore
 - **[GitOps Deployment with FluxCD](fluxcd.md)** - For advanced users
 - **[Logging](observability/logging.md)** - For logging setup
 - **[Multinode Deployment](deployment/multinode-deployment.md)** - For multinode deployment

@@ -294,6 +294,10 @@ class HandlerBase(BaseGenerativeHandler):
         # Remove worker_id if present (added by prefill worker, not needed for decode)
         params_dict.pop("worker_id", None)
 
+        # Deserialize first_gen_log_probs from transport format back to
+        # TRT-LLM's internal {token_id: Logprob} dict format.
+        DisaggregatedParamsCodec.deserialize_first_gen_log_probs(params_dict)
+
         # Extract EPD metadata that was packed by prefill worker
         epd_metadata = {}
         if "_epd_metadata" in params_dict:
@@ -384,6 +388,9 @@ class HandlerBase(BaseGenerativeHandler):
 
         logging.debug("PREFILL: Successfully encoded disaggregated params")
         params_dict = asdict(encoded_params)
+
+        # Serialize first_gen_log_probs for the Rust transport layer.
+        DisaggregatedParamsCodec.serialize_first_gen_log_probs(params_dict)
 
         # Pack prefill metadata for DECODE worker optimization
         # The frontend only forwards disaggregated_params from prefill response

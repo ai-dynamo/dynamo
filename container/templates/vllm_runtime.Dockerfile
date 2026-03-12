@@ -89,7 +89,6 @@ RUN userdel -r ubuntu > /dev/null 2>&1 || true \
     # NOTE: Setting ENV UMASK=002 does NOT work - umask is a shell builtin, not an environment variable
     && mkdir -p /etc/profile.d && echo 'umask 002' > /etc/profile.d/00-umask.sh
 
-ARG ARCH_ALT
 ARG PYTHON_VERSION
 ENV PYTHON_VERSION=${PYTHON_VERSION}
 
@@ -171,11 +170,11 @@ SHELL ["/bin/bash", "-l", "-o", "pipefail", "-c"]
 
 {% if device == "xpu" %}
 ENV NIXL_PREFIX=/opt/intel/intel_nixl
-ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/${ARCH_ALT}-linux-gnu
+ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/x86_64-linux-gnu
 ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
 {% else %}
 ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
-ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/${ARCH_ALT}-linux-gnu
+ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib64
 ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
 {% endif %}
 
@@ -222,20 +221,13 @@ COPY --chown=dynamo:0 --from=framework /opt/vllm /opt/vllm
 COPY --from=wheel_builder /usr/local/ucx /usr/local/ucx
 COPY --chown=dynamo: --from=wheel_builder $NIXL_PREFIX $NIXL_PREFIX
 {% if device == "xpu" %}
-COPY --chown=dynamo: --from=wheel_builder /opt/intel/intel_nixl/lib/${ARCH_ALT}-linux-gnu/. ${NIXL_LIB_DIR}/
-{% else %}
-COPY --chown=dynamo: --from=wheel_builder /opt/nvidia/nvda_nixl/lib64/. ${NIXL_LIB_DIR}/
+{# XPU NIXL uses lib/x86_64-linux-gnu; copy to NIXL_LIB_DIR to ensure lib dir is populated #}
+COPY --chown=dynamo: --from=wheel_builder /opt/intel/intel_nixl/lib/x86_64-linux-gnu/. ${NIXL_LIB_DIR}/
 {% endif %}
+{# For cuda: NIXL_LIB_DIR = lib64, already included in the $NIXL_PREFIX COPY above #}
 COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
 COPY --chown=dynamo: --from=wheel_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
 
-{% if device == "cuda" %}
-# Copy AWS SDK C++ libraries (required for NIXL OBJ backend / S3 support)
-COPY --chown=dynamo: --from=wheel_builder /usr/local/lib64/libaws* /usr/local/lib/
-COPY --chown=dynamo: --from=wheel_builder /usr/local/lib64/libs2n* /usr/local/lib/
-COPY --chown=dynamo: --from=wheel_builder /usr/lib64/libcrypto.so.1.1* /usr/local/lib/
-COPY --chown=dynamo: --from=wheel_builder /usr/lib64/libssl.so.1.1* /usr/local/lib/
-{% endif %}
 
 ENV PATH=/usr/local/ucx/bin:$PATH
 
@@ -311,14 +303,19 @@ RUN if [ "${ENABLE_MODELEXPRESS_P2P}" = "true" ]; then \
     fi
 {% endif %}
 
-# Install common and test dependencies. Cache uv downloads; uv handles its own locking for this cache.
-RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
-    --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
+# Install runtime dependencies (common + vllm-specific + planner + benchmarks).
+# Test and dev dependencies are NOT installed here — they go in the test and dev images.
+RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tmp/requirements.common.txt \
+    --mount=type=bind,source=./container/deps/requirements.vllm.txt,target=/tmp/requirements.vllm.txt \
+    --mount=type=bind,source=./container/deps/requirements.planner.txt,target=/tmp/requirements.planner.txt \
+    --mount=type=bind,source=./container/deps/requirements.benchmark.txt,target=/tmp/requirements.benchmark.txt \
     --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     uv pip install \
-        --requirement /tmp/requirements.txt \
-        --requirement /tmp/requirements.test.txt
+        --requirement /tmp/requirements.common.txt \
+        --requirement /tmp/requirements.vllm.txt \
+        --requirement /tmp/requirements.planner.txt \
+        --requirement /tmp/requirements.benchmark.txt
 
 # Copy tests, deploy and components for CI with correct ownership
 # Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
@@ -342,6 +339,12 @@ RUN chmod g+w /workspace /workspace/* /opt/dynamo /opt/dynamo/* ${VIRTUAL_ENV} &
     echo 'cat /opt/dynamo/.launch_screen' >> /etc/bash.bashrc
 
 {% if device == "cuda" %}
+# Copy AWS SDK C++ libraries (required for NIXL OBJ backend / S3 support)
+COPY --chown=dynamo: --from=wheel_builder /usr/local/lib64/libaws* /usr/local/lib/
+COPY --chown=dynamo: --from=wheel_builder /usr/local/lib64/libs2n* /usr/local/lib/
+COPY --chown=dynamo: --from=wheel_builder /usr/lib64/libcrypto.so.1.1* /usr/local/lib/
+COPY --chown=dynamo: --from=wheel_builder /usr/lib64/libssl.so.1.1* /usr/local/lib/
+
 # Fix library symlinks that Docker COPY dereferenced (COPY always follows symlinks)
 # This recreates proper symlinks to save space and suppress ldconfig warnings
 RUN cd /usr/local/lib && \

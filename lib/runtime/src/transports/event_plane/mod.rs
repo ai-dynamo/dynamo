@@ -284,6 +284,7 @@ pub struct EventPublisher {
     sequence: AtomicU64,
     tx: Arc<dyn EventTransportTx>,
     codec: Arc<Codec>,
+    runtime_handle: tokio::runtime::Handle,
     /// Discovery client and registered instance for unregistration on drop
     discovery_client: Option<Arc<dyn Discovery>>,
     discovery_instance: Option<crate::discovery::DiscoveryInstance>,
@@ -335,6 +336,7 @@ impl EventPublisher {
     ) -> Result<Self> {
         let publisher_id = drt.discovery().instance_id();
         let discovery = Some(drt.discovery());
+        let runtime_handle = drt.runtime().secondary();
 
         // Use Msgpack codec for all transports
         enum TransportSetup {
@@ -464,6 +466,7 @@ impl EventPublisher {
             sequence: AtomicU64::new(0),
             tx,
             codec,
+            runtime_handle,
             discovery_client: discovery,
             discovery_instance,
         })
@@ -515,27 +518,39 @@ impl Drop for EventPublisher {
         {
             let topic = self.topic.clone();
             let instance_id = instance.instance_id();
+            let runtime_handle = self.runtime_handle.clone();
 
-            // Spawn background task for async unregister since Drop is sync
-            tokio::spawn(async move {
-                match discovery.unregister(instance).await {
-                    Ok(()) => {
-                        tracing::info!(
-                            topic = %topic,
-                            instance_id = %instance_id,
-                            "EventPublisher unregistered from discovery"
-                        );
+            // Drop can run outside any Tokio context (notably via PyO3 finalizers), so use
+            // the runtime that created the publisher rather than the ambient thread state.
+            let spawn_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                runtime_handle.spawn(async move {
+                    match discovery.unregister(instance).await {
+                        Ok(()) => {
+                            tracing::info!(
+                                topic = %topic,
+                                instance_id = %instance_id,
+                                "EventPublisher unregistered from discovery"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                topic = %topic,
+                                instance_id = %instance_id,
+                                error = %e,
+                                "Failed to unregister EventPublisher from discovery"
+                            );
+                        }
                     }
-                    Err(e) => {
-                        tracing::warn!(
-                            topic = %topic,
-                            instance_id = %instance_id,
-                            error = %e,
-                            "Failed to unregister EventPublisher from discovery"
-                        );
-                    }
-                }
-            });
+                });
+            }));
+
+            if spawn_result.is_err() {
+                tracing::warn!(
+                    topic = %self.topic,
+                    instance_id = %instance_id,
+                    "Skipping EventPublisher unregister during drop because the runtime is unavailable"
+                );
+            }
         }
     }
 }

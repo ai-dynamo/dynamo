@@ -20,7 +20,7 @@ from typing import Any, Dict, Optional
 import aiohttp
 import pytest
 
-from tests.router.common import (  # utilities
+from tests.router.common import (
     _test_busy_threshold_endpoint,
     _test_python_router_bindings,
     _test_router_basic,
@@ -30,9 +30,8 @@ from tests.router.common import (  # utilities
     _test_router_overload_503,
     _test_router_query_instance_id,
     _test_router_two_routers,
-    generate_random_suffix,
-    get_runtime,
 )
+from tests.router.helper import generate_random_suffix, get_runtime
 from tests.utils.constants import ROUTER_MODEL_NAME
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.port_utils import allocate_ports, deallocate_ports
@@ -158,8 +157,8 @@ def _build_mocker_command(
             command.append("--enable-chunked-prefill")
         else:
             command.append("--no-enable-chunked-prefill")
-    if "watermark" in mocker_args:
-        command.extend(["--watermark", str(mocker_args["watermark"])])
+    if "preemption_mode" in mocker_args:
+        command.extend(["--preemption-mode", str(mocker_args["preemption_mode"])])
     if "dp_size" in mocker_args:
         command.extend(["--data-parallel-size", str(mocker_args["dp_size"])])
     # Use --durable-kv-events to enable JetStream mode (local indexer disabled)
@@ -169,6 +168,8 @@ def _build_mocker_command(
         command.extend(["--bootstrap-ports", mocker_args["bootstrap_ports"]])
     if "zmq_kv_events_ports" in mocker_args:
         command.extend(["--zmq-kv-events-ports", mocker_args["zmq_kv_events_ports"]])
+    if "zmq_replay_ports" in mocker_args:
+        command.extend(["--zmq-replay-ports", mocker_args["zmq_replay_ports"]])
 
     return command
 
@@ -191,6 +192,7 @@ class MockerProcess:
         zmq_kv_events: bool = False,
         standalone_indexer: bool = False,
         model_name: str = "mocker",
+        zmq_replay: bool = False,
     ):
         namespace_suffix = generate_random_suffix()
         self.namespace = f"test-namespace-{namespace_suffix}"
@@ -199,9 +201,12 @@ class MockerProcess:
         self.endpoint = f"dyn://{self.namespace}.{self.component_name}.generate"
         self.num_workers = num_mockers
         self._zmq_kv_events_ports: list[int] = []
+        self._zmq_replay_ports: list[int] = []
         self._standalone_indexer = standalone_indexer
         self._standalone_indexer_port: Optional[int] = None
+        self._standalone_indexer_b_port: Optional[int] = None
         self._indexer_process: Optional[ManagedProcess] = None
+        self._indexer_b_process: Optional[ManagedProcess] = None
         self._mocker_processes: list[ManagedProcess] = []
         self._request = request
         self._store_backend = store_backend
@@ -232,14 +237,28 @@ class MockerProcess:
                 f"(bases: {bases}) for {num_mockers} workers"
             )
 
-        if standalone_indexer:
-            # Allocate a port for the standalone indexer HTTP server
-            self._standalone_indexer_port = allocate_ports(1, BASE_PORT)[0]
-            request.addfinalizer(
-                lambda: deallocate_ports([self._standalone_indexer_port])
-                if self._standalone_indexer_port
-                else None
+        # Allocate ZMQ replay ports (same layout as event ports)
+        if zmq_replay and zmq_kv_events:
+            dp_size = mocker_args.get("dp_size", 1)
+            self._zmq_replay_ports = allocate_ports(
+                num_mockers * dp_size, BASE_PORT_ZMQ + 1000
             )
+            replay_bases = [
+                self._zmq_replay_ports[i * dp_size] for i in range(num_mockers)
+            ]
+            if not standalone_indexer:
+                mocker_args["zmq_replay_ports"] = ",".join(str(p) for p in replay_bases)
+            logger.info(
+                f"Allocated ZMQ replay ports {self._zmq_replay_ports} "
+                f"(bases: {replay_bases}) for {num_mockers} workers"
+            )
+
+        if standalone_indexer:
+            # Allocate ports for standalone indexer A and B (P2P recovery peer)
+            indexer_ports = allocate_ports(2, BASE_PORT)
+            self._standalone_indexer_port = indexer_ports[0]
+            self._standalone_indexer_b_port = indexer_ports[1]
+            request.addfinalizer(lambda: deallocate_ports(indexer_ports))
             # Don't build a single mocker command — we'll launch per-mocker in launch_mockers_with_indexer
             self._process = None
         else:
@@ -274,6 +293,12 @@ class MockerProcess:
             return f"http://localhost:{self._standalone_indexer_port}"
         return None
 
+    @property
+    def standalone_indexer_b_url(self) -> Optional[str]:
+        if self._standalone_indexer_b_port is not None:
+            return f"http://localhost:{self._standalone_indexer_b_port}"
+        return None
+
     def __enter__(self):
         if self._standalone_indexer:
             # Launch the standalone indexer binary
@@ -284,7 +309,7 @@ class MockerProcess:
                 "-p",
                 "dynamo-kv-router",
                 "--features",
-                "indexer-bin",
+                "indexer-bin,test-endpoints",
                 "--bin",
                 "dynamo-kv-indexer",
                 "--",
@@ -333,6 +358,9 @@ class MockerProcess:
             mocker_args = self._mocker_args_orig.copy()
             base_port = self._zmq_kv_events_ports[i * dp_size]
             mocker_args["zmq_kv_events_ports"] = str(base_port)
+            if self._zmq_replay_ports:
+                replay_base = self._zmq_replay_ports[i * dp_size]
+                mocker_args["zmq_replay_ports"] = str(replay_base)
 
             command = _build_mocker_command(
                 endpoint=self.endpoint,
@@ -393,6 +421,9 @@ class MockerProcess:
                             "block_size", BLOCK_SIZE
                         ),
                     }
+                    if self._zmq_replay_ports:
+                        replay_port = self._zmq_replay_ports[i * dp_size + dp_rank]
+                        payload["replay_endpoint"] = f"tcp://127.0.0.1:{replay_port}"
                     async with session.post(register_url, json=payload) as resp:
                         if resp.status != 201:
                             body = await resp.text()
@@ -412,6 +443,64 @@ class MockerProcess:
             f"All {self.num_workers} mockers launched and registered with indexer"
         )
 
+    def launch_indexer(self):
+        """Launch a second standalone indexer (Indexer B) with --peers pointing to Indexer A.
+
+        Workers are passed via --workers so ZMQ sockets connect before recovery
+        runs, ensuring the subscription handshake completes during the recovery
+        delay and no events are lost to the ZMQ slow-joiner problem.
+        """
+        if not self._standalone_indexer or self._standalone_indexer_b_port is None:
+            raise RuntimeError("launch_indexer requires standalone_indexer=True")
+        if not self.worker_id_to_zmq_ports:
+            raise RuntimeError("launch_indexer requires workers to be registered first")
+
+        block_size = self._mocker_args_orig.get("block_size", BLOCK_SIZE)
+
+        # Build --workers arg: "worker_id:dp_rank=zmq_addr,..."
+        worker_entries = []
+        for worker_id, zmq_addresses in self.worker_id_to_zmq_ports.items():
+            for dp_rank_str, zmq_endpoint in zmq_addresses.items():
+                worker_entries.append(f"{worker_id}:{dp_rank_str}={zmq_endpoint}")
+        workers_arg = ",".join(worker_entries)
+
+        indexer_b_cmd = [
+            "cargo",
+            "run",
+            "-p",
+            "dynamo-kv-router",
+            "--features",
+            "indexer-bin,test-endpoints",
+            "--bin",
+            "dynamo-kv-indexer",
+            "--",
+            "--block-size",
+            str(block_size),
+            "--port",
+            str(self._standalone_indexer_b_port),
+            "--peers",
+            f"http://localhost:{self._standalone_indexer_port}",
+            "--workers",
+            workers_arg,
+            "--model-name",
+            self.model_name,
+        ]
+        self._indexer_b_process = ManagedProcess(
+            command=indexer_b_cmd,
+            timeout=120,
+            display_output=True,
+            health_check_ports=[self._standalone_indexer_b_port],
+            health_check_urls=[],
+            log_dir=self._request.node.name,
+            terminate_all_matching_process_names=False,
+            display_name="dynamo-kv-indexer-b",
+        )
+        logger.info(
+            f"Starting standalone indexer B on port {self._standalone_indexer_b_port} "
+            f"with peer http://localhost:{self._standalone_indexer_port}"
+        )
+        self._indexer_b_process.__enter__()
+
     def __exit__(self, exc_type, exc_val, exc_tb):
         logger.info("Stopping mocker process(es)")
         # Stop individual mocker processes (standalone_indexer mode)
@@ -421,7 +510,14 @@ class MockerProcess:
             except Exception as e:
                 logger.warning(f"Error stopping mocker process: {e}")
         self._mocker_processes.clear()
-        # Stop standalone indexer
+        # Stop standalone indexer B (P2P recovery peer)
+        if self._indexer_b_process is not None:
+            try:
+                self._indexer_b_process.__exit__(exc_type, exc_val, exc_tb)
+            except Exception as e:
+                logger.warning(f"Error stopping indexer B process: {e}")
+            self._indexer_b_process = None
+        # Stop standalone indexer A
         if self._indexer_process is not None:
             try:
                 self._indexer_process.__exit__(exc_type, exc_val, exc_tb)
@@ -435,6 +531,10 @@ class MockerProcess:
             deallocate_ports(self._zmq_kv_events_ports)
             logger.info(f"Deallocated ZMQ KV event ports {self._zmq_kv_events_ports}")
             self._zmq_kv_events_ports = []
+        if self._zmq_replay_ports:
+            deallocate_ports(self._zmq_replay_ports)
+            logger.info(f"Deallocated ZMQ replay ports {self._zmq_replay_ports}")
+            self._zmq_replay_ports = []
 
 
 class DisaggMockerProcess:
@@ -748,7 +848,7 @@ def test_kv_router_bindings(
     ],
     indirect=["request_plane", "durable_kv_events"],
 )
-@pytest.mark.timeout(180)
+@pytest.mark.timeout(300)
 def test_indexers_sync(
     request,
     runtime_services_dynamic_ports,
@@ -791,6 +891,10 @@ def test_indexers_sync(
         num_mockers=NUM_MOCKERS,
         store_backend=store_backend,
         request_plane=request_plane,
+        zmq_kv_events=True,
+        zmq_replay=True,
+        standalone_indexer=True,
+        model_name=MODEL_NAME,
     ) as mockers:
         # Start mocker instances (2 workers x 2 DP ranks = 4 independent event streams)
         logger.info(f"Starting {NUM_MOCKERS} mocker instances with dp_size=2")
@@ -810,6 +914,8 @@ def test_indexers_sync(
             nats_server=nats_process if not durable_kv_events else None,
             durable_kv_events=durable_kv_events,
             standalone_indexer_url=mockers.standalone_indexer_url,
+            standalone_indexer_b_url=mockers.standalone_indexer_b_url,
+            test_zmq_replay=True,
         )
 
         logger.info("Indexers sync test completed successfully")
@@ -851,7 +957,7 @@ def test_query_instance_id_returns_worker_and_tokens(
         )
 
 
-@pytest.mark.timeout(90)  # bumped for xdist contention (was 29s; ~9.55s serial avg)
+@pytest.mark.timeout(300)  # bumped for xdist contention (was 29s; ~9.55s serial avg)
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 @pytest.mark.parametrize(
     "durable_kv_events,use_kv_events,zmq_kv_events",

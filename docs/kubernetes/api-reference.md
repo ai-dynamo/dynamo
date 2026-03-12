@@ -1402,6 +1402,28 @@ _Appears in:_
 | `mocker` _[MockerSpec](#mockerspec)_ | Mocker configures the simulated (mocker) backend for testing without GPUs. |  | Optional: \{\} <br /> |
 
 
+#### GPUSKUType
+
+_Underlying type:_ _string_
+
+GPUSKUType is the AIC hardware system identifier for a supported GPU.
+
+_Validation:_
+- Enum: [gb200_sxm h200_sxm h100_sxm b200_sxm a100_sxm l40s]
+
+_Appears in:_
+- [HardwareSpec](#hardwarespec)
+
+| Field | Description |
+| --- | --- |
+| `gb200_sxm` |  |
+| `h200_sxm` |  |
+| `h100_sxm` |  |
+| `b200_sxm` |  |
+| `a100_sxm` |  |
+| `l40s` |  |
+
+
 #### HardwareSpec
 
 
@@ -1416,7 +1438,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `gpuSku` _string_ | GPUSKU is the GPU SKU identifier (e.g., "H100_SXM", "A100_80GB"). |  | Optional: \{\} <br /> |
+| `gpuSku` _[GPUSKUType](#gpuskutype)_ | GPUSKU is the AIC hardware system identifier for the GPU.<br />When omitted, the operator auto-detects this via InferHardwareSystem from cluster GPU node labels. |  | Enum: [gb200_sxm h200_sxm h100_sxm b200_sxm a100_sxm l40s] <br />Optional: \{\} <br /> |
 | `vramMb` _float_ | VRAMMB is the VRAM per GPU in MiB. |  | Optional: \{\} <br /> |
 | `totalGpus` _integer_ | TotalGPUs is the total number of GPUs available in the cluster. |  | Optional: \{\} <br /> |
 | `numGpusPerNode` _integer_ | NumGPUsPerNode is the number of GPUs per node. |  | Optional: \{\} <br /> |
@@ -1456,24 +1478,6 @@ _Appears in:_
 | `pvcName` _string_ | PVCName is the name of the PersistentVolumeClaim containing model weights.<br />The PVC must exist in the same namespace as the DGDR. |  | Optional: \{\} <br /> |
 | `pvcModelPath` _string_ | PVCModelPath is the path to the model checkpoint directory within the PVC<br />(e.g. "deepseek-r1" or "models/Llama-3.1-405B-FP8"). |  | Optional: \{\} <br /> |
 | `pvcMountPath` _string_ | PVCMountPath is the mount path for the PVC inside the container. | /opt/model-cache | Optional: \{\} <br /> |
-
-
-#### OptimizationType
-
-_Underlying type:_ _string_
-
-OptimizationType specifies the profiling optimization strategy.
-
-_Validation:_
-- Enum: [latency throughput]
-
-_Appears in:_
-- [SLASpec](#slaspec)
-
-| Field | Description |
-| --- | --- |
-| `latency` |  |
-| `throughput` |  |
 
 
 #### OverridesSpec
@@ -1557,7 +1561,6 @@ _Appears in:_
 
 
 SLASpec defines the service-level agreement targets for profiling optimization.
-Exactly one mode should be active: ttft+itl (default), e2eLatency, or optimizationType.
 
 
 
@@ -1566,7 +1569,6 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `optimizationType` _[OptimizationType](#optimizationtype)_ | OptimizationType controls the profiling optimization strategy.<br />Use when explicit SLA targets (ttft+itl or e2eLatency) are not known. |  | Enum: [latency throughput] <br />Optional: \{\} <br /> |
 | `ttft` _float_ | TTFT is the Time To First Token target in milliseconds. |  | Optional: \{\} <br /> |
 | `itl` _float_ | ITL is the Inter-Token Latency target in milliseconds. |  | Optional: \{\} <br /> |
 | `e2eLatency` _float_ | E2ELatency is the target end-to-end request latency in milliseconds.<br />Alternative to specifying TTFT + ITL. |  | Optional: \{\} <br /> |
@@ -1683,7 +1685,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `pvcName` _string_ | PVCName is the name of the PVC | chrek-pvc |  |
+| `pvcName` _string_ | PVCName is the name of the PVC | snapshot-pvc |  |
 | `basePath` _string_ | BasePath is the base directory within the PVC | /checkpoints |  |
 
 

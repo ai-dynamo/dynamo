@@ -33,6 +33,8 @@ pub struct RegisterRequest {
     pub block_size: u32,
     #[serde(default)]
     pub dp_rank: Option<u32>,
+    #[serde(default)]
+    pub replay_endpoint: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -85,14 +87,19 @@ async fn register(
     State(state): State<Arc<AppState>>,
     Json(req): Json<RegisterRequest>,
 ) -> impl IntoResponse {
-    match state.registry.register(
-        req.instance_id,
-        req.endpoint,
-        req.dp_rank.unwrap_or(0),
-        req.model_name,
-        req.tenant_id,
-        req.block_size,
-    ) {
+    match state
+        .registry
+        .register(
+            req.instance_id,
+            req.endpoint,
+            req.dp_rank.unwrap_or(0),
+            req.model_name,
+            req.tenant_id,
+            req.block_size,
+            req.replay_endpoint,
+        )
+        .await
+    {
         Ok(()) => (
             StatusCode::CREATED,
             Json(serde_json::json!({"status": "ok"})),
@@ -248,25 +255,108 @@ async fn query_by_hash(
     }
 }
 
-async fn dump_events(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let indexers = state.registry.all_indexers();
-    let mut handles = Vec::with_capacity(indexers.len());
+#[cfg(feature = "test-endpoints")]
+#[derive(Deserialize)]
+struct ListenerControlRequest {
+    instance_id: WorkerId,
+    #[serde(default)]
+    dp_rank: Option<u32>,
+}
 
-    for (key, indexer) in indexers {
+#[cfg(feature = "test-endpoints")]
+async fn test_pause_listener(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ListenerControlRequest>,
+) -> impl IntoResponse {
+    match state
+        .registry
+        .pause_listener(req.instance_id, req.dp_rank.unwrap_or(0))
+    {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"status": "ok"}))),
+        Err(e) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": e.to_string()})),
+        ),
+    }
+}
+
+#[cfg(feature = "test-endpoints")]
+async fn test_resume_listener(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ListenerControlRequest>,
+) -> impl IntoResponse {
+    match state
+        .registry
+        .resume_listener(req.instance_id, req.dp_rank.unwrap_or(0))
+        .await
+    {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"status": "ok"}))),
+        Err(e) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": e.to_string()})),
+        ),
+    }
+}
+
+#[derive(Deserialize)]
+struct PeerRequest {
+    url: String,
+}
+
+async fn register_peer(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<PeerRequest>,
+) -> impl IntoResponse {
+    state.registry.register_peer(req.url);
+    (
+        StatusCode::CREATED,
+        Json(serde_json::json!({"status": "ok"})),
+    )
+}
+
+async fn deregister_peer(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<PeerRequest>,
+) -> impl IntoResponse {
+    if state.registry.deregister_peer(&req.url) {
+        (StatusCode::OK, Json(serde_json::json!({"status": "ok"})))
+    } else {
+        (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "peer not found"})),
+        )
+    }
+}
+
+async fn list_peers(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    Json(state.registry.list_peers())
+}
+
+async fn dump_events(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let all = state.registry.all_indexers_with_block_size();
+    let mut handles = Vec::with_capacity(all.len());
+
+    for (key, indexer, block_size) in all {
         handles.push(tokio::spawn(async move {
             let events = indexer.dump_events().await;
-            (key, events)
+            (key, events, block_size)
         }));
     }
 
     let mut result: HashMap<String, serde_json::Value> = HashMap::new();
     for handle in handles {
         match handle.await {
-            Ok((key, Ok(events))) => {
+            Ok((key, Ok(events), block_size)) => {
                 let map_key = format!("{}:{}", key.model_name, key.tenant_id);
-                result.insert(map_key, serde_json::json!(events));
+                result.insert(
+                    map_key,
+                    serde_json::json!({
+                        "block_size": block_size,
+                        "events": events,
+                    }),
+                );
             }
-            Ok((key, Err(e))) => {
+            Ok((key, Err(e), _)) => {
                 let map_key = format!("{}:{}", key.model_name, key.tenant_id);
                 result.insert(map_key, serde_json::json!({"error": e.to_string()}));
             }
@@ -279,12 +369,21 @@ async fn dump_events(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 }
 
 pub fn create_router(state: Arc<AppState>) -> Router {
-    Router::new()
+    let router = Router::new()
         .route("/register", post(register))
         .route("/unregister", post(unregister))
         .route("/workers", get(list_workers))
         .route("/query", post(query))
         .route("/query_by_hash", post(query_by_hash))
         .route("/dump", get(dump_events))
-        .with_state(state)
+        .route("/register_peer", post(register_peer))
+        .route("/deregister_peer", post(deregister_peer))
+        .route("/peers", get(list_peers));
+
+    #[cfg(feature = "test-endpoints")]
+    let router = router
+        .route("/test/pause_listener", post(test_pause_listener))
+        .route("/test/resume_listener", post(test_resume_listener));
+
+    router.with_state(state)
 }
