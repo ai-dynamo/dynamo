@@ -30,6 +30,18 @@ class VirtualConnector(PlannerConnector):
     This is a virtual connector for planner to output scaling decisions to non-native environments
     This virtual connector does not actually scale the deployment, instead, it communicates with the non-native environment through dynamo-runtime's VirtualConnectorCoordinator.
     The deployment environment needs to use VirtualConnectorClient (in the Rust/Python bindings) to read from the scaling decisions and update report scaling status.
+
+    Examples:
+        >>> from dynamo.planner.virtual_connector import VirtualConnector  # doctest: +SKIP
+        >>> from dynamo.planner.defaults import SubComponentType  # doctest: +SKIP
+        >>>
+        >>> connector = VirtualConnector(  # doctest: +SKIP
+        ...     runtime=runtime,
+        ...     dynamo_namespace="dynamo",
+        ...     model_name="Llama-3.2-1B-Instruct",
+        ... )
+        >>> await connector._async_init()  # doctest: +SKIP
+        >>> await connector.add_component(SubComponentType.PREFILL)  # doctest: +SKIP
     """
 
     def __init__(
