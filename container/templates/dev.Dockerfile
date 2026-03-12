@@ -218,7 +218,6 @@ ENV NIXL_LIB_DIR=/opt/intel/intel_nixl/lib/x86_64-linux-gnu  \
 ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl \
     NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib64 \
     NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib64/plugins
-{% endif %}
 
 # Set universal CUDA development environment variables (all frameworks)
 # vLLM: Dockerfile.vllm line 533, 597
@@ -233,6 +232,7 @@ ENV CUDA_HOME=/usr/local/cuda \
     TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas \
     TRITON_CUDART_PATH=/usr/local/cuda/include \
     NVIDIA_DRIVER_CAPABILITIES=video,compute,utility
+{% endif %}
 
 # Base LD_LIBRARY_PATH with universal paths (all frameworks have these)
 # Framework-specific paths are conditionally added in /etc/profile.d/50-framework-paths.sh
