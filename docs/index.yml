@@ -22,6 +22,8 @@ navigation:
     contents:
       - page: Quickstart
         path: getting-started/quickstart.md
+      - page: Contribution Guide
+        path: contribution-guide.md
 
   # ==================== Resources ====================
   - section: Resources
