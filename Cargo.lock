@@ -8851,6 +8851,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "velo-streaming"
+version = "0.1.0"
+dependencies = [
+ "rmp-serde",
+ "serde",
+ "velo-common",
+]
+
+[[package]]
 name = "velo-transports"
 version = "0.1.0"
 dependencies = [
