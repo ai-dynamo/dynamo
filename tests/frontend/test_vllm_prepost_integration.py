@@ -114,6 +114,17 @@ def _collect_stream_chunks(response: requests.Response) -> list[dict[str, Any]]:
     for line in response.iter_lines(decode_unicode=True):
         if not line:
             continue
+        if line.startswith("event: "):
+            # Collect subsequent data line(s) for diagnostics
+            event_type = line[len("event: ") :]
+            remaining = list(response.iter_lines(decode_unicode=True))
+            data_lines = [
+                ln for ln in remaining if ln.startswith("data: ")
+            ]
+            detail = data_lines[0] if data_lines else "(no data line)"
+            raise AssertionError(
+                f"SSE event '{event_type}': {detail}"
+            )
         assert line.startswith("data: "), f"Unexpected SSE line: {line!r}"
         payload = line[len("data: ") :]
         if payload == "[DONE]":
