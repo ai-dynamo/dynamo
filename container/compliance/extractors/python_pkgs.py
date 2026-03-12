@@ -1,17 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 """Extract Python package information from a container image."""
 
@@ -156,22 +144,25 @@ def extract_python(
 
     try:
         cmd = [
-            docker_cmd, "run", "--rm",
-            "-v", f"{helper_path}:/tmp/python_helper.py:ro",
+            docker_cmd,
+            "run",
+            "--rm",
+            "-v",
+            f"{helper_path}:/tmp/python_helper.py:ro",
             image,
-            "python3", "/tmp/python_helper.py",
+            "python3",
+            "/tmp/python_helper.py",
         ]
         if verbose:
             log.info("Running: %s", " ".join(cmd))
 
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=300
-        )
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
 
         if result.returncode != 0:
             log.error(
                 "Python extraction failed (exit %d): %s",
-                result.returncode, result.stderr,
+                result.returncode,
+                result.stderr,
             )
             raise RuntimeError(f"Python extraction failed: {result.stderr}")
 
@@ -183,12 +174,14 @@ def extract_python(
                     log.warning("Skipping malformed line: %r", line)
                 continue
             pkg_name, version, spdx_license = parts
-            packages.append({
-                "package_name": pkg_name,
-                "version": version,
-                "type": "python",
-                "spdx_license": spdx_license,
-            })
+            packages.append(
+                {
+                    "package_name": pkg_name,
+                    "version": version,
+                    "type": "python",
+                    "spdx_license": spdx_license,
+                }
+            )
 
         if verbose:
             log.info("Extracted %d Python packages", len(packages))

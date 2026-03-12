@@ -1,18 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 """Generate attribution CSV files for container images.
 
@@ -36,8 +24,8 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 _REPO_ROOT = _SCRIPT_DIR.parent.parent
 sys.path.insert(0, str(_SCRIPT_DIR))
 
-from extractors.dpkg import extract_dpkg
-from extractors.python_pkgs import extract_python
+from extractors.dpkg import extract_dpkg  # noqa: E402
+from extractors.python_pkgs import extract_python  # noqa: E402
 
 log = logging.getLogger(__name__)
 
@@ -86,7 +74,11 @@ def resolve_base_image(
         log.error(
             "Could not resolve base image for framework=%s cuda=%s target=%s. "
             "Keys runtime_image/runtime_image_tag not found under %s.%s in context.yaml",
-            framework, cuda_version, target, framework, cuda_key,
+            framework,
+            cuda_version,
+            target,
+            framework,
+            cuda_key,
         )
         sys.exit(1)
 
@@ -165,9 +157,12 @@ Examples:
   %(prog)s my-registry/dynamo:frontend --framework dynamo --target frontend -o frontend.csv
         """,
     )
-    parser.add_argument("image", help="Container image to scan (e.g., my-registry/dynamo:latest)")
     parser.add_argument(
-        "--output", "-o",
+        "image", help="Container image to scan (e.g., my-registry/dynamo:latest)"
+    )
+    parser.add_argument(
+        "--output",
+        "-o",
         help="Output CSV file path (default: stdout)",
     )
     parser.add_argument(
@@ -206,7 +201,8 @@ Examples:
         help="Docker command to use (default: docker)",
     )
     parser.add_argument(
-        "--verbose", "-v",
+        "--verbose",
+        "-v",
         action="store_true",
         help="Enable verbose logging",
     )
@@ -232,7 +228,9 @@ def main() -> None:
     base_image = args.base_image
     if not base_image and args.framework:
         if args.target != "frontend" and not args.cuda_version:
-            log.error("--cuda-version is required when using --framework for runtime targets")
+            log.error(
+                "--cuda-version is required when using --framework for runtime targets"
+            )
             sys.exit(1)
         base_image = resolve_base_image(
             framework=args.framework,
