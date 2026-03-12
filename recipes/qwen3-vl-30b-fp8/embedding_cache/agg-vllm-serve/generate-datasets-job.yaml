@@ -3,7 +3,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: qwen3-vl-30b-fp8-generate-datasets-vllm-serve
+  name: agg-vllm-serve-1gpu-generate-datasets
 spec:
   backoffLimit: 1
   completions: 1
@@ -47,17 +47,23 @@ spec:
 
               mkdir -p "${OUTPUT_DIR}"
 
-              for POOL_SIZE in 200; do  # 500 800
-                OUTPUT_FILE="${OUTPUT_DIR}/1000req_1img_${POOL_SIZE}pool_400word_base64.jsonl"
-                echo "Generating ${OUTPUT_FILE} (images-pool=${POOL_SIZE})"
-                python3 "${GENERATOR_MAIN}" \
-                  -n 1000 \
-                  --images-per-request 1 \
-                  --images-pool "${POOL_SIZE}" \
-                  --user-text-tokens 400 \
-                  --image-mode base64 \
-                  --image-dir /perf-cache-tmp/images \
-                  -o "${OUTPUT_FILE}"
+              for IMAGES_PER_REQ in 1 2 4 8; do
+                for IMAGE_MODE in base64 http; do
+                  OUTPUT_FILE="${OUTPUT_DIR}/1000req_${IMAGES_PER_REQ}img_200pool_400word_${IMAGE_MODE}.jsonl"
+                  if [[ -f "${OUTPUT_FILE}" ]]; then
+                    echo "Skipping ${OUTPUT_FILE} (already exists)"
+                    continue
+                  fi
+                  echo "Generating ${OUTPUT_FILE} (images-per-request=${IMAGES_PER_REQ}, mode=${IMAGE_MODE})"
+                  python3 "${GENERATOR_MAIN}" \
+                    -n 1000 \
+                    --images-per-request "${IMAGES_PER_REQ}" \
+                    --images-pool 200 \
+                    --user-text-tokens 400 \
+                    --image-mode "${IMAGE_MODE}" \
+                    --image-dir /perf-cache-tmp/images \
+                    -o "${OUTPUT_FILE}"
+                done
               done
 
               echo "Dataset generation complete in ${OUTPUT_DIR}"

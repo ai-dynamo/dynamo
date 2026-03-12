@@ -1,81 +1,61 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
+# Plain Deployments bypassing Grove/MNNVL to allow 4 workers on 1 node.
+# Uses etcd for dynamo service discovery instead of DynamoGraphDeployment operator.
+#
 # Toggle embedding cache:
-#   cache ON:  DYN_MULTIMODAL_EMBEDDING_CACHE_GB = "4"  (or any non-zero value)
+#   cache ON:  DYN_MULTIMODAL_EMBEDDING_CACHE_GB = "10" (or any non-zero value)
 #   cache OFF: DYN_MULTIMODAL_EMBEDDING_CACHE_GB = "0"
 #
-apiVersion: nvidia.com/v1alpha1
-kind: DynamoGraphDeployment
+apiVersion: apps/v1
+kind: Deployment
 metadata:
-  name: qwen3-vl-agg-gb200
+  name: qwen3-vl-agg-worker
+  labels:
+    app: qwen3-vl-agg-worker
 spec:
-  pvcs:
-    - create: false
-      name: model-cache
-    - create: false
-      name: compilation-cache
-  services:
-    Frontend:
-      componentType: frontend
-      envs:
-        - name: HF_HOME
-          value: /home/dynamo/.cache/huggingface
-        - name: DYN_REQUEST_PLANE
-          value: tcp
-      extraPodSpec:
-        tolerations:
-          - key: "dedicated"
-            value: "user-workload"
-            effect: "NoSchedule"
-            operator: "Equal"
-          - key: "dedicated"
-            value: "user-workload"
-            effect: "NoExecute"
-            operator: "Equal"
-        affinity:
-          podAffinity:
-            requiredDuringSchedulingIgnoredDuringExecution:
-              - labelSelector:
-                  matchLabels:
-                    nvidia.com/dynamo-component: VllmWorker
-                    nvidia.com/dynamo-graph-deployment-name: qwen3-vl-agg-gb200
-                topologyKey: kubernetes.io/hostname
-        mainContainer:
+  replicas: 4
+  selector:
+    matchLabels:
+      app: qwen3-vl-agg-worker
+  template:
+    metadata:
+      labels:
+        app: qwen3-vl-agg-worker
+    spec:
+      tolerations:
+        - key: "dedicated"
+          value: "user-workload"
+          effect: "NoSchedule"
+          operator: "Equal"
+        - key: "dedicated"
+          value: "user-workload"
+          effect: "NoExecute"
+          operator: "Equal"
+        - key: "nvidia.com/gpu"
+          operator: "Exists"
+          effect: "NoSchedule"
+      securityContext:
+        runAsUser: 0
+        runAsGroup: 0
+        fsGroup: 0
+      nodeSelector:
+        workload: qiwa-agg-benchmark
+      imagePullSecrets:
+        - name: nvcrimagepullsecret
+      containers:
+        - name: worker
           image: nvcr.io/nvstaging/ai-dynamo/vllm-runtime:1.0.0rc8-arm64
           imagePullPolicy: IfNotPresent
           workingDir: /workspace
-      replicas: 1
-      resources:
-        requests:
-          cpu: "1"
-        limits:
-          cpu: "1"
-      subComponentType: null
-
-    VllmWorker:
-      componentType: worker
-      envFromSecret: hf-token-secret
-      extraPodSpec:
-        tolerations:
-          - key: "dedicated"
-            value: "user-workload"
-            effect: "NoSchedule"
-            operator: "Equal"
-          - key: "dedicated"
-            value: "user-workload"
-            effect: "NoExecute"
-            operator: "Equal"
-          - key: "nvidia.com/gpu"
-            operator: "Exists"
-            effect: "NoSchedule"
-        mainContainer:
           command:
             - /bin/bash
             - -lc
           args:
             - |
               set -euo pipefail
+
               SITE_PACKAGES="$(python3 -c 'import pathlib, vllm; print(pathlib.Path(vllm.__file__).resolve().parent.parent)')"
               cd "${SITE_PACKAGES}"
               curl -sL https://github.com/vllm-project/vllm/pull/34182.diff | patch -p1
@@ -96,8 +76,6 @@ spec:
                 --disable-log-requests \
                 --enable-prefix-caching \
                 --multimodal-embedding-cache-capacity-gb "${DYN_MULTIMODAL_EMBEDDING_CACHE_GB}"
-          image: nvcr.io/nvstaging/ai-dynamo/vllm-runtime:1.0.0rc8-arm64
-          imagePullPolicy: IfNotPresent
           env:
             - name: HF_HOME
               value: /home/dynamo/.cache/huggingface
@@ -107,17 +85,107 @@ spec:
               value: nixl-write
             - name: DYN_MULTIMODAL_EMBEDDING_CACHE_GB
               value: "10"  # DYN_MULTIMODAL_EMBEDDING_CACHE_GB
-          workingDir: /workspace
-      replicas: 4
-      resources:
-        limits:
-          gpu: "1"
-        requests:
-          gpu: "1"
-      subComponentType: null
-      volumeMounts:
+            - name: DYN_DISCOVERY_BACKEND
+              value: etcd
+            - name: ETCD_ENDPOINTS
+              value: http://dynamo-platform-etcd:2379
+            - name: DYN_NAMESPACE
+              value: qwen3-vl-agg
+            - name: DYN_EVENT_PLANE
+              value: zmq
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+            requests:
+              nvidia.com/gpu: "1"
+          volumeMounts:
+            - name: model-cache
+              mountPath: /home/dynamo/.cache/huggingface
+            - name: compilation-cache
+              mountPath: /home/dynamo/.cache/vllm
+      volumes:
         - name: model-cache
-          mountPoint: /home/dynamo/.cache/huggingface
+          persistentVolumeClaim:
+            claimName: model-cache
         - name: compilation-cache
-          mountPoint: /home/dynamo/.cache/vllm
-          useAsCompilationCache: true
+          persistentVolumeClaim:
+            claimName: compilation-cache
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: qwen3-vl-agg-frontend
+  labels:
+    app: qwen3-vl-agg-frontend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: qwen3-vl-agg-frontend
+  template:
+    metadata:
+      labels:
+        app: qwen3-vl-agg-frontend
+    spec:
+      tolerations:
+        - key: "dedicated"
+          value: "user-workload"
+          effect: "NoSchedule"
+          operator: "Equal"
+        - key: "dedicated"
+          value: "user-workload"
+          effect: "NoExecute"
+          operator: "Equal"
+      securityContext:
+        runAsUser: 0
+        runAsGroup: 0
+        fsGroup: 0
+      nodeSelector:
+        workload: qiwa-agg-benchmark
+      imagePullSecrets:
+        - name: nvcrimagepullsecret
+      containers:
+        - name: frontend
+          image: nvcr.io/nvstaging/ai-dynamo/vllm-runtime:1.0.0rc8-arm64
+          imagePullPolicy: IfNotPresent
+          workingDir: /workspace
+          command:
+            - /bin/bash
+            - -lc
+          args:
+            - |
+              python3 -m dynamo.frontend \
+                --model-name Qwen/Qwen3-VL-30B-A3B-Instruct-FP8
+          env:
+            - name: HF_HOME
+              value: /home/dynamo/.cache/huggingface
+            - name: DYN_REQUEST_PLANE
+              value: tcp
+            - name: DYN_DISCOVERY_BACKEND
+              value: etcd
+            - name: ETCD_ENDPOINTS
+              value: http://dynamo-platform-etcd:2379
+            - name: DYN_NAMESPACE
+              value: qwen3-vl-agg
+            - name: DYN_EVENT_PLANE
+              value: zmq
+          ports:
+            - containerPort: 8000
+              name: http
+          resources:
+            requests:
+              cpu: "1"
+            limits:
+              cpu: "1"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: qwen3-vl-agg-frontend
+spec:
+  selector:
+    app: qwen3-vl-agg-frontend
+  ports:
+    - port: 8000
+      targetPort: 8000
+      name: http

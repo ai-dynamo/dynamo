@@ -10,18 +10,18 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: qwen3-vl-agg-vllm-serve
+  name: agg-vllm-serve-1gpu
   labels:
-    app: qwen3-vl-agg-vllm-serve
+    app: agg-vllm-serve-1gpu
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: qwen3-vl-agg-vllm-serve
+      app: agg-vllm-serve-1gpu
   template:
     metadata:
       labels:
-        app: qwen3-vl-agg-vllm-serve
+        app: agg-vllm-serve-1gpu
     spec:
       tolerations:
         - key: "dedicated"
@@ -39,6 +39,8 @@ spec:
         runAsUser: 0
         runAsGroup: 0
         fsGroup: 0
+      nodeSelector:
+        workload: qiwa-agg-vllm-serve-benchmark
       imagePullSecrets:
         - name: nvcrimagepullsecret
       containers:
@@ -66,12 +68,8 @@ spec:
 
               EC_ARGS=""
               if [ "${DYN_MULTIMODAL_EMBEDDING_CACHE_GB}" != "0" ]; then
-                EC_ARGS="--ec-transfer-config {
-                  \"ec_role\": \"ec_both\",
-                  \"ec_connector\": \"DynamoMultimodalEmbeddingCacheConnector\",
-                  \"ec_connector_module_path\": \"dynamo.vllm.multimodal_utils.multimodal_embedding_cache_connector\",
-                  \"ec_connector_extra_config\": {\"multimodal_embedding_cache_capacity_gb\": ${DYN_MULTIMODAL_EMBEDDING_CACHE_GB}}
-                }"
+                EC_ARGS="--ec-transfer-config"
+                EC_JSON="{\"ec_role\":\"ec_both\",\"ec_connector\":\"DynamoMultimodalEmbeddingCacheConnector\",\"ec_connector_module_path\":\"dynamo.vllm.multimodal_utils.multimodal_embedding_cache_connector\",\"ec_connector_extra_config\":{\"multimodal_embedding_cache_capacity_gb\":${DYN_MULTIMODAL_EMBEDDING_CACHE_GB}}}"
               fi
 
               vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct-FP8 \
@@ -81,7 +79,7 @@ spec:
                 --disable-log-requests \
                 --enable-prefix-caching \
                 --enable-mm-embeds \
-                ${EC_ARGS}
+                ${EC_ARGS} ${EC_JSON:+"${EC_JSON}"}
           env:
             - name: HF_HOME
               value: /home/dynamo/.cache/huggingface
@@ -106,10 +104,10 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: qwen3-vl-agg-vllm-serve
+  name: agg-vllm-serve-1gpu
 spec:
   selector:
-    app: qwen3-vl-agg-vllm-serve
+    app: agg-vllm-serve-1gpu
   ports:
     - port: 8000
       targetPort: 8000

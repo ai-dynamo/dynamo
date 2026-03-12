@@ -4,53 +4,51 @@
 # Runs cache_on vs cache_off interleaved per dataset/concurrency for realtime comparison.
 # For each (dataset, concurrency): run cache_on, then cache_off, back-to-back.
 #
-# Requires: ServiceAccount with permissions to restart workers and patch the CRD.
+# Requires: ServiceAccount with permissions to patch and restart the worker deployment.
 #
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: benchmark-sa
+  name: benchmark-agg-sa
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: benchmark-restart-role
+  name: benchmark-agg-role
 rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "patch"]
   - apiGroups: [""]
     resources: ["pods"]
-    verbs: ["get", "list", "delete"]
-  - apiGroups: ["nvidia.com"]
-    resources: ["dynamographdeployments"]
-    verbs: ["get", "patch"]
+    verbs: ["get", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: benchmark-restart-binding
+  name: benchmark-agg-binding
 subjects:
   - kind: ServiceAccount
-    name: benchmark-sa
+    name: benchmark-agg-sa
 roleRef:
   kind: Role
-  name: benchmark-restart-role
+  name: benchmark-agg-role
   apiGroup: rbac.authorization.k8s.io
 ---
 apiVersion: v1
 kind: Pod
 metadata:
-  name: qwen3-vl-agg-gb200-benchmark
+  name: qwen3-vl-agg-benchmark
   labels:
     app: benchmark
 spec:
-  serviceAccountName: benchmark-sa
-  affinity:
-    podAffinity:
-      requiredDuringSchedulingIgnoredDuringExecution:
-        - labelSelector:
-            matchLabels:
-              nvidia.com/dynamo-component: VllmWorker
-              nvidia.com/dynamo-graph-deployment-name: qwen3-vl-agg-gb200
-          topologyKey: kubernetes.io/hostname
+  serviceAccountName: benchmark-agg-sa
+  securityContext:
+    runAsUser: 0
+    runAsGroup: 0
+    fsGroup: 0
+  nodeSelector:
+    workload: qiwa-agg-benchmark
   tolerations:
     - key: "dedicated"
       value: "user-workload"
@@ -81,21 +79,30 @@ spec:
               sleep 5
             done
             echo "Model '${MODEL_NAME}' is ready."
+
+            echo "Waiting for all ${EXPECTED_REPLICAS} replicas to be ready..."
+            until [ "$(kubectl get pods -l app=${DEPLOYMENT} \
+              --field-selector=status.phase=Running -o json \
+              | jq '[.items[] | select(.status.containerStatuses[]?.ready==true)] | length')" \
+              -ge "${EXPECTED_REPLICAS}" ]; do
+              echo "[$(date '+%H:%M:%S')] Replicas not all ready, retrying in 10s..."
+              sleep 10
+            done
+            echo "All ${EXPECTED_REPLICAS} replicas are ready."
           }
 
-          restart_worker() {
-            echo "Restarting worker by deleting pod (PodClique will recreate)..."
-            kubectl delete pod -l nvidia.com/dynamo-component=VllmWorker,nvidia.com/dynamo-graph-deployment-name=${GRAPH_DEPLOYMENT} --wait=true
-            sleep 10
+          restart_deployment() {
+            echo "Restarting deployment to clear embedding cache..."
+            kubectl rollout restart deployment/${DEPLOYMENT}
+            kubectl rollout status deployment/${DEPLOYMENT} --timeout=600s
             wait_for_model
           }
 
-          set_cache_gb() {
+          set_cache_and_restart() {
             local gb=$1
-            echo "Patching DynamoGraphDeployment: DYN_MULTIMODAL_EMBEDDING_CACHE_GB=${gb}"
-            kubectl patch dynamographdeployment/${GRAPH_DEPLOYMENT} --type=json \
-              -p "[{\"op\":\"replace\",\"path\":\"/spec/services/VllmWorker/extraPodSpec/mainContainer/env/${CACHE_ENV_INDEX}/value\",\"value\":\"${gb}\"}]"
-            sleep 10
+            echo "Setting DYN_MULTIMODAL_EMBEDDING_CACHE_GB=${gb} on deployment..."
+            kubectl set env deployment/${DEPLOYMENT} DYN_MULTIMODAL_EMBEDDING_CACHE_GB="${gb}"
+            kubectl rollout status deployment/${DEPLOYMENT} --timeout=600s
             wait_for_model
           }
 
@@ -124,8 +131,8 @@ spec:
           }
 
           DATASETS=(
-            "1000req_1img_200pool_400word_base64"
-            "1000req_1img_200pool_400word_http"
+            "1000req_3img_200pool_400word_base64"
+            "1000req_3img_200pool_400word_http"
             # "1000req_1img_500pool_400word_base64"
             # "1000req_1img_800pool_400word_base64"
           )
@@ -144,19 +151,17 @@ spec:
           for ds in "${DATASETS[@]}"; do
             for conc in "${CONCURRENCIES[@]}"; do
               # cache_on: set cache, restart, run
-              set_cache_gb "${CACHE_GB}"
-              restart_worker
+              set_cache_and_restart "${CACHE_GB}"
               run_one cache_on "${ds}" "${conc}"
 
               # cache_off: set cache=0, restart, run
-              set_cache_gb 0
-              restart_worker
+              set_cache_and_restart 0
               run_one cache_off "${ds}" "${conc}"
             done
           done
 
           # Restore cache setting
-          set_cache_gb "${CACHE_GB}"
+          set_cache_and_restart "${CACHE_GB}"
 
           echo "All runs complete. Artifacts in ${ARTIFACT_BASE_DIR}"
           sleep 3600
@@ -164,11 +169,11 @@ spec:
         - name: MODEL_NAME
           value: Qwen/Qwen3-VL-30B-A3B-Instruct-FP8
         - name: FRONTEND
-          value: qwen3-vl-agg-gb200-frontend
-        - name: GRAPH_DEPLOYMENT
-          value: qwen3-vl-agg-gb200
-        - name: CACHE_ENV_INDEX
-          value: "3"  # index of DYN_MULTIMODAL_EMBEDDING_CACHE_GB in deploy.yaml env array
+          value: qwen3-vl-agg-frontend
+        - name: DEPLOYMENT
+          value: qwen3-vl-agg-worker
+        - name: EXPECTED_REPLICAS
+          value: "4"
         - name: CACHE_GB
           value: "10"
         - name: MAX_TOKENS

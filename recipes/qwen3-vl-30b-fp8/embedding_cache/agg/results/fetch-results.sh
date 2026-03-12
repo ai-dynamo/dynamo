@@ -4,12 +4,14 @@
 set -euo pipefail
 
 NAMESPACE="${NAMESPACE:-qiwa}"
-POD="qwen3-vl-agg-gb200-benchmark"
+POD="qwen3-vl-agg-benchmark"
 REMOTE_BASE="/perf-cache/artifacts/fp8/gb200-4gpu/agg"
 LOCAL_BASE="$(cd "$(dirname "$0")" && pwd)/gb200-4gpu"
 DATASETS=(
   "1000req_1img_200pool_400word_base64"
   "1000req_1img_200pool_400word_http"
+  "1000req_3img_200pool_400word_base64"
+  "1000req_3img_200pool_400word_http"
 )
 CONCURRENCIES=(c4 c8 c16 c32 c64 c128)
 

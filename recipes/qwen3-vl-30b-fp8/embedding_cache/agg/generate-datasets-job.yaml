@@ -14,6 +14,8 @@ spec:
         app: generate-datasets
     spec:
       restartPolicy: Never
+      nodeSelector:
+        workload: qiwa-agg-benchmark
       tolerations:
         - key: "dedicated"
           value: "user-workload"
@@ -49,11 +51,11 @@ spec:
 
               for POOL_SIZE in 200; do  # 500 800
                 for IMAGE_MODE in base64 http; do
-                  OUTPUT_FILE="${OUTPUT_DIR}/1000req_1img_${POOL_SIZE}pool_400word_${IMAGE_MODE}.jsonl"
+                  OUTPUT_FILE="${OUTPUT_DIR}/1000req_3img_${POOL_SIZE}pool_400word_${IMAGE_MODE}.jsonl"
                   echo "Generating ${OUTPUT_FILE} (images-pool=${POOL_SIZE}, image-mode=${IMAGE_MODE})"
                   python3 "${GENERATOR_MAIN}" \
                     -n 1000 \
-                    --images-per-request 1 \
+                    --images-per-request 3 \
                     --images-pool "${POOL_SIZE}" \
                     --user-text-tokens 400 \
                     --image-mode "${IMAGE_MODE}" \
