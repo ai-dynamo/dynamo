@@ -99,7 +99,9 @@ class VllmProcessor:
         longer read EOS ids from the preprocessed request object.
         """
         eos_token_ids = getattr(self.tokenizer, "eos_token_ids", None)
-        if eos_token_ids:
+        if eos_token_ids is not None:
+            if isinstance(eos_token_ids, int):
+                return [eos_token_ids]
             return list(eos_token_ids)
 
         eos_token_id = getattr(self.tokenizer, "eos_token_id", None)
