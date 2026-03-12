@@ -271,8 +271,9 @@ class TestVllmRendererApi:
         input_processor.renderer to preprocess_chat_request.
         VllmProcessor iterates input_processor.generation_config_fields.
         """
-        assert hasattr(InputProcessor, "renderer"), (
-            "InputProcessor no longer has 'renderer' attribute/property; "
+        init_source = inspect.getsource(InputProcessor.__init__)
+        assert "self.renderer" in init_source, (
+            "InputProcessor.__init__ no longer initializes 'renderer'; "
             "update preprocess_chat_request call in "
             "components/src/dynamo/frontend/vllm_processor.py"
         )
@@ -363,7 +364,6 @@ class TestVllmRendererApi:
             "mm_features",
             "sampling_params",
             "pooling_params",
-            "eos_token_id",
             "arrival_time",
             "lora_request",
             "cache_salt",
