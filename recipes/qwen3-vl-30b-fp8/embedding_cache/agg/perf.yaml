@@ -4,7 +4,8 @@
 # Runs cache_on vs cache_off interleaved per dataset/concurrency for realtime comparison.
 # For each (dataset, concurrency): run cache_on, then cache_off, back-to-back.
 #
-# Requires: ServiceAccount with permissions to patch and restart the worker deployment.
+# Uses DynamoGraphDeployment CRD patching for cache toggling.
+# Requires: ServiceAccount with permissions to patch the CRD and delete worker pods.
 #
 apiVersion: v1
 kind: ServiceAccount
@@ -21,7 +22,10 @@ rules:
     verbs: ["get", "list", "patch"]
   - apiGroups: [""]
     resources: ["pods"]
-    verbs: ["get", "list"]
+    verbs: ["get", "list", "delete"]
+  - apiGroups: ["nvidia.com"]
+    resources: ["dynamographdeployments"]
+    verbs: ["get", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -79,30 +83,34 @@ spec:
               sleep 5
             done
             echo "Model '${MODEL_NAME}' is ready."
-
-            echo "Waiting for all ${EXPECTED_REPLICAS} replicas to be ready..."
-            until [ "$(kubectl get pods -l app=${DEPLOYMENT} \
-              --field-selector=status.phase=Running -o json \
-              | jq '[.items[] | select(.status.containerStatuses[]?.ready==true)] | length')" \
-              -ge "${EXPECTED_REPLICAS}" ]; do
-              echo "[$(date '+%H:%M:%S')] Replicas not all ready, retrying in 10s..."
-              sleep 10
-            done
-            echo "All ${EXPECTED_REPLICAS} replicas are ready."
           }
 
-          restart_deployment() {
-            echo "Restarting deployment to clear embedding cache..."
-            kubectl rollout restart deployment/${DEPLOYMENT}
-            kubectl rollout status deployment/${DEPLOYMENT} --timeout=600s
+          wait_for_pod_ready() {
+            local label=$1
+            echo "Waiting for pod with label ${label} to be ready..."
+            until kubectl get pod -l "${label}" -o jsonpath='{.items[0].status.containerStatuses[0].ready}' 2>/dev/null | grep -q true; do
+              sleep 5
+            done
+            echo "Pod ${label} is ready."
+          }
+
+          restart_workers() {
+            echo "Restarting worker pods..."
+            kubectl delete pod \
+              -l nvidia.com/dynamo-component=${WORKER_COMPONENT} \
+              -l nvidia.com/dynamo-graph-deployment-name=${GRAPH_DEPLOYMENT} \
+              --wait=true
+            wait_for_pod_ready "nvidia.com/dynamo-component=${WORKER_COMPONENT}"
             wait_for_model
           }
 
-          set_cache_and_restart() {
+          set_cache_gb() {
             local gb=$1
-            echo "Setting DYN_MULTIMODAL_EMBEDDING_CACHE_GB=${gb} on deployment..."
-            kubectl set env deployment/${DEPLOYMENT} DYN_MULTIMODAL_EMBEDDING_CACHE_GB="${gb}"
-            kubectl rollout status deployment/${DEPLOYMENT} --timeout=600s
+            echo "Patching DynamoGraphDeployment: DYN_MULTIMODAL_EMBEDDING_CACHE_GB=${gb}"
+            kubectl patch dynamographdeployment/${GRAPH_DEPLOYMENT} --type=json \
+              -p "[{\"op\":\"replace\",\"path\":\"/spec/services/VllmWorker/extraPodSpec/mainContainer/env/${CACHE_ENV_INDEX}/value\",\"value\":\"${gb}\"}]"
+            sleep 10
+            wait_for_pod_ready "nvidia.com/dynamo-component=${WORKER_COMPONENT}"
             wait_for_model
           }
 
@@ -151,17 +159,19 @@ spec:
           for ds in "${DATASETS[@]}"; do
             for conc in "${CONCURRENCIES[@]}"; do
               # cache_on: set cache, restart, run
-              set_cache_and_restart "${CACHE_GB}"
+              set_cache_gb "${CACHE_GB}"
+              restart_workers
               run_one cache_on "${ds}" "${conc}"
 
               # cache_off: set cache=0, restart, run
-              set_cache_and_restart 0
+              set_cache_gb 0
+              restart_workers
               run_one cache_off "${ds}" "${conc}"
             done
           done
 
           # Restore cache setting
-          set_cache_and_restart "${CACHE_GB}"
+          set_cache_gb "${CACHE_GB}"
 
           echo "All runs complete. Artifacts in ${ARTIFACT_BASE_DIR}"
           sleep 3600
@@ -169,11 +179,13 @@ spec:
         - name: MODEL_NAME
           value: Qwen/Qwen3-VL-30B-A3B-Instruct-FP8
         - name: FRONTEND
-          value: qwen3-vl-agg-frontend
-        - name: DEPLOYMENT
-          value: qwen3-vl-agg-worker
-        - name: EXPECTED_REPLICAS
-          value: "4"
+          value: qwen3-vl-agg-gb200-frontend
+        - name: GRAPH_DEPLOYMENT
+          value: qwen3-vl-agg-gb200
+        - name: WORKER_COMPONENT
+          value: VllmWorker
+        - name: CACHE_ENV_INDEX
+          value: "3"  # index of DYN_MULTIMODAL_EMBEDDING_CACHE_GB in deploy.yaml worker env array
         - name: CACHE_GB
           value: "10"
         - name: MAX_TOKENS

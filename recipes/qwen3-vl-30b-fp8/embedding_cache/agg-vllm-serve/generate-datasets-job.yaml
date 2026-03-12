@@ -47,18 +47,20 @@ spec:
 
               mkdir -p "${OUTPUT_DIR}"
 
-              for IMAGES_PER_REQ in 1 2 4 8; do
+              declare -A POOL_SIZES=( [1]=800 [2]=1600 [4]=3200 )
+              for IMAGES_PER_REQ in 1 2 4; do
+                POOL="${POOL_SIZES[${IMAGES_PER_REQ}]}"
                 for IMAGE_MODE in base64 http; do
-                  OUTPUT_FILE="${OUTPUT_DIR}/1000req_${IMAGES_PER_REQ}img_800pool_400word_${IMAGE_MODE}.jsonl"
+                  OUTPUT_FILE="${OUTPUT_DIR}/1000req_${IMAGES_PER_REQ}img_${POOL}pool_400word_${IMAGE_MODE}.jsonl"
                   if [[ -f "${OUTPUT_FILE}" ]]; then
                     echo "Skipping ${OUTPUT_FILE} (already exists)"
                     continue
                   fi
-                  echo "Generating ${OUTPUT_FILE} (images-per-request=${IMAGES_PER_REQ}, mode=${IMAGE_MODE})"
+                  echo "Generating ${OUTPUT_FILE} (images-per-request=${IMAGES_PER_REQ}, pool=${POOL}, mode=${IMAGE_MODE})"
                   python3 "${GENERATOR_MAIN}" \
                     -n 1000 \
                     --images-per-request "${IMAGES_PER_REQ}" \
-                    --images-pool 800 \
+                    --images-pool "${POOL}" \
                     --user-text-tokens 400 \
                     --image-mode "${IMAGE_MODE}" \
                     --image-dir /perf-cache-tmp/images \
