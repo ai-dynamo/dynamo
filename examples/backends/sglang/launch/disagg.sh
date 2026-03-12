@@ -47,7 +47,7 @@ fi
 
 MODEL="Qwen/Qwen3-0.6B"
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
-print_launch_banner "Launching Disaggregated Workers (P/D)" "$MODEL" "$HTTP_PORT"
+print_launch_banner "Launching Disaggregated Serving (2 GPUs)" "$MODEL" "$HTTP_PORT"
 
 # run ingress
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)

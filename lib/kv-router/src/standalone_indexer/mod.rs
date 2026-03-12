@@ -70,14 +70,17 @@ pub async fn run_server(config: IndexerConfig) -> anyhow::Result<()> {
         })?;
         for (instance_id, dp_rank, endpoint) in parse_workers(workers_str) {
             tracing::info!(instance_id, dp_rank, endpoint, "Registering initial worker");
-            registry.register(
-                instance_id,
-                endpoint,
-                dp_rank,
-                config.model_name.clone(),
-                config.tenant_id.clone(),
-                block_size,
-            )?;
+            registry
+                .register(
+                    instance_id,
+                    endpoint,
+                    dp_rank,
+                    config.model_name.clone(),
+                    config.tenant_id.clone(),
+                    block_size,
+                    None,
+                )
+                .await?;
         }
     }
 

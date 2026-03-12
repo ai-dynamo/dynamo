@@ -13,8 +13,8 @@
 #   DGD gp-decode-1:  LocalRouter + MockerDecode  + Planner
 #
 # Usage:
-#   envsubst < hplanner-mocker-test.yaml | kubectl apply -n ${K8S_NAMESPACE} -f -
-#   envsubst < hplanner-mocker-test.yaml | kubectl delete -n ${K8S_NAMESPACE} -f -
+#   envsubst < global-planner-mocker-test.yaml | kubectl apply -n ${K8S_NAMESPACE} -f -
+#   envsubst < global-planner-mocker-test.yaml | kubectl delete -n ${K8S_NAMESPACE} -f -
 apiVersion: v1
 kind: ConfigMap
 metadata:
