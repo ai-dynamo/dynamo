@@ -23,7 +23,7 @@ def pytest_ignore_collect(collection_path, config):
         if importlib.util.find_spec("sglang") is None:
             return True
         try:
-            importlib.import_module("sglang")
+            importlib.import_module("sglang.srt")
         except (ImportError, ModuleNotFoundError):
             return True
     return None

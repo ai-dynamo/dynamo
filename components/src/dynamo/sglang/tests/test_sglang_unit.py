@@ -10,9 +10,9 @@ from pathlib import Path
 import pytest
 import yaml
 
-from dynamo.sglang.args import parse_args
 from sglang.srt.disaggregation.utils import FAKE_BOOTSTRAP_HOST
 
+from dynamo.sglang.args import parse_args
 from dynamo.sglang.health_check import (
     SglangDisaggHealthCheckPayload,
     SglangPrefillHealthCheckPayload,
