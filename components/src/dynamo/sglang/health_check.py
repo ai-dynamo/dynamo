@@ -7,6 +7,8 @@ sglang-specific health check configuration.
 This module defines the default health check payload for sglang backends.
 """
 
+from __future__ import annotations
+
 import logging
 from typing import Optional
 

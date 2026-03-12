@@ -34,6 +34,14 @@ redirects:
     destination: "/dynamo/"
   - source: "/dynamo/latest/index.html"
     destination: "/dynamo/"
+  - source: "/dynamo/getting-started/support-matrix"
+    destination: "/dynamo/resources/support-matrix"
+  - source: "/dynamo/getting-started/feature-matrix"
+    destination: "/dynamo/resources/feature-matrix"
+  - source: "/dynamo/getting-started/release-artifacts"
+    destination: "/dynamo/resources/release-artifacts"
+  - source: "/dynamo/getting-started/examples"
+    destination: "/dynamo/resources/examples"
 
 # GitHub repository link in navbar
 navbar-links:

@@ -27,6 +27,9 @@ export MAX_FILE_SIZE_MB=${MAX_FILE_SIZE_MB:-50}
 # Extra arguments forwarded to the PD worker (e.g. --multimodal-embedding-cache-capacity-gb 10)
 EXTRA_PD_ARGS=("$@")
 
+HTTP_PORT="${DYN_HTTP_PORT:-8000}"
+print_launch_banner --multimodal "Launching Multimodal E/PD" "$MODEL_PATH" "$HTTP_PORT"
+
 # run frontend
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
 python3 -m dynamo.frontend &

@@ -46,7 +46,7 @@ Platform-specific deployment guides for production environments:
 - **[Amazon EKS](/examples/deployments/EKS/)** - Deploy Dynamo on Amazon Elastic Kubernetes Service
 - **[Azure AKS](/examples/deployments/AKS/)** - Deploy Dynamo on Azure Kubernetes Service
 - **[Amazon ECS](/examples/deployments/ECS/)** - Deploy Dynamo on Amazon Elastic Container Service
-- **Google GKE** - _Coming soon_
+- **[Google GKE](/examples/deployments/GKE/)** - Deploy Dynamo on Google Kubernetes Engine
 
 ## Runtime Examples
 

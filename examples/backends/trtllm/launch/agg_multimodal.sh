@@ -15,6 +15,9 @@ export SERVED_MODEL_NAME=${SERVED_MODEL_NAME:-"Qwen/Qwen2-VL-7B-Instruct"}
 export AGG_ENGINE_ARGS=${AGG_ENGINE_ARGS:-"$DYNAMO_HOME/examples/backends/trtllm/engine_configs/qwen2-vl-7b-instruct/agg.yaml"}
 export MODALITY=${MODALITY:-"multimodal"}
 
+HTTP_PORT="${DYN_HTTP_PORT:-8000}"
+print_launch_banner --multimodal "Launching Aggregated Multimodal Serving" "$MODEL_PATH" "$HTTP_PORT"
+
 # run frontend
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
 python3 -m dynamo.frontend --router-mode kv &
