@@ -785,6 +785,7 @@ mod tests {
     #[derive(Default)]
     struct MockWorkerQueryTransport {
         actions: DashMap<RecoveryKey, Arc<StdMutex<VecDeque<MockQueryAction>>>>,
+        #[allow(clippy::type_complexity)]
         calls: Arc<StdMutex<Vec<(RecoveryKey, Option<u64>, Option<u64>)>>>,
     }
 
