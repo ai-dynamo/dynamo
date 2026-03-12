@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -193,11 +192,19 @@ def process_dataset(dataset_dir: Path, output_dir: Optional[Path]) -> None:
     plot_dir.mkdir(parents=True, exist_ok=True)
 
     for key, stat, ylabel in SINGLE_METRICS:
-        plot_single(results, x_values, key, stat, ylabel, plot_dir / f"{key}.png", x_label)
+        plot_single(
+            results, x_values, key, stat, ylabel, plot_dir / f"{key}.png", x_label
+        )
 
     for key, title_prefix, stats in SUBPLOT_METRICS:
         plot_subplot_grid(
-            results, x_values, key, title_prefix, stats, plot_dir / f"{key}.png", x_label
+            results,
+            x_values,
+            key,
+            title_prefix,
+            stats,
+            plot_dir / f"{key}.png",
+            x_label,
         )
 
 
