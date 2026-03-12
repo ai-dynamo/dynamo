@@ -73,6 +73,8 @@ class FrontendConfig(KvRouterConfigBase):
     enable_anthropic_api: bool
     strip_anthropic_preamble: bool
     debug_perf: bool
+    enable_streaming_tool_dispatch: bool
+    enable_streaming_reasoning_dispatch: bool
     preprocess_workers: int
 
     def validate(self) -> None:
@@ -353,6 +355,30 @@ class FrontendArgGroup(ArgGroup):
             help=(
                 "Strip the Claude Code billing preamble (x-anthropic-billing-header) "
                 "from the system prompt. Saves tokens and improves prompt caching."
+            ),
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--enable-streaming-tool-dispatch",
+            env_var="DYN_ENABLE_STREAMING_TOOL_DISPATCH",
+            default=False,
+            help=(
+                "[EXPERIMENTAL] Enable streaming tool call dispatch. Emits "
+                "'event: tool_call_dispatch' SSE events on /v1/chat/completions "
+                "for each complete tool call before finish_reason arrives. "
+                "Can be combined with --enable-streaming-reasoning-dispatch."
+            ),
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--enable-streaming-reasoning-dispatch",
+            env_var="DYN_ENABLE_STREAMING_REASONING_DISPATCH",
+            default=False,
+            help=(
+                "[EXPERIMENTAL] Enable streaming reasoning dispatch. Emits a "
+                "single 'event: reasoning_dispatch' SSE event on /v1/chat/completions "
+                "with the complete reasoning block once thinking ends. "
+                "Can be combined with --enable-streaming-tool-dispatch."
             ),
         )
         add_argument(

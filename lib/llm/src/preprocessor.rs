@@ -1088,7 +1088,8 @@ impl OpenAIPreprocessor {
 
     /// Check if reasoning parsing should be disabled based on per-request parameters.
     /// For kimi_k25: disabled when chat_template_args contains "thinking": false.
-    /// For nemotron_nano: disabled when chat_template_args contains "enable_thinking": false.
+    /// For nemotron_nano: disabled when chat_template_args contains "enable_thinking": false
+    ///   or "force_nonempty_content": true.
     fn is_reasoning_disabled_by_request(
         reasoning_parser: Option<&str>,
         chat_template_args: Option<&std::collections::HashMap<String, serde_json::Value>>,
@@ -1102,11 +1103,18 @@ impl OpenAIPreprocessor {
                 }
                 false
             }
-            Some("nemotron_nano") => {
-                if let Some(args) = chat_template_args
-                    && let Some(enable_thinking) = args.get("enable_thinking")
-                {
-                    return enable_thinking == &serde_json::Value::Bool(false);
+            Some("nemotron_nano") | Some("nemotron3") => {
+                if let Some(args) = chat_template_args {
+                    if let Some(enable_thinking) = args.get("enable_thinking")
+                        && enable_thinking == &serde_json::Value::Bool(false)
+                    {
+                        return true;
+                    }
+                    if let Some(force_nonempty) = args.get("force_nonempty_content")
+                        && force_nonempty == &serde_json::Value::Bool(true)
+                    {
+                        return true;
+                    }
                 }
                 false
             }

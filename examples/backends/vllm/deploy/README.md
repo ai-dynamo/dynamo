@@ -35,6 +35,9 @@ Advanced disaggregated deployment with KV cache routing capabilities.
 - `VLLMDecodeWorker`: Specialized decode-only worker
 - `VLLMPrefillWorker`: Specialized prefill-only worker (`--disaggregation-mode prefill`)
 
+### 5. **Global Planner Deployments** (see [`examples/global_planner/`](../../../global_planner/))
+Centralized scaling across multiple DGDs via GlobalPlanner. Examples include single-endpoint multi-pool and multi-model GPU budget patterns. See the [global planner examples](../../../global_planner/) for details.
+
 ## CRD Structure
 
 All templates use the **DynamoGraphDeployment** CRD:
@@ -121,6 +124,7 @@ Select the deployment pattern that matches your requirements:
 - Use `disagg.yaml` for maximum performance
 - Use `disagg_router.yaml` for high-performance with KV cache routing
 - Use `disagg_planner.yaml` for SLA-optimized performance
+- Use [global planner examples](../../../global_planner/) for centralized scaling across multiple DGDs
 
 ### 2. Customize Configuration
 Edit the template to match your environment:
@@ -249,6 +253,7 @@ args:
 - **Quickstart**: [Deployment Quickstart](../../../../docs/kubernetes/README.md)
 - **Platform Setup**: [Dynamo Kubernetes Platform Installation](../../../../docs/kubernetes/installation-guide.md)
 - **SLA Planner**: [SLA Planner Quickstart Guide](../../../../docs/components/planner/planner-guide.md)
+- **Global Planner**: [Global Planner Deployment Guide](../../../../docs/components/planner/global-planner.md)
 - **Examples**: [Deployment Examples](../../../../docs/getting-started/examples.md)
 - **Architecture Docs**: [Disaggregated Serving](../../../../docs/design-docs/disagg-serving.md), [KV-Aware Routing](../../../../docs/components/router/README.md)
 

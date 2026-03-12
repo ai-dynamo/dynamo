@@ -18,8 +18,8 @@
 #
 # Usage:
 #   export K8S_NAMESPACE=... DYNAMO_IMAGE=... DYNAMO_VLLM_IMAGE=... MODEL_NAME=... STORAGE_CLASS_NAME=...
-#   envsubst < hplanner-vllm-test.yaml | kubectl apply   -n ${K8S_NAMESPACE} -f -
-#   envsubst < hplanner-vllm-test.yaml | kubectl delete  -n ${K8S_NAMESPACE} -f -
+#   envsubst < global-planner-vllm-test.yaml | kubectl apply   -n ${K8S_NAMESPACE} -f -
+#   envsubst < global-planner-vllm-test.yaml | kubectl delete  -n ${K8S_NAMESPACE} -f -
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:

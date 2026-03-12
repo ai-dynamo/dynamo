@@ -50,6 +50,9 @@ struct ToolCallState {
     accumulated_args: String,
     block_index: u32,
     started: bool,
+    /// Set when `content_block_stop` has already been emitted inline
+    /// (complete tool call detected mid-stream). Prevents duplicate stop in `emit_end_events()`.
+    stopped: bool,
 }
 
 impl AnthropicStreamConverter {
@@ -261,6 +264,7 @@ impl AnthropicStreamConverter {
                             accumulated_args: String::new(),
                             block_index,
                             started: false,
+                            stopped: false,
                         });
                     }
 
@@ -313,6 +317,20 @@ impl AnthropicStreamConverter {
                                 },
                             };
                             events.push(make_sse_event("content_block_delta", &block_delta));
+
+                            // Emit content_block_stop immediately if the tool call arrived
+                            // complete in a single chunk (id + name + args all present).
+                            // Dynamo backends emit complete tool calls, so this fires on the
+                            // same chunk — no need to wait for finish_reason.
+                            if tc.id.is_some()
+                                && func.name.is_some()
+                                && !self.tool_call_states[tc_index].stopped
+                            {
+                                self.tool_call_states[tc_index].stopped = true;
+                                let block_stop =
+                                    AnthropicStreamEvent::ContentBlockStop { index: block_index };
+                                events.push(make_sse_event("content_block_stop", &block_stop));
+                            }
                         }
                     }
                 }
@@ -350,9 +368,9 @@ impl AnthropicStreamConverter {
             events.push(make_sse_event("content_block_stop", &block_stop));
         }
 
-        // Close tool call blocks
+        // Close tool call blocks (skip any already stopped inline)
         for tc in &self.tool_call_states {
-            if tc.started {
+            if tc.started && !tc.stopped {
                 let block_stop = AnthropicStreamEvent::ContentBlockStop {
                     index: tc.block_index,
                 };
@@ -569,6 +587,7 @@ impl AnthropicStreamConverter {
                             accumulated_args: String::new(),
                             block_index,
                             started: false,
+                            stopped: false,
                         });
                     }
                     if let Some(id) = &tc.id {
@@ -611,6 +630,20 @@ impl AnthropicStreamConverter {
                                 },
                             };
                             events.push(make_tagged_event("content_block_delta", &ev));
+
+                            // Emit content_block_stop immediately if the tool call arrived
+                            // complete in a single chunk (id + name + args all present).
+                            // Dynamo backends emit complete tool calls, so this fires on the
+                            // same chunk — no need to wait for finish_reason.
+                            if tc.id.is_some()
+                                && func.name.is_some()
+                                && !self.tool_call_states[tc_index].stopped
+                            {
+                                self.tool_call_states[tc_index].stopped = true;
+                                let ev =
+                                    AnthropicStreamEvent::ContentBlockStop { index: block_index };
+                                events.push(make_tagged_event("content_block_stop", &ev));
+                            }
                         }
                     }
                 }
@@ -647,8 +680,9 @@ impl AnthropicStreamConverter {
             events.push(make_tagged_event("content_block_stop", &ev));
         }
 
+        // Skip already-stopped tool call blocks
         for tc in &self.tool_call_states {
-            if tc.started {
+            if tc.started && !tc.stopped {
                 let ev = AnthropicStreamEvent::ContentBlockStop {
                     index: tc.block_index,
                 };
@@ -788,9 +822,10 @@ mod tests {
             vec![
                 "content_block_stop",
                 "content_block_start",
-                "content_block_delta"
+                "content_block_delta",
+                "content_block_stop",
             ],
-            "text block must be closed before tool block starts"
+            "text block must be closed before tool block starts; complete tool call stopped inline"
         );
 
         // Verify indices: stop=0 (text), start=1 (tool)
@@ -814,17 +849,13 @@ mod tests {
             other => panic!("expected ContentBlockStart, got {other:?}"),
         }
 
-        // End events should NOT duplicate the text block stop
+        // End events should NOT duplicate either stop (both already emitted inline)
         let end_events = conv.emit_end_events_tagged();
         assert_eq!(
             event_types(&end_events),
-            vec!["content_block_stop", "message_delta", "message_stop"],
-            "only tool block stop in end events (text already closed)"
+            vec!["message_delta", "message_stop"],
+            "no block stops in end events (both text and tool already closed inline)"
         );
-        match &end_events[0].data {
-            AnthropicStreamEvent::ContentBlockStop { index } => assert_eq!(*index, 1),
-            other => panic!("expected tool stop at index 1, got {other:?}"),
-        }
     }
 
     /// Tool-only response (no preceding text): no spurious stop events.
@@ -840,13 +871,19 @@ mod tests {
         ));
         assert_eq!(
             event_types(&tool_events),
-            vec!["content_block_start", "content_block_delta"]
+            vec![
+                "content_block_start",
+                "content_block_delta",
+                "content_block_stop"
+            ],
+            "complete tool call emits stop inline"
         );
 
         let end_events = conv.emit_end_events_tagged();
         assert_eq!(
             event_types(&end_events),
-            vec!["content_block_stop", "message_delta", "message_stop"]
+            vec!["message_delta", "message_stop"],
+            "no block stop in end events (already stopped inline)"
         );
     }
 
@@ -937,7 +974,9 @@ mod tests {
             AnthropicStreamEvent::ContentBlockStart { index: 1, .. }
         ));
 
-        // 3. Tool call → text block closes, tool block opens at index 2
+        // 3. Tool call → text block closes, tool block opens at index 2.
+        //    Because the tool call arrives complete (id + name + args in one
+        //    chunk), inline dispatch also emits content_block_stop immediately.
         let ev = conv.process_chunk_tagged(&tool_call_chunk(
             0,
             Some("call-1"),
@@ -949,7 +988,8 @@ mod tests {
             vec![
                 "content_block_stop",
                 "content_block_start",
-                "content_block_delta"
+                "content_block_delta",
+                "content_block_stop"
             ]
         );
         assert!(matches!(
@@ -977,6 +1017,52 @@ mod tests {
                 "message_delta",
                 "message_stop"
             ]
+        );
+    }
+
+    /// Multiple tool calls: each gets inline content_block_stop.
+    #[test]
+    fn test_multiple_tool_calls_each_stopped_inline() {
+        let mut conv = AnthropicStreamConverter::new("test-model".into());
+
+        let events1 = conv.process_chunk_tagged(&tool_call_chunk(
+            0,
+            Some("call-1"),
+            Some("Read"),
+            Some("{\"path\":\"/tmp/a.txt\"}"),
+        ));
+        assert_eq!(
+            event_types(&events1),
+            vec![
+                "content_block_start",
+                "content_block_delta",
+                "content_block_stop"
+            ],
+            "first tool call closed inline"
+        );
+
+        let events2 = conv.process_chunk_tagged(&tool_call_chunk(
+            1,
+            Some("call-2"),
+            Some("Write"),
+            Some("{\"path\":\"/tmp/b.txt\"}"),
+        ));
+        assert_eq!(
+            event_types(&events2),
+            vec![
+                "content_block_start",
+                "content_block_delta",
+                "content_block_stop"
+            ],
+            "second tool call closed inline"
+        );
+
+        // End events: no block stops (both already closed)
+        let end_events = conv.emit_end_events_tagged();
+        assert_eq!(
+            event_types(&end_events),
+            vec!["message_delta", "message_stop"],
+            "no block stops in end events"
         );
     }
 }
