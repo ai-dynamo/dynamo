@@ -17,6 +17,7 @@ from vllm.config import CacheConfig, LoadConfig, ModelConfig, VllmConfig
 from vllm.inputs.data import TokensPrompt
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 from vllm.sampling_params import RequestOutputKind, SamplingParams
+from vllm.tasks import GENERATION_TASKS
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser, ToolParserManager
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
@@ -92,7 +93,7 @@ class VllmProcessor:
         longer read EOS ids from the preprocessed request object.
         """
         eos_token_ids = getattr(self.tokenizer, "eos_token_ids", None)
-        if eos_token_ids:
+        if eos_token_ids is not None and not isinstance(eos_token_ids, int):
             return list(eos_token_ids)
 
         eos_token_id = getattr(self.tokenizer, "eos_token_id", None)
@@ -193,12 +194,7 @@ class VllmProcessor:
             request_id,
             prompt_inputs,
             sampling_params,
-            # arrival_time: float | None = None,
-            # lora_request: LoRARequest | None = None,
-            # tokenization_kwargs: dict[str, Any] | None = None,
-            # trace_headers: Mapping[str, str] | None = None,
-            # priority: int = 0,
-            # data_parallel_rank: int | None = None,
+            GENERATION_TASKS,  # vLLM 0.17.0: required supported_tasks arg
         )
 
         InputProcessor.assign_request_id(vllm_preproc)
