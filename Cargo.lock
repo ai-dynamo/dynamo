@@ -8858,6 +8858,7 @@ dependencies = [
  "dashmap 6.1.0",
  "rmp-serde",
  "serde",
+ "serde_json",
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",

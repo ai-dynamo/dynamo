@@ -18,9 +18,15 @@
 //! - [`anchor::AttachError`]: errors for exclusive-attach operations
 
 pub mod anchor;
+pub mod control;
 pub mod frame;
 pub mod handle;
 pub mod transport;
 
 pub use anchor::{AnchorManager, AnchorStream, AttachError};
+pub use control::{
+    AnchorAttachRequest, AnchorAttachResponse, AnchorCancelRequest, AnchorDetachRequest,
+    AnchorFinalizeRequest, create_anchor_attach_handler, create_anchor_cancel_handler,
+    create_anchor_detach_handler, create_anchor_finalize_handler,
+};
 pub use transport::{FrameReader, FrameTransport, FrameWriter};
