@@ -23,7 +23,8 @@ tokio-util = { workspace = true }
 dashmap = { workspace = true }
 flume = { workspace = true }
 futures = { workspace = true }
+derive_builder = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt"] }
+tokio = { workspace = true, features = ["macros", "rt", "time", "test-util"] }
