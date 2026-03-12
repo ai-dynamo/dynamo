@@ -59,10 +59,10 @@ pub enum AttachError {
 /// Non-generic by design: [`AnchorManager`] stores `DashMap<u64, AnchorEntry>`
 /// which avoids propagating a type parameter throughout the registry.
 ///
-/// The `attachment` field stores the exclusive [`flume::Receiver`] (the receive
-/// half of the transport channel) while a sender is connected. The check-and-set
-/// is performed atomically via [`dashmap::mapref::entry::Entry`] to prevent
-/// TOCTOU races.
+/// The `attachment` flag indicates whether a sender is currently attached.
+/// The check-and-set is performed atomically via [`dashmap::mapref::entry::Entry`]
+/// to prevent TOCTOU races. The reader pump takes ownership of the transport
+/// receiver directly rather than storing it in the entry.
 // Fields are consumed by Phase 7+ control handlers and Phase 8 data path.
 #[allow(dead_code)]
 pub(crate) struct AnchorEntry {
@@ -76,11 +76,9 @@ pub(crate) struct AnchorEntry {
     /// `cancel()` is idempotent -- a second caller is a no-op.
     pub cancel_token: CancellationToken,
 
-    /// Present iff a sender is currently attached.
-    ///
-    /// Holds the receive half of the transport channel returned by
-    /// [`crate::transport::FrameTransport::bind`].
-    pub attachment: Option<flume::Receiver<Vec<u8>>>,
+    /// `true` iff a sender is currently attached. The reader pump owns the
+    /// transport receiver separately (not stored here).
+    pub attachment: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -239,7 +237,7 @@ impl AnchorManager {
         let entry = AnchorEntry {
             frame_tx,
             cancel_token,
-            attachment: None,
+            attachment: false,
         };
 
         self.registry.insert(local_id, entry);
@@ -283,18 +281,18 @@ impl AnchorManager {
         }
     }
 
-    /// Atomically attempt to attach a [`flume::Receiver`] to an anchor.
+    /// Atomically attempt to mark an anchor as attached.
     ///
     /// Uses `DashMap::entry()` to perform the check-and-set atomically under
     /// the shard lock, preventing TOCTOU races between concurrent attach attempts.
+    /// The reader pump takes ownership of the transport receiver separately.
     ///
-    /// Returns `Err(AttachError::AlreadyAttached)` if a reader is already attached.
+    /// Returns `Err(AttachError::AlreadyAttached)` if a sender is already attached.
     /// Returns `Err(AttachError::AnchorNotFound)` if `local_id` is not in the registry.
     #[allow(dead_code)]
     pub(crate) fn try_attach(
         &self,
         local_id: u64,
-        reader: flume::Receiver<Vec<u8>>,
         handle: StreamAnchorHandle,
     ) -> Result<(), AttachError> {
         use dashmap::mapref::entry::Entry;
@@ -302,22 +300,29 @@ impl AnchorManager {
             Entry::Vacant(_) => Err(AttachError::AnchorNotFound { handle }),
             Entry::Occupied(mut occ) => {
                 let entry = occ.get_mut();
-                if entry.attachment.is_some() {
+                if entry.attachment {
                     Err(AttachError::AlreadyAttached { handle })
                 } else {
-                    entry.attachment = Some(reader);
+                    entry.attachment = true;
                     Ok(())
                 }
             }
         }
     }
 
-    /// Detach the current [`flume::Receiver`] from an anchor, returning it if present.
+    /// Clear the attachment flag on an anchor.
+    ///
+    /// Returns `true` if the anchor was found and was previously attached.
     #[allow(dead_code)]
-    pub(crate) fn detach(&self, local_id: u64) -> Option<flume::Receiver<Vec<u8>>> {
+    pub(crate) fn detach(&self, local_id: u64) -> bool {
         self.registry
             .get_mut(&local_id)
-            .and_then(|mut entry| entry.attachment.take())
+            .map(|mut entry| {
+                let was_attached = entry.attachment;
+                entry.attachment = false;
+                was_attached
+            })
+            .unwrap_or(false)
     }
 
     /// Attach a sender to an existing anchor, establishing the transport connection.
@@ -350,14 +355,14 @@ impl AnchorManager {
             let entry = self.registry.get(&local_id);
             match entry {
                 None => return Err(AttachError::AnchorNotFound { handle }),
-                Some(e) if e.attachment.is_some() => {
+                Some(e) if e.attachment => {
                     return Err(AttachError::AlreadyAttached { handle });
                 }
                 _ => {} // looks good, proceed
             }
         } // DashMap ref dropped here
 
-        // Step 2: Async connect OUTSIDE shard lock — validates transport setup
+        // Step 2: Async connect OUTSIDE shard lock -- validates transport setup
         let _transport_tx = self
             .transport
             .connect(endpoint, local_id, session_id)
@@ -370,17 +375,16 @@ impl AnchorManager {
             Entry::Vacant(_) => Err(AttachError::AnchorNotFound { handle }),
             Entry::Occupied(mut occ) => {
                 let entry = occ.get_mut();
-                if entry.attachment.is_some() {
+                if entry.attachment {
                     Err(AttachError::AlreadyAttached { handle })
                 } else {
                     // Clone the frame_tx so the StreamSender can write items
                     // directly to the AnchorStream consumer.
                     let frame_tx = entry.frame_tx.clone();
 
-                    // Mark as attached with a dummy receiver (Plan 03 will
-                    // change attachment to bool since the reader pump takes
-                    // ownership of the transport receiver separately).
-                    entry.attachment = Some(flume::bounded::<Vec<u8>>(1).1);
+                    // Mark as attached (reader pump takes ownership of transport
+                    // receiver separately).
+                    entry.attachment = true;
 
                     Ok(crate::sender::StreamSender::new(frame_tx, handle))
                 }
@@ -536,21 +540,21 @@ mod tests {
         let (_, local_id) = handle.unpack();
 
         // First attach succeeds.
-        let result1 = mgr.try_attach(local_id, flume::bounded::<Vec<u8>>(256).1, handle);
+        let result1 = mgr.try_attach(local_id, handle);
         assert!(result1.is_ok(), "first attach must succeed: {result1:?}");
 
         // Second attach while still attached must fail with AlreadyAttached.
-        let result2 = mgr.try_attach(local_id, flume::bounded::<Vec<u8>>(256).1, handle);
+        let result2 = mgr.try_attach(local_id, handle);
         match result2 {
             Err(AttachError::AlreadyAttached { .. }) => {}
             other => panic!("expected AlreadyAttached, got {other:?}"),
         }
 
         // Detach and try again -- must succeed.
-        let detached = mgr.detach(local_id);
-        assert!(detached.is_some(), "detach must return the reader");
+        let was_attached = mgr.detach(local_id);
+        assert!(was_attached, "detach must return true when attached");
 
-        let result3 = mgr.try_attach(local_id, flume::bounded::<Vec<u8>>(256).1, handle);
+        let result3 = mgr.try_attach(local_id, handle);
         assert!(result3.is_ok(), "third attach after detach must succeed: {result3:?}");
     }
 

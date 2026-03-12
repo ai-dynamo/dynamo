@@ -68,6 +68,65 @@ pub struct AnchorCancelRequest {
 }
 
 // ---------------------------------------------------------------------------
+// Reader pump
+// ---------------------------------------------------------------------------
+
+/// Reader pump: bridges transport frames to the anchor's delivery channel.
+///
+/// Spawned as a tokio task after successful attach. Reads from the transport
+/// receiver, forwards to the anchor's frame_tx. Monitors for heartbeat
+/// timeouts: 3 consecutive 5-second windows with no frames trigger Dropped
+/// sentinel injection, registry removal (LIVE-02), and cleanup.
+pub(crate) async fn reader_pump(
+    transport_rx: flume::Receiver<Vec<u8>>,
+    frame_tx: flume::Sender<Vec<u8>>,
+    cancel_token: tokio_util::sync::CancellationToken,
+    registry: std::sync::Arc<dashmap::DashMap<u64, crate::anchor::AnchorEntry>>,
+    local_id: u64,
+) {
+    let mut missed_heartbeats: u8 = 0;
+    let heartbeat_deadline = std::time::Duration::from_secs(5);
+
+    loop {
+        tokio::select! {
+            _ = cancel_token.cancelled() => break,
+            result = tokio::time::timeout(heartbeat_deadline, transport_rx.recv_async()) => {
+                match result {
+                    Ok(Ok(bytes)) => {
+                        // Any frame (data or heartbeat) proves liveness
+                        missed_heartbeats = 0;
+                        // Forward to anchor's frame channel
+                        if frame_tx.send_async(bytes).await.is_err() {
+                            break; // consumer dropped
+                        }
+                    }
+                    Ok(Err(_)) => break, // transport channel closed
+                    Err(_timeout) => {
+                        missed_heartbeats += 1;
+                        if missed_heartbeats >= 3 {
+                            // Inject Dropped sentinel -- sender is dead
+                            if let Ok(dropped_bytes) = rmp_serde::to_vec(
+                                &crate::frame::StreamFrame::<()>::Dropped
+                            ) {
+                                let _ = frame_tx.try_send(dropped_bytes);
+                            }
+                            // LIVE-02: Full anchor cleanup -- remove from registry
+                            // so no stale entry remains (ANCR-04)
+                            if let Some((_, entry)) = registry.remove(&local_id) {
+                                entry.cancel_token.cancel();
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Cleanup: cancel token so other paths know the pump exited
+    cancel_token.cancel();
+}
+
+// ---------------------------------------------------------------------------
 // Handler constructors
 // ---------------------------------------------------------------------------
 
@@ -97,7 +156,7 @@ pub fn create_anchor_attach_handler(manager: Arc<AnchorManager>) -> velo_messeng
                                 reason: format!("anchor {} not found", req.handle),
                             });
                         }
-                        Some(e) if e.attachment.is_some() => {
+                        Some(e) if e.attachment => {
                             return Ok(AnchorAttachResponse::Err {
                                 reason: format!("anchor {} already attached", req.handle),
                             });
@@ -124,12 +183,32 @@ pub fn create_anchor_attach_handler(manager: Arc<AnchorManager>) -> velo_messeng
                     }),
                     Entry::Occupied(mut occ) => {
                         let entry = occ.get_mut();
-                        if entry.attachment.is_some() {
+                        if entry.attachment {
                             Ok(AnchorAttachResponse::Err {
                                 reason: format!("anchor {} already attached", req.handle),
                             })
                         } else {
-                            entry.attachment = Some(receiver);
+                            // Clone frame_tx and cancel_token for reader pump
+                            let pump_frame_tx = entry.frame_tx.clone();
+                            let pump_cancel = entry.cancel_token.clone();
+
+                            // Mark as attached
+                            entry.attachment = true;
+
+                            // Drop shard lock before spawning
+                            drop(occ);
+
+                            // Spawn reader pump as background task
+                            let pump_registry = manager.registry.clone();
+                            let (_, local_id) = req.handle.unpack();
+                            tokio::spawn(reader_pump(
+                                receiver,        // transport receiver from bind
+                                pump_frame_tx,   // cloned from entry
+                                pump_cancel,     // cloned from entry
+                                pump_registry,   // Arc clone of registry
+                                local_id,        // anchor's local_id
+                            ));
+
                             Ok(AnchorAttachResponse::Ok {
                                 stream_endpoint: endpoint,
                             })
@@ -167,8 +246,8 @@ pub fn create_anchor_detach_handler(manager: Arc<AnchorManager>) -> velo_messeng
                     Entry::Vacant(_) => None,
                     Entry::Occupied(mut occ) => {
                         let entry = occ.get_mut();
-                        // Clear the attachment
-                        let _ = entry.attachment.take();
+                        // Clear the attachment flag
+                        entry.attachment = false;
                         Some((entry.cancel_token.clone(), entry.frame_tx.clone()))
                     }
                 };
@@ -353,7 +432,7 @@ mod tests {
 
         // Simulate bind-then-lock attach handler logic:
         // Step 1: async bind outside shard lock
-        let (endpoint, receiver) = manager.transport.bind(local_id).await.unwrap();
+        let (endpoint, _receiver) = manager.transport.bind(local_id).await.unwrap();
 
         // Step 2: atomically set attachment under shard lock
         use dashmap::mapref::entry::Entry;
@@ -363,12 +442,12 @@ mod tests {
             },
             Entry::Occupied(mut occ) => {
                 let entry = occ.get_mut();
-                if entry.attachment.is_some() {
+                if entry.attachment {
                     AnchorAttachResponse::Err {
                         reason: format!("anchor {} already attached", handle),
                     }
                 } else {
-                    entry.attachment = Some(receiver);
+                    entry.attachment = true;
                     AnchorAttachResponse::Ok {
                         stream_endpoint: endpoint,
                     }
@@ -388,9 +467,9 @@ mod tests {
             manager
                 .registry
                 .get(&local_id)
-                .map(|e| e.attachment.is_some())
+                .map(|e| e.attachment)
                 .unwrap_or(false),
-            "attachment must be Some after attach"
+            "attachment must be true after attach"
         );
 
         // Verify handler constructor compiles and returns Handler
@@ -403,13 +482,12 @@ mod tests {
         let (handle, _stream) = manager.create_anchor::<u8>();
         let (_, local_id) = handle.unpack();
 
-        // First attach via bind-then-lock
+        // First attach: set attachment flag directly
         {
-            let (_, receiver) = manager.transport.bind(local_id).await.unwrap();
             use dashmap::mapref::entry::Entry;
             if let Entry::Occupied(mut occ) = manager.registry.entry(local_id) {
                 let entry = occ.get_mut();
-                entry.attachment = Some(receiver);
+                entry.attachment = true;
             }
         }
 
@@ -421,7 +499,7 @@ mod tests {
             },
             Entry::Occupied(mut occ) => {
                 let entry = occ.get_mut();
-                if entry.attachment.is_some() {
+                if entry.attachment {
                     AnchorAttachResponse::Err {
                         reason: format!("anchor {} already attached", handle),
                     }
@@ -482,13 +560,12 @@ mod tests {
         let (handle, mut stream) = manager.create_anchor::<Vec<u8>>();
         let (_, local_id) = handle.unpack();
 
-        // Simulate attach first via bind-then-lock
+        // Simulate attach: set flag directly
         {
-            let (_, receiver) = manager.transport.bind(local_id).await.unwrap();
             use dashmap::mapref::entry::Entry;
             if let Entry::Occupied(mut occ) = manager.registry.entry(local_id) {
                 let entry = occ.get_mut();
-                entry.attachment = Some(receiver);
+                entry.attachment = true;
             }
         }
 
@@ -498,7 +575,7 @@ mod tests {
             Entry::Vacant(_) => None,
             Entry::Occupied(mut occ) => {
                 let entry = occ.get_mut();
-                let _ = entry.attachment.take();
+                entry.attachment = false;
                 Some((entry.cancel_token.clone(), entry.frame_tx.clone()))
             }
         };
@@ -517,9 +594,9 @@ mod tests {
             manager
                 .registry
                 .get(&local_id)
-                .map(|e| e.attachment.is_none())
+                .map(|e| !e.attachment)
                 .unwrap_or(false),
-            "attachment must be None after detach"
+            "attachment must be false after detach"
         );
 
         // Verify: anchor still in registry
@@ -550,13 +627,12 @@ mod tests {
         let (handle, mut stream) = manager.create_anchor::<Vec<u8>>();
         let (_, local_id) = handle.unpack();
 
-        // Simulate attach via bind-then-lock
+        // Simulate attach: set flag directly
         {
-            let (_, receiver) = manager.transport.bind(local_id).await.unwrap();
             use dashmap::mapref::entry::Entry;
             if let Entry::Occupied(mut occ) = manager.registry.entry(local_id) {
                 let entry = occ.get_mut();
-                entry.attachment = Some(receiver);
+                entry.attachment = true;
             }
         }
 
@@ -712,10 +788,8 @@ mod tests {
 
         let (transport_tx, frame_rx, _cancel, _registry, _id) = make_pump_test_infra();
 
-        // Drop transport sender -- the pump will timeout since no frames arrive
-        drop(transport_tx);
-
-        // Wait for 3 x 5s = 15s of timeouts
+        // Keep transport_tx alive but don't send anything -- pump will timeout
+        // 3 consecutive 5s windows with no frames trigger Dropped
         tokio::time::sleep(std::time::Duration::from_secs(16)).await;
 
         // Collect all frames from frame_rx
@@ -733,6 +807,9 @@ mod tests {
             "last frame must be Dropped, got {:?}",
             decoded
         );
+
+        // Keep transport_tx alive for the duration of the test
+        drop(transport_tx);
     }
 
     #[tokio::test]
@@ -741,10 +818,7 @@ mod tests {
 
         let (transport_tx, _frame_rx, _cancel, registry, local_id) = make_pump_test_infra();
 
-        // Drop transport sender so pump sees timeouts
-        drop(transport_tx);
-
-        // Wait for 3 x 5s = 15s + margin
+        // Keep transport_tx alive but don't send -- pump will timeout
         tokio::time::sleep(std::time::Duration::from_secs(16)).await;
 
         // LIVE-02: anchor entry must be removed from registry
@@ -752,6 +826,9 @@ mod tests {
             !registry.contains_key(&local_id),
             "anchor must be removed from registry after 3 missed heartbeats (LIVE-02)"
         );
+
+        // Keep transport_tx alive for the duration of the test
+        drop(transport_tx);
     }
 
     #[tokio::test]
