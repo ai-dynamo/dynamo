@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: "Optimal LoRA Placement: From Adapter Churn to Global Optimization"
-subtitle: "Biswa Ranjan Panda, Anish Modipatti, Vikram Sharma Mailthody, March 2026"
+subtitle: "Biswa Ranjan Panda, Anish Modipatti, Vikram Sharma Mailthody, Dan Gill -- March 2026"
 description: "Dynamo's LoRA placement controller evolved through four stages (from naive scattering, through rendezvous hashing, to min-cost flow optimization), reducing adapter churn by 99.7% and achieving 95% churn-free ticks across realistic traffic patterns."
 keywords: LoRA, adapter serving, placement optimization, min-cost flow, rendezvous hashing, LLM inference, Dynamo, GPU cluster, adapter churn
 last-updated: March 12, 2026
