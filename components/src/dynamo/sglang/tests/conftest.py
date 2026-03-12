@@ -13,24 +13,13 @@ import pytest
 
 
 def pytest_ignore_collect(collection_path, config):
-    """Skip sglang tests on runners where the native extension can't load.
-
-    Two-stage check:
-    1. find_spec("sglang") — fast check for package not installed at all.
-    2. import_module("sglang.srt") — catches the case where sglang is
-       installed but sgl_kernel fails to load libcuda.so.1 (CPU-only /
-       ARM64 runners without a GPU driver). Top-level `import sglang`
-       is not sufficient because sglang uses lazy submodule loading, so
-       the sgl_kernel native extension is only triggered via sglang.srt.
+    """Skip collecting sglang test files if sglang module isn't installed.
+    Checks test file naming pattern: test_sglang_*.py
     """
     filename = collection_path.name
     if filename.startswith("test_sglang_"):
         if importlib.util.find_spec("sglang") is None:
-            return True
-        try:
-            importlib.import_module("sglang.srt")
-        except (ImportError, ModuleNotFoundError):
-            return True
+            return True  # sglang not available, skip this file
     return None
 
 
