@@ -276,6 +276,60 @@ mod tests {
         AnchorManager::new(worker_id, transport)
     }
 
+    /// A configurable mock transport that can simulate connect failures.
+    struct ConfigurableMockTransport {
+        connect_should_fail: std::sync::atomic::AtomicBool,
+    }
+
+    impl ConfigurableMockTransport {
+        fn new() -> Self {
+            Self {
+                connect_should_fail: std::sync::atomic::AtomicBool::new(false),
+            }
+        }
+
+        fn set_connect_fail(&self, fail: bool) {
+            self.connect_should_fail
+                .store(fail, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    impl crate::transport::FrameTransport for ConfigurableMockTransport {
+        fn bind(
+            &self,
+            _anchor_id: u64,
+        ) -> BoxFuture<'_, AnyhowResult<(String, flume::Receiver<Vec<u8>>)>> {
+            Box::pin(async {
+                Ok(("mock://endpoint".to_string(), flume::bounded::<Vec<u8>>(256).1))
+            })
+        }
+
+        fn connect(
+            &self,
+            _endpoint: &str,
+            _anchor_id: u64,
+            _session_id: u64,
+        ) -> BoxFuture<'_, AnyhowResult<flume::Sender<Vec<u8>>>> {
+            let should_fail = self
+                .connect_should_fail
+                .load(std::sync::atomic::Ordering::Relaxed);
+            Box::pin(async move {
+                if should_fail {
+                    Err(anyhow::anyhow!("mock transport connect failure"))
+                } else {
+                    Ok(flume::bounded::<Vec<u8>>(256).0)
+                }
+            })
+        }
+    }
+
+    fn make_configurable_manager() -> (AnchorManager, Arc<ConfigurableMockTransport>) {
+        let worker_id = velo_common::WorkerId::from_u64(42);
+        let transport = Arc::new(ConfigurableMockTransport::new());
+        let mgr = AnchorManager::new(worker_id, transport.clone());
+        (mgr, transport)
+    }
+
     // -----------------------------------------------------------------------
     // Test 1: Monotonic local IDs starting at 1
     // -----------------------------------------------------------------------
@@ -390,5 +444,111 @@ mod tests {
             !mgr.registry.contains_key(&local_id),
             "entry must be absent after remove_anchor"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // attach_stream_anchor tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_attach_stream_anchor_success() {
+        let (mgr, _transport) = make_configurable_manager();
+        let (handle, _stream) = mgr.create_anchor::<u32>();
+
+        let result = mgr
+            .attach_stream_anchor::<u32>(handle, "mock://endpoint", 1)
+            .await;
+
+        assert!(result.is_ok(), "attach_stream_anchor should succeed: {:?}", result.err());
+
+        // The returned StreamSender should be usable
+        let sender = result.unwrap();
+        sender.finalize().expect("finalize should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_attach_stream_anchor_not_found() {
+        let (mgr, _transport) = make_configurable_manager();
+        // Create a handle for a non-existent anchor
+        let fake_handle = crate::handle::StreamAnchorHandle::pack(
+            velo_common::WorkerId::from_u64(42),
+            999,
+        );
+
+        let result = mgr
+            .attach_stream_anchor::<u32>(fake_handle, "mock://endpoint", 1)
+            .await;
+
+        match result {
+            Err(AttachError::AnchorNotFound { .. }) => {}
+            other => panic!("expected AnchorNotFound, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_attach_stream_anchor_already_attached() {
+        let (mgr, _transport) = make_configurable_manager();
+        let (handle, _stream) = mgr.create_anchor::<u32>();
+
+        // First attach should succeed
+        let sender1 = mgr
+            .attach_stream_anchor::<u32>(handle, "mock://endpoint", 1)
+            .await
+            .expect("first attach should succeed");
+
+        // Second attach should fail with AlreadyAttached
+        let result = mgr
+            .attach_stream_anchor::<u32>(handle, "mock://endpoint", 2)
+            .await;
+
+        match result {
+            Err(AttachError::AlreadyAttached { .. }) => {}
+            other => panic!("expected AlreadyAttached, got {:?}", other),
+        }
+
+        drop(sender1);
+    }
+
+    #[tokio::test]
+    async fn test_attach_stream_anchor_sender_can_send() {
+        let (mgr, _transport) = make_configurable_manager();
+        let (handle, stream) = mgr.create_anchor::<u32>();
+
+        let sender = mgr
+            .attach_stream_anchor::<u32>(handle, "mock://endpoint", 1)
+            .await
+            .expect("attach should succeed");
+
+        // Send an item through the StreamSender
+        sender.send(42u32).await.expect("send should succeed");
+
+        // The item should arrive on the AnchorStream's internal receiver
+        let bytes = stream.rx.try_recv().expect("should receive item on stream rx");
+        let frame: crate::frame::StreamFrame<u32> =
+            rmp_serde::from_slice(&bytes).expect("deserialize");
+        match frame {
+            crate::frame::StreamFrame::Item(val) => assert_eq!(val, 42),
+            other => panic!("expected Item(42), got {:?}", other),
+        }
+
+        drop(sender);
+    }
+
+    #[tokio::test]
+    async fn test_attach_stream_anchor_transport_error() {
+        let (mgr, transport) = make_configurable_manager();
+        let (handle, _stream) = mgr.create_anchor::<u32>();
+
+        // Configure transport to fail on connect
+        transport.set_connect_fail(true);
+
+        let result = mgr
+            .attach_stream_anchor::<u32>(handle, "mock://endpoint", 1)
+            .await;
+
+        match result {
+            Err(AttachError::TransportError(_)) => {}
+            other => panic!("expected TransportError, got {:?}", other),
+        }
     }
 }
