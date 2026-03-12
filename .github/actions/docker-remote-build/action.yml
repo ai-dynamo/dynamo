@@ -84,6 +84,13 @@ runs:
 
         IMAGE_TAG="${{ inputs.image_tag }}"
 
+        # Normalize platform: prepend linux/ only when not already present
+        PLATFORM_FLAG="${PLATFORM}"
+        if [[ "$PLATFORM_FLAG" != linux/* ]]; then
+          PLATFORM_FLAG="linux/${PLATFORM_FLAG}"
+        fi
+        # Sanitized platform for registry tags and filenames (no slashes or commas)
+        PLATFORM_SAFE=$(echo "${PLATFORM}" | sed 's|linux/||g; s/,/-/g')
 
         CUDA_VERSION_MAJOR=${CUDA_VERSION%%.*}
 
@@ -94,7 +101,7 @@ runs:
 
         # Create build logs directory
         mkdir -p build-logs
-        BUILD_LOG_FILE="build-logs/build-${{ inputs.framework }}-${{ inputs.platform }}.log"
+        BUILD_LOG_FILE="build-logs/build-${{ inputs.framework }}-${PLATFORM_SAFE}.log"
         echo "BUILD_LOG_FILE=${BUILD_LOG_FILE}" >> $GITHUB_ENV
         echo "📝 Build log will be saved to: ${BUILD_LOG_FILE}"
 
@@ -102,7 +109,7 @@ runs:
         # Set base cache args and set --cache-to if this is a main commit
         CACHE_ARGS=""
         if [[ "${{ inputs.target }}" != "frontend" ]]; then
-          CACHE_TAG="${{ inputs.framework }}-cuda${CUDA_VERSION_MAJOR}-${PLATFORM}-cache"
+          CACHE_TAG="${{ inputs.framework }}-cuda${CUDA_VERSION_MAJOR}-${PLATFORM_SAFE}-cache"
           CACHE_ARGS="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${CACHE_TAG} "
           CACHE_ARGS+="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:release-${CACHE_TAG} "
           if [[ "$GITHUB_REF_NAME" =~ ^release ]]; then
@@ -112,7 +119,7 @@ runs:
             CACHE_ARGS+="--cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${CACHE_TAG},mode=max "
           fi
         else
-          CACHE_TAG="${{ inputs.target }}-cuda${CUDA_VERSION_MAJOR}-${PLATFORM}-cache"
+          CACHE_TAG="${{ inputs.target }}-cuda${CUDA_VERSION_MAJOR}-${PLATFORM_SAFE}-cache"
           CACHE_ARGS="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${CACHE_TAG} "
           if [[ "$GITHUB_REF_NAME" == "main" ]]; then
             CACHE_ARGS+="--cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${CACHE_TAG},mode=max "
@@ -166,7 +173,7 @@ runs:
         docker buildx build \
           --progress=plain \
           --tag "$IMAGE_TAG" \
-          --platform linux/${{ inputs.platform }} \
+          --platform "${PLATFORM_FLAG}" \
           -f ./container/rendered.Dockerfile \
           $CACHE_ARGS $EXTRA_ARGS $SECRET_ARGS . 2>&1 | tee "${BUILD_LOG_FILE}"
 
@@ -236,7 +243,7 @@ runs:
           echo "⚠️  No image tag available"
         fi
 
-        PLATFORM_ARCH=$(echo "${{ inputs.platform }}" | sed 's/linux\///')
+        PLATFORM_ARCH=$(echo "${{ inputs.platform }}" | sed 's|linux/||g; s/,/-/g')
         echo "  Architecture: ${PLATFORM_ARCH}"
         echo "PLATFORM_ARCH=${PLATFORM_ARCH}" >> $GITHUB_ENV
         JOB_KEY="${{ inputs.framework }}-${PLATFORM_ARCH}"
