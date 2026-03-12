@@ -929,10 +929,30 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 		}
 	}
 
-	// Enrich hardware from GPU discovery before marshalling the spec.
-	// This fills in gpuSku, vramMb, numGpusPerNode if the user didn't set them.
-	if err := r.enrichHardwareFromDiscovery(ctx, dgdr); err != nil {
+	// Enrich hardware from GPU discovery and collect node taints for toleration injection.
+	// enrichHardwareFromDiscovery may short-circuit when all hardware fields are set,
+	// so we fall back to DiscoverNodeTaints for taint-only discovery.
+	var discoveredTolerations []corev1.Toleration
+	gpuInfo, err := r.enrichHardwareFromDiscovery(ctx, dgdr)
+	if err != nil {
 		logger.Info("GPU discovery not available, proceeding without enrichment", "reason", err.Error())
+	}
+	if r.Config.Namespace.Restricted == "" {
+		if gpuInfo != nil && len(gpuInfo.NodeTaints) > 0 {
+			// Reuse taints already collected by DiscoverGPUs
+			discoveredTolerations = gpu.TaintsToTolerations(gpuInfo.NodeTaints)
+		} else {
+			// GPU discovery was skipped or failed; discover taints separately
+			taints, taintErr := gpu.DiscoverNodeTaints(ctx, r.APIReader)
+			if taintErr != nil {
+				logger.Info("Node taint discovery not available", "reason", taintErr.Error())
+			} else if len(taints) > 0 {
+				discoveredTolerations = gpu.TaintsToTolerations(taints)
+			}
+		}
+		if len(discoveredTolerations) > 0 {
+			logger.Info("Discovered node taints for profiling job tolerations", "count", len(discoveredTolerations))
+		}
 	}
 
 	// Use SyncResource to create/update the job
@@ -1140,6 +1160,14 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 			},
 		}
 
+		// Auto-inject tolerations from cluster node taints so the profiling
+		// pod can schedule on tainted nodes (e.g. DGXC clusters).
+		// Applied before user overrides so that spec.overrides.profilingJob
+		// tolerations take precedence.
+		if len(discoveredTolerations) > 0 {
+			podSpec.Tolerations = discoveredTolerations
+		}
+
 		job := &batchv1.Job{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      jobName,
@@ -1193,19 +1221,20 @@ func marshalDGDRSpec(dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest) (strin
 
 // enrichHardwareFromDiscovery fills in hardware fields that the user didn't set.
 // Called before marshalDGDRSpec(). Mutates dgdr.Spec.Hardware in-place (memory only, not persisted).
-func (r *DynamoGraphDeploymentRequestReconciler) enrichHardwareFromDiscovery(ctx context.Context, dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest) error {
+// Returns the GPUInfo from discovery (nil when all hardware fields were already set).
+func (r *DynamoGraphDeploymentRequestReconciler) enrichHardwareFromDiscovery(ctx context.Context, dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest) (*gpu.GPUInfo, error) {
 	if dgdr.Spec.Hardware == nil {
 		dgdr.Spec.Hardware = &nvidiacomv1beta1.HardwareSpec{}
 	}
 	hw := dgdr.Spec.Hardware
 
 	if hw.GPUSKU != "" && hw.VRAMMB != nil && hw.NumGPUsPerNode != nil {
-		return nil // all fields already set by user; TotalGPUs is filled below when discovery runs
+		return nil, nil // all fields already set by user; TotalGPUs is filled below when discovery runs
 	}
 
 	gpuInfo, err := gpu.DiscoverGPUs(ctx, r.APIReader)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	logger := log.FromContext(ctx)
@@ -1245,7 +1274,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) enrichHardwareFromDiscovery(ctx
 		}
 		hw.TotalGPUs = &total
 	}
-	return nil
+	return gpuInfo, nil
 }
 
 // extractModelCachePVCConfig reads model cache PVC settings from the typed v1beta1 spec.

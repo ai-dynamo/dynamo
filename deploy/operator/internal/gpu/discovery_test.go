@@ -375,3 +375,101 @@ func TestInferHardwareSystem_SpacesAndDashes(t *testing.T) {
 		assert.Equal(t, "h100_sxm", string(result), "Should normalize spaces/dashes: %s", variant)
 	}
 }
+
+func TestDiscoverGPUs_CollectsNodeTaints(t *testing.T) {
+	ctx := context.Background()
+
+	gpuNode := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "gpu-node-1",
+			Labels: map[string]string{
+				LabelGPUCount:   "8",
+				LabelGPUProduct: "H100-SXM5-80GB",
+				LabelGPUMemory:  "81920",
+			},
+		},
+		Spec: corev1.NodeSpec{
+			Taints: []corev1.Taint{
+				{Key: "nvidia.com/gpu", Effect: corev1.TaintEffectNoSchedule},
+				{Key: "dedicated", Value: "user-workload", Effect: corev1.TaintEffectNoExecute},
+			},
+		},
+	}
+	cpuNode := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   "cpu-node-1",
+			Labels: map[string]string{},
+		},
+		Spec: corev1.NodeSpec{
+			Taints: []corev1.Taint{
+				{Key: "team", Effect: corev1.TaintEffectNoSchedule},
+			},
+		},
+	}
+
+	k8sClient := newFakeClient(gpuNode, cpuNode)
+	gpuInfo, err := DiscoverGPUs(ctx, k8sClient)
+	require.NoError(t, err)
+	require.NotNil(t, gpuInfo)
+
+	// Should collect taints from both GPU and CPU nodes
+	assert.Len(t, gpuInfo.NodeTaints, 3)
+}
+
+func TestDiscoverNodeTaints(t *testing.T) {
+	ctx := context.Background()
+
+	node1 := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-1"},
+		Spec: corev1.NodeSpec{
+			Taints: []corev1.Taint{
+				{Key: "nvidia.com/gpu", Effect: corev1.TaintEffectNoSchedule},
+				{Key: "dedicated", Value: "user-workload", Effect: corev1.TaintEffectNoExecute},
+			},
+		},
+	}
+	node2 := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-2"},
+		Spec: corev1.NodeSpec{
+			Taints: []corev1.Taint{
+				// Duplicate of node1's first taint
+				{Key: "nvidia.com/gpu", Effect: corev1.TaintEffectNoSchedule},
+				{Key: "kubernetes.io/arch", Effect: corev1.TaintEffectNoSchedule},
+			},
+		},
+	}
+
+	k8sClient := newFakeClient(node1, node2)
+	taints, err := DiscoverNodeTaints(ctx, k8sClient)
+	require.NoError(t, err)
+
+	// Should deduplicate: nvidia.com/gpu appears once, not twice
+	assert.Len(t, taints, 3)
+}
+
+func TestTaintsToTolerations(t *testing.T) {
+	taints := []corev1.Taint{
+		{Key: "nvidia.com/gpu", Effect: corev1.TaintEffectNoSchedule},
+		{Key: "dedicated", Value: "user-workload", Effect: corev1.TaintEffectNoExecute},
+	}
+
+	tolerations := TaintsToTolerations(taints)
+	require.Len(t, tolerations, 2)
+
+	// Empty-value taint → Exists operator
+	assert.Equal(t, "nvidia.com/gpu", tolerations[0].Key)
+	assert.Equal(t, corev1.TolerationOpExists, tolerations[0].Operator)
+	assert.Equal(t, corev1.TaintEffectNoSchedule, tolerations[0].Effect)
+	assert.Empty(t, tolerations[0].Value)
+
+	// Valued taint → Equal operator
+	assert.Equal(t, "dedicated", tolerations[1].Key)
+	assert.Equal(t, corev1.TolerationOpEqual, tolerations[1].Operator)
+	assert.Equal(t, "user-workload", tolerations[1].Value)
+	assert.Equal(t, corev1.TaintEffectNoExecute, tolerations[1].Effect)
+}
+
+func TestTaintsToTolerations_Empty(t *testing.T) {
+	tolerations := TaintsToTolerations(nil)
+	assert.Empty(t, tolerations)
+}

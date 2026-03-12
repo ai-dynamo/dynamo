@@ -94,7 +94,7 @@ func TestEnrichHardwareFromDiscovery_UsesAICSystemIdentifier(t *testing.T) {
 			r := newFakeReconciler(gpuNode("gpu-node-1", tt.gfdProduct, 8, 141312))
 			dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{}
 
-			err := r.enrichHardwareFromDiscovery(context.Background(), dgdr)
+			_, err := r.enrichHardwareFromDiscovery(context.Background(), dgdr)
 			require.NoError(t, err)
 			require.NotNil(t, dgdr.Spec.Hardware)
 			assert.Equal(t, tt.expectedGPUSKU, string(dgdr.Spec.Hardware.GPUSKU),
@@ -109,7 +109,7 @@ func TestEnrichHardwareFromDiscovery_FallsBackToModelForUnknownGPU(t *testing.T)
 	r := newFakeReconciler(gpuNode("gpu-node-1", "Tesla-V100-SXM2-16GB", 8, 16384))
 	dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{}
 
-	err := r.enrichHardwareFromDiscovery(context.Background(), dgdr)
+	_, err := r.enrichHardwareFromDiscovery(context.Background(), dgdr)
 	require.NoError(t, err)
 	require.NotNil(t, dgdr.Spec.Hardware)
 	assert.Equal(t, "Tesla-V100-SXM2-16GB", string(dgdr.Spec.Hardware.GPUSKU),

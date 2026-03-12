@@ -43,6 +43,7 @@ type GPUInfo struct {
 	Model         string                      // GPU product name (e.g., "H100-SXM5-80GB")
 	VRAMPerGPU    int                         // VRAM in MiB per GPU
 	System        nvidiacomv1beta1.GPUSKUType // AIC hardware system identifier (e.g., "h100_sxm", "h200_sxm"), empty if unknown
+	NodeTaints    []corev1.Taint              // Union of all taints found on cluster nodes
 }
 
 // DiscoverGPUs queries Kubernetes nodes to determine GPU configuration.
@@ -67,6 +68,9 @@ func DiscoverGPUs(ctx context.Context, k8sClient client.Reader) (*GPUInfo, error
 	}
 
 	logger.Info("Found cluster nodes", "count", len(nodeList.Items))
+
+	// Collect union of all node taints for toleration injection
+	allTaints := collectNodeTaints(nodeList)
 
 	// Track the best GPU configuration found
 	var bestGPUInfo *GPUInfo
@@ -107,6 +111,7 @@ func DiscoverGPUs(ctx context.Context, k8sClient client.Reader) (*GPUInfo, error
 	// Infer hardware system from GPU model
 	bestGPUInfo.System = InferHardwareSystem(bestGPUInfo.Model)
 	bestGPUInfo.NodesWithGPUs = nodesWithGPUs
+	bestGPUInfo.NodeTaints = allTaints
 
 	logger.Info("GPU discovery completed",
 		"gpusPerNode", bestGPUInfo.GPUsPerNode,
@@ -202,4 +207,59 @@ func InferHardwareSystem(gpuProduct string) nvidiacomv1beta1.GPUSKUType {
 	// Unknown GPU type, return empty value.
 	// User must specify gpuSku explicitly in spec.hardware.
 	return ""
+}
+
+// DiscoverNodeTaints lists all cluster nodes and returns the deduplicated union
+// of their taints. This is useful when GPU discovery is skipped (e.g. hardware
+// fields are already set) but toleration injection is still needed.
+func DiscoverNodeTaints(ctx context.Context, k8sClient client.Reader) ([]corev1.Taint, error) {
+	nodeList := &corev1.NodeList{}
+	if err := k8sClient.List(ctx, nodeList); err != nil {
+		return nil, fmt.Errorf("failed to list cluster nodes: %w", err)
+	}
+	return collectNodeTaints(nodeList), nil
+}
+
+// collectNodeTaints returns the deduplicated union of all taints across nodes.
+func collectNodeTaints(nodeList *corev1.NodeList) []corev1.Taint {
+	type taintKey struct {
+		Key    string
+		Value  string
+		Effect corev1.TaintEffect
+	}
+	seen := make(map[taintKey]struct{})
+	var result []corev1.Taint
+	for i := range nodeList.Items {
+		for _, t := range nodeList.Items[i].Spec.Taints {
+			k := taintKey{Key: t.Key, Value: t.Value, Effect: t.Effect}
+			if _, exists := seen[k]; !exists {
+				seen[k] = struct{}{}
+				result = append(result, corev1.Taint{
+					Key:    t.Key,
+					Value:  t.Value,
+					Effect: t.Effect,
+				})
+			}
+		}
+	}
+	return result
+}
+
+// TaintsToTolerations converts a slice of taints to matching tolerations.
+func TaintsToTolerations(taints []corev1.Taint) []corev1.Toleration {
+	tolerations := make([]corev1.Toleration, 0, len(taints))
+	for _, t := range taints {
+		tol := corev1.Toleration{
+			Key:    t.Key,
+			Effect: t.Effect,
+		}
+		if t.Value == "" {
+			tol.Operator = corev1.TolerationOpExists
+		} else {
+			tol.Operator = corev1.TolerationOpEqual
+			tol.Value = t.Value
+		}
+		tolerations = append(tolerations, tol)
+	}
+	return tolerations
 }
