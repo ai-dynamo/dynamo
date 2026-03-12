@@ -51,13 +51,12 @@ navigation:
             path: kubernetes/deployment/dynamomodel-guide.md
           - page: Autoscaling
             path: kubernetes/autoscaling.md
+          - page: Rolling Update
+            path: kubernetes/rolling-update.md
           - page: Inference Gateway (GAIE)
             path: kubernetes/inference-gateway.md
-          - section: Checkpointing
-            path: kubernetes/chrek/README.md
-            contents:
-              - page: Integration with Dynamo
-                path: kubernetes/chrek/dynamo.md
+          - page: Snapshot
+            path: kubernetes/snapshot.md
       - section: Observability (K8s)
         contents:
           - page: Metrics
@@ -84,19 +83,35 @@ navigation:
         path: components/kvbm/kvbm-guide.md
       - page: Dynamo Benchmarking
         path: benchmarks/benchmarking.md
-      - section: Multimodality Support
-        path: features/multimodal/README.md
+      - section: Multimodal Model Serving
         contents:
-          - page: vLLM Multimodal
-            path: features/multimodal/multimodal-vllm.md
-          - page: TensorRT-LLM Multimodal
-            path: features/multimodal/multimodal-trtllm.md
-          - page: SGLang Multimodal
-            path: features/multimodal/multimodal-sglang.md
+          - section: Vision Language Models (VLMs)
+            path: features/multimodal/README.md
+            contents:
+              - page: Embedding Cache
+                path: features/multimodal/embedding-cache.md
+              - page: Encoder Disaggregation
+                path: features/multimodal/encoder-disaggregation.md
+              - page: Multimodal KV Routing
+                path: features/multimodal/multimodal-kv-routing.md
+          - section: Diffusion (Experimental)
+            path: features/multimodal/diffusion.md
+            contents:
+              - page: vLLM-Omni
+                path: backends/vllm/vllm-omni.md
+              - page: SGLang Diffusion
+                path: backends/sglang/sglang-diffusion.md
+              - page: TRT-LLM Diffusion
+                path: backends/trtllm/trtllm-video-diffusion.md
       - page: Tool Calling
         path: agents/tool-calling.md
       - page: LoRA Adapters
         path: features/lora/README.md
+      - section: Agentic Workloads
+        path: features/agentic_workloads.md
+        contents:
+          - page: SGLang for Agentic Workloads
+            path: backends/sglang/agents.md
       - section: Observability (Local)
         path: observability/README.md
         contents:
@@ -125,7 +140,7 @@ navigation:
             path: fault-tolerance/request-rejection.md
           - page: Testing
             path: fault-tolerance/testing.md
-      - page: Writing Python Workers in Dynamo
+      - page: Writing Python Workers
         path: development/backend-guide.md
 
   # ==================== Backends ====================
@@ -136,6 +151,8 @@ navigation:
         contents:
           - page: Reference Guide
             path: backends/sglang/sglang-reference-guide.md
+          - page: Chat Processor
+            path: backends/sglang/sglang-chat-processor.md
           - page: Examples
             path: backends/sglang/sglang-examples.md
           - page: Disaggregation
@@ -177,6 +194,8 @@ navigation:
             path: components/router/router-guide.md
           - page: Router Examples
             path: components/router/router-examples.md
+          - page: KV Event Replay — Dynamo vs vLLM
+            path: components/router/kv-event-replay-comparison.md
       - section: Planner
         path: components/planner/README.md
         contents:
@@ -220,18 +239,22 @@ navigation:
         path: design-docs/disagg-serving.md
       - page: Distributed Runtime
         path: design-docs/distributed-runtime.md
-      - page: Discovery Plane
-        path: design-docs/discovery-plane.md
-      - page: Request Plane
-        path: design-docs/request-plane.md
-      - page: Event Plane
-        path: design-docs/event-plane.md
-      - page: Router Design
-        path: design-docs/router-design.md
-      - page: KVBM Design
-        path: design-docs/kvbm-design.md
-      - page: Planner Design
-        path: design-docs/planner-design.md
+      - section: Communication Planes
+        contents:
+          - page: Discovery Plane
+            path: design-docs/discovery-plane.md
+          - page: Request Plane
+            path: design-docs/request-plane.md
+          - page: Event Plane
+            path: design-docs/event-plane.md
+      - section: Component Design
+        contents:
+          - page: Router Design
+            path: design-docs/router-design.md
+          - page: KVBM Design
+            path: design-docs/kvbm-design.md
+          - page: Planner Design
+            path: design-docs/planner-design.md
 
   # ==================== Blog ====================
   - section: Blog
@@ -306,6 +329,8 @@ navigation:
             path: backends/vllm/vllm-reference-guide.md
           - page: Examples
             path: backends/vllm/vllm-examples.md
+          - page: KV Cache Offloading
+            path: backends/vllm/vllm-kv-offloading.md
           - page: Observability
             path: backends/vllm/vllm-observability.md
           - page: vLLM-Omni

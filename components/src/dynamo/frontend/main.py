@@ -22,7 +22,7 @@ import os
 import signal
 import sys
 from argparse import Namespace
-from typing import Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import uvloop
 
@@ -41,6 +41,9 @@ from dynamo.runtime.logging import configure_dynamo_logging
 
 from .frontend_args import FrontendArgGroup, FrontendConfig
 
+if TYPE_CHECKING:
+    from .vllm_processor import EngineFactory
+
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
@@ -50,21 +53,46 @@ def setup_engine_factory(
     router_config: RouterConfig,
     config: FrontendConfig,
     vllm_flags: Namespace,
-):
+) -> "EngineFactory":
     """
     When using vllm pre and post processor, create the EngineFactory that
     creates the engines that run requests.
     """
     from .vllm_processor import EngineFactory
 
-    return EngineFactory(runtime, router_config, config, vllm_flags, config.debug_perf)
+    return EngineFactory(runtime, router_config, config, vllm_flags)
 
 
-def parse_args() -> tuple[FrontendConfig, Optional[Namespace]]:
+def setup_sglang_engine_factory(
+    runtime: DistributedRuntime,
+    router_config: RouterConfig,
+    config: FrontendConfig,
+    sglang_flags: Optional[Namespace] = None,
+):
+    """
+    When using sglang pre and post processor, create the SglangEngineFactory
+    that creates the engines that run requests.
+    """
+    from .sglang_processor import SglangEngineFactory
+
+    tool_call_parser = getattr(sglang_flags, "tool_call_parser", None)
+    reasoning_parser = getattr(sglang_flags, "reasoning_parser", None)
+
+    return SglangEngineFactory(
+        runtime,
+        router_config,
+        config,
+        debug_perf=config.debug_perf,
+        tool_call_parser_name=tool_call_parser,
+        reasoning_parser_name=reasoning_parser,
+    )
+
+
+def parse_args() -> tuple[FrontendConfig, Optional[Namespace], Optional[Namespace]]:
     """Parse command-line arguments for the Dynamo frontend.
 
     Returns:
-        FrontendConfig: Parsed configuration object.
+        Tuple of (FrontendConfig, vllm_flags, sglang_flags).
     """
 
     parser = argparse.ArgumentParser(
@@ -80,6 +108,7 @@ def parse_args() -> tuple[FrontendConfig, Optional[Namespace]]:
     config.validate()
 
     vllm_flags = None
+    sglang_flags = None
 
     # parse extra vllm flags using vllm native parser.
     if config.chat_processor == "vllm":
@@ -105,11 +134,19 @@ def parse_args() -> tuple[FrontendConfig, Optional[Namespace]]:
         vllm_parser = AsyncEngineArgs.add_cli_args(vllm_parser)
         # the result is returned as Namespace object rather than AsyncEngineArgs object to avoid import error for non-vllm users.
         vllm_flags = vllm_parser.parse_args(unknown)
+    elif config.chat_processor == "sglang":
+        sglang_parser = argparse.ArgumentParser(add_help=False)
+        sglang_parser.add_argument("--tool-call-parser", default=None)
+        sglang_parser.add_argument("--reasoning-parser", default=None)
+        sglang_flags, remaining = sglang_parser.parse_known_args(unknown)
+        if remaining:
+            logger.error(f"Unknown arguments specified: {remaining}")
+            sys.exit(1)
     else:
         if unknown:
             logger.error(f"Unknown arguments specified: {unknown}")
             sys.exit(1)
-    return config, vllm_flags
+    return config, vllm_flags, sglang_flags
 
 
 async def async_main():
@@ -125,7 +162,7 @@ async def async_main():
     # bind that port before the worker, causing port conflicts and/or scraping the
     # wrong metrics endpoint.
     os.environ.pop("DYN_SYSTEM_PORT", None)
-    config, vllm_flags = parse_args()
+    config, vllm_flags, sglang_flags = parse_args()
     dump_config(config.dump_config_to, config)
     os.environ["DYN_EVENT_PLANE"] = config.event_plane
     logger.info(
@@ -177,24 +214,7 @@ async def async_main():
 
     if config.router_mode == "kv":
         router_mode = RouterMode.KV
-        kv_router_config = KvRouterConfig(
-            overlap_score_weight=config.kv_overlap_score_weight,
-            router_temperature=config.router_temperature,
-            use_kv_events=config.use_kv_events,
-            durable_kv_events=config.durable_kv_events,
-            router_replica_sync=config.router_replica_sync,
-            router_track_active_blocks=config.router_track_active_blocks,
-            router_track_output_blocks=config.router_track_output_blocks,
-            router_assume_kv_reuse=config.router_assume_kv_reuse,
-            router_snapshot_threshold=config.router_snapshot_threshold,
-            router_reset_states=config.router_reset_states,
-            router_ttl_secs=config.router_ttl,
-            router_max_tree_size=config.router_max_tree_size,
-            router_prune_target_ratio=config.router_prune_target_ratio,
-            router_queue_threshold=config.router_queue_threshold,
-            router_event_threads=config.router_event_threads,
-            router_enable_cache_control=config.router_enable_cache_control,
-        )
+        kv_router_config = KvRouterConfig(**config.kv_router_kwargs())
     elif config.router_mode == "random":
         router_mode = RouterMode.Random
         kv_router_config = None
@@ -211,9 +231,9 @@ async def async_main():
         active_decode_blocks_threshold=config.active_decode_blocks_threshold,
         active_prefill_tokens_threshold=config.active_prefill_tokens_threshold,
         active_prefill_tokens_threshold_frac=config.active_prefill_tokens_threshold_frac,
-        decode_fallback=config.decode_fallback,
+        enforce_disagg=config.enforce_disagg,
     )
-    kwargs = {
+    kwargs: dict[str, Any] = {
         "http_host": config.http_host,
         "http_port": config.http_port,
         "kv_cache_block_size": config.kv_cache_block_size,
@@ -239,12 +259,32 @@ async def async_main():
     if config.enable_anthropic_api:
         os.environ["DYN_ENABLE_ANTHROPIC_API"] = "1"
 
+    if config.strip_anthropic_preamble:
+        os.environ["DYN_STRIP_ANTHROPIC_PREAMBLE"] = "1"
+    else:
+        os.environ.pop("DYN_STRIP_ANTHROPIC_PREAMBLE", None)
+
+    if config.enable_streaming_tool_dispatch:
+        os.environ["DYN_ENABLE_STREAMING_TOOL_DISPATCH"] = "1"
+    else:
+        os.environ.pop("DYN_ENABLE_STREAMING_TOOL_DISPATCH", None)
+
+    if config.enable_streaming_reasoning_dispatch:
+        os.environ["DYN_ENABLE_STREAMING_REASONING_DISPATCH"] = "1"
+    else:
+        os.environ.pop("DYN_ENABLE_STREAMING_REASONING_DISPATCH", None)
+
     if config.chat_processor == "vllm":
         assert (
             vllm_flags is not None
-        ), "vllm_flags is required when chat_processor is vllm"
+        ), "vllm_flags is required when chat processor is vllm"
         chat_engine_factory = setup_engine_factory(
             runtime, router_config, config, vllm_flags
+        ).chat_engine_factory
+        kwargs["chat_engine_factory"] = chat_engine_factory
+    elif config.chat_processor == "sglang":
+        chat_engine_factory = setup_sglang_engine_factory(
+            runtime, router_config, config, sglang_flags
         ).chat_engine_factory
         kwargs["chat_engine_factory"] = chat_engine_factory
 
@@ -262,7 +302,7 @@ async def async_main():
         pass
 
 
-async def graceful_shutdown(runtime):
+async def graceful_shutdown(runtime: DistributedRuntime) -> None:
     """Handle graceful shutdown of the distributed runtime.
 
     Args:
@@ -271,7 +311,7 @@ async def graceful_shutdown(runtime):
     runtime.shutdown()
 
 
-def main():
+def main() -> None:
     """Entry point for the Dynamo frontend CLI."""
     uvloop.run(async_main())
 

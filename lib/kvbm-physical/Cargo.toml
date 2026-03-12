@@ -3,7 +3,7 @@
 
 [package]
 name = "kvbm-physical"
-version.workspace = true
+version = "0.1.0"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -35,9 +35,11 @@ validator = { workspace = true }
 [features]
 default = []
 collectives = []
+testing = []
 testing-kvbm = []
 testing-nixl-gds = []
 
 [dev-dependencies]
 dynamo-memory = { workspace = true, features = ["unsafe-slices"] }
 rstest = "0.26"
+tokio = { workspace = true, features = ["test-util"] }

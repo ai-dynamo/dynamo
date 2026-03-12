@@ -259,6 +259,24 @@ def update_engine_config_with_dynamo(
         f"(use_kv_events={dynamo_config.use_kv_events})"
     )
 
+    if envs.is_set("DYN_VLLM_FORWARDPASS_METRIC_PORT"):
+        existing_cls = getattr(engine_config, "scheduler_cls", None)
+        if existing_cls is None:
+            defaults[
+                "scheduler_cls"
+            ] = "dynamo.vllm.instrumented_scheduler.InstrumentedScheduler"
+            logger.info(
+                "Forward pass metrics enabled: scheduler_cls set to InstrumentedScheduler "
+                f"(port={envs.DYN_VLLM_FORWARDPASS_METRIC_PORT})"
+            )
+        else:
+            logger.warning(
+                f"DYN_VLLM_FORWARDPASS_METRIC_PORT is set but scheduler_cls "
+                f"is already '{existing_cls}'. InstrumentedScheduler will NOT "
+                f"be injected. To use forward pass metrics, either remove "
+                f"--scheduler-cls or subclass InstrumentedScheduler."
+            )
+
     logger.debug("Setting Dynamo defaults for vLLM")
     for key, value in defaults.items():
         if hasattr(engine_config, key):
@@ -374,6 +392,10 @@ def _connector_to_kv_transfer_json(connectors: list[str]) -> str:
         if c == "lmcache":
             multi_connectors.append(
                 {"kv_connector": "LMCacheConnectorV1", "kv_role": "kv_both"}
+            )
+        elif c == "flexkv":
+            multi_connectors.append(
+                {"kv_connector": "FlexKVConnectorV1", "kv_role": "kv_both"}
             )
         elif c == "nixl":
             multi_connectors.append(

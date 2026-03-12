@@ -17,23 +17,6 @@ If you want to use LoRA deploy Dynamo without the Inference Gateway.
 
 Currently, these setups are only supported with the kGateway based Inference Gateway.
 
-## Table of Contents
-
-- [Prerequisites](#prerequisites)
-- [Installation Steps](#installation-steps)
-  - [1. Install Dynamo Platform](#1-install-dynamo-platform)
-  - [2. Deploy Inference Gateway](#2-deploy-inference-gateway)
-  - [3. Deploy Your Model](#3-deploy-your-model)
-  - [4. Build EPP image (Optional)](#4-build-epp-image-optional)
-  - [5. Deploy](#5-deploy)
-  - [6. Verify Installation](#6-verify-installation)
-  - [7. Usage](#7-usage)
-  - [8. Deleting the installation](#8-deleting-the-installation)
-- [Gateway API Inference Extension Details](#gateway-api-inference-extension-integration)
-  - [Router bookkeeping operations](#router-bookkeeping-operations)
-  - [Header Routing Hints](#header-routing-hints)
-
-
 ## Prerequisites
 
 - Kubernetes cluster with kubectl configured
@@ -123,11 +106,22 @@ make info # Check image tag
 ### 5. Deploy
 
 We recommend deploying Inference Gateway's Endpoint Picker as a Dynamo operator's managed component. Alternatively,
-you could deploy it as a standalone pod
+you could deploy it as a standalone pod.
+Note that when deploying Dynamo with the Inference Gateway Extension each worker must have the FrontEnd as a sidecar.
 
 #### 5.a. Deploy as a DGD component (recommended)
 
 We provide an example for the Qwen vLLM below.
+You have to deploy the Dynamo Graph and the HttpRoute service.
+For the HttpRoute service make sure to specify the namespace where your gateway (i.e. kGateway was deployed) as shown below.
+```bash
+  parentRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: inference-gateway
+      namespace: my-model # the namespace where your gateway is deployed.
+```
+
 ```bash
 cd <dynamo-source-root>
 kubectl apply -f examples/backends/vllm/deploy/gaie/agg.yaml -n my-model
@@ -158,18 +152,20 @@ kubectl apply -f recipes/llama-3-70b/vllm/disagg-single-node/gaie/http-route.yam
 ```
 
 - When using GAIE the FrontEnd does not choose the workers. The routing is determined in the EPP.
-- You must enable the flag in the FrontEnd cli as below.
-```bash
-    command:
-      - python3
-    args:
-      - -m
-      - dynamo.frontend
-      - --router-mode
-      - direct
+- The FrontEnd must run with `--router-mode direct` so that it respects the EPP's routing decisions passed via request headers.
+- Use the `frontendSidecar` field on a worker service to have the operator automatically inject a fully configured frontend sidecar container with all required Dynamo env vars, probes, and ports:
+
+```yaml
+frontendSidecar:
+  image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+  args:
+    - --router-mode
+    - direct
+  envFromSecret: hf-token-secret
 ```
+
 - The pre-selected worker (decode and prefill in case of the disaggregated serving) are passed in the request headers.
-- The flag assures the routing respects this selection.
+- The `--router-mode direct` flag ensures the routing respects this selection.
 
 **Startup Probe Timeout:** The EPP has a default startup probe timeout of 30 minutes (10s × 180 failures).
 If your model takes longer to load, increase the `failureThreshold` in the EPP's `startupProbe`. For example,
@@ -226,7 +222,7 @@ You can configure the plugin by setting environment variables in the EPP compone
 
 Common Vars for Routing Configuration:
 - Set `DYN_BUSY_THRESHOLD` to configure the upper bound on how "full" a worker can be (often derived from kv_active_blocks or other load metrics) before the router skips it. If the selected worker exceeds this value, routing falls back to the next best candidate. By default the value is negative meaning this is not enabled.
-- Set `DYN_DECODE_FALLBACK=true` to allow falling back to aggregated (decode-only) mode when prefill workers are unavailable. By default, disaggregated prefill-decode is enforced and requests fail if no prefill workers are found.
+- Set `DYN_ENFORCE_DISAGG=true` to strictly enforce disaggregated mode. When enabled, requests fail if prefill workers have not registered yet. Without this, requests arriving before prefill workers are discovered fall through to decode-only routing. Prefill errors always fail requests regardless of this setting.
 - Set `DYN_OVERLAP_SCORE_WEIGHT` to weigh how heavily the score uses token overlap (predicted KV cache hits) versus other factors (load, historical hit rate). Higher weight biases toward reusing workers with similar cached prefixes. (default: 1)
 - Set `DYN_ROUTER_TEMPERATURE` to soften or sharpen the selection curve when combining scores. Low temperature makes the router pick the top candidate deterministically; higher temperature lets lower-scoring workers through more often (exploration).
 - Set `DYN_USE_KV_EVENTS=false` if you want to disable the router listening for KV events while using kv-routing (default: true). SGLang workers require `--kv-events-config` and TRT-LLM workers require `--publish-events-and-metrics` to publish KV events. For vLLM, KV events are auto-configured when prefix caching is active (deprecated — use `--kv-events-config` explicitly)

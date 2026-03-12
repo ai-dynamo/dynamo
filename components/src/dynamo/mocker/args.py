@@ -90,7 +90,7 @@ def resolve_planner_profile_data(
     )
 
 
-def create_temp_engine_args_file(args) -> Path:
+def create_temp_engine_args_file(args: argparse.Namespace) -> Path:
     """
     Create a temporary JSON file with MockEngineArgs from CLI arguments.
     Returns the path to the temporary file.
@@ -107,7 +107,7 @@ def create_temp_engine_args_file(args) -> Path:
         "max_num_batched_tokens": getattr(args, "max_num_batched_tokens", None),
         "enable_prefix_caching": getattr(args, "enable_prefix_caching", None),
         "enable_chunked_prefill": getattr(args, "enable_chunked_prefill", None),
-        "watermark": getattr(args, "watermark", None),
+        "preemption_mode": getattr(args, "preemption_mode", None),
         "speedup_ratio": getattr(args, "speedup_ratio", None),
         "dp_size": getattr(args, "dp_size", None),
         "startup_time": getattr(args, "startup_time", None),
@@ -146,7 +146,7 @@ def create_temp_engine_args_file(args) -> Path:
     return temp_path
 
 
-def validate_worker_type_args(args):
+def validate_worker_type_args(args: argparse.Namespace) -> None:
     """
     Resolve disaggregation mode from --disaggregation-mode or legacy boolean flags.
     Raises ValueError if validation fails.
@@ -199,7 +199,7 @@ def parse_bootstrap_ports(ports_str: str | None) -> list[int]:
     return [int(p.strip()) for p in ports_str.split(",")]
 
 
-def parse_args():
+def parse_args() -> argparse.Namespace:
     """Parse command-line arguments for the Dynamo mocker engine.
 
     Returns:
@@ -287,10 +287,13 @@ def parse_args():
         help="Disable chunked prefill",
     )
     parser.add_argument(
-        "--watermark",
-        type=float,
+        "--preemption-mode",
+        type=str,
         default=None,
-        help="Watermark value for the mocker engine (default: 0.01)",
+        choices=["lifo", "fifo"],
+        help="Preemption mode for decode eviction under memory pressure. "
+        "'lifo' (default) evicts the newest request (matches vLLM v1), "
+        "'fifo' evicts the oldest request.",
     )
     parser.add_argument(
         "--speedup-ratio",

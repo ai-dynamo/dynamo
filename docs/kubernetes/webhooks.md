@@ -6,22 +6,6 @@ title: Webhooks
 
 This document describes the webhook functionality in the Dynamo Operator, including validation webhooks, certificate management, and troubleshooting.
 
-## Table of Contents
-
-- [Overview](#overview)
-- [Architecture](#architecture)
-- [Configuration](#configuration)
-  - [Certificate Management Options](#certificate-management-options)
-  - [Advanced Configuration](#advanced-configuration)
-- [Certificate Management](#certificate-management)
-  - [Automatic Certificates (Default)](#automatic-certificates-default)
-  - [cert-manager Integration](#cert-manager-integration)
-  - [External Certificates](#external-certificates)
-- [Multi-Operator Deployments](#multi-operator-deployments)
-- [Troubleshooting](#troubleshooting)
-
----
-
 ## Overview
 
 The Dynamo Operator uses **Kubernetes admission webhooks** to provide real-time validation and mutation of custom resources. Currently, the operator implements **validation webhooks** that ensure invalid configurations are rejected immediately at the API server level, providing faster feedback to users compared to controller-based validation.
@@ -32,8 +16,8 @@ All webhook types (validating, mutating, conversion, etc.) share the same **webh
 
 - ✅ **Always enabled** - Webhooks are a required component of the operator
 - ✅ **Shared certificate infrastructure** - All webhook types use the same TLS certificates
-- ✅ **Automatic certificate generation** - No manual certificate management required
-- ✅ **cert-manager integration** - Optional integration for automated certificate lifecycle
+- ✅ **Automatic certificate generation and rotation** - Built-in cert-controller, no manual management required
+- ✅ **cert-manager integration** - Optional integration for custom PKI or organizational certificate policies
 - ✅ **Multi-operator support** - Lease-based coordination for cluster-wide and namespace-restricted deployments
 - ✅ **Immutability enforcement** - Critical fields protected via CEL validation rules
 
@@ -102,7 +86,7 @@ The `webhook.enabled` Helm value has been removed. Webhooks are now a required c
 
 1. **Remove `webhook.enabled`** from any custom values files. Helm will ignore the unknown key, but it should be cleaned up to avoid confusion.
 2. **Ensure port 9443 is reachable** from the Kubernetes API server to the operator pod. If you have `NetworkPolicy` rules or firewall configurations restricting traffic, add an ingress rule allowing the API server to reach the webhook server on port 9443.
-3. **Ensure webhook TLS certificates are available.** By default, Helm hooks generate self-signed certificates automatically during `helm upgrade` — no action needed. If you use cert-manager or externally managed certificates, verify your configuration is in place before upgrading.
+3. **Ensure webhook TLS certificates are available.** By default, the operator's built-in cert-controller generates and rotates self-signed certificates automatically at startup — no action needed. If you use cert-manager or externally managed certificates, verify your configuration is in place before upgrading.
 
 ---
 
@@ -114,9 +98,9 @@ The operator supports three certificate management modes:
 
 | Mode | Description | Use Case |
 |------|-------------|----------|
-| **Automatic (Default)** | Helm hooks generate self-signed certificates | Testing and development environments |
-| **cert-manager** | Integrate with cert-manager for automated lifecycle | Production deployments with cert-manager |
-| **External** | Bring your own certificates | Production deployments with custom PKI |
+| **Automatic (Default)** | Operator's built-in cert-controller generates and rotates certificates | All environments (recommended) |
+| **cert-manager** | Integrate with cert-manager for certificate lifecycle management | Clusters with cert-manager and custom PKI requirements |
+| **External** | Bring your own certificates | Environments with externally managed PKI |
 
 ---
 
@@ -127,7 +111,7 @@ The operator supports three certificate management modes:
 ```yaml
 dynamo-operator:
   webhook:
-    # Certificate management
+    # Certificate management (optional, to use cert-manager instead of built-in)
     certManager:
       enabled: false
       issuerRef:
@@ -137,16 +121,7 @@ dynamo-operator:
     # Certificate secret configuration
     certificateSecret:
       name: webhook-server-cert
-      external: false
-
-    # Certificate validity period (automatic generation only)
-    certificateValidity: 3650  # 10 years
-
-    # Certificate generator image (automatic generation only)
-    certGenerator:
-      image:
-        repository: bitnami/kubectl
-        tag: latest
+      external: false           # Set to true for externally managed certificates
 
     # Webhook behavior configuration
     failurePolicy: Fail        # Fail (reject on error) or Ignore (allow on error)
@@ -198,49 +173,46 @@ webhook:
 
 ### Automatic Certificates (Default)
 
-**Zero configuration required!** Certificates are automatically generated during `helm install` and `helm upgrade`.
+**Zero configuration required!** The operator's built-in cert-controller generates and rotates certificates automatically at startup.
 
 #### How It Works
 
-1. **Pre-install/pre-upgrade hook**: Generates self-signed TLS certificates
-   - Root CA (valid 10 years)
-   - Server certificate (valid 10 years)
-   - Stores in Secret: `<release>-webhook-server-cert`
+1. **Operator starts**: The `CertManager` checks for an existing certificate Secret (configured via `webhook.certificateSecret.name`, default: `webhook-server-cert`). If missing or invalid, it generates a self-signed Root CA and server certificate and writes them to the Secret.
 
-2. **Post-install/post-upgrade hook**: Injects CA bundle into `ValidatingWebhookConfiguration`
-   - Reads `ca.crt` from Secret
-   - Patches `ValidatingWebhookConfiguration` with base64-encoded CA bundle
+2. **CA bundle injection**: The `CABundleInjector` reads `ca.crt` from the Secret and patches both the `ValidatingWebhookConfiguration` and `MutatingWebhookConfiguration` with the base64-encoded CA bundle.
 
-3. **Operator pod**: Mounts certificate secret and serves webhook on port 9443
+3. **Certificate rotation**: The cert-controller monitors certificate validity and regenerates certificates before they expire.
+
+4. **Webhook server starts**: The webhook server only begins serving after certificates are confirmed ready, preventing startup races.
 
 #### Certificate Validity
 
 - **Root CA**: 10 years
 - **Server Certificate**: 10 years (same as Root CA)
-- **Automatic rotation**: Certificates are re-generated on every `helm upgrade`
+- **Automatic rotation**: The cert-controller monitors validity and regenerates before expiration
 
-#### Smart Certificate Generation
+#### Smart Certificate Management
 
-The certificate generation hook is intelligent:
-- ✅ **Checks existing certificates** before generating new ones
-- ✅ **Skips generation** if valid certificates exist (valid for 30+ days with correct SANs)
+The cert-controller is intelligent about certificate lifecycle:
+- ✅ **Checks existing certificates** at startup before generating new ones
+- ✅ **Skips generation** if valid certificates already exist in the Secret
 - ✅ **Regenerates** only when needed (missing, expiring soon, or incorrect SANs)
 
 This means:
-- Fast `helm upgrade` operations (no unnecessary cert generation)
-- Safe to run `helm upgrade` frequently
-- Certificates persist across reinstalls (stored in Secret)
+- Fast operator restarts (no unnecessary cert generation)
+- No dependency on Helm hooks or external Jobs
+- Certificates persist across pod restarts (stored in Secret)
 
 #### Manual Certificate Rotation
 
 If you need to rotate certificates manually:
 
 ```bash
-# Delete the certificate secret
+# Delete the certificate secret -- the operator will regenerate it on restart
 kubectl delete secret <release>-webhook-server-cert -n <namespace>
 
-# Upgrade the release to regenerate certificates
-helm upgrade <release> dynamo-platform -n <namespace>
+# Restart the operator pod to trigger regeneration
+kubectl rollout restart deployment/<release>-dynamo-operator -n <namespace>
 ```
 
 ---
@@ -274,12 +246,11 @@ dynamo-operator:
 4. **cert-manager ca-injector**: Automatically injects CA bundle into `ValidatingWebhookConfiguration`
 5. **Operator pod**: Mounts certificate secret and serves webhook
 
-#### Benefits Over Automatic Mode
+#### When to Use cert-manager
 
-- ✅ **Automated rotation**: cert-manager renews certificates before expiration
-- ✅ **Custom validity periods**: Configure certificate lifetime
-- ✅ **CA rotation support**: ca-injector handles CA updates automatically
+- ✅ **Custom validity periods**: Configure certificate lifetime to match organizational policy
 - ✅ **Integration with existing PKI**: Use your organization's certificate infrastructure
+- ✅ **Centralized certificate management**: Manage all cluster certificates through cert-manager
 
 #### Certificate Rotation
 
@@ -550,53 +521,45 @@ kubectl get secret -n <namespace> <release>-webhook-server-cert -o jsonpath='{.d
 # - SAN includes: <service-name>.<namespace>.svc
 ```
 
-4. **Check CA injection job logs**:
+4. **Check operator logs for CA injection errors**:
 ```bash
-kubectl logs -n <namespace> job/<release>-webhook-ca-inject-<revision>
+kubectl logs -n <namespace> deployment/<release>-dynamo-operator | grep -i "cert\|ca.*bundle\|inject"
 ```
 
 ---
 
-### Helm Hook Job Failures
+### Certificate Controller Errors
 
 **Symptoms:**
-- `helm install` or `helm upgrade` hangs or fails
-- Certificate generation errors
+- Operator logs show cert-controller errors
+- Certificate Secret is not created
+- CA bundle is not injected into webhook configurations
 
 **Checks:**
 
-1. **List hook jobs**:
+1. **Check cert-controller logs**:
 ```bash
-kubectl get jobs -n <namespace> | grep webhook
+kubectl logs -n <namespace> deployment/<release>-dynamo-operator | grep -i "cert-manager\|cert-rotation\|cert-controller"
 ```
 
-2. **Check job logs**:
+2. **Verify RBAC permissions**:
 ```bash
-# Certificate generation
-kubectl logs -n <namespace> job/<release>-webhook-cert-gen-<revision>
-
-# CA injection
-kubectl logs -n <namespace> job/<release>-webhook-ca-inject-<revision>
+# The operator needs permissions to manage Secrets, ValidatingWebhookConfigurations,
+# MutatingWebhookConfigurations, and CustomResourceDefinitions
+kubectl auth can-i create secrets -n <namespace> --as=system:serviceaccount:<namespace>:<release>-dynamo-operator
+kubectl auth can-i patch validatingwebhookconfigurations --as=system:serviceaccount:<namespace>:<release>-dynamo-operator
 ```
 
-3. **Check RBAC permissions**:
+3. **Check if the certificate Secret was created**:
 ```bash
-# Verify ServiceAccount exists
-kubectl get sa -n <namespace> <release>-webhook-ca-inject
-
-# Verify ClusterRole and ClusterRoleBinding exist
-kubectl get clusterrole <release>-webhook-ca-inject
-kubectl get clusterrolebinding <release>-webhook-ca-inject
+kubectl get secret -n <namespace> <release>-webhook-server-cert
 ```
 
-4. **Manual cleanup**:
+4. **Force certificate regeneration**:
 ```bash
-# Delete failed jobs
-kubectl delete job -n <namespace> <release>-webhook-cert-gen-<revision>
-kubectl delete job -n <namespace> <release>-webhook-ca-inject-<revision>
-
-# Retry helm upgrade
-helm upgrade <release> dynamo-platform -n <namespace>
+# Delete the certificate secret and restart the operator
+kubectl delete secret <release>-webhook-server-cert -n <namespace>
+kubectl rollout restart deployment/<release>-dynamo-operator -n <namespace>
 ```
 
 ---
@@ -666,13 +629,13 @@ helm upgrade <release> dynamo-platform -n <namespace>
 
 1. ✅ **Use `failurePolicy: Fail`** (default) to ensure validation is enforced
 2. ✅ **Monitor webhook latency** - Validation adds ~10-50ms per resource operation
-3. ✅ **Use cert-manager** for automated certificate lifecycle in large deployments
+3. ✅ **Automatic certificates work well for production** - The built-in cert-controller handles generation and rotation; use cert-manager only if you need integration with organizational PKI
 4. ✅ **Test webhook configuration** in staging before production
 
 ### Development Deployments
 
 1. ✅ **Use `failurePolicy: Ignore`** if webhook availability is problematic during development
-2. ✅ **Keep automatic certificates** (simpler than cert-manager for dev)
+2. ✅ **Keep automatic certificates** (zero configuration, built into the operator)
 
 ### Multi-Tenant Deployments
 
