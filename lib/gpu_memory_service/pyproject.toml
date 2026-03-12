@@ -36,9 +36,16 @@ keywords = ["llm", "genai", "inference", "nvidia", "gpu", "memory", "dynamo"]
 
 [project.scripts]
 gpu-memory-service = "gpu_memory_service.cli.runner:main"
+gms-storage-client = "gpu_memory_service.cli.storage_runner:main"
 
 [project.optional-dependencies]
 test = [
     "pytest>=8.3.4",
     "pytest-asyncio",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "e2e: end-to-end tests that require a real GPU, CUDA environment, and vLLM installed",
 ]

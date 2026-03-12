@@ -51,6 +51,7 @@ from gpu_memory_service.client.cuda_vmm_utils import (
 from gpu_memory_service.client.rpc import GMSRPCClient
 from gpu_memory_service.common.cuda_vmm_utils import (
     align_to_granularity,
+    ensure_cuda_initialized,
     get_allocation_granularity,
 )
 from gpu_memory_service.common.types import GrantedLockType, RequestedLockType
@@ -145,6 +146,10 @@ class GMSClientMemoryManager:
         self._va_preserved = False
         self._last_memory_layout_hash: str = ""
 
+        # Ensure the CUDA driver is initialized before any driver API calls.
+        ensure_cuda_initialized()
+
+        # Set the current CUDA device for subsequent operations.
         set_current_device(self.device)
         self.granularity = get_allocation_granularity(device)
 
@@ -169,6 +174,10 @@ class GMSClientMemoryManager:
     @property
     def total_bytes(self) -> int:
         return sum(m.aligned_size for m in self._mappings.values())
+
+    @property
+    def committed(self) -> bool:
+        return self._client is not None and self._client.committed
 
     # ==================== Tier 1: Connection ====================
 
@@ -254,6 +263,12 @@ class GMSClientMemoryManager:
 
     def list_handles(self, tag: Optional[str] = None) -> List[Dict]:
         return self._client_rpc.list_allocations(tag)
+
+    def get_allocation_id(self, va: int) -> str:
+        mapping = self._mappings.get(va)
+        if mapping is None:
+            raise KeyError(f"Unknown VA 0x{va:x}")
+        return mapping.allocation_id
 
     # ==================== Tier 1: Metadata ====================
 
@@ -456,8 +471,8 @@ class GMSClientMemoryManager:
         # Stale layout check
         current_hash = self.get_memory_layout_hash()
         if (
-            self._last_memory_layout_hash
-            and current_hash != self._last_memory_layout_hash
+            self._last_memory_layout_hash  # noqa: W503
+            and current_hash != self._last_memory_layout_hash  # noqa: W503
         ):
             raise StaleMemoryLayoutError(
                 f"Layout changed: {self._last_memory_layout_hash[:16]}... -> {current_hash[:16]}..."
@@ -576,9 +591,9 @@ class GMSClientMemoryManager:
                 logger.warning("Error freeing VA 0x%x during close: %s", va, e)
 
         if (
-            free
-            and self._client is not None
-            and self._granted_lock_type == GrantedLockType.RW
+            free  # noqa: W503
+            and self._client is not None  # noqa: W503
+            and self._granted_lock_type == GrantedLockType.RW  # noqa: W503
         ):
             try:
                 self.clear_all_handles()

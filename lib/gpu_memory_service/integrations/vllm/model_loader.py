@@ -51,8 +51,21 @@ def register_gms_loader(load_format: str = "gms") -> None:
 
         def __init__(self, load_config):
             super().__init__(load_config)
+            default_extra = getattr(load_config, "model_loader_extra_config", {}) or {}
+            # Strip GMS-only flags before delegating to vLLM's auto loader.
+            # The default loader rejects unknown keys such as gms_read_only.
+            _GMS_ONLY_KEYS = {"gms_read_only"}
+            default_extra = {
+                key: value
+                for key, value in default_extra.items()
+                if key not in _GMS_ONLY_KEYS
+            }
             self.default_loader = DefaultModelLoader(
-                replace(load_config, load_format="auto")
+                replace(
+                    load_config,
+                    load_format="auto",
+                    model_loader_extra_config=default_extra,
+                )
             )
 
         def download_model(self, model_config) -> None:
