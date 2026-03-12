@@ -159,7 +159,8 @@ maturin develop --uv
 #### 6. Install GPU Memory Service
 
 ```bash
-cd ../../..
+# Return to project root
+cd "$(git rev-parse --show-toplevel)"
 uv pip install -e lib/gpu_memory_service
 ```
 
