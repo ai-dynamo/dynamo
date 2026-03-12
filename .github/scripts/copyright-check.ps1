@@ -15,7 +15,7 @@
 
 set-strictmode -version latest
 
-. "$(& git rev-parse --show-toplevel)/.github/workflows/common.ps1"
+. "$(& git rev-parse --show-toplevel)/.github/scripts/common.ps1"
 
 # == begin common.ps1 extensions ==
 
