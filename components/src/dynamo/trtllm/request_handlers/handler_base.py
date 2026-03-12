@@ -81,6 +81,7 @@ class RequestHandlerConfig:
     encoder_cache_capacity_gb: float = 0  # Encoder cache capacity in GB
     disable_request_abort: bool = True
     additional_metrics: Optional["AdditionalMetricsCollector"] = None
+    tokenizer: Optional[object] = None
 
 
 class HandlerBase(BaseGenerativeHandler):
@@ -111,11 +112,14 @@ class HandlerBase(BaseGenerativeHandler):
         self.shutdown_event = config.shutdown_event
         self.disable_request_abort = config.disable_request_abort
         self.additional_metrics = config.additional_metrics
+        self._standalone_tokenizer = config.tokenizer
 
     @property
     def tokenizer(self):
         if self.multimodal_processor is not None:
             return getattr(self.multimodal_processor, "tokenizer", None)
+        if self._standalone_tokenizer is not None:
+            return self._standalone_tokenizer
         llm = getattr(self.engine, "llm", None)
         return getattr(llm, "tokenizer", None)
 
@@ -183,7 +187,7 @@ class HandlerBase(BaseGenerativeHandler):
             token_top_logprobs = []
             for tok_id, logprob_info in token_logprobs_dict.items():
                 token_str = getattr(logprob_info, "decoded_token", None)
-                if token_str is None and tokenizer is not None:
+                if not token_str and tokenizer:
                     try:
                         token_str = tokenizer.decode([tok_id])
                     except Exception:

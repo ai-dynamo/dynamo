@@ -300,10 +300,8 @@ async def init_llm_worker(
     multimodal_processor = None
 
     if os.getenv("DYNAMO_ENABLE_TEST_LOGITS_PROCESSOR") == "1":
-        # We need to initialize the tokenizer for the test logits processor
-        # But detokenizing still happens in the rust engine, so we do _not_ want
-        # to set default_sampling_params.detokenize to True.
-        # This overrides the skip_tokenizer_init=True set earlier
+        # Ensure tokenizer is initialized for the test logits processor.
+        # Detokenization still happens in the Rust frontend.
         engine_args["skip_tokenizer_init"] = False
 
     if config.modality == Modality.MULTIMODAL:
@@ -475,6 +473,7 @@ async def init_llm_worker(
             encoder_cache_capacity_gb=config.multimodal_embedding_cache_capacity_gb,
             disable_request_abort=config.disable_request_abort,
             additional_metrics=additional_metrics,
+            tokenizer=tokenizer,
         )
 
         # Register the model with runtime config

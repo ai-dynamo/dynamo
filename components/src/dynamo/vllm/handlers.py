@@ -1150,7 +1150,7 @@ class BaseWorkerHandler(ABC):
             token_top_logprobs = []
             for tok_id, logprob_info in token_logprobs_dict.items():
                 token_str = getattr(logprob_info, "decoded_token", None)
-                if token_str is None and tokenizer is not None:
+                if not token_str and tokenizer:
                     try:
                         token_str = tokenizer.decode([tok_id])
                     except Exception:
