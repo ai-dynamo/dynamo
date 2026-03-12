@@ -41,7 +41,7 @@ fi
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
-print_launch_banner "Launching Disaggregated (same GPU)" "$MODEL" "$HTTP_PORT" \
+print_launch_banner "Launching Disaggregated on Same GPU" "$MODEL" "$HTTP_PORT" \
     "Context len: $CONTEXT_LENGTH" \
     "GPU Mem:     ${GPU_MEM_FRACTION} per worker (~${_EW_TOTAL_GIB} GiB each)" \
     "  estimate:  weights=${_EW_WEIGHTS_GIB} + kv=${_EW_KV_GIB} + overhead=${_EW_OVERHEAD_GIB} GiB"
