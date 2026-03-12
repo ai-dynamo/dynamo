@@ -69,7 +69,7 @@ impl SchedulingPolicy for WsptPolicy {
         let p75_overlap = if overlaps.is_empty() {
             0
         } else {
-            let idx = overlaps.len() * 3 / 4;
+            let idx = (overlaps.len() - 1) * 3 / 4;
             *overlaps.select_nth_unstable(idx).1
         } as usize;
         let cached_tokens = p75_overlap * self.block_size;
