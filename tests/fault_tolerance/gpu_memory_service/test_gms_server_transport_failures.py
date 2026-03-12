@@ -18,6 +18,7 @@ from gpu_memory_service.client.memory_manager import (
 from gpu_memory_service.common import cuda_vmm_utils
 from gpu_memory_service.common.protocol.messages import (
     CommitRequest,
+    CommitResponse,
     GetLockStateRequest,
     GetLockStateResponse,
     HandshakeRequest,
@@ -26,10 +27,12 @@ from gpu_memory_service.common.types import (
     GrantedLockType,
     RequestedLockType,
     ServerState,
+    StateEvent,
 )
-from gpu_memory_service.server.locking import Connection, GMSLocalFSM, StateEvent
-from gpu_memory_service.server.memory_manager import GMSServerMemoryManager
+from gpu_memory_service.server.allocations import GMSAllocationManager
 from gpu_memory_service.server.rpc import GMSRPCServer
+from gpu_memory_service.server.session import GMSSessionManager
+from gpu_memory_service.server.session import Connection
 
 pytestmark = [
     pytest.mark.unit,
@@ -137,15 +140,56 @@ class _FakeHandler:
         )
 
 
+class _FakeGMS:
+    def __init__(self, handler: _FakeHandler | None = None):
+        self.handler = handler or _FakeHandler()
+        self._sessions = GMSSessionManager(on_rw_abort=self.handler.on_rw_abort)
+        if self.handler.committed_epoch_id is not None:
+            self._sessions._locking._committed = True
+
+    @property
+    def committed(self) -> bool:
+        return self._sessions.snapshot().committed
+
+    async def acquire_lock(self, mode, timeout_ms, session_id):
+        return await self._sessions.acquire_lock(mode, timeout_ms, session_id)
+
+    async def cancel_connect(self, session_id, mode):
+        await self._sessions.cancel_connect(session_id, mode)
+
+    def on_connect(self, conn: Connection) -> None:
+        if conn.mode == GrantedLockType.RW:
+            self.handler.on_rw_connect()
+        self._sessions.on_connect(conn)
+
+    async def cleanup_connection(self, conn: Connection | None) -> None:
+        await self._sessions.cleanup_connection(conn)
+
+    async def handle_request(self, conn: Connection, msg, _is_connected):
+        if isinstance(msg, GetLockStateRequest):
+            snapshot = self._sessions.snapshot()
+            return (
+                self.handler.handle_get_lock_state(
+                    snapshot.has_rw_session,
+                    snapshot.ro_session_count,
+                    snapshot.waiting_writers,
+                    snapshot.committed,
+                ),
+                -1,
+                False,
+            )
+        if isinstance(msg, CommitRequest):
+            self.handler.on_commit()
+            self._sessions.on_commit(conn)
+            return CommitResponse(success=True), -1, True
+        raise AssertionError(f"Unexpected request type in test: {type(msg)}")
+
+
 def _make_server(handler: _FakeHandler | None = None) -> GMSRPCServer:
     server = object.__new__(GMSRPCServer)
     server.socket_path = "/tmp/gms-test.sock"
     server.device = 0
-    server._handler = handler or _FakeHandler()
-    server._sm = GMSLocalFSM(on_rw_abort=server._handler.on_rw_abort)
-    server._waiting_writers = 0
-    server._condition = asyncio.Condition()
-    server._next_session_id = 0
+    server._gms = _FakeGMS(handler)
     server._server = None
     return server
 
@@ -159,24 +203,82 @@ async def test_handshake_success_send_failure_cleans_up_rw_state(monkeypatch):
     async def fake_recv_message(_reader, _buffer):
         return HandshakeRequest(lock_type=RequestedLockType.RW), -1, bytearray()
 
-    async def fake_acquire_lock(_mode, _timeout_ms):
+    async def fake_acquire_lock(_mode, _timeout_ms, _session_id):
+        server._gms._sessions._reserved_rw_session_id = _session_id
         return GrantedLockType.RW
 
     async def fake_send_message(_writer, _msg, _fd=-1):
         raise BrokenPipeError("handshake reply failed")
 
     monkeypatch.setattr("gpu_memory_service.server.rpc.recv_message", fake_recv_message)
-    monkeypatch.setattr(server, "_acquire_lock", fake_acquire_lock)
+    monkeypatch.setattr(server._gms, "acquire_lock", fake_acquire_lock)
     monkeypatch.setattr("gpu_memory_service.server.rpc.send_message", fake_send_message)
 
     conn = await server._do_handshake(reader, writer, "session_1")
 
     assert conn is None
-    assert server._sm.rw_conn is None
-    assert server._sm.state == ServerState.EMPTY
-    assert server._handler.rw_connect_calls == 1
-    assert server._handler.rw_abort_calls == 1
+    assert server._gms._sessions._locking.rw_conn is None
+    assert server._gms._sessions.state == ServerState.EMPTY
+    assert server._gms.handler.rw_connect_calls == 1
+    assert server._gms.handler.rw_abort_calls == 1
     assert writer.closed
+
+
+@pytest.mark.asyncio
+async def test_rw_lock_is_reserved_until_connect():
+    sessions = GMSSessionManager()
+
+    first = await sessions.acquire_lock(
+        RequestedLockType.RW,
+        timeout_ms=50,
+        session_id="session_1",
+    )
+    second = await sessions.acquire_lock(
+        RequestedLockType.RW,
+        timeout_ms=50,
+        session_id="session_2",
+    )
+
+    assert first == GrantedLockType.RW
+    assert second is None
+
+    await sessions.cancel_connect("session_1", GrantedLockType.RW)
+
+
+@pytest.mark.asyncio
+async def test_reader_waiter_wakes_when_waiting_writer_times_out():
+    sessions = GMSSessionManager()
+    sessions._locking._committed = True
+
+    existing_reader = Connection(
+        reader=_DummyReader(),
+        writer=_DummyWriter(),
+        mode=GrantedLockType.RO,
+        session_id="reader_1",
+        recv_buffer=bytearray(),
+    )
+    sessions.on_connect(existing_reader)
+
+    writer_task = asyncio.create_task(
+        sessions.acquire_lock(
+            RequestedLockType.RW,
+            timeout_ms=50,
+            session_id="writer_1",
+        )
+    )
+    await asyncio.sleep(0)
+    reader_task = asyncio.create_task(
+        sessions.acquire_lock(
+            RequestedLockType.RO,
+            timeout_ms=200,
+            session_id="reader_2",
+        )
+    )
+
+    assert await writer_task is None
+    assert await reader_task == GrantedLockType.RO
+
+    await sessions.cleanup_connection(existing_reader)
 
 
 @pytest.mark.asyncio
@@ -185,7 +287,7 @@ async def test_request_response_send_failure_disconnects_without_error_response(
 ):
     handler = _FakeHandler(committed_epoch_id=1)
     server = _make_server(handler)
-    server._sm._committed = True
+    server._gms._sessions._locking._committed = True
 
     reader = _DummyReader()
     writer = _DummyWriter()
@@ -196,7 +298,7 @@ async def test_request_response_send_failure_disconnects_without_error_response(
         session_id="session_2",
         recv_buffer=bytearray(),
     )
-    server._sm.transition(StateEvent.RO_CONNECT, conn)
+    server._gms._sessions._locking.transition(StateEvent.RO_CONNECT, conn)
 
     recv_calls = 0
     sent_messages: list[object] = []
@@ -214,13 +316,13 @@ async def test_request_response_send_failure_disconnects_without_error_response(
     monkeypatch.setattr("gpu_memory_service.server.rpc.send_message", fake_send_message)
 
     await server._request_loop(conn)
-    await server._cleanup_connection(conn)
+    await server._gms.cleanup_connection(conn)
 
     assert recv_calls == 1
     assert len(sent_messages) == 1
     assert isinstance(sent_messages[0], GetLockStateResponse)
-    assert conn not in server._sm.ro_conns
-    assert server._sm.state == ServerState.COMMITTED
+    assert conn not in server._gms._sessions._locking.ro_conns
+    assert server._gms._sessions.state == ServerState.COMMITTED
     assert writer.closed
 
 
@@ -238,7 +340,7 @@ async def test_post_commit_response_send_failure_stays_committed(monkeypatch):
         session_id="session_3",
         recv_buffer=bytearray(),
     )
-    server._sm.transition(StateEvent.RW_CONNECT, conn)
+    server._gms._sessions._locking.transition(StateEvent.RW_CONNECT, conn)
 
     recv_calls = 0
     sent_messages: list[object] = []
@@ -256,20 +358,20 @@ async def test_post_commit_response_send_failure_stays_committed(monkeypatch):
     monkeypatch.setattr("gpu_memory_service.server.rpc.send_message", fake_send_message)
 
     await server._request_loop(conn)
-    await server._cleanup_connection(conn)
+    await server._gms.cleanup_connection(conn)
 
     assert recv_calls == 1
     assert len(sent_messages) == 1
     assert handler.commit_calls == 1
-    assert server._sm.rw_conn is None
-    assert server._sm.committed
-    assert server._sm.state == ServerState.COMMITTED
+    assert server._gms._sessions._locking.rw_conn is None
+    assert server._gms._sessions.snapshot().committed
+    assert server._gms._sessions.state == ServerState.COMMITTED
     assert writer.closed
 
 
 @pytest.mark.asyncio
 async def test_allocate_rejects_non_positive_size_before_cuda():
-    manager = object.__new__(GMSServerMemoryManager)
+    manager = object.__new__(GMSAllocationManager)
     manager._device = 0
     manager._allocations = {}
     manager._granularity = 1
@@ -277,12 +379,12 @@ async def test_allocate_rejects_non_positive_size_before_cuda():
     manager._allocation_retry_timeout = None
 
     with pytest.raises(ValueError, match="size must be > 0"):
-        await manager.allocate(0, epoch_id=1)
+        await manager.allocate(0, epoch_id=1, tag="weights", is_connected=None)
 
 
 @pytest.mark.asyncio
 async def test_allocate_aborts_retry_when_writer_disconnects(monkeypatch):
-    manager = object.__new__(GMSServerMemoryManager)
+    manager = object.__new__(GMSAllocationManager)
     manager._device = 0
     manager._allocations = {}
     manager._granularity = 1
@@ -297,14 +399,14 @@ async def test_allocate_aborts_retry_when_writer_disconnects(monkeypatch):
         return checks < 2
 
     monkeypatch.setattr(
-        "gpu_memory_service.server.memory_manager.cumem_create_tolerate_oom",
+        "gpu_memory_service.server.allocations.cumem_create_tolerate_oom",
         lambda size, device: (False, 0),
     )
 
     with pytest.raises(
         ConnectionAbortedError, match="RW client disconnected during allocation retry"
     ):
-        await manager.allocate(1, epoch_id=1, is_connected=is_connected)
+        await manager.allocate(1, epoch_id=1, tag="weights", is_connected=is_connected)
 
 
 def test_commit_failure_after_local_unmap_keeps_preserved_unmapped_state(monkeypatch):

@@ -34,7 +34,7 @@ import logging
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
-from gpu_memory_service.client.rpc import _GMSRPCClient
+from gpu_memory_service.client.session import _GMSClientSession
 from gpu_memory_service.common.cuda_vmm_utils import (
     align_to_granularity,
     cuda_set_current_device,
@@ -131,7 +131,7 @@ class GMSClientMemoryManager:
         self.socket_path = socket_path
         self.device = device
 
-        self._client: Optional[_GMSRPCClient] = None
+        self._client: Optional[_GMSClientSession] = None
         self._mappings: Dict[int, LocalMapping] = {}  # va -> mapping
         self._inverse_mapping: Dict[str, int] = {}
 
@@ -177,7 +177,7 @@ class GMSClientMemoryManager:
         Updates self._granted_lock_type based on granted lock type. Saves memory layout hash
         for stale detection if server is in committed state.
         """
-        self._client = _GMSRPCClient(
+        self._client = _GMSClientSession(
             self.socket_path,
             lock_type=lock_type,
             timeout_ms=timeout_ms,
@@ -574,7 +574,7 @@ class GMSClientMemoryManager:
     # ==================== Internals ====================
 
     @property
-    def _client_rpc(self) -> _GMSRPCClient:
+    def _client_rpc(self) -> _GMSClientSession:
         """Get connected client or raise."""
         if self._client is None:
             if self._unmapped:

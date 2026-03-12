@@ -1,15 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""CUDA VMM allocation manager - pure business logic, no threading/transport.
+"""Server-side CUDA allocation store."""
 
-This module contains the GMSServerMemoryManager class which handles physical GPU memory
-allocations via CUDA Virtual Memory Management (VMM) API. It creates shareable
-memory without mapping it locally (no CUDA context needed on the server).
-
-The GMSServerMemoryManager is NOT thread-safe. Callers must provide external
-synchronization (e.g., via LockManager ensuring single-writer access).
-"""
+from __future__ import annotations
 
 import asyncio
 import logging
@@ -32,18 +26,6 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class AllocationInfo:
-    """Information about a single GPU memory allocation.
-
-    Attributes:
-        allocation_id: Unique identifier for this allocation
-        size: Requested size in bytes
-        aligned_size: Actual size after alignment to VMM granularity
-        handle: CUmemGenericAllocationHandle value
-        tag: User-provided tag for grouping allocations
-        epoch_id: Epoch that owns this allocation
-        created_at: Timestamp when allocation was created
-    """
-
     allocation_id: str
     size: int
     aligned_size: int
@@ -56,24 +38,9 @@ class AllocationInfo:
 class AllocationNotFoundError(Exception):
     """Raised when an allocation_id doesn't exist."""
 
-    pass
 
-
-class GMSServerMemoryManager:
-    """GPU Memory Service server-side memory manager.
-
-    Manages CUDA VMM physical memory allocations. This class handles the core
-    memory operations using CUDA Virtual Memory Management (VMM) API. It creates
-    physical allocations that can be exported as POSIX file descriptors for
-    sharing with other processes.
-
-    Key design points:
-    - No VA mapping: The memory manager never maps memory to virtual addresses,
-      so it doesn't create a CUDA context. This allows it to survive GPU
-      driver failures.
-    - NOT thread-safe: Callers must provide external synchronization.
-      The GMSLocalFSM's RW/RO semantics ensure single-writer access.
-    """
+class GMSAllocationManager:
+    """Server-side CUDA VMM allocation store."""
 
     def __init__(
         self,
@@ -98,7 +65,7 @@ class GMSServerMemoryManager:
         self._allocation_retry_interval = allocation_retry_interval
         self._allocation_retry_timeout = allocation_retry_timeout
         logger.info(
-            "GMSServerMemoryManager initialized: device=%d, granularity=%d, "
+            "GMSAllocationManager initialized: device=%d, granularity=%d, "
             "alloc_retry_interval=%.3f, alloc_retry_timeout=%s",
             device,
             self._granularity,
@@ -118,44 +85,19 @@ class GMSServerMemoryManager:
     def allocation_count(self) -> int:
         return len(self._allocations)
 
-    def _retry_timeout_exceeded(self, started_at: float) -> bool:
-        if self._allocation_retry_timeout is None:
-            return False
-        return (time.monotonic() - started_at) >= self._allocation_retry_timeout
-
     async def allocate(
         self,
         size: int,
+        epoch_id: int,
         tag: str = "default",
-        epoch_id: int = 0,
         is_connected: Optional[Callable[[], bool]] = None,
     ) -> AllocationInfo:
-        """Create a physical memory allocation (no VA mapping).
-
-        Uses cuMemCreate to allocate physical GPU memory that can be exported
-        as a file descriptor for sharing with other processes.
-
-        On CUDA OOM, this method blocks and retries until allocation succeeds
-        (or optional retry timeout is reached).
-
-        Args:
-            size: Requested size in bytes (will be aligned up to granularity)
-            tag: Tag for grouping allocations (e.g., "weights", "kv_cache")
-            epoch_id: Epoch that owns this allocation
-
-        Returns:
-            AllocationInfo with allocation_id, aligned_size, handle
-
-        Raises:
-            RuntimeError: If CUDA allocation fails
-        """
         if size <= 0:
             raise ValueError(f"size must be > 0, got {size}")
         if epoch_id <= 0:
             raise ValueError(f"epoch_id must be > 0, got {epoch_id}")
 
         aligned_size = align_to_granularity(size, self._granularity)
-
         started_at = time.monotonic()
         while True:
             if is_connected is not None and not is_connected():
@@ -167,20 +109,17 @@ class GMSServerMemoryManager:
             if allocated:
                 break
 
-            if (
-                self._allocation_retry_timeout is not None
-                and (time.monotonic() - started_at) >= self._allocation_retry_timeout
-            ):
-                raise TimeoutError(
-                    "Timed out waiting for GPU memory: "
-                    f"requested_size={size}, aligned_size={aligned_size}, tag={tag}, "
-                    f"epoch={epoch_id}, "
-                    f"waited_sec={time.monotonic() - started_at:.3f}"
-                )
+            if self._allocation_retry_timeout is not None:
+                waited = time.monotonic() - started_at
+                if waited >= self._allocation_retry_timeout:
+                    raise TimeoutError(
+                        "Timed out waiting for GPU memory: "
+                        f"requested_size={size}, aligned_size={aligned_size}, "
+                        f"tag={tag}, epoch={epoch_id}, waited_sec={waited:.3f}"
+                    )
 
             logger.warning(
-                "cuMemCreate OOM for aligned_size=%d bytes, tag=%s, epoch=%s; "
-                "retrying in %.3fs",
+                "cuMemCreate OOM for aligned_size=%d bytes, tag=%s, epoch=%s; retrying in %.3fs",
                 aligned_size,
                 tag,
                 epoch_id,
@@ -188,7 +127,6 @@ class GMSServerMemoryManager:
             )
             await asyncio.sleep(self._allocation_retry_interval)
 
-        # epoch_id is immutable: assigned at allocation creation and never changes.
         info = AllocationInfo(
             allocation_id=str(uuid4()),
             size=size,
@@ -200,42 +138,21 @@ class GMSServerMemoryManager:
         )
         self._allocations[info.allocation_id] = info
         logger.debug(
-            f"Allocated {info.allocation_id}: size={size}, aligned={aligned_size}, tag={tag}, epoch={epoch_id}"
+            "Allocated %s: size=%d, aligned=%d, tag=%s, epoch=%d",
+            info.allocation_id,
+            size,
+            aligned_size,
+            tag,
+            epoch_id,
         )
         return info
 
     def export_allocation(self, allocation_id: str, epoch_id: int) -> int:
-        """Export allocation as POSIX FD for SCM_RIGHTS transfer.
-
-        The returned file descriptor can be sent to another process via
-        Unix domain socket SCM_RIGHTS. The receiving process can then
-        import it using cuMemImportFromShareableHandle.
-
-        IMPORTANT: The caller MUST close the returned FD after sendmsg()
-        to avoid file descriptor leaks.
-
-        Args:
-            allocation_id: ID of allocation to export
-
-        Returns:
-            File descriptor (caller owns, must close after sending)
-
-        Raises:
-            AllocationNotFoundError: If allocation_id doesn't exist
-            RuntimeError: If CUDA export fails
-        """
-        info = self.get_allocation(allocation_id, epoch_id)
-        return cumem_export_to_shareable_handle(info.handle)
+        return cumem_export_to_shareable_handle(
+            self.get_allocation(allocation_id, epoch_id).handle
+        )
 
     def free_allocation(self, allocation_id: str, epoch_id: int) -> bool:
-        """Release physical memory for a single allocation.
-
-        Args:
-            allocation_id: ID of allocation to free
-
-        Returns:
-            True if allocation existed and was freed, False otherwise
-        """
         info = self._allocations.get(allocation_id)
         if info is None:
             return False
@@ -249,25 +166,27 @@ class GMSServerMemoryManager:
             return False
         self._allocations.pop(allocation_id, None)
         cumem_release(info.handle)
-        logger.debug(f"Freed allocation: {allocation_id}")
+        logger.debug("Freed allocation: %s", allocation_id)
         return True
 
     def clear_all_allocations(self, epoch_id: int) -> int:
-        """Release all allocations in a specific epoch."""
-        to_clear = [
+        allocation_ids = [
             allocation_id
             for allocation_id, info in self._allocations.items()
             if info.epoch_id == epoch_id
         ]
-        for allocation_id in to_clear:
+        for allocation_id in allocation_ids:
             info = self._allocations.pop(allocation_id)
             cumem_release(info.handle)
-        if to_clear:
-            logger.info(f"Cleared {len(to_clear)} allocations from epoch {epoch_id}")
-        return len(to_clear)
+        if allocation_ids:
+            logger.info(
+                "Cleared %d allocations from epoch %d",
+                len(allocation_ids),
+                epoch_id,
+            )
+        return len(allocation_ids)
 
     def get_allocation(self, allocation_id: str, epoch_id: int) -> AllocationInfo:
-        """Get allocation info. Raises AllocationNotFoundError if not found."""
         info = self._allocations.get(allocation_id)
         if info is None:
             raise AllocationNotFoundError(f"Unknown allocation: {allocation_id}")
@@ -280,7 +199,6 @@ class GMSServerMemoryManager:
     def list_allocations(
         self, epoch_id: int, tag: Optional[str] = None
     ) -> list[AllocationInfo]:
-        """List all allocations, optionally filtered by tag."""
         allocations = [
             info for info in self._allocations.values() if info.epoch_id == epoch_id
         ]

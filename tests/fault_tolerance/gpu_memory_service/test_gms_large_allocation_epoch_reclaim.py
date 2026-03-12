@@ -15,12 +15,9 @@ import pytest
 import pynvml
 
 from gpu_memory_service.common import cuda_vmm_utils
-from gpu_memory_service.common.protocol.messages import (
-    AllocateRequest,
-    ExportAllocationRequest,
-)
 from gpu_memory_service.common.types import GrantedLockType
-from gpu_memory_service.server.handler import RequestHandler
+from gpu_memory_service.server.allocations import GMSAllocationManager
+from gpu_memory_service.server.epochs import GMSEpochManager
 
 
 def _gpu_memory_free_bytes(device: int = 0) -> int:
@@ -53,33 +50,32 @@ async def test_new_epoch_large_allocation_waits_for_dead_writer_process(
         return allocated, handle
 
     monkeypatch.setattr(
-        "gpu_memory_service.server.memory_manager.cumem_create_tolerate_oom",
+        "gpu_memory_service.server.allocations.cumem_create_tolerate_oom",
         count_oom,
     )
 
-    handler = RequestHandler(
-        device=0,
-        allocation_retry_interval=0.1,
-        allocation_retry_timeout=120.0,
+    epochs = GMSEpochManager(
+        GMSAllocationManager(
+            device=0,
+            allocation_retry_interval=0.1,
+            allocation_retry_timeout=120.0,
+        )
     )
     holder = None
     allocation_task = None
 
     try:
-        handler.on_rw_connect()
-        first_epoch = handler.active_rw_epoch_id
-        first = await handler.handle_allocate(
-            AllocateRequest(size=size, tag="weights"),
-            is_connected=lambda: True,
-        )
+        epochs.on_rw_connect()
+        first_epoch = epochs.active_rw_epoch_id
+        first = await epochs.allocate(size, "weights", lambda: True)
         assert first.epoch_id == first_epoch
 
         free_after_first = _gpu_memory_free_bytes()
         assert free_after_first < free_before - (size // 2)
 
-        _, exported_fd = handler.handle_export(
-            ExportAllocationRequest(allocation_id=first.allocation_id),
+        _, exported_fd = epochs.export_allocation(
             GrantedLockType.RW,
+            first.allocation_id,
         )
         holder_ready = tmp_path / "holder.ready"
         holder_log = tmp_path / "holder.log"
@@ -142,22 +138,19 @@ async def test_new_epoch_large_allocation_waits_for_dead_writer_process(
             assert time.monotonic() < deadline, holder_log.read_text(encoding="utf-8")
             await asyncio.sleep(0.1)
 
-        handler.on_rw_abort()
-        assert handler.active_rw_epoch_id is None
-        assert handler._memory_manager.allocation_count == 0
+        epochs.on_rw_abort()
+        assert epochs.active_rw_epoch_id is None
+        assert epochs.allocation_count == 0
 
         free_after_abort = _gpu_memory_free_bytes()
         assert free_after_abort < free_before - (size // 2)
 
-        handler.on_rw_connect()
-        second_epoch = handler.active_rw_epoch_id
+        epochs.on_rw_connect()
+        second_epoch = epochs.active_rw_epoch_id
         assert second_epoch != first_epoch
 
         allocation_task = asyncio.create_task(
-            handler.handle_allocate(
-                AllocateRequest(size=size, tag="weights"),
-                is_connected=lambda: True,
-            )
+            epochs.allocate(size, "weights", lambda: True)
         )
 
         deadline = time.monotonic() + 30.0
@@ -169,14 +162,14 @@ async def test_new_epoch_large_allocation_waits_for_dead_writer_process(
 
         assert oom_failures > 0
         assert not allocation_task.done()
-        assert handler.active_rw_epoch_id == second_epoch
+        assert epochs.active_rw_epoch_id == second_epoch
 
         os.killpg(os.getpgid(holder.pid), signal.SIGKILL)
         holder.wait(timeout=30.0)
 
         second = await asyncio.wait_for(allocation_task, timeout=120.0)
         assert second.epoch_id == second_epoch
-        assert handler._memory_manager.allocation_count == 1
+        assert epochs.allocation_count == 1
     finally:
         if allocation_task is not None and not allocation_task.done():
             allocation_task.cancel()

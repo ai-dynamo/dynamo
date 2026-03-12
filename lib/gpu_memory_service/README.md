@@ -28,20 +28,20 @@ This leads to:
 ┌──────────────────────────────────────────────────────────────────────────────────────┐
 │                                                                                      │
 │  ┌────────────────────┐                  ┌─────────────────────────────────────────┐ │
-│  │    GMS Server      │                  │    GMSClientMemoryManager (Writer)      │ │
+│  │        GMS         │                  │    GMSClientMemoryManager (Writer)      │ │
 │  │                    │                  │                                         │ │
 │  │ ┌────────────────┐ │                  │  ┌─────────────────────────────────┐    │ │
-│  │ │ Memory Manager │ │ ◄── Unix ───────►│  │         GMSRPCClient            │    │ │
+│  │ │ Memory Manager │ │ ◄── Unix ───────►│  │         GMS Session             │    │ │
 │  │ └────────────────┘ │    Socket        │  └─────────────────────────────────┘    │ │
 │  │                    │       +          │                                         │ │
 │  │ ┌────────────────┐ │      FD          │  Writer-only: create_mapping, commit    │ │
-│  │ │ State Machine  │ │  (SCM_RIGHTS)    └─────────────────────────────────────────┘ │
+│  │ │ Session / FSM  │ │  (SCM_RIGHTS)    └─────────────────────────────────────────┘ │
 │  │ └────────────────┘ │                                                              │
 │  │                    │                  ┌─────────────────────────────────────────┐ │
 │  │ ┌────────────────┐ │                  │    GMSClientMemoryManager (Reader)      │ │
 │  │ │ Metadata Store │ │                  │                                         │ │
 │  │ └────────────────┘ │ ◄── Unix ───────►│  ┌─────────────────────────────────┐    │ │
-│  │                    │    Socket        │  │         GMSRPCClient            │    │ │
+│  │                    │    Socket        │  │         GMS Session             │    │ │
 │  └────────────────────┘       +          │  └─────────────────────────────────┘    │ │
 │                              FD          │                                         │ │
 │                          (SCM_RIGHTS)    │  Reader-only: create_mapping (import),   │ │
@@ -65,11 +65,11 @@ The GMS server runs as an independent process that manages GPU memory without ev
 
 The server consists of three main components:
 
-1. **Memory Manager** - Allocates physical GPU memory via CUDA VMM (`cuMemCreate`) and exports shareable file descriptors (`cuMemExportToShareableHandle`). Critically, it never calls `cuMemMap` - clients handle all virtual address mapping. Allocation requests apply backpressure on OOM: the server retries until allocation succeeds (or optional retry timeout is reached), instead of failing fast.
+1. **Memory Manager** - Allocates physical GPU memory via CUDA VMM (`cuMemCreate`) and exports shareable file descriptors (`cuMemExportToShareableHandle`). Critically, it never calls `cuMemMap` - clients handle all virtual address mapping. Allocation requests retry on OOM until they succeed or the optional retry timeout is reached.
 
-2. **State Machine (FSM)** - Manages global lock state and committed visibility. Any RW session immediately invalidates committed visibility until a fresh commit. See [State Machine](#state-machine) below.
+2. **State Machine (FSM)** - Manages global lock state, waiter coordination, and disconnect cleanup.
 
-3. **Metadata Store** - Epoch-scoped key-value store for tensor metadata (shapes, dtypes, offsets), enabling clients to reconstruct model structure.
+3. **Metadata Store / Epoch State** - Owns active vs committed epoch state, metadata, and the committed memory layout hash.
 
 Each GMS server is responsible for managing memory of only 1 GPU, and does not interact with GMS servers corresponding to other GPUs.
 
@@ -92,7 +92,7 @@ The following diagram shows how `GMSClientMemoryManager` interacts with the serv
 ```mermaid
 sequenceDiagram
     participant C as GMSClientMemoryManager
-    participant S as GMS Server
+    participant S as GMS
     participant GPU as GPU Memory
 
     %% Connection
@@ -111,7 +111,7 @@ sequenceDiagram
 
     %% Export/Import (Both Writer and Reader)
     Note over C,GPU: Both Writer and Reader: Export and map
-    C->>S: ExportRequest(allocation_id)
+    C->>S: ExportAllocationRequest(allocation_id)
     S->>GPU: cuMemExportToShareableHandle(handle)
     GPU-->>S: fd
     S-->>C: Response + fd (via SCM_RIGHTS)
@@ -203,7 +203,6 @@ When a writer requests a new allocation, GMS treats CUDA OOM as a transient cond
 
 - `cuMemCreate` OOM does **not** immediately fail the request.
 - The server retries in a loop and only returns success after allocation is created.
-- Between retries, GMS performs best-effort device free-memory polling (NVML) for observability and logs progress.
 - Server CLI flags:
   - `--alloc-retry-interval` (default `0.5`)
   - `--alloc-retry-timeout` (default unset = wait indefinitely)
@@ -212,7 +211,7 @@ This ensures the "new epoch gets new allocations" workflow can wait for memory r
 
 ### Guarantees
 
-- GMS guarantees that its own RPCs do not mix committed and active generations, and that client-side `commit()` performs a CUDA synchronize and unmaps the writer's local mappings before publish.
+- GMS guarantees that its own RPCs do not mix committed and active generations, and that `GMSClientMemoryManager.commit()` performs a CUDA synchronize and unmaps the writer's local mappings before publish.
 - After local unmap, `commit()` does not attempt in-process recovery. Non-CUDA failures raise, and CUDA VMM failures exit the process.
 - The only non-fatal client connection failure is lock acquisition timeout. Other client-side GMS transport, protocol, and server error responses raise.
 - Any non-OOM CUDA VMM failure on either client or server is fatal and exits the process.
@@ -257,12 +256,13 @@ The first worker loads weights from disk and publishes them to GMS.
 sequenceDiagram
     participant W as Writer Process
     participant C as GMSClientMemoryManager
-    participant S as GMS Server
+    participant S as GMS
 
     W->>C: mgr = GMSClientMemoryManager(socket_path, device=0)
     W->>C: mgr.connect(RW)
     C->>S: HandshakeRequest(lock_type=RW)
-    S->>S: Invalidate prior committed epoch visibility
+    S->>S: Session FSM: EMPTY/COMMITTED -> RW
+    S->>S: Invalidate prior committed epoch
     S->>S: Create new active epoch
     S-->>C: HandshakeResponse(success=true)
 
@@ -291,7 +291,7 @@ Subsequent workers import weights from GMS instead of loading from disk.
 sequenceDiagram
     participant R as Reader Process
     participant C as GMSClientMemoryManager
-    participant S as GMS Server
+    participant S as GMS
 
     R->>C: mgr = GMSClientMemoryManager(socket_path, device=0)
     R->>C: mgr.connect(RO)
@@ -319,7 +319,7 @@ Readers can temporarily release GPU memory while preserving virtual address rese
 sequenceDiagram
     participant R as Reader Process
     participant C as GMSClientMemoryManager
-    participant S as GMS Server
+    participant S as GMS
     participant GPU as GPU Memory
 
     Note over R,GPU: Need to temporarily release GPU memory
@@ -364,7 +364,7 @@ The `RW_OR_RO` mode automatically selects writer or reader based on server state
 sequenceDiagram
     participant P as Process
     participant C as GMSClientMemoryManager
-    participant S as GMS Server
+    participant S as GMS
 
     Note over P,S: Auto-mode: try RW only when no committed epoch exists
 
@@ -492,7 +492,7 @@ class GMSClientMemoryManager:
     def free_handle(allocation_id: str) -> bool
     def commit() -> bool                                             # Sync + unmap local mappings + publish; raises on non-CUDA failure after unmap
     def get_memory_layout_hash() -> str
-    def list_handles(tag: Optional[str] = None) -> List[Dict]
+    def list_handles(tag: Optional[str] = None) -> List[GetAllocationResponse]
 
     # --- Tier 1: VA ops (local) ---
     def reserve_va(size: int) -> int                                 # Returns VA
