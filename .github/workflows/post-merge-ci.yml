@@ -154,7 +154,7 @@ jobs:
       operator_default_tag: ${{ steps.build-and-push-image.outputs.operator_default_tag }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
       - name: Initialize Dynamo Builder
         uses: ./.github/actions/init-dynamo-builder
         with:
@@ -309,7 +309,7 @@ jobs:
       FRAMEWORK: vllm
     steps:
       - name: Checkout code
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
       - name: Run Dynamo Deploy Test
         id: deploy-test
         uses: ./.github/actions/dynamo-deploy-test
@@ -342,7 +342,7 @@ jobs:
       FRAMEWORK: sglang
     steps:
       - name: Checkout code
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
       - name: Run Dynamo Deploy Test
         id: deploy-test
         uses: ./.github/actions/dynamo-deploy-test
@@ -379,7 +379,7 @@ jobs:
       FRAMEWORK: trtllm
     steps:
       - name: Checkout code
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
       - name: Run Dynamo Deploy Test
         id: deploy-test
         uses: ./.github/actions/dynamo-deploy-test
@@ -414,7 +414,7 @@ jobs:
     needs: [vllm-pipeline, sglang-pipeline, trtllm-pipeline, vllm-efa-pipeline, trtllm-efa-pipeline, operator]
     steps:
     - name: Checkout repository
-      uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
     - name: Create K8s builders (skip bootstrap)
       uses: ./.github/actions/bootstrap-buildkit
       continue-on-error: true
@@ -434,7 +434,7 @@ jobs:
     needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm]
     steps:
     - name: Checkout code
-      uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
     - name: Teardown namespace
       if: needs.deploy-operator.outputs.NAMESPACE != ''
       uses: ./.github/actions/teardown-deploy-namespace

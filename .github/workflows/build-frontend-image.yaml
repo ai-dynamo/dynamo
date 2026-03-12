@@ -55,7 +55,7 @@ jobs:
       builder_name: ${{ steps.export-builder-name.outputs.builder_name }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
         with:
           fetch-depth: 0
       - name: Check for changes
@@ -81,7 +81,7 @@ jobs:
       IMAGE_REPOSITORY: dynamo/dynamo-epp
     steps:
       - name: Checkout repository
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
       - name: Initialize Dynamo Builder
         uses: ./.github/actions/init-dynamo-builder
         with:
@@ -138,7 +138,7 @@ jobs:
       FRAMEWORK: dynamo
     steps:
       - name: Checkout repository
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
       - name: Generate Dockerfile
         shell: bash
         run: |
@@ -236,7 +236,7 @@ jobs:
     needs: [build-frontend-image, changed-files]
     steps:
     - name: Checkout repository
-      uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
     - name: Create K8s builders (skip bootstrap)
       uses: ./.github/actions/bootstrap-buildkit
       continue-on-error: true
