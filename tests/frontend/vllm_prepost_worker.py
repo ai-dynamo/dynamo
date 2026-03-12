@@ -68,7 +68,7 @@ async def main():
     """Register a token-based chat model and stream deterministic responses."""
 
     runtime = DistributedRuntime(
-        asyncio.get_running_loop(), "etcd", "tcp", enable_nats=False
+        asyncio.get_running_loop(), "etcd", "tcp"
     )
     endpoint = runtime.endpoint("test.vllm-prepost.generate")
     await register_model(
