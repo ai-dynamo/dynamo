@@ -866,7 +866,10 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
                 ..Default::default()
             },
             nvext: {
-                // Collect per-block cache_control: use the last one found
+                // Lossy: collapse all per-block cache_control into a single
+                // last-one-wins value. Sufficient for backends with a single
+                // prefix cache boundary. Full per-block breakpoints are
+                // preserved in AnthropicContext::cache_breakpoints via UnifiedRequest.
                 let mut last_block_cc: Option<CacheControl> = None;
                 for msg in &req.messages {
                     if let AnthropicMessageContent::Blocks { content } = &msg.content {
