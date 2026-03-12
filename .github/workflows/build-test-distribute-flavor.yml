@@ -428,6 +428,43 @@ jobs:
 
 
   # ============================================================================
+  # COMPLIANCE — Generate attribution CSVs for dpkg and Python packages
+  # ============================================================================
+  compliance:
+    if: inputs.build_image && inputs.push_image
+    needs: [build]
+    name: Compliance cuda${{ inputs.cuda_version }}-${{ inputs.platform }}
+    runs-on: ${{ inputs.platform == 'amd64' && 'prod-builder-amd-v1' || 'prod-tester-arm-v1' }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      - name: Docker Login
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      - name: Calculate image URI
+        id: images
+        shell: bash
+        run: |
+          CUDA_VERSION_RAW=${{ inputs.cuda_version }}
+          CUDA_VERSION=${CUDA_VERSION_RAW%%.*}
+          echo "cuda_major=${CUDA_VERSION}" >> $GITHUB_OUTPUT
+          RUNTIME_IMAGE=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build.outputs.target_tag_plain }}-cuda${CUDA_VERSION}-${{ inputs.platform }}
+          echo "runtime_image=${RUNTIME_IMAGE}" >> $GITHUB_OUTPUT
+      - name: Compliance scan
+        uses: ./.github/actions/compliance-scan
+        with:
+          image: ${{ steps.images.outputs.runtime_image }}
+          artifact_name: compliance-${{ inputs.framework }}-${{ inputs.target }}${{ inputs.make_efa && '-efa' || '' }}-cuda${{ steps.images.outputs.cuda_major }}-${{ inputs.platform }}
+          framework: ${{ inputs.framework }}
+          cuda_version: ${{ inputs.cuda_version }}
+
+
+  # ============================================================================
   # COPY TO ACR
   # ============================================================================
   copy-to-acr:
