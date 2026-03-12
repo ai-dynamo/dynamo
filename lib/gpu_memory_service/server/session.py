@@ -248,6 +248,11 @@ class GMSSessionManager:
     def _can_grant_rw(self) -> bool:
         return self._reserved_rw_session_id is None and self._locking.can_acquire_rw()
 
+    def _can_grant_ro(self) -> bool:
+        return self._reserved_rw_session_id is None and self._locking.can_acquire_ro(
+            self._waiting_writers
+        )
+
     async def acquire_lock(
         self,
         mode: RequestedLockType,
@@ -278,9 +283,7 @@ class GMSSessionManager:
             async with self._condition:
                 try:
                     await asyncio.wait_for(
-                        self._condition.wait_for(
-                            lambda: self._locking.can_acquire_ro(self._waiting_writers)
-                        ),
+                        self._condition.wait_for(self._can_grant_ro),
                         timeout=timeout,
                     )
                 except asyncio.TimeoutError:
@@ -293,9 +296,7 @@ class GMSSessionManager:
                 return GrantedLockType.RW
             try:
                 await asyncio.wait_for(
-                    self._condition.wait_for(
-                        lambda: self._locking.can_acquire_ro(self._waiting_writers)
-                    ),
+                    self._condition.wait_for(self._can_grant_ro),
                     timeout=timeout,
                 )
             except asyncio.TimeoutError:
@@ -334,7 +335,7 @@ class GMSSessionManager:
     def check_operation(self, msg_type: type, conn: Connection) -> None:
         self._locking.check_operation(msg_type, conn)
 
-    async def cleanup_connection(self, conn: Optional[Connection]) -> StateEvent | None:
+    def begin_cleanup(self, conn: Optional[Connection]) -> StateEvent | None:
         if conn is None:
             return None
 
@@ -346,8 +347,10 @@ class GMSSessionManager:
         elif conn in self._locking.ro_conns:
             self._locking.transition(StateEvent.RO_DISCONNECT, conn)
             event = StateEvent.RO_DISCONNECT
+        return event
 
-        await conn.close()
+    async def finish_cleanup(self, conn: Optional[Connection]) -> None:
+        if conn is not None:
+            await conn.close()
         async with self._condition:
             self._condition.notify_all()
-        return event

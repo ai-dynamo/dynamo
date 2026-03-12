@@ -30,6 +30,7 @@ from gpu_memory_service.common.types import (
     StateEvent,
 )
 from gpu_memory_service.server.allocations import GMSAllocationManager
+from gpu_memory_service.server.gms import GMS
 from gpu_memory_service.server.rpc import GMSRPCServer
 from gpu_memory_service.server.session import GMSSessionManager
 from gpu_memory_service.server.session import Connection
@@ -163,9 +164,10 @@ class _FakeGMS:
         self._sessions.on_connect(conn)
 
     async def cleanup_connection(self, conn: Connection | None) -> None:
-        event = await self._sessions.cleanup_connection(conn)
+        event = self._sessions.begin_cleanup(conn)
         if event == StateEvent.RW_ABORT:
             self.handler.on_rw_abort()
+        await self._sessions.finish_cleanup(conn)
 
     async def handle_request(self, conn: Connection, msg, _is_connected):
         if isinstance(msg, GetLockStateRequest):
@@ -248,6 +250,28 @@ async def test_rw_lock_is_reserved_until_connect():
 
 
 @pytest.mark.asyncio
+async def test_reader_cannot_acquire_while_rw_is_reserved_before_connect():
+    sessions = GMSSessionManager()
+    sessions._locking._committed = True
+
+    granted = await sessions.acquire_lock(
+        RequestedLockType.RW,
+        timeout_ms=50,
+        session_id="writer_1",
+    )
+    assert granted == GrantedLockType.RW
+
+    reader = await sessions.acquire_lock(
+        RequestedLockType.RO,
+        timeout_ms=50,
+        session_id="reader_1",
+    )
+    assert reader is None
+
+    await sessions.cancel_connect("writer_1", GrantedLockType.RW)
+
+
+@pytest.mark.asyncio
 async def test_reader_waiter_wakes_when_waiting_writer_times_out():
     sessions = GMSSessionManager()
     sessions._locking._committed = True
@@ -280,7 +304,64 @@ async def test_reader_waiter_wakes_when_waiting_writer_times_out():
     assert await writer_task is None
     assert await reader_task == GrantedLockType.RO
 
-    await sessions.cleanup_connection(existing_reader)
+    event = sessions.begin_cleanup(existing_reader)
+    assert event == StateEvent.RO_DISCONNECT
+    await sessions.finish_cleanup(existing_reader)
+
+
+@pytest.mark.asyncio
+async def test_gms_clears_aborted_rw_epoch_before_waking_waiters():
+    gms = object.__new__(GMS)
+    cleanup_order: list[str] = []
+    conn = Connection(
+        reader=_DummyReader(),
+        writer=_DummyWriter(),
+        mode=GrantedLockType.RW,
+        session_id="session_1",
+        recv_buffer=bytearray(),
+    )
+
+    def begin_cleanup(self, cleanup_conn):
+        cleanup_order.append("begin_cleanup")
+        return StateEvent.RW_ABORT
+
+    async def finish_cleanup(self, cleanup_conn):
+        cleanup_order.append("finish_cleanup")
+
+    def on_rw_abort(self):
+        cleanup_order.append("on_rw_abort")
+        return 7
+
+    def clear_all_allocations(self, epoch_id):
+        cleanup_order.append(f"clear_{epoch_id}")
+
+    gms._sessions = type(
+        "_Sessions",
+        (),
+        {
+            "begin_cleanup": begin_cleanup,
+            "finish_cleanup": finish_cleanup,
+        },
+    )()
+    gms._epochs = type(
+        "_Epochs",
+        (),
+        {"on_rw_abort": on_rw_abort},
+    )()
+    gms._allocations = type(
+        "_Allocations",
+        (),
+        {"clear_all_allocations": clear_all_allocations},
+    )()
+
+    await gms.cleanup_connection(conn)
+
+    assert cleanup_order == [
+        "begin_cleanup",
+        "on_rw_abort",
+        "clear_7",
+        "finish_cleanup",
+    ]
 
 
 @pytest.mark.asyncio

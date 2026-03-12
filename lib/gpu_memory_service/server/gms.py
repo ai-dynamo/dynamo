@@ -127,11 +127,12 @@ class GMS:
             raise
 
     async def cleanup_connection(self, conn: Connection | None) -> None:
-        event = await self._sessions.cleanup_connection(conn)
+        event = self._sessions.begin_cleanup(conn)
         if event == StateEvent.RW_ABORT:
             active_epoch_id = self._epochs.on_rw_abort()
             if active_epoch_id is not None:
                 self._allocations.clear_all_allocations(active_epoch_id)
+        await self._sessions.finish_cleanup(conn)
 
     async def handle_request(
         self,

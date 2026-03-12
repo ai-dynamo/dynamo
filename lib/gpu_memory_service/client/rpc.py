@@ -10,6 +10,7 @@ Session semantics live in `gpu_memory_service.client.session`.
 from __future__ import annotations
 
 import logging
+import os
 import socket
 from typing import Optional, Tuple, Type, TypeVar
 
@@ -79,6 +80,8 @@ class _GMSRPCTransport:
         response, fd = self._send_recv(request, error_prefix=error_prefix)
         if not isinstance(response, response_type):
             prefix = error_prefix or f"GMS request {type(request).__name__}"
+            if fd >= 0:
+                os.close(fd)
             raise RuntimeError(
                 f"{prefix} returned unexpected response type: {type(response)}"
             )
@@ -97,9 +100,16 @@ class _GMSRPCTransport:
                 self._socket, self._recv_buffer
             )
         except Exception as exc:
+            try:
+                self._socket.close()
+            except Exception:
+                pass
+            self._socket = None
             raise ConnectionError(f"{prefix} failed: {exc}") from exc
 
         if isinstance(response, ErrorResponse):
+            if fd >= 0:
+                os.close(fd)
             raise RuntimeError(f"{prefix} error: {response.error}")
         return response, fd
 
