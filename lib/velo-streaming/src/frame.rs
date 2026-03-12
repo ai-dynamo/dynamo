@@ -1,22 +1,27 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! [`StreamFrame<T>`]: the six-variant wire frame enum for the streaming protocol.
+//! [`StreamFrame<T>`]: the seven-variant wire frame enum for the streaming protocol.
 
 use serde::{Deserialize, Serialize};
 
 /// A single frame traveling over the streaming wire.
 ///
 /// `T` is the user-defined item payload type. It must implement `Serialize` and
-/// `Deserialize` at call sites. `String` is used as the error carrier to avoid
-/// requiring `T: std::error::Error` and to ensure msgpack compatibility.
+/// `Deserialize` at call sites. `String` is used as the error carrier in
+/// [`SenderError`](StreamFrame::SenderError) and
+/// [`TransportError`](StreamFrame::TransportError) to avoid requiring
+/// `T: std::error::Error` and to ensure msgpack compatibility.
 ///
 /// Consumers MUST NOT be exposed to [`StreamFrame::Heartbeat`] — the API layer
 /// filters heartbeat frames before surfacing items to user code.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum StreamFrame<T> {
-    /// A data item — `Ok(T)` for a successful item, `Err(String)` for a soft error.
-    Item(Result<T, String>),
+    /// A data item carrying the user payload `T`.
+    Item(T),
+    /// A soft error reported by the sender. Does not terminate the stream;
+    /// the sender may continue sending `Item` frames afterwards.
+    SenderError(String),
     /// The sender was dropped without an explicit detach or finalize.
     /// This is the last frame the anchor receives from a sender that exited abruptly.
     Dropped,
@@ -28,6 +33,42 @@ pub enum StreamFrame<T> {
     Heartbeat,
     /// The transport layer encountered an unrecoverable error.
     TransportError(String),
+}
+
+// ---------------------------------------------------------------------------
+// Error types for the consumer (AnchorStream) and producer (StreamSender) APIs
+// ---------------------------------------------------------------------------
+
+/// Errors surfaced to [`AnchorStream`](crate::anchor::AnchorStream) consumers.
+///
+/// These represent problems that occurred on the sender side or during
+/// transport/deserialization. The stream may or may not continue producing
+/// items after a `StreamError`, depending on the variant.
+#[derive(Debug, thiserror::Error)]
+pub enum StreamError {
+    /// The sender reported a soft error via [`StreamFrame::SenderError`].
+    #[error("sender error: {0}")]
+    SenderError(String),
+    /// The sender was dropped without an explicit detach or finalize.
+    #[error("sender dropped without explicit detach/finalize")]
+    SenderDropped,
+    /// The transport layer encountered an unrecoverable error.
+    #[error("transport error: {0}")]
+    TransportError(String),
+    /// A received frame could not be deserialized into `StreamFrame<T>`.
+    #[error("deserialization error: {0}")]
+    DeserializationError(String),
+}
+
+/// Errors surfaced to [`StreamSender`] callers when a send operation fails.
+#[derive(Debug, thiserror::Error)]
+pub enum SendError {
+    /// The underlying channel is closed (receiver dropped or anchor removed).
+    #[error("channel closed")]
+    ChannelClosed,
+    /// The item could not be serialized into the wire format.
+    #[error("serialization error: {0}")]
+    SerializationError(String),
 }
 
 #[cfg(test)]
