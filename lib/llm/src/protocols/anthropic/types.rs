@@ -928,11 +928,9 @@ fn convert_user_blocks(
             }
             AnthropicContentBlock::Image { source } => {
                 has_image = true;
-                let data_uri =
-                    format!("data:{};base64,{}", source.media_type, source.data);
-                let url = url::Url::parse(&data_uri).map_err(|e| {
-                    anyhow::anyhow!("invalid image data URI: {e}")
-                })?;
+                let data_uri = format!("data:{};base64,{}", source.media_type, source.data);
+                let url = url::Url::parse(&data_uri)
+                    .map_err(|e| anyhow::anyhow!("invalid image data URI: {e}"))?;
                 content_parts.push(ChatCompletionRequestUserMessageContentPart::ImageUrl(
                     ChatCompletionRequestMessageContentPartImage {
                         image_url: ImageUrl {
@@ -2794,9 +2792,7 @@ mod tests {
                             },
                             AnthropicContentBlock::ToolResult {
                                 tool_use_id: "tool_1".into(),
-                                content: Some(ToolResultContent::Text(
-                                    "screenshot taken".into(),
-                                )),
+                                content: Some(ToolResultContent::Text("screenshot taken".into())),
                                 is_error: None,
                                 cache_control: None,
                             },
