@@ -426,11 +426,14 @@ Key NVTX ranges emitted:
 | `mm:enc:embedding_transfer` | Encode | Embedding handoff to downstream worker |
 | `mm:nixl:begin_read` | PD (agg) / Prefill | Begin NIXL read operation for embeddings |
 | `mm:nixl:wait_completion` | PD (agg) / Prefill | Wait for NIXL embedding transfer completion |
-| `mm:pd::generate` | Aggregated worker / Decode worker (`MultimodalWorkerHandler`) | Full worker-side request lifetime |
-| `mm:pd:ttft` | Aggregated worker / Decode worker (`MultimodalWorkerHandler`) | Worker-entry TTFT: from request arrival at this worker to first output token (excludes client->frontend->worker network transit) |
+| `mm:pd:generate` | Aggregated worker / Decode worker (`MultimodalWorkerHandler`) | Full worker-side request lifetime |
 | `mm:pd:generate_agg` | PD (agg) | Aggregated generation path |
-| `mm:pd:generate_disagg` | Decode worker (disagg entrypoint) | Disaggregated generation path |
 | `mm:pd:load_multimodal` | PD (agg) | Build multimodal items from transferred embeddings |
+| `mm:pd:generate_disagg` | Decode worker (disagg entrypoint) | Disaggregated generation path |
+| `mm:prefill:bootstrap` | Prefill (disagg) | Bootstrap coordination path before returning `{bootstrap_host, bootstrap_port, bootstrap_room}` |
+| `mm:prefill:load_multimodal` | Prefill (disagg) | Build multimodal items from transferred embeddings in the prefill worker |
+| `mm:prefill:engine_async_generate` | Prefill (disagg) | SGLang prefill engine invocation (`engine.async_generate`) |
+| `mm:pd:ttft` | Aggregated worker / Decode worker (`MultimodalWorkerHandler`) | Worker-entry TTFT: from request arrival at this worker to first output token (excludes client->frontend->worker network transit) |
 | `mm:dec:first_token` | Aggregated worker / Decode worker (`MultimodalWorkerHandler`) | Decode-stage first-token range (starts when decode stream is launched; not worker-entry TTFT) |
 
 ## Known Limitations

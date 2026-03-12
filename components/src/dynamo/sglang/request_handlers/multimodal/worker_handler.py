@@ -320,7 +320,7 @@ class MultimodalWorkerHandler(BaseWorkerHandler):
             request: Multimodal request with input and parameters.
             context: Context object for cancellation handling.
         """
-        rng_pd = _nvtx.start_range("mm:pd::generate", color="green")
+        rng_pd = _nvtx.start_range("mm:pd:generate", color="green")
         rng_ttft = _nvtx.start_range("mm:pd:ttft", color="yellow")
         ttft_ended = False
 
@@ -352,7 +352,6 @@ class MultimodalWorkerHandler(BaseWorkerHandler):
                     _nvtx.end_range(rng_agg)
 
         except Exception as e:
-            _end_ttft()
             logger.error(f"Error in multimodal generation: {e}", exc_info=True)
             yield ErrorResponseBuilder.build_error_response(e)
         finally:
@@ -533,6 +532,15 @@ class MultimodalPrefillWorkerHandler(BaseWorkerHandler):
             disagg_request: Disaggregated multimodal request.
             context: Context object for cancellation handling.
         """
+        rng_bootstrap = _nvtx.start_range("mm:prefill:bootstrap", color="yellow")
+        bootstrap_ended = False
+
+        def _end_bootstrap() -> None:
+            nonlocal bootstrap_ended
+            if not bootstrap_ended:
+                _nvtx.end_range(rng_bootstrap)
+                bootstrap_ended = True
+
         bootstrap_room = None
         try:
             # Validate and parse request
@@ -546,6 +554,7 @@ class MultimodalPrefillWorkerHandler(BaseWorkerHandler):
                 "bootstrap_room": bootstrap_room,
             }
 
+            _end_bootstrap()
             yield json.dumps(bootstrap_info)
 
             # Process prefill generation
@@ -557,6 +566,8 @@ class MultimodalPrefillWorkerHandler(BaseWorkerHandler):
                 {"bootstrap_room": bootstrap_room} if bootstrap_room is not None else {}
             )
             yield ErrorResponseBuilder.build_error_response(e, extra_fields)
+        finally:
+            _end_bootstrap()
 
     def _validate_and_parse_disagg_request(
         self, disagg_request
@@ -583,18 +594,20 @@ class MultimodalPrefillWorkerHandler(BaseWorkerHandler):
         sampling_params = disagg_request.sampling_params
 
         # Process embeddings from encode worker using our embeddings processor
-        mm_items, _ = await _build_mm_items(request, self.embeddings_processor)
+        with _nvtx.annotate("mm:prefill:load_multimodal", color="cyan"):
+            mm_items, _ = await _build_mm_items(request, self.embeddings_processor)
 
         # Start SGLang prefill generation (like regular SGLang)
-        results = await self.engine.async_generate(
-            input_ids=input_ids,
-            image_data=mm_items,
-            sampling_params=sampling_params,
-            stream=True,
-            bootstrap_host=self.bootstrap_host,
-            bootstrap_port=self.bootstrap_port,
-            bootstrap_room=bootstrap_room,
-        )
+        with _nvtx.annotate("mm:prefill:engine_async_generate", color="blue"):
+            results = await self.engine.async_generate(
+                input_ids=input_ids,
+                image_data=mm_items,
+                sampling_params=sampling_params,
+                stream=True,
+                bootstrap_host=self.bootstrap_host,
+                bootstrap_port=self.bootstrap_port,
+                bootstrap_room=bootstrap_room,
+            )
 
         # Consume results without yielding (prefill doesn't return text, just coordinates)
         asyncio.create_task(self._consume_results(results))
