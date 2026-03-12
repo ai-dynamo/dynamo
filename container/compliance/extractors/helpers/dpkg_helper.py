@@ -5,7 +5,6 @@
 # with zero external dependencies (only Python stdlib).
 
 import os
-import re
 import subprocess
 import sys
 
@@ -65,7 +64,7 @@ def extract_dep5_license(content):
     for line in content.splitlines():
         s = line.strip()
         if s.startswith("License:"):
-            val = s[len("License:"):].strip()
+            val = s[len("License:") :].strip()
             if val:
                 mapped = _DEP5_MAP.get(val) or _DEP5_MAP_LOWER.get(val.lower())
                 if mapped:
@@ -100,7 +99,8 @@ def get_license_for_package(pkg_name):
 def main():
     result = subprocess.run(
         ["dpkg-query", "-W", "-f=${Package}\t${Version}\n"],
-        capture_output=True, text=True
+        capture_output=True,
+        text=True,
     )
     if result.returncode != 0:
         print(f"ERROR: dpkg-query failed: {result.stderr}", file=sys.stderr)

@@ -25,7 +25,8 @@ def extract_python(
         docker_cmd,
         "run",
         "--rm",
-        "--entrypoint", "python3",
+        "--entrypoint",
+        "python3",
         "-v",
         f"{_HELPER_SCRIPT_PATH}:/tmp/python_helper.py:ro",
         image,
@@ -39,7 +40,9 @@ def extract_python(
     if result.returncode != 0:
         # Exit 127 means python3 not found — no Python packages in this image
         if result.returncode == 127:
-            log.warning("python3 not found in %s, skipping Python package extraction", image)
+            log.warning(
+                "python3 not found in %s, skipping Python package extraction", image
+            )
             return []
         log.error(
             "Python extraction failed (exit %d): %s",

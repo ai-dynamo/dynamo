@@ -25,7 +25,8 @@ def extract_dpkg(
         docker_cmd,
         "run",
         "--rm",
-        "--entrypoint", "python3",
+        "--entrypoint",
+        "python3",
         "-v",
         f"{_HELPER_SCRIPT_PATH}:/tmp/dpkg_helper.py:ro",
         image,
@@ -39,7 +40,10 @@ def extract_dpkg(
     if result.returncode != 0:
         # Exit 127 means python3 not found — fall back to shell-based dpkg-query
         if result.returncode == 127:
-            log.warning("python3 not found in %s, falling back to shell-based dpkg extraction (no license info)", image)
+            log.warning(
+                "python3 not found in %s, falling back to shell-based dpkg extraction (no license info)",
+                image,
+            )
             return _extract_dpkg_shell(image, docker_cmd, verbose)
         log.error(
             "dpkg extraction failed (exit %d): %s", result.returncode, result.stderr
@@ -82,9 +86,11 @@ def _extract_dpkg_shell(
         docker_cmd,
         "run",
         "--rm",
-        "--entrypoint", "sh",
+        "--entrypoint",
+        "sh",
         image,
-        "-c", "dpkg-query -W -f='${Package}\\t${Version}\\n'",
+        "-c",
+        "dpkg-query -W -f='${Package}\\t${Version}\\n'",
     ]
     if verbose:
         log.info("Running (shell fallback): %s", " ".join(cmd))
@@ -93,7 +99,9 @@ def _extract_dpkg_shell(
 
     if result.returncode != 0:
         log.error(
-            "dpkg shell extraction failed (exit %d): %s", result.returncode, result.stderr
+            "dpkg shell extraction failed (exit %d): %s",
+            result.returncode,
+            result.stderr,
         )
         raise RuntimeError(f"dpkg shell extraction failed: {result.stderr}")
 

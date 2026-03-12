@@ -5,7 +5,6 @@
 # with zero external dependencies (only Python stdlib).
 
 import importlib.metadata
-import sys
 
 # Conservative classifier -> SPDX mapping
 _CLASSIFIER_MAP = {
