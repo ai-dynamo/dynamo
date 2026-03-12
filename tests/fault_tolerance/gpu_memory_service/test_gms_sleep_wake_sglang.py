@@ -17,8 +17,8 @@ from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
 from tests.utils.managed_process import DynamoFrontendProcess
 
 from .utils.common import (
-    GMSServerProcess,
     MIN_EXPECTED_MEMORY_RETURN_FRACTION,
+    GMSServerProcess,
     assert_log_contains_in_order,
     get_gpu_memory_used,
     send_completion,

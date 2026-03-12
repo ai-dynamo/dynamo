@@ -20,8 +20,8 @@ from gpu_memory_service.server.epochs import (
     GMSEpochManager,
     MetadataEntry,
 )
-from gpu_memory_service.server.rpc import GMSRPCServer
 from gpu_memory_service.server.gms import GMS
+from gpu_memory_service.server.rpc import GMSRPCServer
 from gpu_memory_service.server.session import (
     Connection,
     GMSSessionManager,

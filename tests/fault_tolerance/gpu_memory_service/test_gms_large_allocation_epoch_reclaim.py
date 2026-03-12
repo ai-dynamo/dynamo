@@ -84,7 +84,8 @@ async def test_new_epoch_large_allocation_waits_for_dead_writer_process(
         holder_log = tmp_path / "holder.log"
         holder_script = tmp_path / "hold_import.py"
         holder_script.write_text(
-            textwrap.dedent("""
+            textwrap.dedent(
+                """
                 import sys
                 import time
                 from pathlib import Path
@@ -115,7 +116,8 @@ async def test_new_epoch_large_allocation_waits_for_dead_writer_process(
 
                 while True:
                     time.sleep(1.0)
-                """),
+                """
+            ),
             encoding="utf-8",
         )
 

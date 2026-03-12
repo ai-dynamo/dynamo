@@ -15,9 +15,8 @@ from gpu_memory_service.common.types import GrantedLockType, RequestedLockType
 
 if TYPE_CHECKING:
     import torch
-    from torch.cuda.memory import MemPool
-
     from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
+    from torch.cuda.memory import MemPool
 
 logger = logging.getLogger(__name__)
 

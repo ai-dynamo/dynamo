@@ -9,10 +9,11 @@ import shutil
 
 import requests
 
-from .common import REPO_ROOT
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.payloads import check_health_generate, check_models_api
+
+from .common import REPO_ROOT
 
 logger = logging.getLogger(__name__)
 SGLANG_BIN = REPO_ROOT / "dynamo-sglang" / "bin"

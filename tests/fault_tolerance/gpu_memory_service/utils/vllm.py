@@ -10,10 +10,11 @@ import shutil
 
 import requests
 
-from .common import DYNAMO_BIN
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.payloads import check_health_generate, check_models_api
+
+from .common import DYNAMO_BIN
 
 logger = logging.getLogger(__name__)
 

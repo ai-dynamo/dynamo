@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import pytest
-
 from gpu_memory_service.client import memory_manager as memory_manager_module
 from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
 from gpu_memory_service.common.types import GrantedLockType

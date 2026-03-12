@@ -35,7 +35,8 @@ def _run_worker_script(source: str) -> dict:
 
 
 def test_initialize_from_config_uses_kv_cache_gms_scope():
-    result = _run_worker_script("""
+    result = _run_worker_script(
+        """
         import json
         import os
         import sys
@@ -97,7 +98,8 @@ def test_initialize_from_config_uses_kv_cache_gms_scope():
         )
         sys.stdout.flush()
         os._exit(0)
-        """)
+        """
+    )
 
     assert result["create_calls"] == [
         [result["create_calls"][0][0], 3, "rw", "kv_cache", "kv_cache", None]
@@ -108,7 +110,8 @@ def test_initialize_from_config_uses_kv_cache_gms_scope():
 
 
 def test_sleep_level_2_unmaps_weights_and_kv_cache():
-    result = _run_worker_script("""
+    result = _run_worker_script(
+        """
         import json
         import os
         import sys
@@ -143,14 +146,16 @@ def test_sleep_level_2_unmaps_weights_and_kv_cache():
         print(json.dumps({"weights": weights.calls, "kv_cache": kv_cache.calls}))
         sys.stdout.flush()
         os._exit(0)
-        """)
+        """
+    )
 
     assert result["weights"] == ["unmap_all_vas", "disconnect"]
     assert result["kv_cache"] == ["unmap_all_vas", "disconnect"]
 
 
 def test_wake_up_remaps_weights_and_reallocates_kv_cache():
-    result = _run_worker_script("""
+    result = _run_worker_script(
+        """
         import json
         import os
         import sys
@@ -204,7 +209,8 @@ def test_wake_up_remaps_weights_and_reallocates_kv_cache():
         )
         sys.stdout.flush()
         os._exit(0)
-        """)
+        """
+    )
 
     assert result["weights"] == [
         ["connect", result["expected_ro"]],

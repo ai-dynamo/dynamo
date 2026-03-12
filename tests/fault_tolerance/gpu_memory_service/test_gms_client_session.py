@@ -4,9 +4,10 @@
 from __future__ import annotations
 
 import pytest
-
-from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
-from gpu_memory_service.client.memory_manager import LocalMapping
+from gpu_memory_service.client.memory_manager import (
+    GMSClientMemoryManager,
+    LocalMapping,
+)
 from gpu_memory_service.client.rpc import _GMSRPCTransport
 from gpu_memory_service.client.session import _GMSClientSession
 from gpu_memory_service.common.protocol import wire

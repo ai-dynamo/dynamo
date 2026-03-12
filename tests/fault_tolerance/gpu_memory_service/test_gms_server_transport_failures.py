@@ -129,7 +129,11 @@ class _FakeHandler:
             state=(
                 "RW"
                 if has_rw
-                else "RO" if ro_count else "COMMITTED" if committed else "EMPTY"
+                else "RO"
+                if ro_count
+                else "COMMITTED"
+                if committed
+                else "EMPTY"
             ),
             has_rw_session=has_rw,
             ro_session_count=ro_count,

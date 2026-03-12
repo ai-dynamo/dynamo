@@ -7,7 +7,6 @@ from contextlib import contextmanager
 
 import pytest
 import torch
-
 from gpu_memory_service.common.types import RequestedLockType
 from gpu_memory_service.integrations.sglang.memory_saver import GMSMemorySaverImpl
 
