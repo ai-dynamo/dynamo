@@ -14,7 +14,7 @@
 # limitations under the License.
 tensor_parallel_size: 1
 enable_attention_dp: false
-max_num_tokens: 2048
+max_num_tokens: 16384
 max_batch_size: 64
 max_seq_len: 16384
 trust_remote_code: true
