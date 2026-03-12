@@ -232,7 +232,7 @@ def post_pr_comment(repo, pr_number, results, run_id, run_url, workflow_name, to
     for r in results:
         category_short = r["category"].replace("_error", "")
         transient = "Yes" if r["is_transient"] else "No"
-        summary = r["summary"][:80] + "..." if len(r["summary"]) > 80 else r["summary"]
+        summary = r["summary"][:200] + "..." if len(r["summary"]) > 200 else r["summary"]
         rows.append(
             f"| {r['job_name']} | {r['step']} | {category_short} | {summary} | {transient} |"
         )
@@ -242,7 +242,7 @@ def post_pr_comment(repo, pr_number, results, run_id, run_url, workflow_name, to
     body = f"""{marker}
 ## CI Error Classification
 
-**Run**: [#{run_id}]({run_url}) | **Failed Jobs**: {failed_count}
+**{workflow_name}** [#{run_id}]({run_url}) | **Failed Jobs**: {failed_count}
 
 | Job | Step | Category | Summary | Transient? |
 |-----|------|----------|---------|------------|
