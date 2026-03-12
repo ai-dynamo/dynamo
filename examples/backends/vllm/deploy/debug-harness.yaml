@@ -1,0 +1,31 @@
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-mn-fo
+spec:
+  services:
+    Worker:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      replicas: 1
+      multinode:
+        nodeCount: 2
+      resources:
+        limits:
+          gpu: "1"
+      failover:
+        enabled: true
+      livenessProbe:
+        httpGet:
+          path: /live
+          port: 9090
+        failureThreshold: 9999
+        periodSeconds: 300
+      extraPodSpec:
+        mainContainer:
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo:multinode-failover-ae51ca3f1-vllm-runtime
+          workingDir: /workspace
+          command:
+            - sleep
+          args:
+            - infinity

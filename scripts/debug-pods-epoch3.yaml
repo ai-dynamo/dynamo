@@ -1,0 +1,141 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: debug-ldr
+  namespace: multinode-failover
+  labels: {app: debug-failover, nvidia.com/dynamo-discovery-backend: kubernetes, nvidia.com/dynamo-discovery-enabled: "true", nvidia.com/dynamo-component: Worker, nvidia.com/dynamo-namespace: multinode-failover-debug}
+spec:
+  hostname: debug-ldr
+  subdomain: debug-headless
+  serviceAccountName: debug-k8s-discovery
+  restartPolicy: Always
+  tolerations: [{key: nvidia.com/gpu, operator: Exists, effect: NoSchedule}]
+  resourceClaims: [{name: shared-gpu, resourceClaimTemplateName: debug-gpu}]
+  volumes:
+    - {name: shared-memory, emptyDir: {medium: Memory, sizeLimit: 8Gi}}
+    - {name: failover-shared, emptyDir: {}}
+    - {name: harness, configMap: {name: harness-scripts, defaultMode: 493}}
+  initContainers:
+    - name: gms-weights
+      image: dynamoci.azurecr.io/ai-dynamo/dynamo:multinode-failover-ae51ca3f1-vllm-runtime
+      restartPolicy: Always
+      command: ["/bin/bash", "-c"]
+      args: ["trap 'kill $(jobs -p) 2>/dev/null; wait' EXIT TERM INT; for dev in $(nvidia-smi --query-gpu=index --format=csv,noheader); do TMPDIR=/shared python3 -m gpu_memory_service --device $dev & done; wait -n; exit $?"]
+      resources: {claims: [{name: shared-gpu}]}
+      volumeMounts: [{name: failover-shared, mountPath: /shared}]
+      env: [{name: TMPDIR, value: /shared}]
+  containers:
+    - name: engine-0
+      image: dynamoci.azurecr.io/ai-dynamo/dynamo:multinode-failover-ae51ca3f1-vllm-runtime
+      command: ["bash", "/harness/harness_leader.sh"]
+      args: ["python3", "-m", "dynamo.vllm", "--model", "Qwen/Qwen3-0.6B", "--tensor-parallel-size", "2", "--distributed-executor-backend", "mp", "--load-format", "gms", "--gms-mode", "shadow", "--nnodes", "2", "--node-rank", "0", "--master-addr", "debug-ldr.debug-headless.multinode-failover.svc.cluster.local", "--master-port", "29500"]
+      resources: {claims: [{name: shared-gpu}]}
+      volumeMounts: [{name: shared-memory, mountPath: /dev/shm}, {name: failover-shared, mountPath: /shared}, {name: harness, mountPath: /harness}]
+      env:
+        - {name: ENGINE_ID, value: "0"}
+        - {name: NNODES, value: "2"}
+        - {name: ETCDCTL, value: "etcdctl --endpoints=http://etcd.multinode-failover.svc.cluster.local:2379"}
+        - {name: CONTAINER_NAME, value: engine-0}
+        - {name: TMPDIR, value: /shared}
+        - {name: FAILOVER_LOCK_PATH, value: /shared/failover.lock}
+        - {name: DYN_SYSTEM_PORT, value: "9090"}
+        - {name: DYN_SYSTEM_ENABLED, value: "true"}
+        - {name: DYN_VLLM_GMS_MODE, value: shadow}
+        - {name: SHADOW_SKIP_KV_CACHE, value: "1"}
+        - {name: VLLM_NIXL_SIDE_CHANNEL_PORT, value: "5600"}
+        - {name: DYN_VLLM_KV_EVENT_PORT, value: "20080"}
+        - {name: DYN_DISCOVERY_BACKEND, value: kubernetes}
+        - {name: DYN_NAMESPACE, value: multinode-failover-debug}
+        - {name: DYN_COMPONENT, value: worker}
+        - {name: NATS_SERVER, value: "nats://dynamo-platform-nats.multinode-failover.svc.cluster.local:4222"}
+        - {name: HF_TOKEN, valueFrom: {secretKeyRef: {name: hf-token-secret, key: HF_TOKEN}}}
+        - {name: POD_NAME, valueFrom: {fieldRef: {fieldPath: metadata.name}}}
+        - {name: POD_NAMESPACE, valueFrom: {fieldRef: {fieldPath: metadata.namespace}}}
+        - {name: POD_UID, valueFrom: {fieldRef: {fieldPath: metadata.uid}}}
+    - name: engine-1
+      image: dynamoci.azurecr.io/ai-dynamo/dynamo:multinode-failover-ae51ca3f1-vllm-runtime
+      command: ["bash", "/harness/harness_leader.sh"]
+      args: ["python3", "-m", "dynamo.vllm", "--model", "Qwen/Qwen3-0.6B", "--tensor-parallel-size", "2", "--distributed-executor-backend", "mp", "--load-format", "gms", "--gms-mode", "shadow", "--nnodes", "2", "--node-rank", "0", "--master-addr", "debug-ldr.debug-headless.multinode-failover.svc.cluster.local", "--master-port", "29600"]
+      resources: {claims: [{name: shared-gpu}]}
+      volumeMounts: [{name: shared-memory, mountPath: /dev/shm}, {name: failover-shared, mountPath: /shared}, {name: harness, mountPath: /harness}]
+      env:
+        - {name: ENGINE_ID, value: "1"}
+        - {name: NNODES, value: "2"}
+        - {name: ETCDCTL, value: "etcdctl --endpoints=http://etcd.multinode-failover.svc.cluster.local:2379"}
+        - {name: CONTAINER_NAME, value: engine-1}
+        - {name: TMPDIR, value: /shared}
+        - {name: FAILOVER_LOCK_PATH, value: /shared/failover.lock}
+        - {name: DYN_SYSTEM_PORT, value: "9091"}
+        - {name: DYN_SYSTEM_ENABLED, value: "true"}
+        - {name: DYN_VLLM_GMS_MODE, value: shadow}
+        - {name: SHADOW_SKIP_KV_CACHE, value: "1"}
+        - {name: VLLM_NIXL_SIDE_CHANNEL_PORT, value: "5601"}
+        - {name: DYN_VLLM_KV_EVENT_PORT, value: "20081"}
+        - {name: DYN_DISCOVERY_BACKEND, value: kubernetes}
+        - {name: DYN_NAMESPACE, value: multinode-failover-debug}
+        - {name: DYN_COMPONENT, value: worker}
+        - {name: NATS_SERVER, value: "nats://dynamo-platform-nats.multinode-failover.svc.cluster.local:4222"}
+        - {name: HF_TOKEN, valueFrom: {secretKeyRef: {name: hf-token-secret, key: HF_TOKEN}}}
+        - {name: POD_NAME, valueFrom: {fieldRef: {fieldPath: metadata.name}}}
+        - {name: POD_NAMESPACE, valueFrom: {fieldRef: {fieldPath: metadata.namespace}}}
+        - {name: POD_UID, valueFrom: {fieldRef: {fieldPath: metadata.uid}}}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: debug-wkr
+  namespace: multinode-failover
+  labels: {app: debug-failover, nvidia.com/dynamo-discovery-backend: kubernetes, nvidia.com/dynamo-discovery-enabled: "true", nvidia.com/dynamo-component: Worker, nvidia.com/dynamo-namespace: multinode-failover-debug}
+spec:
+  hostname: debug-wkr
+  subdomain: debug-headless
+  serviceAccountName: debug-k8s-discovery
+  restartPolicy: Always
+  tolerations: [{key: nvidia.com/gpu, operator: Exists, effect: NoSchedule}]
+  resourceClaims: [{name: shared-gpu, resourceClaimTemplateName: debug-gpu}]
+  volumes:
+    - {name: shared-memory, emptyDir: {medium: Memory, sizeLimit: 8Gi}}
+    - {name: failover-shared, emptyDir: {}}
+    - {name: harness, configMap: {name: harness-scripts, defaultMode: 493}}
+  initContainers:
+    - name: gms-weights
+      image: dynamoci.azurecr.io/ai-dynamo/dynamo:multinode-failover-ae51ca3f1-vllm-runtime
+      restartPolicy: Always
+      command: ["/bin/bash", "-c"]
+      args: ["trap 'kill $(jobs -p) 2>/dev/null; wait' EXIT TERM INT; for dev in $(nvidia-smi --query-gpu=index --format=csv,noheader); do TMPDIR=/shared python3 -m gpu_memory_service --device $dev & done; wait -n; exit $?"]
+      resources: {claims: [{name: shared-gpu}]}
+      volumeMounts: [{name: failover-shared, mountPath: /shared}]
+      env: [{name: TMPDIR, value: /shared}]
+  containers:
+    - name: engine-0
+      image: dynamoci.azurecr.io/ai-dynamo/dynamo:multinode-failover-ae51ca3f1-vllm-runtime
+      command: ["bash", "/harness/harness_worker.sh"]
+      args: ["python3", "-m", "dynamo.vllm", "--model", "Qwen/Qwen3-0.6B", "--tensor-parallel-size", "2", "--distributed-executor-backend", "mp", "--load-format", "gms", "--headless", "--nnodes", "2", "--node-rank", "1", "--master-addr", "debug-ldr.debug-headless.multinode-failover.svc.cluster.local", "--master-port", "29500"]
+      resources: {claims: [{name: shared-gpu}]}
+      volumeMounts: [{name: shared-memory, mountPath: /dev/shm}, {name: failover-shared, mountPath: /shared}, {name: harness, mountPath: /harness}]
+      env:
+        - {name: ENGINE_ID, value: "0"}
+        - {name: NODE_RANK, value: "1"}
+        - {name: ETCDCTL, value: "etcdctl --endpoints=http://etcd.multinode-failover.svc.cluster.local:2379"}
+        - {name: CONTAINER_NAME, value: engine-0}
+        - {name: TMPDIR, value: /shared}
+        - {name: SHADOW_SKIP_KV_CACHE, value: "1"}
+        - {name: VLLM_NIXL_SIDE_CHANNEL_PORT, value: "5600"}
+        - {name: DYN_VLLM_KV_EVENT_PORT, value: "20080"}
+        - {name: HF_TOKEN, valueFrom: {secretKeyRef: {name: hf-token-secret, key: HF_TOKEN}}}
+    - name: engine-1
+      image: dynamoci.azurecr.io/ai-dynamo/dynamo:multinode-failover-ae51ca3f1-vllm-runtime
+      command: ["bash", "/harness/harness_worker.sh"]
+      args: ["python3", "-m", "dynamo.vllm", "--model", "Qwen/Qwen3-0.6B", "--tensor-parallel-size", "2", "--distributed-executor-backend", "mp", "--load-format", "gms", "--headless", "--nnodes", "2", "--node-rank", "1", "--master-addr", "debug-ldr.debug-headless.multinode-failover.svc.cluster.local", "--master-port", "29600"]
+      resources: {claims: [{name: shared-gpu}]}
+      volumeMounts: [{name: shared-memory, mountPath: /dev/shm}, {name: failover-shared, mountPath: /shared}, {name: harness, mountPath: /harness}]
+      env:
+        - {name: ENGINE_ID, value: "1"}
+        - {name: NODE_RANK, value: "1"}
+        - {name: ETCDCTL, value: "etcdctl --endpoints=http://etcd.multinode-failover.svc.cluster.local:2379"}
+        - {name: CONTAINER_NAME, value: engine-1}
+        - {name: TMPDIR, value: /shared}
+        - {name: SHADOW_SKIP_KV_CACHE, value: "1"}
+        - {name: VLLM_NIXL_SIDE_CHANNEL_PORT, value: "5601"}
+        - {name: DYN_VLLM_KV_EVENT_PORT, value: "20081"}
+        - {name: HF_TOKEN, valueFrom: {secretKeyRef: {name: hf-token-secret, key: HF_TOKEN}}}

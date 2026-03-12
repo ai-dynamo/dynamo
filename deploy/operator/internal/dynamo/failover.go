@@ -20,11 +20,13 @@ import (
 )
 
 const (
-	failoverSharedVolumeName = "failover-shared"
-	failoverSharedMountPath  = "/shared"
-	failoverLockFile         = "/shared/failover.lock"
-	failoverDRAClaimName     = "shared-gpu"
-	failoverEngineCount      = 2
+	failoverSharedVolumeName    = "failover-shared"
+	failoverSharedMountPath     = "/shared"
+	failoverLockFile            = "/shared/failover.lock"
+	failoverDRAClaimName        = "shared-gpu"
+	failoverEngineCount         = 2
+	failoverMasterPortStride    = 100 // engine-1 gets master-port + 100
+	failoverMasterPortFlag      = "--master-port"
 )
 
 func isFailoverEnabled(component *v1alpha1.DynamoComponentDeploymentSharedSpec) bool {
@@ -154,6 +156,7 @@ func buildEngineContainer(base corev1.Container, engineID int, systemPort int) c
 		{Name: "DYN_SYSTEM_PORT", Value: strconv.Itoa(systemPort)},
 		{Name: "DYN_SYSTEM_ENABLED", Value: "true"},
 		{Name: "DYN_VLLM_GMS_MODE", Value: "shadow"},
+		{Name: "SHADOW_SKIP_KV_CACHE", Value: "1"},
 		{Name: "VLLM_NIXL_SIDE_CHANNEL_PORT", Value: strconv.Itoa(5600 + engineID)},
 		{Name: "DYN_VLLM_KV_EVENT_PORT", Value: strconv.Itoa(20080 + engineID)},
 	}
@@ -175,12 +178,92 @@ func buildEngineContainer(base corev1.Container, engineID int, systemPort int) c
 		engine.ReadinessProbe.HTTPGet.Port = portRef
 	}
 
+	// Stagger --master-port for multinode TP so each engine group uses a
+	// distinct torch.distributed TCP store. engine-0 keeps the original port,
+	// engine-1 gets original + failoverMasterPortStride.
+	if engineID > 0 {
+		staggerMasterPort(&engine, engineID)
+	}
+
 	removeGPUResources(&engine)
 	engine.Resources.Claims = append(engine.Resources.Claims, corev1.ResourceClaim{
 		Name: failoverDRAClaimName,
 	})
 
 	return engine
+}
+
+// staggerMasterPort offsets --master-port in the container args by
+// engineID * failoverMasterPortStride. This prevents port collisions when
+// multiple engine groups run on the same pod in multinode+failover mode.
+func staggerMasterPort(container *corev1.Container, engineID int) {
+	offset := engineID * failoverMasterPortStride
+	staggerFlagValue(container, failoverMasterPortFlag, offset)
+}
+
+// staggerFlagValue finds a --flag VALUE pair in container args and adds offset
+// to the integer value. Handles both separate-token args (["--flag", "29500"])
+// and shell-wrapped args (["sh", "-c", "... --flag 29500 ..."]).
+func staggerFlagValue(container *corev1.Container, flag string, offset int) {
+	// Try direct args first (non-shell case)
+	for i, arg := range container.Args {
+		if arg == flag && i+1 < len(container.Args) {
+			if port, err := strconv.Atoi(container.Args[i+1]); err == nil {
+				container.Args[i+1] = strconv.Itoa(port + offset)
+				return
+			}
+		}
+	}
+
+	// Try shell-wrapped args (sh -c "... --flag 29500 ...")
+	for i, arg := range container.Args {
+		if strings.Contains(arg, flag+" ") {
+			// Find and replace the flag value in the shell string
+			parts := strings.Split(arg, flag+" ")
+			if len(parts) < 2 {
+				continue
+			}
+			// Extract the port number after the flag
+			rest := parts[1]
+			var portStr string
+			for _, ch := range rest {
+				if ch >= '0' && ch <= '9' {
+					portStr += string(ch)
+				} else {
+					break
+				}
+			}
+			if port, err := strconv.Atoi(portStr); err == nil {
+				newPort := strconv.Itoa(port + offset)
+				container.Args[i] = strings.Replace(arg, flag+" "+portStr, flag+" "+newPort, 1)
+				return
+			}
+		}
+	}
+
+	// Also check Command for shell-wrapped cases
+	for i, cmd := range container.Command {
+		if strings.Contains(cmd, flag+" ") {
+			parts := strings.Split(cmd, flag+" ")
+			if len(parts) < 2 {
+				continue
+			}
+			rest := parts[1]
+			var portStr string
+			for _, ch := range rest {
+				if ch >= '0' && ch <= '9' {
+					portStr += string(ch)
+				} else {
+					break
+				}
+			}
+			if port, err := strconv.Atoi(portStr); err == nil {
+				newPort := strconv.Itoa(port + offset)
+				container.Command[i] = strings.Replace(cmd, flag+" "+portStr, flag+" "+newPort, 1)
+				return
+			}
+		}
+	}
 }
 
 // removeGPUResources strips nvidia.com/gpu from container resource limits and requests.

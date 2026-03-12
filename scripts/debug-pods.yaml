@@ -1,0 +1,316 @@
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: debug-gpu
+  namespace: multinode-failover
+spec:
+  spec:
+    devices:
+      requests:
+      - exactly:
+          allocationMode: ExactCount
+          count: 1
+          deviceClassName: gpu.nvidia.com
+        name: gpus
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  labels:
+    nvidia.com/dynamo-component: Worker
+    nvidia.com/dynamo-discovery-backend: kubernetes
+    nvidia.com/dynamo-discovery-enabled: 'true'
+    nvidia.com/dynamo-namespace: multinode-failover-debug
+  name: debug-ldr
+  namespace: multinode-failover
+spec:
+  containers:
+  - args:
+    - infinity
+    command:
+    - sleep
+    env:
+    - name: ENGINE_ID
+      value: '0'
+    - name: CONTAINER_NAME
+      value: engine-0
+    - name: TMPDIR
+      value: /shared
+    - name: FAILOVER_LOCK_PATH
+      value: /shared/failover.lock
+    - name: DYN_SYSTEM_PORT
+      value: '9090'
+    - name: DYN_SYSTEM_ENABLED
+      value: 'true'
+    - name: DYN_VLLM_GMS_MODE
+      value: shadow
+    - name: SHADOW_SKIP_KV_CACHE
+      value: '1'
+    - name: VLLM_NIXL_SIDE_CHANNEL_PORT
+      value: '5600'
+    - name: DYN_VLLM_KV_EVENT_PORT
+      value: '20080'
+    - name: HF_TOKEN
+      valueFrom:
+        secretKeyRef:
+          key: HF_TOKEN
+          name: hf-token-secret
+    - &id001
+      name: POD_NAME
+      valueFrom:
+        fieldRef:
+          fieldPath: metadata.name
+    - &id002
+      name: POD_NAMESPACE
+      valueFrom:
+        fieldRef:
+          fieldPath: metadata.namespace
+    - &id003
+      name: POD_UID
+      valueFrom:
+        fieldRef:
+          fieldPath: metadata.uid
+    - &id004
+      name: DYN_DISCOVERY_BACKEND
+      value: kubernetes
+    - &id005
+      name: DYN_NAMESPACE
+      value: multinode-failover-debug
+    - &id006
+      name: DYN_COMPONENT
+      value: worker
+    image: dynamoci.azurecr.io/ai-dynamo/dynamo:multinode-failover-ae51ca3f1-vllm-runtime
+    name: engine-0
+    resources:
+      claims:
+      - name: shared-gpu
+    volumeMounts:
+    - mountPath: /dev/shm
+      name: shared-memory
+    - mountPath: /shared
+      name: failover-shared
+  - args:
+    - infinity
+    command:
+    - sleep
+    env:
+    - name: ENGINE_ID
+      value: '1'
+    - name: CONTAINER_NAME
+      value: engine-1
+    - name: TMPDIR
+      value: /shared
+    - name: FAILOVER_LOCK_PATH
+      value: /shared/failover.lock
+    - name: DYN_SYSTEM_PORT
+      value: '9091'
+    - name: DYN_SYSTEM_ENABLED
+      value: 'true'
+    - name: DYN_VLLM_GMS_MODE
+      value: shadow
+    - name: SHADOW_SKIP_KV_CACHE
+      value: '1'
+    - name: VLLM_NIXL_SIDE_CHANNEL_PORT
+      value: '5601'
+    - name: DYN_VLLM_KV_EVENT_PORT
+      value: '20081'
+    - name: HF_TOKEN
+      valueFrom:
+        secretKeyRef:
+          key: HF_TOKEN
+          name: hf-token-secret
+    - *id001
+    - *id002
+    - *id003
+    - *id004
+    - *id005
+    - *id006
+    image: dynamoci.azurecr.io/ai-dynamo/dynamo:multinode-failover-ae51ca3f1-vllm-runtime
+    name: engine-1
+    resources:
+      claims:
+      - name: shared-gpu
+    volumeMounts:
+    - mountPath: /dev/shm
+      name: shared-memory
+    - mountPath: /shared
+      name: failover-shared
+  initContainers:
+  - args:
+    - "trap 'kill $(jobs -p) 2>/dev/null; wait' EXIT TERM INT\nfor dev in $(nvidia-smi\
+      \ --query-gpu=index --format=csv,noheader); do\n  TMPDIR=/shared python3 -m\
+      \ gpu_memory_service --device $dev &\ndone\nwait -n\nexit $?\n"
+    command:
+    - /bin/bash
+    - -c
+    env:
+    - name: TMPDIR
+      value: /shared
+    image: dynamoci.azurecr.io/ai-dynamo/dynamo:multinode-failover-ae51ca3f1-vllm-runtime
+    name: gms-weights
+    resources:
+      claims:
+      - name: shared-gpu
+    restartPolicy: Always
+    volumeMounts:
+    - mountPath: /shared
+      name: failover-shared
+  resourceClaims:
+  - name: shared-gpu
+    resourceClaimTemplateName: debug-gpu
+  restartPolicy: Never
+  serviceAccountName: debug-k8s-discovery
+  tolerations:
+  - effect: NoSchedule
+    key: nvidia.com/gpu
+    operator: Exists
+  volumes:
+  - emptyDir:
+      medium: Memory
+      sizeLimit: 8Gi
+    name: shared-memory
+  - emptyDir: {}
+    name: failover-shared
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  labels:
+    nvidia.com/dynamo-component: Worker
+    nvidia.com/dynamo-discovery-backend: kubernetes
+    nvidia.com/dynamo-discovery-enabled: 'true'
+    nvidia.com/dynamo-namespace: multinode-failover-debug
+  name: debug-wkr
+  namespace: multinode-failover
+spec:
+  containers:
+  - args:
+    - infinity
+    command:
+    - sleep
+    env:
+    - name: ENGINE_ID
+      value: '0'
+    - name: CONTAINER_NAME
+      value: engine-0
+    - name: TMPDIR
+      value: /shared
+    - name: SHADOW_SKIP_KV_CACHE
+      value: '1'
+    - name: VLLM_NIXL_SIDE_CHANNEL_PORT
+      value: '5600'
+    - name: DYN_VLLM_KV_EVENT_PORT
+      value: '20080'
+    - name: HF_TOKEN
+      valueFrom:
+        secretKeyRef:
+          key: HF_TOKEN
+          name: hf-token-secret
+    - &id001
+      name: POD_NAME
+      valueFrom:
+        fieldRef:
+          fieldPath: metadata.name
+    - &id002
+      name: POD_NAMESPACE
+      valueFrom:
+        fieldRef:
+          fieldPath: metadata.namespace
+    - &id003
+      name: POD_UID
+      valueFrom:
+        fieldRef:
+          fieldPath: metadata.uid
+    - &id004
+      name: DYN_DISCOVERY_BACKEND
+      value: kubernetes
+    - &id005
+      name: DYN_NAMESPACE
+      value: multinode-failover-debug
+    - &id006
+      name: DYN_COMPONENT
+      value: worker
+    image: dynamoci.azurecr.io/ai-dynamo/dynamo:multinode-failover-ae51ca3f1-vllm-runtime
+    name: engine-0
+    resources:
+      claims:
+      - name: shared-gpu
+    volumeMounts:
+    - mountPath: /dev/shm
+      name: shared-memory
+    - mountPath: /shared
+      name: failover-shared
+  - args:
+    - infinity
+    command:
+    - sleep
+    env:
+    - name: ENGINE_ID
+      value: '1'
+    - name: CONTAINER_NAME
+      value: engine-1
+    - name: TMPDIR
+      value: /shared
+    - name: SHADOW_SKIP_KV_CACHE
+      value: '1'
+    - name: VLLM_NIXL_SIDE_CHANNEL_PORT
+      value: '5601'
+    - name: DYN_VLLM_KV_EVENT_PORT
+      value: '20081'
+    - name: HF_TOKEN
+      valueFrom:
+        secretKeyRef:
+          key: HF_TOKEN
+          name: hf-token-secret
+    - *id001
+    - *id002
+    - *id003
+    - *id004
+    - *id005
+    - *id006
+    image: dynamoci.azurecr.io/ai-dynamo/dynamo:multinode-failover-ae51ca3f1-vllm-runtime
+    name: engine-1
+    resources:
+      claims:
+      - name: shared-gpu
+    volumeMounts:
+    - mountPath: /dev/shm
+      name: shared-memory
+    - mountPath: /shared
+      name: failover-shared
+  initContainers:
+  - args:
+    - "trap 'kill $(jobs -p) 2>/dev/null; wait' EXIT TERM INT\nfor dev in $(nvidia-smi\
+      \ --query-gpu=index --format=csv,noheader); do\n  TMPDIR=/shared python3 -m\
+      \ gpu_memory_service --device $dev &\ndone\nwait -n\nexit $?\n"
+    command:
+    - /bin/bash
+    - -c
+    env:
+    - name: TMPDIR
+      value: /shared
+    image: dynamoci.azurecr.io/ai-dynamo/dynamo:multinode-failover-ae51ca3f1-vllm-runtime
+    name: gms-weights
+    resources:
+      claims:
+      - name: shared-gpu
+    restartPolicy: Always
+    volumeMounts:
+    - mountPath: /shared
+      name: failover-shared
+  resourceClaims:
+  - name: shared-gpu
+    resourceClaimTemplateName: debug-gpu
+  restartPolicy: Never
+  serviceAccountName: debug-k8s-discovery
+  tolerations:
+  - effect: NoSchedule
+    key: nvidia.com/gpu
+    operator: Exists
+  volumes:
+  - emptyDir:
+      medium: Memory
+      sizeLimit: 8Gi
+    name: shared-memory
+  - emptyDir: {}
+    name: failover-shared

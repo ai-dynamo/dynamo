@@ -232,12 +232,6 @@ func (v *SharedSpecValidator) validateFailover() error {
 			v.fieldPath)
 	}
 
-	if v.spec.IsMultinode() {
-		return fmt.Errorf(
-			"%s: failover is not supported with multinode deployments",
-			v.fieldPath)
-	}
-
 	if v.spec.Resources == nil || v.spec.Resources.Limits == nil || v.spec.Resources.Limits.GPU == "" {
 		return fmt.Errorf(
 			"%s.failover: failover requires resources.limits.gpu >= 1",

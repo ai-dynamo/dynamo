@@ -1,0 +1,549 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  annotations:
+    nvidia.com/dynamo-discovery-backend: kubernetes
+    nvidia.com/dynamo-operator-origin-version: 1.0.0
+    pod-group-name: pg-vllm-mn-fo-0-d6a2c0d2-1c1b-41c8-ac77-27ff140887c5
+    received-resource-type: Regular
+  creationTimestamp: "2026-03-10T22:18:17Z"
+  generateName: vllm-mn-fo-0-worker-0-worker-ldr-
+  generation: 2
+  labels:
+    app.kubernetes.io/component: pcsg-podclique
+    app.kubernetes.io/managed-by: grove-operator
+    app.kubernetes.io/name: vllm-mn-fo-0-worker-0-worker-ldr
+    app.kubernetes.io/part-of: vllm-mn-fo
+    grove.io/pod-template-hash: f5f6f688d9d694f4fd8
+    grove.io/podclique: vllm-mn-fo-0-worker-0-worker-ldr
+    grove.io/podcliquescalinggroup: vllm-mn-fo-0-worker
+    grove.io/podcliquescalinggroup-replica-index: "0"
+    grove.io/podcliqueset-replica-index: "0"
+    grove.io/podgang: vllm-mn-fo-0
+    kai.scheduler/queue: dynamo
+    kai.scheduler/subgroup-name: vllm-mn-fo-0-worker-0-worker-ldr
+    nvidia.com/dynamo-component: Worker
+    nvidia.com/dynamo-component-type: worker
+    nvidia.com/dynamo-discovery-backend: kubernetes
+    nvidia.com/dynamo-discovery-enabled: "true"
+    nvidia.com/dynamo-graph-deployment-name: vllm-mn-fo
+    nvidia.com/dynamo-namespace: multinode-failover-vllm-mn-fo
+    nvidia.com/metrics-enabled: "true"
+    nvidia.com/selector: vllm-mn-fo-worker
+  name: vllm-mn-fo-0-worker-0-worker-ldr-r4hwb
+  namespace: multinode-failover
+  ownerReferences:
+  - apiVersion: grove.io/v1alpha1
+    blockOwnerDeletion: true
+    controller: true
+    kind: PodClique
+    name: vllm-mn-fo-0-worker-0-worker-ldr
+    uid: d035cf00-474f-428d-902c-88c8f9b19941
+  resourceVersion: "34683497"
+  uid: b8608cf2-0af5-4c0e-b88e-5b5c5e4d0a66
+spec:
+  containers:
+  - args:
+    - infinity
+    command:
+    - sleep
+    env:
+    - name: DYN_COMPONENT
+      value: worker
+    - name: DYN_DISCOVERY_BACKEND
+      value: kubernetes
+    - name: DYN_NAMESPACE
+      value: multinode-failover-vllm-mn-fo
+    - name: DYN_PARENT_DGD_K8S_NAME
+      value: vllm-mn-fo
+    - name: DYN_PARENT_DGD_K8S_NAMESPACE
+      value: multinode-failover
+    - name: NATS_SERVER
+      value: nats://dynamo-platform-nats.multinode-failover.svc.cluster.local:4222
+    - name: NIXL_TELEMETRY_ENABLE
+      value: "n"
+    - name: NIXL_TELEMETRY_EXPORTER
+      value: prometheus
+    - name: NIXL_TELEMETRY_PROMETHEUS_PORT
+      value: "19090"
+    - name: POD_NAME
+      valueFrom:
+        fieldRef:
+          apiVersion: v1
+          fieldPath: metadata.name
+    - name: POD_NAMESPACE
+      valueFrom:
+        fieldRef:
+          apiVersion: v1
+          fieldPath: metadata.namespace
+    - name: POD_UID
+      valueFrom:
+        fieldRef:
+          apiVersion: v1
+          fieldPath: metadata.uid
+    - name: ENGINE_ID
+      value: "0"
+    - name: CONTAINER_NAME
+      value: engine-0
+    - name: TMPDIR
+      value: /shared
+    - name: FAILOVER_LOCK_PATH
+      value: /shared/failover.lock
+    - name: DYN_SYSTEM_STARTING_HEALTH_STATUS
+      value: notready
+    - name: DYN_SYSTEM_PORT
+      value: "9090"
+    - name: DYN_SYSTEM_ENABLED
+      value: "true"
+    - name: DYN_VLLM_GMS_MODE
+      value: shadow
+    - name: SHADOW_SKIP_KV_CACHE
+      value: "1"
+    - name: VLLM_NIXL_SIDE_CHANNEL_PORT
+      value: "5600"
+    - name: DYN_VLLM_KV_EVENT_PORT
+      value: "20080"
+    - name: GROVE_PCSG_NAME
+      valueFrom:
+        fieldRef:
+          apiVersion: v1
+          fieldPath: metadata.labels['grove.io/podcliquescalinggroup']
+    - name: GROVE_PCSG_TEMPLATE_NUM_PODS
+      value: "2"
+    - name: GROVE_PCSG_INDEX
+      valueFrom:
+        fieldRef:
+          apiVersion: v1
+          fieldPath: metadata.labels['grove.io/podcliquescalinggroup-replica-index']
+    - name: GROVE_PCS_NAME
+      value: vllm-mn-fo
+    - name: GROVE_PCS_INDEX
+      value: "0"
+    - name: GROVE_PCLQ_NAME
+      value: vllm-mn-fo-0-worker-0-worker-ldr
+    - name: GROVE_HEADLESS_SERVICE
+      value: vllm-mn-fo-0.multinode-failover.svc.cluster.local
+    - name: GROVE_PCLQ_POD_INDEX
+      value: "0"
+    envFrom:
+    - secretRef:
+        name: hf-token-secret
+    image: dynamoci.azurecr.io/ai-dynamo/dynamo:multinode-failover-ae51ca3f1-vllm-runtime
+    imagePullPolicy: IfNotPresent
+    livenessProbe:
+      failureThreshold: 9999
+      httpGet:
+        path: /live
+        port: system-0
+        scheme: HTTP
+      periodSeconds: 300
+      successThreshold: 1
+      timeoutSeconds: 1
+    name: engine-0
+    ports:
+    - containerPort: 9090
+      name: system-0
+      protocol: TCP
+    readinessProbe:
+      failureThreshold: 3
+      httpGet:
+        path: /health
+        port: system-0
+        scheme: HTTP
+      periodSeconds: 10
+      successThreshold: 1
+      timeoutSeconds: 4
+    resources:
+      claims:
+      - name: shared-gpu
+    startupProbe:
+      failureThreshold: 720
+      httpGet:
+        path: /live
+        port: system-0
+        scheme: HTTP
+      periodSeconds: 10
+      successThreshold: 1
+      timeoutSeconds: 5
+    terminationMessagePath: /dev/termination-log
+    terminationMessagePolicy: File
+    volumeMounts:
+    - mountPath: /dev/shm
+      name: shared-memory
+    - mountPath: /shared
+      name: failover-shared
+    - mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+      name: kube-api-access-jf7l2
+      readOnly: true
+    workingDir: /workspace
+  - args:
+    - infinity
+    command:
+    - sleep
+    env:
+    - name: DYN_COMPONENT
+      value: worker
+    - name: DYN_DISCOVERY_BACKEND
+      value: kubernetes
+    - name: DYN_NAMESPACE
+      value: multinode-failover-vllm-mn-fo
+    - name: DYN_PARENT_DGD_K8S_NAME
+      value: vllm-mn-fo
+    - name: DYN_PARENT_DGD_K8S_NAMESPACE
+      value: multinode-failover
+    - name: NATS_SERVER
+      value: nats://dynamo-platform-nats.multinode-failover.svc.cluster.local:4222
+    - name: NIXL_TELEMETRY_ENABLE
+      value: "n"
+    - name: NIXL_TELEMETRY_EXPORTER
+      value: prometheus
+    - name: NIXL_TELEMETRY_PROMETHEUS_PORT
+      value: "19090"
+    - name: POD_NAME
+      valueFrom:
+        fieldRef:
+          apiVersion: v1
+          fieldPath: metadata.name
+    - name: POD_NAMESPACE
+      valueFrom:
+        fieldRef:
+          apiVersion: v1
+          fieldPath: metadata.namespace
+    - name: POD_UID
+      valueFrom:
+        fieldRef:
+          apiVersion: v1
+          fieldPath: metadata.uid
+    - name: ENGINE_ID
+      value: "1"
+    - name: CONTAINER_NAME
+      value: engine-1
+    - name: TMPDIR
+      value: /shared
+    - name: FAILOVER_LOCK_PATH
+      value: /shared/failover.lock
+    - name: DYN_SYSTEM_STARTING_HEALTH_STATUS
+      value: notready
+    - name: DYN_SYSTEM_PORT
+      value: "9091"
+    - name: DYN_SYSTEM_ENABLED
+      value: "true"
+    - name: DYN_VLLM_GMS_MODE
+      value: shadow
+    - name: SHADOW_SKIP_KV_CACHE
+      value: "1"
+    - name: VLLM_NIXL_SIDE_CHANNEL_PORT
+      value: "5601"
+    - name: DYN_VLLM_KV_EVENT_PORT
+      value: "20081"
+    - name: GROVE_PCSG_NAME
+      valueFrom:
+        fieldRef:
+          apiVersion: v1
+          fieldPath: metadata.labels['grove.io/podcliquescalinggroup']
+    - name: GROVE_PCSG_TEMPLATE_NUM_PODS
+      value: "2"
+    - name: GROVE_PCSG_INDEX
+      valueFrom:
+        fieldRef:
+          apiVersion: v1
+          fieldPath: metadata.labels['grove.io/podcliquescalinggroup-replica-index']
+    - name: GROVE_PCS_NAME
+      value: vllm-mn-fo
+    - name: GROVE_PCS_INDEX
+      value: "0"
+    - name: GROVE_PCLQ_NAME
+      value: vllm-mn-fo-0-worker-0-worker-ldr
+    - name: GROVE_HEADLESS_SERVICE
+      value: vllm-mn-fo-0.multinode-failover.svc.cluster.local
+    - name: GROVE_PCLQ_POD_INDEX
+      value: "0"
+    envFrom:
+    - secretRef:
+        name: hf-token-secret
+    image: dynamoci.azurecr.io/ai-dynamo/dynamo:multinode-failover-ae51ca3f1-vllm-runtime
+    imagePullPolicy: IfNotPresent
+    livenessProbe:
+      failureThreshold: 9999
+      httpGet:
+        path: /live
+        port: system-1
+        scheme: HTTP
+      periodSeconds: 300
+      successThreshold: 1
+      timeoutSeconds: 1
+    name: engine-1
+    ports:
+    - containerPort: 9091
+      name: system-1
+      protocol: TCP
+    readinessProbe:
+      failureThreshold: 3
+      httpGet:
+        path: /health
+        port: system-1
+        scheme: HTTP
+      periodSeconds: 10
+      successThreshold: 1
+      timeoutSeconds: 4
+    resources:
+      claims:
+      - name: shared-gpu
+    startupProbe:
+      failureThreshold: 720
+      httpGet:
+        path: /live
+        port: system-1
+        scheme: HTTP
+      periodSeconds: 10
+      successThreshold: 1
+      timeoutSeconds: 5
+    terminationMessagePath: /dev/termination-log
+    terminationMessagePolicy: File
+    volumeMounts:
+    - mountPath: /dev/shm
+      name: shared-memory
+    - mountPath: /shared
+      name: failover-shared
+    - mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+      name: kube-api-access-jf7l2
+      readOnly: true
+    workingDir: /workspace
+  dnsPolicy: ClusterFirst
+  enableServiceLinks: true
+  hostname: vllm-mn-fo-0-worker-0-worker-ldr-0
+  initContainers:
+  - args:
+    - |-
+      cleanup() { kill -- -$$ 2>/dev/null; exit 1; }
+      trap cleanup SIGTERM SIGINT
+      for dev in 0; do
+        python3 -m gpu_memory_service --device "$dev" &
+        echo "Started GMS device=$dev pid=$!"
+      done
+      wait -n
+      echo "A GMS subprocess exited, shutting down"
+      cleanup
+    command:
+    - bash
+    - -c
+    env:
+    - name: TMPDIR
+      value: /shared
+    - name: GROVE_PCSG_NAME
+      valueFrom:
+        fieldRef:
+          apiVersion: v1
+          fieldPath: metadata.labels['grove.io/podcliquescalinggroup']
+    - name: GROVE_PCSG_TEMPLATE_NUM_PODS
+      value: "2"
+    - name: GROVE_PCSG_INDEX
+      valueFrom:
+        fieldRef:
+          apiVersion: v1
+          fieldPath: metadata.labels['grove.io/podcliquescalinggroup-replica-index']
+    - name: GROVE_PCS_NAME
+      value: vllm-mn-fo
+    - name: GROVE_PCS_INDEX
+      value: "0"
+    - name: GROVE_PCLQ_NAME
+      value: vllm-mn-fo-0-worker-0-worker-ldr
+    - name: GROVE_HEADLESS_SERVICE
+      value: vllm-mn-fo-0.multinode-failover.svc.cluster.local
+    - name: GROVE_PCLQ_POD_INDEX
+      value: "0"
+    image: dynamoci.azurecr.io/ai-dynamo/dynamo:multinode-failover-ae51ca3f1-vllm-runtime
+    imagePullPolicy: IfNotPresent
+    name: gms-weights
+    resources:
+      claims:
+      - name: shared-gpu
+    restartPolicy: Always
+    startupProbe:
+      exec:
+        command:
+        - sh
+        - -c
+        - test $(ls /shared/gms_*.sock 2>/dev/null | wc -l) -ge 1
+      failureThreshold: 150
+      periodSeconds: 2
+      successThreshold: 1
+      timeoutSeconds: 1
+    terminationMessagePath: /dev/termination-log
+    terminationMessagePolicy: File
+    volumeMounts:
+    - mountPath: /shared
+      name: failover-shared
+    - mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+      name: kube-api-access-jf7l2
+      readOnly: true
+  nodeName: aks-a100exp-11297970-vmss000000
+  preemptionPolicy: PreemptLowerPriority
+  priority: 0
+  resourceClaims:
+  - name: shared-gpu
+    resourceClaimTemplateName: vllm-mn-fo-worker-gpu
+  restartPolicy: Always
+  schedulerName: kai-scheduler
+  securityContext:
+    fsGroup: 1000
+  serviceAccount: vllm-mn-fo-k8s-service-discovery
+  serviceAccountName: vllm-mn-fo-k8s-service-discovery
+  subdomain: vllm-mn-fo-0
+  terminationGracePeriodSeconds: 60
+  tolerations:
+  - effect: NoSchedule
+    key: nvidia.com/gpu
+    operator: Exists
+  - effect: NoExecute
+    key: node.kubernetes.io/not-ready
+    operator: Exists
+    tolerationSeconds: 300
+  - effect: NoExecute
+    key: node.kubernetes.io/unreachable
+    operator: Exists
+    tolerationSeconds: 300
+  volumes:
+  - emptyDir:
+      medium: Memory
+      sizeLimit: 8Gi
+    name: shared-memory
+  - emptyDir: {}
+    name: failover-shared
+  - name: kube-api-access-jf7l2
+    projected:
+      defaultMode: 420
+      sources:
+      - serviceAccountToken:
+          expirationSeconds: 3607
+          path: token
+      - configMap:
+          items:
+          - key: ca.crt
+            path: ca.crt
+          name: kube-root-ca.crt
+      - downwardAPI:
+          items:
+          - fieldRef:
+              apiVersion: v1
+              fieldPath: metadata.namespace
+            path: namespace
+status:
+  conditions:
+  - lastProbeTime: null
+    lastTransitionTime: "2026-03-10T22:18:19Z"
+    message: Pod bound successfully to node aks-a100exp-11297970-vmss000000
+    reason: Bound
+    status: "True"
+    type: PodBound
+  - lastProbeTime: null
+    lastTransitionTime: "2026-03-10T22:18:21Z"
+    observedGeneration: 2
+    status: "True"
+    type: PodReadyToStartContainers
+  - lastProbeTime: null
+    lastTransitionTime: "2026-03-10T22:18:23Z"
+    observedGeneration: 2
+    status: "True"
+    type: Initialized
+  - lastProbeTime: null
+    lastTransitionTime: "2026-03-10T22:18:19Z"
+    message: 'containers with unready status: [engine-0 engine-1]'
+    observedGeneration: 2
+    reason: ContainersNotReady
+    status: "False"
+    type: Ready
+  - lastProbeTime: null
+    lastTransitionTime: "2026-03-10T22:18:19Z"
+    message: 'containers with unready status: [engine-0 engine-1]'
+    observedGeneration: 2
+    reason: ContainersNotReady
+    status: "False"
+    type: ContainersReady
+  - lastProbeTime: null
+    lastTransitionTime: "2026-03-10T22:18:19Z"
+    observedGeneration: 2
+    status: "True"
+    type: PodScheduled
+  containerStatuses:
+  - containerID: containerd://6360e527145364cd45e71ed3ce3de5422944f5632f20f60f37564626659ef0c0
+    image: dynamoci.azurecr.io/ai-dynamo/dynamo:multinode-failover-ae51ca3f1-vllm-runtime
+    imageID: dynamoci.azurecr.io/ai-dynamo/dynamo@sha256:a863ac95c1c4722ce8efa4a27ec45f4b709b0f27b3776bd1a4be9920635e5b8a
+    lastState: {}
+    name: engine-0
+    ready: false
+    resources:
+      claims:
+      - name: shared-gpu
+    restartCount: 0
+    started: false
+    state:
+      running:
+        startedAt: "2026-03-10T22:18:24Z"
+    volumeMounts:
+    - mountPath: /dev/shm
+      name: shared-memory
+    - mountPath: /shared
+      name: failover-shared
+    - mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+      name: kube-api-access-jf7l2
+      readOnly: true
+      recursiveReadOnly: Disabled
+  - containerID: containerd://80ea0e8accefff7ab5c4e5ce727cf3b3cc2c237b5cddbb100a7fb458af2e097b
+    image: dynamoci.azurecr.io/ai-dynamo/dynamo:multinode-failover-ae51ca3f1-vllm-runtime
+    imageID: dynamoci.azurecr.io/ai-dynamo/dynamo@sha256:a863ac95c1c4722ce8efa4a27ec45f4b709b0f27b3776bd1a4be9920635e5b8a
+    lastState: {}
+    name: engine-1
+    ready: false
+    resources:
+      claims:
+      - name: shared-gpu
+    restartCount: 0
+    started: false
+    state:
+      running:
+        startedAt: "2026-03-10T22:18:24Z"
+    volumeMounts:
+    - mountPath: /dev/shm
+      name: shared-memory
+    - mountPath: /shared
+      name: failover-shared
+    - mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+      name: kube-api-access-jf7l2
+      readOnly: true
+      recursiveReadOnly: Disabled
+  hostIP: 10.224.0.5
+  hostIPs:
+  - ip: 10.224.0.5
+  initContainerStatuses:
+  - containerID: containerd://4f0fe7091c586ffdfce9c85c8ba5596684442c1783bbc4a2afdade07316a66f2
+    image: dynamoci.azurecr.io/ai-dynamo/dynamo:multinode-failover-ae51ca3f1-vllm-runtime
+    imageID: dynamoci.azurecr.io/ai-dynamo/dynamo@sha256:a863ac95c1c4722ce8efa4a27ec45f4b709b0f27b3776bd1a4be9920635e5b8a
+    lastState: {}
+    name: gms-weights
+    ready: true
+    resources:
+      claims:
+      - name: shared-gpu
+    restartCount: 0
+    started: true
+    state:
+      running:
+        startedAt: "2026-03-10T22:18:20Z"
+    volumeMounts:
+    - mountPath: /shared
+      name: failover-shared
+    - mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+      name: kube-api-access-jf7l2
+      readOnly: true
+      recursiveReadOnly: Disabled
+  observedGeneration: 2
+  phase: Running
+  podIP: 10.244.1.244
+  podIPs:
+  - ip: 10.244.1.244
+  qosClass: BestEffort
+  resourceClaimStatuses:
+  - name: shared-gpu
+    resourceClaimName: vllm-mn-fo-0-worker-0-worker-ldr-r4hwb-shared-gpu-fcjqf
+  startTime: "2026-03-10T22:18:19Z"
