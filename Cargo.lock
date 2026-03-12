@@ -8854,6 +8854,7 @@ dependencies = [
 name = "velo-streaming"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "rmp-serde",
  "serde",
  "velo-common",
