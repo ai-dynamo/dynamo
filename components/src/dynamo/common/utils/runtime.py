@@ -45,18 +45,12 @@ def create_runtime(
     discovery_backend: str,
     request_plane: str,
     event_plane: str,
-    use_kv_events: bool,
 ) -> Tuple[DistributedRuntime, asyncio.AbstractEventLoop]:
     """Create a DistributedRuntime.
-
-    Sets DYN_EVENT_PLANE in the environment, computes whether NATS is needed,
-    and creates the runtime.
-
     Args:
         discovery_backend: Discovery backend type (kubernetes, etcd, file, mem).
         request_plane: Request distribution method (nats, http, tcp).
         event_plane: Event publishing method (nats, zmq).
-        use_kv_events: Whether KV events are enabled.
 
     Returns:
         Tuple of (runtime, event_loop).
@@ -65,8 +59,6 @@ def create_runtime(
 
     os.environ["DYN_EVENT_PLANE"] = event_plane
 
-    enable_nats = request_plane == "nats" or (event_plane == "nats" and use_kv_events)
-
-    runtime = DistributedRuntime(loop, discovery_backend, request_plane, enable_nats)
+    runtime = DistributedRuntime(loop, discovery_backend, request_plane)
 
     return runtime, loop

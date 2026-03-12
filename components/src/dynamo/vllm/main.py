@@ -155,7 +155,6 @@ async def worker() -> None:
         discovery_backend=config.discovery_backend,
         request_plane=config.request_plane,
         event_plane=config.event_plane,
-        use_kv_events=config.use_kv_events,
     )
 
     install_signal_handlers(loop, runtime, shutdown_endpoints, shutdown_event)

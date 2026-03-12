@@ -545,12 +545,11 @@ enum ModelInput {
 #[pymethods]
 impl DistributedRuntime {
     #[new]
-    #[pyo3(signature = (event_loop, discovery_backend, request_plane, enable_nats=None))]
+    #[pyo3(signature = (event_loop, discovery_backend, request_plane))]
     fn new(
         event_loop: PyObject,
         discovery_backend: String,
         request_plane: String,
-        enable_nats: Option<bool>,
     ) -> PyResult<Self> {
         let discovery_backend_config = match discovery_backend.as_str() {
             "kubernetes" => DiscoveryBackend::Kubernetes,
@@ -589,19 +588,12 @@ impl DistributedRuntime {
             });
         }
 
-        // NATS is used for more than just the NATS request-plane:
-        // - KV router events (JetStream or NATS core + local indexer)
-        // - inter-router replica sync (NATS core)
-        //
-        // NATS initialization logic:
-        // 1. If request_plane is NATS, always enable NATS
-        // 2. Otherwise, use enable_nats parameter (defaults to true for backward compat)
-        //    Pass false to disable NATS (e.g., for approximate KV routing mode)
-        let enable_nats = enable_nats.unwrap_or(true); // Default to true
+        let nats_enabled = request_plane.is_nats()
+            || std::env::var(config::environment_names::nats::NATS_SERVER).is_ok();
 
         let runtime_config = DistributedConfig {
             discovery_backend: discovery_backend_config,
-            nats_config: if request_plane.is_nats() || enable_nats {
+            nats_config: if nats_enabled {
                 Some(dynamo_runtime::transports::nats::ClientOptions::default())
             } else {
                 None
