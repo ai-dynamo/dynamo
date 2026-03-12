@@ -1138,4 +1138,122 @@ mod tests {
             "anchor must be removed after detach + timeout"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // AnchorStream::set_timeout tests (Plan 08-04, Task 2)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_set_timeout_starts_timeout_on_no_default() {
+        tokio::time::pause();
+
+        // Manager with NO default timeout
+        let mgr = make_manager();
+        let (handle, stream) = mgr.create_anchor::<u32>();
+        let (_, local_id) = handle.unpack();
+
+        // set_timeout starts a timeout task even though manager had no default
+        stream.set_timeout(Some(std::time::Duration::from_secs(1)));
+
+        assert!(mgr.registry.contains_key(&local_id), "anchor must exist before timeout");
+
+        // Advance past the timeout
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+        assert!(
+            !mgr.registry.contains_key(&local_id),
+            "anchor must be removed after set_timeout expires"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_set_timeout_none_disables_timeout() {
+        tokio::time::pause();
+
+        let worker_id = velo_common::WorkerId::from_u64(42);
+        let transport: Arc<dyn crate::transport::FrameTransport> = Arc::new(MockTransport);
+        let mgr = AnchorManagerBuilder::default()
+            .worker_id(worker_id)
+            .transport(transport)
+            .default_timeout(std::time::Duration::from_secs(2))
+            .build()
+            .expect("builder should succeed");
+
+        let (handle, stream) = mgr.create_anchor::<u32>();
+        let (_, local_id) = handle.unpack();
+
+        // Disable the timeout
+        stream.set_timeout(None);
+
+        // Advance well past the original deadline
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
+        assert!(
+            mgr.registry.contains_key(&local_id),
+            "anchor must still exist after disabling timeout"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_set_timeout_overrides_default() {
+        tokio::time::pause();
+
+        let worker_id = velo_common::WorkerId::from_u64(42);
+        let transport: Arc<dyn crate::transport::FrameTransport> = Arc::new(MockTransport);
+        let mgr = AnchorManagerBuilder::default()
+            .worker_id(worker_id)
+            .transport(transport)
+            .default_timeout(std::time::Duration::from_secs(10))
+            .build()
+            .expect("builder should succeed");
+
+        let (handle, stream) = mgr.create_anchor::<u32>();
+        let (_, local_id) = handle.unpack();
+
+        // Override with a shorter timeout
+        stream.set_timeout(Some(std::time::Duration::from_secs(1)));
+
+        // Advance 2s -- should trigger the 1s override, not the 10s default
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+        assert!(
+            !mgr.registry.contains_key(&local_id),
+            "anchor must be removed by overridden 1s timeout, not waiting for 10s default"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_set_timeout_while_attached_no_immediate_effect() {
+        tokio::time::pause();
+
+        let mgr = make_manager();
+        let (handle, stream) = mgr.create_anchor::<u32>();
+        let (_, local_id) = handle.unpack();
+
+        // Attach the anchor
+        mgr.try_attach(local_id, handle).expect("attach should succeed");
+
+        // Set a timeout while attached -- should NOT spawn a task immediately
+        stream.set_timeout(Some(std::time::Duration::from_secs(1)));
+
+        // Advance well past the timeout
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+        // Anchor must still exist (attached, timeout only takes effect on detach)
+        assert!(
+            mgr.registry.contains_key(&local_id),
+            "anchor must still exist while attached even with set_timeout"
+        );
+
+        // Detach -- now the timeout should kick in (stored duration from set_timeout)
+        mgr.detach(local_id);
+
+        // Advance past the timeout
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+        assert!(
+            !mgr.registry.contains_key(&local_id),
+            "anchor must be removed after detach with stored set_timeout duration"
+        );
+    }
 }
