@@ -220,6 +220,44 @@ jobs:
           echo "| \`${{ steps.calculate-target-tag.outputs.default_target_image_uri }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| \`${{ steps.calculate-target-tag.outputs.azure_target_image_uri }}\` |" >> $GITHUB_STEP_SUMMARY
 
+  # ============================================================================
+  # COMPLIANCE — Generate attribution CSVs for dpkg and Python packages
+  # ============================================================================
+  compliance:
+    needs: [build-frontend-image, changed-files]
+    if: needs.build-frontend-image.result == 'success'
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    name: Compliance frontend-${{ matrix.arch }}
+    runs-on: ${{ matrix.arch == 'amd64' && 'prod-builder-amd-v1' || 'prod-tester-arm-v1' }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      - name: Docker Login
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      - name: Calculate image URI
+        id: images
+        shell: bash
+        run: |
+          TARGET_TAG="${{ github.sha }}-frontend-${{ matrix.arch }}"
+          FRONTEND_IMAGE="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${TARGET_TAG}"
+          echo "frontend_image=${FRONTEND_IMAGE}" >> $GITHUB_OUTPUT
+      - name: Compliance scan
+        uses: ./.github/actions/compliance-scan
+        with:
+          image: ${{ steps.images.outputs.frontend_image }}
+          artifact_name: compliance-frontend-${{ matrix.arch }}
+          framework: dynamo
+          target: frontend
+
   frontend-status-check:
     runs-on: ubuntu-latest
     needs: [changed-files, build-frontend-image, build-epp-image]

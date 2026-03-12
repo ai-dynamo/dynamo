@@ -102,7 +102,7 @@ jobs:
       target: dev
       platforms: '["amd64", "arm64"]'
       cuda_versions: '["12.9", "13.0"]'
-      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       build_timeout_minutes: 60
       run_cpu_only_tests: false
       run_single_gpu_tests: false
@@ -117,7 +117,7 @@ jobs:
       target: dev
       platforms: '["amd64", "arm64"]'
       cuda_versions: '["12.9", "13.0"]'
-      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       build_timeout_minutes: 60
       run_cpu_only_tests: false
       run_single_gpu_tests: false
@@ -132,7 +132,7 @@ jobs:
       target: dev
       platforms: '["amd64", "arm64"]'
       cuda_versions: '["13.1"]'
-      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       build_timeout_minutes: 60
       run_cpu_only_tests: false
       run_single_gpu_tests: false
@@ -462,7 +462,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [vllm-pipeline, sglang-pipeline, trtllm-pipeline, vllm-efa-pipeline, trtllm-efa-pipeline, operator]
+    needs: [vllm-pipeline, sglang-pipeline, trtllm-pipeline, vllm-dev-pipeline, sglang-dev-pipeline, trtllm-dev-pipeline, vllm-efa-pipeline, trtllm-efa-pipeline, operator]
     steps:
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
@@ -498,7 +498,7 @@ jobs:
     name: Notify Slack
     runs-on: prod-builder-amd-v1
     if: always() && failure()
-    needs: [ vllm-pipeline, sglang-pipeline, trtllm-pipeline, vllm-efa-pipeline, trtllm-efa-pipeline, operator, deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm ]
+    needs: [ vllm-pipeline, sglang-pipeline, trtllm-pipeline, vllm-dev-pipeline, sglang-dev-pipeline, trtllm-dev-pipeline, vllm-efa-pipeline, trtllm-efa-pipeline, operator, deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm ]
     permissions:
       contents: read
     steps:
