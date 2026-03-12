@@ -4,7 +4,8 @@ Conventions for keeping pull requests healthy and reviewable.
 
 ## Keep Your Branch Close to Main
 
-**Always flag** PRs that are more than ~25 commits behind `main`.
+Be aware of PRs targeting `main` that are more than ~25 commits behind.
+Stacked PRs targeting another branch are exempt.
 
 ### 1. Slower CI builds
 
@@ -51,5 +52,7 @@ git fetch origin && git rebase origin/main
   git fetch origin
   git rev-list --count HEAD..origin/main
   ```
-  Double digits? Rebase first.
+  Over 25? Rebase first.
 - **If CI is slow**, check your base commit age before debugging other causes.
+- **Stacked PRs** are exempt. If a PR targets another branch in a stack,
+  distance from `main` is expected and not a problem until the stack lands.
