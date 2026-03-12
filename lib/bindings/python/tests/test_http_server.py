@@ -18,7 +18,7 @@
 import asyncio
 import json
 import time
-from typing import AsyncGenerator, Dict
+from typing import Any, AsyncGenerator, Dict, cast
 
 import aiohttp
 import pytest
@@ -96,10 +96,12 @@ async def http_server(runtime: DistributedRuntime, dynamo_dynamic_ports):
         try:
             loop = asyncio.get_running_loop()
             python_engine = MockHttpEngine(model_name)
-            engine = HttpAsyncEngine(python_engine.generate, loop)
+            http_async_engine = cast(Any, HttpAsyncEngine)
+            engine = http_async_engine(python_engine.generate, loop)
+            service_any = cast(Any, service)
 
-            service.add_chat_completions_model(model_name, checksum, engine)
-            service.enable_endpoint("chat", True)
+            service_any.add_chat_completions_model(model_name, checksum, engine)
+            service_any.enable_endpoint("chat", True)
 
             shutdown_signal = service.run(runtime)
             print("Starting service on port", port)

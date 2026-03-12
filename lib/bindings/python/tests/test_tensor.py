@@ -4,6 +4,7 @@
 # Usage: `TEST_END_TO_END=1 python test_tensor.py` to run this worker as tensor based echo worker.
 
 import os
+from typing import Any, cast
 
 import pytest
 import uvloop
@@ -48,7 +49,7 @@ async def test_register(runtime: DistributedRuntime):
     )
 
     if TEST_END_TO_END:
-        await endpoint.serve_endpoint(generate)
+        await endpoint.serve_endpoint(cast(Any, generate))
 
 
 async def generate(request, context):

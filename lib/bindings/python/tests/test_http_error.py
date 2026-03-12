@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+from typing import Any, cast
+
 import pytest
 
 from dynamo.llm import HttpError
@@ -27,7 +29,7 @@ def test_invalid_http_error_code():
 def test_invalid_http_error_message():
     with pytest.raises(ValueError):
         # The second argument must be a string, not bytes.
-        HttpError(400, b"Bad Request")
+        HttpError(400, cast(Any, b"Bad Request"))
 
 
 def test_long_http_error_message():

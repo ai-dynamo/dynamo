@@ -16,6 +16,7 @@
 
 import json
 import threading
+from typing import cast
 
 import pytest
 
@@ -26,6 +27,11 @@ pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.unit,
 ]
+
+
+def typed_scores(overlap_scores) -> dict[tuple[int, int], int]:
+    """Runtime returns (worker_id, dp_rank) tuple keys even though the stub lags."""
+    return cast(dict[tuple[int, int], int], overlap_scores.scores)
 
 
 @pytest.mark.timeout(5)  # Expected: ~1s, timeout set to 5x for safety
@@ -66,17 +72,13 @@ def test_radix_tree_binding():
 
     # Verify the results
     # Note: scores is now Dict[(worker_id, dp_rank), score]
-    assert overlap_scores.scores is not None
-    assert (
-        len(overlap_scores.scores) == 1
-    ), f"Expected 1 worker in scores, got {len(overlap_scores.scores)}"
+    scores = typed_scores(overlap_scores)
+    assert len(scores) == 1, f"Expected 1 worker in scores, got {len(scores)}"
     worker_key = (worker_id, 0)  # (worker_id, dp_rank)
+    assert worker_key in scores, f"Worker {worker_key} not found in scores"
     assert (
-        worker_key in overlap_scores.scores
-    ), f"Worker {worker_key} not found in scores"
-    assert (
-        overlap_scores.scores[worker_key] == 1
-    ), f"Expected score 1 for worker {worker_key}, got {overlap_scores.scores[worker_key]}"
+        scores[worker_key] == 1
+    ), f"Expected score 1 for worker {worker_key}, got {scores[worker_key]}"
 
     blocks = radix_tree.dump_tree_as_events()
     assert len(blocks) == 1, f"Expected 1 block event, got {len(blocks)}"
@@ -90,7 +92,7 @@ def test_radix_tree_binding():
     ), f"Expected 0 block events after removal, got {len(blocks_empty)}"
 
     print(
-        f"✓ RadixTree test passed: worker {worker_key} has score {overlap_scores.scores[worker_key]}"
+        f"✓ RadixTree test passed: worker {worker_key} has score {scores[worker_key]}"
     )
 
 
@@ -170,14 +172,12 @@ def test_radix_tree_thread_safety(
 
     for i in range(num_threads):
         overlap_scores = radix_tree.find_matches([i])
-        assert overlap_scores.scores is not None
+        scores = typed_scores(overlap_scores)
         worker_key = (i, 0)
+        assert worker_key in scores, f"Worker {worker_key} not found in scores"
         assert (
-            worker_key in overlap_scores.scores
-        ), f"Worker {worker_key} not found in scores"
-        assert (
-            overlap_scores.scores[worker_key] == 1
-        ), f"Expected score 1 for worker {worker_key}, got {overlap_scores.scores[worker_key]}"
+            scores[worker_key] == 1
+        ), f"Expected score 1 for worker {worker_key}, got {scores[worker_key]}"
     # get all blocks
     blocks = radix_tree.dump_tree_as_events()
     expected_blocks = num_threads + (prepopulate_worker_ids * num_threads)

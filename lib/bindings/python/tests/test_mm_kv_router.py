@@ -19,7 +19,7 @@ Test Strategy:
 """
 
 import json
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -37,12 +37,22 @@ MM_HASH_1 = 0xDEADBEEF
 MM_HASH_2 = 0xCAFEBABE
 MM_HASH_3 = 0xFEEDFACE
 
+ScoreMap = dict[tuple[int, int], int]
+BlockMmInfos = list[dict[str, Any] | None]
 
-def make_mm_info(mm_hash: int, offsets: list[list[int]] | None = None) -> dict:
+
+def make_mm_info(
+    mm_hash: int, offsets: list[list[int]] | None = None
+) -> dict[str, Any]:
     """Create a block's MM extra info structure."""
     if offsets is None:
         offsets = [[0, 10]]
     return {"mm_objects": [{"mm_hash": mm_hash, "offsets": offsets}]}
+
+
+def typed_scores(overlap_scores) -> ScoreMap:
+    """Runtime returns tuple-keyed scores even though the stub advertises int keys."""
+    return cast(ScoreMap, overlap_scores.scores)
 
 
 def make_store_event(
@@ -109,18 +119,18 @@ def test_radix_tree_mm_routing_basic():
     assert len(all_blocks) == 2
 
     # Query for worker 0's block
-    scores_w0 = radix_tree.find_matches([block_hash_w0])
-    assert (worker_0, 0) in scores_w0.scores
-    assert scores_w0.scores[(worker_0, 0)] == 1
+    scores_w0 = typed_scores(radix_tree.find_matches([block_hash_w0]))
+    assert (worker_0, 0) in scores_w0
+    assert scores_w0[(worker_0, 0)] == 1
 
     # Query for worker 1's block
-    scores_w1 = radix_tree.find_matches([block_hash_w1])
-    assert (worker_1, 0) in scores_w1.scores
-    assert scores_w1.scores[(worker_1, 0)] == 1
+    scores_w1 = typed_scores(radix_tree.find_matches([block_hash_w1]))
+    assert (worker_1, 0) in scores_w1
+    assert scores_w1[(worker_1, 0)] == 1
 
     # Query with non-existent hash should return no matches
-    scores_none = radix_tree.find_matches([9999])
-    assert len(scores_none.scores) == 0
+    scores_none = typed_scores(radix_tree.find_matches([9999]))
+    assert len(scores_none) == 0
 
 
 # @pytest.mark.timeout(5)
@@ -152,9 +162,9 @@ def test_radix_tree_mm_block_chaining():
     assert len(all_blocks) == 2
 
     # Query with both hashes should match the chain
-    scores = radix_tree.find_matches([parent_hash, child_hash])
-    assert (worker_id, 0) in scores.scores
-    assert scores.scores[(worker_id, 0)] == 2
+    scores = typed_scores(radix_tree.find_matches([parent_hash, child_hash]))
+    assert (worker_id, 0) in scores
+    assert scores[(worker_id, 0)] == 2
 
 
 # @pytest.mark.timeout(5)
@@ -183,8 +193,8 @@ def test_radix_tree_worker_removal():
     remaining = radix_tree.dump_tree_as_events()
     assert len(remaining) == 1
 
-    scores = radix_tree.find_matches([2000])
-    assert (worker_1, 0) in scores.scores
+    scores = typed_scores(radix_tree.find_matches([2000]))
+    assert (worker_1, 0) in scores
 
 
 # @pytest.mark.timeout(5)
@@ -244,7 +254,7 @@ def test_mm_block_hash_computation_basic():
 def test_mm_block_hash_determinism():
     """Test that hash computation is deterministic."""
     tokens = [100] * DEFAULT_BLOCK_SIZE
-    mm_info = [make_mm_info(MM_HASH_1)]
+    mm_info: BlockMmInfos = [make_mm_info(MM_HASH_1)]
 
     hash1 = compute_block_hash_for_seq(tokens, DEFAULT_BLOCK_SIZE, mm_info)
     hash2 = compute_block_hash_for_seq(tokens, DEFAULT_BLOCK_SIZE, mm_info)
@@ -263,7 +273,7 @@ def test_mm_block_hash_multiple_blocks(block_size: int):
         tokens.extend([100 + i] * block_size)
 
     # One MM info per block
-    mm_infos = [make_mm_info(MM_HASH_1) for _ in range(num_blocks)]
+    mm_infos: BlockMmInfos = [make_mm_info(MM_HASH_1) for _ in range(num_blocks)]
 
     hashes = compute_block_hash_for_seq(tokens, block_size, mm_infos)
 
@@ -279,7 +289,7 @@ def test_mm_block_hash_partial_block():
     tokens = [100] * (DEFAULT_BLOCK_SIZE + DEFAULT_BLOCK_SIZE // 2)
 
     # MM info for each block
-    mm_infos = [make_mm_info(MM_HASH_1), make_mm_info(MM_HASH_2)]
+    mm_infos: BlockMmInfos = [make_mm_info(MM_HASH_1), make_mm_info(MM_HASH_2)]
 
     hashes = compute_block_hash_for_seq(tokens, DEFAULT_BLOCK_SIZE, mm_infos)
 
@@ -293,7 +303,7 @@ def test_mm_block_hash_none_mm_info():
     tokens = [100] * DEFAULT_BLOCK_SIZE
 
     # Pass None for some blocks' MM info
-    mm_infos = [None]
+    mm_infos: BlockMmInfos = [None]
 
     hashes_with_none = compute_block_hash_for_seq(tokens, DEFAULT_BLOCK_SIZE, mm_infos)
     hashes_without = compute_block_hash_for_seq(tokens, DEFAULT_BLOCK_SIZE)
@@ -325,7 +335,7 @@ def test_mm_block_hash_multiple_mm_objects():
     tokens = [100] * DEFAULT_BLOCK_SIZE
 
     # Multiple MM objects in one block
-    mm_info = {
+    mm_info: dict[str, Any] = {
         "mm_objects": [
             {"mm_hash": MM_HASH_1, "offsets": [[0, 5]]},
             {"mm_hash": MM_HASH_2, "offsets": [[10, 15]]},
@@ -386,14 +396,14 @@ def test_integration_mm_hash_to_routing():
     )
 
     # Query with MM1's hash should match worker 0
-    scores_mm1 = radix_tree.find_matches([hash_mm1])
-    assert (worker_0, 0) in scores_mm1.scores
-    assert (worker_1, 0) not in scores_mm1.scores
+    scores_mm1 = typed_scores(radix_tree.find_matches([hash_mm1]))
+    assert (worker_0, 0) in scores_mm1
+    assert (worker_1, 0) not in scores_mm1
 
     # Query with MM2's hash should match worker 1
-    scores_mm2 = radix_tree.find_matches([hash_mm2])
-    assert (worker_1, 0) in scores_mm2.scores
-    assert (worker_0, 0) not in scores_mm2.scores
+    scores_mm2 = typed_scores(radix_tree.find_matches([hash_mm2]))
+    assert (worker_1, 0) in scores_mm2
+    assert (worker_0, 0) not in scores_mm2
 
 
 # @pytest.mark.timeout(5)
@@ -429,12 +439,12 @@ def test_integration_multiple_workers_same_tokens(num_workers: int):
             tokens, DEFAULT_BLOCK_SIZE, [make_mm_info(mm_hash)]
         )[0]
 
-        scores = radix_tree.find_matches([block_hash])
+        scores = typed_scores(radix_tree.find_matches([block_hash]))
 
-        assert (worker_id, 0) in scores.scores
-        assert scores.scores[(worker_id, 0)] == 1
+        assert (worker_id, 0) in scores
+        assert scores[(worker_id, 0)] == 1
 
         # No other workers should match
         for other_id in range(num_workers):
             if other_id != worker_id:
-                assert (other_id, 0) not in scores.scores
+                assert (other_id, 0) not in scores

@@ -40,6 +40,7 @@ import socket
 import subprocess
 import tempfile
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -400,6 +401,12 @@ def temp_file_store():
     with tempfile.TemporaryDirectory() as tmpdir:
         os.environ["DYN_FILE_KV"] = tmpdir
         yield tmpdir
+
+
+@pytest.fixture(scope="function")
+def dynamo_dynamic_ports():
+    """Allocate a per-test frontend port for bindings tests."""
+    yield SimpleNamespace(frontend_port=get_free_port(), system_ports=[])
 
 
 @pytest.fixture
