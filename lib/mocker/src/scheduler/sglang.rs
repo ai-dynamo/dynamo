@@ -228,8 +228,8 @@ impl SglangScheduler {
                     }
                 }
 
-                // 5. Simulate decode
-                simulate_decode(
+                // 5. Simulate decode (may retract requests under memory pressure)
+                let retracted = simulate_decode(
                     &mut running,
                     &mut kv_manager,
                     &output_tx,
@@ -238,6 +238,15 @@ impl SglangScheduler {
                     &metrics_tx,
                 )
                 .await;
+
+                if !retracted.is_empty() {
+                    // Retracted requests go back to the front of the waiting queue
+                    for req in retracted.into_iter().rev() {
+                        waiting.push_front(req);
+                    }
+                    // Reset new_token_ratio like SGLang does after retraction
+                    new_token_ratio = config.init_new_token_ratio;
+                }
 
                 // 6. Decay new_token_ratio
                 new_token_ratio = (new_token_ratio - config.new_token_ratio_decay_step)
@@ -383,10 +392,9 @@ fn get_new_batch_prefill(
             break;
         }
 
-        // Release lock from previous chunk before re-allocating (chunked continuation)
-        if let Some(prev_node) = req.last_node.take() {
-            kv_manager.free_request(prev_node);
-        }
+        // Keep previous chunk lock alive to protect cached prefix from eviction.
+        // Released after allocate_for_request secures its own lock.
+        let prev_node = req.last_node.take();
 
         // Determine chunk boundary before allocation
         let chunk_end = if extend_input > rem_chunk_tokens && rem_chunk_tokens > 0.0 {
@@ -401,18 +409,26 @@ fn get_new_batch_prefill(
         };
 
         let alloc_tokens = &req.token_ids[..chunk_end];
-        let needed_tokens = alloc_tokens.len();
+        let prefix_len = kv_manager.cache().prefix_match_len(alloc_tokens);
+        let needed_new = alloc_tokens.len() - prefix_len;
         let available = kv_manager.cache().token_pool.available();
-        if available < needed_tokens {
-            kv_manager.evict(needed_tokens - available);
+        if available < needed_new {
+            kv_manager.evict(needed_new - available);
         }
 
         let alloc = kv_manager.allocate_for_request(alloc_tokens);
         let Some(alloc) = alloc else {
+            // Restore lock on rejection so the cached prefix stays protected
+            req.last_node = prev_node;
             rejected.push_back(req);
             oom = true;
             break;
         };
+
+        // New allocation has its own lock; release the previous one
+        if let Some(node) = prev_node {
+            kv_manager.free_request(node);
+        }
 
         req.last_node = Some(alloc.last_node);
         req.kv_indices = alloc.kv_indices;
@@ -462,6 +478,87 @@ async fn simulate_prefill(total_new_tokens: usize, num_reqs: usize, config: &Sgl
     }
 }
 
+/// Check if the pool has enough tokens for one decode step of the entire batch.
+/// Tries eviction first; if still short, retracts requests by output_len desc
+/// (matching SGLang's retract_decode policy) until enough memory is available.
+/// Returns retracted requests that should go back to the waiting queue.
+fn check_decode_mem(
+    running: &mut Vec<SglangRequest>,
+    kv_manager: &mut SglangKvManager,
+) -> Vec<SglangRequest> {
+    let needed = running.len();
+    let available = kv_manager.cache().token_pool.available();
+    let evictable = kv_manager.cache().evictable_size;
+
+    if available + evictable >= needed {
+        // Evict just enough to cover the deficit
+        if available < needed {
+            kv_manager.evict(needed - available);
+        }
+        return Vec::new();
+    }
+
+    // Not enough even after full eviction — retract requests.
+    // Sort indices by output_len descending (longest-running first, like SGLang).
+    let mut sorted_indices: Vec<usize> = (0..running.len()).collect();
+    sorted_indices.sort_by(|&a, &b| running[b].output_len.cmp(&running[a].output_len));
+
+    let mut retracted = Vec::new();
+    let mut freed = 0usize;
+
+    while available + evictable + freed < needed - retracted.len() {
+        if running.len() - retracted.len() <= 1 {
+            break; // always keep at least one request
+        }
+        let idx = sorted_indices.pop().unwrap();
+        let req = &running[idx];
+
+        // Free this request's KV indices and radix lock
+        let kv_len = req.kv_indices.len();
+        kv_manager.cache_mut().token_pool.free(&req.kv_indices);
+        if let Some(last_node) = req.last_node {
+            kv_manager.free_request(last_node);
+        }
+        freed += kv_len;
+        // Mark index for removal (we'll collect in a second pass)
+        sorted_indices.retain(|&i| i != idx);
+    }
+
+    // Actually remove retracted requests from running (reverse order for swap_remove)
+    // First, collect indices to remove
+    let remaining_set: std::collections::HashSet<usize> = sorted_indices.into_iter().collect();
+    let mut remove_indices: Vec<usize> = (0..running.len())
+        .filter(|i| !remaining_set.contains(i))
+        .collect();
+    remove_indices.sort_unstable_by(|a, b| b.cmp(a));
+    for idx in remove_indices {
+        let mut req = running.swap_remove(idx);
+        // Reset decode state so it re-enters as a fresh prefill
+        req.output_len = 0;
+        req.kv_indices.clear();
+        req.last_node = None;
+        req.prefilled_tokens = 0;
+        retracted.push(req);
+    }
+
+    // Now evict to cover remaining deficit
+    let available = kv_manager.cache().token_pool.available();
+    let needed = running.len();
+    if available < needed {
+        kv_manager.evict(needed - available);
+    }
+
+    if !retracted.is_empty() {
+        tracing::warn!(
+            num_retracted = retracted.len(),
+            remaining = running.len(),
+            "SGLang decode retract requests because KV pool is full"
+        );
+    }
+
+    retracted
+}
+
 async fn simulate_decode(
     running: &mut Vec<SglangRequest>,
     kv_manager: &mut SglangKvManager,
@@ -469,9 +566,9 @@ async fn simulate_decode(
     config: &SglangConfig,
     dp_rank: u32,
     metrics_tx: &tokio::sync::watch::Sender<MockerMetrics>,
-) {
+) -> Vec<SglangRequest> {
     if running.is_empty() {
-        return;
+        return Vec::new();
     }
 
     let start = Instant::now();
@@ -487,6 +584,9 @@ async fn simulate_decode(
         .predict_decode_time(total_context, avg_context);
 
     let total_time = Duration::from_secs_f64(decode_time / 1000.0);
+
+    // Retract requests if not enough memory for one decode step
+    let retracted = check_decode_mem(running, kv_manager);
 
     for req in running.iter_mut() {
         if kv_manager.cache().token_pool.available() == 0 {
@@ -570,6 +670,8 @@ async fn simulate_decode(
             Duration::from_secs_f64(total_time.as_secs_f64() / config.speedup_ratio);
         sleep_until_precise(start + sleep_duration).await;
     }
+
+    retracted
 }
 
 #[cfg(test)]
