@@ -35,10 +35,22 @@ inputs:
 runs:
   using: "composite"
   steps:
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 #v3.11.1
+      with:
+        driver: docker-container
+        # Enable BuildKit for enhanced metadata
+        buildkitd-flags: --debug
+        version: v0.14.1
+    - name: Cleanup
+      if: always()
+      shell: bash
+      run: |
+        docker system prune -af
     - name: Set up Python
       uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
       with:
-        python-version: '3.x'
+        python-version: '3.12'
         pip-install: pyyaml
 
     - name: Pull container image
