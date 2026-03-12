@@ -44,7 +44,7 @@ git fetch origin && git rebase origin/main
 
 ### Guidance
 
-- **Rebase at least every ~25 commits behind**, or when CI builds slow down.
+- **Rebase when you are more than ~25 commits behind main.**
 - **Prefer `rebase` over `merge`** for linear history. Force-push after
   rebasing (`git push --force-with-lease`).
 - **Before requesting review**, check your distance from main:
@@ -52,7 +52,7 @@ git fetch origin && git rebase origin/main
   git fetch origin
   git rev-list --count HEAD..origin/main
   ```
-  Over 25? Rebase first.
+  More than 25? Rebase first.
 - **If CI is slow**, check your base commit age before debugging other causes.
 - **Stacked PRs** are exempt. If a PR targets another branch in a stack,
   distance from `main` is expected and not a problem until the stack lands.
