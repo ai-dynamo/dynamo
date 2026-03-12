@@ -45,6 +45,8 @@ navigation:
         contents:
           - page: Detailed Installation Guide
             path: kubernetes/installation-guide.md
+          - page: Deploying Your First Model
+            path: kubernetes/dgdr.md
           - page: Dynamo Operator
             path: kubernetes/dynamo-operator.md
           - page: Service Discovery
@@ -271,6 +273,9 @@ navigation:
     path: blogs/index.mdx
     slug: blog
     contents:
+      - page: "Full-Stack Optimizations for Agentic Inference"
+        path: blogs/agentic-inference/agentic-inference.md
+        slug: agentic-inference
       - page: "Flash Indexer: Inter-Galactic KV Routing"
         path: blogs/flash-indexer/flash-indexer.md
         slug: flash-indexer

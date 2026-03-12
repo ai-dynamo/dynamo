@@ -168,6 +168,8 @@ def _build_mocker_command(
         command.extend(["--bootstrap-ports", mocker_args["bootstrap_ports"]])
     if "zmq_kv_events_ports" in mocker_args:
         command.extend(["--zmq-kv-events-ports", mocker_args["zmq_kv_events_ports"]])
+    if "zmq_replay_ports" in mocker_args:
+        command.extend(["--zmq-replay-ports", mocker_args["zmq_replay_ports"]])
 
     return command
 
@@ -190,6 +192,7 @@ class MockerProcess:
         zmq_kv_events: bool = False,
         standalone_indexer: bool = False,
         model_name: str = "mocker",
+        zmq_replay: bool = False,
     ):
         namespace_suffix = generate_random_suffix()
         self.namespace = f"test-namespace-{namespace_suffix}"
@@ -198,6 +201,7 @@ class MockerProcess:
         self.endpoint = f"dyn://{self.namespace}.{self.component_name}.generate"
         self.num_workers = num_mockers
         self._zmq_kv_events_ports: list[int] = []
+        self._zmq_replay_ports: list[int] = []
         self._standalone_indexer = standalone_indexer
         self._standalone_indexer_port: Optional[int] = None
         self._standalone_indexer_b_port: Optional[int] = None
@@ -231,6 +235,22 @@ class MockerProcess:
             logger.info(
                 f"Allocated ZMQ KV event ports {self._zmq_kv_events_ports} "
                 f"(bases: {bases}) for {num_mockers} workers"
+            )
+
+        # Allocate ZMQ replay ports (same layout as event ports)
+        if zmq_replay and zmq_kv_events:
+            dp_size = mocker_args.get("dp_size", 1)
+            self._zmq_replay_ports = allocate_ports(
+                num_mockers * dp_size, BASE_PORT_ZMQ + 1000
+            )
+            replay_bases = [
+                self._zmq_replay_ports[i * dp_size] for i in range(num_mockers)
+            ]
+            if not standalone_indexer:
+                mocker_args["zmq_replay_ports"] = ",".join(str(p) for p in replay_bases)
+            logger.info(
+                f"Allocated ZMQ replay ports {self._zmq_replay_ports} "
+                f"(bases: {replay_bases}) for {num_mockers} workers"
             )
 
         if standalone_indexer:
@@ -289,7 +309,7 @@ class MockerProcess:
                 "-p",
                 "dynamo-kv-router",
                 "--features",
-                "indexer-bin",
+                "indexer-bin,test-endpoints",
                 "--bin",
                 "dynamo-kv-indexer",
                 "--",
@@ -338,6 +358,9 @@ class MockerProcess:
             mocker_args = self._mocker_args_orig.copy()
             base_port = self._zmq_kv_events_ports[i * dp_size]
             mocker_args["zmq_kv_events_ports"] = str(base_port)
+            if self._zmq_replay_ports:
+                replay_base = self._zmq_replay_ports[i * dp_size]
+                mocker_args["zmq_replay_ports"] = str(replay_base)
 
             command = _build_mocker_command(
                 endpoint=self.endpoint,
@@ -398,6 +421,9 @@ class MockerProcess:
                             "block_size", BLOCK_SIZE
                         ),
                     }
+                    if self._zmq_replay_ports:
+                        replay_port = self._zmq_replay_ports[i * dp_size + dp_rank]
+                        payload["replay_endpoint"] = f"tcp://127.0.0.1:{replay_port}"
                     async with session.post(register_url, json=payload) as resp:
                         if resp.status != 201:
                             body = await resp.text()
@@ -444,7 +470,7 @@ class MockerProcess:
             "-p",
             "dynamo-kv-router",
             "--features",
-            "indexer-bin",
+            "indexer-bin,test-endpoints",
             "--bin",
             "dynamo-kv-indexer",
             "--",
@@ -505,6 +531,10 @@ class MockerProcess:
             deallocate_ports(self._zmq_kv_events_ports)
             logger.info(f"Deallocated ZMQ KV event ports {self._zmq_kv_events_ports}")
             self._zmq_kv_events_ports = []
+        if self._zmq_replay_ports:
+            deallocate_ports(self._zmq_replay_ports)
+            logger.info(f"Deallocated ZMQ replay ports {self._zmq_replay_ports}")
+            self._zmq_replay_ports = []
 
 
 class DisaggMockerProcess:
@@ -862,6 +892,7 @@ def test_indexers_sync(
         store_backend=store_backend,
         request_plane=request_plane,
         zmq_kv_events=True,
+        zmq_replay=True,
         standalone_indexer=True,
         model_name=MODEL_NAME,
     ) as mockers:
@@ -884,6 +915,7 @@ def test_indexers_sync(
             durable_kv_events=durable_kv_events,
             standalone_indexer_url=mockers.standalone_indexer_url,
             standalone_indexer_b_url=mockers.standalone_indexer_b_url,
+            test_zmq_replay=True,
         )
 
         logger.info("Indexers sync test completed successfully")

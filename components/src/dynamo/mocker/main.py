@@ -218,7 +218,9 @@ async def launch_workers(args: argparse.Namespace, extra_engine_args_path: Path)
         base_engine_args = json.load(f)
 
     needs_per_worker_args = bool(
-        args.bootstrap_ports_list or args.zmq_kv_events_ports_list
+        args.bootstrap_ports_list
+        or args.zmq_kv_events_ports_list
+        or args.zmq_replay_ports_list
     )
 
     for worker_id in range(args.num_workers):
@@ -242,6 +244,8 @@ async def launch_workers(args: argparse.Namespace, extra_engine_args_path: Path)
                 worker_args["zmq_kv_events_port"] = args.zmq_kv_events_ports_list[
                     worker_id
                 ]
+            if args.zmq_replay_ports_list:
+                worker_args["zmq_replay_port"] = args.zmq_replay_ports_list[worker_id]
             with tempfile.NamedTemporaryFile(
                 mode="w", suffix=".json", delete=False
             ) as tmp:

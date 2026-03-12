@@ -33,6 +33,8 @@ pub struct RegisterRequest {
     pub block_size: u32,
     #[serde(default)]
     pub dp_rank: Option<u32>,
+    #[serde(default)]
+    pub replay_endpoint: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -85,14 +87,19 @@ async fn register(
     State(state): State<Arc<AppState>>,
     Json(req): Json<RegisterRequest>,
 ) -> impl IntoResponse {
-    match state.registry.register(
-        req.instance_id,
-        req.endpoint,
-        req.dp_rank.unwrap_or(0),
-        req.model_name,
-        req.tenant_id,
-        req.block_size,
-    ) {
+    match state
+        .registry
+        .register(
+            req.instance_id,
+            req.endpoint,
+            req.dp_rank.unwrap_or(0),
+            req.model_name,
+            req.tenant_id,
+            req.block_size,
+            req.replay_endpoint,
+        )
+        .await
+    {
         Ok(()) => (
             StatusCode::CREATED,
             Json(serde_json::json!({"status": "ok"})),
@@ -248,6 +255,49 @@ async fn query_by_hash(
     }
 }
 
+#[cfg(feature = "test-endpoints")]
+#[derive(Deserialize)]
+struct ListenerControlRequest {
+    instance_id: WorkerId,
+    #[serde(default)]
+    dp_rank: Option<u32>,
+}
+
+#[cfg(feature = "test-endpoints")]
+async fn test_pause_listener(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ListenerControlRequest>,
+) -> impl IntoResponse {
+    match state
+        .registry
+        .pause_listener(req.instance_id, req.dp_rank.unwrap_or(0))
+    {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"status": "ok"}))),
+        Err(e) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": e.to_string()})),
+        ),
+    }
+}
+
+#[cfg(feature = "test-endpoints")]
+async fn test_resume_listener(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ListenerControlRequest>,
+) -> impl IntoResponse {
+    match state
+        .registry
+        .resume_listener(req.instance_id, req.dp_rank.unwrap_or(0))
+        .await
+    {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"status": "ok"}))),
+        Err(e) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": e.to_string()})),
+        ),
+    }
+}
+
 #[derive(Deserialize)]
 struct PeerRequest {
     url: String,
@@ -319,7 +369,7 @@ async fn dump_events(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 }
 
 pub fn create_router(state: Arc<AppState>) -> Router {
-    Router::new()
+    let router = Router::new()
         .route("/register", post(register))
         .route("/unregister", post(unregister))
         .route("/workers", get(list_workers))
@@ -328,6 +378,12 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/dump", get(dump_events))
         .route("/register_peer", post(register_peer))
         .route("/deregister_peer", post(deregister_peer))
-        .route("/peers", get(list_peers))
-        .with_state(state)
+        .route("/peers", get(list_peers));
+
+    #[cfg(feature = "test-endpoints")]
+    let router = router
+        .route("/test/pause_listener", post(test_pause_listener))
+        .route("/test/resume_listener", post(test_resume_listener));
+
+    router.with_state(state)
 }
