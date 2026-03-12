@@ -111,21 +111,29 @@ def _collect_stream_chunks(response: requests.Response) -> list[dict[str, Any]]:
 
     chunks: list[dict[str, Any]] = []
     saw_done = False
+    comments: list[str] = []
     for line in response.iter_lines(decode_unicode=True):
         if not line:
             continue
+        # SSE comments (: prefix) carry error details from the Rust frontend
+        if line.startswith(":"):
+            comments.append(line[1:].strip())
+            continue
         if line.startswith("event: "):
-            # Collect subsequent data line(s) for diagnostics
             event_type = line[len("event: ") :]
-            remaining = list(response.iter_lines(decode_unicode=True))
-            data_lines = [
-                ln for ln in remaining if ln.startswith("data: ")
-            ]
-            detail = data_lines[0] if data_lines else "(no data line)"
-            raise AssertionError(
-                f"SSE event '{event_type}': {detail}"
-            )
+            if event_type == "error":
+                detail = "; ".join(comments) if comments else "(no comment)"
+                remaining = list(response.iter_lines(decode_unicode=True))
+                data_lines = [
+                    ln for ln in remaining if ln.startswith("data: ")
+                ]
+                if data_lines:
+                    detail += f" | {data_lines[0]}"
+                raise AssertionError(f"SSE error: {detail}")
+            comments.clear()
+            continue
         assert line.startswith("data: "), f"Unexpected SSE line: {line!r}"
+        comments.clear()
         payload = line[len("data: ") :]
         if payload == "[DONE]":
             saw_done = True
