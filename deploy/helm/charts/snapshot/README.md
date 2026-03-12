@@ -1,177 +1,123 @@
 # Dynamo Snapshot Helm Chart
 
-> ⚠️ **Experimental Feature**: Dynamo Snapshot is currently in **beta/preview**. The DaemonSet runs in privileged mode to perform CRIU operations. See [Prerequisites](#prerequisites) for security considerations.
+> ⚠️ **Experimental Feature**: Dynamo Snapshot is currently in beta/preview. The DaemonSet runs in privileged mode to perform CRIU checkpoint and restore operations.
 
-This Helm chart deploys the checkpoint/restore infrastructure for NVIDIA Dynamo, including:
-- Persistent Volume Claim (PVC) for checkpoint storage
-- DaemonSet running the CRIU checkpoint agent
-- RBAC resources (ServiceAccount, Role, RoleBinding)
-- Seccomp profile for blocking io_uring syscalls
+This chart installs the namespace-scoped checkpoint/restore infrastructure used by Dynamo:
 
-**Note:**
-- Each namespace gets its own isolated checkpoint infrastructure with namespace-scoped RBAC
-- **Supports vLLM and SGLang backends** (TensorRT-LLM support planned)
+- `snapshot-agent` DaemonSet on GPU nodes
+- `snapshot-pvc` checkpoint storage, or wiring to an existing PVC
+- namespace-scoped RBAC
+- the seccomp profile required by CRIU
+
+Snapshot storage is namespace-local. Install this chart in every namespace where you want checkpoint and restore.
 
 ## Prerequisites
 
-⚠️ **Security Warning**: The Dynamo Snapshot DaemonSet runs in **privileged mode** with `hostPID`, `hostIPC`, and `hostNetwork` to perform CRIU checkpoint/restore operations. Workload pods do not need privileged mode. Only deploy in environments where a privileged DaemonSet is acceptable.
-
 - Kubernetes 1.21+
-- **x86_64 (amd64) nodes only** for the snapshot agent and placeholder images
-- GPU nodes with NVIDIA runtime (`nvidia` runtime class)
-- NVIDIA driver 580.xx or newer on the target GPU nodes
-- containerd runtime (for container inspection; CRIU is bundled in Dynamo Snapshot images)
-- NVIDIA Dynamo operator installed (cluster-wide or namespace-scoped)
-- RWX (ReadWriteMany) storage class for multi-node deployments
-- **Security clearance for privileged DaemonSet** (the Dynamo Snapshot agent runs privileged with hostPID/hostIPC/hostNetwork)
+- x86_64 GPU nodes
+- NVIDIA driver 580.xx or newer
+- containerd runtime
+- a cluster where a privileged DaemonSet with `hostPID`, `hostIPC`, and `hostNetwork` is acceptable
+- Dynamo Platform already installed, with operator checkpointing enabled
 
-## Installation
-
-> **Note:** The Dynamo Snapshot Helm chart is not yet published to a public Helm repository. For now, you must build and deploy from source.
-
-### Building from Source
-
-```bash
-# Set environment
-export NAMESPACE=my-team  # Your target namespace
-export DOCKER_SERVER=your-registry.com/  # Your container registry
-export IMAGE_TAG=latest
-
-# Build Dynamo Snapshot agent image (amd64 only)
-cd deploy/snapshot
-docker build --platform linux/amd64 --target agent -t $DOCKER_SERVER/snapshot-agent:$IMAGE_TAG .
-docker push $DOCKER_SERVER/snapshot-agent:$IMAGE_TAG
-cd -
-
-# Install Dynamo Snapshot chart with custom image
-helm install snapshot ./deploy/helm/charts/snapshot/ \
-  --namespace ${NAMESPACE} \
-  --create-namespace \
-  --set daemonset.image.repository=${DOCKER_SERVER}/snapshot-agent \
-  --set daemonset.image.tag=${IMAGE_TAG} \
-  --set daemonset.imagePullSecrets[0].name=your-registry-secret
-```
-
-## Configuration
-
-See `values.yaml` for all configuration options.
-
-### Key Configuration Options
-
-| Parameter | Description | Default |
-|-----------|-------------|---------|
-| `storage.type` | Storage type: `pvc` (only supported), `s3` and `oci` planned | `pvc` |
-| `storage.pvc.create` | Create a new PVC | `true` |
-| `storage.pvc.name` | PVC name (must match operator config) | `snapshot-pvc` |
-| `storage.pvc.size` | PVC size | `100Gi` |
-| `storage.pvc.storageClass` | Storage class name | `""` (default) |
-| `daemonset.image.repository` | DaemonSet image repository | `nvcr.io/nvidian/dynamo-dev/snapshot-agent` |
-| `daemonset.snapshotLogLevel` | Snapshot agent and nsrestore log level (`trace`, `debug`, `info`, `warn`, `error`) | `info` |
-| `daemonset.nodeSelector` | Node selector for GPU nodes | `nvidia.com/gpu.present: "true"` |
-| `config.checkpoint.criu.ghostLimit` | CRIU ghost file size limit in bytes | `536870912` (512MB) |
-| `config.checkpoint.criu.logLevel` | CRIU logging verbosity (0-4) | `4` |
-| `rbac.namespaceRestricted` | Use namespace-scoped RBAC | `true` |
-
-## Usage
-
-After installing this chart, enable checkpointing in your DynamoGraphDeployment:
+The platform/operator configuration must point at the same checkpoint storage that this chart installs:
 
 ```yaml
-apiVersion: nvidia.com/v1alpha1
-kind: DynamoGraphDeployment
-metadata:
-  name: my-model
-  namespace: my-team
-spec:
-  services:
-    worker:
-      checkpoint:
-        enabled: true
-        mode: auto
-        identity:
-          model: Qwen/Qwen3-0.6B
-          backendFramework: vllm
+dynamo-operator:
+  checkpoint:
+    enabled: true
+    storage:
+      type: pvc
+      pvc:
+        pvcName: snapshot-pvc
+        basePath: /checkpoints
 ```
 
-## Multi-Namespace Deployment
+Cross-node restore requires a shared `ReadWriteMany` storage class. The chart defaults to `storage.pvc.accessMode=ReadWriteMany`.
 
-To enable checkpointing in multiple namespaces, install this chart in each namespace:
+For better restore times, use a fast `ReadWriteMany` StorageClass for the checkpoint PVC.
+
+## Minimal Install
+
+This is the smallest Helm install that creates the checkpoint PVC and the DaemonSet:
 
 ```bash
-# Namespace A
-helm install snapshot nvidia/snapshot -n team-a
-
-# Namespace B
-helm install snapshot nvidia/snapshot -n team-b
+helm upgrade --install snapshot ./deploy/helm/charts/snapshot \
+  --namespace ${NAMESPACE} \
+  --create-namespace \
+  --set storage.pvc.create=true
 ```
 
-Each namespace will have its own isolated checkpoint storage.
+If your cluster does not use a default storage class, also set `storage.pvc.storageClass`.
 
-## Verification
+Keep `storage.pvc.accessMode=ReadWriteMany` for this chart layout. The DaemonSet mounts the same PVC on each eligible node, so a shared `ReadWriteOnce` claim only works when the agent runs on one node.
+
+If you already have a PVC, keep the chart in "use existing PVC" mode:
+
+Do not set `storage.pvc.create=true` when reusing an existing checkpoint PVC.
 
 ```bash
-# Check PVC
-kubectl get pvc snapshot-pvc -n my-team
-
-# Check DaemonSet
-kubectl get daemonset -n my-team
-
-# Check DaemonSet pods are running
-kubectl get pods -n my-team -l app.kubernetes.io/name=snapshot
+helm upgrade --install snapshot ./deploy/helm/charts/snapshot \
+  --namespace ${NAMESPACE} \
+  --create-namespace \
+  --set storage.pvc.create=false \
+  --set storage.pvc.name=my-snapshot-pvc
 ```
 
-## Uninstallation
+## Verify
 
 ```bash
-helm uninstall snapshot -n my-team
+kubectl get pvc snapshot-pvc -n ${NAMESPACE}
+kubectl rollout status daemonset/snapshot-agent -n ${NAMESPACE}
+kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/name=snapshot -o wide
 ```
 
-**Note:** This will NOT delete the PVC by default. To delete the PVC:
+## Important Values
+
+| Parameter | Meaning | Default |
+|-----------|---------|---------|
+| `storage.pvc.create` | Create `snapshot-pvc` instead of using an existing PVC | `true` |
+| `storage.pvc.name` | PVC name used by the agent and by the operator config | `snapshot-pvc` |
+| `storage.pvc.size` | Requested PVC size | `1Ti` |
+| `storage.pvc.storageClass` | Storage class name | `""` |
+| `storage.pvc.accessMode` | Access mode for the checkpoint PVC | `ReadWriteMany` |
+| `storage.pvc.basePath` | Checkpoint root inside the PVC | `/checkpoints` |
+| `daemonset.image.repository` | Snapshot agent image repository | `nvcr.io/nvidia/ai-dynamo/snapshot-agent` |
+| `daemonset.image.tag` | Snapshot agent image tag | `1.0.0` |
+| `daemonset.imagePullSecrets` | Image pull secrets for the agent | `[{name: ngc-secret}]` |
+
+See [values.yaml](./values.yaml) for the complete configuration surface.
+
+## End To End
+
+Once the chart is installed, use the snapshot guide to deploy a snapshot-capable `DynamoGraphDeployment`, wait for the checkpoint to become ready, and then scale the worker to verify restore:
+
+- [Snapshot](../../../../docs/kubernetes/snapshot.md)
+
+## Uninstall
 
 ```bash
-kubectl delete pvc snapshot-pvc -n my-team
+helm uninstall snapshot -n ${NAMESPACE}
+```
+
+The chart does not remove checkpoint data automatically. Delete the PVC yourself if you want to remove stored checkpoints:
+
+```bash
+kubectl delete pvc snapshot-pvc -n ${NAMESPACE}
 ```
 
 ## Troubleshooting
 
-### DaemonSet pods not starting
-
-Check if GPU nodes have the correct labels and runtime class:
+If `snapshot-agent` does not schedule:
 
 ```bash
 kubectl get nodes -l nvidia.com/gpu.present=true
-kubectl describe node <node-name> | grep -A 5 "Runtime Class"
+kubectl describe daemonset snapshot-agent -n ${NAMESPACE}
+kubectl logs -n ${NAMESPACE} -l app.kubernetes.io/name=snapshot --all-containers
 ```
 
-If nodes don't have the `nvidia.com/gpu.present` label, you can add it:
+If checkpoint creation never becomes ready, verify all three pieces line up:
 
-```bash
-kubectl label node <node-name> nvidia.com/gpu.present=true
-```
-
-### Checkpoint job fails
-
-Check DaemonSet logs:
-
-```bash
-kubectl logs -n my-team -l app.kubernetes.io/name=snapshot
-```
-
-### PVC not mounting
-
-Check PVC status and events:
-
-```bash
-kubectl describe pvc snapshot-pvc -n my-team
-```
-
-Ensure your storage class supports `ReadWriteMany` access mode for multi-node deployments.
-
-## Related Documentation
-
-- [Dynamo Snapshot Overview](../../../../docs/kubernetes/snapshot/README.md) - Dynamo Snapshot architecture and use cases
-- [Dynamo Snapshot with Dynamo Platform](../../../../docs/kubernetes/snapshot/dynamo.md) - Integration guide
-
-## License
-
-Apache License 2.0
+- the operator has `dynamo-operator.checkpoint.enabled=true`
+- the operator PVC name and base path match the snapshot chart values
+- the workload uses a snapshot-capable worker image and command

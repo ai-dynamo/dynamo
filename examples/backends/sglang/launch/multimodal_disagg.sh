@@ -60,7 +60,7 @@ if [[ -n "$SERVED_MODEL_NAME" ]]; then
 fi
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
-print_launch_banner --multimodal "Launching Multimodal E/P/D Workers" "$MODEL_NAME" "$HTTP_PORT"
+print_launch_banner --multimodal "Launching Disaggregated Multimodal E/P/D (3 GPUs)" "$MODEL_NAME" "$HTTP_PORT"
 
 # run ingress
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)

@@ -18,6 +18,7 @@ from dynamo.common.multimodal.embedding_transfer import (
     AbstractEmbeddingReceiver,
     LocalEmbeddingReceiver,
 )
+from dynamo.common.utils.time_section import time_and_log_code_section
 from dynamo.runtime import Client
 
 from .encode_utils import get_embedding_hash
@@ -163,41 +164,48 @@ async def _fetch_from_encode_workers(
         multimodal_inputs=[],
     )
 
-    batch: List[MultiModalGroup] = []
-    encode_response_streams = []
-    for url in image_urls:
-        multimodal_input = MultiModalInput()
-        multimodal_input.image_url = url
-        batch.append(MultiModalGroup(multimodal_input=multimodal_input))
+    with time_and_log_code_section(f"[PREFILL] request: {request_id} dispatch encode"):
+        batch: List[MultiModalGroup] = []
+        encode_response_streams = []
+        for url in image_urls:
+            multimodal_input = MultiModalInput()
+            multimodal_input.image_url = url
+            batch.append(MultiModalGroup(multimodal_input=multimodal_input))
 
-        if len(batch) >= encode_batch_size:
+            if len(batch) >= encode_batch_size:
+                encode_request.multimodal_inputs = batch
+                payload = encode_request.model_dump_json()
+                encode_response_streams.append(
+                    await encode_worker_client.round_robin(payload)  # type: ignore[arg-type]
+                )
+                batch = []
+
+        if batch:
             encode_request.multimodal_inputs = batch
             payload = encode_request.model_dump_json()
             encode_response_streams.append(
                 await encode_worker_client.round_robin(payload)  # type: ignore[arg-type]
             )
-            batch = []
 
-    if batch:
-        encode_request.multimodal_inputs = batch
-        payload = encode_request.model_dump_json()
-        encode_response_streams.append(
-            await encode_worker_client.round_robin(payload)  # type: ignore[arg-type]
-        )
+    with time_and_log_code_section(
+        f"[PREFILL] request: {request_id} receive encode responses"
+    ):
+        multimodal_groups: List[MultiModalGroup] = []
+        for stream in encode_response_streams:
+            async for response in stream:
+                logger.debug(f"Received response from encode worker: {response}")
+                output = vLLMMultimodalRequest.model_validate_json(response.data())  # type: ignore[attr-defined]
+                if output.multimodal_inputs:
+                    multimodal_groups.extend(output.multimodal_inputs)
 
-    multimodal_groups: List[MultiModalGroup] = []
-    for stream in encode_response_streams:
-        async for response in stream:
-            logger.debug(f"Received response from encode worker: {response}")
-            output = vLLMMultimodalRequest.model_validate_json(response.data())  # type: ignore[attr-defined]
-            if output.multimodal_inputs:
-                multimodal_groups.extend(output.multimodal_inputs)
-
-    tasks = [
-        asyncio.create_task(receiver.receive_embeddings(group.serialized_request))
-        for group in multimodal_groups
-    ]
-    loaded = await asyncio.gather(*tasks)
+    with time_and_log_code_section(
+        f"[PREFILL] request: {request_id} receive embeddings"
+    ):
+        tasks = [
+            asyncio.create_task(receiver.receive_embeddings(group.serialized_request))
+            for group in multimodal_groups
+        ]
+        loaded = await asyncio.gather(*tasks)
 
     is_local = isinstance(receiver, LocalEmbeddingReceiver)
     pending: _PendingRelease | None = None if is_local else _PendingRelease(receiver)
@@ -302,15 +310,18 @@ async def load_multimodal_embeddings(
     )
 
     multi_modal_data: Dict[str, Any] = defaultdict(list)
-    for group in groups:
-        assert group.loaded_embedding is not None
-        _accumulate_embeddings(
-            multi_modal_data,
-            model,
-            embeddings_dtype,
-            group.loaded_embedding,
-            group.image_grid_thw,
-        )
+    with time_and_log_code_section(
+        f"[PREFILL] request: {request_id} accumulate embeddings"
+    ):
+        for group in groups:
+            assert group.loaded_embedding is not None
+            _accumulate_embeddings(
+                multi_modal_data,
+                model,
+                embeddings_dtype,
+                group.loaded_embedding,
+                group.image_grid_thw,
+            )
 
     if pending is not None:
         # Multi-image: torch.cat in _accumulate_embeddings already created
