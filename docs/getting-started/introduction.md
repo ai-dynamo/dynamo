@@ -7,38 +7,36 @@ sidebar-title: Introduction
 
 # Introduction
 
-Dynamo is NVIDIA's high-throughput, low-latency inference framework, designed to serve generative AI in distributed environments. This page provides an overview of design principles, performance benefits, and production-grade features of Dynamo.
+Dynamo is NVIDIA's high-throughput, low-latency inference framework, designed to serve generative AI workloads in distributed environments. This page gives an overview of Dynamo's design principles, performance benefits, and production-grade features.
 
 > [!TIP]
 > Looking to get started right away? See the [Quickstart](quickstart.md) to install and run Dynamo in minutes.
 
-![Dynamo layer stack](../assets/img/intro-layer-stack.svg)
-
 ## Why Dynamo?
 
-Inference engines optimize the GPU. Dynamo optimizes the system around them.
+Inference engines optimize the GPU; Dynamo optimizes the system around them.
 
-- **System-level optimization on top of any engine** -- Engines optimize the single-GPU forward pass. Dynamo adds the distributed layer: disaggregated serving, smart routing, KV cache management across memory tiers, and auto-scaling.
-- **Composable performance techniques** -- Three techniques (disaggregated serving, KV-aware routing, KV cache offloading) each deliver significant improvements on their own and compound when composed together.
-- **Engine-agnostic** -- Works with SGLang, TensorRT-LLM, and vLLM. Swap engines without changing serving infrastructure. Extending to Intel XPU and AMD hardware.
-- **Production-ready at scale** -- Full lifecycle beyond serving: automatic configuration (AIConfigurator), runtime auto-scaling (Planner), topology-aware gang scheduling (Grove), fault tolerance, and observability.
+- **System-level optimization on top of any engine** -- Inference engines optimize the single-GPU forward pass. Dynamo adds the distributed layer: disaggregated serving, smart routing, KV cache management across memory tiers, and auto-scaling.
+- **Composable performance improvement techniques** -- The techniques, disaggregated serving, KV cache-aware routing, and KV cache offloading, each improve performance on their own; using them together yields compounding gains.
+- **Engine-agnostic** -- Works with vLLM, SGLang, and TensorRT-LLM. Swap engines without changing your serving infrastructure. Extending support for Intel XPU and AMD hardware.
+- **Production-ready at scale** -- Dynamo covers the full deployment lifecycle: automatic configuration (AIConfigurator), runtime auto-scaling (Planner), topology-aware gang scheduling (Grove), fault tolerance, and observability.
 - **Modular adoption** -- Start with one component (e.g., just the Router for KV-aware routing on top of your existing engine). Adopt more as needed. Each component is independently installable via pip.
 
-# Design Principles
+## Design Principles
 
-## Systematic Approach to AI Inference
+### Strong Foundations for AI Inference
 
-Dynamo takes a systematic approach to maximizing inference performance. Instead of leveraging only performance optimization from inference engines, Dynamo aims to augment macro system-level optimization to inference engines. To provide such optimizations, Dynamo took the approach from operating systems to lay down foundations for scheduling, memory management, and data transfer. Once these building blocks are in place, Dynamo can readily support any future technology that unlocks performance at the system level.
+Dynamo adds system-level optimizations on top of inference engines. To provide such optimizations, Dynamo takes an operating systems approach by laying down the foundations for scheduling, memory management, and data transfer. These foundations allow Dynamo to evolve as new system-level performance techniques emerge.
 
-One of the motivations for creating an operating system for inference was to support disaggregated serving. Disaggregated serving is a simple yet powerful technique to separate prefill and decode phases of LLMs to assign them on different devices. Disaggregated prefill and decode phases can be scaled independently with appropriate parallelism to unlock significant performance gains as LLM deployment scales to multi-node.
+One of the motivations for Dynamo's system-level design was to support disaggregated serving: running prefill and decode on different devices so each can be scaled and parallelized independently. Disaggregated serving required three capabilities: (1) scheduling to assign prefill and decode phases without interference, (2) memory management for KV cache offloading and onboarding, and (3) low-latency data transfer to move KV cache between nodes and across the memory hierarchy.
 
 ![Dynamo foundations: scheduling, memory management, and data transfer](../assets/img/intro-foundations.svg)
 
-To facilitate disaggregated serving, developers need a reliable way to 1) schedule prefill and decode to avoid interference, 2) manage KV cache offloading and onboarding, and 3) transfer KV cache between multiple nodes and across the memory hierarchy with low latency. Dynamo's effort to unlock disaggregated serving led to this system design thinking, and the three foundations will be further leveraged to support the latest innovations such as diffusion, RL, and agents.
+Dynamo's foundations first addressed disaggregated serving, then extended to EPD disaggregation for multimodal, and now support workloads such as diffusion, RL, and agents.
 
-## Modular but Well-Integrated Ecosystem
+### Modular but Well-Integrated Ecosystem
 
-Another key design principle of Dynamo is modularity. Dynamo aims to lessen the burden of replacing an existing stack in production. It offers modular and standalone components as Rust crates and pip wheels. For example, the three foundations of Dynamo for scheduling (Dynamo), memory management (KV Block Manager), and data transfer (NIXL) are independently pip installable:
+Dynamo is designed to reduce the burden of replacing an existing stack in production. It offers modular, standalone components as Rust crates and pip wheels. For example, the three foundations of Dynamo for scheduling (Dynamo), memory management (KV Block Manager), and data transfer (NIXL) are each independently installable:
 
 ```bash
 pip install ai-dynamo
@@ -49,7 +47,7 @@ pip install nixl
 > [!NOTE]
 > Pre-built containers with all dependencies are also available. See [Release Artifacts](../reference/release-artifacts.md) for container images.
 
-Additional modular components of Dynamo are the following, and the ecosystem will continue to grow in the future:
+The Dynamo ecosystem includes these additional modular components, and will continue to grow over time:
 
 | Category | Products | Description |
 | :--- | :--- | :--- |
@@ -65,15 +63,15 @@ Additional modular components of Dynamo are the following, and the ecosystem wil
 | | AITune | Given a model or pipeline, searches for best backend to deploy with (e.g., TensorRT, Torch.compile, etc.) (coming soon) |
 | | Flex Tensor | Stream weights to GPUs from host memory to run very large language models in GPUs with limited memory capacity (coming soon) |
 
-These components are modular, but they are designed to integrate well together as a unified product family. Any future product components will follow the same design principle.
+These components are modular but are designed to work together as a unified family. New components will follow the same design principle.
 
-## Vendor-Agnostic Ecosystem Enablement
+### Vendor-Agnostic Ecosystem Enablement
 
-The last design principle is vendor agnosticism. Dynamo is ***not designed to vendor lock-in***. Dynamo will always strive to enable the entire AI ecosystem and provide functionalities required from developers even if they require integration with 3rd party components.
+Dynamo is ***not designed for vendor lock-in***. Dynamo aims to enable the broader AI ecosystem and to provide the functionality developers need, such as integrations with third-party components.
 
-From the beginning, Dynamo is designed to support all LLM inference engines (SGLang, TRT-LLM, and vLLM). Support for additional engines is planned to enable more developer use cases.
+From the beginning, Dynamo is designed to support all LLM inference engines (vLLM, SGLang, and TensorRT-LLM). Support for additional engines is planned to enable more developer use cases.
 
-Non-NVIDIA hardware support is also available. Dynamo partners with HW vendors such as Intel to extend HW support coverage as well as enabling HW support for AMD.
+**Support for non-NVIDIA hardware** is also available: Dynamo is working with HW vendors such as Intel and AMD to extend hardware support.
 
 The full list of supported ecosystem components:
 
@@ -81,11 +79,11 @@ The full list of supported ecosystem components:
 | :--- | :--- |
 | Inference engines | SGLang, TensorRT-LLM, vLLM |
 | Kubernetes | Inference gateway |
-| Memory management | Dynamo KV Block Manager, [LMCache](https://docs.nvidia.com/dynamo/dev/integrations/lmcache), [SGLang HiCache](https://docs.nvidia.com/dynamo/dev/integrations/sglang-hicache), [FlexKV](https://docs.nvidia.com/dynamo/dev/integrations/flexkv) |
-| Networking and storage | Mooncake, DOCA NetIO, GDS, POSIX, S3, 3FS ([supported via NIXL](https://docs.nvidia.com/dynamo/dev/design-docs/component-design/kvbm-design)) |
+| Memory management | Dynamo KV Block Manager, [LMCache](../integrations/lmcache-integration.md), [SGLang HiCache](../integrations/sglang-hicache.md), [FlexKV](../integrations/flexkv-integration.md) |
+| Networking and storage | Mooncake, DOCA NetIO, GDS, POSIX, S3, 3FS ([supported via NIXL](../design-docs/kvbm-design.md)) |
 | Multi-HW | Intel XPU, AMD |
 
-# Performance
+## Performance
 
 Currently for LLMs, Dynamo offers composability of three powerful techniques: disaggregated serving, KV cache aware routing, and KV cache offloading. NIXL provides the low-latency data transfer layer that enables KV cache movement between nodes for disaggregated serving at scale.
 
@@ -97,7 +95,7 @@ In the Design Principles section, we introduced the concept of disaggregated ser
 
 Furthermore, when these three techniques are composed together, they yield compounding benefits as shown in the following diagram.
 
-![Performance composability of disaggregated serving, KV cache aware routing, and KV cache offloading](../assets/img/intro-perf-composition.svg)
+![Performance composability of disaggregated serving, KV cache aware routing, and KV cache offloading](../assets/img/intro-perf.svg)
 
 - **Disaggregated serving + KV cache aware routing** -- KV cache aware routing can load balance for compute on prefill and memory on decode, which can lead to optimizing for latency and throughput simultaneously.
 - **Disaggregated serving + KV cache offloading** -- KV cache offloading results in faster TTFT as mentioned, and prefill workers can be reduced to save TCO.
@@ -106,17 +104,15 @@ Furthermore, when these three techniques are composed together, they yield compo
 > [!TIP]
 > Ready to try these techniques? See [Dynamo recipes](https://github.com/ai-dynamo/dynamo/tree/main/recipes) for step-by-step deployment examples that compose disaggregated serving, routing, and offloading.
 
-# From Configuration to Production-Grade Deployment
+## From Configuration to Production-Grade Deployment
 
-![Dynamo architecture](../assets/img/intro-architecture.svg)
-
-## Finding Best Configurations Under 30 Seconds with AIConfigurator
+### Finding Best Configurations Under 30 Seconds with AIConfigurator
 
 In addition to the strong performance benefits, Dynamo strives to ease the pain of configuration to production. Finding best-performing prefill and decode parallelism configuration for disaggregated serving will take days when determined by sweeping configs on the target GPU. This problem is intensified as the deployment scales.
 
 Dynamo offers [AIConfigurator](https://github.com/ai-dynamo/aiconfigurator/), which can provide the best disaggregated serving configurations in less than 30 seconds and show the projected performance benefit compared to aggregated serving. Dynamo now uses AIConfigurator in its Kubernetes Custom Resource Definition (CRD), Dynamo Graph Deployment Request (DGDR), to allow users to select best deployment options leveraging automatically generated configs via AIConfigurator.
 
-## Auto-Adjusting Deployment Based on SLA with Planner
+### Auto-Adjusting Deployment Based on SLA with Planner
 
 Once the offline configuration is found with AIConfigurator or DGDR, developers can deploy their desired model into production. However, the production traffic can vary greatly online, and static configuration determined offline will not be able to adequately handle spikes in traffic.
 
@@ -124,7 +120,7 @@ Dynamo offers [Planner](../design-docs/planner-design.md) to circumvent this pro
 
 Recently, Planner was expanded to deal with even more sophisticated scenarios such as drastically varying Input Sequence Length (ISL) given the same SLA. See the [Planner documentation](../components/planner/planner-guide.md) for more details.
 
-## Applying Topology-Aware Hierarchical Gang Scheduling with Grove
+### Applying Topology-Aware Hierarchical Gang Scheduling with Grove
 
 When Planner decides to autoscale, developers need a way to effectively scale workers independently and hierarchically. Especially for prefill/decode disaggregation, prefill and decode workers need to be scaled independently to meet the specified SLA, and they need to be scheduled in physical proximity to each other for best performance.
 
@@ -140,7 +136,7 @@ Grove enables:
 
 These features are crucial for deploying and scaling inference at data center scale for optimal performance.
 
-## Ensuring Fault Tolerance for LLMs
+### Ensuring Fault Tolerance for LLMs
 
 Kubernetes comes with some fault tolerance functionalities, but LLM deployment requires specialized fault tolerance and resiliency. Dynamo provides comprehensive fault tolerance mechanisms across multiple layers to ensure reliable LLM inference in production deployments:
 
@@ -149,11 +145,11 @@ Kubernetes comes with some fault tolerance functionalities, but LLM deployment r
 - **Request Cancellation** -- Dynamo supports canceling in-flight requests through the AsyncEngineContext trait, which provides graceful stop signals and hierarchical cancellation propagation through request chains.
 - **Request Rejection (Load Shedding)** -- When workers are overloaded, Dynamo rejects new requests with HTTP 503 responses based on configurable thresholds for KV cache utilization and prefill tokens.
 
-## Observability
+### Observability
 
 Dynamo provides built-in metrics, distributed tracing, and logging for monitoring inference deployments. See the [Observability Guide](../observability/README.md) for setup details.
 
-# What's Next?
+## What's Next?
 
 Explore the following resources to go deeper:
 
