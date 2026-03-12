@@ -22,6 +22,7 @@ members = [
     "lib/velo-common",
     "lib/velo-transports",
     "lib/velo-events",
+    "lib/tui",
 ]
 resolver = "3"
 
