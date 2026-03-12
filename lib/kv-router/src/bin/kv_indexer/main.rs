@@ -97,9 +97,9 @@ async fn main() -> anyhow::Result<()> {
 
     let registry = WorkerRegistry::new(cli.threads);
 
-    // Register initial workers — connects ZMQ sockets but listeners wait
-    // for the ready signal. This ensures ZMQ subscription handshakes begin
-    // before P2P recovery fetches the dump from a peer.
+    // Register initial workers — connects ZMQ SUB sockets (subscription
+    // handshakes begin immediately) and spawns listener tasks that wait for
+    // the ready signal. register() returns as soon as the socket is connected.
     if let Some(ref workers_str) = cli.workers {
         let block_size = cli.block_size.ok_or_else(|| {
             anyhow::anyhow!("--block-size is required when --workers is specified")

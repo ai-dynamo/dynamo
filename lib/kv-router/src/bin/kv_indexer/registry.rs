@@ -178,7 +178,7 @@ impl WorkerRegistry {
         let addr = endpoint.clone();
         let ready = self.ready_rx();
 
-        // Await connection setup — the recv loop is spawned inside.
+        // Connect the ZMQ socket and spawn the listener task (non-blocking).
         run_zmq_listener(
             instance_id,
             dp_rank,

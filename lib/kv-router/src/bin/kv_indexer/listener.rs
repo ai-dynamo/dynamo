@@ -128,12 +128,12 @@ async fn replay_gap(
 // detection works regardless, but replay semantics may differ if a single
 // socket multiplexes dp_ranks.
 
-/// Connect the ZMQ SUB (and optional DEALER replay) sockets, wait for the
-/// ready signal, then spawn the recv loop as a background task.
+/// Connect the ZMQ SUB socket, then spawn a background task that waits for
+/// the ready signal before entering the recv loop.
 ///
-/// The function returns only after the sockets are connected and the ready
-/// signal has fired, so callers know the listener is fully wired before they
-/// expose the worker via HTTP.
+/// Returns once the SUB socket is connected (subscription handshake begins
+/// immediately in the background). The ready gate and recv loop run in a
+/// spawned task so `register()` is never blocked waiting for `signal_ready()`.
 #[expect(clippy::too_many_arguments)]
 pub async fn run_zmq_listener(
     worker_id: WorkerId,
@@ -142,7 +142,7 @@ pub async fn run_zmq_listener(
     block_size: u32,
     indexer: Indexer,
     cancel: CancellationToken,
-    mut ready: watch::Receiver<bool>,
+    ready: watch::Receiver<bool>,
     replay_endpoint: Option<String>,
     watermark: Arc<AtomicU64>,
 ) {
@@ -160,6 +160,35 @@ pub async fn run_zmq_listener(
         return;
     }
 
+    // Spawn the ready-wait + recv loop so the caller returns immediately.
+    // The ZMQ subscription handshake proceeds in the background while P2P
+    // recovery runs; once signal_ready() fires the recv loop starts draining
+    // any buffered messages.
+    tokio::spawn(zmq_wait_ready_then_recv(
+        worker_id,
+        dp_rank,
+        block_size,
+        indexer,
+        cancel,
+        ready,
+        socket,
+        replay_endpoint,
+        watermark,
+    ));
+}
+
+#[expect(clippy::too_many_arguments)]
+async fn zmq_wait_ready_then_recv(
+    worker_id: WorkerId,
+    dp_rank: u32,
+    block_size: u32,
+    indexer: Indexer,
+    cancel: CancellationToken,
+    mut ready: watch::Receiver<bool>,
+    socket: SubSocket,
+    replay_endpoint: Option<String>,
+    watermark: Arc<AtomicU64>,
+) {
     // Wait for the ready signal before entering the recv loop.
     // During P2P recovery, this delay lets the recovery code fetch the dump
     // from a peer while ZMQ subscription handshakes complete in the background.
@@ -197,8 +226,7 @@ pub async fn run_zmq_listener(
         }
     }
 
-    // Spawn the recv loop so the caller isn't blocked.
-    tokio::spawn(zmq_recv_loop(
+    zmq_recv_loop(
         worker_id,
         dp_rank,
         block_size,
@@ -207,7 +235,8 @@ pub async fn run_zmq_listener(
         socket,
         replay_socket,
         watermark,
-    ));
+    )
+    .await;
 }
 
 #[expect(clippy::too_many_arguments)]
