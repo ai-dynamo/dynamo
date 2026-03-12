@@ -170,13 +170,12 @@ RUN --mount=type=bind,from=framework,source=/usr/lib,target=/mnt/usr_lib \
     ARCH_ALT=$([ "${TARGETARCH}" = "amd64" ] && echo "x86_64" || echo "aarch64") && \
     cp /mnt/usr_lib/${ARCH_ALT}-linux-gnu/libgomp.so* /usr/lib/${ARCH_ALT}-linux-gnu/
 
-# Set arch-dependent TensorRT / nvshmem library paths via profile.d script.
-# Sourced by nvidia_entrypoint.sh (ENV=$shinit_v2) and bash login shells.
+# Register arch-dependent TensorRT and nvshmem library paths with ldconfig so the
+# dynamic linker finds them in every execution context (docker run, exec, k8s, etc.)
 RUN ARCH_ALT=$([ "${TARGETARCH}" = "amd64" ] && echo "x86_64" || echo "aarch64") && \
-    printf '%s\n' \
-      "export TENSORRT_LIB_DIR=/usr/local/tensorrt/targets/${ARCH_ALT}-linux-gnu/lib" \
-      "export LD_LIBRARY_PATH=\"/usr/lib/${ARCH_ALT}-linux-gnu/nvshmem/13/:\${TENSORRT_LIB_DIR}:\${LD_LIBRARY_PATH}\"" \
-      > /etc/profile.d/90-trtllm-paths.sh
+    echo "/usr/local/tensorrt/targets/${ARCH_ALT}-linux-gnu/lib" > /etc/ld.so.conf.d/tensorrt.conf && \
+    echo "/usr/lib/${ARCH_ALT}-linux-gnu/nvshmem/13" >> /etc/ld.so.conf.d/tensorrt.conf && \
+    ldconfig
 
 # Switch to dynamo user
 USER dynamo
@@ -202,12 +201,17 @@ COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/whe
 COPY --chown=dynamo: --from=wheel_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
 
 ENV PATH="/usr/local/ucx/bin:${VIRTUAL_ENV}/bin:/opt/hpcx/ompi/bin:/usr/local/bin/etcd/:/usr/local/cuda/bin:/usr/local/cuda/nvvm/bin:$PATH"
+# Both arch paths are listed; the non-existent one is silently ignored by the linker.
 ENV LD_LIBRARY_PATH=\
 $NIXL_LIB_DIR:\
 $NIXL_PLUGIN_DIR:\
 /usr/local/ucx/lib:\
 /usr/local/ucx/lib/ucx:\
 /opt/hpcx/ompi/lib:\
+/usr/local/tensorrt/targets/x86_64-linux-gnu/lib:\
+/usr/local/tensorrt/targets/aarch64-linux-gnu/lib:\
+/usr/lib/x86_64-linux-gnu/nvshmem/13/:\
+/usr/lib/aarch64-linux-gnu/nvshmem/13/:\
 /opt/dynamo/venv/lib/python${PYTHON_VERSION}/site-packages/torch/lib:\
 /opt/dynamo/venv/lib/python${PYTHON_VERSION}/site-packages/torch_tensorrt/lib:\
 /usr/local/cuda/lib:\
