@@ -6,10 +6,10 @@ use std::sync::Arc;
 use anyhow::Result;
 use tokio_util::sync::CancellationToken;
 
-use dynamo_kv_router::ConcurrentRadixTree;
-use dynamo_kv_router::ThreadPoolIndexer;
-use dynamo_kv_router::indexer::{KvIndexer, KvIndexerInterface, KvIndexerMetrics};
-use dynamo_kv_router::protocols::{LocalBlockHash, OverlapScores, RouterEvent, WorkerId};
+use crate::ConcurrentRadixTree;
+use crate::ThreadPoolIndexer;
+use crate::indexer::{KvIndexer, KvIndexerInterface, KvIndexerMetrics};
+use crate::protocols::{LocalBlockHash, OverlapScores, RouterEvent, WorkerId};
 
 #[derive(Clone)]
 pub enum Indexer {
