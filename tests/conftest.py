@@ -141,7 +141,7 @@ def download_models(model_list=None, ignore_weights=False):
         model_list = TEST_MODELS
 
     # Check for HF_TOKEN in environment
-    hf_token = os.environ.get("HF_TOKEN")
+    hf_token = os.environ.get("HF_TOKEN", "").strip() or None
     if hf_token:
         logging.info("HF_TOKEN found in environment")
     else:
@@ -153,45 +153,50 @@ def download_models(model_list=None, ignore_weights=False):
 
     try:
         from huggingface_hub import snapshot_download
+    except ImportError as exc:
+        raise RuntimeError(
+            "huggingface_hub is required to pre-download models for tests"
+        ) from exc
 
-        for model_id in model_list:
-            logging.info(
-                f"Pre-downloading {'model (no weights)' if ignore_weights else 'model'}: {model_id}"
-            )
+    failures = []
+    for model_id in model_list:
+        logging.info(
+            f"Pre-downloading {'model (no weights)' if ignore_weights else 'model'}: {model_id}"
+        )
 
-            try:
-                if ignore_weights:
-                    # Weight file patterns to exclude (based on hub.rs implementation)
-                    weight_patterns = [
-                        "*.bin",
-                        "*.safetensors",
-                        "*.h5",
-                        "*.msgpack",
-                        "*.ckpt.index",
-                    ]
+        try:
+            if ignore_weights:
+                # Weight file patterns to exclude (based on hub.rs implementation)
+                weight_patterns = [
+                    "*.bin",
+                    "*.safetensors",
+                    "*.h5",
+                    "*.msgpack",
+                    "*.ckpt.index",
+                ]
 
-                    # Download everything except weight files
-                    snapshot_download(
-                        repo_id=model_id,
-                        token=hf_token,
-                        ignore_patterns=weight_patterns,
-                    )
-                else:
-                    # Download the full model snapshot (includes all files)
-                    snapshot_download(
-                        repo_id=model_id,
-                        token=hf_token,
-                    )
-                logging.info(f"Successfully pre-downloaded: {model_id}")
+                # Download everything except weight files
+                snapshot_download(
+                    repo_id=model_id,
+                    token=hf_token,
+                    ignore_patterns=weight_patterns,
+                )
+            else:
+                # Download the full model snapshot (includes all files)
+                snapshot_download(
+                    repo_id=model_id,
+                    token=hf_token,
+                )
+            logging.info(f"Successfully pre-downloaded: {model_id}")
 
-            except Exception as e:
-                logging.error(f"Failed to pre-download {model_id}: {e}")
-                # Don't fail the fixture - let individual tests handle missing models
+        except Exception as exc:
+            logging.error(f"Failed to pre-download {model_id}: {exc}")
+            failures.append(f"{model_id}: {exc}")
 
-    except ImportError:
-        logging.warning(
-            "huggingface_hub not installed. "
-            "Models will be downloaded during test execution."
+    if failures:
+        raise RuntimeError(
+            "Failed to pre-download required Hugging Face models:\n"
+            + "\n".join(failures)
         )
 
 
@@ -429,14 +434,7 @@ class NatsServer(ManagedProcess):
     def stop(self):
         """Stop the NATS server for restart. Does not release port or clean up fully."""
         _logger.info(f"Stopping NATS server on port {self.port}")
-        self._terminate_process_group()
-        proc = self.proc  # type: ignore[has-type]
-        if proc is not None:
-            try:
-                proc.wait(timeout=10)
-            except Exception as e:
-                _logger.warning(f"Error waiting for NATS process to stop: {e}")
-            self.proc = None
+        self._stop_started_processes()
 
     def start(self):
         """Restart a stopped NATS server with fresh state."""
