@@ -1097,6 +1097,60 @@ mod tests {
         mm.remove_prefill_activator("llama", "ns1");
     }
 
+    #[tokio::test]
+    async fn test_prefill_router_same_namespace_receivers_share_activation() {
+        let mm = ModelManager::new();
+        let rx1 = mm.register_prefill_router("llama", "ns1");
+        let rx2 = mm.register_prefill_router("llama", "ns1");
+
+        let rt = dynamo_runtime::Runtime::from_current().unwrap();
+        let drt = dynamo_runtime::DistributedRuntime::new(
+            rt.clone(),
+            dynamo_runtime::distributed::DistributedConfig::process_local(),
+        )
+        .await
+        .unwrap();
+        let endpoint = drt
+            .namespace("test-prefill-router")
+            .unwrap()
+            .component("prefill")
+            .unwrap()
+            .endpoint("generate");
+
+        mm.activate_prefill_router("llama", "ns1", endpoint.clone())
+            .unwrap();
+
+        assert_eq!(rx1.borrow().as_ref().map(|e| e.id()), Some(endpoint.id()));
+        assert_eq!(rx2.borrow().as_ref().map(|e| e.id()), Some(endpoint.id()));
+        rt.shutdown();
+    }
+
+    #[tokio::test]
+    async fn test_prefill_router_late_registration_observes_existing_endpoint() {
+        let mm = ModelManager::new();
+
+        let rt = dynamo_runtime::Runtime::from_current().unwrap();
+        let drt = dynamo_runtime::DistributedRuntime::new(
+            rt.clone(),
+            dynamo_runtime::distributed::DistributedConfig::process_local(),
+        )
+        .await
+        .unwrap();
+        let endpoint = drt
+            .namespace("test-prefill-router-late")
+            .unwrap()
+            .component("prefill")
+            .unwrap()
+            .endpoint("generate");
+
+        mm.activate_prefill_router("llama", "ns1", endpoint.clone())
+            .unwrap();
+
+        let rx = mm.register_prefill_router("llama", "ns1");
+        assert_eq!(rx.borrow().as_ref().map(|e| e.id()), Some(endpoint.id()));
+        rt.shutdown();
+    }
+
     #[test]
     fn test_model_namespace_key_format() {
         assert_eq!(

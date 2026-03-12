@@ -750,9 +750,8 @@ pub unsafe extern "C" fn create_routers(
                 let mut prefill_config = kv_router_config;
                 prefill_config.router_track_active_blocks = false;
 
-                // Create immediately-resolved channel to activate router
-                let (tx, rx) = tokio::sync::oneshot::channel();
-                let _ = tx.send(prefill_endpoint);
+                // Create an already-activated shared receiver for the discovered prefill endpoint.
+                let (_tx, rx) = tokio::sync::watch::channel(Some(prefill_endpoint));
 
                 PrefillRouter::new(
                     rx,

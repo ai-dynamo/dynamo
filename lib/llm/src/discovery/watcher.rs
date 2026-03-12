@@ -955,4 +955,19 @@ mod tests {
         mm.remove_model("model-b");
         assert!(is_model_type_list_empty(&mm, ModelType::Prefill));
     }
+
+    #[test]
+    fn test_worker_set_key_decode_includes_priority() {
+        assert_eq!(
+            worker_set_key("ns1", ModelType::Chat, 10),
+            "ns1:priority=10"
+        );
+        assert_eq!(worker_set_key("ns1", ModelType::Chat, 0), "ns1:priority=0");
+    }
+
+    #[test]
+    fn test_worker_set_key_prefill_ignores_priority() {
+        assert_eq!(worker_set_key("ns1", ModelType::Prefill, 10), "ns1:prefill");
+        assert_eq!(worker_set_key("ns1", ModelType::Prefill, 0), "ns1:prefill");
+    }
 }
