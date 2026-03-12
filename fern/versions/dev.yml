@@ -22,6 +22,8 @@ navigation:
     contents:
       - page: Quickstart
         path: ../pages-dev/getting-started/quickstart.md
+      - page: Contribution Guide
+        path: ../pages-dev/contribution-guide.md
   # ==================== Resources ====================
   - section: Resources
     contents:
@@ -33,8 +35,6 @@ navigation:
         path: ../pages-dev/reference/release-artifacts.md
       - page: Examples
         path: ../pages-dev/getting-started/examples.md
-      - page: Contribution Guide
-        path: ../pages-dev/contribution-guide.md
   # ==================== Kubernetes Deployment ====================
   - section: Kubernetes Deployment
     contents:
