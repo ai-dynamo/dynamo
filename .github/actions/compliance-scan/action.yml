@@ -40,7 +40,7 @@ runs:
 
     - name: Install dependencies
       shell: bash
-      run: pip install pyyaml
+      run: python -m pip install pyyaml
 
     - name: Pull container image
       shell: bash
