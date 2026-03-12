@@ -718,6 +718,8 @@ mod tests {
             frame_tx: frame_tx.clone(),
             cancel_token: cancel_token.clone(),
             attachment: true,
+            timeout_cancel: None,
+            timeout_duration: None,
         });
 
         // Spawn the reader pump

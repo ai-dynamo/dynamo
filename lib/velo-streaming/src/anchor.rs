@@ -21,8 +21,10 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
 };
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use dashmap::DashMap;
+use derive_builder::Builder;
 use futures::Stream;
 use serde::de::DeserializeOwned;
 use tokio_util::sync::CancellationToken;
@@ -79,6 +81,14 @@ pub(crate) struct AnchorEntry {
     /// `true` iff a sender is currently attached. The reader pump owns the
     /// transport receiver separately (not stored here).
     pub attachment: bool,
+
+    /// Cancels the inactivity timeout task when a sender attaches.
+    /// `None` if no timeout is configured for this anchor.
+    pub timeout_cancel: Option<CancellationToken>,
+
+    /// The configured timeout duration for this anchor. Stored so that
+    /// `detach` can respawn the timeout task with the same duration.
+    pub timeout_duration: Option<Duration>,
 }
 
 // ---------------------------------------------------------------------------
@@ -202,31 +212,58 @@ impl<T: DeserializeOwned> Stream for AnchorStream<T> {
 /// The `registry` is wrapped in an `Arc` so that control handlers (Phase 7)
 /// and the data-path pump (Phase 8) can hold a cheap clone of the registry
 /// reference without holding a reference to the whole `AnchorManager`.
+///
+/// Use [`AnchorManagerBuilder`] for optional configuration (e.g. `default_timeout`),
+/// or [`AnchorManager::new`] as a convenience constructor with no timeout.
+#[derive(Builder)]
+#[builder(pattern = "owned", build_fn(name = "build_inner", private))]
 pub struct AnchorManager {
     worker_id: velo_common::WorkerId,
+
+    #[builder(setter(skip), default = "AtomicU64::new(0)")]
     next_local_id: AtomicU64,
+
+    #[builder(setter(skip), default = "Arc::new(DashMap::new())")]
     pub(crate) registry: Arc<DashMap<u64, AnchorEntry>>,
+
     pub transport: Arc<dyn crate::transport::FrameTransport>,
+
+    /// Optional inactivity timeout for newly created anchors.
+    /// When set, `create_anchor` spawns a timeout task that auto-removes the
+    /// anchor if no sender attaches within this duration.
+    #[builder(default, setter(into, strip_option))]
+    pub default_timeout: Option<Duration>,
+}
+
+impl AnchorManagerBuilder {
+    /// Build the [`AnchorManager`].
+    pub fn build(self) -> Result<AnchorManager, AnchorManagerBuilderError> {
+        self.build_inner()
+    }
 }
 
 impl AnchorManager {
-    /// Create a new [`AnchorManager`] with the given worker identity and transport.
+    /// Convenience constructor with no default timeout.
+    ///
+    /// Equivalent to `AnchorManagerBuilder::default().worker_id(id).transport(t).build()`.
     pub fn new(
         worker_id: velo_common::WorkerId,
         transport: Arc<dyn crate::transport::FrameTransport>,
     ) -> Self {
-        Self {
-            worker_id,
-            next_local_id: AtomicU64::new(0),
-            registry: Arc::new(DashMap::new()),
-            transport,
-        }
+        AnchorManagerBuilder::default()
+            .worker_id(worker_id)
+            .transport(transport)
+            .build()
+            .expect("required fields provided")
     }
 
     /// Allocate a new anchor and return the handle (for control path) and stream (for consumer).
     ///
     /// Local IDs start at 1 and increment monotonically; ID 0 is reserved.
     /// A flume bounded channel (capacity 256) is created per anchor to deliver raw frame bytes.
+    ///
+    /// If `default_timeout` is configured, a background task is spawned that will
+    /// auto-remove the anchor if no sender attaches within the timeout duration.
     pub fn create_anchor<T>(&self) -> (StreamAnchorHandle, AnchorStream<T>) {
         // fetch_add returns the *old* value (starts at 0), so +1 gives us IDs starting at 1.
         let local_id = self.next_local_id.fetch_add(1, Ordering::Relaxed) + 1;
@@ -234,10 +271,17 @@ impl AnchorManager {
         let (frame_tx, frame_rx) = flume::bounded::<Vec<u8>>(256);
         let cancel_token = CancellationToken::new();
 
+        // Spawn timeout task if default_timeout is configured
+        let timeout_cancel = self.default_timeout.map(|timeout| {
+            Self::spawn_timeout_task(self.registry.clone(), local_id, timeout)
+        });
+
         let entry = AnchorEntry {
             frame_tx,
             cancel_token,
             attachment: false,
+            timeout_cancel,
+            timeout_duration: self.default_timeout,
         };
 
         self.registry.insert(local_id, entry);
@@ -245,6 +289,34 @@ impl AnchorManager {
         let handle = StreamAnchorHandle::pack(self.worker_id, local_id);
         let stream = AnchorStream::new(frame_rx, local_id, self.registry.clone());
         (handle, stream)
+    }
+
+    /// Spawn a background task that removes the anchor after `timeout` elapses.
+    ///
+    /// Returns a [`CancellationToken`] that cancels the task when triggered
+    /// (e.g. on attach, or when `set_timeout(None)` is called).
+    pub(crate) fn spawn_timeout_task(
+        registry: Arc<DashMap<u64, AnchorEntry>>,
+        local_id: u64,
+        timeout: Duration,
+    ) -> CancellationToken {
+        let tc = CancellationToken::new();
+        let tc_clone = tc.clone();
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = tc_clone.cancelled() => {
+                    // Attach or explicit cancel -- do nothing
+                }
+                _ = tokio::time::sleep(timeout) => {
+                    // Timeout expired -- remove anchor
+                    if let Some((_, entry)) = registry.remove(&local_id) {
+                        entry.cancel_token.cancel();
+                        // Dropping frame_tx closes the channel -> AnchorStream yields None
+                    }
+                }
+            }
+        });
+        tc
     }
 
     /// Remove an anchor from the registry and return its entry (if present).
@@ -287,6 +359,8 @@ impl AnchorManager {
     /// the shard lock, preventing TOCTOU races between concurrent attach attempts.
     /// The reader pump takes ownership of the transport receiver separately.
     ///
+    /// If a timeout task is running, it is cancelled (paused) on successful attach.
+    ///
     /// Returns `Err(AttachError::AlreadyAttached)` if a sender is already attached.
     /// Returns `Err(AttachError::AnchorNotFound)` if `local_id` is not in the registry.
     #[allow(dead_code)]
@@ -304,6 +378,10 @@ impl AnchorManager {
                     Err(AttachError::AlreadyAttached { handle })
                 } else {
                     entry.attachment = true;
+                    // Cancel the timeout task while attached (pause timer)
+                    if let Some(ref tc) = entry.timeout_cancel {
+                        tc.cancel();
+                    }
                     Ok(())
                 }
             }
@@ -312,17 +390,33 @@ impl AnchorManager {
 
     /// Clear the attachment flag on an anchor.
     ///
+    /// If the anchor has a configured `timeout_duration`, a new timeout task
+    /// is spawned (timer "resumes" by restarting from the full duration).
+    ///
     /// Returns `true` if the anchor was found and was previously attached.
     #[allow(dead_code)]
     pub(crate) fn detach(&self, local_id: u64) -> bool {
-        self.registry
+        // Phase 1: Clear attachment and read timeout_duration (drop DashMap ref)
+        let (was_attached, maybe_timeout) = self
+            .registry
             .get_mut(&local_id)
             .map(|mut entry| {
-                let was_attached = entry.attachment;
+                let was = entry.attachment;
                 entry.attachment = false;
-                was_attached
+                (was, entry.timeout_duration)
             })
-            .unwrap_or(false)
+            .unwrap_or((false, None));
+
+        // Phase 2: Respawn timeout task outside the DashMap borrow
+        if let Some(timeout) = maybe_timeout {
+            let tc = Self::spawn_timeout_task(self.registry.clone(), local_id, timeout);
+            // Store the new cancellation token back in the entry
+            if let Some(mut entry) = self.registry.get_mut(&local_id) {
+                entry.timeout_cancel = Some(tc);
+            }
+        }
+
+        was_attached
     }
 
     /// Attach a sender to an existing anchor, establishing the transport connection.
@@ -385,6 +479,11 @@ impl AnchorManager {
                     // Mark as attached (reader pump takes ownership of transport
                     // receiver separately).
                     entry.attachment = true;
+
+                    // Cancel the timeout task while attached (pause timer)
+                    if let Some(ref tc) = entry.timeout_cancel {
+                        tc.cancel();
+                    }
 
                     Ok(crate::sender::StreamSender::new(frame_tx, handle))
                 }
