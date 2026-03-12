@@ -40,7 +40,7 @@ def patch_memory_snapshot() -> None:
     def patched_measure(self):
         original_measure(self)
 
-        manager = get_gms_client_memory_manager()
+        manager = get_gms_client_memory_manager("weights")
         assert manager is not None, "GMS client is not initialized"
 
         if manager.granted_lock_type == GrantedLockType.RO:

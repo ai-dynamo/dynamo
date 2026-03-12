@@ -19,10 +19,10 @@ from contextlib import contextmanager
 from typing import TYPE_CHECKING, Optional
 
 import torch
+from gpu_memory_service.client.torch.allocator import gms_use_mem_pool
 
 if TYPE_CHECKING:
     from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
-    from torch.cuda.memory import MemPool
     from torch_memory_saver.entrypoint import _TorchMemorySaverImpl
 
 logger = logging.getLogger(__name__)
@@ -61,9 +61,8 @@ class GMSMemorySaverImpl:
         self._imported_weights_bytes: int = 0
 
         self._allocator: Optional["GMSClientMemoryManager"]
-        self._mem_pool: Optional["MemPool"]
         self._mode: str
-        self._allocator, self._mem_pool, self._mode = self._init_allocator()
+        self._allocator, self._mode = self._init_allocator()
 
         logger.info(
             "[GMS] Initialized: weights=%s mode (device=%d, socket=%s)",
@@ -74,16 +73,17 @@ class GMSMemorySaverImpl:
 
     def _init_allocator(
         self,
-    ) -> tuple[Optional["GMSClientMemoryManager"], Optional["MemPool"], str]:
+    ) -> tuple[Optional["GMSClientMemoryManager"], str]:
         """Create allocator with mode from config (default: RW_OR_RO)."""
         from gpu_memory_service import get_or_create_gms_client_memory_manager
         from gpu_memory_service.common.types import GrantedLockType, RequestedLockType
 
         mode = self._requested_mode or RequestedLockType.RW_OR_RO
-        allocator, mem_pool = get_or_create_gms_client_memory_manager(
+        allocator = get_or_create_gms_client_memory_manager(
             self._socket_path,
             self._device_index,
             mode=mode,
+            scope="weights",
             tag="weights",
         )
         granted_mode = allocator.granted_lock_type
@@ -96,11 +96,7 @@ class GMSMemorySaverImpl:
             actual_mode.upper(),
             self._device_index,
         )
-        return (
-            allocator,
-            mem_pool if granted_mode == GrantedLockType.RW else None,
-            actual_mode,
-        )
+        return allocator, actual_mode
 
     def _is_weights_tag(self, tag: Optional[str]) -> bool:
         return tag in ("weights", "model_weights")
@@ -123,11 +119,8 @@ class GMSMemorySaverImpl:
             yield
             return
 
-        if self._mem_pool is None:
-            raise RuntimeError("GMS mempool is None in WRITE mode")
-
         target_device = torch.device("cuda", self._device_index)
-        with torch.cuda.use_mem_pool(self._mem_pool, device=target_device):
+        with gms_use_mem_pool("weights", target_device):
             yield
 
     def pause(self, tag: Optional[str] = None) -> None:

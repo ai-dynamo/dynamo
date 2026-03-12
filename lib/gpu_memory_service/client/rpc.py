@@ -67,7 +67,12 @@ class _GMSRPCTransport:
         return response
 
     def request(self, request, response_type: Type[T]) -> T:
-        response, _ = self.request_with_fd(request, response_type)
+        response, fd = self.request_with_fd(request, response_type)
+        if fd >= 0:
+            os.close(fd)
+            raise RuntimeError(
+                f"GMS request {type(request).__name__} returned an unexpected FD"
+            )
         return response
 
     def request_with_fd(

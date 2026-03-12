@@ -193,8 +193,12 @@ class GMSClientMemoryManager:
     def disconnect(self) -> None:
         """Close connection and release lock."""
         if self._client is not None:
-            self._client.close()
-            self._client = None
+            try:
+                self._client.close()
+            finally:
+                self._client = None
+                self._granted_lock_type = None
+            return
         self._granted_lock_type = None
 
     # ==================== Tier 1: Handle Operations (server-side) ====================
@@ -420,12 +424,12 @@ class GMSClientMemoryManager:
 
         alloc_id = mapping.allocation_id
 
-        self.unmap_va(va)
-        self.free_va(va)
-
         # Only free server handle if we're RW and haven't committed
         if self._granted_lock_type == GrantedLockType.RW:
             self.free_handle(alloc_id)
+
+        self.unmap_va(va)
+        self.free_va(va)
 
     def unmap_all_vas(self) -> None:
         """Synchronize + unmap all VAs. Preserves VA reservations for remap."""
@@ -470,23 +474,32 @@ class GMSClientMemoryManager:
 
         assert self._granted_lock_type is not None
 
+        imported_handles: list[int] = []
+        remap_plan: list[tuple[int, LocalMapping, int]] = []
+        try:
+            for va, mapping in list(self._mappings.items()):
+                if mapping.handle != 0:
+                    continue
+
+                alloc_info = self.get_handle_info(mapping.allocation_id)
+                if int(alloc_info.aligned_size) != mapping.aligned_size:
+                    raise StaleMemoryLayoutError(
+                        f"Allocation {mapping.allocation_id} size changed: "
+                        f"{mapping.aligned_size} vs {int(alloc_info.aligned_size)}"
+                    )
+
+                fd = self.export_handle(mapping.allocation_id)
+                handle = cumem_import_from_shareable_handle_close_fd(fd)
+                imported_handles.append(handle)
+                remap_plan.append((va, mapping, handle))
+        except Exception:
+            for handle in imported_handles:
+                cumem_release(handle)
+            raise
+
         remapped_count = 0
         total_bytes = 0
-        for va, mapping in list(self._mappings.items()):
-            if mapping.handle != 0:
-                continue  # Already mapped
-
-            # Validate allocation still exists.
-            alloc_info = self.get_handle_info(mapping.allocation_id)
-            if int(alloc_info.aligned_size) != mapping.aligned_size:
-                raise StaleMemoryLayoutError(
-                    f"Allocation {mapping.allocation_id} size changed: "
-                    f"{mapping.aligned_size} vs {int(alloc_info.aligned_size)}"
-                )
-
-            # Re-import and map to preserved VA
-            fd = self.export_handle(mapping.allocation_id)
-            handle = cumem_import_from_shareable_handle_close_fd(fd)
+        for va, mapping, handle in remap_plan:
             cumem_map(va, mapping.aligned_size, handle)
             cumem_set_access(
                 va, mapping.aligned_size, self.device, self._granted_lock_type

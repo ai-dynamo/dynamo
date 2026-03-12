@@ -18,6 +18,7 @@ class Config:
     """Configuration for GPU Memory Service server."""
 
     device: int
+    scope: str
     socket_path: str
     alloc_retry_interval: float
     alloc_retry_timeout: Optional[float]
@@ -35,6 +36,12 @@ def parse_args() -> Config:
         type=int,
         required=True,
         help="CUDA device ID to manage memory for.",
+    )
+    parser.add_argument(
+        "--scope",
+        type=str,
+        default="weights",
+        help="Logical GMS scope for this server (default: weights).",
     )
     parser.add_argument(
         "--socket-path",
@@ -64,7 +71,7 @@ def parse_args() -> Config:
     args = parser.parse_args()
 
     # Use UUID-based socket path by default (stable across CUDA_VISIBLE_DEVICES)
-    socket_path = args.socket_path or get_socket_path(args.device)
+    socket_path = args.socket_path or get_socket_path(args.device, args.scope)
     if args.alloc_retry_interval <= 0:
         parser.error("--alloc-retry-interval must be > 0")
     if args.alloc_retry_timeout is not None and args.alloc_retry_timeout <= 0:
@@ -72,6 +79,7 @@ def parse_args() -> Config:
 
     return Config(
         device=args.device,
+        scope=args.scope,
         socket_path=socket_path,
         alloc_retry_interval=args.alloc_retry_interval,
         alloc_retry_timeout=args.alloc_retry_timeout,

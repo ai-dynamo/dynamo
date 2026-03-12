@@ -32,7 +32,9 @@ from gpu_memory_service.client.memory_manager import (
 # PyTorch integration (GMS client memory manager)
 from gpu_memory_service.client.torch.allocator import (
     get_gms_client_memory_manager,
+    get_gms_client_memory_managers,
     get_or_create_gms_client_memory_manager,
+    gms_use_mem_pool,
 )
 
 __all__ = [
@@ -42,4 +44,6 @@ __all__ = [
     # GMS client memory manager
     "get_or_create_gms_client_memory_manager",
     "get_gms_client_memory_manager",
+    "get_gms_client_memory_managers",
+    "gms_use_mem_pool",
 ]

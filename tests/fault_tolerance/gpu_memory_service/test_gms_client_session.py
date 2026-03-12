@@ -7,6 +7,7 @@ import pytest
 
 from gpu_memory_service.client.rpc import _GMSRPCTransport
 from gpu_memory_service.client.session import _GMSClientSession
+from gpu_memory_service.common.protocol import wire
 from gpu_memory_service.common.protocol.messages import (
     CommitResponse,
     ErrorResponse,
@@ -167,6 +168,47 @@ def test_request_closes_fd_on_error_response(monkeypatch):
         transport.request(CommitResponse(success=True), HandshakeResponse)
 
     assert closed_fds == [41]
+
+
+def test_request_closes_fd_on_unexpected_success_fd(monkeypatch):
+    transport = _GMSRPCTransport("/tmp/gms-test.sock")
+    closed_fds: list[int] = []
+
+    monkeypatch.setattr(
+        transport,
+        "request_with_fd",
+        lambda request, response_type: (CommitResponse(success=True), 43),
+    )
+    monkeypatch.setattr("gpu_memory_service.client.rpc.os.close", closed_fds.append)
+
+    with pytest.raises(RuntimeError, match="unexpected FD"):
+        transport.request(CommitResponse(success=True), CommitResponse)
+
+    assert closed_fds == [43]
+
+
+def test_recv_message_sync_closes_fd_on_decode_failure(monkeypatch):
+    closed_fds: list[int] = []
+
+    monkeypatch.setattr(
+        wire.socket,
+        "recv_fds",
+        lambda sock, size, maxfds: (b"\x00\x00\x00\x01x", [53], 0, None),
+    )
+    monkeypatch.setattr(
+        wire,
+        "decode_message",
+        lambda payload: (_ for _ in ()).throw(ValueError("bad frame")),
+    )
+    monkeypatch.setattr(
+        "gpu_memory_service.common.protocol.wire.os.close",
+        closed_fds.append,
+    )
+
+    with pytest.raises(ValueError, match="bad frame"):
+        wire.recv_message_sync(object(), bytearray())
+
+    assert closed_fds == [53]
 
 
 def test_client_session_commit_tolerates_close_failure_after_success(monkeypatch):

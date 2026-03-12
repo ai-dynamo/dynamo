@@ -63,11 +63,12 @@ class GMSWorker(Worker):
         extra = (
             getattr(self.vllm_config.load_config, "model_loader_extra_config", {}) or {}
         )
-        socket_path = get_socket_path(device)
+        socket_path = get_socket_path(device, "weights")
         get_or_create_gms_client_memory_manager(
             socket_path,
             device,
             mode=get_gms_lock_mode(extra),
+            scope="weights",
             tag="weights",
         )
 
@@ -116,7 +117,7 @@ class GMSWorker(Worker):
         free_bytes_before = torch.cuda.mem_get_info()[0]
 
         # Unmap GMS weights: synchronize + unmap all VAs + disconnect
-        manager = get_gms_client_memory_manager()
+        manager = get_gms_client_memory_manager("weights")
         assert manager is not None, "GMS client is not initialized"
         assert not manager.is_unmapped, "GMS weights are already unmapped"
         manager.unmap_all_vas()
@@ -143,7 +144,7 @@ class GMSWorker(Worker):
             tags = ["weights", "kv_cache"]
 
         if "weights" in tags:
-            manager = get_gms_client_memory_manager()
+            manager = get_gms_client_memory_manager("weights")
             assert manager is not None, "GMS client is not initialized"
             assert manager.is_unmapped, "GMS weights are not unmapped"
             manager.connect(RequestedLockType.RO)
