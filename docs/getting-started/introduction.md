@@ -85,21 +85,20 @@ The full list of supported ecosystem components:
 
 ## Performance
 
-Currently for LLMs, Dynamo offers composability of three powerful techniques: disaggregated serving, KV cache aware routing, and KV cache offloading. NIXL provides the low-latency data transfer layer that enables KV cache movement between nodes for disaggregated serving at scale.
+Dynamo achieves state-of-the-art LLM performance by composing three core techniques: Disaggregated Serving, KV Cache Aware Routing, and KV Cache Offloading. These techniques are underpinned by NIXL, a low-latency data transfer layer that enables seamless KV cache movement between nodes.
 
-[KV cache aware routing](../design-docs/router-design.md) leverages KV cache hit rate and KV load of workers to smartly route the request for best performance. Because KV cache aware routing leverages KV cache already present in a worker, it saves computing KV cache from prefill and can start decoding for a request right away. This usually results in acceleration of Time To First Token (TTFT) but can also have benefits in end-to-end latency and sometimes throughput. For example, when serving Qwen3 Coder 480B A35B, applying Dynamo's KV cache aware routing yielded 2x faster TTFT and 1.6x throughput for [Baseten](https://www.baseten.co/blog/how-baseten-achieved-2x-faster-inference-with-nvidia-dynamo/#how-baseten-uses-nvidia-dynamo).
+- [KV cache-aware routing](../design-docs/router-design.md) Smartly routes requests based on worker load and existing cache hits. By reusing precomputed KV pairs, it bypasses the prefill compute, starting the decode phase immediately. [Baseten](https://www.baseten.co/blog/how-baseten-achieved-2x-faster-inference-with-nvidia-dynamo/#how-baseten-uses-nvidia-dynamo) applied Dynamo KV cache-aware routing and saw 2x faster TTFT and 1.6x throughput on Qwen3 Coder 480B A35B.
 
-[KV cache offloading](../design-docs/kvbm-design.md) can expedite TTFT, reduce Total Cost of Ownership (TCO), and allows for longer context processing. By offloading KV cache from HBM to host memory then further down to local disk and remote storage, developers can expand the amount of KV cache stored and reuse precomputed KV cache for faster decoding. Developers have an option to leverage cheaper storage instead of using expensive GPU for LLM inference, resulting in TCO savings.
+- [KV cache offloading](../design-docs/kvbm-design.md) Expands the available context window by moving KV cache from HBM to cheaper storage tiers such as host memory, local disk, or remote storage. Reusing precomputed state improves TTFT, reduces Total Cost of Ownership (TCO), and allows for longer context processing.
 
-In the Design Principles section, we introduced the concept of disaggregated serving, and its performance has been showcased by [InferenceX](https://newsletter.semianalysis.com/p/inferencex-v2-nvidia-blackwell-vs). DeepSeek V3 can be served with ~7x throughput/GPU, applying disaggregated serving and large-scale expert parallelism.
-
+- [Disaggregated serving]((../design-docs/disaggregated-serving.md) In the Design Principles section, we introduced the concept of disaggregated serving. Its performance has been showcased by [InferenceX](https://newsletter.semianalysis.com/p/inferencex-v2-nvidia-blackwell-vs). DeepSeek V3 can be served with ~7x throughput/GPU, with disaggregated serving and large-scale expert parallelism.
 Furthermore, when these three techniques are composed together, they yield compounding benefits as shown in the following diagram.
 
 ![Performance composability of disaggregated serving, KV cache aware routing, and KV cache offloading](../assets/img/intro-perf.svg)
 
-- **Disaggregated serving + KV cache aware routing** -- KV cache aware routing can load balance for compute on prefill and memory on decode, which can lead to optimizing for latency and throughput simultaneously.
-- **Disaggregated serving + KV cache offloading** -- KV cache offloading results in faster TTFT as mentioned, and prefill workers can be reduced to save TCO.
-- **KV cache aware routing + KV cache offloading** -- Offloading KV cache to memory with larger capacity yields higher KV cache hit rate which can be leveraged by KV cache aware routing to expedite TTFT.
+- **Disaggregated serving + KV cache aware routing** -- KV cache aware routing load balances for both compute (on prefill) and memory (on decode), optimizing latency and throughput simultaneously.
+- **Disaggregated serving + KV cache offloading** -- KV cache offloading results in faster TTFT, and the number of prefill workers can be reduced to reduce TCO.
+- **KV cache aware routing + KV cache offloading** -- Offloading increases the total addressable cache size, increasing the KV cache hit rate, which in turn accelerates the TTFT.
 
 > [!TIP]
 > Ready to try these techniques? See [Dynamo recipes](https://github.com/ai-dynamo/dynamo/tree/main/recipes) for step-by-step deployment examples that compose disaggregated serving, routing, and offloading.
@@ -108,9 +107,9 @@ Furthermore, when these three techniques are composed together, they yield compo
 
 ### Finding Best Configurations Under 30 Seconds with AIConfigurator
 
-In addition to the strong performance benefits, Dynamo strives to ease the pain of configuration to production. Finding best-performing prefill and decode parallelism configuration for disaggregated serving will take days when determined by sweeping configs on the target GPU. This problem is intensified as the deployment scales.
+Manually finding the optimal parallelism for disaggregated serving can take days of exhaustive configuration sweeps—a challenge that only intensifies at scale.
 
-Dynamo offers [AIConfigurator](https://github.com/ai-dynamo/aiconfigurator/), which can provide the best disaggregated serving configurations in less than 30 seconds and show the projected performance benefit compared to aggregated serving. Dynamo now uses AIConfigurator in its Kubernetes Custom Resource Definition (CRD), Dynamo Graph Deployment Request (DGDR), to allow users to select best deployment options leveraging automatically generated configs via AIConfigurator.
+Dynamo's [AIConfigurator](https://github.com/ai-dynamo/aiconfigurator/) solves this by identifying the best-performing configurations in under 30 seconds, providing clear projections of the performance gains over standard aggregated serving. This logic is natively integrated into Kubernetes Custom Resource Definition (CRD), Dynamo Graph Deployment Request (DGDR), allowing users to deploy using automatically generated optimized configs.
 
 ### Auto-Adjusting Deployment Based on SLA with Planner
 
