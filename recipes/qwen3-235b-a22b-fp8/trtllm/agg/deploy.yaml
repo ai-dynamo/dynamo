@@ -24,6 +24,9 @@ data:
       max_batch_size: 128
     disable_overlap_scheduler: false
     print_iter_log: false
+    moe_config:
+      backend: DEEPGEMM
+      max_num_tokens: 8192
 ---
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment

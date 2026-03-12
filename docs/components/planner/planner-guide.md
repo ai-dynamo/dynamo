@@ -114,8 +114,19 @@ The planner receives its config via `--config /path/to/planner_config.json` whic
 
 See the [Profiler Guide](../profiler/profiler-guide.md) for the full profiling workflow and how to configure pre-deployment sweeping.
 
+## Hierarchical Deployments
+
+If you want one public endpoint for a model but multiple private DGDs optimized for different request classes, use a hierarchical deployment:
+
+- one control DGD with `Frontend`, `GlobalRouter`, and `GlobalPlanner`
+- one or more prefill pool DGDs
+- one or more decode pool DGDs
+
+In the current workflow, run profiling independently for each intended pool, then compose the final control DGD plus pool DGDs manually. See [Global Planner Deployment Guide](global-planner.md).
+
 ## See Also
 
 - [Planner README](README.md) — Quick overview
+- [Global Planner Deployment Guide](global-planner.md) — `GlobalPlanner` deployment patterns and single-endpoint multi-pool workflow
 - [Planner Design](../../design-docs/planner-design.md) — Architecture internals
 - [Profiler Guide](../profiler/profiler-guide.md) — How profiling data is generated
