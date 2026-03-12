@@ -336,10 +336,12 @@ fn register_model<'p>(
         }
 
         // For non-TensorBased models, resolve the model path (local or fetch from HuggingFace)
+        // Weight files are never needed here.
         let model_path = if fs::exists(&source_path)? {
             PathBuf::from(&source_path)
         } else {
-            LocalModel::fetch(&source_path, false)
+            let ignore_weights = true;
+            LocalModel::fetch(&source_path, ignore_weights)
                 .await
                 .map_err(to_pyerr)?
         };
