@@ -22,6 +22,10 @@ navigation:
     contents:
       - page: Quickstart
         path: getting-started/quickstart.md
+
+  # ==================== Resources ====================
+  - section: Resources
+    contents:
       - page: Support Matrix
         path: reference/support-matrix.md
       - page: Feature Matrix
