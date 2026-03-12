@@ -53,6 +53,15 @@ impl LocalKvIndexer {
         buffer.iter().cloned().collect()
     }
 
+    /// Build a tree dump response with the given `last_event_id`.
+    async fn tree_dump_response(&self, last_event_id: u64) -> WorkerKvQueryResponse {
+        let events = self.dump_events().await.unwrap_or_default();
+        WorkerKvQueryResponse::TreeDump {
+            events,
+            last_event_id,
+        }
+    }
+
     /// Query events by ID range, returning events in `[start_id, end_id]` (both inclusive).
     ///
     /// ### Arguments
@@ -98,11 +107,7 @@ impl LocalKvIndexer {
         // If no start_id specified, dump entire tree
         if start_id.is_none() {
             tracing::debug!("No start_id specified, dumping entire tree");
-            let events = self.dump_events().await.unwrap_or_default();
-            return WorkerKvQueryResponse::TreeDump {
-                events,
-                last_event_id: last_id.unwrap_or(0),
-            };
+            return self.tree_dump_response(last_id.unwrap_or(0)).await;
         }
 
         let start_id = start_id.unwrap();
@@ -111,11 +116,7 @@ impl LocalKvIndexer {
         // Check for empty buffer
         let Some(first_buffered) = first_id else {
             tracing::debug!("Buffer empty, dumping entire tree");
-            let events = self.dump_events().await.unwrap_or_default();
-            return WorkerKvQueryResponse::TreeDump {
-                events,
-                last_event_id: 0,
-            };
+            return self.tree_dump_response(0).await;
         };
         let last_buffered = last_id.unwrap();
 
@@ -140,11 +141,7 @@ impl LocalKvIndexer {
                 first_buffered,
                 "Requested start_id is older than buffer, dumping entire tree"
             );
-            let events = self.dump_events().await.unwrap_or_default();
-            return WorkerKvQueryResponse::TreeDump {
-                events,
-                last_event_id: last_buffered,
-            };
+            return self.tree_dump_response(last_buffered).await;
         }
 
         // Serve from buffer

@@ -58,6 +58,22 @@ impl RankState {
             RankCursor::InvalidatedByBarrier(last_applied_id) => last_applied_id,
         }
     }
+
+    fn observe_live_id(&mut self, event_id: u64) {
+        self.max_seen_live_id = Some(
+            self.max_seen_live_id
+                .map_or(event_id, |max_seen| max_seen.max(event_id)),
+        );
+    }
+
+    fn clear_max_seen_if_caught_up(&mut self, last_applied_id: u64) {
+        if self
+            .max_seen_live_id
+            .is_some_and(|max_seen| max_seen <= last_applied_id)
+        {
+            self.max_seen_live_id = None;
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -386,11 +402,7 @@ impl WorkerQueryClient {
                     // We have never established a cursor for this rank, so live traffic only tells
                     // us how far ahead the stream has moved while a full restore catches up.
                     RankCursor::NeedsRestore => {
-                        rank_state.max_seen_live_id = Some(
-                            rank_state
-                                .max_seen_live_id
-                                .map_or(event_id, |max_seen| max_seen.max(event_id)),
-                        );
+                        rank_state.observe_live_id(event_id);
                         if !rank_state.recovery_inflight {
                             rank_state.recovery_inflight = true;
                             Action::SpawnFullRestore {
@@ -406,18 +418,10 @@ impl WorkerQueryClient {
                         if event_id <= last_applied_id {
                             Action::Drop
                         } else if rank_state.recovery_inflight {
-                            rank_state.max_seen_live_id = Some(
-                                rank_state
-                                    .max_seen_live_id
-                                    .map_or(event_id, |max_seen| max_seen.max(event_id)),
-                            );
+                            rank_state.observe_live_id(event_id);
                             Action::Drop
                         } else if event_id > last_applied_id.saturating_add(1) {
-                            rank_state.max_seen_live_id = Some(
-                                rank_state
-                                    .max_seen_live_id
-                                    .map_or(event_id, |max_seen| max_seen.max(event_id)),
-                            );
+                            rank_state.observe_live_id(event_id);
                             rank_state.recovery_inflight = true;
                             Action::SpawnIncremental {
                                 epoch: worker_state.epoch,
@@ -425,12 +429,7 @@ impl WorkerQueryClient {
                             }
                         } else {
                             rank_state.cursor = RankCursor::Live(event_id);
-                            if rank_state
-                                .max_seen_live_id
-                                .is_some_and(|max_seen| max_seen <= event_id)
-                            {
-                                rank_state.max_seen_live_id = None;
-                            }
+                            rank_state.clear_max_seen_if_caught_up(event_id);
                             Action::ApplyDirect
                         }
                     }
@@ -602,12 +601,7 @@ impl WorkerQueryClient {
             rank_state.cursor = new_cursor;
 
             let last_applied_id = rank_state.last_applied_id().unwrap_or(0);
-            if rank_state
-                .max_seen_live_id
-                .is_some_and(|max_seen| max_seen <= last_applied_id)
-            {
-                rank_state.max_seen_live_id = None;
-            }
+            rank_state.clear_max_seen_if_caught_up(last_applied_id);
 
             if successful_response
                 && !saw_clear
@@ -867,6 +861,16 @@ mod tests {
         (kv_indexer.clone(), Indexer::KvIndexer(kv_indexer))
     }
 
+    async fn make_test_client(
+        name: &str,
+    ) -> (Arc<WorkerQueryClient>, Arc<MockWorkerQueryTransport>, KvIndexer) {
+        let component = make_test_component(name).await;
+        let (kv_indexer, indexer) = make_test_indexer();
+        let transport = Arc::new(MockWorkerQueryTransport::default());
+        let client = WorkerQueryClient::new(component, indexer, transport.clone());
+        (client, transport, kv_indexer)
+    }
+
     fn make_store_event(worker_id: WorkerId, dp_rank: DpRank, event_id: u64) -> RouterEvent {
         RouterEvent::new(
             worker_id,
@@ -989,10 +993,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_discovery_restore_does_not_block_other_workers() {
-        let component = make_test_component("discovery-concurrency").await;
-        let (kv_indexer, indexer) = make_test_indexer();
-        let transport = Arc::new(MockWorkerQueryTransport::default());
-        let client = WorkerQueryClient::new(component, indexer, transport.clone());
+        let (client, transport, kv_indexer) = make_test_client("discovery-concurrency").await;
 
         let first_started = Arc::new(Notify::new());
         let first_release = Arc::new(Notify::new());
@@ -1030,10 +1031,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_gap_recovery_follows_high_water_mark() {
-        let component = make_test_component("high-water").await;
-        let (kv_indexer, indexer) = make_test_indexer();
-        let transport = Arc::new(MockWorkerQueryTransport::default());
-        let client = WorkerQueryClient::new(component, indexer, transport.clone());
+        let (client, transport, kv_indexer) = make_test_client("high-water").await;
         let key = (1, 0);
 
         {
@@ -1089,10 +1087,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_initial_restore_updates_cursor_for_live_and_gap_paths() {
-        let component = make_test_component("initial-restore-cursor").await;
-        let (kv_indexer, indexer) = make_test_indexer();
-        let transport = Arc::new(MockWorkerQueryTransport::default());
-        let client = WorkerQueryClient::new(component, indexer, transport.clone());
+        let (client, transport, kv_indexer) = make_test_client("initial-restore-cursor").await;
         let key = (1, 0);
 
         transport.push_action(
@@ -1152,10 +1147,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_live_event_for_other_worker_is_not_blocked_by_inflight_recovery() {
-        let component = make_test_component("live-concurrency").await;
-        let (kv_indexer, indexer) = make_test_indexer();
-        let transport = Arc::new(MockWorkerQueryTransport::default());
-        let client = WorkerQueryClient::new(component, indexer, transport.clone());
+        let (client, transport, kv_indexer) = make_test_client("live-concurrency").await;
 
         let delayed_key = (1, 0);
         {
@@ -1206,10 +1198,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_worker_removal_discards_late_recovery_result() {
-        let component = make_test_component("remove-race").await;
-        let (kv_indexer, indexer) = make_test_indexer();
-        let transport = Arc::new(MockWorkerQueryTransport::default());
-        let client = WorkerQueryClient::new(component, indexer, transport.clone());
+        let (client, transport, kv_indexer) = make_test_client("remove-race").await;
         let key = (1, 0);
 
         {
@@ -1245,10 +1234,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_live_cleared_invalidates_inflight_recovery_without_restore() {
-        let component = make_test_component("live-cleared-no-restore").await;
-        let (kv_indexer, indexer) = make_test_indexer();
-        let transport = Arc::new(MockWorkerQueryTransport::default());
-        let client = WorkerQueryClient::new(component, indexer, transport.clone());
+        let (client, transport, kv_indexer) = make_test_client("live-cleared-no-restore").await;
         let key0 = (1, 0);
         let key1 = (1, 1);
 
@@ -1300,10 +1286,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_recovered_cleared_resumes_live_without_restore() {
-        let component = make_test_component("recovered-cleared-no-restore").await;
-        let (kv_indexer, indexer) = make_test_indexer();
-        let transport = Arc::new(MockWorkerQueryTransport::default());
-        let client = WorkerQueryClient::new(component, indexer, transport.clone());
+        let (client, transport, kv_indexer) = make_test_client("recovered-cleared-no-restore").await;
         let key0 = (1, 0);
         let key1 = (1, 1);
 
