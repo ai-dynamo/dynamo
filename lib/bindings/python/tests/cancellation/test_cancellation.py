@@ -162,6 +162,7 @@ async def client(runtime, namespace):
     return client
 
 
+@pytest.mark.pre_merge
 @pytest.mark.forked
 @pytest.mark.asyncio
 @pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
@@ -196,6 +197,7 @@ async def test_client_context_cancel(temp_file_store, server, client):
     # TODO: Test with _generate_until_asyncio_cancelled server handler
 
 
+@pytest.mark.pre_merge
 @pytest.mark.forked
 @pytest.mark.asyncio
 @pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
@@ -229,6 +231,7 @@ async def test_client_loop_break(temp_file_store, server, client):
     # TODO: Test with _generate_until_asyncio_cancelled server handler
 
 
+@pytest.mark.pre_merge
 @pytest.mark.forked
 @pytest.mark.asyncio
 @pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
@@ -256,6 +259,7 @@ async def test_server_context_cancel(temp_file_store, server, client):
     assert not handler.context_is_killed
 
 
+@pytest.mark.pre_merge
 @pytest.mark.forked
 @pytest.mark.asyncio
 @pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
@@ -284,6 +288,7 @@ async def test_server_raise_cancelled(temp_file_store, server, client):
     assert not handler.context_is_killed
 
 
+@pytest.mark.pre_merge
 @pytest.mark.forked
 @pytest.mark.asyncio
 @pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
@@ -307,6 +312,7 @@ async def test_client_context_already_cancelled(temp_file_store, server, client)
     assert not handler.context_is_killed
 
 
+@pytest.mark.pre_merge
 @pytest.mark.forked
 @pytest.mark.asyncio
 @pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
