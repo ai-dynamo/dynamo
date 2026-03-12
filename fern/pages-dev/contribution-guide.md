@@ -7,9 +7,9 @@ max-toc-depth: 3
 
 # Contribution Guide
 
-Dynamo is an open-source distributed inference platform, built by a growing community of contributors. The project is licensed under [Apache 2.0](https://github.com/ai-dynamo/dynamo/blob/main/LICENSE) and developed in the open -- every contributor goes through the same review process, CI pipeline, and code standards, whether they work at NVIDIA or not.
+Dynamo is an open-source distributed inference platform, built by a growing community of contributors. The project is licensed under [Apache 2.0](https://github.com/ai-dynamo/dynamo/blob/main/LICENSE) and welcomes contributions of all sizes -- from typo fixes to major features. Community contributions have shaped core areas of Dynamo including backend integrations, documentation, deployment tooling, and performance improvements.
 
-With 200+ external contributors, 220+ merged community PRs, and new contributors joining every month, Dynamo is one of the fastest-growing open-source inference projects. Check out our [commit activity](https://github.com/ai-dynamo/dynamo/graphs/commit-activity) and [GitHub stars](https://github.com/ai-dynamo/dynamo/stargazers). Whether you're fixing a typo or building a major feature, this guide will help you get started.
+With 200+ external contributors, 220+ merged community PRs, and new contributors joining every month, Dynamo is one of the fastest-growing open-source inference projects. Check out our [commit activity](https://github.com/ai-dynamo/dynamo/graphs/commit-activity) and [GitHub stars](https://github.com/ai-dynamo/dynamo/stargazers). This guide will help you get started.
 
 Join the community:
 
