@@ -46,8 +46,9 @@ try:
     import torch_memory_saver.entrypoint as _ep
 
     _patched_init = getattr(_ep.TorchMemorySaver, "_ensure_initialized", None)
-    if _patched_init is not None and "patched" not in getattr(
-        _patched_init, "__doc__", ""
+    if (
+        _patched_init is not None
+        and "patched" not in getattr(_patched_init, "__doc__", "").lower()
     ):
         logger.error(
             "[GMS] PATCH VERIFY FAIL: TorchMemorySaver._ensure_initialized is NOT patched"
