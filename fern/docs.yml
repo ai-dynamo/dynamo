@@ -42,6 +42,20 @@ redirects:
     destination: "/dynamo/resources/release-artifacts"
   - source: "/dynamo/getting-started/examples"
     destination: "/dynamo/resources/examples"
+  - source: "/dynamo/dev/user-guides/multimodal-model-serving/diffusion-experimental/:slug*"
+    destination: "/dynamo/dev/user-guides/diffusion/:slug*"
+  - source: "/dynamo/dev/user-guides/multimodal-model-serving/diffusion-experimental"
+    destination: "/dynamo/dev/user-guides/diffusion"
+  - source: "/dynamo/dev/user-guides/multimodal-model-serving/vision-language-models-vlms/:slug*"
+    destination: "/dynamo/dev/user-guides/multimodal/:slug*"
+  - source: "/dynamo/dev/user-guides/multimodal-model-serving/vision-language-models-vlms"
+    destination: "/dynamo/dev/user-guides/multimodal"
+  - source: "/dynamo/dev/user-guides/diffusion/diffusion-guide"
+    destination: "/dynamo/dev/user-guides/diffusion/fastvideo"
+  - source: "/dynamo/dev/user-guides/agentic-workloads/:slug*"
+    destination: "/dynamo/dev/user-guides/agents/:slug*"
+  - source: "/dynamo/dev/user-guides/agentic-workloads"
+    destination: "/dynamo/dev/user-guides/agents"
 
 # GitHub repository link in navbar
 navbar-links:
