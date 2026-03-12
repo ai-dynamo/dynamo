@@ -60,10 +60,7 @@ impl RankState {
     }
 
     fn observe_live_id(&mut self, event_id: u64) {
-        self.max_seen_live_id = Some(
-            self.max_seen_live_id
-                .map_or(event_id, |max_seen| max_seen.max(event_id)),
-        );
+        self.max_seen_live_id = Some(self.max_seen_live_id.unwrap_or(0).max(event_id));
     }
 
     fn clear_max_seen_if_caught_up(&mut self, last_applied_id: u64) {
@@ -376,7 +373,6 @@ impl WorkerQueryClient {
             ApplyDirect,
             SpawnFullRestore { epoch: u64 },
             SpawnIncremental { epoch: u64, start_event_id: u64 },
-            Drop,
         }
 
         let action = {
@@ -389,14 +385,13 @@ impl WorkerQueryClient {
             if matches!(&event.event.data, KvCacheEventData::Cleared) {
                 if rank_state
                     .last_applied_id()
-                    .is_some_and(|last_applied_id| event_id <= last_applied_id)
+                    .is_none_or(|last_applied_id| event_id > last_applied_id)
                 {
-                    Action::Drop
-                } else {
-                    self.apply_worker_clear_locked(&mut worker_state, event.clone())
+                    self.apply_worker_clear_locked(&mut worker_state, event)
                         .await;
-                    Action::Drop
                 }
+                // Already applied the event, so no further action needed.
+                return;
             } else {
                 match rank_state.cursor {
                     // We have never established a cursor for this rank, so live traffic only tells
@@ -409,18 +404,22 @@ impl WorkerQueryClient {
                                 epoch: worker_state.epoch,
                             }
                         } else {
-                            Action::Drop
+                            // A recovery is already in flight. Nothing to do.
+                            return;
                         }
                     }
                     // Normal steady-state path: apply contiguous events directly, but coalesce any
                     // gap into a single recovery pass using `max_seen_live_id` as the high-water mark.
                     RankCursor::Live(last_applied_id) => {
                         if event_id <= last_applied_id {
-                            Action::Drop
+                            // We've already applied this event. Nothing to do.
+                            return;
                         } else if rank_state.recovery_inflight {
+                            // A recovery is already in flight. Drop the event for now, and potentially spawn a new recovery afterwards.
                             rank_state.observe_live_id(event_id);
-                            Action::Drop
+                            return;
                         } else if event_id > last_applied_id.saturating_add(1) {
+                            // We've detected a gap. Spawn a new recovery pass.
                             rank_state.observe_live_id(event_id);
                             rank_state.recovery_inflight = true;
                             Action::SpawnIncremental {
@@ -428,6 +427,7 @@ impl WorkerQueryClient {
                                 start_event_id: last_applied_id.saturating_add(1),
                             }
                         } else {
+                            // Apply the event.
                             rank_state.cursor = RankCursor::Live(event_id);
                             rank_state.clear_max_seen_if_caught_up(event_id);
                             Action::ApplyDirect
@@ -440,7 +440,7 @@ impl WorkerQueryClient {
                         if last_applied_id
                             .is_some_and(|last_applied_id| event_id <= last_applied_id)
                         {
-                            Action::Drop
+                            return;
                         } else {
                             rank_state.cursor = RankCursor::Live(event_id);
                             rank_state.max_seen_live_id = None;
@@ -465,7 +465,6 @@ impl WorkerQueryClient {
             } => {
                 self.spawn_recovery_task(key, epoch, Some(start_event_id), None);
             }
-            Action::Drop => {}
         }
     }
 
@@ -525,16 +524,17 @@ impl WorkerQueryClient {
                     key.1,
                     count = events.len()
                 );
-                for event in &events {
+                for event in events {
+                    let event_id = event.event.event_id;
                     if matches!(&event.event.data, KvCacheEventData::Cleared) {
-                        self.apply_worker_clear_locked(&mut worker_state, event.clone())
+                        self.apply_worker_clear_locked(&mut worker_state, event)
                             .await;
-                        new_cursor = RankCursor::Live(event.event.event_id);
+                        new_cursor = RankCursor::Live(event_id);
                         saw_clear = true;
                         continue;
                     }
-                    self.indexer.apply_event(event.clone()).await;
-                    new_cursor = RankCursor::Live(event.event.event_id);
+                    self.indexer.apply_event(event).await;
+                    new_cursor = RankCursor::Live(event_id);
                 }
                 successful_response = true;
             }
@@ -863,7 +863,11 @@ mod tests {
 
     async fn make_test_client(
         name: &str,
-    ) -> (Arc<WorkerQueryClient>, Arc<MockWorkerQueryTransport>, KvIndexer) {
+    ) -> (
+        Arc<WorkerQueryClient>,
+        Arc<MockWorkerQueryTransport>,
+        KvIndexer,
+    ) {
         let component = make_test_component(name).await;
         let (kv_indexer, indexer) = make_test_indexer();
         let transport = Arc::new(MockWorkerQueryTransport::default());
@@ -1286,7 +1290,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_recovered_cleared_resumes_live_without_restore() {
-        let (client, transport, kv_indexer) = make_test_client("recovered-cleared-no-restore").await;
+        let (client, transport, kv_indexer) =
+            make_test_client("recovered-cleared-no-restore").await;
         let key0 = (1, 0);
         let key1 = (1, 1);
 
