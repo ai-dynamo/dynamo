@@ -29,3 +29,4 @@ For deployment guides, configuration, and examples for each backend:
 - **[vLLM-Omni](../../backends/vllm/vllm-omni.md)**
 - **[SGLang Diffusion](../../backends/sglang/sglang-diffusion.md)**
 - **[TRT-LLM Diffusion](../../backends/trtllm/trtllm-video-diffusion.md)**
+- **[FastVideo (custom worker)](fastvideo.md)**
