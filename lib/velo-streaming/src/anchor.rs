@@ -9,7 +9,7 @@
 //! - [`AnchorManager::create_anchor`] allocates a registry slot and returns a
 //!   [`crate::handle::StreamAnchorHandle`] (for use by control handlers) and an
 //!   [`AnchorStream<T>`] (for the consumer).
-//! - Exactly one [`crate::transport::FrameWriter`] may be attached at a time;
+//! - Exactly one [`flume::Sender`] may be attached at a time;
 //!   the attach check is performed atomically via [`dashmap::DashMap::entry`].
 //! - Each entry holds a [`tokio_util::sync::CancellationToken`] created at anchor
 //!   creation so that whichever cleanup path fires first cancels the token; subsequent
@@ -21,11 +21,9 @@ use std::sync::{
 };
 
 use dashmap::DashMap;
-use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::handle::StreamAnchorHandle;
-use crate::transport::FrameReader;
 
 // ---------------------------------------------------------------------------
 // AttachError
@@ -56,31 +54,35 @@ pub enum AttachError {
 /// Non-generic by design: [`AnchorManager`] stores `DashMap<u64, AnchorEntry>`
 /// which avoids propagating a type parameter throughout the registry.
 ///
-/// The `attachment` field stores the exclusive [`FrameReader`] while a sender
-/// is connected. The check-and-set is performed atomically via
-/// [`dashmap::mapref::entry::Entry`] to prevent TOCTOU races.
+/// The `attachment` field stores the exclusive [`flume::Receiver`] (the receive
+/// half of the transport channel) while a sender is connected. The check-and-set
+/// is performed atomically via [`dashmap::mapref::entry::Entry`] to prevent
+/// TOCTOU races.
 // Fields are consumed by Phase 7+ control handlers and Phase 8 data path.
 #[allow(dead_code)]
 pub(crate) struct AnchorEntry {
     /// Raw-bytes frame delivery channel to the [`AnchorStream<T>`] consumer.
     ///
     /// Non-generic so `DashMap<u64, AnchorEntry>` requires no type parameters.
-    pub frame_tx: mpsc::Sender<Vec<u8>>,
+    pub frame_tx: flume::Sender<Vec<u8>>,
 
     /// Created at anchor creation; cancelled by whichever cleanup path fires first.
     ///
-    /// `cancel()` is idempotent — a second caller is a no-op.
+    /// `cancel()` is idempotent -- a second caller is a no-op.
     pub cancel_token: CancellationToken,
 
     /// Present iff a sender is currently attached.
-    pub attachment: Option<Box<dyn FrameReader>>,
+    ///
+    /// Holds the receive half of the transport channel returned by
+    /// [`crate::transport::FrameTransport::bind`].
+    pub attachment: Option<flume::Receiver<Vec<u8>>>,
 }
 
 // ---------------------------------------------------------------------------
 // AnchorStream<T>
 // ---------------------------------------------------------------------------
 
-/// Thin wrapper around the receive half of the per-anchor mpsc channel.
+/// Thin wrapper around the receive half of the per-anchor flume channel.
 ///
 /// Phase 8 will add the async `next()` / `Stream` implementation that
 /// deserializes the raw bytes into `StreamFrame<T>`. For now this is a
@@ -88,12 +90,12 @@ pub(crate) struct AnchorEntry {
 pub struct AnchorStream<T> {
     // Consumed by Phase 8 Stream impl.
     #[allow(dead_code)]
-    pub(crate) rx: mpsc::Receiver<Vec<u8>>,
+    pub(crate) rx: flume::Receiver<Vec<u8>>,
     _phantom: std::marker::PhantomData<T>,
 }
 
 impl<T> AnchorStream<T> {
-    pub(crate) fn new(rx: mpsc::Receiver<Vec<u8>>) -> Self {
+    pub(crate) fn new(rx: flume::Receiver<Vec<u8>>) -> Self {
         Self {
             rx,
             _phantom: std::marker::PhantomData,
@@ -109,7 +111,7 @@ impl<T> AnchorStream<T> {
 ///
 /// `worker_id` is stamped into every [`StreamAnchorHandle`] so that remote
 /// peers can route responses back to the correct worker. `next_local_id`
-/// starts at 0 and is incremented with `fetch_add(1)` — the *result + 1*
+/// starts at 0 and is incremented with `fetch_add(1)` -- the *result + 1*
 /// is the first valid local ID (i.e., IDs start at 1; 0 is reserved).
 ///
 /// The `registry` is wrapped in an `Arc` so that control handlers (Phase 7)
@@ -139,12 +141,12 @@ impl AnchorManager {
     /// Allocate a new anchor and return the handle (for control path) and stream (for consumer).
     ///
     /// Local IDs start at 1 and increment monotonically; ID 0 is reserved.
-    /// An mpsc channel (capacity 256) is created per anchor to deliver raw frame bytes.
+    /// A flume bounded channel (capacity 256) is created per anchor to deliver raw frame bytes.
     pub fn create_anchor<T>(&self) -> (StreamAnchorHandle, AnchorStream<T>) {
         // fetch_add returns the *old* value (starts at 0), so +1 gives us IDs starting at 1.
         let local_id = self.next_local_id.fetch_add(1, Ordering::Relaxed) + 1;
 
-        let (frame_tx, frame_rx) = mpsc::channel::<Vec<u8>>(256);
+        let (frame_tx, frame_rx) = flume::bounded::<Vec<u8>>(256);
         let cancel_token = CancellationToken::new();
 
         let entry = AnchorEntry {
@@ -189,12 +191,12 @@ impl AnchorManager {
             .map(|entry| entry.frame_tx.clone());
 
         if let Some(sender) = maybe_sender {
-            // Non-blocking best-effort — control sentinels must never stall.
+            // Non-blocking best-effort -- control sentinels must never stall.
             let _ = sender.try_send(frame_bytes);
         }
     }
 
-    /// Atomically attempt to attach a [`FrameReader`] to an anchor.
+    /// Atomically attempt to attach a [`flume::Receiver`] to an anchor.
     ///
     /// Uses `DashMap::entry()` to perform the check-and-set atomically under
     /// the shard lock, preventing TOCTOU races between concurrent attach attempts.
@@ -205,7 +207,7 @@ impl AnchorManager {
     pub(crate) fn try_attach(
         &self,
         local_id: u64,
-        reader: Box<dyn FrameReader>,
+        reader: flume::Receiver<Vec<u8>>,
         handle: StreamAnchorHandle,
     ) -> Result<(), AttachError> {
         use dashmap::mapref::entry::Entry;
@@ -223,9 +225,9 @@ impl AnchorManager {
         }
     }
 
-    /// Detach the current [`FrameReader`] from an anchor, returning it if present.
+    /// Detach the current [`flume::Receiver`] from an anchor, returning it if present.
     #[allow(dead_code)]
-    pub(crate) fn detach(&self, local_id: u64) -> Option<Box<dyn FrameReader>> {
+    pub(crate) fn detach(&self, local_id: u64) -> Option<flume::Receiver<Vec<u8>>> {
         self.registry
             .get_mut(&local_id)
             .and_then(|mut entry| entry.attachment.take())
@@ -240,6 +242,7 @@ impl AnchorManager {
 mod tests {
     use super::*;
     use anyhow::Result as AnyhowResult;
+    use futures::future::BoxFuture;
     use std::sync::Arc;
 
     // -----------------------------------------------------------------------
@@ -249,33 +252,21 @@ mod tests {
     struct MockTransport;
 
     impl crate::transport::FrameTransport for MockTransport {
-        fn bind(&self, _anchor_id: u64) -> AnyhowResult<(String, Box<dyn FrameReader>)> {
-            Ok(("mock://endpoint".to_string(), Box::new(MockReader)))
+        fn bind(&self, _anchor_id: u64) -> BoxFuture<'_, AnyhowResult<(String, flume::Receiver<Vec<u8>>)>> {
+            Box::pin(async {
+                Ok(("mock://endpoint".to_string(), flume::bounded::<Vec<u8>>(256).1))
+            })
         }
+
         fn connect(
             &self,
             _endpoint: &str,
             _anchor_id: u64,
             _session_id: u64,
-        ) -> AnyhowResult<Box<dyn crate::transport::FrameWriter>> {
-            Ok(Box::new(MockWriter))
-        }
-    }
-
-    struct MockReader;
-    impl FrameReader for MockReader {
-        fn recv(&mut self) -> Option<AnyhowResult<Vec<u8>>> {
-            None
-        }
-    }
-
-    struct MockWriter;
-    impl crate::transport::FrameWriter for MockWriter {
-        fn send(&mut self, _data: &[u8]) -> AnyhowResult<()> {
-            Ok(())
-        }
-        fn close(self: Box<Self>) -> AnyhowResult<()> {
-            Ok(())
+        ) -> BoxFuture<'_, AnyhowResult<flume::Sender<Vec<u8>>>> {
+            Box::pin(async {
+                Ok(flume::bounded::<Vec<u8>>(256).0)
+            })
         }
     }
 
@@ -324,7 +315,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Test 3: Exclusive attach — second attach while attached returns AlreadyAttached
+    // Test 3: Exclusive attach -- second attach while attached returns AlreadyAttached
     // -----------------------------------------------------------------------
 
     #[test]
@@ -334,21 +325,21 @@ mod tests {
         let (_, local_id) = handle.unpack();
 
         // First attach succeeds.
-        let result1 = mgr.try_attach(local_id, Box::new(MockReader), handle);
+        let result1 = mgr.try_attach(local_id, flume::bounded::<Vec<u8>>(256).1, handle);
         assert!(result1.is_ok(), "first attach must succeed: {result1:?}");
 
         // Second attach while still attached must fail with AlreadyAttached.
-        let result2 = mgr.try_attach(local_id, Box::new(MockReader), handle);
+        let result2 = mgr.try_attach(local_id, flume::bounded::<Vec<u8>>(256).1, handle);
         match result2 {
             Err(AttachError::AlreadyAttached { .. }) => {}
             other => panic!("expected AlreadyAttached, got {other:?}"),
         }
 
-        // Detach and try again — must succeed.
+        // Detach and try again -- must succeed.
         let detached = mgr.detach(local_id);
         assert!(detached.is_some(), "detach must return the reader");
 
-        let result3 = mgr.try_attach(local_id, Box::new(MockReader), handle);
+        let result3 = mgr.try_attach(local_id, flume::bounded::<Vec<u8>>(256).1, handle);
         assert!(result3.is_ok(), "third attach after detach must succeed: {result3:?}");
     }
 
@@ -369,11 +360,11 @@ mod tests {
             .map(|e| e.cancel_token.clone())
             .expect("entry must exist");
 
-        // First cancel — should not panic.
+        // First cancel -- should not panic.
         token.cancel();
         assert!(token.is_cancelled(), "token must be cancelled after first cancel()");
 
-        // Second cancel — must not panic and must still report cancelled.
+        // Second cancel -- must not panic and must still report cancelled.
         token.cancel();
         assert!(token.is_cancelled(), "token must still be cancelled after second cancel()");
     }

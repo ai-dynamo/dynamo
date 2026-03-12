@@ -4,8 +4,9 @@
 //! Control-plane handler constructors for the anchor lifecycle.
 //!
 //! This module provides four [`velo_messenger::Handler`] constructors:
-//! - [`create_anchor_attach_handler`]: validates anchor existence and unattached state,
-//!   calls transport.bind(), stores [`crate::transport::FrameReader`] in [`crate::anchor::AnchorEntry`].
+//! - [`create_anchor_attach_handler`]: validates anchor existence, calls
+//!   `transport.bind().await` (outside shard lock), then atomically stores
+//!   the [`flume::Receiver`] in [`crate::anchor::AnchorEntry`].
 //! - [`create_anchor_detach_handler`]: clears attachment, cancels CancellationToken,
 //!   injects [`crate::frame::StreamFrame::Detached`] sentinel; anchor stays in registry.
 //! - [`create_anchor_finalize_handler`]: injects [`crate::frame::StreamFrame::Finalized`]
@@ -72,8 +73,9 @@ pub struct AnchorCancelRequest {
 
 /// Build the `_anchor_attach` handler.
 ///
-/// Atomically validates that the anchor exists and is unattached via `DashMap::entry()`,
-/// then calls `transport.bind()` and stores the resulting [`crate::transport::FrameReader`].
+/// Uses the bind-then-lock pattern: calls `transport.bind().await` OUTSIDE the
+/// DashMap shard lock, then atomically checks and sets the attachment under the lock.
+/// This avoids holding the shard lock across an async `.await` point.
 ///
 /// Returns [`AnchorAttachResponse::Ok`] on success or [`AnchorAttachResponse::Err`] on
 /// any failure (not found, already attached, transport error).
@@ -86,35 +88,53 @@ pub fn create_anchor_attach_handler(manager: Arc<AnchorManager>) -> velo_messeng
                 let req = ctx.input;
                 let (_, local_id) = req.handle.unpack();
 
-                use dashmap::mapref::entry::Entry;
-                let result = match manager.registry.entry(local_id) {
-                    Entry::Vacant(_) => {
-                        return Ok(AnchorAttachResponse::Err {
-                            reason: format!("anchor {} not found", req.handle),
-                        });
-                    }
-                    Entry::Occupied(mut occ) => {
-                        let entry = occ.get_mut();
-                        if entry.attachment.is_some() {
+                // Step 1: Quick check -- anchor exists and is unattached (drop lock)
+                {
+                    let entry = manager.registry.get(&local_id);
+                    match entry {
+                        None => {
+                            return Ok(AnchorAttachResponse::Err {
+                                reason: format!("anchor {} not found", req.handle),
+                            });
+                        }
+                        Some(e) if e.attachment.is_some() => {
                             return Ok(AnchorAttachResponse::Err {
                                 reason: format!("anchor {} already attached", req.handle),
                             });
                         }
-                        // transport.bind() is synchronous — safe to call inside entry guard
-                        match manager.transport.bind(local_id) {
-                            Ok((endpoint, reader)) => {
-                                entry.attachment = Some(reader);
-                                Ok(AnchorAttachResponse::Ok {
-                                    stream_endpoint: endpoint,
-                                })
-                            }
-                            Err(e) => Err(format!("transport error: {}", e)),
-                        }
+                        _ => {} // looks good, proceed
+                    }
+                } // DashMap ref dropped here
+
+                // Step 2: Async bind OUTSIDE shard lock
+                let (endpoint, receiver) = match manager.transport.bind(local_id).await {
+                    Ok(pair) => pair,
+                    Err(e) => {
+                        return Ok(AnchorAttachResponse::Err {
+                            reason: format!("transport error: {}", e),
+                        });
                     }
                 };
-                match result {
-                    Ok(resp) => Ok(resp),
-                    Err(reason) => Ok(AnchorAttachResponse::Err { reason }),
+
+                // Step 3: Atomically set attachment under shard lock
+                use dashmap::mapref::entry::Entry;
+                match manager.registry.entry(local_id) {
+                    Entry::Vacant(_) => Ok(AnchorAttachResponse::Err {
+                        reason: format!("anchor {} removed during bind", req.handle),
+                    }),
+                    Entry::Occupied(mut occ) => {
+                        let entry = occ.get_mut();
+                        if entry.attachment.is_some() {
+                            Ok(AnchorAttachResponse::Err {
+                                reason: format!("anchor {} already attached", req.handle),
+                            })
+                        } else {
+                            entry.attachment = Some(receiver);
+                            Ok(AnchorAttachResponse::Ok {
+                                stream_endpoint: endpoint,
+                            })
+                        }
+                    }
                 }
             }
         },
@@ -125,8 +145,8 @@ pub fn create_anchor_attach_handler(manager: Arc<AnchorManager>) -> velo_messeng
 
 /// Build the `_anchor_detach` handler.
 ///
-/// Atomically clears `attachment` via `DashMap::entry()`, then — after dropping the
-/// shard lock — cancels the `CancellationToken` and injects a
+/// Atomically clears `attachment` via `DashMap::entry()`, then -- after dropping the
+/// shard lock -- cancels the `CancellationToken` and injects a
 /// [`crate::frame::StreamFrame::Detached`] sentinel into the frame channel.
 /// The anchor remains in the registry so a new sender may re-attach.
 ///
@@ -218,7 +238,7 @@ pub fn create_anchor_cancel_handler(manager: Arc<AnchorManager>) -> velo_messeng
                 let req = ctx.input;
                 let (_, local_id) = req.handle.unpack();
 
-                // remove_anchor is a no-op (returns None) if anchor absent — idempotent
+                // remove_anchor is a no-op (returns None) if anchor absent -- idempotent
                 if let Some(entry) = manager.remove_anchor(local_id) {
                     entry.cancel_token.cancel();
                 }
@@ -239,7 +259,8 @@ pub fn create_anchor_cancel_handler(manager: Arc<AnchorManager>) -> velo_messeng
 mod tests {
     use super::*;
     use anyhow::Result as AnyhowResult;
-    use std::sync::{Arc, Mutex};
+    use futures::future::BoxFuture;
+    use std::sync::Arc;
 
     // -----------------------------------------------------------------------
     // MockFrameTransport (test-only)
@@ -248,8 +269,10 @@ mod tests {
     struct MockFrameTransport;
 
     impl crate::transport::FrameTransport for MockFrameTransport {
-        fn bind(&self, _anchor_id: u64) -> AnyhowResult<(String, Box<dyn crate::transport::FrameReader>)> {
-            Ok(("mock://test-endpoint".to_string(), Box::new(MockFrameReader)))
+        fn bind(&self, _anchor_id: u64) -> BoxFuture<'_, AnyhowResult<(String, flume::Receiver<Vec<u8>>)>> {
+            Box::pin(async {
+                Ok(("mock://test-endpoint".to_string(), flume::bounded::<Vec<u8>>(256).1))
+            })
         }
 
         fn connect(
@@ -257,33 +280,10 @@ mod tests {
             _endpoint: &str,
             _anchor_id: u64,
             _session_id: u64,
-        ) -> AnyhowResult<Box<dyn crate::transport::FrameWriter>> {
-            Ok(Box::new(MockFrameWriter {
-                sent: Arc::new(Mutex::new(vec![])),
-            }))
-        }
-    }
-
-    struct MockFrameReader;
-
-    impl crate::transport::FrameReader for MockFrameReader {
-        fn recv(&mut self) -> Option<AnyhowResult<Vec<u8>>> {
-            None
-        }
-    }
-
-    struct MockFrameWriter {
-        pub sent: Arc<Mutex<Vec<Vec<u8>>>>,
-    }
-
-    impl crate::transport::FrameWriter for MockFrameWriter {
-        fn send(&mut self, data: &[u8]) -> AnyhowResult<()> {
-            self.sent.lock().unwrap().push(data.to_vec());
-            Ok(())
-        }
-
-        fn close(self: Box<Self>) -> AnyhowResult<()> {
-            Ok(())
+        ) -> BoxFuture<'_, AnyhowResult<flume::Sender<Vec<u8>>>> {
+            Box::pin(async {
+                Ok(flume::bounded::<Vec<u8>>(256).0)
+            })
         }
     }
 
@@ -350,7 +350,11 @@ mod tests {
         let (handle, _stream) = manager.create_anchor::<u8>();
         let (_, local_id) = handle.unpack();
 
-        // Simulate attach handler logic
+        // Simulate bind-then-lock attach handler logic:
+        // Step 1: async bind outside shard lock
+        let (endpoint, receiver) = manager.transport.bind(local_id).await.unwrap();
+
+        // Step 2: atomically set attachment under shard lock
         use dashmap::mapref::entry::Entry;
         let result = match manager.registry.entry(local_id) {
             Entry::Vacant(_) => AnchorAttachResponse::Err {
@@ -363,16 +367,9 @@ mod tests {
                         reason: format!("anchor {} already attached", handle),
                     }
                 } else {
-                    match manager.transport.bind(local_id) {
-                        Ok((endpoint, reader)) => {
-                            entry.attachment = Some(reader);
-                            AnchorAttachResponse::Ok {
-                                stream_endpoint: endpoint,
-                            }
-                        }
-                        Err(e) => AnchorAttachResponse::Err {
-                            reason: format!("transport error: {}", e),
-                        },
+                    entry.attachment = Some(receiver);
+                    AnchorAttachResponse::Ok {
+                        stream_endpoint: endpoint,
                     }
                 }
             }
@@ -405,17 +402,18 @@ mod tests {
         let (handle, _stream) = manager.create_anchor::<u8>();
         let (_, local_id) = handle.unpack();
 
-        // First attach
-        use dashmap::mapref::entry::Entry;
+        // First attach via bind-then-lock
         {
+            let (_, receiver) = manager.transport.bind(local_id).await.unwrap();
+            use dashmap::mapref::entry::Entry;
             if let Entry::Occupied(mut occ) = manager.registry.entry(local_id) {
                 let entry = occ.get_mut();
-                let (_, reader) = manager.transport.bind(local_id).unwrap();
-                entry.attachment = Some(reader);
+                entry.attachment = Some(receiver);
             }
         }
 
-        // Second attach via handler logic
+        // Second attach via handler logic -- should fail
+        use dashmap::mapref::entry::Entry;
         let result = match manager.registry.entry(local_id) {
             Entry::Vacant(_) => AnchorAttachResponse::Err {
                 reason: format!("anchor {} not found", handle),
@@ -480,16 +478,16 @@ mod tests {
     #[tokio::test]
     async fn test_anchor_detach_handler() {
         let manager = make_test_manager();
-        let (handle, mut stream) = manager.create_anchor::<Vec<u8>>();
+        let (handle, stream) = manager.create_anchor::<Vec<u8>>();
         let (_, local_id) = handle.unpack();
 
-        // Simulate attach first
+        // Simulate attach first via bind-then-lock
         {
+            let (_, receiver) = manager.transport.bind(local_id).await.unwrap();
             use dashmap::mapref::entry::Entry;
             if let Entry::Occupied(mut occ) = manager.registry.entry(local_id) {
                 let entry = occ.get_mut();
-                let (_, reader) = manager.transport.bind(local_id).unwrap();
-                entry.attachment = Some(reader);
+                entry.attachment = Some(receiver);
             }
         }
 
@@ -550,16 +548,16 @@ mod tests {
     #[tokio::test]
     async fn test_anchor_finalize_handler() {
         let manager = make_test_manager();
-        let (handle, mut stream) = manager.create_anchor::<Vec<u8>>();
+        let (handle, stream) = manager.create_anchor::<Vec<u8>>();
         let (_, local_id) = handle.unpack();
 
-        // Simulate attach
+        // Simulate attach via bind-then-lock
         {
+            let (_, receiver) = manager.transport.bind(local_id).await.unwrap();
             use dashmap::mapref::entry::Entry;
             if let Entry::Occupied(mut occ) = manager.registry.entry(local_id) {
                 let entry = occ.get_mut();
-                let (_, reader) = manager.transport.bind(local_id).unwrap();
-                entry.attachment = Some(reader);
+                entry.attachment = Some(receiver);
             }
         }
 
@@ -613,11 +611,11 @@ mod tests {
             "anchor must be absent after cancel"
         );
 
-        // Idempotent: cancel again — must not panic
+        // Idempotent: cancel again -- must not panic
         if let Some(entry) = manager.remove_anchor(local_id) {
             entry.cancel_token.cancel();
         }
-        // No panic — test passes
+        // No panic -- test passes
 
         // Verify handler constructor compiles
         let _handler = create_anchor_cancel_handler(manager.clone());

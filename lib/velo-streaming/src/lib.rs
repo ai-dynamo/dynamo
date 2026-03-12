@@ -9,8 +9,8 @@
 //!
 //! Transport abstraction:
 //! - [`transport::FrameTransport`]: pluggable ordered-delivery transport trait
-//! - [`transport::FrameReader`]: frame receive half of the transport channel
-//! - [`transport::FrameWriter`]: frame send half of the transport channel
+//!   returning [`flume::Receiver<Vec<u8>>`] and [`flume::Sender<Vec<u8>>`]
+//!   channel endpoints via [`futures::future::BoxFuture`]
 //!
 //! Anchor registry:
 //! - [`anchor::AnchorManager`]: creates and tracks streaming anchors
@@ -29,4 +29,4 @@ pub use control::{
     AnchorFinalizeRequest, create_anchor_attach_handler, create_anchor_cancel_handler,
     create_anchor_detach_handler, create_anchor_finalize_handler,
 };
-pub use transport::{FrameReader, FrameTransport, FrameWriter};
+pub use transport::FrameTransport;

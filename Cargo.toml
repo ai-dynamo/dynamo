@@ -87,6 +87,7 @@ derive_builder = { version = "0.20" }
 derive-getters = { version = "0.5" }
 either = { version = "1.13", features = ["serde"] }
 etcd-client = { version = "0.17.0", features = ["tls"] }
+flume = { version = "0.12.0" }
 futures = { version = "0.3" }
 hf-hub = { version = "0.4.2", default-features = false, features = [
     "tokio",

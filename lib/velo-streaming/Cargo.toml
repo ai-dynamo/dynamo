@@ -21,6 +21,8 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 dashmap = { workspace = true }
+flume = { workspace = true }
+futures = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
