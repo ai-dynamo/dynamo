@@ -15,14 +15,19 @@
 //!   creation so that whichever cleanup path fires first cancels the token; subsequent
 //!   cancellations are no-ops.
 
+use std::pin::Pin;
 use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
 };
+use std::task::{Context, Poll};
 
 use dashmap::DashMap;
+use futures::Stream;
+use serde::de::DeserializeOwned;
 use tokio_util::sync::CancellationToken;
 
+use crate::frame::{StreamError, StreamFrame};
 use crate::handle::StreamAnchorHandle;
 
 // ---------------------------------------------------------------------------
@@ -82,23 +87,105 @@ pub(crate) struct AnchorEntry {
 // AnchorStream<T>
 // ---------------------------------------------------------------------------
 
-/// Thin wrapper around the receive half of the per-anchor flume channel.
+/// Consumer-side receive stream for an anchor.
 ///
-/// Phase 8 will add the async `next()` / `Stream` implementation that
-/// deserializes the raw bytes into `StreamFrame<T>`. For now this is a
-/// stub that holds the receiver and exposes it for testing.
+/// Implements [`futures::Stream`] yielding `Result<StreamFrame<T>, StreamError>`.
+/// Heartbeat frames are filtered out and never exposed to the consumer.
+/// Terminal sentinels (`Finalized`, `Detached`, `Dropped`, `TransportError`)
+/// cause the stream to yield one final item and then `None` on subsequent polls.
+///
+/// Use [`StreamExt::next()`](futures::StreamExt::next) for async iteration.
 pub struct AnchorStream<T> {
-    // Consumed by Phase 8 Stream impl.
-    #[allow(dead_code)]
-    pub(crate) rx: flume::Receiver<Vec<u8>>,
+    /// Async stream obtained from consuming the flume::Receiver via `into_stream()`.
+    inner_stream: flume::r#async::RecvStream<'static, Vec<u8>>,
+    /// Set to true after a terminal sentinel; prevents further polling.
+    terminated: bool,
+    /// The local ID of the anchor in the registry (for cancel).
+    local_id: u64,
+    /// Arc clone of the AnchorManager's registry (for cancel).
+    registry: Arc<DashMap<u64, AnchorEntry>>,
     _phantom: std::marker::PhantomData<T>,
 }
 
 impl<T> AnchorStream<T> {
-    pub(crate) fn new(rx: flume::Receiver<Vec<u8>>) -> Self {
+    pub(crate) fn new(
+        rx: flume::Receiver<Vec<u8>>,
+        local_id: u64,
+        registry: Arc<DashMap<u64, AnchorEntry>>,
+    ) -> Self {
         Self {
-            rx,
+            inner_stream: rx.into_stream(),
+            terminated: false,
+            local_id,
+            registry,
             _phantom: std::marker::PhantomData,
+        }
+    }
+
+    /// Remove the anchor from the registry. Pending or future attach attempts
+    /// will receive `AttachError::AnchorNotFound`.
+    pub fn cancel(&self) {
+        if let Some((_, entry)) = self.registry.remove(&self.local_id) {
+            entry.cancel_token.cancel();
+        }
+    }
+}
+
+// SAFETY: AnchorStream does not use structural pinning. Its `inner_stream`
+// (flume::r#async::RecvStream) is Unpin, and all other fields are trivially Unpin.
+// PhantomData<T> should not prevent Unpin, but we assert it explicitly.
+impl<T> Unpin for AnchorStream<T> {}
+
+impl<T: DeserializeOwned> Stream for AnchorStream<T> {
+    type Item = Result<StreamFrame<T>, StreamError>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        if this.terminated {
+            return Poll::Ready(None);
+        }
+        loop {
+            match Pin::new(&mut this.inner_stream).poll_next(cx) {
+                Poll::Ready(Some(bytes)) => {
+                    match rmp_serde::from_slice::<StreamFrame<T>>(&bytes) {
+                        Ok(StreamFrame::Heartbeat) => continue, // filter heartbeats
+                        Ok(StreamFrame::Item(data)) => {
+                            return Poll::Ready(Some(Ok(StreamFrame::Item(data))));
+                        }
+                        Ok(StreamFrame::SenderError(msg)) => {
+                            // Soft error -- stream continues (not terminated)
+                            return Poll::Ready(Some(Err(StreamError::SenderError(msg))));
+                        }
+                        Ok(StreamFrame::Finalized) => {
+                            this.terminated = true;
+                            return Poll::Ready(Some(Ok(StreamFrame::Finalized)));
+                        }
+                        Ok(StreamFrame::Detached) => {
+                            this.terminated = true;
+                            return Poll::Ready(Some(Ok(StreamFrame::Detached)));
+                        }
+                        Ok(StreamFrame::Dropped) => {
+                            this.terminated = true;
+                            return Poll::Ready(Some(Err(StreamError::SenderDropped)));
+                        }
+                        Ok(StreamFrame::TransportError(msg)) => {
+                            this.terminated = true;
+                            return Poll::Ready(Some(Err(StreamError::TransportError(msg))));
+                        }
+                        Err(e) => {
+                            this.terminated = true;
+                            return Poll::Ready(Some(Err(
+                                StreamError::DeserializationError(e.to_string()),
+                            )));
+                        }
+                    }
+                }
+                Poll::Ready(None) => {
+                    this.terminated = true;
+                    return Poll::Ready(None);
+                }
+                Poll::Pending => return Poll::Pending,
+            }
         }
     }
 }
@@ -158,7 +245,7 @@ impl AnchorManager {
         self.registry.insert(local_id, entry);
 
         let handle = StreamAnchorHandle::pack(self.worker_id, local_id);
-        let stream = AnchorStream::new(frame_rx);
+        let stream = AnchorStream::new(frame_rx, local_id, self.registry.clone());
         (handle, stream)
     }
 
@@ -582,7 +669,7 @@ mod tests {
     #[tokio::test]
     async fn test_attach_stream_anchor_sender_can_send() {
         let (mgr, _transport) = make_configurable_manager();
-        let (handle, stream) = mgr.create_anchor::<u32>();
+        let (handle, mut stream) = mgr.create_anchor::<u32>();
 
         let sender = mgr
             .attach_stream_anchor::<u32>(handle, "mock://endpoint", 1)
@@ -592,12 +679,10 @@ mod tests {
         // Send an item through the StreamSender
         sender.send(42u32).await.expect("send should succeed");
 
-        // The item should arrive on the AnchorStream's internal receiver
-        let bytes = stream.rx.try_recv().expect("should receive item on stream rx");
-        let frame: crate::frame::StreamFrame<u32> =
-            rmp_serde::from_slice(&bytes).expect("deserialize");
-        match frame {
-            crate::frame::StreamFrame::Item(val) => assert_eq!(val, 42),
+        // The item should arrive via the Stream interface
+        let result = stream.next().await;
+        match result {
+            Some(Ok(StreamFrame::Item(val))) => assert_eq!(val, 42),
             other => panic!("expected Item(42), got {:?}", other),
         }
 
@@ -784,10 +869,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_stream_none_when_sender_dropped() {
-        let (tx, mut stream) = make_test_stream::<u32>();
+        let mgr = make_manager();
+        let (handle, mut stream) = mgr.create_anchor::<u32>();
+        let (_, local_id) = handle.unpack();
 
-        // Drop the sender -- channel closes
-        drop(tx);
+        // Remove the anchor from the registry to drop the frame_tx sender,
+        // then drop the returned entry so ALL senders are gone.
+        let entry = mgr.remove_anchor(local_id);
+        drop(entry); // drops frame_tx -> channel closes
 
         let result = stream.next().await;
         assert!(result.is_none(), "expected None when channel sender dropped, got {:?}", result);

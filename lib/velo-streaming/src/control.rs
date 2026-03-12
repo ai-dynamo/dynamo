@@ -260,6 +260,7 @@ mod tests {
     use super::*;
     use anyhow::Result as AnyhowResult;
     use futures::future::BoxFuture;
+    use futures::StreamExt;
     use std::sync::Arc;
 
     // -----------------------------------------------------------------------
@@ -478,7 +479,7 @@ mod tests {
     #[tokio::test]
     async fn test_anchor_detach_handler() {
         let manager = make_test_manager();
-        let (handle, stream) = manager.create_anchor::<Vec<u8>>();
+        let (handle, mut stream) = manager.create_anchor::<Vec<u8>>();
         let (_, local_id) = handle.unpack();
 
         // Simulate attach first via bind-then-lock
@@ -527,14 +528,12 @@ mod tests {
             "anchor must remain in registry after detach"
         );
 
-        // Verify: frame_tx received Detached sentinel
-        let sentinel_bytes = stream.rx.try_recv().expect("must have received sentinel");
-        let decoded: crate::frame::StreamFrame<Vec<u8>> =
-            rmp_serde::from_slice(&sentinel_bytes).expect("deserialize sentinel");
+        // Verify: Detached sentinel received via Stream interface
+        let result = stream.next().await;
         assert!(
-            matches!(decoded, crate::frame::StreamFrame::Detached),
+            matches!(result, Some(Ok(crate::frame::StreamFrame::Detached))),
             "sentinel must be Detached, got {:?}",
-            decoded
+            result
         );
 
         // Verify handler constructor compiles
@@ -548,7 +547,7 @@ mod tests {
     #[tokio::test]
     async fn test_anchor_finalize_handler() {
         let manager = make_test_manager();
-        let (handle, stream) = manager.create_anchor::<Vec<u8>>();
+        let (handle, mut stream) = manager.create_anchor::<Vec<u8>>();
         let (_, local_id) = handle.unpack();
 
         // Simulate attach via bind-then-lock
@@ -576,14 +575,12 @@ mod tests {
             "anchor must be absent from registry after finalize"
         );
 
-        // Verify: Finalized sentinel was injected
-        let sentinel_bytes = stream.rx.try_recv().expect("must have received sentinel");
-        let decoded: crate::frame::StreamFrame<Vec<u8>> =
-            rmp_serde::from_slice(&sentinel_bytes).expect("deserialize sentinel");
+        // Verify: Finalized sentinel received via Stream interface
+        let result = stream.next().await;
         assert!(
-            matches!(decoded, crate::frame::StreamFrame::Finalized),
+            matches!(result, Some(Ok(crate::frame::StreamFrame::Finalized))),
             "sentinel must be Finalized, got {:?}",
-            decoded
+            result
         );
 
         // Verify handler constructor compiles
