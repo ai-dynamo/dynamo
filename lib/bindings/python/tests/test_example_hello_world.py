@@ -8,6 +8,7 @@ Tests for the hello_world example in examples/custom_backend/hello_world
 import asyncio
 import os
 import subprocess
+import sys
 import uuid
 
 import pytest
@@ -87,7 +88,7 @@ def stop_process(process):
 async def server_process(example_dir, example_env):
     """Start the hello_world server and clean up after test"""
     server_proc = subprocess.Popen(
-        ["python3", "-u", "hello_world.py"],
+        [sys.executable, "-u", "hello_world.py"],
         cwd=example_dir,
         env=example_env,
         stdout=subprocess.PIPE,
@@ -112,7 +113,7 @@ async def run_client(example_dir, example_env):
 
     # -u means unbuffered mode
     client_proc = subprocess.Popen(
-        ["python3", "-u", "client.py"],
+        [sys.executable, "-u", "client.py"],
         cwd=example_dir,
         env=example_env,
         stdout=subprocess.PIPE,
@@ -120,13 +121,11 @@ async def run_client(example_dir, example_env):
         text=True,
     )
 
-    # Let it run long enough for one full response cycle.
-    await asyncio.sleep(2)
+    output = await wait_for_output(client_proc, "Hello star!")
 
-    # Terminate the client
     stdout = stop_process(client_proc)
 
-    return stdout
+    return output + stdout
 
 
 @pytest.mark.asyncio

@@ -83,9 +83,9 @@ class MockHttpEngine:
 
 
 @pytest.fixture(scope="function", autouse=False)
-async def http_server(runtime: DistributedRuntime):
+async def http_server(runtime: DistributedRuntime, dynamo_dynamic_ports):
     """Fixture to start a mock HTTP server using HttpService, contributed by Baseten."""
-    port = 8008
+    port = dynamo_dynamic_ports.frontend_port
     model_name = "test_model"
     start_done = asyncio.Event()
     checksum = "abc123"  # Checksum of ModelDeplomentCard for that model
