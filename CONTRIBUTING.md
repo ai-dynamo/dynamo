@@ -21,7 +21,7 @@ Thank you for your interest in contributing to Dynamo!
 
 For the full contribution guide — including how to get started, build from source, submit PRs, and what to expect during review — see:
 
-**[Contribution Guide](https://docs.nvidia.com/dynamo/dynamo/dev/getting-started/contribution-guide)** (docs site)
+**[Contribution Guide](https://docs.nvidia.com/dynamo/dev/getting-started/contribution-guide)** (docs site)
 
 Or view the source: [`docs/contribution-guide.md`](docs/contribution-guide.md)
 

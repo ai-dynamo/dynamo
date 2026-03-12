@@ -8,6 +8,7 @@ boto3==1.42.4
 boto3-stubs[s3]==1.42.9  # Type stubs for boto3 S3 client
 # For IFEval dataset loading in kvbm tests
 datasets==4.4.1
+filelock==3.25.1
 # For Kubernetes operations in deploy tests
 kr8s==0.20.13
 kubernetes_asyncio==32.0.0
@@ -31,12 +32,10 @@ pytest-order==1.3.0
 pytest-timeout==2.4.0
 pytest-xdist==3.8.0
 requests==2.32.5
-# Required by kr8s
-# https://github.com/kr8s-org/kr8s/blob/750022c3ebbb7988cddb5a979aca2ee8074a1069/examples/kubectl-ng/uv.lock#L988
+# Required by kr8s (not declared in kr8s's own dependencies)
 sniffio==1.3.1
 tabulate==0.9.0
 types-aiofiles>=24.1.0
 types-PyYAML==6.0.12.20250915
 types-requests==2.32.4.20250913
 types-tabulate>=0.9.0
-websocket-client==1.9.0
