@@ -150,7 +150,7 @@ def is_qwen_vl_model(model_name: str) -> bool:
     )
 
 
-def load_vision_model(model_id: str) -> torch.nn.Module:
+def load_vision_model(model_id: str, enforce_eager: bool = False) -> torch.nn.Module:
     """
     Load a vision model from a HuggingFace model ID.
     """
@@ -167,10 +167,10 @@ def load_vision_model(model_id: str) -> torch.nn.Module:
         # Load only the vision model via vLLM
         vllm_model = LLM(
             model=model_id,
-            enforce_eager=False,
+            enforce_eager=enforce_eager,
             kv_cache_memory_bytes=1024
             * 1024
-            * 8,  # 8MB KV cache for vLLM to complete the init lifecycle, encoder-only doesn't require KV cache.
+            * 64,  # 64MB KV cache for vLLM to complete the init lifecycle, encoder-only doesn't require KV cache.
             max_model_len=1,
             mm_encoder_only=True,
             enable_prefix_caching=False,
