@@ -12,6 +12,8 @@ apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
   name: qwen3-vl-agg-gb200-v2
+  annotations:
+    grove.io/auto-mnnvl: "disabled"
 spec:
   pvcs:
     - create: false
