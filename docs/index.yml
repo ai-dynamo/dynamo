@@ -47,6 +47,8 @@ navigation:
         contents:
           - page: Detailed Installation Guide
             path: kubernetes/installation-guide.md
+          - page: Deploying Your First Model
+            path: kubernetes/dgdr.md
           - page: Dynamo Operator
             path: kubernetes/dynamo-operator.md
           - page: Service Discovery
