@@ -24,6 +24,10 @@ navigation:
         path: getting-started/quickstart.md
       - page: Contribution Guide
         path: contribution-guide.md
+
+  # ==================== Resources ====================
+  - section: Resources
+    contents:
       - page: Support Matrix
         path: reference/support-matrix.md
       - page: Feature Matrix
@@ -32,6 +36,8 @@ navigation:
         path: reference/release-artifacts.md
       - page: Examples
         path: getting-started/examples.md
+      - page: Contribution Guide
+        path: contribution-guide.md
 
   # ==================== Kubernetes Deployment ====================
   - section: Kubernetes Deployment
