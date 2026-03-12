@@ -37,6 +37,7 @@ CMakeCache.txt
 *_pb2.py
 *_pb2.pyi
 *.svg
+!docs/assets/**/*.svg
 
 *pytest_report.md
 *pytest_report.xml

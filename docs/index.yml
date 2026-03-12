@@ -22,6 +22,12 @@ navigation:
     contents:
       - page: Quickstart
         path: getting-started/quickstart.md
+      - page: Contribution Guide
+        path: contribution-guide.md
+
+  # ==================== Resources ====================
+  - section: Resources
+    contents:
       - page: Support Matrix
         path: reference/support-matrix.md
       - page: Feature Matrix
@@ -30,6 +36,8 @@ navigation:
         path: reference/release-artifacts.md
       - page: Examples
         path: getting-started/examples.md
+      - page: Contribution Guide
+        path: contribution-guide.md
 
   # ==================== Kubernetes Deployment ====================
   - section: Kubernetes Deployment
@@ -108,6 +116,11 @@ navigation:
         path: agents/tool-calling.md
       - page: LoRA Adapters
         path: features/lora/README.md
+      - section: Agentic Workloads
+        path: features/agentic_workloads.md
+        contents:
+          - page: SGLang for Agentic Workloads
+            path: backends/sglang/agents.md
       - section: Observability (Local)
         path: observability/README.md
         contents:
