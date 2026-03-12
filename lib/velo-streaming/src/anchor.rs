@@ -311,7 +311,9 @@ mod tests {
     use super::*;
     use anyhow::Result as AnyhowResult;
     use futures::future::BoxFuture;
+    use futures::StreamExt;
     use std::sync::Arc;
+    use crate::frame::{StreamFrame, StreamError};
 
     // -----------------------------------------------------------------------
     // Mock transport for unit tests
@@ -618,5 +620,189 @@ mod tests {
             Err(AttachError::TransportError(_)) => {}
             other => panic!("expected TransportError, got {:?}", other),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // AnchorStream<T> Stream impl tests (Plan 08-03, Task 1)
+    // -----------------------------------------------------------------------
+
+    /// Helper: create a raw channel pair + AnchorStream for testing Stream impl.
+    /// Returns (sender for pushing raw bytes, AnchorStream<T>).
+    fn make_test_stream<T>() -> (flume::Sender<Vec<u8>>, AnchorStream<T>) {
+        let mgr = make_manager();
+        let (handle, stream) = mgr.create_anchor::<T>();
+        let (_, local_id) = handle.unpack();
+        // Get the frame_tx from the registry for pushing raw bytes
+        let frame_tx = mgr
+            .registry
+            .get(&local_id)
+            .map(|e| e.frame_tx.clone())
+            .expect("entry must exist");
+        (frame_tx, stream)
+    }
+
+    #[tokio::test]
+    async fn test_stream_yields_item() {
+        let (tx, mut stream) = make_test_stream::<u32>();
+
+        // Send serialized Item frame
+        let bytes = rmp_serde::to_vec(&StreamFrame::Item(42u32)).unwrap();
+        tx.send(bytes).unwrap();
+
+        let result = stream.next().await;
+        match result {
+            Some(Ok(StreamFrame::Item(val))) => assert_eq!(val, 42),
+            other => panic!("expected Some(Ok(Item(42))), got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_stream_yields_sender_error_and_continues() {
+        let (tx, mut stream) = make_test_stream::<u32>();
+
+        // Send SenderError
+        let err_bytes = rmp_serde::to_vec(&StreamFrame::<u32>::SenderError("oops".to_string())).unwrap();
+        tx.send(err_bytes).unwrap();
+
+        // Should yield Err(StreamError::SenderError)
+        let result = stream.next().await;
+        match result {
+            Some(Err(StreamError::SenderError(msg))) => assert_eq!(msg, "oops"),
+            other => panic!("expected SenderError, got {:?}", other),
+        }
+
+        // Stream should continue -- send another item
+        let item_bytes = rmp_serde::to_vec(&StreamFrame::Item(99u32)).unwrap();
+        tx.send(item_bytes).unwrap();
+
+        let result2 = stream.next().await;
+        match result2 {
+            Some(Ok(StreamFrame::Item(val))) => assert_eq!(val, 99),
+            other => panic!("expected Item(99) after SenderError, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_stream_finalized_then_none() {
+        let (tx, mut stream) = make_test_stream::<u32>();
+
+        let bytes = rmp_serde::to_vec(&StreamFrame::<u32>::Finalized).unwrap();
+        tx.send(bytes).unwrap();
+
+        // Should yield Ok(Finalized)
+        let result = stream.next().await;
+        assert!(matches!(result, Some(Ok(StreamFrame::Finalized))), "expected Finalized, got {:?}", result);
+
+        // Next call should yield None
+        let result2 = stream.next().await;
+        assert!(result2.is_none(), "expected None after Finalized, got {:?}", result2);
+    }
+
+    #[tokio::test]
+    async fn test_stream_detached_then_none() {
+        let (tx, mut stream) = make_test_stream::<u32>();
+
+        let bytes = rmp_serde::to_vec(&StreamFrame::<u32>::Detached).unwrap();
+        tx.send(bytes).unwrap();
+
+        let result = stream.next().await;
+        assert!(matches!(result, Some(Ok(StreamFrame::Detached))), "expected Detached, got {:?}", result);
+
+        let result2 = stream.next().await;
+        assert!(result2.is_none(), "expected None after Detached, got {:?}", result2);
+    }
+
+    #[tokio::test]
+    async fn test_stream_dropped_then_none() {
+        let (tx, mut stream) = make_test_stream::<u32>();
+
+        let bytes = rmp_serde::to_vec(&StreamFrame::<u32>::Dropped).unwrap();
+        tx.send(bytes).unwrap();
+
+        let result = stream.next().await;
+        match result {
+            Some(Err(StreamError::SenderDropped)) => {}
+            other => panic!("expected SenderDropped, got {:?}", other),
+        }
+
+        let result2 = stream.next().await;
+        assert!(result2.is_none(), "expected None after Dropped, got {:?}", result2);
+    }
+
+    #[tokio::test]
+    async fn test_stream_transport_error_then_none() {
+        let (tx, mut stream) = make_test_stream::<u32>();
+
+        let bytes = rmp_serde::to_vec(&StreamFrame::<u32>::TransportError("conn reset".to_string())).unwrap();
+        tx.send(bytes).unwrap();
+
+        let result = stream.next().await;
+        match result {
+            Some(Err(StreamError::TransportError(msg))) => assert_eq!(msg, "conn reset"),
+            other => panic!("expected TransportError, got {:?}", other),
+        }
+
+        let result2 = stream.next().await;
+        assert!(result2.is_none(), "expected None after TransportError, got {:?}", result2);
+    }
+
+    #[tokio::test]
+    async fn test_stream_filters_heartbeat() {
+        let (tx, mut stream) = make_test_stream::<u32>();
+
+        // Send heartbeat then an item
+        let hb_bytes = rmp_serde::to_vec(&StreamFrame::<u32>::Heartbeat).unwrap();
+        tx.send(hb_bytes).unwrap();
+
+        let item_bytes = rmp_serde::to_vec(&StreamFrame::Item(7u32)).unwrap();
+        tx.send(item_bytes).unwrap();
+
+        // Consumer should never see Heartbeat -- should get Item directly
+        let result = stream.next().await;
+        match result {
+            Some(Ok(StreamFrame::Item(val))) => assert_eq!(val, 7),
+            other => panic!("expected Item(7) (heartbeat filtered), got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_stream_deserialization_error_then_none() {
+        let (tx, mut stream) = make_test_stream::<u32>();
+
+        // Send invalid bytes
+        tx.send(vec![0xFF, 0xFE, 0xFD]).unwrap();
+
+        let result = stream.next().await;
+        match result {
+            Some(Err(StreamError::DeserializationError(_))) => {}
+            other => panic!("expected DeserializationError, got {:?}", other),
+        }
+
+        let result2 = stream.next().await;
+        assert!(result2.is_none(), "expected None after DeserializationError, got {:?}", result2);
+    }
+
+    #[tokio::test]
+    async fn test_stream_none_when_sender_dropped() {
+        let (tx, mut stream) = make_test_stream::<u32>();
+
+        // Drop the sender -- channel closes
+        drop(tx);
+
+        let result = stream.next().await;
+        assert!(result.is_none(), "expected None when channel sender dropped, got {:?}", result);
+    }
+
+    #[tokio::test]
+    async fn test_cancel_removes_anchor_from_registry() {
+        let mgr = make_manager();
+        let (handle, stream) = mgr.create_anchor::<u32>();
+        let (_, local_id) = handle.unpack();
+
+        assert!(mgr.registry.contains_key(&local_id), "anchor must exist before cancel");
+
+        stream.cancel();
+
+        assert!(!mgr.registry.contains_key(&local_id), "anchor must be removed after cancel");
     }
 }
