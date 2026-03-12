@@ -48,7 +48,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 DEFAULT_FPM_PORT = 20380
-ENV_FPM_PORT = "DYN_VLLM_FORWARDPASS_METRIC_PORT"
+ENV_FPM_PORT = "DYN_FORWARDPASS_METRIC_PORT"
 
 
 # ---------------------------------------------------------------------------

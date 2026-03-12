@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Forward Pass Metrics (FPM) relay.
+//! Forward Pass Metrics (FPM = ForwardPassMetrics) relay.
 //!
 //! Subscribes to the raw ZMQ PUB from `InstrumentedScheduler` (running in
 //! a vLLM EngineCore child process) and re-publishes the payloads to the

@@ -385,7 +385,7 @@ def setup_fpm_relay(
     Returns:
         List of FpmEventRelay instances, or None if FPM is not enabled.
     """
-    if not envs.is_set("DYN_VLLM_FORWARDPASS_METRIC_PORT"):
+    if not envs.is_set("DYN_FORWARDPASS_METRIC_PORT"):
         return None
 
     try:
@@ -401,7 +401,7 @@ def setup_fpm_relay(
     relays = []
 
     for dp_rank in range(dp_start, dp_start + dp_size):
-        base_port = envs.DYN_VLLM_FORWARDPASS_METRIC_PORT
+        base_port = envs.DYN_FORWARDPASS_METRIC_PORT
         zmq_endpoint = f"tcp://127.0.0.1:{base_port + dp_rank}"
 
         relay = FpmEventRelay(
