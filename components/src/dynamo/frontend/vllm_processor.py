@@ -44,6 +44,7 @@ def _is_settable(cls: type, name: str) -> bool:
     attr = getattr(cls, name, None)
     return not (isinstance(attr, property) and attr.fset is None)
 
+
 logger = logging.getLogger(__name__)
 
 
