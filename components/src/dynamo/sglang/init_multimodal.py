@@ -13,6 +13,7 @@ from dynamo.llm import ModelInput
 from dynamo.runtime import DistributedRuntime
 from dynamo.sglang.args import Config
 from dynamo.sglang.health_check import (
+    SglangDisaggHealthCheckPayload,
     SglangHealthCheckPayload,
     SglangPrefillHealthCheckPayload,
 )
@@ -31,7 +32,7 @@ async def init_multimodal_processor(
     shutdown_event: asyncio.Event,
     shutdown_endpoints: list,
     run_deferred_handlers: Callable[[], Awaitable[None]] | None = None,
-):
+) -> None:
     """Initialize multimodal processor component"""
     server_args, dynamo_args = config.server_args, config.dynamo_args
     generate_endpoint = runtime.endpoint(
@@ -86,7 +87,7 @@ async def init_multimodal_encode_worker(
     shutdown_event: asyncio.Event,
     shutdown_endpoints: list,
     run_deferred_handlers: Callable[[], Awaitable[None]] | None = None,
-):
+) -> None:
     """Initialize multimodal encode worker component"""
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
@@ -130,7 +131,7 @@ async def init_multimodal_worker(
     shutdown_event: asyncio.Event,
     shutdown_endpoints: list,
     run_deferred_handlers: Callable[[], Awaitable[None]] | None = None,
-):
+) -> None:
     """Initialize multimodal worker component.
 
     This worker is always an internal component that should not register with
@@ -160,7 +161,10 @@ async def init_multimodal_worker(
 
     await handler.async_init()
 
-    health_check_payload = SglangHealthCheckPayload(engine).to_dict()
+    if config.serving_mode == DisaggregationMode.DECODE:
+        health_check_payload = SglangDisaggHealthCheckPayload(engine).to_dict()
+    else:
+        health_check_payload = SglangHealthCheckPayload(engine).to_dict()
 
     try:
         await generate_endpoint.serve_endpoint(
@@ -185,7 +189,7 @@ async def init_multimodal_prefill_worker(
     shutdown_event: asyncio.Event,
     shutdown_endpoints: list,
     run_deferred_handlers: Callable[[], Awaitable[None]] | None = None,
-):
+) -> None:
     """Initialize multimodal prefill worker component"""
     server_args, dynamo_args = config.server_args, config.dynamo_args
 

@@ -52,7 +52,7 @@ class FrontendConfig(KvRouterConfigBase):
     router_mode: str
     namespace: Optional[str] = None
     namespace_prefix: Optional[str] = None
-    decode_fallback: bool
+    enforce_disagg: bool
 
     migration_limit: int
     active_decode_blocks_threshold: Optional[float]
@@ -71,7 +71,10 @@ class FrontendConfig(KvRouterConfigBase):
     event_plane: str
     chat_processor: str
     enable_anthropic_api: bool
+    strip_anthropic_preamble: bool
     debug_perf: bool
+    enable_streaming_tool_dispatch: bool
+    enable_streaming_reasoning_dispatch: bool
     preprocess_workers: int
 
     def validate(self) -> None:
@@ -191,14 +194,15 @@ class FrontendArgGroup(ArgGroup):
 
         add_negatable_bool_argument(
             g,
-            flag_name="--decode-fallback",
-            env_var="DYN_DECODE_FALLBACK",
+            flag_name="--enforce-disagg",
+            env_var="DYN_ENFORCE_DISAGG",
             default=False,
-            dest="decode_fallback",
+            dest="enforce_disagg",
             help=(
-                "Allow falling back to decode-only (aggregated) mode when prefill workers are "
-                "unavailable. By default, disaggregated prefill-decode is enforced and requests "
-                "fail if no prefill workers are found."
+                "Strictly enforce disaggregated mode. Requests will fail if the prefill router "
+                "has not activated yet (e.g., prefill workers still registering). This is stricter "
+                "than the default: without this flag, requests arriving before prefill workers are "
+                "discovered fall through to aggregated decode-only routing."
             ),
         )
 
@@ -343,6 +347,40 @@ class FrontendArgGroup(ArgGroup):
                 "This feature is experimental and may change."
             ),
         )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--strip-anthropic-preamble",
+            env_var="DYN_STRIP_ANTHROPIC_PREAMBLE",
+            default=False,
+            help=(
+                "Strip the Claude Code billing preamble (x-anthropic-billing-header) "
+                "from the system prompt. Saves tokens and improves prompt caching."
+            ),
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--enable-streaming-tool-dispatch",
+            env_var="DYN_ENABLE_STREAMING_TOOL_DISPATCH",
+            default=False,
+            help=(
+                "[EXPERIMENTAL] Enable streaming tool call dispatch. Emits "
+                "'event: tool_call_dispatch' SSE events on /v1/chat/completions "
+                "for each complete tool call before finish_reason arrives. "
+                "Can be combined with --enable-streaming-reasoning-dispatch."
+            ),
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--enable-streaming-reasoning-dispatch",
+            env_var="DYN_ENABLE_STREAMING_REASONING_DISPATCH",
+            default=False,
+            help=(
+                "[EXPERIMENTAL] Enable streaming reasoning dispatch. Emits a "
+                "single 'event: reasoning_dispatch' SSE event on /v1/chat/completions "
+                "with the complete reasoning block once thinking ends. "
+                "Can be combined with --enable-streaming-tool-dispatch."
+            ),
+        )
         add_argument(
             g,
             flag_name="--dyn-chat-processor",
@@ -350,10 +388,12 @@ class FrontendArgGroup(ArgGroup):
             default="dynamo",
             dest="chat_processor",
             help=(
-                "[EXPERIMENTAL] When set to 'vllm', use local vllm for the pre and post "
-                "processor."
+                "[EXPERIMENTAL] Chat pre/post processor backend. 'dynamo' uses the Rust "
+                "preprocessor. 'vllm' uses local vLLM for pre and post processing. "
+                "'sglang' uses SGLang APIs for chat template rendering, tool call "
+                "parsing, and reasoning parsing."
             ),
-            choices=["dynamo", "vllm"],
+            choices=["dynamo", "vllm", "sglang"],
         )
 
         add_negatable_bool_argument(
@@ -365,7 +405,7 @@ class FrontendArgGroup(ArgGroup):
             help=(
                 "[EXPERIMENTAL] Enable performance instrumentation for diagnosing preprocessing bottlenecks. "
                 "Logs per-function timing, request concurrency, and hot-path section durations. "
-                "'--dyn-chat-processor vllm' only."
+                "Supported with '--dyn-chat-processor vllm' and '--dyn-chat-processor sglang'."
             ),
         )
 
@@ -379,7 +419,8 @@ class FrontendArgGroup(ArgGroup):
                 "[EXPERIMENTAL] Number of worker processes for preprocessing and output processing. "
                 "When > 0, offloads CPU-bound work (tokenization, template rendering, "
                 "detokenization) to a ProcessPoolExecutor with N workers, each with its "
-                "own GIL. 0 (default) keeps all processing on the main event loop. '--dyn-chat-processor vllm' only."
+                "own GIL. 0 (default) keeps all processing on the main event loop. "
+                "Supported with '--dyn-chat-processor vllm' and '--dyn-chat-processor sglang'."
             ),
             arg_type=int,
         )

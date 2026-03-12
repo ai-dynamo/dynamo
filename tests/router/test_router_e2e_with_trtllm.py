@@ -12,13 +12,12 @@ from typing import Any, Dict, Optional
 
 import pytest
 
-from tests.router.common import (  # utilities
+from tests.router.common import (
     _test_router_basic,
     _test_router_decisions,
     _test_router_indexers_sync,
-    generate_random_suffix,
-    get_runtime,
 )
+from tests.router.helper import generate_random_suffix, get_runtime
 from tests.utils.constants import DefaultPort
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.port_utils import allocate_ports, deallocate_ports
@@ -317,8 +316,8 @@ class TRTLLMProcess:
         time.sleep(2)
 
 
-@pytest.mark.pre_merge
 @pytest.mark.gpu_1
+@pytest.mark.nightly
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 @pytest.mark.timeout(300)
 def test_trtllm_kv_router_basic(
@@ -420,8 +419,8 @@ def test_router_decisions_trtllm_attention_dp(
         )
 
 
-@pytest.mark.pre_merge
 @pytest.mark.gpu_1
+@pytest.mark.nightly
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 @pytest.mark.timeout(150)  # ~3x average (~45s/test), rounded up
 def test_router_decisions_trtllm_multiple_workers(
@@ -461,8 +460,8 @@ def test_router_decisions_trtllm_multiple_workers(
         )
 
 
-@pytest.mark.pre_merge
 @pytest.mark.gpu_1
+@pytest.mark.nightly
 @pytest.mark.timeout(150)  # ~3x average (~45s/test), rounded up
 @pytest.mark.parametrize(
     "store_backend,durable_kv_events,request_plane",
