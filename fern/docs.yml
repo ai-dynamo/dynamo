@@ -17,7 +17,7 @@
 
 instances:
   - url: dynamo.docs.buildwithfern.com/dynamo
-    custom-domain: docs.dynamo.nvidia.com/dynamo
+    custom-domain: docs.nvidia.com/dynamo
 
 title: NVIDIA Dynamo Documentation
 
@@ -82,6 +82,7 @@ layout:
 experimental:
   mdx-components:
     - ./components
+  basepath-aware: true
 
 colors:
   accentPrimary:
