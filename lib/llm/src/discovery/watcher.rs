@@ -50,12 +50,12 @@ use super::ModelManager;
 use crate::namespace::NamespaceFilter;
 
 /// Constructs the WorkerSet storage key. Prefill and decode workers in the same
-/// namespace get different keys so they don't block each other's registration,
-/// and priority changes create distinct WorkerSets so rolling updates tier
-/// correctly while old and new workers coexist.
+/// namespace get different keys so they don't block each other's registration.
+/// Decode WorkerSets are split by priority for tiered routing, while prefill
+/// WorkerSets remain shared per namespace because priority only applies to decode.
 fn worker_set_key(namespace: &str, model_type: ModelType, priority: u32) -> String {
     if model_type.supports_prefill() {
-        format!("{}:prefill:priority={}", namespace, priority)
+        format!("{}:prefill", namespace)
     } else {
         format!("{}:priority={}", namespace, priority)
     }
@@ -308,6 +308,9 @@ impl ModelWatcher {
             .card_instances_for_model(&model_name, namespace_filter)
             .await
             .with_context(|| model_name.clone())?;
+        let namespace_has_instances = active_instances
+            .iter()
+            .any(|(instance_id, _, _)| instance_id.namespace == *worker_namespace);
 
         // Check if instances of the same WorkerSet key remain. This keeps
         // priority tiers isolated during rolling updates while still allowing
@@ -321,10 +324,13 @@ impl ModelWatcher {
 
         if !worker_set_has_instances {
             // No more workers remain in this WorkerSet — remove it.
-            if let Some(_removed_ws) = self.manager.remove_worker_set(&model_name, &ws_key) {
-                // remove_prefill_activator uses deployment namespace (not ws_key)
-                self.manager
-                    .remove_prefill_activator(&model_name, worker_namespace);
+            if let Some(removed_ws) = self.manager.remove_worker_set(&model_name, &ws_key) {
+                // Shared prefill activators are namespace-scoped. Only clear them when
+                // the prefill WorkerSet is removed or the namespace is fully drained.
+                if removed_ws.is_prefill_set() || !namespace_has_instances {
+                    self.manager
+                        .remove_prefill_activator(&model_name, worker_namespace);
+                }
                 tracing::info!(
                     model_name,
                     namespace = %worker_namespace,
@@ -488,27 +494,29 @@ impl ModelWatcher {
             let tokenizer = card.tokenizer().context("tokenizer")?;
 
             // Create prefill chooser once if we're building pipelines
-            // Both chat and completions will share the same prefill chooser instance
+            // Both chat and completions will share the same prefill chooser instance.
+            // Each decode tier gets its own router, but all tiers in the namespace
+            // subscribe to the same shared prefill endpoint.
             let model_name = card.name().to_string();
-            let prefill_chooser = self
+            let prefill_activation_rx = self
                 .manager
-                .register_prefill_router(&model_name, &namespace)
-                .map(|rx| {
-                    // Create prefill-specific config with track_active_blocks disabled
-                    let mut prefill_config = self.router_config.kv_router_config.clone();
-                    prefill_config.router_track_active_blocks = false;
+                .register_prefill_router(&model_name, &namespace);
+            let prefill_chooser = {
+                // Create prefill-specific config with track_active_blocks disabled
+                let mut prefill_config = self.router_config.kv_router_config.clone();
+                prefill_config.router_track_active_blocks = false;
 
-                    PrefillRouter::new(
-                        rx,
-                        self.manager.clone(),
-                        self.router_config.router_mode,
-                        card.kv_cache_block_size,
-                        Some(prefill_config),
-                        self.router_config.enforce_disagg,
-                        model_name.clone(),
-                        namespace.clone(),
-                    )
-                });
+                Some(PrefillRouter::new(
+                    prefill_activation_rx,
+                    self.manager.clone(),
+                    self.router_config.router_mode,
+                    card.kv_cache_block_size,
+                    Some(prefill_config),
+                    self.router_config.enforce_disagg,
+                    model_name.clone(),
+                    ws_key.clone(),
+                ))
+            };
 
             // Create a new worker monitor for this WorkerSet. Each WorkerSet gets its own
             // monitor (1-to-1) since each monitor is scoped to this WorkerSet's Client/namespace.
@@ -730,9 +738,8 @@ impl ModelWatcher {
             self.manager
                 .add_worker_set(card.name(), &ws_key, worker_set)?;
 
-            // Note: activate_prefill_router is keyed by deployment namespace (not ws_key)
-            // because it coordinates between decode and prefill WorkerSets that share
-            // the same deployment namespace but have different ws_keys ("ns" vs "ns:prefill").
+            // Shared prefill activation is keyed by deployment namespace so all decode
+            // tiers in the namespace can reuse the same prefill endpoint.
             let Ok(()) = self
                 .manager
                 .activate_prefill_router(card.name(), &namespace, endpoint)

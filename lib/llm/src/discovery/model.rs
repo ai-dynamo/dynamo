@@ -287,10 +287,13 @@ impl Model {
         result
     }
 
-    /// Get the worker monitor for a specific namespace's WorkerSet.
-    pub fn get_worker_monitor_for_namespace(&self, namespace: &str) -> Option<KvWorkerMonitor> {
+    /// Get the worker monitor for a specific worker-set key.
+    pub fn get_worker_monitor_for_worker_set(
+        &self,
+        worker_set_key: &str,
+    ) -> Option<KvWorkerMonitor> {
         self.worker_sets
-            .get(namespace)
+            .get(worker_set_key)
             .and_then(|entry| entry.value().worker_monitor.clone())
     }
 
