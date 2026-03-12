@@ -35,8 +35,8 @@ Build and Push Operator Image
 
 ```
 cd deploy/operator
-docker build -t $DOCKER_SERVER/dynamo-operator:$IMAGE_TAG .
-docker push $DOCKER_SERVER/dynamo-operator:$IMAGE_TAG
+docker build -t $DOCKER_SERVER/kubernetes-operator:$IMAGE_TAG .
+docker push $DOCKER_SERVER/kubernetes-operator:$IMAGE_TAG
 ```
 
 Create secrets

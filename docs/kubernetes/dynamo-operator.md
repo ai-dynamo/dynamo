@@ -187,8 +187,8 @@ export IMAGE_TAG=latest
 
 # Build operator image
 cd deploy/operator
-docker build -t $DOCKER_SERVER/dynamo-operator:$IMAGE_TAG .
-docker push $DOCKER_SERVER/dynamo-operator:$IMAGE_TAG
+docker build -t $DOCKER_SERVER/kubernetes-operator:$IMAGE_TAG .
+docker push $DOCKER_SERVER/kubernetes-operator:$IMAGE_TAG
 cd -
 
 # Install platform with custom operator image (CRDs are automatically installed by the chart)
