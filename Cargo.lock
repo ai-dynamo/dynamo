@@ -8856,6 +8856,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "dashmap 6.1.0",
+ "derive_builder",
  "flume",
  "futures",
  "rmp-serde",
