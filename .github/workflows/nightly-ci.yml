@@ -23,6 +23,7 @@ jobs:
     with:
       framework: vllm
       target: runtime
+      no_cache: true
       platforms: '["amd64", "arm64"]'
       cuda_versions: '["12.9", "13.0"]'
       extra_tags: |
@@ -45,6 +46,7 @@ jobs:
     with:
       framework: sglang
       target: runtime
+      no_cache: true
       platforms: '["amd64", "arm64"]'
       cuda_versions: '["12.9", "13.0"]'
       extra_tags: |
@@ -66,6 +68,7 @@ jobs:
     with:
       framework: trtllm
       target: runtime
+      no_cache: true
       platforms: '["amd64", "arm64"]'
       cuda_versions: '["13.1"]'
       extra_tags: |

@@ -307,9 +307,15 @@ jobs:
             PUSH_ARGS="--load"
           fi
 
+          NO_CACHE_ARG=""
+          if [ "${{ inputs.no_cache }}" == "true" ]; then
+            NO_CACHE_ARG="--no-cache"
+          fi
+
           docker buildx build \
             --progress=plain \
             ${PUSH_ARGS} \
+            ${NO_CACHE_ARG} \
             --platform linux/${{ inputs.platform }} \
             -f container/Dockerfile.test \
             --build-arg BASE_IMAGE=${{ steps.calculate-target-tag.outputs.default_target_image_uri }} \
