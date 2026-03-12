@@ -36,10 +36,10 @@ mod tests {
 
     #[test]
     fn test_stream_frame_variants() {
-        // Verify all six variants compile and serialize/deserialize via rmp-serde
+        // Verify all seven variants compile and serialize/deserialize via rmp-serde
         let frames: Vec<StreamFrame<u32>> = vec![
-            StreamFrame::Item(Ok(42u32)),
-            StreamFrame::Item(Err("soft error".to_string())),
+            StreamFrame::Item(42u32),
+            StreamFrame::SenderError("soft error".to_string()),
             StreamFrame::Dropped,
             StreamFrame::Detached,
             StreamFrame::Finalized,
@@ -49,8 +49,73 @@ mod tests {
 
         for frame in &frames {
             let encoded = rmp_serde::to_vec(frame).expect("serialize StreamFrame");
-            let _decoded: StreamFrame<u32> =
+            let decoded: StreamFrame<u32> =
                 rmp_serde::from_slice(&encoded).expect("deserialize StreamFrame");
+            // Verify the variant survived the round-trip
+            match (frame, &decoded) {
+                (StreamFrame::Item(a), StreamFrame::Item(b)) => assert_eq!(a, b),
+                (StreamFrame::SenderError(a), StreamFrame::SenderError(b)) => assert_eq!(a, b),
+                (StreamFrame::Dropped, StreamFrame::Dropped) => {}
+                (StreamFrame::Detached, StreamFrame::Detached) => {}
+                (StreamFrame::Finalized, StreamFrame::Finalized) => {}
+                (StreamFrame::Heartbeat, StreamFrame::Heartbeat) => {}
+                (StreamFrame::TransportError(a), StreamFrame::TransportError(b)) => {
+                    assert_eq!(a, b)
+                }
+                _ => panic!("variant mismatch after round-trip"),
+            }
         }
+    }
+
+    #[test]
+    fn test_stream_frame_item_direct_payload() {
+        // Item(T) contains T directly, not Result<T, String>
+        let frame = StreamFrame::Item(42u32);
+        let encoded = rmp_serde::to_vec(&frame).expect("serialize");
+        let decoded: StreamFrame<u32> = rmp_serde::from_slice(&encoded).expect("deserialize");
+        match decoded {
+            StreamFrame::Item(val) => assert_eq!(val, 42u32),
+            other => panic!("expected Item(42), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_stream_frame_sender_error_round_trip() {
+        let frame = StreamFrame::<u32>::SenderError("msg".to_string());
+        let encoded = rmp_serde::to_vec(&frame).expect("serialize");
+        let decoded: StreamFrame<u32> = rmp_serde::from_slice(&encoded).expect("deserialize");
+        match decoded {
+            StreamFrame::SenderError(msg) => assert_eq!(msg, "msg"),
+            other => panic!("expected SenderError, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_stream_error_display() {
+        assert_eq!(
+            StreamError::SenderError("msg".to_string()).to_string(),
+            "sender error: msg"
+        );
+        assert_eq!(
+            StreamError::SenderDropped.to_string(),
+            "sender dropped without explicit detach/finalize"
+        );
+        assert_eq!(
+            StreamError::TransportError("msg".to_string()).to_string(),
+            "transport error: msg"
+        );
+        assert_eq!(
+            StreamError::DeserializationError("msg".to_string()).to_string(),
+            "deserialization error: msg"
+        );
+    }
+
+    #[test]
+    fn test_send_error_display() {
+        assert_eq!(SendError::ChannelClosed.to_string(), "channel closed");
+        assert_eq!(
+            SendError::SerializationError("msg".to_string()).to_string(),
+            "serialization error: msg"
+        );
     }
 }
