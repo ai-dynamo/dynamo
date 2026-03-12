@@ -89,31 +89,34 @@ navigation:
         path: components/kvbm/kvbm-guide.md
       - page: Dynamo Benchmarking
         path: benchmarks/benchmarking.md
-      - section: Multimodal Model Serving
+      - section: Multimodal
+        path: features/multimodal/README.md
         contents:
-          - section: Vision Language Models (VLMs)
-            path: features/multimodal/README.md
-            contents:
-              - page: Embedding Cache
-                path: features/multimodal/embedding-cache.md
-              - page: Encoder Disaggregation
-                path: features/multimodal/encoder-disaggregation.md
-              - page: Multimodal KV Routing
-                path: features/multimodal/multimodal-kv-routing.md
-          - section: Diffusion (Experimental)
-            path: features/multimodal/diffusion.md
-            contents:
-              - page: vLLM-Omni
-                path: backends/vllm/vllm-omni.md
-              - page: SGLang Diffusion
-                path: backends/sglang/sglang-diffusion.md
-              - page: TRT-LLM Diffusion
-                path: backends/trtllm/trtllm-video-diffusion.md
+          - page: Embedding Cache
+            path: features/multimodal/embedding-cache.md
+          - page: Encoder Disaggregation
+            path: features/multimodal/encoder-disaggregation.md
+          - page: Multimodal KV Routing
+            path: features/multimodal/multimodal-kv-routing.md
+      - section: Diffusion (Preview)
+        slug: diffusion
+        path: features/diffusion/README.md
+        contents:
+          - page: FastVideo
+            slug: fastvideo
+            path: features/diffusion/fastvideo.md
+          - page: vLLM-Omni
+            path: backends/vllm/vllm-omni.md
+          - page: SGLang Diffusion
+            path: backends/sglang/sglang-diffusion.md
+          - page: TRT-LLM Diffusion
+            path: backends/trtllm/trtllm-video-diffusion.md
       - page: Tool Calling
         path: agents/tool-calling.md
       - page: LoRA Adapters
         path: features/lora/README.md
-      - section: Agentic Workloads
+      - section: Agents
+        slug: agents
         path: features/agentic_workloads.md
         contents:
           - page: SGLang for Agentic Workloads
