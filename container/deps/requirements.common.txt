@@ -16,6 +16,7 @@ opentelemetry-sdk<=1.38.0
 prometheus_client==0.23.1
 protobuf>=5.29.5,<7.0.0
 pydantic>=2.11.4,<2.13
+pydantic-settings<2.13.0
 PyYAML==6.0.3
 tensorboard>=2.19.0,<2.21.0
 tensorboardX==2.6.2.2
