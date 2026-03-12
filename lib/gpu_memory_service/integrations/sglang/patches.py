@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import logging
+from contextlib import contextmanager
 from typing import Optional
 
 import torch
@@ -32,6 +33,7 @@ def patch_torch_memory_saver() -> None:
         return
 
     try:
+        import torch_memory_saver
         import torch_memory_saver.entrypoint as entrypoint_module
     except ImportError:
         logger.debug("[GMS] torch_memory_saver not installed, skipping patch")
@@ -39,6 +41,7 @@ def patch_torch_memory_saver() -> None:
 
     # Store reference to original method
     original_ensure_initialized = entrypoint_module.TorchMemorySaver._ensure_initialized
+    original_configure_subprocess = torch_memory_saver.configure_subprocess
 
     def patched_ensure_initialized(self):
         """Patched _ensure_initialized that uses GPU Memory Service implementation."""
@@ -92,6 +95,23 @@ def patch_torch_memory_saver() -> None:
             original_ensure_initialized(self)
 
     entrypoint_module.TorchMemorySaver._ensure_initialized = patched_ensure_initialized
+
+    @contextmanager
+    def patched_configure_subprocess():
+        """Avoid LD_PRELOAD in GMS mode; keep upstream behavior otherwise."""
+        singleton = torch_memory_saver.torch_memory_saver
+        ctor_kwargs = getattr(singleton, "_impl_ctor_kwargs", None) or {}
+        hook_mode = ctor_kwargs.get("hook_mode")
+
+        if hook_mode is None or hook_mode == "gms":
+            logger.info("[GMS] torch_memory_saver.configure_subprocess is a no-op")
+            yield
+            return
+
+        with original_configure_subprocess():
+            yield
+
+    torch_memory_saver.configure_subprocess = patched_configure_subprocess
 
     # Add property to access GMS impl directly from the singleton
     from gpu_memory_service.integrations.sglang.memory_saver import GMSMemorySaverImpl

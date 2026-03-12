@@ -71,19 +71,19 @@ The server consists of three main components:
 
 3. **Metadata Store** - Epoch-scoped key-value store for tensor metadata (shapes, dtypes, offsets), enabling clients to reconstruct model structure.
 
+Each GMS server is responsible for managing memory of only 1 GPU, and does not interact with GMS servers corresponding to other GPUs.
+
 ### Client
 
-Clients connect to the server to acquire locks and access GPU memory. Two client classes are provided:
+Clients connect to the server to acquire locks and access GPU memory. The supported client API is:
 
-1. **GMSRPCClient** - Low-level RPC client for direct protocol access. Handles socket communication, msgpack serialization, and file descriptor passing via `SCM_RIGHTS`. The socket connection **is** the lock - connection lifetime equals lock lifetime, providing automatic crash resilience.
-
-2. **GMSClientMemoryManager** - High-level client that wraps `GMSRPCClient` and handles all CUDA VMM operations for memory import and mapping safely:
+1. **GMSClientMemoryManager** - High-level client that wraps an internal RPC transport layer and handles all CUDA VMM operations for memory import and mapping safely:
    - Imports file descriptors and converts them to CUDA memory handles
    - Reserves virtual address space and maps physical memory
    - Sets appropriate access permissions (RW for writers, RO for readers)
    - Supports **unmap/remap** for VA-stable memory release under memory pressure
 
-> **Note**: Always use `GMSClientMemoryManager` to interact with GMS from client code. The low-level `GMSRPCClient` is an implementation detail and should not be used directly.
+> **Note**: Always use `GMSClientMemoryManager` to interact with GMS from client code. The low-level RPC client is an implementation detail and should not be used directly.
 
 ### Memory Allocation and Import Flow
 
@@ -210,12 +210,42 @@ When a writer requests a new allocation, GMS treats CUDA OOM as a transient cond
 
 This ensures the "new epoch gets new allocations" workflow can wait for memory reclamation instead of racing into immediate OOM failures.
 
-### Scope
+### Guarantees
 
-- GMS now guarantees that its own RPCs do not mix committed and active generations, and that client-side `commit()` performs a CUDA synchronize before publish.
-- GMS does not prove that a disconnected or already-submitted writer has no in-flight GPU work left on the device. The mitigation in this design is that new RW epochs use fresh allocations and may wait for memory reclamation before allocation succeeds.
+- GMS guarantees that its own RPCs do not mix committed and active generations, and that client-side `commit()` performs a CUDA synchronize and unmaps the writer's local mappings before publish.
+- After local unmap, `commit()` does not attempt in-process recovery. Non-CUDA failures raise, and CUDA VMM failures exit the process.
+- The only non-fatal client connection failure is lock acquisition timeout. Other client-side GMS transport, protocol, and server error responses raise.
+- Any non-OOM CUDA VMM failure on either client or server is fatal and exits the process.
+- On the server, an untrusted client connection is isolated to that connection: transport loss and response-send failures unwind the connection state, and only server invariant violations or CUDA failures kill the server.
+- GMS *does not* prove that a disconnected or already-submitted writer has no in-flight GPU work left on the device. The mitigation in this design is that new RW epochs use fresh allocations and may wait for memory reclamation before allocation succeeds.
 
 ---
+
+### Server Trust Boundary
+
+```mermaid
+flowchart TD
+    A[Client event on server connection] --> B{Can server read and decode it?}
+    B -- no --> C[Drop connection]
+    C --> D[Run disconnect cleanup]
+    D --> E[RW_ABORT or RO_DISCONNECT]
+
+    B -- yes --> F{Valid client request?}
+    F -- no --> G[Send ErrorResponse]
+
+    F -- yes --> H{Did request expose server invariant failure?}
+    H -- yes --> I[Exit server process]
+
+    H -- no --> J[Build response or apply commit]
+    J --> K{Can server send response?}
+    K -- no --> D
+    K -- yes --> L[Continue session or close committed writer]
+```
+
+- `Drop connection` means the server stops trusting that socket and unwinds only that connection's lock state.
+- After `RW_COMMIT`, disconnect cleanup only closes the committed writer socket; it does not roll the server back to `RW_ABORT`.
+- `Valid client request?` covers mode/state violations, unknown requests, and request validation failures like bad metadata offsets.
+- `Did request expose server invariant failure?` covers impossible epoch/FSM states and commit-time metadata integrity failures.
 
 ## Sequence Diagrams
 
@@ -244,11 +274,13 @@ sequenceDiagram
 
     W->>C: mgr.commit()
     C->>GPU: synchronize()
-    C->>GPU: set_access(..., RO)
+    C->>GPU: cuMemUnmap(...) + cuMemRelease(...)
     C->>S: CommitRequest()
     S->>S: Publish active epoch as committed
     S->>S: FSM: RW → COMMITTED
     S-->>C: CommitResponse(success=true)
+    W->>C: mgr.connect(RO)
+    W->>C: mgr.remap_all_vas()
 ```
 
 ### Reader Flow (Warm Start)
@@ -458,8 +490,7 @@ class GMSClientMemoryManager:
     def export_handle(allocation_id: str) -> int                     # Returns FD
     def get_handle_info(allocation_id: str) -> GetAllocationResponse
     def free_handle(allocation_id: str) -> bool
-    def clear_all_handles() -> int                                   # Returns count cleared
-    def commit() -> bool                                             # Sync + publish; closes RW on success
+    def commit() -> bool                                             # Sync + unmap local mappings + publish; raises on non-CUDA failure after unmap
     def get_memory_layout_hash() -> str
     def list_handles(tag: Optional[str] = None) -> List[Dict]
 
@@ -481,14 +512,8 @@ class GMSClientMemoryManager:
     def unmap_all_vas() -> None          # Sync + unmap all, preserve VA reservations
     def remap_all_vas() -> None          # Re-import at preserved VAs (checks layout hash)
     def reallocate_all_handles(tag="default") -> None  # Fresh server handles for preserved VAs
-    def close(free: bool = False) -> None
+    def close() -> None
 ```
-
-## Limitations
-
-1. **Single-GPU per server**: Each GMS server manages one GPU device
-2. **CUDA VMM required**: Requires a GPU with Virtual Memory Management support. Check at runtime via `CU_DEVICE_ATTRIBUTE_VIRTUAL_MEMORY_MANAGEMENT_SUPPORTED` - there is no guaranteed minimum compute capability
-3. **No content validation**: Remap doesn't detect in-place weight modifications
 
 ---
 

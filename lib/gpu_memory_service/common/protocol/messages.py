@@ -4,7 +4,7 @@
 """Message types for GPU Memory Service RPC protocol."""
 
 from enum import Enum
-from typing import Any, Dict, List, Optional, Union
+from typing import List, Optional, Union
 
 import msgspec
 
@@ -62,7 +62,6 @@ class GetAllocationStateRequest(msgspec.Struct, tag="get_allocation_state_reques
 
 class GetAllocationStateResponse(msgspec.Struct, tag="get_allocation_state_response"):
     allocation_count: int
-    total_bytes: int
 
 
 class AllocateRequest(msgspec.Struct, tag="allocate_request"):
@@ -74,11 +73,19 @@ class AllocateResponse(msgspec.Struct, tag="allocate_response"):
     allocation_id: str
     size: int
     aligned_size: int
-    epoch_id: str = ""
+    epoch_id: int
 
 
-class ExportRequest(msgspec.Struct, tag="export_request"):
+class ExportAllocationRequest(msgspec.Struct, tag="export_allocation_request"):
     allocation_id: str
+
+
+class ExportAllocationResponse(msgspec.Struct, tag="export_allocation_response"):
+    allocation_id: str
+    size: int
+    aligned_size: int
+    tag: str
+    epoch_id: int
 
 
 class GetAllocationRequest(msgspec.Struct, tag="get_allocation_request"):
@@ -90,7 +97,7 @@ class GetAllocationResponse(msgspec.Struct, tag="get_allocation_response"):
     size: int
     aligned_size: int
     tag: str
-    epoch_id: str = ""
+    epoch_id: int
 
 
 class ListAllocationsRequest(msgspec.Struct, tag="list_allocations_request"):
@@ -98,23 +105,15 @@ class ListAllocationsRequest(msgspec.Struct, tag="list_allocations_request"):
 
 
 class ListAllocationsResponse(msgspec.Struct, tag="list_allocations_response"):
-    allocations: List[Dict[str, Any]] = []
+    allocations: List[GetAllocationResponse] = []
 
 
-class FreeRequest(msgspec.Struct, tag="free_request"):
+class FreeAllocationRequest(msgspec.Struct, tag="free_allocation_request"):
     allocation_id: str
 
 
-class FreeResponse(msgspec.Struct, tag="free_response"):
+class FreeAllocationResponse(msgspec.Struct, tag="free_allocation_response"):
     success: bool
-
-
-class ClearAllRequest(msgspec.Struct, tag="clear_all_request"):
-    pass
-
-
-class ClearAllResponse(msgspec.Struct, tag="clear_all_response"):
-    cleared_count: int
 
 
 class ErrorResponse(msgspec.Struct, tag="error_response"):
@@ -179,15 +178,14 @@ Message = Union[
     GetAllocationStateResponse,
     AllocateRequest,
     AllocateResponse,
-    ExportRequest,
+    ExportAllocationRequest,
+    ExportAllocationResponse,
     GetAllocationRequest,
     GetAllocationResponse,
     ListAllocationsRequest,
     ListAllocationsResponse,
-    FreeRequest,
-    FreeResponse,
-    ClearAllRequest,
-    ClearAllResponse,
+    FreeAllocationRequest,
+    FreeAllocationResponse,
     ErrorResponse,
     MetadataPutRequest,
     MetadataPutResponse,

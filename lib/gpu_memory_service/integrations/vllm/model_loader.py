@@ -136,8 +136,6 @@ def _load_write_mode(
     )
     from vllm.utils.torch_utils import set_default_torch_dtype
 
-    gms_client.clear_all_handles()
-
     # Allocate model tensors using GMS memory pool
     with set_default_torch_dtype(model_config.dtype):
         with use_mem_pool(pool, device=target_device):

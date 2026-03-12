@@ -88,7 +88,6 @@ class GMSMemorySaverImpl:
         )
         granted_mode = allocator.granted_lock_type
         if granted_mode == GrantedLockType.RW:
-            allocator.clear_all_handles()
             actual_mode = "write"
         else:
             actual_mode = "read"

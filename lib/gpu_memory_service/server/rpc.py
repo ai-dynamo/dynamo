@@ -18,16 +18,15 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from typing import ClassVar, Optional
+from typing import Optional
 
 from gpu_memory_service.common.protocol.messages import (
     AllocateRequest,
-    ClearAllRequest,
     CommitRequest,
     CommitResponse,
     ErrorResponse,
-    ExportRequest,
-    FreeRequest,
+    ExportAllocationRequest,
+    FreeAllocationRequest,
     GetAllocationRequest,
     GetAllocationStateRequest,
     GetLockStateRequest,
@@ -47,9 +46,11 @@ from gpu_memory_service.common.types import (
     ServerState,
     StateEvent,
 )
+from gpu_memory_service.common.utils import fail
 
 from .handler import RequestHandler
-from .locking import Connection, GMSLocalFSM
+from .locking import Connection, GMSLocalFSM, InvalidTransition, OperationNotAllowed
+from .memory_manager import AllocationNotFoundError
 
 logger = logging.getLogger(__name__)
 
@@ -86,14 +87,12 @@ class GMSRPCServer:
 
         # Async waiting for lock acquisition
         self._condition = asyncio.Condition()
-        self._shutdown = False
 
         # Session ID generation
         self._next_session_id: int = 0
 
         # Server state
         self._server: Optional[asyncio.Server] = None
-        self._running: bool = False
 
         logger.info(f"GMSRPCServer initialized: device={device}")
 
@@ -104,18 +103,9 @@ class GMSRPCServer:
         """Current server state (delegated to state machine)."""
         return self._sm.state
 
-    @property
-    def granularity(self) -> int:
-        return self._handler.granularity
-
     def is_ready(self) -> bool:
         """Ready = committed and no RW connection."""
         return self._sm.committed and self._sm.rw_conn is None
-
-    @property
-    def running(self) -> bool:
-        """Whether the server is running."""
-        return self._running
 
     def _generate_session_id(self) -> str:
         self._next_session_id += 1
@@ -135,14 +125,19 @@ class GMSRPCServer:
             if conn is None:
                 return
             await self._request_loop(conn)
+        except (InvalidTransition, AssertionError) as exc:
+            fail("fatal server error", exc_info=exc)
         except ConnectionResetError:
             logger.debug(f"Connection reset: {session_id}")
         except asyncio.CancelledError:
             raise
-        except Exception:
-            logger.exception(f"Connection error: {session_id}")
+        except Exception as exc:
+            fail("fatal server error", exc_info=exc)
         finally:
-            await self._cleanup_connection(conn)
+            try:
+                await self._cleanup_connection(conn)
+            except Exception as exc:
+                fail("fatal server error", exc_info=exc)
 
     async def _do_handshake(
         self,
@@ -159,7 +154,12 @@ class GMSRPCServer:
             return None
 
         if not isinstance(msg, HandshakeRequest):
-            await send_message(writer, ErrorResponse(error="Expected HandshakeRequest"))
+            try:
+                await send_message(
+                    writer, ErrorResponse(error="Expected HandshakeRequest")
+                )
+            except Exception:
+                pass
             writer.close()
             return None
 
@@ -167,9 +167,13 @@ class GMSRPCServer:
         # Returns the actual granted mode (may differ from requested for rw_or_ro)
         granted_mode = await self._acquire_lock(msg.lock_type, msg.timeout_ms)
         if granted_mode is None:
-            await send_message(
-                writer, HandshakeResponse(success=False, committed=self._sm.committed)
-            )
+            try:
+                await send_message(
+                    writer,
+                    HandshakeResponse(success=False, committed=self._sm.committed),
+                )
+            except Exception:
+                pass
             writer.close()
             return None
 
@@ -180,35 +184,56 @@ class GMSRPCServer:
             session_id=session_id,
             recv_buffer=recv_buffer,
         )
+        rw_epoch_initialized = False
+        fsm_transitioned = False
 
-        if granted_mode == GrantedLockType.RW:
-            # Intentional ordering: initialize epoch state via on_rw_connect()
-            # before _sm.transition(StateEvent.RW_CONNECT, ...). If the FSM
-            # transition fails, the except block calls on_rw_abort() to clean up
-            # any partially initialized RW epoch state.
-            self._handler.on_rw_connect()
-
-        # State transition: connect
-        event = (
-            StateEvent.RW_CONNECT
-            if granted_mode == GrantedLockType.RW
-            else StateEvent.RO_CONNECT
-        )
         try:
-            self._sm.transition(event, conn)
-        except Exception:
             if granted_mode == GrantedLockType.RW:
-                self._handler.on_rw_abort()
-            raise
+                # Intentional ordering: initialize epoch state via on_rw_connect()
+                # before _sm.transition(StateEvent.RW_CONNECT, ...). If the FSM
+                # transition fails, we must abort the partially initialized epoch.
+                self._handler.on_rw_connect()
+                rw_epoch_initialized = True
 
-        await send_message(
-            writer,
-            HandshakeResponse(
-                success=True,
-                committed=self._sm.committed,
-                granted_lock_type=granted_mode,
-            ),
-        )
+            event = (
+                StateEvent.RW_CONNECT
+                if granted_mode == GrantedLockType.RW
+                else StateEvent.RO_CONNECT
+            )
+            self._sm.transition(event, conn)
+            fsm_transitioned = True
+
+            await send_message(
+                writer,
+                HandshakeResponse(
+                    success=True,
+                    committed=self._sm.committed,
+                    granted_lock_type=granted_mode,
+                ),
+            )
+        except (InvalidTransition, AssertionError):
+            if fsm_transitioned:
+                await self._cleanup_connection(conn)
+            else:
+                if rw_epoch_initialized:
+                    self._handler.on_rw_abort()
+                await conn.close()
+            raise
+        except Exception as e:
+            logger.warning(
+                "Handshake failed after acquiring %s for session %s: %s",
+                granted_mode.value,
+                session_id,
+                e,
+            )
+            if fsm_transitioned:
+                await self._cleanup_connection(conn)
+            else:
+                if rw_epoch_initialized:
+                    self._handler.on_rw_abort()
+                await conn.close()
+            return None
+
         return conn
 
     async def _acquire_lock(
@@ -229,12 +254,10 @@ class GMSRPCServer:
                 async with self._condition:
                     try:
                         await asyncio.wait_for(
-                            self._condition.wait_for(
-                                lambda: self._shutdown or self._sm.can_acquire_rw()
-                            ),
+                            self._condition.wait_for(self._sm.can_acquire_rw),
                             timeout=timeout,
                         )
-                        return None if self._shutdown else GrantedLockType.RW
+                        return GrantedLockType.RW
                     except asyncio.TimeoutError:
                         return None
             finally:
@@ -245,12 +268,11 @@ class GMSRPCServer:
                 try:
                     await asyncio.wait_for(
                         self._condition.wait_for(
-                            lambda: self._shutdown
-                            or self._sm.can_acquire_ro(self._waiting_writers)
+                            lambda: self._sm.can_acquire_ro(self._waiting_writers)
                         ),
                         timeout=timeout,
                     )
-                    return None if self._shutdown else GrantedLockType.RO
+                    return GrantedLockType.RO
                 except asyncio.TimeoutError:
                     return None
 
@@ -276,12 +298,11 @@ class GMSRPCServer:
                 try:
                     await asyncio.wait_for(
                         self._condition.wait_for(
-                            lambda: self._shutdown
-                            or self._sm.can_acquire_ro(self._waiting_writers)
+                            lambda: self._sm.can_acquire_ro(self._waiting_writers)
                         ),
                         timeout=timeout,
                     )
-                    return None if self._shutdown else GrantedLockType.RO
+                    return GrantedLockType.RO
                 except asyncio.TimeoutError:
                     return None
         return None
@@ -311,7 +332,7 @@ class GMSRPCServer:
 
     async def _request_loop(self, conn: Connection) -> None:
         """Process requests until close or commit."""
-        while self._running:
+        while True:
             try:
                 # Server never receives FDs from clients, so no need for raw_socket
                 msg, _, conn.recv_buffer = await recv_message(
@@ -321,58 +342,91 @@ class GMSRPCServer:
                 return
             except asyncio.CancelledError:
                 raise
-            except Exception:
-                logger.exception("Recv error")
+            except Exception as e:
+                logger.warning("Recv error on session %s: %s", conn.session_id, e)
                 return
 
             if msg is None:
                 continue
 
+            fd = -1
             try:
                 response, fd, should_close = await self._dispatch(conn, msg)
-                if response is not None:
-                    try:
-                        await send_message(conn.writer, response, fd)
-                    finally:
-                        if fd >= 0:
-                            os.close(fd)
-                if should_close:
+            except ConnectionAbortedError as e:
+                logger.warning(
+                    "Connection lost during %s on session %s: %s",
+                    type(msg).__name__,
+                    conn.session_id,
+                    e,
+                )
+                return
+            except (
+                OperationNotAllowed,
+                ValueError,
+                TimeoutError,
+                AllocationNotFoundError,
+            ) as e:
+                logger.warning(
+                    "Rejected %s from session %s: %s",
+                    type(msg).__name__,
+                    conn.session_id,
+                    e,
+                )
+                try:
+                    await send_message(conn.writer, ErrorResponse(error=str(e)))
+                except Exception as send_error:
+                    logger.warning(
+                        "Failed to send ErrorResponse for %s on session %s: %s",
+                        type(msg).__name__,
+                        conn.session_id,
+                        send_error,
+                    )
                     return
+                continue
+            except (InvalidTransition, AssertionError) as exc:
+                fail("fatal server error", exc_info=exc)
+            except Exception as exc:
+                fail("fatal server error", exc_info=exc)
+
+            try:
+                if response is not None:
+                    await send_message(conn.writer, response, fd)
             except Exception as e:
-                logger.exception("Request error")
-                await send_message(conn.writer, ErrorResponse(error=str(e)))
+                logger.warning(
+                    "Response send failed for %s on session %s: %s",
+                    type(msg).__name__,
+                    conn.session_id,
+                    e,
+                )
+                return
+            finally:
+                if fd >= 0:
+                    os.close(fd)
 
-    # Dispatch table: message type -> handler method name
-    # Handlers take (msg) and return response. Special cases handled separately.
-    _HANDLERS: ClassVar[dict[type, str]] = {
-        AllocateRequest: "handle_allocate",
-        FreeRequest: "handle_free",
-        MetadataPutRequest: "handle_metadata_put",
-        MetadataDeleteRequest: "handle_metadata_delete",
-    }
-
-    def _get_epoch_for_read(self, conn: Connection) -> str:
-        if conn.mode == GrantedLockType.RO:
-            epoch_id = self._handler.committed_epoch_id
-            if epoch_id is None:
-                raise RuntimeError("Committed epoch is not available")
-            return epoch_id
-
-        epoch_id = self._handler.active_rw_epoch_id
-        if epoch_id is None:
-            raise RuntimeError("RW epoch is not active")
-        return epoch_id
+            if should_close:
+                return
 
     async def _dispatch(self, conn: Connection, msg) -> tuple[object, int, bool]:
         """Dispatch request to handler. Returns (response, fd, should_close)."""
         msg_type = type(msg)
         self._sm.check_operation(msg_type, conn)
 
-        # Special cases
         if msg_type is CommitRequest:
-            return await self._handle_commit(conn)
-
-        if msg_type is GetLockStateRequest:
+            self._handler.on_commit()
+            self._sm.transition(StateEvent.RW_COMMIT, conn)
+            return CommitResponse(success=True), -1, True
+        elif msg_type is AllocateRequest:
+            return (
+                await self._handler.handle_allocate(
+                    msg,
+                    lambda: not conn.reader.at_eof()
+                    and conn.reader.exception() is None
+                    and not conn.writer.is_closing(),
+                ),
+                -1,
+                False,
+            )
+        elif msg_type is GetLockStateRequest:
             return (
                 self._handler.handle_get_lock_state(
                     self._sm.rw_conn is not None,
@@ -383,99 +437,38 @@ class GMSRPCServer:
                 -1,
                 False,
             )
-
-        if msg_type is GetAllocationStateRequest:
+        elif msg_type is GetAllocationStateRequest:
             return self._handler.handle_get_allocation_state(), -1, False
-
-        if msg_type is ExportRequest:
-            epoch_id = self._get_epoch_for_read(conn)
-            response, fd = self._handler.handle_export(msg.allocation_id, epoch_id)
+        elif msg_type is ExportAllocationRequest:
+            response, fd = self._handler.handle_export(msg, conn.mode)
             return response, fd, False
-
-        if msg_type is ClearAllRequest:
-            return self._handler.handle_clear_all(), -1, False
-
-        if msg_type is GetStateHashRequest:
+        elif msg_type is GetStateHashRequest:
             return self._handler.handle_get_memory_layout_hash(), -1, False
-
-        if msg_type is GetAllocationRequest:
-            epoch_id = self._get_epoch_for_read(conn)
-            return self._handler.handle_get_allocation(msg, epoch_id), -1, False
-
-        if msg_type is ListAllocationsRequest:
-            epoch_id = self._get_epoch_for_read(conn)
-            return self._handler.handle_list_allocations(msg, epoch_id), -1, False
-
-        if msg_type is MetadataGetRequest:
-            epoch_id = self._get_epoch_for_read(conn)
-            return self._handler.handle_metadata_get(msg, epoch_id), -1, False
-
-        if msg_type is MetadataListRequest:
-            epoch_id = self._get_epoch_for_read(conn)
-            return self._handler.handle_metadata_list(msg, epoch_id), -1, False
-
-        # Standard dispatch: handler takes msg, returns response
-        handler_name = self._HANDLERS.get(msg_type)
-        if handler_name:
-            handler = getattr(self._handler, handler_name)
-            return handler(msg), -1, False
-
-        raise ValueError(f"Unknown request: {msg_type.__name__}")
-
-    async def _handle_commit(self, conn: Connection) -> tuple[object, int, bool]:
-        """Handle commit via state machine transition - atomic with disconnect."""
-        self._handler.on_commit()
-        self._sm.transition(StateEvent.RW_COMMIT, conn)
-
-        await send_message(conn.writer, CommitResponse(success=True))
-        await conn.close()
-
-        async with self._condition:
-            self._condition.notify_all()
-
-        return None, -1, True
+        elif msg_type is GetAllocationRequest:
+            return self._handler.handle_get_allocation(msg, conn.mode), -1, False
+        elif msg_type is ListAllocationsRequest:
+            return self._handler.handle_list_allocations(msg, conn.mode), -1, False
+        elif msg_type is MetadataGetRequest:
+            return self._handler.handle_metadata_get(msg, conn.mode), -1, False
+        elif msg_type is MetadataListRequest:
+            return self._handler.handle_metadata_list(msg, conn.mode), -1, False
+        elif msg_type is FreeAllocationRequest:
+            return self._handler.handle_free(msg), -1, False
+        elif msg_type is MetadataPutRequest:
+            return self._handler.handle_metadata_put(msg), -1, False
+        elif msg_type is MetadataDeleteRequest:
+            return self._handler.handle_metadata_delete(msg), -1, False
+        else:
+            raise ValueError(f"Unknown request: {msg_type.__name__}")
 
     # ==================== Server Lifecycle ====================
 
-    async def start(self) -> None:
+    async def serve(self) -> None:
         if os.path.exists(self.socket_path):
             os.unlink(self.socket_path)
 
         self._server = await asyncio.start_unix_server(
             self._handle_connection, path=self.socket_path
         )
-        self._running = True
         logger.info(f"Server started: {self.socket_path}")
-
-    async def stop(self) -> None:
-        self._running = False
-        self._shutdown = True
-        async with self._condition:
-            self._condition.notify_all()
-
-        if self._server:
-            self._server.close()
-            await self._server.wait_closed()
-            self._server = None
-
-        # Close connections (bypassing state machine - this is shutdown)
-        if self._sm.rw_conn:
-            await self._sm.rw_conn.close()
-
-        for conn in list(self._sm.ro_conns):
-            await conn.close()
-
-        self._handler.on_shutdown()
-
-        if os.path.exists(self.socket_path):
-            os.unlink(self.socket_path)
-
-        logger.info("Server stopped")
-
-    async def serve_forever(self) -> None:
-        await self.start()
-        try:
-            while self._running:
-                await asyncio.sleep(1)
-        finally:
-            await self.stop()
+        await self._server.serve_forever()

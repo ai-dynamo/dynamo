@@ -8,7 +8,7 @@ Two-tier API for GPU memory lifecycle management:
 Tier 1 (Atomic Operations):
   - Connection: connect(), disconnect()
   - Handle ops (server-side cuMem allocations): allocate_handle, export_handle,
-    get_handle_info, free_handle, clear_all_handles, commit, list_handles,
+    get_handle_info, free_handle, commit, list_handles,
     get_memory_layout_hash
   - VA ops (local address space): reserve_va, map_va, unmap_va, free_va
   - Metadata: metadata_put, metadata_get, metadata_list, metadata_delete
@@ -34,25 +34,22 @@ import logging
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
-from gpu_memory_service.client.cuda_vmm_utils import free_va as _cuda_free_va
-from gpu_memory_service.client.cuda_vmm_utils import (
-    import_handle_from_fd,
-    map_to_va,
-    release_handle,
-)
-from gpu_memory_service.client.cuda_vmm_utils import reserve_va as _cuda_reserve_va
-from gpu_memory_service.client.cuda_vmm_utils import (
-    set_access,
-    set_current_device,
-    synchronize,
-    unmap,
-    validate_pointer,
-)
-from gpu_memory_service.client.rpc import GMSRPCClient
+from gpu_memory_service.client.rpc import _GMSRPCClient
 from gpu_memory_service.common.cuda_vmm_utils import (
     align_to_granularity,
-    get_allocation_granularity,
+    cuda_set_current_device,
+    cuda_synchronize,
+    cuda_validate_pointer,
+    cumem_address_free,
+    cumem_address_reserve,
+    cumem_get_allocation_granularity,
+    cumem_import_from_shareable_handle_close_fd,
+    cumem_map,
+    cumem_release,
+    cumem_set_access,
+    cumem_unmap,
 )
+from gpu_memory_service.common.protocol.messages import GetAllocationResponse
 from gpu_memory_service.common.types import GrantedLockType, RequestedLockType
 
 logger = logging.getLogger(__name__)
@@ -134,7 +131,7 @@ class GMSClientMemoryManager:
         self.socket_path = socket_path
         self.device = device
 
-        self._client: Optional[GMSRPCClient] = None
+        self._client: Optional[_GMSRPCClient] = None
         self._mappings: Dict[int, LocalMapping] = {}  # va -> mapping
         self._inverse_mapping: Dict[str, int] = {}
 
@@ -145,8 +142,8 @@ class GMSClientMemoryManager:
         self._va_preserved = False
         self._last_memory_layout_hash: str = ""
 
-        set_current_device(self.device)
-        self.granularity = get_allocation_granularity(device)
+        cuda_set_current_device(self.device)
+        self.granularity = cumem_get_allocation_granularity(device)
 
     # ==================== Properties ====================
 
@@ -180,23 +177,23 @@ class GMSClientMemoryManager:
         Updates self._granted_lock_type based on granted lock type. Saves memory layout hash
         for stale detection if server is in committed state.
         """
-        self._client = GMSRPCClient(
+        self._client = _GMSRPCClient(
             self.socket_path,
             lock_type=lock_type,
             timeout_ms=timeout_ms,
         )
         self._granted_lock_type = self._client.lock_type
-        # Save layout hash for stale detection on future remap
+        # Only committed epochs have a stable layout hash that can be used for
+        # stale remap detection.
         if self._client.committed:
             self._last_memory_layout_hash = self._client.get_memory_layout_hash()
+        else:
+            self._last_memory_layout_hash = ""
 
     def disconnect(self) -> None:
         """Close connection and release lock."""
         if self._client is not None:
-            try:
-                self._client.close()
-            except Exception:
-                pass
+            self._client.close()
             self._client = None
 
     # ==================== Tier 1: Handle Operations (server-side) ====================
@@ -211,7 +208,7 @@ class GMSClientMemoryManager:
         allocation_id, server_aligned = self._client_rpc.allocate(aligned_size, tag)
         if int(server_aligned) != aligned_size:
             raise RuntimeError(
-                f"Alignment mismatch: {aligned_size} vs {server_aligned}"
+                f"GMS allocation alignment mismatch: {aligned_size} vs {server_aligned}"
             )
         return allocation_id
 
@@ -225,103 +222,42 @@ class GMSClientMemoryManager:
 
     def free_handle(self, allocation_id: str) -> bool:
         """Release a cuMem allocation on the server."""
-        return self._client_rpc.free(allocation_id)
-
-    def clear_all_handles(self) -> int:
-        """Clear all allocations on the server. NO local unmap.
-
-        Safe at startup (no local mappings) and during failover
-        (preserves local VA reservations).
-        """
-        self._require_rw()
-        return self._client_rpc.clear_all()
+        ok = self._client_rpc.free(allocation_id)
+        if not ok:
+            raise RuntimeError(
+                f"GMS free_handle failed for allocation_id={allocation_id}"
+            )
+        return True
 
     def commit(self) -> bool:
-        """Synchronize, downgrade access, then commit.
+        """Synchronize, unmap writer mappings, then commit.
 
         Commit is a publish barrier. It guarantees all prior GPU writes in the
-        current context are complete before the server transitions state.
+        current context are complete before the server transitions state. After
+        a successful commit, the former writer process no longer has any mapped
+        access to the published allocations. Any failure after local unmap
+        raises because the process cannot safely recover its CUDA VMM state.
         """
         self._require_rw()
 
         # Publish barrier: all writer-side GPU work must be visible before commit.
-        synchronize()
+        cuda_synchronize()
 
-        # Freeze current mappings as RO before releasing RW lock ownership.
-        downgraded: list[LocalMapping] = []
-        downgrade_failures: list[tuple[LocalMapping, Exception]] = []
-        for mapping in self._mappings.values():
-            if mapping.handle == 0:
-                continue
-            try:
-                set_access(
-                    mapping.va,
-                    mapping.aligned_size,
-                    self.device,
-                    GrantedLockType.RO,
-                )
-                downgraded.append(mapping)
-            except Exception as e:
-                downgrade_failures.append((mapping, e))
-                logger.error(
-                    "Failed to downgrade mapping to RO before commit: "
-                    "allocation_id=%s va=0x%x size=%d error=%s",
-                    mapping.allocation_id,
-                    mapping.va,
-                    mapping.aligned_size,
-                    e,
-                )
+        for mapping in list(self._mappings.values()):
+            if mapping.handle != 0:
+                self.unmap_va(mapping.va)
 
-        try:
-            ok = bool(self._client_rpc.commit())
-        except Exception as e:
-            ok = False
-            logger.error("Commit RPC failed: %s", e)
+        self._va_preserved = True
+        self._unmapped = True
 
-        if ok:
-            if downgrade_failures:
-                logger.warning(
-                    "Commit succeeded with %d downgrade failures; "
-                    "some mappings may not have been switched to RO",
-                    len(downgrade_failures),
-                )
-            self._client = None
-            return True
-
-        rollback_failures = 0
-        for mapping in downgraded:
-            try:
-                set_access(
-                    mapping.va,
-                    mapping.aligned_size,
-                    self.device,
-                    GrantedLockType.RW,
-                )
-            except Exception as e:
-                rollback_failures += 1
-                logger.error(
-                    "Failed to roll back mapping to RW after commit failure: "
-                    "allocation_id=%s va=0x%x size=%d error=%s",
-                    mapping.allocation_id,
-                    mapping.va,
-                    mapping.aligned_size,
-                    e,
-                )
-
-        logger.error(
-            "Commit failed; kept client handle for caller recovery "
-            "(downgraded=%d downgrade_failures=%d rollback_failures=%d, connected=%s)",
-            len(downgraded),
-            len(downgrade_failures),
-            rollback_failures,
-            bool(self._client and self._client.is_connected),
-        )
-        return False
+        self._client_rpc.commit()
+        self._client = None
+        return True
 
     def get_memory_layout_hash(self) -> str:
         return self._client_rpc.get_memory_layout_hash()
 
-    def list_handles(self, tag: Optional[str] = None) -> List[Dict]:
+    def list_handles(self, tag: Optional[str] = None) -> List[GetAllocationResponse]:
         return self._client_rpc.list_allocations(tag)
 
     # ==================== Tier 1: Metadata ====================
@@ -345,7 +281,7 @@ class GMSClientMemoryManager:
     def reserve_va(self, size: int) -> int:
         """Reserve virtual address space (cuMemAddressReserve). No tracking."""
         aligned_size = align_to_granularity(size, self.granularity)
-        return _cuda_reserve_va(aligned_size, self.granularity)
+        return cumem_address_reserve(aligned_size, self.granularity)
 
     def map_va(self, fd: int, va: int, size: int, allocation_id: str, tag: str) -> int:
         """Import FD + cuMemMap + set access + track.
@@ -354,17 +290,20 @@ class GMSClientMemoryManager:
         """
         assert self._granted_lock_type is not None
         aligned_size = align_to_granularity(size, self.granularity)
-        handle = import_handle_from_fd(fd)
+        handle = cumem_import_from_shareable_handle_close_fd(fd)
+        mapped = False
         try:
-            map_to_va(va, aligned_size, handle)
-            set_access(va, aligned_size, self.device, self._granted_lock_type)
-        except Exception:
-            try:
-                unmap(va, aligned_size)
-            except Exception:
-                pass
-            release_handle(handle)
-            raise
+            cumem_map(va, aligned_size, handle)
+            mapped = True
+            cumem_set_access(va, aligned_size, self.device, self._granted_lock_type)
+        except Exception as e:
+            if mapped:
+                cumem_unmap(va, aligned_size)
+            cumem_release(handle)
+            raise RuntimeError(
+                f"map_va failed for allocation_id={allocation_id} "
+                f"va=0x{va:x} size={aligned_size}: {e}"
+            )
         self._track_mapping(
             LocalMapping(
                 allocation_id=allocation_id,
@@ -386,8 +325,8 @@ class GMSClientMemoryManager:
         mapping = self._mappings.get(va)
         if mapping is None or mapping.handle == 0:
             return
-        unmap(va, mapping.aligned_size)
-        release_handle(mapping.handle)
+        cumem_unmap(va, mapping.aligned_size)
+        cumem_release(mapping.handle)
         self._mappings[va] = mapping.with_handle(0)
 
     def free_va(self, va: int) -> None:
@@ -403,7 +342,7 @@ class GMSClientMemoryManager:
             mapping = self._mappings.get(va)
             if mapping is None:
                 return
-        _cuda_free_va(va, mapping.aligned_size)
+        cumem_address_free(va, mapping.aligned_size)
         self._mappings.pop(va, None)
         self._inverse_mapping.pop(mapping.allocation_id, None)
 
@@ -444,9 +383,14 @@ class GMSClientMemoryManager:
             va = self.reserve_va(aligned_size)
             try:
                 self.map_va(fd, va, alloc_size, allocation_id, alloc_tag)
-            except Exception:
-                _cuda_free_va(va, align_to_granularity(aligned_size, self.granularity))
-                raise
+            except Exception as e:
+                cumem_address_free(
+                    va, align_to_granularity(aligned_size, self.granularity)
+                )
+                raise RuntimeError(
+                    f"create_mapping import path failed for allocation_id={allocation_id} "
+                    f"va=0x{va:x}: {e}"
+                )
             return va
 
         # Allocate path
@@ -458,9 +402,12 @@ class GMSClientMemoryManager:
         va = self.reserve_va(aligned_size)
         try:
             self.map_va(fd, va, size, alloc_id, tag)
-        except Exception:
-            _cuda_free_va(va, aligned_size)
-            raise
+        except Exception as e:
+            cumem_address_free(va, aligned_size)
+            raise RuntimeError(
+                f"create_mapping allocate path failed for allocation_id={alloc_id} "
+                f"va=0x{va:x}: {e}"
+            )
         return va
 
     def destroy_mapping(self, va: int) -> None:
@@ -471,38 +418,25 @@ class GMSClientMemoryManager:
 
         alloc_id = mapping.allocation_id
 
-        try:
-            self.unmap_va(va)
-        except Exception as e:
-            logger.warning("Error in unmap_va for 0x%x: %s", va, e)
-
-        try:
-            self.free_va(va)
-        except Exception as e:
-            logger.warning("Error in free_va for 0x%x: %s", va, e)
+        self.unmap_va(va)
+        self.free_va(va)
 
         # Only free server handle if we're RW and haven't committed
         if self._granted_lock_type == GrantedLockType.RW:
-            try:
-                self.free_handle(alloc_id)
-            except Exception:
-                pass
+            self.free_handle(alloc_id)
 
     def unmap_all_vas(self) -> None:
         """Synchronize + unmap all VAs. Preserves VA reservations for remap."""
-        synchronize()
+        cuda_synchronize()
 
         unmapped_count = 0
         total_bytes = 0
         for va, mapping in list(self._mappings.items()):
             if mapping.handle == 0:
                 continue
-            try:
-                self.unmap_va(va)
-                unmapped_count += 1
-                total_bytes += mapping.aligned_size
-            except Exception as e:
-                logger.warning("Error unmapping VA 0x%x: %s", va, e)
+            self.unmap_va(va)
+            unmapped_count += 1
+            total_bytes += mapping.aligned_size
 
         self._va_preserved = True
         self._unmapped = True
@@ -520,7 +454,7 @@ class GMSClientMemoryManager:
         Checks layout hash for staleness. Validates each allocation still
         exists and size matches before remapping.
         """
-        set_current_device(self.device)
+        cuda_set_current_device(self.device)
 
         # Stale layout check
         current_hash = self.get_memory_layout_hash()
@@ -540,14 +474,8 @@ class GMSClientMemoryManager:
             if mapping.handle != 0:
                 continue  # Already mapped
 
-            # Validate allocation still exists
-            try:
-                alloc_info = self.get_handle_info(mapping.allocation_id)
-            except Exception as e:
-                raise StaleMemoryLayoutError(
-                    f"Allocation {mapping.allocation_id} no longer exists: {e}"
-                ) from e
-
+            # Validate allocation still exists.
+            alloc_info = self.get_handle_info(mapping.allocation_id)
             if int(alloc_info.aligned_size) != mapping.aligned_size:
                 raise StaleMemoryLayoutError(
                     f"Allocation {mapping.allocation_id} size changed: "
@@ -556,12 +484,14 @@ class GMSClientMemoryManager:
 
             # Re-import and map to preserved VA
             fd = self.export_handle(mapping.allocation_id)
-            handle = import_handle_from_fd(fd)
-            map_to_va(va, mapping.aligned_size, handle)
-            set_access(va, mapping.aligned_size, self.device, self._granted_lock_type)
+            handle = cumem_import_from_shareable_handle_close_fd(fd)
+            cumem_map(va, mapping.aligned_size, handle)
+            cumem_set_access(
+                va, mapping.aligned_size, self.device, self._granted_lock_type
+            )
 
-            synchronize()
-            validate_pointer(va)
+            cuda_synchronize()
+            cuda_validate_pointer(va)
 
             self._mappings[va] = mapping.with_handle(handle)
             remapped_count += 1
@@ -602,7 +532,7 @@ class GMSClientMemoryManager:
             )
             if int(server_aligned) != mapping.aligned_size:
                 raise RuntimeError(
-                    f"Alignment mismatch during reallocation: "
+                    "GMS reallocation alignment mismatch: "
                     f"{mapping.aligned_size} vs {server_aligned}"
                 )
 
@@ -620,39 +550,16 @@ class GMSClientMemoryManager:
 
     # ==================== Lifecycle ====================
 
-    def close(self, free: bool = False) -> None:
-        """Best-effort cleanup. NOT reliable in crash/signal paths.
+    def close(self) -> None:
+        """Strict cleanup.
 
         synchronize + unmap all + free all VAs + disconnect.
-        free=True: also clear_all_handles() on server before disconnect.
-        VAs are freed by CUDA context teardown on process exit anyway.
         """
-        try:
-            synchronize()
-        except Exception:
-            pass
+        cuda_synchronize()
 
         for va in list(self._mappings.keys()):
-            try:
-                self.unmap_va(va)
-            except Exception as e:
-                logger.warning("Error unmapping VA 0x%x during close: %s", va, e)
-
-        for va in list(self._mappings.keys()):
-            try:
-                self.free_va(va)
-            except Exception as e:
-                logger.warning("Error freeing VA 0x%x during close: %s", va, e)
-
-        if (
-            free
-            and self._client is not None
-            and self._granted_lock_type == GrantedLockType.RW
-        ):
-            try:
-                self.clear_all_handles()
-            except Exception as e:
-                logger.warning("Error clearing handles during close: %s", e)
+            self.unmap_va(va)
+            self.free_va(va)
 
         self.disconnect()
         self._unmapped = False
@@ -667,7 +574,7 @@ class GMSClientMemoryManager:
     # ==================== Internals ====================
 
     @property
-    def _client_rpc(self) -> GMSRPCClient:
+    def _client_rpc(self) -> _GMSRPCClient:
         """Get connected client or raise."""
         if self._client is None:
             if self._unmapped:
