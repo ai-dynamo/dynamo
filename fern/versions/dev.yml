@@ -22,6 +22,8 @@ navigation:
     contents:
       - page: Quickstart
         path: ../pages-dev/getting-started/quickstart.md
+      - page: Introduction
+        path: ../pages-dev/getting-started/introduction.md
       - page: Contribution Guide
         path: ../pages-dev/contribution-guide.md
   # ==================== Resources ====================
