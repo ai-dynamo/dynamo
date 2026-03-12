@@ -617,4 +617,208 @@ mod tests {
         // Verify handler constructor compiles
         let _handler = create_anchor_cancel_handler(manager.clone());
     }
+
+    // -----------------------------------------------------------------------
+    // reader_pump tests (Plan 08-03, Task 2)
+    // -----------------------------------------------------------------------
+
+    /// Helper: set up infrastructure for reader_pump tests.
+    /// Returns (transport_tx, frame_rx, cancel_token, registry, local_id).
+    fn make_pump_test_infra() -> (
+        flume::Sender<Vec<u8>>,     // transport_tx: simulates transport frames
+        flume::Receiver<Vec<u8>>,   // frame_rx: where pump writes to (consumer side)
+        tokio_util::sync::CancellationToken,
+        std::sync::Arc<dashmap::DashMap<u64, crate::anchor::AnchorEntry>>,
+        u64,                         // local_id
+    ) {
+        let (transport_tx, transport_rx) = flume::bounded::<Vec<u8>>(256);
+        let (frame_tx, frame_rx) = flume::bounded::<Vec<u8>>(256);
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        let registry = std::sync::Arc::new(dashmap::DashMap::new());
+        let local_id = 1u64;
+
+        // Insert an entry in the registry so the pump can remove it
+        registry.insert(local_id, crate::anchor::AnchorEntry {
+            frame_tx: frame_tx.clone(),
+            cancel_token: cancel_token.clone(),
+            attachment: true,
+        });
+
+        // Spawn the reader pump
+        let pump_cancel = cancel_token.clone();
+        let pump_registry = registry.clone();
+        tokio::spawn(reader_pump(
+            transport_rx,
+            frame_tx,
+            pump_cancel,
+            pump_registry,
+            local_id,
+        ));
+
+        (transport_tx, frame_rx, cancel_token, registry, local_id)
+    }
+
+    #[tokio::test]
+    async fn test_pump_forwards_data_frames() {
+        let (transport_tx, frame_rx, _cancel, _registry, _id) = make_pump_test_infra();
+
+        // Send a data frame through the transport side
+        let data_bytes = rmp_serde::to_vec(&crate::frame::StreamFrame::Item(42u32)).unwrap();
+        transport_tx.send_async(data_bytes.clone()).await.unwrap();
+
+        // Should arrive on the frame_rx side
+        let received = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            frame_rx.recv_async(),
+        ).await.expect("timeout waiting for frame").expect("frame_rx closed");
+
+        assert_eq!(received, data_bytes, "pump must forward bytes unchanged");
+    }
+
+    #[tokio::test]
+    async fn test_pump_resets_heartbeat_counter_on_frame() {
+        tokio::time::pause();
+
+        let (transport_tx, frame_rx, _cancel, registry, local_id) = make_pump_test_infra();
+
+        // Wait 4.5 seconds (almost one heartbeat window)
+        tokio::time::sleep(std::time::Duration::from_millis(4500)).await;
+
+        // Send a frame to reset the counter
+        let hb_bytes = rmp_serde::to_vec(&crate::frame::StreamFrame::<()>::Heartbeat).unwrap();
+        transport_tx.send_async(hb_bytes).await.unwrap();
+
+        // Wait another 4.5 seconds
+        tokio::time::sleep(std::time::Duration::from_millis(4500)).await;
+
+        // Send another frame
+        transport_tx.send_async(
+            rmp_serde::to_vec(&crate::frame::StreamFrame::<()>::Heartbeat).unwrap()
+        ).await.unwrap();
+
+        // Drain forwarded frames
+        while frame_rx.try_recv().is_ok() {}
+
+        // The anchor should still be in the registry (counter resets each time)
+        assert!(
+            registry.contains_key(&local_id),
+            "anchor must still be in registry -- heartbeat counter was reset"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_pump_injects_dropped_after_3_missed_heartbeats() {
+        tokio::time::pause();
+
+        let (transport_tx, frame_rx, _cancel, _registry, _id) = make_pump_test_infra();
+
+        // Drop transport sender -- the pump will timeout since no frames arrive
+        drop(transport_tx);
+
+        // Wait for 3 x 5s = 15s of timeouts
+        tokio::time::sleep(std::time::Duration::from_secs(16)).await;
+
+        // Collect all frames from frame_rx
+        let mut frames = Vec::new();
+        while let Ok(bytes) = frame_rx.try_recv() {
+            frames.push(bytes);
+        }
+
+        // The last frame should be a Dropped sentinel
+        assert!(!frames.is_empty(), "must have received at least one frame (Dropped sentinel)");
+        let last = frames.last().unwrap();
+        let decoded: crate::frame::StreamFrame<()> = rmp_serde::from_slice(last).expect("deserialize");
+        assert!(
+            matches!(decoded, crate::frame::StreamFrame::Dropped),
+            "last frame must be Dropped, got {:?}",
+            decoded
+        );
+    }
+
+    #[tokio::test]
+    async fn test_pump_removes_registry_entry_after_3_missed_heartbeats() {
+        tokio::time::pause();
+
+        let (transport_tx, _frame_rx, _cancel, registry, local_id) = make_pump_test_infra();
+
+        // Drop transport sender so pump sees timeouts
+        drop(transport_tx);
+
+        // Wait for 3 x 5s = 15s + margin
+        tokio::time::sleep(std::time::Duration::from_secs(16)).await;
+
+        // LIVE-02: anchor entry must be removed from registry
+        assert!(
+            !registry.contains_key(&local_id),
+            "anchor must be removed from registry after 3 missed heartbeats (LIVE-02)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_pump_exits_when_cancel_token_cancelled() {
+        let (transport_tx, frame_rx, cancel_token, registry, local_id) = make_pump_test_infra();
+
+        // Cancel the token
+        cancel_token.cancel();
+
+        // Give the pump a moment to exit
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Pump should have exited -- sending on transport_tx should not be forwarded
+        let data = rmp_serde::to_vec(&crate::frame::StreamFrame::Item(99u32)).unwrap();
+        let _ = transport_tx.try_send(data);
+
+        // Allow propagation
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // frame_rx should be empty (pump exited, nothing forwarded)
+        assert!(
+            frame_rx.try_recv().is_err(),
+            "no frames should be forwarded after cancel"
+        );
+
+        // Pump calls cancel on exit, so token should be cancelled
+        assert!(cancel_token.is_cancelled());
+
+        // Registry entry may or may not be removed (cancel != heartbeat death)
+        let _ = (registry, local_id);
+    }
+
+    #[tokio::test]
+    async fn test_pump_exits_when_transport_closes() {
+        let (transport_tx, _frame_rx, cancel_token, _registry, _id) = make_pump_test_infra();
+
+        // Drop the transport sender -- transport channel closes
+        drop(transport_tx);
+
+        // Give the pump a moment to exit
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Pump should have exited and cancelled the token
+        assert!(
+            cancel_token.is_cancelled(),
+            "cancel_token must be cancelled after pump exits due to transport close"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_pump_exits_when_consumer_drops() {
+        let (transport_tx, frame_rx, cancel_token, _registry, _id) = make_pump_test_infra();
+
+        // Drop the frame_rx consumer side -- pump's send will fail
+        drop(frame_rx);
+
+        // Send data so the pump tries to forward and fails
+        let data = rmp_serde::to_vec(&crate::frame::StreamFrame::Item(1u32)).unwrap();
+        let _ = transport_tx.send_async(data).await;
+
+        // Give the pump time to process and exit
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Pump should have exited and cancelled the token
+        assert!(
+            cancel_token.is_cancelled(),
+            "cancel_token must be cancelled after pump exits due to consumer drop"
+        );
+    }
 }
