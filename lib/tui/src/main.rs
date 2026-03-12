@@ -33,8 +33,8 @@ use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use futures::StreamExt;
-use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
+use ratatui::backend::CrosstermBackend;
 use tokio_util::sync::CancellationToken;
 use tracing as log;
 
@@ -46,7 +46,10 @@ use sources::{AppEvent, Source};
 
 /// Dynamo TUI — Terminal UI for monitoring Dynamo deployments.
 #[derive(Parser, Debug)]
-#[command(name = "dynamo-tui", about = "Terminal UI for monitoring Dynamo deployments")]
+#[command(
+    name = "dynamo-tui",
+    about = "Terminal UI for monitoring Dynamo deployments"
+)]
 struct Cli {
     /// ETCD endpoint(s), comma-separated. Overrides ETCD_ENDPOINTS env var.
     #[arg(long)]
@@ -130,10 +133,7 @@ async fn run_app(
     });
 
     // Spawn NATS source
-    let nats_config = NatsConfig::from_env(
-        cli.nats_server.as_deref(),
-        Some(cli.nats_interval),
-    );
+    let nats_config = NatsConfig::from_env(cli.nats_server.as_deref(), Some(cli.nats_interval));
     let nats_source = Box::new(NatsSource::new(nats_config));
     let nats_tx = tx.clone();
     let nats_cancel = cancel.clone();

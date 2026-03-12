@@ -7,12 +7,12 @@
 //! Namespace → Component → Endpoint, plus NATS stats and Prometheus metrics.
 
 use std::collections::BTreeMap;
-use std::time::Instant;
 
 /// Health status of a component or endpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HealthStatus {
     Ready,
+    #[allow(dead_code)]
     Provisioning,
     Offline,
 }
@@ -25,14 +25,6 @@ impl HealthStatus {
             HealthStatus::Offline => "○",
         }
     }
-
-    pub fn label(&self) -> &'static str {
-        match self {
-            HealthStatus::Ready => "Ready",
-            HealthStatus::Provisioning => "Provisioning",
-            HealthStatus::Offline => "Offline",
-        }
-    }
 }
 
 /// A single endpoint within a component.
@@ -41,7 +33,6 @@ pub struct Endpoint {
     pub name: String,
     pub instance_count: usize,
     pub status: HealthStatus,
-    pub last_seen: Option<Instant>,
 }
 
 /// A component within a namespace.
@@ -131,8 +122,7 @@ pub fn build_tree(
             let comps: Vec<Component> = components
                 .into_iter()
                 .map(|(comp_name, endpoints)| {
-                    let total_instances: usize =
-                        endpoints.values().map(|ids| ids.len()).sum();
+                    let total_instances: usize = endpoints.values().map(|ids| ids.len()).sum();
                     let eps: Vec<Endpoint> = endpoints
                         .into_iter()
                         .map(|(ep_name, ids)| {
@@ -145,7 +135,6 @@ pub fn build_tree(
                                 } else {
                                     HealthStatus::Offline
                                 },
-                                last_seen: Some(Instant::now()),
                             }
                         })
                         .collect();
@@ -287,9 +276,7 @@ mod tests {
 
     #[test]
     fn test_build_tree_with_models() {
-        let entries = vec![
-            ("ns".into(), "backend".into(), "generate".into(), 1u64),
-        ];
+        let entries = vec![("ns".into(), "backend".into(), "generate".into(), 1u64)];
         let models = vec![
             ("ns".into(), "backend".into(), "llama-7b".into()),
             ("ns".into(), "backend".into(), "mistral-7b".into()),
@@ -303,11 +290,8 @@ mod tests {
     #[test]
     fn test_health_status_display() {
         assert_eq!(HealthStatus::Ready.symbol(), "●");
-        assert_eq!(HealthStatus::Ready.label(), "Ready");
         assert_eq!(HealthStatus::Provisioning.symbol(), "◐");
-        assert_eq!(HealthStatus::Provisioning.label(), "Provisioning");
         assert_eq!(HealthStatus::Offline.symbol(), "○");
-        assert_eq!(HealthStatus::Offline.label(), "Offline");
     }
 
     #[test]
@@ -355,9 +339,7 @@ mod tests {
 
     #[test]
     fn test_build_tree_single_namespace() {
-        let entries = vec![
-            ("ns".into(), "backend".into(), "generate".into(), 1u64),
-        ];
+        let entries = vec![("ns".into(), "backend".into(), "generate".into(), 1u64)];
         let tree = build_tree(&entries, &[]);
         assert_eq!(tree.len(), 1);
         assert_eq!(tree[0].name, "ns");
@@ -394,9 +376,7 @@ mod tests {
     fn test_build_tree_models_without_matching_endpoints() {
         // Models for a component that has no endpoints
         let entries = vec![];
-        let models = vec![
-            ("ns".into(), "backend".into(), "llama-7b".into()),
-        ];
+        let models = vec![("ns".into(), "backend".into(), "llama-7b".into())];
         // Models are only attached to existing components in the tree
         // Since there are no endpoint entries, the tree is empty
         let tree = build_tree(&entries, &models);
@@ -419,20 +399,19 @@ mod tests {
 
     #[test]
     fn test_build_tree_component_status_from_instances() {
-        let entries = vec![
-            ("ns".into(), "backend".into(), "ep".into(), 1u64),
-        ];
+        let entries = vec![("ns".into(), "backend".into(), "ep".into(), 1u64)];
         let tree = build_tree(&entries, &[]);
         assert_eq!(tree[0].components[0].status, HealthStatus::Ready);
     }
 
     #[test]
     fn test_endpoint_status_ready_when_has_instances() {
-        let entries = vec![
-            ("ns".into(), "comp".into(), "ep".into(), 1u64),
-        ];
+        let entries = vec![("ns".into(), "comp".into(), "ep".into(), 1u64)];
         let tree = build_tree(&entries, &[]);
-        assert_eq!(tree[0].components[0].endpoints[0].status, HealthStatus::Ready);
-        assert!(tree[0].components[0].endpoints[0].last_seen.is_some());
+        assert_eq!(
+            tree[0].components[0].endpoints[0].status,
+            HealthStatus::Ready
+        );
+        assert_eq!(tree[0].components[0].endpoints[0].instance_count, 1);
     }
 }

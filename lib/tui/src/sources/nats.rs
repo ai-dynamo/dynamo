@@ -106,13 +106,14 @@ async fn poll_nats_stats(
     if let Ok(stream_names) = collect_stream_names(js_ctx).await {
         for name in stream_names {
             if let Ok(mut stream) = js_ctx.get_stream(&name).await
-                && let Ok(info) = stream.info().await {
-                    streams.push(StreamInfo {
-                        name,
-                        consumer_count: info.state.consumer_count,
-                        message_count: info.state.messages,
-                    });
-                }
+                && let Ok(info) = stream.info().await
+            {
+                streams.push(StreamInfo {
+                    name,
+                    consumer_count: info.state.consumer_count,
+                    message_count: info.state.messages,
+                });
+            }
         }
     }
 
@@ -120,16 +121,16 @@ async fn poll_nats_stats(
         connected: true,
         server_id: info.server_id.clone(),
         msgs_in: stats.in_messages.load(std::sync::atomic::Ordering::Relaxed),
-        msgs_out: stats.out_messages.load(std::sync::atomic::Ordering::Relaxed),
+        msgs_out: stats
+            .out_messages
+            .load(std::sync::atomic::Ordering::Relaxed),
         bytes_in: stats.in_bytes.load(std::sync::atomic::Ordering::Relaxed),
         bytes_out: stats.out_bytes.load(std::sync::atomic::Ordering::Relaxed),
         streams,
     }
 }
 
-async fn collect_stream_names(
-    js_ctx: &async_nats::jetstream::Context,
-) -> Result<Vec<String>> {
+async fn collect_stream_names(js_ctx: &async_nats::jetstream::Context) -> Result<Vec<String>> {
     use futures::TryStreamExt;
     let names: Vec<String> = js_ctx.stream_names().try_collect().await?;
     Ok(names)
@@ -171,10 +172,7 @@ mod tests {
 
     #[test]
     fn test_nats_config_cli_override() {
-        let config = NatsConfig::from_env(
-            Some("nats://custom:4222"),
-            Some(Duration::from_secs(5)),
-        );
+        let config = NatsConfig::from_env(Some("nats://custom:4222"), Some(Duration::from_secs(5)));
         assert_eq!(config.server_url, "nats://custom:4222");
         assert_eq!(config.poll_interval, Duration::from_secs(5));
     }
@@ -206,7 +204,9 @@ mod tests {
             }],
         };
 
-        let source = Box::new(mock::MockNatsSource { stats: stats.clone() });
+        let source = Box::new(mock::MockNatsSource {
+            stats: stats.clone(),
+        });
         let (tx, mut rx) = tokio::sync::mpsc::channel(16);
         let cancel = CancellationToken::new();
 

@@ -9,11 +9,11 @@
 //! - Optional metrics display
 //! - Keyboard shortcut hints
 
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
-use ratatui::Frame;
 
 use crate::app::{App, PaneFocus};
 use crate::model::HealthStatus;
@@ -23,10 +23,10 @@ pub fn render(frame: &mut Frame, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(8),       // Main content area
-            Constraint::Length(3),     // NATS status bar
-            Constraint::Length(3),     // Metrics bar
-            Constraint::Length(1),     // Help bar
+            Constraint::Min(8),    // Main content area
+            Constraint::Length(3), // NATS status bar
+            Constraint::Length(3), // Metrics bar
+            Constraint::Length(1), // Help bar
         ])
         .split(frame.area());
 
@@ -41,9 +41,7 @@ pub fn render(frame: &mut Frame, app: &App) {
 }
 
 fn render_loading(frame: &mut Frame, area: Rect) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" Dynamo TUI ");
+    let block = Block::default().borders(Borders::ALL).title(" Dynamo TUI ");
     let text = Paragraph::new("Connecting to ETCD...")
         .style(Style::default().fg(Color::Yellow))
         .block(block);
@@ -68,7 +66,9 @@ fn render_discovery_panes(frame: &mut Frame, app: &App, area: Rect) {
 fn render_namespace_list(frame: &mut Frame, app: &App, area: Rect) {
     let focused = app.focus == PaneFocus::Namespaces;
     let border_style = if focused {
-        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(Color::DarkGray)
     };
@@ -106,7 +106,9 @@ fn render_namespace_list(frame: &mut Frame, app: &App, area: Rect) {
 fn render_component_list(frame: &mut Frame, app: &App, area: Rect) {
     let focused = app.focus == PaneFocus::Components;
     let border_style = if focused {
-        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(Color::DarkGray)
     };
@@ -159,7 +161,9 @@ fn render_component_list(frame: &mut Frame, app: &App, area: Rect) {
 fn render_endpoint_list(frame: &mut Frame, app: &App, area: Rect) {
     let focused = app.focus == PaneFocus::Endpoints;
     let border_style = if focused {
-        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(Color::DarkGray)
     };
@@ -239,9 +243,16 @@ fn render_nats_bar(frame: &mut Frame, app: &App, area: Rect) {
         format!(" | Streams: {}", summaries.join(", "))
     };
 
+    let server_info = if stats.server_id.is_empty() {
+        String::new()
+    } else {
+        format!(" [{}]", stats.server_id)
+    };
+
     let line = Line::from(vec![
         Span::styled(" NATS: ", Style::default().add_modifier(Modifier::BOLD)),
         status,
+        Span::styled(server_info, Style::default().fg(Color::DarkGray)),
         Span::raw(format!(
             " | Msgs {} / {}",
             format_count(stats.msgs_in),
@@ -272,9 +283,10 @@ fn render_metrics_bar(frame: &mut Frame, app: &App, area: Rect) {
             Span::styled("Not configured", Style::default().fg(Color::DarkGray)),
         ])
     } else {
-        let mut spans = vec![
-            Span::styled(" Metrics: ", Style::default().add_modifier(Modifier::BOLD)),
-        ];
+        let mut spans = vec![Span::styled(
+            " Metrics: ",
+            Style::default().add_modifier(Modifier::BOLD),
+        )];
 
         if let Some(ttft) = m.ttft_p50_ms {
             spans.push(Span::raw(format!("TTFT p50={:.0}ms", ttft)));
@@ -314,7 +326,9 @@ fn render_metrics_bar(frame: &mut Frame, app: &App, area: Rect) {
         .border_style(Style::default().fg(Color::DarkGray))
         .title(" Metrics ");
 
-    let para = Paragraph::new(content).block(block).wrap(Wrap { trim: true });
+    let para = Paragraph::new(content)
+        .block(block)
+        .wrap(Wrap { trim: true });
     frame.render_widget(para, area);
 }
 
@@ -429,35 +443,28 @@ mod tests {
     }
 
     // Render tests using ratatui's TestBackend
-    use ratatui::backend::TestBackend;
-    use ratatui::Terminal;
     use crate::app::App;
     use crate::model::*;
     use crate::sources::AppEvent;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
 
     fn make_test_app() -> App {
         let mut app = App::new();
-        let ns = vec![
-            Namespace {
-                name: "dynamo".into(),
-                components: vec![
-                    Component {
-                        name: "backend".into(),
-                        endpoints: vec![
-                            Endpoint {
-                                name: "generate".into(),
-                                instance_count: 2,
-                                status: HealthStatus::Ready,
-                                last_seen: None,
-                            },
-                        ],
-                        instance_count: 2,
-                        status: HealthStatus::Ready,
-                        models: vec!["llama-7b".into()],
-                    },
-                ],
-            },
-        ];
+        let ns = vec![Namespace {
+            name: "dynamo".into(),
+            components: vec![Component {
+                name: "backend".into(),
+                endpoints: vec![Endpoint {
+                    name: "generate".into(),
+                    instance_count: 2,
+                    status: HealthStatus::Ready,
+                }],
+                instance_count: 2,
+                status: HealthStatus::Ready,
+                models: vec!["llama-7b".into()],
+            }],
+        }];
         app.handle_event(AppEvent::DiscoveryUpdate(ns));
         app
     }
@@ -549,7 +556,11 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         let mut app = make_test_app();
 
-        for focus in [PaneFocus::Namespaces, PaneFocus::Components, PaneFocus::Endpoints] {
+        for focus in [
+            PaneFocus::Namespaces,
+            PaneFocus::Components,
+            PaneFocus::Endpoints,
+        ] {
             app.focus = focus;
             terminal.draw(|frame| render(frame, &app)).unwrap();
         }
@@ -565,7 +576,14 @@ mod tests {
         terminal.draw(|frame| render(frame, &app)).unwrap();
         // We can verify the buffer contains the model name
         let buffer = terminal.backend().buffer().clone();
-        let content: String = buffer.content().iter().map(|c| c.symbol().to_string()).collect();
-        assert!(content.contains("llama-7b"), "Buffer should contain model name");
+        let content: String = buffer
+            .content()
+            .iter()
+            .map(|c| c.symbol().to_string())
+            .collect();
+        assert!(
+            content.contains("llama-7b"),
+            "Buffer should contain model name"
+        );
     }
 }

@@ -166,7 +166,12 @@ mod tests {
             KeyCode::Insert,
         ];
         for code in specials {
-            assert_eq!(map_key(key(code)), None, "KeyCode::{:?} should be unmapped", code);
+            assert_eq!(
+                map_key(key(code)),
+                None,
+                "KeyCode::{:?} should be unmapped",
+                code
+            );
         }
     }
 }

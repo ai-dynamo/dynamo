@@ -182,6 +182,7 @@ impl App {
     }
 
     /// Get the currently selected endpoint (if any).
+    #[allow(dead_code)]
     pub fn selected_endpoint(&self) -> Option<&crate::model::Endpoint> {
         self.selected_component()
             .and_then(|comp| comp.endpoints.get(self.ep_index))
@@ -250,13 +251,11 @@ mod tests {
                                 name: "generate".into(),
                                 instance_count: 2,
                                 status: HealthStatus::Ready,
-                                last_seen: None,
                             },
                             Endpoint {
                                 name: "health".into(),
                                 instance_count: 1,
                                 status: HealthStatus::Ready,
-                                last_seen: None,
                             },
                         ],
                         instance_count: 3,
@@ -269,7 +268,6 @@ mod tests {
                             name: "http".into(),
                             instance_count: 1,
                             status: HealthStatus::Ready,
-                            last_seen: None,
                         }],
                         instance_count: 1,
                         status: HealthStatus::Ready,

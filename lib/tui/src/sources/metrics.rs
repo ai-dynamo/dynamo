@@ -119,17 +119,20 @@ pub fn parse_prometheus_text(text: &str) -> PrometheusMetrics {
 
         // Parse gauge metrics
         if line.contains("requests_inflight")
-            && let Some(val) = extract_gauge_value(line) {
-                metrics.requests_inflight = Some(val as u64);
-            }
+            && let Some(val) = extract_gauge_value(line)
+        {
+            metrics.requests_inflight = Some(val as u64);
+        }
         if line.contains("requests_queued")
-            && let Some(val) = extract_gauge_value(line) {
-                metrics.requests_queued = Some(val as u64);
-            }
+            && let Some(val) = extract_gauge_value(line)
+        {
+            metrics.requests_queued = Some(val as u64);
+        }
         if (line.contains("tokens_per_second") || line.contains("token_throughput"))
-            && let Some(val) = extract_gauge_value(line) {
-                metrics.tokens_per_sec = Some(val);
-            }
+            && let Some(val) = extract_gauge_value(line)
+        {
+            metrics.tokens_per_sec = Some(val);
+        }
     }
 
     metrics
@@ -158,6 +161,7 @@ fn extract_gauge_value(line: &str) -> Option<f64> {
 pub mod mock {
     use super::*;
 
+    #[allow(dead_code)]
     pub struct MockMetricsSource {
         pub metrics: PrometheusMetrics,
     }
@@ -226,7 +230,10 @@ dynamo_frontend_tokens_per_second 450.5
     #[test]
     fn test_extract_gauge_value() {
         assert_eq!(extract_gauge_value("metric_name 42.5"), Some(42.5));
-        assert_eq!(extract_gauge_value("metric_name{label=\"foo\"} 100"), Some(100.0));
+        assert_eq!(
+            extract_gauge_value("metric_name{label=\"foo\"} 100"),
+            Some(100.0)
+        );
         assert_eq!(extract_gauge_value("no_value"), None);
     }
 

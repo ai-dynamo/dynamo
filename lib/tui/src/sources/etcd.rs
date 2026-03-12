@@ -80,10 +80,7 @@ async fn run_etcd_source(
     cancel: CancellationToken,
 ) -> Result<()> {
     let connect_options = if let (Some(user), Some(pass)) = (&config.username, &config.password) {
-        Some(
-            etcd_client::ConnectOptions::new()
-                .with_user(user, pass),
-        )
+        Some(etcd_client::ConnectOptions::new().with_user(user, pass))
     } else {
         None
     };
@@ -110,10 +107,7 @@ async fn run_etcd_source(
 
     // Watch for changes
     let (mut watcher, mut watch_stream) = client
-        .watch(
-            "v1/",
-            Some(WatchOptions::new().with_prefix()),
-        )
+        .watch("v1/", Some(WatchOptions::new().with_prefix()))
         .await
         .context("Failed to create ETCD watch")?;
 
@@ -210,9 +204,10 @@ async fn snapshot_models(
     for kv in resp.kvs() {
         let key = kv.key_str().unwrap_or_default();
         if let Some(parsed) = parse_model_key(key)
-            && !entries.contains(&parsed) {
-                entries.push(parsed);
-            }
+            && !entries.contains(&parsed)
+        {
+            entries.push(parsed);
+        }
     }
 
     log::info!("Snapshot: {} model entries", entries.len());
@@ -291,7 +286,6 @@ mod tests {
                     name: "generate".into(),
                     instance_count: 1,
                     status: HealthStatus::Ready,
-                    last_seen: None,
                 }],
                 instance_count: 1,
                 status: HealthStatus::Ready,
