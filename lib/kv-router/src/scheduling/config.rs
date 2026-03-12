@@ -110,7 +110,7 @@ pub struct KvRouterConfig {
     /// Queue threshold fraction for prefill token capacity.
     /// When set, requests are queued if all workers exceed this fraction of max_num_batched_tokens.
     /// If None, queueing is disabled and all requests go directly to ready.
-    /// Default: 1.5. Must be > 0.
+    /// Default: 2.0. Must be > 0.
     #[validate(range(min = 0.0))]
     pub router_queue_threshold: Option<f64>,
 

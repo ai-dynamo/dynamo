@@ -267,4 +267,5 @@ class KvRouterArgGroup(ArgGroup):
                 "'wspt': weighted shortest processing time (Smith's rule) — optimizes average TTFT."
             ),
             arg_type=str,
+            choices=["fcfs", "wspt"],
         )
