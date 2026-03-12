@@ -91,7 +91,7 @@ Dynamo achieves state-of-the-art LLM performance by composing three core techniq
 
 - [KV cache offloading](../design-docs/kvbm-design.md) Expands the available context window by moving KV cache from HBM to cheaper storage tiers such as host memory, local disk, or remote storage. Reusing precomputed state improves TTFT, reduces Total Cost of Ownership (TCO), and allows for longer context processing.
 
-- [Disaggregated serving](../design-docs/disaggregated-serving.md) In the Design Principles section, we introduced the concept of disaggregated serving. Its performance has been showcased by [InferenceX](https://newsletter.semianalysis.com/p/inferencex-v2-nvidia-blackwell-vs). DeepSeek V3 can be served with ~7x throughput/GPU, with disaggregated serving and large-scale expert parallelism.
+- [Disaggregated serving](../design-docs/disagg-serving.md) In the Design Principles section, we introduced the concept of disaggregated serving. Its performance has been showcased by [InferenceX](https://newsletter.semianalysis.com/p/inferencex-v2-nvidia-blackwell-vs). DeepSeek V3 can be served with ~7x throughput/GPU, with disaggregated serving and large-scale expert parallelism.
 Furthermore, when these three techniques are composed together, they yield compounding benefits as shown in the following diagram.
 
 ![Performance composability of disaggregated serving, KV cache aware routing, and KV cache offloading](../assets/img/intro-perf.svg)
