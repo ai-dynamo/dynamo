@@ -67,8 +67,8 @@ def resolve_base_image(
     cuda_key = f"cuda{cuda_version}"
     cuda_config = fw_config.get(cuda_key, {})
 
-    runtime_image = cuda_config.get("runtime_image")
-    runtime_image_tag = cuda_config.get("runtime_image_tag")
+    runtime_image = cuda_config.get("runtime_image") or fw_config.get("runtime_image")
+    runtime_image_tag = cuda_config.get("runtime_image_tag") or fw_config.get("runtime_image_tag")
 
     if not runtime_image or not runtime_image_tag:
         log.error(
