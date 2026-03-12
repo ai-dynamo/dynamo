@@ -287,14 +287,17 @@ class ManagedProcess:
 
         Termination Strategy (Graceful → Escalate to Force):
         =====================================================
-        1. Send SIGTERM to process group immediately (no delay before SIGTERM)
-        2. Wait up to 2s (poll every 0.1s) for processes to exit
-        3. If still alive after 2s: Send SIGKILL (force kill)
-        4. Terminate individual processes (self.proc, tee, sed):
+        1. Snapshot child processes (before killing parent, so we can find them)
+        2. Send SIGTERM to process group immediately (no delay before SIGTERM)
+        3. Wait up to 2s (poll every 0.1s) for processes to exit
+        4. If still alive after 2s: Send SIGKILL (force kill)
+        5. Terminate individual processes (self.proc, tee, sed):
            - Send SIGTERM immediately (no delay)
            - Wait up to 10s for exit
            - If still alive after 10s: Send SIGKILL (force kill)
-        5. Clean up straggler processes (if configured)
+        6. Kill any orphaned child processes that escaped the process group
+           (e.g. TRT-LLM engine workers started via MPI in separate PGIDs)
+        7. Clean up straggler processes (if configured)
 
         Signal Details:
         - SIGTERM (15): Graceful - allows cleanup handlers to run
@@ -336,6 +339,7 @@ class ManagedProcess:
                         terminate_process_tree(child.pid, self._logger)
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     pass
+
             if self.data_dir:
                 self._remove_directory(self.data_dir)
         finally:
@@ -515,18 +519,21 @@ class ManagedProcess:
                 )
             self._tee_proc = None
 
-    def _terminate_process_group(self, timeout: float = 2.0):
+    def _terminate_process_group(self, timeout: float = 8.0):
         """Terminate the entire process group/session started for the child.
 
         Kill Sequence:
         ==============
         1. Send SIGTERM to entire process group IMMEDIATELY (no delay)
-        2. Wait up to `timeout` seconds (default 2s), polling every 0.1s
+        2. Wait up to `timeout` seconds (default 8s), polling every 0.1s
         3. If still alive after timeout: Send SIGKILL (force kill, immediate)
 
         Timeout Parameter:
         - Controls how long to WAIT AFTER SIGTERM before escalating to SIGKILL
         - NOT a delay before sending SIGTERM (SIGTERM is sent immediately)
+        - 8s gives engines (TRT-LLM, vLLM, etc.) enough time to gracefully
+          shut down MPI workers, release GPU memory, and drain pending requests
+        - Polling at 0.1s intervals means fast exits are not penalized
 
         Process groups catch cases where the launcher shell exits and its
         children are reparented, leaving no parent PID to traverse, but they
