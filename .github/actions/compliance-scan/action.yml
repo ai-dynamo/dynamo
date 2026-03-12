@@ -1,0 +1,74 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: 'Compliance Scan'
+description: 'Generate attribution CSVs (dpkg + Python) for a container image and upload as workflow artifacts'
+
+inputs:
+  image:
+    description: 'Full container image URI to scan (must be pullable)'
+    required: true
+  artifact_name:
+    description: 'Name for the uploaded artifact (e.g., compliance-vllm-cuda12-amd64)'
+    required: true
+  framework:
+    description: 'Framework name for base image resolution (vllm, sglang, trtllm, dynamo)'
+    required: false
+    default: ''
+  target:
+    description: 'Build target for base image resolution (runtime or frontend)'
+    required: false
+    default: 'runtime'
+  cuda_version:
+    description: 'CUDA version for base image resolution (e.g., 12.9, 13.0, 13.1)'
+    required: false
+    default: ''
+  base_image:
+    description: 'Explicit base image for diff (overrides framework/cuda-version auto-resolve)'
+    required: false
+    default: ''
+  retention_days:
+    description: 'Artifact retention in days'
+    required: false
+    default: '90'
+
+runs:
+  using: "composite"
+  steps:
+    - name: Install dependencies
+      shell: bash
+      run: pip install pyyaml
+
+    - name: Pull container image
+      shell: bash
+      run: |
+        source ./.github/scripts/retry_docker.sh
+        retry_pull ${{ inputs.image }}
+
+    - name: Generate attribution CSVs
+      shell: bash
+      run: |
+        ARGS=""
+        if [ -n "${{ inputs.base_image }}" ]; then
+          ARGS+=" --base-image ${{ inputs.base_image }}"
+        elif [ -n "${{ inputs.framework }}" ]; then
+          ARGS+=" --framework ${{ inputs.framework }}"
+          ARGS+=" --target ${{ inputs.target }}"
+          if [ -n "${{ inputs.cuda_version }}" ]; then
+            ARGS+=" --cuda-version ${{ inputs.cuda_version }}"
+          fi
+        fi
+
+        python container/compliance/generate_attributions.py \
+          "${{ inputs.image }}" \
+          --output "${{ inputs.artifact_name }}.csv" \
+          --verbose \
+          ${ARGS}
+
+    - name: Upload attribution artifacts
+      if: always()
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+      with:
+        name: ${{ inputs.artifact_name }}
+        path: ${{ inputs.artifact_name }}*.csv
+        retention-days: ${{ inputs.retention_days }}

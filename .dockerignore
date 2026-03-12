@@ -45,6 +45,7 @@ container/Dockerfile*
 container/**/*.Dockerfile
 container/render.py
 container/context.yaml
+container/compliance/
 .venv
 .venv-docs
 
