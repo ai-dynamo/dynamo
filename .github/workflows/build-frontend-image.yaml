@@ -6,7 +6,7 @@ name: Build Frontend Image
 on:
   push:
     branches:
-    - ops-3946/multi-arch-frontend-image # todo: remove this after testing
+    - ops-3946/multiarch-frontend-image # todo: remove this after testing
     - main
     - 'release/*.*.*'
     - "pull-request/[0-9]+"
