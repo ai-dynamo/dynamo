@@ -145,7 +145,11 @@ class VllmProcessor:
             max_tokens=max_tokens,
         )
         # generation_config.json
+        # Skip eos_token_id: vLLM 0.17.0 made SamplingParams.eos_token_id a
+        # read-only property; eos tokens are handled via eos_token_ids below.
         for k, v in self.input_processor.generation_config_fields.items():
+            if k == "eos_token_id":
+                continue
             if hasattr(sampling_params, k):
                 setattr(sampling_params, k, v)
 
