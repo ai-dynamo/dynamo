@@ -275,7 +275,7 @@ helm dep build ./platform/
 NS_RESTRICT_FLAGS="--set dynamo-operator.namespaceRestriction.enabled=true"
 helm install dynamo-platform ./platform/ \
   --namespace "${NAMESPACE}" \
-  --set "dynamo-operator.controllerManager.manager.image.repository=${DOCKER_SERVER}/dynamo-operator" \
+  --set "dynamo-operator.controllerManager.manager.image.repository=${DOCKER_SERVER}/kubernetes-operator" \
   --set "dynamo-operator.controllerManager.manager.image.tag=${IMAGE_TAG}" \
   --set "dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret" \
   ${NS_RESTRICT_FLAGS}

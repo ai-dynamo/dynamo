@@ -79,7 +79,7 @@ kubectl create secret docker-registry docker-imagepullsecret \
 # Install platform
 helm install dynamo-platform ./platform/ \
   --namespace ${NAMESPACE} \
-  --set "dynamo-operator.controllerManager.manager.image.repository=${DOCKER_SERVER}/dynamo-operator" \
+  --set "dynamo-operator.controllerManager.manager.image.repository=${DOCKER_SERVER}/kubernetes-operator" \
   --set "dynamo-operator.controllerManager.manager.image.tag=${IMAGE_TAG}" \
   --set "dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret"
 ```
