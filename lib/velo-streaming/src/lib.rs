@@ -5,7 +5,7 @@
 //!
 //! Core wire types:
 //! - [`handle::StreamAnchorHandle`]: compact u128 encoding WorkerId + local anchor ID
-//! - [`frame::StreamFrame`]: six-variant enum representing all frame types on the wire
+//! - [`frame::StreamFrame`]: seven-variant enum representing all frame types on the wire
 //!
 //! Transport abstraction:
 //! - [`transport::FrameTransport`]: pluggable ordered-delivery transport trait
@@ -16,6 +16,9 @@
 //! - [`anchor::AnchorManager`]: creates and tracks streaming anchors
 //! - [`anchor::AnchorStream`]: typed receive stream for anchor consumers
 //! - [`anchor::AttachError`]: errors for exclusive-attach operations
+//!
+//! Sender:
+//! - [`sender::StreamSender`]: typed sender for pushing frames with heartbeat and drop safety
 
 pub mod anchor;
 pub mod control;
@@ -30,4 +33,6 @@ pub use control::{
     AnchorFinalizeRequest, create_anchor_attach_handler, create_anchor_cancel_handler,
     create_anchor_detach_handler, create_anchor_finalize_handler,
 };
+pub use frame::{SendError, StreamError, StreamFrame};
+pub use sender::StreamSender;
 pub use transport::FrameTransport;
