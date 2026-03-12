@@ -8855,9 +8855,14 @@ name = "velo-streaming"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "dashmap 6.1.0",
  "rmp-serde",
  "serde",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
  "velo-common",
+ "velo-messenger",
 ]
 
 [[package]]
