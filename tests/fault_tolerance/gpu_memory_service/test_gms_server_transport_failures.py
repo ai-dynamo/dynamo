@@ -10,7 +10,6 @@ from dataclasses import dataclass
 
 import pytest
 from cuda.bindings import driver as cuda
-
 from gpu_memory_service.client.memory_manager import (
     GMSClientMemoryManager,
     LocalMapping,
@@ -32,8 +31,7 @@ from gpu_memory_service.common.types import (
 from gpu_memory_service.server.allocations import GMSAllocationManager
 from gpu_memory_service.server.gms import GMS
 from gpu_memory_service.server.rpc import GMSRPCServer
-from gpu_memory_service.server.session import GMSSessionManager
-from gpu_memory_service.server.session import Connection
+from gpu_memory_service.server.session import Connection, GMSSessionManager
 
 pytestmark = [
     pytest.mark.unit,

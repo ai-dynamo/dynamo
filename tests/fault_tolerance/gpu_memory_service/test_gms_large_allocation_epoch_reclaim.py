@@ -11,9 +11,8 @@ import sys
 import textwrap
 import time
 
-import pytest
 import pynvml
-
+import pytest
 from gpu_memory_service.common import cuda_utils
 from gpu_memory_service.common.types import GrantedLockType
 from gpu_memory_service.server.allocations import GMSAllocationManager
