@@ -97,7 +97,7 @@ ENV VLLM_WORKER_MULTIPROC_METHOD=spawn
 ## to build a cross compiled target to support AVX512, AMX ISA's
 ## vllm-0.16 has a bug that handles non-AVX512 supported cases incorrectly
 ## -  https://github.com/vllm-project/vllm/issues/33991
-## -  Build settings chosen to cross-compile with AVX512 support.
+## -  Build settings chosen to cross-compile with AVX512 support on amd64 only.
 
 ENV VLLM_TARGET_DEVICE=cpu
 ARG VLLM_CPU_DISABLE_AVX512=false  # If false, decide based on build-machine support or below flags (latter overrides former). If true, disable AVX512 support.
@@ -105,12 +105,6 @@ ARG VLLM_CPU_AVX512=true           # Support for building with AVX512 ISA (Expli
 ARG VLLM_CPU_AVX512BF16=true       # Support for building with AVX512BF16 ISA
 ARG VLLM_CPU_AVX512VNNI=false      # Support for building with VLLM_CPU_AVX512VNNI ISA
 ARG VLLM_CPU_AMXBF16=true          # Support for building with AMXBF16 ISA
-
-ENV VLLM_CPU_DISABLE_AVX512=${VLLM_CPU_DISABLE_AVX512}
-ENV VLLM_CPU_AVX512=${VLLM_CPU_AVX512}
-ENV VLLM_CPU_AVX512BF16=${VLLM_CPU_AVX512BF16}
-ENV VLLM_CPU_AVX512VNNI=${VLLM_CPU_AVX512VNNI}
-ENV VLLM_CPU_AMXBF16=${VLLM_CPU_AMXBF16}
 {% endif %}
 
 # Install VLLM and related dependencies
@@ -119,6 +113,13 @@ RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
     export UV_CACHE_DIR=/root/.cache/uv UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     cp /tmp/deps/vllm/install_vllm.sh /tmp/install_vllm.sh && \
     chmod +x /tmp/install_vllm.sh && \
+    if [ "$DEVICE" = "cpu" ] && [ "$TARGETARCH" = "amd64" ]; then \
+        export VLLM_CPU_DISABLE_AVX512=${VLLM_CPU_DISABLE_AVX512} \
+               VLLM_CPU_AVX512=${VLLM_CPU_AVX512} \
+               VLLM_CPU_AVX512BF16=${VLLM_CPU_AVX512BF16} \
+               VLLM_CPU_AVX512VNNI=${VLLM_CPU_AVX512VNNI} \
+               VLLM_CPU_AMXBF16=${VLLM_CPU_AMXBF16}; \
+    fi && \
     /tmp/install_vllm.sh \
         --device $DEVICE \
         --vllm-ref $VLLM_REF \
