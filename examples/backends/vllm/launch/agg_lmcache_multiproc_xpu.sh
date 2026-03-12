@@ -1,0 +1,52 @@
+#!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+set -e
+
+# Explicitly set PROMETHEUS_MULTIPROC_DIR (K8s-style deployment)
+# Use unique directory per test run to avoid conflicts
+export PROMETHEUS_MULTIPROC_DIR=${PROMETHEUS_MULTIPROC_DIR:-/tmp/prometheus_multiproc_$$_$RANDOM}
+rm -rf "$PROMETHEUS_MULTIPROC_DIR"
+mkdir -p "$PROMETHEUS_MULTIPROC_DIR"
+
+# Cleanup function to remove the directory on exit
+cleanup() {
+    echo "Cleaning up..."
+    rm -rf "$PROMETHEUS_MULTIPROC_DIR"
+    kill 0
+}
+trap cleanup EXIT
+
+MODEL="Qwen/Qwen3-0.6B"
+BLOCK_SIZE=64
+HTTP_PORT="${DYN_HTTP_PORT:-8000}"
+echo "=========================================="
+echo "Launching Aggregated + LMCache + Multiproc (1 GPU)"
+echo "=========================================="
+echo "Model:       $MODEL"
+echo "Frontend:    http://localhost:$HTTP_PORT"
+echo "=========================================="
+echo ""
+echo "Example test command:"
+echo ""
+echo "  curl http://localhost:${HTTP_PORT}/v1/chat/completions \\"
+echo "    -H 'Content-Type: application/json' \\"
+echo "    -d '{"
+echo "      \"model\": \"${MODEL}\","
+echo "      \"messages\": [{\"role\": \"user\", \"content\": \"Explain why Roger Federer is considered one of the greatest tennis players of all time\"}],"
+echo "      \"max_tokens\": 32"
+echo "    }'"
+echo ""
+echo "=========================================="
+
+# run ingress
+# dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
+python -m dynamo.frontend &
+
+# run worker with LMCache enabled and PROMETHEUS_MULTIPROC_DIR explicitly set
+DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
+PROMETHEUS_MULTIPROC_DIR="$PROMETHEUS_MULTIPROC_DIR" python -m dynamo.vllm \
+    --model "$MODEL" \
+    --block-size $BLOCK_SIZE \
+    --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both","kv_buffer_device":"xpu"}'
+

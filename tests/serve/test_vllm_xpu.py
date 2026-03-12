@@ -5,6 +5,7 @@ import base64
 import dataclasses
 import logging
 import os
+import random
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -53,7 +54,7 @@ vllm_dir = os.environ.get("VLLM_DIR") or os.path.join(
 # bin-pack safely.
 vllm_configs = {
     "aggregated": VLLMConfig(
-        name="aggregated",
+        name="aggregated_xpu",
         directory=vllm_dir,
         script_name="agg.sh",
         marks=[
@@ -81,7 +82,7 @@ vllm_configs = {
         ],
     ),
     "aggregated_logprobs": VLLMConfig(
-        name="aggregated_logprobs",
+        name="aggregated_logprobs_xpu",
         directory=vllm_dir,
         script_name="agg.sh",
         marks=[pytest.mark.gpu_1, pytest.mark.post_merge],
@@ -104,8 +105,45 @@ vllm_configs = {
             ),
         ],
     ),
+    "aggregated_lmcache": VLLMConfig(
+        name="aggregated_lmcache_xpu",
+        directory=vllm_dir,
+        script_name="agg_lmcache_xpu.sh",
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.pre_merge,
+            pytest.mark.timeout(360),  # 3x estimated time (70s) + download time (150s)
+        ],
+        model="Qwen/Qwen3-0.6B",
+        request_payloads=[
+            chat_payload_default(),
+            completion_payload_default(),
+            metric_payload_default(min_num_requests=6, backend="vllm"),
+            metric_payload_default(min_num_requests=6, backend="lmcache"),
+        ],
+    ),
+    "aggregated_lmcache_multiproc": VLLMConfig(
+        name="aggregated_lmcache_multiproc_xpu",
+        directory=vllm_dir,
+        script_name="agg_lmcache_multiproc_xpu.sh",
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.pre_merge,
+            pytest.mark.timeout(360),  # 3x estimated time (70s) + download time (150s)
+        ],
+        model="Qwen/Qwen3-0.6B",
+        env={
+            "PROMETHEUS_MULTIPROC_DIR": f"/tmp/prometheus_multiproc_test_{os.getpid()}_{random.randint(0, 10000)}"
+        },
+        request_payloads=[
+            chat_payload_default(),
+            completion_payload_default(),
+            metric_payload_default(min_num_requests=6, backend="vllm"),
+            metric_payload_default(min_num_requests=6, backend="lmcache"),
+        ],
+    ),
     "agg-request-plane-tcp": VLLMConfig(
-        name="agg-request-plane-tcp",
+        name="agg-request-plane-tcp-xpu",
         directory=vllm_dir,
         script_name="agg_request_planes_xpu.sh",
         marks=[
@@ -121,7 +159,7 @@ vllm_configs = {
         ],
     ),
     "agg-request-plane-http": VLLMConfig(
-        name="agg-request-plane-http",
+        name="agg-request-plane-http-xpu",
         directory=vllm_dir,
         script_name="agg_request_planes_xpu.sh",
         marks=[
@@ -137,7 +175,7 @@ vllm_configs = {
         ],
     ),
     "agg-router": VLLMConfig(
-        name="agg-router",
+        name="agg-router-xpu",
         directory=vllm_dir,
         script_name="agg_router_xpu.sh",
         marks=[
@@ -159,7 +197,7 @@ vllm_configs = {
         },
     ),
     "agg-router-approx": VLLMConfig(
-        name="agg-router-approx",
+        name="agg-router-approx-xpu",
         directory=vllm_dir,
         script_name="agg_router_approx_xpu.sh",
         marks=[
@@ -194,7 +232,7 @@ vllm_configs = {
         },
     ),
     "multimodal_agg_frontend_decoding": VLLMConfig(
-        name="multimodal_agg_frontend_decoding",
+        name="multimodal_agg_frontend_decoding_xpu",
         directory=vllm_dir,
         script_name="agg_multimodal_xpu.sh",
         marks=[pytest.mark.gpu_1, pytest.mark.pre_merge],
@@ -225,7 +263,7 @@ vllm_configs = {
         ],
     ),
     "multimodal_agg_qwen": VLLMConfig(
-        name="multimodal_agg_qwen",
+        name="multimodal_agg_qwen_xpu",
         directory=vllm_dir,
         script_name="agg_multimodal_xpu.sh",
         marks=[pytest.mark.gpu_1, pytest.mark.pre_merge],
@@ -252,7 +290,7 @@ vllm_configs = {
         ],
     ),
     "multimodal_agg_llava": VLLMConfig(
-        name="multimodal_agg_llava",
+        name="multimodal_agg_llava_xpu",
         directory=vllm_dir,
         script_name="agg_multimodal_xpu.sh",
         marks=[
@@ -289,7 +327,7 @@ vllm_configs = {
         ],
     ),
     "aggregated_toolcalling": VLLMConfig(
-        name="aggregated_toolcalling",
+        name="aggregated_toolcalling_xpu",
         directory=vllm_dir,
         script_name="agg_multimodal_xpu.sh",
         marks=[pytest.mark.gpu_2, pytest.mark.multimodal, pytest.mark.nightly],
@@ -367,7 +405,7 @@ vllm_configs = {
     #     script_args=["--model", "llava-hf/llava-1.5-7b-hf"],
     # ),
     "completions_only": VLLMConfig(
-        name="completions_only",
+        name="completions_only_xpu",
         directory=vllm_dir,
         script_name="agg.sh",
         marks=[
@@ -391,7 +429,7 @@ vllm_configs = {
         ],
     ),
     "guided_decoding": VLLMConfig(
-        name="guided_decoding",
+        name="guided_decoding_xpu",
         directory=vllm_dir,
         script_name="agg.sh",
         marks=[pytest.mark.gpu_1, pytest.mark.pre_merge],
@@ -500,7 +538,7 @@ def test_multimodal_b64(
 
     # Create test config
     config = VLLMConfig(
-        name="test_multimodal_b64",
+        name="test_multimodal_b64_xpu",
         directory=vllm_dir,
         script_name="agg_multimodal_xpu.sh",
         marks=[],  # markers at function-level
@@ -516,180 +554,174 @@ def test_multimodal_b64(
     )
     run_serve_deployment(config, request, ports=dynamo_dynamic_ports)
 
-
-# # LoRA Test Directory
-# lora_dir = os.path.join(vllm_dir, "launch/lora")
-
-
-# def lora_chat_payload(
-#     lora_name: str,
-#     s3_uri: str,
-#     system_port: int = DefaultPort.SYSTEM1.value,
-#     repeat_count: int = 2,
-#     expected_response: Optional[list] = None,
-#     expected_log: Optional[list] = None,
-#     max_tokens: int = 100,
-#     temperature: float = 0.0,
-# ) -> LoraTestChatPayload:
-#     """Create a LoRA-enabled chat payload for testing"""
-#     return LoraTestChatPayload(
-#         body={
-#             "model": lora_name,
-#             "messages": [
-#                 {
-#                     "role": "user",
-#                     "content": "What is deep learning? Answer in one sentence.",
-#                 }
-#             ],
-#             "max_tokens": max_tokens,
-#             "temperature": temperature,
-#             "stream": False,
-#         },
-#         lora_name=lora_name,
-#         s3_uri=s3_uri,
-#         system_port=system_port,
-#         repeat_count=repeat_count,
-#         expected_response=expected_response
-#         or ["learning", "neural", "network", "AI", "model"],
-#         expected_log=expected_log or [],
-#     )
+# LoRA Test Directory
+lora_dir = os.path.join(vllm_dir, "launch/lora")
 
 
-# @pytest.mark.vllm
-# @pytest.mark.e2e
-# @pytest.mark.gpu_1
-# @pytest.mark.model("Qwen/Qwen3-0.6B")
-# @pytest.mark.timeout(600)
-# @pytest.mark.post_merge
-# @pytest.mark.skip(reason="DYN-2260")
-# def test_lora_aggregated(
-#     request,
-#     runtime_services_dynamic_ports,
-#     predownload_models,
-#     minio_lora_service,
-#     dynamo_dynamic_ports,
-# ):
-#     """
-#     Test LoRA inference with aggregated vLLM deployment.
-
-#     This test:
-#     1. Uses MinIO fixture to provide S3-compatible storage with uploaded LoRA
-#     2. Starts vLLM with LoRA support enabled
-#     3. Loads the LoRA adapter via system API
-#     4. Runs inference with the LoRA model
-#     """
-#     minio_config: MinioLoraConfig = minio_lora_service
-
-#     # Create payload that loads LoRA and tests inference
-#     lora_payload = lora_chat_payload(
-#         lora_name=minio_config.lora_name,
-#         s3_uri=minio_config.get_s3_uri(),
-#         system_port=DefaultPort.SYSTEM1.value,
-#         repeat_count=2,
-#     )
-
-#     # Create test config with MinIO environment variables
-#     config = VLLMConfig(
-#         name="test_lora_aggregated",
-#         directory=vllm_dir,
-#         script_name="lora/agg_lora.sh",
-#         marks=[],  # markers at function-level
-#         model="Qwen/Qwen3-0.6B",
-#         timeout=600,
-#         env=minio_config.get_env_vars(),
-#         request_payloads=[lora_payload],
-#     )
-
-#     config = dataclasses.replace(
-#         config, frontend_port=dynamo_dynamic_ports.frontend_port
-#     )
-#     run_serve_deployment(
-#         config,
-#         request,
-#         ports=dynamo_dynamic_ports,
-#         extra_env=minio_config.get_env_vars(),
-#     )
+def lora_chat_payload(
+    lora_name: str,
+    s3_uri: str,
+    system_port: int = DefaultPort.SYSTEM1.value,
+    repeat_count: int = 2,
+    expected_response: Optional[list] = None,
+    expected_log: Optional[list] = None,
+    max_tokens: int = 100,
+    temperature: float = 0.0,
+) -> LoraTestChatPayload:
+    """Create a LoRA-enabled chat payload for testing"""
+    return LoraTestChatPayload(
+        body={
+            "model": lora_name,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "What is deep learning? Answer in one sentence.",
+                }
+            ],
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "stream": False,
+        },
+        lora_name=lora_name,
+        s3_uri=s3_uri,
+        system_port=system_port,
+        repeat_count=repeat_count,
+        expected_response=expected_response
+        or ["learning", "neural", "network", "AI", "model"],
+        expected_log=expected_log or [],
+    )
 
 
-# @pytest.mark.vllm
-# @pytest.mark.e2e
-# @pytest.mark.gpu_2
-# @pytest.mark.model("Qwen/Qwen3-0.6B")
-# @pytest.mark.timeout(600)
-# @pytest.mark.post_merge
-# @pytest.mark.parametrize("num_system_ports", [2], indirect=True)
-# @pytest.mark.skip(reason="DYN-2265")
-# def test_lora_aggregated_router(
-#     request,
-#     runtime_services_dynamic_ports,
-#     predownload_models,
-#     minio_lora_service,
-#     dynamo_dynamic_ports,
-#     num_system_ports,
-# ):
-#     """
-#     Test LoRA inference with aggregated vLLM deployment using KV router.
+@pytest.mark.vllm
+@pytest.mark.e2e
+@pytest.mark.gpu_1
+@pytest.mark.model("Qwen/Qwen3-0.6B")
+@pytest.mark.timeout(600)
+@pytest.mark.post_merge
+def test_lora_aggregated(
+    request,
+    runtime_services_dynamic_ports,
+    predownload_models,
+    minio_lora_service,
+    dynamo_dynamic_ports,
+):
+    """
+    Test LoRA inference with aggregated vLLM deployment.
 
-#     This test:
-#     1. Uses MinIO fixture to provide S3-compatible storage with uploaded LoRA
-#     2. Starts multiple vLLM workers with LoRA support and KV router
-#     3. Loads the LoRA adapter on both workers via system API
-#     4. Runs inference with the LoRA model, verifying KV cache routing
-#     """
-#     assert (
-#         num_system_ports >= 2
-#     ), "serve tests require at least SYSTEM_PORT1 + SYSTEM_PORT2"
-#     minio_config: MinioLoraConfig = minio_lora_service
+    This test:
+    1. Uses MinIO fixture to provide S3-compatible storage with uploaded LoRA
+    2. Starts vLLM with LoRA support enabled
+    3. Loads the LoRA adapter via system API
+    4. Runs inference with the LoRA model
+    """
+    minio_config: MinioLoraConfig = minio_lora_service
 
-#     # Create payloads that load LoRA on both workers and test inference
-#     # Worker 1 (DefaultPort.SYSTEM1)
-#     lora_payload_worker1 = lora_chat_payload(
-#         lora_name=minio_config.lora_name,
-#         s3_uri=minio_config.get_s3_uri(),
-#         system_port=DefaultPort.SYSTEM1.value,
-#         repeat_count=1,
-#     )
+    # Create payload that loads LoRA and tests inference
+    lora_payload = lora_chat_payload(
+        lora_name=minio_config.lora_name,
+        s3_uri=minio_config.get_s3_uri(),
+        system_port=DefaultPort.SYSTEM1.value,
+        repeat_count=2,
+    )
 
-#     # Worker 2 (DefaultPort.SYSTEM2)
-#     lora_payload_worker2 = lora_chat_payload(
-#         lora_name=minio_config.lora_name,
-#         s3_uri=minio_config.get_s3_uri(),
-#         system_port=DefaultPort.SYSTEM2.value,
-#         repeat_count=1,
-#     )
+    # Create test config with MinIO environment variables
+    config = VLLMConfig(
+        name="test_lora_aggregated_xpu",
+        directory=vllm_dir,
+        script_name="lora/agg_lora_xpu.sh",
+        marks=[],  # markers at function-level
+        model="Qwen/Qwen3-0.6B",
+        timeout=600,
+        env=minio_config.get_env_vars(),
+        request_payloads=[lora_payload],
+    )
 
-#     # Additional inference payload to test routing (LoRA already loaded)
-#     inference_payload = chat_payload(
-#         content="Explain machine learning in simple terms.",
-#         repeat_count=2,
-#         expected_response=["learn", "data", "algorithm", "model", "pattern"],
-#         max_tokens=150,
-#         temperature=0.0,
-#     ).with_model(minio_config.lora_name)
+    config = dataclasses.replace(
+        config, frontend_port=dynamo_dynamic_ports.frontend_port
+    )
+    run_serve_deployment(
+        config,
+        request,
+        ports=dynamo_dynamic_ports,
+        extra_env=minio_config.get_env_vars(),
+    )
 
-#     # Add env vars including PYTHONHASHSEED for deterministic KV event IDs
-#     env_vars = minio_config.get_env_vars()
-#     env_vars["PYTHONHASHSEED"] = "0"
+@pytest.mark.vllm
+@pytest.mark.e2e
+@pytest.mark.gpu_2
+@pytest.mark.model("Qwen/Qwen3-0.6B")
+@pytest.mark.timeout(600)
+@pytest.mark.post_merge
+@pytest.mark.parametrize("num_system_ports", [2], indirect=True)
+def test_lora_aggregated_router(
+    request,
+    minio_lora_service,
+    dynamo_dynamic_ports,
+    num_system_ports,
+):
+    """
+    Test LoRA inference with aggregated vLLM deployment using KV router.
 
-#     # Create test config with MinIO environment variables
-#     config = VLLMConfig(
-#         name="test_lora_aggregated_router",
-#         directory=vllm_dir,
-#         script_name="lora/agg_lora_router.sh",
-#         marks=[],  # markers at function-level
-#         model="Qwen/Qwen3-0.6B",
-#         timeout=600,
-#         env=env_vars,
-#         request_payloads=[
-#             lora_payload_worker1,
-#             lora_payload_worker2,
-#             inference_payload,
-#         ],
-#     )
+    This test:
+    1. Uses MinIO fixture to provide S3-compatible storage with uploaded LoRA
+    2. Starts multiple vLLM workers with LoRA support and KV router
+    3. Loads the LoRA adapter on both workers via system API
+    4. Runs inference with the LoRA model, verifying KV cache routing
+    """
+    assert (
+        num_system_ports >= 2
+    ), "serve tests require at least SYSTEM_PORT1 + SYSTEM_PORT2"
+    minio_config: MinioLoraConfig = minio_lora_service
 
-#     config = dataclasses.replace(
-#         config, frontend_port=dynamo_dynamic_ports.frontend_port
-#     )
-#     run_serve_deployment(
-#         config, request, ports=dynamo_dynamic_ports, extra_env=env_vars
-#     )
+    # Create payloads that load LoRA on both workers and test inference
+    # Worker 1 (DefaultPort.SYSTEM1)
+    lora_payload_worker1 = lora_chat_payload(
+        lora_name=minio_config.lora_name,
+        s3_uri=minio_config.get_s3_uri(),
+        system_port=DefaultPort.SYSTEM1.value,
+        repeat_count=1,
+    )
+
+    # Worker 2 (DefaultPort.SYSTEM2)
+    lora_payload_worker2 = lora_chat_payload(
+        lora_name=minio_config.lora_name,
+        s3_uri=minio_config.get_s3_uri(),
+        system_port=DefaultPort.SYSTEM2.value,
+        repeat_count=1,
+    )
+
+    # Additional inference payload to test routing (LoRA already loaded)
+    inference_payload = chat_payload(
+        content="Explain machine learning in simple terms.",
+        repeat_count=2,
+        expected_response=["learn", "data", "algorithm", "model", "pattern"],
+        max_tokens=150,
+        temperature=0.0,
+    ).with_model(minio_config.lora_name)
+
+    # Add env vars including PYTHONHASHSEED for deterministic KV event IDs
+    env_vars = minio_config.get_env_vars()
+    env_vars["PYTHONHASHSEED"] = "0"
+
+    # Create test config with MinIO environment variables
+    config = VLLMConfig(
+        name="test_lora_aggregated_router_xpu",
+        directory=vllm_dir,
+        script_name="lora/agg_lora_router_xpu.sh",
+        marks=[],  # markers at function-level
+        model="Qwen/Qwen3-0.6B",
+        timeout=600,
+        env=env_vars,
+        request_payloads=[
+            lora_payload_worker1,
+            lora_payload_worker2,
+            inference_payload,
+        ],
+    )
+
+    config = dataclasses.replace(
+        config, frontend_port=dynamo_dynamic_ports.frontend_port
+    )
+    run_serve_deployment(
+        config, request, ports=dynamo_dynamic_ports, extra_env=env_vars
+    )
