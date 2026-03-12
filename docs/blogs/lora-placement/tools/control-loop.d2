@@ -1,0 +1,87 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# LoRA Placement: Control Loop (feedback cycle)
+...@theme.d2
+
+direction: right
+
+# ---------------------------------------------------------------------------
+# Main feedback loop nodes
+# ---------------------------------------------------------------------------
+
+requests: Requests {
+  class: api
+  label: "Requests\n\nIncoming LoRA traffic"
+}
+
+load_estimator: LoadEstimator {
+  class: data_component
+  label: "LoadEstimator\n\nWindowed Request Rate\n+ In-flight Tracking"
+}
+
+controller: LoraController {
+  class: service
+  label: "LoraController\n\nPeriodic Recompute\nHysteresis"
+}
+
+routing_table: LoraRoutingTable {
+  shape: cylinder
+  class: data_component
+  label: "LoraRoutingTable\n\nreplica_set\nis_active"
+}
+
+lora_filter: LoraFilter {
+  class: api
+  label: "LoraFilter\n\nCandidate Set\nFiltering"
+}
+
+kv_router: KvRouter {
+  class: api
+  label: "KvRouter\n\nKV-Cache-Aware\nSelection"
+}
+
+worker: Worker {
+  class: gpu
+  label: "Worker\n\nServe Request\nRAII Guard"
+}
+
+# ---------------------------------------------------------------------------
+# Side branch: topology tracking
+# ---------------------------------------------------------------------------
+
+state_tracker: LoraStateTracker {
+  shape: cylinder
+  class: data_component
+  label: "LoraStateTracker\n\nloaded_locations\nworker_capacity"
+}
+
+# ---------------------------------------------------------------------------
+# Main loop connections (forward path)
+# ---------------------------------------------------------------------------
+
+requests -> load_estimator: Arrive { class: data_flow }
+load_estimator -> controller: Rate Signal { class: data_flow }
+controller -> routing_table: Replica Plan { class: data_flow }
+routing_table -> lora_filter: Candidate Set { class: api_call }
+lora_filter -> kv_router: Narrowed Workers { class: data_flow }
+kv_router -> worker: Selected Worker { class: data_flow }
+
+# ---------------------------------------------------------------------------
+# Feedback path (dashed -- load signal returns)
+# ---------------------------------------------------------------------------
+
+worker -> load_estimator: "RAII Guard Drop" {
+  class: event_flow
+}
+
+# ---------------------------------------------------------------------------
+# Side branch: controller reads topology from state tracker
+# ---------------------------------------------------------------------------
+
+controller -> state_tracker: Topology { class: control_flow }
+
+# Workers push MDC events to state tracker (dashed)
+worker -> state_tracker: "MDC Events" {
+  class: event_flow
+}

@@ -68,6 +68,8 @@ navbar-links:
         href: /dynamo/dev/blog/agentic-inference
       - text: "Flash Indexer: Inter-Galactic KV Routing"
         href: /dynamo/dev/blog/flash-indexer
+      - text: "Optimal LoRA Placement"
+        href: /dynamo/dev/blog/lora-placement
   - type: github
     value: https://github.com/ai-dynamo/dynamo
 

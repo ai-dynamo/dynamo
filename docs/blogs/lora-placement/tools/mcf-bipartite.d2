@@ -1,0 +1,118 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# LoRA Placement: Min-Cost Flow Bipartite Graph
+...@theme.d2
+
+direction: right
+
+# ---------------------------------------------------------------------------
+# Source node
+# ---------------------------------------------------------------------------
+
+src: Source {
+  shape: circle
+  class: neutral
+}
+
+# ---------------------------------------------------------------------------
+# LoRA nodes (left column)
+# ---------------------------------------------------------------------------
+
+loras: LoRA Nodes {
+  class: container_l1
+
+  L1: "LoRA-A\nr=3" {
+    class: data_component
+  }
+
+  L2: "LoRA-B\nr=2" {
+    class: data_component
+  }
+
+  L3: "LoRA-C\nr=1" {
+    class: data_component
+  }
+}
+
+# ---------------------------------------------------------------------------
+# Worker nodes (right column)
+# ---------------------------------------------------------------------------
+
+workers: Worker Nodes {
+  class: container_l1
+
+  W1: "Worker 1\nK=4 slots" {
+    class: gpu
+  }
+
+  W2: "Worker 2\nK=4 slots" {
+    class: gpu
+  }
+
+  W3: "Worker 3\nK=6 slots" {
+    class: gpu
+  }
+}
+
+# ---------------------------------------------------------------------------
+# Sink node
+# ---------------------------------------------------------------------------
+
+snk: Sink {
+  shape: circle
+  class: neutral
+}
+
+# ---------------------------------------------------------------------------
+# Overflow node (distinct styling -- critical/red with dashed border)
+# ---------------------------------------------------------------------------
+
+overflow: Overflow {
+  class: critical
+  label: "Overflow\n(cost = 10^12)"
+  style: {
+    stroke-dash: 4
+  }
+}
+
+# ---------------------------------------------------------------------------
+# Source -> LoRA edges (supply)
+# ---------------------------------------------------------------------------
+
+src -> loras.L1: "cap=3" { class: data_flow }
+src -> loras.L2: "cap=2" { class: data_flow }
+src -> loras.L3: "cap=1" { class: data_flow }
+
+# ---------------------------------------------------------------------------
+# LoRA -> Worker edges (assignment arcs with costs)
+# ---------------------------------------------------------------------------
+
+loras.L1 -> workers.W1: "cap=1\ncost=c11" { class: pipeline }
+loras.L1 -> workers.W2: "cap=1\ncost=c12" { class: pipeline }
+
+loras.L2 -> workers.W1: "cap=1\ncost=c21" { class: pipeline }
+loras.L2 -> workers.W3: "cap=1\ncost=c23" { class: pipeline }
+
+loras.L3 -> workers.W2: "cap=1\ncost=c32" { class: pipeline }
+loras.L3 -> workers.W3: "cap=1\ncost=c33" { class: pipeline }
+
+# ---------------------------------------------------------------------------
+# LoRA -> Overflow edge (dashed, critical path styling)
+# ---------------------------------------------------------------------------
+
+loras.L3 -> overflow: "cap=1\ncost=inf" { class: critical_path }
+
+# ---------------------------------------------------------------------------
+# Worker -> Sink edges (capacity)
+# ---------------------------------------------------------------------------
+
+workers.W1 -> snk: "cap=4" { class: data_flow }
+workers.W2 -> snk: "cap=4" { class: data_flow }
+workers.W3 -> snk: "cap=6" { class: data_flow }
+
+# ---------------------------------------------------------------------------
+# Overflow -> Sink edge (dashed, critical path styling)
+# ---------------------------------------------------------------------------
+
+overflow -> snk: "cap=excess" { class: critical_path }

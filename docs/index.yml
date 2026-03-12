@@ -279,6 +279,9 @@ navigation:
       - page: "Flash Indexer: Inter-Galactic KV Routing"
         path: blogs/flash-indexer/flash-indexer.md
         slug: flash-indexer
+      - page: "Optimal LoRA Placement: From Adapter Churn to Global Optimization"
+        path: blogs/lora-placement/lora-placement.md
+        slug: lora-placement
 
   # ==================== Documentation ====================
   - section: Documentation

@@ -1,0 +1,160 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# LoRA Placement: System Architecture Overview
+...@theme.d2
+
+# ---------------------------------------------------------------------------
+# Client Request (top-level entry point)
+# ---------------------------------------------------------------------------
+
+client: "Client Request" {
+  class: neutral
+  label: "POST /v1/chat\nmodel: lora-math"
+}
+
+# ---------------------------------------------------------------------------
+# Router Process (outer container)
+# ---------------------------------------------------------------------------
+
+router_process: Router Process {
+  class: outer_frame
+
+  # -- Control Plane (periodic) --
+  control_plane: "Control Plane -- Periodic" {
+    class: container_l1
+
+    controller: LoraController {
+      class: service
+      label: "LoraController\n\nPeriodic Recompute\nHysteresis"
+    }
+
+    load_estimator: LoadEstimator {
+      class: data_component
+      label: "LoadEstimator\n\nWindowed Request Rate\n+ In-flight Fallback"
+    }
+
+    allocator: LoraAllocator {
+      class: cpu
+      label: "LoraAllocator\n\nSlot-Aware HRW\nblake3 Rendezvous Hash"
+    }
+
+    mcf_solver: McfPlacementSolver {
+      class: cpu
+      label: "McfPlacementSolver\n\nMin-Cost Flow\nDelta Solving"
+    }
+  }
+
+  # -- Shared State (thread-safe) --
+  shared_state: "Shared State -- Thread-safe" {
+    class: container_l1
+
+    routing_table: LoraRoutingTable {
+      shape: cylinder
+      class: data_component
+      label: "LoraRoutingTable\n\nLoRA -> ReplicaConfig\nreplica_set  is_active"
+    }
+
+    state_tracker: LoraStateTracker {
+      shape: cylinder
+      class: data_component
+      label: "LoraStateTracker\n\nloaded_locations\nworker_to_loras\nworker_capacity"
+    }
+  }
+
+  # -- Data Plane (per-request) --
+  data_plane: "Data Plane -- Per-Request" {
+    class: container_l1
+
+    lora_filter: LoraFilter {
+      class: api
+      label: "LoraFilter\n\nActive: replica AND loaded\nInactive: HRW top-1 pin\nUnknown: all workers fallback"
+    }
+
+    kv_router: KvRouter {
+      class: api
+      label: "KvRouter\n\nKV-Cache-Aware\nWorker Selection"
+    }
+  }
+}
+
+# ---------------------------------------------------------------------------
+# Worker Cluster
+# ---------------------------------------------------------------------------
+
+workers: Worker Cluster {
+  class: container_l1
+
+  w1: "Worker 1" {
+    class: gpu
+    label: "Worker 1\n\nK=4 slots\nLoRA-A  LoRA-B  __  __"
+  }
+
+  w2: "Worker 2" {
+    class: gpu
+    label: "Worker 2\n\nK=4 slots\nLoRA-A  __  __  __"
+  }
+
+  w3: "Worker 3" {
+    class: gpu
+    label: "Worker 3\n\nK=6 slots\nLoRA-B  LoRA-C  LoRA-D  __  __  __"
+  }
+}
+
+# ---------------------------------------------------------------------------
+# External Components
+# ---------------------------------------------------------------------------
+
+discovery: "Discovery MDC" {
+  shape: cylinder
+  class: data_component
+  label: "Discovery MDC\n\nEvent Plane\netcd + NATS"
+}
+
+prometheus: "Prometheus Metrics" {
+  class: data_component
+  label: "Prometheus Metrics\n\nlora_replica_factor\nlora_is_active\nlora_estimated_load"
+}
+
+# ---------------------------------------------------------------------------
+# Data Plane Connections (request path)
+# ---------------------------------------------------------------------------
+
+client -> router_process.data_plane.lora_filter: Request { class: data_flow }
+router_process.data_plane.lora_filter -> router_process.data_plane.kv_router: Filtered Candidates { class: data_flow }
+router_process.data_plane.kv_router -> workers.w1: Route { class: data_flow }
+router_process.data_plane.kv_router -> workers.w2: Route { class: data_flow }
+router_process.data_plane.kv_router -> workers.w3: Route { class: data_flow }
+
+# ---------------------------------------------------------------------------
+# Control Plane Connections (controller orchestration)
+# ---------------------------------------------------------------------------
+
+router_process.control_plane.controller -> router_process.control_plane.load_estimator: Read Load { class: control_flow }
+router_process.control_plane.controller -> router_process.control_plane.allocator: Compute Plan { class: control_flow }
+router_process.control_plane.controller -> router_process.control_plane.mcf_solver: Solve Placement { class: control_flow }
+router_process.control_plane.controller -> router_process.shared_state.state_tracker: Read Topology { class: control_flow }
+router_process.control_plane.controller -> router_process.shared_state.routing_table: Write Plan { class: control_flow }
+
+# ---------------------------------------------------------------------------
+# Data Plane -> Shared State reads
+# ---------------------------------------------------------------------------
+
+router_process.data_plane.lora_filter -> router_process.shared_state.routing_table: Lookup { class: api_call }
+router_process.data_plane.lora_filter -> router_process.shared_state.state_tracker: Check Loaded { class: api_call }
+
+# ---------------------------------------------------------------------------
+# Discovery / Event connections (dashed)
+# ---------------------------------------------------------------------------
+
+workers.w1 -> discovery: Events { class: event_flow }
+workers.w2 -> discovery: Events { class: event_flow }
+workers.w3 -> discovery: Events { class: event_flow }
+
+discovery -> router_process.shared_state.state_tracker: MDC Updates { class: event_flow }
+
+# ---------------------------------------------------------------------------
+# Metrics export (dashed)
+# ---------------------------------------------------------------------------
+
+router_process.control_plane.controller -> prometheus: Export { class: event_flow }
