@@ -84,6 +84,10 @@ All CLI arguments can be configured via environment variables using the `DYN_` p
 For complete K8s examples and advanced configuration, see [K8s Examples](router-examples.md#k8s-examples).
 For A/B testing and advanced K8s setup, see the [KV Router A/B Benchmarking Guide](../../benchmarks/kv-router-ab-testing.md).
 
+### Standalone Router
+
+You can also run the KV router as a standalone service (without the Dynamo frontend) for disaggregated serving (e.g., routing to prefill workers), multi-tier architectures, or any scenario requiring intelligent KV cache-aware routing decisions. See the [Standalone Router component](../../../components/src/dynamo/router/) for more details.
+
 ## KV Cache Routing
 
 KV cache routing optimizes large language model inference by intelligently directing requests to workers with the most relevant cached data. By maximizing cache reuse, it reduces redundant computation and improves both throughput and latency.

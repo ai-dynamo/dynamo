@@ -7,6 +7,8 @@ import logging
 
 from dynamo._core import EngineType
 from dynamo._core import EntrypointArgs as EntrypointArgs
+from dynamo._core import FpmEventRelay as FpmEventRelay
+from dynamo._core import FpmEventSubscriber as FpmEventSubscriber
 from dynamo._core import HttpAsyncEngine as HttpAsyncEngine
 from dynamo._core import HttpService as HttpService
 from dynamo._core import KserveGrpcService as KserveGrpcService

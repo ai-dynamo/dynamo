@@ -44,7 +44,7 @@ impl KvScheduler {
         kv_router_config: &KvRouterConfig,
         worker_type: &'static str,
     ) -> Result<Self, KvSchedulerError> {
-        let selector = selector.unwrap_or(Box::new(DefaultWorkerSelector::default()));
+        let selector = selector.unwrap_or(Box::new(DefaultWorkerSelector::new(None, worker_type)));
 
         // Get initial workers from watch receiver.
         // Caller must ensure at least one worker is present (via wait_for).

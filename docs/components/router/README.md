@@ -24,6 +24,10 @@ For Kubernetes, set `DYN_ROUTER_MODE=kv` on the Frontend service. Workers automa
 | `--router-queue-threshold` | `2.0` | Backpressure queue threshold; enables priority scheduling via `nvext.agent_hints.latency_sensitivity` |
 | `--router-queue-policy` | `fcfs` | Queue scheduling policy: `fcfs` (tail TTFT) or `wspt` (avg TTFT) |
 
+### Standalone Router
+
+You can also run the KV router as a standalone service (without the Dynamo frontend). See the [Standalone Router component](../../../components/src/dynamo/router/) for more details.
+
 For all CLI arguments, environment variables, K8s deployment examples, and tuning guidelines, see the [Router Guide](router-guide.md). For A/B benchmarking, see the [KV Router A/B Benchmarking Guide](../../benchmarks/kv-router-ab-testing.md).
 
 ## Prerequisites and Limitations

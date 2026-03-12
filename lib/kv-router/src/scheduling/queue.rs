@@ -284,7 +284,7 @@ mod tests {
         let (cfg_tx, cfg_rx) = watch::channel(configs);
         std::mem::forget(cfg_tx);
 
-        let selector = Box::new(DefaultWorkerSelector::default());
+        let selector = Box::new(DefaultWorkerSelector::new(None, "test"));
         let queue = Arc::new(SchedulerQueue::new(
             Arc::clone(&slots),
             cfg_rx,
