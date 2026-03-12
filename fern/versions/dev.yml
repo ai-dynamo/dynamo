@@ -22,6 +22,9 @@ navigation:
     contents:
       - page: Quickstart
         path: ../pages-dev/getting-started/quickstart.md
+  # ==================== Resources ====================
+  - section: Resources
+    contents:
       - page: Support Matrix
         path: ../pages-dev/reference/support-matrix.md
       - page: Feature Matrix
