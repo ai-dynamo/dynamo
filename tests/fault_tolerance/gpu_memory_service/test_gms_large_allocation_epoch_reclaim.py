@@ -14,7 +14,7 @@ import time
 import pytest
 import pynvml
 
-from gpu_memory_service.common import cuda_vmm_utils
+from gpu_memory_service.common import cuda_utils
 from gpu_memory_service.common.types import GrantedLockType
 from gpu_memory_service.server.allocations import GMSAllocationManager
 from gpu_memory_service.server.epochs import GMSEpochManager
@@ -44,7 +44,7 @@ async def test_new_epoch_large_allocation_waits_for_dead_writer_process(
 
     def count_oom(size: int, device: int) -> tuple[bool, int]:
         nonlocal oom_failures
-        allocated, handle = cuda_vmm_utils.cumem_create_tolerate_oom(size, device)
+        allocated, handle = cuda_utils.cumem_create_tolerate_oom(size, device)
         if not allocated:
             oom_failures += 1
         return allocated, handle
@@ -90,7 +90,7 @@ async def test_new_epoch_large_allocation_waits_for_dead_writer_process(
                 import time
                 from pathlib import Path
 
-                from gpu_memory_service.common.cuda_vmm_utils import (
+                from gpu_memory_service.common.cuda_utils import (
                     cuda_ensure_initialized,
                     cuda_set_current_device,
                     cumem_get_allocation_granularity,

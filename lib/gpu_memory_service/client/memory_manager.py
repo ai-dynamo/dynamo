@@ -35,7 +35,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 from gpu_memory_service.client.session import _GMSClientSession
-from gpu_memory_service.common.cuda_vmm_utils import (
+from gpu_memory_service.common.cuda_utils import (
     align_to_granularity,
     cuda_set_current_device,
     cuda_synchronize,

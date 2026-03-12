@@ -15,7 +15,7 @@ from gpu_memory_service.client.memory_manager import (
     GMSClientMemoryManager,
     LocalMapping,
 )
-from gpu_memory_service.common import cuda_vmm_utils
+from gpu_memory_service.common import cuda_utils
 from gpu_memory_service.common.protocol.messages import (
     CommitRequest,
     CommitResponse,
@@ -44,12 +44,12 @@ pytestmark = [
 
 def test_cumem_create_tolerate_oom_returns_handle_on_success(monkeypatch):
     monkeypatch.setattr(
-        cuda_vmm_utils.cuda,
+        cuda_utils.cuda,
         "cuMemCreate",
         lambda size, prop, flags: (cuda.CUresult.CUDA_SUCCESS, 1234),
     )
 
-    allocated, handle = cuda_vmm_utils.cumem_create_tolerate_oom(4096, 0)
+    allocated, handle = cuda_utils.cumem_create_tolerate_oom(4096, 0)
 
     assert allocated
     assert handle == 1234
@@ -57,12 +57,12 @@ def test_cumem_create_tolerate_oom_returns_handle_on_success(monkeypatch):
 
 def test_cumem_create_tolerate_oom_returns_false_on_oom(monkeypatch):
     monkeypatch.setattr(
-        cuda_vmm_utils.cuda,
+        cuda_utils.cuda,
         "cuMemCreate",
         lambda size, prop, flags: (cuda.CUresult.CUDA_ERROR_OUT_OF_MEMORY, 0),
     )
 
-    allocated, handle = cuda_vmm_utils.cumem_create_tolerate_oom(4096, 0)
+    allocated, handle = cuda_utils.cumem_create_tolerate_oom(4096, 0)
 
     assert not allocated
     assert handle == 0
@@ -70,12 +70,12 @@ def test_cumem_create_tolerate_oom_returns_false_on_oom(monkeypatch):
 
 def test_cumem_export_to_shareable_handle_returns_fd(monkeypatch):
     monkeypatch.setattr(
-        cuda_vmm_utils.cuda,
+        cuda_utils.cuda,
         "cuMemExportToShareableHandle",
         lambda handle, handle_type, flags: (cuda.CUresult.CUDA_SUCCESS, 77),
     )
 
-    fd = cuda_vmm_utils.cumem_export_to_shareable_handle(1234)
+    fd = cuda_utils.cumem_export_to_shareable_handle(1234)
 
     assert fd == 77
 
