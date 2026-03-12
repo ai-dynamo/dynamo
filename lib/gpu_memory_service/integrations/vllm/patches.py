@@ -158,6 +158,79 @@ def patch_request_memory() -> None:
     logger.info("[GMS Patch] Patched request_memory for shadow mode support")
 
 
+def patch_determine_available_memory() -> None:
+    """Patch determine_available_memory to report full GPU capacity in shadow mode.
+
+    During concurrent startup, the shadow engine sees very little free GPU memory
+    because the active engine is consuming it. The profiler computes
+    available_kv_cache_memory from actual free memory, producing a tiny or negative
+    value. This causes two downstream failures:
+    1. _check_enough_kv_cache_memory raises ValueError (runs in EngineCore process,
+       unreachable by worker-side monkey-patches)
+    2. num_gpu_blocks = 0 causes ZeroDivisionError in kv_cache_utils
+
+    The fix: in shadow mode, compute available memory as if the shadow had the GPU
+    to itself. This is what will be true when the shadow wakes (the active engine
+    will be dead). The profiler still runs (needed for torch.compile), but we
+    override the returned available_memory with the correct projected value.
+    """
+    if not _is_shadow_mode():
+        return
+
+    try:
+        from vllm.v1.worker.gpu_worker import Worker
+    except ImportError:
+        logger.debug("[GMS Patch] Worker not available")
+        return
+
+    original_determine = Worker.determine_available_memory
+
+    def patched_determine_available_memory(self):
+        import torch
+
+        # Still need to run profile_run() for torch.compile, but we can't
+        # use the standard memory profiling path because the other engine's
+        # allocations make free_memory tiny/negative and trigger assertions.
+        #
+        # Strategy: run profile_run() for compilation, measure activation
+        # peak ourselves, then compute available memory from total GPU
+        # capacity (what will be available when the shadow wakes alone).
+
+        # Run profile for compilation
+        torch.cuda.reset_peak_memory_stats()
+        self.model_runner.profile_run()
+        torch.cuda.synchronize()
+
+        # Measure peak activation from this process only (PyTorch-tracked)
+        peak_bytes = torch.cuda.max_memory_allocated()
+        model_bytes = int(self.model_runner.model_memory_usage)
+        activation_bytes = max(0, peak_bytes - model_bytes)
+
+        # Compute projected available memory as if we had the full GPU
+        total_memory = self.init_snapshot.total_memory
+        requested_memory = self.requested_memory
+        non_kv_cache_memory = model_bytes + activation_bytes
+
+        projected_available = requested_memory - non_kv_cache_memory
+
+        logger.info(
+            "[GMS Patch] Shadow mode: projected available memory "
+            "%.2f GiB (requested=%.2f GiB, weights=%.2f GiB, "
+            "activations=%.2f GiB)",
+            projected_available / (1 << 30),
+            requested_memory / (1 << 30),
+            model_bytes / (1 << 30),
+            activation_bytes / (1 << 30),
+        )
+
+        return int(projected_available)
+
+    Worker.determine_available_memory = patched_determine_available_memory
+    logger.info(
+        "[GMS Patch] Patched determine_available_memory for shadow mode"
+    )
+
+
 def patch_register_kv_caches() -> None:
     """Patch NixlConnector.register_kv_caches to no-op when empty.
 
@@ -432,6 +505,7 @@ def apply_shadow_mode_patches() -> None:
     non-shadow engines (they'll just pass through to original methods).
     """
     patch_request_memory()
+    patch_determine_available_memory()
     patch_register_kv_caches()
     patch_initialize_kv_cache_tensors()
     patch_get_slot_mappings()
