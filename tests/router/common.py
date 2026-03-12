@@ -111,11 +111,11 @@ class KVRouterProcess(ManagedProcess):
         super().__exit__(exc_type, exc_val, exc_tb)
 
 
-class DirectFrontendProcess(ManagedProcess):
-    """Manages a frontend process in Direct routing mode for EPP-style disagg tests.
+class DirectRouterProcess(ManagedProcess):
+    """Manages a process in Direct routing mode for EPP-style disagg tests.
 
-    In Direct mode, the frontend does not select workers itself — worker IDs
-    must be supplied via x-worker-instance-id / x-prefill-instance-id headers.
+    In Direct mode, the router does not select workers itself — worker IDs
+    must be supplied via x-worker-instance-id and x-prefill-instance-id headers.
     """
 
     def __init__(
@@ -2626,7 +2626,7 @@ def _test_disagg_direct_mode(
 ):
     """E2E test for disaggregated Direct routing mode (simulating GAIE EPP).
 
-    In Direct mode, the frontend does NOT select workers itself.
+    In Direct mode, the router does not select workers itself.
     Worker IDs must be provided via x-worker-instance-id and x-prefill-instance-id
     HTTP headers. The test verifies:
       1. Requests with explicit worker ID headers succeed and report the correct workers.
@@ -2640,7 +2640,7 @@ def _test_disagg_direct_mode(
         test_payload: Base test payload for /v1/chat/completions.
         request_plane: Transport for request plane ("nats" or "tcp").
     """
-    with DirectFrontendProcess(
+    with DirectRouterProcess(
         request,
         frontend_port,
         decode_workers.namespace,
@@ -2650,7 +2650,6 @@ def _test_disagg_direct_mode(
         frontend_url = f"http://localhost:{frontend_port}"
         chat_url = f"{frontend_url}/v1/chat/completions"
 
-        # Phase 1: Wait for models to appear (workers register via discovery)
         logger.info("Waiting for models to appear in Direct-mode frontend...")
 
         async def wait_for_models():

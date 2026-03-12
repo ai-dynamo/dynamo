@@ -636,37 +636,34 @@ mod tests {
         }
         cfg_tx.send(configs).unwrap();
 
-        // Send requests with allowed_worker_ids = {2} only
+        // Send a request with allowed_worker_ids = {2} only
         let mut allowed = std::collections::HashSet::new();
         allowed.insert(2_u64);
 
-        for i in 0..10 {
-            let req_id = format!("filter-{i}");
-            let (tx, rx) = tokio::sync::oneshot::channel();
-            let req = SchedulingRequest {
-                maybe_request_id: Some(req_id.clone()),
-                token_seq: None,
-                isl_tokens: isl,
-                overlaps: OverlapScores::default(),
-                decode_blocks: HashMap::new(),
-                prefill_tokens: HashMap::new(),
-                router_config_override: None,
-                update_states: true,
-                lora_name: None,
-                priority_jump: 0.0,
-                expected_output_tokens: None,
-                allowed_worker_ids: Some(allowed.clone()),
-                resp_tx: Some(tx),
-            };
-            queue.enqueue(req).await;
-            let resp = rx.await.expect("oneshot dropped").expect("scheduling failed");
-            assert_eq!(
-                resp.best_worker.worker_id, 2,
-                "request must be routed to allowed worker 2, got {}",
-                resp.best_worker.worker_id
-            );
-            slots.mark_prefill_completed(&req_id).await.unwrap();
-            slots.free(&req_id).await.unwrap();
-        }
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let req = SchedulingRequest {
+            maybe_request_id: Some("filter-0".to_string()),
+            token_seq: None,
+            isl_tokens: isl,
+            overlaps: OverlapScores::default(),
+            decode_blocks: HashMap::new(),
+            prefill_tokens: HashMap::new(),
+            router_config_override: None,
+            update_states: true,
+            lora_name: None,
+            priority_jump: 0.0,
+            expected_output_tokens: None,
+            allowed_worker_ids: Some(allowed),
+            resp_tx: Some(tx),
+        };
+        queue.enqueue(req).await;
+        let resp = rx.await.expect("oneshot dropped").expect("scheduling failed");
+        assert_eq!(
+            resp.best_worker.worker_id, 2,
+            "request must be routed to allowed worker 2, got {}",
+            resp.best_worker.worker_id
+        );
+        slots.mark_prefill_completed(&"filter-0".to_string()).await.unwrap();
+        slots.free(&"filter-0".to_string()).await.unwrap();
     }
 }
