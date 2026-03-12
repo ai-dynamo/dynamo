@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 import socket
 from dataclasses import dataclass, field
-from typing import Callable, Optional, Set
+from typing import Optional, Set
 
 from gpu_memory_service.common.types import (
     RO_ALLOWED,
@@ -99,11 +99,10 @@ TRANSITIONS: list[Transition] = [
 class GMSLocalFSM:
     """Explicit connection/lock state machine."""
 
-    def __init__(self, on_rw_abort: Optional[Callable[[], None]] = None):
+    def __init__(self):
         self._rw_conn: Optional[Connection] = None
         self._ro_conns: Set[Connection] = set()
         self._committed = False
-        self._on_rw_abort = on_rw_abort
 
     @property
     def state(self) -> ServerState:
@@ -171,8 +170,6 @@ class GMSLocalFSM:
             self._rw_conn = None
         elif event == StateEvent.RW_ABORT:
             self._rw_conn = None
-            if self._on_rw_abort is not None:
-                self._on_rw_abort()
         elif event == StateEvent.RO_CONNECT:
             self._ro_conns.add(conn)
         elif event == StateEvent.RO_DISCONNECT:
@@ -222,8 +219,8 @@ class SessionSnapshot:
 class GMSSessionManager:
     """Owns lock transitions, waiter coordination, and cleanup."""
 
-    def __init__(self, on_rw_abort: Optional[Callable[[], None]] = None):
-        self._locking = GMSLocalFSM(on_rw_abort=on_rw_abort)
+    def __init__(self):
+        self._locking = GMSLocalFSM()
         self._waiting_writers = 0
         self._reserved_rw_session_id: Optional[str] = None
         self._condition = asyncio.Condition()
@@ -249,9 +246,7 @@ class GMSSessionManager:
         )
 
     def _can_grant_rw(self) -> bool:
-        return (
-            self._reserved_rw_session_id is None and self._locking.can_acquire_rw()
-        )
+        return self._reserved_rw_session_id is None and self._locking.can_acquire_rw()
 
     async def acquire_lock(
         self,
@@ -339,16 +334,20 @@ class GMSSessionManager:
     def check_operation(self, msg_type: type, conn: Connection) -> None:
         self._locking.check_operation(msg_type, conn)
 
-    async def cleanup_connection(self, conn: Optional[Connection]) -> None:
+    async def cleanup_connection(self, conn: Optional[Connection]) -> StateEvent | None:
         if conn is None:
-            return
+            return None
 
+        event = None
         if conn.mode == GrantedLockType.RW:
             if self._locking.rw_conn is conn and not self._locking.committed:
                 self._locking.transition(StateEvent.RW_ABORT, conn)
+                event = StateEvent.RW_ABORT
         elif conn in self._locking.ro_conns:
             self._locking.transition(StateEvent.RO_DISCONNECT, conn)
+            event = StateEvent.RO_DISCONNECT
 
         await conn.close()
         async with self._condition:
             self._condition.notify_all()
+        return event

@@ -106,7 +106,10 @@ class _GMSClientSession:
         if not response.success:
             raise RuntimeError("GMS commit returned failure")
         self._committed = True
-        self.close()
+        try:
+            self.close()
+        except ConnectionError as exc:
+            logger.warning("Commit succeeded but closing transport failed: %s", exc)
         logger.info("Committed weights and released RW connection")
         return True
 

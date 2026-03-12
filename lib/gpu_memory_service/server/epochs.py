@@ -8,11 +8,11 @@ from __future__ import annotations
 import hashlib
 import logging
 from dataclasses import dataclass, field
-from typing import Callable, Optional
+from typing import Optional
 
 from gpu_memory_service.common.types import GrantedLockType
 
-from .allocations import AllocationInfo, AllocationNotFoundError, GMSAllocationManager
+from .allocations import AllocationInfo
 
 logger = logging.getLogger(__name__)
 
@@ -40,8 +40,7 @@ class EpochState:
 
 
 class GMSEpochManager:
-    def __init__(self, allocations: GMSAllocationManager):
-        self._allocations = allocations
+    def __init__(self):
         self._epochs = EpochState()
         logger.info("GMSEpochManager initialized")
 
@@ -58,10 +57,6 @@ class GMSEpochManager:
         return self._epochs.active_rw.id
 
     @property
-    def allocation_count(self) -> int:
-        return self._allocations.allocation_count
-
-    @property
     def memory_layout_hash(self) -> str:
         return self._epochs.memory_layout_hash
 
@@ -74,29 +69,30 @@ class GMSEpochManager:
             raise AssertionError("Committed epoch is not available")
         return self._epochs.committed
 
+    def require_epoch_id(self, mode: GrantedLockType) -> int:
+        return self._require_epoch(mode).id
+
     def _validate_metadata_target(
         self,
         epoch: Epoch,
-        allocation_id: str,
+        allocation: AllocationInfo,
         offset_bytes: int,
     ) -> None:
-        try:
-            info = self._allocations.get_allocation(allocation_id, epoch.id)
-        except AllocationNotFoundError:
+        if allocation.epoch_id != epoch.id:
             raise ValueError(
-                "Metadata target allocation does not exist in epoch "
-                f"{epoch.id}: {allocation_id}"
-            ) from None
+                f"Allocation {allocation.allocation_id} is not in active epoch {epoch.id}"
+            )
 
         if offset_bytes < 0:
             raise ValueError(f"offset_bytes must be >= 0, got {offset_bytes}")
-        if offset_bytes >= info.aligned_size:
+        if offset_bytes >= allocation.aligned_size:
             raise ValueError(
-                f"offset_bytes {offset_bytes} out of range for allocation {allocation_id} "
-                f"(aligned_size={info.aligned_size})"
+                f"offset_bytes {offset_bytes} out of range for allocation {allocation.allocation_id} "
+                f"(aligned_size={allocation.aligned_size})"
             )
 
-    def _drop_metadata_for_allocation(self, epoch: Epoch, allocation_id: str) -> int:
+    def drop_metadata_for_allocation(self, allocation_id: str) -> int:
+        epoch = self._require_epoch(GrantedLockType.RW)
         keys_to_remove = [
             key
             for key, entry in epoch.metadata.items()
@@ -106,15 +102,18 @@ class GMSEpochManager:
             epoch.metadata.pop(key, None)
         return len(keys_to_remove)
 
-    def _validate_epoch_integrity(self, epoch: Epoch) -> None:
+    def _validate_epoch_integrity(
+        self,
+        epoch: Epoch,
+        allocations_by_id: dict[str, AllocationInfo],
+    ) -> None:
         for key, entry in epoch.metadata.items():
-            try:
-                info = self._allocations.get_allocation(entry.allocation_id, epoch.id)
-            except AllocationNotFoundError:
+            info = allocations_by_id.get(entry.allocation_id)
+            if info is None:
                 raise AssertionError(
                     f"Metadata key {key!r} references missing allocation "
                     f"{entry.allocation_id!r} in epoch {epoch.id}"
-                ) from None
+                )
 
             if entry.offset_bytes < 0 or entry.offset_bytes >= info.aligned_size:
                 raise AssertionError(
@@ -123,13 +122,13 @@ class GMSEpochManager:
                     f"(aligned_size={info.aligned_size})"
                 )
 
-    def _compute_memory_layout_hash(self, epoch: Epoch) -> str:
+    def _compute_memory_layout_hash(
+        self,
+        epoch: Epoch,
+        allocations: list[AllocationInfo],
+    ) -> str:
         h = hashlib.sha256()
-        allocations = sorted(
-            self._allocations.list_allocations(epoch.id),
-            key=lambda info: info.allocation_id,
-        )
-        for info in allocations:
+        for info in sorted(allocations, key=lambda info: info.allocation_id):
             h.update(
                 f"{info.allocation_id}:{info.size}:{info.aligned_size}:{info.tag}:{info.epoch_id}".encode()
             )
@@ -142,111 +141,71 @@ class GMSEpochManager:
             h.update(entry.value)
         return h.hexdigest()
 
-    def on_rw_connect(self) -> None:
+    def on_rw_connect(self) -> int | None:
         if self._epochs.active_rw is not None:
             raise AssertionError("RW epoch is already active")
 
+        old_epoch_id = None
         if self._epochs.committed is not None:
             old_epoch = self._epochs.committed
-            self._allocations.clear_all_allocations(old_epoch.id)
             self._epochs.committed = None
             self._epochs.memory_layout_hash = ""
+            old_epoch_id = old_epoch.id
             logger.info("RW connected; invalidated committed epoch %d", old_epoch.id)
 
         epoch = Epoch(id=self._epochs.next_id)
         self._epochs.next_id += 1
         self._epochs.active_rw = epoch
         logger.info("RW connected; opened active epoch %d", epoch.id)
+        return old_epoch_id
 
-    def on_rw_abort(self) -> None:
+    def on_rw_abort(self) -> int | None:
         epoch = self._epochs.active_rw
         if epoch is None:
-            return
+            return None
 
         logger.warning("RW aborted; clearing active epoch %d", epoch.id)
-        self._allocations.clear_all_allocations(epoch.id)
         self._epochs.active_rw = None
         if self._epochs.committed is None:
             self._epochs.memory_layout_hash = ""
+        return epoch.id
 
-    def on_commit(self) -> None:
+    def on_commit(self, allocations: list[AllocationInfo]) -> int | None:
         epoch = self._require_epoch(GrantedLockType.RW)
-        self._validate_epoch_integrity(epoch)
-        self._epochs.memory_layout_hash = self._compute_memory_layout_hash(epoch)
+        allocations_by_id = {
+            info.allocation_id: info
+            for info in allocations
+            if info.epoch_id == epoch.id
+        }
+        self._validate_epoch_integrity(epoch, allocations_by_id)
+        self._epochs.memory_layout_hash = self._compute_memory_layout_hash(
+            epoch, allocations
+        )
 
         old_committed = self._epochs.committed
         self._epochs.committed = epoch
         self._epochs.active_rw = None
-        if old_committed is not None and old_committed.id != epoch.id:
-            self._allocations.clear_all_allocations(old_committed.id)
 
         logger.info(
             "Committed epoch %d with state hash: %s...",
             epoch.id,
             self._epochs.memory_layout_hash[:16],
         )
-
-    async def allocate(
-        self,
-        size: int,
-        tag: str,
-        is_connected: Optional[Callable[[], bool]],
-    ) -> AllocationInfo:
-        return await self._allocations.allocate(
-            size=size,
-            tag=tag,
-            epoch_id=self._require_epoch(GrantedLockType.RW).id,
-            is_connected=is_connected,
-        )
-
-    def export_allocation(
-        self,
-        mode: GrantedLockType,
-        allocation_id: str,
-    ) -> tuple[AllocationInfo, int]:
-        info = self.get_allocation(mode, allocation_id)
-        return info, self._allocations.export_allocation(
-            info.allocation_id, info.epoch_id
-        )
-
-    def get_allocation(
-        self,
-        mode: GrantedLockType,
-        allocation_id: str,
-    ) -> AllocationInfo:
-        epoch = self._require_epoch(mode)
-        return self._allocations.get_allocation(allocation_id, epoch.id)
-
-    def list_allocations(
-        self,
-        mode: GrantedLockType,
-        tag: Optional[str] = None,
-    ) -> list[AllocationInfo]:
-        return self._allocations.list_allocations(self._require_epoch(mode).id, tag)
-
-    def free_allocation(self, allocation_id: str) -> bool:
-        epoch = self._require_epoch(GrantedLockType.RW)
-        deleted = self._drop_metadata_for_allocation(epoch, allocation_id)
-        if deleted:
-            logger.debug(
-                "Dropped %d metadata entries for allocation %s in epoch %d",
-                deleted,
-                allocation_id,
-                epoch.id,
-            )
-        return self._allocations.free_allocation(allocation_id, epoch.id)
+        if old_committed is None or old_committed.id == epoch.id:
+            return None
+        return old_committed.id
 
     def put_metadata(
         self,
+        allocation: AllocationInfo,
         key: str,
-        allocation_id: str,
         offset_bytes: int,
         value: bytes,
     ) -> None:
         epoch = self._require_epoch(GrantedLockType.RW)
-        self._validate_metadata_target(epoch, allocation_id, offset_bytes)
+        self._validate_metadata_target(epoch, allocation, offset_bytes)
         epoch.metadata[key] = MetadataEntry(
-            allocation_id=allocation_id,
+            allocation_id=allocation.allocation_id,
             offset_bytes=offset_bytes,
             value=value,
             epoch_id=epoch.id,

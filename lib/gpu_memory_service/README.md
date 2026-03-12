@@ -69,7 +69,7 @@ The server consists of three main components:
 
 2. **State Machine (FSM)** - Manages global lock state, waiter coordination, and disconnect cleanup.
 
-3. **Metadata Store / Epoch State** - Owns active vs committed epoch state, metadata, and the committed memory layout hash.
+3. **Metadata Store / Epoch State** - Owns active vs committed epoch state. Metadata and the memory layout hash are both scoped to a specific epoch and move with that epoch when it is committed.
 
 Each GMS server is responsible for managing memory of only 1 GPU, and does not interact with GMS servers corresponding to other GPUs.
 
@@ -193,6 +193,7 @@ flowchart LR
 - `RW_COMMIT` publishes the current active epoch; it does not create another epoch.
 - `RW_ABORT` discards the current active epoch and returns the system to `EMPTY`.
 - Every allocation gets an immutable `epoch_id` at creation time.
+- Metadata entries belong to exactly one epoch, and the memory layout hash is computed for one committed epoch at a time.
 - RO requests are served only from the committed epoch, while RW requests mutate only the active epoch.
 - Read RPCs (`export`, allocation lookup/listing, metadata lookup/listing) are scoped to the committed epoch for RO clients and to the active epoch for RW clients.
 - `metadata_put` validates allocation ownership and offset bounds, `free` cascades metadata cleanup, and `commit` rejects dangling metadata references.

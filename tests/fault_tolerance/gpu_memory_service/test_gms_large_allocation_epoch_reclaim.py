@@ -54,28 +54,32 @@ async def test_new_epoch_large_allocation_waits_for_dead_writer_process(
         count_oom,
     )
 
-    epochs = GMSEpochManager(
-        GMSAllocationManager(
-            device=0,
-            allocation_retry_interval=0.1,
-            allocation_retry_timeout=120.0,
-        )
+    allocations = GMSAllocationManager(
+        device=0,
+        allocation_retry_interval=0.1,
+        allocation_retry_timeout=120.0,
     )
+    epochs = GMSEpochManager()
     holder = None
     allocation_task = None
 
     try:
-        epochs.on_rw_connect()
+        assert epochs.on_rw_connect() is None
         first_epoch = epochs.active_rw_epoch_id
-        first = await epochs.allocate(size, "weights", lambda: True)
+        first = await allocations.allocate(
+            size=size,
+            epoch_id=epochs.require_epoch_id(GrantedLockType.RW),
+            tag="weights",
+            is_connected=lambda: True,
+        )
         assert first.epoch_id == first_epoch
 
         free_after_first = _gpu_memory_free_bytes()
         assert free_after_first < free_before - (size // 2)
 
-        _, exported_fd = epochs.export_allocation(
-            GrantedLockType.RW,
+        exported_fd = allocations.export_allocation(
             first.allocation_id,
+            epochs.require_epoch_id(GrantedLockType.RW),
         )
         holder_ready = tmp_path / "holder.ready"
         holder_log = tmp_path / "holder.log"
@@ -138,19 +142,24 @@ async def test_new_epoch_large_allocation_waits_for_dead_writer_process(
             assert time.monotonic() < deadline, holder_log.read_text(encoding="utf-8")
             await asyncio.sleep(0.1)
 
-        epochs.on_rw_abort()
+        cleared_epoch_id = epochs.on_rw_abort()
+        assert cleared_epoch_id == first_epoch
+        assert cleared_epoch_id is not None
+        allocations.clear_all_allocations(cleared_epoch_id)
         assert epochs.active_rw_epoch_id is None
-        assert epochs.allocation_count == 0
+        assert allocations.allocation_count == 0
 
-        free_after_abort = _gpu_memory_free_bytes()
-        assert free_after_abort < free_before - (size // 2)
-
-        epochs.on_rw_connect()
+        assert epochs.on_rw_connect() is None
         second_epoch = epochs.active_rw_epoch_id
         assert second_epoch != first_epoch
 
         allocation_task = asyncio.create_task(
-            epochs.allocate(size, "weights", lambda: True)
+            allocations.allocate(
+                size=size,
+                epoch_id=epochs.require_epoch_id(GrantedLockType.RW),
+                tag="weights",
+                is_connected=lambda: True,
+            )
         )
 
         deadline = time.monotonic() + 30.0
@@ -169,7 +178,7 @@ async def test_new_epoch_large_allocation_waits_for_dead_writer_process(
 
         second = await asyncio.wait_for(allocation_task, timeout=120.0)
         assert second.epoch_id == second_epoch
-        assert epochs.allocation_count == 1
+        assert allocations.allocation_count == 1
     finally:
         if allocation_task is not None and not allocation_task.done():
             allocation_task.cancel()

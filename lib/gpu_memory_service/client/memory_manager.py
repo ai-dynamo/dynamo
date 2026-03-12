@@ -195,6 +195,7 @@ class GMSClientMemoryManager:
         if self._client is not None:
             self._client.close()
             self._client = None
+        self._granted_lock_type = None
 
     # ==================== Tier 1: Handle Operations (server-side) ====================
 
@@ -252,6 +253,7 @@ class GMSClientMemoryManager:
 
         self._client_rpc.commit()
         self._client = None
+        self._granted_lock_type = None
         return True
 
     def get_memory_layout_hash(self) -> str:

@@ -94,3 +94,31 @@ def test_client_session_commit_marks_committed_and_closes_transport(monkeypatch)
     assert session.commit()
     assert session.committed
     assert closed
+
+
+def test_client_session_commit_tolerates_close_failure_after_success(monkeypatch):
+    monkeypatch.setattr(_GMSRPCTransport, "connect", lambda self: None)
+    monkeypatch.setattr(
+        _GMSRPCTransport,
+        "handshake",
+        lambda self, lock_type, timeout_ms: HandshakeResponse(
+            success=True,
+            committed=False,
+            granted_lock_type=GrantedLockType.RW,
+        ),
+    )
+    monkeypatch.setattr(
+        _GMSRPCTransport,
+        "request",
+        lambda self, request, response_type: CommitResponse(success=True),
+    )
+    monkeypatch.setattr(
+        _GMSRPCTransport,
+        "close",
+        lambda self: (_ for _ in ()).throw(ConnectionError("close failed")),
+    )
+
+    session = _GMSClientSession("/tmp/gms-test.sock", RequestedLockType.RW, None)
+
+    assert session.commit()
+    assert session.committed

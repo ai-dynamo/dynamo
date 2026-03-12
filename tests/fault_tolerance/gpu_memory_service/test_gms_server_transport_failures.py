@@ -143,7 +143,7 @@ class _FakeHandler:
 class _FakeGMS:
     def __init__(self, handler: _FakeHandler | None = None):
         self.handler = handler or _FakeHandler()
-        self._sessions = GMSSessionManager(on_rw_abort=self.handler.on_rw_abort)
+        self._sessions = GMSSessionManager()
         if self.handler.committed_epoch_id is not None:
             self._sessions._locking._committed = True
 
@@ -163,7 +163,9 @@ class _FakeGMS:
         self._sessions.on_connect(conn)
 
     async def cleanup_connection(self, conn: Connection | None) -> None:
-        await self._sessions.cleanup_connection(conn)
+        event = await self._sessions.cleanup_connection(conn)
+        if event == StateEvent.RW_ABORT:
+            self.handler.on_rw_abort()
 
     async def handle_request(self, conn: Connection, msg, _is_connected):
         if isinstance(msg, GetLockStateRequest):
@@ -469,3 +471,63 @@ def test_commit_failure_after_local_unmap_keeps_preserved_unmapped_state(monkeyp
     assert manager._va_preserved
     assert manager._unmapped
     assert manager._client is not None
+
+
+def test_successful_commit_clears_rw_mode_before_local_cleanup(monkeypatch):
+    manager = object.__new__(GMSClientMemoryManager)
+    manager.socket_path = "/tmp/gms-test.sock"
+    manager.device = 0
+    manager._client = type(
+        "_CommittingClient",
+        (),
+        {
+            "commit": lambda self: True,
+            "is_connected": True,
+        },
+    )()
+    manager._mappings = {
+        0x1000: LocalMapping(
+            allocation_id="alloc_1",
+            va=0x1000,
+            size=4096,
+            aligned_size=4096,
+            handle=11,
+            tag="weights",
+        ),
+    }
+    manager._inverse_mapping = {"alloc_1": 0x1000}
+    manager._unmapped = False
+    manager._granted_lock_type = GrantedLockType.RW
+    manager._va_preserved = False
+    manager._last_memory_layout_hash = ""
+    manager.granularity = 4096
+
+    free_handle_calls: list[str] = []
+
+    monkeypatch.setattr(
+        "gpu_memory_service.client.memory_manager.cuda_synchronize", lambda: None
+    )
+
+    def fake_unmap_va(self, va: int) -> None:
+        self._mappings[va] = self._mappings[va].with_handle(0)
+
+    def fake_free_va(self, va: int) -> None:
+        mapping = self._mappings.pop(va)
+        self._inverse_mapping.pop(mapping.allocation_id, None)
+
+    def fake_free_handle(self, allocation_id: str) -> bool:
+        free_handle_calls.append(allocation_id)
+        return True
+
+    monkeypatch.setattr(GMSClientMemoryManager, "unmap_va", fake_unmap_va)
+    monkeypatch.setattr(GMSClientMemoryManager, "free_va", fake_free_va)
+    monkeypatch.setattr(GMSClientMemoryManager, "free_handle", fake_free_handle)
+
+    assert manager.commit()
+    assert manager._client is None
+    assert manager._granted_lock_type is None
+    assert manager._unmapped
+    assert manager._va_preserved
+
+    manager.destroy_mapping(0x1000)
+    assert free_handle_calls == []

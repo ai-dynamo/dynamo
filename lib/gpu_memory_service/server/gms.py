@@ -40,6 +40,7 @@ from gpu_memory_service.common.types import (
     GrantedLockType,
     RequestedLockType,
     ServerState,
+    StateEvent,
 )
 
 from .allocations import GMSAllocationManager
@@ -59,13 +60,13 @@ class GMS:
         allocation_retry_interval: float = 0.5,
         allocation_retry_timeout: Optional[float] = None,
     ):
-        allocations = GMSAllocationManager(
+        self._allocations = GMSAllocationManager(
             device,
             allocation_retry_interval=allocation_retry_interval,
             allocation_retry_timeout=allocation_retry_timeout,
         )
-        self._epochs = GMSEpochManager(allocations)
-        self._sessions = GMSSessionManager(on_rw_abort=self._epochs.on_rw_abort)
+        self._epochs = GMSEpochManager()
+        self._sessions = GMSSessionManager()
         logger.info("GMS initialized: device=%d", device)
 
     @property
@@ -86,7 +87,7 @@ class GMS:
 
     @property
     def allocation_count(self) -> int:
-        return self._epochs.allocation_count
+        return self._allocations.allocation_count
 
     def is_ready(self) -> bool:
         return self._sessions.snapshot().is_ready
@@ -113,16 +114,24 @@ class GMS:
         rw_epoch_initialized = False
         try:
             if conn.mode == GrantedLockType.RW:
-                self._epochs.on_rw_connect()
+                old_committed_epoch_id = self._epochs.on_rw_connect()
                 rw_epoch_initialized = True
+                if old_committed_epoch_id is not None:
+                    self._allocations.clear_all_allocations(old_committed_epoch_id)
             self._sessions.on_connect(conn)
         except Exception:
             if rw_epoch_initialized:
-                self._epochs.on_rw_abort()
+                active_epoch_id = self._epochs.on_rw_abort()
+                if active_epoch_id is not None:
+                    self._allocations.clear_all_allocations(active_epoch_id)
             raise
 
     async def cleanup_connection(self, conn: Connection | None) -> None:
-        await self._sessions.cleanup_connection(conn)
+        event = await self._sessions.cleanup_connection(conn)
+        if event == StateEvent.RW_ABORT:
+            active_epoch_id = self._epochs.on_rw_abort()
+            if active_epoch_id is not None:
+                self._allocations.clear_all_allocations(active_epoch_id)
 
     async def handle_request(
         self,
@@ -134,12 +143,23 @@ class GMS:
         self._sessions.check_operation(msg_type, conn)
 
         if msg_type is CommitRequest:
-            self._epochs.on_commit()
+            old_committed_epoch_id = self._epochs.on_commit(
+                self._allocations.list_allocations(
+                    self._epochs.require_epoch_id(GrantedLockType.RW)
+                )
+            )
+            if old_committed_epoch_id is not None:
+                self._allocations.clear_all_allocations(old_committed_epoch_id)
             self._sessions.on_commit(conn)
             return CommitResponse(success=True), -1, True
 
         if msg_type is AllocateRequest:
-            info = await self._epochs.allocate(msg.size, msg.tag, is_connected)
+            info = await self._allocations.allocate(
+                size=msg.size,
+                epoch_id=self._epochs.require_epoch_id(GrantedLockType.RW),
+                tag=msg.tag,
+                is_connected=is_connected,
+            )
             return (
                 AllocateResponse(
                     allocation_id=info.allocation_id,
@@ -169,14 +189,18 @@ class GMS:
         if msg_type is GetAllocationStateRequest:
             return (
                 GetAllocationStateResponse(
-                    allocation_count=self._epochs.allocation_count
+                    allocation_count=self._allocations.allocation_count
                 ),
                 -1,
                 False,
             )
 
         if msg_type is ExportAllocationRequest:
-            info, fd = self._epochs.export_allocation(conn.mode, msg.allocation_id)
+            info = self._allocations.get_allocation(
+                msg.allocation_id,
+                self._epochs.require_epoch_id(conn.mode),
+            )
+            fd = self._allocations.export_allocation(info.allocation_id, info.epoch_id)
             return (
                 ExportAllocationResponse(
                     allocation_id=info.allocation_id,
@@ -199,7 +223,10 @@ class GMS:
             )
 
         if msg_type is GetAllocationRequest:
-            info = self._epochs.get_allocation(conn.mode, msg.allocation_id)
+            info = self._allocations.get_allocation(
+                msg.allocation_id,
+                self._epochs.require_epoch_id(conn.mode),
+            )
             return (
                 GetAllocationResponse(
                     allocation_id=info.allocation_id,
@@ -223,7 +250,10 @@ class GMS:
                             tag=info.tag,
                             epoch_id=info.epoch_id,
                         )
-                        for info in self._epochs.list_allocations(conn.mode, msg.tag)
+                        for info in self._allocations.list_allocations(
+                            self._epochs.require_epoch_id(conn.mode),
+                            msg.tag,
+                        )
                     ]
                 ),
                 -1,
@@ -231,18 +261,24 @@ class GMS:
             )
 
         if msg_type is FreeAllocationRequest:
+            epoch_id = self._epochs.require_epoch_id(GrantedLockType.RW)
+            success = self._allocations.free_allocation(msg.allocation_id, epoch_id)
+            if success:
+                self._epochs.drop_metadata_for_allocation(msg.allocation_id)
             return (
-                FreeAllocationResponse(
-                    success=self._epochs.free_allocation(msg.allocation_id)
-                ),
+                FreeAllocationResponse(success=success),
                 -1,
                 False,
             )
 
         if msg_type is MetadataPutRequest:
-            self._epochs.put_metadata(
-                msg.key,
+            allocation = self._allocations.get_allocation(
                 msg.allocation_id,
+                self._epochs.require_epoch_id(GrantedLockType.RW),
+            )
+            self._epochs.put_metadata(
+                allocation,
+                msg.key,
                 msg.offset_bytes,
                 msg.value,
             )
