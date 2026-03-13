@@ -668,8 +668,8 @@ vllm_configs = {
         script_name="multi_node_tp_headless.sh",
         marks=[
             pytest.mark.gpu_2,
-            pytest.mark.post_merge,
-            pytest.mark.timeout(300),
+            pytest.mark.pre_merge,
+            pytest.mark.timeout(600),
         ],
         model="Qwen/Qwen3-0.6B",
         request_payloads=[

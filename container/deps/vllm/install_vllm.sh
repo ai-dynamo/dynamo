@@ -208,6 +208,21 @@ if [ "$DEVICE" = "cpu" ]; then
 fi
 echo "✓ vLLM installation completed"
 
+# Apply hotfix for multi-node TP init ordering (vLLM PR #35892).
+# The patch lives next to this script; SCRIPT_DIR resolves its location.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VLLM_PATCH="${SCRIPT_DIR}/multinode-tp-init-order.patch"
+if [ -f "$VLLM_PATCH" ]; then
+    # Patch the cloned repo (used by CPU/XPU source builds)
+    echo "Applying vLLM multi-node TP hotfix to cloned repo..."
+    git -C "${INSTALLATION_DIR}/vllm" apply --ignore-whitespace "$VLLM_PATCH" || true
+    # Patch the installed site-packages (used by CUDA wheel builds)
+    VLLM_SITE=$(python3 -c "import vllm, pathlib; print(pathlib.Path(vllm.__file__).parent.parent)")
+    echo "Applying vLLM multi-node TP hotfix to ${VLLM_SITE}..."
+    git apply --ignore-whitespace --directory="$VLLM_SITE" -p1 "$VLLM_PATCH" || true
+    echo "✓ vLLM multi-node TP hotfix applied"
+fi
+
 echo "\n=== Installing LMCache from source ==="
 # LMCache prebuilt wheels are built against PyTorch <=2.8.0 and fail with PyTorch 2.10+
 # (undefined symbol: c10::cuda::c10_cuda_check_implementation).
