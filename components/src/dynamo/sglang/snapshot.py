@@ -39,7 +39,6 @@ import sglang as sgl
 
 logger = logging.getLogger(__name__)
 
-
 _SLEEP_MODE_LEVEL = 1
 
 # Memory tags to release/resume for CRIU checkpoint/restore.
@@ -59,7 +58,6 @@ class SGLangCheckpointAdapter:
         self._engine = engine
 
     async def sleep(self, level: int = 1) -> None:
-        logger.info("Sleeping engine")
         from sglang.srt.managers.io_struct import (
             PauseGenerationReqInput,
             ReleaseMemoryOccupationReqInput,
@@ -255,13 +253,6 @@ async def handle_checkpoint_mode(server_args) -> tuple[bool, Optional[sgl.Engine
     )
     if not _using_gms:
         server_args.enable_weights_cpu_backup = True
-
-    # NOTE: The GMS static-state patch (no-op _export/_import_static_state)
-    # is applied inside the scheduler child process via
-    # gpu_memory_service.integrations.sglang.patches.patch_static_state_for_gms,
-    # triggered when the child unpickles server_args.load_format=GMSModelLoader.
-    # Patching here in the parent would have no effect because SGLang uses
-    # multiprocessing spawn, not fork.
 
     start_time = time.time()
     engine = sgl.Engine(server_args=server_args)
