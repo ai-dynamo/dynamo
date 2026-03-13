@@ -356,4 +356,29 @@ mod tests {
         let result = messenger.register_streaming_handler(handler);
         assert!(result.is_ok(), "register_streaming_handler should allow normal handler names");
     }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_am_send_streaming_allows_underscore_prefix() {
+        let messenger = Messenger::builder().build().await.unwrap();
+        let result = messenger.am_send_streaming("_stream_data");
+        assert!(result.is_ok(), "am_send_streaming should allow underscore-prefixed handler names");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_am_send_still_rejects_underscore_prefix() {
+        let messenger = Messenger::builder().build().await.unwrap();
+        let result = messenger.am_send("_stream_data");
+        assert!(result.is_err(), "am_send should still reject underscore-prefixed handler names");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_am_send_streaming_builder_has_setters() {
+        let messenger = Messenger::builder().build().await.unwrap();
+        // Verify builder methods compile and chain correctly
+        let builder = messenger.am_send_streaming("_stream_data").unwrap();
+        let _builder = builder
+            .raw_payload(bytes::Bytes::from_static(b"test"))
+            .worker(velo_common::WorkerId::from_u64(1));
+        // If this compiles, the builder setters are working
+    }
 }
