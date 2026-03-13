@@ -9,8 +9,8 @@ import uvloop
 
 from dynamo.common.config_dump import dump_config
 from dynamo.common.constants import DisaggregationMode
-from dynamo.common.utils.namespace import reload_snapshot_restore_identity
 from dynamo.common.utils.runtime import create_runtime
+from dynamo.common.utils.snapshot import reload_snapshot_restore_identity
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sglang.args import parse_args
 from dynamo.sglang.init_diffusion import (

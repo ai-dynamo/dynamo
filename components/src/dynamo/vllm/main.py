@@ -22,14 +22,16 @@ from dynamo.common.config_dump import dump_config
 from dynamo.common.storage import get_fs
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.common.utils.graceful_shutdown import install_signal_handlers
-from dynamo.common.utils.namespace import reload_snapshot_restore_identity
 from dynamo.common.utils.output_modalities import get_output_modalities
 from dynamo.common.utils.prometheus import (
     LLMBackendMetrics,
     register_engine_metrics_callback,
 )
 from dynamo.common.utils.runtime import create_runtime
-from dynamo.common.utils.snapshot import get_checkpoint_config
+from dynamo.common.utils.snapshot import (
+    get_checkpoint_config,
+    reload_snapshot_restore_identity,
+)
 from dynamo.llm import (
     KvEventPublisher,
     ModelInput,

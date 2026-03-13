@@ -9,7 +9,17 @@ import os
 import signal
 from typing import Any
 
+from dynamo.common.utils.namespace import get_worker_namespace
+
 _LOG = logging.getLogger(__name__)
+PODINFO_ROOT = "/etc/podinfo"
+PODINFO_FILES = {
+    "DYN_NAMESPACE": "dyn_namespace",
+    "DYN_NAMESPACE_WORKER_SUFFIX": "dyn_namespace_worker_suffix",
+    "DYN_COMPONENT": "dyn_component",
+    "DYN_PARENT_DGD_K8S_NAME": "dyn_parent_dgd_k8s_name",
+    "DYN_PARENT_DGD_K8S_NAMESPACE": "dyn_parent_dgd_k8s_namespace",
+}
 
 
 class CheckpointConfig:
@@ -130,3 +140,34 @@ def get_checkpoint_config() -> tuple[bool, CheckpointConfig | None]:
         return True, None
 
     return False, cfg
+
+
+def reload_snapshot_restore_identity() -> tuple[str, str]:
+    namespace = None
+
+    for env_name, podinfo_file in PODINFO_FILES.items():
+        podinfo_path = os.path.join(PODINFO_ROOT, podinfo_file)
+        if not os.path.isfile(podinfo_path):
+            if env_name == "DYN_NAMESPACE":
+                raise RuntimeError(
+                    "snapshot restore requires /etc/podinfo/dyn_namespace"
+                )
+            os.environ.pop(env_name, None)
+            continue
+
+        with open(podinfo_path, encoding="utf-8") as podinfo:
+            value = podinfo.read().strip()
+        if not value:
+            if env_name == "DYN_NAMESPACE":
+                raise RuntimeError(
+                    "snapshot restore requires a non-empty /etc/podinfo/dyn_namespace"
+                )
+            os.environ.pop(env_name, None)
+            continue
+
+        os.environ[env_name] = value
+        if env_name == "DYN_NAMESPACE":
+            namespace = value
+
+    os.environ["DYN_DISCOVERY_BACKEND"] = "kubernetes"
+    return get_worker_namespace(namespace), "kubernetes"
