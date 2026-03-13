@@ -322,9 +322,7 @@ impl KvRouter {
         // Otherwise, create a local indexer and subscribe to KV events directly.
         let indexer = if kv_router_config.overlap_score_weight == 0.0 {
             Indexer::None
-        } else if let Some(ref indexer_component_name) =
-            kv_router_config.remote_indexer_component
-        {
+        } else if let Some(ref indexer_component_name) = kv_router_config.remote_indexer_component {
             tracing::info!(
                 remote_indexer_component = %indexer_component_name,
                 model_name,
