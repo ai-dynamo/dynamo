@@ -86,6 +86,10 @@ if [[ "$SINGLE_GPU" == "true" ]]; then
     WORKER_EXTRA_ARGS="--mem-fraction-static ${DYN_WORKER_GPU_MEM} --delete-ckpt-after-loading --max-running-requests 2 --chunked-prefill-size 4096 --max-prefill-tokens 4096"
 fi
 
+# Prevent port collisions: the test framework exports DYN_SYSTEM_PORT which all
+# child processes would inherit. Unset it so only workers that need it set their own.
+unset DYN_SYSTEM_PORT
+
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 if [[ "$SINGLE_GPU" == "true" ]]; then
     GPU_LABEL="1 GPU"
