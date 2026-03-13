@@ -10557,6 +10557,13 @@ spec:
                     lock becomes active; the second sleeps as a hot standby.
                     Only valid for componentType "worker" (or "prefill"/"decode").
                   properties:
+                    coordinationEndpoint:
+                      description: |-
+                        CoordinationEndpoint is the etcd endpoint used for multinode failover
+                        coordination (leader election and group formation). Required when
+                        failover is enabled with multinode (nodeCount > 1). If omitted, the
+                        operator falls back to Infrastructure.ETCDAddress from operator config.
+                      type: string
                     enabled:
                       description: |-
                         Enabled activates failover mode. Two engine containers are created

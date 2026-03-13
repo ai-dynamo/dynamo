@@ -167,13 +167,16 @@ type ScalingAdapter struct {
 }
 
 // FailoverSpec configures active-passive failover for a worker component.
-// For the POC only Enabled is defined; future fields (e.g. custom lock
-// timeout, GMS image override, standby count) will be added here.
 type FailoverSpec struct {
 	// Enabled activates failover mode. Two engine containers are created
 	// in the same pod, sharing GPUs via DRA and coordinating via a
 	// file-based lock on a shared emptyDir volume.
 	Enabled bool `json:"enabled"`
+	// CoordinationEndpoint is the etcd endpoint used for multinode failover
+	// coordination (leader election and group formation). Required when
+	// failover is enabled with multinode (nodeCount > 1). If omitted, the
+	// operator falls back to Infrastructure.ETCDAddress from operator config.
+	CoordinationEndpoint string `json:"coordinationEndpoint,omitempty"`
 }
 
 // CheckpointMode defines how checkpoint creation is handled

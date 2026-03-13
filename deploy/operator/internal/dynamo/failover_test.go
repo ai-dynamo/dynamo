@@ -80,7 +80,7 @@ func basePodSpec() corev1.PodSpec {
 func TestBuildFailoverPod_EmptyContainers(t *testing.T) {
 	ps := corev1.PodSpec{}
 	component := failoverComponent(2)
-	err := buildFailoverPod(&ps, component, "myapp", "Worker")
+	err := buildFailoverPod(&ps, component, "myapp", "Worker", 1, RoleMain, "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "at least one container")
 }
@@ -88,7 +88,7 @@ func TestBuildFailoverPod_EmptyContainers(t *testing.T) {
 func TestBuildFailoverPod_TwoEngines(t *testing.T) {
 	ps := basePodSpec()
 	component := failoverComponent(2)
-	err := buildFailoverPod(&ps, component, "myapp", "Worker")
+	err := buildFailoverPod(&ps, component, "myapp", "Worker", 1, RoleMain, "")
 	require.NoError(t, err)
 
 	assert.Len(t, ps.Containers, 2, "should have 2 engine containers")
@@ -99,7 +99,7 @@ func TestBuildFailoverPod_TwoEngines(t *testing.T) {
 func TestBuildFailoverPod_GMSSidecar(t *testing.T) {
 	ps := basePodSpec()
 	component := failoverComponent(2)
-	err := buildFailoverPod(&ps, component, "myapp", "Worker")
+	err := buildFailoverPod(&ps, component, "myapp", "Worker", 1, RoleMain, "")
 	require.NoError(t, err)
 
 	require.Len(t, ps.InitContainers, 1, "should have 1 init container (GMS sidecar)")
@@ -115,7 +115,7 @@ func TestBuildFailoverPod_GMSSidecar(t *testing.T) {
 func TestBuildFailoverPod_GMSSidecarTMPDIR(t *testing.T) {
 	ps := basePodSpec()
 	component := failoverComponent(2)
-	err := buildFailoverPod(&ps, component, "myapp", "Worker")
+	err := buildFailoverPod(&ps, component, "myapp", "Worker", 1, RoleMain, "")
 	require.NoError(t, err)
 
 	gms := ps.InitContainers[0]
@@ -132,7 +132,7 @@ func TestBuildFailoverPod_GMSSidecarTMPDIR(t *testing.T) {
 func TestBuildFailoverPod_SharedVolume(t *testing.T) {
 	ps := basePodSpec()
 	component := failoverComponent(2)
-	err := buildFailoverPod(&ps, component, "myapp", "Worker")
+	err := buildFailoverPod(&ps, component, "myapp", "Worker", 1, RoleMain, "")
 	require.NoError(t, err)
 
 	var foundVol bool
@@ -148,7 +148,7 @@ func TestBuildFailoverPod_SharedVolume(t *testing.T) {
 func TestBuildFailoverPod_GPUToleration(t *testing.T) {
 	ps := basePodSpec()
 	component := failoverComponent(2)
-	err := buildFailoverPod(&ps, component, "myapp", "Worker")
+	err := buildFailoverPod(&ps, component, "myapp", "Worker", 1, RoleMain, "")
 	require.NoError(t, err)
 
 	var found bool
@@ -164,7 +164,7 @@ func TestBuildFailoverPod_GPUToleration(t *testing.T) {
 func TestBuildFailoverPod_DRAResourceClaim(t *testing.T) {
 	ps := basePodSpec()
 	component := failoverComponent(2)
-	err := buildFailoverPod(&ps, component, "myapp", "Worker")
+	err := buildFailoverPod(&ps, component, "myapp", "Worker", 1, RoleMain, "")
 	require.NoError(t, err)
 
 	require.Len(t, ps.ResourceClaims, 1)
@@ -177,7 +177,7 @@ func TestBuildFailoverPod_DRAResourceClaim(t *testing.T) {
 func TestBuildEngineContainer_EnvVars(t *testing.T) {
 	ps := basePodSpec()
 	component := failoverComponent(2)
-	err := buildFailoverPod(&ps, component, "myapp", "Worker")
+	err := buildFailoverPod(&ps, component, "myapp", "Worker", 1, RoleMain, "")
 	require.NoError(t, err)
 
 	for i, engine := range ps.Containers {
@@ -203,7 +203,7 @@ func TestBuildEngineContainer_EnvVars(t *testing.T) {
 func TestBuildEngineContainer_StaggeredPorts(t *testing.T) {
 	ps := basePodSpec()
 	component := failoverComponent(2)
-	err := buildFailoverPod(&ps, component, "myapp", "Worker")
+	err := buildFailoverPod(&ps, component, "myapp", "Worker", 1, RoleMain, "")
 	require.NoError(t, err)
 
 	for i, engine := range ps.Containers {
@@ -227,7 +227,7 @@ func TestBuildEngineContainer_StaggeredPorts(t *testing.T) {
 func TestBuildEngineContainer_DiscoveryBackendPreserved(t *testing.T) {
 	ps := basePodSpec()
 	component := failoverComponent(2)
-	err := buildFailoverPod(&ps, component, "myapp", "Worker")
+	err := buildFailoverPod(&ps, component, "myapp", "Worker", 1, RoleMain, "")
 	require.NoError(t, err)
 
 	for _, engine := range ps.Containers {
@@ -248,7 +248,7 @@ func TestBuildEngineContainer_DiscoveryBackendPreserved(t *testing.T) {
 func TestBuildEngineContainer_GPUResourcesRemoved(t *testing.T) {
 	ps := basePodSpec()
 	component := failoverComponent(2)
-	err := buildFailoverPod(&ps, component, "myapp", "Worker")
+	err := buildFailoverPod(&ps, component, "myapp", "Worker", 1, RoleMain, "")
 	require.NoError(t, err)
 
 	gpuResource := corev1.ResourceName(commonconsts.KubeResourceGPUNvidia)
@@ -267,7 +267,7 @@ func TestBuildEngineContainer_GPUResourcesRemoved(t *testing.T) {
 func TestBuildEngineContainer_ProbesUseNamedPort(t *testing.T) {
 	ps := basePodSpec()
 	component := failoverComponent(2)
-	err := buildFailoverPod(&ps, component, "myapp", "Worker")
+	err := buildFailoverPod(&ps, component, "myapp", "Worker", 1, RoleMain, "")
 	require.NoError(t, err)
 
 	for i, engine := range ps.Containers {
@@ -287,7 +287,7 @@ func TestBuildEngineContainer_ProbesUseNamedPort(t *testing.T) {
 func TestBuildEngineContainer_PreservesNonRemovedEnvVars(t *testing.T) {
 	ps := basePodSpec()
 	component := failoverComponent(2)
-	err := buildFailoverPod(&ps, component, "myapp", "Worker")
+	err := buildFailoverPod(&ps, component, "myapp", "Worker", 1, RoleMain, "")
 	require.NoError(t, err)
 
 	for _, engine := range ps.Containers {

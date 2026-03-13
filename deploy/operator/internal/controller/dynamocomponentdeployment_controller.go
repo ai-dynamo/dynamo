@@ -265,6 +265,15 @@ func (r *DynamoComponentDeploymentReconciler) reconcileDeploymentResources(ctx c
 		return ComponentReconcileResult{}, fmt.Errorf("failed to sync failover ResourceClaimTemplate for %s: %w", serviceName, err)
 	}
 
+	// Sync harness ConfigMap for multinode+failover components
+	_, _, err = commonController.SyncResource(ctx, r, dynamoComponentDeployment, func(ctx context.Context) (*corev1.ConfigMap, bool, error) {
+		return dynamo.GenerateFailoverHarnessConfigMap(parentName, dynamoComponentDeployment.Namespace, serviceName, &dynamoComponentDeployment.Spec.DynamoComponentDeploymentSharedSpec)
+	})
+	if err != nil {
+		logger.Error(err, "failed to sync failover harness ConfigMap", "service", serviceName)
+		return ComponentReconcileResult{}, fmt.Errorf("failed to sync failover harness ConfigMap for %s: %w", serviceName, err)
+	}
+
 	deploymentModified, deployment, err := r.createOrUpdateOrDeleteDeployments(ctx, generateResourceOption{
 		dynamoComponentDeployment: dynamoComponentDeployment,
 	})

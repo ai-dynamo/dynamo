@@ -22,7 +22,10 @@ spec:
           gpu: "1"
       failover:
         enabled: true
+        coordinationEndpoint: http://etcd.multinode-failover.svc.cluster.local:2379
       extraPodSpec:
+        nodeSelector:
+          kubernetes.io/hostname: aks-a100exp-11297970-vmss000000
         mainContainer:
           image: dynamoci.azurecr.io/ai-dynamo/dynamo:multinode-failover-ae51ca3f1-vllm-runtime
           workingDir: /workspace/examples/backends/vllm

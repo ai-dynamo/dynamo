@@ -245,6 +245,13 @@ func (v *SharedSpecValidator) validateFailover() error {
 			v.fieldPath)
 	}
 
+	// Multinode failover requires a coordination endpoint (either inline or operator-level etcd)
+	if v.spec.IsMultinode() && v.spec.Failover.CoordinationEndpoint == "" {
+		return fmt.Errorf(
+			"%s.failover: multinode failover requires coordinationEndpoint or operator-level etcd config",
+			v.fieldPath)
+	}
+
 	return nil
 }
 

@@ -578,7 +578,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveScaling(ctx context.Cont
 func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment, restartState *dynamo.RestartState, checkpointInfos map[string]*checkpoint.CheckpointInfo) (ReconcileResult, error) {
 	logger := log.FromContext(ctx)
 
-	// Sync ResourceClaimTemplates for failover-enabled components before creating pods.
+	// Sync ResourceClaimTemplates and harness ConfigMaps for failover-enabled components before creating pods.
 	for serviceName, component := range dynamoDeployment.Spec.Services {
 		svcComponent := component
 		svcName := serviceName
@@ -588,6 +588,15 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Co
 		if err != nil {
 			logger.Error(err, "failed to sync failover ResourceClaimTemplate", "service", svcName)
 			return ReconcileResult{}, fmt.Errorf("failed to sync failover ResourceClaimTemplate for %s: %w", svcName, err)
+		}
+
+		// Sync harness ConfigMap for multinode+failover components
+		_, _, err = commoncontroller.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*corev1.ConfigMap, bool, error) {
+			return dynamo.GenerateFailoverHarnessConfigMap(dynamoDeployment.Name, dynamoDeployment.Namespace, svcName, svcComponent)
+		})
+		if err != nil {
+			logger.Error(err, "failed to sync failover harness ConfigMap", "service", svcName)
+			return ReconcileResult{}, fmt.Errorf("failed to sync failover harness ConfigMap for %s: %w", svcName, err)
 		}
 	}
 
