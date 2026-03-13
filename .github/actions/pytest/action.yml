@@ -152,14 +152,12 @@ runs:
           DOCKER_ENV_FLAGS+=(--env "HF_TOKEN=${HF_TOKEN}")
         fi
 
-        # Mount CI-cached models if available on the host.
-        # The S3 CSI mount uses HF cache layout, so setting HF_HUB_CACHE
-        # lets engines resolve models directly from the mount.
+        # Mount CI-cached models if available on the host (read-only).
+        # conftest.py will symlink these into the writable HF cache.
         CI_MODELS_FLAGS=()
         if [[ -d "/models/ci/models" ]]; then
           echo "📦 CI model cache detected, mounting into container"
           CI_MODELS_FLAGS+=(-v "/models/ci/models:/models/ci/models:ro")
-          DOCKER_ENV_FLAGS+=(--env "HF_HUB_CACHE=/models/ci/models")
         fi
 
         docker run ${GPU_FLAGS} --rm -w /workspace \
@@ -259,14 +257,12 @@ runs:
           DOCKER_ENV_FLAGS+=(--env "HF_TOKEN=${HF_TOKEN}")
         fi
 
-        # Mount CI-cached models if available on the host.
-        # The S3 CSI mount uses HF cache layout, so setting HF_HUB_CACHE
-        # lets engines resolve models directly from the mount.
+        # Mount CI-cached models if available on the host (read-only).
+        # conftest.py will symlink these into the writable HF cache.
         CI_MODELS_FLAGS=()
         if [[ -d "/models/ci/models" ]]; then
           echo "📦 CI model cache detected, mounting into container"
           CI_MODELS_FLAGS+=(-v "/models/ci/models:/models/ci/models:ro")
-          DOCKER_ENV_FLAGS+=(--env "HF_HUB_CACHE=/models/ci/models")
         fi
 
         docker run ${GPU_FLAGS} ${DOCKER_OPTS} --rm -w /workspace \
