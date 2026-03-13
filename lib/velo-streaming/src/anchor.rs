@@ -1297,4 +1297,65 @@ mod tests {
             "anchor must be removed after detach with stored set_timeout duration"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // Registry injection tests (Plan 09-01, Task 2)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_builder_with_external_registry() {
+        let worker_id = velo_common::WorkerId::from_u64(42);
+        let transport: Arc<dyn crate::transport::FrameTransport> = Arc::new(MockTransport);
+        let external_registry: Arc<DashMap<u64, AnchorEntry>> = Arc::new(DashMap::new());
+
+        let mgr = AnchorManagerBuilder::default()
+            .worker_id(worker_id)
+            .transport(transport)
+            .registry(external_registry.clone())
+            .build()
+            .expect("builder with external registry should succeed");
+
+        // Verify the manager uses the injected registry (same Arc)
+        assert!(Arc::ptr_eq(&mgr.registry, &external_registry),
+            "manager must use the externally provided registry Arc");
+    }
+
+    #[test]
+    fn test_builder_without_registry_creates_own() {
+        let worker_id = velo_common::WorkerId::from_u64(42);
+        let transport: Arc<dyn crate::transport::FrameTransport> = Arc::new(MockTransport);
+
+        let mgr = AnchorManagerBuilder::default()
+            .worker_id(worker_id)
+            .transport(transport)
+            .build()
+            .expect("builder without registry should succeed");
+
+        // Registry should exist and be empty
+        assert_eq!(mgr.registry.len(), 0, "auto-created registry must be empty");
+    }
+
+    #[test]
+    fn test_create_anchor_inserts_into_shared_registry() {
+        let worker_id = velo_common::WorkerId::from_u64(42);
+        let transport: Arc<dyn crate::transport::FrameTransport> = Arc::new(MockTransport);
+        let shared_registry: Arc<DashMap<u64, AnchorEntry>> = Arc::new(DashMap::new());
+
+        let mgr = AnchorManagerBuilder::default()
+            .worker_id(worker_id)
+            .transport(transport)
+            .registry(shared_registry.clone())
+            .build()
+            .expect("builder should succeed");
+
+        assert_eq!(shared_registry.len(), 0, "shared registry must be empty before create_anchor");
+
+        let (handle, _stream) = mgr.create_anchor::<u32>();
+        let (_, local_id) = handle.unpack();
+
+        // Verify the entry was inserted into the shared registry (accessible outside mgr)
+        assert_eq!(shared_registry.len(), 1, "shared registry must have 1 entry after create_anchor");
+        assert!(shared_registry.contains_key(&local_id),
+            "shared registry must contain the created anchor");
+    }
 }
