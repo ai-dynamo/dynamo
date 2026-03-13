@@ -116,13 +116,9 @@ def resolve_worker_info(
 
     if can_query_mdc:
         if require_prefill:
-            prefill_info = connector.get_worker_info(
-                SubComponentType.PREFILL, backend
-            )
+            prefill_info = connector.get_worker_info(SubComponentType.PREFILL, backend)
         if require_decode:
-            decode_info = connector.get_worker_info(
-                SubComponentType.DECODE, backend
-            )
+            decode_info = connector.get_worker_info(SubComponentType.DECODE, backend)
     else:
         if require_prefill:
             prefill_info = build_worker_info_from_defaults(
@@ -141,7 +137,13 @@ def resolve_worker_info(
     # Cross-validate model names
     p_model = prefill_info.model_name
     d_model = decode_info.model_name
-    if require_prefill and require_decode and p_model and d_model and p_model != d_model:
+    if (
+        require_prefill
+        and require_decode
+        and p_model
+        and d_model
+        and p_model != d_model
+    ):
         logger.warning(
             f"Model name mismatch between prefill ({p_model}) and "
             f"decode ({d_model}) WorkerInfo"
@@ -165,9 +167,7 @@ def resolve_worker_info(
                 require_prefill=require_prefill,
                 require_decode=require_decode,
             )
-            logger.info(
-                f"Detected model name from DGD container args: {model_name}"
-            )
+            logger.info(f"Detected model name from DGD container args: {model_name}")
         elif config_model_name:
             model_name = config_model_name
             logger.info(f"Using model name from config: {model_name}")
