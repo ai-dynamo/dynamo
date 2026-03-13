@@ -630,7 +630,7 @@ for label, key, stat in metrics:
 
 **Factors that reduce KV router benefit:**
 - **Unique prompts** with no prefix reuse
-- **Short prompts** (<1000 tokens) where routing overhead exceeds benefit
+- **Short prompts** (less than 1000 tokens) where routing overhead exceeds benefit
 - **Evenly distributed load** where round-robin is already optimal
 - **Low request rate** where cache eviction negates benefits
 
@@ -640,7 +640,7 @@ for label, key, stat in metrics:
 - Workload demonstrates measurable prefix reuse patterns
 
 **Standard routing is better when:**
-- KV router shows <10% improvement
+- KV router shows less than 10% improvement
 - Increased latency variance is observed
 - Load distribution across workers is more important than cache affinity
 
