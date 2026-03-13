@@ -691,8 +691,9 @@ pub unsafe extern "C" fn create_routers(
             .kv_chooser_for(
                 &endpoint,
                 block_size,
-                Some(kv_router_config),
+                Some(kv_router_config.clone()),
                 WORKER_TYPE_DECODE,
+                model_name.clone(),
             )
             .await
         {

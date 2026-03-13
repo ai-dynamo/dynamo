@@ -563,6 +563,7 @@ impl ModelManager {
         kv_cache_block_size: u32,
         kv_router_config: Option<KvRouterConfig>,
         worker_type: &'static str,
+        model_name: String,
     ) -> anyhow::Result<Arc<KvRouter>> {
         let client = endpoint.client().await?;
 
@@ -588,7 +589,10 @@ impl ModelManager {
         // Get of create runtime config watcher for this endpoint
         let workers_with_configs = self.get_or_create_runtime_config_watcher(endpoint).await?;
 
-        let selector = Box::new(DefaultWorkerSelector::new(kv_router_config, worker_type));
+        let selector = Box::new(DefaultWorkerSelector::new(
+            kv_router_config.clone(),
+            worker_type,
+        ));
         let chooser = KvRouter::new(
             endpoint.clone(),
             client,
@@ -597,6 +601,7 @@ impl ModelManager {
             Some(selector),
             kv_router_config,
             worker_type,
+            model_name,
         )
         .await?;
         Ok(Arc::new(chooser))

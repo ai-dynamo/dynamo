@@ -106,7 +106,7 @@ pub async fn run_server(config: IndexerConfig) -> anyhow::Result<()> {
     };
 
     let state = Arc::new(AppState {
-        registry,
+        registry: Arc::new(registry),
         #[cfg(feature = "metrics")]
         prom_registry,
     });

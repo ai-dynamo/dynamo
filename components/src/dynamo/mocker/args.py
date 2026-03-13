@@ -462,6 +462,13 @@ def parse_args() -> argparse.Namespace:
         default=os.environ.get("DYN_REQUEST_PLANE", "tcp"),
         help="Determines how requests are distributed from routers to workers. 'tcp' is fastest [nats|http|tcp]",
     )
+    parser.add_argument(
+        "--event-plane",
+        type=str,
+        choices=["nats", "zmq"],
+        default=os.environ.get("DYN_EVENT_PLANE", "nats"),
+        help="Determines how events are published [nats|zmq]",
+    )
 
     args = parser.parse_args()
     validate_worker_type_args(args)

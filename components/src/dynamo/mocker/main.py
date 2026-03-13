@@ -18,6 +18,7 @@ import uvloop
 
 os.environ.setdefault("DYN_COMPUTE_THREADS", "0")
 
+from dynamo.common.utils.runtime import create_runtime
 from dynamo.llm import (
     EngineType,
     EntrypointArgs,
@@ -26,7 +27,6 @@ from dynamo.llm import (
     make_engine,
     run_input,
 )
-from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 
 from .args import create_temp_engine_args_file, parse_args, resolve_planner_profile_data
@@ -193,7 +193,6 @@ async def launch_workers(args: argparse.Namespace, extra_engine_args_path: Path)
     - Independent service registration and stats scraping
     - But still sharing the same tokio runtime (efficient)
     """
-    loop = asyncio.get_running_loop()
     futures = []
     runtimes = []
     per_worker_temp_files: list[Path] = []
@@ -227,10 +226,12 @@ async def launch_workers(args: argparse.Namespace, extra_engine_args_path: Path)
         logger.info(f"Creating mocker worker {worker_id + 1}/{args.num_workers}")
 
         # Create a separate DistributedRuntime for this worker (on same event loop)
-        runtime = DistributedRuntime(
-            loop,
+
+        runtime, loop = create_runtime(
             args.discovery_backend,
             args.request_plane,
+            args.event_plane,
+            True,  # statically set to True, just determines to enable_nats if event_plane is nats
         )
         runtimes.append(runtime)
 

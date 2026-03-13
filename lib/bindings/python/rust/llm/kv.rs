@@ -591,12 +591,39 @@ async fn create_kv_router_from_endpoint(
     } else {
         llm_rs::discovery::WORKER_TYPE_DECODE
     };
+
+    // Query discovery to get the model's display_name from its MDC.
+    let discovery = endpoint.inner.component().drt().discovery();
+    let instances = discovery
+        .list(rs::discovery::DiscoveryQuery::EndpointModels {
+            namespace: endpoint_id.namespace.clone(),
+            component: endpoint_id.component.clone(),
+            endpoint: endpoint_id.name.clone(),
+        })
+        .await
+        .map_err(to_pyerr)?;
+
+    let model_name = instances
+        .into_iter()
+        .find_map(|inst| {
+            inst.deserialize_model::<llm_rs::model_card::ModelDeploymentCard>()
+                .ok()
+                .map(|card| card.display_name)
+        })
+        .ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "no model card found in discovery for endpoint {}/{}/{}",
+                endpoint_id.namespace, endpoint_id.component, endpoint_id.name
+            ))
+        })?;
+
     let kv_router = model_manager
         .kv_chooser_for(
             &endpoint.inner,
             block_size as u32,
             kv_router_config,
             worker_type,
+            model_name,
         )
         .await
         .map_err(to_pyerr)?;

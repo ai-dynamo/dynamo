@@ -38,6 +38,7 @@ pub mod publisher;
 pub mod push_router;
 pub mod queue;
 pub mod recorder;
+pub mod remote_indexer;
 pub mod scheduler;
 pub mod sequence;
 pub mod subscriber;
@@ -58,6 +59,7 @@ use crate::{
             RouterResponse, TokensWithHashes, WorkerId, WorkerWithDpRank,
             compute_block_hash_for_seq,
         },
+        remote_indexer::RemoteIndexer,
         scheduler::{KvScheduler, PotentialLoad},
         sequence::{SequenceError, SequenceRequest},
     },
@@ -84,8 +86,8 @@ pub const ACTIVE_SEQUENCES_SUBJECT: &str = "active_sequences_events";
 pub const RADIX_STATE_BUCKET: &str = "radix-bucket";
 pub const RADIX_STATE_FILE: &str = "radix-state";
 
-// for standalone indexer query
-pub const KV_INDEXER_QUERY_ENDPOINT: &str = "kv_indexer_query";
+// for standalone indexer query — re-export from shared crate
+pub use dynamo_kv_router::indexer::KV_INDEXER_QUERY_ENDPOINT;
 
 // for worker-local kvindexer query
 pub const WORKER_KV_INDEXER_BUFFER_SIZE: usize = 1024; // store 1024 most recent events in worker buffer
@@ -132,6 +134,10 @@ pub enum Indexer {
     /// Uses sticky worker routing for per-worker event serialization.
     /// Does not support TTL/pruning.
     Concurrent(Arc<ThreadPoolIndexer<ConcurrentRadixTree>>),
+
+    /// Forwards queries to a standalone KV indexer service via the request plane.
+    /// The standalone indexer manages its own radix tree and event subscription.
+    Remote(Arc<RemoteIndexer>),
 
     /// Used when we do not wish to use the indexer at all (e.g., when overlap_score_weight is 0).
     /// Note: This will cause KV events to accumulate in JetStream as we do not regularly purge them.
@@ -195,6 +201,10 @@ impl Indexer {
         match self {
             Indexer::KvIndexer(indexer) => indexer.find_matches(sequence).await,
             Indexer::Concurrent(tpi) => tpi.find_matches(sequence).await,
+            Indexer::Remote(remote) => remote.find_matches(sequence).await.map_err(|e| {
+                tracing::warn!(error = %e, "Remote indexer query failed");
+                KvRouterError::IndexerOffline
+            }),
             Indexer::None => Ok(OverlapScores::new()),
         }
     }
@@ -203,6 +213,7 @@ impl Indexer {
         match self {
             Indexer::KvIndexer(indexer) => indexer.dump_events().await,
             Indexer::Concurrent(tpi) => tpi.dump_events().await,
+            Indexer::Remote(_) => Ok(Vec::new()),
             Indexer::None => {
                 panic!(
                     "Cannot dump events: indexer does not exist (is overlap_score_weight set to 0?)"
@@ -226,6 +237,7 @@ impl Indexer {
                 tpi.process_routing_decision_for_request(tokens_with_hashes, worker)
                     .await
             }
+            Indexer::Remote(_) => Ok(()),
             Indexer::None => Ok(()),
         }
     }
@@ -238,6 +250,7 @@ impl Indexer {
                 }
             }
             Indexer::Concurrent(tpi) => tpi.apply_event(event).await,
+            Indexer::Remote(_) => {} // standalone indexer gets events directly
             Indexer::None => {}
         }
     }
@@ -252,6 +265,7 @@ impl Indexer {
             Indexer::Concurrent(tpi) => {
                 KvIndexerInterface::remove_worker(tpi.as_ref(), worker_id).await;
             }
+            Indexer::Remote(_) => {} // standalone indexer manages its own workers
             Indexer::None => {}
         }
     }
@@ -268,6 +282,7 @@ impl Indexer {
                 resp_rx.await.unwrap_or_default()
             }
             Indexer::Concurrent(tpi) => tpi.backend().get_workers(),
+            Indexer::Remote(_) => Vec::new(),
             Indexer::None => Vec::new(),
         }
     }
@@ -285,6 +300,7 @@ pub struct KvRouter {
 }
 
 impl KvRouter {
+    #[allow(clippy::too_many_arguments)]
     pub async fn new(
         endpoint: Endpoint,
         client: Client,
@@ -293,13 +309,29 @@ impl KvRouter {
         selector: Option<Box<WorkerSelector>>,
         kv_router_config: Option<KvRouterConfig>,
         worker_type: &'static str,
+        model_name: String,
     ) -> Result<Self> {
         let kv_router_config = kv_router_config.unwrap_or_default();
         kv_router_config.validate()?;
         let component = endpoint.component();
         let cancellation_token = component.drt().primary_token();
 
-        let indexer = Indexer::new(component, &kv_router_config, block_size);
+        // If a remote indexer component is configured, create a Remote indexer
+        // that queries the standalone KV indexer service via the request plane.
+        // Otherwise, create a local indexer and subscribe to KV events directly.
+        let indexer = if let Some(ref indexer_component_name) =
+            kv_router_config.remote_indexer_component
+        {
+            tracing::info!(
+                remote_indexer_component = %indexer_component_name,
+                model_name,
+                "Using remote KV indexer"
+            );
+            let remote = RemoteIndexer::new(component, indexer_component_name, model_name).await?;
+            Indexer::Remote(Arc::new(remote))
+        } else {
+            Indexer::new(component, &kv_router_config, block_size)
+        };
 
         // Wait for at least one worker with a known runtime config before starting scheduler
         let _ = workers_with_configs
@@ -319,8 +351,11 @@ impl KvRouter {
         )
         .await?;
 
-        // Start KV event subscription if needed (use_kv_events=true and overlap_score_weight>0)
-        if kv_router_config.should_subscribe_to_kv_events() {
+        // Start KV event subscription if needed — skip when using a remote indexer
+        // (the standalone indexer handles its own event subscription).
+        if kv_router_config.remote_indexer_component.is_some() {
+            tracing::info!("Skipping KV event subscription (using remote indexer)");
+        } else if kv_router_config.should_subscribe_to_kv_events() {
             subscriber::start_subscriber(component.clone(), &kv_router_config, indexer.clone())
                 .await?;
         } else {
