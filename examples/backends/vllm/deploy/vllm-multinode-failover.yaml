@@ -10,7 +10,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: dynamoci.azurecr.io/ai-dynamo/dynamo:multinode-failover-ae51ca3f1-vllm-runtime
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo:multinode-failover-6af7f3e72-vllm-runtime
     Worker:
       envFromSecret: hf-token-secret
       componentType: worker
@@ -27,7 +27,7 @@ spec:
         nodeSelector:
           kubernetes.io/hostname: aks-a100exp-11297970-vmss000000
         mainContainer:
-          image: dynamoci.azurecr.io/ai-dynamo/dynamo:multinode-failover-ae51ca3f1-vllm-runtime
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo:multinode-failover-6af7f3e72-vllm-runtime
           workingDir: /workspace/examples/backends/vllm
           command:
             - python3
