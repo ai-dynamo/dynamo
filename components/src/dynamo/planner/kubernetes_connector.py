@@ -361,12 +361,17 @@ class KubernetesConnector(PlannerConnector):
         return entries
 
     def _mdc_entry_is_prefill(self, entry: dict) -> bool:
-        """Check if an MDC entry is a prefill worker via model_type bitflag.
+        """Check if an MDC entry is a prefill worker.
 
-        ModelType::Prefill = 1 << 4 = 16.
+        model_type can be serialized as:
+        - An integer bitflag (ModelType::Prefill = 1 << 4 = 16)
+        - A dict with a "bits" key (serde bitflags format)
+        - A string like "Prefill" or "Chat|Completions"
         """
         card = entry.get("card_json", {})
         model_type = card.get("model_type", 0)
+        if isinstance(model_type, str):
+            return "prefill" in model_type.lower()
         if isinstance(model_type, dict):
             model_type = model_type.get("bits", 0)
         return bool(model_type & 0x10)
