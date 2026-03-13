@@ -7,7 +7,7 @@ import argparse
 from typing import List
 
 
-def _parse_concurrencies(value: str) -> List[int]:
+def _parse_request_rates(value: str) -> List[int]:
     return [int(x.strip()) for x in value.split(",")]
 
 
@@ -38,10 +38,10 @@ def parse_args(argv=None) -> argparse.Namespace:
         help="Override model name from config.",
     )
     parser.add_argument(
-        "--concurrencies",
-        type=_parse_concurrencies,
+        "--request-rates",
+        type=_parse_request_rates,
         default=None,
-        help="Override concurrency levels (comma-separated, e.g. '1,2,4,8').",
+        help="Override request rates (comma-separated, e.g. '4,8,16,32').",
     )
     parser.add_argument(
         "--osl",
@@ -53,7 +53,7 @@ def parse_args(argv=None) -> argparse.Namespace:
         "--request-count",
         type=int,
         default=None,
-        help="Override request count per concurrency level.",
+        help="Override request count per request rate.",
     )
     parser.add_argument(
         "--skip-plots",

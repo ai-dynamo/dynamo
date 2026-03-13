@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from .config import SweepConfig, input_file_tag, resolve_repo_root
-from .runner import run_aiperf_single, run_concurrency_sweep
+from .runner import run_aiperf_single, run_request_rate_sweep
 from .server import ServerManager
 
 
@@ -43,9 +43,9 @@ def run_sweep(
         print(f"                   {f}")
     labels = [c.label for c in config.configs]
     print(f"  Configs:       {labels}")
-    print(f"  Concurrencies: {config.concurrencies}")
+    print(f"  Request rates: {config.request_rates}")
     print(f"  OSL:           {config.osl}")
-    print(f"  Requests:      {config.request_count} per concurrency")
+    print(f"  Requests:      {config.request_count} per request rate")
     print(f"  Restart every: {restart}")
     print(f"  Output:        {output_base}")
     print(flush=True)
@@ -84,10 +84,10 @@ def run_sweep(
                         env_overrides=env_overrides,
                     )
                     try:
-                        run_concurrency_sweep(
+                        run_request_rate_sweep(
                             model=config.model,
                             port=config.port,
-                            concurrencies=config.concurrencies,
+                            request_rates=config.request_rates,
                             request_count=config.request_count,
                             warmup_count=config.warmup_count,
                             input_file=input_file,
@@ -118,10 +118,10 @@ def _sweep_with_restart(
     input_file: str,
     output_dir: Path,
 ) -> None:
-    """Run each concurrency level with a fresh server to avoid warm-cache effects."""
+    """Run each request rate with a fresh server to avoid warm-cache effects."""
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    for c in sorted(config.concurrencies):
+    for request_rate in sorted(config.request_rates):
         server.start(
             workflow_script=workflow_script,
             model=config.model,
@@ -132,12 +132,12 @@ def _sweep_with_restart(
             run_aiperf_single(
                 model=config.model,
                 port=config.port,
-                concurrency=c,
+                request_rate=request_rate,
                 request_count=config.request_count,
                 warmup_count=config.warmup_count,
                 input_file=input_file,
                 osl=config.osl,
-                artifact_dir=output_dir / f"c{c}",
+                artifact_dir=output_dir / f"request_rate{request_rate}",
             )
         finally:
             server.stop()

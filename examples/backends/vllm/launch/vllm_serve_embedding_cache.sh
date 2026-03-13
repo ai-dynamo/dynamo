@@ -27,8 +27,6 @@ if [[ "$CAPACITY_GB" != "0" ]]; then
         \"ec_connector_extra_config\": {\"multimodal_embedding_cache_capacity_gb\": $CAPACITY_GB}
     }")
 fi
-
-CUDA_VISIBLE_DEVICES=2 \
 vllm serve "$MODEL" \
     --enable-log-requests \
     --max-model-len 16384 \

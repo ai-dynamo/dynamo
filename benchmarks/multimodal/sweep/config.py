@@ -25,7 +25,7 @@ class SweepConfig:
     """Top-level sweep configuration loaded from YAML with optional CLI overrides."""
 
     model: str = "Qwen/Qwen3-VL-30B-A3B-Instruct-FP8"
-    concurrencies: List[int] = field(default_factory=lambda: [1, 2, 4, 8, 16, 32])
+    request_rates: List[int] = field(default_factory=lambda: [4, 8, 16, 32, 64])
     osl: int = 150
     request_count: int = 1000
     warmup_count: int = 5
@@ -58,8 +58,8 @@ class SweepConfig:
                     f"Workflow script not found: {script} (config '{cfg.label}')"
                 )
 
-        if not self.concurrencies:
-            raise ValueError("At least one concurrency level is required.")
+        if not self.request_rates:
+            raise ValueError("At least one request rate is required.")
 
 
 def _parse_benchmark_config(raw: Dict[str, Any]) -> BenchmarkConfig:
@@ -83,7 +83,7 @@ def load_config(
 
     cfg = SweepConfig(
         model=raw.get("model", defaults.model),
-        concurrencies=raw.get("concurrencies", defaults.concurrencies),
+        request_rates=raw.get("request_rates", defaults.request_rates),
         osl=raw.get("osl", defaults.osl),
         request_count=raw.get("request_count", defaults.request_count),
         warmup_count=raw.get("warmup_count", defaults.warmup_count),
