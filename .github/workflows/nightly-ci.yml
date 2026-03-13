@@ -79,6 +79,19 @@ jobs:
       multi_gpu_test_timeout_minutes: 120
     secrets: inherit
 
+  # ============================================================================
+  # ERROR CLASSIFICATION
+  # ============================================================================
+
+  classify-errors:
+    if: always() && !cancelled()
+    needs: [vllm-pipeline, sglang-pipeline, trtllm-pipeline]
+    uses: ./.github/workflows/classify-errors.yml
+    with:
+      workflow_type: nightly
+    secrets:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
   ############################## SLACK NOTIFICATION ##############################
   notify-slack:
     name: Notify Slack

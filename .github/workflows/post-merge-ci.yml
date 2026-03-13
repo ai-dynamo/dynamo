@@ -442,6 +442,19 @@ jobs:
         kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
         namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
 
+  # ============================================================================
+  # ERROR CLASSIFICATION
+  # ============================================================================
+
+  classify-errors:
+    if: always() && !cancelled()
+    needs: [clean-k8s-builder, cleanup]
+    uses: ./.github/workflows/classify-errors.yml
+    with:
+      workflow_type: post-merge
+    secrets:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
   ############################## SLACK NOTIFICATION ##############################
   notify-slack:
     name: Notify Slack
