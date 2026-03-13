@@ -29,6 +29,8 @@ Signals handled in checkpoint mode:
 """
 
 import asyncio
+import ctypes
+import gc
 import logging
 import os
 import signal
@@ -38,6 +40,50 @@ from typing import Optional
 import sglang as sgl
 
 logger = logging.getLogger(__name__)
+
+
+def _try_release_memory(label: str) -> None:
+    """Force Python GC and glibc malloc_trim to return freed memory to the OS.
+
+    Logs RSS before/after so you can see how much memory was actually reclaimable.
+    """
+    pid = os.getpid()
+
+    def _get_rss_kb() -> int:
+        try:
+            with open(f"/proc/{pid}/status") as f:
+                for line in f:
+                    if line.startswith("VmRSS:"):
+                        return int(line.split()[1])
+        except Exception:
+            pass
+        return 0
+
+    rss_before = _get_rss_kb()
+
+    collected = gc.collect()
+    rss_after_gc = _get_rss_kb()
+
+    try:
+        libc = ctypes.CDLL("libc.so.6")
+        libc.malloc_trim(0)
+    except Exception as e:
+        logger.debug("[MemRelease:%s] malloc_trim failed: %s", label, e)
+
+    rss_after_trim = _get_rss_kb()
+
+    logger.info(
+        "[MemRelease:%s] gc.collect freed %d objects, "
+        "RSS: %.2f MiB -> %.2f MiB (gc) -> %.2f MiB (malloc_trim), "
+        "reclaimed=%.2f MiB",
+        label,
+        collected,
+        rss_before / 1024,
+        rss_after_gc / 1024,
+        rss_after_trim / 1024,
+        (rss_before - rss_after_trim) / 1024,
+    )
+
 
 _SLEEP_MODE_LEVEL = 1
 
@@ -137,6 +183,8 @@ class CheckpointConfig:
         # Sleep model for checkpoint
         logger.info(f"Putting model to sleep (level={sleep_level})")
         await engine_client.sleep(level=sleep_level)
+
+        _try_release_memory("after_sleep")
 
         # Install signal handlers before writing the ready file so there is no
         # window where the DaemonSet can send SIGUSR1/SIGCONT while the default
@@ -259,6 +307,8 @@ async def handle_checkpoint_mode(server_args) -> tuple[bool, Optional[sgl.Engine
     logger.info(
         f"SGLang engine loaded in {time.time() - start_time:.2f}s (checkpoint mode)"
     )
+
+    _try_release_memory("after_engine_load")
 
     adapter = SGLangCheckpointAdapter(engine)
     if not await cfg.run_lifecycle(adapter, _SLEEP_MODE_LEVEL):

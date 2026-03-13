@@ -15,7 +15,10 @@ import (
 	podresourcesv1 "k8s.io/kubelet/pkg/apis/podresources/v1"
 )
 
-const nvidiaGPUResource = "nvidia.com/gpu"
+const (
+	nvidiaGPUResource  = "nvidia.com/gpu"
+	nvidiaGPUDRADriver = "gpu.nvidia.com"
+)
 
 var podResourcesSocketPath = "/var/lib/kubelet/pod-resources/kubelet.sock"
 
