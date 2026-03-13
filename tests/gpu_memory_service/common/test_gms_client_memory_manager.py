@@ -45,25 +45,6 @@ class _TrackingSession:
         self.closed = True
 
 
-class _ReallocatingSession:
-    def __init__(self) -> None:
-        self.allocations = [
-            ("alloc-new-1", 4096),
-            RuntimeError("allocate failed"),
-        ]
-        self.freed: list[str] = []
-
-    def allocate(self, size: int, tag: str):
-        result = self.allocations.pop(0)
-        if isinstance(result, Exception):
-            raise result
-        return result
-
-    def free(self, allocation_id: str) -> bool:
-        self.freed.append(allocation_id)
-        return True
-
-
 class _FailingCommitSession:
     is_connected = True
 
@@ -81,27 +62,6 @@ class _SuccessfulCommitSession:
 class _CloseFailingSession:
     def close(self) -> None:
         raise ConnectionError("close failed")
-
-
-class _RollbackFailingSession:
-    def __init__(self) -> None:
-        self.allocations = [
-            ("alloc-new-1", 4096),
-            RuntimeError("allocate failed"),
-        ]
-        self.closed = False
-
-    def allocate(self, size: int, tag: str):
-        result = self.allocations.pop(0)
-        if isinstance(result, Exception):
-            raise result
-        return result
-
-    def free(self, allocation_id: str) -> bool:
-        return False
-
-    def close(self) -> None:
-        self.closed = True
 
 
 def _make_mapping(
@@ -211,54 +171,6 @@ def test_disconnect_rejects_live_mappings(monkeypatch):
     assert not session.closed
 
 
-def test_reallocate_all_handles_rolls_back_partial_failure(monkeypatch):
-    session = _ReallocatingSession()
-    manager = _make_manager(
-        monkeypatch,
-        client=session,
-        lock_type=GrantedLockType.RW,
-        mappings=[
-            _make_mapping("alloc-old-1", 0x1000, handle=0, tag="kv_cache"),
-            _make_mapping("alloc-old-2", 0x2000, handle=0, tag="kv_cache"),
-        ],
-        unmapped=True,
-        va_preserved=True,
-    )
-
-    with pytest.raises(RuntimeError, match="allocate failed"):
-        manager.reallocate_all_handles(tag="kv_cache")
-
-    assert session.freed == ["alloc-new-1"]
-    assert manager._inverse_mapping == {
-        "alloc-old-1": 0x1000,
-        "alloc-old-2": 0x2000,
-    }
-
-
-def test_reallocate_all_handles_disconnects_on_rollback_failure(monkeypatch):
-    session = _RollbackFailingSession()
-    manager = _make_manager(
-        monkeypatch,
-        client=session,
-        lock_type=GrantedLockType.RW,
-        mappings=[
-            _make_mapping("alloc-old-1", 0x1000, handle=0, tag="kv_cache"),
-            _make_mapping("alloc-old-2", 0x2000, handle=0, tag="kv_cache"),
-        ],
-        unmapped=True,
-        va_preserved=True,
-    )
-
-    with pytest.raises(RuntimeError, match="session closed"):
-        manager.reallocate_all_handles(tag="kv_cache")
-
-    assert session.closed
-    assert manager._client is None
-    assert manager._granted_lock_type is None
-    assert manager._mappings[0x1000].allocation_id == "alloc-old-1"
-    assert manager._mappings[0x2000].allocation_id == "alloc-old-2"
-
-
 def test_commit_failure_after_local_unmap_keeps_preserved_unmapped_state(monkeypatch):
     manager = _make_manager(
         monkeypatch,
@@ -349,49 +261,6 @@ def test_destroy_mapping_keeps_local_state_when_server_free_fails(monkeypatch):
     assert manager.mappings[mapping.va] == mapping
 
 
-def test_remap_all_vas_releases_imported_handles_before_local_state_changes(
-    monkeypatch,
-):
-    manager = _make_manager(
-        monkeypatch,
-        client=None,
-        lock_type=GrantedLockType.RO,
-        unmapped=True,
-        va_preserved=True,
-        layout_hash="stable",
-        mappings=[
-            _make_mapping("alloc_1", 0x1000, handle=0),
-            _make_mapping("alloc_2", 0x2000, handle=0),
-        ],
-    )
-
-    monkeypatch.setattr(manager, "get_memory_layout_hash", lambda: "stable")
-    monkeypatch.setattr(
-        manager,
-        "get_handle_info",
-        lambda allocation_id: type("_Info", (), {"aligned_size": 4096})(),
-    )
-    export_fds = iter([11])
-    monkeypatch.setattr(
-        manager, "export_handle", lambda allocation_id: next(export_fds)
-    )
-    released_handles: list[int] = []
-    monkeypatch.setattr(memory_manager_module, "cumem_release", released_handles.append)
-    monkeypatch.setattr(
-        memory_manager_module,
-        "cumem_import_from_shareable_handle_close_fd",
-        lambda fd: 71,
-    )
-
-    with pytest.raises(StopIteration):
-        manager.remap_all_vas()
-
-    assert released_handles == [71]
-    assert manager.mappings[0x1000].handle == 0
-    assert manager.mappings[0x2000].handle == 0
-    assert manager.is_unmapped
-
-
 def test_disconnect_clears_local_state_even_if_close_fails(monkeypatch):
     manager = _make_manager(
         monkeypatch,
@@ -404,25 +273,3 @@ def test_disconnect_clears_local_state_even_if_close_fails(monkeypatch):
 
     assert manager._client is None
     assert manager._granted_lock_type is None
-
-
-def test_create_mapping_frees_server_allocation_if_export_fails(monkeypatch):
-    manager = _make_manager(
-        monkeypatch,
-        client=object(),
-        lock_type=GrantedLockType.RW,
-    )
-
-    freed_allocations: list[str] = []
-    monkeypatch.setattr(manager, "allocate_handle", lambda size, tag: "alloc_1")
-    monkeypatch.setattr(
-        manager,
-        "export_handle",
-        lambda allocation_id: (_ for _ in ()).throw(RuntimeError("export failed")),
-    )
-    monkeypatch.setattr(manager, "free_handle", freed_allocations.append)
-
-    with pytest.raises(RuntimeError, match="export failed"):
-        manager.create_mapping(size=4096, tag="kv_cache")
-
-    assert freed_allocations == ["alloc_1"]

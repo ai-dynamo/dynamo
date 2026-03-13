@@ -22,11 +22,9 @@ from gpu_memory_service.common.protocol.messages import (
     GetAllocationResponse,
     GetAllocationStateRequest,
     GetAllocationStateResponse,
-    GetEventHistoryRequest,
     GetEventHistoryResponse,
     GetLockStateRequest,
     GetLockStateResponse,
-    GetRuntimeStateRequest,
     GetRuntimeStateResponse,
     GetStateHashRequest,
     GetStateHashResponse,
@@ -233,11 +231,19 @@ class GMS:
             return CommitResponse(success=True), -1, True
 
         if msg_type is AllocateRequest:
+            epoch_id = self._epochs.require_epoch_id(GrantedLockType.RW)
             info = await self._allocations.allocate(
                 size=msg.size,
-                epoch_id=self._epochs.require_epoch_id(GrantedLockType.RW),
+                epoch_id=epoch_id,
                 tag=msg.tag,
                 is_connected=is_connected,
+                on_oom=lambda: self._events.append(
+                    GMSRuntimeEvent(
+                        kind="allocation_oom",
+                        epoch_id=epoch_id,
+                        allocation_count=self._allocations.allocation_count,
+                    )
+                ),
             )
             return (
                 AllocateResponse(
@@ -273,12 +279,6 @@ class GMS:
                 -1,
                 False,
             )
-
-        if msg_type is GetRuntimeStateRequest:
-            return self.get_runtime_state(), -1, False
-
-        if msg_type is GetEventHistoryRequest:
-            return self.get_event_history(), -1, False
 
         if msg_type is ExportAllocationRequest:
             info = self._allocations.get_allocation(

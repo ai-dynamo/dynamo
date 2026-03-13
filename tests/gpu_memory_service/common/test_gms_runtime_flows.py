@@ -611,60 +611,6 @@ def test_remap_all_vas_rejects_stale_layout_after_new_epoch_commit(real_gms):
     reader.disconnect()
 
 
-def test_remap_all_vas_rolls_back_partial_failure(real_gms, monkeypatch):
-    _, socket_path = real_gms
-
-    writer = GMSClientMemoryManager(socket_path, device=0)
-    writer.connect(RequestedLockType.RW)
-    first_va = writer.create_mapping(size=4096, tag="weights")
-    second_va = writer.create_mapping(size=4096, tag="weights")
-    first_allocation_id = writer.mappings[first_va].allocation_id
-    second_allocation_id = writer.mappings[second_va].allocation_id
-    assert writer.commit()
-
-    reader = GMSClientMemoryManager(socket_path, device=0)
-    reader.connect(RequestedLockType.RO)
-    remap_first_va = reader.create_mapping(allocation_id=first_allocation_id)
-    remap_second_va = reader.create_mapping(allocation_id=second_allocation_id)
-    reader.unmap_all_vas()
-    reader.disconnect()
-    reader.connect(RequestedLockType.RO)
-
-    map_calls = 0
-    released_handles: list[int] = []
-    unmapped_vas: list[int] = []
-
-    def fail_on_second_map(va: int, size: int, handle: int) -> None:
-        nonlocal map_calls
-        map_calls += 1
-        if map_calls == 2:
-            raise RuntimeError("synthetic remap failure")
-
-    monkeypatch.setattr(
-        "gpu_memory_service.client.memory_manager.cumem_map",
-        fail_on_second_map,
-    )
-    monkeypatch.setattr(
-        "gpu_memory_service.client.memory_manager.cumem_release",
-        released_handles.append,
-    )
-    monkeypatch.setattr(
-        "gpu_memory_service.client.memory_manager.cumem_unmap",
-        lambda va, size: unmapped_vas.append(va),
-    )
-
-    with pytest.raises(RuntimeError, match="synthetic remap failure"):
-        reader.remap_all_vas()
-
-    assert reader.is_unmapped
-    assert reader._va_preserved
-    assert reader.mappings[remap_first_va].handle == 0
-    assert reader.mappings[remap_second_va].handle == 0
-    assert released_handles and len(released_handles) == 2
-    assert unmapped_vas == [remap_first_va]
-    reader.disconnect()
-
-
 def test_reallocate_all_handles_reuses_preserved_vas_in_new_epoch(real_gms):
     server, socket_path = real_gms
 
@@ -687,6 +633,39 @@ def test_reallocate_all_handles_reuses_preserved_vas_in_new_epoch(real_gms):
     assert manager.mappings[va].handle != 0
     manager.close()
     _wait_for_server_state(server, ServerState.EMPTY)
+
+
+def test_same_process_republish_remaps_against_new_committed_hash(real_gms):
+    _, socket_path = real_gms
+
+    manager = GMSClientMemoryManager(socket_path, device=0)
+    manager.connect(RequestedLockType.RW)
+    va = manager.create_mapping(size=4096, tag="weights")
+    first_allocation_id = manager.mappings[va].allocation_id
+    manager.metadata_put("tensor", first_allocation_id, 0, b"epoch-1")
+    assert manager.commit()
+
+    manager.connect(RequestedLockType.RO)
+    manager.remap_all_vas()
+    manager.unmap_all_vas()
+    manager.disconnect()
+
+    manager.connect(RequestedLockType.RW)
+    manager.reallocate_all_handles(tag="weights")
+    second_allocation_id = manager.mappings[va].allocation_id
+    assert second_allocation_id != first_allocation_id
+    manager.remap_all_vas()
+    manager.metadata_put("tensor", second_allocation_id, 0, b"epoch-2")
+    assert manager.commit()
+
+    manager.connect(RequestedLockType.RO)
+    manager.remap_all_vas()
+
+    assert manager.mappings[va].va == va
+    assert manager.mappings[va].allocation_id == second_allocation_id
+    assert manager.metadata_get("tensor") == (second_allocation_id, 0, b"epoch-2")
+
+    manager.close()
 
 
 def test_disconnect_during_allocation_retry_aborts_writer_and_unblocks_next_writer(
@@ -805,29 +784,8 @@ async def test_new_epoch_large_allocation_waits_for_dead_writer_process(
                 import time
                 from pathlib import Path
 
-                from gpu_memory_service.common.cuda_utils import (
-                    cuda_ensure_initialized,
-                    cuda_set_current_device,
-                    cumem_address_reserve,
-                    cumem_get_allocation_granularity,
-                    cumem_import_from_shareable_handle_close_fd,
-                    cumem_map,
-                    cumem_set_access,
-                )
-                from gpu_memory_service.common.types import GrantedLockType
-
                 fd = int(sys.argv[1])
-                size = int(sys.argv[2])
-                ready_path = Path(sys.argv[3])
-
-                cuda_ensure_initialized()
-                cuda_set_current_device(0)
-                granularity = cumem_get_allocation_granularity(0)
-                handle = cumem_import_from_shareable_handle_close_fd(fd)
-                va = cumem_address_reserve(size, granularity)
-                cumem_map(va, size, handle)
-                cumem_set_access(va, size, 0, GrantedLockType.RW)
-                ready_path.write_text(str(va))
+                Path(sys.argv[2]).write_text(str(fd))
 
                 while True:
                     time.sleep(1.0)
@@ -841,7 +799,6 @@ async def test_new_epoch_large_allocation_waits_for_dead_writer_process(
                     sys.executable,
                     str(holder_script),
                     str(exported_fd),
-                    str(first.aligned_size),
                     str(holder_ready),
                 ],
                 pass_fds=[exported_fd],

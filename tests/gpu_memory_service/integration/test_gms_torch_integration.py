@@ -47,7 +47,7 @@ class _TinyModule(torch.nn.Module):
 
 @pytest.fixture
 def running_gms(request):
-    with GMSServerProcess(request, device=0, scope="weights") as server:
+    with GMSServerProcess(request, device=0, tag="weights") as server:
         yield server.socket_path
 
 
@@ -108,6 +108,39 @@ def test_gms_tensor_matches_plain_torch_ops(running_gms):
     _assert_exact_tensor_equal(
         (baseline * 2.0 - 5.0).square(), (gms_tensor * 2.0 - 5.0).square()
     )
+
+    reader.close()
+
+
+def test_live_gms_tensor_survives_unmap_and_remap(running_gms):
+    socket_path = running_gms
+    baseline = torch.arange(64, device="cuda", dtype=torch.float32).reshape(8, 8)
+
+    writer = GMSClientMemoryManager(socket_path, device=0)
+    writer.connect(RequestedLockType.RW)
+    allocation_id, _ = _make_gms_tensor(writer, baseline, tag="weights")
+    assert writer.commit()
+
+    reader = GMSClientMemoryManager(socket_path, device=0)
+    reader.connect(RequestedLockType.RO)
+    va = reader.create_mapping(allocation_id=allocation_id)
+    gms_tensor = _tensor_from_pointer(
+        va,
+        list(baseline.shape),
+        list(baseline.stride()),
+        baseline.dtype,
+        0,
+    )
+    pointer_before = gms_tensor.data_ptr()
+    expected = torch.relu((baseline + 7.0).square())
+
+    reader.unmap_all_vas()
+    reader.disconnect()
+    reader.connect(RequestedLockType.RO)
+    reader.remap_all_vas()
+
+    assert gms_tensor.data_ptr() == pointer_before
+    _assert_exact_tensor_equal(expected, torch.relu((gms_tensor + 7.0).square()))
 
     reader.close()
 

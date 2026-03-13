@@ -65,8 +65,8 @@ def test_region_routes_weights_and_kv_cache_to_gms(monkeypatch):
     pool_calls: list[tuple[str, torch.device]] = []
 
     @contextmanager
-    def fake_use_mem_pool(scope: str, device: torch.device):
-        pool_calls.append((scope, device))
+    def fake_use_mem_pool(tag: str, device: torch.device):
+        pool_calls.append((tag, device))
         yield
 
     monkeypatch.setattr(
@@ -126,3 +126,60 @@ def test_pause_resume_routes_kv_cache_to_gms(monkeypatch):
     ]
     assert torch_impl.pause_calls == [None]
     assert torch_impl.resume_calls == [None]
+
+
+def test_region_treats_model_weights_as_weights(monkeypatch):
+    weights = _FakeManager()
+    kv_cache = _FakeManager()
+    torch_impl = _FakeTorchImpl()
+    pool_calls: list[tuple[str, torch.device]] = []
+
+    @contextmanager
+    def fake_use_mem_pool(tag: str, device: torch.device):
+        pool_calls.append((tag, device))
+        yield
+
+    monkeypatch.setattr(
+        GMSMemorySaverImpl,
+        "_init_allocators",
+        lambda self: (weights, kv_cache, "write"),
+    )
+    monkeypatch.setattr(
+        "gpu_memory_service.integrations.sglang.memory_saver.gms_use_mem_pool",
+        fake_use_mem_pool,
+    )
+
+    impl = GMSMemorySaverImpl(torch_impl=torch_impl, device_index=1, mode=None)
+
+    with impl.region("model_weights", enable_cpu_backup=False):
+        pass
+
+    assert pool_calls == [("weights", torch.device("cuda", 1))]
+    assert torch_impl.region_calls == []
+
+
+def test_pause_resume_model_weights_only_routes_weights(monkeypatch):
+    weights = _FakeManager()
+    kv_cache = _FakeManager()
+    torch_impl = _FakeTorchImpl()
+
+    monkeypatch.setattr(
+        GMSMemorySaverImpl,
+        "_init_allocators",
+        lambda self: (weights, kv_cache, "read"),
+    )
+
+    impl = GMSMemorySaverImpl(torch_impl=torch_impl, device_index=0, mode=None)
+
+    impl.pause("model_weights")
+    impl.resume("model_weights")
+
+    assert weights.calls == [
+        "unmap_all_vas",
+        "disconnect",
+        ("connect", RequestedLockType.RO),
+        "remap_all_vas",
+    ]
+    assert kv_cache.calls == []
+    assert torch_impl.pause_calls == []
+    assert torch_impl.resume_calls == []

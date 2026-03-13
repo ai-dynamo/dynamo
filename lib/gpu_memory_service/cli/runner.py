@@ -36,7 +36,7 @@ async def worker() -> None:
         logging.getLogger("gpu_memory_service").setLevel(logging.DEBUG)
 
     logger.info(f"Starting GPU Memory Service Server for device {config.device}")
-    logger.info(f"GMS scope: {config.scope}")
+    logger.info("GMS tag: %s", config.tag)
     logger.info(f"Socket path: {config.socket_path}")
     logger.info(
         "Allocation retry config: interval=%ss timeout=%s",

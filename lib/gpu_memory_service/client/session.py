@@ -71,12 +71,10 @@ class _GMSClientSession:
             raise TimeoutError("Timeout waiting for lock")
 
         self._committed = response.committed
-        if response.granted_lock_type is not None:
-            self._granted_lock_type = response.granted_lock_type
-        elif self._requested_lock_type == RequestedLockType.RW:
-            self._granted_lock_type = GrantedLockType.RW
-        else:
-            self._granted_lock_type = GrantedLockType.RO
+        if response.granted_lock_type is None:
+            self._transport.close()
+            raise RuntimeError("HandshakeResponse omitted granted_lock_type")
+        self._granted_lock_type = response.granted_lock_type
 
         logger.info(
             "Connected with %s lock (granted=%s), committed=%s",

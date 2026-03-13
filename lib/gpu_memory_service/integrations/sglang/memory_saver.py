@@ -81,14 +81,12 @@ class GMSMemorySaverImpl:
             get_socket_path(self._device_index, "weights"),
             self._device_index,
             mode=mode,
-            scope="weights",
             tag="weights",
         )
         kv_cache_allocator = get_or_create_gms_client_memory_manager(
             get_socket_path(self._device_index, "kv_cache"),
             self._device_index,
             mode=RequestedLockType.RW,
-            scope="kv_cache",
             tag="kv_cache",
         )
         granted_mode = weights_allocator.granted_lock_type

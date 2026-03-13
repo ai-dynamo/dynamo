@@ -64,8 +64,6 @@ def finalize_gms_write(
 
     allocator.commit()
 
-    # commit() closed the RW socket and left the writer unmapped.
-    allocator.disconnect()  # no-op if commit already cleared _client, but safe
     allocator.connect(RequestedLockType.RO)
     allocator.remap_all_vas()
 

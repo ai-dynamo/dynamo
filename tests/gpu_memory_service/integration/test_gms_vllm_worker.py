@@ -38,7 +38,7 @@ class _FakeManager:
         self.is_unmapped = False
 
 
-def test_initialize_from_config_uses_kv_cache_gms_scope(monkeypatch):
+def test_initialize_from_config_uses_kv_cache_gms_tag(monkeypatch):
     from gpu_memory_service.integrations.vllm.worker import GMSWorker
     import gpu_memory_service.integrations.vllm.worker as worker_module
     import vllm.distributed.kv_transfer as kv_transfer
@@ -49,12 +49,12 @@ def test_initialize_from_config_uses_kv_cache_gms_scope(monkeypatch):
     kv_init_calls: list[object] = []
 
     @contextmanager
-    def fake_use_mem_pool(scope, device):
-        pool_calls.append((scope, str(device)))
+    def fake_use_mem_pool(tag, device):
+        pool_calls.append((tag, str(device)))
         yield
 
-    def fake_get_or_create(socket_path, device, mode, *, scope, tag, timeout_ms=None):
-        create_calls.append((socket_path, device, mode.value, scope, tag, timeout_ms))
+    def fake_get_or_create(socket_path, device, mode, *, tag, timeout_ms=None):
+        create_calls.append((socket_path, device, mode.value, tag, timeout_ms))
         return object()
 
     monkeypatch.setattr(worker_module, "gms_use_mem_pool", fake_use_mem_pool)
@@ -66,7 +66,7 @@ def test_initialize_from_config_uses_kv_cache_gms_scope(monkeypatch):
     monkeypatch.setattr(
         worker_module,
         "get_socket_path",
-        lambda device, scope: f"/tmp/{scope}-{device}.sock",
+        lambda device, tag: f"/tmp/{tag}-{device}.sock",
     )
     monkeypatch.setattr(
         kv_transfer,
@@ -87,9 +87,7 @@ def test_initialize_from_config_uses_kv_cache_gms_scope(monkeypatch):
 
     worker.initialize_from_config("kv-config")
 
-    assert create_calls == [
-        ("/tmp/kv_cache-3.sock", 3, "rw", "kv_cache", "kv_cache", None)
-    ]
+    assert create_calls == [("/tmp/kv_cache-3.sock", 3, "rw", "kv_cache", None)]
     assert pool_calls == [("kv_cache", "cuda:3")]
     assert kv_transfer_calls == ["kv-config"]
     assert kv_init_calls == ["kv-config"]
@@ -105,7 +103,7 @@ def test_sleep_level_2_unmaps_weights_and_kv_cache(monkeypatch):
     monkeypatch.setattr(
         worker_module,
         "get_gms_client_memory_manager",
-        lambda scope: weights if scope == "weights" else kv_cache,
+        lambda tag: weights if tag == "weights" else kv_cache,
     )
     monkeypatch.setattr(
         worker_module.torch.cuda,
@@ -131,7 +129,7 @@ def test_wake_up_remaps_weights_and_reallocates_kv_cache(monkeypatch):
     monkeypatch.setattr(
         worker_module,
         "get_gms_client_memory_manager",
-        lambda scope: weights if scope == "weights" else kv_cache,
+        lambda tag: weights if tag == "weights" else kv_cache,
     )
 
     worker = object.__new__(GMSWorker)
@@ -152,3 +150,40 @@ def test_wake_up_remaps_weights_and_reallocates_kv_cache(monkeypatch):
         "remap_all_vas",
     ]
     assert fp8_calls == ["fp8"]
+
+
+def test_maybe_get_memory_pool_context_routes_tags(monkeypatch):
+    from gpu_memory_service.integrations.vllm.worker import GMSWorker, Worker
+    import gpu_memory_service.integrations.vllm.worker as worker_module
+
+    kv_cache_context = object()
+    super_calls: list[str] = []
+    mem_pool_calls: list[tuple[str, str]] = []
+
+    def fake_use_mem_pool(tag, device):
+        mem_pool_calls.append((tag, str(device)))
+        return kv_cache_context
+
+    def fake_super_context(self, tag):
+        del self
+        super_calls.append(tag)
+        return f"super:{tag}"
+
+    monkeypatch.setattr(worker_module, "gms_use_mem_pool", fake_use_mem_pool)
+    monkeypatch.setattr(Worker, "_maybe_get_memory_pool_context", fake_super_context)
+
+    worker = object.__new__(GMSWorker)
+    worker.local_rank = 2
+
+    weights_context = worker._maybe_get_memory_pool_context("weights")
+    with weights_context:
+        pass
+    assert mem_pool_calls == []
+    assert super_calls == []
+
+    assert worker._maybe_get_memory_pool_context("kv_cache") is kv_cache_context
+    assert mem_pool_calls == [("kv_cache", "cuda:2")]
+    assert super_calls == []
+
+    assert worker._maybe_get_memory_pool_context("other") == "super:other"
+    assert super_calls == ["other"]

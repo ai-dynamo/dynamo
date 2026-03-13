@@ -22,15 +22,16 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
-class _ScopeState:
+class _TagState:
     manager: "GMSClientMemoryManager"
-    tag: str
     mem_pool: "MemPool | None"
+    socket_path: str
+    device: int
 
 
-_scope_states: dict[str, _ScopeState] = {}
-_active_scope: ContextVar[str | None] = ContextVar(
-    "gpu_memory_service_active_scope",
+_tag_states: dict[str, _TagState] = {}
+_active_tag: ContextVar[str | None] = ContextVar(
+    "gpu_memory_service_active_tag",
     default=None,
 )
 _callbacks_initialized = False
@@ -38,25 +39,25 @@ _pluggable_alloc: Any | None = None
 
 
 def _gms_malloc(size: int, device: int, stream: int) -> int:
-    scope = _active_scope.get()
-    if scope is None:
-        raise RuntimeError("No active GMS allocation scope")
+    tag = _active_tag.get()
+    if tag is None:
+        raise RuntimeError("No active GMS allocation tag")
 
-    state = _scope_states.get(scope)
+    state = _tag_states.get(tag)
     if state is None:
-        raise RuntimeError(f"Unknown GMS allocation scope: {scope}")
+        raise RuntimeError(f"Unknown GMS allocation tag: {tag}")
 
-    va = state.manager.create_mapping(size=int(size), tag=state.tag)
-    logger.debug("[GMS] malloc(scope=%s): va=0x%x size=%d", scope, va, size)
+    va = state.manager.create_mapping(size=int(size), tag=tag)
+    logger.debug("[GMS] malloc(tag=%s): va=0x%x size=%d", tag, va, size)
     return va
 
 
 def _gms_free(ptr: int, size: int, device: int, stream: int) -> None:
     va = int(ptr)
-    for scope, state in _scope_states.items():
+    for tag, state in _tag_states.items():
         if va not in state.manager.mappings:
             continue
-        logger.debug("[GMS] free(scope=%s): va=0x%x size=%d", scope, va, size)
+        logger.debug("[GMS] free(tag=%s): va=0x%x size=%d", tag, va, size)
         state.manager.destroy_mapping(va)
         return
     logger.warning("[GMS] free: no manager owns va=0x%x, ignoring", va)
@@ -88,22 +89,41 @@ def get_or_create_gms_client_memory_manager(
     device: int,
     mode: RequestedLockType,
     *,
-    scope: str = "weights",
-    tag: str | None = None,
+    tag: str = "weights",
     timeout_ms: Optional[int] = None,
 ) -> "GMSClientMemoryManager":
     from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
 
-    state = _scope_states.get(scope)
+    state = _tag_states.get(tag)
+    if state is not None:
+        if state.socket_path != socket_path or state.device != device:
+            raise RuntimeError(
+                f"GMS allocator tag={tag} was initialized for "
+                f"{state.socket_path} on device {state.device}, not {socket_path} "
+                f"on device {device}"
+            )
+
+        manager = state.manager
+        if not manager.is_connected:
+            if manager.mappings or manager.is_unmapped or manager.granted_lock_type:
+                raise RuntimeError(
+                    f"GMS allocator tag={tag} is disconnected but still owns "
+                    "preserved state; recreate the process instead of reusing it"
+                )
+            manager._client = None
+            manager._granted_lock_type = None
+            _tag_states.pop(tag, None)
+            state = None
+
     if state is not None:
         current = state.manager.granted_lock_type
         if mode == RequestedLockType.RW and current != GrantedLockType.RW:
             raise RuntimeError(
-                f"Cannot get RW allocator for scope {scope}: existing is in {current} mode"
+                f"Cannot get RW allocator for tag {tag}: existing is in {current} mode"
             )
         if mode == RequestedLockType.RO and current != GrantedLockType.RO:
             raise RuntimeError(
-                f"Cannot get RO allocator for scope {scope}: existing is in {current} mode"
+                f"Cannot get RO allocator for tag {tag}: existing is in {current} mode"
             )
         return state.manager
 
@@ -115,46 +135,54 @@ def get_or_create_gms_client_memory_manager(
         _ensure_callbacks_initialized()
         mem_pool = _create_mem_pool()
 
-    _scope_states[scope] = _ScopeState(
+    _tag_states[tag] = _TagState(
         manager=manager,
-        tag=tag or scope,
         mem_pool=mem_pool,
+        socket_path=socket_path,
+        device=device,
     )
     logger.info(
-        "[GMS] Created %s allocator for scope=%s (device=%d)",
+        "[GMS] Created %s allocator for tag=%s (device=%d)",
         manager.granted_lock_type.value,
-        scope,
+        tag,
         device,
     )
     return manager
 
 
 def get_gms_client_memory_manager(
-    scope: str = "weights",
+    tag: str = "weights",
 ) -> "GMSClientMemoryManager | None":
-    state = _scope_states.get(scope)
+    state = _tag_states.get(tag)
     if state is None:
         return None
     return state.manager
 
 
 def get_gms_client_memory_managers() -> tuple["GMSClientMemoryManager", ...]:
-    return tuple(state.manager for state in _scope_states.values())
+    return tuple(state.manager for state in _tag_states.values())
+
+
+def evict_gms_client_memory_manager(manager: "GMSClientMemoryManager") -> None:
+    for tag, state in list(_tag_states.items()):
+        if state.manager is manager:
+            _tag_states.pop(tag, None)
+            return
 
 
 @contextmanager
-def gms_use_mem_pool(scope: str, device: "torch.device | int") -> Iterator[None]:
+def gms_use_mem_pool(tag: str, device: "torch.device | int") -> Iterator[None]:
     import torch
 
-    state = _scope_states.get(scope)
+    state = _tag_states.get(tag)
     if state is None:
-        raise RuntimeError(f"No GMS allocator initialized for scope={scope}")
+        raise RuntimeError(f"No GMS allocator initialized for tag={tag}")
     if state.mem_pool is None:
-        raise RuntimeError(f"GMS allocator scope={scope} does not have a mempool")
+        raise RuntimeError(f"GMS allocator tag={tag} does not have a mempool")
 
-    token = _active_scope.set(scope)
+    token = _active_tag.set(tag)
     try:
         with torch.cuda.use_mem_pool(state.mem_pool, device=device):
             yield
     finally:
-        _active_scope.reset(token)
+        _active_tag.reset(token)

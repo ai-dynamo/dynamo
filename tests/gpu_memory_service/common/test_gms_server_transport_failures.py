@@ -7,7 +7,10 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+import os
 import socket
+import subprocess
+import sys
 import time
 
 import pytest
@@ -17,11 +20,9 @@ from gpu_memory_service.common.protocol.messages import (
     CommitRequest,
     CommitResponse,
     GetEventHistoryRequest,
-    GetEventHistoryResponse,
     GetLockStateRequest,
     GetLockStateResponse,
     GetRuntimeStateRequest,
-    GetRuntimeStateResponse,
     HandshakeRequest,
 )
 from gpu_memory_service.common.types import (
@@ -33,7 +34,11 @@ from gpu_memory_service.common.types import (
 from gpu_memory_service.server.allocations import GMSAllocationManager
 from gpu_memory_service.server.gms import GMS
 from gpu_memory_service.server.rpc import GMSRPCServer, _is_connection_alive
-from gpu_memory_service.server.session import Connection, GMSSessionManager
+from gpu_memory_service.server.session import (
+    Connection,
+    GMSSessionManager,
+    OperationNotAllowed,
+)
 
 pytestmark = [
     pytest.mark.unit,
@@ -77,6 +82,17 @@ def test_cumem_export_to_shareable_handle_returns_fd(monkeypatch):
     fd = cuda_utils.cumem_export_to_shareable_handle(1234)
 
     assert fd == 77
+
+
+def test_non_oom_cuda_error_exits_process() -> None:
+    script = """
+from cuda.bindings import driver as cuda
+from gpu_memory_service.common import cuda_utils
+
+cuda_utils.cuda_check_result(cuda.CUresult.CUDA_ERROR_INVALID_VALUE, "synthetic")
+"""
+    result = subprocess.run([sys.executable, "-c", script], check=False)
+    assert result.returncode == 1
 
 
 class _DummyReader:
@@ -550,47 +566,61 @@ async def test_runtime_state_handshake_send_failure_does_not_fail_server(monkeyp
 
 
 @pytest.mark.asyncio
-async def test_runtime_state_request_is_supported_on_live_session():
+async def test_runtime_state_request_is_rejected_on_live_session():
     gms = GMS()
     conn, _ = _make_connection(GrantedLockType.RW, "session_4")
 
     gms._sessions._reserved_rw_session_id = conn.session_id
     gms.on_connect(conn)
 
-    response, fd, should_close = await gms.handle_request(
-        conn,
-        GetRuntimeStateRequest(),
-        lambda: True,
-    )
-
-    assert fd == -1
-    assert not should_close
-    assert isinstance(response, GetRuntimeStateResponse)
-    assert response.state == ServerState.RW.name
-    assert response.has_rw_session
-    assert response.active_rw_epoch_id == 1
+    with pytest.raises(OperationNotAllowed):
+        await gms.handle_request(
+            conn,
+            GetRuntimeStateRequest(),
+            lambda: True,
+        )
 
 
 @pytest.mark.asyncio
-async def test_event_history_request_is_supported_on_live_session():
+async def test_event_history_request_is_rejected_on_live_session():
     gms = GMS()
     conn, _ = _make_connection(GrantedLockType.RW, "session_5")
 
     gms._sessions._reserved_rw_session_id = conn.session_id
     gms.on_connect(conn)
 
-    response, fd, should_close = await gms.handle_request(
-        conn,
-        GetEventHistoryRequest(),
-        lambda: True,
+    with pytest.raises(OperationNotAllowed):
+        await gms.handle_request(
+            conn,
+            GetEventHistoryRequest(),
+            lambda: True,
+        )
+
+
+@pytest.mark.asyncio
+async def test_server_refuses_to_bind_over_live_socket(monkeypatch, tmp_path):
+    socket_path = str(tmp_path / "gms.sock")
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(socket_path)
+    listener.listen(1)
+
+    monkeypatch.setattr(
+        "gpu_memory_service.server.allocations.cuda_ensure_initialized",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        "gpu_memory_service.server.allocations.cumem_get_allocation_granularity",
+        lambda device: 4096,
     )
 
-    assert fd == -1
-    assert not should_close
-    assert isinstance(response, GetEventHistoryResponse)
-    assert [(event.kind, event.epoch_id) for event in response.events] == [
-        ("rw_connected", 1),
-    ]
+    server = GMSRPCServer(socket_path, device=0)
+    try:
+        with pytest.raises(RuntimeError, match="already running"):
+            await asyncio.wait_for(server.serve(), timeout=0.1)
+    finally:
+        listener.close()
+        if os.path.exists(socket_path):
+            os.unlink(socket_path)
 
 
 @pytest.mark.asyncio

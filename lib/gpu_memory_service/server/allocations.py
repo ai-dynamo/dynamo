@@ -91,6 +91,7 @@ class GMSAllocationManager:
         epoch_id: int,
         tag: str = "default",
         is_connected: Optional[Callable[[], bool]] = None,
+        on_oom: Optional[Callable[[], None]] = None,
     ) -> AllocationInfo:
         if size <= 0:
             raise ValueError(f"size must be > 0, got {size}")
@@ -99,6 +100,7 @@ class GMSAllocationManager:
 
         aligned_size = align_to_granularity(size, self._granularity)
         started_at = time.monotonic()
+        reported_oom = False
         while True:
             if is_connected is not None and not is_connected():
                 raise ConnectionAbortedError(
@@ -108,6 +110,10 @@ class GMSAllocationManager:
             allocated, handle = cumem_create_tolerate_oom(aligned_size, self._device)
             if allocated:
                 break
+
+            if on_oom is not None and not reported_oom:
+                on_oom()
+                reported_oom = True
 
             if self._allocation_retry_timeout is not None:
                 waited = time.monotonic() - started_at
@@ -164,8 +170,8 @@ class GMSAllocationManager:
                 epoch_id,
             )
             return False
-        self._allocations.pop(allocation_id, None)
         cumem_release(info.handle)
+        self._allocations.pop(allocation_id, None)
         logger.debug("Freed allocation: %s", allocation_id)
         return True
 
@@ -176,8 +182,9 @@ class GMSAllocationManager:
             if info.epoch_id == epoch_id
         ]
         for allocation_id in allocation_ids:
-            info = self._allocations.pop(allocation_id)
+            info = self._allocations[allocation_id]
             cumem_release(info.handle)
+            self._allocations.pop(allocation_id, None)
         if allocation_ids:
             logger.info(
                 "Cleared %d allocations from epoch %d",

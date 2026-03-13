@@ -69,14 +69,13 @@ class GMSWorker(Worker):
             socket_path,
             device,
             mode=get_gms_lock_mode(extra),
-            scope="weights",
             tag="weights",
         )
         # Parent will set device again (harmless) and do memory checks
         super().init_device()
 
     def initialize_from_config(self, kv_cache_config) -> None:
-        """Allocate KV cache with a dedicated RW-only GMS scope."""
+        """Allocate KV cache with a dedicated RW-only GMS tag."""
         from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized
 
         ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
@@ -90,7 +89,6 @@ class GMSWorker(Worker):
             get_socket_path(device, "kv_cache"),
             device,
             mode=RequestedLockType.RW,
-            scope="kv_cache",
             tag="kv_cache",
         )
         with gms_use_mem_pool("kv_cache", torch.device(f"cuda:{device}")):
@@ -187,10 +185,14 @@ class GMSWorker(Worker):
                 self.model_runner.init_fp8_kv_scales()
 
     def _maybe_get_memory_pool_context(self, tag: str):
-        """Skip CuMemAllocator for weights when using GMS.
+        """Route tag-scoped runtime allocations to the right allocator.
 
-        GMS manages its own memory pool for weights, so we don't want vLLM's
-        CuMemAllocator to interfere.
+        Weight tensors are allocated explicitly in the GMS model-loader path,
+        not through vLLM's tagged runtime allocator hook. For `weights` we
+        therefore only suppress CuMemAllocator here so it does not interfere
+        with the loader-managed GMS allocations. `kv_cache` is the tag that
+        actually allocates through this hook, so it uses the dedicated GMS
+        mempool.
         """
         if tag == "weights":
             logger.debug("[GMS] Skipping CuMemAllocator for weights")

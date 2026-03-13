@@ -169,11 +169,13 @@ stateDiagram-v2
 
 ### Lock Semantics
 
-The socket connection **is** the lock:
+A handshaken socket connection **is** the lock:
 
 - **Crash resilience**: Connection close (including process crash) automatically releases the lock
 - **No explicit unlock**: Eliminates forgotten locks and deadlocks
 - **Atomic transitions**: State changes happen atomically with socket operations
+
+The only exception is the runtime inspection probes (`GetRuntimeState`, `GetEventHistory`): they connect, fetch diagnostics, and close without entering the lock FSM.
 
 ### Epoch Model
 
@@ -217,6 +219,7 @@ This ensures the "new epoch gets new allocations" workflow can wait for memory r
 - The only non-fatal client connection failure is lock acquisition timeout. Other client-side GMS transport, protocol, and server error responses raise.
 - Any non-OOM CUDA VMM failure on either client or server is fatal and exits the process.
 - On the server, an untrusted client connection is isolated to that connection: transport loss and response-send failures unwind the connection state, and only server invariant violations or CUDA failures kill the server.
+- Runtime-state `allocation_count` and `allocations_cleared` report server-owned allocation handles only. Imported handles in other processes can still keep VRAM alive after the server clears its own epoch state.
 - GMS *does not* prove that a disconnected or already-submitted writer has no in-flight GPU work left on the device. The mitigation in this design is that new RW epochs use fresh allocations and may wait for memory reclamation before allocation succeeds.
 
 ---
@@ -528,7 +531,9 @@ When `--load-format gms` is set:
 
 1. **A GMS server must already be running** for the target GPU device. The engine connects to it via a Unix socket derived from the GPU UUID.
 2. The engine uses `RW_OR_RO` mode by default: if no committed epoch exists and no writer holds the lock, the first process gets RW and loads weights from disk. Otherwise clients wait for a committed epoch and then get RO to import published weights.
-3. Weights are managed by GMS; KV cache is managed by the framework's own allocator (e.g., vLLM's `CuMemAllocator`).
+3. Both weights and KV cache are managed by GMS, but they use separate tags:
+   - `weights`: publish/import flow (`RW_OR_RO`, then `RO` after commit)
+   - `kv_cache`: separate RW-only tag for mutable KV-cache memory
 
 #### vLLM
 
@@ -545,10 +550,10 @@ The integration uses a custom worker class (`GMSWorker`) that:
 - Establishes the GMS connection early in `init_device()` so vLLM's `MemorySnapshot` can account for committed weights
 - Registers a custom model loader (`GMSModelLoader`) for the `gms` load format
 - Patches `torch.cuda.empty_cache` to avoid releasing GMS-managed memory
-- Uses two GMS scopes on the GPU:
+- Uses two GMS tags on the GPU:
   - `weights`: normal publish/import flow (`RW_OR_RO`, then `RO` after commit)
-  - `kv_cache`: separate RW-only scope for mutable KV-cache memory
-- Routes both weight and KV-cache allocation through a `CUDAPluggableAllocator` backed by the appropriate GMS scope
+  - `kv_cache`: separate RW-only tag for mutable KV-cache memory
+- Routes both weight and KV-cache allocation through a `CUDAPluggableAllocator` backed by the appropriate GMS tag
 
 #### SGLang
 
@@ -561,8 +566,8 @@ python -m dynamo.sglang \
 ```
 
 The integration patches `torch_memory_saver` to route both weight and KV-cache operations through GMS:
-- Weights (`"weights"` / `"model_weights"` tags) use the `weights` GMS scope
-- KV cache (`"kv_cache"`) uses a separate RW-only `kv_cache` GMS scope
+- Weights (`"weights"` / `"model_weights"` tags) use the `weights` GMS tag
+- KV cache (`"kv_cache"`) uses a separate RW-only `kv_cache` GMS tag
 - Other tags still use the default torch mempool implementation
 - The `--enable-memory-saver` flag is required to activate the memory saver pathway
 
@@ -573,14 +578,14 @@ Both integrations support releasing and reclaiming GPU memory for shadow engine 
 - **vLLM**: `sleep` / `wake_up` (via `/engine/sleep` and `/engine/wake_up` HTTP endpoints)
 - **SGLang**: `release_memory_occupation` / `resume_memory_occupation` (via the corresponding HTTP endpoints)
 
-Under the hood, sleeping calls `unmap_all_vas()` + `disconnect()` to release GPU memory while preserving VA reservations. Waking is scope-specific:
+Under the hood, sleeping calls `unmap_all_vas()` + `disconnect()` to release GPU memory while preserving VA reservations. Waking is tag-specific:
 
 - **weights**: `connect(RO)` + `remap_all_vas()`
 - **kv_cache**: `connect(RW)` + `reallocate_all_handles("kv_cache")` + `remap_all_vas()`
 
 Tensor pointers remain valid because the original virtual addresses are preserved.
 
-This enables a shadow engine to release its GPU memory, let a primary engine use the GPU, and then reclaim the memory after the primary is killed. The mutable KV cache always moves through a new RW epoch in its own GMS scope before it is reallocated.
+This enables a shadow engine to release its GPU memory, let a primary engine use the GPU, and then reclaim the memory after the primary is killed. The mutable KV cache always moves through a new RW epoch in its own GMS tag before it is reallocated.
 
 ### Configuration via `model_loader_extra_config`
 

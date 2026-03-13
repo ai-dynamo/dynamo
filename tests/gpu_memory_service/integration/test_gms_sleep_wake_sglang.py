@@ -51,10 +51,10 @@ def test_gms_basic_sleep_wake(
 
     with ExitStack() as stack:
         weights_gms = stack.enter_context(
-            GMSServerProcess(request, device=0, scope="weights")
+            GMSServerProcess(request, device=0, tag="weights")
         )
         kv_cache_gms = stack.enter_context(
-            GMSServerProcess(request, device=0, scope="kv_cache")
+            GMSServerProcess(request, device=0, tag="kv_cache")
         )
         stack.enter_context(
             DynamoFrontendProcess(request, frontend_port=ports["frontend"])
@@ -126,18 +126,39 @@ def test_gms_basic_sleep_wake(
                 time.sleep(0.1)
 
             weights_events = weights_gms.get_event_history().events
-            assert [(event.kind, event.epoch_id) for event in weights_events] == [
-                ("rw_connected", weights_before_sleep.committed_epoch_id),
-                ("committed", weights_before_sleep.committed_epoch_id),
-            ]
+            weights_pairs = [(event.kind, event.epoch_id) for event in weights_events]
+            weights_connect = ("rw_connected", weights_before_sleep.committed_epoch_id)
+            weights_commit = ("committed", weights_before_sleep.committed_epoch_id)
+            assert weights_connect in weights_pairs
+            assert weights_commit in weights_pairs
+            assert weights_pairs.count(weights_connect) == 1
+            assert weights_pairs.count(weights_commit) == 1
+            assert weights_pairs.index(weights_connect) < weights_pairs.index(
+                weights_commit
+            )
 
             kv_events = kv_cache_gms.get_event_history().events
-            assert [(event.kind, event.epoch_id) for event in kv_events] == [
-                ("rw_connected", kv_before_sleep.active_rw_epoch_id),
-                ("rw_aborted", kv_before_sleep.active_rw_epoch_id),
-                ("allocations_cleared", kv_before_sleep.active_rw_epoch_id),
-            ]
-            assert kv_events[-1].allocation_count > 0
+            kv_pairs = [(event.kind, event.epoch_id) for event in kv_events]
+            kv_connect = ("rw_connected", kv_before_sleep.active_rw_epoch_id)
+            kv_abort = ("rw_aborted", kv_before_sleep.active_rw_epoch_id)
+            kv_clear = ("allocations_cleared", kv_before_sleep.active_rw_epoch_id)
+            assert kv_connect in kv_pairs
+            assert kv_abort in kv_pairs
+            assert kv_clear in kv_pairs
+            assert kv_pairs.count(kv_connect) == 1
+            assert kv_pairs.count(kv_abort) == 1
+            assert kv_pairs.count(kv_clear) == 1
+            assert kv_pairs.index(kv_connect) < kv_pairs.index(kv_abort)
+            assert kv_pairs.index(kv_abort) < kv_pairs.index(kv_clear)
+            assert (
+                next(
+                    event
+                    for event in kv_events
+                    if event.kind == "allocations_cleared"
+                    and event.epoch_id == kv_before_sleep.active_rw_epoch_id
+                ).allocation_count
+                > 0
+            )
 
             wake_result = engine.wake()
             assert wake_result["status"] == "ok"
@@ -176,21 +197,48 @@ def test_gms_basic_sleep_wake(
                 time.sleep(0.1)
 
             weights_events_after_wake = weights_gms.get_event_history().events
-            assert [
+            weights_pairs_after_wake = [
                 (event.kind, event.epoch_id) for event in weights_events_after_wake
-            ] == [
-                ("rw_connected", weights_before_sleep.committed_epoch_id),
-                ("committed", weights_before_sleep.committed_epoch_id),
             ]
+            assert weights_connect in weights_pairs_after_wake
+            assert weights_commit in weights_pairs_after_wake
+            assert weights_pairs_after_wake.count(weights_connect) == 1
+            assert weights_pairs_after_wake.count(weights_commit) == 1
+            assert weights_pairs_after_wake.index(
+                weights_connect
+            ) < weights_pairs_after_wake.index(weights_commit)
 
             kv_events_after_wake = kv_cache_gms.get_event_history().events
-            assert [(event.kind, event.epoch_id) for event in kv_events_after_wake] == [
-                ("rw_connected", kv_before_sleep.active_rw_epoch_id),
-                ("rw_aborted", kv_before_sleep.active_rw_epoch_id),
-                ("allocations_cleared", kv_before_sleep.active_rw_epoch_id),
-                ("rw_connected", kv_after_wake.active_rw_epoch_id),
+            kv_pairs_after_wake = [
+                (event.kind, event.epoch_id) for event in kv_events_after_wake
             ]
-            assert kv_events_after_wake[2].allocation_count > 0
+            kv_reconnect = ("rw_connected", kv_after_wake.active_rw_epoch_id)
+            assert kv_connect in kv_pairs_after_wake
+            assert kv_abort in kv_pairs_after_wake
+            assert kv_clear in kv_pairs_after_wake
+            assert kv_reconnect in kv_pairs_after_wake
+            assert kv_pairs_after_wake.count(kv_connect) == 1
+            assert kv_pairs_after_wake.count(kv_abort) == 1
+            assert kv_pairs_after_wake.count(kv_clear) == 1
+            assert kv_pairs_after_wake.count(kv_reconnect) == 1
+            assert kv_pairs_after_wake.index(kv_connect) < kv_pairs_after_wake.index(
+                kv_abort
+            )
+            assert kv_pairs_after_wake.index(kv_abort) < kv_pairs_after_wake.index(
+                kv_clear
+            )
+            assert kv_pairs_after_wake.index(kv_clear) < kv_pairs_after_wake.index(
+                kv_reconnect
+            )
+            assert (
+                next(
+                    event
+                    for event in kv_events_after_wake
+                    if event.kind == "allocations_cleared"
+                    and event.epoch_id == kv_before_sleep.active_rw_epoch_id
+                ).allocation_count
+                > 0
+            )
 
             result = send_completion(ports["frontend"], "Goodbye")
             logger.info(f"Post-wake inference result: {result}")

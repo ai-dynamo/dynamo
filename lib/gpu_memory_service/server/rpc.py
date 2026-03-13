@@ -9,6 +9,7 @@ import asyncio
 import logging
 import os
 import select
+import socket
 from typing import Optional
 
 from gpu_memory_service.common.protocol.messages import (
@@ -71,6 +72,22 @@ class GMSRPCServer:
         )
         self._server: Optional[asyncio.Server] = None
         logger.info("GMSRPCServer initialized: device=%d", device)
+
+    def _prepare_socket_path(self) -> None:
+        if not os.path.exists(self.socket_path):
+            return
+
+        probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            probe.connect(self.socket_path)
+        except OSError:
+            if os.path.exists(self.socket_path):
+                os.unlink(self.socket_path)
+            return
+        finally:
+            probe.close()
+
+        raise RuntimeError(f"GMS already running at {self.socket_path}")
 
     @property
     def state(self):
@@ -271,8 +288,7 @@ class GMSRPCServer:
                 return
 
     async def serve(self) -> None:
-        if os.path.exists(self.socket_path):
-            os.unlink(self.socket_path)
+        self._prepare_socket_path()
         self._server = await asyncio.start_unix_server(
             self._handle_connection,
             path=self.socket_path,

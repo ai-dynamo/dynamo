@@ -13,9 +13,7 @@ from gpu_memory_service.common.protocol.messages import (
     FreeAllocationRequest,
     GetAllocationRequest,
     GetAllocationStateRequest,
-    GetEventHistoryRequest,
     GetLockStateRequest,
-    GetRuntimeStateRequest,
     GetStateHashRequest,
     GrantedLockType,
     ListAllocationsRequest,
@@ -107,8 +105,6 @@ RO_ALLOWED: frozenset[type] = frozenset(
         GetLockStateRequest,
         GetAllocationStateRequest,
         GetStateHashRequest,
-        GetRuntimeStateRequest,
-        GetEventHistoryRequest,
     }
 )
 

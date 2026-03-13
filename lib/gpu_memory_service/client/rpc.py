@@ -138,4 +138,9 @@ class _GMSRPCTransport:
 
     def __del__(self):
         if self._socket is not None:
+            try:
+                self._socket.close()
+            except Exception:
+                pass
+            self._socket = None
             logger.warning("_GMSRPCTransport not closed properly")

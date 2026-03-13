@@ -17,8 +17,8 @@ def fail(message: str, *args, exc_info=None) -> NoReturn:
     os._exit(1)
 
 
-def get_socket_path(device: int, scope: str = "weights") -> str:
-    """Get GMS socket path for the given CUDA device and scope.
+def get_socket_path(device: int, tag: str = "weights") -> str:
+    """Get GMS socket path for the given CUDA device and tag.
 
     The socket path is based on GPU UUID, making it stable across different
     CUDA_VISIBLE_DEVICES configurations.
@@ -38,4 +38,4 @@ def get_socket_path(device: int, scope: str = "weights") -> str:
         uuid = pynvml.nvmlDeviceGetUUID(handle)
     finally:
         pynvml.nvmlShutdown()
-    return os.path.join(tempfile.gettempdir(), f"gms_{uuid}_{scope}.sock")
+    return os.path.join(tempfile.gettempdir(), f"gms_{uuid}_{tag}.sock")

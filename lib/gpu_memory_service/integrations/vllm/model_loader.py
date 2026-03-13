@@ -70,7 +70,6 @@ def register_gms_loader(load_format: str = "gms") -> None:
                 get_socket_path(device, "weights"),
                 device,
                 mode=mode,
-                scope="weights",
                 tag="weights",
             )
 

@@ -185,6 +185,9 @@ class GMSClientMemoryManager:
             timeout_ms=timeout_ms,
         )
         self._granted_lock_type = self._client.lock_type
+        if self._granted_lock_type == GrantedLockType.RW:
+            self._last_memory_layout_hash = ""
+            return
         # Preserve the pre-unmap hash across reconnects so remap_all_vas can
         # detect that another epoch changed the committed layout while this
         # process was disconnected.
@@ -304,19 +307,8 @@ class GMSClientMemoryManager:
         assert self._granted_lock_type is not None
         aligned_size = align_to_granularity(size, self.granularity)
         handle = cumem_import_from_shareable_handle_close_fd(fd)
-        mapped = False
-        try:
-            cumem_map(va, aligned_size, handle)
-            mapped = True
-            cumem_set_access(va, aligned_size, self.device, self._granted_lock_type)
-        except Exception as e:
-            if mapped:
-                cumem_unmap(va, aligned_size)
-            cumem_release(handle)
-            raise RuntimeError(
-                f"map_va failed for allocation_id={allocation_id} "
-                f"va=0x{va:x} size={aligned_size}: {e}"
-            )
+        cumem_map(va, aligned_size, handle)
+        cumem_set_access(va, aligned_size, self.device, self._granted_lock_type)
         self._track_mapping(
             LocalMapping(
                 allocation_id=allocation_id,
@@ -394,42 +386,17 @@ class GMSClientMemoryManager:
 
             fd = self.export_handle(allocation_id)
             va = self.reserve_va(aligned_size)
-            try:
-                self.map_va(fd, va, alloc_size, allocation_id, alloc_tag)
-            except Exception as e:
-                cumem_address_free(
-                    va, align_to_granularity(aligned_size, self.granularity)
-                )
-                raise RuntimeError(
-                    f"create_mapping import path failed for allocation_id={allocation_id} "
-                    f"va=0x{va:x}: {e}"
-                )
+            self.map_va(fd, va, alloc_size, allocation_id, alloc_tag)
             return va
 
         # Allocate path
         if size <= 0:
             raise ValueError("size must be > 0 when allocation_id is None")
         alloc_id = self.allocate_handle(size, tag)
-        try:
-            fd = self.export_handle(alloc_id)
-            aligned_size = align_to_granularity(size, self.granularity)
-            va = self.reserve_va(aligned_size)
-            self.map_va(fd, va, size, alloc_id, tag)
-        except Exception as e:
-            if "va" in locals():
-                cumem_address_free(va, aligned_size)
-            cleanup_error = None
-            try:
-                self.free_handle(alloc_id)
-            except Exception as cleanup_exc:
-                cleanup_error = cleanup_exc
-            error = (
-                f"create_mapping allocate path failed for allocation_id={alloc_id} "
-                f"{f'va=0x{va:x}' if 'va' in locals() else 'va=<unreserved>'}: {e}"
-            )
-            if cleanup_error is not None:
-                error = f"{error}; cleanup failed: {cleanup_error}"
-            raise RuntimeError(error)
+        fd = self.export_handle(alloc_id)
+        aligned_size = align_to_granularity(size, self.granularity)
+        va = self.reserve_va(aligned_size)
+        self.map_va(fd, va, size, alloc_id, tag)
         return va
 
     def destroy_mapping(self, va: int) -> None:
@@ -490,63 +457,31 @@ class GMSClientMemoryManager:
 
         assert self._granted_lock_type is not None
 
-        imported_handles: list[int] = []
-        remap_plan: list[tuple[int, LocalMapping, int]] = []
-        try:
-            for va, mapping in list(self._mappings.items()):
-                if mapping.handle != 0:
-                    continue
-
-                alloc_info = self.get_handle_info(mapping.allocation_id)
-                if int(alloc_info.aligned_size) != mapping.aligned_size:
-                    raise StaleMemoryLayoutError(
-                        f"Allocation {mapping.allocation_id} size changed: "
-                        f"{mapping.aligned_size} vs {int(alloc_info.aligned_size)}"
-                    )
-
-                fd = self.export_handle(mapping.allocation_id)
-                handle = cumem_import_from_shareable_handle_close_fd(fd)
-                imported_handles.append(handle)
-                remap_plan.append((va, mapping, handle))
-        except Exception:
-            for handle in imported_handles:
-                cumem_release(handle)
-            raise
-
         remapped_count = 0
         total_bytes = 0
-        remapped: list[tuple[int, LocalMapping, int]] = []
-        current_index = -1
-        try:
-            for current_index, (va, mapping, handle) in enumerate(remap_plan):
-                mapped = False
-                try:
-                    cumem_map(va, mapping.aligned_size, handle)
-                    mapped = True
-                    cumem_set_access(
-                        va, mapping.aligned_size, self.device, self._granted_lock_type
-                    )
+        for va, mapping in list(self._mappings.items()):
+            if mapping.handle != 0:
+                continue
 
-                    cuda_synchronize()
-                    cuda_validate_pointer(va)
-                except Exception:
-                    if mapped:
-                        cumem_unmap(va, mapping.aligned_size)
-                    cumem_release(handle)
-                    raise
+            alloc_info = self.get_handle_info(mapping.allocation_id)
+            if int(alloc_info.aligned_size) != mapping.aligned_size:
+                raise StaleMemoryLayoutError(
+                    f"Allocation {mapping.allocation_id} size changed: "
+                    f"{mapping.aligned_size} vs {int(alloc_info.aligned_size)}"
+                )
 
-                self._mappings[va] = mapping.with_handle(handle)
-                remapped.append((va, mapping, handle))
-                remapped_count += 1
-                total_bytes += mapping.aligned_size
-        except Exception:
-            for va, mapping, handle in reversed(remapped):
-                cumem_unmap(va, mapping.aligned_size)
-                cumem_release(handle)
-                self._mappings[va] = mapping.with_handle(0)
-            for _, _, handle in remap_plan[current_index + 1 :]:
-                cumem_release(handle)
-            raise
+            fd = self.export_handle(mapping.allocation_id)
+            handle = cumem_import_from_shareable_handle_close_fd(fd)
+            cumem_map(va, mapping.aligned_size, handle)
+            cumem_set_access(
+                va, mapping.aligned_size, self.device, self._granted_lock_type
+            )
+            cuda_synchronize()
+            cuda_validate_pointer(va)
+
+            self._mappings[va] = mapping.with_handle(handle)
+            remapped_count += 1
+            total_bytes += mapping.aligned_size
 
         self._va_preserved = False
         self._unmapped = False
@@ -572,38 +507,20 @@ class GMSClientMemoryManager:
                 "reallocate_all_handles requires preserved VAs (call unmap_all_vas first)"
             )
 
-        reallocation_plan: list[tuple[int, LocalMapping, str]] = []
-        cleanup_failures: list[str] = []
-        try:
-            for va, mapping in list(self._mappings.items()):
-                if mapping.handle != 0:
-                    continue
-
-                allocation_id, server_aligned = self._client_rpc.allocate(
-                    mapping.aligned_size, tag
-                )
-                if int(server_aligned) != mapping.aligned_size:
-                    self.free_handle(allocation_id)
-                    raise RuntimeError(
-                        "GMS reallocation alignment mismatch: "
-                        f"{mapping.aligned_size} vs {server_aligned}"
-                    )
-                reallocation_plan.append((va, mapping, allocation_id))
-        except Exception as exc:
-            for _, _, allocation_id in reallocation_plan:
-                try:
-                    self.free_handle(allocation_id)
-                except Exception as cleanup_exc:
-                    cleanup_failures.append(f"{allocation_id}: {cleanup_exc}")
-            if cleanup_failures:
-                self.disconnect()
-                raise RuntimeError(
-                    f"{exc}; rollback failed for {cleanup_failures}; session closed"
-                ) from exc
-            raise
-
         reallocated = 0
-        for va, mapping, allocation_id in reallocation_plan:
+        for va, mapping in list(self._mappings.items()):
+            if mapping.handle != 0:
+                continue
+
+            allocation_id, server_aligned = self._client_rpc.allocate(
+                mapping.aligned_size, tag
+            )
+            if int(server_aligned) != mapping.aligned_size:
+                raise RuntimeError(
+                    "GMS reallocation alignment mismatch: "
+                    f"{mapping.aligned_size} vs {server_aligned}"
+                )
+
             old_alloc_id = mapping.allocation_id
             self._inverse_mapping.pop(old_alloc_id, None)
             self._mappings[va] = mapping.with_allocation_id(allocation_id)
@@ -631,6 +548,11 @@ class GMSClientMemoryManager:
         self.disconnect()
         self._unmapped = False
         self._va_preserved = False
+        from gpu_memory_service.client.torch.allocator import (
+            evict_gms_client_memory_manager,
+        )
+
+        evict_gms_client_memory_manager(self)
 
     def __enter__(self) -> "GMSClientMemoryManager":
         return self

@@ -84,6 +84,22 @@ def test_client_session_records_granted_lock_and_committed(monkeypatch):
     assert session.is_ready()
 
 
+def test_client_session_requires_granted_lock_type(monkeypatch):
+    closed = _patch_handshake(
+        monkeypatch,
+        response=HandshakeResponse(
+            success=True,
+            committed=False,
+            granted_lock_type=None,
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="granted_lock_type"):
+        _GMSClientSession("/tmp/gms-test.sock", RequestedLockType.RW_OR_RO, None)
+
+    assert closed["value"]
+
+
 def test_client_session_commit_marks_committed_and_closes_transport(monkeypatch):
     closed = _patch_handshake(
         monkeypatch,
