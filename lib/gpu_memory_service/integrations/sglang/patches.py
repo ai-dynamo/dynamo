@@ -11,7 +11,6 @@
 from __future__ import annotations
 
 import logging
-import os
 from typing import Optional
 
 import torch
@@ -47,15 +46,11 @@ def patch_torch_memory_saver() -> None:
         """Patched _ensure_initialized that uses GPU Memory Service implementation."""
         # Check if already initialized
         if self._impl is not None:
-            logger.info(
-                "[GMS] TorchMemorySaver already initialized (impl=%s), skipping",
-                type(self._impl).__name__,
-            )
+            logger.debug("[GMS] TorchMemorySaver already initialized, skipping")
             return
 
         # Check hook_mode - use GMS for None or explicit "gms"
         hook_mode = self._impl_ctor_kwargs.get("hook_mode")
-        logger.info(f"[GMS] TorchMemorySaver initializing with hook_mode={hook_mode}")
 
         if hook_mode is None or hook_mode == "gms":
             # Use our GPU Memory Service implementation
@@ -119,10 +114,9 @@ def patch_torch_memory_saver() -> None:
 
     singleton = torch_memory_saver.torch_memory_saver
     if singleton._impl is not None:
-        logger.info(
-            "[GMS] TorchMemorySaver singleton already initialized "
-            "(impl=%s), resetting to force GMS re-init on next use",
-            type(singleton._impl).__name__,
+        logger.debug(
+            "[GMS] TorchMemorySaver singleton already initialized, "
+            "resetting to force GMS re-init on next use"
         )
         singleton._impl = None
         # The original _ensure_initialized deletes _impl_ctor_kwargs after
@@ -213,27 +207,17 @@ def patch_static_state_for_gms() -> None:
         from sglang.srt.managers import scheduler_update_weights_mixin as _mixin
 
         def _export_noop(model):
-            num_buffers = sum(1 for _ in model.named_buffers())
-            logger.info(
-                "[GMS] _export_static_state NO-OP called (pid=%d, %d named buffers skipped)",
-                os.getpid(),
-                num_buffers,
-            )
+            """NO-OP: GMS preserves buffers via VA-stable unmap/remap."""
             return dict(buffers=[])
 
         def _import_noop(model, static_params):
-            logger.info(
-                "[GMS] _import_static_state NO-OP called (pid=%d)",
-                os.getpid(),
-            )
+            """NO-OP: GMS preserves buffers via VA-stable unmap/remap."""
+            pass
 
         _mixin._export_static_state = _export_noop
         _mixin._import_static_state = _import_noop
         _static_state_patched = True
-        logger.info(
-            "[GMS] Patched _export/_import_static_state -> no-op (pid=%d)",
-            os.getpid(),
-        )
+        logger.debug("[GMS] Patched _export/_import_static_state -> no-op")
     except ImportError:
         logger.warning(
             "[GMS] Could not import scheduler_update_weights_mixin, "
