@@ -14,9 +14,10 @@ repository.workspace = true
 default = []
 metrics = ["dep:dynamo-runtime"]
 bench = ["dep:clap", "dep:indicatif", "dep:serde_json", "dep:plotters"]
-standalone-indexer = ["metrics", "dep:axum", "dep:bytes", "dep:zeromq", "dep:serde_json", "dep:reqwest"]
-indexer-bin = ["standalone-indexer", "dep:clap"]
+standalone-indexer = ["dep:axum", "dep:bytes", "dep:zeromq", "dep:serde_json", "dep:reqwest"]
+indexer-bin = ["standalone-indexer", "dep:clap", "dep:tracing-subscriber"]
 test-endpoints = ["indexer-bin"]
+dynamo-runtime-mode = ["metrics", "standalone-indexer"]
 
 [dependencies]
 # repo
@@ -57,6 +58,7 @@ rustc-hash = "2.1.1"
 axum = { workspace = true, optional = true }
 bytes = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }
+tracing-subscriber = { workspace = true, optional = true }
 zeromq = { version = "0.4.1", optional = true }
 
 

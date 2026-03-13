@@ -13,8 +13,11 @@ use dynamo_kv_router::standalone_indexer::{
     server::{AppState, create_router},
 };
 
+#[cfg(feature = "dynamo-runtime-mode")]
 mod discovery;
+#[cfg(feature = "dynamo-runtime-mode")]
 mod query_engine;
+#[cfg(feature = "dynamo-runtime-mode")]
 mod subscriber;
 
 #[derive(Parser)]
@@ -51,18 +54,22 @@ struct Cli {
     /// Enable Dynamo runtime integration (discovery, event plane, request plane).
     /// When enabled, workers are discovered via MDC and events arrive via the event plane.
     /// Also enables router to configure a remote indexer via the request plane.
+    #[cfg(feature = "dynamo-runtime-mode")]
     #[arg(long)]
     dynamo_runtime: bool,
 
     /// Dynamo namespace to register the indexer component under
+    #[cfg(feature = "dynamo-runtime-mode")]
     #[arg(long, default_value = "default")]
     namespace: String,
 
     /// Component name for this indexer in the Dynamo runtime
+    #[cfg(feature = "dynamo-runtime-mode")]
     #[arg(long, default_value = "kv-indexer")]
     component_name: String,
 
     /// Component name that workers register under (for event plane subscription)
+    #[cfg(feature = "dynamo-runtime-mode")]
     #[arg(long, default_value = "backend")]
     worker_component: String,
 }
@@ -70,17 +77,18 @@ struct Cli {
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
+    #[cfg(feature = "dynamo-runtime-mode")]
     if cli.dynamo_runtime {
         // Full Dynamo runtime mode: discovery, event plane, request plane
         dynamo_runtime::logging::init();
         let worker = dynamo_runtime::Worker::from_settings()?;
-        worker.execute(move |runtime| app_with_runtime(runtime, cli))
-    } else {
-        // Standalone HTTP-only mode: no runtime dependencies
-        dynamo_runtime::logging::init();
-        let rt = tokio::runtime::Runtime::new()?;
-        rt.block_on(app_standalone(cli))
+        return worker.execute(move |runtime| app_with_runtime(runtime, cli));
     }
+
+    // Standalone HTTP-only mode: no runtime dependencies
+    tracing_subscriber::fmt::init();
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(app_standalone(cli))
 }
 
 async fn app_standalone(cli: Cli) -> anyhow::Result<()> {
@@ -109,6 +117,7 @@ async fn app_standalone(cli: Cli) -> anyhow::Result<()> {
     run_common(&cli, &registry, cancel_token).await
 }
 
+#[cfg(feature = "dynamo-runtime-mode")]
 async fn app_with_runtime(runtime: dynamo_runtime::Runtime, cli: Cli) -> anyhow::Result<()> {
     use dynamo_kv_router::indexer::{
         IndexerQueryRequest, IndexerQueryResponse, KV_INDEXER_QUERY_ENDPOINT,

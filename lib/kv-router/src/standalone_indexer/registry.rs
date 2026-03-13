@@ -51,6 +51,7 @@ pub struct WorkerRegistry {
     /// Saved listener state for pause/resume. Populated on register, kept on pause.
     listener_states: DashMap<(WorkerId, u32), ListenerState>,
     /// Workers added via MDC discovery (no ZMQ listener). Maps worker_id → indexer key.
+    #[cfg(feature = "dynamo-runtime-mode")]
     discovered_workers: DashMap<WorkerId, IndexerKey>,
     num_threads: usize,
     ready_tx: watch::Sender<bool>,
@@ -66,6 +67,7 @@ impl WorkerRegistry {
             peers: DashMap::new(),
             watermarks: DashMap::new(),
             listener_states: DashMap::new(),
+            #[cfg(feature = "dynamo-runtime-mode")]
             discovered_workers: DashMap::new(),
             num_threads,
             ready_tx,
@@ -105,6 +107,7 @@ impl WorkerRegistry {
         replay_endpoint: Option<String>,
     ) -> Result<()> {
         // Reject if this worker was already added via discovery
+        #[cfg(feature = "dynamo-runtime-mode")]
         if self.discovered_workers.contains_key(&instance_id) {
             bail!(
                 "instance {instance_id} is already registered via discovery; \
@@ -223,14 +226,13 @@ impl WorkerRegistry {
             tenant_id: tenant_id.to_string(),
         };
 
-        // Check ZMQ-registered workers first
+        // Check ZMQ-registered workers first, then discovery workers (if runtime mode)
         if let Some((_, entry)) = self.workers.remove(&instance_id) {
             super::metrics::dec_workers();
             for cancel in entry.cancels.values() {
                 cancel.cancel();
             }
-        } else if self.discovered_workers.remove(&instance_id).is_some() {
-            // Discovered worker — no ZMQ listeners to cancel
+        } else if self.remove_discovered_worker(instance_id) {
             super::metrics::dec_workers();
             tracing::info!(instance_id, "Deregistering discovered worker via HTTP");
         } else {
@@ -301,13 +303,13 @@ impl WorkerRegistry {
         instance_id: WorkerId,
         model_name: &str,
     ) -> Result<()> {
-        // Check ZMQ-registered workers first
+        // Check ZMQ-registered workers first, then discovery workers (if runtime mode)
         if let Some((_, entry)) = self.workers.remove(&instance_id) {
             super::metrics::dec_workers();
             for cancel in entry.cancels.values() {
                 cancel.cancel();
             }
-        } else if self.discovered_workers.remove(&instance_id).is_some() {
+        } else if self.remove_discovered_worker(instance_id) {
             super::metrics::dec_workers();
             tracing::info!(
                 instance_id,
@@ -401,6 +403,7 @@ impl WorkerRegistry {
     }
 
     pub fn list(&self) -> Vec<(WorkerId, HashMap<u32, String>)> {
+        #[allow(unused_mut)]
         let mut result: Vec<(WorkerId, HashMap<u32, String>)> = self
             .workers
             .iter()
@@ -408,6 +411,7 @@ impl WorkerRegistry {
             .collect();
 
         // Include discovered workers (no ZMQ endpoints)
+        #[cfg(feature = "dynamo-runtime-mode")]
         for entry in self.discovered_workers.iter() {
             let worker_id = *entry.key();
             // Skip if already in the workers map (shouldn't happen, but be safe)
@@ -462,12 +466,26 @@ impl WorkerRegistry {
             .collect()
     }
 
+    /// Helper: try to remove a worker from the discovered_workers map.
+    /// Returns false when the feature is disabled (no discovered workers exist).
+    fn remove_discovered_worker(&self, _instance_id: WorkerId) -> bool {
+        #[cfg(feature = "dynamo-runtime-mode")]
+        {
+            self.discovered_workers.remove(&_instance_id).is_some()
+        }
+        #[cfg(not(feature = "dynamo-runtime-mode"))]
+        {
+            false
+        }
+    }
+
     // ---------------------------------------------------------------
     // Discovery-based worker management (no ZMQ listener)
     // ---------------------------------------------------------------
 
     /// Register a worker discovered via MDC. Creates the indexer if needed but
     /// does NOT start a ZMQ listener — events arrive via the event plane.
+    #[cfg(feature = "dynamo-runtime-mode")]
     pub fn add_worker_from_discovery(
         &self,
         instance_id: WorkerId,
@@ -517,6 +535,7 @@ impl WorkerRegistry {
     }
 
     /// Remove a worker that was discovered via MDC.
+    #[cfg(feature = "dynamo-runtime-mode")]
     pub async fn remove_worker_from_discovery(&self, instance_id: WorkerId) {
         if let Some((_, key)) = self.discovered_workers.remove(&instance_id) {
             if let Some(ie) = self.indexers.get(&key) {
@@ -532,6 +551,7 @@ impl WorkerRegistry {
 
     /// Look up the indexer responsible for a given worker_id.
     /// Checks both discovery-registered and CLI-registered workers.
+    #[cfg(feature = "dynamo-runtime-mode")]
     pub fn get_indexer_for_worker(&self, worker_id: WorkerId) -> Option<Indexer> {
         // Check discovery workers first (more common in runtime mode)
         if let Some(key) = self.discovered_workers.get(&worker_id)
