@@ -5,11 +5,14 @@
 
 import pytest
 
-# Skip collection entirely if gpu_memory_service is not installed
+# Skip collection entirely if gpu_memory_service is not installed.
+# This package lives under nested common/ and integration/ subdirectories, so
+# we ignore those directories directly instead of only matching test files next
+# to this conftest.
 try:
     import gpu_memory_service  # noqa: F401
 except ImportError:
-    collect_ignore_glob = ["test_*.py"]
+    collect_ignore = ["common", "integration"]
 
 from tests.utils.port_utils import allocate_port, deallocate_ports
 
