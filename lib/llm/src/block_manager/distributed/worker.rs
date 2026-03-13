@@ -467,18 +467,37 @@ impl KvbmWorker {
                 )
             }
             LayoutType::LayerSeparate { outer_contiguous } => {
-                // Use the already-detected layout type from config (no re-detection needed)
                 let layout_type = config.device_layout_type;
+                let num_layers = device_tensors.len();
 
-                // Extract outer_dim based on the provided outer_contiguous value
-                let outer_dim = if outer_contiguous {
-                    shape[0] // Outer contiguous: [outer_dim, n_blocks, ...]
+                // Determine outer_dim from the tensor shape.
+                // outer_dim represents K/V separation: 1 = combined (MLA), 2 = separate K and V.
+                // Valid range is [1, 2]. If the candidate dimension exceeds 2, the tensor
+                // does not have an explicit outer_dim (e.g. MLA models produce 3D tensors
+                // shaped [n_blocks, page_size, latent_dim] with no K/V split).
+                let candidate = if outer_contiguous {
+                    shape[0]
                 } else {
-                    shape[1] // Block contiguous: [n_blocks, outer_dim, ...]
+                    shape[1]
                 };
 
-                let num_layers = device_tensors.len();
-                let inner_dim = shape[2..].iter().product::<usize>() / config.page_size;
+                let (outer_dim, inner_dim) = if candidate <= 2 {
+                    // Explicit outer_dim present in shape:
+                    //   outer_contiguous=true:  [outer_dim, n_blocks, page_size, inner_dim, ...]
+                    //   outer_contiguous=false: [n_blocks, outer_dim, page_size, inner_dim, ...]
+                    let inner_dim =
+                        shape[2..].iter().product::<usize>() / config.page_size;
+                    (candidate, inner_dim)
+                } else {
+                    // No explicit outer_dim — MLA-style combined K/V cache.
+                    // For MLA, K and V are fused into a single latent vector, so outer_dim=1.
+                    // The tensor shape is [n_blocks, page_size, latent_dim, ...] (when !outer_contiguous).
+                    // All dims after n_blocks contribute to page_size * inner_dim.
+                    let dims_start = if outer_contiguous { 2 } else { 1 };
+                    let inner_dim =
+                        shape[dims_start..].iter().product::<usize>() / config.page_size;
+                    (1, inner_dim)
+                };
 
                 tracing::info!(
                     "Inferred layout: num_layers={}, outer_dim={}, outer_contiguous={}, page_size={}, inner_dim={}",
