@@ -202,9 +202,7 @@ pub enum ConsolidatedEvent {
         dp_rank: Option<i32>,
     },
     /// All blocks cleared
-    ClearAll {
-        dp_rank: Option<i32>,
-    },
+    ClearAll { dp_rank: Option<i32> },
 }
 
 /// Cache Status Tracker
@@ -505,10 +503,15 @@ impl CacheStatusTracker {
     /// Handle a CLEAR_ALL event with a specific data parallel rank
     pub fn handle_clear_all_with_rank(&mut self, dp_rank: Option<i32>) {
         let num_blocks = self.blocks.len();
-        tracing::debug!("Clearing all {} blocks from tracker (dp_rank={:?})", num_blocks, dp_rank);
+        tracing::debug!(
+            "Clearing all {} blocks from tracker (dp_rank={:?})",
+            num_blocks,
+            dp_rank
+        );
         self.blocks.clear();
         self.hash_mapping.clear();
-        self.event_queue.push(ConsolidatedEvent::ClearAll { dp_rank });
+        self.event_queue
+            .push(ConsolidatedEvent::ClearAll { dp_rank });
     }
 
     /// Drain all pending events to be published

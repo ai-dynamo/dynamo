@@ -209,8 +209,7 @@ async fn perform_allocation_and_build_handler(
     // --- Additional cache groups (e.g. DSA indexer k cache) ---
     // block_set_idx starts at 3 (0=primary device, 1=primary host, 2=primary disk)
     let mut block_set_idx = 3;
-    for (name, additional_device_layout, mut additional_layout_builder) in
-        additional_device_layouts
+    for (name, additional_device_layout, mut additional_layout_builder) in additional_device_layouts
     {
         tracing::info!(
             "Building additional cache group '{}': num_layers={}, outer_dim={}, inner_dim={}, dtype_bytes={}",
@@ -271,11 +270,8 @@ async fn perform_allocation_and_build_handler(
         });
     }
 
-    let handler = BlockTransferHandler::new_multi(
-        cache_groups,
-        transfer_context,
-        scheduler_client,
-    )?;
+    let handler =
+        BlockTransferHandler::new_multi(cache_groups, transfer_context, scheduler_client)?;
     Ok(handler)
 }
 
@@ -654,8 +650,7 @@ impl KvbmWorker {
             // FullyContiguous layout: [num_blocks, num_layers, outer_dim, page_size * inner_dim]
             let add_num_layers = add_shape[1];
             let add_outer_dim = add_shape[2];
-            let add_inner_dim =
-                add_shape[3..].iter().product::<usize>() / config.page_size;
+            let add_inner_dim = add_shape[3..].iter().product::<usize>() / config.page_size;
 
             tracing::info!(
                 "Additional cache group '{}': num_layers={}, outer_dim={}, page_size={}, inner_dim={}, dtype_bytes={}",
@@ -950,9 +945,7 @@ impl KvbmWorker {
                 handler_cell: transfer_handler_cell.clone(),
                 handler_tx, // sends BlockTransferHandler to caller
                 started: AtomicBool::new(false),
-                additional_device_layouts: tokio::sync::Mutex::new(Some(
-                    additional_device_layouts,
-                )),
+                additional_device_layouts: tokio::sync::Mutex::new(Some(additional_device_layouts)),
             }) as Arc<dyn Handler>,
         );
 

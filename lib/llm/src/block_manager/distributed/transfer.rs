@@ -135,7 +135,10 @@ impl BlockTransferHandler {
         context: Arc<TransferContext>,
         scheduler_client: Option<TransferSchedulerClient>,
     ) -> Result<Self> {
-        assert!(!cache_groups.is_empty(), "At least one cache group required");
+        assert!(
+            !cache_groups.is_empty(),
+            "At least one cache group required"
+        );
 
         Ok(Self {
             cache_groups,

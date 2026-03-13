@@ -103,14 +103,17 @@ impl Event {
                     i32::MAX
                 });
 
-                Ok((Event::BlockStored {
-                    block_hashes: vec![parsed_hash],
-                    parent_block_hash: parsed_parent,
-                    token_ids: token_ids_i32,
-                    block_size: block_size_i32,
-                    lora_name,
-                    medium: None,
-                }, dp_rank))
+                Ok((
+                    Event::BlockStored {
+                        block_hashes: vec![parsed_hash],
+                        parent_block_hash: parsed_parent,
+                        token_ids: token_ids_i32,
+                        block_size: block_size_i32,
+                        lora_name,
+                        medium: None,
+                    },
+                    dp_rank,
+                ))
             }
             ConsolidatedEvent::Remove {
                 block_hash,
@@ -122,10 +125,13 @@ impl Event {
                     format!("Failed to parse block_hash for removal: {}", block_hash)
                 })?;
 
-                Ok((Event::BlockRemoved {
-                    block_hashes: vec![parsed_hash],
-                    medium: None, // Not provided by ConsolidatedEvent
-                }, dp_rank))
+                Ok((
+                    Event::BlockRemoved {
+                        block_hashes: vec![parsed_hash],
+                        medium: None, // Not provided by ConsolidatedEvent
+                    },
+                    dp_rank,
+                ))
             }
             ConsolidatedEvent::ClearAll { dp_rank } => Ok((Event::AllBlocksCleared {}, dp_rank)),
         }
