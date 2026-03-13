@@ -55,17 +55,17 @@ class TestInferType:
 
 class TestSetNested:
     def test_single_key(self):
-        d = {}
+        d: dict[str, object] = {}
         set_nested(d, ["key"], "value")
         assert d == {"key": "value"}
 
     def test_two_levels(self):
-        d = {}
+        d: dict[str, object] = {}
         set_nested(d, ["a", "b"], 42)
         assert d == {"a": {"b": 42}}
 
     def test_three_levels(self):
-        d = {}
+        d: dict[str, object] = {}
         set_nested(d, ["a", "b", "c"], True)
         assert d == {"a": {"b": {"c": True}}}
 
@@ -147,3 +147,8 @@ class TestParseDynamicFlags:
         """Keys are not transformed — hyphens, underscores, mixed case all pass through."""
         result = parse_dynamic_flags(["--trtllm.My-Key_name.SubKey", "42"])
         assert result == {"My-Key_name": {"SubKey": 42}}
+
+    def test_conflicting_path_exits(self):
+        """Scalar then nested path on same key should fail gracefully."""
+        with pytest.raises(SystemExit):
+            parse_dynamic_flags(["--trtllm.a", "1", "--trtllm.a.b", "2"])

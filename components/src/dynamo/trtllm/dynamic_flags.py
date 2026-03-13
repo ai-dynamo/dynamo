@@ -34,11 +34,22 @@ def infer_type(value: str) -> Any:
     return value
 
 
-def set_nested(d: dict, keys: List[str], value: Any) -> None:
+def set_nested(d: Dict[str, Any], keys: List[str], value: Any) -> None:
     """Set a value in a nested dict, creating intermediate dicts as needed."""
+    current: Dict[str, Any] = d
     for key in keys[:-1]:
-        d = d.setdefault(key, {})
-    d[keys[-1]] = value
+        existing = current.get(key)
+        if existing is None:
+            current[key] = {}
+            current = current[key]
+        elif not isinstance(existing, dict):
+            raise ValueError(
+                f"Conflicting dynamic flag path: key '{key}' is already set "
+                f"to a {type(existing).__name__} value"
+            )
+        else:
+            current = existing
+    current[keys[-1]] = value
 
 
 def parse_dynamic_flags(remaining: List[str]) -> dict:
@@ -67,7 +78,11 @@ def parse_dynamic_flags(remaining: List[str]) -> dict:
             sys.exit(1)
 
         value = infer_type(remaining[i])
-        set_nested(result, keys, value)
+        try:
+            set_nested(result, keys, value)
+        except ValueError as e:
+            logging.error("%s", e)
+            sys.exit(1)
         i += 1
 
     return result
