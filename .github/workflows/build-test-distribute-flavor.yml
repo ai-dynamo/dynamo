@@ -475,7 +475,6 @@ jobs:
           framework: ${{ inputs.framework }}
           test_type: "pre_merge_cpu"
           platform_arch: ${{ inputs.platform }}
-          enable_mypy: 'false' # mypy runs in dedicated step above
           hf_token: ${{ secrets.HF_TOKEN }}
           parallel_mode: 'auto'
           dind_as_sidecar: 'true'
@@ -492,7 +491,6 @@ jobs:
           framework: ${{ inputs.framework }}
           test_type: "pre_merge_gpu"
           platform_arch: ${{ inputs.platform }}
-          enable_mypy: 'false' # already covered by CPU tests
           hf_token: ${{ secrets.HF_TOKEN }}
           parallel_mode: 'none'
           dind_as_sidecar: 'true'
@@ -556,7 +554,6 @@ jobs:
           framework: ${{ inputs.framework }}
           test_type: "pre_merge_gpu"
           platform_arch: ${{ inputs.platform }}
-          enable_mypy: 'false' # already covered by CPU tests
           hf_token: ${{ secrets.HF_TOKEN }}
           parallel_mode: 'none'
           dind_as_sidecar: 'true'
