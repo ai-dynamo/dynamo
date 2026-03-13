@@ -156,9 +156,7 @@ def _is_model_cached(model_id: str) -> bool:
             f"revision={revision}, snapshot={snapshot_dir}"
         )
         return True
-    logging.debug(
-        f"Cache miss for {model_id}: snapshot dir {snapshot_dir} not found"
-    )
+    logging.debug(f"Cache miss for {model_id}: snapshot dir {snapshot_dir} not found")
     return False
 
 
