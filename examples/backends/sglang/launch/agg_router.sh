@@ -5,14 +5,11 @@
 # Two aggregated workers behind a KV-aware router.
 # GPUs: 2
 
-# Setup cleanup trap
-cleanup() {
-    echo "Cleaning up background processes..."
-    kill $DYNAMO_PID $WORKER_PID 2>/dev/null || true
-    wait $DYNAMO_PID $WORKER_PID 2>/dev/null || true
-    echo "Cleanup complete."
-}
-trap cleanup EXIT INT TERM
+set -e
+trap 'echo Cleaning up...; kill 0' EXIT
+
+SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
 # Parse command line arguments
 ENABLE_OTEL=false
@@ -56,24 +53,7 @@ fi
 
 MODEL="Qwen/Qwen3-0.6B"
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
-echo "=========================================="
-echo "Launching Aggregated Router (2 workers)"
-echo "=========================================="
-echo "Model:       $MODEL"
-echo "Frontend:    http://localhost:$HTTP_PORT"
-echo "=========================================="
-echo ""
-echo "Example test command:"
-echo ""
-echo "  curl http://localhost:${HTTP_PORT}/v1/chat/completions \\"
-echo "    -H 'Content-Type: application/json' \\"
-echo "    -d '{"
-echo "      \"model\": \"${MODEL}\","
-echo "      \"messages\": [{\"role\": \"user\", \"content\": \"Hello!\"}],"
-echo "      \"max_tokens\": 32"
-echo "    }'"
-echo ""
-echo "=========================================="
+print_launch_banner "Launching Aggregated + KV Routing (2 GPUs)" "$MODEL" "$HTTP_PORT"
 
 # run ingress
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
@@ -83,7 +63,6 @@ if [ "$APPROX_MODE" = true ]; then
 fi
 OTEL_SERVICE_NAME=dynamo-frontend \
 python3 -m dynamo.frontend "${FRONTEND_ARGS[@]}" &
-DYNAMO_PID=$!
 
 # run worker
 # Build KV events args conditionally (only when not in approx mode)
@@ -104,7 +83,6 @@ python3 -m dynamo.sglang \
   "${KV_EVENTS_ARGS_1[@]}" \
   --enable-metrics \
   "${TRACE_ARGS[@]}" &
-WORKER_PID=$!
 
 OTEL_SERVICE_NAME=dynamo-worker-2 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT_WORKER2:-8082} \
 CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.sglang \
@@ -115,4 +93,7 @@ CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.sglang \
   --trust-remote-code \
   "${KV_EVENTS_ARGS_2[@]}" \
   --enable-metrics \
-  "${TRACE_ARGS[@]}"
+  "${TRACE_ARGS[@]}" &
+
+# Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
+wait_any_exit

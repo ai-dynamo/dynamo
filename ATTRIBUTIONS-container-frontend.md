@@ -10095,7 +10095,7 @@ END OF TERMS AND CONDITIONS
 ```
 
 
-## go.opentelemetry.io/otel/sdk (v1.35.0)
+## go.opentelemetry.io/otel/sdk (v1.40.0)
 **License Type(s)**: Apache-2.0
 ### License: Apache-2.0
 ```

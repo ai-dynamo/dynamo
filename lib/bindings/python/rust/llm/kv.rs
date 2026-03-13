@@ -27,26 +27,6 @@ fn depythonize_block_mm_infos(obj: &Bound<'_, PyAny>) -> PyResult<Vec<Option<Blo
 }
 
 #[pyfunction]
-#[pyo3(name = "start_kv_block_indexer", signature = (endpoint, block_size, kv_router_config))]
-pub fn start_kv_block_indexer_py<'p>(
-    py: Python<'p>,
-    endpoint: &Endpoint,
-    block_size: u32,
-    kv_router_config: &super::entrypoint::KvRouterConfig,
-) -> PyResult<Bound<'p, PyAny>> {
-    let component = endpoint.inner.component().clone();
-    let config = kv_router_config.inner();
-    pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        llm_rs::kv_router::indexer_standalone::start_kv_block_indexer(
-            &component, &config, block_size,
-        )
-        .await
-        .map_err(to_pyerr)?;
-        Ok(())
-    })
-}
-
-#[pyfunction]
 #[pyo3(name = "compute_block_hash_for_seq", signature = (tokens, kv_block_size, block_mm_infos=None, lora_name=None))]
 pub fn compute_block_hash_for_seq_py(
     _py: Python,
@@ -132,8 +112,27 @@ pub(crate) struct KvEventPublisher {
 
 #[pymethods]
 impl KvEventPublisher {
+    /// Create a KV event publisher that batches raw engine events before forwarding
+    /// them to NATS / the event plane.
+    ///
+    /// Args:
+    ///     endpoint: The Dynamo component endpoint for this worker.
+    ///     worker_id: Identifier of this worker (default 0).
+    ///     kv_block_size: KV cache block size in tokens; must be > 0.
+    ///     dp_rank: Data-parallel rank of this worker (default 0).
+    ///     enable_local_indexer: When True, a local KV indexer is kept in-process
+    ///         so that routers can recover events directly from this worker.
+    ///     zmq_endpoint: Optional ZMQ SUB endpoint to read raw engine events from.
+    ///     zmq_topic: ZMQ topic filter (default "").
+    ///     batching_timeout_ms: Maximum time (in **milliseconds**) to accumulate
+    ///         events into a single batch before flushing.
+    ///         ``None`` disables batching: every event is published immediately.
+    ///         ``50`` to enable batching with a 50 ms window.
+    ///         ``0`` is treated as ``None`` (also disables batching).
+    ///         Maximum allowed is 15_000 (15 seconds); larger values are capped.
     #[new]
-    #[pyo3(signature = (endpoint, worker_id=0, kv_block_size=0, dp_rank=0, enable_local_indexer=false, zmq_endpoint=None, zmq_topic=None))]
+    #[pyo3(signature = (endpoint, worker_id=0, kv_block_size=0, dp_rank=0, enable_local_indexer=false, zmq_endpoint=None, zmq_topic=None, batching_timeout_ms=llm_rs::kv_router::publisher::DEFAULT_BATCHING_TIMEOUT_MS))]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         endpoint: Endpoint,
         worker_id: WorkerId,
@@ -142,6 +141,7 @@ impl KvEventPublisher {
         enable_local_indexer: bool,
         zmq_endpoint: Option<String>,
         zmq_topic: Option<String>,
+        batching_timeout_ms: Option<u64>,
     ) -> PyResult<Self> {
         let _ = worker_id;
 
@@ -163,6 +163,7 @@ impl KvEventPublisher {
             source_config,
             enable_local_indexer,
             dp_rank,
+            batching_timeout_ms,
         )
         .map_err(to_pyerr)?;
 
@@ -919,6 +920,7 @@ impl KvRouter {
                     update_states,
                     lora_name,
                     0.0,
+                    None,
                     None, // allowed_worker_ids: pass via RoutingHints in PreprocessedRequest path
                 )
                 .await

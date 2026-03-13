@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+pub use dynamo_kv_router::scheduling::policy::RouterSchedulingPolicy;
 pub use dynamo_kv_router::scheduling::{
     KvSchedulerError, PotentialLoad, SchedulingRequest, SchedulingResponse,
 };
@@ -9,6 +10,7 @@ pub use dynamo_kv_router::selector::DefaultWorkerSelector;
 use super::KvRouterConfig;
 use super::RouterConfigOverride;
 use super::WorkerSelector;
+use super::metrics::ROUTER_QUEUE_METRICS;
 use super::protocols::{OverlapScores, WorkerId};
 use super::queue::SchedulerQueue;
 use super::sequence::{
@@ -42,7 +44,7 @@ impl KvScheduler {
         kv_router_config: &KvRouterConfig,
         worker_type: &'static str,
     ) -> Result<Self, KvSchedulerError> {
-        let selector = selector.unwrap_or(Box::new(DefaultWorkerSelector::default()));
+        let selector = selector.unwrap_or(Box::new(DefaultWorkerSelector::new(None, worker_type)));
 
         // Get initial workers from watch receiver.
         // Caller must ensure at least one worker is present (via wait_for).
@@ -86,11 +88,11 @@ impl KvScheduler {
                 let current_workers = monitor_rx.borrow_and_update().clone();
 
                 if current_workers != last_workers {
-                    let dp_sizes: HashMap<u64, u32> = current_workers
+                    let dp_range: HashMap<u64, (u32, u32)> = current_workers
                         .iter()
-                        .map(|(&id, c)| (id, c.data_parallel_size))
+                        .map(|(&id, c)| (id, (c.data_parallel_start_rank, c.data_parallel_size)))
                         .collect();
-                    slots_monitor.update_workers(&dp_sizes);
+                    slots_monitor.update_workers(&dp_range);
                     last_workers = current_workers;
                 }
             }
@@ -99,12 +101,20 @@ impl KvScheduler {
         let (request_tx, request_rx) = tokio::sync::mpsc::channel::<SchedulingRequest>(1024);
         let scheduler_cancel_token = component.drt().primary_token();
 
+        let policy =
+            RouterSchedulingPolicy::new(kv_router_config.router_queue_policy, block_size as usize);
+        tracing::info!(
+            "Router queue policy: {}",
+            kv_router_config.router_queue_policy
+        );
+
         let queue = Arc::new(SchedulerQueue::new(
             slots.clone(),
             workers_with_configs.clone(),
             kv_router_config.router_queue_threshold,
             block_size,
             selector,
+            policy,
         ));
         let queue_clone = queue.clone();
 
@@ -127,9 +137,11 @@ impl KvScheduler {
                         };
                         tracing::trace!("received request to be scheduled");
                         queue_clone.enqueue(request).await;
+                        ROUTER_QUEUE_METRICS.set_pending(worker_type, queue_clone.pending_count());
                     }
                     _ = recheck_interval.tick() => {
                         queue_clone.update().await;
+                        ROUTER_QUEUE_METRICS.set_pending(worker_type, queue_clone.pending_count());
                     }
                 }
             }
@@ -144,7 +156,7 @@ impl KvScheduler {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub async fn schedule(
         &self,
         maybe_request_id: Option<String>,
@@ -155,6 +167,7 @@ impl KvScheduler {
         update_states: bool,
         lora_name: Option<String>,
         priority_jump: f64,
+        expected_output_tokens: Option<u32>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
     ) -> Result<SchedulingResponse, KvSchedulerError> {
         #[cfg(feature = "bench")]
@@ -172,6 +185,7 @@ impl KvScheduler {
             update_states,
             lora_name,
             priority_jump,
+            expected_output_tokens,
             allowed_worker_ids,
             resp_tx: Some(resp_tx),
         };
@@ -210,13 +224,20 @@ impl KvScheduler {
             .mark_prefill_completed(&request_id.to_string())
             .await?;
         self.queue.update().await;
+        ROUTER_QUEUE_METRICS.set_pending(self.worker_type(), self.queue.pending_count());
         Ok(())
     }
 
     pub async fn free(&self, request_id: &str) -> Result<(), SequenceError> {
         self.slots.free(&request_id.to_string()).await?;
         self.queue.update().await;
+        ROUTER_QUEUE_METRICS.set_pending(self.worker_type(), self.queue.pending_count());
         Ok(())
+    }
+
+    /// Number of requests currently parked in the scheduler queue.
+    pub fn pending_count(&self) -> usize {
+        self.queue.pending_count()
     }
 
     /// Get the worker type for this scheduler ("prefill" or "decode").

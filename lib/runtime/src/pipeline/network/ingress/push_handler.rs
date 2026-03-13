@@ -252,7 +252,7 @@ where
                 }
                 #[cfg(not(debug_assertions))]
                 {
-                    tracing::error!("Failed to generate response stream: {}", error_string);
+                    tracing::error!("Failed to generate response stream: {error_string}");
                 }
 
                 let _result = publisher.send_prologue(Some(error_string)).await;

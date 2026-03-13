@@ -2,13 +2,16 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
+from typing import Any, Dict, Tuple
 
 from sglang.srt.parser.conversation import chat_templates
 
 logger = logging.getLogger(__name__)
 
 
-def multimodal_request_to_sglang(raw_request, tokenizer, chat_template):
+def multimodal_request_to_sglang(
+    raw_request: Any, tokenizer: Any, chat_template: str
+) -> Dict[str, Any]:
     conv = chat_templates[chat_template].copy()
     conv.messages = []
 
@@ -48,7 +51,7 @@ def multimodal_request_to_sglang(raw_request, tokenizer, chat_template):
     return sglang_request
 
 
-def detokenize_sglang_response(response_data, tokenizer):
+def detokenize_sglang_response(response_data: Any, tokenizer: Any) -> str:
     """
     Detokenize SGLang response token IDs to text.
 
@@ -106,7 +109,9 @@ def detokenize_sglang_response(response_data, tokenizer):
         return f"[Detokenization error: {e}]"
 
 
-def process_sglang_stream_response(response_data, tokenizer, accumulated_text=""):
+def process_sglang_stream_response(
+    response_data: Any, tokenizer: Any, accumulated_text: str = ""
+) -> Tuple[str, str, bool]:
     """
     Process a single SGLang streaming response with efficient detokenization.
 

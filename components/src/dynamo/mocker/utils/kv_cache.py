@@ -2,6 +2,7 @@
 #  SPDX-License-Identifier: Apache-2.0
 
 import logging
+from typing import Any
 
 from transformers import AutoConfig
 
@@ -43,7 +44,7 @@ def _normalize_dtype_str(dtype) -> str:
     return s
 
 
-def get_kv_cache_dtype_bytes(config, kv_cache_dtype: str = "auto") -> int:
+def get_kv_cache_dtype_bytes(config: Any, kv_cache_dtype: str = "auto") -> int:
     """Get the byte size per element for KV cache based on dtype.
 
     When kv_cache_dtype is "auto", uses the model's dtype from config.

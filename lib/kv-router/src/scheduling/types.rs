@@ -47,6 +47,9 @@ pub struct SchedulingRequest {
     pub lora_name: Option<String>,
     /// Priority jump in seconds; decreases effective arrival time in the queue.
     pub priority_jump: f64,
+    /// Expected output tokens from agent_hints.osl, forwarded to the slot tracker
+    /// for output block decay estimation.
+    pub expected_output_tokens: Option<u32>,
     /// Optional set of allowed worker IDs to restrict routing decisions (EPP).
     pub allowed_worker_ids: Option<HashSet<WorkerId>>,
     pub resp_tx: Option<tokio::sync::oneshot::Sender<Result<SchedulingResponse, KvSchedulerError>>>,

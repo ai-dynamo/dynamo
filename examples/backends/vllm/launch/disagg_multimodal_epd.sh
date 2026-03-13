@@ -4,6 +4,9 @@
 set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
+SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+source "$SCRIPT_DIR/../../../common/launch_utils.sh"
+
 # Default values
 MODEL_NAME="llava-hf/llava-1.5-7b-hf"
 
@@ -56,11 +59,13 @@ while [[ $# -gt 0 ]]; do
 done
 
 
-echo "=================================================="
-echo "Disaggregated Multimodal Serving (E + P + D)"
-echo "=================================================="
-echo "Model: $MODEL_NAME"
-echo "=================================================="
+HTTP_PORT="${DYN_HTTP_PORT:-8000}"
+if [[ "$SINGLE_GPU" == "true" ]]; then
+    GPU_LABEL="1 GPU"
+else
+    GPU_LABEL="3 GPUs"
+fi
+print_launch_banner --multimodal "Launching Disaggregated Multimodal E/P/D ($GPU_LABEL)" "$MODEL_NAME" "$HTTP_PORT"
 
 
 # Start frontend (no router mode)
@@ -110,5 +115,5 @@ echo "=================================================="
 echo "All components started. Waiting for initialization..."
 echo "=================================================="
 
-# Wait for all background processes to complete
-wait
+# Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
+wait_any_exit

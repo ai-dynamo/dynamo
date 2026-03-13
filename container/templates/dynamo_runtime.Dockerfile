@@ -9,7 +9,6 @@
 
 FROM dynamo_base AS runtime
 
-ARG ARCH_ALT
 ARG PYTHON_VERSION
 
 # Create dynamo user with group 0 for OpenShift compatibility
@@ -26,8 +25,8 @@ RUN userdel -r ubuntu > /dev/null 2>&1 || true \
 
 # NIXL environment variables
 ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl \
-    NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu \
-    NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu/plugins \
+    NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib64 \
+    NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib64/plugins \
     CARGO_TARGET_DIR=/opt/dynamo/target
 
 ENV LD_LIBRARY_PATH=\
@@ -40,7 +39,6 @@ ${LD_LIBRARY_PATH}
 # Copy ucx and nixl libs
 COPY --chown=dynamo: --from=wheel_builder /usr/local/ucx/ /usr/local/ucx/
 COPY --chown=dynamo: --from=wheel_builder ${NIXL_PREFIX}/ ${NIXL_PREFIX}/
-COPY --chown=dynamo: --from=wheel_builder /opt/nvidia/nvda_nixl/lib64/. ${NIXL_LIB_DIR}/
 COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
 COPY --chown=dynamo: --from=wheel_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
 
@@ -52,15 +50,19 @@ RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/loca
     cp -nL /tmp/usr/local/lib/pkgconfig/libav*.pc /tmp/usr/local/lib/pkgconfig/libsw*.pc /usr/local/lib/pkgconfig/ && \
     cp -r /tmp/usr/local/src/ffmpeg /usr/local/src/
 
-# Copy built artifacts
+{% if target not in ("dev", "local-dev") %}
+# Copy built artifacts (not needed for dev/local-dev; users build from source)
 COPY --chown=dynamo: --from=wheel_builder $CARGO_TARGET_DIR $CARGO_TARGET_DIR
+{% endif %}
 COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
 
 # Install Python for framework=none runtime (cuda-dl-base doesn't include Python)
 # This is needed to create venv and install dynamo packages
 ARG PYTHON_VERSION
 # Cache apt downloads; sharing=locked avoids apt/dpkg races with concurrent builds.
+# Clear partial downloads first to avoid stale rename failures from prior interrupted builds.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    rm -rf /var/cache/apt/archives/partial/* && \
     apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         python${PYTHON_VERSION}-dev \
@@ -74,7 +76,6 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         patchelf \
         git \
         git-lfs && \
-    apt-get clean && \
     rm -rf /var/lib/apt/lists/* && \
     ln -sf /usr/bin/python${PYTHON_VERSION} /usr/bin/python3
 
@@ -93,24 +94,16 @@ RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
 ENV VIRTUAL_ENV=/opt/dynamo/venv \
     PATH="/opt/dynamo/venv/bin:${PATH}"
 
+{% if target not in ("dev", "local-dev") %}
 # Install dynamo wheels (runtime packages only, no test dependencies)
 # uv handles its own locking for the cache, no need to add sharing=locked
 ARG ENABLE_KVBM
-ARG ENABLE_GPU_MEMORY_SERVICE
 RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
     uv pip install \
     /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
     /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
     /opt/dynamo/wheelhouse/nixl/nixl*.whl && \
-    if [ "$ENABLE_GPU_MEMORY_SERVICE" = "true" ]; then \
-        GMS_WHEEL=$(ls /opt/dynamo/wheelhouse/gpu_memory_service*.whl 2>/dev/null | head -1); \
-        if [ -z "$GMS_WHEEL" ]; then \
-            echo "ERROR: ENABLE_GPU_MEMORY_SERVICE is true but no gpu_memory_service wheel found in wheelhouse" >&2; \
-            exit 1; \
-        fi; \
-        uv pip install "$GMS_WHEEL"; \
-    fi && \
     if [ "$ENABLE_KVBM" = "true" ]; then \
         KVBM_WHEEL=$(ls /opt/dynamo/wheelhouse/kvbm*.whl 2>/dev/null | head -1); \
         if [ -z "$KVBM_WHEEL" ]; then \
@@ -119,21 +112,43 @@ RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
         fi; \
         uv pip install "$KVBM_WHEEL"; \
     fi
+{% else %}
+# Dev/local-dev: skip dynamo wheel install (users build from source via cargo build + maturin develop).
+# Install NIXL wheel only (pre-built C++ binary, not buildable from source).
+RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
+    export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
+    uv pip install /opt/dynamo/wheelhouse/nixl/nixl*.whl
+{% endif %}
+
+# Install gpu_memory_service wheel if enabled (all targets)
+ARG ENABLE_GPU_MEMORY_SERVICE
+RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
+    if [ "${ENABLE_GPU_MEMORY_SERVICE}" = "true" ]; then \
+        export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
+        GMS_WHEEL=$(ls /opt/dynamo/wheelhouse/gpu_memory_service*.whl 2>/dev/null | head -1); \
+        if [ -n "$GMS_WHEEL" ]; then uv pip install "$GMS_WHEEL"; fi; \
+    fi
 
 # Initialize Git LFS (required for git+https dependencies with LFS artifacts)
 RUN git lfs install
 
-# Install test and common dependencies
-RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
-    --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
+# Install runtime dependencies (common + planner + frontend).
+# Frontend deps (tritonclient + grpcio/protobuf pins) are installed here so the resolver
+# sees all constraints in one pass, avoiding grpcio downgrades in the test layer.
+# Test and dev dependencies are NOT installed here — they go in the test and dev images.
+RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tmp/requirements.common.txt \
+    --mount=type=bind,source=./container/deps/requirements.planner.txt,target=/tmp/requirements.planner.txt \
+    --mount=type=bind,source=./container/deps/requirements.frontend.txt,target=/tmp/requirements.frontend.txt \
     --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     uv pip install \
         --index-strategy unsafe-best-match \
         --extra-index-url https://download.pytorch.org/whl/cu130 \
-        --requirement /tmp/requirements.txt \
-        --requirement /tmp/requirements.test.txt
+        --requirement /tmp/requirements.common.txt \
+        --requirement /tmp/requirements.planner.txt \
+        --requirement /tmp/requirements.frontend.txt
 
+# TODO: skip /workspace COPY for dev/local-dev (bind-mounted from host, gets shadowed)
 # Copy workspace source code
 ARG WORKSPACE_DIR=/workspace
 WORKDIR ${WORKSPACE_DIR}

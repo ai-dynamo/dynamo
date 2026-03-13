@@ -22,6 +22,8 @@ import (
 	"testing"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
@@ -248,6 +250,54 @@ func TestSharedSpecValidator_Validate(t *testing.T) {
 			calculatedNamespace: "default-my-dgd",
 			wantErr:             true,
 			errMsg:              `spec.services[decode].annotations[nvidia.com/vllm-distributed-executor-backend] has invalid value "invalid": must be "mp" or "ray"`,
+		},
+		{
+			name: "frontendSidecar with no extraPodSpec containers is valid",
+			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				FrontendSidecar: &nvidiacomv1alpha1.FrontendSidecarSpec{
+					Image: "my-frontend:latest",
+				},
+			},
+			fieldPath:           "spec.services[worker]",
+			calculatedNamespace: "default-my-dgd",
+			wantErr:             false,
+		},
+		{
+			name: "frontendSidecar rejects duplicate container name in extraPodSpec",
+			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				FrontendSidecar: &nvidiacomv1alpha1.FrontendSidecarSpec{
+					Image: "my-frontend:latest",
+				},
+				ExtraPodSpec: &nvidiacomv1alpha1.ExtraPodSpec{
+					PodSpec: &corev1.PodSpec{
+						Containers: []corev1.Container{
+							{Name: consts.FrontendSidecarContainerName, Image: "conflict:latest"},
+						},
+					},
+				},
+			},
+			fieldPath:           "spec.services[worker]",
+			calculatedNamespace: "default-my-dgd",
+			wantErr:             true,
+			errMsg:              `spec.services[worker]: cannot inject frontend sidecar: a container named "sidecar-frontend" already exists in extraPodSpec.containers`,
+		},
+		{
+			name: "frontendSidecar with non-conflicting extraPodSpec containers is valid",
+			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				FrontendSidecar: &nvidiacomv1alpha1.FrontendSidecarSpec{
+					Image: "my-frontend:latest",
+				},
+				ExtraPodSpec: &nvidiacomv1alpha1.ExtraPodSpec{
+					PodSpec: &corev1.PodSpec{
+						Containers: []corev1.Container{
+							{Name: "other-sidecar", Image: "other:latest"},
+						},
+					},
+				},
+			},
+			fieldPath:           "spec.services[worker]",
+			calculatedNamespace: "default-my-dgd",
+			wantErr:             false,
 		},
 	}
 

@@ -155,7 +155,7 @@ impl Worker {
 
             tokio::select! {
                 _ = cancel_token.cancelled() => {
-                    tracing::debug!("{}", SHUTDOWN_MESSAGE);
+                    tracing::debug!("{SHUTDOWN_MESSAGE}");
                     tracing::debug!("{} {} seconds", SHUTDOWN_TIMEOUT_MESSAGE, timeout);
                 }
 

@@ -18,7 +18,9 @@ use super::metrics;
 use super::metrics::register_worker_timing_metrics;
 use crate::discovery::ModelManager;
 use crate::endpoint_type::EndpointType;
-use crate::kv_router::metrics::{RoutingOverheadMetrics, register_worker_load_metrics};
+use crate::kv_router::metrics::{
+    RoutingOverheadMetrics, register_router_queue_metrics, register_worker_load_metrics,
+};
 use crate::request_template::RequestTemplate;
 use anyhow::Result;
 use axum_server::tls_rustls::RustlsConfig;
@@ -151,6 +153,26 @@ impl State {
     // TODO
     pub fn sse_keep_alive(&self) -> Option<Duration> {
         None
+    }
+
+    /// Returns true if streaming tool call dispatch is enabled via
+    /// [`env_llm::DYN_ENABLE_STREAMING_TOOL_DISPATCH`].
+    ///
+    /// When enabled, the chat completions streaming path emits `event: tool_call_dispatch`
+    /// SSE events for each complete tool call, letting clients start processing tool calls
+    /// before `finish_reason="tool_calls"` arrives.
+    pub fn streaming_tool_dispatch_enabled(&self) -> bool {
+        env_is_truthy(env_llm::DYN_ENABLE_STREAMING_TOOL_DISPATCH)
+    }
+
+    /// Returns true if streaming reasoning dispatch is enabled via
+    /// [`env_llm::DYN_ENABLE_STREAMING_REASONING_DISPATCH`].
+    ///
+    /// When enabled, the chat completions streaming path accumulates reasoning tokens and
+    /// emits a single `event: reasoning_dispatch` SSE event with the complete reasoning
+    /// block once thinking ends (DeepSeek-R1, Qwen3, etc.).
+    pub fn streaming_reasoning_dispatch_enabled(&self) -> bool {
+        env_is_truthy(env_llm::DYN_ENABLE_STREAMING_REASONING_DISPATCH)
     }
 }
 
@@ -424,6 +446,12 @@ impl HttpServiceConfigBuilder {
         // These are updated by ResponseMetricCollector when observing TTFT/ITL
         if let Err(e) = register_worker_timing_metrics(&registry) {
             tracing::warn!("Failed to register worker timing metrics: {}", e);
+        }
+
+        // Register router queue metrics (pending requests per worker_type)
+        // These are updated by KvScheduler on enqueue/update/free
+        if let Err(e) = register_router_queue_metrics(&registry) {
+            tracing::warn!("Failed to register router queue metrics: {}", e);
         }
 
         if let Some(ref discovery) = config.drt_discovery {

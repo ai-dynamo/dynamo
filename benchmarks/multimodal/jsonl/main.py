@@ -46,12 +46,11 @@ def main() -> None:
         )
     slot_refs = sample_slots(py_rng, pool, num_requests, images_per_request)
 
-    unique_images = len(set(slot_refs))
     output_path = args.output
     if output_path is None:
         output_path = (
             Path(__file__).parent
-            / f"{num_requests}req_{images_per_request}img_{unique_images}pool_{args.user_text_tokens}word_{args.image_mode}.jsonl"
+            / f"{num_requests}req_{images_per_request}img_{image_pool}pool_{args.user_text_tokens}word_{args.image_mode}.jsonl"
         )
 
     with open(output_path, "w") as f:

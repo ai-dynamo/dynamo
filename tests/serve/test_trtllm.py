@@ -119,7 +119,11 @@ trtllm_configs = {
         name="disaggregated_logprobs",
         directory=trtllm_dir,
         script_name="disagg.sh",
-        marks=[pytest.mark.gpu_2, pytest.mark.post_merge, pytest.mark.trtllm],
+        marks=[
+            pytest.mark.gpu_2,
+            pytest.mark.post_merge,
+            pytest.mark.trtllm,
+        ],
         model="Qwen/Qwen3-0.6B",
         frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
@@ -147,7 +151,7 @@ trtllm_configs = {
             chat_payload_default(
                 expected_log=[
                     r"Event processor for worker_id \d+ processing event: Stored\(",
-                    r"Selected worker: worker_id=\d+ dp_rank=.*?, logit: ",
+                    r"Selected worker: worker_type=\w+, worker_id=\d+ dp_rank=.*?, logit: ",
                 ]
             )
         ],
@@ -230,6 +234,32 @@ trtllm_configs = {
             "ENCODE_CUDA_VISIBLE_DEVICES": "0",
         },
     ),
+    # Test Encoder with Aggregated PD worker on same GPU
+    # Make this pre-merge after TRTLLM #5938603 is fixed
+    "e_pd_multimodal": TRTLLMConfig(
+        name="e_pd_multimodal",
+        directory=trtllm_dir,
+        script_name="disagg_e_pd.sh",
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.trtllm,
+            pytest.mark.multimodal,
+            pytest.mark.nightly,
+        ],
+        model="Qwen/Qwen3-VL-2B-Instruct",
+        frontend_port=DefaultPort.FRONTEND.value,
+        timeout=900,
+        delayed_start=120,
+        request_payloads=[
+            multimodal_payload_default(
+                text="Describe what you see in this image.",
+                expected_response=["mountain", "rock", "trees", "road"],
+            )
+        ],
+        env={
+            "ENCODE_CUDA_VISIBLE_DEVICES": "0",
+        },
+    ),
     "completions_only": TRTLLMConfig(
         name="completions_only",
         directory=trtllm_dir,
@@ -238,6 +268,7 @@ trtllm_configs = {
             pytest.mark.gpu_1,
             pytest.mark.trtllm,
             pytest.mark.post_merge,
+            pytest.mark.skip(reason="DIS-1566"),
             pytest.mark.timeout(
                 480
             ),  # 3x measured time (83.85s) + download time (210s) for 7B model

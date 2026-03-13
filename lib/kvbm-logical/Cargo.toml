@@ -3,7 +3,7 @@
 
 [package]
 name = "kvbm-logical"
-version.workspace = true
+version = "0.1.0"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -15,7 +15,6 @@ dynamo-tokens = { workspace = true }
 anyhow = { workspace = true }
 async-stream = "0.3"
 bytes = "1.10"
-bincode = { version = "2.0.1", features = ["serde", "derive"] }
 derive_builder = { workspace = true }
 futures = { workspace = true }
 lru = "0.16"

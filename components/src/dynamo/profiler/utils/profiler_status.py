@@ -12,6 +12,7 @@ import logging
 import os
 import time
 from enum import Enum
+from typing import Any
 
 import yaml
 
@@ -47,7 +48,7 @@ def write_profiler_status(
         outputs: Optional dict of output files (for success status)
     """
     status_file = os.path.join(output_dir, STATUS_FILE_NAME)
-    status_data = {
+    status_data: dict[str, Any] = {
         "status": status.value,
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }

@@ -8,7 +8,7 @@
 //! - `NixlBackendConfig`: Configuration for NIXL backends from environment variables
 
 use anyhow::Result;
-use nixl_sys::Agent;
+use nixl_sys::{Agent, is_stub};
 use std::collections::{HashMap, HashSet};
 
 use crate::nixl::NixlBackendConfig;
@@ -34,6 +34,9 @@ pub struct NixlAgent {
 impl NixlAgent {
     /// Create a NIXL agent without any backends.
     pub fn new(name: &str) -> Result<Self> {
+        if is_stub() {
+            return Err(anyhow::anyhow!("NIXL is not supported in stub mode"));
+        }
         let agent = Agent::new(name)?;
 
         Ok(Self {

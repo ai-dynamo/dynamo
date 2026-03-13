@@ -29,6 +29,64 @@ from tests.utils.managed_deployment import DeploymentSpec, ManagedDeployment
 from tests.utils.test_output import resolve_test_output_path
 
 
+def get_model_from_deployment(
+    deployment_spec: DeploymentSpec,
+    scenario: Optional[Scenario] = None,
+    service_name: Optional[str] = None,
+) -> str:
+    """Get model name from deployment spec.
+
+    Args:
+        deployment_spec: Deployment specification
+        scenario: Optional Scenario object with backend and model info
+        service_name: Optional specific service to get model from
+
+    Returns:
+        Model name (never None, falls back to default)
+    """
+    # If scenario specifies a model, use that
+    if scenario and scenario.model:
+        return scenario.model
+
+    # Try to get model from specified service
+    if service_name:
+        try:
+            service_spec = deployment_spec[service_name]
+            if service_spec and service_spec.model:
+                return service_spec.model
+        except (KeyError, AttributeError):
+            pass
+
+    # Get model from backend-specific worker (if scenario provided)
+    if scenario:
+        try:
+            model: Optional[str] = None
+            if scenario.backend == "vllm":
+                model = deployment_spec["VllmDecodeWorker"].model
+            elif scenario.backend == "sglang":
+                model = deployment_spec["decode"].model
+            elif scenario.backend == "trtllm":
+                # Determine deployment type from scenario deployment name
+                if (
+                    "agg" in deployment_spec.name
+                    and "disagg" not in deployment_spec.name
+                ):
+                    model = deployment_spec["TRTLLMWorker"].model
+                else:
+                    model = deployment_spec["TRTLLMDecodeWorker"].model
+            if model:
+                return model
+        except (KeyError, AttributeError) as e:
+            logging.warning(
+                f"Could not get model from backend-specific worker "
+                f"(backend={scenario.backend}): {e}"
+            )
+
+    # Fallback to default
+    logging.info("Using default model: Qwen/Qwen3-0.6B")
+    return "Qwen/Qwen3-0.6B"
+
+
 @pytest.fixture
 def scenario(scenario_name, client_type):
     """Get scenario and optionally override client type from command line.
@@ -235,6 +293,8 @@ async def _inject_failures(
     return affected_pods
 
 
+# TODO: These globals might not work in parallel testing. FIXME
+
 global_result_list = []
 # Global storage for test results (used by validation fixture)
 test_results_cache = {}
@@ -434,6 +494,7 @@ def results_summary():
 @pytest.mark.post_merge
 @pytest.mark.e2e
 @pytest.mark.slow
+@pytest.mark.gpu_0
 @pytest.mark.filterwarnings("ignore::DeprecationWarning")
 async def test_fault_scenario(
     scenario: Scenario,  # noqa: F811
@@ -460,32 +521,9 @@ async def test_fault_scenario(
     if image:
         scenario.deployment.set_image(image)
 
-    model: Optional[str] = None
-    if scenario.model:
-        scenario.deployment.set_model(scenario.model)
-        model = scenario.model
-    else:
-        # Get model from the appropriate worker based on backend
-        try:
-            if scenario.backend == "vllm":
-                model = scenario.deployment["VllmDecodeWorker"].model
-            elif scenario.backend == "sglang":
-                model = scenario.deployment["decode"].model
-            elif scenario.backend == "trtllm":
-                # Determine deployment type from scenario deployment name
-                if (
-                    "agg" in scenario.deployment.name
-                    and "disagg" not in scenario.deployment.name
-                ):
-                    model = scenario.deployment["TRTLLMWorker"].model
-                else:
-                    model = scenario.deployment["TRTLLMDecodeWorker"].model
-            else:
-                model = None
-        except (KeyError, AttributeError):
-            model = None
-    # Fallback to default if still None
-    model = model or "Qwen/Qwen3-0.6B"
+    # Get model using helper function and ensure it's set on all services
+    model = get_model_from_deployment(scenario.deployment, scenario)
+    scenario.deployment.set_model(model)  # Set model on all services including Frontend
 
     scenario.deployment.set_logging(True, "info")
 
@@ -501,7 +539,7 @@ async def test_fault_scenario(
 
         with _clients(
             logger,
-            request.node.name,
+            resolve_test_output_path(request.node.name),
             scenario.deployment,
             namespace,
             model,

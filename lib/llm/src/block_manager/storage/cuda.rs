@@ -216,7 +216,14 @@ impl PinnedStorage {
                 match numa_allocator::worker_pool::NumaWorkerPool::global()
                     .allocate_pinned_for_gpu(size, device_id)
                 {
-                    Ok(ptr) => ptr,
+                    Ok(Some(ptr)) => ptr,
+                    Ok(None) => {
+                        tracing::debug!(
+                            "NUMA node unknown for GPU {}, using direct allocation",
+                            device_id
+                        );
+                        malloc_host_prefer_writecombined(size)?
+                    }
                     Err(e) => {
                         tracing::warn!("NUMA allocation failed: {}, using direct allocation", e);
                         malloc_host_prefer_writecombined(size)?
@@ -332,10 +339,13 @@ impl Default for PinnedAllocator {
 }
 
 impl PinnedAllocator {
-    /// Create a new pinned allocator
-    pub fn new() -> Result<Self, StorageError> {
+    /// Create a new pinned allocator for the specified device.
+    ///
+    /// The device_id determines which NUMA node pinned memory will be allocated
+    /// on when NUMA-aware allocation is enabled.
+    pub fn new(device_id: usize) -> Result<Self, StorageError> {
         Ok(Self {
-            ctx: Cuda::device_or_create(0)?,
+            ctx: Cuda::device_or_create(device_id)?,
         })
     }
 }

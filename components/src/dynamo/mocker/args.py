@@ -90,7 +90,7 @@ def resolve_planner_profile_data(
     )
 
 
-def create_temp_engine_args_file(args) -> Path:
+def create_temp_engine_args_file(args: argparse.Namespace) -> Path:
     """
     Create a temporary JSON file with MockEngineArgs from CLI arguments.
     Returns the path to the temporary file.
@@ -107,8 +107,9 @@ def create_temp_engine_args_file(args) -> Path:
         "max_num_batched_tokens": getattr(args, "max_num_batched_tokens", None),
         "enable_prefix_caching": getattr(args, "enable_prefix_caching", None),
         "enable_chunked_prefill": getattr(args, "enable_chunked_prefill", None),
-        "watermark": getattr(args, "watermark", None),
+        "preemption_mode": getattr(args, "preemption_mode", None),
         "speedup_ratio": getattr(args, "speedup_ratio", None),
+        "decode_speedup_ratio": getattr(args, "decode_speedup_ratio", None),
         "dp_size": getattr(args, "dp_size", None),
         "startup_time": getattr(args, "startup_time", None),
         "planner_profile_data": (
@@ -146,7 +147,7 @@ def create_temp_engine_args_file(args) -> Path:
     return temp_path
 
 
-def validate_worker_type_args(args):
+def validate_worker_type_args(args: argparse.Namespace) -> None:
     """
     Resolve disaggregation mode from --disaggregation-mode or legacy boolean flags.
     Raises ValueError if validation fails.
@@ -199,7 +200,7 @@ def parse_bootstrap_ports(ports_str: str | None) -> list[int]:
     return [int(p.strip()) for p in ports_str.split(",")]
 
 
-def parse_args():
+def parse_args() -> argparse.Namespace:
     """Parse command-line arguments for the Dynamo mocker engine.
 
     Returns:
@@ -287,16 +288,27 @@ def parse_args():
         help="Disable chunked prefill",
     )
     parser.add_argument(
-        "--watermark",
-        type=float,
+        "--preemption-mode",
+        type=str,
         default=None,
-        help="Watermark value for the mocker engine (default: 0.01)",
+        choices=["lifo", "fifo"],
+        help="Preemption mode for decode eviction under memory pressure. "
+        "'lifo' (default) evicts the newest request (matches vLLM v1), "
+        "'fifo' evicts the oldest request.",
     )
     parser.add_argument(
         "--speedup-ratio",
         type=float,
         default=None,
         help="Speedup ratio for mock execution (default: 1.0). Use 0 for infinite speedup (no simulation delays).",
+    )
+    parser.add_argument(
+        "--decode-speedup-ratio",
+        type=float,
+        default=None,
+        help="Additional speedup multiplier applied only to decode steps (default: 1.0). "
+        "Models speculative decoding (e.g. Eagle) where decode throughput improves "
+        "without affecting prefill latency. Effective decode speedup is speedup_ratio * decode_speedup_ratio.",
     )
     parser.add_argument(
         "--data-parallel-size",
@@ -381,6 +393,15 @@ def parse_args():
         "in vLLM native wire format. One port per worker (must match --num-workers). "
         "Each worker's DP ranks bind on base_port + dp_rank. A KvEventPublisher relay "
         "subscribes and forwards events to NATS. (default: None, disabled)",
+    )
+    parser.add_argument(
+        "--zmq-replay-ports",
+        type=str,
+        default=None,
+        help="Comma-separated list of ZMQ ROUTER base ports for KV event replay. "
+        "One port per worker (must match --num-workers). "
+        "Each worker's DP ranks bind on base_port + dp_rank. "
+        "Used alongside --zmq-kv-events-ports for gap recovery. (default: None, disabled)",
     )
     parser.add_argument(
         "--bootstrap-ports",
@@ -474,6 +495,17 @@ def parse_args():
             raise ValueError(
                 f"--zmq-kv-events-ports must have exactly --num-workers ({args.num_workers}) ports, "
                 f"got {len(args.zmq_kv_events_ports_list)}: {args.zmq_kv_events_ports_list}"
+            )
+
+    # Parse and validate zmq_replay_ports
+    args.zmq_replay_ports_list = parse_bootstrap_ports(args.zmq_replay_ports)
+    if args.zmq_replay_ports_list:
+        if not args.zmq_kv_events_ports_list:
+            raise ValueError("--zmq-replay-ports requires --zmq-kv-events-ports")
+        if len(args.zmq_replay_ports_list) != args.num_workers:
+            raise ValueError(
+                f"--zmq-replay-ports must have exactly --num-workers ({args.num_workers}) ports, "
+                f"got {len(args.zmq_replay_ports_list)}: {args.zmq_replay_ports_list}"
             )
 
     # Set endpoint default based on worker type if not explicitly provided

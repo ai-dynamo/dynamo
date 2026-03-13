@@ -12,13 +12,12 @@ repository.workspace = true
 
 [dependencies]
 # repo
+dynamo-kv-router = { workspace = true }
 dynamo-runtime = { workspace = true }
 dynamo-tokens = { workspace = true }
-dynamo-kv-router = { workspace = true }
 
 # workspace
 anyhow = { workspace = true }
-validator = { workspace = true }
 dashmap = { workspace = true }
 derive_builder = { workspace = true }
 derive-getters = { workspace = true }
@@ -29,6 +28,7 @@ tokio = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
+validator = { workspace = true }
 
 # crate-specific
 ndarray = "0.16"

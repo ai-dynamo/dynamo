@@ -59,18 +59,41 @@ def sample_slots(
     num_requests: int,
     images_per_request: int,
 ) -> list[str]:
-    """Sample image slots from a fixed pool, no duplicates within each request."""
-    assert (
-        len(pool) >= images_per_request
-    ), f"images-pool ({len(pool)}) must be >= images-per-request ({images_per_request})"
-    total_slots = num_requests * images_per_request
-    slot_refs: list[str] = []
-    for _ in range(num_requests):
-        slot_refs.extend(py_rng.sample(pool, images_per_request))
+    """Sample image slots from a fixed pool, no duplicates within each request.
 
+    Every image in the pool is guaranteed to appear at least once.
+    """
+    pool_size = len(pool)
+    total_slots = num_requests * images_per_request
+    assert (
+        pool_size >= images_per_request
+    ), f"images-pool ({pool_size}) must be >= images-per-request ({images_per_request})"
+    assert total_slots >= pool_size, (
+        f"total slots ({num_requests}×{images_per_request}={total_slots}) < "
+        f"images-pool ({pool_size}). Increase --num-requests or --images-per-request, "
+        f"or reduce --images-pool."
+    )
+
+    # Round-robin every pool image into requests so each appears at least once
+    shuffled = list(pool)
+    py_rng.shuffle(shuffled)
+    requests: list[list[str]] = [[] for _ in range(num_requests)]
+    for i, img in enumerate(shuffled):
+        requests[i % num_requests].append(img)
+
+    # Fill remaining slots with random pool samples (no intra-request duplicates)
+    for req in requests:
+        remaining = images_per_request - len(req)
+        if remaining > 0:
+            used = set(req)
+            available = [img for img in pool if img not in used]
+            req.extend(py_rng.sample(available, remaining))
+        py_rng.shuffle(req)
+
+    slot_refs = [img for req in requests for img in req]
     num_unique = len(set(slot_refs))
     print(
-        f"Generated {total_slots} image slots from pool of {len(pool)}: "
+        f"Generated {total_slots} image slots from pool of {pool_size}: "
         f"{num_unique} unique in use, "
         f"{total_slots - num_unique} duplicate references "
         f"({(total_slots - num_unique) / total_slots:.1%} reuse)"

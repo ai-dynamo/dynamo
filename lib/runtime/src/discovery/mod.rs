@@ -58,7 +58,7 @@ impl EventTransportKind {
     /// Logs a warning if an invalid value is encountered.
     pub fn from_env_or_default() -> Self {
         Self::from_env().unwrap_or_else(|e| {
-            tracing::warn!("{}, defaulting to NATS", e);
+            tracing::warn!("{e}, defaulting to NATS");
             Self::Nats
         })
     }

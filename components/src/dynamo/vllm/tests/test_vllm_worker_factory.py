@@ -103,14 +103,12 @@ class TestCreate:
         factory._create_multimodal_worker.assert_called_once()  # type: ignore[union-attr]
 
     @pytest.mark.asyncio
-    async def test_passes_checkpoint_restore_engine(
-        self, factory: WorkerFactory
-    ) -> None:
+    async def test_passes_snapshot_engine(self, factory: WorkerFactory) -> None:
         config = _make_config(multimodal_worker=True)
         runtime = Mock()
         shutdown_event = asyncio.Event()
         shutdown_endpoints: list = []
-        checkpoint_restore_engine: EngineSetupResult = (
+        snapshot_engine: EngineSetupResult = (
             Mock(),
             Mock(),
             Mock(),
@@ -123,7 +121,7 @@ class TestCreate:
             config,
             shutdown_event,
             shutdown_endpoints,
-            checkpoint_restore_engine=checkpoint_restore_engine,
+            snapshot_engine=snapshot_engine,
         )
 
         factory._create_multimodal_worker.assert_called_once_with(  # type: ignore[union-attr]
@@ -131,7 +129,7 @@ class TestCreate:
             config,
             shutdown_event,
             shutdown_endpoints,
-            checkpoint_restore_engine=checkpoint_restore_engine,
+            snapshot_engine=snapshot_engine,
         )
 
     @pytest.mark.asyncio

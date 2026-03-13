@@ -64,7 +64,7 @@ chrono = { workspace = true }
 derive_builder = { workspace = true }
 either = { workspace = true }
 futures = { workspace = true }
-futures-util = "0.3.31"
+futures-util = { workspace = true }
 hf-hub = { workspace = true }
 humantime = { workspace = true }                           # input/batch
 rand = { workspace = true }
@@ -108,7 +108,7 @@ dialoguer = { version = "0.11", default-features = false, features = [
 
 # block_manager
 aligned-vec = { version = "0.6.4", optional = true }
-nixl-sys = { version = "=0.10.0", optional = true }
+nixl-sys = { version = "=0.10.1", optional = true }
 cudarc = { workspace = true, optional = true }
 nix = { version = "0.26", optional = true }
 

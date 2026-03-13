@@ -459,8 +459,8 @@ impl GrpcInferenceService for KserveService {
                                 let mut reply = ModelStreamInferResponse::try_from(data).map_err(|e| {
                                     Status::invalid_argument(format!("Failed to parse response: {}", e))
                                 })?;
-                                if reply.infer_response.is_some() {
-                                    reply.infer_response.as_mut().unwrap().id = request_id.clone();
+                                if let Some(infer_response) = reply.infer_response.as_mut() {
+                                    infer_response.id = request_id.clone();
                                 }
                                 yield reply;
                             },
@@ -514,8 +514,8 @@ impl GrpcInferenceService for KserveService {
                                 let mut reply = ModelStreamInferResponse::try_from(data).map_err(|e| {
                                     Status::invalid_argument(format!("Failed to parse response: {}", e))
                                 })?;
-                                if reply.infer_response.is_some() {
-                                    reply.infer_response.as_mut().unwrap().id = request_id.clone();
+                                if let Some(infer_response) = reply.infer_response.as_mut() {
+                                    infer_response.id = request_id.clone();
                                 }
                                 yield reply;
                             },
@@ -538,8 +538,8 @@ impl GrpcInferenceService for KserveService {
                     let mut response: ModelStreamInferResponse = completion_response.try_into().map_err(|e| {
                         Status::invalid_argument(format!("Failed to parse response: {}", e))
                     })?;
-                    if response.infer_response.is_some() {
-                        response.infer_response.as_mut().unwrap().id = request_id.clone();
+                    if let Some(infer_response) = response.infer_response.as_mut() {
+                        infer_response.id = request_id.clone();
                     }
                     yield response;
                 }

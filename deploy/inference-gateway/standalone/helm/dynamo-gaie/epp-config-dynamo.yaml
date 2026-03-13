@@ -46,6 +46,8 @@ schedulingProfiles:
   - name: decode
     plugins:
       - pluginRef: decode-filter
+        weight: 1
       - pluginRef: dyn-decode
         weight: 1
       - pluginRef: picker
+        weight: 1

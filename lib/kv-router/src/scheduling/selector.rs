@@ -79,15 +79,17 @@ fn softmax_sample(
 }
 
 /// Default implementation matching the Python _cost_function.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct DefaultWorkerSelector {
     pub kv_router_config: KvRouterConfig,
+    pub worker_type: &'static str,
 }
 
 impl DefaultWorkerSelector {
-    pub fn new(kv_router_config: Option<KvRouterConfig>) -> Self {
+    pub fn new(kv_router_config: Option<KvRouterConfig>, worker_type: &'static str) -> Self {
         Self {
             kv_router_config: kv_router_config.unwrap_or_default(),
+            worker_type,
         }
     }
 }
@@ -129,8 +131,10 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
             .filter(|(wid, _)| allowed_ids.is_none_or(|ids| ids.contains(wid)))
         {
             let data_parallel_size = config.data_parallel_size();
+            let data_parallel_start_rank = config.data_parallel_start_rank();
 
-            for dp_rank in 0..data_parallel_size {
+            for dp_rank in data_parallel_start_rank..(data_parallel_start_rank + data_parallel_size)
+            {
                 let worker = WorkerWithDpRank::new(*worker_id, dp_rank);
 
                 let overlap = *overlaps.get(&worker).unwrap_or(&0);
@@ -147,7 +151,7 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
 
                 worker_logits.insert(worker, logit);
 
-                tracing::info!(
+                tracing::debug!(
                     "Formula for worker_id={} dp_rank={:?} with {overlap} cached blocks: {logit:.3} \
                      = {overlap_weight:.1} * prefill_blocks + decode_blocks \
                      = {overlap_weight:.1} * {potential_prefill_block:.3} + {decode_block:.3}",
@@ -165,7 +169,9 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
         let candidates = softmax_sample(&worker_logits, temperature);
 
         let best_worker = if candidates.len() > 1 {
-            tracing::info!("Multiple workers tied with same logit, using tree size as tie-breaker");
+            tracing::debug!(
+                "Multiple workers tied with same logit, using tree size as tie-breaker"
+            );
             let tree_sizes: Vec<(usize, &WorkerWithDpRank)> = candidates
                 .iter()
                 .map(|w| (request.overlaps.tree_sizes.get(w).copied().unwrap_or(0), w))
@@ -183,6 +189,21 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
 
         let best_logit = worker_logits[&best_worker];
 
+        if self.worker_type == "decode" {
+            tracing::info!(
+                "Selected worker: worker_type={}, worker_id={} dp_rank={:?}, logit: {:.3}",
+                self.worker_type,
+                best_worker.worker_id,
+                best_worker.dp_rank,
+                best_logit,
+            );
+            return Ok(WorkerSelectionResult {
+                worker: best_worker,
+                required_blocks: request_blocks as u64,
+                overlap_blocks: overlaps.get(&best_worker).copied().unwrap_or(0),
+            });
+        }
+
         let best_overlap = *overlaps.get(&best_worker).unwrap_or(&0);
 
         let total_blocks_info = workers
@@ -199,7 +220,8 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
             .unwrap_or(0);
 
         tracing::info!(
-            "Selected worker: worker_id={} dp_rank={:?}, logit: {:.3}, cached blocks: {}, tree size: {}{}",
+            "Selected worker: worker_type={}, worker_id={} dp_rank={:?}, logit: {:.3}, cached blocks: {}, tree size: {}{}",
+            self.worker_type,
             best_worker.worker_id,
             best_worker.dp_rank,
             best_logit,

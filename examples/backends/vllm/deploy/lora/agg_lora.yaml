@@ -11,7 +11,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/dynamo-dev/biswa:7e499b5c460f1883a9945d221123e0760051210f-39500608-vllm-amd64
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
     VllmDecodeWorker:
       envFromSecret: hf-token-secret
       componentType: worker
@@ -24,7 +24,7 @@ spec:
         name: Qwen/Qwen3-0.6B
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/dynamo-dev/biswa:7e499b5c460f1883a9945d221123e0760051210f-39500608-vllm-amd64
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
           workingDir: /workspace/examples/backends/vllm
           env:
             - name: DYN_LORA_ENABLED

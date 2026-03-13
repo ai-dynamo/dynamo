@@ -19,7 +19,7 @@ import re
 import time
 from copy import deepcopy
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, cast
 
 import requests
 
@@ -554,7 +554,7 @@ class ResponsesStreamPayload(BasePayload):
 
         response.raise_for_status()
 
-        events = []
+        events: list[tuple[str, Any]] = []
         event_type = ""
         for line in response.iter_lines(decode_unicode=True):
             if not line:
@@ -834,18 +834,27 @@ class MetricsPayload(BasePayload):
                 # Check: Minimum count of unique dynamo_component_* metrics
                 name=f"{prefix}_*",
                 pattern=lambda name: rf"^{prefix}_\w+",
-                validator=lambda value: len(set(value))
-                >= 7,  # 80% of typical ~13 metrics (excluding _bucket and removed kvstats metrics)
-                error_msg=lambda name, value: f"Expected at least 7 unique {prefix}_* metrics, but found only {len(set(value))}",
-                success_msg=lambda name, value: f"SUCCESS: Found {len(set(value))} unique {prefix}_* metrics (minimum required: 7)",
+                validator=lambda value: (
+                    len(set(value)) >= 7
+                ),  # 80% of typical ~13 metrics (excluding _bucket and removed kvstats metrics)
+                error_msg=lambda name, value: (
+                    f"Expected at least 7 unique {prefix}_* metrics, but found only {len(set(value))}"
+                ),
+                success_msg=lambda name, value: (
+                    f"SUCCESS: Found {len(set(value))} unique {prefix}_* metrics (minimum required: 7)"
+                ),
                 multiline=True,
             ),
             MetricCheck(
                 name=f"{prefix}_{prometheus_names.work_handler.REQUESTS_TOTAL}",
                 pattern=metric_pattern,
                 validator=lambda value: int(float(value)) >= self.min_num_requests,
-                error_msg=lambda name, value: f"{name} has count {value} which is less than required {self.min_num_requests}",
-                success_msg=lambda name, value: f"SUCCESS: Found {name} with count: {value}",
+                error_msg=lambda name, value: (
+                    f"{name} has count {value} which is less than required {self.min_num_requests}"
+                ),
+                success_msg=lambda name, value: (
+                    f"SUCCESS: Found {name} with count: {value}"
+                ),
             ),
             MetricCheck(
                 name=f"{prefix}_{prometheus_names.distributed_runtime.UPTIME_SECONDS}",
@@ -865,7 +874,9 @@ class MetricsPayload(BasePayload):
                 name=f"{prefix}_{prometheus_names.kvstats.GPU_CACHE_USAGE_PERCENT}",
                 pattern=metric_pattern,
                 validator=lambda value: 0.0 <= float(value) <= 1.0,
-                error_msg=lambda name, value: f"{name} should be between 0.0 and 1.0, but got {value}",
+                error_msg=lambda name, value: (
+                    f"{name} should be between 0.0 and 1.0, but got {value}"
+                ),
                 success_msg=lambda name, value: f"SUCCESS: Found {name} = {value}",
             ),
             MetricCheck(
@@ -873,7 +884,9 @@ class MetricsPayload(BasePayload):
                 pattern=metric_pattern,
                 validator=lambda value: float(value) > 0,
                 error_msg=lambda name, value: f"{name} should be > 0, but got {value}",
-                success_msg=lambda name, value: f"SUCCESS: Found {name} = {float(value):.2f}s",
+                success_msg=lambda name, value: (
+                    f"SUCCESS: Found {name} = {float(value):.2f}s"
+                ),
             ),
         ]
 
@@ -955,10 +968,15 @@ class VLLMMetricsPayload(MetricsPayload):
                 # Check: Minimum count of unique vllm:* metrics
                 name="vllm:*",
                 pattern=lambda name: r"^vllm:\w+",
-                validator=lambda value: len(set(value))
-                >= 56,  # 80% of typical ~70 vllm metrics (excluding _bucket) as of 2026-02-05 (but will grow)
-                error_msg=lambda name, value: f"Expected at least 56 unique vllm:* metrics, but found only {len(set(value))}",
-                success_msg=lambda name, value: f"SUCCESS: Found {len(set(value))} unique vllm:* metrics (minimum required: 56)",
+                validator=lambda value: (
+                    len(set(value)) >= 56
+                ),  # 80% of typical ~70 vllm metrics (excluding _bucket) as of 2026-02-05 (but will grow)
+                error_msg=lambda name, value: (
+                    f"Expected at least 56 unique vllm:* metrics, but found only {len(set(value))}"
+                ),
+                success_msg=lambda name, value: (
+                    f"SUCCESS: Found {len(set(value))} unique vllm:* metrics (minimum required: 56)"
+                ),
                 multiline=True,
             )
         ]
@@ -975,10 +993,23 @@ class VLLMMetricsPayload(MetricsPayload):
             checks.append(
                 MetricCheck(
                     name=f"vllm:* with {label_name}",
-                    pattern=lambda name, lbl=label_name: rf'vllm:\w+\{{[^}}]*{lbl}="[^"]+"',
+                    pattern=cast(
+                        Callable[[str], str],
+                        lambda name, lbl=label_name: rf'vllm:\w+\{{[^}}]*{lbl}="[^"]+"',
+                    ),
                     validator=lambda value: len(value) > 0,
-                    error_msg=lambda name, value, lbl=label_name: f"vLLM metrics missing label: {lbl}",
-                    success_msg=lambda name, value, lbl=label_name: f"SUCCESS: vLLM metrics include {lbl} label (found {len(value)} metrics)",
+                    error_msg=cast(
+                        Callable[[str, Any], str],
+                        lambda name, value, lbl=label_name: (
+                            f"vLLM metrics missing label: {lbl}"
+                        ),
+                    ),
+                    success_msg=cast(
+                        Callable[[str, Any], str],
+                        lambda name, value, lbl=label_name: (
+                            f"SUCCESS: vLLM metrics include {lbl} label (found {len(value)} metrics)"
+                        ),
+                    ),
                     multiline=True,
                 )
             )
@@ -997,10 +1028,15 @@ class LMCacheMetricsPayload(MetricsPayload):
                 # Check: Minimum count of unique lmcache:* metrics
                 name="lmcache:*",
                 pattern=lambda name: r"^lmcache:\w+",
-                validator=lambda value: len(set(value))
-                >= 26,  # 80% of typical ~33 lmcache metrics (excluding _bucket) as of 2026-02-05 (but will grow)
-                error_msg=lambda name, value: f"Expected at least 26 unique lmcache:* metrics, but found only {len(set(value))}",
-                success_msg=lambda name, value: f"SUCCESS: Found {len(set(value))} lmcache:* metrics (minimum required: 26)",
+                validator=lambda value: (
+                    len(set(value)) >= 26
+                ),  # 80% of typical ~33 lmcache metrics (excluding _bucket) as of 2026-02-05 (but will grow)
+                error_msg=lambda name, value: (
+                    f"Expected at least 26 unique lmcache:* metrics, but found only {len(set(value))}"
+                ),
+                success_msg=lambda name, value: (
+                    f"SUCCESS: Found {len(set(value))} lmcache:* metrics (minimum required: 26)"
+                ),
                 multiline=True,
             )
         ]
@@ -1017,10 +1053,15 @@ class SGLangMetricsPayload(MetricsPayload):
                 # Check: Minimum count of unique sglang:* metrics
                 name="sglang:*",
                 pattern=lambda name: r"^sglang:\w+",
-                validator=lambda value: len(set(value))
-                >= 20,  # 80% of typical ~25 sglang metrics (excluding _bucket) as of 2025-10-22 (but will grow)
-                error_msg=lambda name, value: f"Expected at least 20 unique sglang:* metrics, but found only {len(set(value))}",
-                success_msg=lambda name, value: f"SUCCESS: Found {len(set(value))} unique sglang:* metrics (minimum required: 20)",
+                validator=lambda value: (
+                    len(set(value)) >= 20
+                ),  # 80% of typical ~25 sglang metrics (excluding _bucket) as of 2025-10-22 (but will grow)
+                error_msg=lambda name, value: (
+                    f"Expected at least 20 unique sglang:* metrics, but found only {len(set(value))}"
+                ),
+                success_msg=lambda name, value: (
+                    f"SUCCESS: Found {len(set(value))} unique sglang:* metrics (minimum required: 20)"
+                ),
                 multiline=True,
             )
         ]
@@ -1037,10 +1078,25 @@ class SGLangMetricsPayload(MetricsPayload):
             checks.append(
                 MetricCheck(
                     name=f"sglang:* with {label_name}",
-                    pattern=lambda name, lbl=label_name: rf'sglang:\w+\{{[^}}]*{lbl}="[^"]+"',
+                    pattern=cast(
+                        Callable[[str], str],
+                        lambda name, lbl=label_name: (
+                            rf'sglang:\w+\{{[^}}]*{lbl}="[^"]+"'
+                        ),
+                    ),
                     validator=lambda value: len(value) > 0,
-                    error_msg=lambda name, value, lbl=label_name: f"sglang metrics missing label: {lbl}",
-                    success_msg=lambda name, value, lbl=label_name: f"SUCCESS: sglang metrics include {lbl} label (found {len(value)} metrics)",
+                    error_msg=cast(
+                        Callable[[str, Any], str],
+                        lambda name, value, lbl=label_name: (
+                            f"sglang metrics missing label: {lbl}"
+                        ),
+                    ),
+                    success_msg=cast(
+                        Callable[[str, Any], str],
+                        lambda name, value, lbl=label_name: (
+                            f"SUCCESS: sglang metrics include {lbl} label (found {len(value)} metrics)"
+                        ),
+                    ),
                     multiline=True,
                 )
             )
@@ -1059,10 +1115,15 @@ class TRTLLMMetricsPayload(MetricsPayload):
                 # Check: Minimum count of unique trtllm_* metrics
                 name="trtllm_*",
                 pattern=lambda name: r"^trtllm_\w+",
-                validator=lambda value: len(set(value))
-                >= 4,  # 80% of typical ~5 trtllm metrics (excluding _bucket) as of 2025-10-22 (but will grow)
-                error_msg=lambda name, value: f"Expected at least 4 unique trtllm_* metrics, but found only {len(set(value))}",
-                success_msg=lambda name, value: f"SUCCESS: Found {len(set(value))} unique trtllm_* metrics (minimum required: 4)",
+                validator=lambda value: (
+                    len(set(value)) >= 4
+                ),  # 80% of typical ~5 trtllm metrics (excluding _bucket) as of 2025-10-22 (but will grow)
+                error_msg=lambda name, value: (
+                    f"Expected at least 4 unique trtllm_* metrics, but found only {len(set(value))}"
+                ),
+                success_msg=lambda name, value: (
+                    f"SUCCESS: Found {len(set(value))} unique trtllm_* metrics (minimum required: 4)"
+                ),
                 multiline=True,
             )
         ]
@@ -1079,10 +1140,25 @@ class TRTLLMMetricsPayload(MetricsPayload):
             checks.append(
                 MetricCheck(
                     name=f"trtllm_* with {label_name}",
-                    pattern=lambda name, lbl=label_name: rf'trtllm_\w+\{{[^}}]*{lbl}="[^"]+"',
+                    pattern=cast(
+                        Callable[[str], str],
+                        lambda name, lbl=label_name: (
+                            rf'trtllm_\w+\{{[^}}]*{lbl}="[^"]+"'
+                        ),
+                    ),
                     validator=lambda value: len(value) > 0,
-                    error_msg=lambda name, value, lbl=label_name: f"TRT-LLM metrics missing label: {lbl}",
-                    success_msg=lambda name, value, lbl=label_name: f"SUCCESS: TRT-LLM metrics include {lbl} label (found {len(value)} metrics)",
+                    error_msg=cast(
+                        Callable[[str, Any], str],
+                        lambda name, value, lbl=label_name: (
+                            f"TRT-LLM metrics missing label: {lbl}"
+                        ),
+                    ),
+                    success_msg=cast(
+                        Callable[[str, Any], str],
+                        lambda name, value, lbl=label_name: (
+                            f"SUCCESS: TRT-LLM metrics include {lbl} label (found {len(value)} metrics)"
+                        ),
+                    ),
                     multiline=True,
                 )
             )

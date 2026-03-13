@@ -133,9 +133,9 @@ impl DeltaAggregator {
                     }
                 };
 
-                if aggregator.error.is_none() && delta.data.is_some() {
-                    // Extract the data payload from the delta.
-                    let delta = delta.data.unwrap();
+                if aggregator.error.is_none()
+                    && let Some(delta) = delta.data
+                {
                     aggregator.id = delta.id;
                     aggregator.model = delta.model;
                     aggregator.created = delta.created;

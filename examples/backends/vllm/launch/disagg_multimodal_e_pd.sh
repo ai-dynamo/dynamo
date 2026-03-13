@@ -4,6 +4,9 @@
 set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
+SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+source "$SCRIPT_DIR/../../../common/launch_utils.sh"
+
 # Default values
 MODEL_NAME="Qwen/Qwen3-VL-30B-A3B-Instruct-FP8"
 SINGLE_GPU=false
@@ -57,11 +60,13 @@ done
 PD_MAX_MODEL_LEN="16384"
 
 
-echo "=================================================="
-echo "Disaggregated Multimodal Serving (E + PD)"
-echo "=================================================="
-echo "Model: $MODEL_NAME"
-echo "=================================================="
+HTTP_PORT="${DYN_HTTP_PORT:-8000}"
+if [[ "$SINGLE_GPU" == "true" ]]; then
+    GPU_LABEL="1 GPU"
+else
+    GPU_LABEL="2 GPUs"
+fi
+print_launch_banner --multimodal "Launching Disaggregated Multimodal E+PD ($GPU_LABEL)" "$MODEL_NAME" "$HTTP_PORT"
 
 
 # Start frontend (no router mode)
@@ -70,10 +75,14 @@ python -m dynamo.frontend &
 
 EXTRA_ARGS=""
 
-# Embedding transfer: 1 = local file (safetensors), 0 = NIXL RDMA
-export TRANSFER_LOCAL=${TRANSFER_LOCAL:-1}
+# Embedding transfer:
+#   "local" = local file (safetensors),
+#   "nixl-write" = NIXL WRITE transfer
+#   "nixl-read" = NIXL READ transfer (default: "local")
+export DYN_VLLM_EMBEDDING_TRANSFER_MODE=${DYN_VLLM_EMBEDDING_TRANSFER_MODE:-"local"}
 
 # GPU assignments (override via environment variables)
+# In single-GPU mode both workers share the same GPU.
 if [[ "$SINGLE_GPU" == "true" ]]; then
     DYN_ENCODE_WORKER_GPU=${DYN_ENCODE_WORKER_GPU:-0}
     DYN_PD_WORKER_GPU=${DYN_PD_WORKER_GPU:-0}
@@ -115,5 +124,5 @@ echo "=================================================="
 echo "All components started. Waiting for initialization..."
 echo "=================================================="
 
-# Wait for all background processes to complete
-wait
+# Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
+wait_any_exit

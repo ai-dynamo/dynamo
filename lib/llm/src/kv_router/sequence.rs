@@ -103,15 +103,20 @@ pub async fn create_multi_worker_sequences(
         metrics_publisher,
     };
 
-    let dp_sizes: HashMap<u64, u32> = workers_with_configs
+    let dp_range: HashMap<u64, (u32, u32)> = workers_with_configs
         .into_iter()
-        .map(|(id, config)| (id, config.data_parallel_size))
+        .map(|(id, config)| {
+            (
+                id,
+                (config.data_parallel_start_rank, config.data_parallel_size),
+            )
+        })
         .collect();
 
     let multi_worker = ActiveSequencesMultiWorker::new(
         publisher,
         block_size,
-        dp_sizes,
+        dp_range,
         replica_sync,
         router_id,
         worker_type,

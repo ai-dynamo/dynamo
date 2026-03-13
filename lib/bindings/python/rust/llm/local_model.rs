@@ -6,7 +6,7 @@ use llm_rs::local_model::runtime_config::DisaggregatedEndpoint as RsDisaggregate
 use llm_rs::local_model::runtime_config::ModelRuntimeConfig as RsModelRuntimeConfig;
 
 #[pyclass]
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct ModelRuntimeConfig {
     pub(crate) inner: RsModelRuntimeConfig,
 }
@@ -43,6 +43,11 @@ impl ModelRuntimeConfig {
     #[setter]
     fn set_reasoning_parser(&mut self, reasoning_parser: Option<String>) {
         self.inner.reasoning_parser = reasoning_parser;
+    }
+
+    #[setter]
+    fn set_data_parallel_start_rank(&mut self, data_parallel_start_rank: u32) {
+        self.inner.data_parallel_start_rank = data_parallel_start_rank;
     }
 
     #[setter]

@@ -10,6 +10,13 @@ export PYTHONHASHSEED=0
 # Common configuration
 MODEL="Qwen/Qwen3-0.6B"
 BLOCK_SIZE=64
+SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+source "$SCRIPT_DIR/../../../common/launch_utils.sh"
+
+HTTP_PORT_R1="${DYN_HTTP_PORT_R1:-8000}"
+HTTP_PORT_R2="${DYN_HTTP_PORT_R2:-8001}"
+print_launch_banner --no-curl "Launching Aggregated + KV Routing + Replicas (2 GPUs)" "$MODEL" "$HTTP_PORT_R1" \
+    "Frontend R2: http://localhost:$HTTP_PORT_R2"
 
 # run two routers (different HTTP + system ports)
 # Note: use --router-reset-states only on one router to avoid wiping shared state twice.
@@ -38,4 +45,7 @@ CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.vllm \
     --model $MODEL \
     --block-size $BLOCK_SIZE \
     --enforce-eager \
-    --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081","enable_kv_cache_events":true}'
+    --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081","enable_kv_cache_events":true}' &
+
+# Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
+wait_any_exit

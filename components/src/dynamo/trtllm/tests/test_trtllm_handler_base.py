@@ -4,6 +4,7 @@
 import asyncio
 import re as re_mod
 from dataclasses import dataclass
+from typing import Any
 from unittest import mock
 from unittest.mock import MagicMock
 
@@ -284,7 +285,7 @@ class TestGuidedDecodingFromToolChoice:
     def test_empty_choice_ignored(self):
         """Empty choice list should not produce a regex."""
         sampling_params = MockSamplingParams()
-        request = {
+        request: dict[str, Any] = {
             "sampling_options": {
                 "guided_decoding": {
                     "choice": [],
