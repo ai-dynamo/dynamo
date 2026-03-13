@@ -28,3 +28,8 @@ derive_builder = { workspace = true }
 [dev-dependencies]
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "time", "test-util"] }
+velo-messenger = { workspace = true }
+velo-transports = { workspace = true }
+bytes = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

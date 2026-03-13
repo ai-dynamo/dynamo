@@ -264,7 +264,7 @@ pub struct AnchorManager {
     #[builder(setter(skip), default = "AtomicU64::new(0)")]
     next_local_id: AtomicU64,
 
-    #[builder(setter(skip), default = "Arc::new(DashMap::new())")]
+    #[builder(default = "Arc::new(DashMap::new())")]
     pub(crate) registry: Arc<DashMap<u64, AnchorEntry>>,
 
     pub transport: Arc<dyn crate::transport::FrameTransport>,
