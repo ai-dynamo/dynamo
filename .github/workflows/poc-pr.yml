@@ -74,7 +74,7 @@ jobs:
         matrix:
           cuda_version: [ '12.9', '13.0' ]
           platform: [ amd64, arm64 ]
-    uses: ./.github/shared-workflows/build-image.yml
+    uses: ./.github/workflows/build-image.yml
     with:
       framework: vllm
       cuda_version: ${{ matrix.cuda_version }}
@@ -89,7 +89,7 @@ jobs:
         matrix:
           cuda_version: [ '12.9', '13.0' ]
           platform: [ amd64, arm64 ]
-    uses: ./.github/shared-workflows/build-image.yml
+    uses: ./.github/workflows/build-image.yml
     with:
       framework: sglang
       cuda_version: ${{ matrix.cuda_version }}
@@ -104,7 +104,7 @@ jobs:
         matrix:
           cuda_version: [ '13.1' ]
           platform: [ amd64, arm64 ]
-    uses: ./.github/shared-workflows/build-image.yml
+    uses: ./.github/workflows/build-image.yml
     with:
       framework: trtllm
       cuda_version: ${{ matrix.cuda_version }}
@@ -122,7 +122,7 @@ jobs:
         matrix:
           cuda_version: [ '12.9', '13.0' ]
           platform: [ amd64, arm64 ]
-    uses: ./.github/shared-workflows/single-gpu-test.yml
+    uses: ./.github/workflows/single-gpu-test.yml
     with:
       framework: vllm
       cuda_version: ${{ matrix.cuda_version }}
@@ -136,7 +136,7 @@ jobs:
         matrix:
           cuda_version: [ '12.9', '13.0' ]
           platform: [ amd64, arm64 ]
-    uses: ./.github/shared-workflows/single-gpu-test.yml
+    uses: ./.github/workflows/single-gpu-test.yml
     with:
       framework: sglang
       cuda_version: ${{ matrix.cuda_version }}
@@ -150,7 +150,7 @@ jobs:
         matrix:
           cuda_version: [ '13.1' ]
           platform: [ amd64, arm64 ]
-    uses: ./.github/shared-workflows/single-gpu-test.yml
+    uses: ./.github/workflows/single-gpu-test.yml
     with:
       framework: trtllm
       cuda_version: ${{ matrix.cuda_version }}
@@ -168,7 +168,7 @@ jobs:
         matrix:
           cuda_version: [ '12.9', '13.0' ]
           platform: [ amd64, arm64 ]
-    uses: ./.github/shared-workflows/copy-to-acr.yml
+    uses: ./.github/workflows/copy-to-acr.yml
     with:
       framework: vllm
       cuda_version: ${{ matrix.cuda_version }}
@@ -182,7 +182,7 @@ jobs:
         matrix: 
           cuda_version: [ '12.9', '13.0' ]
           platform: [ amd64, arm64 ]
-    uses: ./.github/shared-workflows/copy-to-acr.yml
+    uses: ./.github/workflows/copy-to-acr.yml
     with:
       framework: sglang
       cuda_version: ${{ matrix.cuda_version }}
@@ -196,7 +196,7 @@ jobs:
         matrix:
           cuda_version: [ '13.1' ]
           platform: [ amd64, arm64 ]
-    uses: ./.github/shared-workflows/copy-to-acr.yml
+    uses: ./.github/workflows/copy-to-acr.yml
     with:
       framework: trtllm
       cuda_version: ${{ matrix.cuda_version }}
@@ -214,7 +214,7 @@ jobs:
         matrix:
           cuda_version: [ '12.9', '13.0' ]
           platform: [ amd64, arm64 ]
-    uses: ./.github/shared-workflows/deploy-test.yml
+    uses: ./.github/workflows/deploy-test.yml
     with:
       framework: vllm
       cuda_version: ${{ matrix.cuda_version }}
@@ -228,7 +228,7 @@ jobs:
         matrix:
           cuda_version: [ '12.9', '13.0' ]
           platform: [ amd64, arm64 ]
-    uses: ./.github/shared-workflows/deploy-test.yml
+    uses: ./.github/workflows/deploy-test.yml
     with:
       framework: sglang
       cuda_version: ${{ matrix.cuda_version }}
@@ -242,7 +242,7 @@ jobs:
         matrix:
           cuda_version: [ '13.1' ]
           platform: [ amd64, arm64 ]
-    uses: ./.github/shared-workflows/deploy-test.yml
+    uses: ./.github/workflows/deploy-test.yml
     with:
       framework: trtllm
       cuda_version: ${{ matrix.cuda_version }}
