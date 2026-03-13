@@ -125,6 +125,8 @@ jobs:
     needs: [changed-files, build-epp-image]
     if: needs.changed-files.outputs.frontend == 'true' || inputs.skip_change_detection == true || startsWith(github.ref_name, 'release/')
     runs-on: prod-builder-v3
+    outputs:
+      target_tag: ${{ steps.calculate-target-tag.outputs.target_tag }}
     env:
       IMAGE_REGISTRY: ai-dynamo
       IMAGE_REPOSITORY: dynamo
@@ -244,17 +246,10 @@ jobs:
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-      - name: Calculate image URI
-        id: images
-        shell: bash
-        run: |
-          TARGET_TAG="${{ github.sha }}-frontend"
-          FRONTEND_IMAGE="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${TARGET_TAG}"
-          echo "frontend_image=${FRONTEND_IMAGE}" >> $GITHUB_OUTPUT
       - name: Compliance scan
         uses: ./.github/actions/compliance-scan
         with:
-          image: ${{ steps.images.outputs.frontend_image }}
+          image: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build-frontend-image.outputs.target_tag }}
           artifact_name: compliance-frontend-${{ matrix.arch }}
           framework: dynamo
           target: frontend
