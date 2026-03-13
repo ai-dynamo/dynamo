@@ -58,14 +58,14 @@ class MultimodalDecodeWorkerHandler(BaseWorkerHandler):
     async def generate(self, request: vLLMMultimodalRequest, context):
         rng_decode = _nvtx.start_range("mm:decode_worker_generate", color="blue")
         logger.debug(f"Got raw request: {request}")
+        if not isinstance(request, vLLMMultimodalRequest):
+            if isinstance(request, str):
+                request = vLLMMultimodalRequest.model_validate_json(request)
+            else:
+                request = vLLMMultimodalRequest.model_validate(request)
         with time_and_log_code_section(
             f"[DECODE] request: {request.request_id} preprocessing time"
         ):
-            if not isinstance(request, vLLMMultimodalRequest):
-                if isinstance(request, str):
-                    request = vLLMMultimodalRequest.model_validate_json(request)
-                else:
-                    request = vLLMMultimodalRequest.model_validate(request)
             logger.debug(f"Received decode request: {{ id: {request.request_id} }}.")
 
             # For Qwen VL models with mRoPE, we need to pass multi_modal_data containing
