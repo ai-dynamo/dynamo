@@ -3,6 +3,7 @@
 
 import asyncio
 import base64
+import concurrent.futures
 import logging
 import math
 import os
@@ -398,6 +399,13 @@ class NixlWriteEmbeddingSender(AbstractEmbeddingSender):
 
         self.id_counter = MonolithicCounter()
 
+        # Thread pool for concurrent NIXL transfers. transfer() holds the GIL
+        # during memcpy; dispatching via run_in_executor yields control back to
+        # the asyncio event loop between GIL acquisition cycles.
+        self._transfer_pool = concurrent.futures.ThreadPoolExecutor(
+            max_workers=4, thread_name_prefix="nixl_xfer"
+        )
+
         # Background transfer task..
         # Create a queue hinting whether the sender is expecting future transfer
         self.transfer_queue: asyncio.Queue[str] = asyncio.Queue()
@@ -406,6 +414,16 @@ class NixlWriteEmbeddingSender(AbstractEmbeddingSender):
 
     def __del__(self):
         self._state_update_task.cancel()
+
+    def _do_transfer(self, xfer_handle, done_signal):
+        """Execute a single NIXL transfer in a thread pool worker.
+
+        transfer() holds the GIL during the memcpy. Running it via
+        run_in_executor yields control back to the event loop between
+        GIL acquisition cycles, allowing notification polling, handshake
+        processing, and other requests to proceed concurrently.
+        """
+        return self.nixl_agent.transfer(xfer_handle, done_signal)
 
     async def _state_update(self):
         """Long-running async task that processes transfer requests."""
@@ -420,6 +438,7 @@ class NixlWriteEmbeddingSender(AbstractEmbeddingSender):
 
                 # check if write is requested, initiate the write
                 write_requests = self._get_receiver_handshakes()
+                pending_xfers = []
                 for (
                     remote_agent_id,
                     remote_agent_metadata,
@@ -457,12 +476,28 @@ class NixlWriteEmbeddingSender(AbstractEmbeddingSender):
                         remote_agent_id,
                         done_signal,
                     )
-                    self.nixl_agent.transfer(xfer_handle, done_signal)
+                    pending_xfers.append((tensor_id, xfer_handle, done_signal))
 
-                    inflight_transfers[tensor_id] = [
-                        xfer_handle,
-                        time.perf_counter(),
-                    ]
+                # Dispatch all transfers concurrently via thread pool
+                if pending_xfers:
+                    loop = asyncio.get_running_loop()
+                    xfer_futures = []
+                    for tensor_id, xfer_handle, done_signal in pending_xfers:
+                        fut = loop.run_in_executor(
+                            self._transfer_pool,
+                            self._do_transfer,
+                            xfer_handle,
+                            done_signal,
+                        )
+                        xfer_futures.append((tensor_id, xfer_handle, fut))
+
+                    await asyncio.gather(*(fut for _, _, fut in xfer_futures))
+                    completion_time = time.perf_counter()
+                    for tensor_id, xfer_handle, _ in xfer_futures:
+                        inflight_transfers[tensor_id] = [
+                            xfer_handle,
+                            completion_time,
+                        ]
 
                 # check inflight transfer state, if completed, get another task to match
                 # remaining transfers count
@@ -505,8 +540,7 @@ class NixlWriteEmbeddingSender(AbstractEmbeddingSender):
                         scheduled_transfer_task = None
                         break
 
-                # short pause to yield control and allow cancellation
-                await asyncio.sleep(0.001)
+                await asyncio.sleep(0)
             except Exception as e:
                 logger.error(f"Error in state update loop: {e}")
                 await asyncio.sleep(1)  # Backoff on error to prevent tight error loop
@@ -636,6 +670,60 @@ class NixlWriteEmbeddingReceiver(AbstractEmbeddingReceiver):
         self.id_counter = MonolithicCounter()
         self.to_buffer_id = {}
 
+        # Event-driven buffer availability: waiters wake immediately
+        # when a buffer is released instead of polling at 5ms intervals.
+        self._buffer_available = asyncio.Event()
+        self._buffer_available.set()
+
+        # Per-transfer completion events, keyed by done_signal bytes.
+        # A single background poller dispatches to these instead of
+        # N independent 1ms polling loops.
+        self._completion_events: dict[bytes, asyncio.Event] = {}
+        self._notif_poller_task: asyncio.Task | None = None
+        self._poller_has_work = asyncio.Event()
+
+    def __del__(self):
+        if self._notif_poller_task is not None:
+            self._notif_poller_task.cancel()
+
+    def _ensure_poller(self):
+        """Lazily start the background notification poller."""
+        if self._notif_poller_task is None or self._notif_poller_task.done():
+            self._notif_poller_task = asyncio.create_task(self._poll_notifications())
+
+    async def _poll_notifications(self):
+        """Background task that polls NIXL notifications and dispatches
+        to per-transfer completion events."""
+        while True:
+            try:
+                await self._poller_has_work.wait()
+
+                idle_iterations = 0
+                while self._completion_events:
+                    notifs = self.nixl_agent.update_notifs()
+                    found_any = False
+                    for sender_id, sender_notifs in notifs.items():
+                        for notif in list(sender_notifs):
+                            if notif in self._completion_events:
+                                self._completion_events[notif].set()
+                                self.nixl_agent.notifs[sender_id].remove(notif)
+                                found_any = True
+
+                    if found_any:
+                        idle_iterations = 0
+                    else:
+                        idle_iterations += 1
+
+                    if idle_iterations < 100:
+                        await asyncio.sleep(0)
+                    else:
+                        await asyncio.sleep(0.0001)
+
+                self._poller_has_work.clear()
+            except Exception as e:
+                logger.error(f"Error in notification poller: {e}")
+                await asyncio.sleep(0.1)
+
     async def receive_embeddings(
         self, request: TransferRequest, receive_timeout=60
     ) -> tuple[int, torch.Tensor]:
@@ -651,6 +739,8 @@ class NixlWriteEmbeddingReceiver(AbstractEmbeddingReceiver):
             A tuple containing the tensor ID and the received embeddings as a torch.Tensor.
             Caller should invoke release_tensor(tensor_id) when the tensor is no longer needed to free up resources.
         """
+        self._ensure_poller()
+
         nixl_request = NixlTransferRequest.model_validate_json(
             request.serialized_request
         )
@@ -665,7 +755,8 @@ class NixlWriteEmbeddingReceiver(AbstractEmbeddingReceiver):
                 base64.b64decode(nixl_request.agent_metadata)
             )
 
-        # Allocate tensor to be written into.
+        # Allocate tensor to be written into, using event-driven waiting
+        # instead of fixed-interval polling.
         start_time = time.perf_counter()
         while True:
             buffer_id, transfer_tensor = self.ring_buffer.get_buffer(
@@ -674,25 +765,19 @@ class NixlWriteEmbeddingReceiver(AbstractEmbeddingReceiver):
             if transfer_tensor is not None:
                 break
 
-            # No available buffer, wait for a short period and retry.
-            # The receiver side should have concurrent work on other
-            # allocated buffer and release them in a timely manner,
-            # so the wait time should not be long.
-            #
-            # NOTE This approach can result in deadlock due to
-            # the current usage of the receiver:
-            # The case of concurrent requests may request 2 buffer in order,
-            # if all request get the first buffer and exhaust the ring buffer,
-            # then no request can get the second buffer and proceed.
-            # On raising the timeout error from this function, the caller must
-            # release all previously allocated tensor of the request to unblock
-            # other requests, and retry the request after some delay to avoid
-            # repeated deadlock.
-            # [gluo WIP] provide an API for batch allocation so some requests can
-            # proceed.
-            if time.perf_counter() - start_time > receive_timeout:
+            remaining = receive_timeout - (time.perf_counter() - start_time)
+            if remaining <= 0:
                 raise TimeoutError("Timeout while waiting for available buffer.")
-            await asyncio.sleep(0.005)
+
+            self._buffer_available.clear()
+            try:
+                await asyncio.wait_for(
+                    self._buffer_available.wait(),
+                    timeout=min(1.0, remaining),
+                )
+            except asyncio.TimeoutError:
+                pass
+
         # view as tensor matching the source tensor..
         embeddings_shape = request.embeddings_shape
         embeddings_dtype = torch_dtype_from_string(request.embedding_dtype_str)
@@ -702,6 +787,13 @@ class NixlWriteEmbeddingReceiver(AbstractEmbeddingReceiver):
 
         # Request for transfer
         tensor_id = self.id_counter.get_next_id()
+        done_signal = str(tensor_id).encode()
+
+        # Register completion event before sending handshake
+        completion_event = asyncio.Event()
+        self._completion_events[done_signal] = completion_event
+        self._poller_has_work.set()
+
         notif_msg = msgpack.packb(
             (
                 nixl_request.tensor_id,
@@ -720,33 +812,19 @@ class NixlWriteEmbeddingReceiver(AbstractEmbeddingReceiver):
         )
         self.nixl_agent.send_notif(nixl_request.sender_agent_id, notif_msg=notif_msg)
 
-        # await for write notification
-        start_time = time.perf_counter()
-        done_signal = str(tensor_id).encode()
-        found = False
-        while not found:
-            # parse notifications to find done signal, we can't use 'check_remote_xfer_done' API
-            # because it match requested string pattern in substring of the notifications instead
-            # of exact match, which is not what we want, i.e. for two done signal "1" and "11",
-            # 'check_remote_xfer_done("1")' will return True for both signal and "11" will be cleared
-            # as a result, leading the subsequent 'check_remote_xfer_done("1")' returns False.
-            notifs = self.nixl_agent.update_notifs()
-            if nixl_request.sender_agent_id in notifs:
-                for notif in notifs[nixl_request.sender_agent_id]:
-                    if notif == done_signal:
-                        self.nixl_agent.notifs[nixl_request.sender_agent_id].remove(
-                            notif
-                        )
-                        found = True
-                        break
-
-            await asyncio.sleep(0.001)
-            # Waited for too long without transfer completion, log for debugging
-            if (time.perf_counter() - start_time) > receive_timeout:
-                self.ring_buffer.release_buffer(buffer_id)
-                raise TimeoutError(
-                    f"Timeout while waiting for transfer completion for tensor_id {tensor_id} for more than {receive_timeout} seconds"
-                )
+        # Wait for transfer completion via event instead of polling loop
+        try:
+            await asyncio.wait_for(completion_event.wait(), timeout=receive_timeout)
+        except asyncio.TimeoutError:
+            self.ring_buffer.release_buffer(buffer_id)
+            raise TimeoutError(
+                f"Timeout while waiting for transfer completion for tensor_id {tensor_id} for more than {receive_timeout} seconds"
+            )
+        except BaseException:
+            self.ring_buffer.release_buffer(buffer_id)
+            raise
+        finally:
+            self._completion_events.pop(done_signal, None)
         logger.debug(
             f"Transfer completed for tensor_id {tensor_id}, total wait time: {time.perf_counter() - start_time:.2f} seconds"
         )
@@ -763,6 +841,7 @@ class NixlWriteEmbeddingReceiver(AbstractEmbeddingReceiver):
         """
         buffer_id = self.to_buffer_id.pop(tensor_id)
         self.ring_buffer.release_buffer(buffer_id)
+        self._buffer_available.set()
 
 
 class PersistentConnector(nixl_connect.Connector):
