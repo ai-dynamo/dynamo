@@ -157,11 +157,16 @@ runs:
         # container, so we use --volumes-from to inherit the runner's mounts.
         CI_MODELS_FLAGS=()
         if [[ -d "/models/ci/models" ]]; then
-          echo "📦 CI model cache detected, sharing via --volumes-from $HOSTNAME"
-          echo "📂 Runner /models/ci/models contents:"
-          ls -la /models/ci/models/ || true
-          ls -la /models/ci/models/Qwen/ 2>/dev/null || echo "  (no Qwen/ subdir)"
-          CI_MODELS_FLAGS+=(--volumes-from "$HOSTNAME:ro")
+          RUNNER_CID=$(cat /proc/self/cgroup 2>/dev/null | grep -oP '[a-f0-9]{64}' | head -1)
+          if [[ -n "$RUNNER_CID" ]]; then
+            echo "📦 CI model cache detected, sharing via --volumes-from ${RUNNER_CID:0:12}"
+            echo "📂 Runner /models/ci/models contents:"
+            ls -la /models/ci/models/ || true
+            ls -la /models/ci/models/Qwen/ 2>/dev/null || echo "  (no Qwen/ subdir)"
+            CI_MODELS_FLAGS+=(--volumes-from "$RUNNER_CID:ro")
+          else
+            echo "⚠️  CI models found but could not detect runner container ID"
+          fi
         fi
 
         docker run ${GPU_FLAGS} --rm -w /workspace \
@@ -266,11 +271,16 @@ runs:
         # container, so we use --volumes-from to inherit the runner's mounts.
         CI_MODELS_FLAGS=()
         if [[ -d "/models/ci/models" ]]; then
-          echo "📦 CI model cache detected, sharing via --volumes-from $HOSTNAME"
-          echo "📂 Runner /models/ci/models contents:"
-          ls -la /models/ci/models/ || true
-          ls -la /models/ci/models/Qwen/ 2>/dev/null || echo "  (no Qwen/ subdir)"
-          CI_MODELS_FLAGS+=(--volumes-from "$HOSTNAME:ro")
+          RUNNER_CID=$(cat /proc/self/cgroup 2>/dev/null | grep -oP '[a-f0-9]{64}' | head -1)
+          if [[ -n "$RUNNER_CID" ]]; then
+            echo "📦 CI model cache detected, sharing via --volumes-from ${RUNNER_CID:0:12}"
+            echo "📂 Runner /models/ci/models contents:"
+            ls -la /models/ci/models/ || true
+            ls -la /models/ci/models/Qwen/ 2>/dev/null || echo "  (no Qwen/ subdir)"
+            CI_MODELS_FLAGS+=(--volumes-from "$RUNNER_CID:ro")
+          else
+            echo "⚠️  CI models found but could not detect runner container ID"
+          fi
         fi
 
         docker run ${GPU_FLAGS} ${DOCKER_OPTS} --rm -w /workspace \
