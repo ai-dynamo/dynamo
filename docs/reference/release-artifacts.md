@@ -22,9 +22,11 @@ Release history in this document begins at v0.6.0.
 |-----------|-------------|---------|------|------|-----|-------|
 | `vllm-runtime:1.0.0` | Runtime container for vLLM backend | vLLM `v0.16.0` | `v12.9` | AMD64/ARM64 | [link](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/vllm-runtime?version=1.0.0) | |
 | `vllm-runtime:1.0.0-cuda13` | Runtime container for vLLM backend (CUDA 13) | vLLM `v0.16.0` | `v13.0` | AMD64/ARM64* | [link](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/vllm-runtime?version=1.0.0-cuda13) | |
+| `vllm-runtime:1.0.0-efa-amd64` | Runtime container for vLLM with AWS EFA | vLLM `v0.16.0` | `v12.9` | AMD64 | [link](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/vllm-runtime?version=1.0.0-efa-amd64) | Experimental |
 | `sglang-runtime:1.0.0` | Runtime container for SGLang backend | SGLang `v0.5.9` | `v12.9` | AMD64/ARM64 | [link](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/sglang-runtime?version=1.0.0) | |
 | `sglang-runtime:1.0.0-cuda13` | Runtime container for SGLang backend (CUDA 13) | SGLang `v0.5.9` | `v13.0` | AMD64/ARM64* | [link](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/sglang-runtime?version=1.0.0-cuda13) | |
 | `tensorrtllm-runtime:1.0.0` | Runtime container for TensorRT-LLM backend | TRT-LLM `v1.3.0rc5.post1` | `v13.1` | AMD64/ARM64 | [link](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/tensorrtllm-runtime?version=1.0.0) | |
+| `tensorrtllm-runtime:1.0.0-efa-amd64` | Runtime container for TensorRT-LLM with AWS EFA | TRT-LLM `v1.3.0rc5.post1` | `v13.1` | AMD64 | [link](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/tensorrtllm-runtime?version=1.0.0-efa-amd64) | Experimental |
 | `dynamo-frontend:1.0.0` | API gateway with Endpoint Prediction Protocol (EPP) | — | — | AMD64/ARM64 | [link](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/dynamo-frontend?version=1.0.0) | |
 | `kubernetes-operator:1.0.0` | Kubernetes operator for Dynamo deployments | — | — | AMD64/ARM64 | [link](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/kubernetes-operator?version=1.0.0) | |
 | `snapshot-agent:1.0.0` | Snapshot agent for fast GPU worker recovery via CRIU | — | — | AMD64/ARM64 | [link](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/snapshot-agent?version=1.0.0) | Preview |
@@ -79,6 +81,10 @@ docker pull nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.0
 # CUDA 13 variants
 docker pull nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0-cuda13
 docker pull nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.0.0-cuda13
+
+# EFA variants (AWS, AMD64 only, experimental)
+docker pull nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0-efa-amd64
+docker pull nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.0-efa-amd64
 
 # Infrastructure containers
 docker pull nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.0.0
@@ -151,12 +157,13 @@ For a complete list of known issues, refer to the release notes for each version
 
 ## Release History
 
-- **v1.0.0**: First major release. SGLang `v0.5.9`, TRT-LLM `v1.3.0rc5.post1` (CUDA 13.1), vLLM `v0.16.0`, NIXL `v0.10.1`. New `snapshot-agent` container and `snapshot` Helm chart (Preview). New `dynamo-mocker` and `dynamo-kv-router` Rust crates. Deprecated `dynamo-crds` Helm chart (CRDs now managed by the Operator). `v1alpha1` CRDs deprecated.
+- **v1.0.0**: First major release. SGLang `v0.5.9`, TRT-LLM `v1.3.0rc5.post1` (CUDA 13.1), vLLM `v0.16.0`, NIXL `v0.10.1`. New `snapshot-agent` container and `snapshot` Helm chart (Preview). New EFA container variants for vLLM and TRT-LLM (Experimental, AMD64 only). New `dynamo-mocker` and `dynamo-kv-router` Rust crates. Deprecated `dynamo-crds` Helm chart (CRDs now managed by the Operator). `v1alpha1` CRDs deprecated.
 - **v0.9.1**: Updated TRT-LLM to `v1.3.0rc3`. All other backend versions unchanged from v0.9.0.
 - **v0.9.0.post1**: Fixed `dynamo-platform` Helm chart operator image tag (Helm chart only, NGC)
 - **v0.9.0**: Updated vLLM to `v0.14.1`, SGLang to `v0.5.8`, TRT-LLM to `v1.3.0rc1`, NIXL to `v0.9.0`. New `dynamo-tokens` Rust crate. Deprecated `dynamo-graph` Helm chart.
 - **v0.8.1.post1/.post2/.post3 Patches**: Experimental patch releases updating TRT-LLM only (PyPI wheels and TRT-LLM container). No other artifacts changed.
 - **Standalone Frontend Container**: `dynamo-frontend` added in v0.8.0
+- **EFA Runtimes**: Experimental AWS EFA variants for vLLM and TRT-LLM (AMD64 only) in v1.0.0
 - **CUDA 13 Runtimes**: Experimental CUDA 13 runtime for SGLang and vLLM in v0.8.0
 - **New Rust Crates**: `dynamo-memory` and `dynamo-config` added in v0.8.0
 
@@ -187,6 +194,7 @@ For a complete list of known issues, refer to the release notes for each version
 |-----------|------|------|------|-------|
 | `vllm-runtime:1.0.0` | `v0.16.0` | AMD64/ARM64 | `v12.9` | |
 | `vllm-runtime:1.0.0-cuda13` | `v0.16.0` | AMD64/ARM64* | `v13.0` | |
+| `vllm-runtime:1.0.0-efa-amd64` | `v0.16.0` | AMD64 | `v12.9` | Experimental |
 | `vllm-runtime:0.9.1` | `v0.14.1` | AMD64/ARM64 | `v12.9` | |
 | `vllm-runtime:0.9.1-cuda13` | `v0.14.1` | AMD64/ARM64* | `v13.0` | Experimental |
 | `vllm-runtime:0.9.0` | `v0.14.1` | AMD64/ARM64 | `v12.9` | |
@@ -228,6 +236,7 @@ For a complete list of known issues, refer to the release notes for each version
 | Image:Tag | TRT-LLM | Arch | CUDA | Notes |
 |-----------|---------|------|------|-------|
 | `tensorrtllm-runtime:1.0.0` | `v1.3.0rc5.post1` | AMD64/ARM64 | `v13.1` | |
+| `tensorrtllm-runtime:1.0.0-efa-amd64` | `v1.3.0rc5.post1` | AMD64 | `v13.1` | Experimental |
 | `tensorrtllm-runtime:0.9.1` | `v1.3.0rc3` | AMD64/ARM64 | `v13.0` | |
 | `tensorrtllm-runtime:0.9.0` | `v1.3.0rc1` | AMD64/ARM64 | `v13.0` | |
 | `tensorrtllm-runtime:0.8.1.post3` | `v1.2.0rc6.post3` | AMD64/ARM64 | `v13.0` | Patch |
