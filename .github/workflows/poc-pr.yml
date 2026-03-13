@@ -70,45 +70,33 @@ jobs:
     name: vllm
     needs: [changed-files]
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
-    strategy:
-        matrix:
-          cuda_version: [ '12.9', '13.0' ]
-          platform: [ amd64, arm64 ]
     uses: ./.github/workflows/build-image.yml
     with:
       framework: vllm
-      cuda_version: ${{ matrix.cuda_version }}
-      platform: ${{ matrix.platform }}
+      cuda_version: "[ '12.9', '13.0' ]"
+      platform: "[ 'amd64', 'arm64' ]"
     secrets: inherit
 
   sglang-build:
     name: sglang
     needs: [changed-files]
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true'
-    strategy:
-        matrix:
-          cuda_version: [ '12.9', '13.0' ]
-          platform: [ amd64, arm64 ]
     uses: ./.github/workflows/build-image.yml
     with:
       framework: sglang
-      cuda_version: ${{ matrix.cuda_version }}
-      platform: ${{ matrix.platform }}
+      cuda_version: "[ '12.9', '13.0' ]"
+      platform: "[ 'amd64', 'arm64' ]"
     secrets: inherit
 
   trtllm-build:
     name: trtllm
     needs: [changed-files]
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true'
-    strategy:
-        matrix:
-          cuda_version: [ '13.1' ]
-          platform: [ amd64, arm64 ]
     uses: ./.github/workflows/build-image.yml
     with:
       framework: trtllm
-      cuda_version: ${{ matrix.cuda_version }}
-      platform: ${{ matrix.platform }}
+      cuda_version: "[ '13.1' ]"
+      platform: "[ 'amd64', 'arm64' ]"
     secrets: inherit
 
   # ============================================================================
@@ -118,43 +106,31 @@ jobs:
   vllm-test:
     name: vllm Test
     needs: [vllm-build]
-    strategy:
-        matrix:
-          cuda_version: [ '12.9', '13.0' ]
-          platform: [ amd64, arm64 ]
     uses: ./.github/workflows/single-gpu-test.yml
     with:
       framework: vllm
-      cuda_version: ${{ matrix.cuda_version }}
-      platform: ${{ matrix.platform }}
+      cuda_version: "[ '12.9', '13.0' ]"
+      platform: "[ 'amd64', 'arm64' ]"
     secrets: inherit
 
   sglang-test:
     name: sglang Test
     needs: [sglang-build]
-    strategy:
-        matrix:
-          cuda_version: [ '12.9', '13.0' ]
-          platform: [ amd64, arm64 ]
     uses: ./.github/workflows/single-gpu-test.yml
     with:
       framework: sglang
-      cuda_version: ${{ matrix.cuda_version }}
-      platform: ${{ matrix.platform }}
+      cuda_version: "[ '12.9', '13.0' ]"
+      platform: "[ 'amd64', 'arm64' ]"
     secrets: inherit
 
   trtllm-test:
     name: trtllm Test
     needs: [trtllm-build]
-    strategy:
-        matrix:
-          cuda_version: [ '13.1' ]
-          platform: [ amd64, arm64 ]
     uses: ./.github/workflows/single-gpu-test.yml
     with:
       framework: trtllm
-      cuda_version: ${{ matrix.cuda_version }}
-      platform: ${{ matrix.platform }}
+      cuda_version: "[ '13.1' ]"
+      platform: "[ 'amd64', 'arm64' ]"
     secrets: inherit
 
   # ============================================================================
@@ -164,43 +140,31 @@ jobs:
   vllm-copy-to-acr:
     name: vllm Copy to ACR
     needs: [vllm-test]
-    strategy:
-        matrix:
-          cuda_version: [ '12.9', '13.0' ]
-          platform: [ amd64, arm64 ]
     uses: ./.github/workflows/copy-to-acr.yml
     with:
       framework: vllm
-      cuda_version: ${{ matrix.cuda_version }}
-      platform: ${{ matrix.platform }}
+      cuda_version: "[ '12.9', '13.0' ]"
+      platform: "[ 'amd64', 'arm64' ]"
     secrets: inherit
 
   sglang-copy-to-acr:
     name: sglang Copy to ACR
     needs: [sglang-test]
-    strategy:
-        matrix: 
-          cuda_version: [ '12.9', '13.0' ]
-          platform: [ amd64, arm64 ]
     uses: ./.github/workflows/copy-to-acr.yml
     with:
       framework: sglang
-      cuda_version: ${{ matrix.cuda_version }}
-      platform: ${{ matrix.platform }}
+      cuda_version: "[ '12.9', '13.0' ]"
+      platform: "[ 'amd64', 'arm64' ]"
     secrets: inherit
 
   trtllm-copy-to-acr:
     name: trtllm Copy to ACR
     needs: [trtllm-test]
-    strategy:
-        matrix:
-          cuda_version: [ '13.1' ]
-          platform: [ amd64, arm64 ]
     uses: ./.github/workflows/copy-to-acr.yml
     with:
       framework: trtllm
-      cuda_version: ${{ matrix.cuda_version }}
-      platform: ${{ matrix.platform }}
+      cuda_version: "[ '13.1' ]"
+      platform: "[ 'amd64', 'arm64' ]"
     secrets: inherit
 
   # ============================================================================
@@ -210,41 +174,29 @@ jobs:
   vllm-deploy-test:
     name: vllm Deploy Test
     needs: [vllm-copy-to-acr]
-    strategy:
-        matrix:
-          cuda_version: [ '12.9', '13.0' ]
-          platform: [ amd64, arm64 ]
     uses: ./.github/workflows/deploy-test.yml
     with:
       framework: vllm
-      cuda_version: ${{ matrix.cuda_version }}
-      platform: ${{ matrix.platform }}
+      cuda_version: "[ '12.9', '13.0' ]"
+      platform: "[ 'amd64', 'arm64' ]"
     secrets: inherit
 
   sglang-deploy-test:
     name: sglang Deploy Test
     needs: [sglang-copy-to-acr]
-    strategy:
-        matrix:
-          cuda_version: [ '12.9', '13.0' ]
-          platform: [ amd64, arm64 ]
     uses: ./.github/workflows/deploy-test.yml
     with:
       framework: sglang
-      cuda_version: ${{ matrix.cuda_version }}
-      platform: ${{ matrix.platform }}
+      cuda_version: "[ '12.9', '13.0' ]"
+      platform: "[ 'amd64', 'arm64' ]"
     secrets: inherit
 
   trtllm-deploy-test:
     name: trtllm Deploy Test
     needs: [trtllm-copy-to-acr]
-    strategy:
-        matrix:
-          cuda_version: [ '13.1' ]
-          platform: [ amd64, arm64 ]
     uses: ./.github/workflows/deploy-test.yml
     with:
       framework: trtllm
-      cuda_version: ${{ matrix.cuda_version }}
-      platform: ${{ matrix.platform }}
+      cuda_version: "[ '13.1' ]"
+      platform: "[ 'amd64', 'arm64' ]"
     secrets: inherit

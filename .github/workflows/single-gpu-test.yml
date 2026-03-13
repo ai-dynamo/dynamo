@@ -25,11 +25,16 @@ on:
 jobs:
   build:
     name: Single GPU Test
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: ${{ fromJson(inputs.platform) }}
+        cuda_version: ${{ fromJson(inputs.cuda_version) }}
     runs-on: ubuntu-latest
     env:
       FRAMEWORK: ${{ inputs.framework }}
-      CUDA_VERSION: ${{ inputs.cuda_version }}
-      PLATFORM: ${{ inputs.platform }}
+      CUDA_VERSION: ${{ matrix.cuda_version }}
+      PLATFORM: ${{ matrix.platform }}
     steps:
       - name: Echo Build Parameters
         run: |
