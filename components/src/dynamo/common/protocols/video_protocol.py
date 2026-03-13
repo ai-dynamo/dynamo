@@ -40,6 +40,12 @@ class VideoNvExt(BaseModel):
     seed: Optional[int] = None
     """Random seed for reproducibility."""
 
+    boundary_ratio: Optional[float] = None
+    """MoE expert switching boundary as a fraction of the denoising schedule (vLLM-Omni I2V)."""
+
+    guidance_scale_2: Optional[float] = None
+    """CFG scale for the low-noise expert (vLLM-Omni I2V dual-guidance)."""
+
 
 class NvCreateVideoRequest(BaseModel):
     """Request for video generation (/v1/videos endpoint).

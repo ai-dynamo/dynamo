@@ -1887,6 +1887,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum 0.8.4",
+ "bytes",
  "clap 4.5.60",
  "dashmap 6.1.0",
  "derive-getters",
@@ -1895,6 +1896,7 @@ dependencies = [
  "dynamo-tokens",
  "flume",
  "indicatif 0.18.4",
+ "ordered-float 4.6.0",
  "parking_lot",
  "plotters",
  "prometheus",
@@ -5262,6 +5264,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ordered-float"
+version = "4.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7bb71e1b3fa6ca1c61f383464aaf2bb0e2f8e772a1f01d486832464de363b951"
+dependencies = [
+ "num-traits",
+]
+
+[[package]]
 name = "ordered-multimap"
 version = "0.7.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6951,7 +6962,7 @@ version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f3a1a3341211875ef120e117ea7fd5228530ae7e7036a779fdc9117be6b3282c"
 dependencies = [
- "ordered-float",
+ "ordered-float 2.10.1",
  "serde",
 ]
 

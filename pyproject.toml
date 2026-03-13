@@ -16,14 +16,9 @@ dependencies = [
     "ai-dynamo-runtime==1.0.0",
     "transformers>=4.56.0",
     "kubernetes>=32.0.1,<33.0.0",
-    "fastapi>=0.115.0",
-    "distro",
-    # filelock: required by planner
-    "filelock",
-    "typer",
-    "click<8.2.0",
-    "setuptools",
     "prometheus_client>=0.23.1,<1.0",
+    "msgspec>=0.19.0",
+    "pyzmq>=26.0.0",
     "msgpack==1.1.2",
 ]
 
@@ -55,11 +50,11 @@ trtllm =[
 vllm = [
     "uvloop",
     "nixl[cu12]<=0.10.1",
-    "vllm[flashinfer,runai]==0.16.0",
-    # vllm-omni 0.16.0rc1 is not on PyPI; installed from source in container builds
+    "vllm[flashinfer,runai]==0.17.1",
+    # vllm-omni 0.16.0 is now on PyPI; install only future rc builds from source in container builds
     # (see container/deps/vllm/install_vllm.sh). pip install ai-dynamo[vllm] will
     # not include vllm-omni — install it separately from source if needed.
-    # "vllm-omni==0.16.0rc1",
+    "vllm-omni==0.16.0",
     "blake3>=1.0.0,<2.0.0",
 ]
 
@@ -315,6 +310,12 @@ check_untyped_defs = true
 module = ["vllm.*"]
 follow_imports = "skip"
 ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# WAR mypy 1.18.x crash with numpy 1.26.x stubs:
+# "Should never get here in normal mode, got TypeAlias:numpy.float64 instead of TypeInfo"
+module = ["numpy", "numpy.*"]
+follow_imports = "skip"
 
 [tool.sphinx]
 

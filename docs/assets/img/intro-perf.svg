@@ -1,0 +1,31 @@
+<svg width="650" height="440" viewBox="0 0 650 440" xmlns="http://www.w3.org/2000/svg">
+  <rect width="100%" height="100%" fill="transparent"/>
+
+  <ellipse cx="325" cy="230" rx="200" ry="135" fill="none" stroke="#76b900" stroke-width="2" />
+
+  <rect x="220" y="30" width="210" height="80" rx="12" fill="#1e3a08" stroke="#76b900" stroke-width="2"/>
+  <text x="325" y="65" font-family="Arial, Helvetica, sans-serif" font-size="18" font-weight="700" text-anchor="middle" fill="#f0f0f0">Disaggregated</text>
+  <text x="325" y="87" font-family="Arial, Helvetica, sans-serif" font-size="18" font-weight="700" text-anchor="middle" fill="#f0f0f0">Serving</text>
+
+  <rect x="35" y="230" width="210" height="80" rx="12" fill="#251a3a" stroke="#8a60c0" stroke-width="2"/>
+  <text x="140" y="265" font-family="Arial, Helvetica, sans-serif" font-size="18" font-weight="700" text-anchor="middle" fill="#f0f0f0">KV Cache</text>
+  <text x="140" y="287" font-family="Arial, Helvetica, sans-serif" font-size="18" font-weight="700" text-anchor="middle" fill="#f0f0f0">Aware Routing</text>
+
+  <rect x="405" y="230" width="210" height="80" rx="12" fill="#1a2a30" stroke="#50b0a0" stroke-width="2"/>
+  <text x="510" y="265" font-family="Arial, Helvetica, sans-serif" font-size="18" font-weight="700" text-anchor="middle" fill="#f0f0f0">KV Cache</text>
+  <text x="510" y="287" font-family="Arial, Helvetica, sans-serif" font-size="18" font-weight="700" text-anchor="middle" fill="#f0f0f0">Offloading</text>
+
+  <!-- Left label: near left edge -->
+  <text x="45" y="155" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="700" fill="#d4b040">Improved latency</text>
+  <text x="45" y="173" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="700" fill="#d4b040">and throughput</text>
+
+  <!-- Right label: near right edge -->
+  <text x="510" y="155" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="700" fill="#d4b040">Better TCO</text>
+  <text x="510" y="173" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="700" fill="#d4b040">Faster TTFT</text>
+
+  <!-- Bottom label: between Routing and Offloading -->
+  <text x="325" y="345" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="700" text-anchor="middle" fill="#d4b040">Higher KV cache hit rate</text>
+
+  <!-- Composition summary -->
+  <text x="325" y="420" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="600" text-anchor="middle" fill="#76b900">All Three Composed: Max Throughput | Lowest Latency | Best TCO</text>
+</svg>

@@ -285,6 +285,13 @@ pub mod llm {
     /// varies per session and per release, wasting tokens and breaking prompt caching.
     pub const DYN_STRIP_ANTHROPIC_PREAMBLE: &str = "DYN_STRIP_ANTHROPIC_PREAMBLE";
 
+    /// Enable streaming tool call dispatch (`event: tool_call_dispatch` SSE events)
+    pub const DYN_ENABLE_STREAMING_TOOL_DISPATCH: &str = "DYN_ENABLE_STREAMING_TOOL_DISPATCH";
+
+    /// Enable streaming reasoning dispatch (`event: reasoning_dispatch` SSE events)
+    pub const DYN_ENABLE_STREAMING_REASONING_DISPATCH: &str =
+        "DYN_ENABLE_STREAMING_REASONING_DISPATCH";
+
     /// Metrics configuration
     pub mod metrics {
         /// Custom metrics prefix (overrides default "dynamo_frontend")
@@ -322,6 +329,16 @@ pub mod model {
         /// Set to "1" or "true" to enable
         pub const HF_HUB_OFFLINE: &str = "HF_HUB_OFFLINE";
     }
+}
+
+/// KV Router configuration environment variables
+pub mod router {
+    /// Queue threshold fraction for prefill token capacity.
+    /// When set, requests are queued if all workers exceed this fraction of max_num_batched_tokens.
+    pub const DYN_ROUTER_QUEUE_THRESHOLD: &str = "DYN_ROUTER_QUEUE_THRESHOLD";
+
+    /// Scheduling policy for the router queue ("fcfs" or "wspt").
+    pub const DYN_ROUTER_QUEUE_POLICY: &str = "DYN_ROUTER_QUEUE_POLICY";
 }
 
 /// Event Plane transport environment variables
@@ -464,6 +481,8 @@ mod tests {
             llm::DYN_LORA_PATH,
             llm::DYN_ENABLE_ANTHROPIC_API,
             llm::DYN_STRIP_ANTHROPIC_PREAMBLE,
+            llm::DYN_ENABLE_STREAMING_TOOL_DISPATCH,
+            llm::DYN_ENABLE_STREAMING_REASONING_DISPATCH,
             llm::metrics::DYN_METRICS_PREFIX,
             // Model
             model::model_express::MODEL_EXPRESS_URL,
@@ -472,6 +491,9 @@ mod tests {
             model::huggingface::HF_HUB_CACHE,
             model::huggingface::HF_HOME,
             model::huggingface::HF_HUB_OFFLINE,
+            // Router
+            router::DYN_ROUTER_QUEUE_THRESHOLD,
+            router::DYN_ROUTER_QUEUE_POLICY,
             // Event Plane
             event_plane::DYN_EVENT_PLANE,
             event_plane::DYN_EVENT_PLANE_CODEC,

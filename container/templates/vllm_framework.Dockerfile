@@ -61,7 +61,7 @@ RUN mkdir -p /opt/dynamo/venv && \
 ENV VIRTUAL_ENV=/opt/dynamo/venv \
     PATH="/opt/dynamo/venv/bin:${PATH}"
 
-ARG ARCH
+ARG TARGETARCH
 # Install vllm - keep this early in Dockerfile to avoid
 # rebuilds from unrelated source code changes
 ARG VLLM_REF
@@ -98,7 +98,7 @@ RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
         --device $DEVICE \
         --vllm-ref $VLLM_REF \
         --max-jobs $MAX_JOBS \
-        --arch $ARCH \
+        --arch $TARGETARCH \
         --installation-dir /opt \
         ${LMCACHE_REF:+--lmcache-ref "$LMCACHE_REF"} \
         ${VLLM_OMNI_REF:+--vllm-omni-ref "$VLLM_OMNI_REF"} \

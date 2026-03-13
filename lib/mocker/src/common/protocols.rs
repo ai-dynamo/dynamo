@@ -30,7 +30,12 @@ pub type NumBlocks = usize;
 /// For Use and Promote variants, block hashes are included for KV event publishing
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum MoveBlock {
-    Use(Vec<UniqueBlock>, Vec<BlockHash>, Option<Vec<Vec<u32>>>),
+    Use(
+        Vec<UniqueBlock>,
+        Vec<BlockHash>,
+        Option<Vec<Vec<u32>>>,
+        Option<UniqueBlock>,
+    ),
     Destroy(Vec<UniqueBlock>),
     Deref(Vec<UniqueBlock>),
     Promote(Uuid, SequenceHash, Option<u64>, BlockHash, Option<Vec<u32>>),
@@ -212,6 +217,13 @@ pub struct MockEngineArgs {
     #[builder(default = "None")]
     pub zmq_kv_events_port: Option<u16>,
 
+    /// ZMQ ROUTER port for replay of buffered KV event batches.
+    /// When set alongside `zmq_kv_events_port`, the mocker binds a ROUTER socket
+    /// that streams back buffered batches by sequence number on request.
+    /// Port is offset by dp_rank (replay_port + dp_rank).
+    #[builder(default = "None")]
+    pub zmq_replay_port: Option<u16>,
+
     /// Preemption mode for decode eviction under memory pressure.
     /// Lifo (default) evicts the newest request; Fifo evicts the oldest.
     #[builder(default)]
@@ -271,6 +283,7 @@ impl MockEngineArgs {
             "kv_transfer_bandwidth",
             "reasoning",
             "zmq_kv_events_port",
+            "zmq_replay_port",
             "preemption_mode",
         ]
         .iter()
@@ -381,6 +394,12 @@ impl MockEngineArgs {
             && let Some(port) = value.as_u64()
         {
             builder = builder.zmq_kv_events_port(Some(port as u16));
+        }
+
+        if let Some(value) = extra_args.get("zmq_replay_port")
+            && let Some(port) = value.as_u64()
+        {
+            builder = builder.zmq_replay_port(Some(port as u16));
         }
 
         if let Some(value) = extra_args.get("preemption_mode")

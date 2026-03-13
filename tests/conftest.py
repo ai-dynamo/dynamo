@@ -1,10 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import importlib.util
 import logging
 import os
 import shutil
-import subprocess
 import tempfile
 from pathlib import Path
 from typing import Generator, Optional
@@ -50,6 +50,7 @@ def pytest_configure(config):
         "vllm: marks tests as requiring vllm",
         "trtllm: marks tests as requiring trtllm",
         "sglang: marks tests as requiring sglang",
+        "lmcache: mark tests as requiring lmcache",
         "multimodal: marks tests as multimodal (image/video) tests",
         "slow: marks tests as known to be slow",
         "h100: marks tests to run on H100",
@@ -242,30 +243,6 @@ def predownload_tokenizers(pytestconfig):
     os.environ.pop("HF_HUB_OFFLINE", None)
 
 
-@pytest.fixture(scope="session")
-def build_kv_indexer():
-    """Pre-build the standalone KV indexer binary once per session.
-
-    Runs `cargo build` so that `cargo run` in tests starts instantly.
-    No-op if the binary is already cached in target/.
-    """
-    _logger.info("Building dynamo-kv-indexer binary (cached after first build)")
-    subprocess.check_call(
-        [
-            "cargo",
-            "build",
-            "-p",
-            "dynamo-kv-router",
-            "--features",
-            "indexer-bin",
-            "--bin",
-            "dynamo-kv-indexer",
-        ],
-        timeout=600,
-    )
-    _logger.info("dynamo-kv-indexer binary ready")
-
-
 @pytest.fixture(autouse=True)
 def logger(request):
     log_dir = resolve_test_output_path(request.node.name)
@@ -282,11 +259,40 @@ def logger(request):
     logger.removeHandler(handler)
 
 
+def _item_has_marker(item, marker_name):
+    """Check if a test item has a marker, including module-level pytestmark."""
+    if item.get_closest_marker(marker_name):
+        return True
+    module = getattr(item, "module", None)
+    if module is not None:
+        marks = getattr(module, "pytestmark", [])
+        if not isinstance(marks, list):
+            marks = [marks]
+        if any(getattr(m, "name", "") == marker_name for m in marks):
+            return True
+    return False
+
+
 @pytest.hookimpl(trylast=True)
 def pytest_collection_modifyitems(config, items):
     """
     This function is called to modify the list of tests to run.
     """
+    # Auto-skip tests marked with a framework marker when the framework is not installed
+    framework_markers = {
+        "trtllm": "tensorrt_llm",
+        "vllm": "vllm",
+        "sglang": "sglang",
+        "kvbm": "kvbm",
+        "lmcache": "lmcache",
+    }
+    for marker_name, module_name in framework_markers.items():
+        if importlib.util.find_spec(module_name) is None:
+            skip = pytest.mark.skip(reason=f"{module_name} is not installed")
+            for item in items:
+                if _item_has_marker(item, marker_name):
+                    item.add_marker(skip)
+
     # Collect models via explicit pytest mark from final filtered items only
     models_to_download = set()
     for item in items:

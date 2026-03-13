@@ -22,6 +22,14 @@ navigation:
     contents:
       - page: Quickstart
         path: getting-started/quickstart.md
+      - page: Introduction
+        path: getting-started/introduction.md
+      - page: Contribution Guide
+        path: contribution-guide.md
+
+  # ==================== Resources ====================
+  - section: Resources
+    contents:
       - page: Support Matrix
         path: reference/support-matrix.md
       - page: Feature Matrix
@@ -39,6 +47,8 @@ navigation:
         contents:
           - page: Detailed Installation Guide
             path: kubernetes/installation-guide.md
+          - page: Deploying Your First Model
+            path: kubernetes/dgdr.md
           - page: Dynamo Operator
             path: kubernetes/dynamo-operator.md
           - page: Service Discovery
@@ -55,11 +65,8 @@ navigation:
             path: kubernetes/rolling-update.md
           - page: Inference Gateway (GAIE)
             path: kubernetes/inference-gateway.md
-          - section: Checkpointing
-            path: kubernetes/snapshot/README.md
-            contents:
-              - page: Integration with Dynamo
-                path: kubernetes/snapshot/dynamo.md
+          - page: Snapshot
+            path: kubernetes/snapshot.md
       - section: Observability (K8s)
         contents:
           - page: Metrics
@@ -86,31 +93,34 @@ navigation:
         path: components/kvbm/kvbm-guide.md
       - page: Dynamo Benchmarking
         path: benchmarks/benchmarking.md
-      - section: Multimodal Model Serving
+      - section: Multimodal
+        path: features/multimodal/README.md
         contents:
-          - section: Vision Language Models (VLMs)
-            path: features/multimodal/README.md
-            contents:
-              - page: Embedding Cache
-                path: features/multimodal/embedding-cache.md
-              - page: Encoder Disaggregation
-                path: features/multimodal/encoder-disaggregation.md
-              - page: Multimodal KV Routing
-                path: features/multimodal/multimodal-kv-routing.md
-          - section: Diffusion (Experimental)
-            path: features/multimodal/diffusion.md
-            contents:
-              - page: vLLM-Omni
-                path: backends/vllm/vllm-omni.md
-              - page: SGLang Diffusion
-                path: backends/sglang/sglang-diffusion.md
-              - page: TRT-LLM Diffusion
-                path: backends/trtllm/trtllm-video-diffusion.md
+          - page: Embedding Cache
+            path: features/multimodal/embedding-cache.md
+          - page: Encoder Disaggregation
+            path: features/multimodal/encoder-disaggregation.md
+          - page: Multimodal KV Routing
+            path: features/multimodal/multimodal-kv-routing.md
+      - section: Diffusion (Preview)
+        slug: diffusion
+        path: features/diffusion/README.md
+        contents:
+          - page: FastVideo
+            slug: fastvideo
+            path: features/diffusion/fastvideo.md
+          - page: vLLM-Omni
+            path: backends/vllm/vllm-omni.md
+          - page: SGLang Diffusion
+            path: backends/sglang/sglang-diffusion.md
+          - page: TRT-LLM Diffusion
+            path: backends/trtllm/trtllm-video-diffusion.md
       - page: Tool Calling
         path: agents/tool-calling.md
       - page: LoRA Adapters
         path: features/lora/README.md
-      - section: Agentic Workloads
+      - section: Agents
+        slug: agents
         path: features/agentic_workloads.md
         contents:
           - page: SGLang for Agentic Workloads
@@ -137,10 +147,10 @@ navigation:
             path: fault-tolerance/request-migration.md
           - page: Request Cancellation
             path: fault-tolerance/request-cancellation.md
-          - page: Graceful Shutdown
-            path: fault-tolerance/graceful-shutdown.md
           - page: Request Rejection
             path: fault-tolerance/request-rejection.md
+          - page: Graceful Shutdown
+            path: fault-tolerance/graceful-shutdown.md
           - page: Testing
             path: fault-tolerance/testing.md
       - page: Writing Python Workers
@@ -265,6 +275,9 @@ navigation:
     path: blogs/index.mdx
     slug: blog
     contents:
+      - page: "Full-Stack Optimizations for Agentic Inference"
+        path: blogs/agentic-inference/agentic-inference.md
+        slug: agentic-inference
       - page: "Flash Indexer: Inter-Galactic KV Routing"
         path: blogs/flash-indexer/flash-indexer.md
         slug: flash-indexer
@@ -325,6 +338,9 @@ navigation:
         path: reference/glossary.md
       - page: Tuning Disaggregated Performance
         path: performance/tuning.md
+      # -- Frontend (hidden sub-pages) --
+      - page: NVIDIA Request Extensions (nvext)
+        path: components/frontend/nvext.md
       # -- Backend detail pages --
       - section: vLLM Details
         contents:
