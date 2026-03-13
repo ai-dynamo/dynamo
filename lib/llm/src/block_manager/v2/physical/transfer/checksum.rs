@@ -25,6 +25,40 @@ use std::{
 
 use cudarc::runtime::sys::{cudaMemcpy, cudaMemcpyKind};
 
+/// Synchronous D2H/H2D copy using Level Zero immediate command list.
+#[cfg(feature = "level-zero")]
+fn ze_sync_copy(
+    dst: *mut std::ffi::c_void,
+    src: *const std::ffi::c_void,
+    size: usize,
+    device_ordinal: u32,
+) -> anyhow::Result<()> {
+    use syclrc::level_zero::ze::safe::{ZeDevice, ZeImmediateCmdList};
+
+    let dev = ZeDevice::new(device_ordinal as usize)
+        .map_err(|e| anyhow!("Failed to create ZeDevice {}: {}", device_ordinal, e))?;
+    let cmdlist = ZeImmediateCmdList::new(dev)
+        .map_err(|e| anyhow!("Failed to create ZeImmediateCmdList: {}", e))?;
+
+    unsafe {
+        cmdlist
+            .append_memcpy(
+                dst,
+                src,
+                size,
+                std::ptr::null_mut(),
+                &mut [],
+            )
+            .map_err(|e| anyhow!("zeCommandListAppendMemoryCopy failed: {}", e))?;
+    }
+
+    cmdlist
+        .host_synchronize(u64::MAX)
+        .map_err(|e| anyhow!("ZeImmediateCmdList host_synchronize failed: {}", e))?;
+
+    Ok(())
+}
+
 pub type BlockChecksum = String;
 
 /// Compute checksums for a list of blocks.
@@ -139,7 +173,20 @@ fn compute_single_block_checksum(
                     }
                     hasher.update(system_region.as_slice());
                 }
+                #[cfg(feature = "level-zero")]
+                StorageKind::XpuDevice(device_id) => {
+                    let mut system_region: Vec<u8> = vec![0; region.size()];
+                    ze_sync_copy(
+                        system_region.as_mut_ptr() as *mut std::ffi::c_void,
+                        region.addr() as *const std::ffi::c_void,
+                        region.size(),
+                        device_id,
+                    )?;
+                    hasher.update(system_region.as_slice());
+                }
+                #[cfg(not(feature = "level-zero"))]
                 StorageKind::XpuDevice(_) => {
+                    return Err(anyhow!("checksum for XPU requires the level-zero feature"));
                 }
                 StorageKind::Disk(fd) => {
                     let mut system_region: AVec<u8, _> = avec![[4096]| 0; region.size()];
