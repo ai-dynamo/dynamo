@@ -74,8 +74,11 @@ aiconfigurator cli default \
   --ttft 600 \
   --tpot 16.67 \
   --backend vllm \
-  --backend_version 0.12.0 \
-  --save_dir ./results_vllm
+  --backend-version 0.12.0 \
+  --generator-dynamo-version 1.0.0 \
+  --generator-set K8sConfig.k8s_namespace=$YOUR_NAMESPACE \
+  --generator-set K8sConfig.k8s_pvc_name=$YOUR_PVC \
+  --save-dir ./results_vllm
 ```
 
 **Parameters explained:**
@@ -220,7 +223,7 @@ spec:
           value: /opt/models
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0
           imagePullPolicy: IfNotPresent
 
     VLLMWorker:
@@ -240,7 +243,7 @@ spec:
           value: /opt/models
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0
           workingDir: /workspace
           imagePullPolicy: IfNotPresent
           command:
@@ -456,7 +459,7 @@ spec:
           value: /opt/models
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0
           imagePullPolicy: IfNotPresent
 
     VLLMPrefillWorker:
@@ -483,7 +486,7 @@ spec:
           value: "0"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0
           workingDir: /workspace
           imagePullPolicy: IfNotPresent
           securityContext:
@@ -531,7 +534,7 @@ spec:
           value: "0"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0
           workingDir: /workspace
           imagePullPolicy: IfNotPresent
           securityContext:
