@@ -2210,4 +2210,260 @@ pub mod tests {
             );
         }
     }
+
+    // ============================================================================
+    // MLA (outer_dim=1) TESTS
+    // ============================================================================
+
+    mod mla_outer_dim_1_tests {
+        use super::*;
+
+        const MLA_NUM_BLOCKS: usize = 100;
+        const MLA_NUM_LAYERS: usize = 61;
+        const MLA_OUTER_DIM: usize = 1;
+        const MLA_PAGE_SIZE: usize = 64;
+        const MLA_INNER_DIM: usize = 576;
+        const MLA_DTYPE_WIDTH_BYTES: usize = 2;
+
+        fn setup_mla_layer_separate(
+            is_outer_contiguous: bool,
+        ) -> Result<LayerSeparate<NullDeviceStorage>, LayoutError> {
+            let config = LayoutConfig {
+                num_blocks: MLA_NUM_BLOCKS,
+                num_layers: MLA_NUM_LAYERS,
+                outer_dim: MLA_OUTER_DIM,
+                page_size: MLA_PAGE_SIZE,
+                inner_dim: MLA_INNER_DIM,
+                alignment: 1,
+                dtype_width_bytes: MLA_DTYPE_WIDTH_BYTES,
+            };
+
+            let ls_config = LayerSeparateConfig::new(config.clone(), is_outer_contiguous)?;
+            let required_size = ls_config.required_allocation_size();
+            let storages = (0..MLA_NUM_LAYERS)
+                .map(|_| NullDeviceStorage::new(required_size as u64))
+                .collect();
+
+            LayerSeparate::new(config, storages, is_outer_contiguous)
+        }
+
+        #[test]
+        fn test_mla_config_validates() {
+            let config = LayoutConfig::builder()
+                .num_blocks(MLA_NUM_BLOCKS)
+                .num_layers(MLA_NUM_LAYERS)
+                .outer_dim(1)
+                .page_size(MLA_PAGE_SIZE)
+                .inner_dim(MLA_INNER_DIM)
+                .build()
+                .unwrap();
+
+            assert!(config.validate().is_ok(), "outer_dim=1 should be valid");
+        }
+
+        #[test]
+        fn test_mla_config_outer_dim_3_invalid() {
+            let config = LayoutConfig::builder()
+                .num_blocks(MLA_NUM_BLOCKS)
+                .num_layers(MLA_NUM_LAYERS)
+                .outer_dim(3)
+                .page_size(MLA_PAGE_SIZE)
+                .inner_dim(MLA_INNER_DIM)
+                .build()
+                .unwrap();
+
+            assert!(
+                config.validate().is_err(),
+                "outer_dim=3 should fail validation"
+            );
+        }
+
+        #[test]
+        fn test_mla_ls_creation_block_contiguous() {
+            let layout = setup_mla_layer_separate(false)
+                .expect("MLA LayerSeparate creation should succeed");
+
+            assert_eq!(layout.num_blocks(), MLA_NUM_BLOCKS);
+            assert_eq!(layout.num_layers(), MLA_NUM_LAYERS);
+            assert_eq!(layout.outer_dim(), 1);
+            assert_eq!(layout.page_size(), MLA_PAGE_SIZE);
+            assert_eq!(layout.inner_dim(), MLA_INNER_DIM);
+            assert_eq!(
+                layout.layout_type(),
+                LayoutType::LayerSeparate {
+                    outer_contiguous: false
+                }
+            );
+        }
+
+        #[test]
+        fn test_mla_ls_creation_outer_contiguous() {
+            let layout = setup_mla_layer_separate(true)
+                .expect("MLA LayerSeparate creation should succeed");
+
+            assert_eq!(layout.outer_dim(), 1);
+            assert_eq!(
+                layout.layout_type(),
+                LayoutType::LayerSeparate {
+                    outer_contiguous: true
+                }
+            );
+        }
+
+        #[test]
+        fn test_mla_ls_memory_region_size() {
+            let layout = setup_mla_layer_separate(false).expect("Layout setup failed");
+
+            let region = layout.memory_region(0, 0, 0).unwrap();
+            let expected_size = MLA_PAGE_SIZE * MLA_INNER_DIM * MLA_DTYPE_WIDTH_BYTES;
+            assert_eq!(
+                region.size, expected_size,
+                "MLA memory region size should be page_size * inner_dim * dtype_bytes = {} * {} * {} = {}",
+                MLA_PAGE_SIZE, MLA_INNER_DIM, MLA_DTYPE_WIDTH_BYTES, expected_size
+            );
+        }
+
+        #[test]
+        fn test_mla_ls_block_stride() {
+            let layout = setup_mla_layer_separate(false).expect("Layout setup failed");
+
+            let region_0 = layout.memory_region(0, 0, 0).unwrap();
+            let region_1 = layout.memory_region(1, 0, 0).unwrap();
+
+            // With outer_dim=1 and block_contiguous, block_stride = outer_dim_stride * outer_dim
+            // = (page_size * inner_dim * dtype) * 1
+            let expected_stride = MLA_PAGE_SIZE * MLA_INNER_DIM * MLA_DTYPE_WIDTH_BYTES;
+            assert_eq!(
+                region_1.addr - region_0.addr,
+                expected_stride,
+                "MLA block stride should equal memory_region_size when outer_dim=1"
+            );
+        }
+
+        #[test]
+        fn test_mla_ls_outer_idx_must_be_zero() {
+            let layout = setup_mla_layer_separate(false).expect("Layout setup failed");
+
+            assert!(
+                layout.memory_region(0, 0, 0).is_ok(),
+                "outer_idx=0 should be valid for outer_dim=1"
+            );
+            assert!(
+                layout.memory_region(0, 0, 1).is_err(),
+                "outer_idx=1 should be invalid for outer_dim=1"
+            );
+        }
+
+        #[test]
+        fn test_mla_ls_verify_all_regions() {
+            let layout = setup_mla_layer_separate(false).expect("Layout setup failed");
+
+            assert!(
+                layout.verify_memory_regions().is_ok(),
+                "MLA LayerSeparate memory region verification should pass"
+            );
+
+            for block_idx in 0..MLA_NUM_BLOCKS {
+                for layer_idx in 0..MLA_NUM_LAYERS {
+                    let matches = layout
+                        .verify_memory_region(block_idx, layer_idx, 0)
+                        .expect("Verification should not error");
+                    assert!(
+                        matches,
+                        "MLA region ({}, {}, 0) should match",
+                        block_idx, layer_idx
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn test_mla_ls_address_calculation() {
+            let layout = setup_mla_layer_separate(false).expect("Layout setup failed");
+
+            for block_idx in 0..MLA_NUM_BLOCKS {
+                for layer_idx in 0..MLA_NUM_LAYERS {
+                    let actual = layout.memory_region(block_idx, layer_idx, 0).unwrap();
+                    let expected_addr = layout
+                        .expected_memory_address(block_idx, layer_idx, 0)
+                        .unwrap();
+
+                    assert_eq!(
+                        actual.addr, expected_addr,
+                        "MLA address mismatch at ({}, {}, 0)",
+                        block_idx, layer_idx
+                    );
+                }
+            }
+        }
+    }
+
+    // ============================================================================
+    // layout_separate_auto DETECTION TESTS
+    // ============================================================================
+
+    mod layout_auto_detection_tests {
+        use super::*;
+
+        #[test]
+        fn test_auto_detect_block_contiguous() {
+            // shape[0] >= num_device_blocks → block contiguous (outer_contiguous=false)
+            let shape = vec![1024, 2, 64, 128];
+            let result = LayoutType::layer_separate_auto(&shape, 1024).unwrap();
+            assert_eq!(
+                result,
+                LayoutType::LayerSeparate {
+                    outer_contiguous: false
+                }
+            );
+        }
+
+        #[test]
+        fn test_auto_detect_outer_contiguous() {
+            // shape[0] < num_device_blocks, shape[1] >= num_device_blocks → outer contiguous
+            let shape = vec![2, 1024, 64, 128];
+            let result = LayoutType::layer_separate_auto(&shape, 1024).unwrap();
+            assert_eq!(
+                result,
+                LayoutType::LayerSeparate {
+                    outer_contiguous: true
+                }
+            );
+        }
+
+        #[test]
+        fn test_auto_detect_unsupported_shape() {
+            // Neither dimension >= num_device_blocks → error
+            let shape = vec![4, 8, 64, 128];
+            let result = LayoutType::layer_separate_auto(&shape, 1024);
+            assert!(result.is_err());
+        }
+
+        #[test]
+        fn test_auto_detect_mla_3d_tensor() {
+            // MLA-style 3D tensor: [num_blocks, page_size, latent_dim]
+            // shape[0] = num_blocks → block contiguous
+            let shape = vec![12212, 64, 576];
+            let result = LayoutType::layer_separate_auto(&shape, 12212).unwrap();
+            assert_eq!(
+                result,
+                LayoutType::LayerSeparate {
+                    outer_contiguous: false
+                }
+            );
+        }
+
+        #[test]
+        fn test_auto_detect_standard_4d_tensor() {
+            // Standard 4D tensor: [num_blocks, 2, page_size, head_dim]
+            let shape = vec![8000, 2, 64, 128];
+            let result = LayoutType::layer_separate_auto(&shape, 8000).unwrap();
+            assert_eq!(
+                result,
+                LayoutType::LayerSeparate {
+                    outer_contiguous: false
+                }
+            );
+        }
+    }
 }
