@@ -59,14 +59,23 @@ def run_sweep(
 
             for request_rate in sorted(config.request_rates):
                 for bench_cfg in config.configs:
+                    workflow_abs = _resolve_workflow(bench_cfg.workflow, repo_root)
+                    sweep_dir = file_output_dir / bench_cfg.label
+                    artifact_dir = sweep_dir / f"request_rate{request_rate}"
+
+                    if (artifact_dir / "profile_export_aiperf.json").exists():
+                        print(
+                            f"  SKIP {bench_cfg.label} request_rate={request_rate} "
+                            f"(results exist in {artifact_dir})",
+                            flush=True,
+                        )
+                        continue
+
                     _print_banner(
                         f"[{file_tag}] Config: {bench_cfg.label}  "
                         f"request_rate={request_rate}",
                         char="-",
                     )
-
-                    workflow_abs = _resolve_workflow(bench_cfg.workflow, repo_root)
-                    sweep_dir = file_output_dir / bench_cfg.label
 
                     server.start(
                         workflow_script=workflow_abs,
@@ -83,7 +92,7 @@ def run_sweep(
                             warmup_count=config.warmup_count,
                             input_file=input_file,
                             osl=config.osl,
-                            artifact_dir=sweep_dir / f"request_rate{request_rate}",
+                            artifact_dir=artifact_dir,
                         )
                     finally:
                         server.stop()

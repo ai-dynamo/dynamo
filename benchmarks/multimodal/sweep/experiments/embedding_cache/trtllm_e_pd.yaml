@@ -7,7 +7,7 @@
 #   python -m benchmarks.multimodal.sweep --config benchmarks/multimodal/sweep/experiments/embedding_cache/trtllm_e_pd.yaml
 
 model: Qwen/Qwen3-VL-2B-Instruct
-request_rates: [16, 32, 64, 128, 256]
+concurrencies: [16, 32, 64, 128, 256]
 osl: 150
 request_count: 1000
 warmup_count: 5
