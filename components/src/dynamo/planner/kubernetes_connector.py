@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 import logging
 import os
 from typing import Optional
@@ -33,6 +34,7 @@ from dynamo.planner.utils.exceptions import (
     PlannerError,
     UserProvidedModelNameMismatchError,
 )
+from dynamo.planner.worker_info import WorkerInfo, build_worker_info_from_defaults
 from dynamo.runtime.logging import configure_dynamo_logging
 
 configure_dynamo_logging()
@@ -307,11 +309,222 @@ class KubernetesConnector(PlannerConnector):
 
         return None
 
-    async def wait_for_deployment_ready(self):
-        """Wait for the deployment to be ready"""
+    async def wait_for_deployment_ready(self, include_planner: bool = True):
+        """Wait for the deployment to be ready.
+
+        Args:
+            include_planner: If False, skip the planner service when checking
+                readiness. This lets the planner read MDC from worker pods
+                without waiting for itself to be marked ready in the DGD.
+        """
         await self.kube_api.wait_for_graph_deployment_ready(
             self.graph_deployment_name,
+            include_planner=include_planner,
         )
+
+    def _list_worker_metadata_crs(self) -> list[dict]:
+        """List all DynamoWorkerMetadata CRs in the current namespace."""
+        try:
+            result = self.kube_api.custom_api.list_namespaced_custom_object(
+                group="nvidia.com",
+                version="v1alpha1",
+                namespace=self.kube_api.current_namespace,
+                plural="dynamoworkermetadatas",
+            )
+            return result.get("items", [])
+        except Exception as e:
+            logger.warning(f"Failed to list DynamoWorkerMetadata CRs: {e}")
+            return []
+
+    def _extract_mdc_entries(
+        self,
+    ) -> list[dict]:
+        """Extract all MDC entries from DynamoWorkerMetadata CRs.
+
+        Returns a list of dicts, each containing:
+            namespace, component, endpoint, instance_id, card_json
+        """
+        crs = self._list_worker_metadata_crs()
+        entries: list[dict] = []
+        for cr in crs:
+            data = cr.get("spec", {}).get("data", {})
+            if isinstance(data, str):
+                try:
+                    data = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+            model_cards = data.get("model_cards", {})
+            for _key, instance in model_cards.items():
+                if instance.get("type") != "Model":
+                    continue
+                entries.append(instance)
+        return entries
+
+    def _mdc_entry_is_prefill(self, entry: dict) -> bool:
+        """Check if an MDC entry is a prefill worker via model_type bitflag.
+
+        ModelType::Prefill = 1 << 4 = 16.
+        """
+        card = entry.get("card_json", {})
+        model_type = card.get("model_type", 0)
+        if isinstance(model_type, dict):
+            model_type = model_type.get("bits", 0)
+        return bool(model_type & 0x10)
+
+    def _build_worker_info_from_mdc(
+        self,
+        entry: dict,
+        sub_component_type: SubComponentType,
+    ) -> WorkerInfo:
+        """Build a WorkerInfo from an MDC entry, applying the fallback chain.
+
+        Priority: MDC -> DGD container-arg parsing -> hard-coded defaults.
+        """
+        defaults = build_worker_info_from_defaults(
+            self._backend_hint or "vllm", sub_component_type
+        )
+
+        card = entry.get("card_json", {})
+        runtime_cfg = card.get("runtime_config", {})
+
+        # --- component / endpoint names from MDC wrapper ---
+        mdc_component = entry.get("component")
+        mdc_endpoint = entry.get("endpoint")
+
+        component_name = mdc_component or defaults.component_name
+        endpoint = mdc_endpoint or defaults.endpoint
+        if not mdc_component:
+            logger.info(
+                f"MDC missing 'component' for {sub_component_type.value}, "
+                f"falling back to default: {defaults.component_name}"
+            )
+        if not mdc_endpoint:
+            logger.info(
+                f"MDC missing 'endpoint' for {sub_component_type.value}, "
+                f"falling back to default: {defaults.endpoint}"
+            )
+
+        # --- model name ---
+        mdc_model = card.get("display_name")
+        model_name = mdc_model
+        if not model_name:
+            # Fallback: parse from DGD container args
+            try:
+                deployment = self.kube_api.get_graph_deployment(
+                    self.graph_deployment_name
+                )
+                service = get_service_from_sub_component_type_or_name(
+                    deployment, sub_component_type
+                )
+                model_name = service.get_model_name()
+                if model_name:
+                    logger.info(
+                        f"MDC missing model name for {sub_component_type.value}, "
+                        f"fell back to DGD container args: {model_name}"
+                    )
+            except PlannerError:
+                pass
+        if not model_name:
+            logger.warning(
+                f"Could not determine model name for {sub_component_type.value} "
+                f"from MDC or DGD container args"
+            )
+
+        # --- runtime config fields ---
+        total_kv_blocks = runtime_cfg.get("total_kv_blocks")
+        max_num_seqs = runtime_cfg.get("max_num_seqs")
+        max_num_batched_tokens = runtime_cfg.get("max_num_batched_tokens")
+        kv_cache_block_size = card.get("kv_cache_block_size")
+        context_length = card.get("context_length")
+
+        if total_kv_blocks is None:
+            logger.info(f"MDC missing total_kv_blocks for {sub_component_type.value}")
+        if max_num_seqs is None:
+            logger.info(f"MDC missing max_num_seqs for {sub_component_type.value}")
+
+        # --- k8s_name: resolve from DGD subComponentType ---
+        k8s_name = defaults.k8s_name
+        try:
+            deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
+            service = get_service_from_sub_component_type_or_name(
+                deployment, sub_component_type
+            )
+            k8s_name = service.name
+        except PlannerError:
+            logger.info(
+                f"Could not resolve k8s service name for {sub_component_type.value}, "
+                f"using default: {defaults.k8s_name}"
+            )
+
+        info = WorkerInfo(
+            k8s_name=k8s_name,
+            component_name=component_name,
+            endpoint=endpoint,
+            model_name=model_name,
+            total_kv_blocks=total_kv_blocks,
+            kv_cache_block_size=kv_cache_block_size,
+            max_num_seqs=max_num_seqs,
+            max_num_batched_tokens=max_num_batched_tokens,
+            context_length=context_length,
+        )
+        return info
+
+    def get_worker_info(
+        self,
+        sub_component_type: SubComponentType,
+        backend: str = "vllm",
+    ) -> WorkerInfo:
+        """Get WorkerInfo for a sub-component, trying MDC first, then fallbacks.
+
+        Args:
+            sub_component_type: PREFILL or DECODE
+            backend: Backend framework name (for default fallback)
+        """
+        self._backend_hint = backend
+        entries = self._extract_mdc_entries()
+
+        # Find the matching MDC entry
+        for entry in entries:
+            is_prefill = self._mdc_entry_is_prefill(entry)
+            if sub_component_type == SubComponentType.PREFILL and is_prefill:
+                info = self._build_worker_info_from_mdc(entry, sub_component_type)
+                logger.info(f"Built prefill WorkerInfo from MDC: {info.summary()}")
+                return info
+            if sub_component_type == SubComponentType.DECODE and not is_prefill:
+                info = self._build_worker_info_from_mdc(entry, sub_component_type)
+                logger.info(f"Built decode WorkerInfo from MDC: {info.summary()}")
+                return info
+
+        # No MDC entry found -- fall back entirely to defaults + DGD arg parsing
+        logger.warning(
+            f"No DynamoWorkerMetadata CR found for {sub_component_type.value}. "
+            f"Workers may not be registered yet. Falling back to defaults."
+        )
+        info = build_worker_info_from_defaults(backend, sub_component_type)
+
+        # Try to enrich model_name from DGD container args
+        try:
+            deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
+            service = get_service_from_sub_component_type_or_name(
+                deployment, sub_component_type
+            )
+            info.k8s_name = service.name
+            arg_model = service.get_model_name()
+            if arg_model:
+                info.model_name = arg_model
+                logger.info(
+                    f"Enriched {sub_component_type.value} WorkerInfo model name "
+                    f"from DGD args: {arg_model}"
+                )
+        except PlannerError as e:
+            logger.info(
+                f"Could not enrich WorkerInfo from DGD for {sub_component_type.value}: {e}"
+            )
+
+        logger.info(
+            f"Using fallback WorkerInfo for {sub_component_type.value}: {info.summary()}"
+        )
+        return info
 
     def get_actual_worker_counts(
         self,

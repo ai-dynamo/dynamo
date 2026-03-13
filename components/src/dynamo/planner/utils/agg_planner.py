@@ -6,6 +6,7 @@ import logging
 from typing import Optional
 
 from dynamo.planner import SubComponentType, TargetReplica
+from dynamo.planner.defaults import WORKER_COMPONENT_NAMES
 from dynamo.planner.utils.load_based_regression import LoadBasedRegressionModel
 from dynamo.planner.utils.planner_config import PlannerConfig
 from dynamo.planner.utils.planner_core import (
@@ -80,15 +81,20 @@ class AggPlanner:
         self.cached_load_metrics = CachedLoadMetrics()
 
     async def _async_init(self):
-        await self.planner._async_init()
+        # AggPlanner overrides _async_init: decode-only, no prefill.
+        defaults = WORKER_COMPONENT_NAMES.get(self.config.backend)
 
-    async def run(self):
         if not self.config.no_operation:
+            connector = getattr(self.planner, "connector", None)
+            if connector and hasattr(connector, "_async_init"):
+                await connector._async_init()
+
             logger.info("Validating deployment...")
-            # Agg mode: only decode component exists (engines serve both P and D)
             await self.planner.connector.validate_deployment(
                 prefill_component_name=None,
-                decode_component_name=self.planner.decode_component_name,
+                decode_component_name=(
+                    defaults.decode_worker_k8s_name if defaults else None
+                ),
                 require_prefill=False,
                 require_decode=True,
             )
@@ -101,24 +107,14 @@ class AggPlanner:
                 require_decode=True,
             )
 
-            await self.planner.connector.wait_for_deployment_ready()
-
-        # Model name discovery runs in all modes (needed for metrics collection)
-        if not self.config.no_operation:
-            model_name = await self.planner._get_model_name(
-                require_prefill=False, require_decode=True
+            await self.planner.connector.wait_for_deployment_ready(
+                include_planner=False
             )
-            logger.info(f"Detected model name from deployment: {model_name}")
-            self.planner.model_name = model_name.lower()
-        else:
-            model_name = getattr(self.config, "model_name", None)
-            if not model_name:
-                raise ValueError(
-                    "Model name is required in no-operation mode. "
-                    "Please set model_name in the config."
-                )
-            self.planner.model_name = model_name.lower()
 
+        await self.planner._init_worker_info(require_prefill=False, require_decode=True)
+
+    async def run(self):
+        """Main scaling loop. Call _async_init() before this."""
         loops = [
             self._load_loop(),
             self.planner.prometheus_engine_client.run_sampling_loop(
@@ -326,7 +322,7 @@ class AggPlanner:
                 target_replicas = [
                     TargetReplica(
                         sub_component_type=SubComponentType.DECODE,
-                        component_name=self.planner.decode_component_name,
+                        component_name=self.planner.decode_worker_info.k8s_name,
                         desired_replicas=desired,
                     )
                 ]

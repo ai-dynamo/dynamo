@@ -7,6 +7,7 @@ import time
 from typing import Optional
 
 from dynamo.planner import SubComponentType, TargetReplica
+from dynamo.planner.defaults import WORKER_COMPONENT_NAMES
 from dynamo.planner.utils.decode_planner import DecodePlanner
 from dynamo.planner.utils.planner_config import PlannerConfig
 from dynamo.planner.utils.planner_core import (
@@ -57,21 +58,29 @@ class DisaggPlanner:
         )
 
     async def _async_init(self):
-        # Prefill/Decode share the same connector instance in disagg mode.
-        await self.prefill_planner._async_init()
+        # DisaggPlanner overrides _async_init to handle both prefill+decode
+        # and share WorkerInfo between the two sub-planners.
+        defaults = WORKER_COMPONENT_NAMES.get(self.config.backend)
 
-    async def run(self):
         if not self.config.no_operation:
+            # Connector init (prefill/decode share the same connector)
+            connector = getattr(self.prefill_planner, "connector", None)
+            if connector and hasattr(connector, "_async_init"):
+                await connector._async_init()
+
             logger.info("Validating deployment...")
             await self.prefill_planner.connector.validate_deployment(
-                prefill_component_name=self.prefill_planner.prefill_component_name,
-                decode_component_name=self.prefill_planner.decode_component_name,
+                prefill_component_name=(
+                    defaults.prefill_worker_k8s_name if defaults else None
+                ),
+                decode_component_name=(
+                    defaults.decode_worker_k8s_name if defaults else None
+                ),
                 require_prefill=True,
                 require_decode=True,
             )
             logger.info("Successfully validated the deployment")
 
-            # Initialize GPU counts
             _initialize_gpu_counts(
                 self.config,
                 self.prefill_planner.connector,
@@ -79,30 +88,25 @@ class DisaggPlanner:
                 require_decode=True,
             )
 
-            await self.prefill_planner.connector.wait_for_deployment_ready()
-
-        # Model name discovery runs in all modes (needed for metrics collection)
-        if not self.config.no_operation:
-            model_name = await self.prefill_planner._get_model_name(
-                require_prefill=True, require_decode=True
+            await self.prefill_planner.connector.wait_for_deployment_ready(
+                include_planner=False
             )
-            logger.info(f"Detected model name from deployment: {model_name}")
-            model_name = model_name.lower()
-        else:
-            model_name = getattr(self.config, "model_name", None)
-            if not model_name:
-                raise ValueError(
-                    "Model name is required in no-operation mode. "
-                    "Please set model_name in the config."
-                )
-            model_name = model_name.lower()
-        self.prefill_planner.model_name = model_name
-        self.decode_planner.model_name = model_name
 
+        await self.prefill_planner._init_worker_info(
+            require_prefill=True, require_decode=True
+        )
+        # Share WorkerInfo and model name with decode planner
+        self.decode_planner.prefill_worker_info = (
+            self.prefill_planner.prefill_worker_info
+        )
+        self.decode_planner.decode_worker_info = self.prefill_planner.decode_worker_info
+        self.decode_planner.model_name = self.prefill_planner.model_name
+
+    async def run(self):
+        """Main scaling loop. Call _async_init() before this."""
         self.shared_state.last_adjustment_time = time.time()
         self.shared_state.last_load_adjustment_time = time.time()
 
-        # Build list of concurrent loops based on enabled scaling modes
         loops = []
         if self.enable_throughput:
             loops.append(self._throughput_loop())
@@ -160,12 +164,12 @@ class DisaggPlanner:
                         target_replicas = [
                             TargetReplica(
                                 sub_component_type=SubComponentType.PREFILL,
-                                component_name=self.prefill_planner.prefill_component_name,
+                                component_name=self.prefill_planner.prefill_worker_info.k8s_name,
                                 desired_replicas=next_num_p,
                             ),
                             TargetReplica(
                                 sub_component_type=SubComponentType.DECODE,
-                                component_name=self.prefill_planner.decode_component_name,
+                                component_name=self.prefill_planner.decode_worker_info.k8s_name,
                                 desired_replicas=next_num_d,
                             ),
                         ]
@@ -245,12 +249,12 @@ class DisaggPlanner:
                 target_replicas = [
                     TargetReplica(
                         sub_component_type=SubComponentType.PREFILL,
-                        component_name=self.prefill_planner.prefill_component_name,
+                        component_name=self.prefill_planner.prefill_worker_info.k8s_name,
                         desired_replicas=final_p,
                     ),
                     TargetReplica(
                         sub_component_type=SubComponentType.DECODE,
-                        component_name=self.prefill_planner.decode_component_name,
+                        component_name=self.prefill_planner.decode_worker_info.k8s_name,
                         desired_replicas=final_d,
                     ),
                 ]

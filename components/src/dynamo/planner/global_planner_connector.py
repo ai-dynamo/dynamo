@@ -196,7 +196,7 @@ class GlobalPlannerConnector(PlannerConnector):
             "(GlobalPlanner will validate on its side)"
         )
 
-    async def wait_for_deployment_ready(self):
+    async def wait_for_deployment_ready(self, include_planner: bool = True):
         """
         Wait for deployment to be ready (no-op for GlobalPlanner).
 

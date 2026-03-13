@@ -28,10 +28,6 @@ from dynamo.runtime import DistributedRuntime, dynamo_worker
 
 logger = logging.getLogger(__name__)
 
-# start planner 30 seconds after the other components to make sure planner can see them
-# TODO: remove this delay
-INIT_PLANNER_START_DELAY = 30
-
 
 class RequestType(BaseModel):
     text: str
@@ -49,21 +45,29 @@ async def start_planner(runtime: DistributedRuntime, config: PlannerConfig):
         planner = AggPlanner(runtime, config)
     else:
         raise ValueError(f"Invalid planner mode: {mode}")
+
     await planner._async_init()
-    await planner.run()
-
-
-async def init_planner(runtime: DistributedRuntime, config: PlannerConfig):
-    await asyncio.sleep(INIT_PLANNER_START_DELAY)
-
-    await start_planner(runtime, config)
 
     async def generate(request: RequestType):
-        """Dummy endpoint to satisfy that each component has an endpoint"""
         yield "mock endpoint"
 
     generate_endpoint = runtime.endpoint(f"{config.namespace}.Planner.generate")
-    await generate_endpoint.serve_endpoint(generate)  # type: ignore[arg-type]
+
+    # serve_endpoint registers a health check target and sets HealthStatus::Ready
+    # once the handler is registered with the transport.  Running it concurrently
+    # with planner.run() ensures the system server (/health, /live) reports the
+    # planner as ready only after _async_init() has completed.
+    await asyncio.gather(
+        generate_endpoint.serve_endpoint(
+            generate,  # type: ignore[arg-type]
+            health_check_payload={"text": "health"},
+        ),
+        planner.run(),
+    )
+
+
+async def init_planner(runtime: DistributedRuntime, config: PlannerConfig):
+    await start_planner(runtime, config)
 
 
 def _parse_config() -> PlannerConfig:

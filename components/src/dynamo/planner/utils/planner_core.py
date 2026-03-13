@@ -33,6 +33,7 @@ from dynamo.planner.utils.prometheus import (
     PrometheusAPIClient,
 )
 from dynamo.planner.utils.trace_data_extractor import extract_metrics_from_mooncake
+from dynamo.planner.worker_info import WorkerInfo, resolve_worker_info
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 
@@ -386,12 +387,10 @@ class BasePlanner:
                     config.profile_results_dir
                 )
 
-        self.prefill_component_name = WORKER_COMPONENT_NAMES[
-            self.config.backend
-        ].prefill_worker_k8s_name
-        self.decode_component_name = WORKER_COMPONENT_NAMES[
-            self.config.backend
-        ].decode_worker_k8s_name
+        # WorkerInfo: finalized by _init_worker_info() at the start of run().
+        # Empty placeholders until then.
+        self.prefill_worker_info = WorkerInfo()
+        self.decode_worker_info = WorkerInfo()
 
         self.prometheus_metrics: PlannerPrometheusMetrics | None = None
         if not self.dryrun:
@@ -475,8 +474,26 @@ class BasePlanner:
     def last_metrics(self, value: Metrics) -> None:
         self.shared_state.last_metrics = value
 
+    async def _init_worker_info(
+        self, require_prefill: bool, require_decode: bool
+    ) -> None:
+        """Initialize WorkerInfo and model name in a single step."""
+        connector = getattr(self, "connector", None)
+        self.prefill_worker_info, self.decode_worker_info = resolve_worker_info(
+            backend=self.config.backend,
+            require_prefill=require_prefill,
+            require_decode=require_decode,
+            connector=connector,
+            config_model_name=getattr(self.config, "model_name", ""),
+            no_operation=self.config.no_operation,
+        )
+        # model_name is resolved and written into both WorkerInfo objects
+        self.model_name = (
+            self.decode_worker_info.model_name or self.prefill_worker_info.model_name
+        )
+
     async def _async_init(self):
-        """Async initialization for components that need it"""
+        """Async initialization: connector init, deployment validation, WorkerInfo."""
         if (
             not self.dryrun
             and hasattr(self, "connector")
@@ -484,13 +501,42 @@ class BasePlanner:
         ):
             await self.connector._async_init()
 
-    async def _get_model_name(self, require_prefill: bool, require_decode: bool) -> str:
-        model_name = self.connector.get_model_name(
-            require_prefill=require_prefill, require_decode=require_decode
+        require_prefill = self.component_type == SubComponentType.PREFILL
+        require_decode = self.component_type == SubComponentType.DECODE
+
+        if not self.dryrun and not self.config.no_operation:
+            defaults = WORKER_COMPONENT_NAMES.get(self.config.backend)
+
+            logger.info("Validating deployment...")
+            await self.connector.validate_deployment(
+                prefill_component_name=(
+                    defaults.prefill_worker_k8s_name
+                    if require_prefill and defaults
+                    else None
+                ),
+                decode_component_name=(
+                    defaults.decode_worker_k8s_name
+                    if require_decode and defaults
+                    else None
+                ),
+                require_prefill=require_prefill,
+                require_decode=require_decode,
+            )
+            logger.info("Successfully validated the deployment")
+
+            _initialize_gpu_counts(
+                self.config,
+                self.connector,
+                require_prefill=require_prefill,
+                require_decode=require_decode,
+            )
+
+            await self.connector.wait_for_deployment_ready(include_planner=False)
+
+        await self._init_worker_info(
+            require_prefill=require_prefill,
+            require_decode=require_decode,
         )
-        if asyncio.iscoroutine(model_name):
-            model_name = await model_name
-        return model_name
 
     async def _get_or_create_client(self, component_name: str, endpoint_name: str):
         """Create a client for the given component and endpoint, with a brief sleep for state sync."""
@@ -524,10 +570,10 @@ class BasePlanner:
                 is_stable,
             ) = self.connector.get_actual_worker_counts(
                 prefill_component_name=(
-                    self.prefill_component_name if require_prefill else None
+                    self.prefill_worker_info.k8s_name if require_prefill else None
                 ),
                 decode_component_name=(
-                    self.decode_component_name if require_decode else None
+                    self.decode_worker_info.k8s_name if require_decode else None
                 ),
             )
             num_p_workers = prefill_count if require_prefill else 0
@@ -538,14 +584,12 @@ class BasePlanner:
         if self.runtime is None:
             raise RuntimeError("Runtime is not initialized")
 
-        worker_names = WORKER_COMPONENT_NAMES[self.config.backend]
-
         if require_prefill:
             try:
                 if self.prefill_client is None:
                     self.prefill_client = await self._get_or_create_client(
-                        worker_names.prefill_worker_component_name,
-                        worker_names.prefill_worker_endpoint,
+                        self.prefill_worker_info.component_name,
+                        self.prefill_worker_info.endpoint,
                     )
                 num_p_workers = len(self.prefill_client.instance_ids())  # type: ignore
             except Exception:
@@ -558,8 +602,8 @@ class BasePlanner:
             try:
                 if self.workers_client is None:
                     self.workers_client = await self._get_or_create_client(
-                        worker_names.decode_worker_component_name,
-                        worker_names.decode_worker_endpoint,
+                        self.decode_worker_info.component_name,
+                        self.decode_worker_info.endpoint,
                     )
                 num_d_workers = len(self.workers_client.instance_ids())  # type: ignore
             except Exception as e:
@@ -738,8 +782,8 @@ class BasePlanner:
 
     def _component_name(self) -> str:
         if self.component_type == SubComponentType.PREFILL:
-            return self.prefill_component_name
-        return self.decode_component_name
+            return self.prefill_worker_info.k8s_name
+        return self.decode_worker_info.k8s_name
 
     def _engine_num_gpu(self) -> int:
         if self.component_type == SubComponentType.PREFILL:
@@ -919,49 +963,9 @@ class BasePlanner:
                 await self._apply_scaling_blocking(desired_replicas)
 
     async def run(self):
-        """Main loop for the planner"""
+        """Main scaling loop. Call _async_init() before this."""
         require_prefill = self.component_type == SubComponentType.PREFILL
         require_decode = self.component_type == SubComponentType.DECODE
-
-        if not self.config.no_operation:
-            logger.info("Validating deployment...")
-            await self.connector.validate_deployment(
-                prefill_component_name=(
-                    self.prefill_component_name if require_prefill else None
-                ),
-                decode_component_name=(
-                    self.decode_component_name if require_decode else None
-                ),
-                require_prefill=require_prefill,
-                require_decode=require_decode,
-            )
-            logger.info("Successfully validated the deployment")
-
-            # Initialize GPU counts
-            _initialize_gpu_counts(
-                self.config,
-                self.connector,
-                require_prefill=require_prefill,
-                require_decode=require_decode,
-            )
-
-            await self.connector.wait_for_deployment_ready()
-
-        # Model name discovery runs in all modes (needed for metrics collection)
-        if not self.config.no_operation:
-            model_name = await self._get_model_name(
-                require_prefill=require_prefill, require_decode=require_decode
-            )
-            logger.info(f"Detected model name from deployment: {model_name}")
-            self.model_name = model_name.lower()
-        else:
-            model_name = getattr(self.config, "model_name", "")
-            if not model_name:
-                raise ValueError(
-                    "Model name is required in no-operation mode. "
-                    "Please set model_name in the config."
-                )
-            self.model_name = model_name.lower()
 
         self.shared_state.last_adjustment_time = time.time()
         self.shared_state.last_load_adjustment_time = time.time()
