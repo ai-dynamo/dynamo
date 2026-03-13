@@ -67,7 +67,7 @@ jobs:
   # ============================================================================
 
   vllm-build:
-    name: vllm / Build
+    name: vllm Build
     needs: [changed-files]
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
     uses: ./.github/workflows/shared-build-image.yml
@@ -78,7 +78,7 @@ jobs:
     secrets: inherit
 
   sglang-build:
-    name: sglang / Build
+    name: sglang Build
     needs: [changed-files]
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true'
     uses: ./.github/workflows/shared-build-image.yml
@@ -89,7 +89,7 @@ jobs:
     secrets: inherit
 
   trtllm-build:
-    name: trtllm / Build
+    name: trtllm Build
     needs: [changed-files]
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true'
     uses: ./.github/workflows/shared-build-image.yml
@@ -104,7 +104,7 @@ jobs:
   # ============================================================================
 
   vllm-test:
-    name: vllm / Test
+    name: vllm Test
     needs: [vllm-build]
     uses: ./.github/workflows/shared-single-gpu-test.yml
     with:
@@ -114,7 +114,7 @@ jobs:
     secrets: inherit
 
   sglang-test:
-    name: sglang / Test
+    name: sglang Test
     needs: [sglang-build]
     uses: ./.github/workflows/shared-single-gpu-test.yml
     with:
@@ -124,7 +124,7 @@ jobs:
     secrets: inherit
 
   trtllm-test:
-    name: trtllm / Test
+    name: trtllm Test
     needs: [trtllm-build]
     uses: ./.github/workflows/shared-single-gpu-test.yml
     with:
@@ -138,7 +138,7 @@ jobs:
   # ============================================================================
 
   vllm-copy-to-acr:
-    name: vllm / Copy to ACR
+    name: vllm Copy to ACR
     needs: [vllm-test]
     uses: ./.github/workflows/shared-copy.yml
     with:
@@ -148,7 +148,7 @@ jobs:
     secrets: inherit
 
   sglang-copy-to-acr:
-    name: sglang / Copy to ACR
+    name: sglang Copy to ACR
     needs: [sglang-test]
     uses: ./.github/workflows/shared-copy.yml
     with:
@@ -158,7 +158,7 @@ jobs:
     secrets: inherit
 
   trtllm-copy-to-acr:
-    name: trtllm / Copy to ACR
+    name: trtllm Copy to ACR
     needs: [trtllm-test]
     uses: ./.github/workflows/shared-copy.yml
     with:
@@ -172,7 +172,7 @@ jobs:
   # ============================================================================
 
   vllm-deploy-test:
-    name: vllm / Deploy Test
+    name: vllm Deploy Test
     needs: [vllm-copy-to-acr]
     uses: ./.github/workflows/shared-deploy-test.yml
     with:
@@ -182,7 +182,7 @@ jobs:
     secrets: inherit
 
   sglang-deploy-test:
-    name: sglang / Deploy Test
+    name: sglang Deploy Test
     needs: [sglang-copy-to-acr]
     uses: ./.github/workflows/shared-deploy-test.yml
     with:
@@ -192,7 +192,7 @@ jobs:
     secrets: inherit
 
   trtllm-deploy-test:
-    name: trtllm / Deploy Test
+    name: trtllm Deploy Test
     needs: [trtllm-copy-to-acr]
     uses: ./.github/workflows/shared-deploy-test.yml
     with:
