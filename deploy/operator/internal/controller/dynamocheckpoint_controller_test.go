@@ -117,6 +117,10 @@ func makeTestCheckpoint(phase nvidiacomv1alpha1.DynamoCheckpointPhase) *nvidiaco
 func TestBuildCheckpointJob(t *testing.T) {
 	s := checkpointTestScheme()
 	ckpt := makeTestCheckpoint(nvidiacomv1alpha1.DynamoCheckpointPhasePending)
+	ckpt.Spec.Job.PodTemplateSpec.Labels = map[string]string{
+		consts.KubeLabelDynamoNamespace:  "manual-checkpoint",
+		consts.KubeLabelDynamoWorkerHash: "worker-1234",
+	}
 
 	r := makeCheckpointReconciler(s, ckpt)
 	job := r.buildCheckpointJob(ckpt, "checkpoint-"+testHash)
@@ -137,7 +141,25 @@ func TestBuildCheckpointJob(t *testing.T) {
 	assert.Equal(t, testHash, envMap[consts.EnvCheckpointHash])
 	assert.Equal(t, "/checkpoints/"+testHash, envMap[consts.EnvCheckpointLocation])
 	assert.Equal(t, "pvc", envMap[consts.EnvCheckpointStorageType])
+	assert.Equal(t, "manual-checkpoint", envMap[consts.DynamoNamespaceEnvVar])
+	assert.Equal(t, consts.ComponentTypeWorker, envMap[consts.DynamoComponentEnvVar])
+	assert.Equal(t, "worker-1234", envMap[consts.DynamoNamespaceWorkerSuffixEnvVar])
+	assert.Equal(t, "kubernetes", envMap[consts.DynamoDiscoveryBackendEnvVar])
+	assert.Equal(t, "9090", envMap["DYN_SYSTEM_PORT"])
+	assert.Equal(t, "true", envMap["DYN_SYSTEM_ENABLED"])
 	assert.Equal(t, "secret", envMap["HF_TOKEN"])
+
+	var podNameEnv *corev1.EnvVar
+	for i := range main.Env {
+		if main.Env[i].Name == "POD_NAME" {
+			podNameEnv = &main.Env[i]
+			break
+		}
+	}
+	require.NotNil(t, podNameEnv)
+	require.NotNil(t, podNameEnv.ValueFrom)
+	require.NotNil(t, podNameEnv.ValueFrom.FieldRef)
+	assert.Equal(t, "metadata.name", podNameEnv.ValueFrom.FieldRef.FieldPath)
 
 	// Seccomp profile
 	require.NotNil(t, podSpec.SecurityContext)
@@ -206,6 +228,7 @@ func TestBuildCheckpointJobInjectsStandardEnvVars(t *testing.T) {
 	ckpt.Spec.Job.PodTemplateSpec.Spec.Containers[0].Env = append(
 		ckpt.Spec.Job.PodTemplateSpec.Spec.Containers[0].Env,
 		corev1.EnvVar{Name: "NATS_SERVER", Value: "nats://custom:4222"},
+		corev1.EnvVar{Name: "DYN_SYSTEM_PORT", Value: "10090"},
 	)
 
 	r := makeCheckpointReconciler(s, ckpt)
@@ -225,6 +248,7 @@ func TestBuildCheckpointJobInjectsStandardEnvVars(t *testing.T) {
 	}
 
 	assert.Equal(t, "nats://custom:4222", envMap["NATS_SERVER"])
+	assert.Equal(t, "10090", envMap["DYN_SYSTEM_PORT"])
 	assert.Equal(t, "http://etcd:2379", envMap["ETCD_ENDPOINTS"])
 	assert.Equal(t, "http://model-express:8000", envMap["MODEL_EXPRESS_URL"])
 	assert.Equal(t, "http://prometheus:9090", envMap["PROMETHEUS_ENDPOINT"])

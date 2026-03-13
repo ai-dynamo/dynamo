@@ -407,8 +407,8 @@ func InjectPodInfoVolume(podSpec *corev1.PodSpec) {
 							FieldPath: consts.PodInfoFieldPodNamespace,
 						},
 					},
-					// Restore namespace and worker suffix from current pod labels
-					// so the restored process can rebuild its current worker namespace.
+					// Restore worker identity from current pod labels/fields so the
+					// restored process can discard stale checkpoint-source env.
 					{
 						Path: consts.PodInfoFileDynNamespace,
 						FieldRef: &corev1.ObjectFieldSelector{
@@ -419,6 +419,24 @@ func InjectPodInfoVolume(podSpec *corev1.PodSpec) {
 						Path: consts.PodInfoFileDynNamespaceWorkerSuffix,
 						FieldRef: &corev1.ObjectFieldSelector{
 							FieldPath: "metadata.labels['" + consts.KubeLabelDynamoWorkerHash + "']",
+						},
+					},
+					{
+						Path: consts.PodInfoFileDynComponent,
+						FieldRef: &corev1.ObjectFieldSelector{
+							FieldPath: "metadata.labels['" + consts.KubeLabelDynamoComponentType + "']",
+						},
+					},
+					{
+						Path: consts.PodInfoFileDynParentDGDName,
+						FieldRef: &corev1.ObjectFieldSelector{
+							FieldPath: "metadata.labels['" + consts.KubeLabelDynamoGraphDeploymentName + "']",
+						},
+					},
+					{
+						Path: consts.PodInfoFileDynParentDGDNamespace,
+						FieldRef: &corev1.ObjectFieldSelector{
+							FieldPath: consts.PodInfoFieldPodNamespace,
 						},
 					},
 				},

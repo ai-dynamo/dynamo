@@ -176,6 +176,9 @@ const (
 	// Downward API file names for restore identity
 	PodInfoFileDynNamespace             = "dyn_namespace"
 	PodInfoFileDynNamespaceWorkerSuffix = "dyn_namespace_worker_suffix"
+	PodInfoFileDynComponent             = "dyn_component"
+	PodInfoFileDynParentDGDName         = "dyn_parent_dgd_k8s_name"
+	PodInfoFileDynParentDGDNamespace    = "dyn_parent_dgd_k8s_namespace"
 
 	// Rolling update annotations
 	AnnotationCurrentWorkerHash = "nvidia.com/current-worker-hash"

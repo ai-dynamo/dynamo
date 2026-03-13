@@ -155,9 +155,7 @@ async def worker() -> None:
         ):
             return
 
-        config.namespace, config.discovery_backend = reload_snapshot_restore_identity(
-            config.namespace, config.discovery_backend
-        )
+        config.namespace, config.discovery_backend = reload_snapshot_restore_identity()
         logger.info(
             "Reloaded snapshot identity after restore (namespace=%s, discovery_backend=%s)",
             config.namespace,

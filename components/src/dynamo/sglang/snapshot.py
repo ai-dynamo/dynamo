@@ -78,21 +78,19 @@ async def handle_checkpoint_mode(
     if checkpoint_cfg is None:
         return False, None
 
-    unsupported_roles = []
-    if dynamo_args.embedding_worker:
-        unsupported_roles.append("embedding")
-    if dynamo_args.multimodal_processor:
-        unsupported_roles.append("multimodal-processor")
-    if dynamo_args.multimodal_encode_worker:
-        unsupported_roles.append("multimodal-encode-worker")
-    if dynamo_args.multimodal_worker:
-        unsupported_roles.append("multimodal-worker")
-    if dynamo_args.image_diffusion_worker:
-        unsupported_roles.append("image-diffusion")
-    if dynamo_args.video_generation_worker:
-        unsupported_roles.append("video-generation")
-    if dynamo_args.diffusion_worker:
-        unsupported_roles.append("llm-diffusion")
+    unsupported_roles = [
+        role
+        for enabled, role in [
+            (dynamo_args.embedding_worker, "embedding"),
+            (dynamo_args.multimodal_processor, "multimodal-processor"),
+            (dynamo_args.multimodal_encode_worker, "multimodal-encode-worker"),
+            (dynamo_args.multimodal_worker, "multimodal-worker"),
+            (dynamo_args.image_diffusion_worker, "image-diffusion"),
+            (dynamo_args.video_generation_worker, "video-generation"),
+            (dynamo_args.diffusion_worker, "llm-diffusion"),
+        ]
+        if enabled
+    ]
     if unsupported_roles:
         raise ValueError(
             "checkpoint mode only supports standard, decode, and prefill LLM SGLang workers; "

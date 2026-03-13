@@ -289,6 +289,35 @@ func (r *CheckpointReconciler) handleCreating(ctx context.Context, ckpt *nvidiac
 	return ctrl.Result{}, nil
 }
 
+func (r *CheckpointReconciler) buildCheckpointWorkerDefaultEnv(
+	ckpt *nvidiacomv1alpha1.DynamoCheckpoint,
+	podTemplate *corev1.PodTemplateSpec,
+) []corev1.EnvVar {
+	componentType := consts.ComponentTypeWorker
+	dynamoNamespace := consts.GlobalDynamoNamespace
+	parentGraphDeploymentName := podTemplate.Labels[consts.KubeLabelDynamoGraphDeploymentName]
+	workerHashSuffix := podTemplate.Labels[consts.KubeLabelDynamoWorkerHash]
+	discoveryBackend := configv1alpha1.DiscoveryBackendKubernetes
+
+	if podTemplate.Labels[consts.KubeLabelDynamoNamespace] != "" {
+		dynamoNamespace = podTemplate.Labels[consts.KubeLabelDynamoNamespace]
+	}
+	if podTemplate.Labels[consts.KubeLabelDynamoComponentType] != "" &&
+		dynamo.IsWorkerComponent(podTemplate.Labels[consts.KubeLabelDynamoComponentType]) {
+		componentType = podTemplate.Labels[consts.KubeLabelDynamoComponentType]
+	}
+
+	defaultContainer, _ := dynamo.NewWorkerDefaults().GetBaseContainer(dynamo.ComponentContext{
+		ComponentType:                  componentType,
+		DynamoNamespace:                dynamoNamespace,
+		ParentGraphDeploymentName:      parentGraphDeploymentName,
+		ParentGraphDeploymentNamespace: ckpt.Namespace,
+		DiscoveryBackend:               discoveryBackend,
+		WorkerHashSuffix:               workerHashSuffix,
+	})
+	return defaultContainer.Env
+}
+
 func (r *CheckpointReconciler) buildCheckpointJob(ckpt *nvidiacomv1alpha1.DynamoCheckpoint, jobName string) *batchv1.Job {
 	// Use the pod template from the spec
 	podTemplate := ckpt.Spec.Job.PodTemplateSpec.DeepCopy()
@@ -308,6 +337,12 @@ func (r *CheckpointReconciler) buildCheckpointJob(ckpt *nvidiacomv1alpha1.Dynamo
 	if len(podTemplate.Spec.Containers) > 0 {
 		mainContainer := &podTemplate.Spec.Containers[0]
 
+		// Manual checkpoints start from a raw pod template, so re-apply the worker
+		// runtime env defaults before layering checkpoint-specific env on top.
+		mainContainer.Env = dynamo.MergeEnvs(
+			r.buildCheckpointWorkerDefaultEnv(ckpt, podTemplate),
+			mainContainer.Env,
+		)
 		dynamo.AddStandardEnvVars(mainContainer, r.Config)
 
 		// Compute checkpoint location and storage type using helper functions

@@ -1346,7 +1346,7 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 		}
 	})
 
-	t.Run("operator reasserts dynamo namespace label after metadata merge", func(t *testing.T) {
+	t.Run("operator reasserts restore identity labels after metadata merge", func(t *testing.T) {
 		identity := v1alpha1.DynamoCheckpointIdentity{Model: "test-model", BackendFramework: "vllm"}
 		checkpointName, err := checkpoint.ComputeIdentityHash(identity)
 		if err != nil {
@@ -1355,7 +1355,9 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 		dcd := makeDCD(checkpointName)
 		dcd.Spec.ExtraPodMetadata = &v1alpha1.ExtraPodMetadata{
 			Labels: map[string]string{
-				commonconsts.KubeLabelDynamoNamespace: "wrong-namespace",
+				commonconsts.KubeLabelDynamoNamespace:           "wrong-namespace",
+				commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypeFrontend,
+				commonconsts.KubeLabelDynamoGraphDeploymentName: "wrong-dgd",
 			},
 		}
 		ckpt := &v1alpha1.DynamoCheckpoint{
@@ -1381,6 +1383,12 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 
 		if got := podTemplateSpec.Labels[commonconsts.KubeLabelDynamoNamespace]; got != defaultNamespace {
 			t.Fatalf("expected %s label to be %q, got %q", commonconsts.KubeLabelDynamoNamespace, "default", got)
+		}
+		if got := podTemplateSpec.Labels[commonconsts.KubeLabelDynamoComponentType]; got != commonconsts.ComponentTypeWorker {
+			t.Fatalf("expected %s label to be %q, got %q", commonconsts.KubeLabelDynamoComponentType, commonconsts.ComponentTypeWorker, got)
+		}
+		if got := podTemplateSpec.Labels[commonconsts.KubeLabelDynamoGraphDeploymentName]; got != "test-dgd" {
+			t.Fatalf("expected %s label to be %q, got %q", commonconsts.KubeLabelDynamoGraphDeploymentName, "test-dgd", got)
 		}
 	})
 

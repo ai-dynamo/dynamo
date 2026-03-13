@@ -30,6 +30,7 @@ from dynamo.sglang.shutdown import install_graceful_shutdown
 from dynamo.sglang.snapshot import handle_checkpoint_mode
 
 configure_dynamo_logging()
+logger = logging.getLogger(__name__)
 
 
 async def worker():
@@ -53,10 +54,8 @@ async def worker():
         (
             dynamo_args.namespace,
             dynamo_args.discovery_backend,
-        ) = reload_snapshot_restore_identity(
-            dynamo_args.namespace, dynamo_args.discovery_backend
-        )
-        logging.info(
+        ) = reload_snapshot_restore_identity()
+        logger.info(
             "Reloaded snapshot identity after restore (namespace=%s, discovery_backend=%s)",
             dynamo_args.namespace,
             dynamo_args.discovery_backend,
@@ -74,7 +73,7 @@ async def worker():
     run_deferred_handlers = install_graceful_shutdown(
         loop, runtime, shutdown_endpoints, shutdown_event
     )
-    logging.info(
+    logger.info(
         "Signal handlers set up for graceful shutdown "
         "(discovery unregister + grace period, with chaining)"
     )

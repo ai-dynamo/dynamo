@@ -1510,6 +1510,10 @@ func generateLabels(
 			return nil, fmt.Errorf("failed to merge extraPodMetadata labels: %w", err)
 		}
 	}
+	labels[commonconsts.KubeLabelDynamoGraphDeploymentName] = dynamoDeployment.Name
+	if component.ComponentType != "" {
+		labels[commonconsts.KubeLabelDynamoComponentType] = component.ComponentType
+	}
 	if component.DynamoNamespace != nil {
 		labels[commonconsts.KubeLabelDynamoNamespace] = *component.DynamoNamespace
 	}

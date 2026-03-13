@@ -9,8 +9,11 @@ _DYN_NAMESPACE_PODINFO_FILE = Path("/etc/podinfo/dyn_namespace")
 _DYN_NAMESPACE_WORKER_SUFFIX_PODINFO_FILE = Path(
     "/etc/podinfo/dyn_namespace_worker_suffix"
 )
-_DYN_SYSTEM_PORT_ENV = "DYN_SYSTEM_PORT"
-_DEFAULT_WORKER_SYSTEM_PORT = "9090"
+_DYN_COMPONENT_PODINFO_FILE = Path("/etc/podinfo/dyn_component")
+_DYN_PARENT_DGD_NAME_PODINFO_FILE = Path("/etc/podinfo/dyn_parent_dgd_k8s_name")
+_DYN_PARENT_DGD_NAMESPACE_PODINFO_FILE = Path(
+    "/etc/podinfo/dyn_parent_dgd_k8s_namespace"
+)
 
 
 def get_worker_namespace(
@@ -32,12 +35,10 @@ def get_worker_namespace(
     return namespace
 
 
-def reload_snapshot_restore_identity(
-    namespace: Optional[str], discovery_backend: str
-) -> tuple[str, str]:
+def reload_snapshot_restore_identity() -> tuple[str, str]:
     """Reload worker identity after snapshot restore on Kubernetes."""
     if not _DYN_NAMESPACE_PODINFO_FILE.is_file():
-        return get_worker_namespace(namespace), discovery_backend
+        raise RuntimeError("snapshot restore requires /etc/podinfo/dyn_namespace")
 
     namespace = _DYN_NAMESPACE_PODINFO_FILE.read_text(encoding="utf-8").strip()
     if not namespace:
@@ -53,7 +54,45 @@ def reload_snapshot_restore_identity(
         if not suffix:
             suffix = None
 
-    if int(os.environ.get(_DYN_SYSTEM_PORT_ENV, "-1")) < 0:
-        os.environ[_DYN_SYSTEM_PORT_ENV] = _DEFAULT_WORKER_SYSTEM_PORT
+    component = None
+    if _DYN_COMPONENT_PODINFO_FILE.is_file():
+        component = _DYN_COMPONENT_PODINFO_FILE.read_text(encoding="utf-8").strip()
+        if not component:
+            component = None
+
+    parent_dgd_name = None
+    if _DYN_PARENT_DGD_NAME_PODINFO_FILE.is_file():
+        parent_dgd_name = _DYN_PARENT_DGD_NAME_PODINFO_FILE.read_text(
+            encoding="utf-8"
+        ).strip()
+        if not parent_dgd_name:
+            parent_dgd_name = None
+
+    parent_dgd_namespace = None
+    if _DYN_PARENT_DGD_NAMESPACE_PODINFO_FILE.is_file():
+        parent_dgd_namespace = _DYN_PARENT_DGD_NAMESPACE_PODINFO_FILE.read_text(
+            encoding="utf-8"
+        ).strip()
+        if not parent_dgd_namespace:
+            parent_dgd_namespace = None
+
+    os.environ["DYN_NAMESPACE"] = namespace
+    if suffix is None:
+        os.environ.pop("DYN_NAMESPACE_WORKER_SUFFIX", None)
+    else:
+        os.environ["DYN_NAMESPACE_WORKER_SUFFIX"] = suffix
+    if component is None:
+        os.environ.pop("DYN_COMPONENT", None)
+    else:
+        os.environ["DYN_COMPONENT"] = component
+    if parent_dgd_name is None:
+        os.environ.pop("DYN_PARENT_DGD_K8S_NAME", None)
+    else:
+        os.environ["DYN_PARENT_DGD_K8S_NAME"] = parent_dgd_name
+    if parent_dgd_namespace is None:
+        os.environ.pop("DYN_PARENT_DGD_K8S_NAMESPACE", None)
+    else:
+        os.environ["DYN_PARENT_DGD_K8S_NAMESPACE"] = parent_dgd_namespace
+    os.environ["DYN_DISCOVERY_BACKEND"] = "kubernetes"
 
     return get_worker_namespace(namespace, suffix), "kubernetes"
