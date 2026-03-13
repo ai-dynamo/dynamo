@@ -335,6 +335,7 @@ func generateSingleDCD(
 	}
 
 	propagateDGDAnnotations(parentDGD.GetAnnotations(), &deployment.Spec.DynamoComponentDeploymentSharedSpec)
+	propagateDGDSpecMetadata(parentDGD.Spec.Annotations, parentDGD.Spec.Labels, &deployment.Spec.DynamoComponentDeploymentSharedSpec)
 
 	// Apply restart annotation if this service should be restarted.
 	if restartState.ShouldAnnotateService(componentName) {
@@ -1300,6 +1301,7 @@ func GeneratePodSpecForComponent(
 	}
 
 	propagateDGDAnnotations(dynamoDeployment.GetAnnotations(), component)
+	propagateDGDSpecMetadata(dynamoDeployment.Spec.Annotations, dynamoDeployment.Spec.Labels, component)
 
 	podSpec, err := GenerateBasePodSpec(component, backendFramework, secretsRetriever, dynamoDeployment.Name, dynamoDeployment.Namespace, role, numberOfNodes, operatorConfig, multinodeDeploymentType, serviceName, checkpointInfo)
 	if err != nil {
@@ -1334,6 +1336,27 @@ func propagateDGDAnnotations(dgdAnnotations map[string]string, component *v1alph
 	}
 }
 
+// propagateDGDSpecMetadata merges DGD spec-level annotations and labels into
+// the component as a low-priority base. Service-level values take precedence.
+func propagateDGDSpecMetadata(annotations, labels map[string]string, component *v1alpha1.DynamoComponentDeploymentSharedSpec) {
+	for k, v := range annotations {
+		if component.Annotations == nil {
+			component.Annotations = make(map[string]string)
+		}
+		if _, exists := component.Annotations[k]; !exists {
+			component.Annotations[k] = v
+		}
+	}
+	for k, v := range labels {
+		if component.Labels == nil {
+			component.Labels = make(map[string]string)
+		}
+		if _, exists := component.Labels[k]; !exists {
+			component.Labels[k] = v
+		}
+	}
+}
+
 // GenerateGrovePodCliqueSet generates a Grove PodCliqueSet for the given deployment, supporting both single-node and multinode cases.
 func GenerateGrovePodCliqueSet(
 	ctx context.Context,
@@ -1348,6 +1371,8 @@ func GenerateGrovePodCliqueSet(
 	gangSet := &grovev1alpha1.PodCliqueSet{}
 	gangSet.Name = dynamoDeployment.Name
 	gangSet.Namespace = dynamoDeployment.Namespace
+	gangSet.Labels = maps.Clone(dynamoDeployment.Spec.Labels)
+	gangSet.Annotations = maps.Clone(dynamoDeployment.Spec.Annotations)
 	gangSet.Spec.Replicas = 1
 	gangSet.Spec.Template.HeadlessServiceConfig = &grovev1alpha1.HeadlessServiceConfig{
 		PublishNotReadyAddresses: true,
