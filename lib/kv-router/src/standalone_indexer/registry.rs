@@ -475,6 +475,14 @@ impl WorkerRegistry {
         tenant_id: String,
         block_size: u32,
     ) -> Result<()> {
+        // Reject if this worker is already registered via ZMQ (--workers or /register)
+        if self.workers.contains_key(&instance_id) {
+            bail!(
+                "instance {instance_id} is already registered via ZMQ; \
+                 cannot add via discovery"
+            );
+        }
+
         let key = IndexerKey {
             model_name,
             tenant_id,
