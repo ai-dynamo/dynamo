@@ -132,6 +132,7 @@ jobs:
       TARGET: frontend
       CUDA_VERSION: "12.9"
       FRAMEWORK: dynamo
+      PLATFORM: "linux/amd64,linux/arm64"
     steps:
       - name: Checkout repository
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
@@ -142,7 +143,7 @@ jobs:
           python ./container/render.py \
               --target=${{ env.TARGET }} \
               --framework=${{ env.FRAMEWORK }} \
-              --platform=linux/amd64,linux/arm64 \
+              --platform=${{ env.PLATFORM }} \
               --cuda-version=${{ env.CUDA_VERSION }} \
               --show-result \
               --output-short-filename
@@ -163,7 +164,7 @@ jobs:
           echo "image_tag: ${{ steps.calculate-target-tag.outputs.default_target_image_uri }}"
           echo "framework: ${{ env.FRAMEWORK }}"
           echo "target: ${{ env.TARGET }}"
-          echo "platform: linux/amd64,linux/arm64"
+          echo "platform: ${{ env.PLATFORM }}"
           echo "cuda_version: ${{ env.CUDA_VERSION }}"
           echo "extra_tags: ${{ steps.calculate-target-tag.outputs.azure_target_image_uri }}"
           echo "epp_image_uri: ${{ steps.calculate-target-tag.outputs.epp_image_uri }}"
@@ -190,7 +191,7 @@ jobs:
           image_tag: ${{ steps.calculate-target-tag.outputs.default_target_image_uri }}
           framework: ${{ env.FRAMEWORK }}
           target: ${{ env.TARGET }}
-          platform: linux/amd64,linux/arm64
+          platform: ${{ env.PLATFORM }}
           cuda_version: ${{ env.CUDA_VERSION }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
@@ -225,9 +226,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        arch: [amd64, arm64]
+        include:
+          - arch: amd64
+            runner: prod-builder-amd-v1
+          - arch: arm64
+            runner: prod-tester-arm-v1
     name: Compliance frontend-${{ matrix.arch }}
-    runs-on: ${{ matrix.arch == 'amd64' && 'prod-builder-amd-v1' || 'prod-tester-arm-v1' }}
+    runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
@@ -243,7 +248,7 @@ jobs:
         id: images
         shell: bash
         run: |
-          TARGET_TAG="${{ github.sha }}-frontend-${{ matrix.arch }}"
+          TARGET_TAG="${{ github.sha }}-frontend"
           FRONTEND_IMAGE="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${TARGET_TAG}"
           echo "frontend_image=${FRONTEND_IMAGE}" >> $GITHUB_OUTPUT
       - name: Compliance scan
