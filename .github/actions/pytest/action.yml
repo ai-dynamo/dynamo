@@ -296,20 +296,11 @@ runs:
           JUNIT_NAME="pytest_test_report_${{ inputs.framework }}_${STR_TEST_TYPE}_${{ inputs.platform_arch }}_${{ github.run_id }}_${{ job.check_run_id }}.xml"
           mv "$JUNIT_FILE" "test-results/$JUNIT_NAME"
           echo "📝 Renamed XML file to: $JUNIT_NAME"
-
-          if [[ "${TEST_EXIT_CODE}" != "0" ]]; then
-            echo "⚠️  Ignoring non-zero test container exit code ${TEST_EXIT_CODE} because JUnit XML was generated"
-          fi
         else
           echo "⚠️  JUnit XML file not found - test results may not be available for upload"
           TOTAL_TESTS=0
           FAILED_TESTS=1  # Treat missing XML as failure
           ERROR_TESTS=0
-        fi
-
-        # Treat the run as successful if pytest produced a JUnit XML file.
-        if [[ -n "${JUNIT_NAME:-}" ]]; then
-          exit 0
         fi
 
         exit ${TEST_EXIT_CODE}

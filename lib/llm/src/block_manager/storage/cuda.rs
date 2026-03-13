@@ -216,7 +216,14 @@ impl PinnedStorage {
                 match numa_allocator::worker_pool::NumaWorkerPool::global()
                     .allocate_pinned_for_gpu(size, device_id)
                 {
-                    Ok(ptr) => ptr,
+                    Ok(Some(ptr)) => ptr,
+                    Ok(None) => {
+                        tracing::debug!(
+                            "NUMA node unknown for GPU {}, using direct allocation",
+                            device_id
+                        );
+                        malloc_host_prefer_writecombined(size)?
+                    }
                     Err(e) => {
                         tracing::warn!("NUMA allocation failed: {}, using direct allocation", e);
                         malloc_host_prefer_writecombined(size)?

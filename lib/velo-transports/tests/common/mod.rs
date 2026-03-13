@@ -14,8 +14,6 @@
 // use velo_transports::http::{HttpTransport, HttpTransportBuilder};
 // #[cfg(feature = "nats")]
 // use velo_transports::nats::{NatsTransport, NatsTransportBuilder};
-// #[cfg(feature = "ucx")]
-// use velo_transports::ucx::{UcxTransport, UcxTransportBuilder};
 
 use bytes::Bytes;
 use std::sync::{Arc, Mutex};
@@ -415,18 +413,6 @@ impl TestCluster<TcpTransport> {
             TcpTransportBuilder::new().from_listener(listener)?.build()
         })
         .await
-    }
-}
-
-// UCX-specific convenience constructor
-#[cfg(feature = "ucx")]
-impl TestCluster<UcxTransport> {
-    /// Create a new UCX test cluster with the specified number of transports
-    ///
-    /// This is a convenience method for creating UCX clusters.
-    /// For other transport types, use `with_factory()`.
-    pub async fn new_ucx(size: usize) -> anyhow::Result<Self> {
-        Self::with_factory(size, || UcxTransportBuilder::new().build()).await
     }
 }
 

@@ -24,6 +24,7 @@ from dynamo.common.utils import (
     paths,
     prometheus,
     runtime,
+    time_section,
 )
 
 __all__ = [
@@ -32,6 +33,7 @@ __all__ = [
     "namespace",
     "nvtx_utils",
     "otel_tracing",
+    "time_section",
     "paths",
     "prometheus",
     "runtime",

@@ -14,7 +14,9 @@ repository.workspace = true
 default = []
 metrics = []
 bench = ["dep:clap", "dep:indicatif", "dep:serde_json", "dep:plotters"]
-indexer-bin = ["metrics", "dep:axum", "dep:clap", "dep:zeromq", "dep:tracing-subscriber", "dep:serde_json", "dep:reqwest"]
+standalone-indexer = ["metrics", "dep:axum", "dep:bytes", "dep:zeromq", "dep:serde_json", "dep:reqwest"]
+indexer-bin = ["standalone-indexer", "dep:clap", "dep:tracing-subscriber"]
+test-endpoints = ["indexer-bin"]
 
 [dependencies]
 # repo
@@ -25,6 +27,7 @@ dynamo-tokens = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 dashmap = { workspace = true }
+ordered-float = { workspace = true }
 derive_builder = { workspace = true }
 derive-getters = { workspace = true }
 prometheus = { workspace = true }
@@ -52,6 +55,7 @@ rustc-hash = "2.1.1"
 
 # indexer-bin (optional)
 axum = { workspace = true, optional = true }
+bytes = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }
 zeromq = { version = "0.4.1", optional = true }
 tracing-subscriber = { workspace = true, optional = true }
