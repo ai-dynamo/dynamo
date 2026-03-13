@@ -41,6 +41,7 @@ from dynamo.runtime import DistributedRuntime, Endpoint
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.vllm.worker_factory import WorkerFactory
 
+from . import envs
 from .args import Config, _uses_dynamo_connector, parse_args
 from .constants import DisaggregationMode
 from .handlers import DecodeWorkerHandler, PrefillWorkerHandler, get_dp_range_for_worker
@@ -382,8 +383,55 @@ def setup_kv_event_publisher(
     return kv_publishers if kv_publishers else None
 
 
+def setup_fpm_relay(
+    generate_endpoint: Endpoint,
+    vllm_config: VllmConfig,
+) -> Optional[list]:
+    """
+    Set up forward pass metrics relays for the event plane.
+
+    Creates one FpmEventRelay per dp_rank. Each relay subscribes to the
+    local raw ZMQ PUB from InstrumentedScheduler (in the EngineCore child
+    process) and re-publishes to the Dynamo event plane with automatic
+    discovery registration.
+
+    Returns:
+        List of FpmEventRelay instances, or None if FPM is not enabled.
+    """
+    if not envs.is_set("DYN_FORWARDPASS_METRIC_PORT"):
+        return None
+
+    try:
+        from dynamo.llm import FpmEventRelay
+    except ImportError:
+        logger.warning(
+            "FpmEventRelay not available (Rust bindings not built with FPM support). "
+            "Forward pass metrics will not be relayed to the event plane."
+        )
+        return None
+
+    dp_start, dp_size = get_dp_range_for_worker(vllm_config)
+    relays = []
+
+    for dp_rank in range(dp_start, dp_start + dp_size):
+        base_port = envs.DYN_FORWARDPASS_METRIC_PORT
+        zmq_endpoint = f"tcp://127.0.0.1:{base_port + dp_rank}"
+
+        relay = FpmEventRelay(
+            endpoint=generate_endpoint,
+            zmq_endpoint=zmq_endpoint,
+        )
+        relays.append(relay)
+
+        logger.info(f"FPM relay for dp_rank={dp_rank} subscribing to {zmq_endpoint}")
+
+    return relays if relays else None
+
+
 def setup_vllm_engine(
-    config: Config, stat_logger: Optional[StatLoggerFactory] = None
+    config: Config,
+    stat_logger: Optional[StatLoggerFactory] = None,
+    fpm_worker_id: Optional[str] = None,
 ) -> tuple[AsyncLLM, VllmConfig, Any, Any, LLMBackendMetrics]:
     # vLLM v0.11.0 bug: vllm/v1.metrics/prometheus.py:79 passes TemporaryDirectory object
     # instead of .name string, causing false error on exit. Set PROMETHEUS_MULTIPROC_DIR
@@ -503,6 +551,10 @@ def setup_vllm_engine(
     # Store consolidator endpoints in additional_config (vLLM 0.16+ uses strict
     # dataclass fields; monkey-patching attributes onto VllmConfig is no longer safe).
     vllm_config.additional_config["consolidator_endpoints"] = consolidator_endpoints
+
+    # Pass worker identity to InstrumentedScheduler via additional_config.
+    if fpm_worker_id is not None:
+        vllm_config.additional_config["fpm_worker_id"] = fpm_worker_id
 
     factory = []
     if stat_logger:
@@ -631,6 +683,7 @@ async def init_prefill(
     )
 
     # Use pre-created engine if provided (checkpoint mode), otherwise create new
+    fpm_worker_id = str(generate_endpoint.connection_id())
     if snapshot_engine is not None:
         (
             engine_client,
@@ -639,6 +692,11 @@ async def init_prefill(
             prometheus_temp_dir,
             _component_gauges,
         ) = snapshot_engine
+        # TODO: The scheduler in the child process still has worker_id=""
+        # because the engine was forked before the runtime existed.
+        # Propagating the new ID to the child requires shared memory or
+        # a restart of the EngineCore process.
+        vllm_config.additional_config["fpm_worker_id"] = fpm_worker_id
     else:
         (
             engine_client,
@@ -646,7 +704,7 @@ async def init_prefill(
             default_sampling_params,
             prometheus_temp_dir,
             _component_gauges,
-        ) = setup_vllm_engine(config)
+        ) = setup_vllm_engine(config, fpm_worker_id=fpm_worker_id)
 
     handler = PrefillWorkerHandler(
         runtime,
@@ -685,6 +743,13 @@ async def init_prefill(
     )
     if kv_publishers:
         handler.kv_publishers = kv_publishers
+
+    # Set up forward pass metrics relay (child ZMQ -> event plane).
+    # In checkpoint mode the engine was created before the runtime, so
+    # ForwardPassMetrics.worker_id will be empty (relay still works).
+    fpm_relays = setup_fpm_relay(generate_endpoint, vllm_config)
+    if fpm_relays:
+        handler.fpm_relays = fpm_relays
 
     setup_metrics_collection(config, generate_endpoint, logger)
 
@@ -801,6 +866,7 @@ async def init(
         )
 
     # Use pre-created engine if provided (checkpoint mode), otherwise create new
+    fpm_worker_id = str(generate_endpoint.connection_id())
     if snapshot_engine is not None:
         (
             engine_client,
@@ -809,6 +875,7 @@ async def init(
             prometheus_temp_dir,
             component_gauges,
         ) = snapshot_engine
+        vllm_config.additional_config["fpm_worker_id"] = fpm_worker_id
         # Factory is created after unpack so component_gauges is available
         factory = StatLoggerFactory(
             endpoint=generate_endpoint,
@@ -827,7 +894,7 @@ async def init(
             default_sampling_params,
             prometheus_temp_dir,
             component_gauges,
-        ) = setup_vllm_engine(config, factory)
+        ) = setup_vllm_engine(config, factory, fpm_worker_id=fpm_worker_id)
 
     # TODO Hack to get data, move this to registering in TBD
     factory.set_num_gpu_blocks_all(vllm_config.cache_config.num_gpu_blocks)
@@ -870,6 +937,13 @@ async def init(
     )
     if kv_publishers:
         handler.kv_publishers = kv_publishers
+
+    # Set up forward pass metrics relay (child ZMQ -> event plane).
+    # In checkpoint mode the engine was created before the runtime, so
+    # ForwardPassMetrics.worker_id will be empty (relay still works).
+    fpm_relays = setup_fpm_relay(generate_endpoint, vllm_config)
+    if fpm_relays:
+        handler.fpm_relays = fpm_relays
 
     setup_metrics_collection(config, generate_endpoint, logger)
 

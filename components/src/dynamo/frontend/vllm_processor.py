@@ -9,7 +9,6 @@ import asyncio
 import logging
 import os
 import time
-import uuid
 from argparse import Namespace
 from collections.abc import AsyncGenerator
 from typing import Any
@@ -37,11 +36,11 @@ from dynamo.llm import (
 from dynamo.runtime import Client, DistributedRuntime
 
 from .prepost import StreamingPostProcessor, preprocess_chat_request
+from .utils import random_uuid
 
 logger = logging.getLogger(__name__)
 
 
-_MASK_64_BITS = (1 << 64) - 1
 _FINISH_REASON_MAP: dict[str, FinishReason] = {
     "eos": FinishReason.STOP,
     "stop": FinishReason.STOP,
@@ -50,10 +49,6 @@ _FINISH_REASON_MAP: dict[str, FinishReason] = {
     "cancelled": FinishReason.ABORT,
     "content_filter": FinishReason.STOP,
 }
-
-
-def random_uuid() -> str:
-    return f"{uuid.uuid4().int & _MASK_64_BITS:016x}"  # 16 hex chars
 
 
 def map_finish_reason(raw_reason: str | None) -> FinishReason | None:
@@ -234,9 +229,11 @@ class VllmProcessor:
                 "prompt_logprobs": sp.prompt_logprobs,
                 "skip_special_tokens": sp.skip_special_tokens,
             },
-            "eos_token_ids": [vllm_preproc.eos_token_id]
-            if vllm_preproc.eos_token_id is not None
-            else [],
+            "eos_token_ids": (
+                [vllm_preproc.eos_token_id]
+                if vllm_preproc.eos_token_id is not None
+                else []
+            ),
             "annotations": [],
         }
 
@@ -439,7 +436,7 @@ class EngineFactory:
         else:
             reasoning_parser_class = None
 
-        (namespace_name, component_name, endpoint_name) = instance_id.triple()
+        namespace_name, component_name, endpoint_name = instance_id.triple()
         generate_endpoint = self.runtime.endpoint(
             f"{namespace_name}.{component_name}.{endpoint_name}"
         )

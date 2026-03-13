@@ -17,6 +17,7 @@ networks:
 volumes:
   grafana-data:
   tempo-data:
+  loki-data:
 
 services:
   # DCGM stands for Data Center GPU Manager: https://developer.nvidia.com/dcgm
@@ -83,7 +84,21 @@ services:
       - dcgm-exporter
       - nats-prometheus-exporter
 
+  # Loki - Log aggregation backend
+  loki:
+    image: grafana/loki:3.5.0
+    command: [ "-config.file=/etc/loki.yaml" ]
+    user: root
+    volumes:
+      - ./observability/loki.yaml:/etc/loki.yaml
+      - loki-data:/loki
+    ports:
+      - "3100:3100"   # Loki HTTP API (push/query)
+    networks:
+      - server
+
   # Tempo - Distributed tracing backend
+  # Note: OTLP ports (4317/4318) are internal-only; the OTel Collector handles host-facing ingestion.
   tempo:
     image: grafana/tempo:2.8.2
     command: [ "-config.file=/etc/tempo.yaml" ]
@@ -92,11 +107,26 @@ services:
       - ./observability/tempo.yaml:/etc/tempo.yaml
       - tempo-data:/tmp/tempo
     ports:
-      - "3200:3200"   # Tempo HTTP
+      - "3200:3200"   # Tempo HTTP (query API)
+    networks:
+      - server
+
+  # OpenTelemetry Collector - Unified ingestion point for traces and logs
+  # Dynamo services send OTLP to localhost:4317 (gRPC) or localhost:4318 (HTTP).
+  # The collector routes traces to Tempo and logs to Loki.
+  otel-collector:
+    image: otel/opentelemetry-collector:0.120.0
+    command: [ "--config=/etc/otel-collector.yaml" ]
+    volumes:
+      - ./observability/otel-collector.yaml:/etc/otel-collector.yaml
+    ports:
       - "4317:4317"   # OTLP gRPC receiver (accessible from host)
       - "4318:4318"   # OTLP HTTP receiver (accessible from host)
     networks:
       - server
+    depends_on:
+      - tempo
+      - loki
 
   # Grafana - Visualization and dashboards
   # Supports both Prometheus (metrics) and Tempo (tracing) datasources
@@ -111,6 +141,7 @@ services:
       - ./observability/grafana_dashboards:/etc/grafana/provisioning/dashboards
       - ./observability/grafana-datasources.yml:/etc/grafana/provisioning/datasources/prometheus.yml
       - ./observability/tempo-datasource.yml:/etc/grafana/provisioning/datasources/tempo.yml
+      - ./observability/loki-datasource.yml:/etc/grafana/provisioning/datasources/loki.yml
     environment:
       - GF_SERVER_HTTP_PORT=3000
       # do not make it admin/admin, because you will be prompted to change the password every time
@@ -134,4 +165,5 @@ services:
     depends_on:
       - prometheus
       - tempo
+      - loki
 
