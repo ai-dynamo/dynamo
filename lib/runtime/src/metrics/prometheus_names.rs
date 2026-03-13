@@ -519,10 +519,16 @@ pub mod tokio_perf {
     pub const ALIVE_TASKS: &str = "alive_tasks";
 }
 
-// KvRouter (including KvInexer) Prometheus metric names
+// KvRouter (including KvIndexer) Prometheus metric names
 pub mod kvrouter {
     /// Number of KV cache events applied to the index (including status)
     pub const KV_CACHE_EVENTS_APPLIED: &str = "kv_cache_events_applied";
+}
+
+/// KV Publisher metrics
+pub mod kv_publisher {
+    /// Total number of raw events dropped by engines before reaching publisher (detected via event_id gaps)
+    pub const ENGINES_DROPPED_EVENTS_TOTAL: &str = "kv_publisher_engines_dropped_events_total";
 }
 
 /// Additional TRT-LLM worker metrics beyond what the engine natively provides.

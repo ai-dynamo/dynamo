@@ -315,7 +315,7 @@ impl RoutingOverheadMetrics {
 /// # Why component-scoped
 ///
 /// These metrics MUST be registered through the Component hierarchy (not a standalone
-/// registry). In hierarchical planner deployments, the frontend's router is the global
+/// registry). In global planner deployments, the frontend's router is the global
 /// entry point, but each worker pool has its own local router (e.g. prefill pool,
 /// decode pool). Component-scoped metrics let each local router emit metrics with
 /// distinct `dynamo_component` labels, so pools can be monitored and scaled
