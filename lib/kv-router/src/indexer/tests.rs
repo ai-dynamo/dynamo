@@ -267,7 +267,7 @@ fn make_indexer(variant: &str) -> Box<dyn KvIndexerInterface> {
 /// after asynchronous event ingestion.
 async fn flush_and_settle(index: &dyn KvIndexerInterface) {
     index.flush().await;
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
 }
 
 #[tokio::test]
@@ -443,7 +443,7 @@ async fn test_dump_and_restore(variant: &str) {
         restored.apply_event(event).await;
     }
 
-    flush_and_settle(index.as_ref()).await;
+    flush_and_settle(restored.as_ref()).await;
 
     assert_eq!(
         snapshot_tree(index.as_ref()).await,
