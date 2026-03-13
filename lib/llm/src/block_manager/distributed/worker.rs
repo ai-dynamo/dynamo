@@ -475,18 +475,13 @@ impl KvbmWorker {
                 // Valid range is [1, 2]. If the candidate dimension exceeds 2, the tensor
                 // does not have an explicit outer_dim (e.g. MLA models produce 3D tensors
                 // shaped [n_blocks, page_size, latent_dim] with no K/V split).
-                let candidate = if outer_contiguous {
-                    shape[0]
-                } else {
-                    shape[1]
-                };
+                let candidate = if outer_contiguous { shape[0] } else { shape[1] };
 
                 let (outer_dim, inner_dim) = if candidate <= 2 {
                     // Explicit outer_dim present in shape:
                     //   outer_contiguous=true:  [outer_dim, n_blocks, page_size, inner_dim, ...]
                     //   outer_contiguous=false: [n_blocks, outer_dim, page_size, inner_dim, ...]
-                    let inner_dim =
-                        shape[2..].iter().product::<usize>() / config.page_size;
+                    let inner_dim = shape[2..].iter().product::<usize>() / config.page_size;
                     (candidate, inner_dim)
                 } else {
                     // No explicit outer_dim — MLA-style combined K/V cache.

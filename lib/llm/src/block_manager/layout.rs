@@ -2280,8 +2280,8 @@ pub mod tests {
 
         #[test]
         fn test_mla_ls_creation_block_contiguous() {
-            let layout = setup_mla_layer_separate(false)
-                .expect("MLA LayerSeparate creation should succeed");
+            let layout =
+                setup_mla_layer_separate(false).expect("MLA LayerSeparate creation should succeed");
 
             assert_eq!(layout.num_blocks(), MLA_NUM_BLOCKS);
             assert_eq!(layout.num_layers(), MLA_NUM_LAYERS);
@@ -2298,8 +2298,8 @@ pub mod tests {
 
         #[test]
         fn test_mla_ls_creation_outer_contiguous() {
-            let layout = setup_mla_layer_separate(true)
-                .expect("MLA LayerSeparate creation should succeed");
+            let layout =
+                setup_mla_layer_separate(true).expect("MLA LayerSeparate creation should succeed");
 
             assert_eq!(layout.outer_dim(), 1);
             assert_eq!(
