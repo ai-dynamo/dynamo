@@ -12,7 +12,7 @@ from typing import Generator, Optional
 import pytest
 from filelock import FileLock
 
-from tests.utils.constants import CI_MODELS_DIR, TEST_MODELS, DefaultPort
+from tests.utils.constants import TEST_MODELS, DefaultPort
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.port_utils import (
     ServicePorts,
@@ -132,49 +132,34 @@ def set_ucx_tls_no_mm():
     mp.undo()
 
 
-def _link_ci_model_to_hf_cache(model_id: str, ci_models_dir: str) -> bool:
-    """Create HF-compatible cache entries pointing to a CI-cached model directory.
+def _is_model_cached(model_id: str) -> bool:
+    """Check if a model already exists in the HF cache.
 
-    Both Python ``huggingface_hub`` and Rust ``hf_hub::Cache`` resolve models
-    via ``refs/main`` -> ``snapshots/{hash}/``.  We create that structure with
-    a symlink so engines see the CI copy as a regular cached model.
-
-    Returns True if the link was created successfully, False otherwise.
+    Reads the HF cache directory structure (refs/main -> snapshots/{rev}/)
+    without writing anything, so it's safe on read-only mounts.
     """
-    ci_model_path = Path(ci_models_dir) / model_id
-    if not ci_model_path.is_dir() or not (ci_model_path / "config.json").exists():
-        return False
-
     try:
         from huggingface_hub.constants import HF_HUB_CACHE
     except ImportError:
         return False
 
-    try:
-        # e.g. "Qwen/Qwen3-0.6B" -> "models--Qwen--Qwen3-0.6B"
-        repo_dir = Path(HF_HUB_CACHE) / f"models--{model_id.replace('/', '--')}"
-
-        refs_dir = repo_dir / "refs"
-        refs_dir.mkdir(parents=True, exist_ok=True)
-
-        snapshots_dir = repo_dir / "snapshots"
-        snapshots_dir.mkdir(parents=True, exist_ok=True)
-
-        # Write the fake revision hash used by the symlink
-        refs_file = refs_dir / "main"
-        refs_file.write_text("ci-local")
-
-        # Create symlink: snapshots/ci-local -> /models/ci/models/<org>/<model>
-        snapshot_link = snapshots_dir / "ci-local"
-        if snapshot_link.is_symlink() or snapshot_link.exists():
-            snapshot_link.unlink()
-        snapshot_link.symlink_to(ci_model_path)
-
-        logging.info(f"Linked CI-cached model: {model_id} -> {ci_model_path}")
-        return True
-    except Exception as exc:
-        logging.warning(f"Failed to link CI-cached model {model_id}: {exc}")
+    repo_dir = Path(HF_HUB_CACHE) / f"models--{model_id.replace('/', '--')}"
+    refs_file = repo_dir / "refs" / "main"
+    if not refs_file.exists():
+        logging.debug(f"Cache miss for {model_id}: {refs_file} not found")
         return False
+    revision = refs_file.read_text().strip()
+    snapshot_dir = repo_dir / "snapshots" / revision
+    if snapshot_dir.is_dir():
+        logging.info(
+            f"Cache hit for {model_id}: HF_HUB_CACHE={HF_HUB_CACHE}, "
+            f"revision={revision}, snapshot={snapshot_dir}"
+        )
+        return True
+    logging.debug(
+        f"Cache miss for {model_id}: snapshot dir {snapshot_dir} not found"
+    )
+    return False
 
 
 def download_models(model_list=None, ignore_weights=False):
@@ -187,11 +172,7 @@ def download_models(model_list=None, ignore_weights=False):
     if model_list is None:
         model_list = TEST_MODELS
 
-    # Check whether CI-cached models are available
-    ci_models_dir = CI_MODELS_DIR
-    ci_available = Path(ci_models_dir).is_dir()
-    if ci_available:
-        logging.info(f"CI model cache detected at {ci_models_dir}")
+    logging.info(f"HF cache location: {os.environ.get('HF_HUB_CACHE', '(default)')}")
 
     # Check for HF_TOKEN in environment
     hf_token = os.environ.get("HF_TOKEN", "").strip() or None
@@ -213,8 +194,8 @@ def download_models(model_list=None, ignore_weights=False):
 
     failures = []
     for model_id in model_list:
-        # Try CI cache first
-        if ci_available and _link_ci_model_to_hf_cache(model_id, ci_models_dir):
+        if _is_model_cached(model_id):
+            logging.info(f"Model already cached, skipping download: {model_id}")
             continue
 
         logging.info(

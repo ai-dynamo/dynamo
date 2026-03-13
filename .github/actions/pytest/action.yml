@@ -130,7 +130,7 @@ runs:
             echo "🔍 Mypy type checking enabled"
             MYPY_FLAG="--mypy"
           fi
-          PYTEST_CMD="pytest --continue-on-collection-errors -v --tb=short --basetemp=/tmp/pytest_temp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --durations=20 ${MYPY_FLAG} -m \"${{ inputs.pytest_marks }}\""
+          PYTEST_CMD="pytest --continue-on-collection-errors -v --tb=short --log-cli-level=INFO --basetemp=/tmp/pytest_temp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --durations=20 ${MYPY_FLAG} -m \"${{ inputs.pytest_marks }}\""
 
           # Detect GPU availability and conditionally add GPU flags
           GPU_FLAGS=""
@@ -152,11 +152,14 @@ runs:
           DOCKER_ENV_FLAGS+=(--env "HF_TOKEN=${HF_TOKEN}")
         fi
 
-        # Mount CI-cached models if available on the host
+        # Mount CI-cached models if available on the host.
+        # The S3 CSI mount uses HF cache layout, so setting HF_HUB_CACHE
+        # lets engines resolve models directly from the mount.
         CI_MODELS_FLAGS=()
         if [[ -d "/models/ci/models" ]]; then
           echo "📦 CI model cache detected, mounting into container"
           CI_MODELS_FLAGS+=(-v "/models/ci/models:/models/ci/models:ro")
+          DOCKER_ENV_FLAGS+=(--env "HF_HUB_CACHE=/models/ci/models")
         fi
 
         docker run ${GPU_FLAGS} --rm -w /workspace \
@@ -242,7 +245,7 @@ runs:
 
           # Construct final command with xdist parallelization (-n) and other options
           # --dist=loadscope groups tests by module/class to prevent race conditions in stateful tests
-          PYTEST_CMD="pytest ${PARALLEL_OPTS} --dist=loadscope --continue-on-collection-errors -v --tb=short --basetemp=/tmp/pytest_temp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --durations=10 ${MYPY_FLAG} -m \"${{ inputs.pytest_marks }}\""
+          PYTEST_CMD="pytest ${PARALLEL_OPTS} --dist=loadscope --continue-on-collection-errors -v --tb=short --log-cli-level=INFO --basetemp=/tmp/pytest_temp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --durations=10 ${MYPY_FLAG} -m \"${{ inputs.pytest_marks }}\""
         fi
 
         # Get absolute path for test-results directory and ensure it has proper permissions
@@ -256,11 +259,14 @@ runs:
           DOCKER_ENV_FLAGS+=(--env "HF_TOKEN=${HF_TOKEN}")
         fi
 
-        # Mount CI-cached models if available on the host
+        # Mount CI-cached models if available on the host.
+        # The S3 CSI mount uses HF cache layout, so setting HF_HUB_CACHE
+        # lets engines resolve models directly from the mount.
         CI_MODELS_FLAGS=()
         if [[ -d "/models/ci/models" ]]; then
           echo "📦 CI model cache detected, mounting into container"
           CI_MODELS_FLAGS+=(-v "/models/ci/models:/models/ci/models:ro")
+          DOCKER_ENV_FLAGS+=(--env "HF_HUB_CACHE=/models/ci/models")
         fi
 
         docker run ${GPU_FLAGS} ${DOCKER_OPTS} --rm -w /workspace \
