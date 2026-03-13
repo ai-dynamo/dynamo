@@ -21,7 +21,6 @@ from gpu_memory_service.integrations.common import patch_empty_cache
 from gpu_memory_service.integrations.common.utils import setup_meta_tensor_workaround
 from gpu_memory_service.integrations.sglang.patches import (
     patch_model_runner,
-    patch_static_state_for_gms,
     patch_torch_memory_saver,
 )
 
@@ -35,7 +34,6 @@ logger = logging.getLogger(__name__)
 patch_empty_cache()
 patch_torch_memory_saver()
 patch_model_runner()
-patch_static_state_for_gms()
 logger.info("[GMS] Applied patches")
 
 

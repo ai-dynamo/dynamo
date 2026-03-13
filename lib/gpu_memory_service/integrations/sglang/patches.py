@@ -5,7 +5,6 @@
 
 - patch_torch_memory_saver: Routes to GMS hybrid implementation
 - patch_model_runner: Fixes memory accounting with pre-loaded weights
-- patch_static_state_for_gms: No-ops named-buffer export/import (GMS preserves them)
 """
 
 from __future__ import annotations
@@ -20,7 +19,6 @@ logger = logging.getLogger(__name__)
 
 _torch_memory_saver_patched = False
 _model_runner_patched = False
-_static_state_patched = False
 
 
 def patch_torch_memory_saver() -> None:
@@ -177,40 +175,3 @@ def patch_model_runner() -> None:
     ModelRunner._gms_patched = True
     _model_runner_patched = True
     logger.info("[GMS] Patched ModelRunner.init_memory_pool")
-
-
-def patch_static_state_for_gms() -> None:
-    """No-op SGLang's _export/_import_static_state when using GMS.
-
-    SGLang's release_memory_occupation clones every named buffer via
-    buffer.detach().clone() through the default CUDA allocator, then restores
-    them during resume_memory_occupation.
-    This patch must run inside the scheduler child process (which uses
-    multiprocessing spawn).  It is triggered by the GMSModelLoader import
-    in model_loader.py, which executes at module level in the child.
-    """
-    pass
-    global _static_state_patched
-    if _static_state_patched:
-        return
-
-    try:
-        from sglang.srt.managers import scheduler_update_weights_mixin as _mixin
-
-        def _export_noop(model):
-            """NO-OP: GMS preserves buffers via VA-stable unmap/remap."""
-            return dict(buffers=[])
-
-        def _import_noop(model, static_params):
-            """NO-OP: GMS preserves buffers via VA-stable unmap/remap."""
-            pass
-
-        _mixin._export_static_state = _export_noop
-        _mixin._import_static_state = _import_noop
-        _static_state_patched = True
-        logger.debug("[GMS] Patched _export/_import_static_state -> no-op")
-    except ImportError:
-        logger.warning(
-            "[GMS] Could not import scheduler_update_weights_mixin, "
-            "skipping static state patch"
-        )
