@@ -14,6 +14,7 @@ from gpu_memory_service.client.torch.module import (
 )
 from gpu_memory_service.client.torch.tensor import _tensor_from_pointer
 from gpu_memory_service.common.types import RequestedLockType
+
 from tests.gpu_memory_service.harness.gms import GMSServerProcess
 
 pytestmark = [

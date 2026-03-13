@@ -6,6 +6,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
+
 from tests.gpu_memory_service.harness.gms import GMSServerProcess
 from tests.utils.managed_process import ManagedProcess
 

@@ -39,9 +39,9 @@ class _FakeManager:
 
 
 def test_initialize_from_config_uses_kv_cache_gms_tag(monkeypatch):
-    from gpu_memory_service.integrations.vllm.worker import GMSWorker
     import gpu_memory_service.integrations.vllm.worker as worker_module
     import vllm.distributed.kv_transfer as kv_transfer
+    from gpu_memory_service.integrations.vllm.worker import GMSWorker
 
     create_calls: list[tuple[object, ...]] = []
     pool_calls: list[tuple[str, str]] = []
@@ -94,8 +94,8 @@ def test_initialize_from_config_uses_kv_cache_gms_tag(monkeypatch):
 
 
 def test_sleep_level_2_unmaps_weights_and_kv_cache(monkeypatch):
-    from gpu_memory_service.integrations.vllm.worker import GMSWorker
     import gpu_memory_service.integrations.vllm.worker as worker_module
+    from gpu_memory_service.integrations.vllm.worker import GMSWorker
 
     weights = _FakeManager()
     kv_cache = _FakeManager()
@@ -119,8 +119,8 @@ def test_sleep_level_2_unmaps_weights_and_kv_cache(monkeypatch):
 
 
 def test_wake_up_remaps_weights_and_reallocates_kv_cache(monkeypatch):
-    from gpu_memory_service.integrations.vllm.worker import GMSWorker
     import gpu_memory_service.integrations.vllm.worker as worker_module
+    from gpu_memory_service.integrations.vllm.worker import GMSWorker
 
     weights = _FakeManager(is_unmapped=True)
     kv_cache = _FakeManager(is_unmapped=True)
@@ -153,8 +153,8 @@ def test_wake_up_remaps_weights_and_reallocates_kv_cache(monkeypatch):
 
 
 def test_maybe_get_memory_pool_context_routes_tags(monkeypatch):
-    from gpu_memory_service.integrations.vllm.worker import GMSWorker, Worker
     import gpu_memory_service.integrations.vllm.worker as worker_module
+    from gpu_memory_service.integrations.vllm.worker import GMSWorker, Worker
 
     kv_cache_context = object()
     super_calls: list[str] = []

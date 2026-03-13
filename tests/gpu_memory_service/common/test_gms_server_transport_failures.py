@@ -6,12 +6,12 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
 import os
 import socket
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 
 import pytest
 from cuda.bindings import driver as cuda
@@ -205,7 +205,11 @@ class _FakeHandler:
             state=(
                 "RW"
                 if has_rw
-                else "RO" if ro_count else "COMMITTED" if committed else "EMPTY"
+                else "RO"
+                if ro_count
+                else "COMMITTED"
+                if committed
+                else "EMPTY"
             ),
             has_rw_session=has_rw,
             ro_session_count=ro_count,

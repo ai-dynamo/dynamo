@@ -16,6 +16,7 @@ from gpu_memory_service.client.torch.allocator import gms_use_mem_pool
 from gpu_memory_service.client.torch.module import register_module_tensors
 from gpu_memory_service.common.types import RequestedLockType
 from gpu_memory_service.common.utils import get_socket_path
+
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
 
 from .runtime import DYNAMO_BIN, REPO_ROOT

@@ -11,6 +11,7 @@ from typing import Callable, Protocol
 import pytest
 from gpu_memory_service.client.session import _GMSClientSession
 from gpu_memory_service.common.types import RequestedLockType, ServerState
+
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
 from tests.utils.managed_process import DynamoFrontendProcess
 
@@ -32,13 +33,17 @@ from ..harness.vllm import VLLMWithGMSProcess
 
 
 class _SleepWakeEngine(Protocol):
-    def __enter__(self): ...
+    def __enter__(self):
+        ...
 
-    def __exit__(self, exc_type, exc_val, exc_tb) -> None: ...
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        ...
 
-    def sleep(self) -> dict: ...
+    def sleep(self) -> dict:
+        ...
 
-    def wake(self) -> dict: ...
+    def wake(self) -> dict:
+        ...
 
 
 def _list_committed_weight_allocations(

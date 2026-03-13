@@ -5,8 +5,8 @@
 
 from __future__ import annotations
 
-from collections import deque
 import logging
+from collections import deque
 from typing import Callable, Optional
 
 from gpu_memory_service.common.protocol.messages import (
