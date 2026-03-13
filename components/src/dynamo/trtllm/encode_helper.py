@@ -143,7 +143,7 @@ class EncodeHelper:
     @staticmethod
     async def read_embeddings_from_encode_response(
         encode_response: Dict[str, Any], connector: nixl_connect.Connector
-    ) -> Union[torch.Tensor, Dict[str, torch.Tensor]]:
+    ) -> Union[torch.Tensor, Dict[str, torch.Tensor], list]:
         """
         Read embeddings from encode worker response using NIXL and reconstruct original format.
 
@@ -152,7 +152,9 @@ class EncodeHelper:
             connector: NIXL connector for reading operations
 
         Returns:
-            Either a single tensor or dictionary containing mm_embeddings and auxiliary data
+            - List[torch.Tensor]: When multiple plain-tensor embeddings were sent
+            - torch.Tensor: When a single plain-tensor embedding was sent
+            - dict: When a dict-format embedding (with auxiliary data) was sent
 
         Raises:
             RuntimeError: If there's an error in the encode response or NIXL operations
@@ -167,6 +169,7 @@ class EncodeHelper:
         embeddings_shape = encode_response["embeddings_shape"]
         embeddings_dtype_str = encode_response["embeddings_dtype"]
         auxiliary_data = encode_response.get("auxiliary_data", {})
+        per_embedding_shapes = encode_response.get("per_embedding_shapes")
         readable_metadata = nixl_connect.RdmaMetadata.model_validate(
             encode_response["nixl_readable_metadata"]
         )
@@ -191,15 +194,23 @@ class EncodeHelper:
 
         # Reconstruct original format and return
         if auxiliary_data:
-            # Deserialize auxiliary tensors and reconstruct dictionary format
+            # Dict format: reconstruct dictionary with mm_embeddings + auxiliary data
             deserialized_auxiliary = EncodeHelper.deserialize_tensor_dict(
                 auxiliary_data
             )
             result = {"mm_embeddings": encodings_tensor}
             result.update(deserialized_auxiliary)
             return result
+        elif per_embedding_shapes and len(per_embedding_shapes) > 1:
+            # Multiple plain tensors were concatenated for transfer — split back
+            split_sizes = [
+                int(torch.prod(torch.tensor(shape[:-1])).item())
+                for shape in per_embedding_shapes
+            ]
+            parts = torch.split(encodings_tensor, split_sizes, dim=0)
+            return [p.reshape(shape) for p, shape in zip(parts, per_embedding_shapes)]
         else:
-            # Return just the tensor
+            # Single plain tensor
             return encodings_tensor
 
     # =========================================================================
@@ -231,8 +242,15 @@ class EncodeHelper:
         """
         Process pre-computed embeddings via NIXL transfer.
 
-        Loads embeddings from a file path/URL and creates a NIXL readable operation
-        for the prefill worker to read via RDMA.
+        Loads embeddings from one or more file paths/URLs and creates a NIXL readable
+        operation for the prefill worker to read via RDMA.
+
+        For multiple plain-tensor embeddings, all tensors are concatenated along dim=0
+        for a single NIXL transfer. The per-embedding shapes are stored in the response
+        so the reader can split them back into a list.
+
+        For dict-format embeddings (containing auxiliary data), only a single path is
+        supported. If multiple dict-format paths are provided, only the first is used.
 
         Args:
             embedding_paths: List of paths to embedding files (.pt/.pth/.bin)
@@ -240,26 +258,57 @@ class EncodeHelper:
             connector: NIXL connector for RDMA transfer
 
         Yields:
-            Response with NIXL metadata, shape, dtype, and auxiliary data
+            Response with NIXL metadata, shape, dtype, auxiliary data, and
+            per_embedding_shapes for multi-embedding reconstruction
         """
-        logging.info(f"EncodeHelper: loading embeddings from {embedding_paths[0]}")
-        loaded_data = multimodal_processor.load_tensor_from_path_or_url(
-            embedding_paths[0]
-        )
+        logging.info(f"EncodeHelper: loading embeddings from {embedding_paths}")
 
-        # Handle both tensor and dictionary formats
-        if isinstance(loaded_data, dict):
-            # Dictionary format: contains 'mm_embeddings' key plus auxiliary data
-            encodings = loaded_data.get("mm_embeddings")
-            if encodings is None:
-                yield {"error": "Dictionary embeddings missing 'mm_embeddings' key"}
-                return
-            auxiliary_data = {
-                k: v for k, v in loaded_data.items() if k != "mm_embeddings"
-            }
+        # Load all embedding files
+        loaded_tensors = []
+        auxiliary_data_list = []
+        has_dict_format = False
+
+        for path in embedding_paths:
+            loaded_data = multimodal_processor.load_tensor_from_path_or_url(path)
+            if isinstance(loaded_data, dict):
+                has_dict_format = True
+                tensor = loaded_data.get("mm_embeddings")
+                if tensor is None:
+                    yield {
+                        "error": f"Dictionary embeddings missing 'mm_embeddings' key in {path}"
+                    }
+                    return
+                auxiliary_data_list.append(
+                    {k: v for k, v in loaded_data.items() if k != "mm_embeddings"}
+                )
+            else:
+                tensor = loaded_data
+                auxiliary_data_list.append({})
+            loaded_tensors.append(tensor)
+
+        if has_dict_format and len(embedding_paths) > 1:
+            logging.warning(
+                "Multiple embedding paths with dict format are not supported. "
+                "Only the first embedding will be used."
+            )
+            loaded_tensors = [loaded_tensors[0]]
+            auxiliary_data_list = [auxiliary_data_list[0]]
+
+        per_embedding_shapes = [list(t.shape) for t in loaded_tensors]
+
+        if has_dict_format:
+            # Dict format: single embedding with auxiliary data (original behavior)
+            encodings = loaded_tensors[0]
+            auxiliary_data = auxiliary_data_list[0]
+        elif len(loaded_tensors) == 1:
+            # Single plain tensor (original behavior)
+            encodings = loaded_tensors[0]
+            auxiliary_data = {}
         else:
-            # Tensor format: raw embeddings tensor
-            encodings = loaded_data
+            # Multiple plain tensors: flatten each to [rows, hidden_dim] and concatenate
+            # so they can be transferred in a single NIXL operation
+            flat_tensors = [t.reshape(-1, t.shape[-1]) for t in loaded_tensors]
+            encodings = torch.cat(flat_tensors, dim=0)
             auxiliary_data = {}
 
         # Create NIXL readable operation for prefill worker to read
@@ -271,6 +320,7 @@ class EncodeHelper:
                 "embeddings_shape": list(encodings.shape),
                 "embeddings_dtype": str(encodings.dtype),
                 "auxiliary_data": EncodeHelper.serialize_tensor_dict(auxiliary_data),
+                "per_embedding_shapes": per_embedding_shapes,
             }
             yield response
 
