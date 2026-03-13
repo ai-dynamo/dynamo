@@ -95,6 +95,9 @@ fn allocate_event(resources: &mut ZeDeviceResources) -> Result<ZeEvent> {
 /// The last `zeCommandListAppendMemoryCopy` signals a [`ZeEvent`]; the event
 /// is then registered with the [`TransferContext`] notification subsystem for
 /// async polling, mirroring the CUDA event path.
+///
+/// If `ze_cmdlist` is provided, uses that command list instead of the
+/// per-device cached one. The caller is responsible for synchronization.
 pub fn execute_ze_transfer(
     src: &PhysicalLayout,
     dst: &PhysicalLayout,
@@ -102,6 +105,7 @@ pub fn execute_ze_transfer(
     dst_block_ids: &[usize],
     layer_range: Option<Range<usize>>,
     strategy: TransferStrategy,
+    ze_cmdlist: Option<Arc<ZeImmediateCmdList>>,
     ctx: &TransferContext,
 ) -> Result<TransferCompleteNotification> {
     // Validate layouts
@@ -144,7 +148,9 @@ pub fn execute_ze_transfer(
     let resources_lock = ze_resources(device_ordinal)?;
     let mut resources = resources_lock.lock().unwrap();
 
-    let cmdlist = resources.cmdlist.clone();
+    // Use caller-provided command list if available, otherwise use cached one
+    let caller_manages_sync = ze_cmdlist.is_some();
+    let cmdlist = ze_cmdlist.unwrap_or_else(|| resources.cmdlist.clone());
     let signal_event = allocate_event(&mut resources)?;
 
     // Release the lock before issuing memcpy operations
@@ -178,6 +184,7 @@ pub fn execute_ze_transfer(
     }
 
     // Register the signal event for async polling completion
+    let _ = caller_manages_sync; // reserved for future: skip event if caller syncs
     Ok(ctx.register_ze_event(signal_event))
 }
 

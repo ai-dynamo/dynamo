@@ -111,6 +111,7 @@ fn allocate_event(resources: &mut ZeDeviceResources) -> Result<ZeEvent> {
 /// * `dst_block_ids` - Destination block IDs to transfer
 /// * `layer_range` - Optional range of layers to transfer (None = all layers)
 /// * `strategy` - XPU transfer strategy (ZeAsyncH2D, ZeAsyncD2H, ZeAsyncD2D)
+/// * `ze_cmdlist` - Optional caller-provided command list (caller manages sync)
 /// * `ctx` - Transfer context
 pub fn execute_ze_transfer(
     src: &PhysicalLayout,
@@ -119,6 +120,7 @@ pub fn execute_ze_transfer(
     dst_block_ids: &[BlockId],
     layer_range: Option<Range<usize>>,
     strategy: TransferStrategy,
+    ze_cmdlist: Option<Arc<ZeImmediateCmdList>>,
     ctx: &TransferContext,
 ) -> Result<TransferCompleteNotification> {
     // Validate layouts
@@ -167,7 +169,9 @@ pub fn execute_ze_transfer(
     let resources_lock = ze_resources(device_ordinal)?;
     let mut resources = resources_lock.lock().unwrap();
 
-    let cmdlist = resources.cmdlist.clone();
+    // Use caller-provided command list if available, otherwise use cached one
+    let caller_manages_sync = ze_cmdlist.is_some();
+    let cmdlist = ze_cmdlist.unwrap_or_else(|| resources.cmdlist.clone());
     let signal_event = allocate_event(&mut resources)?;
 
     // Release the lock before issuing memcpy operations
@@ -223,7 +227,10 @@ pub fn execute_ze_transfer(
         }
     }
 
-    // Register the signal event for async polling completion
+    // Register the signal event for async polling completion.
+    // When the caller provided their own command list, they manage synchronization,
+    // but we still register the event so the notification system works uniformly.
+    let _ = caller_manages_sync; // reserved for future: skip event if caller syncs
     Ok(ctx.register_ze_event(signal_event))
 }
 
