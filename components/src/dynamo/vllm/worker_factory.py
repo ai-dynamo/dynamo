@@ -14,13 +14,13 @@ from vllm.v1.engine.async_llm import AsyncLLM
 from dynamo import prometheus_names
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.common.utils.prometheus import LLMBackendMetrics
-from dynamo.llm import ModelInput
+from dynamo.llm import ModelInput, ModelType
 from dynamo.runtime import DistributedRuntime
 
 from .args import Config
 from .constants import DisaggregationMode
-from .handlers import DecodeWorkerHandler
-from .health_check import VllmHealthCheckPayload
+from .handlers import DecodeWorkerHandler, PrefillWorkerHandler
+from .health_check import VllmHealthCheckPayload, VllmPrefillHealthCheckPayload
 from .multimodal_handlers import (
     EncodeWorkerHandler,
     MultimodalDecodeWorkerHandler,
@@ -176,7 +176,13 @@ class WorkerFactory:
         # the use case of only disaggregating encode worker, so adding only decode
         # worker creation for now, which is used in DisaggregationMode.AGGREGATED.
         if config.disaggregation_mode == DisaggregationMode.PREFILL:
-            raise NotImplementedError("To be extracted from main.py")
+            await self._create_prefill_worker(
+                runtime,
+                config,
+                shutdown_event,
+                shutdown_endpoints,
+                snapshot_engine=snapshot_engine,
+            )
         else:
             await self._create_decode_worker(
                 runtime,
@@ -247,14 +253,9 @@ class WorkerFactory:
             ) = self.setup_vllm_engine(config)
 
         # Set up encode worker client when routing to encoder is enabled
-        encode_worker_client = None
-        if config.route_to_encoder:
-            encode_worker_client = await runtime.endpoint(
-                f"{config.namespace}.encoder.generate"
-            ).client()
-            logger.info("Waiting for Encoder Worker Instances ...")
-            await encode_worker_client.wait_for_instances()
-            logger.info("Connected to encoder workers")
+        encode_worker_client = await self._maybe_get_encode_worker_client(
+            runtime, config
+        )
 
         # Set up decode worker client for disaggregated mode
         decode_worker_client = None
@@ -378,7 +379,6 @@ class WorkerFactory:
         finally:
             handler.cleanup()
 
-    # [gluo WIP] from main.py
     async def _create_decode_worker(
         self,
         runtime: DistributedRuntime,
@@ -461,20 +461,9 @@ class WorkerFactory:
         # Currently routing to worker is still controlled by the worker
         # as the worker has logic to determine whether remote encode should be
         # performed
-        # Set up encode worker client when routing to encoder is enabled
-        encode_worker_client = None
-        # Only set up encode worker if the worker is not disagg decode worker,
-        # Only worker that performs prefill, PREFILL or AGGREGATED, may require remote encode.
-        if (
-            config.route_to_encoder
-            and config.disaggregation_mode != DisaggregationMode.DECODE
-        ):
-            encode_worker_client = await runtime.endpoint(
-                f"{config.namespace}.encoder.generate"
-            ).client()
-            logger.info("Waiting for Encoder Worker Instances ...")
-            await encode_worker_client.wait_for_instances()
-            logger.info("Connected to encoder workers")
+        encode_worker_client = await self._maybe_get_encode_worker_client(
+            runtime, config
+        )
 
         handler = DecodeWorkerHandler(
             runtime,
@@ -612,3 +601,179 @@ class WorkerFactory:
             logger.debug("Cleaning up decode worker")
             # Cleanup background tasks
             handler.cleanup()
+
+    async def _create_prefill_worker(
+        self,
+        runtime: DistributedRuntime,
+        config: Config,
+        shutdown_event: asyncio.Event,
+        shutdown_endpoints: list,  # mutated in place
+        snapshot_engine: Optional[EngineSetupResult] = None,
+    ) -> None:
+        """
+        Instantiate and serve
+        """
+        generate_endpoint = runtime.endpoint(
+            f"{config.namespace}.{config.component}.{config.endpoint}"
+        )
+        clear_endpoint = runtime.endpoint(
+            f"{config.namespace}.{config.component}.clear_kv_blocks"
+        )
+
+        # Use pre-created engine if provided (checkpoint mode), otherwise create new
+        fpm_worker_id = str(generate_endpoint.connection_id())
+        if snapshot_engine is not None:
+            (
+                engine_client,
+                vllm_config,
+                default_sampling_params,
+                prometheus_temp_dir,
+                _component_gauges,
+            ) = snapshot_engine
+            # TODO: The scheduler in the child process still has worker_id=""
+            # because the engine was forked before the runtime existed.
+            # Propagating the new ID to the child requires shared memory or
+            # a restart of the EngineCore process.
+            vllm_config.additional_config["fpm_worker_id"] = fpm_worker_id
+        else:
+            (
+                engine_client,
+                vllm_config,
+                default_sampling_params,
+                prometheus_temp_dir,
+                _component_gauges,
+            ) = self.setup_vllm_engine(config, fpm_worker_id=fpm_worker_id)
+
+        encode_worker_client = await self._maybe_get_encode_worker_client(
+            runtime, config
+        )
+
+        handler = PrefillWorkerHandler(
+            runtime,
+            engine_client,
+            default_sampling_params,
+            getattr(getattr(vllm_config, "model_config", None), "max_model_len", None),
+            enable_multimodal=config.enable_multimodal,
+            generate_endpoint=generate_endpoint,
+            config=config,
+            use_vllm_tokenizer=config.use_vllm_tokenizer,
+            shutdown_event=shutdown_event,
+            enable_frontend_decoding=config.frontend_decoding,
+            encode_worker_client=encode_worker_client,
+        )
+        handler.add_temp_dir(prometheus_temp_dir)
+
+        # Check if kv event consolidator is enabled (port was allocated in setup_vllm_engine)
+        consolidator_enabled = False
+        consolidator_port = None
+
+        _consolidator_eps = vllm_config.additional_config.get("consolidator_endpoints")
+        if _consolidator_eps:
+            # Extract connect endpoint (third element) for clients to subscribe
+            # consolidator_endpoints = (vllm_endpoint, bind_endpoint, connect_endpoint)
+            consolidator_output_endpoint = _consolidator_eps[2]
+            consolidator_port = int(consolidator_output_endpoint.split(":")[-1])
+            consolidator_enabled = True
+
+        # Set up KV event publishers for prefix caching if enabled (one per dp_rank)
+        # If kv event consolidator is enabled, publisher will subscribe to kv event consolidator's output
+        kv_publishers = self.setup_kv_event_publisher(
+            config,
+            generate_endpoint,
+            vllm_config,
+            consolidator_enabled=consolidator_enabled,
+            consolidator_port=consolidator_port,
+        )
+        if kv_publishers:
+            handler.kv_publishers = kv_publishers
+
+        # Set up forward pass metrics relay (child ZMQ -> event plane).
+        # In checkpoint mode the engine was created before the runtime, so
+        # ForwardPassMetrics.worker_id will be empty (relay still works).
+        fpm_relays = self.setup_fpm_relay(generate_endpoint, vllm_config)
+        if fpm_relays:
+            handler.fpm_relays = fpm_relays
+
+        self.setup_metrics_collection(config, generate_endpoint, logger)
+        # Register sleep/wake_up engine routes
+        runtime.register_engine_route("sleep", handler.sleep)
+        runtime.register_engine_route("wake_up", handler.wake_up)
+        logger.info("Registered engine routes: /engine/sleep, /engine/wake_up")
+
+        shutdown_endpoints[:] = [generate_endpoint, clear_endpoint]
+
+        # Register prefill model with ModelType.Prefill
+        model_input = (
+            ModelInput.Text if config.use_vllm_tokenizer else ModelInput.Tokens
+        )
+        await self.register_vllm_model(
+            model_input,
+            ModelType.Prefill,
+            generate_endpoint,
+            config,
+            engine_client,
+            vllm_config,
+        )
+
+        health_check_payload = VllmPrefillHealthCheckPayload(
+            engine_client, use_text_input=config.use_vllm_tokenizer
+        ).to_dict()
+
+        try:
+            logger.debug("Starting serve_endpoint for prefill worker")
+            await asyncio.gather(
+                # for prefill, we want to shutdown the engine after all prefill requests are finished because
+                #     (temp reason): we don't support re-routing prefill requests
+                #     (long-term reason): prefill engine should pull from a global queue so there is
+                #                         only a few in-flight requests that can be quickly finished
+                generate_endpoint.serve_endpoint(
+                    handler.generate,  # type: ignore
+                    graceful_shutdown=True,
+                    # In practice config.served_model_name is always set, but mypy needs the "or" here.
+                    metrics_labels=[
+                        (
+                            prometheus_names.labels.MODEL,
+                            config.served_model_name or config.model,
+                        ),
+                        (
+                            prometheus_names.labels.MODEL_NAME,
+                            config.served_model_name or config.model,
+                        ),
+                    ],
+                    health_check_payload=health_check_payload,
+                ),
+                clear_endpoint.serve_endpoint(
+                    handler.clear_kv_blocks,  # type: ignore
+                    metrics_labels=[
+                        (
+                            prometheus_names.labels.MODEL,
+                            config.served_model_name or config.model,
+                        ),
+                        (
+                            prometheus_names.labels.MODEL_NAME,
+                            config.served_model_name or config.model,
+                        ),
+                    ],
+                ),
+            )
+            logger.debug("serve_endpoint completed for prefill worker")
+        except Exception as e:
+            logger.error(f"Failed to serve endpoints: {e}")
+            raise
+        finally:
+            logger.debug("Cleaning up prefill worker")
+            handler.cleanup()
+
+    async def _maybe_get_encode_worker_client(
+        self, runtime: DistributedRuntime, config: Config
+    ) -> Optional[Any]:
+        """Helper function to get encode worker client if routing to encoder is enabled."""
+        if config.route_to_encoder:
+            encode_worker_client = await runtime.endpoint(
+                f"{config.namespace}.encoder.generate"
+            ).client()
+            logger.info("Waiting for Encoder Worker Instances ...")
+            await encode_worker_client.wait_for_instances()
+            logger.info("Connected to encoder workers")
+            return encode_worker_client
+        return None
