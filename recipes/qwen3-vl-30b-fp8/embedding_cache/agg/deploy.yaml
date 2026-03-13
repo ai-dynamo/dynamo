@@ -11,13 +11,11 @@
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
-  name: qwen3-vl-agg-gb200
+  name: agg
 spec:
   pvcs:
     - create: false
       name: model-cache
-    - create: false
-      name: compilation-cache
   services:
     Frontend:
       componentType: frontend
@@ -51,9 +49,7 @@ spec:
       replicas: 1
       resources:
         requests:
-          cpu: "1"
-        limits:
-          cpu: "1"
+          cpu: "8"
       subComponentType: null
 
     VllmWorker:

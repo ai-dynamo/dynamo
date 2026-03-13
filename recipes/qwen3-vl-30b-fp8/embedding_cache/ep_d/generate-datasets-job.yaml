@@ -3,7 +3,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: agg-vllm-serve-1gpu-generate-datasets
+  name: ep-d-generate-datasets
 spec:
   backoffLimit: 1
   completions: 1
