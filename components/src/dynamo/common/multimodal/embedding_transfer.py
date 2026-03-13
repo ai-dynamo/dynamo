@@ -3,7 +3,6 @@
 
 import asyncio
 import base64
-import concurrent.futures
 import logging
 import math
 import os
@@ -399,13 +398,6 @@ class NixlWriteEmbeddingSender(AbstractEmbeddingSender):
 
         self.id_counter = MonolithicCounter()
 
-        # Thread pool for concurrent NIXL transfers. transfer() holds the GIL
-        # during memcpy; dispatching via run_in_executor yields control back to
-        # the asyncio event loop between GIL acquisition cycles.
-        self._transfer_pool = concurrent.futures.ThreadPoolExecutor(
-            max_workers=4, thread_name_prefix="nixl_xfer"
-        )
-
         # Background transfer task..
         # Create a queue hinting whether the sender is expecting future transfer
         self.transfer_queue: asyncio.Queue[str] = asyncio.Queue()
@@ -416,13 +408,7 @@ class NixlWriteEmbeddingSender(AbstractEmbeddingSender):
         self._state_update_task.cancel()
 
     def _do_transfer(self, xfer_handle, done_signal):
-        """Execute a single NIXL transfer in a thread pool worker.
-
-        transfer() holds the GIL during the memcpy. Running it via
-        run_in_executor yields control back to the event loop between
-        GIL acquisition cycles, allowing notification polling, handshake
-        processing, and other requests to proceed concurrently.
-        """
+        """Execute a single NIXL transfer in a thread pool worker."""
         return self.nixl_agent.transfer(xfer_handle, done_signal)
 
     async def _state_update(self):
@@ -478,13 +464,14 @@ class NixlWriteEmbeddingSender(AbstractEmbeddingSender):
                     )
                     pending_xfers.append((tensor_id, xfer_handle, done_signal))
 
-                # Dispatch all transfers concurrently via thread pool
+                # Offload blocking transfer() calls to the default thread pool
+                # so the event loop stays responsive during it.
                 if pending_xfers:
                     loop = asyncio.get_running_loop()
                     xfer_futures = []
                     for tensor_id, xfer_handle, done_signal in pending_xfers:
                         fut = loop.run_in_executor(
-                            self._transfer_pool,
+                            None,
                             self._do_transfer,
                             xfer_handle,
                             done_signal,
