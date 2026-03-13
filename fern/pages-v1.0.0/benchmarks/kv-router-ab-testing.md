@@ -121,7 +121,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.9.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0
           env:
             - name: POD_UID
               valueFrom:
@@ -146,7 +146,7 @@ spec:
                       values:
                         - gpu-h100-sxm  # Adjust to your GPU node type
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.9.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0
           workingDir: /workspace
           command:
             - /bin/sh
@@ -212,7 +212,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.9.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0
           env:
             - name: POD_UID
               valueFrom:
@@ -240,7 +240,7 @@ spec:
                       values:
                         - gpu-h100-sxm  # Adjust to your GPU node type
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.9.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0
           workingDir: /workspace
           command:
             - /bin/sh
@@ -438,7 +438,7 @@ spec:
       restartPolicy: Never
       containers:
       - name: benchmark
-        image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.9.0
+        image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0
         securityContext:
           runAsUser: 0  # Required: apt-get and pip install need root in ephemeral benchmark pod
         command:
