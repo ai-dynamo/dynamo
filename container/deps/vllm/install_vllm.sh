@@ -220,13 +220,14 @@ if [ ! -f "$VLLM_PATCH" ]; then
     VLLM_PATCH="/tmp/deps/vllm/multinode-tp-init-order.patch"
 fi
 if [ "$VLLM_VER" = "0.17.1" ]; then
-    # Patch the cloned repo (used by CPU/XPU source builds)
+    # Patch the cloned repo (used by CPU/XPU source builds that build from source)
     echo "Applying vLLM multi-node TP hotfix to cloned repo..."
     git -C "${INSTALLATION_DIR}/vllm" apply --ignore-whitespace "$VLLM_PATCH" || true
-    # Patch the installed site-packages (used by CUDA wheel builds)
-    VLLM_SITE=$(python3 -c "import vllm, pathlib; print(pathlib.Path(vllm.__file__).parent.parent)")
+    # Patch the installed site-packages (used by CUDA wheel builds).
+    # Use `patch` instead of `git apply` because site-packages is not a git repo.
+    VLLM_SITE=$(python3 -c "import vllm, pathlib; print(pathlib.Path(vllm.__file__).parent.parent)" 2>/dev/null)
     echo "Applying vLLM multi-node TP hotfix to ${VLLM_SITE}..."
-    git apply --ignore-whitespace --directory="$VLLM_SITE" -p1 "$VLLM_PATCH" || true
+    patch -d "$VLLM_SITE" -p1 < "$VLLM_PATCH"
     echo "✓ vLLM multi-node TP hotfix applied"
 else
     echo "❌ ERROR: vLLM version is ${VLLM_VER}, not 0.17.1."
