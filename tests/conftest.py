@@ -145,19 +145,19 @@ def _is_model_cached(model_id: str) -> bool:
 
     repo_dir = Path(HF_HUB_CACHE) / f"models--{model_id.replace('/', '--')}"
     refs_file = repo_dir / "refs" / "main"
+    logging.info(
+        f"_is_model_cached({model_id}): HF_HUB_CACHE={HF_HUB_CACHE}, "
+        f"repo_dir_exists={repo_dir.exists()}, refs_file_exists={refs_file.exists()}"
+    )
     if not refs_file.exists():
-        logging.debug(f"Cache miss for {model_id}: {refs_file} not found")
         return False
     revision = refs_file.read_text().strip()
     snapshot_dir = repo_dir / "snapshots" / revision
-    if snapshot_dir.is_dir():
-        logging.info(
-            f"Cache hit for {model_id}: HF_HUB_CACHE={HF_HUB_CACHE}, "
-            f"revision={revision}, snapshot={snapshot_dir}"
-        )
-        return True
-    logging.debug(f"Cache miss for {model_id}: snapshot dir {snapshot_dir} not found")
-    return False
+    logging.info(
+        f"_is_model_cached({model_id}): revision={revision!r}, "
+        f"snapshot_dir_exists={snapshot_dir.is_dir()}"
+    )
+    return snapshot_dir.is_dir()
 
 
 def download_models(model_list=None, ignore_weights=False):
