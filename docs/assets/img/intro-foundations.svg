@@ -1,0 +1,29 @@
+<svg width="500" height="500" viewBox="0 0 500 500" xmlns="http://www.w3.org/2000/svg">
+  <rect width="100%" height="100%" fill="transparent"/>
+
+  <circle cx="250" cy="155" r="110" fill="#1a1a1a" stroke="#505050" stroke-width="1" />
+  <circle cx="150" cy="330" r="110" fill="#1a1a1a" stroke="#505050" stroke-width="1" />
+  <circle cx="350" cy="330" r="110" fill="#1a1a1a" stroke="#505050" stroke-width="1" />
+
+  <circle cx="250" cy="275" r="90" fill="#2d5a10" stroke="#76b900" stroke-width="2" />
+
+  <style>
+    .label { font-family: Arial, Helvetica, sans-serif; font-size: 20px; font-weight: 700; text-anchor: middle; fill: #e0e0e0; }
+    .sublabel { font-family: Arial, Helvetica, sans-serif; font-size: 14px; font-weight: 400; text-anchor: middle; fill: #909090; }
+    .center-label { font-family: Arial, Helvetica, sans-serif; font-size: 20px; font-weight: 700; text-anchor: middle; fill: #f0f0f0; }
+  </style>
+
+  <text x="250" y="120" class="label">Scheduling</text>
+  <text x="250" y="140" class="sublabel">(Dynamo)</text>
+
+  <text x="115" y="330" class="label">Memory</text>
+  <text x="115" y="352" class="label">Management</text>
+  <text x="115" y="375" class="sublabel">(KVBM)</text>
+
+  <text x="385" y="330" class="label">Data</text>
+  <text x="385" y="352" class="label">Transfer</text>
+  <text x="385" y="375" class="sublabel">(NIXL)</text>
+
+  <text x="250" y="268" class="center-label">Disaggregated</text>
+  <text x="250" y="292" class="center-label">Serving</text>
+</svg>

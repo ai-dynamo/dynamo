@@ -35,6 +35,10 @@ Backend workers register themselves using the `register_model` API, after which 
 
 For all available options: `python -m dynamo.frontend --help`
 
+### Standalone Router
+
+You can also run the KV router as a standalone service (without the Dynamo frontend). See the [Standalone Router component](../../../components/src/dynamo/router/) for more details.
+
 ### Kubernetes Deployment
 
 To enable the KV Router in Kubernetes, add the `DYN_ROUTER_MODE` environment variable to your frontend service:
