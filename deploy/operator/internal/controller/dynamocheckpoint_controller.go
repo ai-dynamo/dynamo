@@ -21,6 +21,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -85,23 +86,51 @@ func (r *CheckpointReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 	logger.Info("Reconciling DynamoCheckpoint", "name", ckpt.Name, "phase", ckpt.Status.Phase)
 
-	// Compute identity hash if not already set
-	if ckpt.Status.IdentityHash == "" {
-		hash, err := checkpoint.ComputeIdentityHash(ckpt.Spec.Identity)
-		if err != nil {
-			logger.Error(err, "Failed to compute identity hash")
-			return ctrl.Result{}, fmt.Errorf("failed to compute identity hash: %w", err)
-		}
+	identityHash, err := checkpoint.ComputeIdentityHash(ckpt.Spec.Identity)
+	if err != nil {
+		logger.Error(err, "Failed to compute checkpoint identity hash")
+		return ctrl.Result{}, fmt.Errorf("failed to compute checkpoint identity hash: %w", err)
+	}
 
-		ckpt.Status.IdentityHash = hash
-		ckpt.Status.Phase = nvidiacomv1alpha1.DynamoCheckpointPhasePending
-
-		if err := r.Status().Update(ctx, ckpt); err != nil {
-			logger.Error(err, "Failed to update DynamoCheckpoint status with hash")
+	if ckpt.Labels == nil {
+		ckpt.Labels = map[string]string{}
+	}
+	if ckpt.Labels[consts.KubeLabelCheckpointHash] != identityHash {
+		ckpt.Labels[consts.KubeLabelCheckpointHash] = identityHash
+		if err := r.Update(ctx, ckpt); err != nil {
 			return ctrl.Result{}, err
 		}
-		// Status update will trigger a new reconcile via the watch
-		return ctrl.Result{}, nil
+		if err := r.Get(ctx, req.NamespacedName, ckpt); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+
+	needsStatusUpdate := false
+	phaseWasEmpty := ckpt.Status.Phase == ""
+	if ckpt.Status.IdentityHash != identityHash {
+		ckpt.Status.IdentityHash = identityHash
+		needsStatusUpdate = true
+	}
+	switch ckpt.Status.Phase {
+	case "", nvidiacomv1alpha1.DynamoCheckpointPhasePending, nvidiacomv1alpha1.DynamoCheckpointPhaseCreating, nvidiacomv1alpha1.DynamoCheckpointPhaseReady, nvidiacomv1alpha1.DynamoCheckpointPhaseFailed:
+	default:
+		ckpt.Status.Phase = nvidiacomv1alpha1.DynamoCheckpointPhasePending
+		ckpt.Status.Message = ""
+		needsStatusUpdate = true
+	}
+	if ckpt.Status.Phase == "" {
+		ckpt.Status.Phase = nvidiacomv1alpha1.DynamoCheckpointPhasePending
+		ckpt.Status.Message = ""
+		needsStatusUpdate = true
+	}
+	if needsStatusUpdate {
+		if err := r.Status().Update(ctx, ckpt); err != nil {
+			logger.Error(err, "Failed to initialize DynamoCheckpoint status")
+			return ctrl.Result{}, err
+		}
+		if phaseWasEmpty {
+			return ctrl.Result{}, nil
+		}
 	}
 
 	// Handle based on current phase
@@ -151,6 +180,7 @@ func (r *CheckpointReconciler) handlePending(ctx context.Context, ckpt *nvidiaco
 	// Update status to Creating phase
 	ckpt.Status.Phase = nvidiacomv1alpha1.DynamoCheckpointPhaseCreating
 	ckpt.Status.JobName = jobName
+	ckpt.Status.Message = ""
 	meta.SetStatusCondition(&ckpt.Status.Conditions, metav1.Condition{
 		Type:               string(nvidiacomv1alpha1.DynamoCheckpointConditionJobCreated),
 		Status:             metav1.ConditionTrue,
@@ -170,6 +200,15 @@ func (r *CheckpointReconciler) handlePending(ctx context.Context, ckpt *nvidiaco
 func (r *CheckpointReconciler) handleCreating(ctx context.Context, ckpt *nvidiacomv1alpha1.DynamoCheckpoint) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
+	if ckpt.Status.JobName == "" {
+		ckpt.Status.Phase = nvidiacomv1alpha1.DynamoCheckpointPhasePending
+		ckpt.Status.Message = "checkpoint job is missing from status"
+		if err := r.Status().Update(ctx, ckpt); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{}, nil
+	}
+
 	// Check Job status
 	job := &batchv1.Job{}
 	if err := r.Get(ctx, client.ObjectKey{Namespace: ckpt.Namespace, Name: ckpt.Status.JobName}, job); err != nil {
@@ -177,6 +216,7 @@ func (r *CheckpointReconciler) handleCreating(ctx context.Context, ckpt *nvidiac
 			// Job was deleted, go back to Pending
 			ckpt.Status.Phase = nvidiacomv1alpha1.DynamoCheckpointPhasePending
 			ckpt.Status.JobName = ""
+			ckpt.Status.Message = "checkpoint job was deleted"
 			meta.SetStatusCondition(&ckpt.Status.Conditions, metav1.Condition{
 				Type:               string(nvidiacomv1alpha1.DynamoCheckpointConditionJobCreated),
 				Status:             metav1.ConditionFalse,
@@ -200,11 +240,9 @@ func (r *CheckpointReconciler) handleCreating(ctx context.Context, ckpt *nvidiac
 		now := metav1.Now()
 		ckpt.Status.Phase = nvidiacomv1alpha1.DynamoCheckpointPhaseReady
 		ckpt.Status.CreatedAt = &now
-
-		// Set checkpoint location and storage type using helper functions
 		ckpt.Status.Location = r.getCheckpointLocation(ckpt.Status.IdentityHash)
 		ckpt.Status.StorageType = r.getCheckpointStorageType()
-
+		ckpt.Status.Message = ""
 		meta.SetStatusCondition(&ckpt.Status.Conditions, metav1.Condition{
 			Type:               string(nvidiacomv1alpha1.DynamoCheckpointConditionJobCompleted),
 			Status:             metav1.ConditionTrue,
@@ -254,20 +292,26 @@ func (r *CheckpointReconciler) handleCreating(ctx context.Context, ckpt *nvidiac
 func (r *CheckpointReconciler) buildCheckpointJob(ckpt *nvidiacomv1alpha1.DynamoCheckpoint, jobName string) *batchv1.Job {
 	// Use the pod template from the spec
 	podTemplate := ckpt.Spec.Job.PodTemplateSpec.DeepCopy()
+	hash := ckpt.Status.IdentityHash
+	if hash == "" {
+		hash, _ = checkpoint.ComputeIdentityHash(ckpt.Spec.Identity)
+	}
 
 	// Add checkpoint-related labels
 	if podTemplate.Labels == nil {
 		podTemplate.Labels = make(map[string]string)
 	}
-	podTemplate.Labels[consts.KubeLabelCheckpointHash] = ckpt.Status.IdentityHash
+	podTemplate.Labels[consts.KubeLabelCheckpointHash] = hash
 	podTemplate.Labels[consts.KubeLabelIsCheckpointSource] = "true"
 
 	// Add checkpoint env vars and volume mounts to main container
 	if len(podTemplate.Spec.Containers) > 0 {
 		mainContainer := &podTemplate.Spec.Containers[0]
 
+		dynamo.AddStandardEnvVars(mainContainer, r.Config)
+
 		// Compute checkpoint location and storage type using helper functions
-		checkpointLocation := r.getCheckpointLocation(ckpt.Status.IdentityHash)
+		checkpointLocation := r.getCheckpointLocation(hash)
 		storageType := string(r.getCheckpointStorageType())
 
 		// Add checkpoint-related env vars
@@ -280,7 +324,7 @@ func (r *CheckpointReconciler) buildCheckpointJob(ckpt *nvidiacomv1alpha1.Dynamo
 			// Checkpoint hash: For idempotency check
 			corev1.EnvVar{
 				Name:  consts.EnvCheckpointHash,
-				Value: ckpt.Status.IdentityHash,
+				Value: hash,
 			},
 			// Checkpoint location: For idempotency check
 			corev1.EnvVar{
@@ -331,11 +375,12 @@ func (r *CheckpointReconciler) buildCheckpointJob(ckpt *nvidiacomv1alpha1.Dynamo
 
 	// Apply seccomp profile to block io_uring syscalls
 	// CRIU doesn't support io_uring memory mappings, so we must block these syscalls
-	podTemplate.Spec.SecurityContext = &corev1.PodSecurityContext{
-		SeccompProfile: &corev1.SeccompProfile{
-			Type:             corev1.SeccompProfileTypeLocalhost,
-			LocalhostProfile: ptr.To(consts.SeccompProfilePath),
-		},
+	if podTemplate.Spec.SecurityContext == nil {
+		podTemplate.Spec.SecurityContext = &corev1.PodSecurityContext{}
+	}
+	podTemplate.Spec.SecurityContext.SeccompProfile = &corev1.SeccompProfile{
+		Type:             corev1.SeccompProfileTypeLocalhost,
+		LocalhostProfile: ptr.To(consts.SeccompProfilePath),
 	}
 
 	// Build the Job
@@ -362,7 +407,7 @@ func (r *CheckpointReconciler) buildCheckpointJob(ckpt *nvidiacomv1alpha1.Dynamo
 			Name:      jobName,
 			Namespace: ckpt.Namespace,
 			Labels: map[string]string{
-				consts.KubeLabelCheckpointHash: ckpt.Status.IdentityHash,
+				consts.KubeLabelCheckpointHash: hash,
 			},
 		},
 		Spec: batchv1.JobSpec{

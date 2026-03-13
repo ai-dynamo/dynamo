@@ -124,11 +124,13 @@ spec:
                       default: 3600
                       description: ActiveDeadlineSeconds specifies the maximum time the Job can run
                       format: int64
+                      minimum: 0
                       type: integer
                     backoffLimit:
                       default: 3
                       description: BackoffLimit specifies the number of retries before marking the Job failed
                       format: int32
+                      minimum: 0
                       type: integer
                     podTemplateSpec:
                       description: |-
@@ -8158,6 +8160,7 @@ spec:
                       default: 300
                       description: TTLSecondsAfterFinished specifies how long to keep the Job after completion
                       format: int32
+                      minimum: 0
                       type: integer
                   required:
                     - podTemplateSpec
@@ -8170,7 +8173,7 @@ spec:
               description: DynamoCheckpointStatus defines the observed state of DynamoCheckpoint
               properties:
                 conditions:
-                  description: Conditions represent the latest available observations of the checkpoint's state
+                  description: 'DEPRECATED: Conditions are deprecated. Use status.phase instead.'
                   items:
                     description: Condition contains details for one aspect of the current state of this API Resource.
                     properties:

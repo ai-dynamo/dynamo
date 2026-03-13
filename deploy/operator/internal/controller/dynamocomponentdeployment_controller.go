@@ -1072,6 +1072,7 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 	// value after metadata merge; the controller re-adds it only when the
 	// checkpoint contract below is satisfied.
 	delete(podLabels, commonconsts.KubeLabelIsRestoreTarget)
+	delete(podLabels, commonconsts.KubeLabelCheckpointHash)
 
 	// Explicit restore orchestration contract:
 	// only mark pods as restore targets when checkpoint material is ready.
@@ -1080,6 +1081,14 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 		if checkpointInfo.Hash != "" {
 			podLabels[commonconsts.KubeLabelCheckpointHash] = checkpointInfo.Hash
 		}
+		dynamoNamespace, err := opt.dynamoComponentDeployment.ResolveDynamoNamespace()
+		if err != nil {
+			return nil, err
+		}
+		if podAnnotations == nil {
+			podAnnotations = make(map[string]string)
+		}
+		podAnnotations[commonconsts.AnnotationDynNamespace] = dynamoNamespace
 	}
 
 	// Propagate restart annotation to pod template to trigger rolling restart
@@ -1131,15 +1140,16 @@ func (r *DynamoComponentDeploymentReconciler) generateService(opt generateResour
 		return deleteStub, true, nil
 	}
 
-	if dcd.Spec.DynamoNamespace == nil {
-		return nil, false, fmt.Errorf("expected DynamoComponentDeployment %s to have a dynamoNamespace", dcd.Name)
+	dynamoNamespace, err := dcd.ResolveDynamoNamespace()
+	if err != nil {
+		return nil, false, err
 	}
 
 	svc, err := dynamo.GenerateComponentService(dynamo.ComponentServiceParams{
 		ServiceName:     dcd.Name,
 		Namespace:       dcd.Namespace,
 		ComponentType:   dcd.Spec.ComponentType,
-		DynamoNamespace: *dcd.Spec.DynamoNamespace,
+		DynamoNamespace: dynamoNamespace,
 		ComponentName:   dcd.Spec.ServiceName,
 		Labels:          r.getKubeLabels(dcd),
 		Annotations:     r.getKubeAnnotations(dcd),

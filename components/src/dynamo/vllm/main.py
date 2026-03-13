@@ -22,12 +22,14 @@ from dynamo.common.config_dump import dump_config
 from dynamo.common.storage import get_fs
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.common.utils.graceful_shutdown import install_signal_handlers
+from dynamo.common.utils.namespace import reload_snapshot_restore_identity
 from dynamo.common.utils.output_modalities import get_output_modalities
 from dynamo.common.utils.prometheus import (
     LLMBackendMetrics,
     register_engine_metrics_callback,
 )
 from dynamo.common.utils.runtime import create_runtime
+from dynamo.common.utils.snapshot import get_checkpoint_config
 from dynamo.llm import (
     KvEventPublisher,
     ModelInput,
@@ -50,7 +52,6 @@ from .health_check import (
     VllmPrefillHealthCheckPayload,
 )
 from .publisher import DYNAMO_COMPONENT_REGISTRY, StatLoggerFactory
-from .snapshot import get_checkpoint_config
 
 # Optional imports for frontend decoding support
 MediaDecoder: type | None = None
@@ -153,6 +154,15 @@ async def worker() -> None:
             engine_client, CHECKPOINT_SLEEP_MODE_LEVEL
         ):
             return
+
+        config.namespace, config.discovery_backend = reload_snapshot_restore_identity(
+            config.namespace, config.discovery_backend
+        )
+        logger.info(
+            "Reloaded snapshot identity after restore (namespace=%s, discovery_backend=%s)",
+            config.namespace,
+            config.discovery_backend,
+        )
 
     shutdown_event = asyncio.Event()
     runtime, loop = create_runtime(

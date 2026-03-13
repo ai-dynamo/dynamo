@@ -25,6 +25,7 @@ import (
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
@@ -48,6 +49,8 @@ import (
 	leaderworkersetv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
 	volcanov1beta1 "volcano.sh/apis/pkg/apis/scheduling/v1beta1"
 )
+
+const testDGDNamespace = "default-test-dgd"
 
 func TestIsDeploymentReady(t *testing.T) {
 	type args struct {
@@ -1258,6 +1261,10 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "test-worker",
 				Namespace: "default",
+				OwnerReferences: []metav1.OwnerReference{{
+					Kind: "DynamoGraphDeployment",
+					Name: "test-dgd",
+				}},
 			},
 			Spec: v1alpha1.DynamoComponentDeploymentSpec{
 				BackendFramework: string(dynamo.BackendFrameworkVLLM),
@@ -1308,16 +1315,20 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 	}
 
 	t.Run("ready checkpoint adds explicit restore labels", func(t *testing.T) {
-		checkpointName := "ckpt-ready"
+		identity := v1alpha1.DynamoCheckpointIdentity{Model: "test-model", BackendFramework: "vllm"}
+		checkpointName, err := checkpoint.ComputeIdentityHash(identity)
+		if err != nil {
+			t.Fatalf("ComputeIdentityHash failed: %v", err)
+		}
 		dcd := makeDCD(checkpointName)
 		ckpt := &v1alpha1.DynamoCheckpoint{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      checkpointName,
 				Namespace: "default",
 			},
+			Spec: v1alpha1.DynamoCheckpointSpec{Identity: identity},
 			Status: v1alpha1.DynamoCheckpointStatus{
-				Phase:        v1alpha1.DynamoCheckpointPhaseReady,
-				IdentityHash: "hash-ready-1",
+				Phase: v1alpha1.DynamoCheckpointPhaseReady,
 			},
 		}
 
@@ -1334,22 +1345,62 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 		if got := podTemplateSpec.Labels[commonconsts.KubeLabelIsRestoreTarget]; got != commonconsts.KubeLabelValueTrue {
 			t.Fatalf("expected %s label to be true, got %q", commonconsts.KubeLabelIsRestoreTarget, got)
 		}
-		if got := podTemplateSpec.Labels[commonconsts.KubeLabelCheckpointHash]; got != "hash-ready-1" {
+		if got := podTemplateSpec.Labels[commonconsts.KubeLabelCheckpointHash]; got != checkpointName {
 			t.Fatalf("expected %s to be checkpoint hash, got %q", commonconsts.KubeLabelCheckpointHash, got)
+		}
+		if got := podTemplateSpec.Annotations[commonconsts.AnnotationDynNamespace]; got != testDGDNamespace {
+			t.Fatalf("expected %s annotation to be %q, got %q", commonconsts.AnnotationDynNamespace, testDGDNamespace, got)
+		}
+	})
+
+	t.Run("restore target falls back to parent graph namespace when deprecated field is unset", func(t *testing.T) {
+		identity := v1alpha1.DynamoCheckpointIdentity{Model: "test-model", BackendFramework: "vllm"}
+		checkpointName, err := checkpoint.ComputeIdentityHash(identity)
+		if err != nil {
+			t.Fatalf("ComputeIdentityHash failed: %v", err)
+		}
+		dcd := makeDCD(checkpointName)
+		dcd.Spec.DynamoNamespace = nil
+		ckpt := &v1alpha1.DynamoCheckpoint{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      checkpointName,
+				Namespace: "default",
+			},
+			Spec: v1alpha1.DynamoCheckpointSpec{Identity: identity},
+			Status: v1alpha1.DynamoCheckpointStatus{
+				Phase: v1alpha1.DynamoCheckpointPhaseReady,
+			},
+		}
+
+		r := makeReconciler(dcd, ckpt)
+		podTemplateSpec, err := r.generatePodTemplateSpec(
+			context.Background(),
+			generateResourceOption{dynamoComponentDeployment: dcd},
+			dynamo.RoleMain,
+		)
+		if err != nil {
+			t.Fatalf("generatePodTemplateSpec failed: %v", err)
+		}
+		if got := podTemplateSpec.Annotations[commonconsts.AnnotationDynNamespace]; got != testDGDNamespace {
+			t.Fatalf("expected %s annotation to be %q, got %q", commonconsts.AnnotationDynNamespace, testDGDNamespace, got)
 		}
 	})
 
 	t.Run("non-ready checkpoint clears stale restore labels", func(t *testing.T) {
-		checkpointName := "ckpt-pending"
+		identity := v1alpha1.DynamoCheckpointIdentity{Model: "test-model", BackendFramework: "vllm"}
+		checkpointName, err := checkpoint.ComputeIdentityHash(identity)
+		if err != nil {
+			t.Fatalf("ComputeIdentityHash failed: %v", err)
+		}
 		dcd := makeDCD(checkpointName)
 		ckpt := &v1alpha1.DynamoCheckpoint{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      checkpointName,
 				Namespace: "default",
 			},
+			Spec: v1alpha1.DynamoCheckpointSpec{Identity: identity},
 			Status: v1alpha1.DynamoCheckpointStatus{
-				Phase:        v1alpha1.DynamoCheckpointPhaseCreating,
-				IdentityHash: "hash-pending-1",
+				Phase: v1alpha1.DynamoCheckpointPhaseCreating,
 			},
 		}
 
@@ -1368,6 +1419,9 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 		}
 		if _, ok := podTemplateSpec.Labels[commonconsts.KubeLabelCheckpointHash]; ok {
 			t.Fatalf("did not expect %s label when checkpoint is not ready", commonconsts.KubeLabelCheckpointHash)
+		}
+		if _, ok := podTemplateSpec.Annotations[commonconsts.AnnotationDynNamespace]; ok {
+			t.Fatalf("did not expect %s annotation when checkpoint is not ready", commonconsts.AnnotationDynNamespace)
 		}
 	})
 }
@@ -1440,16 +1494,20 @@ func TestDynamoComponentDeploymentReconciler_generateDeployment_RestoreStrategy(
 	}
 
 	t.Run("ready checkpoint forces Recreate strategy", func(t *testing.T) {
-		checkpointName := "ckpt-ready"
+		identity := v1alpha1.DynamoCheckpointIdentity{Model: "test-model", BackendFramework: "vllm"}
+		checkpointName, err := checkpoint.ComputeIdentityHash(identity)
+		if err != nil {
+			t.Fatalf("ComputeIdentityHash failed: %v", err)
+		}
 		dcd := makeDCD(checkpointName)
 		ckpt := &v1alpha1.DynamoCheckpoint{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      checkpointName,
 				Namespace: "default",
 			},
+			Spec: v1alpha1.DynamoCheckpointSpec{Identity: identity},
 			Status: v1alpha1.DynamoCheckpointStatus{
-				Phase:        v1alpha1.DynamoCheckpointPhaseReady,
-				IdentityHash: "hash-ready-1",
+				Phase: v1alpha1.DynamoCheckpointPhaseReady,
 			},
 		}
 
@@ -1469,16 +1527,20 @@ func TestDynamoComponentDeploymentReconciler_generateDeployment_RestoreStrategy(
 	})
 
 	t.Run("non-ready checkpoint keeps RollingUpdate strategy", func(t *testing.T) {
-		checkpointName := "ckpt-creating"
+		identity := v1alpha1.DynamoCheckpointIdentity{Model: "test-model", BackendFramework: "vllm"}
+		checkpointName, err := checkpoint.ComputeIdentityHash(identity)
+		if err != nil {
+			t.Fatalf("ComputeIdentityHash failed: %v", err)
+		}
 		dcd := makeDCD(checkpointName)
 		ckpt := &v1alpha1.DynamoCheckpoint{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      checkpointName,
 				Namespace: "default",
 			},
+			Spec: v1alpha1.DynamoCheckpointSpec{Identity: identity},
 			Status: v1alpha1.DynamoCheckpointStatus{
-				Phase:        v1alpha1.DynamoCheckpointPhaseCreating,
-				IdentityHash: "hash-creating-1",
+				Phase: v1alpha1.DynamoCheckpointPhaseCreating,
 			},
 		}
 

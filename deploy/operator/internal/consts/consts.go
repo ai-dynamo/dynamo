@@ -173,19 +173,12 @@ const (
 	PodInfoFieldPodUID       = "metadata.uid"
 	PodInfoFieldPodNamespace = "metadata.namespace"
 
-	// Downward API file names for DGD annotations
-	PodInfoFileDynNamespace        = "dyn_namespace"
-	PodInfoFileDynComponent        = "dyn_component"
-	PodInfoFileDynParentDGDName    = "dyn_parent_dgd_name"
-	PodInfoFileDynParentDGDNS      = "dyn_parent_dgd_namespace"
-	PodInfoFileDynDiscoveryBackend = "dyn_discovery_backend"
+	// Downward API file names for restore identity
+	PodInfoFileDynNamespace             = "dyn_namespace"
+	PodInfoFileDynNamespaceWorkerSuffix = "dyn_namespace_worker_suffix"
 
 	// Annotation keys for DGD info (exposed via Downward API)
-	AnnotationDynNamespace        = "nvidia.com/dyn-namespace"
-	AnnotationDynComponent        = "nvidia.com/dyn-component"
-	AnnotationDynParentDGDName    = "nvidia.com/dyn-parent-dgd-name"
-	AnnotationDynParentDGDNS      = "nvidia.com/dyn-parent-dgd-namespace"
-	AnnotationDynDiscoveryBackend = "nvidia.com/dyn-discovery-backend"
+	AnnotationDynNamespace = "nvidia.com/dyn-namespace"
 
 	// Rolling update annotations
 	AnnotationCurrentWorkerHash = "nvidia.com/current-worker-hash"

@@ -928,8 +928,9 @@ func IsWorkerComponent(componentType string) bool {
 		componentType == commonconsts.ComponentTypeDecode
 }
 
-// addStandardEnvVars adds the standard environment variables that are common to both Grove and Controller
-func addStandardEnvVars(container *corev1.Container, operatorConfig *configv1alpha1.OperatorConfiguration) {
+// AddStandardEnvVars adds the standard environment variables that are common to
+// both checkpoint jobs and generated worker pods.
+func AddStandardEnvVars(container *corev1.Container, operatorConfig *configv1alpha1.OperatorConfiguration) {
 	standardEnvVars := []corev1.EnvVar{}
 	if operatorConfig.Infrastructure.NATSAddress != "" {
 		standardEnvVars = append(standardEnvVars, corev1.EnvVar{
@@ -1077,7 +1078,7 @@ func GenerateBasePodSpec(
 		})
 	}
 
-	addStandardEnvVars(&container, operatorConfig)
+	AddStandardEnvVars(&container, operatorConfig)
 
 	volumes := make([]corev1.Volume, 0, len(component.VolumeMounts)+1) // +1 for shared memory volume
 
@@ -1215,7 +1216,6 @@ func setMetricsLabels(labels map[string]string, dynamoGraphDeployment *v1alpha1.
 
 func generateComponentContext(component *v1alpha1.DynamoComponentDeploymentSharedSpec, parentGraphDeploymentName string, namespace string, numberOfNodes int32, discoveryBackend configv1alpha1.DiscoveryBackend) ComponentContext {
 	dynamoNamespace := v1alpha1.ComputeDynamoNamespace(component.GlobalDynamoNamespace, namespace, parentGraphDeploymentName)
-
 	var workerHashSuffix string
 	if IsWorkerComponent(component.ComponentType) && component.Labels[commonconsts.KubeLabelDynamoWorkerHash] != "" {
 		workerHashSuffix = component.Labels[commonconsts.KubeLabelDynamoWorkerHash]
@@ -1277,7 +1277,7 @@ func generateFrontendSidecar(
 		container.Env = MergeEnvs(container.Env, spec.Envs)
 	}
 
-	addStandardEnvVars(&container, operatorConfig)
+	AddStandardEnvVars(&container, operatorConfig)
 
 	return container, nil
 }
@@ -1428,7 +1428,10 @@ func GenerateGrovePodCliqueSet(
 				return nil, fmt.Errorf("failed to generate labels: %w", err)
 			}
 			clique.Labels = labels
-			annotations, err := generateAnnotations(component)
+			annotations, err := generateAnnotations(
+				component,
+				checkpointInfo,
+			)
 			if err != nil {
 				return nil, fmt.Errorf("failed to generate annotations: %w", err)
 			}
@@ -1510,13 +1513,8 @@ func generateLabels(
 			return nil, fmt.Errorf("failed to merge extraPodMetadata labels: %w", err)
 		}
 	}
-
-	// Inject checkpoint labels AFTER user labels so they cannot be overridden.
-	var err error
-	labels, err = checkpoint.InjectCheckpointLabelsFromConfig(labels, component.Checkpoint)
-	if err != nil {
-		return nil, fmt.Errorf("failed to inject checkpoint labels: %w", err)
-	}
+	delete(labels, commonconsts.KubeLabelIsRestoreTarget)
+	delete(labels, commonconsts.KubeLabelCheckpointHash)
 
 	// Only mark pods as restore targets when a concrete checkpoint is ready.
 	if checkpointInfo != nil && checkpointInfo.Enabled && checkpointInfo.Ready {
@@ -1526,7 +1524,10 @@ func generateLabels(
 	return labels, nil
 }
 
-func generateAnnotations(component *v1alpha1.DynamoComponentDeploymentSharedSpec) (map[string]string, error) {
+func generateAnnotations(
+	component *v1alpha1.DynamoComponentDeploymentSharedSpec,
+	checkpointInfo *checkpoint.CheckpointInfo,
+) (map[string]string, error) {
 	annotations := make(map[string]string)
 	if component.Annotations != nil {
 		err := mergo.Merge(&annotations, component.Annotations, mergo.WithOverride)
@@ -1539,6 +1540,12 @@ func generateAnnotations(component *v1alpha1.DynamoComponentDeploymentSharedSpec
 		if err != nil {
 			return nil, fmt.Errorf("failed to merge extraPodMetadata annotations: %w", err)
 		}
+	}
+	if checkpointInfo != nil && checkpointInfo.Enabled && checkpointInfo.Ready {
+		if component.DynamoNamespace == nil || *component.DynamoNamespace == "" {
+			return nil, fmt.Errorf("restore target requires a dynamoNamespace")
+		}
+		annotations[commonconsts.AnnotationDynNamespace] = *component.DynamoNamespace
 	}
 	return annotations, nil
 }
@@ -1706,8 +1713,10 @@ func GenerateBasePodSpecForController(
 	}
 
 	// Generate base PodSpec with standard env vars using merged component envs
-	// For controller usage, we may not have serviceName, so use the component name as fallback
-	serviceName := dynComponent.Name
+	serviceName := dynComponent.Spec.ServiceName
+	if serviceName == "" {
+		serviceName = dynComponent.Name
+	}
 	podSpec, err := GenerateBasePodSpec(
 		componentSpec,
 		backendFramework,

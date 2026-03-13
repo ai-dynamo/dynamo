@@ -16,7 +16,7 @@
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoCheckpoint
 metadata:
-  name: vllm-llama3-8b-tp1
+  name: 871bbc6fb7abd517
 spec:
   # Identity - determines the checkpoint hash
   identity:
@@ -30,8 +30,8 @@ spec:
     extraParameters:
       enableChunkedPrefill: "true"
 
-  # Job configuration for checkpoint creation
-  job:
+  # Capture configuration for checkpoint creation
+  capture:
     activeDeadlineSeconds: 3600
     backoffLimit: 3
     ttlSecondsAfterFinished: 300
@@ -60,4 +60,3 @@ spec:
               limits:
                 nvidia.com/gpu: 1
         restartPolicy: Never
-

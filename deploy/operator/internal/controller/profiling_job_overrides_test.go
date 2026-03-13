@@ -638,16 +638,18 @@ func TestApplyProfilingJobOverrides_PodSecurityContext(t *testing.T) {
 	if got == nil {
 		t.Fatal("pod securityContext is nil after override")
 	}
-	// User override wins: RunAsNonRoot should be false.
-	if got.RunAsNonRoot == nil || *got.RunAsNonRoot != false {
-		t.Errorf("expected RunAsNonRoot=false, got %v", got.RunAsNonRoot)
-	}
-	// Controller defaults preserved for fields not specified in the override.
-	if got.RunAsUser == nil || *got.RunAsUser != 1000 {
-		t.Errorf("expected RunAsUser=1000 (controller default preserved), got %v", got.RunAsUser)
-	}
-	if got.FSGroup == nil || *got.FSGroup != 1000 {
-		t.Errorf("expected FSGroup=1000 (controller default preserved), got %v", got.FSGroup)
+	if got != nil {
+		// User override wins: RunAsNonRoot should be false.
+		if got.RunAsNonRoot == nil || *got.RunAsNonRoot != false {
+			t.Errorf("expected RunAsNonRoot=false, got %v", got.RunAsNonRoot)
+		}
+		// Controller defaults preserved for fields not specified in the override.
+		if got.RunAsUser == nil || *got.RunAsUser != 1000 {
+			t.Errorf("expected RunAsUser=1000 (controller default preserved), got %v", got.RunAsUser)
+		}
+		if got.FSGroup == nil || *got.FSGroup != 1000 {
+			t.Errorf("expected FSGroup=1000 (controller default preserved), got %v", got.FSGroup)
+		}
 	}
 }
 

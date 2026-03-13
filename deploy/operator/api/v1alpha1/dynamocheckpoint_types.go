@@ -95,16 +95,19 @@ type DynamoCheckpointJobConfig struct {
 
 	// ActiveDeadlineSeconds specifies the maximum time the Job can run
 	// +optional
+	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:default=3600
 	ActiveDeadlineSeconds *int64 `json:"activeDeadlineSeconds,omitempty"`
 
 	// BackoffLimit specifies the number of retries before marking the Job failed
 	// +optional
+	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:default=3
 	BackoffLimit *int32 `json:"backoffLimit,omitempty"`
 
 	// TTLSecondsAfterFinished specifies how long to keep the Job after completion
 	// +optional
+	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:default=300
 	TTLSecondsAfterFinished *int32 `json:"ttlSecondsAfterFinished,omitempty"`
 }
@@ -124,9 +127,9 @@ type DynamoCheckpointSpec struct {
 type DynamoCheckpointConditionType string
 
 const (
-	// DynamoCheckpointConditionJobCreated indicates whether the checkpoint Job has been created
+	// DEPRECATED: DynamoCheckpointConditionJobCreated is deprecated. Use status.phase instead.
 	DynamoCheckpointConditionJobCreated DynamoCheckpointConditionType = "JobCreated"
-	// DynamoCheckpointConditionJobCompleted indicates whether the checkpoint Job has completed
+	// DEPRECATED: DynamoCheckpointConditionJobCompleted is deprecated. Use status.phase instead.
 	DynamoCheckpointConditionJobCompleted DynamoCheckpointConditionType = "JobCompleted"
 )
 
@@ -164,7 +167,7 @@ type DynamoCheckpointStatus struct {
 	// +optional
 	Message string `json:"message,omitempty"`
 
-	// Conditions represent the latest available observations of the checkpoint's state
+	// DEPRECATED: Conditions are deprecated. Use status.phase instead.
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
