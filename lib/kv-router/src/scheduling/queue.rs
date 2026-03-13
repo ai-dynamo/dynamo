@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::time::Instant;
@@ -105,7 +105,7 @@ impl<P: SequencePublisher + 'static, C: WorkerConfigLike, S: SchedulingPolicy>
             return;
         };
 
-        if self.all_workers_busy(threshold) {
+        if self.all_workers_busy(threshold, request.allowed_worker_ids.as_ref()) {
             tracing::debug!("all workers busy, queueing request");
             let arrival_offset = self.start_time.elapsed();
             let key = self.policy.enqueue_key(arrival_offset, &request);
@@ -139,7 +139,7 @@ impl<P: SequencePublisher + 'static, C: WorkerConfigLike, S: SchedulingPolicy>
         }
 
         loop {
-            if self.all_workers_busy(threshold) {
+            if self.all_workers_busy(threshold, None) {
                 break;
             }
             let Some(entry) = self.pending.lock().await.pop() else {
@@ -213,13 +213,22 @@ impl<P: SequencePublisher + 'static, C: WorkerConfigLike, S: SchedulingPolicy>
         self.pending_count.load(AtomicOrdering::Relaxed)
     }
 
-    /// Check if all workers are busy based on threshold.
-    /// Returns true only if ALL workers exceed the threshold (no worker has capacity).
-    fn all_workers_busy(&self, threshold: f64) -> bool {
+    /// Check if all eligible workers are busy based on threshold.
+    /// When `allowed` is `Some`, only those worker IDs are considered;
+    /// otherwise all registered workers are checked.
+    /// Returns false when no eligible workers exist so the request falls
+    /// through to `schedule`, which returns a proper `NoEndpoints` error.
+    fn all_workers_busy(&self, threshold: f64, allowed: Option<&HashSet<WorkerId>>) -> bool {
         let active_tokens = self.slots.active_tokens();
         let configs = self.workers_with_configs.borrow();
 
+        let mut checked_any = false;
         for (&worker_id, config) in configs.iter() {
+            if let Some(ids) = allowed
+                && !ids.contains(&worker_id)
+            {
+                continue;
+            }
             let dp_size = config.data_parallel_size();
             let dp_start_rank = config.data_parallel_start_rank();
             let max_batched = config
@@ -227,6 +236,7 @@ impl<P: SequencePublisher + 'static, C: WorkerConfigLike, S: SchedulingPolicy>
                 .unwrap_or(DEFAULT_MAX_BATCHED_TOKENS);
 
             for dp_rank in dp_start_rank..dp_start_rank + dp_size {
+                checked_any = true;
                 let worker = WorkerWithDpRank::new(worker_id, dp_rank);
                 let tokens = active_tokens.get(&worker).copied().unwrap_or(0);
                 if (tokens as f64) <= threshold * (max_batched as f64) {
@@ -234,7 +244,7 @@ impl<P: SequencePublisher + 'static, C: WorkerConfigLike, S: SchedulingPolicy>
                 }
             }
         }
-        true
+        checked_any
     }
 }
 

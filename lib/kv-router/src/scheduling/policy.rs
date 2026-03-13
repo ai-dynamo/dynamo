@@ -45,13 +45,9 @@ impl SchedulingPolicy for FcfsPolicy {
 
 /// Weighted Shortest Processing Time (Smith's rule):
 /// key = (1 + priority_jump) / new_tokens, where new_tokens estimates the
-/// actual prefill cost by subtracting the p75 KV cache overlap from ISL.
-/// We use p75 rather than median because the downstream selector routes to
-/// the best-overlap worker, so the realized overlap skews above the median.
-///
-/// TODO: the p75 heuristic is a rough proxy for post-routing overlap;
-/// a tighter estimate could condition on worker load or use the selector's
-/// own scoring function directly.
+/// actual prefill cost by subtracting the max KV cache overlap from ISL.
+/// We use max because the downstream selector routes to the best-overlap
+/// worker, so the realized overlap is well-approximated by the best available.
 ///
 /// Optimizes for average TTFT — minimizes total weighted completion time
 /// (Smith 1956). Short or high-priority requests are scheduled before
@@ -65,14 +61,8 @@ impl SchedulingPolicy for WsptPolicy {
 
     fn enqueue_key(&self, _arrival_offset: Duration, request: &SchedulingRequest) -> Self::Key {
         let weight = 1.0 + request.priority_jump.max(0.0);
-        let mut overlaps: Vec<u32> = request.overlaps.scores.values().copied().collect();
-        let p75_overlap = if overlaps.is_empty() {
-            0
-        } else {
-            let idx = (overlaps.len() - 1) * 3 / 4;
-            *overlaps.select_nth_unstable(idx).1
-        } as usize;
-        let cached_tokens = p75_overlap * self.block_size;
+        let max_overlap = request.overlaps.scores.values().copied().max().unwrap_or(0) as usize;
+        let cached_tokens = max_overlap * self.block_size;
         let new_tokens = request.isl_tokens.saturating_sub(cached_tokens).max(1);
         OrderedFloat(weight / new_tokens as f64)
     }
@@ -230,17 +220,17 @@ mod tests {
     }
 
     #[test]
-    fn wspt_uses_p75_overlap() {
+    fn wspt_uses_max_overlap() {
         let policy = WsptPolicy { block_size: 16 };
-        // 4 workers with overlaps [10, 20, 50, 60]. p75 = 50 (index 3 of 4).
-        // new_tokens = 1024 - 50*16 = 224
+        // 4 workers with overlaps [10, 20, 50, 60]. max = 60.
+        // new_tokens = 1024 - 60*16 = 64
         let req = request_with(
             1024,
             0.0,
             overlaps_from(&[(0, 10), (1, 20), (2, 50), (3, 60)]),
         );
         let key = policy.enqueue_key(Duration::ZERO, &req);
-        let expected = OrderedFloat(1.0 / 224.0);
+        let expected = OrderedFloat(1.0 / 64.0);
         assert_eq!(key, expected);
     }
 
