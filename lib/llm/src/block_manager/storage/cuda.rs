@@ -226,11 +226,15 @@ impl PinnedStorage {
     ///
     /// Uses write-combined allocation with NUMA-awareness when enabled.
     /// Prefer [`new_for_device`](Self::new_for_device) for new code.
+    ///
+    /// TODO(KVBM-336): remove PinnedStorage::new in the future
+    #[deprecated(since = "1.0.0", note = "Use PinnedStorage::new_for_device instead")]
     pub fn new(ctx: &Arc<CudaContext>, size: usize) -> Result<Self, StorageError> {
         unsafe {
             ctx.bind_to_thread().map_err(StorageError::Cuda)?;
 
             // Try NUMA-aware allocation if enabled, otherwise use direct allocation.
+            #[allow(deprecated)]
             let ptr = if numa_allocator::is_numa_enabled() {
                 let device_id = ctx.cu_device() as u32;
                 match numa_allocator::worker_pool::NumaWorkerPool::global()

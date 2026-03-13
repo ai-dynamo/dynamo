@@ -13,6 +13,9 @@ pub use dynamo_memory::numa::*;
 /// The global kill switch `DYN_MEMORY_DISABLE_NUMA` always takes precedence:
 /// if it is set truthy, this function returns `false` regardless of
 /// `DYN_KVBM_ENABLE_NUMA`.
+///
+/// TODO(KVBM-336): remove this function in the future
+#[deprecated(since = "1.0.0", note = "Use dynamo_memory::numa::is_numa_enabled instead")]
 pub fn is_numa_enabled() -> bool {
     // Global kill switch always wins
     if is_numa_disabled() {
