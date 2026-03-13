@@ -33,16 +33,38 @@ pass() { pass_count=$((pass_count + 1)); echo "  PASS: $1"; }
 fail() { fail_count=$((fail_count + 1)); echo "  FAIL: $1"; }
 strip_ansi() { sed 's/\x1b\[[0-9;]*m//g'; }
 
+extract_from_log() {
+    local log_file="$1" grep_pattern="$2" sed_pattern="$3"
+    cat "$log_file" 2>/dev/null | strip_ansi | grep "$grep_pattern" | head -1 | sed "$sed_pattern"
+}
+
+within_pct() {
+    local a="$1" b="$2" pct="$3" label="$4"
+    if [ -z "$a" ] || [ -z "$b" ] || [ "$a" -eq 0 ] || [ "$b" -eq 0 ]; then
+        fail "$label (could not extract values: a=$a b=$b)"
+        return
+    fi
+    local diff=$(( a > b ? a - b : b - a ))
+    local pct_diff=$(( diff * 100 / a ))
+    if [ "$pct_diff" -le "$pct" ]; then
+        pass "$label (winner=$a, loser=$b, delta=${pct_diff}%)"
+    else
+        fail "$label (winner=$a, loser=$b, delta=${pct_diff}% > ${pct}%)"
+    fi
+}
+
 full_cleanup() {
     echo ""
     echo "=== Cleaning up ==="
     for pid_file in "$LOG_DIR"/*.pid; do
         [ -f "$pid_file" ] || continue
         pid=$(cat "$pid_file")
+        [ -z "$pid" ] && continue
         if kill -0 "$pid" 2>/dev/null; then
             echo "Killing $(basename "$pid_file" .pid) (PID: $pid)"
-            kill "$pid" 2>/dev/null || true
-            wait "$pid" 2>/dev/null || true
+            # Engine PIDs are setsid session leaders — kill -PGID gets the tree.
+            # GMS/frontend are direct children — plain kill works.
+            kill -9 -"$pid" 2>/dev/null || kill -9 "$pid" 2>/dev/null || true
         fi
     done
     # Kill orphaned vllm workers by master-port
@@ -64,7 +86,8 @@ start_engine_leader() {
     local kv_event_port=$((20080 + engine_id))
 
     echo "Starting $label leader (ENGINE_ID=$engine_id, master-port=$master_port)..."
-    CUDA_VISIBLE_DEVICES=0 \
+    setsid \
+    env CUDA_VISIBLE_DEVICES=0 \
     ENGINE_ID="$engine_id" \
     FAILOVER_LOCK_PATH="$LOCK_PATH" \
     DYN_SYSTEM_PORT="$system_port" \
@@ -104,7 +127,8 @@ start_engine_worker() {
     local label="$1" master_port="$2"
 
     echo "Starting $label worker (headless, node-rank 1)..."
-    CUDA_VISIBLE_DEVICES=1 \
+    setsid \
+    env CUDA_VISIBLE_DEVICES=1 \
     SHADOW_SKIP_KV_CACHE=1 \
     python3 -m dynamo.vllm \
         --model "$MODEL_NAME" \
@@ -147,20 +171,17 @@ kill_engine_group() {
     local label="$1"
     local leader_pid=$(cat "$LOG_DIR/${label}_leader.pid" 2>/dev/null)
     local worker_pid=$(cat "$LOG_DIR/${label}_worker.pid" 2>/dev/null)
-    echo "Killing $label group (process group kill)..."
-    # Kill entire process groups to ensure all vLLM subprocesses
-    # (EngineCore, Worker) are terminated. This simulates K8s container
-    # termination where all processes in the container die.
-    if [ -n "$leader_pid" ]; then
-        local leader_pgid=$(ps -o pgid= -p "$leader_pid" 2>/dev/null | tr -d ' ')
-        [ -n "$leader_pgid" ] && kill -9 -"$leader_pgid" 2>/dev/null
-        wait "$leader_pid" 2>/dev/null
+    echo "Killing $label group (session kill)..."
+    # Each engine process was launched with setsid, so PID == PGID.
+    # kill -9 -PID kills the entire session (all vLLM subprocesses)
+    # without affecting other engines or the test script.
+    if [ -n "$leader_pid" ] && kill -0 "$leader_pid" 2>/dev/null; then
+        kill -9 -"$leader_pid" 2>/dev/null || true
     fi
-    if [ -n "$worker_pid" ]; then
-        local worker_pgid=$(ps -o pgid= -p "$worker_pid" 2>/dev/null | tr -d ' ')
-        [ -n "$worker_pgid" ] && kill -9 -"$worker_pgid" 2>/dev/null
-        wait "$worker_pid" 2>/dev/null
+    if [ -n "$worker_pid" ] && kill -0 "$worker_pid" 2>/dev/null; then
+        kill -9 -"$worker_pid" 2>/dev/null || true
     fi
+    sleep 1
     # Clear PID files so cleanup doesn't double-kill
     echo "" > "$LOG_DIR/${label}_leader.pid"
     echo "" > "$LOG_DIR/${label}_worker.pid"
@@ -318,6 +339,68 @@ else
 fi
 
 # ============================================================
+# Phase 2b: KV cache block validation
+# The winner is active with KV cache allocated (~45 GiB/GPU).
+# The loser computed its blocks via patch_determine_available_memory
+# while the winner was consuming GPU memory. Verify the loser's
+# projected blocks match the winner's actual blocks (±10%).
+# ============================================================
+echo ""
+echo "=== Phase 2b: KV Cache Block Validation ==="
+
+# Winner metrics (from get_engine_cache_info after wake)
+W_NUM_BLOCKS=$(extract_from_log "$WINNER_LOG" "Cache config values" \
+    "s/.*num_gpu_blocks': \([0-9]*\).*/\1/")
+W_KV_TOKENS=$(extract_from_log "$WINNER_LOG" "GPU KV cache size" \
+    "s/.*GPU KV cache size: \([0-9,]*\) tokens.*/\1/" | tr -d ',')
+
+# Loser metrics (from init, before sleeping)
+L_KV_TOKENS=$(extract_from_log "$LOSER_LOG" "GPU KV cache size" \
+    "s/.*GPU KV cache size: \([0-9,]*\) tokens.*/\1/" | tr -d ',')
+L_PROJECTED_MEM=$(extract_from_log "$LOSER_LOG" "projected available memory" \
+    "s/.*projected available memory \([0-9.]*\) GiB.*/\1/")
+# num_gpu_blocks is logged after wake, so derive from tokens for now
+L_NUM_BLOCKS_INIT=$((L_KV_TOKENS / 16))
+
+echo "Winner: num_gpu_blocks=$W_NUM_BLOCKS, KV tokens=$W_KV_TOKENS"
+echo "Loser:  num_gpu_blocks=$L_NUM_BLOCKS_INIT (derived), KV tokens=$L_KV_TOKENS, projected=$L_PROJECTED_MEM GiB"
+
+echo ""
+echo "  ┌─────────────────────────┬──────────┬──────────┐"
+echo "  │ Metric                  │ Winner   │ Loser    │"
+echo "  ├─────────────────────────┼──────────┼──────────┤"
+printf "  │ %-23s │ %8s │ %8s │\n" "num_gpu_blocks" "$W_NUM_BLOCKS" "$L_NUM_BLOCKS_INIT"
+printf "  │ %-23s │ %8s │ %8s │\n" "KV cache tokens" "$W_KV_TOKENS" "$L_KV_TOKENS"
+echo "  └─────────────────────────┴──────────┴──────────┘"
+echo ""
+
+within_pct "$W_NUM_BLOCKS" "$L_NUM_BLOCKS_INIT" 10 \
+    "KV: Loser num_gpu_blocks within 10% of winner"
+
+within_pct "$W_KV_TOKENS" "$L_KV_TOKENS" 10 \
+    "KV: Loser KV cache tokens within 10% of winner"
+
+# Verify shadow patch was invoked on loser
+if cat "$LOSER_LOG" 2>/dev/null | strip_ansi | grep -q "projected available memory"; then
+    pass "KV: Loser used patch_determine_available_memory"
+else
+    fail "KV: Loser did NOT use patch_determine_available_memory"
+fi
+
+# Verify loser skipped KV cache at init
+LOSER_WORKER_LOG="$LOG_DIR/${LOSER}_worker.log"
+if cat "$LOSER_LOG" 2>/dev/null | strip_ansi | grep -q "Init phase: stored config, skipping KV cache allocation"; then
+    pass "KV: Loser leader skipped KV cache at init"
+else
+    fail "KV: Loser leader did NOT skip KV cache at init"
+fi
+if cat "$LOSER_WORKER_LOG" 2>/dev/null | strip_ansi | grep -q "Init phase: stored config, skipping KV cache allocation"; then
+    pass "KV: Loser worker skipped KV cache at init"
+else
+    fail "KV: Loser worker did NOT skip KV cache at init"
+fi
+
+# ============================================================
 # Phase 3: Health probe validation
 # ============================================================
 echo ""
@@ -435,6 +518,24 @@ for i in $(seq 1 120); do
 done
 
 pass "D4: Loser auto-woke via lock release"
+
+# Post-wake KV cache validation
+L_WAKE_ALLOC=$(extract_from_log "$LOSER_LOG" "Allocated KV cache on wake" \
+    "s/.*Allocated KV cache on wake: \([0-9.]*\) GiB.*/\1/")
+if [ -n "$L_WAKE_ALLOC" ]; then
+    pass "KV: Loser allocated KV cache on wake: $L_WAKE_ALLOC GiB"
+else
+    fail "KV: Loser did not log KV cache allocation on wake"
+fi
+
+L_NUM_BLOCKS_WAKE=$(extract_from_log "$LOSER_LOG" "Cache config values" \
+    "s/.*num_gpu_blocks': \([0-9]*\).*/\1/")
+if [ -n "$L_NUM_BLOCKS_WAKE" ]; then
+    within_pct "$W_NUM_BLOCKS" "$L_NUM_BLOCKS_WAKE" 10 \
+        "KV: Loser post-wake num_gpu_blocks within 10% of winner"
+else
+    fail "KV: Could not extract loser num_gpu_blocks after wake"
+fi
 
 # Timing
 LOCK_LINE=$(cat "$LOSER_LOG" | strip_ansi | grep "Lock acquired, waking engine" | tail -1)
