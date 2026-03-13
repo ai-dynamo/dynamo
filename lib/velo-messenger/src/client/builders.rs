@@ -30,6 +30,17 @@ impl AmSendBuilder {
         })
     }
 
+    /// Create an `AmSendBuilder` without validating the handler name.
+    ///
+    /// Used by [`Messenger::am_send_streaming`] to bypass the underscore-prefix
+    /// restriction so that `velo-streaming` can send frames to internal handlers
+    /// like `_stream_data`.
+    pub(crate) fn new_unchecked(client: Arc<ActiveMessageClient>, handler: &str) -> Self {
+        Self {
+            inner: MessageBuilder::new_unchecked(client, handler),
+        }
+    }
+
     pub fn payload<T: Serialize>(mut self, data: T) -> Result<Self> {
         self.inner = self.inner.payload(data)?;
         Ok(self)

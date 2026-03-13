@@ -203,6 +203,16 @@ impl Messenger {
         crate::client::builders::AmSendBuilder::new(self.client.clone(), handler)
     }
 
+    /// Fire-and-forget builder that bypasses handler name validation.
+    ///
+    /// This is the send-side analog of [`Messenger::register_streaming_handler`].
+    /// Intended for `velo-streaming` to send frames to internal handlers like
+    /// `_stream_data` whose names start with an underscore (normally rejected
+    /// by [`Messenger::am_send`]).
+    pub fn am_send_streaming(&self, handler: &str) -> Result<crate::client::builders::AmSendBuilder> {
+        Ok(crate::client::builders::AmSendBuilder::new_unchecked(self.client.clone(), handler))
+    }
+
     /// Active-message synchronous completion (await handler finish).
     pub fn am_sync(&self, handler: &str) -> Result<crate::client::builders::AmSyncBuilder> {
         crate::client::builders::AmSyncBuilder::new(self.client.clone(), handler)
