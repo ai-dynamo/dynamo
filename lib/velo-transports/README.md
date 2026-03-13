@@ -42,7 +42,7 @@ graph TD
 | `http`  | ✓ | axum, reqwest | HTTP transport with Axum server |
 | `nats`  | ✓ | async-nats, bs58 | NATS pub-sub transport |
 | `grpc`  | ✓ | tonic, prost, tower | gRPC bidirectional streaming |
-| `ucx`   | ✗ | async-ucx | UCX/RDMA transport (requires UCX libraries) |
+| `nixl`   | ✗ | nixl-sys | UCX/RDMA transport via NIXL (future work) |
 
 TCP transport is always available (no feature gate).
 

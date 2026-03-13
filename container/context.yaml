@@ -24,7 +24,7 @@ dynamo:
   etcd_version: v3.5.21
 
   nixl_ref: 0.10.1
-  nixl_ucx_ref: v1.20.0
+  nixl_ucx_ref: v1.20.x
   nixl_gdrcopy_ref: v2.5.1
   nixl_ucx_efa_ref: 9d2b88a1f67faf9876f267658bd077b379b8bb76
   nixl_libfabric_ref: v2.3.0
@@ -40,22 +40,22 @@ vllm:
     runtime_image: nvcr.io/nvidia/cuda
     base_image_tag: 25.06-cuda12.9-devel-ubuntu24.04
     runtime_image_tag: 12.9.1-runtime-ubuntu24.04
-    vllm_ref: v0.16.0
+    vllm_ref: v0.17.1
   cuda13.0:
     base_image: nvcr.io/nvidia/cuda-dl-base
     runtime_image: nvcr.io/nvidia/cuda
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
     runtime_image_tag: 13.0.2-runtime-ubuntu24.04
-    vllm_ref: v0.16.0
+    vllm_ref: v0.17.1
   xpu:
     base_image: intel/deep-learning-essentials
     runtime_image: intel/deep-learning-essentials
     base_image_tag: 2025.3.2-0-devel-ubuntu24.04
     runtime_image_tag: 2025.3.2-0-devel-ubuntu24.04
     vllm_ref: v0.14.0
-  flashinf_ref: v0.6.3
-  lmcache_ref: 0.3.14
-  vllm_omni_ref: "v0.16.0rc1"
+  flashinf_ref: v0.6.4
+  lmcache_ref: 0.4.1
+  vllm_omni_ref: "v0.16.0"
   max_jobs: "10"
   enable_media_ffmpeg: "false"
   enable_gpu_memory_service: "true"

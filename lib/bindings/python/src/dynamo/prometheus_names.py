@@ -42,6 +42,23 @@ class distributed_runtime:
     UPTIME_SECONDS = "uptime_seconds"
 
 
+class frontend_perf:
+    """Frontend pipeline stage and event-loop metrics"""
+
+    # Per-stage latency histogram (label: stage = preprocess|route|transport_roundtrip|postprocess)
+    STAGE_DURATION_SECONDS = "stage_duration_seconds"
+    # Tokenization time in preprocessor
+    TOKENIZE_SECONDS = "tokenize_seconds"
+    # Template application time in preprocessor
+    TEMPLATE_SECONDS = "template_seconds"
+    # Per-token detokenization cost (microseconds)
+    DETOKENIZE_PER_TOKEN_US = "detokenize_per_token_us"
+    # Event loop delay canary (sleep 10ms, measure drift)
+    EVENT_LOOP_DELAY_SECONDS = "event_loop_delay_seconds"
+    # Count of event loop stalls (delay > 5ms)
+    EVENT_LOOP_STALL_TOTAL = "event_loop_stall_total"
+
+
 class frontend_service:
     """Frontend service metrics (LLM HTTP service)"""
 
@@ -115,6 +132,13 @@ class frontend_service:
     OPERATION_LABEL = "operation"
 
 
+class kv_publisher:
+    """KV Publisher metrics"""
+
+    # Total number of raw events dropped by engines before reaching publisher (detected via event_id gaps)
+    ENGINES_DROPPED_EVENTS_TOTAL = "kv_publisher_engines_dropped_events_total"
+
+
 class kvbm:
     """KVBM"""
 
@@ -148,6 +172,21 @@ class kvbm:
     OBJECT_READ_FAILURES = "object_read_failures"
     # Number of failed object storage write operations (blocks)
     OBJECT_WRITE_FAILURES = "object_write_failures"
+
+
+class kvindexer:
+    """Standalone KV indexer HTTP service metrics"""
+
+    # HTTP request latency
+    REQUEST_DURATION_SECONDS = "request_duration_seconds"
+    # Total HTTP requests
+    REQUESTS_TOTAL = "requests_total"
+    # HTTP error responses (4xx/5xx)
+    ERRORS_TOTAL = "errors_total"
+    # Number of active model+tenant indexers
+    MODELS = "models"
+    # Number of registered worker instances
+    WORKERS = "workers"
 
 
 class kvrouter:
@@ -206,6 +245,10 @@ class name_prefix:
     FRONTEND = "dynamo_frontend"
     # Prefix for KV router metrics (used with router_id label)
     ROUTER = "dynamo_router"
+    # Prefix for tokio runtime metrics
+    TOKIO = "dynamo_tokio"
+    # Prefix for standalone KV indexer metrics
+    KVINDEXER = "dynamo_kvindexer"
 
 
 class router:
@@ -246,6 +289,40 @@ class routing_overhead:
     TOTAL_MS = "overhead_total_ms"
 
 
+class task_tracker:
+    """Task tracker Prometheus metric name suffixes"""
+
+    # Total number of tasks issued/submitted
+    TASKS_ISSUED_TOTAL = "tasks_issued_total"
+    # Total number of tasks started
+    TASKS_STARTED_TOTAL = "tasks_started_total"
+    # Total number of successfully completed tasks
+    TASKS_SUCCESS_TOTAL = "tasks_success_total"
+    # Total number of cancelled tasks
+    TASKS_CANCELLED_TOTAL = "tasks_cancelled_total"
+    # Total number of failed tasks
+    TASKS_FAILED_TOTAL = "tasks_failed_total"
+    # Total number of rejected tasks
+    TASKS_REJECTED_TOTAL = "tasks_rejected_total"
+
+
+class tokio_perf:
+    """Tokio runtime metrics"""
+
+    WORKER_MEAN_POLL_TIME_NS = "worker_mean_poll_time_ns"
+    GLOBAL_QUEUE_DEPTH = "global_queue_depth"
+    BUDGET_FORCED_YIELD_TOTAL = "budget_forced_yield_total"
+    WORKER_BUSY_RATIO = "worker_busy_ratio"
+    WORKER_PARK_COUNT_TOTAL = "worker_park_count_total"
+    WORKER_LOCAL_QUEUE_DEPTH = "worker_local_queue_depth"
+    WORKER_STEAL_COUNT_TOTAL = "worker_steal_count_total"
+    WORKER_OVERFLOW_COUNT_TOTAL = "worker_overflow_count_total"
+    BLOCKING_THREADS = "blocking_threads"
+    BLOCKING_IDLE_THREADS = "blocking_idle_threads"
+    BLOCKING_QUEUE_DEPTH = "blocking_queue_depth"
+    ALIVE_TASKS = "alive_tasks"
+
+
 class trtllm_additional:
     """Additional TRT-LLM worker metrics beyond what the engine natively provides."""
 
@@ -265,23 +342,6 @@ class trtllm_additional:
     KV_TRANSFER_SPEED_GB_S = "trtllm_kv_transfer_speed_gb_s"
 
 
-class task_tracker:
-    """Task tracker Prometheus metric name suffixes"""
-
-    # Total number of tasks issued/submitted
-    TASKS_ISSUED_TOTAL = "tasks_issued_total"
-    # Total number of tasks started
-    TASKS_STARTED_TOTAL = "tasks_started_total"
-    # Total number of successfully completed tasks
-    TASKS_SUCCESS_TOTAL = "tasks_success_total"
-    # Total number of cancelled tasks
-    TASKS_CANCELLED_TOTAL = "tasks_cancelled_total"
-    # Total number of failed tasks
-    TASKS_FAILED_TOTAL = "tasks_failed_total"
-    # Total number of rejected tasks
-    TASKS_REJECTED_TOTAL = "tasks_rejected_total"
-
-
 class work_handler:
     """Work handler Prometheus metric names"""
 
@@ -298,5 +358,9 @@ class work_handler:
     REQUEST_DURATION_SECONDS = "request_duration_seconds"
     # Total number of errors in work handler processing
     ERRORS_TOTAL = "errors_total"
+    # Network transit: frontend send to backend receive (wall-clock, cross-process)
+    NETWORK_TRANSIT_SECONDS = "network_transit_seconds"
+    # Backend processing: handle_payload entry to first response sent
+    TIME_TO_FIRST_RESPONSE_SECONDS = "time_to_first_response_seconds"
     # Label name for error type classification
     ERROR_TYPE_LABEL = "error_type"

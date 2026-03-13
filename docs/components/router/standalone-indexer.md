@@ -99,6 +99,30 @@ dynamo-kv-indexer --port 8090 [--threads 4] [--block-size 16 --model-name my-mod
 
 ## HTTP API
 
+### `GET /health` — Liveness check
+
+Returns `200 OK` unconditionally.
+
+```bash
+curl http://localhost:8090/health
+```
+
+### `GET /metrics` — Prometheus metrics
+
+Returns metrics in Prometheus text exposition format. Available when the binary is built with the `metrics` feature (enabled by default via `standalone-indexer`).
+
+```bash
+curl http://localhost:8090/metrics
+```
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `dynamo_kvindexer_request_duration_seconds` | Histogram | `endpoint` | HTTP request latency |
+| `dynamo_kvindexer_requests_total` | Counter | `endpoint`, `method` | Total HTTP requests |
+| `dynamo_kvindexer_errors_total` | Counter | `endpoint`, `status_class` | HTTP error responses (4xx/5xx) |
+| `dynamo_kvindexer_models` | Gauge | — | Number of active model+tenant indexers |
+| `dynamo_kvindexer_workers` | Gauge | — | Number of registered worker instances |
+
 ### `POST /register` — Register an endpoint
 
 Register a ZMQ endpoint for an instance. Each call creates or reuses the indexer for the given `(model_name, tenant_id)` pair.
@@ -135,6 +159,7 @@ curl -X POST http://localhost:8090/register \
 | `block_size` | yes | — | KV cache block size (must match the engine) |
 | `tenant_id` | no | `"default"` | Tenant identifier for isolation |
 | `dp_rank` | no | `0` | Data parallel rank |
+| `replay_endpoint` | no | — | ZMQ ROUTER address for gap replay (e.g. `tcp://host:5560`) |
 
 ### `POST /unregister` — Deregister an instance
 
@@ -270,6 +295,24 @@ Returns:
 ["http://peer:8091"]
 ```
 
+## DP Rank Handling
+
+When a worker registers with the standalone KV indexer (`/register`), it provides an `instance_id`, a ZMQ `endpoint`, and an optional `dp_rank` (defaults to 0). The service spawns one ZMQ listener per registration.
+
+Each incoming `KvEventBatch` may carry an optional `data_parallel_rank` field. If present, it **overrides** the statically-registered `dp_rank` for that batch. This allows a single ZMQ port to multiplex events from multiple DP ranks.
+
+**Caveat**: the registry only tracks dp_ranks from explicit `/register` calls. If an engine dynamically emits batches with a dp_rank that was never registered, the indexer will store those blocks correctly (under the dynamic `WorkerWithDpRank` key), but per-dp_rank deregistration (`/unregister` with `dp_rank`) will not find them. Full-instance deregistration (`/unregister` without `dp_rank`) still cleans up all dp_ranks for a given `worker_id` in the tree via `remove_worker`.
+
+## Gap Detection and Replay
+
+ZMQ PUB/SUB is lossy — messages can be dropped under backpressure or brief disconnects. The indexer detects gaps by tracking the sequence number of each batch: if `seq > last_seq + 1`, a gap is detected.
+
+When a `replay_endpoint` is provided during `/register`, the indexer connects a DEALER socket to the engine's ROUTER socket and requests the missing batches by sequence number. The engine streams back buffered `(seq, payload)` pairs from its ring buffer until an empty-payload sentinel.
+
+If no `replay_endpoint` is configured, gaps are logged as warnings but not recovered.
+
+The sequence counter (`last_seq`) persists across unregister/register cycles, so re-registering a worker after a gap will trigger replay on the first batch received by the new listener.
+
 ## Limitations
 
 - **ZMQ only**: Workers must publish KV events via ZMQ PUB sockets. The standalone indexer does not subscribe to NATS event streams.
@@ -288,7 +331,7 @@ graph TD
         REG[Worker Registry]
         ZMQ[ZMQ SUB Listeners]
         IDX["Indexer Map<br/>(model, tenant) → Radix Tree"]
-        HTTP[HTTP API<br/>/query /dump /register]
+        HTTP[HTTP API<br/>/query /dump /register /metrics /health]
     end
 
     CLIENT[External Client]
