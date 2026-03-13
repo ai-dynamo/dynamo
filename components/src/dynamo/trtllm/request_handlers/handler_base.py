@@ -1128,7 +1128,7 @@ class HandlerBase(BaseGenerativeHandler):
             if (
                 has_guided_decoding
                 and structural_tag is None
-                and enable_thinking is not None
+                and enable_thinking is True
             ):
                 # Build xgrammar content from guided decoding params
                 content = self._build_xgrammar_content(

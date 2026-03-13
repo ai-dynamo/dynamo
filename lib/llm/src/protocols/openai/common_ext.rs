@@ -220,6 +220,7 @@ mod tests {
             guided_choice: None,
             guided_decoding_backend: None,
             guided_whitespace_pattern: None,
+            guided_structural_tag: None,
             skip_special_tokens: None,
         };
         assert!(common_ext.validate().is_ok());

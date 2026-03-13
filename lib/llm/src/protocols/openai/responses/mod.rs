@@ -521,6 +521,26 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
         // Map service_tier
         let service_tier = resp.inner.service_tier.as_ref().map(convert_service_tier);
 
+        // FIX: Proper reasoning + guided decoding interaction
+        // Case 1: JSON schema WITHOUT reasoning → disable thinking
+        // Case 2: JSON schema WITH reasoning → enable thinking (requires structural_tag in Python layer)
+        let chat_template_args = if response_format.is_some() {
+            let mut args = std::collections::HashMap::new();
+            if resp.inner.reasoning.is_none() {
+                // Case 1: Guided decoding without reasoning → disable thinking
+                // This prevents the server-level reasoning parser from treating all content as reasoning
+                args.insert("enable_thinking".to_string(), serde_json::Value::Bool(false));
+            } else {
+                // Case 2: Guided decoding WITH reasoning → enable thinking
+                // The Python handler should generate a structural_tag with sequence format:
+                // <think>...</think> for reasoning, then JSON schema constraint for final answer
+                args.insert("enable_thinking".to_string(), serde_json::Value::Bool(true));
+            }
+            Some(args)
+        } else {
+            None
+        };
+
         Ok(NvCreateChatCompletionRequest {
             inner: CreateChatCompletionRequest {
                 messages,
@@ -540,7 +560,7 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
             },
             common: Default::default(),
             nvext: resp.nvext,
-            chat_template_args: None,
+            chat_template_args,
             media_io_kwargs: None,
             unsupported_fields: Default::default(),
         })

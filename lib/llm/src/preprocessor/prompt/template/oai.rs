@@ -483,7 +483,22 @@ impl OAIPromptFormatter for HfTokenizerConfigJsonFormatter {
         } else {
             self.env.get_template("default")?
         };
-        Ok(tmpl.render(&ctx)?)
+        let rendered = tmpl.render(&ctx)?;
+
+        // Debug: log rendered prompt (last 500 chars to see generation prompt + thinking tags)
+        let prompt_tail = if rendered.len() > 500 {
+            &rendered[rendered.len() - 500..]
+        } else {
+            &rendered
+        };
+        tracing::debug!(
+            chat_template_args = ?req.chat_template_args(),
+            prompt_tail = %prompt_tail,
+            prompt_len = rendered.len(),
+            "Chat template rendered (showing last 500 chars)"
+        );
+
+        Ok(rendered)
     }
 }
 
