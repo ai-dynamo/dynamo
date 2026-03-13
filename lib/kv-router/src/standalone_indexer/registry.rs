@@ -113,6 +113,7 @@ impl WorkerRegistry {
                 block_size,
                 "Creating new indexer"
             );
+            super::metrics::inc_models();
             IndexerEntry {
                 indexer: create_indexer(block_size, self.num_threads),
                 block_size,
@@ -135,14 +136,14 @@ impl WorkerRegistry {
 
         // Check for duplicate and insert replay endpoint while holding the lock briefly.
         {
-            let mut entry = self
-                .workers
-                .entry(instance_id)
-                .or_insert_with(|| WorkerEntry {
+            let mut entry = self.workers.entry(instance_id).or_insert_with(|| {
+                super::metrics::inc_workers();
+                WorkerEntry {
                     endpoints: HashMap::new(),
                     replay_endpoints: HashMap::new(),
                     cancels: HashMap::new(),
-                });
+                }
+            });
 
             if entry.endpoints.contains_key(&dp_rank) {
                 bail!("instance {instance_id} dp_rank {dp_rank} already registered");
@@ -210,6 +211,8 @@ impl WorkerRegistry {
             .workers
             .remove(&instance_id)
             .ok_or_else(|| anyhow::anyhow!("instance {instance_id} not found"))?;
+
+        super::metrics::dec_workers();
 
         for cancel in entry.cancels.values() {
             cancel.cancel();
@@ -287,6 +290,8 @@ impl WorkerRegistry {
             .workers
             .remove(&instance_id)
             .ok_or_else(|| anyhow::anyhow!("instance {instance_id} not found"))?;
+
+        super::metrics::dec_workers();
 
         for cancel in entry.cancels.values() {
             cancel.cancel();

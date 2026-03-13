@@ -203,7 +203,7 @@ vllm_configs = {
                 expected_log=[
                     r"ZMQ listener .* received batch with \d+ events \(seq=\d+(?:, [^)]*)?\)",
                     r"Event processor for worker_id \d+ processing event: Stored\(",
-                    r"Selected worker: worker_id=\d+ dp_rank=.*?, logit: ",
+                    r"Selected worker: worker_type=\w+, worker_id=\d+ dp_rank=.*?, logit: ",
                 ]
             )
         ],
@@ -228,7 +228,7 @@ vllm_configs = {
                 repeat_count=3,
                 expected_log=[
                     # Verify scheduler is selecting workers with cache awareness
-                    r"Selected worker: worker_id=\d+ dp_rank=.*?, logit: ",
+                    r"Selected worker: worker_type=\w+, worker_id=\d+ dp_rank=.*?, logit: ",
                     # After first request, should see cached blocks being tracked
                     r"with \d+ cached blocks",
                 ],
