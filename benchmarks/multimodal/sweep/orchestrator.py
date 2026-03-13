@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from .config import SweepConfig, input_file_tag, resolve_repo_root
-from .runner import run_aiperf_single, run_request_rate_sweep
+from .runner import run_aiperf_single
 from .server import ServerManager
 
 
@@ -34,8 +34,6 @@ def run_sweep(
 
     output_base = Path(config.output_dir)
 
-    restart = config.restart_server_every_benchmark
-
     _print_banner("Multimodal Benchmark Sweep")
     print(f"  Model:         {config.model}")
     print(f"  Input files:   {len(config.input_files)}")
@@ -46,7 +44,6 @@ def run_sweep(
     print(f"  Request rates: {config.request_rates}")
     print(f"  OSL:           {config.osl}")
     print(f"  Requests:      {config.request_count} per request rate")
-    print(f"  Restart every: {restart}")
     print(f"  Output:        {output_base}")
     print(flush=True)
 
@@ -60,23 +57,17 @@ def run_sweep(
 
             _print_banner(f"Input: {Path(input_file).name}  ({file_tag})", char="#")
 
-            for bench_cfg in config.configs:
-                _print_banner(f"[{file_tag}] Config: {bench_cfg.label}", char="-")
-
-                workflow_abs = _resolve_workflow(bench_cfg.workflow, repo_root)
-                sweep_dir = file_output_dir / bench_cfg.label
-
-                if restart:
-                    _sweep_with_restart(
-                        server=server,
-                        workflow_script=workflow_abs,
-                        config=config,
-                        bench_cfg=bench_cfg,
-                        env_overrides=env_overrides,
-                        input_file=input_file,
-                        output_dir=sweep_dir,
+            for request_rate in sorted(config.request_rates):
+                for bench_cfg in config.configs:
+                    _print_banner(
+                        f"[{file_tag}] Config: {bench_cfg.label}  "
+                        f"request_rate={request_rate}",
+                        char="-",
                     )
-                else:
+
+                    workflow_abs = _resolve_workflow(bench_cfg.workflow, repo_root)
+                    sweep_dir = file_output_dir / bench_cfg.label
+
                     server.start(
                         workflow_script=workflow_abs,
                         model=config.model,
@@ -84,15 +75,15 @@ def run_sweep(
                         env_overrides=env_overrides,
                     )
                     try:
-                        run_request_rate_sweep(
+                        run_aiperf_single(
                             model=config.model,
                             port=config.port,
-                            request_rates=config.request_rates,
+                            request_rate=request_rate,
                             request_count=config.request_count,
                             warmup_count=config.warmup_count,
                             input_file=input_file,
                             osl=config.osl,
-                            output_dir=sweep_dir,
+                            artifact_dir=sweep_dir / f"request_rate{request_rate}",
                         )
                     finally:
                         server.stop()
@@ -107,42 +98,6 @@ def run_sweep(
             server.stop()
 
     _print_summary(config, output_base)
-
-
-def _sweep_with_restart(
-    server: ServerManager,
-    workflow_script: str,
-    config: SweepConfig,
-    bench_cfg,
-    env_overrides: dict,
-    input_file: str,
-    output_dir: Path,
-) -> None:
-    """Run each request rate with a fresh server to avoid warm-cache effects."""
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    for request_rate in sorted(config.request_rates):
-        server.start(
-            workflow_script=workflow_script,
-            model=config.model,
-            extra_args=bench_cfg.extra_args,
-            env_overrides=env_overrides,
-        )
-        try:
-            run_aiperf_single(
-                model=config.model,
-                port=config.port,
-                request_rate=request_rate,
-                request_count=config.request_count,
-                warmup_count=config.warmup_count,
-                input_file=input_file,
-                osl=config.osl,
-                artifact_dir=output_dir / f"request_rate{request_rate}",
-            )
-        finally:
-            server.stop()
-
-    print(f"Sweep complete. Results in {output_dir}", flush=True)
 
 
 def _generate_plots_for_file(
