@@ -98,7 +98,7 @@ impl VeloFrameTransport {
     ///
     /// Called when the reader_pump exits or the anchor is cleaned up.
     /// After unbind, subsequent AM frames targeting this anchor_id are silently dropped.
-    pub(crate) fn unbind(&self, anchor_id: u64) {
+    pub fn unbind(&self, anchor_id: u64) {
         self.dispatch.remove(&anchor_id);
     }
 }
