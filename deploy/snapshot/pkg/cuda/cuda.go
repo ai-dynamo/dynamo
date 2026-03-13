@@ -15,17 +15,9 @@ import (
 	podresourcesv1 "k8s.io/kubelet/pkg/apis/podresources/v1"
 )
 
-<<<<<<< jc/gmschrek
-const (
-	podResourcesSocket = "/var/lib/kubelet/pod-resources/kubelet.sock"
-	nvidiaGPUResource  = "nvidia.com/gpu"
-	nvidiaGPUDRADriver = "gpu.nvidia.com"
-)
-=======
 const nvidiaGPUResource = "nvidia.com/gpu"
 
 var podResourcesSocketPath = "/var/lib/kubelet/pod-resources/kubelet.sock"
->>>>>>> main
 
 // GetPodGPUUUIDs resolves GPU UUIDs for a pod/container from the kubelet PodResources API.
 // It first checks device-plugin-allocated GPUs (nvidia.com/gpu entries in GetDevices()).
