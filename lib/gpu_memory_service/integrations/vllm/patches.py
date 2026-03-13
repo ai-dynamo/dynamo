@@ -383,16 +383,13 @@ def patch_allocate_kv_cache_on_wake() -> None:
 
         config = self._shadow_kv_cache_config
 
-        # Estimate memory needed for KV cache allocation
-        needed_bytes = sum(
-            group.kv_cache_spec.page_size_bytes * config.num_blocks
-            for group in config.kv_cache_groups
-        )
-
-        # Poll until enough GPU memory is free. This handles the case where
-        # the previous engine's processes haven't fully released GPU memory
-        # yet (e.g., NCCL timeout, container termination delay).
-        free_bytes = torch.cuda.mem_get_info()[0]
+        # Require 70% of this GPU's total memory to be free before
+        # allocating KV cache. This replaces the previous per-group sum
+        # which was incorrect for multi-GPU setups (it summed memory
+        # requirements across all GPU groups, then compared against a
+        # single GPU's free memory).
+        free_bytes, total_bytes = torch.cuda.mem_get_info()
+        needed_bytes = int(0.7 * total_bytes)
         if free_bytes < needed_bytes:
             logger.info(
                 "[Shadow] Waiting for GPU memory before KV cache allocation "
