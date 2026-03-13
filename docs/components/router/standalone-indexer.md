@@ -81,11 +81,39 @@ Peers can be registered at startup via `--peers` or dynamically via the HTTP API
 
 ## Building
 
-The binary is a feature-gated target in the `dynamo-kv-router` crate:
+The binary is a feature-gated target in the `dynamo-kv-router` crate. The available cargo features control which capabilities are compiled in:
+
+| Feature | Description |
+|---------|-------------|
+| `standalone-indexer` | Core standalone indexer library (HTTP server, ZMQ listeners, P2P recovery) |
+| `metrics` | Prometheus metrics (`/metrics` endpoint, request/worker gauges) |
+| `indexer-bin` | CLI binary target |
+| `indexer-runtime` | Dynamo runtime integration (discovery, event plane, request plane) |
+| `test-endpoints` | Test-only endpoints (`/test/pause_listener`, `/test/resume_listener`) |
+
+### Standalone build (no runtime dependency)
 
 ```bash
 cargo build -p dynamo-kv-router --features indexer-bin --bin dynamo-kv-indexer
 ```
+
+This produces a binary with no `dynamo-runtime` dependency. It supports ZMQ event listeners, HTTP API, and P2P recovery.
+
+### Standalone build with metrics
+
+```bash
+cargo build -p dynamo-kv-router --features indexer-bin,metrics --bin dynamo-kv-indexer
+```
+
+Adds Prometheus metrics support (`/metrics` endpoint). Pulls in `dynamo-runtime` for the metrics implementation.
+
+### Runtime-enabled build
+
+```bash
+cargo build -p dynamo-kv-router --features indexer-bin,indexer-runtime --bin dynamo-kv-indexer
+```
+
+Enables the `--dynamo-runtime` CLI flag for MDC discovery, event plane subscription, and request plane query endpoint. Includes metrics.
 
 ## CLI
 
@@ -95,7 +123,7 @@ cargo build -p dynamo-kv-router --features indexer-bin --bin dynamo-kv-indexer
 dynamo-kv-indexer --port 8090 [--threads 4] [--block-size 16 --model-name my-model --tenant-id default --workers "1=tcp://host:5557,2:1=tcp://host:5558"] [--peers "http://peer1:8090,http://peer2:8091"]
 ```
 
-### Dynamo runtime mode
+### Dynamo runtime mode (requires `indexer-runtime` feature)
 
 ```bash
 dynamo-kv-indexer --dynamo-runtime --namespace default --component-name kv-indexer --worker-component backend --port 8090 [--threads 4]
@@ -112,7 +140,7 @@ In runtime mode, workers are discovered automatically via MDC. The `--workers` f
 | `--model-name` | `default` | Model name for initial `--workers` |
 | `--tenant-id` | `default` | Tenant ID for initial `--workers` |
 | `--peers` | (none) | Comma-separated peer indexer URLs for P2P recovery on startup |
-| `--dynamo-runtime` | `false` | Enable Dynamo runtime integration (discovery, event plane, request plane) |
+| `--dynamo-runtime` | `false` | Enable Dynamo runtime integration (requires `indexer-runtime` feature) |
 | `--namespace` | `default` | Dynamo namespace to register the indexer component under (runtime mode) |
 | `--component-name` | `kv-indexer` | Component name for this indexer in the Dynamo runtime (runtime mode) |
 | `--worker-component` | `backend` | Component name that workers register under, for event plane subscription (runtime mode) |
@@ -129,7 +157,7 @@ curl http://localhost:8090/health
 
 ### `GET /metrics` — Prometheus metrics
 
-Returns metrics in Prometheus text exposition format. Available when the binary is built with the `metrics` feature (enabled by default via `standalone-indexer`).
+Returns metrics in Prometheus text exposition format. Available when the binary is built with the `metrics` or `indexer-runtime` feature.
 
 ```bash
 curl http://localhost:8090/metrics
@@ -364,7 +392,7 @@ The HTTP API remains fully available in runtime mode. Static workers can be adde
 
 ## Limitations
 
-- **Standalone mode is ZMQ only**: In standalone mode, workers must publish KV events via ZMQ PUB sockets. Use `--dynamo-runtime` to receive events via the event plane (NATS or ZMQ).
+- **Standalone mode is ZMQ only**: In standalone mode, workers must publish KV events via ZMQ PUB sockets. Build with `indexer-runtime` and use `--dynamo-runtime` to receive events via the event plane (NATS or ZMQ).
 - **No routing logic**: The indexer only maintains the radix tree and answers queries. It does not track active blocks, manage request lifecycle, or perform worker selection.
 
 ## Architecture
