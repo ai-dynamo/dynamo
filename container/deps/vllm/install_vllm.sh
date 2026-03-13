@@ -224,9 +224,10 @@ if [ "$VLLM_VER" = "0.17.1" ]; then
     echo "Applying vLLM multi-node TP hotfix to cloned repo..."
     git -C "${INSTALLATION_DIR}/vllm" apply --ignore-whitespace "$VLLM_PATCH"
     # Also patch site-packages if vLLM was installed from a wheel (CUDA builds).
-    # Skip if Python resolves vllm from the clone (already patched above).
-    VLLM_SITE=$(python3 -c "import vllm, pathlib; print(pathlib.Path(vllm.__file__).parent.parent)" 2>/dev/null)
-    if [ "$VLLM_SITE" != "${INSTALLATION_DIR}/vllm" ]; then
+    # Skip if the installed location is the clone itself (already patched above).
+    # Use `uv pip show` instead of importing vllm to avoid pulling in torch/CUDA.
+    VLLM_SITE=$(uv pip show vllm 2>/dev/null | grep -i '^Location:' | awk '{print $2}')
+    if [ -n "$VLLM_SITE" ] && [ "$VLLM_SITE" != "${INSTALLATION_DIR}/vllm" ]; then
         echo "Applying vLLM multi-node TP hotfix to ${VLLM_SITE}..."
         patch -d "$VLLM_SITE" -p1 < "$VLLM_PATCH"
     fi
