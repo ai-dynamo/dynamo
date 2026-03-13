@@ -189,6 +189,7 @@ def patch_static_state_for_gms() -> None:
     multiprocessing spawn).  It is triggered by the GMSModelLoader import
     in model_loader.py, which executes at module level in the child.
     """
+    pass
     global _static_state_patched
     if _static_state_patched:
         return
