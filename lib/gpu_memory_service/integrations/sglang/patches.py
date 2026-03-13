@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 _torch_memory_saver_patched = False
 _model_runner_patched = False
+_static_state_patched = False
 
 
 def patch_torch_memory_saver() -> None:
@@ -175,3 +176,47 @@ def patch_model_runner() -> None:
     ModelRunner._gms_patched = True
     _model_runner_patched = True
     logger.info("[GMS] Patched ModelRunner.init_memory_pool")
+
+
+def patch_static_state_for_gms() -> None:
+    """Wrap SGLang's _import_static_state with CUDA synchronization.
+
+    After CRIU checkpoint/restore the CUDA context on the scheduler process may
+    not be fully initialized when resume_memory_occupation fires.  Synchronizing
+    before the buffer copies ensures restored allocations are visible to the
+    runtime.
+
+    This patch runs inside the scheduler child process (triggered by the
+    GMSModelLoader import in model_loader.py via multiprocessing spawn).
+    """
+    global _static_state_patched
+    if _static_state_patched:
+        return
+
+    try:
+        from sglang.srt.managers import scheduler_update_weights_mixin as _mixin
+
+        _original_import_static_state = _mixin._import_static_state
+
+        def _synced_import(model, static_params):
+            """Synchronize CUDA before restoring named buffers."""
+            if torch.cuda.is_available():
+                logger.info(
+                    "[GMS] _import_static_state: synchronizing CUDA before "
+                    "buffer restore (pid=%d)",
+                    __import__("os").getpid(),
+                )
+                torch.cuda.synchronize()
+            return _original_import_static_state(model, static_params)
+
+        _mixin._import_static_state = _synced_import
+        _static_state_patched = True
+        logger.info(
+            "[GMS] Patched _import_static_state with CUDA sync (pid=%d)",
+            __import__("os").getpid(),
+        )
+    except ImportError:
+        logger.warning(
+            "[GMS] Could not import scheduler_update_weights_mixin, "
+            "skipping static state patch"
+        )
