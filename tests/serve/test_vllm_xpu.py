@@ -554,6 +554,7 @@ def test_multimodal_b64(
     )
     run_serve_deployment(config, request, ports=dynamo_dynamic_ports)
 
+
 # LoRA Test Directory
 lora_dir = os.path.join(vllm_dir, "launch/lora")
 
@@ -645,6 +646,7 @@ def test_lora_aggregated(
         ports=dynamo_dynamic_ports,
         extra_env=minio_config.get_env_vars(),
     )
+
 
 @pytest.mark.vllm
 @pytest.mark.e2e
