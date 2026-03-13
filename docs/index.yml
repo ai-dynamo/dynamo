@@ -147,10 +147,10 @@ navigation:
             path: fault-tolerance/request-migration.md
           - page: Request Cancellation
             path: fault-tolerance/request-cancellation.md
-          - page: Graceful Shutdown
-            path: fault-tolerance/graceful-shutdown.md
           - page: Request Rejection
             path: fault-tolerance/request-rejection.md
+          - page: Graceful Shutdown
+            path: fault-tolerance/graceful-shutdown.md
           - page: Testing
             path: fault-tolerance/testing.md
       - page: Writing Python Workers
