@@ -152,15 +152,16 @@ runs:
           DOCKER_ENV_FLAGS+=(--env "HF_TOKEN=${HF_TOKEN}")
         fi
 
-        # Mount CI-cached models if available on the host (read-only).
-        # conftest.py will symlink these into the writable HF cache.
+        # Share CI-cached models with the test container.  In dind setups,
+        # bind mounts (-v) resolve against the Docker host, not the runner
+        # container, so we use --volumes-from to inherit the runner's mounts.
         CI_MODELS_FLAGS=()
         if [[ -d "/models/ci/models" ]]; then
-          echo "📦 CI model cache detected on runner, mounting into container"
+          echo "📦 CI model cache detected, sharing via --volumes-from $HOSTNAME"
           echo "📂 Runner /models/ci/models contents:"
           ls -la /models/ci/models/ || true
           ls -la /models/ci/models/Qwen/ 2>/dev/null || echo "  (no Qwen/ subdir)"
-          CI_MODELS_FLAGS+=(-v "/models/ci/models:/models/ci/models:ro")
+          CI_MODELS_FLAGS+=(--volumes-from "$HOSTNAME:ro")
         fi
 
         docker run ${GPU_FLAGS} --rm -w /workspace \
@@ -260,15 +261,16 @@ runs:
           DOCKER_ENV_FLAGS+=(--env "HF_TOKEN=${HF_TOKEN}")
         fi
 
-        # Mount CI-cached models if available on the host (read-only).
-        # conftest.py will symlink these into the writable HF cache.
+        # Share CI-cached models with the test container.  In dind setups,
+        # bind mounts (-v) resolve against the Docker host, not the runner
+        # container, so we use --volumes-from to inherit the runner's mounts.
         CI_MODELS_FLAGS=()
         if [[ -d "/models/ci/models" ]]; then
-          echo "📦 CI model cache detected on runner, mounting into container"
+          echo "📦 CI model cache detected, sharing via --volumes-from $HOSTNAME"
           echo "📂 Runner /models/ci/models contents:"
           ls -la /models/ci/models/ || true
           ls -la /models/ci/models/Qwen/ 2>/dev/null || echo "  (no Qwen/ subdir)"
-          CI_MODELS_FLAGS+=(-v "/models/ci/models:/models/ci/models:ro")
+          CI_MODELS_FLAGS+=(--volumes-from "$HOSTNAME:ro")
         fi
 
         docker run ${GPU_FLAGS} ${DOCKER_OPTS} --rm -w /workspace \
