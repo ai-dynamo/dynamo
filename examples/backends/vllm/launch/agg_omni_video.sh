@@ -5,6 +5,8 @@
 set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
+SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
 MODEL="Wan-AI/Wan2.1-T2V-1.3B-Diffusers"
 
@@ -24,24 +26,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
-echo "=========================================="
-echo "Launching vLLM-Omni Video Generation (1 GPU)"
-echo "=========================================="
-echo "Model:       $MODEL"
-echo "Frontend:    http://localhost:$HTTP_PORT"
-echo "=========================================="
-echo ""
-echo "Example test command:"
-echo ""
-echo "  curl http://localhost:${HTTP_PORT}/v1/chat/completions \\"
-echo "    -H 'Content-Type: application/json' \\"
-echo "    -d '{"
-echo "      \"model\": \"${MODEL}\","
-echo "      \"messages\": [{\"role\": \"user\", \"content\": \"Generate a short video of ocean waves.\"}],"
-echo "      \"max_tokens\": 32"
-echo "    }'"
-echo ""
-echo "=========================================="
+print_launch_banner "Launching vLLM-Omni Video Generation (1 GPU)" "$MODEL" "$HTTP_PORT"
+
 
 python -m dynamo.frontend &
 FRONTEND_PID=$!
@@ -55,4 +41,7 @@ DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
     --omni \
     --output-modalities video \
     --media-output-fs-url file:///tmp/dynamo_media \
-    "${EXTRA_ARGS[@]}"
+    "${EXTRA_ARGS[@]}" &
+
+# Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
+wait_any_exit

@@ -1,0 +1,88 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: 'Compliance Scan'
+description: 'Generate attribution CSVs (dpkg + Python) for a container image and upload as workflow artifacts'
+
+inputs:
+  image:
+    description: 'Full container image URI to scan (must be pullable)'
+    required: true
+  artifact_name:
+    description: 'Name for the uploaded artifact (e.g., compliance-vllm-cuda12-amd64)'
+    required: true
+  framework:
+    description: 'Framework name for base image resolution (vllm, sglang, trtllm, dynamo)'
+    required: false
+    default: ''
+  target:
+    description: 'Build target for base image resolution (runtime or frontend)'
+    required: false
+    default: 'runtime'
+  cuda_version:
+    description: 'CUDA version for base image resolution (e.g., 12.9, 13.0, 13.1)'
+    required: false
+    default: ''
+  base_image:
+    description: 'Explicit base image for diff (overrides framework/cuda-version auto-resolve)'
+    required: false
+    default: ''
+  retention_days:
+    description: 'Artifact retention in days'
+    required: false
+    default: '90'
+
+runs:
+  using: "composite"
+  steps:
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 #v3.11.1
+      with:
+        driver: docker-container
+        # Enable BuildKit for enhanced metadata
+        buildkitd-flags: --debug
+        version: v0.14.1
+    - name: Cleanup
+      if: always()
+      shell: bash
+      run: |
+        docker system prune -af
+    - name: Set up Python
+      uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+      with:
+        python-version: '3.12'
+        pip-install: pyyaml
+
+    - name: Pull container image
+      shell: bash
+      run: |
+        source ./.github/scripts/retry_docker.sh
+        retry_pull ${{ inputs.image }}
+
+    - name: Generate attribution CSVs
+      shell: bash
+      run: |
+        ARGS=""
+        if [ -n "${{ inputs.base_image }}" ]; then
+          ARGS+=" --base-image ${{ inputs.base_image }}"
+        elif [ -n "${{ inputs.framework }}" ]; then
+          ARGS+=" --framework ${{ inputs.framework }}"
+          ARGS+=" --target ${{ inputs.target }}"
+          if [ -n "${{ inputs.cuda_version }}" ]; then
+            ARGS+=" --cuda-version ${{ inputs.cuda_version }}"
+          fi
+        fi
+
+        python container/compliance/generate_attributions.py \
+          "${{ inputs.image }}" \
+          --output "${{ inputs.artifact_name }}.csv" \
+          --verbose \
+          ${ARGS}
+
+    - name: Upload attribution artifacts
+      if: always()
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+      with:
+        name: ${{ inputs.artifact_name }}
+        path: ${{ inputs.artifact_name }}*.csv
+        retention-days: ${{ inputs.retention_days }}

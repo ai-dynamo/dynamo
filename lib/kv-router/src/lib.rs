@@ -27,6 +27,9 @@ pub use scheduling::selector;
 pub use sequences::multi_worker as multi_worker_sequence;
 pub use sequences::single as sequence;
 
+#[cfg(feature = "standalone-indexer")]
+pub mod standalone_indexer;
+
 #[cfg(any(test, feature = "bench"))]
 pub mod test_utils;
 
