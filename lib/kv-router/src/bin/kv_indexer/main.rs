@@ -59,17 +59,17 @@ struct Cli {
     dynamo_runtime: bool,
 
     /// Dynamo namespace to register the indexer component under
-    #[cfg(feature = "dynamo-runtime-mode")]
+    #[cfg(feature = "indexer-runtime")]
     #[arg(long, default_value = "default")]
     namespace: String,
 
     /// Component name for this indexer in the Dynamo runtime
-    #[cfg(feature = "dynamo-runtime-mode")]
+    #[cfg(feature = "indexer-runtime")]
     #[arg(long, default_value = "kv-indexer")]
     component_name: String,
 
     /// Component name that workers register under (for event plane subscription)
-    #[cfg(feature = "dynamo-runtime-mode")]
+    #[cfg(feature = "indexer-runtime")]
     #[arg(long, default_value = "backend")]
     worker_component: String,
 }
@@ -77,7 +77,7 @@ struct Cli {
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    #[cfg(feature = "dynamo-runtime-mode")]
+    #[cfg(feature = "indexer-runtime")]
     if cli.dynamo_runtime {
         // Full Dynamo runtime mode: discovery, event plane, request plane
         dynamo_runtime::logging::init();
@@ -117,7 +117,7 @@ async fn app_standalone(cli: Cli) -> anyhow::Result<()> {
     run_common(&cli, &registry, cancel_token).await
 }
 
-#[cfg(feature = "dynamo-runtime-mode")]
+#[cfg(feature = "indexer-runtime")]
 async fn app_with_runtime(runtime: dynamo_runtime::Runtime, cli: Cli) -> anyhow::Result<()> {
     use dynamo_kv_router::indexer::{
         IndexerQueryRequest, IndexerQueryResponse, KV_INDEXER_QUERY_ENDPOINT,
