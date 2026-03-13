@@ -26,6 +26,7 @@ pub mod frame;
 pub mod handle;
 pub mod sender;
 pub mod transport;
+pub mod velo_transport;
 
 pub use anchor::{AnchorManager, AnchorStream, AttachError};
 pub use control::{
@@ -36,3 +37,4 @@ pub use control::{
 pub use frame::{SendError, StreamError, StreamFrame};
 pub use sender::StreamSender;
 pub use transport::FrameTransport;
+pub use velo_transport::VeloFrameTransport;
