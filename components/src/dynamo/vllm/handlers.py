@@ -37,6 +37,7 @@ from dynamo.llm import (
     register_model,
     unregister_model,
 )
+from dynamo.runtime import Client
 from dynamo.runtime.logging import configure_dynamo_logging
 
 from .engine_monitor import VllmEngineMonitor
@@ -1298,7 +1299,13 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         use_vllm_tokenizer: bool = False,
         shutdown_event: asyncio.Event | None = None,
         enable_frontend_decoding: bool = False,
+        encode_worker_client: Client | None = None,
     ):
+        if encode_worker_client is not None:
+            raise NotImplementedError(
+                "'encode_worker_client' is provided which indicates remote "
+                "multimodal encode is configured, this is not currently supported."
+            )
         super().__init__(
             runtime,
             engine,
