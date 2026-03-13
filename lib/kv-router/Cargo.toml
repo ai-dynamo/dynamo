@@ -58,7 +58,7 @@ reqwest = { workspace = true, optional = true }
 zeromq = { version = "0.4.1", optional = true }
 
 [package.metadata.cargo-machete]
-ignored = ["indicatif", "plotters"]
+ignored = ["clap", "indicatif", "plotters"]
 
 [dev-dependencies]
 rstest = "0.18.2"
