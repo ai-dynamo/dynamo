@@ -68,7 +68,7 @@ pub enum SequenceError {
 }
 
 /// Duration after which stale requests are forcibly expired (5 minutes)
-const EXPIRY_DURATION: Duration = Duration::from_secs(300);
+const EXPIRY_DURATION: Duration = Duration::from_secs(3600);
 
 // TODO: use the common request_id if it exists in the repo
 pub type RequestId = String;
