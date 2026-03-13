@@ -693,7 +693,7 @@ pub unsafe extern "C" fn create_routers(
                 block_size,
                 Some(kv_router_config.clone()),
                 WORKER_TYPE_DECODE,
-                model_name.clone(),
+                Some(model_name.clone()),
             )
             .await
         {

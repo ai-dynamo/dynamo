@@ -464,7 +464,7 @@ impl ModelWatcher {
                             card.kv_cache_block_size,
                             Some(self.router_config.kv_router_config.clone()),
                             WORKER_TYPE_DECODE, // This is the decode router
-                            card.display_name.clone(),
+                            Some(card.display_name.clone()),
                         )
                         .await?,
                 )

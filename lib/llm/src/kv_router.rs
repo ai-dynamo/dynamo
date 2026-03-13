@@ -309,7 +309,7 @@ impl KvRouter {
         selector: Option<Box<WorkerSelector>>,
         kv_router_config: Option<KvRouterConfig>,
         worker_type: &'static str,
-        model_name: String,
+        model_name: Option<String>,
     ) -> Result<Self> {
         let kv_router_config = kv_router_config.unwrap_or_default();
         kv_router_config.validate()?;
@@ -323,6 +323,11 @@ impl KvRouter {
         let indexer = if kv_router_config.overlap_score_weight == 0.0 {
             Indexer::None
         } else if let Some(ref indexer_component_name) = kv_router_config.remote_indexer_component {
+            let model_name = model_name.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "model_name is required when remote_indexer_component is configured"
+                )
+            })?;
             tracing::info!(
                 remote_indexer_component = %indexer_component_name,
                 model_name,

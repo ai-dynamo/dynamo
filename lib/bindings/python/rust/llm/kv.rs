@@ -592,30 +592,42 @@ async fn create_kv_router_from_endpoint(
         llm_rs::discovery::WORKER_TYPE_DECODE
     };
 
-    // Query discovery to get the model's display_name from its MDC.
-    let discovery = endpoint.inner.component().drt().discovery();
-    let instances = discovery
-        .list(rs::discovery::DiscoveryQuery::EndpointModels {
-            namespace: endpoint_id.namespace.clone(),
-            component: endpoint_id.component.clone(),
-            endpoint: endpoint_id.name.clone(),
-        })
-        .await
-        .map_err(to_pyerr)?;
+    // Only query discovery for model_name when a remote indexer is configured,
+    // since model_name is only needed for the RemoteIndexer path.
+    let needs_model_name = kv_router_config
+        .as_ref()
+        .map(|cfg| cfg.remote_indexer_component.is_some())
+        .unwrap_or(false);
 
-    let model_name = instances
-        .into_iter()
-        .find_map(|inst| {
-            inst.deserialize_model::<llm_rs::model_card::ModelDeploymentCard>()
-                .ok()
-                .map(|card| card.display_name)
-        })
-        .ok_or_else(|| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "no model card found in discovery for endpoint {}/{}/{}",
-                endpoint_id.namespace, endpoint_id.component, endpoint_id.name
-            ))
-        })?;
+    let model_name = if needs_model_name {
+        let discovery = endpoint.inner.component().drt().discovery();
+        let instances = discovery
+            .list(rs::discovery::DiscoveryQuery::EndpointModels {
+                namespace: endpoint_id.namespace.clone(),
+                component: endpoint_id.component.clone(),
+                endpoint: endpoint_id.name.clone(),
+            })
+            .await
+            .map_err(to_pyerr)?;
+
+        Some(
+            instances
+                .into_iter()
+                .find_map(|inst| {
+                    inst.deserialize_model::<llm_rs::model_card::ModelDeploymentCard>()
+                        .ok()
+                        .map(|card| card.display_name)
+                })
+                .ok_or_else(|| {
+                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                        "no model card found in discovery for endpoint {}/{}/{}",
+                        endpoint_id.namespace, endpoint_id.component, endpoint_id.name
+                    ))
+                })?,
+        )
+    } else {
+        None
+    };
 
     let kv_router = model_manager
         .kv_chooser_for(
