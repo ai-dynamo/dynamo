@@ -1,0 +1,124 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agg-config
+data:
+  agg-kvbm.yaml: |
+    backend: pytorch
+    trust_remote_code: true
+    tensor_parallel_size: 4
+    moe_expert_parallel_size: 4
+    moe_tensor_parallel_size: 1
+    enable_attention_dp: false
+    enable_chunked_prefill: true
+    kv_cache_config:
+      enable_block_reuse: true
+      free_gpu_memory_fraction: 0.8
+      dtype: auto
+    cache_transceiver_config:
+      backend: DEFAULT
+    cuda_graph_config:
+      enable_padding: true
+      max_batch_size: 128
+    disable_overlap_scheduler: false
+    print_iter_log: false
+    kv_connector_config:
+      connector_module: kvbm.trtllm_integration.connector
+      connector_scheduler_class: DynamoKVBMConnectorLeader
+      connector_worker_class: DynamoKVBMConnectorWorker
+---
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: qwen3-coder-480b-agg-kvbm
+spec:
+  backendFramework: trtllm
+  pvcs:
+    - name: model-cache
+      create: false
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        affinity:
+          podAntiAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                - key: nvidia.com/dynamo-graph-deployment-name
+                  operator: In
+                  values:
+                    - qwen3-coder-480b-agg-kvbm-frontend
+              topologyKey: kubernetes.io/hostname
+        mainContainer:
+          image: nvcr.io/nvidian/dynamo-dev/dynamo:cuda-13.1-trtllm-runtime-rc5post1-kimi-k2.5-patched-v3
+          args:
+            - python3 -m dynamo.frontend --router-mode kv --http-port 8000
+          command:
+            - /bin/sh
+            - -c
+    TrtllmWorker:
+      componentType: worker
+      envFromSecret: hf-token-secret
+      sharedMemory:
+        size: 256Gi
+      extraPodSpec:
+        tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+        affinity:
+          nodeAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              nodeSelectorTerms:
+              - matchExpressions:
+                - key: nvidia.com/gpu.present
+                  operator: In
+                  values:
+                  - "true"
+        mainContainer:
+          env:
+            - name: MODEL_PATH
+              value: nvidia/Qwen3-Coder-480B-A35B-Instruct-NVFP4
+            - name: HF_HOME
+              value: /mnt/model-cache
+            - name: ENGINE_ARGS
+              value: /engine_configs/agg-kvbm.yaml
+            # Adjust CPU cache size as needed; start small for faster startup
+            - name: DYN_KVBM_CPU_CACHE_GB
+              value: "10"
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - |
+              python3 -m dynamo.trtllm \
+              --model-path "${MODEL_PATH}" \
+              --served-model-name "nvidia/Qwen3-Coder-480B-A35B-Instruct-NVFP4" \
+              --max-batch-size 128 \
+              --max-num-tokens 8192 \
+              --max-seq-len 8192 \
+              --extra-engine-args "${ENGINE_ARGS}"
+          image: nvcr.io/nvidian/dynamo-dev/dynamo:cuda-13.1-trtllm-runtime-rc5post1-kimi-k2.5-patched-v3
+          workingDir: /workspace/components/backends/trtllm
+          volumeMounts:
+            - name: agg-config
+              mountPath: /engine_configs
+            - name: model-cache
+              mountPath: /mnt/model-cache
+        volumes:
+          - name: agg-config
+            configMap:
+              name: agg-config
+          - name: model-cache
+            persistentVolumeClaim:
+              claimName: model-cache
+      replicas: 1
+      resources:
+        limits:
+          gpu: "4"
+        requests:
+          gpu: "4"

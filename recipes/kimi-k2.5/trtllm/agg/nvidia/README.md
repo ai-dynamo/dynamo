@@ -23,7 +23,7 @@ docker build -t dynamo:cuda-13.1-trtllm-runtime-rc5post1-kimi-k2.5 -f container/
 
 4. python container/render.py --framework trtllm --target runtime --output-short-filename --cuda-version 13.0
 
-5. docker build -t dynamo:cuda-13.0-trtllm-runtime-kimi-k2.5 -f container/rendered.Dockerfile --build-context trtllm_wheel=/tmp/trtllm_wheel .
+5. docker build -t dynamo:cuda-13.0-trtllm-runtime-kimi-k2.5-weka -f container/rendered.Dockerfile --build-context trtllm_wheel=/tmp/trtllm_wheel .
 
 # tag and push to nvcr.io/nvidian/dynamo-dev/
 ```

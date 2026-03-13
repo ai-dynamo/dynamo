@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# One-off job to fix model cache permissions when it was populated by root.
+# Run: kubectl apply -f fix-cache-permissions.yaml -n <namespace>
+# Then: kubectl wait --for=condition=Complete job/fix-model-cache-perms -n <namespace> --timeout=300s
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: fix-model-cache-perms
+spec:
+  ttlSecondsAfterFinished: 60
+  template:
+    spec:
+      restartPolicy: Never
+      securityContext:
+        fsGroup: 0  # Run as root to chown
+      containers:
+        - name: fix
+          image: busybox
+          command: ["sh", "-c", "chown -R 1000:1000 /mnt/model-cache && echo Done"]
+          volumeMounts:
+            - name: model-cache
+              mountPath: /mnt/model-cache
+      volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
