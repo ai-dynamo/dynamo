@@ -152,21 +152,16 @@ runs:
           DOCKER_ENV_FLAGS+=(--env "HF_TOKEN=${HF_TOKEN}")
         fi
 
-        # Share CI-cached models with the test container.  In dind setups,
-        # bind mounts (-v) resolve against the Docker host, not the runner
-        # container, so we use --volumes-from to inherit the runner's mounts.
+        # Mount CI-cached models into the test container (read-only).
+        # The dind sidecar must also have the models PVC mounted for this
+        # bind mount to resolve correctly.
         CI_MODELS_FLAGS=()
         if [[ -d "/models/ci/models" ]]; then
-          RUNNER_CID=$(cat /proc/self/cgroup 2>/dev/null | grep -oP '[a-f0-9]{64}' | head -1)
-          if [[ -n "$RUNNER_CID" ]]; then
-            echo "📦 CI model cache detected, sharing via --volumes-from ${RUNNER_CID:0:12}"
-            echo "📂 Runner /models/ci/models contents:"
-            ls -la /models/ci/models/ || true
-            ls -la /models/ci/models/Qwen/ 2>/dev/null || echo "  (no Qwen/ subdir)"
-            CI_MODELS_FLAGS+=(--volumes-from "$RUNNER_CID:ro")
-          else
-            echo "⚠️  CI models found but could not detect runner container ID"
-          fi
+          echo "📦 CI model cache detected, mounting into container"
+          echo "📂 Runner /models/ci/models contents:"
+          ls -la /models/ci/models/ || true
+          ls -la /models/ci/models/Qwen/ 2>/dev/null || echo "  (no Qwen/ subdir)"
+          CI_MODELS_FLAGS+=(-v "/models/ci/models:/models/ci/models:ro")
         fi
 
         docker run ${GPU_FLAGS} --rm -w /workspace \
@@ -266,21 +261,16 @@ runs:
           DOCKER_ENV_FLAGS+=(--env "HF_TOKEN=${HF_TOKEN}")
         fi
 
-        # Share CI-cached models with the test container.  In dind setups,
-        # bind mounts (-v) resolve against the Docker host, not the runner
-        # container, so we use --volumes-from to inherit the runner's mounts.
+        # Mount CI-cached models into the test container (read-only).
+        # The dind sidecar must also have the models PVC mounted for this
+        # bind mount to resolve correctly.
         CI_MODELS_FLAGS=()
         if [[ -d "/models/ci/models" ]]; then
-          RUNNER_CID=$(cat /proc/self/cgroup 2>/dev/null | grep -oP '[a-f0-9]{64}' | head -1)
-          if [[ -n "$RUNNER_CID" ]]; then
-            echo "📦 CI model cache detected, sharing via --volumes-from ${RUNNER_CID:0:12}"
-            echo "📂 Runner /models/ci/models contents:"
-            ls -la /models/ci/models/ || true
-            ls -la /models/ci/models/Qwen/ 2>/dev/null || echo "  (no Qwen/ subdir)"
-            CI_MODELS_FLAGS+=(--volumes-from "$RUNNER_CID:ro")
-          else
-            echo "⚠️  CI models found but could not detect runner container ID"
-          fi
+          echo "📦 CI model cache detected, mounting into container"
+          echo "📂 Runner /models/ci/models contents:"
+          ls -la /models/ci/models/ || true
+          ls -la /models/ci/models/Qwen/ 2>/dev/null || echo "  (no Qwen/ subdir)"
+          CI_MODELS_FLAGS+=(-v "/models/ci/models:/models/ci/models:ro")
         fi
 
         docker run ${GPU_FLAGS} ${DOCKER_OPTS} --rm -w /workspace \
