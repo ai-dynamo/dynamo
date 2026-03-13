@@ -34,9 +34,6 @@ spec:
                   - key: nvidia.com/gpu.present
                     operator: In
                     values: ["true"]
-                  - key: kubernetes.io/hostname
-                    operator: In
-                    values: ["cluster-0967a26d-pool-14bee067-prctr-f4kvl"]
       tolerations:
         - key: nvidia.com/gpu
           operator: Exists
@@ -74,7 +71,7 @@ spec:
             - name: OUTPUT_DIR
               value: "/model-cache/results/qwen3_vl_30b_b200/qps_sweep"
             - name: INPUT_FILE
-              value: "benchmarks/multimodal/jsonl/1000req_1img_200pool_400word_http.jsonl"
+              value: "benchmarks/multimodal/jsonl/1000req_1img_200pool_400word_base64.jsonl"
             # Infra
             - name: ETCD_ENDPOINTS
               value: "localhost:2379"
@@ -169,7 +166,7 @@ spec:
                   echo "[data] Generating JSONL input file..."
                   cd /workspace/benchmarks/multimodal/jsonl
                   python main.py -n 1000 --images-per-request 1 --images-pool 200 \
-                      --user-text-tokens 400 --image-mode http
+                      --user-text-tokens 400 --image-mode base64
                   cd /workspace
               else
                   echo "[data] Input file exists: $INPUT_FILE"

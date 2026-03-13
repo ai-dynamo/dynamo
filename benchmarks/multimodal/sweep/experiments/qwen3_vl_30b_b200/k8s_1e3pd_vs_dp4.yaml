@@ -237,11 +237,11 @@ spec:
 
           resources:
             requests:
-              nvidia.com/gpu: "8"
+              nvidia.com/gpu: "4"
               cpu: "64"
               memory: "256Gi"
             limits:
-              nvidia.com/gpu: "8"
+              nvidia.com/gpu: "4"
               cpu: "128"
               memory: "512Gi"
           volumeMounts:
