@@ -539,7 +539,7 @@ impl ResponseStreamConverter {
 
 fn make_sse_event(event: &ResponseStreamEvent) -> Result<Event, anyhow::Error> {
     let event_type = get_event_type(event);
-    let data = serde_json::to_string(event)?;
+    let data = crate::http::service::serialize_json_for_sse(event)?;
     Ok(Event::default().event(event_type).data(data))
 }
 

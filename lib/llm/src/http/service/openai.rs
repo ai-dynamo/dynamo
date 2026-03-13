@@ -945,7 +945,7 @@ fn make_dispatch_event(
     event_name: &str,
     payload: &impl serde::Serialize,
 ) -> Option<Result<Event, axum::Error>> {
-    match serde_json::to_string(payload) {
+    match super::serialize_json_for_sse(payload) {
         Ok(json) => Some(Ok(Event::default().event(event_name).data(json))),
         Err(e) => {
             tracing::warn!("streaming_{event_name}: failed to serialize: {e}");
