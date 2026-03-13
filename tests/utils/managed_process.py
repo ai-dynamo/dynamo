@@ -262,7 +262,9 @@ class ManagedProcess:
                         self._logger.info(
                             "Terminating Straggler %s %s", process_name, ps_process.pid
                         )
-                        terminate_process_tree(ps_process.pid, self._logger)
+                        terminate_process_tree(
+                            ps_process.pid, self._logger, immediate_kill=True
+                        )
 
                     # Check command line arguments
                     cmdline = ps_process.cmdline()
@@ -275,7 +277,9 @@ class ManagedProcess:
                                 ps_process.pid,
                                 straggler_cmd,
                             )
-                            terminate_process_tree(ps_process.pid, self._logger)
+                            terminate_process_tree(
+                                ps_process.pid, self._logger, immediate_kill=True
+                            )
                             break  # Avoid terminating the same process multiple times
                 except (
                     psutil.NoSuchProcess,
