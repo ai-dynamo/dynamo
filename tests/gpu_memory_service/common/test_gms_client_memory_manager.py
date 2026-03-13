@@ -137,11 +137,11 @@ def test_commit_clears_client_lock_state(manager):
     assert manager.is_unmapped
 
 
-def test_disconnect_clears_client_lock_state(manager):
+def test_abort_clears_client_lock_state(manager):
     manager._client = _FakeSession()
     manager._granted_lock_type = GrantedLockType.RW
 
-    manager.disconnect()
+    manager.abort()
 
     assert manager.granted_lock_type is None
     assert not manager.is_connected
@@ -158,7 +158,7 @@ def test_connect_rejects_double_connect(monkeypatch):
         manager.connect(RequestedLockType.RO)
 
 
-def test_disconnect_rejects_live_mappings(monkeypatch):
+def test_abort_drops_session_with_live_mappings(monkeypatch):
     session = _TrackingSession()
     manager = _make_manager(
         monkeypatch,
@@ -167,10 +167,12 @@ def test_disconnect_rejects_live_mappings(monkeypatch):
         mappings=[_make_mapping("alloc-1", 0x1000, handle=1234)],
     )
 
-    with pytest.raises(RuntimeError, match="unmapped first"):
-        manager.disconnect()
+    manager.abort()
 
-    assert not session.closed
+    assert session.closed
+    assert manager.granted_lock_type is None
+    assert not manager.is_connected
+    assert manager.mappings[0x1000].handle == 1234
 
 
 def test_commit_failure_after_local_unmap_keeps_preserved_unmapped_state(monkeypatch):
@@ -271,7 +273,7 @@ def test_disconnect_clears_local_state_even_if_close_fails(monkeypatch):
     )
 
     with pytest.raises(ConnectionError, match="close failed"):
-        manager.disconnect()
+        manager.abort()
 
     assert manager._client is None
     assert manager._granted_lock_type is None

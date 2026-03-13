@@ -216,10 +216,12 @@ class GMSClientMemoryManager:
         elif not self._va_preserved:
             self._last_memory_layout_hash = ""
 
-    def disconnect(self) -> None:
-        """Close connection and release lock."""
-        if any(mapping.handle != 0 for mapping in self._mappings.values()):
-            raise RuntimeError("disconnect requires all mappings to be unmapped first")
+    def abort(self) -> None:
+        """Drop the GMS session.
+
+        Clean callers should unmap first. This also supports abrupt session
+        drop with live mappings still present.
+        """
         if self._client is not None:
             try:
                 self._client.close()
@@ -593,7 +595,7 @@ class GMSClientMemoryManager:
     def close(self) -> None:
         """Strict cleanup.
 
-        synchronize + unmap all + free all VAs + disconnect.
+        synchronize + unmap all + free all VAs + abort.
         """
         cuda_synchronize()
 
@@ -601,7 +603,7 @@ class GMSClientMemoryManager:
             self.unmap_va(va)
             self.free_va(va)
 
-        self.disconnect()
+        self.abort()
         self._unmapped = False
         self._va_preserved = False
         from gpu_memory_service.client.torch.allocator import (

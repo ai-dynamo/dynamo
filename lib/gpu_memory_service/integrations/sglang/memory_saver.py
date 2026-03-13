@@ -159,7 +159,7 @@ class GMSMemorySaverImpl:
             return
         logger.info("[GMS] Unmapping weights (VA-stable)")
         self._weights_allocator.unmap_all_vas()
-        self._weights_allocator.disconnect()
+        self._weights_allocator.abort()
 
     def _resume_weights(self) -> None:
         if self._weights_allocator is None:
@@ -175,7 +175,7 @@ class GMSMemorySaverImpl:
             return
         logger.info("[GMS] Unmapping KV cache")
         self._kv_cache_allocator.unmap_all_vas()
-        self._kv_cache_allocator.disconnect()
+        self._kv_cache_allocator.abort()
 
     def _resume_kv_cache(self) -> None:
         if not self._kv_cache_allocator.is_unmapped:

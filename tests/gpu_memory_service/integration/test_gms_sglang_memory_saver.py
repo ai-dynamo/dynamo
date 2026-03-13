@@ -25,8 +25,8 @@ class _FakeManager:
         self.calls.append("unmap_all_vas")
         self.is_unmapped = True
 
-    def disconnect(self) -> None:
-        self.calls.append("disconnect")
+    def abort(self) -> None:
+        self.calls.append("abort")
 
     def connect(self, lock_type) -> None:
         self.calls.append(("connect", lock_type))
@@ -113,13 +113,13 @@ def test_pause_resume_routes_kv_cache_to_gms(monkeypatch):
 
     assert weights.calls == [
         "unmap_all_vas",
-        "disconnect",
+        "abort",
         ("connect", RequestedLockType.RO),
         "remap_all_vas",
     ]
     assert kv_cache.calls == [
         "unmap_all_vas",
-        "disconnect",
+        "abort",
         ("connect", RequestedLockType.RW),
         ("reallocate_all_handles", "kv_cache"),
         "remap_all_vas",
@@ -176,7 +176,7 @@ def test_pause_resume_model_weights_only_routes_weights(monkeypatch):
 
     assert weights.calls == [
         "unmap_all_vas",
-        "disconnect",
+        "abort",
         ("connect", RequestedLockType.RO),
         "remap_all_vas",
     ]

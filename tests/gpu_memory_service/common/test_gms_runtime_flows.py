@@ -54,6 +54,8 @@ def _gpu_memory_free_bytes(device: int = 0) -> int:
 
 
 def _drop_connection(session: _GMSClientSession) -> None:
+    # Use a raw transport break here, not abort(), because these tests need to
+    # simulate an unexpected socket loss while a request is still in flight.
     sock = session._transport._socket
     assert sock is not None
     try:
@@ -351,7 +353,7 @@ def test_reader_mapping_disconnect_then_next_writer_clears_old_epoch(real_gms):
     assert server._gms.allocation_count == 1
 
     reader.unmap_all_vas()
-    reader.disconnect()
+    reader.abort()
     thread.join(timeout=2)
 
     next_writer = next_writer_result.get("session")
@@ -558,7 +560,7 @@ def test_destroy_mapping_frees_allocation_and_metadata(real_gms):
 
     assert writer.list_handles() == []
     assert writer.metadata_list() == []
-    writer.disconnect()
+    writer.abort()
 
 
 def test_remap_all_vas_succeeds_when_committed_layout_is_unchanged(real_gms):
@@ -575,7 +577,7 @@ def test_remap_all_vas_succeeds_when_committed_layout_is_unchanged(real_gms):
     imported_va = reader.create_mapping(allocation_id=allocation_id)
     imported_mapping = reader.mappings[imported_va]
     reader.unmap_all_vas()
-    reader.disconnect()
+    reader.abort()
 
     reader.connect(RequestedLockType.RO)
     reader.remap_all_vas()
@@ -598,7 +600,7 @@ def test_remap_all_vas_rejects_stale_layout_after_new_epoch_commit(real_gms):
     reader.connect(RequestedLockType.RO)
     reader.create_mapping(allocation_id=allocation_id)
     reader.unmap_all_vas()
-    reader.disconnect()
+    reader.abort()
 
     next_writer = GMSClientMemoryManager(socket_path, device=0)
     next_writer.connect(RequestedLockType.RW)
@@ -608,7 +610,7 @@ def test_remap_all_vas_rejects_stale_layout_after_new_epoch_commit(real_gms):
     reader.connect(RequestedLockType.RO)
     with pytest.raises(StaleMemoryLayoutError, match="Layout changed"):
         reader.remap_all_vas()
-    reader.disconnect()
+    reader.abort()
 
 
 def test_remap_all_vas_accepts_new_epoch_with_same_structural_layout(real_gms):
@@ -625,7 +627,7 @@ def test_remap_all_vas_accepts_new_epoch_with_same_structural_layout(real_gms):
     reader.connect(RequestedLockType.RO)
     imported_va = reader.create_mapping(allocation_id=first_allocation_id)
     reader.unmap_all_vas()
-    reader.disconnect()
+    reader.abort()
 
     second_writer = GMSClientMemoryManager(socket_path, device=0)
     second_writer.connect(RequestedLockType.RW)
@@ -681,7 +683,7 @@ def test_same_process_republish_remaps_against_new_committed_hash(real_gms):
     manager.connect(RequestedLockType.RO)
     manager.remap_all_vas()
     manager.unmap_all_vas()
-    manager.disconnect()
+    manager.abort()
 
     manager.connect(RequestedLockType.RW)
     manager.reallocate_all_handles(tag="weights")

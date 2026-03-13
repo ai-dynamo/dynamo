@@ -337,7 +337,7 @@ sequenceDiagram
         Note over C: Keep VA reservation!
     end
 
-    R->>C: mgr.disconnect()
+    R->>C: mgr.abort()
     C->>S: Close socket (release RO lock)
     S->>S: FSM: RO → COMMITTED (if last reader)
 
@@ -487,7 +487,7 @@ class GMSClientMemoryManager:
 
     # --- Tier 1: Connection ---
     def connect(lock_type: RequestedLockType, timeout_ms: Optional[int] = None) -> None
-    def disconnect() -> None
+    def abort() -> None
 
     # --- Tier 1: Handle ops (server-side, RW only) ---
     def allocate_handle(size: int, tag: str = "default") -> str     # Returns allocation_id
@@ -578,7 +578,7 @@ Both integrations support releasing and reclaiming GPU memory for shadow engine 
 - **vLLM**: `sleep` / `wake_up` (via `/engine/sleep` and `/engine/wake_up` HTTP endpoints)
 - **SGLang**: `release_memory_occupation` / `resume_memory_occupation` (via the corresponding HTTP endpoints)
 
-Under the hood, sleeping calls `unmap_all_vas()` + `disconnect()` to release GPU memory while preserving VA reservations. Waking is tag-specific:
+Under the hood, sleeping calls `unmap_all_vas()` + `abort()` to release GPU memory while preserving VA reservations. Waking is tag-specific:
 
 - **weights**: `connect(RO)` + `remap_all_vas()`
 - **kv_cache**: `connect(RW)` + `reallocate_all_handles("kv_cache")` + `remap_all_vas()`

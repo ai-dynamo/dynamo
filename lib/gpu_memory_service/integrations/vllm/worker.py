@@ -139,13 +139,13 @@ class GMSWorker(Worker):
         assert weights_manager is not None, "GMS weights client is not initialized"
         assert not weights_manager.is_unmapped, "GMS weights are already unmapped"
         weights_manager.unmap_all_vas()
-        weights_manager.disconnect()
+        weights_manager.abort()
 
         kv_cache_manager = get_gms_client_memory_manager("kv_cache")
         assert kv_cache_manager is not None, "GMS KV cache client is not initialized"
         assert not kv_cache_manager.is_unmapped, "GMS KV cache is already unmapped"
         kv_cache_manager.unmap_all_vas()
-        kv_cache_manager.disconnect()
+        kv_cache_manager.abort()
 
         free_bytes_after, total = torch.cuda.mem_get_info()
         freed_bytes = free_bytes_after - free_bytes_before

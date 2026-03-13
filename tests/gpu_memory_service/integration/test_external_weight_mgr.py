@@ -6,13 +6,13 @@ from __future__ import annotations
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
-from typing import Callable
+from typing import Callable, Protocol
 
 import pytest
 from gpu_memory_service.client.session import _GMSClientSession
 from gpu_memory_service.common.types import RequestedLockType, ServerState
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
-from tests.utils.managed_process import DynamoFrontendProcess, ManagedProcess
+from tests.utils.managed_process import DynamoFrontendProcess
 
 from ..harness.external_weight_writer import run_external_weight_writer
 from ..harness.gms import GMSServerProcess
@@ -29,6 +29,16 @@ from ..harness.vllm import VLLMWithGMSProcess
 #    different allocation IDs but the same structural layout, and exits.
 # 6. The engine wakes, remaps the preserved weight VAs into the new committed epoch, recreates its
 #    KV cache in a new RW epoch, and serves inference without a stale-layout error.
+
+
+class _SleepWakeEngine(Protocol):
+    def __enter__(self): ...
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None: ...
+
+    def sleep(self) -> dict: ...
+
+    def wake(self) -> dict: ...
 
 
 def _list_committed_weight_allocations(
@@ -53,7 +63,7 @@ def _run_external_weight_mgr_test(
     request,
     ports: dict,
     backend: str,
-    make_engine: Callable[[], ManagedProcess],
+    make_engine: Callable[[], _SleepWakeEngine],
 ) -> None:
     with ExitStack() as stack:
         weights_gms = stack.enter_context(

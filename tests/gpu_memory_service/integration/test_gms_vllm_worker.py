@@ -23,8 +23,8 @@ class _FakeManager:
         self.calls.append("unmap_all_vas")
         self.is_unmapped = True
 
-    def disconnect(self) -> None:
-        self.calls.append("disconnect")
+    def abort(self) -> None:
+        self.calls.append("abort")
 
     def connect(self, lock_type) -> None:
         self.calls.append(("connect", lock_type.value))
@@ -114,8 +114,8 @@ def test_sleep_level_2_unmaps_weights_and_kv_cache(monkeypatch):
     worker = object.__new__(GMSWorker)
     worker.sleep(level=2)
 
-    assert weights.calls == ["unmap_all_vas", "disconnect"]
-    assert kv_cache.calls == ["unmap_all_vas", "disconnect"]
+    assert weights.calls == ["unmap_all_vas", "abort"]
+    assert kv_cache.calls == ["unmap_all_vas", "abort"]
 
 
 def test_wake_up_remaps_weights_and_reallocates_kv_cache(monkeypatch):

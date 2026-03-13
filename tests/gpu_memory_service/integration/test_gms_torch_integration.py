@@ -135,7 +135,7 @@ def test_live_gms_tensor_survives_unmap_and_remap(running_gms):
     expected = torch.relu((baseline + 7.0).square())
 
     reader.unmap_all_vas()
-    reader.disconnect()
+    reader.abort()
     reader.connect(RequestedLockType.RO)
     reader.remap_all_vas()
 
