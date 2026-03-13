@@ -20,7 +20,7 @@ pytestmark = [
 ]
 
 
-async def wait_for_output(process, expected_text, timeout=10):
+async def wait_for_output(log_name, process, expected_text, timeout=10):
     """Read process output until the expected text appears."""
     if process.stdout is None:
         raise RuntimeError("Process stdout was not captured")
@@ -40,6 +40,8 @@ async def wait_for_output(process, expected_text, timeout=10):
             asyncio.to_thread(process.stdout.readline),
             timeout=remaining,
         )
+        # Doesn't show when the tests succeed, very helpful if they fail
+        print(f"{log_name}: {line.strip()}")
 
         if not line:
             if process.poll() is not None:
@@ -97,7 +99,7 @@ async def server_process(example_dir, example_env):
     )
 
     try:
-        await wait_for_output(server_proc, "Successfully registered")
+        await wait_for_output("SERVER", server_proc, "Successfully registered")
     except Exception:
         stop_process(server_proc)
         raise
@@ -121,7 +123,7 @@ async def run_client(example_dir, example_env):
         text=True,
     )
 
-    output = await wait_for_output(client_proc, "Hello star!")
+    output = await wait_for_output("CLIENT", client_proc, "Hello star!")
 
     stdout = stop_process(client_proc)
 
