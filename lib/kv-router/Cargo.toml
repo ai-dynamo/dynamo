@@ -15,7 +15,6 @@ default = []
 metrics = ["dep:dynamo-runtime"]
 bench = ["dep:clap", "dep:indicatif", "dep:serde_json", "dep:plotters"]
 standalone-indexer = ["metrics", "dep:axum", "dep:bytes", "dep:zeromq", "dep:serde_json", "dep:reqwest"]
-test-endpoints = ["standalone-indexer"]
 
 [dependencies]
 # repo

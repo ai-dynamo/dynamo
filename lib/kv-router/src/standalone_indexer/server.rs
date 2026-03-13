@@ -254,7 +254,6 @@ async fn query_by_hash(
     }
 }
 
-#[cfg(feature = "test-endpoints")]
 #[derive(Deserialize)]
 struct ListenerControlRequest {
     instance_id: WorkerId,
@@ -262,7 +261,6 @@ struct ListenerControlRequest {
     dp_rank: Option<u32>,
 }
 
-#[cfg(feature = "test-endpoints")]
 async fn test_pause_listener(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ListenerControlRequest>,
@@ -279,7 +277,6 @@ async fn test_pause_listener(
     }
 }
 
-#[cfg(feature = "test-endpoints")]
 async fn test_resume_listener(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ListenerControlRequest>,
@@ -401,12 +398,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/peers", get(list_peers))
         .route("/health", get(handle_health));
 
-    #[cfg(feature = "test-endpoints")]
     let router = router
         .route("/test/pause_listener", post(test_pause_listener))
-        .route("/test/resume_listener", post(test_resume_listener));
-
-    let router = router.with_state(state.clone());
+        .route("/test/resume_listener", post(test_resume_listener))
+        .with_state(state.clone());
 
     #[cfg(feature = "metrics")]
     let router = {

@@ -315,7 +315,6 @@ impl WorkerRegistry {
         Ok(())
     }
 
-    #[cfg_attr(not(feature = "test-endpoints"), allow(dead_code))]
     pub fn pause_listener(&self, instance_id: WorkerId, dp_rank: u32) -> Result<()> {
         let mut entry = self
             .workers
@@ -331,7 +330,6 @@ impl WorkerRegistry {
         Ok(())
     }
 
-    #[cfg_attr(not(feature = "test-endpoints"), allow(dead_code))]
     pub async fn resume_listener(&self, instance_id: WorkerId, dp_rank: u32) -> Result<()> {
         {
             let entry = self
