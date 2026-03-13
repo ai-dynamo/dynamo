@@ -17,7 +17,7 @@
 
 instances:
   - url: dynamo.docs.buildwithfern.com/dynamo
-    custom-domain: docs.nvidia.com/dynamo
+    custom-domain: [docs.nvidia.com/dynamo, docs.dynamo.nvidia.com]
 
 title: NVIDIA Dynamo Documentation
 
