@@ -323,11 +323,12 @@ func generateSingleDCD(
 	deployment.Spec.DynamoNamespace = &dynamoNamespace
 
 	labels := make(map[string]string)
-	deployment.Spec.Labels = labels
-	deployment.Labels = labels
+	maps.Copy(labels, component.Labels)
 	labels[commonconsts.KubeLabelDynamoComponent] = componentName
 	labels[commonconsts.KubeLabelDynamoNamespace] = dynamoNamespace
 	labels[commonconsts.KubeLabelDynamoGraphDeploymentName] = parentDGD.Name
+	deployment.Spec.Labels = labels
+	deployment.Labels = labels
 
 	// only label worker DCDs with their hash for cleanup during rolling updates
 	if IsWorkerComponent(component.ComponentType) {

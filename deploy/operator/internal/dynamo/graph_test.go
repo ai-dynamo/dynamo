@@ -7346,12 +7346,13 @@ func TestGenerateDynamoComponentsDeployments_SpecMetadataPropagation(t *testing.
 		},
 		Spec: v1alpha1.DynamoGraphDeploymentSpec{
 			Annotations: map[string]string{"team/cost-center": "abc", "shared": "dgd"},
-			Labels:      map[string]string{"env": "prod"},
+			Labels:      map[string]string{"env": "prod", "shared-label": "dgd"},
 			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 				"frontend": {
 					ComponentType: commonconsts.ComponentTypeFrontend,
 					Replicas:      ptr.To(int32(1)),
 					Annotations:   map[string]string{"shared": "svc"},
+					Labels:        map[string]string{"shared-label": "svc", "svc-only": "val"},
 				},
 			},
 		},
@@ -7363,8 +7364,20 @@ func TestGenerateDynamoComponentsDeployments_SpecMetadataPropagation(t *testing.
 	dcd := dcds["frontend"]
 	require.NotNil(t, dcd)
 
+	// Annotations: service-level takes precedence over DGD-level
 	assert.Equal(t, "abc", dcd.Spec.Annotations["team/cost-center"])
 	assert.Equal(t, "svc", dcd.Spec.Annotations["shared"],
-		"service-level annotation should take precedence over spec.metadata")
-	assert.Equal(t, "prod", dcd.Spec.Labels["env"])
+		"service-level annotation should take precedence over DGD annotation")
+
+	// Labels: service-level survives and takes precedence over DGD-level
+	assert.Equal(t, "svc", dcd.Spec.Labels["shared-label"],
+		"service-level label should take precedence over DGD label")
+	assert.Equal(t, "val", dcd.Spec.Labels["svc-only"],
+		"service-only label should be preserved")
+	assert.Equal(t, "prod", dcd.Spec.Labels["env"],
+		"DGD-level label should propagate when no service override")
+
+	// Controller labels must always be present
+	assert.Equal(t, "frontend", dcd.Spec.Labels[commonconsts.KubeLabelDynamoComponent])
+	assert.Equal(t, dgd.Name, dcd.Spec.Labels[commonconsts.KubeLabelDynamoGraphDeploymentName])
 }
