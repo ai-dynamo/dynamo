@@ -316,10 +316,13 @@ impl KvRouter {
         let component = endpoint.component();
         let cancellation_token = component.drt().primary_token();
 
-        // If a remote indexer component is configured, create a Remote indexer
+        // If overlap scoring is disabled, skip indexing entirely.
+        // Otherwise, if a remote indexer component is configured, create a Remote indexer
         // that queries the standalone KV indexer service via the request plane.
         // Otherwise, create a local indexer and subscribe to KV events directly.
-        let indexer = if let Some(ref indexer_component_name) =
+        let indexer = if kv_router_config.overlap_score_weight == 0.0 {
+            Indexer::None
+        } else if let Some(ref indexer_component_name) =
             kv_router_config.remote_indexer_component
         {
             tracing::info!(
