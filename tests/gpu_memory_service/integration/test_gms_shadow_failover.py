@@ -11,15 +11,27 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 from typing import Callable
 
+import pytest
 from gpu_memory_service.common.types import ServerState
+from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
 from tests.utils.managed_process import DynamoFrontendProcess, ManagedProcess
 
-from .gms import ThreadedGMSServer
-from .runtime import (
+from ..harness.gms import ThreadedGMSServer
+from ..harness.runtime import (
     MIN_EXPECTED_MEMORY_RETURN_FRACTION,
     get_gpu_memory_used,
     send_completion,
 )
+from ..harness.sglang import SGLangWithGMSProcess
+from ..harness.vllm import VLLMWithGMSProcess
+
+# Event flow under test:
+# 1. Shadow starts with committed weights and a live RW KV epoch.
+# 2. Shadow sleeps, which aborts and clears that KV epoch.
+# 3. Primary wakes and owns the next RW KV epoch.
+# 4. Shadow wakes after a forced primary disconnect and enters a new RW epoch.
+# 5. Shadow blocks on allocation_oom until the still-alive primary is killed.
+# 6. After primary death, the old KV epoch clears and shadow finishes wake.
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +65,7 @@ def _is_process_alive(process: ManagedProcess) -> bool:
     return True
 
 
-def run_shadow_failover_test(
+def _run_shadow_failover_test(
     request,
     ports: dict,
     make_shadow: Callable[[], ManagedProcess],
@@ -76,6 +88,8 @@ def run_shadow_failover_test(
             assert result["choices"], "Shadow inference failed"
             logger.info("Shadow inference OK: %s", result)
 
+            # The shadow starts in the same steady state as the sleep/wake test:
+            # committed weights plus a live RW KV-cache epoch.
             deadline = time.monotonic() + 30.0
             while True:
                 weights_initial = weights_gms.get_runtime_state()
@@ -109,6 +123,8 @@ def run_shadow_failover_test(
             assert shadow_memory_after_sleep < shadow_memory_before_sleep
             assert shadow_released_bytes > 0
 
+            # Sleeping the shadow should keep the committed weights epoch intact
+            # while dropping the mutable KV-cache epoch back to EMPTY.
             deadline = time.monotonic() + 30.0
             while True:
                 weights_after_shadow_sleep = weights_gms.get_runtime_state()
@@ -132,6 +148,8 @@ def run_shadow_failover_test(
                     raise TimeoutError("shadow sleep did not clear GMS state")
                 time.sleep(0.1)
 
+            # After sleep, the shadow's old KV epoch must have connected once, then
+            # aborted, then cleared its server-owned allocations.
             weights_events_after_shadow_sleep = weights_gms.get_event_history().events
             weights_pairs_after_shadow_sleep = [
                 (event.kind, event.epoch_id)
@@ -215,6 +233,9 @@ def run_shadow_failover_test(
                 primary_kv_epoch_id = kv_with_primary.active_rw_epoch_id
 
                 with ThreadPoolExecutor(max_workers=1) as executor:
+                    # The shadow wakes while the primary is still alive. After we
+                    # force-disconnect the primary from GMS, the shadow should enter a
+                    # new RW epoch but block on real CUDA OOM until the primary dies.
                     wake_future = executor.submit(shadow.wake, 180)
                     deadline = time.monotonic() + 10.0
                     while time.monotonic() < deadline:
@@ -275,12 +296,12 @@ def run_shadow_failover_test(
                             and event.epoch_id == kv_while_lingering.active_rw_epoch_id
                             for event in kv_events_while_lingering
                         )
-                        assert _is_process_alive(
-                            primary
-                        ), "primary died before the linger window completed"
-                        assert (
-                            not wake_future.done()
-                        ), "shadow wake completed while the primary was still alive"
+                        assert _is_process_alive(primary), (
+                            "primary died before the linger window completed"
+                        )
+                        assert not wake_future.done(), (
+                            "shadow wake completed while the primary was still alive"
+                        )
                         time.sleep(0.2)
 
                     primary_memory_before_kill = get_gpu_memory_used()
@@ -327,6 +348,8 @@ def run_shadow_failover_test(
                 shadow_reacquired_bytes
             ) >= shadow_released_bytes * MIN_EXPECTED_MEMORY_RETURN_FRACTION
 
+            # Once the primary is gone, the shadow should finish wake with the same
+            # committed weights epoch and a new live RW KV-cache epoch.
             deadline = time.monotonic() + 30.0
             while True:
                 weights_after_wake = weights_gms.get_runtime_state()
@@ -353,6 +376,9 @@ def run_shadow_failover_test(
                     )
                 time.sleep(0.1)
 
+            # The final KV history should show the full handoff:
+            # initial shadow epoch -> primary epoch -> primary abort/clear ->
+            # shadow reconnect in a new epoch -> shadow saw OOM while blocked.
             weights_events_after_wake = weights_gms.get_event_history().events
             weights_pairs_after_wake = [
                 (event.kind, event.epoch_id) for event in weights_events_after_wake
@@ -427,7 +453,66 @@ def run_shadow_failover_test(
                 > 0
             )
 
-            for i in range(3):
-                result = send_completion(frontend_port, f"Verify {i}")
-                assert result["choices"], f"Verification {i} failed"
-            logger.info("All verification passed")
+            result = send_completion(frontend_port, "Post failover")
+            assert result["choices"], "Shadow inference after failover failed"
+            logger.info("Shadow inference after failover OK: %s", result)
+
+
+@pytest.mark.vllm
+@pytest.mark.e2e
+@pytest.mark.gpu_1
+@pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
+@pytest.mark.timeout(600)
+def test_gms_shadow_engine_failover_vllm(
+    request, runtime_services_dynamic_ports, gms_ports, predownload_models
+):
+    ports = gms_ports
+    _run_shadow_failover_test(
+        request,
+        ports,
+        make_shadow=lambda: VLLMWithGMSProcess(
+            request,
+            "shadow",
+            ports["shadow_system"],
+            ports["shadow_kv_event"],
+            ports["shadow_nixl"],
+            ports["frontend"],
+        ),
+        make_primary=lambda: VLLMWithGMSProcess(
+            request,
+            "primary",
+            ports["primary_system"],
+            ports["primary_kv_event"],
+            ports["primary_nixl"],
+            ports["frontend"],
+        ),
+    )
+
+
+@pytest.mark.sglang
+@pytest.mark.e2e
+@pytest.mark.gpu_1
+@pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
+@pytest.mark.timeout(600)
+def test_gms_shadow_engine_failover_sglang(
+    request, runtime_services_dynamic_ports, gms_ports, predownload_models
+):
+    ports = gms_ports
+    _run_shadow_failover_test(
+        request,
+        ports,
+        make_shadow=lambda: SGLangWithGMSProcess(
+            request,
+            "shadow",
+            ports["shadow_system"],
+            ports["shadow_sglang"],
+            ports["frontend"],
+        ),
+        make_primary=lambda: SGLangWithGMSProcess(
+            request,
+            "primary",
+            ports["primary_system"],
+            ports["primary_sglang"],
+            ports["frontend"],
+        ),
+    )

@@ -1,22 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""
-GPU Memory Service Basic Sleep/Wake Test for SGLang.
-
-Tests the basic sleep/wake cycle of a single SGLang engine using the GPU Memory
-Service for VA-stable weight offloading.
-"""
+from __future__ import annotations
 
 import logging
 import time
 from contextlib import ExitStack
+from typing import Callable
 
 import pytest
 from gpu_memory_service.common.types import ServerState
-
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
-from tests.utils.managed_process import DynamoFrontendProcess
+from tests.utils.managed_process import DynamoFrontendProcess, ManagedProcess
 
 from ..harness.gms import GMSServerProcess
 from ..harness.runtime import (
@@ -25,30 +20,23 @@ from ..harness.runtime import (
     send_completion,
 )
 from ..harness.sglang import SGLangWithGMSProcess
+from ..harness.vllm import VLLMWithGMSProcess
+
+# Event flow under test:
+# 1. Weights are published once as a committed epoch.
+# 2. KV cache starts as a live RW epoch.
+# 3. Sleep keeps weights committed but aborts and clears the KV epoch.
+# 4. Wake reconnects weights as RO to the same committed epoch.
+# 5. Wake recreates KV cache in a fresh RW epoch after the old one was cleared.
 
 logger = logging.getLogger(__name__)
 
 
-@pytest.mark.sglang
-@pytest.mark.e2e
-@pytest.mark.gpu_1
-@pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
-@pytest.mark.timeout(300)
-def test_gms_basic_sleep_wake(
+def _run_sleep_wake_test(
     request,
-    runtime_services_dynamic_ports,
-    gms_ports,
-    predownload_models,
-):
-    """Test basic sleep/wake with GPU Memory Service.
-
-    1. Start GMS server and SGLang engine with GMS integration
-    2. Run initial inference to verify engine works
-    3. Put engine to sleep and verify GPU memory is freed
-    4. Wake engine and verify inference still works
-    """
-    ports = gms_ports
-
+    ports: dict,
+    make_engine: Callable[[], ManagedProcess],
+) -> None:
     with ExitStack() as stack:
         weights_gms = stack.enter_context(
             GMSServerProcess(request, device=0, tag="weights")
@@ -59,17 +47,13 @@ def test_gms_basic_sleep_wake(
         stack.enter_context(
             DynamoFrontendProcess(request, frontend_port=ports["frontend"])
         )
-        with SGLangWithGMSProcess(
-            request,
-            "engine",
-            ports["shadow_system"],
-            ports["shadow_sglang"],
-            ports["frontend"],
-        ) as engine:
+        with make_engine() as engine:
             result = send_completion(ports["frontend"])
-            logger.info(f"Initial inference result: {result}")
+            logger.info("Initial inference result: %s", result)
             assert result["choices"]
 
+            # Before sleep, weights must already be published as a committed epoch
+            # while KV cache remains a live RW epoch owned by the engine.
             deadline = time.monotonic() + 30.0
             while True:
                 weights_before_sleep = weights_gms.get_runtime_state()
@@ -89,17 +73,19 @@ def test_gms_basic_sleep_wake(
                 time.sleep(0.1)
 
             mem_before = get_gpu_memory_used()
-            logger.info(f"Memory before sleep: {mem_before / (1 << 20):.0f} MB")
+            logger.info("Memory before sleep: %.0f MB", mem_before / (1 << 20))
 
             sleep_result = engine.sleep()
             assert sleep_result["status"] == "ok"
 
             mem_after_sleep = get_gpu_memory_used()
             released_bytes = mem_before - mem_after_sleep
-            logger.info(f"Memory after sleep: {mem_after_sleep / (1 << 20):.0f} MB")
+            logger.info("Memory after sleep: %.0f MB", mem_after_sleep / (1 << 20))
             assert mem_after_sleep < mem_before, "Sleep should reduce memory"
             assert released_bytes > 0
 
+            # Sleep preserves the committed weights epoch but aborts and clears the
+            # mutable KV-cache epoch, which is what should release GPU memory.
             deadline = time.monotonic() + 30.0
             while True:
                 weights_after_sleep = weights_gms.get_runtime_state()
@@ -125,6 +111,8 @@ def test_gms_basic_sleep_wake(
                     )
                 time.sleep(0.1)
 
+            # Weights are immutable across sleep/wake, so their event history should
+            # still be the original publish: connect once, commit once.
             weights_events = weights_gms.get_event_history().events
             weights_pairs = [(event.kind, event.epoch_id) for event in weights_events]
             weights_connect = ("rw_connected", weights_before_sleep.committed_epoch_id)
@@ -137,6 +125,8 @@ def test_gms_basic_sleep_wake(
                 weights_commit
             )
 
+            # KV cache is different: sleep must abort the old RW epoch and clear its
+            # server-owned allocations before wake can start a new RW epoch.
             kv_events = kv_cache_gms.get_event_history().events
             kv_pairs = [(event.kind, event.epoch_id) for event in kv_events]
             kv_connect = ("rw_connected", kv_before_sleep.active_rw_epoch_id)
@@ -165,12 +155,14 @@ def test_gms_basic_sleep_wake(
 
             mem_after_wake = get_gpu_memory_used()
             reacquired_bytes = mem_after_wake - mem_after_sleep
-            logger.info(f"Memory after wake: {mem_after_wake / (1 << 20):.0f} MB")
+            logger.info("Memory after wake: %.0f MB", mem_after_wake / (1 << 20))
             assert mem_after_wake > mem_after_sleep, "Wake should reacquire memory"
             assert (
                 reacquired_bytes
             ) >= released_bytes * MIN_EXPECTED_MEMORY_RETURN_FRACTION
 
+            # Wake reconnects weights as RO to the same committed epoch, but KV cache
+            # must come back as a fresh RW epoch with new allocations.
             deadline = time.monotonic() + 30.0
             while True:
                 weights_after_wake = weights_gms.get_runtime_state()
@@ -208,6 +200,8 @@ def test_gms_basic_sleep_wake(
                 weights_connect
             ) < weights_pairs_after_wake.index(weights_commit)
 
+            # The wake history should therefore extend the old KV sequence with one
+            # new RW connect after the previous epoch was fully cleared.
             kv_events_after_wake = kv_cache_gms.get_event_history().events
             kv_pairs_after_wake = [
                 (event.kind, event.epoch_id) for event in kv_events_after_wake
@@ -241,9 +235,60 @@ def test_gms_basic_sleep_wake(
             )
 
             result = send_completion(ports["frontend"], "Goodbye")
-            logger.info(f"Post-wake inference result: {result}")
+            logger.info("Post-wake inference result: %s", result)
             assert result["choices"]
 
             logger.info(
-                f"Memory freed: {(mem_before - mem_after_sleep) / (1 << 20):.0f} MB"
+                "Memory freed: %.0f MB", (mem_before - mem_after_sleep) / (1 << 20)
             )
+
+
+@pytest.mark.vllm
+@pytest.mark.e2e
+@pytest.mark.gpu_1
+@pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
+@pytest.mark.timeout(300)
+def test_gms_basic_sleep_wake_vllm(
+    request,
+    runtime_services_dynamic_ports,
+    gms_ports,
+    predownload_models,
+):
+    ports = gms_ports
+    _run_sleep_wake_test(
+        request,
+        ports,
+        make_engine=lambda: VLLMWithGMSProcess(
+            request,
+            "engine",
+            ports["shadow_system"],
+            ports["shadow_kv_event"],
+            ports["shadow_nixl"],
+            ports["frontend"],
+        ),
+    )
+
+
+@pytest.mark.sglang
+@pytest.mark.e2e
+@pytest.mark.gpu_1
+@pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
+@pytest.mark.timeout(300)
+def test_gms_basic_sleep_wake_sglang(
+    request,
+    runtime_services_dynamic_ports,
+    gms_ports,
+    predownload_models,
+):
+    ports = gms_ports
+    _run_sleep_wake_test(
+        request,
+        ports,
+        make_engine=lambda: SGLangWithGMSProcess(
+            request,
+            "engine",
+            ports["shadow_system"],
+            ports["shadow_sglang"],
+            ports["frontend"],
+        ),
+    )
