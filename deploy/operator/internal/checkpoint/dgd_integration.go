@@ -25,6 +25,8 @@ import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -119,6 +121,70 @@ func FindCheckpointByIdentityHash(
 	}
 
 	return existing, nil
+}
+
+// CreateOrGetAutoCheckpoint returns the canonical checkpoint object for an identity.
+// If a checkpoint already exists for the identity hash, it is reused as-is rather than
+// mutating its capture pod template.
+func CreateOrGetAutoCheckpoint(
+	ctx context.Context,
+	c client.Client,
+	namespace string,
+	identity nvidiacomv1alpha1.DynamoCheckpointIdentity,
+	podTemplate corev1.PodTemplateSpec,
+) (*nvidiacomv1alpha1.DynamoCheckpoint, error) {
+	hash, err := ComputeIdentityHash(identity)
+	if err != nil {
+		return nil, fmt.Errorf("failed to compute identity hash: %w", err)
+	}
+
+	existing, err := FindCheckpointByIdentityHash(ctx, c, namespace, hash)
+	if err != nil {
+		return nil, err
+	}
+	if existing != nil {
+		return existing, nil
+	}
+
+	ckptName := fmt.Sprintf("checkpoint-%s", hash)
+	ckpt := &nvidiacomv1alpha1.DynamoCheckpoint{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      ckptName,
+			Namespace: namespace,
+			Labels: map[string]string{
+				consts.KubeLabelCheckpointHash: hash,
+			},
+		},
+		Spec: nvidiacomv1alpha1.DynamoCheckpointSpec{
+			Identity: identity,
+			Job: nvidiacomv1alpha1.DynamoCheckpointJobConfig{
+				PodTemplateSpec: podTemplate,
+			},
+		},
+	}
+
+	if err := c.Create(ctx, ckpt); err != nil {
+		if !apierrors.IsAlreadyExists(err) {
+			return nil, fmt.Errorf("failed to create checkpoint %s: %w", ckptName, err)
+		}
+
+		existing = &nvidiacomv1alpha1.DynamoCheckpoint{}
+		key := types.NamespacedName{Name: ckptName, Namespace: namespace}
+		if getErr := c.Get(ctx, key, existing); getErr != nil {
+			return nil, fmt.Errorf("failed to get checkpoint %s after already exists: %w", ckptName, getErr)
+		}
+
+		existingHash, err := getCheckpointIdentityHash(existing)
+		if err != nil {
+			return nil, err
+		}
+		if existingHash != hash {
+			return nil, fmt.Errorf("checkpoint %s already exists with identity hash %s", ckptName, existingHash)
+		}
+		return existing, nil
+	}
+
+	return ckpt, nil
 }
 
 // getPVCBasePath returns the PVC base path from storage config.

@@ -1286,25 +1286,6 @@ func (r *DynamoGraphDeploymentReconciler) createCheckpointCR(
 		ExtraParameters:      identity.ExtraParameters,
 	}
 
-	// Compute hash for checkpoint identity and uniqueness checks.
-	hash, err := checkpoint.ComputeIdentityHash(checkpointIdentity)
-	if err != nil {
-		return nil, fmt.Errorf("failed to compute identity hash: %w", err)
-	}
-
-	existing, err := checkpoint.FindCheckpointByIdentityHash(
-		ctx,
-		r.Client,
-		dynamoDeployment.Namespace,
-		hash,
-	)
-	if err != nil {
-		return nil, err
-	}
-	if existing != nil {
-		return existing, nil
-	}
-
 	// Capture config is not part of the checkpoint identity. Once a checkpoint object exists for a
 	// hash, later reconcilers must reuse it instead of racing to overwrite the capture pod template.
 	podTemplate, err := r.buildCheckpointJobPodTemplate(
@@ -1317,48 +1298,13 @@ func (r *DynamoGraphDeploymentReconciler) createCheckpointCR(
 		return nil, fmt.Errorf("failed to build checkpoint job pod template: %w", err)
 	}
 
-	ckptName := fmt.Sprintf("checkpoint-%s", hash)
-
-	ckpt := &nvidiacomv1alpha1.DynamoCheckpoint{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      ckptName,
-			Namespace: dynamoDeployment.Namespace,
-			Labels: map[string]string{
-				consts.KubeLabelCheckpointHash: hash,
-			},
-		},
-		Spec: nvidiacomv1alpha1.DynamoCheckpointSpec{
-			Identity: checkpointIdentity,
-			Job: nvidiacomv1alpha1.DynamoCheckpointJobConfig{
-				PodTemplateSpec: podTemplate,
-			},
-		},
-	}
-
-	if err := r.Create(ctx, ckpt); err != nil {
-		if errors.IsAlreadyExists(err) {
-			existing = &nvidiacomv1alpha1.DynamoCheckpoint{}
-			key := types.NamespacedName{Name: ckptName, Namespace: dynamoDeployment.Namespace}
-			if getErr := r.Get(ctx, key, existing); getErr != nil {
-				return nil, fmt.Errorf("failed to get checkpoint %s after already exists: %w", ckptName, getErr)
-			}
-			existingHash := existing.Status.IdentityHash
-			if existingHash == "" {
-				computedHash, computeErr := checkpoint.ComputeIdentityHash(existing.Spec.Identity)
-				if computeErr != nil {
-					return nil, fmt.Errorf("failed to compute identity hash for checkpoint %s: %w", existing.Name, computeErr)
-				}
-				existingHash = computedHash
-			}
-			if existingHash != hash {
-				return nil, fmt.Errorf("checkpoint %s already exists with identity hash %s", ckptName, existingHash)
-			}
-			return existing, nil
-		}
-		return nil, fmt.Errorf("failed to create checkpoint %s: %w", ckptName, err)
-	}
-
-	return ckpt, nil
+	return checkpoint.CreateOrGetAutoCheckpoint(
+		ctx,
+		r.Client,
+		dynamoDeployment.Namespace,
+		checkpointIdentity,
+		podTemplate,
+	)
 }
 
 // buildCheckpointJobPodTemplate builds a pod template for the checkpoint job from service spec
