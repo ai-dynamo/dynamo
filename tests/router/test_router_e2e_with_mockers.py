@@ -304,15 +304,7 @@ class MockerProcess:
             # Launch the standalone indexer binary
             block_size = self._mocker_args_orig.get("block_size", BLOCK_SIZE)
             indexer_cmd = [
-                "cargo",
-                "run",
-                "-p",
-                "dynamo-kv-router",
-                "--features",
-                "indexer-bin,test-endpoints",
-                "--bin",
                 "dynamo-kv-indexer",
-                "--",
                 "--block-size",
                 str(block_size),
                 "--port",
@@ -465,15 +457,7 @@ class MockerProcess:
         workers_arg = ",".join(worker_entries)
 
         indexer_b_cmd = [
-            "cargo",
-            "run",
-            "-p",
-            "dynamo-kv-router",
-            "--features",
-            "indexer-bin,test-endpoints",
-            "--bin",
             "dynamo-kv-indexer",
-            "--",
             "--block-size",
             str(block_size),
             "--port",

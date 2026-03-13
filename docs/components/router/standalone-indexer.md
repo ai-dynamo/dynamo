@@ -75,11 +75,13 @@ Peers can be registered at startup via `--peers` or dynamically via the HTTP API
 
 ## Building
 
-The binary is a feature-gated target in the `dynamo-kv-router` crate:
+The binary is built via maturin as part of the Python bindings:
 
 ```bash
-cargo build -p dynamo-kv-router --features indexer-bin --bin dynamo-kv-indexer
+cd lib/bindings/python && VIRTUAL_ENV=../../.venv ../../.venv/bin/maturin develop --uv --features kv-indexer
 ```
+
+This installs `dynamo-kv-indexer` into the virtualenv. For test builds with pause/resume listener endpoints, use `--features test-endpoints`.
 
 ## CLI
 

@@ -15,8 +15,7 @@ default = []
 metrics = []
 bench = ["dep:clap", "dep:indicatif", "dep:serde_json", "dep:plotters"]
 standalone-indexer = ["metrics", "dep:axum", "dep:bytes", "dep:zeromq", "dep:serde_json", "dep:reqwest"]
-indexer-bin = ["standalone-indexer", "dep:clap", "dep:tracing-subscriber"]
-test-endpoints = ["indexer-bin"]
+test-endpoints = ["standalone-indexer"]
 
 [dependencies]
 # repo
@@ -52,12 +51,11 @@ indicatif = { version = "0.18.0", optional = true }
 plotters = { version = "0.3", optional = true, default-features = false, features = ["svg_backend", "line_series", "point_series", "full_palette"] }
 rustc-hash = "2.1.1"
 
-# indexer-bin (optional)
+# standalone-indexer (optional)
 axum = { workspace = true, optional = true }
 bytes = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }
 zeromq = { version = "0.4.1", optional = true }
-tracing-subscriber = { workspace = true, optional = true }
 
 [package.metadata.cargo-machete]
 ignored = ["indicatif", "plotters"]
@@ -69,7 +67,3 @@ serde_json = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros", "time"] }
 dynamo-tokens = { workspace = true }
 
-[[bin]]
-name = "dynamo-kv-indexer"
-path = "src/bin/kv_indexer/main.rs"
-required-features = ["indexer-bin"]
