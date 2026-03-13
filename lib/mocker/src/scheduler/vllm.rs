@@ -28,7 +28,6 @@
 //! ## NOTE
 //! The current prefill and decoding time simulations are not scientific at all and are WIP
 
-use crate::common::perf_model::PerfModel;
 use crate::common::protocols::{
     DirectRequest, KvCacheEventSink, MockEngineArgs, MoveBlock, OutputSignal, PreemptionMode,
     WorkerType,
@@ -228,16 +227,7 @@ impl Scheduler {
                 // 2. Simulate prefill + decode
                 simulate_prefill(&mut state, &mut kv_manager, &mut hit_rates, &args).await;
 
-                simulate_decode(
-                    &mut state,
-                    &mut kv_manager,
-                    &output_tx,
-                    &args.perf_model,
-                    args.block_size,
-                    args.speedup_ratio,
-                    args.preemption_mode,
-                )
-                .await;
+                simulate_decode(&mut state, &mut kv_manager, &output_tx, &args).await;
 
                 // 3. Send metrics once per forward pass (after all prefill and decode processing)
                 let _ = metrics_tx.send(MockerMetrics {
@@ -429,15 +419,12 @@ async fn simulate_decode(
     state: &mut SchedulerState,
     kv_manager: &mut KvManager,
     output_tx: &Option<mpsc::UnboundedSender<OutputSignal>>,
-    perf_model: &PerfModel,
-    block_size: usize,
-    speedup_ratio: f64,
-    preemption_mode: PreemptionMode,
+    args: &MockEngineArgs,
 ) -> Duration {
     let start_time = Instant::now();
 
     // Compute decode timing
-    let active_kv_tokens = kv_manager.num_active_blocks() * block_size;
+    let active_kv_tokens = kv_manager.num_active_blocks() * args.block_size;
 
     // Compute average context length across all active decode requests
     let total_length: usize = state
@@ -454,7 +441,9 @@ async fn simulate_decode(
     let count = state.decode.len();
 
     let context_length = if count > 0 { total_length / count } else { 0 };
-    let decoding_time = perf_model.predict_decode_time(active_kv_tokens, context_length);
+    let decoding_time = args
+        .perf_model
+        .predict_decode_time(active_kv_tokens, context_length);
     let total_time = Duration::from_secs_f64(decoding_time / 1000.0);
 
     // Process decoding
@@ -481,7 +470,7 @@ async fn simulate_decode(
             }
 
             // Preempt one request and free its blocks
-            for signal in state.preempt(preemption_mode) {
+            for signal in state.preempt(args.preemption_mode) {
                 kv_manager.process(&signal);
             }
 
@@ -521,8 +510,9 @@ async fn simulate_decode(
         }
     }
 
-    if speedup_ratio > 0.0 && total_time > Duration::ZERO {
-        let sleep_duration = Duration::from_secs_f64(total_time.as_secs_f64() / speedup_ratio);
+    let effective_ratio = args.speedup_ratio * args.decode_speedup_ratio;
+    if effective_ratio > 0.0 && total_time > Duration::ZERO {
+        let sleep_duration = Duration::from_secs_f64(total_time.as_secs_f64() / effective_ratio);
         let deadline = start_time + sleep_duration;
 
         sleep_until_precise(deadline).await;
@@ -889,16 +879,7 @@ mod tests {
 
         // ── Step 3: First simulate_decode ──
         // R1 generates 1 token, gains a partial block.
-        simulate_decode(
-            &mut state,
-            &mut kv_manager,
-            &output_tx,
-            &args.perf_model,
-            args.block_size,
-            args.speedup_ratio,
-            args.preemption_mode,
-        )
-        .await;
+        simulate_decode(&mut state, &mut kv_manager, &output_tx, &args).await;
 
         assert_eq!(state.decode.len(), 1);
         assert_eq!(state.decode[0], r1_uuid);
@@ -933,16 +914,7 @@ mod tests {
 
         // ── Step 5: Second simulate_decode ──
         // R1 generates 2nd token → complete. Frees 3 blocks (1 destroyed, 2 deactivated).
-        simulate_decode(
-            &mut state,
-            &mut kv_manager,
-            &output_tx,
-            &args.perf_model,
-            args.block_size,
-            args.speedup_ratio,
-            args.preemption_mode,
-        )
-        .await;
+        simulate_decode(&mut state, &mut kv_manager, &output_tx, &args).await;
 
         assert!(!state.requests.contains_key(&r1_uuid), "R1 completed");
         assert_eq!(state.decode.len(), 0);
@@ -965,16 +937,7 @@ mod tests {
         // ── Steps 7+: Cycle until all requests complete ──
         loop {
             simulate_prefill(&mut state, &mut kv_manager, &mut hit_rates, &args).await;
-            simulate_decode(
-                &mut state,
-                &mut kv_manager,
-                &output_tx,
-                &args.perf_model,
-                args.block_size,
-                args.speedup_ratio,
-                args.preemption_mode,
-            )
-            .await;
+            simulate_decode(&mut state, &mut kv_manager, &output_tx, &args).await;
 
             if state.is_empty() {
                 break;

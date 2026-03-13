@@ -166,6 +166,14 @@ pub struct MockEngineArgs {
     #[validate(range(min = 0.0))]
     pub speedup_ratio: f64,
 
+    /// Additional speedup multiplier applied only to decode steps.
+    /// Models speculative decoding (e.g. Eagle) where decode throughput improves
+    /// without affecting prefill latency. The effective decode speedup is
+    /// `speedup_ratio * decode_speedup_ratio`.
+    #[builder(default = "1.0")]
+    #[validate(range(min = 0.0))]
+    pub decode_speedup_ratio: f64,
+
     #[builder(default = "1")]
     #[validate(range(min = 1))]
     pub dp_size: u32,
@@ -272,6 +280,7 @@ impl MockEngineArgs {
             "enable_prefix_caching",
             "enable_chunked_prefill",
             "speedup_ratio",
+            "decode_speedup_ratio",
             "dp_size",
             "startup_time",
             "is_prefill",
@@ -346,6 +355,12 @@ impl MockEngineArgs {
             && let Some(num) = value.as_f64()
         {
             builder = builder.speedup_ratio(num);
+        }
+
+        if let Some(value) = extra_args.get("decode_speedup_ratio")
+            && let Some(num) = value.as_f64()
+        {
+            builder = builder.decode_speedup_ratio(num);
         }
 
         if let Some(value) = extra_args.get("dp_size")
