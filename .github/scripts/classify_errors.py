@@ -227,12 +227,16 @@ def post_pr_comment(repo, pr_number, results, run_id, run_url, workflow_name, to
     marker = "<!-- error-classification -->"
     failed_count = len({r["job_id"] for r in results})
 
-    # Build table rows
+    # Build table rows — one row per job (first/primary error only)
+    seen_jobs = set()
     rows = []
     for r in results:
+        if r["job_id"] in seen_jobs:
+            continue
+        seen_jobs.add(r["job_id"])
         category_short = r["category"].replace("_error", "")
         transient = "Yes" if r["is_transient"] else "No"
-        summary = r["summary"][:200] + "..." if len(r["summary"]) > 200 else r["summary"]
+        summary = r["summary"]
         rows.append(
             f"| {r['job_name']} | {r['step']} | {category_short} | {summary} | {transient} |"
         )
@@ -251,31 +255,10 @@ def post_pr_comment(repo, pr_number, results, run_id, run_url, workflow_name, to
 
     headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github+json"}
 
-    # Search for existing comment to update
-    comment_id = find_existing_comment(repo, pr_number, marker, headers)
-    if comment_id:
-        url = f"https://api.github.com/repos/{repo}/issues/comments/{comment_id}"
-        resp = requests.patch(url, headers=headers, json={"body": body})
-    else:
-        url = f"https://api.github.com/repos/{repo}/issues/{pr_number}/comments"
-        resp = requests.post(url, headers=headers, json={"body": body})
+    url = f"https://api.github.com/repos/{repo}/issues/{pr_number}/comments"
+    resp = requests.post(url, headers=headers, json={"body": body})
     print(f"  Comment API response: {resp.status_code} {resp.text[:500]}")
     resp.raise_for_status()
-
-
-def find_existing_comment(repo, pr_number, marker, headers):
-    """Find an existing comment containing the marker string."""
-    url = f"https://api.github.com/repos/{repo}/issues/{pr_number}/comments"
-    params = {"per_page": 100}
-    while url:
-        resp = requests.get(url, headers=headers, params=params)
-        resp.raise_for_status()
-        for comment in resp.json():
-            if marker in comment.get("body", ""):
-                return comment["id"]
-        url = resp.links.get("next", {}).get("url")
-        params = None
-    return None
 
 
 def write_json_output(path, run_id, repo, workflow_name, workflow_type, branch, commit_sha,
