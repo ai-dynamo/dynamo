@@ -250,11 +250,11 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler):
                 request.serialized_request = readable.metadata()
                 logger.debug(f"Request: {request.model_dump_json()}")
 
+                # Get the response generator from downstream worker
+                response_generator = await self.pd_worker_client.round_robin(
+                    request.model_dump_json()
+                )
                 with _nvtx.annotate("mm:enc:embedding_transfer", color="purple"):
-                    # Get the response generator from downstream worker
-                    response_generator = await self.pd_worker_client.round_robin(
-                        request.model_dump_json()
-                    )
                     await readable.wait_for_completion()
 
                 async for response in response_generator:
