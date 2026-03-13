@@ -387,7 +387,8 @@ impl NixlRegisterableStorage for DiskStorage {
         }
 
         handle_nixl_register(self, agent, opt_args)?;
-        self.unlink()?;
+        // self.unlink()?;
+        tracing::warn!("Unlinking disk storage after NIXL registration is currently disabled to avoid GDS registration failures.");
         Ok(())
     }
 }
