@@ -53,6 +53,7 @@ WORKDIR /dynamo
 
 # Copy Cargo workspace manifests, lockfile, and README (some crates inherit
 # readme.workspace = true, so cargo needs README.md at the workspace root)
+COPY --from=dynamo .cargo/ .cargo/
 COPY --from=dynamo Cargo.toml Cargo.lock README.md ./
 
 # Copy all workspace crates (libdynamo_llm depends transitively on many)

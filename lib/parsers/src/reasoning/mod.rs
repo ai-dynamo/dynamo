@@ -31,6 +31,7 @@ fn get_reasoning_parser_map() -> &'static HashMap<&'static str, ReasoningParserT
         map.insert("mistral", ReasoningParserType::Mistral);
         map.insert("granite", ReasoningParserType::Granite);
         map.insert("nemotron_nano", ReasoningParserType::DeepseekR1); // nemotron nano is ...</think>
+        map.insert("nemotron3", ReasoningParserType::DeepseekR1);
         map.insert("glm45", ReasoningParserType::NemotronDeci); // GLM-4.5/5 is <think>...</think>, no force_reasoning
         map.insert(
             "minimax_append_think",
@@ -86,6 +87,14 @@ pub trait ReasoningParser: Send + std::fmt::Debug {
         text: &str,
         token_ids: &[u32],
     ) -> ParserResult;
+
+    /// Override the parser's initial reasoning state. When called with `true`, the parser
+    /// starts in reasoning mode without waiting for the start token in the completion stream.
+    /// Use this when the chat template already injected the start token (e.g., `<think>`)
+    /// into the prompt, so it won't appear in the model's output.
+    fn set_in_reasoning(&mut self, _in_reasoning: bool) {
+        // Default no-op for parsers that don't support per-request overrides.
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,6 +130,10 @@ impl ReasoningParser for ReasoningParserWrapper {
     ) -> ParserResult {
         self.parser
             .parse_reasoning_streaming_incremental(text, token_ids)
+    }
+
+    fn set_in_reasoning(&mut self, in_reasoning: bool) {
+        self.parser.set_in_reasoning(in_reasoning)
     }
 }
 
@@ -237,6 +250,7 @@ mod tests {
             "mistral",
             "granite",
             "nemotron_nano",
+            "nemotron3",
             "glm45",
             "minimax_append_think",
         ];

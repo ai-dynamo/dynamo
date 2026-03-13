@@ -107,7 +107,7 @@ def create_temp_engine_args_file(args: argparse.Namespace) -> Path:
         "max_num_batched_tokens": getattr(args, "max_num_batched_tokens", None),
         "enable_prefix_caching": getattr(args, "enable_prefix_caching", None),
         "enable_chunked_prefill": getattr(args, "enable_chunked_prefill", None),
-        "watermark": getattr(args, "watermark", None),
+        "preemption_mode": getattr(args, "preemption_mode", None),
         "speedup_ratio": getattr(args, "speedup_ratio", None),
         "dp_size": getattr(args, "dp_size", None),
         "startup_time": getattr(args, "startup_time", None),
@@ -287,10 +287,13 @@ def parse_args() -> argparse.Namespace:
         help="Disable chunked prefill",
     )
     parser.add_argument(
-        "--watermark",
-        type=float,
+        "--preemption-mode",
+        type=str,
         default=None,
-        help="Watermark value for the mocker engine (default: 0.01)",
+        choices=["lifo", "fifo"],
+        help="Preemption mode for decode eviction under memory pressure. "
+        "'lifo' (default) evicts the newest request (matches vLLM v1), "
+        "'fifo' evicts the oldest request.",
     )
     parser.add_argument(
         "--speedup-ratio",
@@ -381,6 +384,15 @@ def parse_args() -> argparse.Namespace:
         "in vLLM native wire format. One port per worker (must match --num-workers). "
         "Each worker's DP ranks bind on base_port + dp_rank. A KvEventPublisher relay "
         "subscribes and forwards events to NATS. (default: None, disabled)",
+    )
+    parser.add_argument(
+        "--zmq-replay-ports",
+        type=str,
+        default=None,
+        help="Comma-separated list of ZMQ ROUTER base ports for KV event replay. "
+        "One port per worker (must match --num-workers). "
+        "Each worker's DP ranks bind on base_port + dp_rank. "
+        "Used alongside --zmq-kv-events-ports for gap recovery. (default: None, disabled)",
     )
     parser.add_argument(
         "--bootstrap-ports",
@@ -474,6 +486,17 @@ def parse_args() -> argparse.Namespace:
             raise ValueError(
                 f"--zmq-kv-events-ports must have exactly --num-workers ({args.num_workers}) ports, "
                 f"got {len(args.zmq_kv_events_ports_list)}: {args.zmq_kv_events_ports_list}"
+            )
+
+    # Parse and validate zmq_replay_ports
+    args.zmq_replay_ports_list = parse_bootstrap_ports(args.zmq_replay_ports)
+    if args.zmq_replay_ports_list:
+        if not args.zmq_kv_events_ports_list:
+            raise ValueError("--zmq-replay-ports requires --zmq-kv-events-ports")
+        if len(args.zmq_replay_ports_list) != args.num_workers:
+            raise ValueError(
+                f"--zmq-replay-ports must have exactly --num-workers ({args.num_workers}) ports, "
+                f"got {len(args.zmq_replay_ports_list)}: {args.zmq_replay_ports_list}"
             )
 
     # Set endpoint default based on worker type if not explicitly provided

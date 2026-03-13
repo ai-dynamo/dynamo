@@ -21,6 +21,9 @@
 # Set to false if CRDs are managed externally (e.g., via GitOps or a separate pipeline).
 upgradeCRD: true
 
+# Environment variables to pass to operator Deployment.
+env: []
+
 # Namespace restriction configuration for the operator
 # If enabled: true and targetNamespace is empty, the operator will be restricted to the release namespace
 # If enabled: true and targetNamespace is set, the operator will be restricted to the specified namespace

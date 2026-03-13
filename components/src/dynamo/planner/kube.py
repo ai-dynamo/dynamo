@@ -58,6 +58,16 @@ class KubernetesAPI:
             name=graph_deployment_name,
         )
 
+    def list_graph_deployments(self) -> list[dict]:
+        """List all DynamoGraphDeployments in the current namespace."""
+        result = self.custom_api.list_namespaced_custom_object(
+            group="nvidia.com",
+            version="v1alpha1",
+            namespace=self.current_namespace,
+            plural="dynamographdeployments",
+        )
+        return result.get("items", [])
+
     def get_graph_deployment(self, graph_deployment_name: str) -> dict:
         """
         Get the parent DynamoGraphDeployment

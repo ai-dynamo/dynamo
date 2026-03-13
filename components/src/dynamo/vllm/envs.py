@@ -20,6 +20,7 @@ REGISTERED_PORT_MAX = 49151
 
 if TYPE_CHECKING:
     DYN_VLLM_KV_EVENT_PORT: int = 20080
+    DYN_FORWARDPASS_METRIC_PORT: int = 20380
 
 
 def _resolve_port(env_var: str, default_port: int) -> int:
@@ -61,6 +62,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Port used for KV events publishing to the frontend
     # Note: This env variable is ignored if explicitly using --kv-events-config ''
     "DYN_VLLM_KV_EVENT_PORT": lambda: _resolve_port("DYN_VLLM_KV_EVENT_PORT", 20080),
+    "DYN_FORWARDPASS_METRIC_PORT": lambda: _resolve_port(
+        "DYN_FORWARDPASS_METRIC_PORT", 20380
+    ),
 }
 
 

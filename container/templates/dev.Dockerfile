@@ -13,8 +13,7 @@
 #   pull those binaries/configs in via COPY.
 FROM runtime AS dynamo_tools
 
-ARG ARCH
-ARG ARCH_ALT
+ARG TARGETARCH
 ARG DEVICE
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -131,9 +130,9 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 # Estimated layer size: ~500MB–1.5GB (nsight-systems is a full profiling suite)
 # Cache apt downloads; sharing=locked avoids apt/dpkg races with concurrent builds.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    wget -qO - "https://developer.download.nvidia.com/devtools/repos/ubuntu2404/${ARCH}/nvidia.pub" \
+    wget -qO - "https://developer.download.nvidia.com/devtools/repos/ubuntu2404/${TARGETARCH}/nvidia.pub" \
         | gpg --dearmor -o /etc/apt/keyrings/nvidia-devtools.gpg && \
-    echo "deb [signed-by=/etc/apt/keyrings/nvidia-devtools.gpg] https://developer.download.nvidia.com/devtools/repos/ubuntu2404/${ARCH} /" \
+    echo "deb [signed-by=/etc/apt/keyrings/nvidia-devtools.gpg] https://developer.download.nvidia.com/devtools/repos/ubuntu2404/${TARGETARCH} /" \
         | tee /etc/apt/sources.list.d/nvidia-devtools.list && \
     apt-get update && \
     apt-get install -y --no-install-recommends nsight-systems-2025.5.1 && \
@@ -193,7 +192,7 @@ RUN if [ ! -e /usr/bin/python3 ]; then \
 # wheels, but dev stage needs it for maturin develop and cargo build from source.
 # - SGLang: Copy NIXL/UCX/libfabric/gdrcopy binaries from wheel_builder (not in upstream lmsysorg/sglang runtime).
 # - vllm/trtllm/none: NIXL/UCX are already present in runtime (no-op).
-ARG ARCH_ALT
+ARG TARGETARCH
 RUN --mount=from=wheel_builder,target=/wheel_builder \
     if [ "${FRAMEWORK}" = "sglang" ]; then \
         if [ -d /wheel_builder/usr/local/ucx ] && [ -d /wheel_builder/opt/nvidia/nvda_nixl ]; then \
@@ -204,20 +203,16 @@ RUN --mount=from=wheel_builder,target=/wheel_builder \
             cp /wheel_builder/usr/include/gdrapi.h /usr/include/; \
             cp /wheel_builder/usr/lib64/libgdrapi.so* /usr/lib64/; \
             echo "/usr/lib64" >> /etc/ld.so.conf.d/gdrcopy.conf; \
-            # SGLang expects ARCH-qualified lib paths; mirror lib64 into lib/${ARCH_ALT}-linux-gnu for parity.
-            if [ -d /opt/nvidia/nvda_nixl/lib64 ]; then \
-                mkdir -p /opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu; \
-                cp -r /opt/nvidia/nvda_nixl/lib64/. /opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu/; \
-            fi; \
         fi; \
     fi
 
-# All frameworks use the same path pattern: /opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu
-# For vllm/trtllm/none: This resets the same values already set in runtime (no harm)
-# For sglang: This sets them for the first time (required)
+# NIXL is installed under lib64 (manylinux/AlmaLinux convention used by the wheel_builder).
+# All frameworks reference NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib64.
+# For vllm/trtllm/none: This resets the same values already set in runtime (no harm).
+# For sglang: This sets them for the first time (required).
 ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl \
-    NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu \
-    NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu/plugins
+    NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib64 \
+    NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib64/plugins
 
 # Set universal CUDA development environment variables (all frameworks)
 # vLLM: Dockerfile.vllm line 533, 597
@@ -313,12 +308,12 @@ RUN if [ ! -d /opt/dynamo/venv ]; then \
 # Initialize Git LFS for the dynamo user (required for requirements with lfs=true)
 RUN git lfs install
 
-# Install common and test dependencies (matches main Dockerfile dev stage)
-# This installs pytest-benchmark and other test dependencies required for CI
-# TRT-LLM specific: Also installs cupy-cuda13x with special index strategy (Dockerfile.trtllm lines 768-776)
+# Install only the ADDITIONAL dev/test dependencies.
+# Runtime deps (common, framework, planner, benchmark) are already installed
+# in the parent runtime image — re-resolving them here would risk version drift.
 # SGLang specific: Reinstall pytest to ensure venv has pytest executable with correct shebang
 ARG FRAMEWORK
-RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
+RUN --mount=type=bind,source=./container/deps/requirements.dev.txt,target=/tmp/requirements.dev.txt \
     --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
     # Cache uv downloads; uv handles its own locking for this cache.
     --mount=type=cache,target=/root/.cache/uv \
@@ -326,7 +321,7 @@ RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requi
     uv pip install \
         --index-strategy unsafe-best-match \
         --extra-index-url https://download.pytorch.org/whl/cu130 \
-        --requirement /tmp/requirements.txt \
+        --requirement /tmp/requirements.dev.txt \
         --requirement /tmp/requirements.test.txt && \
     if [ "${FRAMEWORK}" = "sglang" ]; then \
         uv pip install --force-reinstall --no-deps pytest; \
