@@ -1,0 +1,38 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Build, Test, and Copy Framework Image
+
+on:
+  workflow_call:
+    inputs:
+      framework:
+        description: 'Framework name (vllm, sglang, trtllm)'
+        default: 'vllm'
+        required: true
+        type: string
+      cuda_version:
+        description: 'CUDA version to build with'
+        default: '12.9'
+        required: true
+        type: string
+      platform:
+        description: 'Target platform (amd64 or arm64)'
+        default: 'amd64'
+        required: true
+        type: string
+
+jobs:
+  build:
+    name: Deploy Test
+    runs-on: ubuntu-latest
+    env:
+      FRAMEWORK: ${{ inputs.framework }}
+      CUDA_VERSION: ${{ inputs.cuda_version }}
+      PLATFORM: ${{ inputs.platform }}
+    steps:
+      - name: Echo Build Parameters
+        run: |
+          echo "Framework: $FRAMEWORK"
+          echo "CUDA version: $CUDA_VERSION"
+          echo "Platform: $PLATFORM"
