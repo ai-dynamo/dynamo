@@ -96,7 +96,7 @@ Furthermore, when these three techniques are composed together, they yield compo
 
 ![Performance composability of disaggregated serving, KV cache-aware routing, and KV cache offloading](../assets/img/intro-perf.svg)
 
-- **Disaggregated Serving + KV Cache-Aware Routing** -- KV cache aware routing load balances for both compute (on prefill) and memory (on decode), optimizing latency and throughput simultaneously.
+- **Disaggregated Serving + KV Cache-Aware Routing** -- KV cache-aware routing load balances for both compute (on prefill) and memory (on decode), optimizing latency and throughput simultaneously.
 - **Disaggregated Serving + KV Cache Offloading** -- KV cache offloading results in faster TTFT, and the number of prefill workers can be reduced to reduce TCO.
 - **KV Cache-Aware Routing + KV Cache Offloading** -- Offloading increases the total addressable cache size, increasing the KV cache hit rate, which in turn accelerates the TTFT.
 
