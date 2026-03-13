@@ -250,10 +250,10 @@ cd deploy/operator
 # 2.1 Alternative 1 : Build and push the operator image for multiple platforms
 docker buildx create --name multiplatform --driver docker-container --bootstrap
 docker buildx use multiplatform
-docker buildx build --platform linux/amd64,linux/arm64 -t $DOCKER_SERVER/dynamo-operator:$IMAGE_TAG --push .
+docker buildx build --platform linux/amd64,linux/arm64 -t $DOCKER_SERVER/kubernetes-operator:$IMAGE_TAG --push .
 
 # 2.2 Alternative 2 : Build and push the operator image for a single platform
-docker build -t $DOCKER_SERVER/dynamo-operator:$IMAGE_TAG . && docker push $DOCKER_SERVER/dynamo-operator:$IMAGE_TAG
+docker build -t $DOCKER_SERVER/kubernetes-operator:$IMAGE_TAG . && docker push $DOCKER_SERVER/kubernetes-operator:$IMAGE_TAG
 
 cd -
 
@@ -275,7 +275,7 @@ helm dep build ./platform/
 NS_RESTRICT_FLAGS="--set dynamo-operator.namespaceRestriction.enabled=true"
 helm install dynamo-platform ./platform/ \
   --namespace "${NAMESPACE}" \
-  --set "dynamo-operator.controllerManager.manager.image.repository=${DOCKER_SERVER}/dynamo-operator" \
+  --set "dynamo-operator.controllerManager.manager.image.repository=${DOCKER_SERVER}/kubernetes-operator" \
   --set "dynamo-operator.controllerManager.manager.image.tag=${IMAGE_TAG}" \
   --set "dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret" \
   ${NS_RESTRICT_FLAGS}

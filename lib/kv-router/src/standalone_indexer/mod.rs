@@ -3,6 +3,7 @@
 
 pub mod indexer;
 pub mod listener;
+pub mod metrics;
 pub mod recovery;
 pub mod registry;
 pub mod server;
@@ -97,7 +98,18 @@ pub async fn run_server(config: IndexerConfig) -> anyhow::Result<()> {
 
     registry.signal_ready();
 
-    let state = Arc::new(AppState { registry });
+    #[cfg(feature = "metrics")]
+    let prom_registry = {
+        let r = prometheus::Registry::new();
+        metrics::register(&r).expect("failed to register indexer metrics");
+        r
+    };
+
+    let state = Arc::new(AppState {
+        registry,
+        #[cfg(feature = "metrics")]
+        prom_registry,
+    });
 
     let app = create_router(state);
     let listener = TcpListener::bind(("0.0.0.0", config.port)).await?;

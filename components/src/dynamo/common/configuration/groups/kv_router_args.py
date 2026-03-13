@@ -3,7 +3,7 @@
 
 """Shared KV router configuration ArgGroup.
 
-Defines the 16 KvRouterConfig parameters once so that both
+Defines the 17 KvRouterConfig parameters once so that both
 ``dynamo.frontend`` and ``dynamo.router`` can reuse them without duplication.
 Field names on ``KvRouterConfigBase`` match the ``KvRouterConfig`` Python
 constructor kwargs 1:1, so ``kv_router_kwargs()`` returns a dict that can be
@@ -34,11 +34,12 @@ _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "router_queue_threshold",
     "router_event_threads",
     "router_enable_cache_control",
+    "router_queue_policy",
 )
 
 
 class KvRouterConfigBase(ConfigBase):
-    """Mixin carrying the 16 KvRouterConfig fields."""
+    """Mixin carrying the 17 KvRouterConfig fields."""
 
     overlap_score_weight: float
     router_temperature: float
@@ -56,6 +57,7 @@ class KvRouterConfigBase(ConfigBase):
     router_queue_threshold: Optional[float]
     router_event_threads: int
     router_enable_cache_control: bool
+    router_queue_policy: str
 
     def kv_router_kwargs(self) -> dict:
         """Return a dict suitable for ``KvRouterConfig(**kwargs)``."""
@@ -63,7 +65,7 @@ class KvRouterConfigBase(ConfigBase):
 
 
 class KvRouterArgGroup(ArgGroup):
-    """CLI arguments for the 16 KvRouterConfig parameters."""
+    """CLI arguments for the 17 KvRouterConfig parameters."""
 
     def add_arguments(self, parser) -> None:
         g = parser.add_argument_group("KV Router Options")
@@ -222,11 +224,11 @@ class KvRouterArgGroup(ArgGroup):
             g,
             flag_name="--router-queue-threshold",
             env_var="DYN_ROUTER_QUEUE_THRESHOLD",
-            default=None,
+            default=2.0,
             help=(
                 "KV Router: Queue threshold fraction for prefill token capacity. "
-                "When set, requests are queued if all workers exceed this fraction of "
-                "max_num_batched_tokens. Must be > 0. If not set, queueing is disabled."
+                "Requests are queued if all workers exceed this fraction of "
+                "max_num_batched_tokens. Must be > 0."
             ),
             arg_type=float,
         )
@@ -253,4 +255,17 @@ class KvRouterArgGroup(ArgGroup):
                 "a cache_control service mesh client and fires pin_prefix after generation for "
                 "requests with nvext.cache_control."
             ),
+        )
+        add_argument(
+            g,
+            flag_name="--router-queue-policy",
+            env_var="DYN_ROUTER_QUEUE_POLICY",
+            default="fcfs",
+            help=(
+                "KV Router: Scheduling policy for the router queue. "
+                "'fcfs' (default): first-come first-served with priority bumps — optimizes tail TTFT. "
+                "'wspt': weighted shortest processing time (Smith's rule) — optimizes average TTFT."
+            ),
+            arg_type=str,
+            choices=["fcfs", "wspt"],
         )

@@ -12,7 +12,7 @@ repository.workspace = true
 
 [features]
 default = []
-metrics = []
+metrics = ["dep:dynamo-runtime"]
 bench = ["dep:clap", "dep:indicatif", "dep:serde_json", "dep:plotters"]
 standalone-indexer = ["metrics", "dep:axum", "dep:bytes", "dep:zeromq", "dep:serde_json", "dep:reqwest"]
 indexer-bin = ["standalone-indexer", "dep:clap", "dep:tracing-subscriber"]
@@ -20,13 +20,14 @@ test-endpoints = ["indexer-bin"]
 
 [dependencies]
 # repo
-dynamo-runtime = { workspace = true }
+dynamo-runtime = { workspace = true, optional = true }
 dynamo-tokens = { workspace = true }
 
 # workspace
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 dashmap = { workspace = true }
+ordered-float = { workspace = true }
 derive_builder = { workspace = true }
 derive-getters = { workspace = true }
 prometheus = { workspace = true }

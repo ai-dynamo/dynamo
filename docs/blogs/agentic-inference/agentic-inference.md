@@ -87,7 +87,7 @@ The `agent_hints` fields:
 - **`osl`** (output sequence length) is the harness's estimate of how many tokens this request will generate. The router uses this to gauge how long a worker will be occupied, which improves load balancing. A harness can learn this over time by tracking average output lengths per tool call type.
 - **`speculative_prefill`** signals the orchestrator to begin caching this request's prefix on a likely worker before the full request is ready. This is useful when the harness knows a tool call is about to return and wants to warm the cache ahead of time.
 
-The `cache_control` field will look familiar to anyone who has used Anthropic's prompt caching API. It tells the orchestrator to pin the computed prefix on the worker for the specified TTL, protecting it from eviction during tool call gaps. Currently `ephemeral` is the only supported type (to match Anthropic's API). We discuss how this works in the cache retention section below. You can find complete documentation on agent hints [here](https://docs.nvidia.com/ai-enterprise/dynamo/latest/components/frontend/nvext.html#cache-control).
+The `cache_control` field will look familiar to anyone who has used Anthropic's prompt caching API. It tells the orchestrator to pin the computed prefix on the worker for the specified TTL, protecting it from eviction during tool call gaps. Currently `ephemeral` is the only supported type (to match Anthropic's API). We discuss how this works in the cache retention section below. You can find complete documentation on agent hints [here](../../components/frontend/nvext.md#cache-control).
 
 ## Layer 2: The Router
 
@@ -95,7 +95,7 @@ A coding agent follows a sequential pattern: long prefill, tool call, extend pre
 
 ### KV-Aware Placement
 
-Without cache-aware routing, turn 2 of a conversation has a ~1/N chance of landing on the same worker as turn 1. Every miss is a full prefix recomputation which is a significant performance bottleneck and extremely costly for an end user. Dynamo's router maintains a global index of which KV cache blocks exist on which workers. The [Flash Indexer post](https://developer.nvidia.com/blog/building-a-high-performance-kv-cache-index-for-llm-inference-with-nvidia-dynamo/) covers the six iterations that got this indexer to 170M ops/s (**planetary** scale KV routing). On every request, the router queries the index for per-worker overlap scores and selects the worker that minimizes the combined cost of cache miss and current decode load. This cost function is tunable, and we show below how teams can build custom agent aware routing strategies on top of it.
+Without cache-aware routing, turn 2 of a conversation has a ~1/N chance of landing on the same worker as turn 1. Every miss is a full prefix recomputation which is a significant performance bottleneck and extremely costly for an end user. Dynamo's router maintains a global index of which KV cache blocks exist on which workers. The [Flash Indexer post](../flash-indexer/flash-indexer.md) covers the six iterations that got this indexer to 170M ops/s (**planetary** scale KV routing). On every request, the router queries the index for per-worker overlap scores and selects the worker that minimizes the combined cost of cache miss and current decode load. This cost function is tunable, and we show below how teams can build custom agent aware routing strategies on top of it.
 
 ### Priority Scheduling
 
