@@ -1,13 +1,13 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Introduction
+title: Introduction to Dynamo
 sidebar-title: Introduction
 ---
 
-# Introduction
+# Introduction to Dynamo
 
-Dynamo is NVIDIA's high-throughput, low-latency inference framework, designed to serve generative AI workloads in distributed environments. This page gives an overview of Dynamo's design principles, performance benefits, and production-grade features.
+Dynamo is an open-source, high-throughput, low-latency inference framework, designed to serve generative AI workloads in distributed environments. This page gives an overview of Dynamo's design principles, performance benefits, and production-grade features.
 
 <Tip>
 Looking to get started right away? See the [Quickstart](quickstart.md) to install and run Dynamo in minutes.
@@ -55,12 +55,12 @@ The Dynamo ecosystem includes these additional modular components, and will cont
 | :--- | :--- | :--- |
 | **Scheduling** | Dynamo | Inference serving for GenAI workloads |
 | **Routing** | Router | Smart routing leveraging KV cache hit rate and KV cache load. More algorithms will be added (e.g., agentic routing) |
-| **Data Transfer** | NIXL | Point-to-point data transfer between GPUs and tiered storage (G1: GPU, G2: CPU, G3: SSD, G4: remote) |
+| **Data Transfer** | [NIXL](https://github.com/ai-dynamo/nixl) | Point-to-point data transfer between GPUs and tiered storage (G1: GPU, G2: CPU, G3: SSD, G4: remote) |
 | **Memory** | KVBM (KV Block Manager) | Manage KV cache across memory tiers (G1-G4) with customizable eviction policy |
 | **Scaling / Cloud** | Planner | Automatically tune performance in real time for prefill and decode given SLA constraints (TTFT and TPOT) |
-| | Grove | Enables gang scheduling and topology awareness required for Kubernetes multi-node disaggregated serving |
+| | [Grove](https://github.com/ai-dynamo/grove) | Enables gang scheduling and topology awareness required for Kubernetes multi-node disaggregated serving |
 | | [Model Express](https://github.com/ai-dynamo/model-express) | Load model weights fast by caching and transferring them via NIXL to other GPUs. Will also be leveraged for fault tolerance |
-| **Perf** | AIConfigurator | Estimate performance for aggregated vs. disaggregated serving based on model, ISL/OSL, HW, etc. Formerly known as LLMPet |
+| **Perf** | [AIConfigurator](https://github.com/ai-dynamo/aiconfigurator) | Estimate performance for aggregated vs. disaggregated serving based on model, ISL/OSL, HW, etc. Formerly known as LLMPet |
 | | [AIPerf](https://github.com/ai-dynamo/aiperf) | Re-architected GenAI-Perf written in Python for maximum extensibility; supports distributed benchmarking |
 | | AITune | Given a model or pipeline, searches for best backend to deploy with (e.g., TensorRT, Torch.compile, etc.) (coming soon) |
 | | Flex Tensor | Stream weights to GPUs from host memory to run very large language models in GPUs with limited memory capacity (coming soon) |
@@ -96,11 +96,11 @@ Dynamo achieves state-of-the-art LLM performance by composing three core techniq
 - [Disaggregated serving](../design-docs/disagg-serving.md) In the Design Principles section, we introduced the concept of disaggregated serving. Its performance has been showcased by [InferenceX](https://newsletter.semianalysis.com/p/inferencex-v2-nvidia-blackwell-vs). DeepSeek V3 can be served with ~7x throughput/GPU, with disaggregated serving and large-scale expert parallelism.
 Furthermore, when these three techniques are composed together, they yield compounding benefits as shown in the following diagram.
 
-![Performance composability of disaggregated serving, KV cache aware routing, and KV cache offloading](../assets/img/intro-perf.svg)
+![Performance composability of disaggregated serving, KV cache-aware routing, and KV cache offloading](../assets/img/intro-perf.svg)
 
-- **Disaggregated serving + KV cache aware routing** -- KV cache aware routing load balances for both compute (on prefill) and memory (on decode), optimizing latency and throughput simultaneously.
-- **Disaggregated serving + KV cache offloading** -- KV cache offloading results in faster TTFT, and the number of prefill workers can be reduced to reduce TCO.
-- **KV cache aware routing + KV cache offloading** -- Offloading increases the total addressable cache size, increasing the KV cache hit rate, which in turn accelerates the TTFT.
+- **Disaggregated Serving + KV Cache-Aware Routing** -- KV cache-aware routing load balances for both compute (on prefill) and memory (on decode), optimizing latency and throughput simultaneously.
+- **Disaggregated Serving + KV Cache Offloading** -- KV cache offloading results in faster TTFT, and the number of prefill workers can be reduced to reduce TCO.
+- **KV Cache-Aware Routing + KV Cache Offloading** -- Offloading increases the total addressable cache size, increasing the KV cache hit rate, which in turn accelerates the TTFT.
 
 <Tip>
 Ready to try these techniques? See [Dynamo recipes](https://github.com/ai-dynamo/dynamo/tree/main/recipes) for step-by-step deployment examples that compose disaggregated serving, routing, and offloading.
