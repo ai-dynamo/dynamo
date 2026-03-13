@@ -328,6 +328,9 @@ navigation:
         path: ../pages-dev/reference/glossary.md
       - page: Tuning Disaggregated Performance
         path: ../pages-dev/performance/tuning.md
+      # -- Frontend (hidden sub-pages) --
+      - page: NVIDIA Request Extensions (nvext)
+        path: ../pages-dev/components/frontend/nvext.md
       # -- Backend detail pages --
       - section: vLLM Details
         contents:
