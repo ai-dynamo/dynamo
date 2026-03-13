@@ -108,25 +108,25 @@ TensorRT-LLM delivers maximum inference performance and optimization, with full 
 > 5. **Request Cancellation**: Due to known issues, the TensorRT-LLM engine is temporarily not notified of request cancellations, meaning allocated resources for cancelled requests are not freed.
 
 {/* Backend READMEs */}
-[vllm-readme]: /dynamo/v-0-9-0/components/backends/v-llm
-[sglang-readme]: /dynamo/v-0-9-0/components/backends/sg-lang
-[trtllm-readme]: /dynamo/v-0-9-0/components/backends/tensor-rt-llm
+[vllm-readme]: /dynamo/v-0-9-1/components/backends/v-llm
+[sglang-readme]: /dynamo/v-0-9-1/components/backends/sg-lang
+[trtllm-readme]: /dynamo/v-0-9-1/components/backends/tensor-rt-llm
 
 {/* Design Docs */}
-[disagg]: /dynamo/v-0-9-0/design-docs/disaggregated-serving
-[kv-routing]: /dynamo/v-0-9-0/user-guides/kv-cache-aware-routing
-[planner]: /dynamo/v-0-9-0/components/planner
-[kvbm]: /dynamo/v-0-9-0/components/kvbm
-[migration]: /dynamo/v-0-9-0/user-guides/fault-tolerance/request-migration
-[tools]: /dynamo/v-0-9-0/user-guides/tool-calling
+[disagg]: /dynamo/v-0-9-1/design-docs/disaggregated-serving
+[kv-routing]: /dynamo/v-0-9-1/user-guides/kv-cache-aware-routing
+[planner]: /dynamo/v-0-9-1/components/planner
+[kvbm]: /dynamo/v-0-9-1/components/kvbm
+[migration]: /dynamo/v-0-9-1/user-guides/fault-tolerance/request-migration
+[tools]: /dynamo/v-0-9-1/user-guides/tool-calling
 
 {/* Multimodal */}
-[mm]: /dynamo/v-0-9-0/user-guides/multimodality-support
-[mm-vllm]: /dynamo/v-0-9-0/user-guides/multimodality-support/v-llm-multimodal
-[mm-trtllm]: /dynamo/v-0-9-0/user-guides/multimodality-support/tensor-rt-llm-multimodal
-[mm-sglang]: /dynamo/v-0-9-0/user-guides/multimodality-support/sg-lang-multimodal
+[mm]: /dynamo/v-0-9-1/user-guides/multimodality-support
+[mm-vllm]: /dynamo/v-0-9-1/user-guides/multimodality-support/v-llm-multimodal
+[mm-trtllm]: /dynamo/v-0-9-1/user-guides/multimodality-support/tensor-rt-llm-multimodal
+[mm-sglang]: /dynamo/v-0-9-1/user-guides/multimodality-support/sg-lang-multimodal
 
 {/* Feature-specific */}
-[lora]: /dynamo/v-0-9-0/kubernetes-deployment/deployment-guide/managing-models-with-dynamo-model
-[vllm-spec]: /dynamo/v-0-9-0/additional-resources/speculative-decoding/speculative-decoding-with-v-llm
-[trtllm-eagle]: /dynamo/v-0-9-0/additional-resources/tensor-rt-llm-details/llama-4-eagle
+[lora]: /dynamo/v-0-9-1/kubernetes-deployment/deployment-guide/managing-models-with-dynamo-model
+[vllm-spec]: /dynamo/v-0-9-1/additional-resources/speculative-decoding/speculative-decoding-with-v-llm
+[trtllm-eagle]: /dynamo/v-0-9-1/additional-resources/tensor-rt-llm-details/llama-4-eagle
