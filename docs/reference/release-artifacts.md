@@ -142,7 +142,6 @@ cargo add dynamo-kv-router@1.0.0
 For a complete list of known issues, refer to the release notes for each version:
 - [v1.0.0 Release Notes](https://github.com/ai-dynamo/dynamo/releases/tag/v1.0.0)
 - [v0.9.0 Release Notes](https://github.com/ai-dynamo/dynamo/releases/tag/v0.9.0)
-- [v0.8.1 Release Notes](https://github.com/ai-dynamo/dynamo/releases/tag/v0.8.1)
 
 ### Known Artifact Issues
 
@@ -157,7 +156,7 @@ For a complete list of known issues, refer to the release notes for each version
 
 ## Release History
 
-- **v1.0.0**: First major release. SGLang `v0.5.9`, TRT-LLM `v1.3.0rc5.post1` (CUDA 13.1), vLLM `v0.16.0`, NIXL `v0.10.1`. New `snapshot-agent` container and `snapshot` Helm chart (Preview). New EFA container variants for vLLM and TRT-LLM (Experimental, AMD64 only). New `dynamo-mocker` and `dynamo-kv-router` Rust crates. Deprecated `dynamo-crds` Helm chart (CRDs now managed by the Operator). `v1alpha1` CRDs deprecated.
+- **v1.0.0**: First major release. SGLang `v0.5.9`, TRT-LLM `v1.3.0rc5.post1` (CUDA 13.1), vLLM `v0.16.0`, NIXL `v0.10.1`. New `snapshot-agent` container and `snapshot` Helm chart (Preview). New EFA container variants for vLLM and TRT-LLM (Experimental, AMD64 only). New `dynamo-mocker` and `dynamo-kv-router` Rust crates. Deprecated `dynamo-crds` Helm chart (CRDs now managed by the Operator).
 - **v0.9.1**: Updated TRT-LLM to `v1.3.0rc3`. All other backend versions unchanged from v0.9.0.
 - **v0.9.0.post1**: Fixed `dynamo-platform` Helm chart operator image tag (Helm chart only, NGC)
 - **v0.9.0**: Updated vLLM to `v0.14.1`, SGLang to `v0.5.8`, TRT-LLM to `v1.3.0rc1`, NIXL to `v0.9.0`. New `dynamo-tokens` Rust crate. Deprecated `dynamo-graph` Helm chart.
