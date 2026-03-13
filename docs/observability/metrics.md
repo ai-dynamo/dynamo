@@ -223,7 +223,29 @@ Suppose the backend allows 3 concurrent requests and there are 10 clients contin
 
 The router exposes metrics for monitoring routing decisions and overhead. Defined in `lib/llm/src/kv_router/metrics.rs`.
 
-For router configuration and tuning, see the [Router Guide](../components/router/router-guide.md).
+For router configuration, deployment modes, and tuning, see the [Router Guide](../components/router/router-guide.md).
+
+#### Metrics Availability by Configuration
+
+Not all metrics appear in every deployment. The chart below shows which metric groups are **registered** and **populated** in each configuration:
+
+| Metric Group | Frontend + KV (agg) | Frontend + KV (disagg) | Frontend + non-KV (round-robin/random/direct) | Standalone Router |
+|---|---|---|---|---|
+| `dynamo_component_router_*` (request metrics) | Registered and populated | Registered and populated | Registered, **always zero** | Populated (on `DYN_SYSTEM_PORT`) |
+| `dynamo_router_overhead_*` (routing overhead) | Registered and populated | Registered and populated | **Not registered** | **Not created** |
+| `dynamo_frontend_router_queue_*` (queue depth) | Registered; populated when `--router-queue-threshold` set | Registered; populated when `--router-queue-threshold` set | **Not registered** | **Not created** |
+| `dynamo_component_kv_cache_events_applied` (indexer) | Populated when KV events are received | Populated when KV events are received | **Not registered** | Populated when KV events are received |
+| `dynamo_frontend_worker_*` (per-worker load/timing) | Registered and populated | Registered and populated (`worker_type`=`prefill`/`decode`) | Registered and populated (`worker_type`=`decode`) | **Not created** |
+
+**Key:**
+- **Registered and populated**: Metric appears at `/metrics` with real values
+- **Registered, always zero**: Metric appears at `/metrics` but the counter/histogram is never incremented (useful for dashboards that expect the metric to exist)
+- **Not registered / Not created**: Metric does not appear at `/metrics` at all
+
+**Scrape endpoints:**
+- Frontend: `/metrics` on HTTP port (default 8000, configurable via `--http-port` or `DYN_HTTP_PORT`)
+- Standalone router: `/metrics` on `DYN_SYSTEM_PORT` (must be set explicitly; default is `-1` / disabled)
+- Backend workers: `/metrics` on `DYN_SYSTEM_PORT` (separate from frontend metrics)
 
 #### Router Request Metrics (`dynamo_component_router_*`)
 
@@ -242,7 +264,7 @@ All metrics carry the standard hierarchy labels (`dynamo_namespace`, `dynamo_com
 
 #### Per-Request Routing Overhead (`dynamo_router_overhead_*`)
 
-Histograms (in milliseconds) tracking the time spent in each phase of the routing decision for every request. Registered on the frontend port (default 8000) at `/metrics` with a `router_id` label (the frontend's discovery instance ID).
+Histograms (in milliseconds) tracking the time spent in each phase of the routing decision for every request. Registered on the frontend port (default 8000) at `/metrics` with a `router_id` label (the frontend's discovery instance ID). These metrics are only created when the frontend has DRT discovery enabled (i.e., `--router-mode kv`); they do not appear in non-KV modes or on the standalone router.
 
 | Metric | Type | Description |
 |--------|------|-------------|
@@ -252,6 +274,16 @@ Histograms (in milliseconds) tracking the time spent in each phase of the routin
 | `dynamo_router_overhead_scheduling_ms` | Histogram | Time in scheduler worker selection |
 | `dynamo_router_overhead_total_ms` | Histogram | Total routing overhead per request |
 
+#### Router Queue Metrics (`dynamo_frontend_router_queue_*`)
+
+Gauge tracking the number of requests pending in the router's scheduler queue. Only registered when `--router-queue-threshold` is set. Labeled by `worker_type` to distinguish prefill vs. decode queues in disaggregated mode.
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `dynamo_frontend_router_queue_pending_requests` | Gauge | Requests pending in the router scheduler queue |
+
+**Labels:** `worker_type` (`prefill` or `decode`)
+
 #### KV Indexer Metrics
 
 Tracks KV cache events applied to the router's radix tree index. Only appears when `--router-kv-overlap-score-weight` is greater than 0 (default) and workers are publishing KV events. Will not appear if `--router-kv-overlap-score-weight 0` is set or no KV events have been received.
@@ -260,11 +292,11 @@ Tracks KV cache events applied to the router's radix tree index. Only appears wh
 |--------|------|-------------|
 | `dynamo_component_kv_cache_events_applied` | Counter | KV cache events applied to the index |
 
-**Additional labels:** `status` (`ok` / `error`), `event_type` (`stored` / `removed` / `cleared`)
+**Additional labels:** `status` (`ok` / `parent_block_not_found` / `block_not_found` / `invalid_block`), `event_type` (`stored` / `removed` / `cleared`)
 
 #### Per-Worker Load and Timing Gauges (`dynamo_frontend_worker_*`)
 
-These appear once workers register and begin serving requests. They are registered on the frontend's local Prometheus registry (not component-scoped) and do not carry `dynamo_namespace` or `dynamo_component` labels.
+These appear once workers register and begin serving requests. They are registered on the frontend's local Prometheus registry (not component-scoped) and do not carry `dynamo_namespace` or `dynamo_component` labels. These metrics are frontend-only and are not available on the standalone router.
 
 | Metric | Type | Description |
 |--------|------|-------------|

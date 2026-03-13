@@ -10,6 +10,57 @@ subtitle: Enable KV-aware routing using Router for Dynamo deployments
 The Dynamo KV Router intelligently routes requests by evaluating their computational costs across different workers. It considers both decoding costs (from active blocks) and prefill costs (from newly computed blocks), using KV cache overlap to minimize redundant computation. Optimizing the KV Router is critical for achieving maximum throughput and minimum latency in distributed inference setups.
 This guide helps you get started with using the Dynamo router, with further details on configuration, disaggregated serving setup, and parameter tuning.
 
+## Deployment Modes
+
+The Dynamo router can be deployed in several configurations. The table below shows every combination and when to use it:
+
+| Mode | Command | Routing Logic | KV Events | Topology | Use Case |
+|------|---------|---------------|-----------|----------|----------|
+| **Frontend + Round-Robin** | `python -m dynamo.frontend --router-mode round-robin` | Cycles through workers | None | Aggregated | Simplest baseline; no KV awareness |
+| **Frontend + Random** | `python -m dynamo.frontend --router-mode random` | Random worker selection | None | Aggregated | Stateless load balancing |
+| **Frontend + KV (Aggregated)** | `python -m dynamo.frontend --router-mode kv` | KV cache overlap + load | NATS Core / JetStream / ZMQ / Approx | Aggregated | Production single-pool serving with cache reuse |
+| **Frontend + KV (Disaggregated)** | `python -m dynamo.frontend --router-mode kv` with prefill + decode workers | KV cache overlap + load | NATS Core / JetStream / ZMQ / Approx | Disaggregated (prefill + decode pools) | Separate prefill/decode for large-scale serving |
+| **Frontend + Direct** | `python -m dynamo.frontend --router-mode direct` | Worker ID from request hints | None | Aggregated | External orchestrator (e.g., EPP/GAIE) selects workers |
+| **Standalone Router** | `python -m dynamo.router` | KV cache overlap + load | NATS Core / JetStream / ZMQ | Any | Routing without the HTTP frontend (multi-tier, custom pipelines) |
+
+### Routing Modes (`--router-mode`)
+
+| Mode | Value | How Workers Are Selected |
+|------|-------|-------------------------|
+| **Round-Robin** | `round-robin` (default) | Cycles through available workers in order |
+| **Random** | `random` | Selects a random worker for each request |
+| **KV** | `kv` | Evaluates KV cache overlap and decode load per worker; picks lowest cost |
+| **Direct** | `direct` | Reads the target `worker_id` from the request's routing hints; no selection logic |
+
+### KV Event Transport Modes (within `--router-mode kv`)
+
+When using KV routing, the router needs to know what each worker has cached. There are four ways to get this information:
+
+| Event Mode | How to Enable | Description |
+|------------|---------------|-------------|
+| **NATS Core (local indexer)** | Default (no extra flags) | Workers maintain a local indexer; router queries workers on startup and receives events via NATS Core |
+| **JetStream (durable)** | `--router-durable-kv-events` | Events persisted in NATS JetStream; supports snapshots and durable consumers. *Deprecated.* |
+| **ZMQ** | `--event-plane zmq` | Workers publish via ZMQ PUB sockets; standalone indexer aggregates events |
+| **Approximate (no events)** | `--no-router-kv-events` | No events consumed; router predicts cache state from its own routing decisions with TTL-based expiration |
+
+### Aggregated vs. Disaggregated Topology
+
+| Topology | Workers | How It Works |
+|----------|---------|--------------|
+| **Aggregated** | Single pool (prefill + decode in one process) | All workers handle the full request lifecycle |
+| **Disaggregated** | Separate prefill and decode pools | Frontend routes to a prefill worker first, then to a decode worker; requires workers registered with `ModelType.Prefill` |
+
+Disaggregated mode is activated automatically when prefill workers register alongside decode workers. See [Disaggregated Serving](#disaggregated-serving) for details.
+
+### Frontend-Embedded vs. Standalone Router
+
+| Deployment | Process | Metrics Port | Use Case |
+|------------|---------|--------------|----------|
+| **Frontend-embedded** | `python -m dynamo.frontend --router-mode kv` | Frontend HTTP port (default 8000) | Standard deployment; router runs inside the frontend process |
+| **Standalone** | `python -m dynamo.router` | `DYN_SYSTEM_PORT` (if set) | Multi-tier architectures, SGLang disagg prefill routing, custom pipelines |
+
+The standalone router does not include the HTTP frontend (no `/v1/chat/completions` endpoint). It exposes only the `RouterRequestMetrics` via the system status server. See the [Standalone Router README](../../../components/src/dynamo/router/README.md).
+
 ## Quick Start
 
 ### Python / CLI Deployment

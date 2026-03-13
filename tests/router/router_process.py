@@ -6,8 +6,13 @@ import os
 from tests.utils.managed_process import ManagedProcess
 
 
-class KVRouterProcess(ManagedProcess):
-    """Manages the KV router process using dynamo.frontend"""
+class FrontendRouterProcess(ManagedProcess):
+    """Manages a dynamo.frontend process with configurable --router-mode.
+
+    Supports all router modes (round-robin, random, kv, direct) and all
+    KV-specific options (block size, thresholds, durable events, disagg).
+    block_size is only sent to the CLI when router_mode is "kv".
+    """
 
     def __init__(
         self,
@@ -22,15 +27,14 @@ class KVRouterProcess(ManagedProcess):
         tokens_threshold_frac: float | None = None,
         request_plane: str = "nats",
         durable_kv_events: bool = False,
+        router_mode: str = "kv",
     ):
         command = [
             "python3",
             "-m",
             "dynamo.frontend",
-            "--kv-cache-block-size",
-            str(block_size),
             "--router-mode",
-            "kv",
+            router_mode,
             "--http-port",
             str(frontend_port),
             "--discovery-backend",
@@ -38,6 +42,9 @@ class KVRouterProcess(ManagedProcess):
             "--namespace",
             namespace,
         ]
+
+        if router_mode == "kv":
+            command.extend(["--kv-cache-block-size", str(block_size)])
 
         if enforce_disagg:
             command.append("--enforce-disagg")
@@ -72,10 +79,16 @@ class KVRouterProcess(ManagedProcess):
             terminate_all_matching_process_names=False,
         )
         self.port = frontend_port
+        self.router_mode = router_mode
 
     def _check_ready(self, response):
-        """Check if KV router is ready"""
+        """Check if KV, random, round-robin, or direct router is ready"""
         return response.status_code == 200
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         super().__exit__(exc_type, exc_val, exc_tb)
+
+
+# Backward-compatible alias so existing callers that import KVRouterProcess
+# continue to work without changes.
+KVRouterProcess = FrontendRouterProcess
