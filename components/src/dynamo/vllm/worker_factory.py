@@ -131,10 +131,9 @@ class WorkerFactory:
             config.route_to_encoder
             and config.disaggregation_mode == DisaggregationMode.PREFILL
         ):
-            if config.disaggregation_mode == DisaggregationMode.PREFILL:
-                raise NotImplementedError(
-                    "Dynamo orchestrated disaggregated prefill worker, combined with remote encode worker is not supported."
-                )
+            raise NotImplementedError(
+                "Dynamo orchestrated disaggregated prefill worker, combined with remote encode worker is not supported."
+            )
 
     async def create(
         self,
