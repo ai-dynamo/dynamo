@@ -144,10 +144,10 @@ navigation:
             path: ../pages-dev/fault-tolerance/request-migration.md
           - page: Request Cancellation
             path: ../pages-dev/fault-tolerance/request-cancellation.md
-          - page: Graceful Shutdown
-            path: ../pages-dev/fault-tolerance/graceful-shutdown.md
           - page: Request Rejection
             path: ../pages-dev/fault-tolerance/request-rejection.md
+          - page: Graceful Shutdown
+            path: ../pages-dev/fault-tolerance/graceful-shutdown.md
           - page: Testing
             path: ../pages-dev/fault-tolerance/testing.md
       - page: Writing Python Workers
