@@ -209,10 +209,11 @@ fi
 echo "✓ vLLM installation completed"
 
 # Apply hotfix for multi-node TP init ordering (vLLM PR #35892).
-# The patch lives next to this script; SCRIPT_DIR resolves its location.
+# Only applies to vLLM 0.17.1 — fail loudly on any other version so the
+# patch + this block get cleaned up when vLLM is bumped.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VLLM_PATCH="${SCRIPT_DIR}/multinode-tp-init-order.patch"
-if [ -f "$VLLM_PATCH" ]; then
+if [ "$VLLM_VER" = "0.17.1" ]; then
     # Patch the cloned repo (used by CPU/XPU source builds)
     echo "Applying vLLM multi-node TP hotfix to cloned repo..."
     git -C "${INSTALLATION_DIR}/vllm" apply --ignore-whitespace "$VLLM_PATCH" || true
@@ -221,6 +222,11 @@ if [ -f "$VLLM_PATCH" ]; then
     echo "Applying vLLM multi-node TP hotfix to ${VLLM_SITE}..."
     git apply --ignore-whitespace --directory="$VLLM_SITE" -p1 "$VLLM_PATCH" || true
     echo "✓ vLLM multi-node TP hotfix applied"
+else
+    echo "❌ ERROR: vLLM version is ${VLLM_VER}, not 0.17.1."
+    echo "   The multi-node TP hotfix patch (multinode-tp-init-order.patch) and"
+    echo "   this block in install_vllm.sh are no longer needed — please remove them."
+    exit 1
 fi
 
 echo "\n=== Installing LMCache from source ==="
