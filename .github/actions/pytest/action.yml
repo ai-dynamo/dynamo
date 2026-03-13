@@ -156,7 +156,10 @@ runs:
         # conftest.py will symlink these into the writable HF cache.
         CI_MODELS_FLAGS=()
         if [[ -d "/models/ci/models" ]]; then
-          echo "📦 CI model cache detected, mounting into container"
+          echo "📦 CI model cache detected on runner, mounting into container"
+          echo "📂 Runner /models/ci/models contents:"
+          ls -la /models/ci/models/ || true
+          ls -la /models/ci/models/Qwen/ 2>/dev/null || echo "  (no Qwen/ subdir)"
           CI_MODELS_FLAGS+=(-v "/models/ci/models:/models/ci/models:ro")
         fi
 
@@ -168,7 +171,7 @@ runs:
           --name ${{ env.CONTAINER_ID }}_pytest \
           -v "${TEST_RESULTS_DIR}:/workspace/test-results" \
           ${{ inputs.image_tag }} \
-          bash -c "${PYTEST_CMD}"
+          bash -c "echo '📂 Container /models/ci/models contents:' && ls -la /models/ci/models/ 2>/dev/null && ls -la /models/ci/models/Qwen/ 2>/dev/null || echo '  (empty or missing inside container)' && ${PYTEST_CMD}"
 
         TEST_EXIT_CODE=$?
         echo "TEST_EXIT_CODE=${TEST_EXIT_CODE}" >> $GITHUB_ENV
@@ -261,7 +264,10 @@ runs:
         # conftest.py will symlink these into the writable HF cache.
         CI_MODELS_FLAGS=()
         if [[ -d "/models/ci/models" ]]; then
-          echo "📦 CI model cache detected, mounting into container"
+          echo "📦 CI model cache detected on runner, mounting into container"
+          echo "📂 Runner /models/ci/models contents:"
+          ls -la /models/ci/models/ || true
+          ls -la /models/ci/models/Qwen/ 2>/dev/null || echo "  (no Qwen/ subdir)"
           CI_MODELS_FLAGS+=(-v "/models/ci/models:/models/ci/models:ro")
         fi
 
@@ -272,7 +278,7 @@ runs:
           --name ${{ env.CONTAINER_ID }}_pytest \
           -v "${TEST_RESULTS_DIR}:/workspace/test-results" \
           ${{ inputs.image_tag }} \
-          bash -c "${PYTEST_CMD}"
+          bash -c "echo '📂 Container /models/ci/models contents:' && ls -la /models/ci/models/ 2>/dev/null && ls -la /models/ci/models/Qwen/ 2>/dev/null || echo '  (empty or missing inside container)' && ${PYTEST_CMD}"
 
         TEST_EXIT_CODE=$?
         echo "TEST_EXIT_CODE=${TEST_EXIT_CODE}" >> $GITHUB_ENV
