@@ -143,7 +143,10 @@ def _link_ci_model_to_hf_cache(model_id: str, ci_models_dir: str) -> bool:
     """
     ci_model_path = Path(ci_models_dir) / model_id
     if not ci_model_path.is_dir() or not (ci_model_path / "config.json").exists():
-        logging.debug(f"CI cache miss for {model_id}: {ci_model_path} not found or missing config.json")
+        logging.info(
+            f"CI cache miss for {model_id}: dir_exists={ci_model_path.is_dir()}, "
+            f"config_exists={(ci_model_path / 'config.json').exists() if ci_model_path.is_dir() else 'N/A'}"
+        )
         return False
 
     try:
